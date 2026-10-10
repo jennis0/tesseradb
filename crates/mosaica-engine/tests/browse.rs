@@ -46,7 +46,7 @@ use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource, SuppliedContent, SuppliedRequirement,
 };
-use mosaica_types::{EntityId, TesseraId};
+use mosaica_types::{EntityId, MosaicaId};
 
 const N: u64 = 900;
 const LAYER: &str = "clusters/tree";
@@ -278,13 +278,13 @@ fn key_set(out: &BrowseOut) -> Vec<String> {
 }
 
 /// **The total order, checked as a property rather than as a transcript.** Count descending, then
-/// `tessera_id` ascending. The identifiers are a blinding permutation (I10), so an alphabetical
+/// `mosaica_id` ascending. The identifiers are a blinding permutation (I10), so an alphabetical
 /// expectation would be asserting the permutation rather than the rule.
 fn is_in_total_order(out: &BrowseOut) -> bool {
     out.artifacts.windows(2).all(|w| {
         let count = |r: &BrowseRow| r.matched_count.unwrap_or(r.masked_count);
-        (std::cmp::Reverse(count(&w[0])), w[0].tessera_id.raw())
-            < (std::cmp::Reverse(count(&w[1])), w[1].tessera_id.raw())
+        (std::cmp::Reverse(count(&w[0])), w[0].mosaica_id.raw())
+            < (std::cmp::Reverse(count(&w[1])), w[1].mosaica_id.raw())
     })
 }
 
@@ -325,16 +325,16 @@ fn keys(out: &BrowseOut) -> Vec<String> {
         .collect()
 }
 
-fn id_of(fx: &Fixture, credential: &[u8], key: &str) -> TesseraId {
+fn id_of(fx: &Fixture, credential: &[u8], key: &str) -> MosaicaId {
     let out = browse(&fx.engine, credential, BrowseForm::Roots, None, 100);
     if let Some(row) = out.artifacts.iter().find(|r| r.key.as_deref() == Some(key)) {
-        return row.tessera_id;
+        return row.mosaica_id;
     }
     for root in out.artifacts {
         let children = browse(
             &fx.engine,
             credential,
-            BrowseForm::Children(root.tessera_id),
+            BrowseForm::Children(root.mosaica_id),
             None,
             100,
         );
@@ -343,7 +343,7 @@ fn id_of(fx: &Fixture, credential: &[u8], key: &str) -> TesseraId {
             .iter()
             .find(|r| r.key.as_deref() == Some(key))
         {
-            return row.tessera_id;
+            return row.mosaica_id;
         }
     }
     panic!("'{key}' is not served to this principal");
@@ -383,7 +383,7 @@ fn the_three_forms_serve_the_lineage_and_the_oracles_counts() {
             .iter()
             .find(|r| r.key.as_deref() == Some("alpha"))
             .expect("alpha is served")
-            .tessera_id;
+            .mosaica_id;
         let children = browse(
             &fx.engine,
             &credential,
@@ -411,13 +411,13 @@ fn the_three_forms_serve_the_lineage_and_the_oracles_counts() {
         let leaf = browse(
             &fx.engine,
             &credential,
-            BrowseForm::Children(children.artifacts[0].tessera_id),
+            BrowseForm::Children(children.artifacts[0].mosaica_id),
             None,
             100,
         );
         assert!(leaf.artifacts.is_empty(), "a leaf has no children");
         assert_eq!(
-            leaf.parents.iter().map(|r| r.tessera_id).collect::<Vec<_>>(),
+            leaf.parents.iter().map(|r| r.mosaica_id).collect::<Vec<_>>(),
             vec![alpha],
             "and its own parent is named beside them"
         );
@@ -478,7 +478,7 @@ fn the_criterion_decides_the_page_before_the_limit_does() {
         vec!["alpha", "bravo", "charlie"],
         "the roots clear the bar for the narrow principal too"
     );
-    let alpha = narrow_roots.artifacts[0].tessera_id;
+    let alpha = narrow_roots.artifacts[0].mosaica_id;
     let narrow_children = browse(
         &fx.engine,
         &subset_credential(),
@@ -493,7 +493,7 @@ fn the_criterion_decides_the_page_before_the_limit_does() {
     let broad_children = browse(
         &fx.engine,
         &full_coverage_credential(),
-        BrowseForm::Children(broad_roots.artifacts[0].tessera_id),
+        BrowseForm::Children(broad_roots.artifacts[0].mosaica_id),
         None,
         100,
     );
@@ -514,7 +514,7 @@ fn a_child_whose_parent_is_withheld_is_a_root() {
     // test can drive.
     let fx = fixture(None);
     let alpha = id_of(&fx, &full_coverage_credential(), "alpha");
-    let entity = fx.engine.resolve_tessera_ids(&[alpha]).unwrap()[0].unwrap();
+    let entity = fx.engine.resolve_mosaica_ids(&[alpha]).unwrap()[0].unwrap();
     fx.engine
         .accept_change(entity, mosaica_lifecycle::wal::ChangeOp::Suppress)
         .unwrap();
@@ -588,7 +588,7 @@ fn a_rows_child_count_counts_only_the_children_this_principal_is_served() {
     );
 
     let one = id_of(&fx, &full_coverage_credential(), "alpha-one");
-    let entity = fx.engine.resolve_tessera_ids(&[one]).unwrap()[0].unwrap();
+    let entity = fx.engine.resolve_mosaica_ids(&[one]).unwrap()[0].unwrap();
     fx.engine
         .accept_change(entity, mosaica_lifecycle::wal::ChangeOp::Suppress)
         .unwrap();
@@ -597,7 +597,7 @@ fn a_rows_child_count_counts_only_the_children_this_principal_is_served() {
     assert_eq!(counts(&subset_credential()), all(0));
 
     let two = id_of(&fx, &full_coverage_credential(), "alpha-two");
-    let entity = fx.engine.resolve_tessera_ids(&[two]).unwrap()[0].unwrap();
+    let entity = fx.engine.resolve_mosaica_ids(&[two]).unwrap()[0].unwrap();
     fx.engine
         .accept_change(entity, mosaica_lifecycle::wal::ChangeOp::Delete)
         .unwrap();
@@ -671,7 +671,7 @@ fn a_dag_child_counts_once_under_each_served_parent() {
         };
         let mut out = Vec::new();
         for row in ask(BrowseForm::Roots).artifacts {
-            let children = ask(BrowseForm::Children(row.tessera_id)).artifacts;
+            let children = ask(BrowseForm::Children(row.mosaica_id)).artifacts;
             assert_eq!(
                 children.len() as u64,
                 row.child_count,
@@ -791,12 +791,12 @@ fn a_filter_adds_a_count_per_row_and_moves_nothing_else() {
             let plain_counts: HashMap<u64, u64> = plain
                 .artifacts
                 .iter()
-                .map(|r| (r.tessera_id.raw(), r.masked_count))
+                .map(|r| (r.mosaica_id.raw(), r.masked_count))
                 .collect();
             let mut any_positive = false;
             for row in &filtered.artifacts {
                 assert_eq!(
-                    row.masked_count, plain_counts[&row.tessera_id.raw()],
+                    row.masked_count, plain_counts[&row.mosaica_id.raw()],
                     "and the same masked count beside them"
                 );
                 assert_eq!(row.child_count, 3, "and the same children, whatever they match");
@@ -877,8 +877,8 @@ fn the_refusals_are_about_schema_and_an_artifact_is_an_empty_page() {
     // An identifier that names nothing, and one that names a point rather than an artifact: an
     // empty page, never a refusal.
     for id in [
-        TesseraId::new(0x7777_7777_7777_7777),
-        TesseraId::new(0x1234_5678_9abc_def0),
+        MosaicaId::new(0x7777_7777_7777_7777),
+        MosaicaId::new(0x1234_5678_9abc_def0),
     ] {
         let page = ask(LAYER, None, 10, BrowseForm::Children(id)).expect("answered, not refused");
         assert_eq!(
@@ -1007,7 +1007,7 @@ struct Labelled {
     fx: Fixture,
     map: std::collections::BTreeMap<u64, u64>,
     /// The label artifacts' identifiers, by key.
-    ids: HashMap<String, TesseraId>,
+    ids: HashMap<String, MosaicaId>,
 }
 
 impl Labelled {

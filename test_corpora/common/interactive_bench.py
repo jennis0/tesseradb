@@ -15,7 +15,7 @@ figures that compare between runs:
   bundle's pages evicted again, and each principal opening once more.
 * **Map.** For each principal, a fixed camera script from the whole extent the session opened on:
   into its own two densest regions down to zoom 14, with pans, and back out after each.
-* **Lookups.** For the narrowest and the broadest principal: an item card by `tessera_id`, and a
+* **Lookups.** For the narrowest and the broadest principal: an item card by `mosaica_id`, and a
   filter `eq` on a unique field answering one item, for 200 items the map served.
 
 The session and map sections run the TypeScript core's own store, driver and replica in Node

@@ -175,7 +175,7 @@ fn the_box_and_the_hull_are_drawn_from_visible_members_alone() {
 
     let narrow = artifacts_of(&engine, &subset_credential());
     let bbox = narrow[0].derived.bbox.expect("declared");
-    let hull = shape_of(&engine, &subset_credential(), narrow[0].tessera_id).expect("declared");
+    let hull = shape_of(&engine, &subset_credential(), narrow[0].mosaica_id).expect("declared");
 
     let visible: Vec<[u32; 2]> = visible_to_subset(sources.iter().copied())
         .into_iter()
@@ -234,7 +234,7 @@ fn the_served_hull_is_tighter_than_its_wrap_and_holds_every_visible_member() {
 
     for credential in [subset_credential(), full_coverage_credential()] {
         let served = artifacts_of(&engine, &credential);
-        let hull = shape_of(&engine, &credential, served[0].tessera_id).expect("declared");
+        let hull = shape_of(&engine, &credential, served[0].mosaica_id).expect("declared");
         let visible: Vec<[u32; 2]> = if credential == subset_credential() {
             visible_to_subset(sources.iter().copied())
                 .into_iter()
@@ -312,7 +312,7 @@ fn the_drill_down_agrees_with_the_viewport_on_derived_content() {
     let drilled = engine
         .artifact(
             &session,
-            from_viewport[0].tessera_id,
+            from_viewport[0].mosaica_id,
             "s0",
             None,
         )
@@ -779,7 +779,7 @@ fn every_artifact_keeps_its_own_content_when_the_level_is_read_from_the_blob() {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     for artifact in &served {
         let drilled = engine
-            .artifact(&session, artifact.tessera_id, "s0", None)
+            .artifact(&session, artifact.mosaica_id, "s0", None)
             .unwrap()
             .expect("the identifier the viewport just issued");
         assert_eq!(drilled.content, artifact.content);

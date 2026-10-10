@@ -52,15 +52,15 @@ fn reachable(engine: &Engine, credential: &[u8]) -> Vec<String> {
         .collect()
 }
 
-/// Invert a layer's `tessera_id` the way `/control/changes` does — through the admin plane's own
+/// Invert a layer's `mosaica_id` the way `/control/changes` does — through the admin plane's own
 /// resolver, so this exercises the misdirection guard rather than going round it.
 ///
 /// **This is the assertion, not a convenience.** A layer's entity sits *above* the row-less mark,
 /// and the guard used to be a single `entity < high_water` test, which refuses every layer
 /// identifier this deployment has ever issued. The symptom would not have looked like a range
 /// check: suppressing a layer would simply have answered *no such thing*.
-fn layer_entity(engine: &Engine, id: mosaica_types::TesseraId) -> mosaica_types::EntityId {
-    engine.resolve_tessera_ids(&[id]).unwrap()[0]
+fn layer_entity(engine: &Engine, id: mosaica_types::MosaicaId) -> mosaica_types::EntityId {
+    engine.resolve_mosaica_ids(&[id]).unwrap()[0]
         .expect("a layer identifier names the entity this deployment issued for it")
 }
 
@@ -208,7 +208,7 @@ fn a_registration_and_its_suppression_survive_a_restart_through_the_wal() {
 
 /// Row-less allocation must not touch the point region, and both marks must come back from a
 /// restart. A mark that reset to the ceiling would reissue a live layer's entity to a point: two
-/// entities, one `tessera_id`.
+/// entities, one `mosaica_id`.
 #[test]
 fn the_two_regions_stay_apart_and_both_marks_survive() {
     let fx = fixture();

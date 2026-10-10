@@ -30,18 +30,18 @@ exists to rule out, reproduced one level up.
 item handle to its planted `fx_key`, because raw comparison "is impossible, since per-session handle
 and pin bytes never match". **The handle column that made it impossible no longer exists.** Decision
 0006 retired the per-session `handle: u32` from the viewer plane and contracts r6 replaced it with
-`tessera_id`, a keyed permutation of `(shard_id, entity_id)` — so the points batch is
-`(tessera_id, x, y, declared scalars…)`, in which every column is a deterministic function of the
+`mosaica_id`, a keyed permutation of `(shard_id, entity_id)` — so the points batch is
+`(mosaica_id, x, y, declared scalars…)`, in which every column is a deterministic function of the
 bundle and none is a function of the session. The per-session bytes that remain are the token and
 `x-mosaica-pin`, both of which live in headers and never enter the body this compares.
 
-**The points are compared by the entity each row names, not by its `tessera_id`.** Each state is
+**The points are compared by the entity each row names, not by its `mosaica_id`.** Each state is
 a separate build, and every build generates its own identity key, so the same item has a different
-`tessera_id` in each state, and a tile's points, which are served in `tessera_id` order, arrive in
-a different order. The comparison therefore inverts every row's `tessera_id` under its own
+`mosaica_id` in each state, and a tile's points, which are served in `mosaica_id` order, arrive in
+a different order. The comparison therefore inverts every row's `mosaica_id` under its own
 bundle's key (read from that bundle's manifest), and compares each tile's rows as the set of
 entities it served with every other column unchanged, after checking that each state served them
-in the contract's ascending `tessera_id` order. The allocation rules keep every base item's
+in the contract's ascending `mosaica_id` order. The allocation rules keep every base item's
 entity id identical across builds, so that join is exact, and the untruncated configuration below
 means a tile's served set does not depend on the key either. What the key does decide, the order
 within a tile, is not a function of visibility. `fx_key` remains planted-but-unserved and its
@@ -202,24 +202,24 @@ def _canonical_response(state: State, token, zoom, bbox) -> Streamed:
 
 
 def _points_by_entity(raw: bytes, key: identity_mod.IdentityKey, zoom: int) -> bytes:
-    """The points surface with each row's `tessera_id` replaced by the entity it names under
+    """The points surface with each row's `mosaica_id` replaced by the entity it names under
     `key`, the rows sorted by that entity, as one Arrow stream. The module doc says why.
 
     Sorting drops the served order, so it is checked here first: each tile's rows, the tile being
-    the top `2 * zoom` bits of the row's position code, arrive in ascending `tessera_id` order."""
+    the top `2 * zoom` bits of the row's position code, arrive in ascending `mosaica_id` order."""
     if not any(kind == wire.FRAME_POINTS for kind, _payload in wire.split_frames(raw)):
         return b""
     points = decode_viewport_points(raw)
-    ids = points.column("tessera_id").to_pylist()
+    ids = points.column("mosaica_id").to_pylist()
     codes = points.column("code").to_pylist()
     by_tile: dict[int, list[int]] = {}
-    for tessera_id, code in zip(ids, codes):
-        by_tile.setdefault(code >> (64 - 2 * zoom), []).append(tessera_id)
+    for mosaica_id, code in zip(ids, codes):
+        by_tile.setdefault(code >> (64 - 2 * zoom), []).append(mosaica_id)
     for tile, served in by_tile.items():
         assert served == sorted(served), (
-            f"tile {tile} at zoom {zoom} serves its points out of `tessera_id` order"
+            f"tile {tile} at zoom {zoom} serves its points out of `mosaica_id` order"
         )
-    at = points.schema.get_field_index("tessera_id")
+    at = points.schema.get_field_index("mosaica_id")
     entities = pa.array(
         [identity_mod.invert(key, t)[1] for t in points.column(at).to_pylist()], pa.uint64()
     )
@@ -277,7 +277,7 @@ def test_the_allocation_rules_hold_for_both_extra_item_states(canary_bundles):
     Order matters: without these rules the canary test measures **fixture perturbation, not
     disclosure** (conformance design §2), and it measures it while passing or failing for reasons
     that have nothing to do with I2. An extra item allocated in the middle of entity space changes
-    every later item's `tessera_id`, which is §7.2's selection key — so the two states would
+    every later item's `mosaica_id`, which is §7.2's selection key — so the two states would
     legitimately draw different samples and the comparator would report a leak that is not there.
 
     Both the canary and the visible state are checked, because the positive control is only a

@@ -26,7 +26,7 @@ impl IngestRows for Engine {
         let rows = rows
             .into_iter()
             .map(|row| IngestRow {
-                tessera_id: None,
+                mosaica_id: None,
                 labels: Some(row.descriptors),
                 position: Some((row.x, row.y)),
                 scalars: row.scalars,
@@ -41,10 +41,10 @@ impl IngestRows for Engine {
             rows,
             artifacts: Default::default(),
             strict: false,
-            tessera_id_column: false,
+            mosaica_id_column: false,
         })?;
         Ok(self
-            .resolve_tessera_ids(&receipt.tessera_ids.iter().flatten().copied().collect::<Vec<_>>())
+            .resolve_mosaica_ids(&receipt.mosaica_ids.iter().flatten().copied().collect::<Vec<_>>())
             .unwrap()
             .into_iter()
             .map(|entity| entity.expect("an accepted row names an item"))

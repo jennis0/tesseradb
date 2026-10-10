@@ -69,18 +69,18 @@ fi
 deny mosaica-engine tokio
 deny mosaica-store tokio
 # I4: no ID conversions in types
-if grep -rn "impl From" crates/mosaica-types/src/ | grep -E "EntityId|RowId|TermId|AttrLocalId|TesseraId"; then
+if grep -rn "impl From" crates/mosaica-types/src/ | grep -E "EntityId|RowId|TermId|AttrLocalId|MosaicaId"; then
   echo "FORBIDDEN: ID conversion in mosaica-types"; fail=1
 fi
 
 # I10 (contracts r6): no request-path artifact stores an entity ID. `columns.arrow`
-# carries `tessera_id`, so the store's column reader must expose no entity_id accessor.
+# carries `mosaica_id`, so the store's column reader must expose no entity_id accessor.
 if grep -n "fn entity_id" crates/mosaica-store/src/read.rs; then
   echo "FAIL: ColumnsRef exposes an entity_id accessor; contracts r6 removed the column"
   fail=1
 fi
 
-# The identity key inverts every tessera_id and must never reach the wire.
+# The identity key inverts every mosaica_id and must never reach the wire.
 if grep -rn "IdentityKey" crates/mosaica-wire/src/ crates/mosaica-server/src/viewer.rs \
     crates/mosaica-server/src/records.rs crates/mosaica-server/src/stream.rs; then
   echo "FAIL: the identity key must not appear in the wire or viewer layers"
@@ -94,7 +94,7 @@ if grep -rn "identity_key_hex" crates/mosaica-wire/src/ crates/mosaica-server/sr
   fail=1
 fi
 
-# Do NOT add a `priority` grep here (2026-07-30 fold). `priority` is `high16(tessera_id)` -- a
+# Do NOT add a `priority` grep here (2026-07-30 fold). `priority` is `high16(mosaica_id)` -- a
 # keyed prefix of a value the payload already carries in full -- so publishing it discloses
 # nothing beyond the id itself, and Important I-4 (which this would-be grep enforced) is
 # retired. See task-10-brief.md's "The routing principle" note before reinstating anything here.

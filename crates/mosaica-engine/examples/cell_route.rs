@@ -55,7 +55,7 @@ use mosaica_spatial::{fixed32, tiler::sort_batch, Bounds, TilerItem};
 use mosaica_store::read::SegmentData;
 use mosaica_store::write::{write_permutation, write_segment};
 use mosaica_store::{Permutation, RowSpace};
-use mosaica_types::{EntityId, TermId, TesseraId};
+use mosaica_types::{EntityId, TermId, MosaicaId};
 
 const ROWS: u32 = 1 << 20;
 const EXTENT: Bounds = Bounds {
@@ -188,7 +188,7 @@ fn scan(
     params: &SelectParams,
     visible: u64,
 ) -> (Vec<u32>, u64) {
-    let ids = &seg.data.columns.tessera_id()[range.start as usize..range.end as usize];
+    let ids = &seg.data.columns.mosaica_id()[range.start as usize..range.end as usize];
     let mut c_theta: u64 = 0;
     match params.threshold {
         Threshold::Saturated => c_theta += ids.len() as u64,
@@ -225,7 +225,7 @@ struct Segment {
 ///
 /// The positions are a lattice so the count is exact rather than distributional: a cell's row
 /// count is what the sweep's x-axis says it is, not what a random scatter happened to produce.
-/// Identities are random, and `sort_batch` puts them in the `(morton, tessera_id)` order a real
+/// Identities are random, and `sort_batch` puts them in the `(morton, mosaica_id)` order a real
 /// segment has — which is the order the route reads them in.
 fn segment_of(rows_per_cell: u32) -> Segment {
     let mut rng = StdRng::seed_from_u64(0xCE11_u64 * u64::from(rows_per_cell) + 7);
@@ -238,7 +238,7 @@ fn segment_of(rows_per_cell: u32) -> Segment {
             let cell = i % positions;
             let (x, y) = ((cell % side) as f32 * step, (cell / side) as f32 * step);
             TilerItem {
-                tessera_id: TesseraId::new(rng.gen()),
+                mosaica_id: MosaicaId::new(rng.gen()),
                 qx: fixed32(f64::from(x), EXTENT.x_min, EXTENT.x_max),
                 qy: fixed32(f64::from(y), EXTENT.y_min, EXTENT.y_max),
                 scalars: Vec::new(),

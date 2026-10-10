@@ -171,13 +171,13 @@ def test_new_papers_with_a_cluster_and_a_label_are_served(served, corpus):
     # One cluster and one label artifact, and the memberships each carried.
     assert report.artifacts_minted == 2
     assert report.flush_wait is not None and report.flush_reached
-    assert len(report.tessera_ids) == len(NEW_IDS)
+    assert len(report.mosaica_ids) == len(NEW_IDS)
 
     after = viewport(db, "s0", whole_frame(db))["counts"]["visible"]
     assert after == before + len(NEW_IDS)
 
     # A drill-down on one of the rows the route answered with, by the id it returned.
-    record = item(db, report.tessera_ids[0])
+    record = item(db, report.mosaica_ids[0])
     assert record["fields"]["arxiv_id"].startswith("2609.")
     assert record["labels"] == ["cs.LG"]
 
@@ -285,7 +285,7 @@ def test_a_retried_request_inside_one_commit_is_a_replay_and_lands_nothing(serve
     assert retry.ok, retry
     assert retry.body["replayed"] is True, retry.body
     assert retry.body["created"] == 0, retry.body
-    assert retry.body["tessera_ids"] == first.body["tessera_ids"], retry.body
+    assert retry.body["mosaica_ids"] == first.body["mosaica_ids"], retry.body
 
     control.flush(wait=True)
     assert viewport(db, "s0", whole_frame(db))["counts"]["visible"] == before + len(NEW_IDS)
@@ -752,10 +752,10 @@ def test_suppress_hides_a_row_and_unsuppress_returns_it(served, corpus):
     db = notebook(served, corpus)
     frame = whole_frame(db)
     before = viewport(db, "s0", frame)["counts"]["visible"]
-    [held] = db.lookup("s0", "id", [8]).column("tessera_id").to_pylist()
+    [held] = db.lookup("s0", "id", [8]).column("mosaica_id").to_pylist()
     assert db.suppress({"id": [8]}).ok
     assert viewport(db, "s0", frame)["counts"]["visible"] == before - 1
-    # The same item, named by the `tessera_id` it was served under.
+    # The same item, named by the `mosaica_id` it was served under.
     assert db.unsuppress([held]).ok
     assert viewport(db, "s0", frame)["counts"]["visible"] == before
 
@@ -1061,7 +1061,7 @@ def artifact_rows_of(db, view: str = "map", frame=None, terms=None) -> list[tupl
 
 
 def artifact_targets_of(db, view: str = "map", frame=None) -> dict[tuple[str, str], tuple[int, int | None]]:
-    """`(layer, key) -> (tessera_id, target)` from the same frame.
+    """`(layer, key) -> (mosaica_id, target)` from the same frame.
 
     `target` is the identifier of the artifact a row is attached to, as this same response served
     it, and `None` for a row attached to nothing (owner ruling, 2026-09-18). It is how a client
@@ -1070,10 +1070,10 @@ def artifact_targets_of(db, view: str = "map", frame=None) -> dict[tuple[str, st
     """
     out: dict[tuple[str, str], tuple[int, int | None]] = {}
     for table in artifact_tables_of(db, view, frame):
-        for layer, key, tessera_id, target in zip(
-            table["layer"], table["key"], table["tessera_id"], table["target"]
+        for layer, key, mosaica_id, target in zip(
+            table["layer"], table["key"], table["mosaica_id"], table["target"]
         ):
-            out[(layer, key)] = (tessera_id, target)
+            out[(layer, key)] = (mosaica_id, target)
     return out
 
 

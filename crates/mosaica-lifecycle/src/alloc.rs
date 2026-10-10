@@ -8,13 +8,13 @@
 //! ## Freed ids
 //!
 //! An edit moves an item to a new entity and keeps its number, the entity it was first given,
-//! from which its `tessera_id` is taken. The entity it leaves is deleted, and the fold that
+//! from which its `mosaica_id` is taken. The entity it leaves is deleted, and the fold that
 //! removes its rows frees it. A freed id is issued again before any id from the high-water, so
 //! repeated edits reuse a bounded set of ids rather than growing the id space and everything sized
 //! by it.
 //!
 //! Only an entity that is no item's number is freed. A deleted item's number stays reserved, so a
-//! `tessera_id` a caller holds never comes to name another item. A suppressed entity is freed like
+//! `mosaica_id` a caller holds never comes to name another item. A suppressed entity is freed like
 //! any other: the fold that removes it drops its suppression with it.
 //!
 //! A fold's freed ids are held back until the log keeps no record older than the fold's
@@ -49,7 +49,7 @@
 //! observe.
 //!
 //! **The downward mark is durable on the same terms as the upward one** and must be, or a rotation
-//! and restart can re-issue a row-less id to a point: two entities, one `tessera_id`. See
+//! and restart can re-issue a row-less id to a point: two entities, one `mosaica_id`. See
 //! [`low_water_from`], which is [`high_water_from`]'s mirror, and `allocator_floor`'s companion
 //! [`allocator_ceiling`].
 //!
@@ -171,7 +171,7 @@ impl Allocator {
     /// Allocates `n` **point** entity IDs, ascending: the lowest freed ids first, then ids from
     /// the high-water mark, which advances past them. Refuses — leaving the allocator unchanged —
     /// if the ids from the high-water would reach the row-less region: an allocation that overran
-    /// it would put two entities on one `tessera_id`.
+    /// it would put two entities on one `mosaica_id`.
     pub fn allocate(&mut self, n: u64) -> Result<Vec<u64>, AllocError> {
         let reused = n.min(self.free.cardinality());
         let lo = self.high_water;
@@ -428,7 +428,7 @@ pub fn entities_named<'r>(records: impl IntoIterator<Item = &'r WalRecord>) -> B
 ///
 /// **[`high_water_from`]'s mirror, and it exists for the failure that motivated the two regions.**
 /// Without it a rotation and restart reseeds the row-less mark at the ceiling and the next layer
-/// registration is handed ids a live layer already holds — two entities sharing a `tessera_id`,
+/// registration is handed ids a live layer already holds — two entities sharing a `mosaica_id`,
 /// which is the one thing "collision-free by construction" is not allowed to mean sometimes.
 ///
 /// **Two records move this mark, not one.** A [`WalRecord::LayerCreate`] takes the layer's entity
@@ -436,7 +436,7 @@ pub fn entities_named<'r>(records: impl IntoIterator<Item = &'r WalRecord>) -> B
 /// level outgrows its reservation. Reading only the first was the shape this function had while
 /// levels could not grow, and leaving it that way once they could would reissue an extension block
 /// on the first restart after a large publication — with every artifact in it already suppressible
-/// by a `tessera_id` a caller holds.
+/// by a `mosaica_id` a caller holds.
 ///
 /// **A drop does not raise it.** The name is tombstoned and the ids are not reclaimed (decision
 /// 0072 is settled and unbuilt), so a dropped layer's run must stay below the mark: raising it
@@ -636,7 +636,7 @@ mod tests {
     fn the_allocator_refuses_to_issue_a_point_id_that_reaches_the_rowless_region() {
         // Without the cap, `allocate` would be `lo + n` on a u64 and "collision-free by
         // construction" would rest on the corpus happening to stay small. Past 2^32 two entities
-        // would share a tessera_id and `invert` would return the WRONG one.
+        // would share a mosaica_id and `invert` would return the WRONG one.
         let mut a = Allocator::new(ROWLESS_CEILING - 2);
         assert!(a.allocate(1).is_ok());
         assert!(matches!(a.allocate(10), Err(AllocError::Exhausted { .. })));
@@ -756,7 +756,7 @@ mod tests {
     fn low_water_from_recovers_the_rowless_mark_a_rotation_would_otherwise_lose() {
         // The hazard decision 0074 names as the part to get right: a layer allocation that raised
         // no durable mark survives a rotation and restart only until the next allocation reissues
-        // its ids — two entities, one tessera_id.
+        // its ids — two entities, one mosaica_id.
         assert_eq!(low_water_from(&[]), ROWLESS_CEILING);
 
         let a = layer_create(ROWLESS_CEILING - 1, ROWLESS_CEILING - RESERVED_BLOCK);

@@ -397,7 +397,7 @@ export class MosaicaMap extends MosaicaElement {
    * The field a hovered point is titled by, read from the marks where they carry it (the map asks
    * the store for a rendered one with `setPointColumns`), else from the item's record once the
    * pointer has rested on it for 140 ms. Unset, the title is the point's
-   * `tessera_id`.
+   * `mosaica_id`.
    */
   @property({attribute: 'title-field'}) accessor titleField = '';
   /** What a drag does: `pan` moves the camera, `box` draws a box selection and `lasso` a freehand one. */
@@ -484,11 +484,11 @@ export class MosaicaMap extends MosaicaElement {
    */
   @property({attribute: false}) accessor valueColours: Colouring['values'] | null = null;
   /**
-   * Colours for single clusters, per layer, per `tessera_id` as a decimal string, as `#rrggbb`, such
+   * Colours for single clusters, per layer, per `mosaica_id` as a decimal string, as `#rrggbb`, such
    * as `{topics: {'4021': '#f28e2b'}}`, set on the store in place of their palette colours
    * (`Store.setArtifactColours`). Setting it replaces every cluster colour chosen before, including
    * those chosen on a field card or in Edit colours; a host restores a viewer's saved choices this
-   * way, having kept them from `mosaica-clustercolour`. An entry that is not a `tessera_id` and a
+   * way, having kept them from `mosaica-clustercolour`. An entry that is not a `mosaica_id` and a
    * `#rrggbb` colour is skipped. Unset, the choices made on the cards stand.
    */
   @property({attribute: false}) accessor clusterColours: Record<string, Record<string, string>> | null = null;
@@ -551,7 +551,7 @@ export class MosaicaMap extends MosaicaElement {
    */
   lastPick: PickOutcome = null;
   /**
-   * What the last click picked and where: an item or an artifact, by `tesseraId`, and the world
+   * What the last click picked and where: an item or an artifact, by `mosaicaId`, and the world
    * position the card for it points at, the picked point's own or, for an artifact, where the click
    * landed. `null` before a pick, after a miss and after a switch of view. `<mosaica-explorer>`
    * places its callout from it through {@link MosaicaMap.screenOf}.
@@ -971,7 +971,7 @@ export class MosaicaMap extends MosaicaElement {
   private clusterProbe(clusterLayer: string | null, a: ArtifactsProjection, bands: MarksProjection['bands']): MapProbe['cluster'] {
     const layer = clusterLayer ?? a.layers[0] ?? null;
     const rows = clusterLayer ? a.colourServed : a.served;
-    const rowOrdinals = clusterLayer ? new Set(rows.map((x) => a.table.ordinalOf(x.layer, x.tesseraId))) : a.servedOrdinals;
+    const rowOrdinals = clusterLayer ? new Set(rows.map((x) => a.table.ordinalOf(x.layer, x.mosaicaId))) : a.servedOrdinals;
     const sample: {ordinal: number; resolvedId: string | null}[] = [];
     let coloured = 0;
     if (layer) {
@@ -983,12 +983,12 @@ export class MosaicaMap extends MosaicaElement {
           const resolved = a.table.resolve(ordinal, rowOrdinals, this.clusterLevel ?? undefined);
           const entry = resolved === 0 ? null : a.table.entry(resolved);
           if (a.table.resolve(ordinal, a.colours, this.clusterLevel ?? undefined) !== 0) coloured += 1;
-          sample.push({ordinal, resolvedId: entry ? idString(entry.tesseraId) : null});
+          sample.push({ordinal, resolvedId: entry ? idString(entry.mosaicaId) : null});
         }
         if (sample.length >= 16) break;
       }
     }
-    return {layer, layersOn: a.layers, coverage: a.coverage, servedIds: rows.map((x) => idString(x.tesseraId)), sample, coloured};
+    return {layer, layersOn: a.layers, coverage: a.coverage, servedIds: rows.map((x) => idString(x.mosaicaId)), sample, coloured};
   }
 
   /** Dispose of the store this map built, as on every element, and release its GPU resources now. */

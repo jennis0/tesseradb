@@ -25,7 +25,7 @@ The steps, numbered as §12.2 numbers them:
    stop checking the two counts that are deterministic functions of served content.
 3. Tiles: re-serialised sorted by tile id. Emission order under a parallel gather is not contract.
 4. Points: the kind-3 payloads concatenated, compared as bytes in served order. Contracts §3.2
-   orders points ascending by `tessera_id` within each tile, so comparing them *unsorted* is
+   orders points ascending by `mosaica_id` within each tile, so comparing them *unsorted* is
    stronger than sorting them — a reordering is a defect, not noise.
 5. The underlay: its own stream, its own comparison. The artifacts of the same request, read from
    `/v1/artifacts/viewport`, likewise, and unsorted — their frames follow the request's tiles and

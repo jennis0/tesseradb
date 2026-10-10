@@ -45,7 +45,7 @@ class _Backpressure(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(answer)
             return
-        answer = json.dumps({"created": 1, "minted": 0, "tessera_ids": ["7"]}).encode()
+        answer = json.dumps({"created": 1, "minted": 0, "mosaica_ids": ["7"]}).encode()
         self.send_response(200)
         self.send_header("content-length", str(len(answer)))
         self.end_headers()
@@ -95,21 +95,21 @@ def declared():
     db.close()
 
 
-def test_a_list_names_items_by_tessera_id_and_a_table_by_its_columns_as_text(declared):
-    """A list holds `tessera_id`s; a table's rows name items by its `tessera_id` and unique
+def test_a_list_names_items_by_mosaica_id_and_a_table_by_its_columns_as_text(declared):
+    """A list holds `mosaica_id`s; a table's rows name items by its `mosaica_id` and unique
     columns. Every value is text, and a null stays null."""
     assert declared.addresses([7, "8", None]) == [
-        {"tessera_id": "7"}, {"tessera_id": "8"}, {"tessera_id": None}
+        {"mosaica_id": "7"}, {"mosaica_id": "8"}, {"mosaica_id": None}
     ]
     assert declared.addresses({"paper": ["p3", None], "n": [None, 5]}) == [
         {"paper": "p3", "n": None},
         {"paper": None, "n": "5"},
     ]
-    # A column that is neither `tessera_id` nor a unique attribute names nothing and is left out.
+    # A column that is neither `mosaica_id` nor a unique attribute names nothing and is left out.
     assert declared.addresses({"paper": ["p3"], "title": ["A title"]}) == [{"paper": "p3"}]
     # A frame's own ids arrive as numpy scalars, which are integers and are not `int`.
     numpy = pytest.importorskip("numpy")
-    assert declared.addresses([numpy.uint64(2**63)]) == [{"tessera_id": str(2**63)}]
+    assert declared.addresses([numpy.uint64(2**63)]) == [{"mosaica_id": str(2**63)}]
     # A pandas frame's index is not one of its columns.
     pd = pytest.importorskip("pandas")
     frame = pd.DataFrame({"paper": ["a", "b", "c"]}).iloc[[2, 0]]

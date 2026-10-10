@@ -9,7 +9,7 @@ against the value the item carries. Empty combinators are their operators' ident
 candidate, `any_of: []` matches nothing. `match` is specified and unbuilt, so this module refuses it
 the way the server does — by raising, never by evaluating a guess. The `region` leaf
 (`selection-operand.md`, stage 4 of the shape work) is a shape — a polygon or a box in the view's
-own coordinates — or a published artifact named by its `tessera_id`, evaluated here as an even-odd
+own coordinates — or a published artifact named by its `mosaica_id`, evaluated here as an even-odd
 walk over the entity's **stored** position on the quantised grid with a point on an edge inside
 ([`RegionColumn`]), and by artifact through the fixture's own membership; `none_of` over it is the
 complement within the rowed entities, every one of which carries a position.
@@ -183,7 +183,7 @@ class RegionColumn:
 
     `positions` maps entity id → `(qx, qy)` on the 32-bit grid; an entity absent here has no
     row (buffered, or in no view) and matches neither the region nor its negation, which is
-    `filter-index.md` §5's ruling applied without exception. `artifacts` maps a `tessera_id`
+    `filter-index.md` §5's ruling applied without exception. `artifacts` maps a `mosaica_id`
     (as its decimal string) → the member entities of the artifact **this principal is served**;
     an id absent here is an empty operand — for an unknown id, a suppressed artifact, one
     withheld by criterion, exactly as the server answers. `quantise` is the build's `fixed32`
@@ -217,7 +217,7 @@ class MemberOfColumn:
     """The `member_of` leaf's definition (`highlight-and-hierarchy.md` §3), from the fixture's own
     member file: one artifact of one layer, resolved to `membership ∩ M_auth`.
 
-    `members` maps `(layer, tessera_id as a decimal string)` → the member entities of the artifact
+    `members` maps `(layer, mosaica_id as a decimal string)` → the member entities of the artifact
     **this principal is served**. A pair absent here is an **empty operand** — an identifier that
     names nothing, one of another layer, one suppressed, one below this principal's own existence
     criterion — exactly as the server answers, and never a refusal: a `422` there would make the

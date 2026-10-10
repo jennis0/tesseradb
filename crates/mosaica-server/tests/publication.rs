@@ -78,7 +78,7 @@ async fn await_publication(server: &TestServer, n: u64) {
     .await;
 }
 
-/// The `tessera_id`s `s0` serves from a small box around one point, from a fresh session. Small
+/// The `mosaica_id`s `s0` serves from a small box around one point, from a fresh session. Small
 /// enough that the fixture's own rows, which sit on a grid across the frame, cannot fill the k
 /// budget and hide the row a test is asking about.
 async fn points_near(server: &TestServer, x: f64, y: f64) -> BTreeSet<u64> {
@@ -100,7 +100,7 @@ async fn points_near(server: &TestServer, x: f64, y: f64) -> BTreeSet<u64> {
     points.into_iter().map(|(id, _)| id).collect()
 }
 
-/// The `tessera_id`s one view serves, from a fresh session.
+/// The `mosaica_id`s one view serves, from a fresh session.
 async fn points_in(server: &TestServer, view: &str) -> BTreeSet<u64> {
     let token = token_for(server, &["0", "1"][..]).await;
     let resp = server
@@ -881,7 +881,7 @@ async fn an_unknown_wait_value_on_the_flush_is_refused() {
 
 /// **A replayed page accepts nothing and says so.** `created` is the effect
 /// this submission had, so a client summing it over its pages is not made to double-count every
-/// page it retried; `tessera_ids` is the full list either way, which is what a caller correlates
+/// page it retried; `mosaica_ids` is the full list either way, which is what a caller correlates
 /// its rows by.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_replayed_page_accepts_nothing_and_says_so() {
@@ -903,7 +903,7 @@ async fn a_replayed_page_accepts_nothing_and_says_so() {
         "the replay took no rows, so a client's sum stays honest: {second}"
     );
     assert_eq!(
-        second["tessera_ids"], first["tessera_ids"],
+        second["mosaica_ids"], first["mosaica_ids"],
         "and the identifiers are the same ones, which is what the caller correlates by"
     );
 }

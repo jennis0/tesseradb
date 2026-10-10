@@ -425,7 +425,7 @@ therefore grants what `read-all` grants wherever a view has a unique field.
   that does not exist.
 - An insert whose unique field collides with an item the writer cannot see is refused as a
   collision. It is never treated as an update of that item, and the refusal carries no
-  `tessera_id`. It tells the writer that an item with that value exists, and nothing else about it.
+  `mosaica_id`. It tells the writer that an item with that value exists, and nothing else about it.
   Postgres's row-level security has the same property and documents it. Scoping uniqueness to what
   each writer can see would let two items share a value that is meant to identify one.
 - Declaring a view or a layer under a name that a view or layer the writer cannot reach already

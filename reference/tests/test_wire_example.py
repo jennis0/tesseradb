@@ -60,11 +60,11 @@ def test_decodes_to_the_agreed_frames_counts_and_first_ids(name: str) -> None:
         assert v.trailer["rows"] == artifact_rows
 
     first_point = example.first_rows(v.points, 1)
-    got = str(first_point[0]["tessera_id"]) if first_point else None
-    assert got == want["first_point_tessera_id"]
+    got = str(first_point[0]["mosaica_id"]) if first_point else None
+    assert got == want["first_point_mosaica_id"]
     first_artifact = example.first_rows(v.artifacts, 1)
-    got_artifact = str(first_artifact[0]["tessera_id"]) if first_artifact else None
-    assert got_artifact == want["first_artifact_tessera_id"]
+    got_artifact = str(first_artifact[0]["mosaica_id"]) if first_artifact else None
+    assert got_artifact == want["first_artifact_mosaica_id"]
 
 
 def test_served_per_tile_sums_to_the_points_delivered() -> None:

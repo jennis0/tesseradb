@@ -427,7 +427,7 @@ fn a_mixed_put_mints_only_the_new_keys_and_an_identical_re_put_is_a_no_op() {
         "the created leaf's members are joined; the held root's are all held"
     );
     assert_eq!(
-        mixed.tessera_ids[1], first.tessera_ids[0],
+        mixed.mosaica_ids[1], first.mosaica_ids[0],
         "the held key answers the artifact it names"
     );
     assert_eq!(
@@ -454,7 +454,7 @@ fn a_mixed_put_mints_only_the_new_keys_and_an_identical_re_put_is_a_no_op() {
         )
         .expect("an identical re-PUT");
     assert_eq!((again.created, again.joined, again.filled), (0, 0, 0));
-    assert_eq!(again.tessera_ids, mixed.tessera_ids);
+    assert_eq!(again.mosaica_ids, mixed.mosaica_ids);
     assert_eq!(engine.published_artifacts(), 2);
     served(&engine, "clusters/tree");
     assert_eq!(

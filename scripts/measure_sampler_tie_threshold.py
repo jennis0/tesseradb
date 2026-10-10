@@ -3,8 +3,8 @@
 docs/evidence/memos/2026-07-30-priority-as-identity-prefix.md.
 
 **HISTORICAL — the defect this probe quantifies has been fixed.** The memo's redefinition landed
-(contracts §2.6 r6: `priority = high16(tessera_id)`), and design §7.2's selection now compares the
-full `tessera_id`, which is unique per row — so there is no tiebreak left to be dominated by, at any
+(contracts §2.6 r6: `priority = high16(mosaica_id)`), and design §7.2's selection now compares the
+full `mosaica_id`, which is unique per row — so there is no tiebreak left to be dominated by, at any
 V. This script is kept because it measures how *exposed* the shipped system was, which is evidence
 about the fix's value rather than about the current code. It still runs: `decode_viewport` now
 returns 4-tuples `(tile, visible, matched, served)` and this script reads `visible` positionally.

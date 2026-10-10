@@ -325,7 +325,7 @@ fn a_refresh_two_publications_late_still_patches_the_session() {
     // drill-down must not answer from it: that would call the first flush's item absent while the
     // viewport, finding neither rung, rebuilds and draws it.
     let first = item_of_key(&engine, "ext-1").expect("the first flush's item resolves");
-    let id = engine.tessera_id_of(first).unwrap();
+    let id = engine.mosaica_id_of(first).unwrap();
     assert!(
         engine.item(&session, id).unwrap().is_some(),
         "the drill-down answers from no entry staler than the viewport's rung 2"

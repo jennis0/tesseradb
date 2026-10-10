@@ -19,18 +19,18 @@ use mosaica_store::manifest::{
 };
 use mosaica_store::write::{write_permutation, write_segment};
 use mosaica_store::{open_bundle, tile_ranges, StoreError};
-use mosaica_types::{EntityId, TesseraId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+use mosaica_types::{EntityId, MosaicaId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
-/// A synthetic `tessera_id`-shaped value for test fixtures: full splitmix64 output over a
-/// seed, so its top 16 bits are a `priority` prefix like any real `tessera_id` (contracts
+/// A synthetic `mosaica_id`-shaped value for test fixtures: full splitmix64 output over a
+/// seed, so its top 16 bits are a `priority` prefix like any real `mosaica_id` (contracts
 /// §2.6), without claiming this is the actual Feistel construction — `mosaica-types`'s identity
 /// tests cover that separately.
-fn synthetic_tessera_id(seed: u64) -> TesseraId {
+fn synthetic_mosaica_id(seed: u64) -> MosaicaId {
     let mut z = seed.wrapping_add(0x9E3779B97F4A7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
     z ^= z >> 31;
-    TesseraId::new(z)
+    MosaicaId::new(z)
 }
 
 fn unit_extent() -> Bounds {
@@ -66,7 +66,7 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
     let extent = unit_extent();
     let mut items: Vec<TilerItem> = (0..n)
         .map(|entity_id| TilerItem {
-            tessera_id: synthetic_tessera_id(entity_id),
+            mosaica_id: synthetic_mosaica_id(entity_id),
             // Spread points across the grid deterministically so tiles split them up.
             qx: fixed32(((entity_id * 37) % 100) as f64 / 100.0, 0.0, 1.0),
             qy: fixed32(((entity_id * 61) % 100) as f64 / 100.0, 0.0, 1.0),
@@ -198,12 +198,12 @@ fn open_bundle_loads_segments_and_columns_round_trip() {
     assert_eq!(seg.row_count, items.len() as u32);
 
     // columns.arrow round-trips row 0..n exactly. (No `priority` column — decision 0046; the
-    // quantity is the high 16 bits of `tessera_id`, carried in the same row.)
-    let tessera_id_col = seg.columns.tessera_id();
+    // quantity is the high 16 bits of `mosaica_id`, carried in the same row.)
+    let mosaica_id_col = seg.columns.mosaica_id();
     let residual_col = seg.columns.residual();
-    assert_eq!(tessera_id_col.len(), items.len());
+    assert_eq!(mosaica_id_col.len(), items.len());
     for (i, item) in items.iter().enumerate() {
-        assert_eq!(tessera_id_col[i], item.tessera_id.raw());
+        assert_eq!(mosaica_id_col[i], item.mosaica_id.raw());
         assert_eq!(residual_col[i], split32(item.qx, item.qy).1);
     }
 
@@ -1139,7 +1139,7 @@ fn a_just_written_prefix_opens_to_the_same_bundle_without_re_verifying_it() {
     assert_eq!(a.row_count, items.len() as u32);
     assert_eq!(b.row_count, a.row_count);
     assert_eq!(b.morton.u32(), codes.as_slice());
-    assert_eq!(b.columns.tessera_id(), a.columns.tessera_id());
+    assert_eq!(b.columns.mosaica_id(), a.columns.mosaica_id());
     assert_eq!(
         verified.partitions["default"].segments_n,
         trusted.partitions["default"].segments_n

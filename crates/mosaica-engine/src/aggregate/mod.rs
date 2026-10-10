@@ -12,7 +12,7 @@
 //! the next page. Which groups a table lists under `top` is fixed at its first page and carried in
 //! the cursor; a histogram is served in one page.
 //!
-//! Rows carry vocabulary keys, bin edges, artifacts' `tessera_id`s and cell prefixes. A code, an ordinal or an
+//! Rows carry vocabulary keys, bin edges, artifacts' `mosaica_id`s and cell prefixes. A code, an ordinal or an
 //! entity id reaches the caller only inside a sealed cursor.
 
 mod artifacts;
@@ -25,7 +25,7 @@ mod values;
 use std::time::Instant;
 
 use arrow::record_batch::RecordBatch;
-use mosaica_types::TesseraId;
+use mosaica_types::MosaicaId;
 
 use crate::cancel::CancelToken;
 use crate::engine::Engine;
@@ -117,7 +117,7 @@ pub enum By {
     Layer {
         layer: String,
         level: Option<u32>,
-        pick: Pick<TesseraId>,
+        pick: Pick<MosaicaId>,
         cut: Option<Cut>,
         palette: Option<u8>,
     },
@@ -139,7 +139,7 @@ pub struct Cut {
 /// Which groups a table lists.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pick<K> {
-    /// The `n` with the most items in the set, ties by key or `tessera_id`.
+    /// The `n` with the most items in the set, ties by key or `mosaica_id`.
     Top(u32),
     /// These, in this order, a repeat counted once.
     Named(Vec<K>),

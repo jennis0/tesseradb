@@ -10,7 +10,7 @@ an item is drawn and how it is queried, never what the item is or who may see it
 An item is one record in the corpus. It carries an access label, an expression over the
 [terms that decide who may see it](access-control.md#terms-and-access-labels) that the operator declares per item,
 and a value, present or absent, for every field the corpus declares. The operator addresses an item
-again by its `tessera_id` or by the value of a field declared [unique](#unique-fields): a DOI, an
+again by its `mosaica_id` or by the value of a field declared [unique](#unique-fields): a DOI, an
 accession number, a GeoNames id.
 
 ## Views and view groups
@@ -27,7 +27,7 @@ absent from a view's mapping has no position there.
 flowchart TB
   subgraph entity["entity space: one per corpus, shared by every view"]
     direction LR
-    ids["item identities<br/>entity id, tessera_id, unique values"]
+    ids["item identities<br/>entity id, mosaica_id, unique values"]
     terms["who may see it"]
     fields["field values"]
     members["membership of annotation layers"]
@@ -79,7 +79,7 @@ item: a sentiment score recomputed each quarter, for instance. Reading it under 
 group returns that view's own value. Reading it from anywhere else requires naming the view
 explicitly, because the field holds no single value outside one.
 
-An ingest row names an item by its `tessera_id` and the value of every unique field it carries,
+An ingest row names an item by its `mosaica_id` and the value of every unique field it carries,
 and names no item where none of them is held; a change and a layer's member name an item the same
 way, by those columns ([resolving a batch](write-path.md#resolving-a-batch)).
 A row naming an item that has no row in the batch's view, carrying a position there and changing
@@ -88,7 +88,7 @@ and every value declared once for the whole item. The item stays served in its o
 is served in the new one from the next flush. This is how one item comes to exist in more than one
 view. A row that names an item and carries what the item stores changes nothing. Any other row
 naming an item edits it: it changes a value, the label or a position. An edit
-keeps the item's `tessera_id`, the views it is in, its layer
+keeps the item's `mosaica_id`, the views it is in, its layer
 memberships, the contents generated from it and a suppression standing against it
 ([the write path](write-path.md#edits)). A row that places an item in a layer's artifact changes
 the artifact, not the item: the item is not edited and keeps its entity.
@@ -104,7 +104,7 @@ Four identifiers name an item or a view, one for each party that needs to addres
 | Identifier | Assigned by | Held by | What changes it |
 |---|---|---|---|
 | entity id | the server, at ingest | never leaves the server | an edit, which moves the item to a new one; the id an edit left is issued again once a compaction has removed its rows and the log has rotated past that compaction |
-| `tessera_id` | derived from the entity id by a keyed permutation, at the same time | the client | a rebuild, which creates a new bundle with a new key |
+| `mosaica_id` | derived from the entity id by a keyed permutation, at the same time | the client | a rebuild, which creates a new bundle with a new key |
 | unique value | the operator, in a field declared `unique` | the operator, and any record of a write naming it | an edit of that field |
 | view key | the operator, when a view of a group is created | any request naming that view | a drop frees the key; a later create under it starts a new, empty view |
 
@@ -116,14 +116,14 @@ already exists, in a range sorted the same way within itself but appended after 
 on disc rather than interleaved with it. The exception is an id a compaction has freed: an edit
 leaves the item's old entity deleted, the compaction that removes its rows frees the id, and the
 allocator issues freed ids, lowest first, before new ones. An item's first entity id is never
-freed, because its `tessera_id` is derived from it, and neither is one a suppression stands
+freed, because its `mosaica_id` is derived from it, and neither is one a suppression stands
 against ([freed entity ids](write-path.md#freed-entity-ids) has the rules).
 
-The `tessera_id` is what a client receives and holds instead of the entity id. The key of the
+The `mosaica_id` is what a client receives and holds instead of the entity id. The key of the
 permutation is drawn at random by `mosaica build` each time it creates a bundle and is stored in
-the bundle's manifest. Nobody configures it, and no response carries it. A `tessera_id` is stable
+the bundle's manifest. Nobody configures it, and no response carries it. A `mosaica_id` is stable
 for the item's life in that bundle, across edits, sessions, restarts, flushes, merges and
-compactions, and a copy of the bundle keeps it. A rebuild issues a new `tessera_id` for every item, and one from
+compactions, and a copy of the bundle keeps it. A rebuild issues a new `mosaica_id` for every item, and one from
 the old bundle does not name an item in the new one.
 
 ## Projections and the frame
@@ -278,9 +278,9 @@ row carrying no unique value, so a corpus that declares no unique field makes ea
 points an item of its own. A points row carrying a value an earlier view's points gave names that
 item, and this is how one item comes to be in two views. A row of any other file must name an
 item, so the build is refused where a file other than a view's points carries neither a
-`tessera_id` column nor a unique field's column. A `tessera_id` column meets that requirement, but
-an empty database holds no `tessera_id`, so each row naming an item by one is refused as
-`unknown_tessera_id`.
+`mosaica_id` column nor a unique field's column. A `mosaica_id` column meets that requirement, but
+an empty database holds no `mosaica_id`, so each row naming an item by one is refused as
+`unknown_mosaica_id`.
 
 A build leaves out a row that names two items, names an item or sets a value an earlier row of its
 file names or sets, or names no item in a file that cannot create one. Of two rows naming one item,

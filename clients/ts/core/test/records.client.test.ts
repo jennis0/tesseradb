@@ -37,7 +37,7 @@ const trailer = (pages: number, rows: number, next: string | null = null) =>
 /** A page of `ids` with a category, a string with a null, and a number. */
 function page(ids: bigint[]): Table {
   return new Table({
-    tessera_id: u64(ids),
+    mosaica_id: u64(ids),
     archive: vectorFromArray(
       ids.map((id) => ['cs', 'hep', 'math'][Number(id % 3n)]!),
       new Dictionary(new Utf8(), new Int32())
@@ -228,7 +228,7 @@ describe('MosaicaClient.items and artifacts', () => {
         PAGES.map((table, i) => ({rows: rowsOf(table), next: CURSORS[i], endedBy: i < 2 ? 'rows' : 'end'}))
       );
       // A category arrives as its keys, and an absent value as null.
-      expect(pages[0]!.rows[0]).toEqual({tessera_id: 1n, archive: 'hep', title: 'paper 1', score: 0.125});
+      expect(pages[0]!.rows[0]).toEqual({mosaica_id: 1n, archive: 'hep', title: 'paper 1', score: 0.125});
       expect(pages[0]!.rows.map((r) => r.archive)).toEqual(['hep', 'math', 'cs']);
       expect(pages[1]!.rows[0]!.title).toBeNull();
       expect(read.trailer).toEqual({pages: 3, rows: 8, next: null, endedBy: 'end', streamUs: 12});
@@ -362,7 +362,7 @@ describe('MosaicaClient.items and artifacts', () => {
   });
 
   it('reads the artifacts head, whose counts are of artifacts served', async () => {
-    const none = new Table({tessera_id: u64([]), key: vectorFromArray([], new Utf8())});
+    const none = new Table({mosaica_id: u64([]), key: vectorFromArray([], new Utf8())});
     const {client, sent} = clientFor(
       byCursor({
         // A response that found no row can still move the cursor on.

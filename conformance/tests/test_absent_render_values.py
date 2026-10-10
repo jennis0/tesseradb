@@ -98,7 +98,7 @@ def test_an_absent_rendered_value_is_null_through_a_restart_and_a_fold(deploymen
 
 
 def test_points_naming_their_columns_carry_those_alone_with_the_corpus_values(deployment):
-    """`point_rows` as a list: `tessera_id`, `code` and the named rendered columns, each value the
+    """`point_rows` as a list: `mosaica_id`, `code` and the named rendered columns, each value the
     corpus's, over the points and counts the full answer serves. A name no rendered column has is
     a 422."""
     d = deployment
@@ -106,7 +106,7 @@ def test_points_naming_their_columns_carry_those_alone_with_the_corpus_values(de
     full = d.server.viewport(token, fx.WORLD, 0, fx.BBOX, k=fx.K)
     named = d.server.viewport(token, fx.WORLD, 0, fx.BBOX, k=fx.K, point_rows=["fx", "heat"])
     table = decode_viewport_points(named)
-    assert table.column_names == ["tessera_id", "code", "fx", "heat"]
+    assert table.column_names == ["mosaica_id", "code", "fx", "heat"]
     items = values(table, "fx")
     assert sorted(items) == BUILT + INGESTED
     heat = COLUMNS[0]
@@ -116,7 +116,7 @@ def test_points_naming_their_columns_carry_those_alone_with_the_corpus_values(de
     bare = decode_viewport_points(
         d.server.viewport(token, fx.WORLD, 0, fx.BBOX, k=fx.K, point_rows=[])
     )
-    assert bare.column_names == ["tessera_id", "code"]
+    assert bare.column_names == ["mosaica_id", "code"]
 
     refused = d.server.viewport_request(
         token, fx.WORLD, 0, fx.BBOX, k=fx.K, point_rows=["heat", "no_such_column"]

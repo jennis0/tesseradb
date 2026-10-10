@@ -292,7 +292,7 @@ pub struct BuildArgs {
     /// Refuse the build at the first file with a row the identity rule refuses, rather than
     /// refusing those rows and reporting them ([`ids`]).
     pub strict: bool,
-    /// The key of the `tessera_id` permutation, recorded in the manifest. The CLI generates one
+    /// The key of the `mosaica_id` permutation, recorded in the manifest. The CLI generates one
     /// for every bundle it creates; a caller that needs two builds to agree byte for byte passes
     /// the same key to both.
     pub identity_key: IdentityKey,
@@ -511,7 +511,7 @@ impl Occupancy {
     /// Count the distinct cells over a build's Morton codes **in tiler order**.
     ///
     /// **A run count over the sorted codes, not a bitmap.** Both builds reach this holding the
-    /// codes they are about to write to `morton.u32`, which is `(morton, tessera_id)` ascending
+    /// codes they are about to write to `morton.u32`, which is `(morton, mosaica_id)` ascending
     /// by contract (contracts §2.6 r6) — so equal codes are adjacent and the exact answer is one
     /// comparison per point with nothing retained. A Roaring bitmap of the codes gives the same
     /// exact answer for unsorted input, and is what this would need if the count moved anywhere
@@ -1554,16 +1554,16 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     }
 
     // ---- 6. the identity, computed BEFORE the tiler (2026-07-30 fold, memo §6) --------
-    // `tessera_id` is now a sort key (`priority = high16(tessera_id)`, and the storage order is
-    // `(morton, tessera_id)`), so it must exist before `sort_batch` runs, not be written at the
+    // `mosaica_id` is now a sort key (`priority = high16(mosaica_id)`, and the storage order is
+    // `(morton, mosaica_id)`), so it must exist before `sort_batch` runs, not be written at the
     // row after it.
     let mut entity_ids: Vec<EntityId> = (0..n).map(EntityId::new).collect();
     let mut tiler_items: Vec<TilerItem> = Vec::with_capacity(n as usize);
     for (position, item) in staged.iter().enumerate() {
         let entity_id = EntityId::new(position as u64);
-        let tessera_id = args.identity_key.forward(args.shard_id, entity_id)?;
+        let mosaica_id = args.identity_key.forward(args.shard_id, entity_id)?;
         tiler_items.push(TilerItem {
-            tessera_id,
+            mosaica_id,
             qx: item.qx,
             qy: item.qy,
             scalars: Vec::new(),
@@ -1850,7 +1850,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     let band_schema = band_schema_of(&args.schema);
     let codes = sort_batch(&mut tiler_items, &mut entity_ids);
     // **The resolution this frame actually gave the corpus**, counted here because `codes` is the
-    // row order — `(morton, tessera_id)` ascending — and is the same vector `write_segment` puts
+    // row order — `(morton, mosaica_id)` ascending — and is the same vector `write_segment` puts
     // into `morton.u32` below. The streaming pipeline counts the identical thing at its own
     // segment write; a figure that appeared on one path and not the other would be worse than
     // none, since which path ran is not something the caller chose.
@@ -2505,7 +2505,7 @@ pub struct VerifyReport {
 /// Verify a bundle at `root`: run the read protocol (which checks every manifest digest, every
 /// file's size and SHA-256, and each permutation's bijectivity onto its segment's rows), then
 /// re-confirm the row space covers exactly the rows the segments claim, and re-derive every
-/// row's `tessera_id` from `(identity.key, identity.shard_id, entity_id)`, failing if a single
+/// row's `mosaica_id` from `(identity.key, identity.shard_id, entity_id)`, failing if a single
 /// row disagrees (contracts §2.6 r6: "`mosaica verify` checks the whole column against" the
 /// key).
 pub fn verify(root: &Path) -> Result<VerifyReport> {
@@ -2746,7 +2746,7 @@ fn scratch_name(view_id: &str) -> String {
         .collect()
 }
 
-/// Surjectivity of one view's row space onto its segments' rows, and every row's `tessera_id`
+/// Surjectivity of one view's row space onto its segments' rows, and every row's `mosaica_id`
 /// against `identity.key`.
 ///
 /// **Both halves in one pass over a window, so neither costs a row-indexed array over the view.**
@@ -2766,8 +2766,8 @@ fn scratch_name(view_id: &str) -> String {
 /// "not a bijection" (the false refusal §18 obligation 10 names).
 ///
 /// **What the identity half actually covers is the base's rows.** An extent has no stored mapping:
-/// `SegmentExtent::rebuild` recovers one at open by inverting each row's `tessera_id` under the
-/// bundle's key (contracts §2.1). Comparing that `tessera_id` back against what the key derives
+/// `SegmentExtent::rebuild` recovers one at open by inverting each row's `mosaica_id` under the
+/// bundle's key (contracts §2.1). Comparing that `mosaica_id` back against what the key derives
 /// for the entity the inversion produced is therefore a tautology over an extent's rows — it
 /// restates the inversion. Over the base's rows, whose mapping is `permutation.bin`, the comparison
 /// is between two artefacts and is the check contracts §2.6 r6 describes. The extent rows are still
@@ -2913,8 +2913,8 @@ fn claim_rows(
 }
 
 /// The rows of `[lo, hi)` that a segment holds, in row order: each one's entity from `window`, and
-/// its stored `tessera_id` against what the key derives for that entity.
-/// What a row's `tessera_id` is checked against: the key and shard it is derived under, and the
+/// its stored `mosaica_id` against what the key derives for that entity.
+/// What a row's `mosaica_id` is checked against: the key and shard it is derived under, and the
 /// edited items a moved row's entity is found in.
 #[derive(Clone, Copy)]
 struct Identity<'a> {
@@ -2938,7 +2938,7 @@ fn walk_window(
         if from >= to {
             continue;
         }
-        let ids = segment.columns.tessera_id();
+        let ids = segment.columns.mosaica_id();
         for row in from..to {
             let local = (row - row_base) as usize;
             let entity = window[(row - lo) as usize];
@@ -2965,9 +2965,9 @@ fn walk_window(
             if id == expected {
                 continue;
             }
-            // A row an edit moved records its entity, and its `tessera_id` is its number's, whose
+            // A row an edit moved records its entity, and its `mosaica_id` is its number's, whose
             // entries in the edited items name the entity.
-            let (shard, number) = identity_key.invert(mosaica_types::TesseraId::new(id));
+            let (shard, number) = identity_key.invert(mosaica_types::MosaicaId::new(id));
             let moved = recorded.is_some()
                 && shard == shard_id
                 && u32::try_from(number.raw()).is_ok_and(|number| {
@@ -2978,7 +2978,7 @@ fn walk_window(
                 });
             if !moved {
                 return Err(BuildError::Invalid(format!(
-                    "view '{view_id}' segment '{}' row {local}: tessera_id {id:#x} does not \
+                    "view '{view_id}' segment '{}' row {local}: mosaica_id {id:#x} does not \
                      match identity.key's derivation {expected:#x} for entity {entity}",
                     segment.seg_id
                 )));

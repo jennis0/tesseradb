@@ -103,12 +103,12 @@ def main() -> int:
             first = http.post(f"{v}/v1/artifacts/browse", json=browse, timeout=600)
             first.raise_for_status()
             page1 = first.json()
-            ids = [row["tessera_id"] for row in page1["artifacts"]]
+            ids = [row["mosaica_id"] for row in page1["artifacts"]]
             genus = http.post(
                 f"{v}/v1/artifacts/browse",
                 json={"view": view, "layer": layer, "level": LEVEL - 1, "limit": 1, "q": "a"},
                 timeout=600,
-            ).json()["artifacts"][0]["tessera_id"]
+            ).json()["artifacts"][0]["mosaica_id"]
             children = {"view": view, "layer": layer, "level": LEVEL, "limit": 100, "parent": genus}
             asks = {
                 "browse page 1": lambda: http.post(

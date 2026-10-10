@@ -26,7 +26,7 @@ a principal holding the other is served the other. Closing it here needs a confo
 multi-compartment items, which is a fixture regeneration rather than a test to write.
 
 **Why the join runs through `fx_key` and not through an inverted identity.** A served point carries
-its planted key and its opaque `tessera_id`; `oracle.catalogue.entity_of_fx_key` is the suite's one
+its planted key and its opaque `mosaica_id`; `oracle.catalogue.entity_of_fx_key` is the suite's one
 legitimate handle→item join, and using it here keeps this module on the same side of **I10** as
 every other differential — no entity id crosses the boundary, in either direction.
 """
@@ -94,7 +94,7 @@ def _granted_descriptors(bundle, grants) -> dict[int, str]:
 
 
 def _served_sample(server, token: str):
-    """`[(tessera_id, fx_key)]` from one whole-map viewport — the only route a client has to an
+    """`[(mosaica_id, fx_key)]` from one whole-map viewport — the only route a client has to an
     identifier it may drill down on."""
     body = server.viewport(token, VIEW, 0, cat.FULL_VIEWPORT, k=500)
     # A zero-visibility principal's response carries no points frame at all, so the schema-bearing
@@ -105,7 +105,7 @@ def _served_sample(server, token: str):
     points = decode_viewport_points(body)
     pairs = list(
         zip(
-            points.column("tessera_id").to_pylist(),
+            points.column("mosaica_id").to_pylist(),
             points.column("fx_key").to_pylist(),
         )
     )
@@ -130,12 +130,12 @@ def test_the_served_labels_are_the_oracle_s_intersection(
     terms = _terms_by_entity(catalogue_bundle)
     granted = _granted_descriptors(catalogue_bundle, case.grants)
 
-    for tessera_id, fx_key in sample:
+    for mosaica_id, fx_key in sample:
         entity = entity_of_key[fx_key]
         expected = sorted(
             granted[term] for term in terms.get(entity, set()) if term in granted
         )
-        response = catalogue_server.item(token, tessera_id)
+        response = catalogue_server.item(token, mosaica_id)
         assert response.status_code == 200, (
             f"{case.name}: an item this principal's own viewport served must drill down"
         )

@@ -49,12 +49,12 @@ describe('each route', () => {
   const JSON_ROUTE = {'content-type': 'application/json'};
   const PUBLISHED: PublishRequest = {
     level: 0,
-    artifacts: [{key: 'c0', members: {tessera_id: ['12', null], doi: [null, '10.1/x']}, content: [{values: ['c'], generated_from: {geonameid: [5]}}]}]
+    artifacts: [{key: 'c0', members: {mosaica_id: ['12', null], doi: [null, '10.1/x']}, content: [{values: ['c'], generated_from: {geonameid: [5]}}]}]
   };
-  const GROWN: GrowRequest = {level: 0, artifacts: [{key: 'c0', rank: 0, members: {}, leaving: {tessera_id: ['12']}}]};
+  const GROWN: GrowRequest = {level: 0, artifacts: [{key: 'c0', rank: 0, members: {}, leaving: {mosaica_id: ['12']}}]};
   const CHANGES: ChangeItem[] = [
     {op: 'suppress', match: {doi: '10.1/x'}},
-    {op: 'delete', match: {tessera_id: '12', geonameid: 5}}
+    {op: 'delete', match: {mosaica_id: '12', geonameid: 5}}
   ];
   const cases: {name: string; call: (c: Control) => Promise<Answer>; method: string; path: string; headers?: Record<string, string>; json?: unknown}[] = [
     {name: 'status', call: (c) => c.status(), method: 'GET', path: '/control/status'},
@@ -283,7 +283,7 @@ describe('an answer', () => {
     vi.stubGlobal('fetch', async () => {
       throw new TypeError('fetch failed');
     });
-    const answer = await control.changes([{op: 'delete', match: {tessera_id: '5'}}]);
+    const answer = await control.changes([{op: 'delete', match: {mosaica_id: '5'}}]);
     expect(answer).toMatchObject({status: UNANSWERED, ok: false, attempts: 1});
   });
 

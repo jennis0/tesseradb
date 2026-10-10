@@ -17,7 +17,7 @@
 //!
 //! 1. **Row-count preserving.** The output holds exactly as many rows as its inputs did. Dropping
 //!    one is the compaction *fold*, which is invariant-bearing work this layer must not do.
-//! 2. **Position-preserving, byte-exact.** The `(tessera_id, code, residual)` multiset is
+//! 2. **Position-preserving, byte-exact.** The `(mosaica_id, code, residual)` multiset is
 //!    unchanged. A merge that dequantised and requantised — rather than carrying the Morton code
 //!    through — moves points on a viewer's map by a sub-cell amount that no count would show.
 //! 3. **Morton-sorted output.** The sort *is* the tile index: `tile_ranges` binary-searches it, so
@@ -37,7 +37,7 @@ use mosaica_store::flush::{write_flush_segment, FlushInput, FlushRow};
 use mosaica_store::manifest::Quantisation;
 use mosaica_store::merge::{execute_merge, MergeInput, MergeSpec};
 use mosaica_store::read::{ColumnsRef, MortonSlice};
-use mosaica_types::{EntityId, IdentityKey, TesseraId, ROW_ABSENT};
+use mosaica_types::{EntityId, IdentityKey, MosaicaId, ROW_ABSENT};
 
 fn key() -> IdentityKey {
     IdentityKey::from_hex("0123456789abcdef0123456789abcdef").expect("test key")
@@ -80,7 +80,7 @@ fn shapes() -> impl Strategy<Value = Vec<Shape>> {
 }
 
 /// Write `shape` as a flush segment and return its `MergeInput`, alongside `(entity, code,
-/// residual, tessera_id)` for every row it holds.
+/// residual, mosaica_id)` for every row it holds.
 fn write_input(root: &Path, index: usize, entity_lo: u64, shape: &Shape) -> MergeInput {
     let seg_id = format!("in-{index}");
     let rows: Vec<FlushRow> = (entity_lo..entity_lo + shape.count)
@@ -127,7 +127,7 @@ fn seg_dir(root: &Path, seg_id: &str) -> std::path::PathBuf {
         .join(seg_id)
 }
 
-/// `(tessera_id, code, residual)` for every row of a segment, sorted — the multiset property 2 is
+/// `(mosaica_id, code, residual)` for every row of a segment, sorted — the multiset property 2 is
 /// about.
 fn points_of(root: &Path, seg_id: &str) -> Vec<(u64, u32, u32)> {
     let d = seg_dir(root, seg_id);
@@ -136,7 +136,7 @@ fn points_of(root: &Path, seg_id: &str) -> Vec<(u64, u32, u32)> {
     let mut out: Vec<(u64, u32, u32)> = (0..codes.u32().len())
         .map(|row| {
             (
-                cols.tessera_id()[row],
+                cols.mosaica_id()[row],
                 codes.u32()[row],
                 cols.residual()[row],
             )
@@ -209,7 +209,7 @@ proptest! {
             for entity in input.entity_lo..=input.entity_hi {
                 let row = out.extent.rows[(entity - base) as usize];
                 prop_assert_ne!(row, ROW_ABSENT, "entity {} has no row", entity);
-                let (shard, back) = key().invert(TesseraId::new(cols.tessera_id()[row as usize]));
+                let (shard, back) = key().invert(MosaicaId::new(cols.mosaica_id()[row as usize]));
                 prop_assert_eq!(shard, 0);
                 prop_assert_eq!(
                     back.raw(), entity,

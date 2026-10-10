@@ -113,11 +113,11 @@ def test_a_reader_given_no_terms_is_the_operator_and_reads_every_item(db):
 
 
 def test_a_sample_carries_the_rendered_columns_and_the_served_count(db):
-    """The points surface: `tessera_id`, `code` and what `/v1/meta` declares as rendered."""
+    """The points surface: `mosaica_id`, `code` and what `/v1/meta` declares as rendered."""
     meta = db.meta()
     rendered = {s["name"] for s in meta["declared_scalars"] if s["render"]}
     table = db.view("s0").sample(k=64)
-    assert set(table.column_names) == {"tessera_id", "code"} | rendered
+    assert set(table.column_names) == {"mosaica_id", "code"} | rendered
     # A served set is not the whole set: `k` bounds it, and the counts are what say by how much.
     assert table.num_rows == served_count(table)
     assert served_count(table) < visible_count(table)
@@ -130,8 +130,8 @@ def test_a_sample_naming_its_columns_carries_those_alone_over_the_same_points(db
     rendered = sorted(s["name"] for s in meta["declared_scalars"] if s["render"])
     full = db.view("s0").sample(k=64)
     named = db.view("s0").sample(k=64, point_rows=[rendered[0]])
-    assert named.column_names == ["tessera_id", "code", rendered[0]]
-    assert named.column("tessera_id") == full.column("tessera_id")
+    assert named.column_names == ["mosaica_id", "code", rendered[0]]
+    assert named.column("mosaica_id") == full.column("mosaica_id")
     assert named.column("code") == full.column("code")
     assert named.column(rendered[0]) == full.column(rendered[0])
     assert named.schema.metadata[b"mosaica.counts"] == full.schema.metadata[b"mosaica.counts"]
@@ -142,7 +142,7 @@ def test_a_sample_naming_its_columns_carries_those_alone_over_the_same_points(db
 def test_item_is_the_record_for_a_point_a_sample_served(db):
     """The drill-down: the record by declared column name, and the satisfied terms only."""
     table = db.view("s0").sample(k=8)
-    one = table.column("tessera_id")[0].as_py()
+    one = table.column("mosaica_id")[0].as_py()
     record = db.item(one)
     assert record["fields"]["arxiv_id"]
     # The operator's session satisfies every label, so the card names each label the item holds.
@@ -154,7 +154,7 @@ def test_a_sample_that_serves_no_point_still_has_the_two_fixed_columns(db):
     """A response with no points frame: the table is empty, and its columns are not invented."""
     empty = db.view("s0").filter({"arxiv_id": {"eq": "no-such-paper"}}).sample()
     assert empty.num_rows == 0
-    assert empty.column_names == ["tessera_id", "code"]
+    assert empty.column_names == ["mosaica_id", "code"]
     assert json.loads(empty.schema.metadata[b"mosaica.counts"])["matched"] == 0
 
 
@@ -163,11 +163,11 @@ def test_an_items_join_value_is_one_of_its_fields_and_finds_it_again(db):
     a lookup by value answers with the same item, from the database and from `connect()`
     alike."""
     table = db.view("s0").sample(k=8)
-    one = table.column("tessera_id")[0].as_py()
+    one = table.column("mosaica_id")[0].as_py()
     carried = db.item(one)["fields"]["id"]
     assert isinstance(carried, int)
     found = db.lookup("s0", "id", [carried])
-    assert found.column("tessera_id").to_pylist() == [one]
+    assert found.column("mosaica_id").to_pylist() == [one]
 
     token = authorise(db.session_url, db.operator_credential, read_all=True)
     assert connect(db.viewer_url, token).item(one)["fields"]["id"] == carried
@@ -183,7 +183,7 @@ def test_connect_reads_a_hosted_deployment_with_the_token_it_was_given(db):
     assert v.meta()["views"][0]["id"] == "s0"
     table = v.view("s0").sample(k=8)
     assert table.num_rows > 0
-    assert v.item(table.column("tessera_id")[0].as_py())["fields"]
+    assert v.item(table.column("mosaica_id")[0].as_py())["fields"]
 
 
 def test_connect_has_no_way_to_mint_another_principal_and_no_way_to_write(db):

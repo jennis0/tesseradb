@@ -15,10 +15,10 @@ import {
 /**
  * The replica: the points a client holds, as one band per tile.
  *
- * The server sends a prefix of each tile's visible set in `tessera_id` order, and the prefixes
+ * The server sends a prefix of each tile's visible set in `mosaica_id` order, and the prefixes
  * nest across depth: a point served at depth 3 is served again by every deeper fetch that covers
  * it. A band is such a prefix, so one bound describes everything held for a tile: every member of
- * its visible set with `tessera_id` below `heldBelow`. The bound is an identity rather than a count
+ * its visible set with `mosaica_id` below `heldBelow`. The bound is an identity rather than a count
  * because it means the same at every depth, so one declaration against a parent answers for its
  * four children.
  *
@@ -87,7 +87,7 @@ export function bandKey(depth: number, prefix: bigint): BandKey {
 }
 
 /**
- * One tile's held points, ascending by `tessera_id` as the server sent them. A {@link Composition}
+ * One tile's held points, ascending by `mosaica_id` as the server sent them. A {@link Composition}
  * and the store's `marks` projection hold bands by reference. Every array is the band's own copy. A
  * tile in which nothing matches is a band of none, which carries the tile's counts and draws nothing.
  *
@@ -106,7 +106,7 @@ export type Band = {
   x: number;
   /** The tile's row index at `depth`. */
   y: number;
-  /** Each point's `tessera_id`, ascending. */
+  /** Each point's `mosaica_id`, ascending. */
   ids: BigUint64Array;
   /**
    * Each point's position in deck.gl world space: `x` and `y` interleaved, two `f32` entries a
@@ -144,7 +144,7 @@ export type Band = {
   matched: bigint;
   /** How many of `matched` also match the request's highlight; equal to `matched` where none is set. */
   highlighted: bigint;
-  /** One past the highest `tessera_id` held, so every id in `ids` is below it. `0n` for an empty band. */
+  /** One past the highest `mosaica_id` held, so every id in `ids` is below it. `0n` for an empty band. */
   heldBelow: bigint;
   /** The identity key of the response the band came from. */
   identityKey: string;
@@ -273,7 +273,7 @@ function nameResponse(result: ViewportResult, table: SessionArtifactTable): {nam
     const refs: ArtifactRef[] = [];
     // A tag names an artifact alone. Its level, parents and centroid arrive with the artifact
     // channel's frames, or from a read by identifier where no frame carries it.
-    for (let d = 0; d < column.ids.length; d++) refs.push({tesseraId: column.ids[d]!, layer, parentIds: []});
+    for (let d = 0; d < column.ids.length; d++) refs.push({mosaicaId: column.ids[d]!, layer, parentIds: []});
     const ordinals = table.take(refs);
     held.push(ordinals);
     const map = new Uint32Array(column.ids.length + 1);
@@ -369,7 +369,7 @@ export function bandSplitter(
           if (ids[p]! <= ids[p - 1]!) {
             throw new Error(
               `band ${tile.tile}: ids out of ascending order at ${p}; a response lists each tile's ` +
-                `ids in ascending \`tessera_id\` order.`
+                `ids in ascending \`mosaica_id\` order.`
             );
           }
         }

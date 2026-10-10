@@ -336,14 +336,14 @@ pub(crate) fn holders(
     Ok(out)
 }
 
-/// An item's `tessera_id` as a refusal names it.
-pub(crate) fn tessera_id_text(
+/// An item's `mosaica_id` as a refusal names it.
+pub(crate) fn mosaica_id_text(
     engine: &crate::Engine,
     generation: &Generation,
     entity: EntityId,
 ) -> String {
     engine
-        .tessera_id_in(generation, entity)
+        .mosaica_id_in(generation, entity)
         .map(|id| id.raw().to_string())
         .unwrap_or_else(|_| "unknown".to_string())
 }

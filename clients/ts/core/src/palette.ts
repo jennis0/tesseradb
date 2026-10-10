@@ -134,7 +134,7 @@ export function paletteOfSize(size: number | null): PaletteName | null {
 
 /**
  * Colours chosen for single artifacts in place of their palette colours, by layer and then by
- * `tessera_id`.
+ * `mosaica_id`.
  *
  * @category Coordinates and colour
  */
@@ -142,14 +142,14 @@ export type ChosenColours = ReadonlyMap<string, ReadonlyMap<bigint, Rgba>>;
 
 /**
  * An artifact a colour is wanted for: its ordinal in the session table, its layer, its
- * `tessera_id`, its slot and the palette size the slot was served under.
+ * `mosaica_id`, its slot and the palette size the slot was served under.
  *
  * @internal
  */
-export type Slotted = {ordinal: number; layer: string; tesseraId: bigint; slot: number | null; paletteSize: number | null};
+export type Slotted = {ordinal: number; layer: string; mosaicaId: bigint; slot: number | null; paletteSize: number | null};
 
 /**
- * A colour per artifact, by ordinal, with the colours `chosen` for its layer and `tessera_id` in
+ * A colour per artifact, by ordinal, with the colours `chosen` for its layer and `mosaica_id` in
  * place of the palette's. Each slot is coloured from the palette it was served for, so a slot served before a
  * change of palette keeps its colour until the slot of the new size arrives.
  *
@@ -164,6 +164,6 @@ export function artifactColours(artifacts: readonly Slotted[], chosen: ChosenCol
 /** One artifact's colour, as {@link artifactColours} gives it. @internal */
 export function slottedColour(a: Omit<Slotted, 'ordinal'>, chosen: ChosenColours): Rgba {
   const palette = paletteOfSize(a.paletteSize);
-  const own = chosen.get(a.layer)?.get(a.tesseraId);
+  const own = chosen.get(a.layer)?.get(a.mosaicaId);
   return palette === null ? (own ?? NEUTRAL) : artifactColour(palette, a.slot, own);
 }

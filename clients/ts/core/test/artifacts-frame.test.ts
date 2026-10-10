@@ -19,7 +19,7 @@ type Row = {layer?: string; id: bigint; rung?: number; matched?: boolean | null;
 function columns(rows: Row[], layerType: unknown = LAYER): Record<string, unknown> {
   return {
     layer: vectorFromArray(rows.map((r) => r.layer ?? 'clusters/x'), layerType as never),
-    tessera_id: u64(rows.map((r) => r.id)),
+    mosaica_id: u64(rows.map((r) => r.id)),
     key: vectorFromArray(rows.map((r) => `c-${r.id}`), new Utf8()),
     masked_count: u64(rows.map(() => 7n)),
     centroid_x: vectorFromArray(rows.map((r) => (r.centroid === null ? null : (r.centroid?.[0] ?? 4))), new Float64()),
@@ -48,7 +48,7 @@ describe('an artifacts frame', () => {
     expect(decoded.artifacts).toEqual([
       {
         layer: 'clusters/x',
-        tesseraId: 1n,
+        mosaicaId: 1n,
         key: 'c-1',
         maskedCount: 7n,
         centroid: [4, 4],

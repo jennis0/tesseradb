@@ -220,7 +220,7 @@ view's, under `ingest_by_view` (below, under "Beyond the schema").
 | `driver_peak_rss` | bytes/`null` | the driver's own `VmHWM` at the cell's end, not the server's |
 | `equivalence` | — | the masked-count equivalence test, by surface — below |
 | `<phase>.phase_s` | seconds | one phase's own wall — `flush`, `fold`, `equivalence`, `write_cycle`, `restart` — whether it held or failed |
-| `write_cycle` | — | deletes, suppressions, re-ingests, a fold and every view's count again, each with its latency to visibility. A deleted item is re-ingested in every view it was in, the anchor's first; `by_view` holds each view's count before, the suppressed items it holds, and its count after against the expected one; `reingest.items_with_several_ids` counts items answered with different `tessera_id`s by different views' passes |
+| `write_cycle` | — | deletes, suppressions, re-ingests, a fold and every view's count again, each with its latency to visibility. A deleted item is re-ingested in every view it was in, the anchor's first; `by_view` holds each view's count before, the suppressed items it holds, and its count after against the expected one; `reingest.items_with_several_ids` counts items answered with different `mosaica_id`s by different views' passes |
 
 `publish` covers one phase: the base bundle carries the built fraction's points and every layer's
 declaration; each layer's artifacts, memberships and supplied content are published through

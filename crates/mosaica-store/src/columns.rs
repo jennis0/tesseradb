@@ -97,7 +97,7 @@ impl ColumnsPlan {
     /// [`crate::write::SegmentWriter`] builds from the same inputs.
     pub fn new(scalars: &[(String, ScalarType)], rows: usize) -> io::Result<ColumnsPlan> {
         let mut fields = vec![
-            Field::new("tessera_id", DataType::UInt64, false),
+            Field::new("mosaica_id", DataType::UInt64, false),
             Field::new("residual", DataType::UInt32, false),
         ];
         let mut widths: Vec<Option<usize>> = vec![Some(8), Some(4)];

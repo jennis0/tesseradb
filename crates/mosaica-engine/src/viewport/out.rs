@@ -43,12 +43,12 @@ pub struct TileCount {
 /// The sampled points, column-major: one buffer per field, all of the same length. Column-major
 /// because the wire wants it and the read is cheapest as it, measured at 944 ms row-major-then-
 /// transpose against 51 ms gathered column-major over 10⁶ points in nineteen columns. No entity
-/// id leaves the engine on this path, because none is stored. `tessera_ids`, `codes` and every
+/// id leaves the engine on this path, because none is stored. `mosaica_ids`, `codes` and every
 /// buffer in `scalars` are parallel: index *i* is one point in all of them, checked by
 /// [`Self::len`].
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PointColumns {
-    pub tessera_ids: Vec<u64>,
+    pub mosaica_ids: Vec<u64>,
     /// Each point's position as the 64-bit Morton interleave of its two 32-bit fixed-point axes.
     /// Shifting right by `32 - 2·zoom` gives the containing tile.
     pub codes: Vec<u64>,
@@ -66,19 +66,19 @@ pub struct PointColumns {
 
 impl PointColumns {
     pub fn len(&self) -> usize {
-        self.tessera_ids.len()
+        self.mosaica_ids.len()
     }
 
-    /// `(tessera_id, code)` per point, in served order: the identity half of the response.
-    pub fn iter(&self) -> impl Iterator<Item = (TesseraId, u64)> + '_ {
-        self.tessera_ids
+    /// `(mosaica_id, code)` per point, in served order: the identity half of the response.
+    pub fn iter(&self) -> impl Iterator<Item = (MosaicaId, u64)> + '_ {
+        self.mosaica_ids
             .iter()
             .zip(&self.codes)
-            .map(|(&id, &code)| (TesseraId::new(id), code))
+            .map(|(&id, &code)| (MosaicaId::new(id), code))
     }
 
     pub fn is_empty(&self) -> bool {
-        self.tessera_ids.is_empty()
+        self.mosaica_ids.is_empty()
     }
 
     /// Concatenate `other` onto this buffer, column by column. A type disagreement means two
@@ -88,7 +88,7 @@ impl PointColumns {
         &mut self,
         other: PointColumns,
     ) -> std::result::Result<(), (&'static str, &'static str)> {
-        self.tessera_ids.extend(other.tessera_ids);
+        self.mosaica_ids.extend(other.mosaica_ids);
         self.codes.extend(other.codes);
         // Positional: index i is the same declared column on both sides.
         for (dst, src) in self.scalars.iter_mut().zip(other.scalars) {
@@ -113,17 +113,17 @@ impl PointColumns {
     /// Estimated wire bytes of these columns, the emit pass's flush threshold. A hint, not a
     /// contract: it decides where chunks split, never what they contain.
     pub fn wire_bytes_estimate(&self) -> usize {
-        // `tessera_id` and `code`, both u64.
-        let mut bytes = self.tessera_ids.len() * 16;
+        // `mosaica_id` and `code`, both u64.
+        let mut bytes = self.mosaica_ids.len() * 16;
         for col in &self.scalars {
             bytes += col.wire_bytes_estimate();
         }
         // A u64 and a validity bit per point per membership column.
         bytes += self.membership.len()
-            * (self.tessera_ids.len() * 8 + self.tessera_ids.len().div_ceil(8));
+            * (self.mosaica_ids.len() * 8 + self.mosaica_ids.len().div_ceil(8));
         // A bit per point, in Arrow's packed boolean buffer.
         if self.highlighted.is_some() {
-            bytes += self.tessera_ids.len().div_ceil(8);
+            bytes += self.mosaica_ids.len().div_ceil(8);
         }
         bytes
     }
@@ -345,7 +345,7 @@ pub struct ArtifactOut {
     pub layer: String,
     /// Its opaque identifier — the only artifact address that crosses the trust boundary, and
     /// what a drill-down or a suppression later names.
-    pub tessera_id: TesseraId,
+    pub mosaica_id: MosaicaId,
     /// The publisher's own key, if they supplied one. Operator-chosen text, not corpus data.
     pub key: Option<String>,
     /// How many of this artifact's members this principal can see, never how many it has. The
@@ -359,12 +359,12 @@ pub struct ArtifactOut {
     /// tree's list is at most one long; a `dag` layer's may name several. An absent entry covers
     /// a root and a withheld parent alike, so distinguishing them cannot disclose a coarser
     /// grouping.
-    pub parent_ids: Vec<TesseraId>,
+    pub parent_ids: Vec<MosaicaId>,
     /// The artifact this one is attached to, named by the identifier this response served it
     /// under. `None` where attached to nothing, or on the identifier route. Always names a row in
     /// this same response; a dependent whose target is absent is dropped before this is filled.
     /// Never an entity id or a stored address.
-    pub target: Option<TesseraId>,
+    pub target: Option<MosaicaId>,
     /// One content, entire: the first ranked description whose generating set the viewer
     /// contains completely. A viewer containing none gets no artifact, not this list empty.
     pub content: Vec<String>,
@@ -474,7 +474,7 @@ pub trait ViewportSink {
     /// (possibly empty) when it did.
     fn counts(&mut self, tiles: &[TileCount], sub_cells: Option<&[SubCellCount]>) -> SinkResult;
     /// One flush chunk: whole tiles' worth of points, in response order, ascending by
-    /// `tessera_id` within each tile. Never called with an empty chunk.
+    /// `mosaica_id` within each tile. Never called with an empty chunk.
     fn points(&mut self, chunk: PointColumns) -> SinkResult;
 }
 
@@ -502,7 +502,7 @@ pub(super) fn emit_points<'a>(
     // Seeded from the declaration, not from whichever tile arrives first: a narrower first tile
     // must not fix the column set. Re-seeded identically at each flush.
     let seed = || PointColumns {
-        tessera_ids: Vec::new(),
+        mosaica_ids: Vec::new(),
         codes: Vec::new(),
         scalars: schema
             .render_scalars

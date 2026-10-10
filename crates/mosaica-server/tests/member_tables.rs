@@ -1,4 +1,4 @@
-//! **A membership names its members in a table**: columns keyed by `tessera_id` and unique field
+//! **A membership names its members in a table**: columns keyed by `mosaica_id` and unique field
 //! names, one row per member, resolved by the identity rule. A member naming no item, or two, is
 //! left out and listed in the answer's `refused`, or, under `strict=true`, refuses the request
 //! with nothing written. A content's generating set is refused whole at any such member, strict or
@@ -85,13 +85,13 @@ async fn count(server: &TestServer, served: usize) -> Vec<u64> {
     counts
 }
 
-/// Members named by `tessera_id`, by a unique field, and by both agreeing, in one table.
+/// Members named by `mosaica_id`, by a unique field, and by both agreeing, in one table.
 #[tokio::test]
 async fn a_table_names_members_by_any_identifier_they_hold() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     register(&server, flat_layer(LAYER)).await;
-    let (zero, two) = (tessera_id_of(&server, 0), tessera_id_of(&server, 2));
+    let (zero, two) = (mosaica_id_of(&server, 0), mosaica_id_of(&server, 2));
 
     let (status, body) = put(
         &server,
@@ -99,7 +99,7 @@ async fn a_table_names_members_by_any_identifier_they_hold() {
         json!([{
             "key": "a",
             "members": {
-                "tessera_id": [zero.to_string(), null, two.to_string()],
+                "mosaica_id": [zero.to_string(), null, two.to_string()],
                 "id": [null, "1", 2],
             },
         }]),
@@ -118,12 +118,12 @@ async fn a_member_naming_no_item_or_two_is_left_out_or_refuses_a_strict_request(
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     register(&server, flat_layer(LAYER)).await;
-    let three = tessera_id_of(&server, 3);
+    let three = mosaica_id_of(&server, 3);
 
     let nothing = json!([{ "key": "a", "members": { "id": [0, 999_999] } }]);
     let two = json!([{
         "key": "a",
-        "members": { "tessera_id": [null, three.to_string()], "id": [0, 4] },
+        "members": { "mosaica_id": [null, three.to_string()], "id": [0, 4] },
     }]);
     let (status, body) = put(&server, true, nothing).await;
     assert_eq!(status, 404, "{body}");
@@ -138,7 +138,7 @@ async fn a_member_naming_no_item_or_two_is_left_out_or_refuses_a_strict_request(
             { "key": "a", "members": { "id": [0, 999_999, 5, null] } },
             {
                 "key": "b",
-                "members": { "tessera_id": [three.to_string(), three.to_string()], "id": [4, 3] },
+                "members": { "mosaica_id": [three.to_string(), three.to_string()], "id": [4, 3] },
             },
         ]),
     )
@@ -180,7 +180,7 @@ async fn a_generating_set_member_naming_nothing_refuses_the_request() {
     count(&server, 0).await;
 }
 
-/// A column that is neither `tessera_id` nor a unique field names nothing: it is ignored whatever
+/// A column that is neither `mosaica_id` nor a unique field names nothing: it is ignored whatever
 /// its cells hold, as a build ignores it, and the answer names it.
 #[tokio::test]
 async fn a_column_that_names_nothing_is_ignored_and_named() {
@@ -237,11 +237,11 @@ async fn a_generating_set_grown_by_a_member_naming_nothing_or_two_refuses_the_re
             .json(&body)
             .send()
     };
-    let three = tessera_id_of(&server, 3);
+    let three = mosaica_id_of(&server, 3);
     for (members, status) in [
         (json!({ "id": [2, 999_999] }), 404),
         (
-            json!({ "id": [2, 4], "tessera_id": [null, three.to_string()] }),
+            json!({ "id": [2, 4], "mosaica_id": [null, three.to_string()] }),
             409,
         ),
     ] {
@@ -273,7 +273,7 @@ async fn a_malformed_table_is_refused_whole() {
     for (what, artifacts) in [
         (
             "columns of different lengths",
-            json!([{ "key": "a", "members": { "id": [0, 1], "tessera_id": [null] } }]),
+            json!([{ "key": "a", "members": { "id": [0, 1], "mosaica_id": [null] } }]),
         ),
         (
             "no column that names items",
@@ -284,8 +284,8 @@ async fn a_malformed_table_is_refused_whole() {
             json!([{ "key": "a", "members": ["0"] }]),
         ),
         (
-            "a tessera_id that is a number",
-            json!([{ "key": "a", "members": { "tessera_id": [12] } }]),
+            "a mosaica_id that is a number",
+            json!([{ "key": "a", "members": { "mosaica_id": [12] } }]),
         ),
         (
             "a fraction for an integer field",
@@ -322,9 +322,9 @@ async fn an_arrow_growth_names_members_as_a_list_of_structs() {
     .await;
     assert_eq!(status, 201, "{body}");
 
-    let one = tessera_id_of(&server, 1);
+    let one = mosaica_id_of(&server, 1);
     let fields = Fields::from(vec![
-        Field::new("tessera_id", DataType::Utf8, true),
+        Field::new("mosaica_id", DataType::Utf8, true),
         Field::new("id", DataType::UInt64, true),
     ]);
     let elements = StructArray::new(
@@ -366,7 +366,7 @@ async fn an_arrow_growth_names_members_as_a_list_of_structs() {
 
 /// An Arrow member struct's columns are checked only where they name items: a unique field of
 /// another type than its values, and a column named twice, are refused; a column naming nothing is
-/// ignored whatever its type; and a `tessera_id` column may be uint64, as a read sends it.
+/// ignored whatever its type; and a `mosaica_id` column may be uint64, as a read sends it.
 #[tokio::test]
 async fn an_arrow_member_column_is_checked_only_where_it_names_items() {
     let tmp = TempDir::new().unwrap();
@@ -442,8 +442,8 @@ async fn an_arrow_member_column_is_checked_only_where_it_names_items() {
     assert_eq!(count(&server, 1).await, vec![2]);
 
     let read_back = body_of(
-        vec![Field::new("tessera_id", DataType::UInt64, true)],
-        vec![Arc::new(UInt64Array::from(vec![tessera_id_of(&server, 2)])) as ArrayRef],
+        vec![Field::new("mosaica_id", DataType::UInt64, true)],
+        vec![Arc::new(UInt64Array::from(vec![mosaica_id_of(&server, 2)])) as ArrayRef],
     );
     let (status, body) = patch_arrow(&server, read_back).await;
     assert_eq!(status, 200, "{body}");

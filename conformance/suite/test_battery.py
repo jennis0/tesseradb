@@ -51,7 +51,7 @@ def battery_token(catalogue_server) -> str:
 def catalogue_battery(catalogue_server, battery_token):
     """The battery for the catalogue deployment, plus one tiles-form viewport.
 
-    Item ids come from a served response, never from the fixture's entity ids: a `tessera_id` is
+    Item ids come from a served response, never from the fixture's entity ids: a `mosaica_id` is
     a keyed permutation minted per build, and nothing may persist one across runs
     (`oracle.harness.fixture_recipe`'s note). The appended tiles-form query pins the recorder
     against contracts §3.2's second request form; `build_battery` itself emits the bbox form.
@@ -59,7 +59,7 @@ def catalogue_battery(catalogue_server, battery_token):
     meta = catalogue_server.meta(battery_token)
     raw = catalogue_server.viewport(battery_token, cat.VIEW_ID, 3, BBOX, k=K)
     _tiles, points = wire.decode_viewport(raw)
-    item_ids = sorted({tessera_id for tessera_id, _code in points})[:3]
+    item_ids = sorted({mosaica_id for mosaica_id, _code in points})[:3]
     battery = build_battery(
         meta,
         view_id=cat.VIEW_ID,

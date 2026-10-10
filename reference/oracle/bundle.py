@@ -47,13 +47,13 @@ PERMUTATION_PAGE_ALIGN = 4096
 # legacy path" (docs/evidence/memos/2026-07-30-tessera-id-construction.md §2). The fallback
 # below violates that rule on purpose, as a temporary scaffold: no bundle in this checkout
 # carries an `identity` object yet, because mosaica-build/mosaica-store have not been
-# repointed at the tessera_id column (only mosaica-types/identity.rs has landed as of
+# repointed at the mosaica_id column (only mosaica-types/identity.rs has landed as of
 # Task 5/12). REMOVE THIS FALLBACK the moment Task 6/7 land build-side `identity` emission
 # -- at that point every bundle this oracle reads is post-r6 and an absent `identity`
 # object must raise, full stop.
 PRE_R6_IDENTITY_FALLBACK_REMOVE_AT = (
     "Task 6/7: mosaica-build/mosaica-store emitting MANIFEST `identity` and the "
-    "`tessera_id` column"
+    "`mosaica_id` column"
 )
 
 
@@ -65,12 +65,12 @@ def _sha256_hex(data: bytes) -> str:
 class Segment:
     """One (partition, view, seg_id)'s row-space geometry.
 
-    Contracts r6 replaced the `entity_id` column in `columns.arrow` with `tessera_id`
-    (`docs/evidence/memos/2026-07-30-tessera-id-construction.md`): `tessera_id` is now read
+    Contracts r6 replaced the `entity_id` column in `columns.arrow` with `mosaica_id`
+    (`docs/evidence/memos/2026-07-30-tessera-id-construction.md`): `mosaica_id` is now read
     directly off the row, and `entity_id` is *derived* -- either by inverting it through
     `identity.invert` (pure, no file I/O) when the bundle carries an `identity` key, or, for
     a pre-r6 bundle that still stores `entity_id` directly, read as before. Exactly one of
-    `tessera_id`/`entity_id` is the bundle's stored column; the other is always derived, and
+    `mosaica_id`/`entity_id` is the bundle's stored column; the other is always derived, and
     both are kept on `Segment` so callers (`viewport.py`'s entity-space mask membership,
     `test_byte_scan.py`'s entity-ID sweep) do not need to know which.
     """
@@ -79,7 +79,7 @@ class Segment:
     residual: np.ndarray  # uint32, row order (the position's low half, from columns.arrow)
     morton: np.ndarray  # uint32, row order (raw sorted codes from morton.u32)
     row_count: int
-    tessera_id: np.ndarray | None = None  # uint64, row order (stored post-r6; absent pre-r6)
+    mosaica_id: np.ndarray | None = None  # uint64, row order (stored post-r6; absent pre-r6)
     cuts: np.ndarray | None = None  # uint32, ascending (raw row starts from cuts.u32)
 
     def cut_starts(self) -> np.ndarray:
@@ -397,7 +397,7 @@ class Bundle:
                 raise ValueError(f"view '{view_id}' declares no quantisation extent")
 
         # `identity` (contracts r6, docs/evidence/memos/2026-07-30-tessera-id-construction.md
-        # §2): the bundle's key and the §13.3 shard prefix `tessera_id` is built
+        # §2): the bundle's key and the §13.3 shard prefix `mosaica_id` is built
         # under. A bundle that *does* carry `identity` is read strictly, per the memo's
         # fail-closed rule: bad construction/rounds/key/shard_id all refuse, none
         # default. An absent object takes the PRE_R6_IDENTITY_FALLBACK_REMOVE_AT scaffold
@@ -625,28 +625,28 @@ class Bundle:
 
     def verify_identity_cross_check(self, view_id: str, sample: int = 200) -> None:
         """The only test that catches a key/column disagreement (Task 12 brief, Step 2): for
-        a sample of rows, `identity.forward(shard, entity_of_row[r]) == tessera_id[r]`, where
-        `entity_of_row` came from the permutation (key-independent) and `tessera_id` came
+        a sample of rows, `identity.forward(shard, entity_of_row[r]) == mosaica_id[r]`, where
+        `entity_of_row` came from the permutation (key-independent) and `mosaica_id` came
         from the stored column. Requires a post-r6 bundle."""
         if self.identity_key is None:
             raise ValueError("bundle has no `identity` object in MANIFEST (pre-r6 bundle)")
         seg = self.segment(view_id)
-        if seg.tessera_id is None:
-            raise ValueError("segment has no stored tessera_id column (pre-r6 bundle)")
+        if seg.mosaica_id is None:
+            raise ValueError("segment has no stored mosaica_id column (pre-r6 bundle)")
         rng = np.random.default_rng(20260730)
         n = min(sample, seg.row_count)
         rows = rng.choice(seg.row_count, size=n, replace=False) if seg.row_count else np.array([])
         for row in rows:
             entity_id = int(seg.entity_id[row])
-            expected = int(seg.tessera_id[row])
+            expected = int(seg.mosaica_id[row])
             got = identity_mod.forward(self.identity_key, self.identity_shard_id, entity_id)
             if got != expected:
                 raise ValueError(
                     f"identity cross-check failed at row {row}: entity {entity_id} forwards to "
-                    f"{got:#x}, stored tessera_id is {expected:#x}"
+                    f"{got:#x}, stored mosaica_id is {expected:#x}"
                 )
 
-    def tessera_id_of(self, entity_id: int) -> int:
+    def mosaica_id_of(self, entity_id: int) -> int:
         """Pure function, no file read (memo §6): `forward(identity.key, identity.shard_id,
         entity_id)`. Requires a post-r6 bundle (`identity` present in MANIFEST)."""
         if self.identity_key is None:
@@ -656,7 +656,7 @@ class Bundle:
     def derive_row_order(self, view_id: str) -> np.ndarray:
         """Re-derive row order from `(source-recomputed morton, forward(identity.key,
         identity.shard_id, entity_id))` ascending, with no further tiebreak (the
-        priority-as-identity-prefix fold; `tessera_id` is already unique so nothing else is
+        priority-as-identity-prefix fold; `mosaica_id` is already unique so nothing else is
         needed to break ties). Row order is therefore key-dependent, where it previously
         was not -- this reads `identity.key` and `identity.shard_id` from MANIFEST, which
         `Bundle.__init__` already parses.
@@ -664,8 +664,8 @@ class Bundle:
         Delegates to `row_order_from_geometry`, the module-level, key-dependent
         re-derivation -- computed from the *source* geometry and the permutation-derived
         `entity_id`,
-        **never from the stored `morton`/`tessera_id` columns** (finding 5): a build that
-        emitted a wrong `tessera_id` column and sorted consistently by its own wrong
+        **never from the stored `morton`/`mosaica_id` columns** (finding 5): a build that
+        emitted a wrong `mosaica_id` column and sorted consistently by its own wrong
         values must fail this check, not pass it. `test_identity.py` calls the same
         function, so the shipped path is the tested path.
 
@@ -818,7 +818,7 @@ def row_order_from_geometry(
     """The single, module-level row-order re-derivation (finding 5, task-5 review): sort
     ascending by `(morton, forward(key, shard_id, entity_id))`, with the codes coming from
     `Bundle.row_morton_codes` -- i.e. from the source geometry and the permutation-derived
-    entity id, never from the stored `morton`/`tessera_id` columns, so a build that emits a
+    entity id, never from the stored `morton`/`mosaica_id` columns, so a build that emits a
     wrong column but sorts consistently by its own wrong values does not pass this check.
 
     It takes codes rather than coordinates because the source is no longer required to hold
@@ -827,7 +827,7 @@ def row_order_from_geometry(
     `Bundle.row_position_codes`; this function orders by it.
 
     `Bundle.derive_row_order` and `test_identity.py`'s
-    `test_row_order_is_morton_then_tessera_id_ascending` both call this function rather
+    `test_row_order_is_morton_then_mosaica_id_ascending` both call this function rather
     than each re-implementing the lexsort inline, so the shipped ordering path is the
     tested ordering path: swapping the two `np.lexsort` arguments here breaks the test
     directly, instead of the test silently re-deriving the same (possibly also swapped)
@@ -842,16 +842,16 @@ def row_order_from_geometry(
             f"row_order_from_geometry: {n} entity ids but {len(morton_codes)} morton codes"
         )
     mortons = np.empty(n, dtype=np.uint64)
-    tesseras = np.empty(n, dtype=np.uint64)
+    mosaica_ids = np.empty(n, dtype=np.uint64)
     for i in range(n):
-        morton_code, tessera_id = identity_mod.row_sort_key(
+        morton_code, mosaica_id = identity_mod.row_sort_key(
             key, shard_id, int(entity_ids[i]), int(morton_codes[i])
         )
         mortons[i] = morton_code
-        tesseras[i] = tessera_id
-    # np.lexsort sorts by the LAST key primary -- (morton, tessera_id) ascending means
-    # tessera_id is the secondary (fastest-varying) key, morton primary.
-    return np.lexsort((tesseras, mortons))
+        mosaica_ids[i] = mosaica_id
+    # np.lexsort sorts by the LAST key primary -- (morton, mosaica_id) ascending means
+    # mosaica_id is the secondary (fastest-varying) key, morton primary.
+    return np.lexsort((mosaica_ids, mortons))
 
 
 def _read_permutation(path: Path) -> Permutation:
@@ -947,14 +947,14 @@ def _read_segment(seg_dir: Path, perm_path: Path | None = None) -> Segment:
     cuts = np.frombuffer(cuts_path.read_bytes(), dtype="<u4")
 
     column_names = set(table.schema.names)
-    if "tessera_id" in column_names:
-        # Post-r6: columns.arrow stores tessera_id; entity_id is DERIVED via the
+    if "mosaica_id" in column_names:
+        # Post-r6: columns.arrow stores mosaica_id; entity_id is DERIVED via the
         # permutation (the key-independent direction, memo §7 -- "there is no
-        # tessera_id -> entity sidecar").
-        tessera_id = table.column("tessera_id").to_numpy(zero_copy_only=False).astype(np.uint64)
+        # mosaica_id -> entity sidecar").
+        mosaica_id = table.column("mosaica_id").to_numpy(zero_copy_only=False).astype(np.uint64)
         if perm_path is None or not perm_path.exists():
             raise ValueError(
-                f"{seg_dir}: columns.arrow has tessera_id but no permutation.bin was given to "
+                f"{seg_dir}: columns.arrow has mosaica_id but no permutation.bin was given to "
                 "derive entity_id from"
             )
         perm = _read_permutation(perm_path)
@@ -972,16 +972,16 @@ def _read_segment(seg_dir: Path, perm_path: Path | None = None) -> Segment:
     elif "entity_id" in column_names:
         # Pre-r6: columns.arrow stores entity_id directly.
         entity_id = table.column("entity_id").to_numpy(zero_copy_only=False).astype(np.uint64)
-        tessera_id = None
+        mosaica_id = None
     else:
-        raise ValueError(f"{seg_dir}: columns.arrow has neither entity_id nor tessera_id")
+        raise ValueError(f"{seg_dir}: columns.arrow has neither entity_id nor mosaica_id")
 
     return Segment(
         entity_id=entity_id,
         residual=residual,
         morton=morton,
         row_count=row_count,
-        tessera_id=tessera_id,
+        mosaica_id=mosaica_id,
         cuts=cuts,
     )
 

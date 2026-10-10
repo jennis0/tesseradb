@@ -16,7 +16,7 @@
 //!   O(viewport rows). Two variants, because the difference between them is the whole question:
 //!   - **B-ideal** indexes a materialised `row_to_entity` array. This is what
 //!     `probes/2026-08-08-filter-layout/` arm 3 measured, and **the system has no such array**.
-//!   - **B-real** does what the engine would actually have to do: read the row's `tessera_id`
+//!   - **B-real** does what the engine would actually have to do: read the row's `mosaica_id`
 //!     (a `u64` column read, modelled as an indexed gather) and `IdentityKey::invert` it. The
 //!     real Feistel, from `mosaica-types`, not a stand-in.
 //! - **C — coarse Morton pre-filter.** A second bitmap per coarse Morton cell, holding the
@@ -139,15 +139,15 @@ fn route_per_tile_ideal(result: &Bitmap, row_to_entity: &[u32], tiles: &[(u32, u
 
 fn route_per_tile_real(
     result: &Bitmap,
-    tessera_id_by_row: &[u64],
+    mosaica_id_by_row: &[u64],
     key: &IdentityKey,
     tiles: &[(u32, u32)],
 ) -> Bitmap {
     let mut out = Bitmap::new();
     for &(lo, hi) in tiles {
         for row in lo..hi {
-            let id = tessera_id_by_row[row as usize];
-            let (_shard, entity) = key.invert(mosaica_types::TesseraId::new(id));
+            let id = mosaica_id_by_row[row as usize];
+            let (_shard, entity) = key.invert(mosaica_types::MosaicaId::new(id));
             if result.contains(entity.raw() as u32) {
                 out.add(row);
             }
@@ -163,7 +163,7 @@ fn route_per_tile_real(
 /// (4 KB at 1,000 rows), so it stays in L1 and adds no memory term worth naming.
 fn route_per_tile_batched(
     result: &Bitmap,
-    tessera_id_by_row: &[u64],
+    mosaica_id_by_row: &[u64],
     key: &IdentityKey,
     tiles: &[(u32, u32)],
     scratch: &mut Vec<u32>,
@@ -172,8 +172,8 @@ fn route_per_tile_batched(
     for &(lo, hi) in tiles {
         scratch.clear();
         for row in lo..hi {
-            let id = tessera_id_by_row[row as usize];
-            let (_shard, entity) = key.invert(mosaica_types::TesseraId::new(id));
+            let id = mosaica_id_by_row[row as usize];
+            let (_shard, entity) = key.invert(mosaica_types::MosaicaId::new(id));
             scratch.push(entity.raw() as u32);
         }
         for (offset, &entity) in scratch.iter().enumerate() {
@@ -185,13 +185,13 @@ fn route_per_tile_batched(
     out
 }
 
-/// Diagnostic only — not an answer. The cost of *reading* the `tessera_id` column over the
+/// Diagnostic only — not an answer. The cost of *reading* the `mosaica_id` column over the
 /// viewport, with no inversion and no membership test, so the two terms can be attributed.
-fn gather_only(tessera_id_by_row: &[u64], tiles: &[(u32, u32)]) -> u64 {
+fn gather_only(mosaica_id_by_row: &[u64], tiles: &[(u32, u32)]) -> u64 {
     let mut acc = 0u64;
     for &(lo, hi) in tiles {
         for row in lo..hi {
-            acc = acc.wrapping_add(tessera_id_by_row[row as usize]);
+            acc = acc.wrapping_add(mosaica_id_by_row[row as usize]);
         }
     }
     acc
@@ -249,10 +249,10 @@ fn main() {
     eprintln!("building the permutation at n={n}…");
     let (entity_to_row, row_to_entity) = permutation(n);
 
-    // `columns.arrow`'s `tessera_id`, row-indexed — what route B actually has to read.
-    eprintln!("building the tessera_id column…");
+    // `columns.arrow`'s `mosaica_id`, row-indexed — what route B actually has to read.
+    eprintln!("building the mosaica_id column…");
     let key = IdentityKey::from_hex("000102030405060708090a0b0c0d0e0f").expect("key");
-    let tessera_id_by_row: Vec<u64> = row_to_entity
+    let mosaica_id_by_row: Vec<u64> = row_to_entity
         .iter()
         .map(|&e| key.forward(0, EntityId::new(e as u64)).expect("forward").raw())
         .collect();
@@ -307,11 +307,11 @@ fn main() {
             // **Agreement before timing.** Four routes, one answer.
             let a = route_project(&result, &entity_to_row, &view);
             let bi = route_per_tile_ideal(&result, &row_to_entity, &tiles);
-            let br = route_per_tile_real(&result, &tessera_id_by_row, &key, &tiles);
+            let br = route_per_tile_real(&result, &mosaica_id_by_row, &key, &tiles);
             let c = route_coarse(&result, &cells, cell_width, &entity_to_row, &tiles, &view);
             let mut scratch: Vec<u32> = Vec::with_capacity(tile_width);
             let bb =
-                route_per_tile_batched(&result, &tessera_id_by_row, &key, &tiles, &mut scratch);
+                route_per_tile_batched(&result, &mosaica_id_by_row, &key, &tiles, &mut scratch);
             assert_eq!(a, bi, "project and per-tile-ideal disagree");
             assert_eq!(a, br, "project and per-tile-real disagree");
             assert_eq!(a, bb, "project and per-tile-batched disagree");
@@ -338,7 +338,7 @@ fn main() {
                 let t = Instant::now();
                 std::hint::black_box(route_per_tile_real(
                     &result,
-                    &tessera_id_by_row,
+                    &mosaica_id_by_row,
                     &key,
                     &tiles,
                 ));
@@ -347,7 +347,7 @@ fn main() {
                 let t = Instant::now();
                 std::hint::black_box(route_per_tile_batched(
                     &result,
-                    &tessera_id_by_row,
+                    &mosaica_id_by_row,
                     &key,
                     &tiles,
                     &mut scratch,
@@ -355,7 +355,7 @@ fn main() {
                 timings[3].1.push(t.elapsed().as_secs_f64() * 1e3);
 
                 let t = Instant::now();
-                std::hint::black_box(gather_only(&tessera_id_by_row, &tiles));
+                std::hint::black_box(gather_only(&mosaica_id_by_row, &tiles));
                 timings[4].1.push(t.elapsed().as_secs_f64() * 1e3);
 
                 let t = Instant::now();

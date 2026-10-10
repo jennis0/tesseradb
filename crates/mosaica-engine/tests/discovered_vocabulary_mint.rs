@@ -204,7 +204,7 @@ fn ingest_row(engine: &Engine, batch: &str, scalar: WalScalar) -> EntityId {
         .expect("the ingest is accepted")[0]
 }
 
-/// One column's stored code for `entity`, read back through `ColumnsRef` by `tessera_id` — the same
+/// One column's stored code for `entity`, read back through `ColumnsRef` by `mosaica_id` — the same
 /// route the serving path reads it. `None` if the entity has not reached a segment (not flushed).
 fn stored_code_of(root: &Path, column: &str, entity: EntityId) -> Option<u32> {
     let bundle = open_bundle(root).expect("the bundle opens");
@@ -212,7 +212,7 @@ fn stored_code_of(root: &Path, column: &str, entity: EntityId) -> Option<u32> {
         serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT is readable"))
             .expect("CURRENT parses");
     let prefix = &current.prefix;
-    let tessera_id = test_key().forward(0, entity).unwrap().raw();
+    let mosaica_id = test_key().forward(0, entity).unwrap().raw();
     for (phash, partition) in &bundle.partitions {
         for segment in &partition.manifest.segments {
             let dir = root
@@ -225,8 +225,8 @@ fn stored_code_of(root: &Path, column: &str, entity: EntityId) -> Option<u32> {
                 .join(&segment.seg_id);
             let columns = ColumnsRef::load(&dir.join("columns.arrow"))
                 .unwrap_or_else(|e| panic!("segment {} must open: {e}", segment.seg_id));
-            let ids = columns.tessera_id();
-            let Some(row) = ids.iter().position(|&id| id == tessera_id) else {
+            let ids = columns.mosaica_id();
+            let Some(row) = ids.iter().position(|&id| id == mosaica_id) else {
                 continue;
             };
             return match columns.scalar(column) {

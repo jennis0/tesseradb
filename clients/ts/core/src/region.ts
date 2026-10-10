@@ -76,7 +76,7 @@ export function insideBox(x: number, y: number, box: [number, number, number, nu
 /**
  * A selection as the operand of a `region` filter leaf, in the view's data coordinates. A box is
  * normalised so either corner may come first. A lasso's points are sent as drawn. An artifact is
- * named by its `tessera_id` as a decimal string.
+ * named by its `mosaica_id` as a decimal string.
  *
  * @category Filters
  */

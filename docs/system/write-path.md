@@ -32,7 +32,7 @@ stateDiagram-v2
 
 An item has an entity id: its position in entity space, the corpus-wide record of its identity
 and access label, shared by every view. An edit moves the item to a new entity id and keeps its
-`tessera_id` ([edits](#edits)). It also has one row per view, its position in that view's file
+`mosaica_id` ([edits](#edits)). It also has one row per view, its position in that view's file
 layout, called row space; a row's position can move when files are rewritten, at a merge or a
 compaction, though never at a flush, which only appends.
 
@@ -137,13 +137,13 @@ acknowledged, written to the WAL, or allocated an entity id.
 
 ### Resolving a batch
 
-A row names an item by the values that identify one: its `tessera_id`, and each unique field's
+A row names an item by the values that identify one: its `mosaica_id`, and each unique field's
 value it carries that is not null. The request handler reads one generation for the whole batch,
-off the executor thread, and looks each value up there: a `tessera_id` by inverting it, a unique
-value in the field's index. A deleted item names nothing, and a `tessera_id` names an item only
+off the executor thread, and looks each value up there: a `mosaica_id` by inverting it, a unique
+value in the field's index. A deleted item names nothing, and a `mosaica_id` names an item only
 while the service holds it (a row, a buffered row, or the label a flush wrote), since a fold that
 removes a deleted item also drops its deletion. The same rule answers a change and a membership's
-member, each naming its item by a `tessera_id` and unique values ([accepting a
+member, each naming its item by a `mosaica_id` and unique values ([accepting a
 deny](#accepting-a-deny)). It is the rule a build applies to its files, written once in
 `mosaica-lifecycle` (`resolve.rs`).
 
@@ -161,20 +161,20 @@ Across the batch, a row naming an item an earlier row names, and a row setting a
 earlier row sets, are refused, since each row is decided against what was held before the batch:
 of the two, the first is kept. Rows are decided in row order against the rows kept before them:
 a refused row claims neither its item nor its values, so it never refuses a later row. Where two
-reasons apply to one row, the first of these is given: a `tessera_id` naming nothing, values
+reasons apply to one row, the first of these is given: a `mosaica_id` naming nothing, values
 naming two items, naming no item where the row cannot create one, an item an earlier kept row
 names, a value an earlier kept row sets. A batch in which no row carries a position creates
-nothing, so it needs a `tessera_id` or a unique column to address items by, or is refused with
+nothing, so it needs a `mosaica_id` or a unique column to address items by, or is refused with
 `422`, as a build refuses an attribute file with none. A
-`tessera_id` naming no live or suppressed item is refused, because a new item is given its
-`tessera_id` when it is created and a caller cannot choose one.
+`mosaica_id` naming no live or suppressed item is refused, because a new item is given its
+`mosaica_id` when it is created and a caller cannot choose one.
 
 A refused row writes nothing, and the batch applies its other rows. The answer lists each refused
 row in `refused`, by its position in the batch and its reason (`names_two_items`,
-`unknown_tessera_id`, `names_no_item`, `one_item_twice` or `one_value_twice`), and answers `null`
-for its `tessera_id`; it names no entity and no value the caller did not send. A caller that asks
+`unknown_mosaica_id`, `names_no_item`, `one_item_twice` or `one_value_twice`), and answers `null`
+for its `mosaica_id`; it names no entity and no value the caller did not send. A caller that asks
 for `strict=true` has the whole batch refused with `409` at its first refused row instead, naming
-rows by position, values as sent and items by `tessera_id`, and nothing is written. A build refuses
+rows by position, values as sent and items by `mosaica_id`, and nothing is written. A build refuses
 the rows of its files by the same rule, and `mosaica build --strict` refuses the build at the first
 file with a refused row.
 
@@ -187,7 +187,7 @@ decided, so a refused batch or row leaves nothing behind.
 
 Every accepted batch goes to the executor, a batch of rows that change nothing or are refused
 included: such a batch writes its batch id and its receipt alone, so it answers the same
-`tessera_id`s and refused rows when it is sent again, as every accepted batch does. The WAL record
+`mosaica_id`s and refused rows when it is sent again, as every accepted batch does. The WAL record
 carries the accepted rows and a receipt for every row, the refused ones with their reason, so a
 replay applies exactly the accepted rows.
 
@@ -208,7 +208,7 @@ more against a newer generation. If that attempt finds it moved again, the batch
 ### Edits
 
 An edit moves the item to a new entity. The item keeps its number, the entity id it was first
-given, which its `tessera_id` is derived from, so a caller never sees the move. The old entity is
+given, which its `mosaica_id` is derived from, so a caller never sees the move. The old entity is
 deleted and the new one inserted in one WAL record, one fsync and one swap. Until a flush places
 the new entity's rows, the item is in no view: it is served again, with what the edit changed,
 from the publication its receipt names.
@@ -245,7 +245,7 @@ The edited-items map says which entity holds each edited item. It has two direct
 entity and entity to number, each a set of run files like a unique field's: a flush writes one run
 for the edited items whose new rows it writes, a merge combines runs, and a compaction rewrites
 them without the entities it removes. Until a flush writes an edit's pair, the pair is held in the
-generation. Every translation between an entity and a `tessera_id` reads both. A segment whose rows
+generation. Every translation between an entity and a `mosaica_id` reads both. A segment whose rows
 belong to an edited item lists those rows' entities beside its columns, so opening, merging and
 compacting a segment reads a row's entity without the map. `mosaica verify --deep` checks that the
 two directions hold the same pairs and that every such row is a pair of the map.
@@ -273,9 +273,9 @@ reads what was written.
 At close, the whole window is sorted and allocated from the id allocator in one call. One WAL
 record per submission is appended, carrying its rows and what every row of the request became, and
 one fsync covers the entire window. Only then is the window applied to build a new generation, the
-pointer is swapped, and every waiting request is acknowledged with every row's `tessera_id`. If
+pointer is swapped, and every waiting request is acknowledged with every row's `mosaica_id`. If
 the append or the fsync fails, the window applies nothing: every waiter is refused, and a caller
-retries under the same batch id. A retry of an accepted batch answers the `tessera_id`s its first
+retries under the same batch id. A retry of an accepted batch answers the `mosaica_id`s its first
 acceptance did, and the rows it refused, after a restart too, since the record carries them. The
 index of accepted batch ids is built from the WAL members retained, so a batch id is remembered
 until the flush whose WAL rotation removes the member holding its record, and a retry sent after
@@ -317,7 +317,7 @@ acknowledged.
 A value an ingest row carries identifies the item that holds it ([resolving a
 batch](#resolving-a-batch)), so a row setting a value another item holds names two items and is
 refused; under `strict=true` the batch is refused with `409`, naming the row, the value and both
-`tessera_id`s. A value the batch's own
+`mosaica_id`s. A value the batch's own
 rows set is checked twice: the handler checks it against the generation current when the batch
 arrived, and the executor checks it again, from memory, against the values added since.
 
@@ -341,10 +341,10 @@ the new label, which edits it ([edits](#edits)).
 
 ### Accepting a deny
 
-A change names its item in `match`: by its `tessera_id`, inverted under the bundle's identity key,
+A change names its item in `match`: by its `mosaica_id`, inverted under the bundle's identity key,
 and by the values of unique fields, each looked up in the field's index. Every identifier must name
 the same item. A membership's members, excluded items and generating sets are tables of the same
-columns, one row per member, resolved the same way. A column that is neither `tessera_id` nor a
+columns, one row per member, resolved the same way. A column that is neither `mosaica_id` nor a
 unique field names nothing: it is ignored, as a build ignores it, and the answer names it in
 `ignored_columns`.
 
@@ -360,7 +360,7 @@ item already suppressed is accepted and has no further effect. A deleted item na
 deletion sent again is listed as refused, and a retried request is safe to resend without
 `strict`.
 
-Only the entity id is written to the WAL, never a `tessera_id`. The address is resolved once, when
+Only the entity id is written to the WAL, never a `mosaica_id`. The address is resolved once, when
 the request is accepted, into the entity it names, and that entity id is stable for the item's
 life, or until an edit moves the item to another.
 
@@ -551,7 +551,7 @@ an explicit unsuppress lifts the suppression of an item that exists (Rule S).
 
 A compaction also frees entity ids. Every entity it removes is freed, so its id can be given to a
 new entity, except an item's number. An item's first entity id is its number, from which its
-`tessera_id` is derived, and it stays reserved after the item is deleted, so a `tessera_id` a client
+`mosaica_id` is derived, and it stays reserved after the item is deleted, so a `mosaica_id` a client
 holds never comes to name another item. The entities an edit leaves are removed and freed, including
 one an edit made and a later edit or deletion left before any flush placed it: the edited-items map
 keeps its pair until the compaction that removes it, which is how the compaction tells it from a
@@ -602,7 +602,7 @@ reads a projection the background pass has already rebuilt or, if the pass has n
 request is turned away to protect that rebuild.
 
 Nothing a client already holds stops resolving. A tile is a Morton prefix and an item is a
-`tessera_id`, and both resolve against any generation; a compaction moves the rows behind an identifier
+`mosaica_id`, and both resolve against any generation; a compaction moves the rows behind an identifier
 without breaking the identifier itself. Presenting an old content key is therefore never an error:
 it names the generation a response was answered from and carries no authorisation weight, so a
 client that re-issues a request always gets a correct answer, only a more or less current one. How
@@ -643,7 +643,7 @@ The entity id allocator resumes from whichever is larger, the manifest's recorde
 the value replay reaches, so an id above the high point is never issued twice. Every side-manifest
 records the allocator's own high point, not only the highest entity a segment holds: an item
 deleted before its flush holds no row, and once the log records naming it are reclaimed, the
-manifest is what keeps its entity id, and so its `tessera_id`, from being issued to a new item.
+manifest is what keeps its entity id, and so its `mosaica_id`, from being issued to a new item.
 Freed ids are restored from the newest manifest less every id the replay names
 ([freed entity ids](#freed-entity-ids)). The buffer of rows
 awaiting flush is rebuilt as exactly the replayed rows whose entity has no row in any segment,

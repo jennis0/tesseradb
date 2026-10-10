@@ -14,7 +14,7 @@ import medcpt from './fixtures/medcpt-kmeans-labels.json' with {type: 'json'};
 
 const artifact = (id: bigint, count: bigint, content: string[] = [], layer = 'clusters', parent: bigint | null = null): Artifact => ({
   layer,
-  tesseraId: id,
+  mosaicaId: id,
   key: `c-${id}`,
   maskedCount: count,
   centroid: [Number(id) * 2 ** 24, Number(id) * 2 ** 24],
@@ -43,7 +43,7 @@ const topic = (id: bigint, target: bigint, text: string, count = 1n): Artifact =
  * parent, at 0). Nothing under test derives it again.
  */
 function withRungs(served: Artifact[]): Artifact[] {
-  const byId = new Map(served.map((a) => [a.tesseraId, a]));
+  const byId = new Map(served.map((a) => [a.mosaicaId, a]));
   const depthOf = (a: Artifact, guard = 0): number => {
     const parent = a.parentIds.length === 0 ? undefined : byId.get(a.parentIds[0]!);
     return parent && guard < 1024 ? depthOf(parent, guard + 1) + 1 : 0;
@@ -54,7 +54,7 @@ function withRungs(served: Artifact[]): Artifact[] {
 function projection(input: Artifact[]): ArtifactsProjection {
   const served = withRungs(input);
   const table = new SessionArtifactTable();
-  const ordinals = table.take(served.map((a) => ({tesseraId: a.tesseraId, layer: a.layer, parentIds: a.parentIds, rung: a.rung})));
+  const ordinals = table.take(served.map((a) => ({mosaicaId: a.mosaicaId, layer: a.layer, parentIds: a.parentIds, rung: a.rung})));
   return {layer: 'clusters', layers: ['clusters'], served, colourServed: [], lineage: servedLineage(served), attached: attachedTextOf(served, ['clusters', 'topics'].map((name) => ({name, hierarchy: {kind: 'flat' as const, pruneChildren: false}}))), status: 'shown', refusal: null, version: 1, held: 0, table, servedOrdinals: new Set(ordinals), shapes: new Map(), colours: new Map(), palette: 'tableau10', overrides: new Map(), coverage: {current: 0, stale: 0}};
 }
 

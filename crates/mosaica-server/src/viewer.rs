@@ -1,5 +1,5 @@
 //! The viewer plane: `/v1/meta`, `/v1/categories`, `/v1/viewport`, `/v1/artifacts/viewport`,
-//! `/v1/items`, `/v1/items/{tessera_id}`, `/v1/artifacts` and `/v1/aggregate`, plus `/healthz` and
+//! `/v1/items`, `/v1/items/{mosaica_id}`, `/v1/artifacts` and `/v1/aggregate`, plus `/healthz` and
 //! `/readyz`. Bearer auth is a session token minted by the session plane's `/session/authorise`.
 
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use mosaica_types::{GenerationStamp, TesseraId};
+use mosaica_types::{GenerationStamp, MosaicaId};
 use mosaica_wire::{
     points_frame, points_highlight_frame, sub_cells_frame, tiles_frame, trailer_frame,
     ScalarColumn,
@@ -42,10 +42,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/v1/viewport", post(viewport))
         .route("/v1/items", post(crate::records::items))
-        .route("/v1/items/{tessera_id}", post(item))
+        .route("/v1/items/{mosaica_id}", post(item))
         .route("/v1/artifacts", post(crate::records::artifacts))
         .route("/v1/artifacts/viewport", post(crate::artifact_tiles::viewport_artifacts))
-        .route("/v1/artifacts/{tessera_id}", post(artifact))
+        .route("/v1/artifacts/{mosaica_id}", post(artifact))
         .route("/v1/artifacts/browse", post(browse))
         .route("/v1/aggregate", post(crate::aggregate::aggregate))
         .route("/healthz", get(healthz))
@@ -744,9 +744,9 @@ struct ViewportReq {
     /// candidate.
     #[serde(default)]
     highlight: Option<serde_json::Value>,
-    /// Point columns: `"full"` (the default), a list of render column names (`tessera_id`, `code`
+    /// Point columns: `"full"` (the default), a list of render column names (`mosaica_id`, `code`
     /// and those columns, no other column read), or `"highlight"`, the same points as
-    /// `(tessera_id, highlighted)` for a client that changed only its highlight. A stale stamp
+    /// `(mosaica_id, highlighted)` for a client that changed only its highlight. A stale stamp
     /// means re-ask; with no `highlight`, `"highlight"` answers as `"full"`.
     #[serde(default)]
     point_rows: Option<PointRowsReq>,
@@ -846,7 +846,7 @@ struct WireSink {
     permits: GatePermits,
     /// Taken after admission and before spawning, so blocking-pool wait counts in `server_us`.
     start: Instant,
-    /// Whether [`Self::points`] writes the `(tessera_id, highlighted)` frame where a chunk carries
+    /// Whether [`Self::points`] writes the `(mosaica_id, highlighted)` frame where a chunk carries
     /// the bits.
     highlight_rows: bool,
     arrow_serialise_ns: u64,
@@ -920,10 +920,10 @@ impl ViewportSink for WireSink {
         // The highlight projection writes the two-column frame; the rows are the same either way.
         let frame = match (self.highlight_rows, chunk.highlighted.as_deref()) {
             (true, Some(bits)) => {
-                points_highlight_frame(&chunk.tessera_ids, bits)
+                points_highlight_frame(&chunk.mosaica_ids, bits)
             }
             (_, bits) => points_frame(
-                &chunk.tessera_ids,
+                &chunk.mosaica_ids,
                 &chunk.codes,
                 &scalar_refs,
                 bits,
@@ -931,7 +931,7 @@ impl ViewportSink for WireSink {
             ),
         };
         self.arrow_serialise_ns += serialise_start.elapsed().as_nanos() as u64;
-        self.points_total += chunk.tessera_ids.len() as u64;
+        self.points_total += chunk.mosaica_ids.len() as u64;
         self.flushes += 1;
         self.producer.send(frame)
     }
@@ -1429,7 +1429,7 @@ struct ItemViewDto {
     y: u32,
 }
 
-/// The blocking part of `/v1/items/{tessera_id}`: the engine lookup and the shaping after it.
+/// The blocking part of `/v1/items/{mosaica_id}`: the engine lookup and the shaping after it.
 /// "No such id" and "not visible to you" are one 404 from one site, with no logging on either, so
 /// a viewer cannot tell them apart. The engine tests visibility before any file read, so a store
 /// failure (a 500) can arise only for an item the viewer can already see.
@@ -1438,7 +1438,7 @@ fn run_item(
     session: &mosaica_engine::Session,
     raw: u64,
 ) -> Result<ItemResp, ApiError> {
-    let item = match state.engine.item(session, TesseraId::new(raw)) {
+    let item = match state.engine.item(session, MosaicaId::new(raw)) {
         // A store or IO failure is a 500, never a missing field.
         Err(e) => return Err(map_engine_error(e)),
         // The one 404, for no such id and for not visible alike.
@@ -1553,7 +1553,7 @@ struct BrowseReq {
     #[serde(default)]
     level: Option<u32>,
     /// The children form: the artifacts naming this one among their parents, with its own served
-    /// parents in `parents`. A `tessera_id`, as a number or its decimal string.
+    /// parents in `parents`. A `mosaica_id`, as a number or its decimal string.
     #[serde(default)]
     parent: Option<serde_json::Value>,
     /// The search form: the layer's artifacts whose key or served `name` contains this
@@ -1588,7 +1588,7 @@ struct BrowseResp {
 #[derive(Debug, Serialize)]
 struct BrowseRowResp {
     /// A string, since a `u64` does not survive a JavaScript number intact.
-    tessera_id: String,
+    mosaica_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1608,7 +1608,7 @@ struct BrowseRowResp {
 
 fn browse_row(row: mosaica_engine::browse::BrowseRow) -> BrowseRowResp {
     BrowseRowResp {
-        tessera_id: row.tessera_id.raw().to_string(),
+        mosaica_id: row.mosaica_id.raw().to_string(),
         key: row.key,
         name: row.name,
         masked_count: row.masked_count,
@@ -1651,7 +1651,7 @@ async fn browse(
     }
     let form = match (&req.parent, &req.q) {
         (Some(value), _) => {
-            BrowseForm::Children(crate::filter_dto::tessera_id(Some(value), "parent")?)
+            BrowseForm::Children(crate::filter_dto::mosaica_id(Some(value), "parent")?)
         }
         (None, Some(q)) => BrowseForm::Search(q.clone()),
         (None, None) => BrowseForm::Roots,
@@ -1735,7 +1735,7 @@ async fn browse(
         .expect("response construction cannot fail"))
 }
 
-/// `POST /v1/artifacts/{tessera_id}`: one artifact's drill-down. A separate route from
+/// `POST /v1/artifacts/{mosaica_id}`: one artifact's drill-down. A separate route from
 /// `/v1/items`, so the shape of an answer never says which kind an id names. An id naming nothing
 /// or a point and an artifact not visible to this principal (unreachable layer, suppressed, below
 /// its existence criterion) all get one 404 with one detail, so a viewer cannot tell them apart.
@@ -1760,7 +1760,7 @@ async fn artifact(
                 .engine
                 .artifact(
                     &session,
-                    TesseraId::new(raw),
+                    MosaicaId::new(raw),
                     &view,
                     req.zoom,
                 )

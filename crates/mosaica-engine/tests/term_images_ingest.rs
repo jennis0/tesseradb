@@ -10,11 +10,11 @@
 //! compared against the corpus's own definition and not only between the two bundles, so two paths
 //! agreeing on a wrong answer would still fail.
 //!
-//! **Through a unique `id`, reached from the `tessera_id` each response carries.** The two bundles
+//! **Through a unique `id`, reached from the `mosaica_id` each response carries.** The two bundles
 //! assign different entity ids to the same item: a build assigns in term-signature order and an
-//! ingest assigns in arrival order, and `tessera_id` is a permutation of the entity id, so the two
+//! ingest assigns in arrival order, and `mosaica_id` is a permutation of the entity id, so the two
 //! responses cannot be compared as identities. The `id` is the caller's own name for the item and
-//! is the same on both sides, so each served `tessera_id` is resolved through `Engine::item` and
+//! is the same on both sides, so each served `mosaica_id` is resolved through `Engine::item` and
 //! the sets of names compared.
 //!
 //! Term ids differ for the same reason: a build interns the corpus's descriptors in its own order
@@ -38,7 +38,7 @@ use common::*;
 use mosaica_build::{build, BuildArgs};
 use mosaica_engine::{Engine, EngineConfig, ViewportRequest};
 use mosaica_lifecycle::UnallocatedRow;
-use mosaica_types::TesseraId;
+use mosaica_types::MosaicaId;
 
 const WAIT: Duration = Duration::from_secs(180);
 
@@ -315,7 +315,7 @@ fn authorise(engine: &Engine, credential: &[u8]) -> mosaica_engine::Session {
     }
 }
 
-/// The `id`s one principal is served over the whole extent, reached from the `tessera_id` of each
+/// The `id`s one principal is served over the whole extent, reached from the `mosaica_id` of each
 /// served point.
 fn served_ids(engine: &Engine, credential: &[u8]) -> BTreeSet<u64> {
     let session = authorise(engine, credential);
@@ -327,11 +327,11 @@ fn served_ids(engine: &Engine, credential: &[u8]) -> BTreeSet<u64> {
         .expect("the viewport serves");
     response
         .points
-        .tessera_ids
+        .mosaica_ids
         .iter()
         .map(|id| {
             engine
-                .item(&session, TesseraId::new(*id))
+                .item(&session, MosaicaId::new(*id))
                 .expect("the drill-down answers")
                 .expect("a served point is an item this principal may reach")
                 .fields

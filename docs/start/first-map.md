@@ -394,12 +394,12 @@ the name back to `population` and run `mosaica check` once more to get `check OK
 
 Inside the server, every place is identified by a number of Mosaica's own. That number never
 leaves the server, because a viewer who collected a few of them could estimate how many places
-they aren't allowed to see. Browsers get a `tessera_id` for each place instead. It's the internal
+they aren't allowed to see. Browsers get a `mosaica_id` for each place instead. It's the internal
 number scrambled with a secret key, which the build makes up at random and keeps inside the bundle.
 There is nothing for you to set up. The [security
 chapter](../system/security.md#a-client-never-sees-an-entity-id) explains what the scrambling
 hides and what it doesn't. Each build makes a new key, so building again gives every place a new
-`tessera_id`, and any `tessera_id` a viewer had saved will no longer point at the same place.
+`mosaica_id`, and any `mosaica_id` a viewer had saved will no longer point at the same place.
 
 Now build the bundle. The build reads every row of `points.parquet` and works out where each place
 sits on the map. It stores neighbouring places next to each other on disc, so that the places in any

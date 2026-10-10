@@ -109,11 +109,11 @@ class Aggregate:
 
 @dataclass(frozen=True)
 class Item:
-    """`POST /v1/items/{tessera_id}` — the whole record, assembled from all three homes. Nothing
+    """`POST /v1/items/{mosaica_id}` — the whole record, assembled from all three homes. Nothing
     else reads the record blob on the viewer plane, so this is the only surface where a
     blob-resident field dropped by a producer is visible at all (§3)."""
 
-    tessera_id: int
+    mosaica_id: int
 
 
 @dataclass(frozen=True)
@@ -129,7 +129,7 @@ class Suggest:
 @dataclass(frozen=True)
 class Browse:
     """`POST /v1/artifacts/browse`: one page of a layer's hierarchy. The roots form when `parent`
-    and `q` are both None, the children form with a `parent` tessera id, the search form with `q`."""
+    and `q` are both None, the children form with a `parent` mosaica id, the search form with `q`."""
 
     view_id: str
     layer: str
@@ -141,9 +141,9 @@ class Browse:
 
 @dataclass(frozen=True)
 class ArtifactCard:
-    """`POST /v1/artifacts/{tessera_id}`: one artifact as this principal sees it."""
+    """`POST /v1/artifacts/{mosaica_id}`: one artifact as this principal sees it."""
 
-    tessera_id: int
+    mosaica_id: int
     view_id: str
 
 
@@ -179,7 +179,7 @@ def build_battery(
     `meta` is the server's own `/v1/meta` answer — the category columns are read from its
     `declared_scalars`, so the battery covers whatever vocabulary surfaces the deployment
     declares rather than a hard-coded list that rots. `item_ids` must come from served responses
-    (they are per-build `tessera_id`s and nothing may persist them across builds — the identity
+    (they are per-build `mosaica_id`s and nothing may persist them across builds — the identity
     key is minted per fixture); at least one is required, because a battery without the
     drill-down has no reader of the record blob at all. `filters`, when given, adds one filtered
     viewport beside the unfiltered ones rather than replacing them — a battery whose every
@@ -226,7 +226,7 @@ def build_battery(
             )
         )
     entries.append(_aggregate(meta, view_id, bbox))
-    entries += [Item(tessera_id) for tessera_id in item_ids]
+    entries += [Item(mosaica_id) for mosaica_id in item_ids]
     return tuple(entries)
 
 
@@ -303,7 +303,7 @@ def record_one(server, token: str, query: Query) -> Canonical:
         return _status_and_body(resp, (200, 422))
     if isinstance(query, ArtifactCard):
         resp = requests.post(
-            f"{server.viewer_base}/v1/artifacts/{query.tessera_id}",
+            f"{server.viewer_base}/v1/artifacts/{query.mosaica_id}",
             headers={"Authorization": f"Bearer {token}"},
             json={"view": query.view_id},
             timeout=10,
@@ -316,7 +316,7 @@ def record_one(server, token: str, query: Query) -> Canonical:
         # 404 is a *real* answer on this surface — contracts §3.2 returns it identically for "no
         # such ID" and "not visible to this principal", and a deny stage legitimately moves a
         # battery item from 200 to 404. Anything else is a harness failure.
-        resp = server.item(token, query.tessera_id)
+        resp = server.item(token, query.mosaica_id)
         if resp.status_code not in (200, 404):
             resp.raise_for_status()
         return Json({"status": resp.status_code, "body": resp.json()})

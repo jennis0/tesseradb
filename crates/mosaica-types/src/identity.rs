@@ -1,14 +1,14 @@
-//! The `tessera_id` construction: a keyed **blinding permutation**, not encryption.
+//! The `mosaica_id` construction: a keyed **blinding permutation**, not encryption.
 //!
 //! Threat model, in three sentences (design memo
 //! `docs/evidence/memos/2026-07-30-tessera-id-construction.md`, normative): the key is not
-//! secret against a bundle-holder, who can already invert every `tessera_id` trivially and
+//! secret against a bundle-holder, who can already invert every `mosaica_id` trivially and
 //! gains nothing from doing so; the property actually defended is that a **viewer-plane**
-//! client — holding `tessera_id`s and no bundle — cannot derive entity IDs, cannot order
+//! client — holding `mosaica_id`s and no bundle — cannot derive entity IDs, cannot order
 //! them, and cannot count the gaps between them; and the key must never leave the server,
 //! on any plane, in any response, log line or metric label.
 //!
-//! `tessera_id = FPE_k(shard_id: u32 ‖ entity_id: u32) -> u64`: a balanced Feistel network,
+//! `mosaica_id = FPE_k(shard_id: u32 ‖ entity_id: u32) -> u64`: a balanced Feistel network,
 //! 8 rounds, 32-bit halves, round function `splitmix64` (a non-cryptographic mixer — see
 //! the memo §8 for the ruling that keeps it, and §3 for why a cryptographic PRF is not
 //! required here). Do not change the round count, the round function, the packing or the
@@ -16,14 +16,14 @@
 
 use crate::EntityId;
 
-/// Number of Feistel rounds in the `tessera_id` construction. Fixed by the memo §1 — do
+/// Number of Feistel rounds in the `mosaica_id` construction. Fixed by the memo §1 — do
 /// not change.
 pub const IDENTITY_ROUNDS: u32 = 8;
 
 /// Identifies the construction, as recorded in MANIFEST's `identity.construction` field.
 pub const IDENTITY_CONSTRUCTION: &str = "feistel-splitmix64-v1";
 
-/// Errors from key parsing and from the checked `shard_id ‖ entity_id -> tessera_id`
+/// Errors from key parsing and from the checked `shard_id ‖ entity_id -> mosaica_id`
 /// conversion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityError {
@@ -69,7 +69,7 @@ impl std::fmt::Display for IdentityError {
             IdentityError::EntityOutOfRange { entity } => {
                 write!(
                     f,
-                    "entity id {entity} exceeds u32::MAX; cannot form a tessera_id"
+                    "entity id {entity} exceeds u32::MAX; cannot form a mosaica_id"
                 )
             }
         }
@@ -78,17 +78,17 @@ impl std::fmt::Display for IdentityError {
 
 impl std::error::Error for IdentityError {}
 
-/// `tessera_id`: the opaque, blinded wire identity of a point (invariant I10 — entity IDs
+/// `mosaica_id`: the opaque, blinded wire identity of a point (invariant I10 — entity IDs
 /// never cross the trust boundary). A newtype with no conversions to or from any other ID
 /// newtype (invariant I4); see `IdentityKey::forward` / `IdentityKey::invert` for the only
 /// way to produce or unwrap one.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct TesseraId(u64);
+pub struct MosaicaId(u64);
 
-impl TesseraId {
+impl MosaicaId {
     #[inline]
     pub fn new(raw: u64) -> Self {
-        TesseraId(raw)
+        MosaicaId(raw)
     }
 
     #[inline]
@@ -106,7 +106,7 @@ impl TesseraId {
     }
 }
 
-/// The bundle's 128-bit key for the `tessera_id` blinding permutation, generated when the bundle
+/// The bundle's 128-bit key for the `mosaica_id` blinding permutation, generated when the bundle
 /// is created and stored in its manifest. `Debug` is redacted. The key never leaves the server.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct IdentityKey {
@@ -205,11 +205,11 @@ impl IdentityKey {
         (splitmix64((r as u64) ^ self.round_key(i)) >> 32) as u32
     }
 
-    /// `tessera_id = FPE_k(shard_id ‖ entity_id)`. Fallible: `entity` must fit in `u32`
+    /// `mosaica_id = FPE_k(shard_id ‖ entity_id)`. Fallible: `entity` must fit in `u32`
     /// (plan Important I-1, memo §1.8) — a truncating cast would let two entities differing
-    /// only above bit 32 share a `tessera_id`, silently breaking "collision-free by
+    /// only above bit 32 share a `mosaica_id`, silently breaking "collision-free by
     /// construction" and making `invert` return the wrong entity.
-    pub fn forward(&self, shard: u32, entity: EntityId) -> Result<TesseraId, IdentityError> {
+    pub fn forward(&self, shard: u32, entity: EntityId) -> Result<MosaicaId, IdentityError> {
         let entity_raw = entity.raw();
         if entity_raw > u32::MAX as u64 {
             return Err(IdentityError::EntityOutOfRange { entity: entity_raw });
@@ -222,13 +222,13 @@ impl IdentityKey {
             l = new_l;
             r = new_r;
         }
-        Ok(TesseraId(((l as u64) << 32) | (r as u64)))
+        Ok(MosaicaId(((l as u64) << 32) | (r as u64)))
     }
 
     /// The inverse of `forward`, total over the full `u64` space (memo §1.7): every
-    /// `tessera_id` inverts to *some* `(shard_id, entity_id)`, meaningful only if the
+    /// `mosaica_id` inverts to *some* `(shard_id, entity_id)`, meaningful only if the
     /// caller separately validates shard and entity range/presence.
-    pub fn invert(&self, id: TesseraId) -> (u32, EntityId) {
+    pub fn invert(&self, id: MosaicaId) -> (u32, EntityId) {
         let raw = id.raw();
         let mut l = (raw >> 32) as u32;
         let mut r = raw as u32;
@@ -257,7 +257,7 @@ mod tests {
 
     const CANONICAL_KEY: &str = "000102030405060708090a0b0c0d0e0f";
 
-    /// Loads `reference/vectors/tessera_id.json`, shared with every test below that reads
+    /// Loads `reference/vectors/mosaica_id.json`, shared with every test below that reads
     /// from it -- a single load point so a future correction to the file reaches every
     /// block, not just `vectors`/`inverse_only`/`secondary_key`/`rejected_keys` (task-5
     /// review minor: `splitmix64_known_answers` and `key_schedule_matches_vectors` used to
@@ -265,9 +265,9 @@ mod tests {
     fn load_vectors_doc() -> serde_json::Value {
         let raw = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../reference/vectors/tessera_id.json"
+            "/../../reference/vectors/mosaica_id.json"
         ))
-        .expect("reference/vectors/tessera_id.json must exist");
+        .expect("reference/vectors/mosaica_id.json must exist");
         serde_json::from_str(&raw).unwrap()
     }
 
@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn it_matches_the_shared_known_answer_vectors() {
-        // reference/vectors/tessera_id.json was generated from the spec text before either
+        // reference/vectors/mosaica_id.json was generated from the spec text before either
         // implementation existed. The Python oracle tests against the same file. Disagreement
         // here means the Rust is wrong; agreement between two independent implementations and
         // the file is the evidence the construction is reproducible.
@@ -348,11 +348,11 @@ mod tests {
         for v in main_vectors {
             let shard = v["shard_id"].as_u64().unwrap() as u32;
             let entity = v["entity_id"].as_u64().unwrap();
-            let expected = parse_hex_u64(v["tessera_id"].as_str().unwrap());
+            let expected = parse_hex_u64(v["mosaica_id"].as_str().unwrap());
             let id = key.forward(shard, EntityId::new(entity)).unwrap();
             assert_eq!(id.raw(), expected, "forward shard={shard} entity={entity}");
             assert_eq!(
-                key.invert(TesseraId::new(expected)),
+                key.invert(MosaicaId::new(expected)),
                 (shard, EntityId::new(entity)),
                 "invert shard={shard} entity={entity}"
             );
@@ -361,15 +361,15 @@ mod tests {
         // `inverse_only`: asserted in BOTH directions (task-5 review minor -- Rust used
         // to assert the inverse direction only). Valid because the construction is a
         // total bijection over 2**64 (memo §1.7): `forward(*invert(x)) == x` must hold
-        // even for a `tessera_id` not drawn from a forward-generated vector.
+        // even for a `mosaica_id` not drawn from a forward-generated vector.
         let inverse_only = doc["inverse_only"].as_array().unwrap();
         assert_eq!(inverse_only.len(), 6);
         for v in inverse_only {
-            let id = parse_hex_u64(v["tessera_id"].as_str().unwrap());
+            let id = parse_hex_u64(v["mosaica_id"].as_str().unwrap());
             let shard = v["shard_id"].as_u64().unwrap() as u32;
             let entity = v["entity_id"].as_u64().unwrap();
             assert_eq!(
-                key.invert(TesseraId::new(id)),
+                key.invert(MosaicaId::new(id)),
                 (shard, EntityId::new(entity))
             );
             assert_eq!(
@@ -389,7 +389,7 @@ mod tests {
         for v in sk_vectors {
             let shard = v["shard_id"].as_u64().unwrap() as u32;
             let entity = v["entity_id"].as_u64().unwrap();
-            let expected = parse_hex_u64(v["tessera_id"].as_str().unwrap());
+            let expected = parse_hex_u64(v["mosaica_id"].as_str().unwrap());
             let id = sk_key.forward(shard, EntityId::new(entity)).unwrap();
             assert_eq!(
                 id.raw(),
@@ -397,7 +397,7 @@ mod tests {
                 "secondary_key shard={shard} entity={entity}"
             );
             assert_eq!(
-                sk_key.invert(TesseraId::new(expected)),
+                sk_key.invert(MosaicaId::new(expected)),
                 (shard, EntityId::new(entity)),
                 "secondary_key invert shard={shard} entity={entity}"
             );
@@ -468,7 +468,7 @@ mod tests {
     #[test]
     fn forward_refuses_an_entity_above_u32_max_rather_than_truncating() {
         // IMPORTANT I-1. A truncating cast makes "collision-free by construction" FALSE:
-        // 0x1_0000_0000 and 0x0 would share a tessera_id, and `invert` would name the wrong
+        // 0x1_0000_0000 and 0x0 would share a mosaica_id, and `invert` would name the wrong
         // entity -- a /control/changes suppression against the wrong item. The allocator's
         // u32 cap makes this unreachable; this makes a bypass loud.
         let key = IdentityKey::from_hex(CANONICAL_KEY).unwrap();
@@ -508,8 +508,8 @@ mod tests {
     fn priority_is_the_leading_sixteen_bits_of_the_identity() {
         // Contracts §2.6 r6. The point of the redefinition is that the sort prefix and the
         // full sort key are the same value, so this is not a formatting detail: if priority
-        // is ever anything but a prefix, "k lowest by priority then by tessera_id" stops
-        // being "k lowest by tessera_id" and the sampler acquires a composite comparator.
+        // is ever anything but a prefix, "k lowest by priority then by mosaica_id" stops
+        // being "k lowest by mosaica_id" and the sampler acquires a composite comparator.
         let key = IdentityKey::from_hex(CANONICAL_KEY).unwrap();
         for e in (0u32..1 << 16).step_by(13) {
             let id = key.forward(0, EntityId::new(e as u64)).unwrap();
@@ -523,7 +523,7 @@ mod tests {
         // sort_by(|a,b| a.priority().cmp(&b.priority()).then(a.raw().cmp(&b.raw()))) must
         // produce exactly sort_by_key(|x| x.raw()).
         let key = IdentityKey::from_hex(CANONICAL_KEY).unwrap();
-        let mut ids: Vec<TesseraId> = (0u32..5000)
+        let mut ids: Vec<MosaicaId> = (0u32..5000)
             .map(|e| key.forward(0, EntityId::new(e as u64)).unwrap())
             .collect();
 

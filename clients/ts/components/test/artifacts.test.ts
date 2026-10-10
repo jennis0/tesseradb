@@ -35,7 +35,7 @@ const META = meta({
 
 const artifact = (id: bigint, count: bigint, parent: bigint | null = null, content: string[] = []): Artifact => ({
   layer: 'clusters',
-  tesseraId: id,
+  mosaicaId: id,
   key: `c-${id}`,
   maskedCount: count,
   centroid: [2 ** 31, 2 ** 31],
@@ -51,7 +51,7 @@ const artifact = (id: bigint, count: bigint, parent: bigint | null = null, conte
 
 function artifactsProjection(served: Artifact[], layers = ['clusters', 'labels']): ArtifactsProjection {
   const table = new SessionArtifactTable();
-  const ordinals = table.take(served.map((a) => ({tesseraId: a.tesseraId, layer: a.layer, parentIds: a.parentIds})));
+  const ordinals = table.take(served.map((a) => ({mosaicaId: a.mosaicaId, layer: a.layer, parentIds: a.parentIds})));
   return {
     layer: layers[0] ?? null,
     layers,

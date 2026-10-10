@@ -443,7 +443,7 @@ fn segments_dir(root: &std::path::Path, view: &str) -> std::path::PathBuf {
 /// Whether a full-coverage viewer is served `entity`, ingested at (0.5, 0.5), in `view`.
 fn serves(engine: &Engine, view: &str, entity: EntityId) -> bool {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
-    let wanted = engine.tessera_id_of(entity).unwrap();
+    let wanted = engine.mosaica_id_of(entity).unwrap();
     engine
         .viewport(
             &session,

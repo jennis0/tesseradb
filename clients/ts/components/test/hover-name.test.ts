@@ -40,7 +40,7 @@ async function map(scalars: {name: string; arrowType: string}[], attributes = ''
 }
 
 /** Deck's answer for a mark: the slot layer, the row, and the ids that layer was given. */
-const markAt = (id: bigint) => ({index: 0, x: 10, y: 20, sourceLayer: {id: 'marks-p0', props: {tesseraIds: new BigUint64Array([id])}}});
+const markAt = (id: bigint) => ({index: 0, x: 10, y: 20, sourceLayer: {id: 'marks-p0', props: {mosaicaIds: new BigUint64Array([id])}}});
 
 /** The marks under the pointer carrying `scalars`, one row each. */
 const carrying = (scalars: Record<string, {arrowType: string; value: unknown}>) => () => ({
@@ -152,7 +152,7 @@ describe('a hover under a highlight', () => {
     };
     for (const pass of ['lit', 'dull']) {
       asked = null;
-      el.onHover({index: 0, x: 10, y: 20, sourceLayer: {id: `marks-p3-${pass}`, props: {tesseraIds: new BigUint64Array([5n])}}});
+      el.onHover({index: 0, x: 10, y: 20, sourceLayer: {id: `marks-p3-${pass}`, props: {mosaicaIds: new BigUint64Array([5n])}}});
       expect(asked).toBe(3);
       expect(el.hover?.title).toBe('London');
     }

@@ -493,7 +493,7 @@ fn shape_of(
         .into_iter()
         .find(|a| a.layer == layer)
         .expect("the artifact is served")
-        .tessera_id;
+        .mosaica_id;
     engine
         .artifact(session, id, "s0", None)
         .expect("a read by identifier")

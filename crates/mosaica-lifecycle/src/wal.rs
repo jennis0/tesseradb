@@ -249,7 +249,7 @@ pub enum WalRecord {
     /// item to in place. `edits` holds each item the batch moved to a new entity, with everything
     /// the item carries, so replay reads nothing from stored files. `receipt` holds one entry per
     /// row of the request, in request order, including the rows that changed nothing and wrote no
-    /// row, so a replay of the batch id answers the `tessera_id`s the first acceptance did.
+    /// row, so a replay of the batch id answers the `mosaica_id`s the first acceptance did.
     IngestBatch {
         batch_id: String,
         body_hash: [u8; 32],
@@ -279,7 +279,7 @@ pub enum WalRecord {
     /// all.
     ///
     /// Keyed by entity rather than by the identifier the caller supplied: the handler resolves a
-    /// `tessera_id` or a unique value once, at admission, and replay applies what was decided
+    /// `mosaica_id` or a unique value once, at admission, and replay applies what was decided
     /// without resolving anything.
     ChangeBatch { changes: Vec<(EntityId, ChangeOp)> },
     /// An accepted annotation-layer registration.
@@ -288,7 +288,7 @@ pub enum WalRecord {
     /// `alloc::high_water_from` derives the restart seed from `IngestBatch` rows and
     /// `OverlaySnapshot` entries and from nothing else, so a layer allocation that raised no mark
     /// would survive a rotation and restart only until the next allocation reissued its ids — two
-    /// entities, one `tessera_id`. [`crate::alloc::low_water_from`] reads this record and this
+    /// entities, one `mosaica_id`. [`crate::alloc::low_water_from`] reads this record and this
     /// record alone, which is why the ids are carried here explicitly rather than being recomputed
     /// from the declaration: a replay must apply what was decided, not re-derive it.
     ///
@@ -560,14 +560,14 @@ pub struct BatchIdentity<'a> {
     pub receipt: &'a [RowReceipt],
 }
 
-/// What an accepted ingest batch did with one of its rows, and the `tessera_id` of the item the
+/// What an accepted ingest batch did with one of its rows, and the `mosaica_id` of the item the
 /// row named or created: none for a refused row.
 ///
 /// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RowReceipt {
     pub outcome: RowOutcome,
-    pub tessera_id: Option<u64>,
+    pub mosaica_id: Option<u64>,
     /// The row created an item indexed under more than [`mosaica_authz::MAX_KEYS_PER_ITEM`] keys.
     /// It is stored all the same.
     pub over_bound: bool,
@@ -598,7 +598,7 @@ pub enum RowOutcome {
 pub struct WalEdit {
     /// The entity the item leaves. This record deletes it.
     pub old: EntityId,
-    /// The item's number: the entity it was first given, which its `tessera_id` is taken from.
+    /// The item's number: the entity it was first given, which its `mosaica_id` is taken from.
     pub number: EntityId,
     /// The old entity was suppressed, so the new one is.
     pub suppressed: bool,
@@ -1060,7 +1060,7 @@ const WAL_MAGIC: [u8; 4] = *b"MWAL";
 // `Edited`, and `ValuesBatch` left the variant table. A log at 27 is refused.
 // **29**: `ViewDrop` gained `deleted`, the items the drop left in no view. A log at 28 is refused.
 // **30**: `WalRow` lost `external_id`. A log at 29 is refused.
-// **31**: `RowOutcome` gained `Refused`, and `RowReceipt::tessera_id` is optional, absent for a
+// **31**: `RowOutcome` gained `Refused`, and `RowReceipt::mosaica_id` is optional, absent for a
 // refused row. A log at 30 is refused.
 // **32**: an access label is an expression, and a row's descriptors are the keys it is indexed
 // under: a term, `public`, or a label holding a conjunction under its own key. A log at 31 is
@@ -2835,7 +2835,7 @@ mod tests {
                 }],
                 receipt: vec![RowReceipt {
                     outcome: RowOutcome::Edited,
-                    tessera_id: Some(12_345),
+                    mosaica_id: Some(12_345),
                     over_bound: false,
                 }],
             },

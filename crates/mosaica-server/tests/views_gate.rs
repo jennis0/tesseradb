@@ -1194,7 +1194,7 @@ async fn the_control_plane_reaches_a_gated_group() {
 // The drill-down, which the gate reaches for the same reason every other surface does
 // ---------------------------------------------------------------------------------------------
 
-/// The `tessera_id`s a view serves this principal.
+/// The `mosaica_id`s a view serves this principal.
 async fn point_ids(served: &Served, token: &str, view: &str) -> Vec<u64> {
     let resp = served
         .server
@@ -1213,7 +1213,7 @@ async fn point_ids(served: &Served, token: &str, view: &str) -> Vec<u64> {
     points.into_iter().map(|(id, _)| id).collect()
 }
 
-/// The `tessera_id` one source entity is served under in `view`, found through the drill-down's
+/// The `mosaica_id` one source entity is served under in `view`, found through the drill-down's
 /// `id`, the identity permutation being the server's alone.
 async fn id_of(served: &Served, token: &str, view: &str, entity: u64) -> u64 {
     for id in point_ids(served, token, view).await {

@@ -485,7 +485,7 @@ async fn viewport(served: &Served, view: &str, filters: Option<Value>) -> reqwes
         .unwrap()
 }
 
-/// The `tessera_id`s a view answers with under a filter — an **entity** set, since an identifier
+/// The `mosaica_id`s a view answers with under a filter — an **entity** set, since an identifier
 /// is the entity's wherever it appears (`views.md` §1).
 async fn ids(served: &Served, view: &str, filters: Option<Value>) -> BTreeSet<u64> {
     let resp = viewport(served, view, filters).await;
@@ -559,7 +559,7 @@ async fn keys_as(served: &Served, token: &str, path: &str) -> Vec<String> {
 #[tokio::test]
 async fn a_scoped_category_answers_from_the_requests_own_view() {
     let served = Served::build(build_families).await;
-    // The served answer is a set of `tessera_id`s and the expected one a set of entity numbers, so
+    // The served answer is a set of `mosaica_id`s and the expected one a set of entity numbers, so
     // the comparison is by **cardinality**, as every test in this directory compares them: the
     // identifier is a blinding permutation and never the entity id (I10, decision 0014).
     for (slot, (key, _)) in QUARTERS.iter().enumerate() {
@@ -919,7 +919,7 @@ async fn a_suppression_reaches_both_scoped_routes() {
 
     let resp = post_changes(
         &served,
-        &json!([{ "op": "suppress", "match": { "tessera_id": victim.to_string() } }]),
+        &json!([{ "op": "suppress", "match": { "mosaica_id": victim.to_string() } }]),
     )
     .await;
     assert_eq!(
@@ -1200,7 +1200,7 @@ fn scoped_batch(rows: &[(u64, f64, f64, Written)], nulls: &[&str]) -> Vec<u8> {
     w.into_inner().unwrap()
 }
 
-/// One batch into `view`, returning the `tessera_id` of each accepted row in the batch's own order
+/// One batch into `view`, returning the `mosaica_id` of each accepted row in the batch's own order
 /// — an identifier the fold and the restart both preserve, so one handle serves every stage.
 async fn ingest_scoped(
     served: &Served,

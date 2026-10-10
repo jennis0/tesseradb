@@ -305,10 +305,10 @@ pub fn identity_key_fingerprint(key_hex: &str) -> String {
     out
 }
 
-/// `MANIFEST.json`'s `identity` object: the `tessera_id` permutation's construction, round count,
+/// `MANIFEST.json`'s `identity` object: the `mosaica_id` permutation's construction, round count,
 /// key and shard id. The key is generated when the bundle is created and is never configured or
-/// changed, so a copy of the bundle keeps its `tessera_id`s and a rebuild gives new ones. The
-/// object is required: without it no `tessera_id` can be inverted.
+/// changed, so a copy of the bundle keeps its `mosaica_id`s and a rebuild gives new ones. The
+/// object is required: without it no `mosaica_id` can be inverted.
 ///
 /// `Debug` is hand-written and prints the key's fingerprint.
 #[derive(Clone, Serialize, Deserialize)]
@@ -624,7 +624,7 @@ impl ScopedScalar {
     /// postings over it.
     ///
     /// This is what gives a neither-flag declaration its meaning (owner ruling 2026-09-01): stored,
-    /// served on `POST /v1/items/{tessera_id}`, on no filter surface and in no row tail.
+    /// served on `POST /v1/items/{mosaica_id}`, on no filter surface and in no row tail.
     pub fn has_value_column(&self) -> bool {
         self.vocabulary.is_some() || self.arrow_type != ScalarType::Text
     }
@@ -1961,7 +1961,7 @@ pub struct SegmentsManifest {
     /// **Required, and this is the field decision 0074 calls the part to get right.** The WAL
     /// carries the same mark in its `LayerCreate` records, and rotation reclaims those — so a mark
     /// that lived only there is lost at the first rotation, and the next registration is handed ids
-    /// a live layer already holds: two entities, one `tessera_id`. This is the home that survives,
+    /// a live layer already holds: two entities, one `mosaica_id`. This is the home that survives,
     /// exactly as `entity_id_high_water` is for the point region.
     ///
     /// **No `serde(default)`, and the reason is sharper here than elsewhere.** A default would make

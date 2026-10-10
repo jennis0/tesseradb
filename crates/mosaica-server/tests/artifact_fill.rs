@@ -123,12 +123,12 @@ async fn served(server: &TestServer, layer: &str) -> Vec<(String, u64)> {
 }
 
 /// The drill-down's body for one artifact, or its status where it is withheld.
-async fn drill(server: &TestServer, tessera_id: &str) -> (u16, serde_json::Value) {
+async fn drill(server: &TestServer, mosaica_id: &str) -> (u16, serde_json::Value) {
     let auth = authorise(server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
     let resp = server
         .client
-        .post(server.viewer_url(&format!("/v1/artifacts/{tessera_id}")))
+        .post(server.viewer_url(&format!("/v1/artifacts/{mosaica_id}")))
         .bearer_auth(token)
         .json(&json!({ "view": "s0" }))
         .send()
@@ -158,7 +158,7 @@ async fn a_content_is_filled_on_an_artifact_published_without_one_and_a_differin
         body["without_content"], 1,
         "the publication reports the artifact it accepted without content: {body}"
     );
-    let id = body["artifacts"][0]["tessera_id"]
+    let id = body["artifacts"][0]["mosaica_id"]
         .as_str()
         .expect("an identifier")
         .to_string();
@@ -177,7 +177,7 @@ async fn a_content_is_filled_on_an_artifact_published_without_one_and_a_differin
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["artifacts"][0]["filled"], 1, "{body}");
     assert_eq!(body["artifacts"][0]["joined"], 0, "{body}");
-    assert_eq!(body["artifacts"][0]["tessera_id"], id, "{body}");
+    assert_eq!(body["artifacts"][0]["mosaica_id"], id, "{body}");
     assert_eq!(served(&server, TOPICS).await, vec![("t0".to_string(), 40)]);
     let (status, body) = drill(&server, &id).await;
     assert_eq!(status, 200, "{body}");
@@ -237,11 +237,11 @@ async fn a_parent_is_filled_by_patch_and_a_held_key_on_put_mints_nothing() {
     .await;
     assert_eq!(status, 201, "{body}");
     assert_eq!(body["created"], 2, "{body}");
-    let root = body["artifacts"][0]["tessera_id"]
+    let root = body["artifacts"][0]["mosaica_id"]
         .as_str()
         .unwrap()
         .to_string();
-    let child = body["artifacts"][1]["tessera_id"]
+    let child = body["artifacts"][1]["mosaica_id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -279,8 +279,8 @@ async fn a_parent_is_filled_by_patch_and_a_held_key_on_put_mints_nothing() {
     assert_eq!(body["created"], 0, "{body}");
     assert_eq!(body["filled"], 0, "{body}");
     assert_eq!(body["joined"], 0, "{body}");
-    assert_eq!(body["artifacts"][0]["tessera_id"], root, "{body}");
-    assert_eq!(body["artifacts"][1]["tessera_id"], child, "{body}");
+    assert_eq!(body["artifacts"][0]["mosaica_id"], root, "{body}");
+    assert_eq!(body["artifacts"][1]["mosaica_id"], child, "{body}");
 
     // A held key beside a new one: one created, the held one's members join, the new one under
     // the held sibling. `joined` is the created leaf's ten members and the root's ten new ones.
@@ -296,7 +296,7 @@ async fn a_parent_is_filled_by_patch_and_a_held_key_on_put_mints_nothing() {
     assert_eq!(status, 201, "{body}");
     assert_eq!(body["created"], 1, "{body}");
     assert_eq!(body["joined"], 20, "{body}");
-    assert_eq!(body["artifacts"][1]["tessera_id"], root, "{body}");
+    assert_eq!(body["artifacts"][1]["mosaica_id"], root, "{body}");
     assert_eq!(
         served(&server, TREE).await,
         vec![("leaf".to_string(), 10)],

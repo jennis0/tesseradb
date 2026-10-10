@@ -85,7 +85,7 @@ pub(super) struct FoldDerived<'a> {
 }
 
 /// The entities of `executed` the allocator may issue again: each one whose number, the entity
-/// its item was first given, is another. An item's number is never freed, so a `tessera_id` a
+/// its item was first given, is another. An item's number is never freed, so a `mosaica_id` a
 /// client holds never comes to name another item.
 fn freed_by(
     live: &Generation,
@@ -1703,7 +1703,7 @@ impl Executor {
     /// The returned list replaces the manifest's rather than extending it: one extent per level,
     /// covering `[0, len)`. Holes are written, not packed around: closing one would hand every
     /// later artifact in the level the identity of its neighbour, since an ordinal is the identity
-    /// a caller's `tessera_id` resolves to.
+    /// a caller's `mosaica_id` resolves to.
     pub(super) fn rewrite_membership_extents(
         &self,
         prefix_dir: &std::path::Path,

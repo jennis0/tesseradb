@@ -295,7 +295,7 @@ fn at_least(value: f64) -> FilterOperand {
 }
 
 fn fields_of(engine: &Engine, session: &Session, entity: EntityId) -> BTreeMap<String, ScalarOut> {
-    let id = engine.tessera_id_of(entity).unwrap();
+    let id = engine.mosaica_id_of(entity).unwrap();
     engine
         .item(session, id)
         .unwrap()
@@ -460,7 +460,7 @@ fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_b
     let ids_of = |entities: &[EntityId]| -> Vec<u64> {
         let mut ids: Vec<u64> = entities
             .iter()
-            .map(|e| engine.tessera_id_of(*e).unwrap().raw())
+            .map(|e| engine.mosaica_id_of(*e).unwrap().raw())
             .collect();
         ids.sort_unstable();
         ids
@@ -617,7 +617,7 @@ fn a_declaration_mid_ingest_pads_earlier_rows_and_neither_panics_nor_fails_the_f
     publish_buffered(&engine);
 
     let session = session(&engine);
-    let id = |e: EntityId| engine.tessera_id_of(e).unwrap().raw();
+    let id = |e: EntityId| engine.mosaica_id_of(e).unwrap().raw();
     assert_eq!(
         fields_of(&engine, &session, carrying[0])["late"],
         ScalarOut::F32(0.75)
@@ -693,7 +693,7 @@ fn a_restart_replays_the_declaration_from_the_log_and_from_the_manifest() {
     let engine = restart(&fx, engine);
     assert_eq!(declared_names(&engine), ["band", "score", "id", "sentiment"]);
     let session = session(&engine);
-    let id = |e: EntityId| engine.tessera_id_of(e).unwrap().raw();
+    let id = |e: EntityId| engine.mosaica_id_of(e).unwrap().raw();
     assert!(!fields_of(&engine, &session, before[0]).contains_key("sentiment"));
     assert_eq!(
         fields_of(&engine, &session, carrying[0])["sentiment"],
@@ -768,7 +768,7 @@ fn the_fold_carries_a_runtime_column_into_the_base() {
     );
 
     let session = session(&engine);
-    let id = engine.tessera_id_of(carrying[0]).unwrap().raw();
+    let id = engine.mosaica_id_of(carrying[0]).unwrap().raw();
     assert_eq!(
         fields_of(&engine, &session, carrying[0])["sentiment"],
         ScalarOut::F32(0.6)
@@ -963,7 +963,7 @@ fn a_declaration_during_a_fold_survives_the_publication_at_the_same_tail_positio
             ["band", "score"],
             "the render list is the build's alone"
         );
-        let id = engine.tessera_id_of(during[0]).unwrap().raw();
+        let id = engine.mosaica_id_of(during[0]).unwrap().raw();
         let fields = fields_of(engine, &session, during[0]);
         assert_eq!(
             fields["before"],

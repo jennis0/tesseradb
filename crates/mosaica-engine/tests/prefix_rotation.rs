@@ -445,7 +445,7 @@ fn a_drill_down_after_a_rotation_does_not_reuse_the_superseded_prefixs_fragment(
     visible(&engine, &session);
 
     let entity = entity_of_source(&root, 5);
-    let id = engine.tessera_id_of(entity).unwrap();
+    let id = engine.mosaica_id_of(entity).unwrap();
     assert!(engine.item(&session, id).unwrap().is_some());
 
     let before = engine.generation();

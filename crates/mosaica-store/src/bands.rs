@@ -1,13 +1,13 @@
 //! A segment's identity bands, the copies beside them, and its cell codes.
 //!
-//! **Band `j`** holds every row of a segment whose `tessera_id` has at least `j` leading zero bits.
+//! **Band `j`** holds every row of a segment whose `mosaica_id` has at least `j` leading zero bits.
 //! Identities are a keyed permutation of entity ids, so band `j` holds about `2^-j` of the rows, and
 //! the `m` smallest identities of a tile that lie below a cut are read from the narrowest band that
 //! still holds them rather than from the identity column. Bands [`FIRST_BAND`] and up are written,
 //! every one of them that holds a row. They nest: band `j + 1` is a subset of band `j`, so the file
 //! holds about twice band [`FIRST_BAND`], `n / 32` entries.
 //!
-//! An **entry** is `(row, tessera_id, morton, residual)` for one row, and a band's entries are in
+//! An **entry** is `(row, mosaica_id, morton, residual)` for one row, and a band's entries are in
 //! row order, which is also Morton order: a tile is a contiguous run of a band, found by binary
 //! search on its codes. Beside the entries, every render column of the segment is copied in entry
 //! order, so a band entry's drawn value is read beside it instead of from the column at a scattered
@@ -142,8 +142,8 @@ pub fn will_need(pages: &mut [usize]) {
 }
 
 /// The band a row falls in at most: its identity's leading zero bits.
-pub fn band_of(tessera_id: u64) -> u32 {
-    tessera_id.leading_zeros()
+pub fn band_of(mosaica_id: u64) -> u32 {
+    mosaica_id.leading_zeros()
 }
 
 /// The narrowest band holding every identity below `cut`, or `None` where that band is wider than
@@ -416,15 +416,15 @@ impl BandWriter {
     /// only of a row that falls in a band.
     pub fn push(
         &mut self,
-        tessera_id: u64,
+        mosaica_id: u64,
         morton: u32,
         residual: u32,
         mut indexed: impl FnMut(usize) -> io::Result<ScalarValue>,
     ) -> io::Result<()> {
-        let zeros = band_of(tessera_id);
+        let zeros = band_of(mosaica_id);
         if zeros >= FIRST_BAND {
             let record = &mut self.record;
-            record[0..8].copy_from_slice(&tessera_id.to_le_bytes());
+            record[0..8].copy_from_slice(&mosaica_id.to_le_bytes());
             record[8..12].copy_from_slice(&self.row.to_le_bytes());
             record[12..16].copy_from_slice(&morton.to_le_bytes());
             record[16..20].copy_from_slice(&residual.to_le_bytes());
@@ -941,7 +941,7 @@ impl Bands {
         unsafe { std::slice::from_raw_parts(self.map.as_ptr().add(at) as *const T, self.entries()) }
     }
 
-    /// Each entry's `tessera_id`.
+    /// Each entry's `mosaica_id`.
     pub fn ids(&self) -> &[u64] {
         self.typed(self.layout.ids)
     }
@@ -1043,7 +1043,7 @@ impl Bands {
         morton: &[u32],
         columns: &ColumnsRef,
     ) -> std::result::Result<(), String> {
-        let ids = columns.tessera_id();
+        let ids = columns.mosaica_id();
         let residuals = columns.residual();
         if ids.len() != self.row_count as usize || morton.len() != ids.len() {
             return Err(format!(
@@ -1383,7 +1383,7 @@ mod tests {
     use super::*;
     use crate::write::write_segment;
     use mosaica_spatial::tiler::{ScalarType, ScalarValue, TilerItem};
-    use mosaica_types::TesseraId;
+    use mosaica_types::MosaicaId;
 
     /// Item `i`'s value of the indexed column `year`: none on every seventh item.
     fn year_of(i: usize) -> ScalarValue {
@@ -1402,7 +1402,7 @@ mod tests {
                 let zeros = (i % 20) as u32;
                 let id = (u64::MAX >> zeros) - i as u64;
                 TilerItem {
-                    tessera_id: TesseraId::new(id),
+                    mosaica_id: MosaicaId::new(id),
                     qx: ((i / 3) as u32) << 17,
                     qy: 7,
                     scalars: vec![
@@ -1417,7 +1417,7 @@ mod tests {
         let mut order: Vec<usize> = (0..n).collect();
         let key = |i: usize| {
             let code = mosaica_spatial::split32(items[i].qx, items[i].qy).0.raw();
-            (code, items[i].tessera_id.raw())
+            (code, items[i].mosaica_id.raw())
         };
         order.sort_by_key(|&i| key(i));
         let sorted: Vec<TilerItem> = order.iter().map(|&i| items[i].clone()).collect();
@@ -1454,7 +1454,7 @@ mod tests {
             let expected: Vec<u32> = rows
                 .iter()
                 .enumerate()
-                .filter(|(_, it)| band_of(it.tessera_id.raw()) >= j)
+                .filter(|(_, it)| band_of(it.mosaica_id.raw()) >= j)
                 .map(|(row, _)| row as u32)
                 .collect();
             assert_eq!(
@@ -1488,8 +1488,8 @@ mod tests {
         assert_eq!(bands.indexed_names().collect::<Vec<_>>(), vec!["year"]);
         let year = bands.copy("year").unwrap();
         for (e, &row) in bands.rows().iter().enumerate() {
-            let i = (u64::MAX >> (rows[row as usize].tessera_id.raw().leading_zeros()))
-                - rows[row as usize].tessera_id.raw();
+            let i = (u64::MAX >> (rows[row as usize].mosaica_id.raw().leading_zeros()))
+                - rows[row as usize].mosaica_id.raw();
             let held = year.holds(e).then(|| year.value_at(e));
             let expected = match year_of(i as usize) {
                 ScalarValue::Null => None,
@@ -1531,7 +1531,7 @@ mod tests {
         let rows = segment(dir.path(), 400);
         let bands = Bands::open(dir.path(), 400).unwrap();
         let item_of = |row: u32| {
-            let id = rows[row as usize].tessera_id.raw();
+            let id = rows[row as usize].mosaica_id.raw();
             ((u64::MAX >> id.leading_zeros()) - id) as usize
         };
         bands
@@ -1604,7 +1604,7 @@ mod tests {
     fn a_segment_with_no_row_in_the_first_band_has_an_empty_file_that_opens() {
         let dir = tempfile::TempDir::new().unwrap();
         let items = vec![TilerItem {
-            tessera_id: TesseraId::new(u64::MAX),
+            mosaica_id: MosaicaId::new(u64::MAX),
             qx: 1,
             qy: 1,
             scalars: vec![],

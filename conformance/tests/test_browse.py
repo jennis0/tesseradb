@@ -7,7 +7,7 @@ from one of them by its own criterion.
 
 What is asserted, and by which second reader:
 
-- **Every row is the artifacts frame's own row.** The page's `tessera_id`, `key` and `masked_count`
+- **Every row is the artifacts frame's own row.** The page's `mosaica_id`, `key` and `masked_count`
   are compared against what a zoom-0 viewport serves the same principal, and `child_count` against
   how many of the frame's artifacts name the row among their `parent_ids` — the artifacts frame being
   the reader that already exists for those numbers — so a browse that computed its counts a second
@@ -113,7 +113,7 @@ def served_artifacts(server, token: str, layer: str) -> dict:
     """What `/v1/artifacts/viewport` serves this principal for `layer` — the second
     reader for every identifier and every count browse reports."""
     return {
-        str(a.tessera_id): a
+        str(a.mosaica_id): a
         for a in decode_viewport_artifacts(server.artifacts_viewport(token, VIEW_ID, 0, WHOLE_MAP))
         if a.layer == layer
     }
@@ -127,7 +127,7 @@ def test_a_page_is_the_artifacts_frames_own_rows(browse_server):
             frame = served_artifacts(server, token, layer)
             assert frame, f"principal {terms}: {layer} serves artifacts"
             out = page(server, token, layer=layer, limit=200)
-            rows = {row["tessera_id"]: row for row in out["artifacts"]}
+            rows = {row["mosaica_id"]: row for row in out["artifacts"]}
             assert set(rows) == set(frame), (
                 f"principal {terms}/{layer}: browse and the viewport serve different artifacts"
             )
@@ -140,7 +140,7 @@ def test_a_page_is_the_artifacts_frames_own_rows(browse_server):
                 assert row["child_count"] == children == 0, f"{layer}/{tid}: a flat layer has no children"
             assert out["parents"] == [], "`parents` is the children form's"
             # The total order, as a property: count descending, then identifier ascending.
-            keyed = [(-row["masked_count"], int(row["tessera_id"])) for row in out["artifacts"]]
+            keyed = [(-row["masked_count"], int(row["mosaica_id"])) for row in out["artifacts"]]
             assert keyed == sorted(keyed), f"principal {terms}/{layer}: the order is not total"
 
 
@@ -157,10 +157,10 @@ def test_a_rows_child_count_is_the_children_the_principal_is_served(browse_serve
         while queue:
             row = queue.pop()
             rows.append(row)
-            under = page(server, token, layer=TREE, parent=row["tessera_id"], limit=200)["artifacts"]
+            under = page(server, token, layer=TREE, parent=row["mosaica_id"], limit=200)["artifacts"]
             assert len(under) == row["child_count"], f"{terms}/{row.get('key')}: the children page"
             queue.extend(under)
-        counts = {row["tessera_id"]: row["child_count"] for row in rows}
+        counts = {row["mosaica_id"]: row["child_count"] for row in rows}
         assert counts == children_in_frame, f"principal {terms}: browse and the frame disagree"
         by_key = {row.get("key"): row["child_count"] for row in rows}
         assert by_key["top"] == want_top[tuple(terms)], f"principal {terms}: {by_key}"
@@ -184,7 +184,7 @@ def test_the_gate_runs_before_the_page(browse_server):
     assert page(server, broad, layer=GATED, q="strip")["artifacts"] == broad_rows
     assert page(server, narrow, layer=GATED, q="strip")["artifacts"] == []
     # Its identifier as a `parent` answers an empty page rather than refusing.
-    withheld = page(server, narrow, layer=GATED, parent=strip["tessera_id"])
+    withheld = page(server, narrow, layer=GATED, parent=strip["mosaica_id"])
     unknown = page(server, narrow, layer=GATED, parent="8589934593")
     assert withheld == unknown == {"artifacts": [], "parents": []}
 
@@ -211,16 +211,16 @@ def test_a_filter_adds_a_count_per_row_and_moves_nothing_else(browse_server):
     clause = {"fx_key": {"range": {"lt": bound}}}
     for terms in PRINCIPALS:
         token = server.authorise(terms)["token"]
-        plain = {r["tessera_id"]: r for r in page(server, token, layer=SHAPES, limit=200)["artifacts"]}
+        plain = {r["mosaica_id"]: r for r in page(server, token, layer=SHAPES, limit=200)["artifacts"]}
         filtered = page(server, token, layer=SHAPES, filters=clause, limit=200)["artifacts"]
-        assert {r["tessera_id"] for r in filtered} == set(plain), (
+        assert {r["mosaica_id"] for r in filtered} == set(plain), (
             f"principal {terms}: a filter served a different set of artifacts (I3, I12)"
         )
         frame = served_artifacts(server, token, SHAPES)
         seen = visible(points, terms)
         any_positive = False
         for row in filtered:
-            tid = row["tessera_id"]
+            tid = row["mosaica_id"]
             assert row["masked_count"] == plain[tid]["masked_count"], "the masked count moved"
             key = frame[tid].key
             want = sum(
@@ -232,7 +232,7 @@ def test_a_filter_adds_a_count_per_row_and_moves_nothing_else(browse_server):
             any_positive |= want > 0
         assert any_positive, "a filter matching nothing everywhere proves nothing here"
         # Ordered by the filtered count under `filters`.
-        keyed = [(-r["matched_count"], int(r["tessera_id"])) for r in filtered]
+        keyed = [(-r["matched_count"], int(r["mosaica_id"])) for r in filtered]
         assert keyed == sorted(keyed), f"principal {terms}: the filtered order is not total"
 
 

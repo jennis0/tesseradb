@@ -147,7 +147,7 @@ A column each item carries. `render` and `index` decide where its value is kept,
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `name` | string | required | The column's name, which filters and `/v1/categories/{column}` use. ASCII letters, digits, `_` and `-`, unique among attributes. `tessera_id`, `residual`, `x`, `y`, `access`, `node_id`, `record`, `all_of`, `any_of`, `none_of`, `region`, `member_of` and `highlighted` are refused. |
+| `name` | string | required | The column's name, which filters and `/v1/categories/{column}` use. ASCII letters, digits, `_` and `-`, unique among attributes. `mosaica_id`, `residual`, `x`, `y`, `access`, `node_id`, `record`, `all_of`, `any_of`, `none_of`, `region`, `member_of` and `highlighted` are refused. |
 | `title` | string | not set | A display title. Not built yet: the title is accepted and not published. |
 | `field` | string | the attribute's `name` | The column of the source file holding the values. An empty name is refused. |
 | `source` | string | the value of `[defaults].source` | A name in `[sources]`: the file the values are read from. A file other than a view's points names the item each row belongs to by the columns of the attributes declared `unique`. A build refuses an entity-scoped attribute with no source here or in `[defaults]`. A group-scoped attribute with none reads each view's own points file, and `[defaults]` does not reach it. |

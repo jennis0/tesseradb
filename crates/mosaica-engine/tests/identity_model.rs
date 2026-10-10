@@ -4,19 +4,19 @@
 //! restarts, resent batches and declarations of `unique` on and off one column. After every step
 //! it compares what the service serves with what a model of the items says it should: every
 //! view's points for two principals, `in` over every unique value, every item's card, the
-//! artifact's content, and that no two items' `tessera_id`s name one entity. A second strategy
+//! artifact's content, and that no two items' `mosaica_id`s name one entity. A second strategy
 //! runs long sequences that edit the same items again and again, so that folds free the entities
 //! the edits leave and later edits take them.
 //!
-//! An ingest row names an item by its `tessera_id` or a unique value, and carries
+//! An ingest row names an item by its `mosaica_id` or a unique value, and carries
 //! any of the item's fields, its label and a position in the batch's view. The model decides each
 //! row the way the service must: a row naming nothing creates an item, one naming an item it
 //! leaves unchanged is counted unchanged, one adding the item to a view it is not in is added, and
 //! one that changes the item edits it. An item added to a view keeps its entity and stays served in
 //! its other views, and is served in the new one from the next flush. An edit keeps the item's
-//! `tessera_id` and its suppression, and hides the item in every view from its acknowledgement
+//! `mosaica_id` and its suppression, and hides the item in every view from its acknowledgement
 //! until a flush places it again. A batch naming two items in one row,
-//! one item in two rows, one value in two rows or a `tessera_id` nobody holds is refused whole.
+//! one item in two rows, one value in two rows or a `mosaica_id` nobody holds is refused whole.
 //! A fold runs with whatever the buffer holds, so it can fall between an edit and its flush.
 //!
 //! Beside the unique columns, the items carry one column of each other family a row can compare:
@@ -53,7 +53,7 @@ use mosaica_lifecycle::wal::WalScalar;
 use mosaica_lifecycle::{ChangeOp, IngestRow};
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_types::layer::LayerScope;
-use mosaica_types::{EntityId, TesseraId};
+use mosaica_types::{EntityId, MosaicaId};
 
 const VIEWS: [&str; 2] = ["s0", "s1"];
 /// The one key of the group `quarter`, whose view every built item is in beside [`VIEWS`].
@@ -491,11 +491,11 @@ struct Item {
 
 #[derive(Debug, Clone, Default)]
 struct Model {
-    /// Every live or suppressed item, by `tessera_id`.
+    /// Every live or suppressed item, by `mosaica_id`.
     items: BTreeMap<u64, Item>,
-    /// `tessera_id`s of deleted items, which name nothing.
+    /// `mosaica_id`s of deleted items, which name nothing.
     deleted: BTreeSet<u64>,
-    /// The `(tessera_id, view)` rows a flush has given a position.
+    /// The `(mosaica_id, view)` rows a flush has given a position.
     flushed: BTreeSet<(u64, String)>,
     doi_unique: bool,
     /// Whether [`GROUP_VIEW`] has not been dropped.
@@ -549,7 +549,7 @@ impl Model {
             ..Model::default()
         };
         for (source, entity) in built_entities(engine) {
-            let tid = engine.tessera_id_of(EntityId::new(entity)).unwrap().raw();
+            let tid = engine.mosaica_id_of(EntityId::new(entity)).unwrap().raw();
             let position = built_position(source);
             let labels = terms_of(source).iter().map(|t| t.to_string()).collect();
             model.items.insert(
@@ -690,9 +690,9 @@ impl Model {
         Some(expect)
     }
 
-    /// Apply an accepted batch whose rows answered `tessera_ids`.
-    fn apply(&mut self, view: Option<&str>, rows: &[Row], expect: &[Expect], tessera_ids: &[u64]) {
-        for ((row, expect), tid) in rows.iter().zip(expect).zip(tessera_ids) {
+    /// Apply an accepted batch whose rows answered `mosaica_ids`.
+    fn apply(&mut self, view: Option<&str>, rows: &[Row], expect: &[Expect], mosaica_ids: &[u64]) {
+        for ((row, expect), tid) in rows.iter().zip(expect).zip(mosaica_ids) {
             match expect {
                 Expect::Create => {
                     let view = view.expect("a create names a view").to_string();
@@ -715,13 +715,13 @@ impl Model {
                     self.made += 1;
                     assert!(
                         !self.items.contains_key(tid) && !self.deleted.contains(tid),
-                        "a new item was given tessera_id {tid}, which another item has held"
+                        "a new item was given mosaica_id {tid}, which another item has held"
                     );
                     self.items.insert(*tid, item);
                 }
                 Expect::Unchanged(named) => assert_eq!(tid, named),
                 Expect::Added(named) => {
-                    assert_eq!(tid, named, "a row adding an item answers its tessera_id");
+                    assert_eq!(tid, named, "a row adding an item answers its mosaica_id");
                     let view = view.expect("a row adding an item names a view").to_string();
                     let item = self.items.get_mut(named).unwrap();
                     item.views.insert(view, row.position.unwrap());
@@ -732,7 +732,7 @@ impl Model {
                     }
                 }
                 Expect::Edited(named) => {
-                    assert_eq!(tid, named, "an edit never changes an item's tessera_id");
+                    assert_eq!(tid, named, "an edit never changes an item's mosaica_id");
                     let item = self.items.get_mut(named).unwrap();
                     if let Some(labels) = &row.labels {
                         item.labels = labels.clone();
@@ -800,7 +800,7 @@ impl Model {
 #[derive(Debug, Clone)]
 struct RowGen {
     about: Option<u16>,
-    /// 0 `tessera_id`, 1 gid, 2 doi, 4 a `tessera_id` nobody holds.
+    /// 0 `mosaica_id`, 1 gid, 2 doi, 4 a `mosaica_id` nobody holds.
     by: u8,
     /// Bits: 1 gid, 2 doi, 4 score, 8 labels.
     carry: u8,
@@ -899,7 +899,7 @@ struct Sent {
     view: Option<String>,
     rows: Vec<IngestRow>,
     model_rows: Vec<Row>,
-    tessera_ids: Vec<u64>,
+    mosaica_ids: Vec<u64>,
 }
 
 struct Run {
@@ -1068,7 +1068,7 @@ impl Run {
             }
         }
         let wire = IngestRow {
-            tessera_id: row.tid.map(TesseraId::new),
+            mosaica_id: row.tid.map(MosaicaId::new),
             labels: row
                 .labels
                 .as_ref()
@@ -1109,7 +1109,7 @@ impl Run {
                 rows,
                 artifacts: Default::default(),
                 strict: true,
-                tessera_id_column: false,
+                mosaica_id_column: false,
             })
     }
 
@@ -1146,11 +1146,11 @@ impl Run {
                 if std::env::var_os("MODEL_TRACE").is_some() {
                     eprintln!(
                         "TRACE {batch_id} view {view:?} expect {expect:?} receipt {:?}",
-                        receipt.tessera_ids
+                        receipt.mosaica_ids
                     );
                 }
                 self.check_receipt(&expect, &receipt, &batch_id);
-                let ids: Vec<u64> = receipt.tessera_ids.iter().map(|t| t.expect("an accepted row has a tessera_id").raw()).collect();
+                let ids: Vec<u64> = receipt.mosaica_ids.iter().map(|t| t.expect("an accepted row has a mosaica_id").raw()).collect();
                 self.model.apply(view, &rows, &expect, &ids);
                 self.renumber(&expect, &ids);
                 self.sent.push(Sent {
@@ -1158,7 +1158,7 @@ impl Run {
                     view: view.map(str::to_string),
                     rows: wire,
                     model_rows: rows,
-                    tessera_ids: ids,
+                    mosaica_ids: ids,
                 });
             }
         }
@@ -1166,18 +1166,18 @@ impl Run {
 
     /// Give each item a batch created or moved the place its entity takes: a window assigns its
     /// new entities in the order of their labels' terms, not the order of the rows.
-    fn renumber(&mut self, expect: &[Expect], tessera_ids: &[u64]) {
+    fn renumber(&mut self, expect: &[Expect], mosaica_ids: &[u64]) {
         let moved: Vec<u64> = expect
             .iter()
-            .zip(tessera_ids)
+            .zip(mosaica_ids)
             .filter(|(e, _)| matches!(e, Expect::Create | Expect::Edited(_)))
             .map(|(_, tid)| *tid)
             .collect();
-        let ids: Vec<TesseraId> = moved.iter().map(|t| TesseraId::new(*t)).collect();
-        let entities = self.engine().resolve_tessera_ids(&ids).unwrap();
+        let ids: Vec<MosaicaId> = moved.iter().map(|t| MosaicaId::new(*t)).collect();
+        let entities = self.engine().resolve_mosaica_ids(&ids).unwrap();
         let highest = self.highest;
         for (tid, entity) in moved.iter().zip(entities) {
-            let entity = entity.expect("an accepted row's item is named by its tessera_id");
+            let entity = entity.expect("an accepted row's item is named by its mosaica_id");
             let item = self.model.items.get_mut(tid).unwrap();
             item.made = entity.raw();
             if entity.raw() < highest {
@@ -1196,7 +1196,7 @@ impl Run {
     fn check_receipt(&self, expect: &[Expect], receipt: &IngestReceipt, batch_id: &str) {
         let count = |f: fn(&Expect) -> bool| expect.iter().filter(|e| f(e)).count() as u64;
         assert!(!receipt.replayed, "batch {batch_id} is new");
-        assert_eq!(receipt.tessera_ids.len(), expect.len());
+        assert_eq!(receipt.mosaica_ids.len(), expect.len());
         assert_eq!(
             receipt.created,
             count(|e| matches!(e, Expect::Create)),
@@ -1217,13 +1217,13 @@ impl Run {
             count(|e| matches!(e, Expect::Edited(_))),
             "{batch_id}"
         );
-        for (expect, tid) in expect.iter().zip(&receipt.tessera_ids) {
+        for (expect, tid) in expect.iter().zip(&receipt.mosaica_ids) {
             if let Expect::Unchanged(named) | Expect::Added(named) | Expect::Edited(named) = expect
             {
                 assert_eq!(
-                    tid.expect("an accepted row has a tessera_id").raw(),
+                    tid.expect("an accepted row has a mosaica_id").raw(),
                     *named,
-                    "{batch_id} answers the named item's tessera_id"
+                    "{batch_id} answers the named item's mosaica_id"
                 );
             }
         }
@@ -1243,17 +1243,17 @@ impl Run {
                 sent.view.clone(),
                 sent.rows.clone(),
                 sent.model_rows.clone(),
-                sent.tessera_ids.clone(),
+                sent.mosaica_ids.clone(),
             )
         };
         let answered = self.send(&batch_id, view.as_deref(), rows);
         let expected = self.model.decide(view.as_deref(), &model_rows);
         match answered {
             Ok(receipt) if receipt.replayed => {
-                let got: Vec<u64> = receipt.tessera_ids.iter().map(|t| t.expect("an accepted row has a tessera_id").raw()).collect();
+                let got: Vec<u64> = receipt.mosaica_ids.iter().map(|t| t.expect("an accepted row has a mosaica_id").raw()).collect();
                 assert_eq!(
                     got, ids,
-                    "a replay of {batch_id} answers its first tessera_ids"
+                    "a replay of {batch_id} answers its first mosaica_ids"
                 );
             }
             Ok(receipt) => {
@@ -1265,12 +1265,12 @@ impl Run {
                     )
                 });
                 self.check_receipt(&expect, &receipt, &batch_id);
-                let got: Vec<u64> = receipt.tessera_ids.iter().map(|t| t.expect("an accepted row has a tessera_id").raw()).collect();
+                let got: Vec<u64> = receipt.mosaica_ids.iter().map(|t| t.expect("an accepted row has a mosaica_id").raw()).collect();
                 self.model
                     .apply(view.as_deref(), &model_rows, &expect, &got);
                 self.renumber(&expect, &got);
                 // The batch id now answers this acceptance.
-                self.sent[at].tessera_ids = got;
+                self.sent[at].mosaica_ids = got;
             }
             Err(e) => assert!(
                 expected.is_none()
@@ -1296,9 +1296,9 @@ impl Run {
             let op = [ChangeOp::Delete, ChangeOp::Suppress, ChangeOp::Unsuppress][*op as usize];
             let entity = self
                 .engine()
-                .resolve_tessera_ids(&[TesseraId::new(tid)])
+                .resolve_mosaica_ids(&[MosaicaId::new(tid)])
                 .unwrap()[0]
-                .expect("a live item's tessera_id names it");
+                .expect("a live item's mosaica_id names it");
             changes.push((entity, op));
             match op {
                 ChangeOp::Delete => {
@@ -1543,13 +1543,13 @@ impl Run {
         self.check_entities(after);
     }
 
-    /// Every live item's `tessera_id` names an entity, and no two name the same one: an id a fold
+    /// Every live item's `mosaica_id` names an entity, and no two name the same one: an id a fold
     /// freed serves one item at a time. A deleted item's names nothing.
     fn check_entities(&self, after: &str) {
         let model = &self.model;
         let tids: Vec<u64> = model.items.keys().copied().collect();
-        let ids: Vec<TesseraId> = tids.iter().map(|t| TesseraId::new(*t)).collect();
-        let entities = self.engine().resolve_tessera_ids(&ids).unwrap();
+        let ids: Vec<MosaicaId> = tids.iter().map(|t| MosaicaId::new(*t)).collect();
+        let entities = self.engine().resolve_mosaica_ids(&ids).unwrap();
         let mut held: BTreeMap<u64, u64> = BTreeMap::new();
         for (tid, entity) in tids.iter().zip(entities) {
             let entity = entity
@@ -1559,10 +1559,10 @@ impl Run {
                 panic!("items {other} and {tid} name entity {entity}, after {after}");
             }
         }
-        let deleted: Vec<TesseraId> = model.deleted.iter().map(|t| TesseraId::new(*t)).collect();
+        let deleted: Vec<MosaicaId> = model.deleted.iter().map(|t| MosaicaId::new(*t)).collect();
         for (tid, entity) in deleted
             .iter()
-            .zip(self.engine().resolve_tessera_ids(&deleted).unwrap())
+            .zip(self.engine().resolve_mosaica_ids(&deleted).unwrap())
         {
             assert!(
                 entity.is_none(),
@@ -1600,7 +1600,7 @@ impl Run {
     /// Every item's card, for each principal. An item is shown only to a principal whose labels
     /// reach it, and only in the views a flush has placed it in: an edited item has no card from
     /// its acknowledgement until its flush, and the card then shows only what the edit left. A
-    /// deleted item's `tessera_id` answers nothing.
+    /// deleted item's `mosaica_id` answers nothing.
     fn check_cards(&self, principals: &[(Session, Vec<&str>)], after: &str) {
         let engine = self.engine();
         let model = &self.model;
@@ -1612,7 +1612,7 @@ impl Run {
                     .filter(|(view, _)| model.flushed.contains(&(item.tid, view.to_string())))
                     .collect();
                 let card = engine
-                    .item(session, TesseraId::new(item.tid))
+                    .item(session, MosaicaId::new(item.tid))
                     .unwrap_or_else(|e| panic!("item {}'s card, after {after}: {e}", item.tid));
                 if placed.is_empty() || !model.visible_to(item, labels) {
                     assert!(
@@ -1701,7 +1701,7 @@ impl Run {
             for tid in &model.deleted {
                 assert!(
                     engine
-                        .item(session, TesseraId::new(*tid))
+                        .item(session, MosaicaId::new(*tid))
                         .unwrap()
                         .is_none(),
                     "deleted item {tid} has no card, after {after}"
@@ -1814,7 +1814,7 @@ fn label_layer() -> mosaica_types::layer::LayerDeclaration {
 }
 
 /// Register the layer and publish its artifact over every built item, its content generated
-/// from [`CONTENT_SOURCES`], answering the content's items' `tessera_id`s.
+/// from [`CONTENT_SOURCES`], answering the content's items' `mosaica_id`s.
 fn publish_content(engine: &Engine) -> BTreeSet<u64> {
     use mosaica_lifecycle::membership::IncomingContent;
     use mosaica_lifecycle::IncomingArtifact;
@@ -1843,7 +1843,7 @@ fn publish_content(engine: &Engine) -> BTreeSet<u64> {
     tick(engine);
     CONTENT_SOURCES
         .iter()
-        .map(|s| engine.tessera_id_of(entity(*s)).unwrap().raw())
+        .map(|s| engine.mosaica_id_of(entity(*s)).unwrap().raw())
         .collect()
 }
 
@@ -1927,7 +1927,7 @@ proptest! {
     }
 }
 
-/// An edit of an existing item in view 0 or 1, by `tessera_id`, with a new score or a new
+/// An edit of an existing item in view 0 or 1, by `mosaica_id`, with a new score or a new
 /// position.
 fn edit_row() -> impl Strategy<Value = RowGen> {
     (any::<u16>(), any::<u16>(), prop_oneof![Just(0u8), Just(2u8)]).prop_map(
@@ -2114,7 +2114,7 @@ fn each_kind_of_row_is_decided_as_the_model_decides_it() {
                 },
             ],
         },
-        // A tessera_id nobody holds, a row naming two items, two rows naming one.
+        // A mosaica_id nobody holds, a row naming two items, two rows naming one.
         Op::Ingest {
             view: 0,
             rows: vec![RowGen { by: 4, ..fresh(3) }],
@@ -2166,7 +2166,7 @@ fn an_item_older_than_a_views_newest_rows_joins_it_in_place() {
     let mut engine = open(&fx);
     engine.set_merge_for_test(false);
     let row = |position: (f64, f64)| IngestRow {
-        tessera_id: None,
+        mosaica_id: None,
         labels: Some(vec![b"0".to_vec()]),
         position: Some(position),
         scalars: vec![WalScalar::Null; 3],
@@ -2182,17 +2182,17 @@ fn an_item_older_than_a_views_newest_rows_joins_it_in_place() {
                 rows,
                 artifacts: Default::default(),
                 strict: false,
-                tessera_id_column: false,
+                mosaica_id_column: false,
             })
             .unwrap_or_else(|e| panic!("{batch} is accepted: {e}"))
     };
     // `older` is given an entity between two items of the other view, so that view's segment spans
     // it with no row.
     send(&engine, "before", VIEWS[1], vec![row((20.0, 20.0))]);
-    let older = send(&engine, "older", VIEWS[0], vec![row((10.0, 10.0))]).tessera_ids[0].expect("an accepted row has a tessera_id");
+    let older = send(&engine, "older", VIEWS[0], vec![row((10.0, 10.0))]).mosaica_ids[0].expect("an accepted row has a mosaica_id");
     send(&engine, "after", VIEWS[1], vec![row((25.0, 25.0))]);
     publish_buffered(&engine);
-    let entity = |engine: &Engine| engine.resolve_tessera_ids(&[older]).unwrap()[0];
+    let entity = |engine: &Engine| engine.resolve_mosaica_ids(&[older]).unwrap()[0];
     let first = entity(&engine);
     // Where the item is served, and at what position in each view.
     let placed = |engine: &Engine| -> BTreeMap<String, (u32, u32)> {
@@ -2222,12 +2222,12 @@ fn an_item_older_than_a_views_newest_rows_joins_it_in_place() {
     };
 
     let joining = IngestRow {
-        tessera_id: Some(older),
+        mosaica_id: Some(older),
         ..row((30.0, 30.0))
     };
     let added = send(&engine, "add-older", VIEWS[1], vec![joining]);
     assert_eq!((added.added, added.edited), (1, 0));
-    assert_eq!(added.tessera_ids, vec![Some(older)], "the item keeps its tessera_id");
+    assert_eq!(added.mosaica_ids, vec![Some(older)], "the item keeps its mosaica_id");
     assert_eq!(entity(&engine), first, "and its entity");
     assert_eq!(
         placed(&engine),

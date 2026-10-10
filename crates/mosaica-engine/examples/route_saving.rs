@@ -42,7 +42,7 @@ use mosaica_spatial::{fixed32, tiler::sort_batch, Bounds, TilerItem};
 use mosaica_store::read::SegmentData;
 use mosaica_store::write::{write_permutation, write_segment};
 use mosaica_store::{Permutation, RowSpace};
-use mosaica_types::{EntityId, TermId, TesseraId};
+use mosaica_types::{EntityId, TermId, MosaicaId};
 
 const EXTENT: Bounds = Bounds {
     x_min: 0.0,
@@ -207,7 +207,7 @@ fn fixture(v_per_tile: usize) -> (TempDir, SegmentData, EffectiveMask) {
         let fx = (mix(n) >> 40) as f64 / (1u64 << 24) as f64;
         let fy = (mix(n ^ 0xABCD) >> 40) as f64 / (1u64 << 24) as f64;
         items.push(TilerItem {
-            tessera_id: TesseraId::new(mix(n ^ 0x5EED)),
+            mosaica_id: MosaicaId::new(mix(n ^ 0x5EED)),
             qx: fixed32(fx * 1023.0, EXTENT.x_min, EXTENT.x_max),
             qy: fixed32(fy * 1023.0, EXTENT.y_min, EXTENT.y_max),
             scalars: Vec::new(),

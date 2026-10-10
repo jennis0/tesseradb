@@ -4,7 +4,7 @@
 //   node src/decode-viewport.mjs <body.bin>
 //
 // prints every frame (kind, payload length, and for an Arrow payload its row count, column names
-// and first row), then the first rows of each batch. `tessera_id` is a `u64`: Arrow gives a
+// and first row), then the first rows of each batch. `mosaica_id` is a `u64`: Arrow gives a
 // `BigInt`, printed as a decimal string, since a JS number would lose precision.
 
 import {readFileSync} from 'node:fs';

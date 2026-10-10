@@ -41,7 +41,7 @@ see is exactly what the row surfaces must catch.
 ## What this module fixes about the corpus
 
 Deny targets are battery items (so the drill-down surface flips are exercised in both
-directions), addressed by the `tessera_id` the battery served them under.
+directions), addressed by the `mosaica_id` the battery served them under.
 Ingested rows use established vocabulary values only (`/v1/categories` must not move — the diff
 treats a vocabulary change as unexplained, and this plan is why it can), carry an access term the
 battery principal already holds, and land inside the extent, so the flush's entitlement is
@@ -182,12 +182,12 @@ def _write_stage(index: int, fx_pair: list[int]) -> Write:
 
 
 def _battery_item(index: int):
-    """Resolve the index-th battery item to (tessera_id, fx) at apply time — the battery, and
+    """Resolve the index-th battery item to (mosaica_id, fx) at apply time — the battery, and
     therefore the item list, does not exist when the plan is written down."""
 
     def pick(h: SuiteHarness) -> tuple[str, int]:
-        tessera_id = h.item_ids[index]
-        return str(tessera_id), h.fx_by_tessera[tessera_id]
+        mosaica_id = h.item_ids[index]
+        return str(mosaica_id), h.fx_by_mosaica[mosaica_id]
 
     return pick
 

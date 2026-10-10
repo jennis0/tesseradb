@@ -44,7 +44,7 @@ impl SystemField {
     }
 }
 
-/// Every column a request's pages carry after `tessera_id`, in order.
+/// Every column a request's pages carry after `mosaica_id`, in order.
 pub(super) struct FieldPlan {
     pub(super) named: Vec<Named>,
     pub(super) system: Vec<SystemField>,

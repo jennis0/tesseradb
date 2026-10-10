@@ -664,7 +664,7 @@ def record_of(source_id: int, fx: list[int]) -> dict[str, object]:
     (`department`, `archive`, `title`), record blob (`note`, `pages`).
 
     This is the oracle's side of the record-always-exists differential (records §10): when
-    drill-down assembles the record from its three homes, `/v1/items/{tessera_id}` must return
+    drill-down assembles the record from its three homes, `/v1/items/{mosaica_id}` must return
     exactly these values for every visible entity. Absent values are omitted, not `None`-valued —
     absence is absence from the record, exactly as it is absence from the blob row.
 
@@ -800,7 +800,7 @@ class Block:
 def entity_of_fx_key(bundle) -> dict[int, int]:
     """`fx_key -> entity id`, the suite's one legitimate handle→item join.
 
-    A served point carries its planted `fx_key` and its opaque `tessera_id`; the key is what lets a
+    A served point carries its planted `fx_key` and its opaque `mosaica_id`; the key is what lets a
     differential name the item without a reverse map and without an entity id crossing the boundary
     (I10). The keys are planted **by source id**, so the join lands in source space and is carried
     the last hop by [`entities_by_source`].
@@ -864,7 +864,7 @@ def dict_terms(bundle, names) -> set[int]:
 # entity ranges out end to end in the same order. Inserting a block anywhere but the end therefore
 # renumbers every later block's *term* and moves every later block's *entity range* — which
 # silently re-points `boundary` away from 65,536, moves `filler_tail` off 131,072, and changes
-# every case's `tessera_id` ordering, i.e. §7.2's served set. `verify()` catches the term
+# every case's `mosaica_id` ordering, i.e. §7.2's served set. `verify()` catches the term
 # renumbering loudly; it cannot catch "the case no longer straddles what it was designed to
 # straddle" beyond the two boundary claims it checks by name. Append, and resize `filler_tail` to
 # compensate.
@@ -1222,7 +1222,7 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
     `_LAYOUT` (which fixes both the term IDs and the entity ranges), `SEED` (geometry and the
     planted `fx_key`s), the `ONE_TILE_*` constants, the declaration, and the CLI arguments — of
     which the identity key is
-    the one that decides `tessera_id`, and therefore §7.2's entire served order. Anything that
+    the one that decides `mosaica_id`, and therefore §7.2's entire served order. Anything that
     lands here later must be added; a recipe that omits an input is a reuse test that pins the
     suite to the older fixture, which is the failure this replaced.
 

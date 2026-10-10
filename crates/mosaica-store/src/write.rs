@@ -41,7 +41,7 @@ use arrow::record_batch::RecordBatch;
 
 use mosaica_spatial::split32;
 use mosaica_spatial::tiler::{ScalarType, ScalarValue, TilerItem};
-use mosaica_types::{EntityId, TesseraId};
+use mosaica_types::{EntityId, MosaicaId};
 
 use crate::permutation::{
     pages_for, payload_start, PAGE_ABSENT, PAGE_BYTES, PAGE_ENTRIES, PAGE_SHIFT,
@@ -100,14 +100,14 @@ pub fn write_segment(
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
-                        "write_segment: tessera_id {} has no value for indexed column {k}",
-                        item.tessera_id.raw()
+                        "write_segment: mosaica_id {} has no value for indexed column {k}",
+                        item.mosaica_id.raw()
                     ),
                 )
             })
         };
         writer.append(SegmentRow {
-            tessera_id: item.tessera_id,
+            mosaica_id: item.mosaica_id,
             morton: *code,
             // The residual is the low half of the same `split32` whose high half the tiler
             // returned as this row's code, so the stored pair is one splitting of one position
@@ -181,7 +181,7 @@ impl CutWriter {
 /// dequantise-then-requantise would move every point by up to a cell on every merge, silently
 /// (write-path §7).
 pub struct SegmentRow<'a> {
-    pub tessera_id: TesseraId,
+    pub mosaica_id: MosaicaId,
     pub morton: u32,
     /// The low half of the row's 64-bit interleaved position; `morton` is the high half.
     pub residual: u32,
@@ -201,7 +201,7 @@ pub fn no_indexed(k: usize) -> io::Result<ScalarValue> {
 }
 
 /// Writes one segment's `morton.u32` and `columns.arrow` from rows arriving in
-/// `(morton, tessera_id)` order, holding no row and no column.
+/// `(morton, mosaica_id)` order, holding no row and no column.
 ///
 /// See the module doc for why this is the only thing that knows the layout. Memory is the offset
 /// table of any `Utf8` declared scalar (4 B/row — the one term that is not O(1) in rows) plus two
@@ -224,11 +224,11 @@ pub struct SegmentWriter {
     dir: PathBuf,
     columns_path: PathBuf,
     schema: Arc<Schema>,
-    /// One spool per schema column, in schema order: `tessera_id`, `residual`, then the declared
+    /// One spool per schema column, in schema order: `mosaica_id`, `residual`, then the declared
     /// scalars.
     columns: Vec<ColumnSpool>,
     rows: usize,
-    /// The last `(morton, tessera_id)` appended — the row-order check's only state.
+    /// The last `(morton, mosaica_id)` appended — the row-order check's only state.
     last_key: Option<(u32, u64)>,
     spools: SpoolGuard,
 }
@@ -275,7 +275,7 @@ impl SegmentWriter {
         })
     }
 
-    /// Append the next row. Rows must arrive in `(morton, tessera_id)` order — contracts §2.6's
+    /// Append the next row. Rows must arrive in `(morton, mosaica_id)` order — contracts §2.6's
     /// row order, which `tile_ranges` binary-searches.
     ///
     /// **A `debug_assert`, matching what this function replaced, because the fail-closed backstop
@@ -284,18 +284,18 @@ impl SegmentWriter {
     /// out-of-order producer is a refused publication in release and a failed test in debug, never
     /// a bundle that serves nonsense.
     pub fn append(&mut self, row: SegmentRow<'_>) -> io::Result<()> {
-        let key = (row.morton, row.tessera_id.raw());
+        let key = (row.morton, row.mosaica_id.raw());
         debug_assert!(
             self.last_key.is_none_or(|last| last <= key),
-            "SegmentWriter::append: rows must arrive in (morton, tessera_id) order"
+            "SegmentWriter::append: rows must arrive in (morton, mosaica_id) order"
         );
         self.last_key = Some(key);
 
         self.morton.write_all(&row.morton.to_le_bytes())?;
         self.cuts.push(row.morton)?;
         self.bands
-            .push(row.tessera_id.raw(), row.morton, row.residual, row.indexed)?;
-        self.columns[0].append_u64(row.tessera_id.raw())?;
+            .push(row.mosaica_id.raw(), row.morton, row.residual, row.indexed)?;
+        self.columns[0].append_u64(row.mosaica_id.raw())?;
         self.columns[1].append_u32(row.residual)?;
         for (idx, spool) in self.columns.iter_mut().enumerate().skip(FIXED_COLUMN_COUNT) {
             let name = self.schema.field(idx).name();
@@ -303,14 +303,14 @@ impl SegmentWriter {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
-                        "write_segment: tessera_id {} is missing scalar '{}' at index {}",
-                        row.tessera_id.raw(),
+                        "write_segment: mosaica_id {} is missing scalar '{}' at index {}",
+                        row.mosaica_id.raw(),
                         name,
                         idx - FIXED_COLUMN_COUNT
                     ),
                 )
             })?;
-            spool.append(value, name, row.tessera_id)?;
+            spool.append(value, name, row.mosaica_id)?;
         }
         self.rows += 1;
         Ok(())
@@ -459,7 +459,7 @@ impl ColumnSpool {
         })
     }
 
-    /// The `tessera_id` column, whose type [`fixed_fields`] fixes — no tag to check.
+    /// The `mosaica_id` column, whose type [`fixed_fields`] fixes — no tag to check.
     fn append_u64(&mut self, value: u64) -> io::Result<()> {
         debug_assert!(matches!(self.kind, ColumnKind::U64));
         self.writer.write_all(&value.to_ne_bytes())
@@ -495,7 +495,7 @@ impl ColumnSpool {
     /// **A mismatch fails the write rather than coercing or dropping.** Dropping shortens the
     /// column and shifts every later row of it into another row's place — every value present,
     /// every value against the wrong identity, and no error anywhere.
-    fn append(&mut self, value: &ScalarValue, name: &str, tessera_id: TesseraId) -> io::Result<()> {
+    fn append(&mut self, value: &ScalarValue, name: &str, mosaica_id: MosaicaId) -> io::Result<()> {
         match (self.kind, value) {
             // Packed into the spool a bit at a time, so the spool *is* the Arrow values buffer
             // and `into_array` can map it like every other column. Buffering a byte and flushing
@@ -534,8 +534,8 @@ impl ColumnSpool {
             (kind, got) => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "write_segment: tessera_id {} scalar '{name}' expected {kind:?}, got {got:?}",
-                    tessera_id.raw()
+                    "write_segment: mosaica_id {} scalar '{name}' expected {kind:?}, got {got:?}",
+                    mosaica_id.raw()
                 ),
             )),
         }
@@ -656,12 +656,12 @@ impl ColumnSpool {
 /// than an `f32`'s 24-bit mantissa.
 fn fixed_fields() -> Vec<Field> {
     // No `priority` column (decision 0046). It was 2 B/row written and read by nothing at query
-    // time — the selection comparator reads the full `tessera_id`, of which priority is the high
+    // time — the selection comparator reads the full `mosaica_id`, of which priority is the high
     // 16 bits — and format 1 is unpublished, so cutting it now is free where cutting it later is
     // a break. Re-adding it is additive (the reader matches columns by name) and is licensed the
     // day a measured prefix-scan optimisation asks for it.
     vec![
-        Field::new("tessera_id", DataType::UInt64, false),
+        Field::new("mosaica_id", DataType::UInt64, false),
         Field::new("residual", DataType::UInt32, false),
     ]
 }
@@ -861,7 +861,7 @@ impl PagePlan {
 /// Writes `permutation.bin` **through a mapping**, scattering `perm[entity] = row` in any order.
 ///
 /// **Scatter order is free, which is why this is a writer and not an iterator.** The compaction
-/// fold's pass 1 emits rows in `(morton, tessera_id)` order and learns `perm[entity]` in that
+/// fold's pass 1 emits rows in `(morton, mosaica_id)` order and learns `perm[entity]` in that
 /// order, which is *not* entity order — a sequential writer would have to buffer the whole
 /// mapping to reorder, which is the cost this avoids. Bytes live in a mapping rather than in a
 /// `Vec` for the same reason: anonymous memory the kernel can only swap, against page cache it can

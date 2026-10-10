@@ -62,7 +62,7 @@ pub enum RegionLeaf {
     /// A box, circle, ellipse or polygon in its canonical grid-unit form.
     Shape(Arc<mosaica_spatial::shape::Shape>),
     /// A published artifact's membership.
-    Artifact(mosaica_types::TesseraId),
+    Artifact(mosaica_types::MosaicaId),
 }
 
 /// The leaf name a `member_of` leaf answers to, reserved exactly as `region` is.
@@ -77,7 +77,7 @@ pub const MEMBER_OF_COLUMN: &str = "member_of";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberOfLeaf {
     pub layer: String,
-    pub artifact: mosaica_types::TesseraId,
+    pub artifact: mosaica_types::MosaicaId,
 }
 
 /// A filter expression: a leaf predicate over one column, or a combinator over sub-expressions.

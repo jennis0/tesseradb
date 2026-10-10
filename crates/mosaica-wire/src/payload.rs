@@ -51,7 +51,7 @@
 //! Clients index the tiles batch and the artifacts batch's columns by position, so a new column is
 //! appended and never inserted.
 //!
-//! Nothing here takes an entity id: identities arrive as `tessera_id: u64` columns.
+//! Nothing here takes an entity id: identities arrive as `mosaica_id: u64` columns.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -82,7 +82,7 @@ pub const FRAME_TABLE_HEAD: u8 = 9;
 
 pub const FRAME_HEADER_BYTES: usize = 5;
 
-/// One declared scalar column of a points frame, as long as the frame's `tessera_ids`.
+/// One declared scalar column of a points frame, as long as the frame's `mosaica_ids`.
 pub enum ScalarColumn<'a> {
     Bool(&'a [bool]),
     U8(&'a [u8]),
@@ -270,7 +270,7 @@ pub fn sub_cells_frame(cells: &[u64], counts: &[u64]) -> Vec<u8> {
 #[derive(Debug, Clone, Default)]
 pub struct ArtifactRow<'a> {
     pub layer: &'a str,
-    pub tessera_id: u64,
+    pub mosaica_id: u64,
     pub key: Option<&'a str>,
     pub masked_count: u64,
     /// Over the members this viewer can see, in the grid units of the points frame's `code`.
@@ -293,7 +293,7 @@ pub struct ArtifactRow<'a> {
     /// The same for the filter and the highlight together. `None` when the request had no
     /// highlight.
     pub highlighted: Option<bool>,
-    /// The `tessera_id` of the row this artifact is attached to, such as a label's cluster, in
+    /// The `mosaica_id` of the row this artifact is attached to, such as a label's cluster, in
     /// this frame or in the response's frame of treed layers. `None` for an artifact attached to
     /// nothing.
     pub target: Option<u64>,
@@ -355,8 +355,8 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
     let (content, parent_ids): (ArrayRef, ArrayRef) =
         (Arc::new(content.finish()), Arc::new(parent_ids.finish()));
     let required_u = |name, column: ArrayRef| (required(name, &column), column);
-    let tessera_id: ArrayRef =
-        Arc::new(UInt64Array::from_iter_values(rows.iter().map(|r| r.tessera_id)));
+    let mosaica_id: ArrayRef =
+        Arc::new(UInt64Array::from_iter_values(rows.iter().map(|r| r.mosaica_id)));
     let masked_count: ArrayRef = Arc::new(UInt64Array::from_iter_values(
         rows.iter().map(|r| r.masked_count),
     ));
@@ -366,7 +366,7 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
     };
     let columns = vec![
         layer_column(rows),
-        required_u("tessera_id", tessera_id),
+        required_u("mosaica_id", mosaica_id),
         optional::<StringArray, _>("key", rows.iter().map(|r| r.key)),
         required_u("masked_count", masked_count),
         optional::<Float64Array, _>("centroid_x", rows.iter().map(|r| r.centroid.map(|c| c[0]))),
@@ -388,17 +388,17 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
 }
 
 /// The points frame in the highlight projection: the points [`points_frame`] would carry, as
-/// `tessera_id` and `highlighted` only.
+/// `mosaica_id` and `highlighted` only.
 ///
 /// # Panics
 ///
 /// Panics if the columns differ in length.
-pub fn points_highlight_frame(tessera_ids: &[u64], highlighted: &[bool]) -> Vec<u8> {
-    let (tessera_ids, highlighted) = (u64_column(tessera_ids), bool_column(highlighted));
+pub fn points_highlight_frame(mosaica_ids: &[u64], highlighted: &[bool]) -> Vec<u8> {
+    let (mosaica_ids, highlighted) = (u64_column(mosaica_ids), bool_column(highlighted));
     arrow_frame(
         FRAME_POINTS,
         vec![
-            (required("tessera_id", &tessera_ids), tessera_ids),
+            (required("mosaica_id", &mosaica_ids), mosaica_ids),
             (required("highlighted", &highlighted), highlighted),
         ],
     )
@@ -408,10 +408,10 @@ fn membership_column_name(layer: &str) -> String {
     format!("membership:{layer}")
 }
 
-/// The points frame. Columns, in order: `tessera_id`; `code`, the Morton interleave of the
+/// The points frame. Columns, in order: `mosaica_id`; `code`, the Morton interleave of the
 /// point's two 32-bit grid coordinates; the declared scalars; `highlighted`, when the request
 /// carried a highlight; then one nullable [`membership_column_name`] column per layer, holding
-/// the `tessera_id` of the deepest served artifact the point belongs to.
+/// the `mosaica_id` of the deepest served artifact the point belongs to.
 ///
 /// Each declared scalar comes with which of its values are present, `None` where all are. Its
 /// field is nullable whether or not this frame holds a null, so every frame of a response has one
@@ -421,15 +421,15 @@ fn membership_column_name(layer: &str) -> String {
 ///
 /// Panics if the columns differ in length.
 pub fn points_frame(
-    tessera_ids: &[u64],
+    mosaica_ids: &[u64],
     codes: &[u64],
     scalars: &[(&str, ScalarColumn, Option<&[bool]>)],
     highlighted: Option<&[bool]>,
     membership: &[(&str, &[Option<u64>])],
 ) -> Vec<u8> {
-    let (tessera_ids, codes) = (u64_column(tessera_ids), u64_column(codes));
+    let (mosaica_ids, codes) = (u64_column(mosaica_ids), u64_column(codes));
     let mut columns = vec![
-        (required("tessera_id", &tessera_ids), tessera_ids),
+        (required("mosaica_id", &mosaica_ids), mosaica_ids),
         (required("code", &codes), codes),
     ];
     for (name, scalar, present) in scalars {

@@ -743,7 +743,7 @@ async fn a_member_of_filter_counts_the_members_and_withholds_as_absence() {
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|a| a["tessera_id"].as_str().unwrap().to_string())
+                .map(|a| a["mosaica_id"].as_str().unwrap().to_string())
                 .collect::<Vec<_>>()
         }
     };

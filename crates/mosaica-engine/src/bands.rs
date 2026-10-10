@@ -1,7 +1,7 @@
 //! Selection from a segment's identity bands ([`mosaica_store::bands`]): the same served set
 //! [`crate::select`] defines, read from the few entries of a tile that can be in it.
 //!
-//! Band `j` holds every row whose `tessera_id` is below `2^(64 - j)`, so it holds every row below
+//! Band `j` holds every row whose `mosaica_id` is below `2^(64 - j)`, so it holds every row below
 //! the cut `P_d` wherever `j <= leading_zeros(P_d)`. For a tile, with its visible rows taken from
 //! the composed mask:
 //!
@@ -32,7 +32,7 @@ pub const BANDS_BELOW_ZOOM: u8 = 10;
 /// What the bands answer for one tile.
 #[derive(Debug, PartialEq, Eq)]
 pub enum BandAnswer {
-    /// The tile's served rows, in view row space and ascending by `tessera_id`, and each one's
+    /// The tile's served rows, in view row space and ascending by `mosaica_id`, and each one's
     /// entry in its segment's bands. `widened` where the band first read held fewer than `m`
     /// visible entries and a wider one answered.
     Served {
@@ -120,7 +120,7 @@ pub fn select(
 }
 
 /// Each entry of `segment`'s band `band` whose row lies in `range`, segment-local, and whose view
-/// row (`row_base` plus the row) `admits`, in entry order: `each(entry, view_row, tessera_id)`.
+/// row (`row_base` plus the row) `admits`, in entry order: `each(entry, view_row, mosaica_id)`.
 /// Answers how many entries were read. The mask, or a set composed under it, is what `admits`
 /// asks, so the band decides only which rows are read, never which are visible.
 pub(crate) fn admitted_entries(

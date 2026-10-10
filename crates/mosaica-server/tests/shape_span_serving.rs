@@ -158,7 +158,7 @@ async fn shape_in_view(server: &TestServer, view: &str) -> Vec<Vec<Vec<[u32; 2]>
         .expect("an artifact is served")
         .pop()
         .expect("one artifact")
-        .tessera_id;
+        .mosaica_id;
     shape_by_id(server, token, view, id, 0).await.expect("a drawn geometry")
 }
 

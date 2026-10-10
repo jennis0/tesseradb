@@ -23,7 +23,7 @@ const boxOf = (x0: number, y0: number, x1: number, y1: number): [number, number,
 
 const artifact = (id: bigint, parent: bigint | null, rung: number, box: [number, number, number, number]): Artifact => ({
   layer: 'clusters',
-  tesseraId: id,
+  mosaicaId: id,
   key: `c-${id}`,
   maskedCount: 10n,
   centroid: [box[0], box[1]],
@@ -39,7 +39,7 @@ const artifact = (id: bigint, parent: bigint | null, rung: number, box: [number,
 
 function artifactsProjection(served: Artifact[]): ArtifactsProjection {
   const table = new SessionArtifactTable();
-  const ordinals = table.take(served.map((a) => ({tesseraId: a.tesseraId, layer: a.layer, parentIds: a.parentIds, rung: a.rung})));
+  const ordinals = table.take(served.map((a) => ({mosaicaId: a.mosaicaId, layer: a.layer, parentIds: a.parentIds, rung: a.rung})));
   return {
     layer: 'clusters',
     layers: ['clusters'],
@@ -117,7 +117,7 @@ describe('a click on a contour', () => {
   it('leaves deck’s own answers alone: a mark under the pointer is picked, not the contour', async () => {
     const {el, store} = await map();
     const ids = new BigUint64Array([7n]);
-    el.onClick({index: 0, x: 50, y: 50, sourceLayer: {id: 'marks-p0', props: {tesseraIds: ids}}, coordinate: [50, 50]});
+    el.onClick({index: 0, x: 50, y: 50, sourceLayer: {id: 'marks-p0', props: {mosaicaIds: ids}}, coordinate: [50, 50]});
     expect(opened(store)).toEqual([]);
     expect(store.calls.filter((c) => c.name === 'pick').map((c) => String(c.args[0]))).toEqual(['7']);
   });

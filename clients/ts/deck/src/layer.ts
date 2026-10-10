@@ -88,11 +88,11 @@ export type MosaicaLayerProps = CompositeLayerProps & {
    */
   selectedWorldXY?: [number, number] | null;
   /**
-   * The `tesseraId` of the opened artifact, whose outline is drawn. Under cluster colour, the marks
+   * The `mosaicaId` of the opened artifact, whose outline is drawn. Under cluster colour, the marks
    * coloured by any other artifact, or by none, draw dimmed. Defaults to `null`.
    */
   openedArtifact?: bigint | null;
-  /** The `tesseraId` of the artifact under the pointer, whose outline is drawn. Defaults to `null`. */
+  /** The `mosaicaId` of the artifact under the pointer, whose outline is drawn. Defaults to `null`. */
   hoveredArtifact?: bigint | null;
   /** The selected region as a box `[x0, y0, x1, y1]` in world units. Defaults to `null`. */
   region?: [number, number, number, number] | null;
@@ -476,9 +476,9 @@ export type ContourOptions = {
  * which the viewer chose.
  */
 function onFrontier(a: ArtifactsProjection, artifact: Artifact, level: number | undefined, opened: bigint | null = null): boolean {
-  const drawn = (x: Artifact) => (x.matched !== false || x.tesseraId === opened) && (level === undefined || x.rung <= level);
+  const drawn = (x: Artifact) => (x.matched !== false || x.mosaicaId === opened) && (level === undefined || x.rung <= level);
   if (!drawn(artifact)) return false;
-  return !(a.lineage.childrenOf.get(artifact.tesseraId) ?? []).some((c) => drawn(c));
+  return !(a.lineage.childrenOf.get(artifact.mosaicaId) ?? []).some((c) => drawn(c));
 }
 
 /** The layers whose artifacts attach their text to another layer's, and draw no shape of their own. */
@@ -506,11 +506,11 @@ export function contourShapes(a: ArtifactsProjection, o: ContourOptions): Contou
   const front = frontier(a, o.level, o.opened ?? null);
   const shapes: ContourShape[] = [];
   for (const artifact of a.served) {
-    if (!front.has(artifact.tesseraId)) continue;
+    if (!front.has(artifact.mosaicaId)) continue;
     if (dependent.has(artifact.layer)) continue;
-    const outline = outlineOf(artifact, a.shapes?.get(artifact.tesseraId));
+    const outline = outlineOf(artifact, a.shapes?.get(artifact.mosaicaId));
     if (!outline) continue;
-    shapes.push({id: artifact.tesseraId, rung: artifact.rung, parts: outline.parts, bbox: shapeBbox(outline.parts)});
+    shapes.push({id: artifact.mosaicaId, rung: artifact.rung, parts: outline.parts, bbox: shapeBbox(outline.parts)});
   }
   return shapes;
 }
@@ -537,7 +537,7 @@ export function focusOutlines(a: ArtifactsProjection, o: OutlineOptions): Outlin
   for (const id of [o.opened, o.hovered]) {
     if (id === null || seen.has(id)) continue;
     seen.add(id);
-    const artifact = a.served.find((x) => x.tesseraId === id);
+    const artifact = a.served.find((x) => x.mosaicaId === id);
     if (!artifact) continue;
     if (dependent.has(artifact.layer)) continue;
     if (!onFrontier(a, artifact, o.level, o.opened)) continue;
@@ -549,14 +549,14 @@ export function focusOutlines(a: ArtifactsProjection, o: OutlineOptions): Outlin
     // With no roster, a served shape is smoothed as a hull.
     const smooth = !box && (kind === null || kind === 'derived');
     const opened = id === o.opened;
-    const ordinal = a.table.ordinalOf(artifact.layer, artifact.tesseraId);
+    const ordinal = a.table.ordinalOf(artifact.layer, artifact.mosaicaId);
     const colour = a.colours.get(ordinal) ?? NEUTRAL;
     const fill = box ? 0 : opened ? OPENED_FILL : HOVER_FILL[o.scheme];
     const line = opened ? OPENED_LINE : HOVER_LINE;
     const width = box ? BOX_LINE_WIDTH : opened ? 1.2 : 1;
     for (const part of outline.parts) {
       data.push({
-        id: artifact.tesseraId,
+        id: artifact.mosaicaId,
         polygon: smooth ? part.map((ring) => smoothRing(ring)) : part.map((ring) => [...ring]),
         colour,
         opened,
@@ -621,7 +621,7 @@ const TOPIC_SIZE = 12;
  */
 export function frontier(a: ArtifactsProjection, level: number | undefined, opened: bigint | null = null): Set<bigint> {
   const out = new Set<bigint>();
-  for (const artifact of a.served) if (onFrontier(a, artifact, level, opened)) out.add(artifact.tesseraId);
+  for (const artifact of a.served) if (onFrontier(a, artifact, level, opened)) out.add(artifact.mosaicaId);
   return out;
 }
 
@@ -654,7 +654,7 @@ function namedCandidates(a: ArtifactsProjection, meta: Meta | null, level: numbe
   // The same frontier the hover shapes use, so a name and the shape it labels agree.
   const front = frontier(a, level, opened);
   const named = placed
-    .filter((x) => !dependent.has(x.layer) && front.has(x.tesseraId))
+    .filter((x) => !dependent.has(x.layer) && front.has(x.mosaicaId))
     .filter((x) => artifactName(x, a.attached) !== null)
     .sort((x, y) => Number(y.maskedCount - x.maskedCount))
     .slice(0, Math.max(0, budget));
@@ -672,15 +672,15 @@ function namedCandidates(a: ArtifactsProjection, meta: Meta | null, level: numbe
     const size = labelSize(count, smallest, largest);
     // An artifact with no text takes its topic as the name; one with both draws the topic beneath.
     const name = artifactName(artifact, a.attached)!;
-    const attached = a.attached.get(artifact.tesseraId) ?? null;
+    const attached = a.attached.get(artifact.mosaicaId) ?? null;
     const topic = attached === name ? null : attached;
     const countText = count.toLocaleString('en-GB');
     const line = labelLine(name);
-    byId.set(artifact.tesseraId, {artifact, line, countText, size, topic});
+    byId.set(artifact.mosaicaId, {artifact, line, countText, size, topic});
     // The box placed is the name alone, as drawn at rest; the count and topic show on hover.
     const lineWidth = line.length * NAME_EM * size;
     candidates.push({
-      id: artifact.tesseraId,
+      id: artifact.mosaicaId,
       x: gridToWorld(artifact.centroid![0]),
       y: gridToWorld(artifact.centroid![1]),
       width: lineWidth + 8,
@@ -974,8 +974,8 @@ export class MosaicaLayer extends CompositeLayer<MosaicaLayerInternalProps> {
     const lut = this.lut();
     const lutStarted = performance.now();
     const opened = this.props.openedArtifact ?? null;
-    const highlight = r.artifacts && opened !== null ? r.artifacts.served.find((a) => a.tesseraId === opened) : undefined;
-    const highlightOrdinal = highlight && r.artifacts ? r.artifacts.table.ordinalOf(highlight.layer, highlight.tesseraId) : NO_ORDINAL;
+    const highlight = r.artifacts && opened !== null ? r.artifacts.served.find((a) => a.mosaicaId === opened) : undefined;
+    const highlightOrdinal = highlight && r.artifacts ? r.artifacts.table.ordinalOf(highlight.layer, highlight.mosaicaId) : NO_ORDINAL;
     if (r.artifacts) {
       lut.update(
         {artifacts: r.artifacts, level: this.props.clusterLevel, highlight: highlightOrdinal},
@@ -1087,7 +1087,7 @@ export class MosaicaLayer extends CompositeLayer<MosaicaLayerInternalProps> {
                       getSize: binary(held.draw.sizes, 1)
                     }
               },
-              tesseraIds: held.draw.ids,
+              mosaicaIds: held.draw.ids,
               mosaicaPositions: held.draw.positions,
               useLut,
               highlighting,
@@ -1122,7 +1122,7 @@ export class MosaicaLayer extends CompositeLayer<MosaicaLayerInternalProps> {
                 getSize: binary(sizes, 1)
               }
             },
-            tesseraIds: standIn.ids,
+            mosaicaIds: standIn.ids,
             mosaicaPositions: standIn.positions,
             useLut,
             highlighting,
@@ -1162,7 +1162,7 @@ export class MosaicaLayer extends CompositeLayer<MosaicaLayerInternalProps> {
         {
           visible: false,
           data: {length: 0, attributes: {getPosition: binary(EMPTY_F32, 2), getFillColor: binary(EMPTY_U8, 4, true), getOrdinal: binary(EMPTY_F32, 1)}},
-          tesseraIds: EMPTY_IDS,
+          mosaicaIds: EMPTY_IDS,
           useLut: false,
           lutTexture: null,
           radiusUnits: 'pixels' as const,
@@ -1179,7 +1179,7 @@ export class MosaicaLayer extends CompositeLayer<MosaicaLayerInternalProps> {
           {
             visible: false,
             data: {length: 0, attributes: {getPosition: binary(EMPTY_F32, 2), getFillColor: binary(EMPTY_U8, 4, true), getOrdinal: binary(EMPTY_F32, 1)}},
-            tesseraIds: EMPTY_IDS,
+            mosaicaIds: EMPTY_IDS,
             useLut: false,
             lutTexture: null,
             radiusUnits: 'pixels' as const,
@@ -1451,15 +1451,15 @@ export class MosaicaLayer extends CompositeLayer<MosaicaLayerInternalProps> {
         placed += 1;
         const {artifact, line, countText, size, topic} = byId.get(p.id)!;
         const position = gridToWorldXY(artifact.centroid!);
-        const ordinal = a.table.ordinalOf(artifact.layer, artifact.tesseraId);
+        const ordinal = a.table.ordinalOf(artifact.layer, artifact.mosaicaId);
         const colour = a.colours.get(ordinal) ?? NEUTRAL;
         // The name centred on the anchor; the count starts where the name ends, and the topic
         // sits beneath, so neither overlaps it.
         const seam = p.dx + (line.length * NAME_EM * size) / 2;
         const baseline = p.dy;
-        data.push({id: artifact.tesseraId, position, text: line, size, offset: [p.dx, baseline], colour, kind: 'name', anchor: 'middle'});
-        data.push({id: artifact.tesseraId, position, text: countText, size: size * COUNT_SCALE, offset: [seam + size * COUNT_GAP_EM, baseline + size * 0.08], colour, kind: 'count', anchor: 'start'});
-        if (topic) data.push({id: artifact.tesseraId, position, text: topic, size: TOPIC_SIZE, offset: [p.dx, baseline + size * 0.78 + 3], colour, kind: 'topic', anchor: 'middle'});
+        data.push({id: artifact.mosaicaId, position, text: line, size, offset: [p.dx, baseline], colour, kind: 'name', anchor: 'middle'});
+        data.push({id: artifact.mosaicaId, position, text: countText, size: size * COUNT_SCALE, offset: [seam + size * COUNT_GAP_EM, baseline + size * 0.08], colour, kind: 'count', anchor: 'start'});
+        if (topic) data.push({id: artifact.mosaicaId, position, text: topic, size: TOPIC_SIZE, offset: [p.dx, baseline + size * 0.78 + 3], colour, kind: 'topic', anchor: 'middle'});
         if (p.leader) leaders.push({from: position, to: [position[0] + p.dx / scale, position[1] + p.dy / scale]});
       }
       held = {key, data, leaders, placed};

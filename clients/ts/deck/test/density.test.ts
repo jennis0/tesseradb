@@ -64,7 +64,7 @@ describe('binDensity', () => {
 describe('resolvePick — a miss is not a broken pick', () => {
   const ids = BigUint64Array.from([11n, 12n]);
   it('resolves a mark by its sublayer’s identity array', () => {
-    expect(resolvePick({index: 1, sourceLayer: {id: 'm', props: {tesseraIds: ids}}, coordinate: [3, 4]})).toEqual({
+    expect(resolvePick({index: 1, sourceLayer: {id: 'm', props: {mosaicaIds: ids}}, coordinate: [3, 4]})).toEqual({
       kind: 'mark',
       id: 12n,
       worldXY: [3, 4]
@@ -72,7 +72,7 @@ describe('resolvePick — a miss is not a broken pick', () => {
   });
   it('answers the mark’s own position, not the pointer’s', () => {
     const positions = Float32Array.from([1, 2, 30, 40]);
-    expect(resolvePick({index: 1, sourceLayer: {id: 'm', props: {tesseraIds: ids, mosaicaPositions: positions}}, coordinate: [31, 41]})).toEqual({
+    expect(resolvePick({index: 1, sourceLayer: {id: 'm', props: {mosaicaIds: ids, mosaicaPositions: positions}}, coordinate: [31, 41]})).toEqual({
       kind: 'mark',
       id: 12n,
       worldXY: [30, 40]
@@ -85,7 +85,7 @@ describe('resolvePick — a miss is not a broken pick', () => {
     expect(resolvePick({index: -1})).toEqual({kind: 'miss'});
   });
   it('reports a hit it cannot resolve as broken, naming the layer', () => {
-    expect(resolvePick({index: 5, sourceLayer: {id: 'm', props: {tesseraIds: ids}}})).toEqual({
+    expect(resolvePick({index: 5, sourceLayer: {id: 'm', props: {mosaicaIds: ids}}})).toEqual({
       kind: 'broken',
       index: 5,
       layer: 'm',

@@ -1,5 +1,5 @@
 mod identity;
-pub use identity::{IdentityError, IdentityKey, TesseraId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+pub use identity::{IdentityError, IdentityKey, MosaicaId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
 /// The process's own memory — the allocator's retention and the kernel's resident figures.
 ///

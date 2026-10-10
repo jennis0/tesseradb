@@ -5,8 +5,8 @@
 # (`docs/ingest-campaign.md` §4c), then the manifests field by field. Each build generates its own
 # identity key, so the two bundles are not byte for byte the same: the manifest's `identity` and
 # `created_at`, the `CURRENT` that digests it, every `columns.arrow` (which stores each row's
-# `tessera_id`) and the manifest's digests of those files differ by construction. So may a file
-# whose rows are ordered by `tessera_id` among points sharing one cell. The listing leaves out the
+# `mosaica_id`) and the manifest's digests of those files differ by construction. So may a file
+# whose rows are ordered by `mosaica_id` among points sharing one cell. The listing leaves out the
 # files that differ by construction; anything else it prints is a difference to explain.
 #
 # Part two slices prefixes of the GBIF ladder corpus, builds each with both binaries and samples

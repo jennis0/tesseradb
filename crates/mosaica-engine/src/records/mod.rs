@@ -7,10 +7,10 @@
 //! Every page of either route is built from the latest generation with the visible set composed
 //! again, exactly as a viewport composes it, so a deletion or suppression accepted during a read
 //! applies from the next page. A page takes its rows from that mask and reads fields for those
-//! rows alone. Rows are addressed by `tessera_id`; an entity id or any other internal position
+//! rows alone. Rows are addressed by `mosaica_id`; an entity id or any other internal position
 //! reaches the caller only inside a sealed cursor.
 //!
-//! An items read's map order is `(cell, tessera_id)` merged across the view's segments, and its
+//! An items read's map order is `(cell, mosaica_id)` merged across the view's segments, and its
 //! stored order is ascending item number. Either resumes from a position that is a value, found
 //! again in whatever segments the next page's generation holds, so a flush, merge or fold between
 //! pages loses no row and repeats none.
@@ -48,7 +48,7 @@ use walk::{filter_rows, Collected, PageCx, Walk, Walked};
 /// The order a read returns its rows in. Both return the same rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordsOrder {
-    /// By map cell in the view, then `tessera_id`.
+    /// By map cell in the view, then `mosaica_id`.
     Map,
     /// By the internal item numbering the record store holds rows in.
     Stored,

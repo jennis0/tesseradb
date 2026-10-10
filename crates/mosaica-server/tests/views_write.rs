@@ -822,7 +822,7 @@ async fn a_known_id_joins_a_second_view_and_is_placed_in_each() {
 
 /// **A row naming an item and changing it edits it**, however it changes it: a second position in
 /// a view it is in, a new label, a different value, a null clearing one. Each keeps the item's
-/// `tessera_id`, and a row leaving every column out changes nothing.
+/// `mosaica_id`, and a row leaving every column out changes nothing.
 #[tokio::test]
 async fn a_second_row_a_relabel_and_a_changed_attribute_edit_the_item() {
     let served = Served::build(build_fixture_bundle).await;
@@ -894,19 +894,19 @@ async fn a_suppressed_holder_joins_a_view_and_stays_hidden_until_it_is_unsuppres
     )
     .await;
     assert_eq!(resp.status(), 200);
-    let tessera_id = ingested_ids(&resp.json::<Value>().await.unwrap())[0];
+    let mosaica_id = ingested_ids(&resp.json::<Value>().await.unwrap())[0];
     drain(&served.server).await;
     assert!(
         points(&served, "world")
             .await
             .iter()
-            .any(|p| p.0 == tessera_id),
+            .any(|p| p.0 == mosaica_id),
         "visible before the suppression"
     );
 
     let change = |op: &str| {
         let body =
-            json!([{ "op": op, "match": { "tessera_id": tessera_id.to_string() } }]);
+            json!([{ "op": op, "match": { "mosaica_id": mosaica_id.to_string() } }]);
         served
             .server
             .client
@@ -920,7 +920,7 @@ async fn a_suppressed_holder_joins_a_view_and_stays_hidden_until_it_is_unsuppres
         !points(&served, "world")
             .await
             .iter()
-            .any(|p| p.0 == tessera_id),
+            .any(|p| p.0 == mosaica_id),
         "suppressed"
     );
 
@@ -942,14 +942,14 @@ async fn a_suppressed_holder_joins_a_view_and_stays_hidden_until_it_is_unsuppres
         !points(&served, "quarter:2026-Q5")
             .await
             .iter()
-            .any(|p| p.0 == tessera_id),
+            .any(|p| p.0 == mosaica_id),
         "hidden in the new view from the moment the row exists — suppression is entity-space"
     );
     assert!(
         !points(&served, "world")
             .await
             .iter()
-            .any(|p| p.0 == tessera_id),
+            .any(|p| p.0 == mosaica_id),
         "and still hidden in the first"
     );
 
@@ -961,14 +961,14 @@ async fn a_suppressed_holder_joins_a_view_and_stays_hidden_until_it_is_unsuppres
         points(&served, "world")
             .await
             .iter()
-            .any(|p| p.0 == tessera_id),
+            .any(|p| p.0 == mosaica_id),
         "unsuppress is the one retirement route, and it reveals the row"
     );
     assert!(
         points(&served, "quarter:2026-Q5")
             .await
             .iter()
-            .any(|p| p.0 == tessera_id),
+            .any(|p| p.0 == mosaica_id),
         "in the joined view too"
     );
 }
@@ -1177,7 +1177,7 @@ async fn a_drop_deletes_only_the_items_it_leaves_in_no_view() {
     assert_ne!(
         ingested_ids(&again)[0],
         before,
-        "the new item has a new tessera_id"
+        "the new item has a new mosaica_id"
     );
 }
 
@@ -1903,12 +1903,12 @@ async fn an_edit_after_the_flush_carries_every_home_and_changes_what_it_names() 
     assert_eq!(cleared["edited"], 1, "nulls clear held values: {cleared}");
 }
 
-/// The card `/v1/items/{tessera_id}` serves this server's principal.
-async fn item_card(served: &Served, tessera_id: u64) -> Value {
+/// The card `/v1/items/{mosaica_id}` serves this server's principal.
+async fn item_card(served: &Served, mosaica_id: u64) -> Value {
     let resp = served
         .server
         .client
-        .post(served.server.viewer_url(&format!("/v1/items/{tessera_id}")))
+        .post(served.server.viewer_url(&format!("/v1/items/{mosaica_id}")))
         .bearer_auth(&served.token)
         .json(&json!({}))
         .send()
@@ -2028,7 +2028,7 @@ async fn an_omitted_render_value_is_backfilled_into_the_joined_views_tail() {
     let id = NEW_ID;
     let resp = families_ingest(&served, "first", "world", id, 10.0, 10.0, HELD).await;
     assert_eq!(resp.status(), 200);
-    let tessera_id = ingested_ids(&resp.json::<Value>().await.unwrap())[0];
+    let mosaica_id = ingested_ids(&resp.json::<Value>().await.unwrap())[0];
     drain(&served.server).await;
 
     // The row adding the item leaves every value out, which is what would otherwise put an
@@ -2045,7 +2045,7 @@ async fn an_omitted_render_value_is_backfilled_into_the_joined_views_tail() {
     for view in ["world", "quarter:2026-Q5"] {
         let matched = filtered_points(&served, view, score_is_one.clone()).await;
         assert!(
-            matched.iter().any(|(id, _)| *id == tessera_id),
+            matched.iter().any(|(id, _)| *id == mosaica_id),
             "the entity renders its one stored score under '{view}': {matched:?}"
         );
     }
@@ -2083,7 +2083,7 @@ async fn a_row_whose_item_is_deleted_under_it_creates_a_fresh_item_that_keeps_it
 
     // The item is deleted, so the re-ingest below names no live item and creates one, where a
     // live item would have been edited.
-    let body = json!([{ "op": "delete", "match": { "tessera_id": first.to_string() } }]);
+    let body = json!([{ "op": "delete", "match": { "mosaica_id": first.to_string() } }]);
     let resp = served
         .server
         .client
@@ -2136,7 +2136,7 @@ async fn a_row_whose_item_is_deleted_under_it_creates_a_fresh_item_that_keeps_it
         assert_eq!(seed.status(), 200);
         let holder = ingested_ids(&seed.json::<Value>().await.unwrap())[0];
 
-        let body = json!([{ "op": "delete", "match": { "tessera_id": holder.to_string() } }]);
+        let body = json!([{ "op": "delete", "match": { "mosaica_id": holder.to_string() } }]);
         let batch_id = format!("demote-race-again-{round}");
         let rows = [(id, 800.0, 300.0, &["1"][..], Some(7))];
         let (deleted, again) = tokio::join!(
@@ -2758,7 +2758,7 @@ async fn a_dropped_views_joined_item_is_served_alike_live_and_after_a_restart() 
             .await,
         )
         .await;
-        let tessera_id = ingested_ids(&own)[0];
+        let mosaica_id = ingested_ids(&own)[0];
         drain(&served.server).await;
         accepted(
             ingest(
@@ -2776,11 +2776,11 @@ async fn a_dropped_views_joined_item_is_served_alike_live_and_after_a_restart() 
         }
         let (all, scored, restricted) = world_as_served(&mut served).await;
         assert!(
-            all.contains(&tessera_id) && scored.contains(&tessera_id),
+            all.contains(&mosaica_id) && scored.contains(&mosaica_id),
             "`world` serves the item with its score (restart {restart})"
         );
         assert!(
-            !restricted.contains(&tessera_id),
+            !restricted.contains(&mosaica_id),
             "and not to a principal its label does not admit (restart {restart})"
         );
         observed.push((all, scored, restricted));

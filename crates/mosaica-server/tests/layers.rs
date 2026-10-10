@@ -61,7 +61,7 @@ async fn the_meta_layer_list_is_filtered_per_principal() {
     let (status, body) = put_layer(&server, declaration("clusters/open", None)).await;
     assert_eq!(status, 201, "{body}");
     assert!(
-        body["tessera_id"].is_string(),
+        body["mosaica_id"].is_string(),
         "the identifier comes back, since it is the only address by which the layer can later be \
          suppressed: {body}"
     );
@@ -429,7 +429,7 @@ async fn publish(
 
 /// The publication round trip, and the fields the response must not carry.
 ///
-/// **A `tessera_id` per artifact and never an ordinal.** An ordinal is a position in a dense level,
+/// **A `mosaica_id` per artifact and never an ordinal.** An ordinal is a position in a dense level,
 /// so two of them tell the holder how many artifacts sit between — a corpus-wide count over objects
 /// they may not individually see, which is C8's row. The identifier is the only artifact address
 /// that crosses the wire, and it is what a later suppression names.
@@ -459,10 +459,10 @@ async fn publishing_artifacts_returns_an_identifier_each_and_never_an_ordinal() 
     for (i, artifact) in artifacts.iter().enumerate() {
         assert_eq!(artifact["key"], ["c0", "c1"][i]);
         assert!(
-            artifact["tessera_id"].is_string(),
+            artifact["mosaica_id"].is_string(),
             "string-encoded, since a bare JSON number loses a u64 past 2^53: {artifact}"
         );
-        assert!(ids.insert(artifact["tessera_id"].as_str().unwrap().to_string()));
+        assert!(ids.insert(artifact["mosaica_id"].as_str().unwrap().to_string()));
         assert!(
             artifact.get("ordinal").is_none(),
             "an ordinal is a position in a dense level, so it never crosses the wire: {artifact}"
@@ -568,8 +568,8 @@ async fn viewport_artifacts(
 }
 
 /// The drawn shape of one artifact as `principal` is served it by its identifier.
-async fn drawn(server: &TestServer, terms: &[&str], tessera_id: u64) -> Vec<Vec<Vec<[u32; 2]>>> {
-    let (status, body) = drill(server, terms, &tessera_id.to_string()).await;
+async fn drawn(server: &TestServer, terms: &[&str], mosaica_id: u64) -> Vec<Vec<Vec<[u32; 2]>>> {
+    let (status, body) = drill(server, terms, &mosaica_id.to_string()).await;
     assert_eq!(status, 200, "{body}");
     serde_json::from_value(body["shape"].clone()).expect("a drawn shape")
 }
@@ -616,7 +616,7 @@ async fn the_artifacts_frame_carries_a_masked_count_and_no_unmasked_quantity() {
         "a count equal to the membership would mean the mask was never applied"
     );
     // The identifier is stable across principals by construction (C17); only the number moves.
-    assert_eq!(broad[0].tessera_id, narrow[0].tessera_id);
+    assert_eq!(broad[0].mosaica_id, narrow[0].mosaica_id);
     assert_eq!(broad[0].key.as_deref(), Some("c0"));
     assert_eq!(broad[0].layer, "clusters/a");
 }
@@ -696,7 +696,7 @@ async fn the_artifact_budget_is_accepted_and_never_met_by_sampling() {
     );
 }
 
-/// A level's artifacts in a tile go by masked count, largest first, and then by `tessera_id`,
+/// A level's artifacts in a tile go by masked count, largest first, and then by `mosaica_id`,
 /// whatever order they were published in and whether they carry a key; the order holds after a
 /// fold and a restart.
 #[tokio::test]
@@ -728,7 +728,7 @@ async fn the_artifacts_frame_serves_a_level_largest_first() {
         assert_eq!(status, 201, "{body}");
     }
     let order = |rows: Vec<ArtifactRow>| -> Vec<(u64, u64)> {
-        rows.into_iter().map(|row| (row.masked_count, row.tessera_id)).collect()
+        rows.into_iter().map(|row| (row.masked_count, row.mosaica_id)).collect()
     };
     let first = order(viewport_artifacts(&server, &["0"], json!({})).await.unwrap());
     let mut expected = first.clone();
@@ -745,12 +745,12 @@ async fn the_artifacts_frame_serves_a_level_largest_first() {
     assert_eq!(order(viewport_artifacts(&server, &["0"], json!({})).await.unwrap()), first);
 }
 
-async fn drill(server: &TestServer, terms: &[&str], tessera_id: &str) -> (u16, serde_json::Value) {
+async fn drill(server: &TestServer, terms: &[&str], mosaica_id: &str) -> (u16, serde_json::Value) {
     let auth = authorise(server, terms).await;
     let token = auth["token"].as_str().unwrap();
     let resp = server
         .client
-        .post(server.viewer_url(&format!("/v1/artifacts/{tessera_id}")))
+        .post(server.viewer_url(&format!("/v1/artifacts/{mosaica_id}")))
         .bearer_auth(token)
         .json(&json!({ "view": "s0" }))
         .send()
@@ -788,7 +788,7 @@ async fn drilling_down_on_an_artifact_agrees_with_the_viewport_and_withholds_ide
         .await
         .unwrap();
     assert_eq!(served.len(), 1);
-    let id = served[0].tessera_id.to_string();
+    let id = served[0].mosaica_id.to_string();
 
     let (status, body) = drill(&server, &["0"], &id).await;
     assert_eq!(status, 200, "{body}");
@@ -862,8 +862,8 @@ async fn the_artifacts_frame_carries_geometry_computed_for_the_asking_principal(
     );
     // The narrow principal's hull is inside the broad one's bounds: they see a subset of the
     // members, so their hull cannot reach further out than the full one.
-    let broad_hull = &drawn(&server, &["0"], b.tessera_id).await;
-    let narrow_hull = &drawn(&server, &["1"], n.tessera_id).await;
+    let broad_hull = &drawn(&server, &["0"], b.mosaica_id).await;
+    let narrow_hull = &drawn(&server, &["1"], n.mosaica_id).await;
     // Over every ring of every part, because a hull is a list of them.
     let bounds = |h: &Vec<Vec<Vec<[u32; 2]>>>| {
         let v = || h.iter().flatten().flatten();
@@ -880,7 +880,7 @@ async fn the_artifacts_frame_carries_geometry_computed_for_the_asking_principal(
         "the narrow hull {nb:?} reaches outside the broad one {bb:?}"
     );
     // Same artifact throughout: only what is said about it moved.
-    assert_eq!(b.tessera_id, n.tessera_id);
+    assert_eq!(b.mosaica_id, n.mosaica_id);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1058,7 +1058,7 @@ async fn a_named_computed_set_narrows_what_the_frame_carries() {
     let narrowed = computed_row(&server, json!({ "computed": ["box"] })).await;
     assert!(narrowed.centroid.is_none(), "not asked for");
     assert_eq!(
-        narrowed.tessera_id, all.tessera_id,
+        narrowed.mosaica_id, all.mosaica_id,
         "the same artifact is served either way — only what is said about it moved"
     );
     assert_eq!(
@@ -1133,7 +1133,7 @@ async fn the_drill_down_carries_the_hull_the_tiles_do_not() {
 
     let row = computed_row(&server, json!({ "computed": ["centroid"] })).await;
 
-    let (status, body) = drill(&server, &["0"], &row.tessera_id.to_string()).await;
+    let (status, body) = drill(&server, &["0"], &row.mosaica_id.to_string()).await;
     assert_eq!(status, 200, "{body}");
     let rings = body["shape"]
         .as_array()
@@ -1243,7 +1243,7 @@ async fn a_predicate_shape_is_served_when_asked_and_is_the_same_for_every_princi
 
     let broad = viewport_artifacts(&server, &["0"], json!({})).await.expect("served");
     assert!(broad[0].centroid.is_some() && broad[0].bbox.is_some());
-    let shape = drawn(&server, &["0"], broad[0].tessera_id).await;
+    let shape = drawn(&server, &["0"], broad[0].mosaica_id).await;
     assert_eq!(shape.len(), 1, "one part");
     assert_eq!(shape[0].len(), 2, "its outer and its hole, the role kept: {shape:?}");
     assert_eq!(shape[0][0].len(), 4);
@@ -1253,7 +1253,7 @@ async fn a_predicate_shape_is_served_when_asked_and_is_the_same_for_every_princi
     let narrow = viewport_artifacts(&server, &["1"], json!({})).await.expect("served");
     assert!(narrow[0].masked_count < broad[0].masked_count);
     assert_eq!(
-        drawn(&server, &["1"], narrow[0].tessera_id).await,
+        drawn(&server, &["1"], narrow[0].mosaica_id).await,
         shape,
         "a predicate shape does not move with the principal"
     );
@@ -1327,7 +1327,7 @@ async fn a_derived_shape_is_the_hull_read_by_identifier() {
     one_cluster(&server).await;
     // `shape` on a layer whose drawn geometry is the hull is the hull, one part per group.
     let row = computed_row(&server, json!({})).await;
-    let shape = drawn(&server, &["0"], row.tessera_id).await;
+    let shape = drawn(&server, &["0"], row.mosaica_id).await;
     assert!(shape.iter().all(|part| part.len() == 1), "a hull has no holes: {shape:?}");
     let kinds: Vec<serde_json::Value> = meta_layers(&server, &["0"]).await.iter().map(|l| l["shape"].clone()).collect();
     assert_eq!(kinds, vec![json!("derived")]);
@@ -1380,12 +1380,12 @@ async fn an_authored_polygon_content_is_canonicalised_at_publication_and_served_
 
     let rows = viewport_artifacts(&server, &["0"], json!({})).await.expect("served");
     assert_eq!(rows[0].content, ["a name", ""], "the shape's slot is blank on the tiles too");
-    let shape = drawn(&server, &["0"], rows[0].tessera_id).await;
+    let shape = drawn(&server, &["0"], rows[0].mosaica_id).await;
     assert_eq!(shape[0].len(), 2, "outer and hole: {shape:?}");
 
     // The drill-down: the text in its slot, the shape's slot blank — the geometry travels as
     // rings under `shape` and never as the string.
-    let (status, body) = drill(&server, &["0"], &rows[0].tessera_id.to_string()).await;
+    let (status, body) = drill(&server, &["0"], &rows[0].mosaica_id.to_string()).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["content"], json!(["a name", ""]));
     assert_eq!(body["shape"][0].as_array().map(Vec::len), Some(2));

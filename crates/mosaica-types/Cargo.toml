@@ -28,7 +28,7 @@ libc = "0.2"
 # unrelated member's dependency decided. `cargo tree -e normal` does not see a dev edge, so
 # check-layers.sh's rule 2 is unaffected.
 mosaica-types = { path = ".", features = ["serde"] }
-# Test-only: parses reference/vectors/tessera_id.json against the known-answer vectors
+# Test-only: parses reference/vectors/mosaica_id.json against the known-answer vectors
 # (Task 5). The crate itself remains dependency-free of serde_json.
 serde_json = { workspace = true }
 # Test-only: the I4 compile-fail rows (conformance §4.1). `cargo build` does not build

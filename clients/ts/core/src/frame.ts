@@ -7,10 +7,10 @@
  *   `highlighted`, all `uint64`. Exactly one, first.
  * - Kind 2, sub-cells: an Arrow IPC stream of `cell` and `count`, both `uint64`. Present only where
  *   the request asked for an underlay, and schema-only where it asked and no cell had a count.
- * - Kind 3, points: an Arrow IPC stream of `tessera_id` and `code`, both `uint64`, then the
+ * - Kind 3, points: an Arrow IPC stream of `mosaica_id` and `code`, both `uint64`, then the
  *   rendered columns, a `highlighted` column where the request carried a highlight, and a
  *   `membership:<layer>` column per layer the response names; a request for the highlight
- *   projection gets `tessera_id` and `highlighted` alone. Zero or more, each holding whole tiles;
+ *   projection gets `mosaica_id` and `highlighted` alone. Zero or more, each holding whole tiles;
  *   their rows, in order, are the response's points.
  * - Kind 4, trailer: JSON, exactly one, last. A body without it is incomplete.
  */

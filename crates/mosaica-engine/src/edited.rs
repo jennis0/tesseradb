@@ -1,20 +1,20 @@
 //! Edited items at a running service: the entries of the edited-items map no run holds yet, and
-//! the one translation between an item's `tessera_id` and the entity holding it.
+//! the one translation between an item's `mosaica_id` and the entity holding it.
 //!
 //! An edit gives its item a new entity and keeps the item's number, the entity it was first given,
-//! which its `tessera_id` is taken from ([`mosaica_store::edited`]). The window that commits an
+//! which its `mosaica_id` is taken from ([`mosaica_store::edited`]). The window that commits an
 //! edit adds its pair here, and the first flush that gives the new entity a row writes a run
 //! holding it, whose publication removes the pair from here. A new entity deleted or edited away
 //! before that flush keeps its pair here until the fold that removes the entity. Every lookup reads
 //! both.
 //!
-//! A `tessera_id` names the entity [`entities_of_numbers`] answers: an entity of the number's
+//! A `mosaica_id` names the entity [`entities_of_numbers`] answers: an entity of the number's
 //! entries that the generation holds and has not deleted, or, where the number has no entries,
 //! the number itself.
 
 use rustc_hash::FxHashMap;
 use mosaica_store::StoreError;
-use mosaica_types::{EntityId, TesseraId};
+use mosaica_types::{EntityId, MosaicaId};
 
 use crate::Generation;
 
@@ -280,12 +280,12 @@ impl Stamp {
 }
 
 impl crate::Engine {
-    /// The `tessera_id` of each of `entities`, against `generation`: its number's permutation.
-    pub(crate) fn tessera_ids_of_in(
+    /// The `mosaica_id` of each of `entities`, against `generation`: its number's permutation.
+    pub(crate) fn mosaica_ids_of_in(
         &self,
         generation: &Generation,
         entities: &[EntityId],
-    ) -> Result<Vec<TesseraId>, StoreError> {
+    ) -> Result<Vec<MosaicaId>, StoreError> {
         let shard = generation.bundle.manifest.identity.shard_id;
         numbers_of(generation, entities)?
             .into_iter()
@@ -299,12 +299,12 @@ impl crate::Engine {
             .collect()
     }
 
-    /// [`Self::tessera_ids_of_in`] for one entity.
-    pub(crate) fn tessera_id_in(
+    /// [`Self::mosaica_ids_of_in`] for one entity.
+    pub(crate) fn mosaica_id_in(
         &self,
         generation: &Generation,
         entity: EntityId,
-    ) -> Result<TesseraId, StoreError> {
-        Ok(self.tessera_ids_of_in(generation, &[entity])?[0])
+    ) -> Result<MosaicaId, StoreError> {
+        Ok(self.mosaica_ids_of_in(generation, &[entity])?[0])
     }
 }

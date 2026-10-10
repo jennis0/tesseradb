@@ -7,7 +7,7 @@
 //! - **Range counts** ([`count_by_ranges`]): find each occupied cell's rows with a binary search of
 //!   the cell codes and count the set over that range. The cost is per occupied cell.
 //! - **The pass** ([`pass`]): walk the set's rows in row order and emit a cell when its prefix
-//!   changes. The cost is per row of the set. Rows within one depth-16 cell are in `tessera_id`
+//!   changes. The cost is per row of the set. Rows within one depth-16 cell are in `mosaica_id`
 //!   order rather than position order, so below depth 16 each depth-16 cell's rows are sorted by
 //!   their finer prefix before they are counted.
 //!
@@ -702,7 +702,7 @@ fn count_segment_alone(
         }
         return;
     }
-    // Rows of one depth-16 cell are in `tessera_id` order, so their finer prefixes are sorted
+    // Rows of one depth-16 cell are in `mosaica_id` order, so their finer prefixes are sorted
     // before they are counted.
     let residual = segment.columns.residual();
     let shift = 64 - 2 * u32::from(depth);

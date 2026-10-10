@@ -32,7 +32,7 @@ use mosaica_types::layer::{
     ArtifactVisibility, ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
-use mosaica_types::TesseraId;
+use mosaica_types::MosaicaId;
 
 const SIDE: u64 = 64;
 const CELL: f64 = 1000.0 / SIDE as f64;
@@ -184,7 +184,7 @@ impl Fx {
     }
 
     /// Register `name` over `nodes`, nested or flat, and answer each node's id by key.
-    fn plant(&self, name: &str, kind: HierarchyKind, nodes: &[Node]) -> BTreeMap<String, TesseraId> {
+    fn plant(&self, name: &str, kind: HierarchyKind, nodes: &[Node]) -> BTreeMap<String, MosaicaId> {
         self.plant_as(name, kind, nodes, None, Vec::new())
     }
 
@@ -196,7 +196,7 @@ impl Fx {
         nodes: &[Node],
         layout: Option<mosaica_types::layer::ServingLayout>,
         computed: Vec<String>,
-    ) -> BTreeMap<String, TesseraId> {
+    ) -> BTreeMap<String, MosaicaId> {
         self.plant_declared(name, kind, nodes, layout, computed, None)
     }
 
@@ -209,7 +209,7 @@ impl Fx {
         layout: Option<mosaica_types::layer::ServingLayout>,
         computed: Vec<String>,
         criterion: Option<mosaica_types::layer::ExistenceCriterion>,
-    ) -> BTreeMap<String, TesseraId> {
+    ) -> BTreeMap<String, MosaicaId> {
         self.engine
             .register_layer(LayerDeclaration {
                 scope: Default::default(),
@@ -284,7 +284,7 @@ fn viewport_slots(
     let out = engine.viewport_artifacts(session, request).unwrap();
     let mut slots = BTreeMap::new();
     for artifact in out.frames.iter().flat_map(|frame| &frame.artifacts) {
-        let held = slots.insert(artifact.tessera_id.raw(), artifact.slot);
+        let held = slots.insert(artifact.mosaica_id.raw(), artifact.slot);
         assert!(held.is_none_or(|held| held == artifact.slot));
     }
     slots
@@ -334,7 +334,7 @@ fn read_slots(
             &mut pages,
         )
         .unwrap();
-    id_slots(&pages.pages, "tessera_id").into_iter().collect()
+    id_slots(&pages.pages, "mosaica_id").into_iter().collect()
 }
 
 /// Every served tree node's slot for a palette of ten.
@@ -580,7 +580,7 @@ fn a_slot_is_the_same_at_any_zoom_box_budget_or_filter() {
             nodes.iter().filter(served).filter(|n| n.key.starts_with("b3-")).count()
         );
         for row in found {
-            assert_eq!(row.slot, Some(held[&row.tessera_id.raw()]), "browse row");
+            assert_eq!(row.slot, Some(held[&row.mosaica_id.raw()]), "browse row");
         }
         assert!(browse(None, None).iter().all(|row| row.slot.is_none()));
 
@@ -751,7 +751,7 @@ fn stacked_and_tiered_layers_are_coloured_level_by_level() {
                 shape: None,
             })
             .unwrap();
-        let mut ids: BTreeMap<String, TesseraId> = BTreeMap::new();
+        let mut ids: BTreeMap<String, MosaicaId> = BTreeMap::new();
         for level in 0..3u32 {
             let at: Vec<&Node> = nodes
                 .iter()
@@ -960,7 +960,7 @@ fn a_level_centred_by_its_figures_is_coloured_alike_whichever_route_asks() {
         .unwrap()
         .artifacts
         .iter()
-        .map(|row| (row.tessera_id.raw(), row.slot))
+        .map(|row| (row.mosaica_id.raw(), row.slot))
         .collect();
     assert_eq!(browsed.len(), leaves.len());
     assert!(browsed.values().all(Option::is_some), "browse alone serves slots");
@@ -1026,7 +1026,7 @@ fn a_tiered_parent_has_one_heir_at_its_shallowest_child_level() {
         (2, "under-small", "b4-5-0", Some("small"), None),
         (2, "q-grandchild", "b3-4-4", Some("q-hidden"), None),
     ];
-    let mut ids: BTreeMap<&str, TesseraId> = BTreeMap::new();
+    let mut ids: BTreeMap<&str, MosaicaId> = BTreeMap::new();
     for level in 0..3u32 {
         let at: Vec<_> = planted.iter().filter(|p| p.0 == level).collect();
         let artifacts = at
@@ -1165,7 +1165,7 @@ fn colouring_a_tiered_level_fills_no_deeper_level() {
                 &mut pages,
             )
             .unwrap();
-        let rows = id_slots(&pages.pages, "tessera_id");
+        let rows = id_slots(&pages.pages, "mosaica_id");
         assert!(rows.iter().all(|(_, slot)| slot.is_some()), "{level:?}");
         engine.figures_stats().misses - before
     };
@@ -1323,7 +1323,7 @@ fn a_tiered_level_is_rebuilt_over_rebuilt_coarser_levels() {
                 &mut pages,
             )
             .unwrap();
-        id_slots(&pages.pages, "tessera_id").into_iter().collect()
+        id_slots(&pages.pages, "mosaica_id").into_iter().collect()
     };
     let before = level_slots(&session, 2);
 

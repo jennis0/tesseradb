@@ -44,14 +44,14 @@ A decoder keeps two rules. **The trailer is the completeness signal**: a body wi
 kind-4 frame is incomplete whatever the transport said, though every prefix is sound to draw,
 since the counts are exact from the first frame. **An unknown kind is an error**, never skipped.
 
-The points batch is `(tessera_id: u64, code: u64, …render columns)`, the render columns in
+The points batch is `(mosaica_id: u64, code: u64, …render columns)`, the render columns in
 `/v1/meta`'s `declared_scalars` order, each named by its column. A render column is nullable: a
 point whose item has no value in it is null, and a zero is a value. A category is the exception:
 it has no nulls, and its code 0 means no value. `code` is the position: 32 bits
 per axis, Morton-interleaved; deinterleave and scale against `/v1/meta`'s `quantisation` to
 recover coordinates. A request with a `highlight` adds a `highlighted` bool after the render
 columns. Each layer the request names that serves an artifact holding a served point then adds a
-`membership:<layer>` column of `uint64`: the `tessera_id` of the deepest artifact of that layer the
+`membership:<layer>` column of `uint64`: the `mosaica_id` of the deepest artifact of that layer the
 point belongs to and the principal is served, or null. `served` on the tiles batch is how many
 points each tile contributed, in order, which is how a reader splits the flat concatenation back
 into tiles.
@@ -76,7 +76,7 @@ whose request named a layer:
 $ python3 reference/examples/decode_viewport.py clients/ts/core/test/fixtures/viewport-membership.bin
 clients/ts/core/test/fixtures/viewport-membership.bin: 12068 bytes, 3 frames
   kind 1 tiles: 1736 B, 15 rows, columns ['tile', 'visible', 'matched', 'served', 'highlighted']
-  kind 3 points: 10248 B, 255 rows, columns ['tessera_id', 'code', 'archive', 'primary_category', 'submitted_at', 'membership:clusters/kmeans']
+  kind 3 points: 10248 B, 255 rows, columns ['mosaica_id', 'code', 'archive', 'primary_category', 'submitted_at', 'membership:clusters/kmeans']
   kind 4 trailer: 69 B  {"arrow_serialise_ns":26507,"flushes":1,"points":255,"stream_us":758}
 first tiles rows: [{'tile': 0, 'visible': 86, 'matched': 86, 'served': 2, 'highlighted': 86}, {'tile': 1, 'visible': 2985, 'matched': 2985, 'served': 27, 'highlighted': 2985}, {'tile': 4, 'visible': 649, 'matched': 649, 'served': 7, 'highlighted': 649}]
 ...
@@ -94,17 +94,17 @@ workspace under `clients/ts` with no dependency on the client packages, here ove
 ```
 $ cd clients/ts/wire-example && node src/decode-viewport.mjs ../core/test/fixtures/viewport-artifacts.bin
 ../core/test/fixtures/viewport-artifacts.bin: 81754 bytes, 17 frames
-  kind 5 artifacts: 4936 B, 2 rows, columns [layer, tessera_id, key, masked_count, centroid_x, centroid_y, box_min_x, box_min_y, box_max_x, box_max_y, content, parent_ids, rung, matched, highlighted, target, tile]
-  kind 5 artifacts: 5320 B, 10 rows, columns [layer, tessera_id, key, masked_count, centroid_x, centroid_y, box_min_x, box_min_y, box_max_x, box_max_y, content, parent_ids, rung, matched, highlighted, target, tile]
+  kind 5 artifacts: 4936 B, 2 rows, columns [layer, mosaica_id, key, masked_count, centroid_x, centroid_y, box_min_x, box_min_y, box_max_x, box_max_y, content, parent_ids, rung, matched, highlighted, target, tile]
+  kind 5 artifacts: 5320 B, 10 rows, columns [layer, mosaica_id, key, masked_count, centroid_x, centroid_y, box_min_x, box_min_y, box_max_x, box_max_y, content, parent_ids, rung, matched, highlighted, target, tile]
 ...
-  kind 5 artifacts: 2696 B, 0 rows, columns [layer, tessera_id, key, masked_count, centroid_x, centroid_y, box_min_x, box_min_y, box_max_x, box_max_y, content, parent_ids, rung, matched, highlighted, target, tile]
+  kind 5 artifacts: 2696 B, 0 rows, columns [layer, mosaica_id, key, masked_count, centroid_x, centroid_y, box_min_x, box_min_y, box_max_x, box_max_y, content, parent_ids, rung, matched, highlighted, target, tile]
 ...
   kind 4 trailer: 69 B  {"arrow_serialise_ns":522516,"frames":16,"rows":114,"stream_us":2120}
 first tiles rows: []
 first artifacts rows: [
   {
     layer: 'clusters/kmeans',
-    tessera_id: '9805232920100346745',
+    mosaica_id: '9805232920100346745',
     key: 'km-000014',
     masked_count: '571',
 ...
@@ -113,7 +113,7 @@ first artifacts rows: [
 That fixture answers a request for one layer of clusters at zoom 2 with a `per_tile` of 50. It holds
 one frame for each of the sixteen tiles, one of them empty, and no frame for nested or `dag` layers.
 The `u64` columns come off Arrow JS as `BigInt` and are printed as decimal strings; a decoder that
-narrows a `tessera_id` to a JS `number` has already lost bits on this fixture's first id. Its test
+narrows a `mosaica_id` to a JS `number` has already lost bits on this fixture's first id. Its test
 is `clients/ts/wire-example/test/decode.test.ts`, run by `bash scripts/check-clients.sh` with the
 rest of the client gate.
 
@@ -245,7 +245,7 @@ function decodeItems(body) {
 const { head, tables, trailer } = decodeItems(new Uint8Array(await response.arrayBuffer()));
 ```
 
-`tessera_id` arrives as a `uint64`, which Arrow JS reads as a `BigInt`; narrowing it to a `number`
+`mosaica_id` arrives as a `uint64`, which Arrow JS reads as a `BigInt`; narrowing it to a `number`
 loses bits. Both decoders were run against zstd-compressed and uncompressed bodies from a release
 server, and without the registered codec Arrow JS refuses the compressed one. Neither has a test of
 its own, as the viewport decodes do.

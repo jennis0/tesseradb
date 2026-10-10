@@ -13,7 +13,7 @@
 use croaring::Bitmap;
 use rustc_hash::{FxHashMap, FxHashSet};
 use mosaica_types::layer::{HierarchyKind, RegisteredLayer, ServingLayout};
-use mosaica_types::{EntityId, TesseraId};
+use mosaica_types::{EntityId, MosaicaId};
 
 use super::set::Cx;
 use super::table::{Groups, Key};
@@ -37,7 +37,7 @@ pub(super) struct Layer {
     /// another layer, and serves nothing to this read.
     entity: EntityId,
     level: u32,
-    pick: Pick<TesseraId>,
+    pick: Pick<MosaicaId>,
     cut: Option<Cut>,
     palette: Option<u8>,
 }
@@ -64,7 +64,7 @@ impl Layer {
         view: &str,
         layer: &str,
         level: Option<u32>,
-        pick: &Pick<TesseraId>,
+        pick: &Pick<MosaicaId>,
         cut: Option<Cut>,
         palette: Option<u8>,
     ) -> Result<Layer> {
@@ -229,7 +229,7 @@ impl Layer {
         let entity_at = |ordinal: u32| -> Option<u64> {
             registered.as_ref()?.runs[self.level as usize].entity_of(u64::from(ordinal))
         };
-        let tessera_id = |ordinal: u32| -> Option<u64> {
+        let mosaica_id = |ordinal: u32| -> Option<u64> {
             engine
                 .identity_key
                 .forward(shard, EntityId::new(entity_at(ordinal)?))
@@ -312,7 +312,7 @@ impl Layer {
                         .iter()
                         .zip(&counts)
                         .filter(|&(_, &count)| count > 0)
-                        .filter_map(|(&o, &count)| Some((count, tessera_id(o)?, o)))
+                        .filter_map(|(&o, &count)| Some((count, mosaica_id(o)?, o)))
                         .collect();
                     ranked.sort_unstable_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
                     ranked

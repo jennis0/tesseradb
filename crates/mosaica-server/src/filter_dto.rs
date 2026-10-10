@@ -16,7 +16,7 @@ use serde_json::Value;
 use mosaica_engine::filter::{Endpoint, Family, FilterExpr, FilterOperand, RegionLeaf, Scalar};
 use mosaica_engine::LeafColumn;
 use mosaica_engine::shapes::{Bounds, CanonError, Projection, ShapeF64, ShapeSpace};
-use mosaica_types::{AttrLocalId, TesseraId};
+use mosaica_types::{AttrLocalId, MosaicaId};
 
 use crate::error::ApiError;
 
@@ -44,18 +44,18 @@ pub fn view_extent(view: &mosaica_engine::MetaView) -> Bounds {
     }
 }
 
-/// A `tessera_id` as a request carries it: a JSON number, or its decimal string for a caller that
+/// A `mosaica_id` as a request carries it: a JSON number, or its decimal string for a caller that
 /// cannot carry a `u64` intact. `field` names it in the refusal.
-pub fn tessera_id(value: Option<&Value>, field: &str) -> Result<TesseraId, ApiError> {
+pub fn mosaica_id(value: Option<&Value>, field: &str) -> Result<MosaicaId, ApiError> {
     match value {
         Some(Value::Number(n)) => n.as_u64(),
         Some(Value::String(s)) => s.parse::<u64>().ok(),
         _ => None,
     }
-    .map(TesseraId::new)
+    .map(MosaicaId::new)
     .ok_or_else(|| {
         bad(format!(
-            "`{field}` is not a `tessera_id`; send a JSON number or a decimal string"
+            "`{field}` is not a `mosaica_id`; send a JSON number or a decimal string"
         ))
     })
 }
@@ -165,7 +165,7 @@ pub fn parse(
     }
 }
 
-/// A `member_of` leaf's body: `{layer: <name>, artifact: <tessera_id>}`. Only the shape is
+/// A `member_of` leaf's body: `{layer: <name>, artifact: <mosaica_id>}`. Only the shape is
 /// checked: the engine checks the layer against the principal's reachable layers, and an artifact
 /// the principal cannot see is an empty operand.
 fn parse_member_of(body: &Value) -> Result<mosaica_engine::filter::MemberOfLeaf, ApiError> {
@@ -183,7 +183,7 @@ fn parse_member_of(body: &Value) -> Result<mosaica_engine::filter::MemberOfLeaf,
         .get("layer")
         .and_then(Value::as_str)
         .ok_or_else(|| bad("`member_of.layer` is the name of a layer, as a string"))?;
-    let artifact = tessera_id(obj.get("artifact"), "member_of.artifact")?;
+    let artifact = mosaica_id(obj.get("artifact"), "member_of.artifact")?;
     Ok(mosaica_engine::filter::MemberOfLeaf {
         layer: layer.to_string(),
         artifact,
@@ -238,7 +238,7 @@ fn parse_region(body: &Value, ctx: &RegionContext) -> Result<RegionLeaf, ApiErro
         if obj.contains_key("space") {
             return Err(bad("`region.artifact` names a published shape and carries no `space`"));
         }
-        return Ok(RegionLeaf::Artifact(tessera_id(obj.get("artifact"), "region.artifact")?));
+        return Ok(RegionLeaf::Artifact(mosaica_id(obj.get("artifact"), "region.artifact")?));
     }
     let number = |v: &Value, what: &str| -> Result<f64, ApiError> {
         v.as_f64()
@@ -826,7 +826,7 @@ mod tests {
         for text in [r#"{"region": {"artifact": 42}}"#, r#"{"region": {"artifact": "42"}}"#] {
             assert_eq!(
                 parse_str(text).unwrap(),
-                FilterExpr::Region(RegionLeaf::Artifact(TesseraId::new(42)))
+                FilterExpr::Region(RegionLeaf::Artifact(MosaicaId::new(42)))
             );
         }
     }

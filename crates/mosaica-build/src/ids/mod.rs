@@ -48,9 +48,9 @@ pub(crate) use stream::number as number_streaming;
 /// selection, `--limit` or the rule left out. Every reader skips it.
 pub(crate) const NO_SOURCE: u64 = u64::MAX;
 
-/// The column a build file's rows would carry a `tessera_id` in. Nothing holds one in an empty
+/// The column a build file's rows would carry a `mosaica_id` in. Nothing holds one in an empty
 /// database, so a row carrying one is refused.
-pub const TESSERA_ID_COLUMN: &str = "tessera_id";
+pub const MOSAICA_ID_COLUMN: &str = "mosaica_id";
 
 /// A unique field one file carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -535,7 +535,7 @@ impl Limited {
             keys: lists.keys.clone(),
             outside: None,
             left_out: None,
-            tessera: None,
+            mosaica: None,
         };
         let Some(limited) = limited else {
             return scanned;

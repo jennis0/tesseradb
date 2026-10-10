@@ -264,7 +264,7 @@ impl Executor {
     ///
     /// The high-water mark is the allocator's, not the highest entity a segment holds: an item
     /// deleted before its flush holds no row, and once the log records naming it are reclaimed,
-    /// only this keeps its entity id, and so its `tessera_id`, from being issued again.
+    /// only this keeps its entity id, and so its `mosaica_id`, from being issued again.
     fn write_live_state(&self, manifest: &mut SegmentsManifest, fold: bool) {
         let registry = self.live.registry_for_publication();
         manifest.entity_id_low_water = manifest.entity_id_low_water.min(registry.low_water);

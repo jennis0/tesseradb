@@ -132,7 +132,7 @@ fn batch(rows: &[Row], runtime: bool) -> Vec<u8> {
     writer.into_inner().unwrap()
 }
 
-/// Ingest and answer the `tessera_id`s the batch was given, in row order.
+/// Ingest and answer the `mosaica_id`s the batch was given, in row order.
 async fn ingest(served: &Served, batch_id: &str, body: Vec<u8>) -> Vec<u64> {
     let (status, body) = post_ingest(served, batch_id, ARROW, body).await;
     assert_eq!(status, 200, "batch {batch_id} is accepted: {body}");
@@ -176,7 +176,7 @@ async fn post_ingest_into(
     (status, resp.json().await.unwrap())
 }
 
-/// The `tessera_id`s a filtered viewport answers, from a fresh session so the rows flushed since
+/// The `mosaica_id`s a filtered viewport answers, from a fresh session so the rows flushed since
 /// the last one are in the answer (`views_write.rs`'s note on `points`).
 async fn filtered(served: &Served, filters: Value) -> BTreeSet<u64> {
     let token = token_for(&served.server, &["0", "1"][..]).await;
@@ -202,11 +202,11 @@ async fn filtered(served: &Served, filters: Value) -> BTreeSet<u64> {
     points.into_iter().map(|(id, _)| id).collect()
 }
 
-async fn item(served: &Served, tessera_id: u64) -> Value {
+async fn item(served: &Served, mosaica_id: u64) -> Value {
     let resp = served
         .server
         .client
-        .post(served.server.viewer_url(&format!("/v1/items/{tessera_id}")))
+        .post(served.server.viewer_url(&format!("/v1/items/{mosaica_id}")))
         .bearer_auth(&served.token)
         .json(&json!({}))
         .send()
@@ -402,7 +402,7 @@ async fn a_row_may_leave_a_column_out_and_every_reader_answers_it() {
         .server
         .state
         .engine
-        .tessera_id_of(mosaica_types::EntityId::new(0))
+        .mosaica_id_of(mosaica_types::EntityId::new(0))
         .unwrap()
         .raw();
     let record = item(&served, built).await;

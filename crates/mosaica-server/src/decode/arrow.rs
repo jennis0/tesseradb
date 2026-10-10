@@ -9,7 +9,7 @@ use mosaica_engine::vocabulary::{code_value, Resolved};
 use mosaica_engine::{absent_scalar, DeclaredScalar, Projection, ScopedScalar, Vocabularies};
 use mosaica_lifecycle::{BatchArtifacts, WalScalar};
 use mosaica_types::layer::LayerDeclaration;
-use mosaica_types::TesseraId;
+use mosaica_types::MosaicaId;
 
 use super::json::JsonColumns;
 use super::membership::{membership_column, MembershipColumn, MembershipTally};
@@ -18,7 +18,7 @@ use super::{scoped_as_declared, scoped_wire_type, BodyEncoding, Fixed};
 
 #[derive(Debug)]
 pub(crate) struct RawIngestItem {
-    pub(crate) tessera_id: Option<TesseraId>,
+    pub(crate) mosaica_id: Option<MosaicaId>,
     /// In the view's frame, never longitude and latitude: the projection has already run. `None`
     /// for a row carrying no coordinates.
     pub(crate) position: Option<(f64, f64)>,
@@ -43,8 +43,8 @@ pub(crate) struct ParsedBatch {
     pub(crate) clipped: u64,
     /// Rows outside the view's extent, moved onto its edge.
     pub(crate) clamped: u64,
-    /// The batch carries a `tessera_id` column, null in every row or not.
-    pub(crate) tessera_id_column: bool,
+    /// The batch carries a `mosaica_id` column, null in every row or not.
+    pub(crate) mosaica_id_column: bool,
 }
 
 /// The frame an ingest batch's coordinates are read against: its view's projection and extent.
@@ -309,7 +309,7 @@ pub(crate) fn parse_ingest_batch(
         Some(frame) => coordinates::axis_names(frame.projection),
         None => ("", ""),
     };
-    let mut fixed = vec![Fixed::TesseraId, Fixed::Access, Fixed::NodeId];
+    let mut fixed = vec![Fixed::MosaicaId, Fixed::Access, Fixed::NodeId];
     if frame.is_some() {
         fixed.extend([Fixed::Coordinate(x_name), Fixed::Coordinate(y_name)]);
     }
@@ -334,15 +334,15 @@ pub(crate) fn parse_ingest_batch(
     let mut items = Vec::new();
     let mut tally = MembershipTally::default();
     let (mut clipped, mut clamped) = (0u64, 0u64);
-    let mut tessera_id_column = false;
+    let mut mosaica_id_column = false;
     for batch in batches {
         let (batch, omitted) = batch?;
         // Where this record batch's rows start in the request's numbering, which a membership
         // names.
         let offset = items.len();
 
-        let mosaica = tessera_id_col(body_name, &batch)?;
-        tessera_id_column |= mosaica.is_some();
+        let mosaica = mosaica_id_col(body_name, &batch)?;
+        mosaica_id_column |= mosaica.is_some();
         let has_column = |name: &str| batch.column_by_name(name).is_some();
         let (x, y) = match &frame {
             None => {
@@ -440,9 +440,9 @@ pub(crate) fn parse_ingest_batch(
             for (d, cells) in scoped_declared.iter().zip(&scoped_cells) {
                 scoped_values.push(value_of(cells, i, d)?);
             }
-            let tessera_id = match &mosaica {
+            let mosaica_id = match &mosaica {
                 Some(arr) if !arr.is_null(i) => {
-                    Some(parse_tessera_id(body_name, offset + i, arr.value(i))?)
+                    Some(parse_mosaica_id(body_name, offset + i, arr.value(i))?)
                 }
                 _ => None,
             };
@@ -456,7 +456,7 @@ pub(crate) fn parse_ingest_batch(
                 _ => None,
             };
             items.push(RawIngestItem {
-                tessera_id,
+                mosaica_id,
                 position,
                 labels,
                 scalars,
@@ -470,16 +470,16 @@ pub(crate) fn parse_ingest_batch(
         artifacts: tally.into_artifacts(),
         clipped,
         clamped,
-        tessera_id_column,
+        mosaica_id_column,
     })
 }
 
-/// The batch's `tessera_id` column, decimal digits in a string, or `None` where it has none.
-fn tessera_id_col<'a>(
+/// The batch's `mosaica_id` column, decimal digits in a string, or `None` where it has none.
+fn mosaica_id_col<'a>(
     body_name: &str,
     batch: &'a RecordBatch,
 ) -> Result<Option<&'a arrow::array::StringArray>, DecodeError> {
-    match batch.column_by_name("tessera_id") {
+    match batch.column_by_name("mosaica_id") {
         None => Ok(None),
         Some(col) => col
             .as_any()
@@ -487,17 +487,17 @@ fn tessera_id_col<'a>(
             .map(Some)
             .ok_or_else(|| {
                 DecodeError(format!(
-                    "{body_name}: column 'tessera_id' is not utf8; send each tessera_id as \
+                    "{body_name}: column 'mosaica_id' is not utf8; send each mosaica_id as \
                      decimal digits in a string"
                 ))
             }),
     }
 }
 
-fn parse_tessera_id(body_name: &str, row: usize, text: &str) -> Result<TesseraId, DecodeError> {
-    text.parse::<u64>().map(TesseraId::new).map_err(|_| {
+fn parse_mosaica_id(body_name: &str, row: usize, text: &str) -> Result<MosaicaId, DecodeError> {
+    text.parse::<u64>().map(MosaicaId::new).map_err(|_| {
         DecodeError(format!(
-            "{body_name}: row {row}, column 'tessera_id' is not decimal digits; send it as a \
+            "{body_name}: row {row}, column 'mosaica_id' is not decimal digits; send it as a \
              string of digits"
         ))
     })

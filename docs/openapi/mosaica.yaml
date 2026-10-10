@@ -645,7 +645,7 @@ paths:
         check this.
 
         **Layers.** Each layer `layers` names that serves an artifact holding a served point adds
-        a `membership:<layer>` column to the points frames: the `tessera_id` of the deepest
+        a `membership:<layer>` column to the points frames: the `mosaica_id` of the deepest
         artifact of the layer the point belongs to that this principal is served, or null. The
         artifacts themselves are served by `POST /v1/artifacts/viewport`. A nested or `dag`
         layer is cut to `artifact_budget`, met by tagging with ancestors in place of their
@@ -676,7 +676,7 @@ paths:
               schema:
                 type: string
             x-mosaica-identity-key:
-              description: The identity key, derived from the credential, its mask fragment and the view. The mask fragment's identity is keyed by the bundle, so a rebuilt bundle, whose `tessera_id`s are all new, gives a new identity key. A held band may be drawn only under the same key, so a client partitions its cache by it.
+              description: The identity key, derived from the credential, its mask fragment and the view. The mask fragment's identity is keyed by the bundle, so a rebuilt bundle, whose `mosaica_id`s are all new, gives a new identity key. A held band may be drawn only under the same key, so a client partitions its cache by it.
               required: true
               schema:
                 type: string
@@ -774,7 +774,7 @@ paths:
         `fields`, `system_fields`, `filters`, `keep_unmatched` and `page_rows` may change between
         the requests of one read, and the page schema changes with them.
 
-        **Columns.** `tessera_id` (`uint64`) first, then the named fields in the order named, then
+        **Columns.** `mosaica_id` (`uint64`) first, then the named fields in the order named, then
         the system fields in the order named, then `mosaica:matched` (`bool`) under
         `keep_unmatched`. Every named field is present whether or not an item carries a value. A
         number or boolean arrives as its declared type, `timestamp_us` as `timestamp[us, UTC]`, a
@@ -792,7 +792,7 @@ paths:
         group, or of a group sharing its views, they read that view's column; elsewhere they are
         pinned as `<field>@<key>`.
 
-        **Order.** `map` returns rows by map cell in `view`, then by `tessera_id`. `stored` returns
+        **Order.** `map` returns rows by map cell in `view`, then by `mosaica_id`. `stored` returns
         them in the order the record store holds items, which groups items by their full set of
         access labels. The two orders return the same rows. With neither `order` nor `cursor`, the
         server takes `stored` when any named field's `homes` in `/v1/meta` is `["record"]`, and
@@ -893,7 +893,7 @@ paths:
         "500":
           $ref: "#/components/responses/FailClosed"
 
-  /v1/items/{tessera_id}:
+  /v1/items/{mosaica_id}:
     post:
       tags: [viewer]
       operationId: item
@@ -915,7 +915,7 @@ paths:
       security:
         - sessionToken: []
       parameters:
-        - $ref: "#/components/parameters/TesseraId"
+        - $ref: "#/components/parameters/MosaicaId"
       requestBody:
         required: true
         content:
@@ -967,7 +967,7 @@ paths:
         served only while the artifact it is attached to is. Publication order is the publisher's
         and is not grouped by access labels.
 
-        **Narrowing.** `ids` reads the artifacts those `tessera_id`s name, such as the tags of
+        **Narrowing.** `ids` reads the artifacts those `mosaica_id`s name, such as the tags of
         points a client holds no artifact for; one this principal is not served has no row, as
         one naming nothing does. `level` reads one level of a levelled layer. `parent` reads the artifacts
         naming that artifact among their parents; a parent this principal is not served answers
@@ -986,7 +986,7 @@ paths:
         principal, while a read is under way ends the read: the next page finds no artifact, and
         the response ends by `end`.
 
-        **Columns.** `tessera_id` (`uint64`) first, then the named properties in the order named,
+        **Columns.** `mosaica_id` (`uint64`) first, then the named properties in the order named,
         then `matched_count` (`uint64`) whenever the request carries `filters`.
 
         - `key`: `utf8`, null where the publisher supplied none.
@@ -1005,7 +1005,7 @@ paths:
           same terms.
         - `shape`: `binary`, a WKB `MultiPolygon` in the view's coordinates, null on a layer that
           draws no geometry: a hull over the members this principal can see, or a spatial or
-          authored shape whole, as `POST /v1/artifacts/{tessera_id}` serves it. Every ring is
+          authored shape whole, as `POST /v1/artifacts/{mosaica_id}` serves it. Every ring is
           closed and holds at least four points; a hull over one or two members, or over members
           on one line, is a zero-area polygon over their positions, repeated.
         - `slot`: `uint8`, this principal's palette slot for the artifact among `palette_size`
@@ -1115,7 +1115,7 @@ paths:
         **A tile's frame.** For each layer named, and each of its levels selected, the artifacts
         this principal is served that hold a member the principal can see inside the tile, at most
         `per_tile` of them, the largest first: by `masked_count`, descending, and then by
-        `tessera_id`. An artifact with visible members in several tiles is in each of their frames,
+        `mosaica_id`. An artifact with visible members in several tiles is in each of their frames,
         with the same `masked_count`, centroid and box: every number is over the artifact's whole
         membership as this principal sees it, never over the tile. Levels follow the layers'
         order, a layer after any it depends on, and each level's rows follow their own.
@@ -1125,13 +1125,13 @@ paths:
         sampling, as one frame with no tile. `rung` there is the depth in that frame's own parent
         links.
 
-        **Columns.** Eighteen, at fixed positions: `layer` (dictionary-encoded), `tessera_id`,
+        **Columns.** Eighteen, at fixed positions: `layer` (dictionary-encoded), `mosaica_id`,
         `key`, `masked_count`, `centroid_x`, `centroid_y`, `box_min_x`, `box_min_y`, `box_max_x`,
         `box_max_y`, `content`, `parent_ids`, `rung`, `matched`, `highlighted`, `target`, `tile`
         (`uint32`, the tile's Morton prefix at `zoom`) and `slot` (`uint8`, null where the request
         names no `palette_size`; see **Slots**). A null in a geometry column means
         the layer declares no such property or the request asked for none. `parent_ids` names the
-        parents that are rows of the same frame. `target` is the `tessera_id` of the artifact a row
+        parents that are rows of the same frame. `target` is the `mosaica_id` of the artifact a row
         is attached to, such as the cluster a label names, in the same frame or the treed frame;
         null where the row is attached to nothing. A dependent is served in a tile only where its
         target is in that tile's frame or the treed frame, when the request names its target's
@@ -1140,7 +1140,7 @@ paths:
         `highlighted` the same for `filters` and `highlight` together; each is null where the
         request carries no such expression, and a label takes its target's. A filter changes
         nothing else: the same artifacts are served with the same counts, filtered or not. No
-        frame carries a shape; `POST /v1/artifacts/{tessera_id}` serves an artifact's.
+        frame carries a shape; `POST /v1/artifacts/{mosaica_id}` serves an artifact's.
 
         **Slots.** With `palette_size`, every row carries `slot`, a number below it that a client
         maps to a colour. It is this principal's and fixed for them: worked out once over every
@@ -1273,7 +1273,7 @@ paths:
         **Visibility first.** Every artifact served has passed its own existence criterion,
         evaluated over the form's whole candidate set before `limit` and `cursor` apply, so a
         page's fill and its `next` count only artifacts this principal may see, and a withheld
-        artifact leaves no gap. The order is total: count descending, then `tessera_id` ascending,
+        artifact leaves no gap. The order is total: count descending, then `mosaica_id` ascending,
         so a cursor over tied counts neither repeats nor skips a row. A relation is named only
         where both ends are served: a child whose parent is withheld is a root here, and a parent
         below this principal's criterion is absent from `parents`.
@@ -1321,13 +1321,13 @@ paths:
         "500":
           $ref: "#/components/responses/FailClosed"
 
-  /v1/artifacts/{tessera_id}:
+  /v1/artifacts/{mosaica_id}:
     post:
       tags: [viewer]
       operationId: artifact
       summary: One annotation artifact, with its masked count and geometry for this principal.
       description: |
-        A separate route from `/v1/items/{tessera_id}`, so the shape of an answer does not say
+        A separate route from `/v1/items/{mosaica_id}`, so the shape of an answer does not say
         which of the two an identifier names. `masked_count` is this principal's count of the
         artifact's members, not its size. Geometry is computed per principal from the members this
         principal can see, in the same 32-bit-per-axis grid units as the viewport's `code`, so a
@@ -1341,7 +1341,7 @@ paths:
       security:
         - sessionToken: []
       parameters:
-        - $ref: "#/components/parameters/TesseraId"
+        - $ref: "#/components/parameters/MosaicaId"
       requestBody:
         required: true
         content:
@@ -1494,7 +1494,7 @@ paths:
         largest value.
 
         **Sampled bins.** With `sample`, a set of `N` items where `N` is more than `sample` is
-        counted over its items whose `tessera_id` is below the cut `floor(sample × 2^64 / N)`,
+        counted over its items whose `mosaica_id` is below the cut `floor(sample × 2^64 / N)`,
         about `sample` of them, and each row's `count` is the count among them times `N` over
         the items counted, rounded to the nearest whole number with a half rounded up. The cut is
         one for the whole set: no tile, cell or group has a floor or a cap. `N` is `total`, the
@@ -1529,7 +1529,7 @@ paths:
 
         **Columns**, in this order, each only where stated: `group` (`dictionary<int8, utf8>`, with
         `by`): `listed`, `rest` or `none`. `key` (with `by`): a field's vocabulary key as
-        `dictionary<int32, utf8>`, or an artifact's `tessera_id` as `uint64`; null on `rest` and
+        `dictionary<int32, utf8>`, or an artifact's `mosaica_id` as `uint64`; null on `rest` and
         `none`. `title` (`dictionary<int32, utf8>`, with `by` on a field or a layer): a value's
         title as `/v1/categories` gives it, or an artifact's name as `/v1/artifacts/browse` gives
         it to this principal; null where it has none. `slot` (`uint8`, with `by` on a layer): this
@@ -1637,7 +1637,7 @@ paths:
             - the viewport's filter refusals, in `filters` or `reference`;
             - an unknown key, a missing `view` or `groupings`, no grouping, or more than `selection.max_aggregate_groupings`;
             - `by` naming neither or both of `field` and `layer`, or carrying neither or both of `top` and `values` or `artifacts`, or `values` on a layer, or `artifacts` or `level` on a field;
-            - `top` of 0 or above `selection.max_aggregate_top`; `values` or `artifacts` empty or longer than `selection.max_aggregate_named`; an `artifacts` entry that is not a `tessera_id`;
+            - `top` of 0 or above `selection.max_aggregate_top`; `values` or `artifacts` empty or longer than `selection.max_aggregate_named`; an `artifacts` entry that is not a `mosaica_id`;
             - `bins` beside `top` or `values`, or on a layer; `range` without `bins`; `bins` of 0 or above `selection.max_aggregate_bins`; a `range` whose lower bound is not below its upper, or that is not two numbers; a fractional bound on a timestamp field; `bins` with `cells`; `sample` without `bins`, on a layer, or of 0;
             - `summary` beside `top`, `values`, `bins`, `range` or `sample`, or on a layer; `summary` with `cells`; `summary` on a field that is not a number or timestamp, and on a number or timestamp field declared with neither `index` nor `render`, with a detail saying to name a number or timestamp field declared with `index` or `render`;
             - `bins` on a field that is not a number or timestamp, each kind with its own detail; on a `bool`, with a detail saying it has no bins; and on a number or timestamp field declared with neither `index` nor `render`, with a detail saying to name a number or timestamp field declared with `index` or `render`;
@@ -1674,7 +1674,7 @@ paths:
         deployment with one view takes that view, and one with several gives the batch no view,
         whose rows carry no coordinates and change only what is stored in no view.
 
-        **Which item a row names.** A row names an item by its `tessera_id` and the value of every
+        **Which item a row names.** A row names an item by its `mosaica_id` and the value of every
         unique column it carries that is not null. A row whose values name no
         item creates one. A row whose values name one item addresses it: where every value the
         row carries is the one the item stores, the row changes nothing and is counted in
@@ -1682,7 +1682,7 @@ paths:
         there and changes nothing else, the row adds the item to the view, counted in `added`: the
         item stays served in its other views and is served in this one from the next flush. Any
         other row edits the item and is counted in `edited`: it changes a value, the label or a
-        position. An edited item keeps its `tessera_id`, its views, its layer memberships and a suppression; a label the edit narrows
+        position. An edited item keeps its `mosaica_id`, its views, its layer memberships and a suppression; a label the edit narrows
         applies from the answer on. A row whose one change is placing the item in artifacts that
         do not hold it changes the artifacts, not the item: it is counted in `unchanged`, and the
         memberships it adds in `joined`.
@@ -1693,7 +1693,7 @@ paths:
         `none`, and `lon` and `lat` in degrees on any other, `float32` or `float64` in Arrow; a row
         carries both or neither. A row that creates an item needs them: a row naming no item and
         carrying none is refused as naming no item. A batch in which no row carries coordinates
-        creates nothing and only addresses items, so it needs a `tessera_id` or a unique column,
+        creates nothing and only addresses items, so it needs a `mosaica_id` or a unique column,
         null in every row or not; without one it is `422`.
         A coordinate outside the view's extent is stored on its edge and counted in `clamped`; one
         outside the projection's domain is counted in `clipped`; a non-finite one is `422`.
@@ -1706,9 +1706,9 @@ paths:
         could hold it. The same grammar applies to every label this API takes. Left out or null,
         it keeps the item's label, and a new item takes the view's `point_visibility.default`. An
         empty list, and a label empty once trimmed, is the view's default; a new item with no label
-        on a view with no default is `422`. `tessera_id` is a string of decimal digits and names an
-        item; a row whose `tessera_id` names no live or suppressed item is refused, since a new
-        item is given its `tessera_id` when it is created. `node_id` is accepted and not stored. Every other column is a declared
+        on a view with no default is `422`. `mosaica_id` is a string of decimal digits and names an
+        item; a row whose `mosaica_id` names no live or suppressed item is refused, since a new
+        item is given its `mosaica_id` when it is created. `node_id` is accepted and not stored. Every other column is a declared
         attribute, a group-scoped attribute of the view's group, or an enumerated layer; any other
         name is `422`. A category takes its vocabulary's key: under a `closed` vocabulary an
         unknown key is `422`, and under an `open` one it is added. An integer is read exactly,
@@ -1723,18 +1723,18 @@ paths:
         changes nothing names only artifacts that already hold its item.
 
         **Refused rows.** A row is refused where its values name more than one item, where its
-        `tessera_id` names no item, where it names no item and carries no coordinates, where it
+        `mosaica_id` names no item, where it names no item and carries no coordinates, where it
         names an item an earlier row of the batch names, or where it sets a unique value an earlier
         row sets: of two rows naming one item or setting
         one value, the first is kept. A refused row writes nothing. The batch applies its other
         rows, lists each refused row in `refused` by position with its reason, and answers `null`
-        in its place in `tessera_ids`. With `strict=true` the batch is `409` at its first refused
-        row instead, naming rows by position, values as sent and items by `tessera_id`, and nothing
+        in its place in `mosaica_ids`. With `strict=true` the batch is `409` at its first refused
+        row instead, naming rows by position, values as sent and items by `mosaica_id`, and nothing
         is written. A deleted item names nothing, so its values may be given to a new item. A null
         is no value.
 
         **Retries.** `x-mosaica-batch-id` names the batch. The same bytes sent again under the same
-        id answer `200` with `replayed: true`, the first acceptance's `tessera_ids` and `refused`,
+        id answer `200` with `replayed: true`, the first acceptance's `mosaica_ids` and `refused`,
         and change nothing, whatever `strict` says; different bytes under a used id are `409`.
 
         **Limits.** The body is at most `ingest.ingest_max_batch_bytes` and the batch at most
@@ -1787,10 +1787,10 @@ paths:
                 $ref: "#/components/schemas/Error"
         "409":
           description: |
-            Nothing was written. The detail names rows by position, values as sent and items by `tessera_id`.
+            Nothing was written. The detail names rows by position, values as sent and items by `mosaica_id`.
 
             - The batch id was used for a different body
-            - With `strict=true`, a row is refused: its values name more than one item, as when a row gives an item a unique value another item holds; its `tessera_id` names no live or suppressed item; it names no item and carries no coordinates; or it names an item, or sets a unique value, an earlier row does
+            - With `strict=true`, a row is refused: its values name more than one item, as when a row gives an item a unique value another item holds; its `mosaica_id` names no live or suppressed item; it names no item and carries no coordinates; or it names an item, or sets a unique value, an earlier row does
             - An item a row edits changed while the batch was checked; sending it again answers
             - The items the batch names changed while it was checked twice; sending it again answers
           content:
@@ -1809,7 +1809,7 @@ paths:
             - A cell does not fit its column
             - A key is not in a closed vocabulary or layer
             - A row creates an item with no label on a view with no default
-            - No row carries coordinates, and the batch has neither a `tessera_id` nor a unique column
+            - No row carries coordinates, and the batch has neither a `mosaica_id` nor a unique column
             - A row carries one coordinate and not the other, or coordinates in a batch naming no view
             - The batch is over the row cap
           content:
@@ -1838,11 +1838,11 @@ paths:
         There is no edit here: an item's access labels change by an ingest row naming the item with
         the new labels, and `op: "predicate"` is refused with that advice.
 
-        A change names its item in `match`, by its `tessera_id`, a string of decimal digits, and
+        A change names its item in `match`, by its `mosaica_id`, a string of decimal digits, and
         by the values of fields declared unique: a keyword as a string, an integer or a timestamp
         as a number or a string of decimal digits. A `null` names nothing. Every value names the
         item that holds it, and a change whose values name no item, or name two, is refused; so is
-        a change whose `tessera_id` names no item. A refused change is listed in `refused` by
+        a change whose `mosaica_id` names no item. A refused change is listed in `refused` by
         position with its reason, and the others are applied. With `strict=true` the request is
         refused at its first refused change instead, `404` where it names no item and `409` where
         it names two, and nothing is applied. Many changes may name one item. Every item is checked
@@ -1898,8 +1898,8 @@ paths:
             - The body is not a JSON array of change items, is over 2 MiB or carries more than 10,000 items
             - An unknown `op`, or an item without `match`
             - No change names its item by an identifying column
-            - A `tessera_id` that is not a decimal string
-            - A `match` key that is neither `tessera_id` nor a field declared unique, or a value that is not one of its field's
+            - A `mosaica_id` that is not a decimal string
+            - A `match` key that is neither `mosaica_id` nor a field declared unique, or a value that is not one of its field's
           content:
             application/json:
               schema:
@@ -2459,7 +2459,7 @@ paths:
         Every item the drop leaves with a row in no view, flushed or buffered, is deleted, as
         `POST /control/changes` deletes it, and `deleted` counts them. A deleted item names
         nothing afterwards: a later row carrying one of its unique values creates a new item, and
-        one carrying its `tessera_id` is refused.
+        one carrying its `mosaica_id` is refused.
       security:
         - controlCredential: []
       parameters:
@@ -2508,7 +2508,7 @@ paths:
       description: |
         The body is a corpus declaration's `[[layer]]` block in JSON. `views` may name a view
         group, which stands for every view the group holds when the layer is registered. The
-        answer follows the write-ahead log's fsync and carries the layer's `tessera_id`, the address
+        answer follows the write-ahead log's fsync and carries the layer's `mosaica_id`, the address
         `POST /control/changes` suppresses it by.
 
         A layer's name is its identity for ever: a name already registered, or one a dropped layer
@@ -2618,7 +2618,7 @@ paths:
       description: |
         The body is JSON only; `application/vnd.apache.arrow.stream` is `422`. Each artifact names
         its members by `members`, or by `excluding`, the view's items it leaves out. Each is a
-        `MemberTable`: one row per member, naming it by `tessera_id` and the values of fields
+        `MemberTable`: one row per member, naming it by `mosaica_id` and the values of fields
         declared unique. A member whose values name no item, a deleted item included, or name two,
         is refused: it is left out and listed in `refused` with its reason, and the rest are
         published. With `strict=true` the request is refused at its first refused member instead,
@@ -2638,7 +2638,7 @@ paths:
         and a shape of at most `serve.max_shape_vertices` vertices after it is fitted to each view.
         Over any is `422`; `/control/status` publishes them under `limits.publish`.
 
-        The answer gives each artifact's `tessera_id` in the order sent, and never an ordinal or a
+        The answer gives each artifact's `mosaica_id` in the order sent, and never an ordinal or a
         membership's size. `shapes` reports what fitting each shape to each of the layer's views
         did.
       security:
@@ -2693,7 +2693,7 @@ paths:
             - An exclusion list over its cap
             - `view` missing on a layer scoped to a group or present on another
             - A member table whose columns differ in length, or tables left with no identifying column
-            - A `tessera_id` that is not a decimal string, or a value that is not one of its field's
+            - A `mosaica_id` that is not a decimal string, or a value that is not one of its field's
             - A member deleted after it was resolved, or one that names no item with a row
             - An unknown layer or level, or a layer whose membership is an attribute
             - A shape on a layer that declares none, none on one that does, the wrong kind, or one over the vertex cap
@@ -2730,7 +2730,7 @@ paths:
         The body is JSON, or an Arrow IPC stream as `application/vnd.apache.arrow.stream`. The
         Arrow form carries one row per artifact: `key` as `utf8`, `members` as `list<struct>` or
         `large_list<struct>` whose struct fields are the member table's columns, each named once:
-        `tessera_id` as `utf8`, `large_utf8` or an unsigned integer (as a read sends it), a unique
+        `mosaica_id` as `utf8`, `large_utf8` or an unsigned integer (as a read sends it), a unique
         field as `utf8` or `large_utf8` or, for an integer or timestamp field, as a signed or
         unsigned integer of any width. Any other type in those columns is `422`; any other column
         is ignored whatever its type. Optionally `view` as `utf8` and
@@ -2795,7 +2795,7 @@ paths:
             - `leaving` without a `rank`
             - `view` missing on a layer scoped to a group or present on another
             - A member table whose columns differ in length, or tables left with no identifying column
-            - A `tessera_id` that is not a decimal string, or a value that is not one of its field's
+            - A `mosaica_id` that is not a decimal string, or a value that is not one of its field's
             - A member deleted after it was resolved, or one that names no item with a row
             - A shape the layer does not take
             - A content without a generating set on a layer whose content requires every member visible
@@ -3708,8 +3708,8 @@ components:
       description: Only the sessions authorised through this provider.
       schema:
         type: string
-    TesseraId:
-      name: tessera_id
+    MosaicaId:
+      name: mosaica_id
       in: path
       required: true
       description: The item's or artifact's opaque identifier, a `u64` in decimal. It is a keyed permutation of the internal identity that blinds it, under a key generated when the bundle was built. It is stable across sessions and restarts, and a rebuilt bundle issues new ones. It is not encryption.
@@ -4472,7 +4472,7 @@ components:
                 items: { type: string }
         declared_scalars:
           type: array
-          description: The whole entity-scoped column schema, in declaration order. `render = true` columns arrive in the points frame after `tessera_id` and `code`, in this order, each named by its column; under a view of a group, that group's `render = true` families (`scoped_scalars`) follow. Read the columns by name. Every such column is nullable, and a point whose item has no value is null, except in a category, where no value is code 0.
+          description: The whole entity-scoped column schema, in declaration order. `render = true` columns arrive in the points frame after `mosaica_id` and `code`, in this order, each named by its column; under a view of a group, that group's `render = true` families (`scoped_scalars`) follow. Read the columns by name. Every such column is nullable, and a point whose item has no value is null, except in a category, where no value is code 0.
           items:
             $ref: "#/components/schemas/DeclaredScalar"
         scoped_scalars:
@@ -4766,7 +4766,7 @@ components:
             is a spatial layer's membership shape, the same for every principal served the
             artifact. `authored` is a supplied `polygon`, `circle` or `ellipse` content, served
             under that content's own requirement and also the same for every principal. A client
-            may keep a `predicate` or `authored` shape against a `tessera_id` across principals,
+            may keep a `predicate` or `authored` shape against a `mosaica_id` across principals,
             and may not keep a `derived` one. The geometry itself is `ArtifactResponse.shape` and
             the bulk read's `shape`.
           oneOf:
@@ -5006,16 +5006,16 @@ components:
             same under every value; only the columns change.
 
             Absent or `"full"` is every render column. A list names the render columns to serve:
-            each point is `tessera_id`, `code` and those columns, in the view's declaration order,
+            each point is `mosaica_id`, `code` and those columns, in the view's declaration order,
             followed by `highlighted` and the membership columns as under `"full"`. No other render
             column is read, so a map that colours by one column asks for that one and pays for
             nothing else; `[]` is position alone. A name that is not one of the view's render
             columns in `/v1/meta` is `422`. Fetch the rest of an item from `/v1/items`.
 
-            `"highlight"` is the same points as `(tessera_id, highlighted)`, the other columns
+            `"highlight"` is the same points as `(mosaica_id, highlighted)`, the other columns
             absent from the schema. Nine bytes a point. It is for a client that changed only its
             highlight and holds every point it needs; it joins the bits to its points by
-            `tessera_id`. When `x-mosaica-stale` moves, the held points may no longer be what the
+            `mosaica_id`. When `x-mosaica-stale` moves, the held points may no longer be what the
             same request serves, and the client asks again with its columns. Without a `highlight`
             it answers as `"full"`. Any other string is `422`.
           oneOf:
@@ -5069,7 +5069,7 @@ components:
           minimum: 0
           description: The most artifacts one level serves in one tile, at most `selection.max_artifacts_per_tile`.
         computed:
-          description: Which of each layer's declared `centroid` and `box` to serve. Absent is each layer's declaration, and `[]` is none, the artifacts still served and counted. It narrows and cannot widen. Any other word is `422`; a shape is read by `tessera_id`.
+          description: Which of each layer's declared `centroid` and `box` to serve. Absent is each layer's declaration, and `[]` is none, the artifacts still served and counted. It narrows and cannot widen. Any other word is `422`; a shape is read by `mosaica_id`.
           type: array
           items:
             type: string
@@ -5113,7 +5113,7 @@ components:
           minimum: 0
           description: The level to browse on a levelled layer (`stacked`, `tiered`). `422` on `flat`, `nested` and `dag`, which have one level, and on a level the layer does not hold, since a parameter accepted and ignored would give a wrong answer that looks right.
         parent:
-          description: The children form. The artifacts naming this one among their parents, with its own served parents in `parents`. A `tessera_id`, as a number or its decimal string. One that names nothing, one of another layer, one suppressed and one below this principal's criterion all answer an empty page.
+          description: The children form. The artifacts naming this one among their parents, with its own served parents in `parents`. A `mosaica_id`, as a number or its decimal string. One that names nothing, one of another layer, one suppressed and one below this principal's criterion all answer an empty page.
           oneOf:
             - type: integer
               minimum: 0
@@ -5153,9 +5153,9 @@ components:
 
     BrowseRow:
       type: object
-      required: [tessera_id, masked_count, rung, parent_ids, child_count, slot]
+      required: [mosaica_id, masked_count, rung, parent_ids, child_count, slot]
       properties:
-        tessera_id:
+        mosaica_id:
           type: string
           description: A decimal string, as every viewer-plane JSON identifier is, since a JavaScript number does not hold a `u64` exactly.
         key:
@@ -5275,7 +5275,7 @@ components:
         default, or `wgs84` on a view that declares a projection: degrees, densified before they
         are projected so each edge is straight in the plane it was declared in. `wgs84` on a view
         that projects nothing is `422`. Or `artifact`: a published shape named by its
-        `tessera_id`, answered from its stored membership under the artifact's own test. An
+        `mosaica_id`, answered from its stored membership under the artifact's own test. An
         artifact this principal would not be served, an identifier that names nothing, one on
         another view, and one whose layer draws an authored shape are an empty operand, one answer
         for every reason.
@@ -5375,7 +5375,7 @@ components:
         fields:
           type: array
           items: { type: string }
-          description: Declared fields to return, by name, each once. A group-scoped field may be pinned as `<field>@<key>`. Empty returns `tessera_id` alone.
+          description: Declared fields to return, by name, each once. A group-scoped field may be pinned as `<field>@<key>`. Empty returns `mosaica_id` alone.
         system_fields:
           type: array
           items:
@@ -5431,7 +5431,7 @@ components:
               minimum: 0
             - type: string
               pattern: "^[0-9]+$"
-          description: A `tessera_id`. Only the artifacts naming it among their parents. Not with `q`.
+          description: A `mosaica_id`. Only the artifacts naming it among their parents. Not with `q`.
         q:
           type: string
           description: Only artifacts whose key, or first served text content, contains this, ignoring case. Not with `parent`.
@@ -5443,7 +5443,7 @@ components:
                 minimum: 0
               - type: string
                 pattern: "^[0-9]+$"
-          description: "`tessera_id`s. Only the artifacts of `layer` they name that this principal is served. An identifier this principal is not served, and one naming nothing in the layer, have no row and are one answer."
+          description: "`mosaica_id`s. Only the artifacts of `layer` they name that this principal is served. An identifier this principal is not served, and one naming nothing in the layer, have no row and are one answer."
         filters:
           $ref: "#/components/schemas/FilterExpr"
         keep_unmatched:
@@ -5703,7 +5703,7 @@ components:
             artifacts:
               type: array
               minItems: 1
-              description: "`tessera_id`s, at most `selection.max_aggregate_named`."
+              description: "`mosaica_id`s, at most `selection.max_aggregate_named`."
               items:
                 oneOf:
                   - type: integer
@@ -5836,7 +5836,7 @@ components:
       properties:
         view:
           type: string
-          description: The view whose rows the count is taken over. Required, unlike on `/v1/items/{tessera_id}`, since a masked count is taken in one view's rows.
+          description: The view whose rows the count is taken over. Required, unlike on `/v1/items/{mosaica_id}`, since a masked count is taken in one view's rows.
         zoom:
           type: integer
           minimum: 0
@@ -5916,7 +5916,7 @@ components:
       type: object
       description: One row of a JSON ingest batch. The properties below are the route's own; any other key is a declared attribute, a group-scoped attribute of the view's group, or an enumerated layer's name.
       properties:
-        tessera_id:
+        mosaica_id:
           type: [string, "null"]
           pattern: "^[0-9]+$"
           description: The item the row names, as a string of decimal digits. It must name a live or suppressed item.
@@ -5953,7 +5953,7 @@ components:
     IngestResponse:
       type: object
       additionalProperties: false
-      required: [rows, created, edited, added, unchanged, over_bound, over_bound_rows, clipped, clamped, tessera_ids, refused, minted, joined, publication]
+      required: [rows, created, edited, added, unchanged, over_bound, over_bound_rows, clipped, clamped, mosaica_ids, refused, minted, joined, publication]
       properties:
         rows:
           type: integer
@@ -5994,9 +5994,9 @@ components:
           type: integer
           minimum: 0
           description: Rows whose coordinates lay outside the view's extent and were stored on its edge.
-        tessera_ids:
+        mosaica_ids:
           type: array
-          description: One `tessera_id` per row in the order sent, as a string of decimal digits, for the item the row created or named, and `null` for a refused row. A replay answers the original ids.
+          description: One `mosaica_id` per row in the order sent, as a string of decimal digits, for the item the row created or named, and `null` for a refused row. A replay answers the original ids.
           items:
             type: [string, "null"]
             pattern: "^[0-9]+$"
@@ -6039,20 +6039,20 @@ components:
 
     AddressRow:
       type: object
-      description: "One item, named by its `tessera_id` and the values of fields declared unique, keyed by column. Every value names the item that holds it; a row naming no item, or two, is refused. A key that is neither `tessera_id` nor a unique field names nothing: it is ignored, as a build ignores it, and the answer lists it in `ignored_columns`. A request none of whose rows carries an identifying key is `422`."
+      description: "One item, named by its `mosaica_id` and the values of fields declared unique, keyed by column. Every value names the item that holds it; a row naming no item, or two, is refused. A key that is neither `mosaica_id` nor a unique field names nothing: it is ignored, as a build ignores it, and the answer lists it in `ignored_columns`. A request none of whose rows carries an identifying key is `422`."
       properties:
-        tessera_id:
+        mosaica_id:
           type: [string, "null"]
           pattern: "^[0-9]+$"
-          description: The item's `tessera_id`, as a string of decimal digits; a JSON number is `422`.
+          description: The item's `mosaica_id`, as a string of decimal digits; a JSON number is `422`.
       additionalProperties:
         description: A value of the unique field the key names. A keyword is a string, and a number is `422`; an integer or a timestamp is a number or a string of decimal digits. `null` names nothing. Any other value in a unique field's column is `422`; a key that is not a unique field takes any value.
 
     MemberTable:
       type: object
-      description: "Members, one row per member, as columns of equal length keyed by `tessera_id` and unique field names; a cell is as in an `AddressRow`, and `null` where that column does not name the row's member. `{}` holds no member. Columns of different lengths are `422`. A key that is neither `tessera_id` nor a unique field is ignored and listed in `ignored_columns`; a request whose tables are left with no identifying column is `422`."
+      description: "Members, one row per member, as columns of equal length keyed by `mosaica_id` and unique field names; a cell is as in an `AddressRow`, and `null` where that column does not name the row's member. `{}` holds no member. Columns of different lengths are `422`. A key that is neither `mosaica_id` nor a unique field is ignored and listed in `ignored_columns`; a request whose tables are left with no identifying column is `422`."
       properties:
-        tessera_id:
+        mosaica_id:
           type: array
           items:
             type: [string, "null"]
@@ -6064,7 +6064,7 @@ components:
 
     IgnoredColumns:
       type: array
-      description: The keys of the request's `match`es or member tables that are neither `tessera_id` nor a unique field, which named nothing and were ignored, each once.
+      description: The keys of the request's `match`es or member tables that are neither `mosaica_id` nor a unique field, which named nothing and were ignored, each once.
       items:
         type: string
 
@@ -6103,8 +6103,8 @@ components:
 
     RefusalReason:
       type: string
-      enum: [names_two_items, unknown_tessera_id, names_no_item, one_item_twice, one_value_twice]
-      description: "`names_two_items`: the row's values name more than one item. `unknown_tessera_id`: its `tessera_id` names no live or suppressed item. `names_no_item`: its values name no item, in a request or a row that creates none. `one_item_twice`: an earlier kept row names the same item. `one_value_twice`: an earlier kept row sets the same unique value. Rows are decided in row order against the rows kept before them, so a refused row refuses no later row. Where two reasons apply to one row the first in this order is given: `unknown_tessera_id`, `names_two_items`, `names_no_item`, `one_item_twice`, `one_value_twice`."
+      enum: [names_two_items, unknown_mosaica_id, names_no_item, one_item_twice, one_value_twice]
+      description: "`names_two_items`: the row's values name more than one item. `unknown_mosaica_id`: its `mosaica_id` names no live or suppressed item. `names_no_item`: its values name no item, in a request or a row that creates none. `one_item_twice`: an earlier kept row names the same item. `one_value_twice`: an earlier kept row sets the same unique value. Rows are decided in row order against the rows kept before them, so a refused row refuses no later row. Where two reasons apply to one row the first in this order is given: `unknown_mosaica_id`, `names_two_items`, `names_no_item`, `one_item_twice`, `one_value_twice`."
 
     ChangesApplied:
       type: object
@@ -6686,11 +6686,11 @@ components:
     LayerRegistered:
       type: object
       additionalProperties: false
-      required: [name, tessera_id, publication]
+      required: [name, mosaica_id, publication]
       properties:
         name:
           type: string
-        tessera_id:
+        mosaica_id:
           type: string
           pattern: "^[0-9]+$"
           description: The layer's own identifier, the address `POST /control/changes` suppresses the layer by.
@@ -6823,11 +6823,11 @@ components:
           items:
             type: object
             additionalProperties: false
-            required: [key, tessera_id]
+            required: [key, mosaica_id]
             properties:
               key:
                 type: [string, "null"]
-              tessera_id:
+              mosaica_id:
                 type: string
                 pattern: "^[0-9]+$"
                 description: The artifact's identifier, the held artifact's own where the key was held.
@@ -7029,11 +7029,11 @@ components:
           items:
             type: object
             additionalProperties: false
-            required: [key, tessera_id, joined, filled, left]
+            required: [key, mosaica_id, joined, filled, left]
             properties:
               key:
                 type: string
-              tessera_id:
+              mosaica_id:
                 type: string
                 pattern: "^[0-9]+$"
               joined:

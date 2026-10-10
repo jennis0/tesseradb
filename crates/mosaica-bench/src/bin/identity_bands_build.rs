@@ -1,18 +1,18 @@
 //! Build the identity-band structures for one segment, so the probe beside this can price them.
 //!
-//! A whole-map viewport needs, per tile, how many visible rows carry a `tessera_id` below the
+//! A whole-map viewport needs, per tile, how many visible rows carry a `mosaica_id` below the
 //! depth's cut and which the smallest of them are (architecture §7.2). Every shipped route reads
 //! the 8 B/row identity column to answer it. The structures written here are the candidates for
 //! answering it without that read, and the measurement they exist for is
 //! `probes/2026-09-14-identity-bands/`. **Nothing here ships**: this is a probe input, written
 //! beside a bundle and never into one, and no bundle format knows about these files.
 //!
-//! One sequential pass over `tessera_id` and `morton.u32` in lockstep, through the store's own
+//! One sequential pass over `mosaica_id` and `morton.u32` in lockstep, through the store's own
 //! readers, writing:
 //!
 //! | file | content |
 //! |---|---|
-//! | `lz.u8` | one byte a row, `tessera_id.leading_zeros()` (0..=64) |
+//! | `lz.u8` | one byte a row, `mosaica_id.leading_zeros()` (0..=64) |
 //! | `fp16.u16` | two bytes a row, the quantised identity prefix — see [`fp16_of`] |
 //! | `top-J.bin` | `(row: u32, id: u64, code: u32)`, 16 B, for every row with `lz >= J`, row order |
 //! | `cell-codes.u32` | one `u32` a cell, `morton[cuts[i]]` |
@@ -131,7 +131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect::<Result<_, _>>()?;
 
     let mut histogram = [0u64; 65];
-    let ids = columns.tessera_id();
+    let ids = columns.mosaica_id();
     let codes = morton.u32();
     for row in 0..row_count as usize {
         let id = ids[row];

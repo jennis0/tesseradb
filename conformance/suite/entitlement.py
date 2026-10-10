@@ -241,7 +241,7 @@ class _Row(NamedTuple):
     """One served point, keyed for the residual check by its full column tuple."""
 
     key: tuple
-    tessera_id: int
+    mosaica_id: int
     code: int
     fx: int
 
@@ -271,7 +271,7 @@ def _points_table(canon: Streamed, label: str, reasons: list[str]) -> pa.Table |
     table = _tables(canon.points)
     if table is None:
         return None
-    for required in ("tessera_id", "code", FX_COLUMN):
+    for required in ("mosaica_id", "code", FX_COLUMN):
         if required not in table.schema.names:
             reasons.append(f"{label}: points schema lacks `{required}` — cannot attribute rows")
             return None
@@ -293,9 +293,9 @@ def _rows_at(table: pa.Table, positions: np.ndarray) -> list[_Row]:
     taken = table.take(pa.array(positions, pa.int64()))
     names = taken.schema.names
     columns = [taken.column(name).to_pylist() for name in names]
-    ti, ci, fi = names.index("tessera_id"), names.index("code"), names.index(FX_COLUMN)
+    ti, ci, fi = names.index("mosaica_id"), names.index("code"), names.index(FX_COLUMN)
     return [
-        _Row(key=values, tessera_id=values[ti], code=values[ci], fx=values[fi])
+        _Row(key=values, mosaica_id=values[ti], code=values[ci], fx=values[fi])
         for values in zip(*columns)
     ]
 
@@ -324,12 +324,12 @@ def _split_rows(tb: pa.Table, ta: pa.Table) -> tuple[np.ndarray, np.ndarray, boo
     answer, computed without decoding either recording.
 
     A row is *removed* when its full column tuple is absent from the other side, which — given a
-    unique served identity — is exactly "no row there carries this `tessera_id`, or one does and
+    unique served identity — is exactly "no row there carries this `mosaica_id`, or one does and
     some column differs". Both halves are set operations over the identity column and a
     columnwise comparison at the matched positions, so nothing is decoded but the rows that
     actually moved.
 
-    **Returns `None` rather than an answer when `tessera_id` is not unique in either recording**,
+    **Returns `None` rather than an answer when `mosaica_id` is not unique in either recording**,
     because the identity join above is then not the tuple semantics: two rows sharing an identity
     would match one position and hide the other. The contract makes the served identity unique
     per recording, so this is a guard against a defect, not a supported shape — and declining
@@ -338,7 +338,7 @@ def _split_rows(tb: pa.Table, ta: pa.Table) -> tuple[np.ndarray, np.ndarray, boo
     """
     if ta.schema.names != tb.schema.names:
         return None
-    identity = (tb.column("tessera_id"), ta.column("tessera_id"))
+    identity = (tb.column("mosaica_id"), ta.column("mosaica_id"))
     # An identity that is not a non-null integer cannot key the join: a null decodes to NaN and
     # compares unequal to itself, and a non-integer decodes to an object array whose sortedness
     # says nothing. Both are contract violations rather than shapes to support, so decline into
@@ -388,7 +388,7 @@ def _resolve_ids(analysed: dict, wanted: set[int]) -> list[_Row]:
         for table in vd.tables:
             if table is None:
                 continue
-            column = table.column("tessera_id")
+            column = table.column("mosaica_id")
             mask = pc.is_in(column, value_set=want.cast(column.type))
             out.extend(_rows_at(table, np.flatnonzero(mask.to_numpy(zero_copy_only=False))))
     return out
@@ -487,7 +487,7 @@ def _analyse_viewport(
         removed, added, residual_ok = _rows_by_tuple(rows_before, rows_after)
 
     # The residual must be identical *in order*: contracts §3.2 orders points ascending by
-    # `tessera_id` within each tile, so an unexplained reordering is a defect, never noise.
+    # `mosaica_id` within each tile, so an unexplained reordering is a defect, never noise.
     if not residual_ok:
         reasons.append(
             f"{label}: beyond the {len(added)} added / {len(removed)} removed rows, the "
@@ -678,17 +678,17 @@ def diff(before: Recorded, after: Recorded) -> Delta | CappedDelta | Uncheckable
     # served row. The distinction is not academic at endurance scale: the full form decodes
     # millions of rows to answer a few hundred questions.
     code_of_fx: dict[int, int] = {}
-    fx_of_tessera: dict[int, int] = {}
+    fx_of_mosaica: dict[int, int] = {}
     for vd in analysed.values():
         for row in (*vd.removed, *vd.added):
             code_of_fx[row.fx] = row.code
-            fx_of_tessera[row.tessera_id] = row.fx
-    for row in _resolve_ids(analysed, {q.tessera_id for q in before if isinstance(q, Item)}):
+            fx_of_mosaica[row.mosaica_id] = row.fx
+    for row in _resolve_ids(analysed, {q.mosaica_id for q in before if isinstance(q, Item)}):
         # A moved row's own code wins: an item that both moved and is drilled into is described
         # by the recording that changed, which is what the full form's before-then-after order
         # also yielded.
         code_of_fx.setdefault(row.fx, row.code)
-        fx_of_tessera.setdefault(row.tessera_id, row.fx)
+        fx_of_mosaica.setdefault(row.mosaica_id, row.fx)
 
     # -- membership evidence (module doc): untruncated tiles of every viewport — an unfiltered
     # one's complete tile is the visible set, a filtered one's the matched set, and a matched
@@ -714,10 +714,10 @@ def diff(before: Recorded, after: Recorded) -> Delta | CappedDelta | Uncheckable
         status_before = payload_before["status"] if payload_before else None
         status_after = payload_after["status"] if payload_after else None
         if (status_before, status_after) in ((200, 404), (404, 200)):
-            fx = fx_of_tessera.get(q.tessera_id)
+            fx = fx_of_mosaica.get(q.mosaica_id)
             if fx is None:
                 reasons.append(
-                    f"item {q.tessera_id} flipped {status_before} -> {status_after} but no "
+                    f"item {q.mosaica_id} flipped {status_before} -> {status_after} but no "
                     f"recorded viewport ever served it — the flip cannot be attributed to any "
                     f"item identity"
                 )
@@ -817,16 +817,16 @@ def diff(before: Recorded, after: Recorded) -> Delta | CappedDelta | Uncheckable
     # Drill-down consistency in both directions: a stable item may not sit in an evidenced set,
     # a flipped item may not contradict one, and a body may not move under a stable status.
     for q, (payload_before, payload_after) in item_payloads.items():
-        fx = fx_of_tessera.get(q.tessera_id)
+        fx = fx_of_mosaica.get(q.mosaica_id)
         if payload_before == payload_after:
             if fx in vanished and payload_before and payload_before["status"] == 200:
                 reasons.append(
-                    f"item {q.tessera_id} (fx {fx:#x}) vanished from the viewports but its "
+                    f"item {q.mosaica_id} (fx {fx:#x}) vanished from the viewports but its "
                     f"drill-down still answers 200"
                 )
             if fx in appeared and payload_before and payload_before["status"] == 404:
                 reasons.append(
-                    f"item {q.tessera_id} (fx {fx:#x}) appeared in the viewports but its "
+                    f"item {q.mosaica_id} (fx {fx:#x}) appeared in the viewports but its "
                     f"drill-down still answers 404"
                 )
             continue
@@ -835,18 +835,18 @@ def diff(before: Recorded, after: Recorded) -> Delta | CappedDelta | Uncheckable
         if status_before == 200 and status_after == 404:
             if fx in appeared:
                 reasons.append(
-                    f"item {q.tessera_id} (fx {fx:#x}) flipped 200 -> 404 while complete "
+                    f"item {q.mosaica_id} (fx {fx:#x}) flipped 200 -> 404 while complete "
                     f"evidence shows it appearing"
                 )
         elif status_before == 404 and status_after == 200:
             if fx in vanished:
                 reasons.append(
-                    f"item {q.tessera_id} (fx {fx:#x}) flipped 404 -> 200 while complete "
+                    f"item {q.mosaica_id} (fx {fx:#x}) flipped 404 -> 200 while complete "
                     f"evidence shows it vanishing"
                 )
         else:
             reasons.append(
-                f"item {q.tessera_id} changed its body without changing status "
+                f"item {q.mosaica_id} changed its body without changing status "
                 f"({status_before} -> {status_after}) — a record field moved under a stable item"
             )
 

@@ -75,11 +75,11 @@ def test_a_filtered_set_against_a_reference(db):
 
 
 def test_the_artifacts_of_a_layer(db):
-    """Five clusters of four papers each, keyed by their `tessera_id`s as the artifacts read
+    """Five clusters of four papers each, keyed by their `mosaica_id`s as the artifacts read
     gives them."""
     (clusters,) = db.aggregate("map", [{"by": {"layer": "clusters", "top": 5}}])
     assert [r["count"] for r in rows(clusters)] == [4] * 5
-    ids = db.artifacts("map", "clusters", []).column("tessera_id").to_pylist()
+    ids = db.artifacts("map", "clusters", []).column("mosaica_id").to_pylist()
     assert sorted(clusters.column("key").to_pylist()) == sorted(ids)
 
 
@@ -103,7 +103,7 @@ def test_a_layer_row_is_titled_with_the_name_browse_gives(served, corpus):
     listed = [r for r in rows(named) if r["group"] == "listed"]
     assert [(r["title"], r["count"]) for r in listed] == [("Alpha", 6), ("Beta", 4)]
     browsed = db.viewer().browse_artifacts("map", "named")["artifacts"]
-    assert {r["key"]: r["title"] for r in listed} == {int(r["tessera_id"]): r["name"] for r in browsed}
+    assert {r["key"]: r["title"] for r in listed} == {int(r["mosaica_id"]): r["name"] for r in browsed}
 
 
 def test_a_selection_counts_what_count_counts(db):

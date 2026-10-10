@@ -1,4 +1,4 @@
-//! **Ingest rows without coordinates**: rows naming items that exist, by `tessera_id` or by the
+//! **Ingest rows without coordinates**: rows naming items that exist, by `mosaica_id` or by the
 //! value of the unique `id`, carrying only the values they change, in JSON by default and Arrow by
 //! content type. Such a row edits the item it names and places it nowhere new; one naming no item creates
 //! nothing and is refused. What this file pins is the wire: the counts each answer carries, the two
@@ -81,13 +81,13 @@ async fn declare(served: &Served, body: Value) {
     );
 }
 
-/// Ingest one point holding `id` and answer its `tessera_id`. The runtime columns [`serve`]
+/// Ingest one point holding `id` and answer its `mosaica_id`. The runtime columns [`serve`]
 /// declares are null, since a later row sets them.
 async fn ingest_point(served: &Served, batch_id: &str, id: u64) -> u64 {
     ingest_point_with(served, batch_id, json!({"id": id})).await
 }
 
-/// Ingest one point with `columns` added to the row, and answer its `tessera_id`.
+/// Ingest one point with `columns` added to the row, and answer its `mosaica_id`.
 async fn ingest_point_with(served: &Served, batch_id: &str, columns: Value) -> u64 {
     let mut row = json!({
         "x": 500.0,
@@ -154,7 +154,7 @@ fn arrow_values(id: u64, tag: &str) -> Vec<u8> {
     writer.into_inner().unwrap()
 }
 
-/// The drill-down's fields for one `tessera_id`, by name.
+/// The drill-down's fields for one `mosaica_id`, by name.
 async fn item_fields(served: &Served, id: u64) -> Value {
     let token = token_for(&served.server, &["0", "1"][..]).await;
     let resp = served
@@ -196,7 +196,7 @@ async fn rows_without_coordinates_edit_restate_and_create_nothing() {
     assert_eq!(
         ingested_ids(&answer),
         vec![id],
-        "the item keeps its tessera_id"
+        "the item keeps its mosaica_id"
     );
     tick(&served.server).await;
 
@@ -247,7 +247,7 @@ async fn rows_without_coordinates_edit_restate_and_create_nothing() {
         json!([{ "row": 0, "reason": "names_no_item" }]),
         "the refusal names the row and not the id: {answer}"
     );
-    assert_eq!(answer["tessera_ids"], json!([null]), "{answer}");
+    assert_eq!(answer["mosaica_ids"], json!([null]), "{answer}");
     assert_eq!(answer["created"], 0, "{answer}");
 }
 
@@ -445,9 +445,9 @@ async fn the_two_encodings_land_identical_values() {
     assert_eq!(answer["unchanged"], 1, "{answer}");
 }
 
-/// **A row may name its item by `tessera_id`**, on `/control/changes`' rule.
+/// **A row may name its item by `mosaica_id`**, on `/control/changes`' rule.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_row_may_name_its_entity_by_tessera_id() {
+async fn a_row_may_name_its_entity_by_mosaica_id() {
     let served = serve().await;
     let id = ingest_point(&served, "points-1", SUBJECT).await;
     tick(&served.server).await;
@@ -456,17 +456,17 @@ async fn a_row_may_name_its_entity_by_tessera_id() {
         &served,
         "values-1",
         Some("s0"),
-        json!([{"tessera_id": id.to_string(), "tag": "alpha"}]),
+        json!([{"mosaica_id": id.to_string(), "tag": "alpha"}]),
     )
     .await;
     assert_eq!(status, 200, "{answer}");
     assert_eq!(answer["edited"], 1);
 }
 
-/// One Arrow batch of one row naming its item by `tessera_id`.
-fn arrow_values_by_tessera_id(id: u64, tag: &str) -> Vec<u8> {
+/// One Arrow batch of one row naming its item by `mosaica_id`.
+fn arrow_values_by_mosaica_id(id: u64, tag: &str) -> Vec<u8> {
     let schema = Arc::new(Schema::new(vec![
-        Field::new("tessera_id", DataType::Utf8, true),
+        Field::new("mosaica_id", DataType::Utf8, true),
         Field::new("tag", DataType::Utf8, true),
     ]));
     let batch = RecordBatch::try_new(
@@ -482,9 +482,9 @@ fn arrow_values_by_tessera_id(id: u64, tag: &str) -> Vec<u8> {
     writer.into_inner().unwrap()
 }
 
-/// An Arrow row names its entity by `tessera_id` as a JSON row does.
+/// An Arrow row names its entity by `mosaica_id` as a JSON row does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_arrow_row_addressed_by_tessera_id_fills_its_cell() {
+async fn an_arrow_row_addressed_by_mosaica_id_fills_its_cell() {
     let served = serve().await;
     let id = ingest_point(&served, "points-1", SUBJECT).await;
     tick(&served.server).await;
@@ -497,7 +497,7 @@ async fn an_arrow_row_addressed_by_tessera_id_fills_its_cell() {
         .header("x-mosaica-batch-id", "values-arrow")
         .header("x-mosaica-view", "s0")
         .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(arrow_values_by_tessera_id(id, "alpha"))
+        .body(arrow_values_by_mosaica_id(id, "alpha"))
         .send()
         .await
         .unwrap();
@@ -522,7 +522,7 @@ async fn a_row_naming_its_item_by_both_forms_or_neither() {
         &served,
         "values-both",
         Some("s0"),
-        json!([{"id": SUBJECT, "tessera_id": id.to_string(),
+        json!([{"id": SUBJECT, "mosaica_id": id.to_string(),
                 "tag": "alpha"}]),
     )
     .await;

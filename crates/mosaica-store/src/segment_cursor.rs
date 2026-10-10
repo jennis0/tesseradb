@@ -57,11 +57,11 @@ impl SegmentCursor {
         morton.advise_sequential();
         columns.advise_sequential();
         let rows = morton.len();
-        if rows != columns.tessera_id().len() || rows != columns.residual().len() {
+        if rows != columns.mosaica_id().len() || rows != columns.residual().len() {
             return Err(StoreError::MalformedBundle {
                 detail: format!(
                     "{op}: segment '{seg_id}' has {rows} codes against {} identities",
-                    columns.tessera_id().len()
+                    columns.mosaica_id().len()
                 ),
             });
         }
@@ -123,14 +123,14 @@ impl SegmentCursor {
     ) -> Result<mosaica_types::EntityId> {
         self.entities.entity_of(
             self.row as u32,
-            self.columns.tessera_id()[self.row],
+            self.columns.mosaica_id()[self.row],
             key,
             shard_id,
             &self.seg_id,
         )
     }
 
-    /// This cursor's current `(morton, tessera_id)`, or `None` once it is spent.
+    /// This cursor's current `(morton, mosaica_id)`, or `None` once it is spent.
     ///
     /// `MortonSlice::load` verified the codes ascend, so the sequence a cursor offers is
     /// non-decreasing and the heap's output is sorted — the property
@@ -139,7 +139,7 @@ impl SegmentCursor {
         (self.row < self.rows).then(|| {
             (
                 self.morton.u32()[self.row],
-                self.columns.tessera_id()[self.row],
+                self.columns.mosaica_id()[self.row],
             )
         })
     }

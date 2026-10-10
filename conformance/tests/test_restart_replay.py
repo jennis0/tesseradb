@@ -323,7 +323,7 @@ def test_no_acked_operation_is_lost_when_the_unsynced_tail_is_discarded(
         delete_entity, suppress_a, suppress_b = sorted(base_mask)[:3]
 
         def item(entity_id: int, op: str) -> dict:
-            return {"op": op, "match": {"tessera_id": str(oracle_bundle.tessera_id_of(entity_id))}}
+            return {"op": op, "match": {"mosaica_id": str(oracle_bundle.mosaica_id_of(entity_id))}}
 
         resp = srv.changes(
             [item(delete_entity, "delete"), item(suppress_a, "suppress"), item(suppress_b, "suppress")],
@@ -435,7 +435,7 @@ def test_deny_ops_and_ingest_survive_a_sigkill_restart(catalogue_bundle_root: Pa
         delete_entity, suppress_entity_a, suppress_entity_b = ordered[0], ordered[1], ordered[2]
 
         def item(entity_id: int, op: str) -> dict:
-            return {"op": op, "match": {"tessera_id": str(oracle_bundle.tessera_id_of(entity_id))}}
+            return {"op": op, "match": {"mosaica_id": str(oracle_bundle.mosaica_id_of(entity_id))}}
 
         resp = srv.changes(
             [
@@ -503,7 +503,7 @@ def test_deny_ops_and_ingest_survive_a_sigkill_restart(catalogue_bundle_root: Pa
             # acceptance gave.
             assert replay_body["created"] == 0, replay_body
             assert replay_body["replayed"] is True, replay_body
-            assert replay_body["tessera_ids"] == ingest_body["tessera_ids"], replay_body
+            assert replay_body["mosaica_ids"] == ingest_body["mosaica_ids"], replay_body
 
             status_after_replay_ingest = srv2.status()
             assert (

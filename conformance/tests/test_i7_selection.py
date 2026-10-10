@@ -2,7 +2,7 @@
 
 **I7: sampling happens after masking, never before.** The sample of an authorised set is not the
 authorised portion of a global sample. §7.2 gives the definition — floor ∪ threshold ∪ cap over
-`tessera_id`, every rank and every count taken over `vis(T)` — and `oracle/viewport.py` is that
+`mosaica_id`, every rank and every count taken over `vis(T)` — and `oracle/viewport.py` is that
 definition written out literally. This module puts the two side by side across the catalogue ×
 depths × `k`.
 
@@ -13,7 +13,7 @@ Four tests, and the last is the one that makes the others mean anything:
    contains it (§7.2's nesting argument, which is what makes a zoom not flicker);
 3. **the cap**, against a server whose `K_max` is small enough to bind — every other run in this
    suite leaves `cap = min(k, K_max)` reducing to `k`, so the clause is otherwise dead;
-4. **the negative control** — a first-`k` stub that ignores `tessera_id` ordering, and proof that
+4. **the negative control** — a first-`k` stub that ignores `mosaica_id` ordering, and proof that
    the differential *disagrees* with it. A differential that passes against a deliberately wrong
    implementation is not testing anything, and this is the cheapest possible check that it is live.
 
@@ -32,7 +32,7 @@ Exact equality, and **as ordered lists** rather than sets or multisets. A set co
 absorb an engine bug that dropped one of two entities sharing rounded coordinates in a tile while
 duplicating the other; a multiset comparison catches that but still discards the order — and the
 order is contract, not presentation. Contracts §2.6 makes the points batch ascending by
-`tessera_id` within each tile, and §7.2's nesting argument depends on the served set being a
+`mosaica_id` within each tile, and §7.2's nesting argument depends on the served set being a
 *prefix*, so a client that truncates to its own budget forfeits nesting the moment the payload
 arrives unsorted. Both sides are already in ascending order, so list equality is strictly stronger
 at no cost — an engine draining a bounded heap without a final sort passes a multiset comparison
@@ -183,7 +183,7 @@ def test_i7_selection_differential(
                     f"depth {depth}, k={k}, θ {theta}. Engine served {served_n} of {visible} "
                     f"visible; the definition serves {len(expected)}. Compared as ordered lists: "
                     f"a disagreement here can be membership OR order, and contracts §2.6 makes "
-                    f"the order (ascending tessera_id within a tile) part of the payload."
+                    f"the order (ascending mosaica_id within a tile) part of the payload."
                 )
                 assert served_n == len(expected), (
                     f"{case.name}: the tile batch's `served` column says {served_n} but the "
@@ -205,7 +205,7 @@ def test_i7_selection_differential(
 
     # Every non-empty case must truncate *somewhere*, or its point-set comparison degenerated to
     # "serve everything visible" and could not distinguish a correct selection from one that
-    # ignores `tessera_id` entirely. `single_item` is the honest exception: one visible entity can
+    # ignores `mosaica_id` entirely. `single_item` is the honest exception: one visible entity can
     # never exceed a cap of 2.
     if case.name != "single_item":
         assert truncating_tiles > 0, (
@@ -227,7 +227,7 @@ def test_i7_selection_nests_across_zoom(catalogue_bundle: Bundle, catalogue_dens
 
     This is the property that makes zooming in *reveal* rather than reshuffle. §7.2 proves it from
     three facts — ranks fall under a subset, θ is monotone in depth, and each clause is a
-    `tessera_id`-order prefix — and it holds **for a fixed `cap`**, which is why `k` is held
+    `mosaica_id`-order prefix — and it holds **for a fixed `cap`**, which is why `k` is held
     constant across the two depths here. A client that reduced `k` while zooming in would forfeit
     nesting; that is a client obligation the engine cannot enforce, so the test does not ask it to.
 
@@ -340,13 +340,13 @@ def test_k_max_binds_and_is_not_the_max_k_knob(catalogue_bundle: Bundle, catalog
 def test_the_differential_disagrees_with_a_first_k_stub(catalogue_bundle: Bundle, catalogue_server):
     """The negative control: prove the differential can fail.
 
-    `Selection.first_k_rows` serves §7.2's *count* in **storage order** instead of `tessera_id`
+    `Selection.first_k_rows` serves §7.2's *count* in **storage order** instead of `mosaica_id`
     order — the pre-2026-07-30 placeholder sampler. Every tile count, every `served` column and
     every response length is identical; only the membership differs. If the differential above
     could not tell the two apart it would be checking arithmetic and calling it I7.
 
     The stub is worth the eight lines it costs for a second reason: storage order is `(morton,
-    tessera_id)`, and `tessera_id` is a keyed permutation of `(shard_id, entity_id)` where
+    mosaica_id)`, and `mosaica_id` is a keyed permutation of `(shard_id, entity_id)` where
     `entity_id` is assigned in **term-signature order** (§11.1, permanent under I9). So "first `m`
     in storage order" is, within a tile, ordered by permission signature — which is exactly the
     disclosure §7.2 r21 records having found and removed. The stub is not an arbitrary wrong
@@ -384,7 +384,7 @@ def test_the_differential_disagrees_with_a_first_k_stub(catalogue_bundle: Bundle
         "too few tiles to draw a conclusion from; check the fixture and the depth"
     )
     # Not "at least one": a differential that caught the stub on a single tile out of a thousand
-    # would be a coincidence, not a live check. Storage order and `tessera_id` order are unrelated
+    # would be a coincidence, not a live check. Storage order and `mosaica_id` order are unrelated
     # permutations, so on a truncating tile they agree only by chance.
     assert disagreed_with_stub > agreed_with_definition // 2, (
         f"the differential agreed with a deliberately wrong first-k stub on "

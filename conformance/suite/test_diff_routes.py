@@ -32,15 +32,15 @@ from .entitlement import _rows_at, _rows_by_tuple, _split_rows
 
 #: Wide enough to carry a null-bearing column of each kind the render columns actually use — the
 #: null semantics are where the two routes diverge if `_column_equal` is wrong.
-COLUMNS = ("tessera_id", "code", "fx_key", "weight", "seen_at", "bay")
+COLUMNS = ("mosaica_id", "code", "fx_key", "weight", "seen_at", "bay")
 
 
 def _table(rows: list[tuple]) -> pa.Table:
-    """A points table from `(tessera_id, code, fx, weight, seen_at, bay)` tuples, nulls allowed
+    """A points table from `(mosaica_id, code, fx, weight, seen_at, bay)` tuples, nulls allowed
     in the three non-identity columns."""
     return pa.table(
         {
-            "tessera_id": pa.array([r[0] for r in rows], pa.uint64()),
+            "mosaica_id": pa.array([r[0] for r in rows], pa.uint64()),
             "code": pa.array([r[1] for r in rows], pa.uint64()),
             "fx_key": pa.array([r[2] for r in rows], pa.uint64()),
             "weight": pa.array([r[3] for r in rows], pa.float64()),
@@ -171,7 +171,7 @@ def test_a_reorder_that_preserves_the_set_is_reported_as_a_reorder():
 
 
 def test_a_duplicated_identity_makes_the_vectorised_route_decline():
-    """Two rows sharing a `tessera_id` break the join the fast route is built on, so it must
+    """Two rows sharing a `mosaica_id` break the join the fast route is built on, so it must
     refuse rather than match one of them and silently drop the other. The reference route still
     answers, so the defect is caught — slowly, which is the right trade for a shape the contract
     forbids.

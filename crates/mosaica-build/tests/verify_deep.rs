@@ -375,7 +375,7 @@ fn the_partition_route_and_the_window_route_agree() {
     .expect("the partition route accepts the same bundle deep");
     assert_eq!(deep.shallow.rows, window.rows);
 
-    // One `tessera_id` of the *base* segment is replaced by another entity's, so the row is
+    // One `mosaica_id` of the *base* segment is replaced by another entity's, so the row is
     // claimed — surjectivity still holds — and what refuses is the derivation. The base is the
     // segment where the comparison is between two artefacts rather than a restatement of the
     // extent inversion the open performs.
@@ -388,7 +388,7 @@ fn the_partition_route_and_the_window_route_agree() {
         .column(0)
         .as_any()
         .downcast_ref::<UInt64Array>()
-        .expect("column 0 is the u64 tessera_id");
+        .expect("column 0 is the u64 mosaica_id");
     let mut values: Vec<u64> = ids.values().to_vec();
     assert!(values.len() >= 2 && values[0] != values[1]);
     values[0] = values[1];

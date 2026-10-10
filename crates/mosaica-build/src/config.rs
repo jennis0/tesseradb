@@ -616,7 +616,7 @@ struct VocabularyBlock {
 #[serde(deny_unknown_fields)]
 struct AttributeBlock {
     /// The column's name, which filters and `/v1/categories/{column}` use. ASCII letters, digits,
-    /// `_` and `-`, unique among attributes. `tessera_id`, `residual`, `x`, `y`,
+    /// `_` and `-`, unique among attributes. `mosaica_id`, `residual`, `x`, `y`,
     /// `access`, `node_id`, `record`, `all_of`, `any_of`, `none_of`, `region`, `member_of` and
     /// `highlighted` are refused.
     name: String,

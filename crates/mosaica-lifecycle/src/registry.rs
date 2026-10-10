@@ -1009,7 +1009,7 @@ impl LayerRegistry {
     /// treated as an update: an edit is a delete plus a re-ingest (decision 0047), and the delete
     /// half is the write cycle's edit pass, which is a later stage's work. Silently replacing would
     /// be the fail-open reading — it would strand the old artifact's entity while callers still
-    /// hold its `tessera_id`, so a suppression against the thing they were shown would land on
+    /// hold its `mosaica_id`, so a suppression against the thing they were shown would land on
     /// nothing. The control plane's `PUT` partitions a batch before it reaches here
     /// ([`prepare_put`]), so a held key is compared under the fill rule there and this refusal is
     /// the ingest route's mint pass's, where a held key means a resolution went wrong.
@@ -3708,7 +3708,7 @@ mod tests {
     fn a_key_already_in_the_level_or_repeated_in_the_batch_is_refused() {
         // Append-only: an edit is a delete plus a re-publish (decision 0047), and silently
         // replacing would strand the old artifact's entity while callers still hold its
-        // `tessera_id` — so a suppression against what they were shown would land on nothing.
+        // `mosaica_id` — so a suppression against what they were shown would land on nothing.
         let mut reg = LayerRegistry::new();
         let mut store = ArtifactStore::new();
         let mut alloc = Allocator::new(0);
@@ -3859,7 +3859,7 @@ mod tests {
     #[test]
     fn replay_lands_a_publication_where_it_was_acked() {
         // The durability contract, on `replay_applies_the_recorded_ids_rather_than_reallocating`'s
-        // argument: an artifact must come back on the entity its `tessera_id` was minted from,
+        // argument: an artifact must come back on the entity its `mosaica_id` was minted from,
         // whatever the replaying allocator's state.
         let mut reg = LayerRegistry::new();
         let mut store = ArtifactStore::new();
@@ -3911,7 +3911,7 @@ mod tests {
     fn an_extension_lowers_the_replayed_mark_as_far_as_a_registration_does() {
         // The failure this closes: an extension block that raised no mark would be reissued on the
         // first restart after a large publication, with every artifact in it already suppressible
-        // by a `tessera_id` a caller holds.
+        // by a `mosaica_id` a caller holds.
         let mut reg = LayerRegistry::new();
         let mut store = ArtifactStore::new();
         let mut alloc = Allocator::new(0);

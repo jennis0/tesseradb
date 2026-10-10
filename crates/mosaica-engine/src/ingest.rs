@@ -15,7 +15,7 @@
 //!   flush places the row below the view's newest rows where the item is older than them;
 //! - any other row edits the item: its entity is deleted and a new one carries everything the item
 //!   holds, the row's values over the stored ones, in every view the item is in. The item keeps its
-//!   number and so its `tessera_id`.
+//!   number and so its `mosaica_id`.
 //!
 //! The rows that create, add or edit are submitted with the unique entries' sequence number the
 //! handler read at, and each edit with the views its item held. The executor re-checks, from
@@ -34,7 +34,7 @@ use mosaica_lifecycle::{
 };
 use mosaica_store::manifest::DeclaredScalar;
 use mosaica_store::unique::{key_of, value_text, KeyKind, UniqueKey};
-use mosaica_types::{EntityId, TermId, TesseraId};
+use mosaica_types::{EntityId, TermId, MosaicaId};
 
 use crate::engine::Engine;
 use crate::write::joined::{self, BlobRow};
@@ -54,8 +54,8 @@ pub struct IngestRequest {
     pub artifacts: BatchArtifacts,
     /// Refuse the whole batch at its first refused row, instead of applying the other rows.
     pub strict: bool,
-    /// The batch carries a `tessera_id` column, whether or not any row gives one.
-    pub tessera_id_column: bool,
+    /// The batch carries a `mosaica_id` column, whether or not any row gives one.
+    pub mosaica_id_column: bool,
 }
 
 /// What an accepted batch did.
@@ -63,7 +63,7 @@ pub struct IngestRequest {
 pub struct IngestReceipt {
     /// One per row, in request order: the item the row created or named, or none for a refused
     /// row.
-    pub tessera_ids: Vec<Option<TesseraId>>,
+    pub mosaica_ids: Vec<Option<MosaicaId>>,
     /// The rows the identity rule refused, by position in the request, with the reason.
     pub refused: Vec<(usize, Reason)>,
     pub created: u64,
@@ -80,7 +80,7 @@ pub struct IngestReceipt {
     /// ones alike. A row whose one change is a membership changes the artifact, not the item, and
     /// is counted unchanged.
     pub joined: u64,
-    /// The batch id was accepted before with this body. The `tessera_id`s are the first
+    /// The batch id was accepted before with this body. The `mosaica_id`s are the first
     /// acceptance's, and every count is zero, since this request changed nothing.
     pub replayed: bool,
     /// The rows that created an item indexed under more than
@@ -98,9 +98,9 @@ impl IngestReceipt {
             receipt.iter().filter(|r| r.outcome == outcome).count() as u64
         };
         IngestReceipt {
-            tessera_ids: receipt
+            mosaica_ids: receipt
                 .iter()
-                .map(|r| r.tessera_id.map(TesseraId::new))
+                .map(|r| r.mosaica_id.map(MosaicaId::new))
                 .collect(),
             refused: receipt
                 .iter()
@@ -259,7 +259,7 @@ impl Engine {
                 }
             }
             identities.push(RowIdentity {
-                tessera_id: row.tessera_id,
+                mosaica_id: row.mosaica_id,
                 unique: carried_keys(declared, row),
             });
         }
@@ -281,8 +281,8 @@ impl Engine {
         // A batch that only addresses items needs a column to address them by, as a build's
         // attribute file does.
         if !creates && !request.rows.is_empty() {
-            let mosaica = request.tessera_id_column
-                || request.rows.iter().any(|row| row.tessera_id.is_some());
+            let mosaica = request.mosaica_id_column
+                || request.rows.iter().any(|row| row.mosaica_id.is_some());
             let unique = declared.iter().enumerate().any(|(at, d)| {
                 d.unique
                     && request
@@ -394,7 +394,7 @@ impl Engine {
                 None => stored.blobs = Some(more),
             }
         }
-        // Each named item's number, which its `tessera_id` is taken from and an edit keeps.
+        // Each named item's number, which its `mosaica_id` is taken from and an edit keeps.
         let entities: Vec<EntityId> = order.iter().map(|(entity, _)| *entity).collect();
         let numbers: FxHashMap<EntityId, EntityId> = entities
             .iter()
@@ -426,7 +426,7 @@ impl Engine {
                     keys.extend(identities[at].unique.iter().copied());
                     slots.push(Slot::Written {
                         row: rows.len() as u32,
-                        tessera_id: None,
+                        mosaica_id: None,
                     });
                     written_from.push(at);
                     rows.push(UnallocatedRow {
@@ -445,19 +445,19 @@ impl Engine {
                 Some(entity) => match decided.remove(&at).expect("every named row was decided") {
                     Decided::Unchanged => slots.push(Slot::Unchanged {
                         entity: *entity,
-                        tessera_id: tid_of(entity)?,
+                        mosaica_id: tid_of(entity)?,
                     }),
                     Decided::Joined => {
                         slots.push(Slot::Joined {
                             entity: *entity,
-                            tessera_id: tid_of(entity)?,
+                            mosaica_id: tid_of(entity)?,
                         });
                         joined_from.push(at);
                     }
                     Decided::Added(join) => {
                         slots.push(Slot::Written {
                             row: rows.len() as u32,
-                            tessera_id: Some(tid_of(entity)?),
+                            mosaica_id: Some(tid_of(entity)?),
                         });
                         written_from.push(at);
                         rows.push(*join);
@@ -480,7 +480,7 @@ impl Engine {
                         keys.extend(identities[at].unique.iter().copied());
                         slots.push(Slot::Edited {
                             edit: edits.len() as u32,
-                            tessera_id: tid_of(entity)?,
+                            mosaica_id: tid_of(entity)?,
                         });
                         edited_from.push(at);
                         edits.push(edit);
@@ -1070,7 +1070,7 @@ impl Engine {
     }
 
     /// A refusal as the caller reads it: rows by position, values as sent, items by
-    /// `tessera_id`.
+    /// `mosaica_id`.
     fn refusal_text(
         &self,
         generation: &Generation,
@@ -1078,9 +1078,9 @@ impl Engine {
         request: &IngestRequest,
         refusal: &Refusal,
     ) -> String {
-        let tid = |entity: EntityId| crate::unique::tessera_id_text(self, generation, entity);
+        let tid = |entity: EntityId| crate::unique::mosaica_id_text(self, generation, entity);
         let value = |row: usize, field: Identifier| match field {
-            Identifier::TesseraId => "its tessera_id".to_string(),
+            Identifier::MosaicaId => "its mosaica_id".to_string(),
             Identifier::Unique(at) => {
                 let at = usize::from(at);
                 let text = request.rows[row]
@@ -1110,14 +1110,14 @@ impl Engine {
                     parts.join(" and ")
                 )
             }
-            Refusal::UnknownTesseraId { row } => {
+            Refusal::UnknownMosaicaId { row } => {
                 let id = request.rows[*row]
-                    .tessera_id
+                    .mosaica_id
                     .map(|t| t.raw())
                     .unwrap_or_default();
                 format!(
-                    "row {row}'s tessera_id {id} names no item; leave tessera_id out to create \
-                     an item, which is given its tessera_id when it is created"
+                    "row {row}'s mosaica_id {id} names no item; leave mosaica_id out to create \
+                     an item, which is given its mosaica_id when it is created"
                 )
             }
             Refusal::NamesNoItem { row } => format!(
@@ -1219,7 +1219,7 @@ fn scoped_against_held(
 }
 
 /// Who holds what in one generation: the unique indexes and their live entries, and the
-/// `tessera_id`s issued, deleted items left out of each.
+/// `mosaica_id`s issued, deleted items left out of each.
 struct Held<'a> {
     engine: &'a Engine,
     generation: &'a Generation,
@@ -1240,11 +1240,11 @@ impl resolve::Holdings for Held<'_> {
             .map_err(|e| AcceptError::Unreadable(e.to_string()))
     }
 
-    fn tessera_holders(&self, ids: &[TesseraId]) -> Result<Vec<Option<EntityId>>, AcceptError> {
+    fn mosaica_holders(&self, ids: &[MosaicaId]) -> Result<Vec<Option<EntityId>>, AcceptError> {
         let high_water = self.engine.allocator_high_water();
         Ok(self
             .engine
-            .tessera_ids_in(self.generation, ids)
+            .mosaica_ids_in(self.generation, ids)
             .map_err(|e| AcceptError::Unreadable(e.to_string()))?
             .into_iter()
             .map(|entity| entity.filter(|e| e.raw() < high_water))

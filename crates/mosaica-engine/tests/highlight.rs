@@ -337,7 +337,7 @@ fn the_served_set_is_identical_with_and_without_a_highlight() {
                     let what = format!("zoom {zoom}, bbox {bbox:?}, filter {}", filter.is_some());
                     assert_eq!(draw(&lit), draw(&plain), "{what}: the tile split moved");
                     assert_eq!(
-                        lit.points.tessera_ids, plain.points.tessera_ids,
+                        lit.points.mosaica_ids, plain.points.mosaica_ids,
                         "{what}: the point set moved"
                     );
                     assert_eq!(lit.points.codes, plain.points.codes, "{what}: positions moved");
@@ -564,7 +564,7 @@ fn the_highlight_projection_serves_the_same_rows_in_the_same_split() {
             );
             assert_eq!(draw(&projected), draw(&full), "the tile split moved");
             assert_eq!(
-                projected.points.tessera_ids, full.points.tessera_ids,
+                projected.points.mosaica_ids, full.points.mosaica_ids,
                 "the row set moved"
             );
             assert_eq!(
@@ -612,7 +612,7 @@ fn named_point_columns_serve_only_those_columns_over_the_same_points() {
                 ask().point_rows(PointRows::Columns(&score)),
             );
             assert_eq!(full.tiles, named.tiles, "the counts moved");
-            assert_eq!(full.points.tessera_ids, named.points.tessera_ids);
+            assert_eq!(full.points.mosaica_ids, named.points.mosaica_ids);
             assert_eq!(full.points.codes, named.points.codes);
             assert_eq!(full.points.highlighted, named.points.highlighted);
             assert_eq!(named.scalar_names, ["score"]);
@@ -646,7 +646,7 @@ fn named_point_columns_serve_only_those_columns_over_the_same_points() {
 
 /// **Every per-tile prefix stays sound with the new columns.**
 ///
-/// §7.2's nesting argument depends on the served set being a *prefix* — ascending by `tessera_id`
+/// §7.2's nesting argument depends on the served set being a *prefix* — ascending by `mosaica_id`
 /// within each tile, so a client truncating to its own budget keeps a valid smaller selection —
 /// and the `highlighted` column has to travel with it. What could go wrong is not the order but
 /// the alignment: a bit column gathered from a different order, or built once per response rather
@@ -685,10 +685,10 @@ fn every_per_tile_prefix_carries_its_own_points_bits() {
             let mut at = 0usize;
             for tile in &out.tiles {
                 let end = at + tile.served as usize;
-                let ids = &out.points.tessera_ids[at..end];
+                let ids = &out.points.mosaica_ids[at..end];
                 assert!(
                     ids.windows(2).all(|w| w[0] < w[1]),
-                    "tile {} is not ascending by tessera_id, so a prefix is not a selection",
+                    "tile {} is not ascending by mosaica_id, so a prefix is not a selection",
                     tile.tile
                 );
                 for cut in 0..=ids.len() {

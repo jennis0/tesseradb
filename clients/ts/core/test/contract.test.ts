@@ -64,7 +64,7 @@ function planes(text: string): Map<string, string> {
   return out;
 }
 
-/** The operation a request is, preferring the most literal path: `/v1/artifacts/browse` over `/v1/artifacts/{tessera_id}`. */
+/** The operation a request is, preferring the most literal path: `/v1/artifacts/browse` over `/v1/artifacts/{mosaica_id}`. */
 function operationOf(ops: Operation[], method: string, path: string): string | null {
   const matching = ops.filter((op) => op.method === method && op.pattern.test(path));
   matching.sort((a, b) => b.literal - a.literal);

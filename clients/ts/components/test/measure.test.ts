@@ -21,9 +21,9 @@ const frames = (n: number) =>
   });
 
 function artifacts(ids: bigint[]): ArtifactsProjection {
-  const served: Artifact[] = ids.map((id) => ({layer: 'clusters', tesseraId: id, key: null, maskedCount: 1n, centroid: null, box: null, shape: null, content: [], parentIds: [], rung: 0, matched: null, highlighted: null, target: null, slot: null}));
+  const served: Artifact[] = ids.map((id) => ({layer: 'clusters', mosaicaId: id, key: null, maskedCount: 1n, centroid: null, box: null, shape: null, content: [], parentIds: [], rung: 0, matched: null, highlighted: null, target: null, slot: null}));
   const table = new SessionArtifactTable();
-  const ordinals = table.take(served.map((a) => ({tesseraId: a.tesseraId, layer: a.layer, parentIds: a.parentIds})));
+  const ordinals = table.take(served.map((a) => ({mosaicaId: a.mosaicaId, layer: a.layer, parentIds: a.parentIds})));
   return {layer: 'clusters', layers: ['clusters'], served, colourServed: [], attached: new Map(), lineage: servedLineage(served), status: 'shown', refusal: null, version: 1, held: served.length, table, servedOrdinals: new Set(ordinals), shapes: new Map(), colours: new Map(), palette: 'tableau10', overrides: new Map(), coverage: {current: 0, stale: 0}};
 }
 

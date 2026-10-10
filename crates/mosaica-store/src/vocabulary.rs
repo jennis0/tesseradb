@@ -5,7 +5,7 @@
 //! auth dictionary's correctness argument — extents positional and append-only, the moved-under
 //! discard — exists *because* an ordinal is a position in a concatenation. §3.4 requires the
 //! opposite object: a code drawn at random from the declared width's unused space, recorded beside
-//! its key, pinned forever. Codes are the `tessera_id` of vocabulary space; ordinals are its
+//! its key, pinned forever. Codes are the `mosaica_id` of vocabulary space; ordinals are its
 //! `entity_id`, and the two are joined only through the key. That is why none of
 //! `mosaica_authz::dict` appears here.
 //!

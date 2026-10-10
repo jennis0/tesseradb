@@ -74,7 +74,7 @@ if __name__ == "__main__":
     try:
         tok = authorise()
         rows = browse(tok, "mesh/descriptors")["artifacts"]
-        HL_ID = rows[0]["tessera_id"]
+        HL_ID = rows[0]["mosaica_id"]
         print("highlight artifact:", HL_ID, rows[0].get("name"), rows[0]["masked_count"])
     finally:
         stop(p)

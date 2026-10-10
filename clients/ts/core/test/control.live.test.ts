@@ -117,7 +117,7 @@ describe('Control against a live server', () => {
     // The same rows again name the items they created, by their keys, and change nothing.
     const again = await control.ingest(points(), {view: 's0'});
     expect(again).toMatchObject({status: 200, body: {rows: 4, created: 0, unchanged: 4}});
-    expect(again.body.tessera_ids).toEqual(inserted.body.tessera_ids);
+    expect(again.body.mosaica_ids).toEqual(inserted.body.mosaica_ids);
     await flushed();
     token = (await client.authorise({terms: [TERM]})).token;
     const after = await seen();
@@ -149,11 +149,11 @@ describe('Control against a live server', () => {
   it('refuses a row naming two items and stores the rest, or with strict refuses the page', async (ctx) => {
     live(ctx);
     const row0 = (await byKey()).get('row-0')!.toString();
-    // Row 0 names row-0 and changes nothing; row 1 names row-1 by its key and row-0 by its tessera_id.
+    // Row 0 names row-0 and changes nothing; row 1 names row-1 by its key and row-0 by its mosaica_id.
     const page = tableToIPC(
       new Table({
         [KEY]: vectorFromArray(['row-0', 'row-1'], new Utf8()),
-        tessera_id: vectorFromArray([null, row0], new Utf8())
+        mosaica_id: vectorFromArray([null, row0], new Utf8())
       }),
       'stream'
     );
@@ -162,7 +162,7 @@ describe('Control against a live server', () => {
     const answer = await control.ingest(page, {view: 's0'});
     expect(answer).toMatchObject({
       status: 200,
-      body: {rows: 2, unchanged: 1, edited: 0, created: 0, tessera_ids: [row0, null], refused: [{row: 1, reason: 'names_two_items'}]}
+      body: {rows: 2, unchanged: 1, edited: 0, created: 0, mosaica_ids: [row0, null], refused: [{row: 1, reason: 'names_two_items'}]}
     });
   });
 
@@ -191,12 +191,12 @@ describe('Control against a live server', () => {
     expect((await control.declareLayer(declaration)).status).toBe(201);
     const published = await control.publish(LAYER, {level: 0, artifacts: [{key: 'pair', members: {[KEY]: ['row-2', 'row-3', 'row-none']}}]});
     expect(published).toMatchObject({status: 201, body: {refused: [{artifact: 0, list: 'members', row: 2, reason: 'names_no_item'}]}});
-    pair = BigInt((published.body.artifacts as {key: string; tessera_id: string}[])[0]!.tessera_id);
+    pair = BigInt((published.body.artifacts as {key: string; mosaica_id: string}[])[0]!.mosaica_id);
     await flushed();
     expect(await client.artifact(token, pair, {view: 's0'})).toMatchObject({layer: LAYER, key: 'pair', maskedCount: 2n});
 
     const row1 = (await byKey()).get('row-1')!;
-    const grown = await control.grow(LAYER, {level: 0, artifacts: [{key: 'pair', members: {tessera_id: [row1.toString()]}}]});
+    const grown = await control.grow(LAYER, {level: 0, artifacts: [{key: 'pair', members: {mosaica_id: [row1.toString()]}}]});
     expect(grown).toMatchObject({status: 200, body: {refused: []}});
     await flushed();
     expect((await client.artifact(token, pair, {view: 's0'})).maskedCount).toBe(3n);
@@ -229,7 +229,7 @@ describe('Control against a live server', () => {
       ]
     }, {wait: true});
     expect(published.status).toBe(201);
-    const label = BigInt((published.body.artifacts as {tessera_id: string}[])[0]!.tessera_id);
+    const label = BigInt((published.body.artifacts as {mosaica_id: string}[])[0]!.mosaica_id);
     expect(await client.artifact(token, label, {view: 's0'})).toMatchObject({layer: labels, key: 'l-pair', maskedCount: 2n});
 
     // The pair `write-cycle-demo.mjs` declares: no existence floor, the centroid alone.
@@ -286,7 +286,7 @@ describe('Control against a live server', () => {
     const hidden = (await byKey()).get('row-1')!;
     const nobody = {[KEY]: 'row-none'};
     const suppressed = await control.changes([
-      {op: 'suppress', match: {tessera_id: hidden.toString()}},
+      {op: 'suppress', match: {mosaica_id: hidden.toString()}},
       {op: 'suppress', match: nobody}
     ]);
     expect(suppressed).toMatchObject({status: 200, body: {accepted: 1, refused: [{row: 1, reason: 'names_no_item'}]}});

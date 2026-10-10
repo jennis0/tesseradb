@@ -220,7 +220,7 @@ export class MosaicaArtifactCard extends MosaicaElement {
     const {artifact, refusal} = this.shown;
     // The heading is the level's title on a levelled layer (County, Admin 2), else the layer's.
     const metaLayers = this.resolvedStore?.get('meta')?.layers ?? [];
-    const row = artifact ? this.resolvedStore?.get('artifacts')?.served.find((a) => a.tesseraId === artifact.id) : undefined;
+    const row = artifact ? this.resolvedStore?.get('artifacts')?.served.find((a) => a.mosaicaId === artifact.id) : undefined;
     // A filter layer's artifacts are never served, so the layer falls back to the drill-down's;
     // otherwise the card would offer Fit on a layer with nothing drawn.
     const declaredLayer = row?.layer ?? artifact?.detail.layer;
@@ -243,12 +243,12 @@ export class MosaicaArtifactCard extends MosaicaElement {
     const served = artifacts?.served ?? [];
     const attached = artifacts?.attached ?? new Map<bigint, string>();
     // The artifact's row and children are read from the served set now, on every render.
-    const here = served.find((a) => a.tesseraId === artifact.id);
+    const here = served.find((a) => a.mosaicaId === artifact.id);
     // On a `dag` layer a child appears on the card of each served parent.
     const children = served.filter((a) => a.parentIds.includes(artifact.id)).sort((a, b) => (a.maskedCount < b.maskedCount ? 1 : a.maskedCount > b.maskedCount ? -1 : 0));
     // Parents from the served set, which holds every parent the map draws. The hierarchy panel
     // asks `POST /v1/artifacts/browse` for the rest.
-    const parents = here ? served.filter((a) => here.parentIds.includes(a.tesseraId)).sort((a, b) => (a.maskedCount < b.maskedCount ? 1 : a.maskedCount > b.maskedCount ? -1 : 0)) : [];
+    const parents = here ? served.filter((a) => here.parentIds.includes(a.mosaicaId)).sort((a, b) => (a.maskedCount < b.maskedCount ? 1 : a.maskedCount > b.maskedCount ? -1 : 0)) : [];
     const stale = s?.get('status').stale ?? false;
     const count: Masked = {value: Number(artifact.detail.maskedCount), exact: true};
     const id = idString(artifact.id);
@@ -261,7 +261,7 @@ export class MosaicaArtifactCard extends MosaicaElement {
       <span part="state" data-state="shown"></span>
       <div part="headline" class="card-title" ?data-unnamed=${clauseName === null}>${clauseName ?? UNNAMED}</div>
       <div part="count"><mosaica-count .masked=${count} .stale=${stale} label="members"></mosaica-count></div>
-      ${here && here.content.length > 0 && attached.has(here.tesseraId) ? html`<p part="content">${attached.get(here.tesseraId)}</p>` : here && here.content.length > 1 ? html`<p part="content">${here.content.slice(1).join(' · ')}</p>` : nothing}
+      ${here && here.content.length > 0 && attached.has(here.mosaicaId) ? html`<p part="content">${attached.get(here.mosaicaId)}</p>` : here && here.content.length > 1 ? html`<p part="content">${here.content.slice(1).join(' · ')}</p>` : nothing}
       <div class="field">
         <div class="k">Layer</div><div part="value" class="v">${decl?.title || artifact.detail.layer}</div>
         ${artifact.detail.key ? html`<div class="k">Key</div><div part="value" class="v mono">${artifact.detail.key}</div>` : nothing}
@@ -271,7 +271,7 @@ export class MosaicaArtifactCard extends MosaicaElement {
         ? html`<div part="label" class="xs muted parents-label">Parents</div>
             <ul part="parents" class="list">
               ${parents.map(
-                (pnt: Artifact) => html`<li part="parent" class="item child" role="button" tabindex="0" data-id=${idString(pnt.tesseraId)} @click=${() => void s?.openArtifact(pnt.tesseraId)} @keydown=${onKeys(() => void s?.openArtifact(pnt.tesseraId))}>
+                (pnt: Artifact) => html`<li part="parent" class="item child" role="button" tabindex="0" data-id=${idString(pnt.mosaicaId)} @click=${() => void s?.openArtifact(pnt.mosaicaId)} @keydown=${onKeys(() => void s?.openArtifact(pnt.mosaicaId))}>
                   ${nameSpan(artifactName(pnt, attached))}
                   <mosaica-count .masked=${{value: Number(pnt.maskedCount), exact: true} as Masked} .stale=${stale}></mosaica-count>
                 </li>`
@@ -282,7 +282,7 @@ export class MosaicaArtifactCard extends MosaicaElement {
         ? html`<div part="label" class="xs muted children-label">Children in this view</div>
             <ul part="children" class="list">
               ${children.map(
-                (c: Artifact) => html`<li part="child" class="item child" role="button" tabindex="0" data-id=${idString(c.tesseraId)} @click=${() => void s?.openArtifact(c.tesseraId)} @keydown=${onKeys(() => void s?.openArtifact(c.tesseraId))}>
+                (c: Artifact) => html`<li part="child" class="item child" role="button" tabindex="0" data-id=${idString(c.mosaicaId)} @click=${() => void s?.openArtifact(c.mosaicaId)} @keydown=${onKeys(() => void s?.openArtifact(c.mosaicaId))}>
                   ${nameSpan(artifactName(c, attached))}
                   <mosaica-count .masked=${{value: Number(c.maskedCount), exact: true} as Masked} .stale=${stale}></mosaica-count>
                 </li>`

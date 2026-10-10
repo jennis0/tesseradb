@@ -385,10 +385,10 @@ struct IngestResp {
     clipped: u64,
     /// Rows whose coordinates fell outside the view's extent and were stored on its edge.
     clamped: u64,
-    /// One `tessera_id` per row, in request order: the item the row created or named, and null
+    /// One `mosaica_id` per row, in request order: the item the row created or named, and null
     /// for a refused row. Decimal strings, since a JSON number loses `u64` precision past 2^53 in
     /// JavaScript.
-    tessera_ids: Vec<Option<String>>,
+    mosaica_ids: Vec<Option<String>>,
     /// The rows the identity rule refused, each `{row, reason}` by position in the batch. The
     /// batch applied every other row. Empty in a strict batch, which is refused whole instead.
     refused: Vec<serde_json::Value>,
@@ -399,7 +399,7 @@ struct IngestResp {
     /// ones alike.
     joined: u64,
     /// This body was already accepted under this batch id. Every count is then 0, so a client
-    /// summing them over retried pages does not double-count; `tessera_ids` is the first
+    /// summing them over retried pages does not double-count; `mosaica_ids` is the first
     /// acceptance's.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     replayed: bool,
@@ -460,7 +460,7 @@ fn run_ingest(
         artifacts,
         clipped,
         clamped,
-        tessera_id_column,
+        mosaica_id_column,
     } = parse_ingest_batch(
         encoding,
         body,
@@ -532,7 +532,7 @@ fn run_ingest(
     let rows_in: Vec<mosaica_engine::IngestRow> = items
         .into_iter()
         .map(|item| mosaica_engine::IngestRow {
-            tessera_id: item.tessera_id,
+            mosaica_id: item.mosaica_id,
             labels: item.labels,
             position: item.position,
             scalars: item.scalars,
@@ -549,7 +549,7 @@ fn run_ingest(
             rows: rows_in,
             artifacts,
             strict,
-            tessera_id_column,
+            mosaica_id_column,
         })
         .map_err(|e| {
             tracing::debug!(detail = %e, "an ingest batch was refused");
@@ -573,8 +573,8 @@ fn run_ingest(
         over_bound_rows,
         clipped,
         clamped,
-        tessera_ids: receipt
-            .tessera_ids
+        mosaica_ids: receipt
+            .mosaica_ids
             .iter()
             .map(|id| id.map(|id| id.raw().to_string()))
             .collect(),
@@ -648,7 +648,7 @@ async fn ingest(
 #[serde(deny_unknown_fields)]
 struct ChangeItem {
     op: String,
-    /// The item, by its `tessera_id` and the values of unique fields, keyed by column: one row of
+    /// The item, by its `mosaica_id` and the values of unique fields, keyed by column: one row of
     /// an address table ([`crate::address::Table`]).
     #[serde(rename = "match")]
     matching: std::collections::BTreeMap<String, crate::address::Cell>,
@@ -935,7 +935,7 @@ async fn compact(State(state): State<Arc<AppState>>) -> StatusCode {
 }
 
 /// `PUT /control/layers`: registers one annotation layer. Synchronous: the answer follows the
-/// fsynced append and carries the layer's `tessera_id`, its only address for a later suppression.
+/// fsynced append and carries the layer's `mosaica_id`, its only address for a later suppression.
 /// A failure means the layer does not exist, unlike a suppression, which is applied even when its
 /// append fails. A declaration that breaks the deployment's rules is a 422 saying why.
 async fn register_layer(
@@ -1012,7 +1012,7 @@ async fn register_layer(
     let id = state
         .write(move |state| state.engine.register_layer(declaration))
         .await?;
-    let body = serde_json::json!({ "name": name, "tessera_id": id.raw().to_string() });
+    let body = serde_json::json!({ "name": name, "mosaica_id": id.raw().to_string() });
     acknowledge(&state, &wait, StatusCode::CREATED, body).await
 }
 
@@ -1471,7 +1471,7 @@ fn artifact_json<T: serde::de::DeserializeOwned>(body: &[u8], noun: &str) -> Res
 
 /// `PATCH /control/layers/{name}/artifacts`'s Arrow form: one row per artifact, `key: utf8` and
 /// `members: list<struct<…>>` or `large_list<struct<…>>`, each struct a member named by its
-/// `tessera_id` and unique field columns, with `view` and `access` optional and `level` in the
+/// `mosaica_id` and unique field columns, with `view` and `access` optional and `level` in the
 /// schema metadata. Decoded into the JSON form's body and member tables, so the handler has one
 /// path.
 fn grow_body_from_arrow(body: &[u8]) -> Result<(GrowBody, Vec<MemberList>), ApiError> {
@@ -1510,7 +1510,7 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<(GrowBody, Vec<MemberList>), ApiE
         })?,
     };
     let list_type = "list<struct> or large_list<struct>, one member per element, each struct \
-                     naming its member by `tessera_id` and unique field columns";
+                     naming its member by `mosaica_id` and unique field columns";
     let mut artifacts = Vec::new();
     let mut lists = Vec::new();
     for batch in reader {
@@ -1681,7 +1681,7 @@ enum MemberColumn {
     LargeText(arrow::array::LargeStringArray),
     Signed(arrow::array::Int64Array),
     Unsigned(arrow::array::UInt64Array),
-    /// Unsigned integers read as their decimal text: a `tessera_id` column, which a read sends as
+    /// Unsigned integers read as their decimal text: a `mosaica_id` column, which a read sends as
     /// uint64.
     Decimal(arrow::array::UInt64Array),
     /// A column of any other type, and how a refusal shows its values.
@@ -1725,7 +1725,7 @@ impl MemberColumn {
                     .downcast_ref::<UInt64Array>()
                     .expect("uint64")
                     .clone();
-                match field.name() == "tessera_id" {
+                match field.name() == "mosaica_id" {
                     true => MemberColumn::Decimal(column),
                     false => MemberColumn::Unsigned(column),
                 }
@@ -1868,7 +1868,7 @@ struct IncomingArtifactBody {
     /// entity-scoped one. Keys are unique per view, and an edge may not cross views.
     #[serde(default)]
     view: Option<String>,
-    /// A table of members ([`crate::address::Table`]): columns keyed by `tessera_id` and unique
+    /// A table of members ([`crate::address::Table`]): columns keyed by `mosaica_id` and unique
     /// field names. Absent only when `excluding` is given; an empty table is a membership that
     /// holds nobody.
     #[serde(default)]
@@ -2245,7 +2245,7 @@ struct IncomingContentBody {
 }
 
 /// `PUT /control/layers/{name}/artifacts`: publishes artifacts into one level, all or none; a held
-/// key is filled under the fill rule. The answer gives each a `tessera_id`, never an ordinal,
+/// key is filled under the fill rule. The answer gives each a `mosaica_id`, never an ordinal,
 /// since two ordinals disclose how many artifacts lie between them.
 async fn publish_artifacts(
     State(state): State<Arc<AppState>>,
@@ -2498,10 +2498,10 @@ async fn publish_artifacts(
         .await?;
 
     let published: Vec<serde_json::Value> = batch
-        .tessera_ids
+        .mosaica_ids
         .iter()
         .zip(keys)
-        .map(|(id, key)| serde_json::json!({ "key": key, "tessera_id": id.raw().to_string() }))
+        .map(|(id, key)| serde_json::json!({ "key": key, "mosaica_id": id.raw().to_string() }))
         .collect();
     // `shapes` is the build's shape report, present only when a shape was canonicalised.
     // `joined` counts memberships added to created and held artifacts alike. The status is 201
@@ -2742,7 +2742,7 @@ async fn grow_memberships(
         .map(|(receipt, key)| {
             let mut row = serde_json::json!({
                 "key": key,
-                "tessera_id": receipt.tessera_id.raw().to_string(),
+                "mosaica_id": receipt.mosaica_id.raw().to_string(),
                 "joined": receipt.joined,
                 "filled": receipt.filled,
                 "left": receipt.left,

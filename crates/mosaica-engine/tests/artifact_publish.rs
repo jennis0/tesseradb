@@ -6,7 +6,7 @@
 //! caller's batch and durable state, because each of these fails in a way that looks like success:
 //! an artifact republished onto an ordinal that already existed still serves *an* artifact; a
 //! membership lost at a restart still serves a cluster, just an empty one; and an entity reissued
-//! after a rotation still resolves a `tessera_id`, just to the wrong thing.
+//! after a rotation still resolves a `mosaica_id`, just to the wrong thing.
 
 mod common;
 
@@ -110,7 +110,7 @@ fn a_published_batch_takes_one_entity_per_artifact_and_none_of_them_is_the_layer
 }
 
 /// A second batch continues the first's numbering. Restarting it would overwrite the first batch's
-/// artifacts in place — same ordinals, same entities, different members — and every `tessera_id`
+/// artifacts in place — same ordinals, same entities, different members — and every `mosaica_id`
 /// the first batch handed out would silently name the second's clusters.
 #[test]
 fn a_second_batch_continues_the_numbering_rather_than_restarting_it() {
@@ -159,7 +159,7 @@ fn a_second_batch_continues_the_numbering_rather_than_restarting_it() {
         "the members joined the artifact the key names"
     );
     assert_eq!(
-        again.tessera_ids,
+        again.mosaica_ids,
         vec![first[0]],
         "the identity did not move"
     );

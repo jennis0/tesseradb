@@ -284,8 +284,8 @@ async fn one_key_in_two_views_is_two_artifacts_each_drawn_on_its_own_view() {
     .await;
     assert_eq!(status, 201, "{body}");
     assert_eq!(body["created"], 2, "{body}");
-    let first = body["artifacts"][0]["tessera_id"].as_str().unwrap();
-    let second = body["artifacts"][1]["tessera_id"].as_str().unwrap();
+    let first = body["artifacts"][0]["mosaica_id"].as_str().unwrap();
+    let second = body["artifacts"][1]["mosaica_id"].as_str().unwrap();
     assert_ne!(first, second, "two artifacts, two identities: {body}");
     let first = first.to_string();
 
@@ -320,7 +320,7 @@ async fn one_key_in_two_views_is_two_artifacts_each_drawn_on_its_own_view() {
     .await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["created"], 0, "{body}");
-    assert_eq!(body["artifacts"][0]["tessera_id"], first, "{body}");
+    assert_eq!(body["artifacts"][0]["mosaica_id"], first, "{body}");
 }
 
 /// **An edge may not cross views** (`views.md` §3.5): a parent this level holds in another view
@@ -388,7 +388,7 @@ async fn a_group_scoped_level_survives_a_fold_and_a_reopen_with_its_views() {
     )
     .await;
     assert_eq!(status, 201, "{body}");
-    let q1 = body["artifacts"][0]["tessera_id"]
+    let q1 = body["artifacts"][0]["mosaica_id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -427,7 +427,7 @@ async fn a_group_scoped_level_survives_a_fold_and_a_reopen_with_its_views() {
     .await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["created"], 0, "{body}");
-    assert_eq!(body["artifacts"][0]["tessera_id"], q1, "{body}");
+    assert_eq!(body["artifacts"][0]["mosaica_id"], q1, "{body}");
 }
 
 /// A shape layer scoped to the group: its membership is the rows inside the box, resolved per
@@ -561,11 +561,11 @@ async fn drilled(
     server: &TestServer,
     token: &str,
     view: &str,
-    tessera_id: &str,
+    mosaica_id: &str,
 ) -> (u16, serde_json::Value) {
     let resp = server
         .client
-        .post(server.viewer_url(&format!("/v1/artifacts/{tessera_id}")))
+        .post(server.viewer_url(&format!("/v1/artifacts/{mosaica_id}")))
         .bearer_auth(token)
         .json(&json!({ "view": view }))
         .send()
@@ -578,7 +578,7 @@ async fn drilled(
 /// **A view of a group-scoped layer serves that view's artifacts and no others** (`views.md`
 /// §3.5). An artifact of another view of the group is absent entire — from the viewport's
 /// artifacts frame, from browse, and from the identifier route — rather than served with a masked
-/// count of zero beside its key and its `tessera_id`.
+/// count of zero beside its key and its `mosaica_id`.
 ///
 /// The layer declares no existence criterion, which is the condition that makes the distinction
 /// observable: a zero count clears no bar, so nothing else withholds the row. The two views carry
@@ -604,11 +604,11 @@ async fn an_artifact_of_another_view_of_the_group_is_absent_from_every_verb() {
     )
     .await;
     assert_eq!(status, 201, "{body}");
-    let q1_id = body["artifacts"][0]["tessera_id"]
+    let q1_id = body["artifacts"][0]["mosaica_id"]
         .as_str()
         .unwrap()
         .to_string();
-    let q2_id = body["artifacts"][1]["tessera_id"]
+    let q2_id = body["artifacts"][1]["mosaica_id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -726,8 +726,8 @@ async fn matched(server: &TestServer, token: &str, view: &str, filters: serde_js
 }
 
 /// A `member_of` leaf over the scoped layer, by identifier.
-fn member_of(tessera_id: &str) -> serde_json::Value {
-    json!({ "member_of": { "layer": SCOPED, "artifact": tessera_id } })
+fn member_of(mosaica_id: &str) -> serde_json::Value {
+    json!({ "member_of": { "layer": SCOPED, "artifact": mosaica_id } })
 }
 
 /// **One flush tick, asked for and waited on** — the one moment a held row form takes the
@@ -771,7 +771,7 @@ enum Second {
 /// where a write into another view of the group can reach it. The sequence is exactly that: browse
 /// A, which builds and holds A's form; write into B; let the tick pass; browse A again.
 ///
-/// What a wrong answer hands a principal of A: B's key, B's `tessera_id` and a live count of A's
+/// What a wrong answer hands a principal of A: B's key, B's `mosaica_id` and a live count of A's
 /// own rows — and with them the drill-down, the `member_of` highlight and the region leaves, which
 /// all read the same form.
 async fn a_warm_form_takes_no_delta_of_another_view(warm: usize, second: Second) {
@@ -794,7 +794,7 @@ async fn a_warm_form_takes_no_delta_of_another_view(warm: usize, second: Second)
     }
     let (status, body) = put(&server, SCOPED, json!(first)).await;
     assert_eq!(status, 201, "{body}");
-    let a_id = body["artifacts"][0]["tessera_id"]
+    let a_id = body["artifacts"][0]["mosaica_id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -819,7 +819,7 @@ async fn a_warm_form_takes_no_delta_of_another_view(warm: usize, second: Second)
         if second == Second::Grown { 200 } else { 201 },
         "{body}"
     );
-    let b_id = body["artifacts"][0]["tessera_id"]
+    let b_id = body["artifacts"][0]["mosaica_id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -1037,7 +1037,7 @@ async fn create_key(server: &TestServer, key: &str) {
 }
 
 /// As many new items as q2 was built with, `id` 20,000 onwards, every one right of the shapes
-/// these tests publish, returning their `tessera_id`s.
+/// these tests publish, returning their `mosaica_id`s.
 async fn ingest_right_of_the_shape(server: &TestServer, view: &str, batch_id: &str) -> BTreeSet<u64> {
     let rows: Vec<(Option<u64>, f32, f32, &str)> = (0..IN_VIEW[1])
         .map(|i| {
@@ -1080,7 +1080,7 @@ async fn fold_settled(server: &TestServer) -> bool {
     server.state.engine.write_executor_stats().folds > before.folds
 }
 
-/// The `tessera_id`s one view serves over the whole extent, to a principal holding every term.
+/// The `mosaica_id`s one view serves over the whole extent, to a principal holding every term.
 async fn points_of(server: &TestServer, view: &str) -> BTreeSet<u64> {
     points_as(server, &["0", "1"], view).await
 }
@@ -1407,7 +1407,7 @@ async fn a_recreated_view_serves_none_of_its_predecessors_artifacts() {
     )
     .await;
     assert_eq!(status, 201, "{body}");
-    let old_c1 = body["artifacts"][1]["tessera_id"]
+    let old_c1 = body["artifacts"][1]["mosaica_id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -1448,7 +1448,7 @@ async fn a_recreated_view_serves_none_of_its_predecessors_artifacts() {
     .await;
     assert_eq!(status, 201, "{body}");
     assert_eq!(body["created"], 1, "{body}");
-    assert_ne!(body["artifacts"][0]["tessera_id"].as_str().unwrap(), old_c1);
+    assert_ne!(body["artifacts"][0]["mosaica_id"].as_str().unwrap(), old_c1);
     // A held form takes a publication at the next tick.
     tick(&server).await;
     let republished = vec![("c1".to_string(), 20)];

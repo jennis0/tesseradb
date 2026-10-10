@@ -1985,7 +1985,7 @@ pub(crate) fn disk(
         );
     }
     // Per view: `morton.u32`, `cuts.u32`, `permutation.bin`, `row-entity.u32` and the segment's
-    // `columns.arrow` — the residual, the `tessera_id` and one slot per render column, each with
+    // `columns.arrow` — the residual, the `mosaica_id` and one slot per render column, each with
     // the Arrow validity bitmap the column carries beside it at a bit a row.
     //
     // **`cuts.u32` is charged at its ceiling of 4 B a row**, which is one occupied leaf cell per

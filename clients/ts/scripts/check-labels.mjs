@@ -77,7 +77,7 @@ async function artifacts(token, layers) {
   const table = tableFromIPC(frame.payload);
   const layerCol = table.getChild('layer');
   const keys = table.getChild('key');
-  const ids = table.getChild('tessera_id').toArray();
+  const ids = table.getChild('mosaica_id').toArray();
   const masked = table.getChild('masked_count').toArray();
   const content = table.getChild('content');
   for (let i = 0; i < ids.length; i++) {
@@ -188,7 +188,7 @@ if (!cluster) throw new Error(`no cluster ${label.key.replace(/^l-/, '')} served
 expect('the label answers on its identifier before the suppression', (await byIdentifier(witnessToken, label.id)) !== null);
 
 const change = async (op) => {
-  accepted(op, await control.changes([{op, match: {tessera_id: cluster.id.toString()}}]));
+  accepted(op, await control.changes([{op, match: {mosaica_id: cluster.id.toString()}}]));
 };
 
 // The unsuppress runs in `finally`, so a throw does not leave the cluster hidden.

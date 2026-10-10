@@ -132,7 +132,7 @@ paths = [
 
 # Owner rulings 2026-09-18. `fix-batch-id`: the SDK's batch id is a fresh id per request (never derived
 # from the body); the server indexes every batch-carrying record by one exhaustive rule and trims the
-# index at WAL rotation (#154). `fix-label-target`: a dependent's row names its target by tessera id;
+# index at WAL rotation (#154). `fix-label-target`: a dependent's row names its target by mosaica id;
 # the copied masked count and the client's join by count go. Contracts and decisions are the controller's.
 [track.fix-batch-id]
 paths = [
@@ -158,7 +158,7 @@ paths = [
 ]
 
 # Found by the fix-wire round, 2026-09-18: on a group-scoped layer a view's browse returns another
-# view's artifact (key and tessera_id, count zero). A view of a scoped layer serves its own artifacts only.
+# view's artifact (key and mosaica_id, count zero). A view of a scoped layer serves its own artifacts only.
 [track.fix-scoped-roster]
 paths = [
   "crates/mosaica-engine/src/*",

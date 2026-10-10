@@ -99,7 +99,7 @@ class IngestOp:
     #: The rows that created an item, each taking a new entity id. A row adding an item to a view
     #: or changing nothing takes none.
     created: int
-    tessera_ids: tuple[str, ...] = ()
+    mosaica_ids: tuple[str, ...] = ()
     # The `entity_id_high_water` the barrier waits for: what it was before the call, plus the
     # rows the service said created an item. Captured per batch because that is the only quantity
     # `/control/status` exposes that moves with an ingest at all (see `barrier`).
@@ -141,15 +141,15 @@ class AckedJournal:
         op: str,
         *,
         term_ids: set[int] | None = None,
-        tessera_id: int | None = None,
+        mosaica_id: int | None = None,
     ) -> requests.Response:
         """Submit one `/control/changes` item, journalling it **iff** the service returns 200.
 
         `predicate` takes `term_ids`, the item's *new* term set, which the journal records if the
         service accepts it; the request carries only the fields the server defines.
 
-        The item is addressed by its `tessera_id`, computed from `entity_id` under the bundle's
-        key. `tessera_id` overrides that, for the one case a test needs it: naming an item the
+        The item is addressed by its `mosaica_id`, computed from `entity_id` under the bundle's
+        key. `mosaica_id` overrides that, for the one case a test needs it: naming an item the
         deployment has never held, which must be refused. A refusal has no entity to journal, so
         nothing is journalled — but a *200* to such a call would leave this object with an
         operation it cannot attribute, so it raises rather than recording a fiction.
@@ -159,14 +159,14 @@ class AckedJournal:
         if op == "predicate" and term_ids is None:
             raise ValueError("a predicate change must state the item's new term set")
 
-        supplied = tessera_id
+        supplied = mosaica_id
         if supplied is None:
-            supplied = self.bundle.tessera_id_of(entity_id)
+            supplied = self.bundle.mosaica_id_of(entity_id)
         response = self.server.change(supplied, op, strict=True)
 
-        if response.status_code == 200 and tessera_id is not None:
+        if response.status_code == 200 and mosaica_id is not None:
             raise AssertionError(
-                f"the service accepted a {op} against tessera_id {tessera_id}, which this journal "
+                f"the service accepted a {op} against mosaica_id {mosaica_id}, which this journal "
                 "has no entity for; it cannot be composed and must not be silently dropped"
             )
 
@@ -185,8 +185,8 @@ class AckedJournal:
                 Refusal(
                     sequence=self._sequence,
                     what=(
-                        f"{op} tessera_id {tessera_id}"
-                        if tessera_id is not None
+                        f"{op} mosaica_id {mosaica_id}"
+                        if mosaica_id is not None
                         else f"{op} entity {entity_id}"
                     ),
                     status=response.status_code,
@@ -206,7 +206,7 @@ class AckedJournal:
         payload = []
         for entity_id, op, _term_ids in items:
             payload.append(
-                {"op": op, "match": {"tessera_id": str(self.bundle.tessera_id_of(entity_id))}}
+                {"op": op, "match": {"mosaica_id": str(self.bundle.mosaica_id_of(entity_id))}}
             )
 
         response = self.server.changes(payload, strict=True)
@@ -252,7 +252,7 @@ class AckedJournal:
                     sequence=self._sequence,
                     batch_id=batch_id,
                     created=created,
-                    tessera_ids=tuple(payload.get("tessera_ids", ()) or ()),
+                    mosaica_ids=tuple(payload.get("mosaica_ids", ()) or ()),
                     required_high_water=before + created,
                 )
             )

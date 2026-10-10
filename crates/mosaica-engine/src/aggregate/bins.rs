@@ -26,7 +26,7 @@
 //! # A sampled histogram
 //!
 //! With a sample size `s` and a set of `N > s` items, the counts are taken over the set's items
-//! whose `tessera_id` is below the cut `⌊s · 2⁶⁴ / N⌋`, about `s` of them, and each count is scaled
+//! whose `mosaica_id` is below the cut `⌊s · 2⁶⁴ / N⌋`, about `s` of them, and each count is scaled
 //! by `N` over the items counted, rounded to the nearest whole number with a half rounded up. The
 //! cut is one for the whole set, so no tile, segment or group has a floor or a cap. `N` is the
 //! set's composed size and the sample is drawn from the set's own rows, which are inside the
@@ -441,7 +441,7 @@ impl Bins {
 }
 
 impl Numbers {
-    /// The values of `members`' items whose `tessera_id` is below the plan's cut, in parallel
+    /// The values of `members`' items whose `mosaica_id` is below the plan's cut, in parallel
     /// pieces of the view's rows, each read from the band or by scanning as the plan says.
     fn pass_sample<K: Num, T: Tally<K>>(
         &self,
@@ -513,7 +513,7 @@ impl Numbers {
                             // A drawn field is read from its column. An indexed field is read from
                             // the band's copy, whose entries are found in row order, since every
                             // row below the cut is in the band.
-                            let ids = segment.columns.tessera_id();
+                            let ids = segment.columns.mosaica_id();
                             let mut entries = segment.bands.entries_from(band, local.start);
                             members.for_each_run(piece.rows.clone(), &mut |run| {
                                 for view_row in run {

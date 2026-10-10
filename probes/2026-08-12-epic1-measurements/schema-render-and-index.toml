@@ -17,7 +17,7 @@
 # widths let a per-row constant be attributed to the width rather than averaged over it.
 #
 # Build with:
-#   tessera build --points data/scaled/attrs/points.parquet \
+#   mosaica build --points data/scaled/attrs/points.parquet \
 #                 --pairs  data/scaled/pairs/categories-subclass.pairs.parquet \
 #                 --schema probes/2026-08-12-epic1-measurements/schema-render.toml \
 #                 --values archive=data/scaled/attrs/archive.parquet \

@@ -140,7 +140,7 @@ fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path, points: &[(f
     .expect("the deep-frame fixture builds");
 }
 
-/// Every served point's 64-bit position, by `tessera_id`.
+/// Every served point's 64-bit position, by `mosaica_id`.
 fn served_positions(engine: &Engine) -> BTreeMap<u64, u64> {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let f = frame();
@@ -227,7 +227,7 @@ fn a_build_and_an_ingest_place_one_coordinate_in_one_cell() {
     );
 
     let position_of = |entity: EntityId| -> u64 {
-        let id = engine.tessera_id_of(entity).expect("a live entity has one");
+        let id = engine.mosaica_id_of(entity).expect("a live entity has one");
         *positions
             .get(&id.raw())
             .unwrap_or_else(|| panic!("entity {entity:?} was not served"))

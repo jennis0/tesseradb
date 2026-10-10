@@ -40,8 +40,8 @@ describe('<mosaica-item-card>', () => {
     // The headline is the field the host named; the rest in declared-then-extra order, then the
     // id; the absent `archive` is not rendered.
     expect(deep(host, '[part="headline"]')?.getAttribute('data-name')).toBe('title');
-    expect(deepAll(host, '[part="field"]').map((f) => f.getAttribute('data-name'))).toEqual(['submitted_at', 'note', 'tessera_id']);
-    expect(deep(host, '[part="field"][data-name="tessera_id"] [part="value"]')?.textContent).toBe('12345678901234567890');
+    expect(deepAll(host, '[part="field"]').map((f) => f.getAttribute('data-name'))).toEqual(['submitted_at', 'note', 'mosaica_id']);
+    expect(deep(host, '[part="field"][data-name="mosaica_id"] [part="value"]')?.textContent).toBe('12345678901234567890');
     expect(deep(host, '[part="field"][data-name="submitted_at"] [part="value"]')?.textContent).toBe('14 November 2023, 22:13:20 UTC');
     expect(deep(host, 'slot[name="field-title"]')).not.toBeNull();
     expect(host.textContent).toContain('my link');

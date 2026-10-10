@@ -414,7 +414,7 @@ TOPIC_MEMBERS = {key: [i for i in ALL if _topic_of(i) == key] for key in TOPIC_P
 
 #: The flat layer's artifacts, chosen so its fraction passes for different principals: `s-a`
 #: and `s-mixed` only for `everyone`, `s-bc` not for `few`, `s-c` for all three. Disjoint: a
-#: point in two artifacts at one depth names the one with the lower `tessera_id` in its
+#: point in two artifacts at one depth names the one with the lower `mosaica_id` in its
 #: membership column, and the two deployments number artifacts differently.
 STRICT_MEMBERS = {
     "s-a": [i for i in range(800) if fx.access_of(i) == "pa"],

@@ -251,7 +251,7 @@ def main():
     # crates/mosaica-server/src/viewer.rs here); the DAG layer's artifact frames ride the ordinary
     # `/v1/viewport` response when `layers` includes it, which `layers: "all"` already does above
     # -- so `viewport_pan_*` already exercises "the artifact frame with mesh/descriptors". This
-    # step additionally drills into a few artifact ids via `POST /v1/artifacts/{tessera_id}`.
+    # step additionally drills into a few artifact ids via `POST /v1/artifacts/{mosaica_id}`.
     if results["died"] is None:
         def gen():
             for h in range(1, 11):

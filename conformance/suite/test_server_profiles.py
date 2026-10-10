@@ -138,9 +138,9 @@ def _rotation_growth(h: SuiteHarness) -> None:
     and because a pair that failed to restore byte-identically would fail the rotate stage's
     entitlement in the warm profiles too, which is coverage, not cost.
     """
-    tessera_id, _fx = _battery_item(0)(h)
+    mosaica_id, _fx = _battery_item(0)(h)
     for op in ("suppress", "unsuppress"):
-        resp = h.server.change(tessera_id, op)
+        resp = h.server.change(mosaica_id, op)
         if resp.status_code != 200:
             raise RuntimeError(
                 f"rotation growth: {op} refused ({resp.status_code}): {resp.text}"

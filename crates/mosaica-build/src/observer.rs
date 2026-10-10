@@ -74,7 +74,7 @@ pub enum BuildStage {
     /// 8c′. The unique columns' indexes, each through a spill sort that finds every value held
     ///    twice.
     UniqueIndexes,
-    /// 9. The tiler sort: `(morton, tessera_id)` ascending.
+    /// 9. The tiler sort: `(morton, mosaica_id)` ascending.
     TilerSort,
     /// 10. Segment files: `morton.u32`, `permutation.bin`, `columns.arrow`, and their fsyncs.
     SegmentWrite,

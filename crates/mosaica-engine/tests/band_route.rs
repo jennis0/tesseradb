@@ -2,7 +2,7 @@
 //!
 //! Every check below runs one request twice on one engine and one generation: answered from the
 //! identity bands at every zoom, and answered by the scan alone, the reference. The two responses
-//! must be equal in every tile's counts, every served `tessera_id` in its order, every position and
+//! must be equal in every tile's counts, every served `mosaica_id` in its order, every position and
 //! every render value with its presence. Principals see the whole corpus, a third of it, a fiftieth
 //! of it and one item; the corpus is checked as built, with an ingest flushed beside it, with
 //! deletions and suppressions applied, after a fold and after a restart.
@@ -279,7 +279,7 @@ fn check(engine: &Engine, term: &str) -> Served {
             served.from_bands += bands.timings.tiles_from_bands;
             served.widened += bands.timings.tiles_bands_widened;
             served.sparse_after_read += bands.timings.tiles_sparse_after_read;
-            served.points += bands.points.tessera_ids.len();
+            served.points += bands.points.mosaica_ids.len();
         }
     }
     served

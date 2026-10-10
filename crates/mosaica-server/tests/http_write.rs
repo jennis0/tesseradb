@@ -204,7 +204,7 @@ async fn post_body(server: &TestServer, batch_id: &str, body: Vec<u8>) -> (u16, 
 }
 
 /// A second row carrying the `id` of an item ingested at the running service edits that item: it
-/// keeps its `tessera_id` and takes one new entity id.
+/// keeps its `mosaica_id` and takes one new entity id.
 #[tokio::test]
 async fn a_second_row_for_an_ingested_id_edits_its_item() {
     let tmp = TempDir::new().unwrap();
@@ -236,7 +236,7 @@ async fn a_second_row_for_an_ingested_id_edits_its_item() {
     assert_eq!(
         ingested_ids(&second),
         ingested_ids(&first),
-        "the item keeps its tessera_id"
+        "the item keeps its mosaica_id"
     );
     assert_eq!(
         control_status(&server).await["entity_id_high_water"].as_u64(),
@@ -370,7 +370,7 @@ fn concurrent_ingest_and_change_both_survive() {
     let ingest_thread = std::thread::spawn(move || {
         // A caller does not name the entity id at all: the executor assigns it.
         let row = mosaica_lifecycle::IngestRow {
-            tessera_id: None,
+            mosaica_id: None,
             labels: Some(vec![b"0".to_vec()]),
             position: Some((5.0, 5.0)),
             scalars: Vec::new(),
@@ -386,23 +386,23 @@ fn concurrent_ingest_and_change_both_survive() {
                 rows: vec![row],
                 artifacts: Default::default(),
                 strict: false,
-                tessera_id_column: false,
+                mosaica_id_column: false,
             })
             .expect("ingest should be accepted");
-        let tessera_id = receipt.tessera_ids[0].expect("an accepted row has a tessera_id");
-        let entity = engine_b.resolve_tessera_ids(&[tessera_id]).unwrap()[0];
-        (tessera_id, entity.expect("the item it created"))
+        let mosaica_id = receipt.mosaica_ids[0].expect("an accepted row has a mosaica_id");
+        let entity = engine_b.resolve_mosaica_ids(&[mosaica_id]).unwrap()[0];
+        (mosaica_id, entity.expect("the item it created"))
     });
 
     change_thread.join().unwrap();
     // The id the EXECUTOR assigned, not one this test chose: assignment is off the caller, so the
     // identity to assert against is the one that comes back.
-    let (ingested_tessera_id, ingested_entity) = ingest_thread.join().unwrap();
+    let (ingested_mosaica_id, ingested_entity) = ingest_thread.join().unwrap();
 
     // The suppression's effect: a viewport count one lower than the full-coverage baseline.
     // (A buffered item has no row geometry — there is no flush — so the ingested
     // item contributes nothing to any tile's count regardless of correctness; its effect is
-    // checked separately below, by resolving the `tessera_id` it was given, which a lost swap would
+    // checked separately below, by resolving the `mosaica_id` it was given, which a lost swap would
     // leave naming nothing.)
     let session = engine
         .authorise(br#"{"terms": ["0"]}"#)
@@ -421,24 +421,24 @@ fn concurrent_ingest_and_change_both_survive() {
          unchanged"
     );
 
-    // The ingest's effect: the newly-accepted item's `tessera_id` must resolve to its assigned
+    // The ingest's effect: the newly-accepted item's `mosaica_id` must resolve to its assigned
     // entity — a lost update (the ingest's generation swap silently reverted by a racing change, or
     // vice versa) would make this `None`.
     assert_eq!(
         engine
-            .resolve_tessera_ids(&[ingested_tessera_id])
-            .expect("resolve_tessera_ids should not fail for a healthy bundle")[0],
+            .resolve_mosaica_ids(&[ingested_mosaica_id])
+            .expect("resolve_mosaica_ids should not fail for a healthy bundle")[0],
         Some(ingested_entity),
         "the concurrent ingest must have survived — a lost update would drop it from the live \
          buffer/established state"
     );
 }
 
-/// An item ingested with no `id` is accepted, and the `tessera_id` the answer gives it is its only
+/// An item ingested with no `id` is accepted, and the `mosaica_id` the answer gives it is its only
 /// address. Inverting that id with the bundle's key yields the fixture's shard and a
 /// freshly allocated entity, and once the row is published the viewer serves it under that id.
 #[tokio::test]
-async fn ingest_without_an_id_returns_a_genuinely_resolvable_tessera_id() {
+async fn ingest_without_an_id_returns_a_genuinely_resolvable_mosaica_id() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
 
@@ -456,11 +456,11 @@ async fn ingest_without_an_id_returns_a_genuinely_resolvable_tessera_id() {
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["created"], 1);
-    let tessera_ids = ingested_ids(&json);
-    assert_eq!(tessera_ids.len(), 1);
-    let tessera_id = tessera_ids[0];
+    let mosaica_ids = ingested_ids(&json);
+    assert_eq!(mosaica_ids.len(), 1);
+    let mosaica_id = mosaica_ids[0];
 
-    let (shard, entity) = test_key().invert(mosaica_types::TesseraId::new(tessera_id));
+    let (shard, entity) = test_key().invert(mosaica_types::MosaicaId::new(mosaica_id));
     assert_eq!(shard, 0, "the fixture bundle is shard 0");
     assert!(
         entity.raw() >= N_ITEMS,
@@ -482,7 +482,7 @@ async fn ingest_without_an_id_returns_a_genuinely_resolvable_tessera_id() {
     assert_eq!(resp.status(), 200);
     let (_, points) = decode_viewport(&resp.bytes().await.unwrap());
     let served: Vec<u64> = points.into_iter().map(|(id, _)| id).collect();
-    assert_eq!(served, [tessera_id]);
+    assert_eq!(served, [mosaica_id]);
 }
 
 /// A batch mixing items with and without an `id` is accepted whole, and only the supplied ids name
@@ -550,18 +550,18 @@ async fn ingest_two_rows_without_an_id_in_one_batch_do_not_collide() {
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["created"], 2);
-    let tessera_ids = ingested_ids(&json);
-    assert_eq!(tessera_ids.len(), 2);
+    let mosaica_ids = ingested_ids(&json);
+    assert_eq!(mosaica_ids.len(), 2);
     assert_ne!(
-        tessera_ids[0], tessera_ids[1],
-        "two items without an id must still get distinct entities/tessera_ids"
+        mosaica_ids[0], mosaica_ids[1],
+        "two items without an id must still get distinct entities/mosaica_ids"
     );
 }
 
-/// A `tessera_id` fills 64 bits, and a JSON number past 2^53 is rounded by JavaScript, so the
+/// A `mosaica_id` fills 64 bits, and a JSON number past 2^53 is rounded by JavaScript, so the
 /// ingest answer sends each as a decimal string: the same id the viewer serves for that row.
 #[tokio::test]
-async fn ingest_answers_each_rows_tessera_id_as_the_string_the_viewer_serves() {
+async fn ingest_answers_each_rows_mosaica_id_as_the_string_the_viewer_serves() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
 
@@ -1549,7 +1549,7 @@ async fn ingest_is_refused_by_buffer_occupancy() {
     );
 }
 
-/// The cell pair of every point served in `bbox` at zoom 8, by `tessera_id`.
+/// The cell pair of every point served in `bbox` at zoom 8, by `mosaica_id`.
 fn served_cells(engine: &Engine, bbox: [f64; 4]) -> std::collections::BTreeMap<u64, (u16, u16)> {
     let session = engine
         .authorise(br#"{"terms": ["0"]}"#)
@@ -3783,7 +3783,7 @@ async fn control_status_serves_its_pinned_shape() {
     let id = decode_artifact_frames(&resp.bytes().await.unwrap())
         .artifacts
         .expect("the artifact is served")[0]
-        .tessera_id;
+        .mosaica_id;
     for _ in 0..2 {
         assert!(shape_by_id(&server, &token, "s0", id, 0).await.is_some());
     }
@@ -4283,13 +4283,13 @@ async fn a_deleted_holder_names_nothing_and_a_suppressed_one_is_named() {
     assert_eq!(apply("suppress", fresh).await.status(), 200);
     let again: serde_json::Value = ingest("rebind-2", vec![fresh]).await.json().await.unwrap();
     assert_eq!(again["unchanged"], 1, "{again}");
-    assert_eq!(again["tessera_ids"], first["tessera_ids"], "{again}");
+    assert_eq!(again["mosaica_ids"], first["mosaica_ids"], "{again}");
 
     // Deleted: forgotten, so the same row creates a new item.
     assert_eq!(apply("delete", fresh).await.status(), 200);
     let reborn: serde_json::Value = ingest("rebind-3", vec![fresh]).await.json().await.unwrap();
     assert_eq!(reborn["created"], 1, "a deleted holder names nothing: {reborn}");
-    assert_ne!(reborn["tessera_ids"], first["tessera_ids"], "{reborn}");
+    assert_ne!(reborn["mosaica_ids"], first["mosaica_ids"], "{reborn}");
 
     // And the `id` names the new item: a suppress addresses it, answered 200.
     assert_eq!(apply("suppress", fresh).await.status(), 200);

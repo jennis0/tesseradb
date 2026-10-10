@@ -7,9 +7,9 @@
 //! batch a deleted member, each refuse the whole batch with nothing applied; a suppressed member
 //! joins and stays
 //! outside every mask; a suppressed artifact grows and stays suppressed; the growth comes back from
-//! a restart and survives a fold; the same with members named by `tessera_id`;
+//! a restart and survives a fold; the same with members named by `mosaica_id`;
 //! and the body takes keys, members and the fixed parts and nothing else (the fills are
-//! `artifact_fill.rs`'s subject). The response carries a `tessera_id` and the count that joined,
+//! `artifact_fill.rs`'s subject). The response carries a `mosaica_id` and the count that joined,
 //! and never an ordinal or a membership size (C8).
 
 mod common;
@@ -32,7 +32,7 @@ fn artifacts_url(server: &TestServer) -> String {
     ))
 }
 
-/// Publish one artifact under `key`; return its `tessera_id`.
+/// Publish one artifact under `key`; return its `mosaica_id`.
 async fn publish(server: &TestServer, key: &str, body_members: serde_json::Value) -> String {
     let resp = server
         .client
@@ -49,7 +49,7 @@ async fn publish(server: &TestServer, key: &str, body_members: serde_json::Value
     assert_eq!(status, 201, "{body}");
     // Durable at the acknowledgement, served from the next publication (`ingest.md` §1.3).
     tick(server).await;
-    body["artifacts"][0]["tessera_id"]
+    body["artifacts"][0]["mosaica_id"]
         .as_str()
         .expect("a publication answers an identifier")
         .to_string()
@@ -133,10 +133,10 @@ async fn change(server: &TestServer, item: serde_json::Value) {
 }
 
 /// The receipt says what joined and nothing else.
-fn assert_receipt(artifact: &serde_json::Value, key: &str, tessera_id: &str, joined: u64) {
+fn assert_receipt(artifact: &serde_json::Value, key: &str, mosaica_id: &str, joined: u64) {
     assert_eq!(artifact["key"], key, "{artifact}");
     assert_eq!(
-        artifact["tessera_id"], tessera_id,
+        artifact["mosaica_id"], mosaica_id,
         "the identifier is the publication's: {artifact}"
     );
     assert_eq!(artifact["joined"], joined, "{artifact}");
@@ -178,7 +178,7 @@ async fn an_artifact_published_with_one_slice_grows_in_two_more_and_serves_the_u
         "the narrow principal sees the union inside their mask"
     );
     let row = served(&server, &["0"]).await.unwrap();
-    assert_eq!(row.tessera_id.to_string(), id, "the identity did not move");
+    assert_eq!(row.mosaica_id.to_string(), id, "the identity did not move");
 
     // The no-op: the same slice again names the artifact and adds nothing, and is accepted.
     let (status, body) = grow(&server, json!([{ "key": "a", "members": members(20..30) }])).await;
@@ -228,7 +228,7 @@ async fn an_unknown_key_refuses_the_whole_batch() {
     );
 }
 
-/// A deleted member names nothing, by its `id` or by its `tessera_id`, and refuses a strict
+/// A deleted member names nothing, by its `id` or by its `mosaica_id`, and refuses a strict
 /// batch; a suppressed member joins and stays outside every mask until the suppression is lifted.
 #[tokio::test]
 async fn a_deleted_member_refuses_the_batch_and_a_suppressed_member_joins() {
@@ -237,7 +237,7 @@ async fn a_deleted_member_refuses_the_batch_and_a_suppressed_member_joins() {
     register(&server, flat_layer(LAYER)).await;
     publish(&server, "a", members(0..10)).await;
 
-    let by_tessera = members_by_tessera_id((10..20).map(|s| tessera_id_of(&server, s)));
+    let by_mosaica = members_by_mosaica_id((10..20).map(|s| mosaica_id_of(&server, s)));
     change(
         &server,
         json!({ "op": "delete", "match": { "id": member(15) } }),
@@ -245,7 +245,7 @@ async fn a_deleted_member_refuses_the_batch_and_a_suppressed_member_joins() {
     .await;
     for body in [
         json!({ "artifacts": [{ "key": "a", "members": members(10..20) }] }),
-        json!({ "artifacts": [{ "key": "a", "members": by_tessera }] }),
+        json!({ "artifacts": [{ "key": "a", "members": by_mosaica }] }),
     ] {
         let (status, answer) = grow_raw(&server, true, body).await;
         assert_eq!(status, 404, "{answer}");
@@ -293,7 +293,7 @@ async fn a_suppressed_artifact_grows_and_stays_suppressed() {
     let id = publish(&server, "a", members(0..10)).await;
     change(
         &server,
-        json!({ "op": "suppress", "match": { "tessera_id": id } }),
+        json!({ "op": "suppress", "match": { "mosaica_id": id } }),
     )
     .await;
     assert!(
@@ -316,7 +316,7 @@ async fn a_suppressed_artifact_grows_and_stays_suppressed() {
 
     change(
         &server,
-        json!({ "op": "unsuppress", "match": { "tessera_id": id } }),
+        json!({ "op": "unsuppress", "match": { "mosaica_id": id } }),
     )
     .await;
     assert_eq!(
@@ -340,7 +340,7 @@ async fn growth_survives_a_restart_and_a_fold() {
     let server = restart(server, &tmp).await;
     let row = served(&server, &["0"]).await.expect("replayed");
     assert_eq!(row.masked_count, 20, "the growth came back from the log");
-    assert_eq!(row.tessera_id.to_string(), id);
+    assert_eq!(row.mosaica_id.to_string(), id);
 
     let (status, body) = grow(&server, json!([{ "key": "a", "members": members(20..30) }])).await;
     assert_eq!(status, 200, "{body}");
@@ -369,9 +369,9 @@ async fn growth_survives_a_restart_and_a_fold() {
     assert_eq!(count(&server, &["0"]).await, 40);
 }
 
-/// Members named by `tessera_id`: the identifiers a viewer holds.
+/// Members named by `mosaica_id`: the identifiers a viewer holds.
 #[tokio::test]
-async fn members_named_by_tessera_id_grow_by_the_identifiers_a_viewer_holds() {
+async fn members_named_by_mosaica_id_grow_by_the_identifiers_a_viewer_holds() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     register(&server, flat_layer(LAYER)).await;
@@ -397,7 +397,7 @@ async fn members_named_by_tessera_id_grow_by_the_identifiers_a_viewer_holds() {
     let points = decode_viewport_frames(&resp.bytes().await.unwrap()).points;
     let ids: Vec<u64> = points
         .iter()
-        .map(|(tessera_id, _)| *tessera_id)
+        .map(|(mosaica_id, _)| *mosaica_id)
         .collect();
     assert!(
         ids.len() >= 100,
@@ -411,14 +411,14 @@ async fn members_named_by_tessera_id_grow_by_the_identifiers_a_viewer_holds() {
         .put(artifacts_url(&server))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&json!({
-            "artifacts": [{ "key": "a", "members": members_by_tessera_id(first) }]
+            "artifacts": [{ "key": "a", "members": members_by_mosaica_id(first) }]
         }))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 201);
     let body: serde_json::Value = resp.json().await.unwrap();
-    let id = body["artifacts"][0]["tessera_id"]
+    let id = body["artifacts"][0]["mosaica_id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -428,7 +428,7 @@ async fn members_named_by_tessera_id_grow_by_the_identifiers_a_viewer_holds() {
         &server,
         false,
         json!({
-            "artifacts": [{ "key": "a", "members": members_by_tessera_id(second) }]
+            "artifacts": [{ "key": "a", "members": members_by_mosaica_id(second) }]
         }),
     )
     .await;
@@ -441,7 +441,7 @@ async fn members_named_by_tessera_id_grow_by_the_identifiers_a_viewer_holds() {
         &server,
         false,
         json!({
-            "artifacts": [{ "key": "a", "members": members_by_tessera_id(ids[..100].to_vec()) }]
+            "artifacts": [{ "key": "a", "members": members_by_mosaica_id(ids[..100].to_vec()) }]
         }),
     )
     .await;

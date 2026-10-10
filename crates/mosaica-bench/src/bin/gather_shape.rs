@@ -23,7 +23,7 @@
 //! asserted.
 //!
 //! So the row set is **scattered and sorted**, matching what a real selection produces
-//! (`Selection` sorts ascending by `tessera_id`, and the priority key is uncorrelated with row
+//! (`Selection` sorts ascending by `mosaica_id`, and the priority key is uncorrelated with row
 //! order — see `arms/gather.rs`'s `Pattern::Scattered`). A contiguous row set would flatter B.
 //!
 //! **The outputs are compared, not just timed.** A shape that is faster because it dropped or
@@ -86,7 +86,7 @@ macro_rules! flat_members {
 }
 
 struct Point {
-    tessera_id: u64,
+    mosaica_id: u64,
     code: u64,
     scalars: Vec<ScalarOut>,
 }
@@ -95,7 +95,7 @@ struct Point {
 fn row_to_point(segment: &SegmentData, row: u32, declared: &[String]) -> Point {
     let idx = row as usize;
     let cols = &segment.columns;
-    let tessera_id = cols.tessera_id()[idx];
+    let mosaica_id = cols.mosaica_id()[idx];
     let code = ((segment.morton.u32()[idx] as u64) << 32) | cols.residual()[idx] as u64;
     let mut scalars = Vec::with_capacity(declared.len());
     for name in declared {
@@ -113,7 +113,7 @@ fn row_to_point(segment: &SegmentData, row: u32, declared: &[String]) -> Point {
         }
     }
     Point {
-        tessera_id,
+        mosaica_id,
         code,
         scalars,
     }
@@ -189,7 +189,7 @@ fn gather_row_major_hoisted(
                 }
                 scalars.push(flat_members!(out));
             }
-            Point { tessera_id: cols.tessera_id()[idx], code: 0, scalars }
+            Point { mosaica_id: cols.mosaica_id()[idx], code: 0, scalars }
         })
         .collect();
     transpose(&points, slices.len())
@@ -205,15 +205,15 @@ fn gather_column_major(
     declared: &[String],
 ) -> (Vec<u64>, Vec<u64>, Vec<ColumnBuf>) {
     let cols = &segment.columns;
-    let ids = cols.tessera_id();
+    let ids = cols.mosaica_id();
     let residual = cols.residual();
     let morton = segment.morton.u32();
 
-    let mut tessera_ids = Vec::with_capacity(rows.len());
+    let mut mosaica_ids = Vec::with_capacity(rows.len());
     let mut codes = Vec::with_capacity(rows.len());
     for &row in rows {
         let idx = row as usize;
-        tessera_ids.push(ids[idx]);
+        mosaica_ids.push(ids[idx]);
         codes.push(((morton[idx] as u64) << 32) | residual[idx] as u64);
     }
 
@@ -247,7 +247,7 @@ fn gather_column_major(
         }
         columns.push(flat_members!(fill));
     }
-    (tessera_ids, codes, columns)
+    (mosaica_ids, codes, columns)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -302,7 +302,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if a_cols != b_cols {
         return Err("the two shapes disagree — column-major is WRONG, not faster".into());
     }
-    let a_ids: Vec<u64> = points_once.iter().map(|p| p.tessera_id).collect();
+    let a_ids: Vec<u64> = points_once.iter().map(|p| p.mosaica_id).collect();
     let a_codes: Vec<u64> = points_once.iter().map(|p| p.code).collect();
     if a_ids != b_ids || a_codes != b_codes {
         return Err("identity or position columns disagree".into());

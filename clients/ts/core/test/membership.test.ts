@@ -59,7 +59,7 @@ describe('the membership column in the decoder', () => {
       body(
         [
           new Table({
-            tessera_id: u64([1n, 2n, 3n, 4n]),
+            mosaica_id: u64([1n, 2n, 3n, 4n]),
             code: u64([0n, 0n, 0n, 0n]),
             w: vectorFromArray(Uint32Array.from([10, 11, 12, 13])),
             'membership:clusters/x': u64n([5n, null, 2n ** 63n + 7n, 5n])
@@ -80,8 +80,8 @@ describe('the membership column in the decoder', () => {
     const r = decodeViewport(
       body(
         [
-          new Table({tessera_id: u64([1n, 2n]), code: u64([0n, 0n]), 'membership:l': u64n([9n, null])}),
-          new Table({tessera_id: u64([3n, 4n]), code: u64([0n, 0n]), 'membership:l': u64n([8n, 9n])})
+          new Table({mosaica_id: u64([1n, 2n]), code: u64([0n, 0n]), 'membership:l': u64n([9n, null])}),
+          new Table({mosaica_id: u64([3n, 4n]), code: u64([0n, 0n]), 'membership:l': u64n([8n, 9n])})
         ],
         [2n, 2n]
       )
@@ -92,11 +92,11 @@ describe('the membership column in the decoder', () => {
 
   it('carries one column per layer, and none where no layer was served', () => {
     const two = decodeViewport(
-      body([new Table({tessera_id: u64([1n]), code: u64([0n]), 'membership:a': u64n([1n]), 'membership:b': u64n([null])})], [1n])
+      body([new Table({mosaica_id: u64([1n]), code: u64([0n]), 'membership:a': u64n([1n]), 'membership:b': u64n([null])})], [1n])
     );
     expect(Object.keys(two.membership).sort()).toEqual(['a', 'b']);
     expect([...two.membership['b']!.index]).toEqual([0]);
-    const none = decodeViewport(body([new Table({tessera_id: u64([1n]), code: u64([0n])})], [1n]));
+    const none = decodeViewport(body([new Table({mosaica_id: u64([1n]), code: u64([0n])})], [1n]));
     expect(none.membership).toEqual({});
   });
 
@@ -105,7 +105,7 @@ describe('the membership column in the decoder', () => {
     const ids = Array.from({length: n}, (_, i) => BigInt(i + 1));
     // 9,000 distinct artifacts, above the hash's initial half-load.
     const members = Array.from({length: n}, (_, i) => BigInt(1_000_000 + (i % 9_000)));
-    const r = decodeViewport(body([new Table({tessera_id: u64(ids), code: u64(ids.map(() => 0n)), 'membership:l': u64n(members)})], [BigInt(n)]));
+    const r = decodeViewport(body([new Table({mosaica_id: u64(ids), code: u64(ids.map(() => 0n)), 'membership:l': u64n(members)})], [BigInt(n)]));
     const m = r.membership['l']!;
     expect(m.index).toBeInstanceOf(Uint32Array);
     expect(m.ids.length).toBe(9_000);
@@ -223,7 +223,7 @@ describe('the membership golden (the notebook corpus’s k-means layer, named wi
       reader
         .push(fixture('viewport-artifacts.bin'))
         .filter((f) => f.kind === FRAME_ARTIFACTS)
-        .flatMap((f) => decodeArtifactsFrame(f.payload).artifacts.map((a) => a.tesseraId))
+        .flatMap((f) => decodeArtifactsFrame(f.payload).artifacts.map((a) => a.mosaicaId))
     );
     for (const id of m.ids) expect(served.has(id)).toBe(true);
   });

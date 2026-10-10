@@ -83,7 +83,7 @@ fn ids(body: &serde_json::Value) -> Vec<(String, String)> {
         .map(|a| {
             (
                 a["key"].as_str().unwrap().to_string(),
-                a["tessera_id"].as_str().unwrap().to_string(),
+                a["mosaica_id"].as_str().unwrap().to_string(),
             )
         })
         .collect()
@@ -366,14 +366,14 @@ async fn assert_indistinguishable(a: &Deployment, b: &Deployment) -> usize {
         &viewport_raw(&a.server, &blue_a, viewport(0, json!({ "layers": [] }))).await,
     )
     .points;
-    for (tessera_id, _) in points.iter().take(40) {
-        let a_item = post_item(&a.server, &blue_a, *tessera_id).await;
-        let b_item = post_item(&b.server, &blue_b, *tessera_id).await;
+    for (mosaica_id, _) in points.iter().take(40) {
+        let a_item = post_item(&a.server, &blue_a, *mosaica_id).await;
+        let b_item = post_item(&b.server, &blue_b, *mosaica_id).await;
         assert_eq!(a_item.status(), b_item.status());
         assert_eq!(
             a_item.text().await.unwrap(),
             b_item.text().await.unwrap(),
-            "item card {tessera_id}"
+            "item card {mosaica_id}"
         );
         compared += 1;
     }

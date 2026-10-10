@@ -18,8 +18,8 @@ const expected: Record<
     sub_cells: number | null;
     artifacts: number | null;
     points: number;
-    first_point_tessera_id: string | null;
-    first_artifact_tessera_id: string | null;
+    first_point_mosaica_id: string | null;
+    first_artifact_mosaica_id: string | null;
   }
 > = JSON.parse(readFileSync(join(import.meta.dirname, 'expected.json'), 'utf8'));
 
@@ -40,15 +40,15 @@ describe('the worked decode', () => {
       else expect(r.trailer!.rows).toBe(artifactRows);
 
       const firstPoint = firstRows(r.points, 1)[0];
-      expect(firstPoint?.tessera_id ?? null).toBe(want.first_point_tessera_id);
+      expect(firstPoint?.mosaica_id ?? null).toBe(want.first_point_mosaica_id);
       const firstArtifact = firstRows(r.artifacts, 1)[0];
-      expect(firstArtifact?.tessera_id ?? null).toBe(want.first_artifact_tessera_id);
+      expect(firstArtifact?.mosaica_id ?? null).toBe(want.first_artifact_mosaica_id);
     });
   }
 
-  it('reads a tessera_id as a BigInt and never as a number', () => {
+  it('reads a mosaica_id as a BigInt and never as a number', () => {
     const r = decodeViewport(fixture('viewport-plain.bin'));
-    const id = r.points[0]!.getChild('tessera_id')!.get(0);
+    const id = r.points[0]!.getChild('mosaica_id')!.get(0);
     expect(typeof id).toBe('bigint');
     // Past 2^53 a JS number would already have lost bits; the fixture's first id is.
     expect(id > 2n ** 53n).toBe(true);

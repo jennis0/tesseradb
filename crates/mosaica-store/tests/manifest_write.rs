@@ -24,16 +24,16 @@ use mosaica_store::manifest_write::{write_current, write_manifest_json};
 use mosaica_store::write::{write_permutation, write_segment};
 use mosaica_store::write_segments_manifest;
 use mosaica_store::{open_bundle, StoreError};
-use mosaica_types::{EntityId, TesseraId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+use mosaica_types::{EntityId, MosaicaId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
-/// A synthetic `tessera_id`-shaped value for test fixtures — see `bundle_read.rs`'s copy of the
+/// A synthetic `mosaica_id`-shaped value for test fixtures — see `bundle_read.rs`'s copy of the
 /// same helper for why full splitmix64 output rather than a raw seed.
-fn synthetic_tessera_id(seed: u64) -> TesseraId {
+fn synthetic_mosaica_id(seed: u64) -> MosaicaId {
     let mut z = seed.wrapping_add(0x9E3779B97F4A7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
     z ^= z >> 31;
-    TesseraId::new(z)
+    MosaicaId::new(z)
 }
 
 fn unit_extent() -> Bounds {
@@ -66,7 +66,7 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
     let extent = unit_extent();
     let mut items: Vec<TilerItem> = (0..n)
         .map(|entity_id| TilerItem {
-            tessera_id: synthetic_tessera_id(entity_id),
+            mosaica_id: synthetic_mosaica_id(entity_id),
             qx: fixed32(((entity_id * 37) % 100) as f64 / 100.0, 0.0, 1.0),
             qy: fixed32(((entity_id * 61) % 100) as f64 / 100.0, 0.0, 1.0),
             scalars: vec![],

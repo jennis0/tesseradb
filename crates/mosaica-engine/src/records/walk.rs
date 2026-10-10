@@ -112,7 +112,7 @@ pub(super) struct Taken {
     /// Index into the view's segments, ascending by row base.
     pub(super) seg: usize,
     pub(super) local: u32,
-    pub(super) tessera_id: u64,
+    pub(super) mosaica_id: u64,
     pub(super) entity: u32,
     pub(super) matched: bool,
 }
@@ -225,7 +225,7 @@ fn key_of(order: RecordsOrder, segments: &[(&SegmentData, u32)], row: &Taken) ->
     match order {
         RecordsOrder::Map => {
             let (segment, _) = segments[row.seg];
-            (segment.morton.u32()[row.local as usize], row.tessera_id)
+            (segment.morton.u32()[row.local as usize], row.mosaica_id)
         }
         RecordsOrder::Stored => (row.entity, 0),
     }
@@ -239,14 +239,14 @@ fn before(key: Key) -> Option<Key> {
     }
 }
 
-/// The first local row of `segment` past `after` in `(cell, tessera_id)` order, the order every
+/// The first local row of `segment` past `after` in `(cell, mosaica_id)` order, the order every
 /// segment's rows are stored in.
 fn first_after(segment: &SegmentData, after: Option<Key>) -> u32 {
     let Some(after) = after else {
         return 0;
     };
     let cells = segment.morton.u32();
-    let ids = segment.columns.tessera_id();
+    let ids = segment.columns.mosaica_id();
     let (mut lo, mut hi) = (0usize, cells.len());
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
@@ -449,7 +449,7 @@ impl Walk {
                 (reach < segment.row_count as usize).then(|| {
                     (
                         segment.morton.u32()[reach],
-                        segment.columns.tessera_id()[reach],
+                        segment.columns.mosaica_id()[reach],
                     )
                 })
             })
@@ -639,7 +639,7 @@ impl Walk {
             let key = match order {
                 RecordsOrder::Map => (
                     segment.morton.u32()[local as usize],
-                    segment.columns.tessera_id()[local as usize],
+                    segment.columns.mosaica_id()[local as usize],
                 ),
                 RecordsOrder::Stored => (entity, 0),
             };
@@ -848,7 +848,7 @@ impl SegmentRun<'_> {
         let local = local as usize;
         (
             self.segment.morton.u32()[local],
-            self.segment.columns.tessera_id()[local],
+            self.segment.columns.mosaica_id()[local],
         )
     }
 
@@ -896,7 +896,7 @@ impl Take<'_> {
 
     /// Take map-order rows past `scan` and in the stretch until `rows` holds `need`: each
     /// segment's rows that the page's mask admits, and the filter where rows must match, merged
-    /// across segments by `(cell, tessera_id)`. The least key the scan has not reached is taken
+    /// across segments by `(cell, mosaica_id)`. The least key the scan has not reached is taken
     /// where it is a gathered row, and gathered where it is not, so the clock, read before each
     /// chunk, can stop the scan after one. `Some` where it did, with the first key the scan did
     /// not reach.
@@ -937,11 +937,11 @@ impl Take<'_> {
             let run = &mut runs[i];
             if run.at < run.buffered.len() {
                 let (local, matched) = run.buffered[run.at];
-                let tessera_id = run.segment.columns.tessera_id()[local as usize];
+                let mosaica_id = run.segment.columns.mosaica_id()[local as usize];
                 rows.push(Taken {
                     seg: run.seg,
                     local,
-                    tessera_id,
+                    mosaica_id,
                     entity: cx.entity_of(run.segment, local),
                     matched,
                 });
@@ -1002,7 +1002,7 @@ impl Take<'_> {
             rows.push(Taken {
                 seg,
                 local,
-                tessera_id: segments[seg].0.columns.tessera_id()[local as usize],
+                mosaica_id: segments[seg].0.columns.mosaica_id()[local as usize],
                 entity,
                 matched,
             });

@@ -1,6 +1,6 @@
 //! Edited items: which entity holds an item whose number is not its entity.
 //!
-//! An item's number is the entity id it was first given, and its `tessera_id` is the keyed
+//! An item's number is the entity id it was first given, and its `mosaica_id` is the keyed
 //! permutation of that number. An edit moves an item to a new entity and keeps its number, so an
 //! item edited at least once needs a map from its number to the entity holding it and back. Items
 //! never edited are in no map: their entity is their number.
@@ -14,7 +14,7 @@
 //!
 //! A segment whose rows hold an edited item carries [`EDITED_ROWS_FILE`] beside its columns: the
 //! `(row, entity)` pairs, ascending by row, of the rows whose entity is not the one their
-//! `tessera_id` inverts to. Opening, merging and folding a segment read a row's entity from it.
+//! `mosaica_id` inverts to. Opening, merging and folding a segment read a row's entity from it.
 
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
@@ -477,7 +477,7 @@ pub fn lists_edited_rows<'a>(files: impl IntoIterator<Item = &'a String>) -> boo
 /// Where the entity of each of a segment's rows is read.
 #[derive(Debug, Clone)]
 pub enum RowEntities {
-    /// Every row's entity is the number its `tessera_id` inverts to.
+    /// Every row's entity is the number its `mosaica_id` inverts to.
     Numbers,
     /// A flush or merge segment: the rows an edit moved are listed, and every other row's entity
     /// is its number.
@@ -488,20 +488,20 @@ pub enum RowEntities {
 
 impl RowEntities {
     /// The `(row, entity)` of every row an edit moved: every listed row, and every base row whose
-    /// table names another entity than its `tessera_id`'s number.
+    /// table names another entity than its `mosaica_id`'s number.
     pub fn moved<'a>(
         &'a self,
-        tessera_ids: &'a [u64],
+        mosaica_ids: &'a [u64],
         key: &'a mosaica_types::IdentityKey,
     ) -> Box<dyn Iterator<Item = (u32, u32)> + 'a> {
         match self {
             RowEntities::Numbers => Box::new(std::iter::empty()),
             RowEntities::Listed(rows) => Box::new(rows.iter()),
             RowEntities::Table(_) => {
-                Box::new((0..tessera_ids.len() as u32).filter_map(move |row| {
+                Box::new((0..mosaica_ids.len() as u32).filter_map(move |row| {
                     let entity = self.recorded(row)?;
                     let (_, number) =
-                        key.invert(mosaica_types::TesseraId::new(tessera_ids[row as usize]));
+                        key.invert(mosaica_types::MosaicaId::new(mosaica_ids[row as usize]));
                     (u64::from(entity) != number.raw()).then_some((row, entity))
                 }))
             }
@@ -520,21 +520,21 @@ impl RowEntities {
         }
     }
 
-    /// The entity `row` belongs to. Refused where its `tessera_id` inverts to another shard, or
+    /// The entity `row` belongs to. Refused where its `mosaica_id` inverts to another shard, or
     /// a base row lies past its table.
     pub fn entity_of(
         &self,
         row: u32,
-        tessera_id: u64,
+        mosaica_id: u64,
         key: &mosaica_types::IdentityKey,
         shard_id: u32,
         seg_id: &str,
     ) -> Result<mosaica_types::EntityId> {
-        let (shard, number) = key.invert(mosaica_types::TesseraId::new(tessera_id));
+        let (shard, number) = key.invert(mosaica_types::MosaicaId::new(mosaica_id));
         if shard != shard_id {
             return Err(StoreError::MalformedBundle {
                 detail: format!(
-                    "segment '{seg_id}': row {row}'s tessera_id inverts to shard {shard}, but the \
+                    "segment '{seg_id}': row {row}'s mosaica_id inverts to shard {shard}, but the \
                      manifest declares shard {shard_id}"
                 ),
             });

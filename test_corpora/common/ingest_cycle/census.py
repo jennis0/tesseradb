@@ -346,7 +346,7 @@ def artifact_frame_census(content: bytes) -> dict:
 
 def artifact_frame_parents(content: bytes) -> dict:
     """The served parent links per layer, as sorted `[child, parent]` pairs of artifact keys,
-    read back through the frame's `tessera_id -> key` map since a `tessera_id` is specific to
+    read back through the frame's `mosaica_id -> key` map since a `mosaica_id` is specific to
     this deployment. A parent is named only where it is a row of the same frame, so the map
     resolves every link, and a level served without the level above it carries none.
     """
@@ -354,7 +354,7 @@ def artifact_frame_parents(content: bytes) -> dict:
     for table in artifact_frame_rows(content):
         names = table.schema.names
         keys = table.column("key").to_pylist() if "key" in names else [None] * table.num_rows
-        ids = table.column("tessera_id").to_pylist()
+        ids = table.column("mosaica_id").to_pylist()
         parents = table.column("parent_ids").to_pylist() if "parent_ids" in names else None
         layers = table.column("layer").to_pylist()
         named = {i: key if key is not None else str(i) for i, key in zip(ids, keys)}

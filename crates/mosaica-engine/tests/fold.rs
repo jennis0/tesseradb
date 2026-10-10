@@ -26,7 +26,7 @@ use mosaica_engine::{Engine, EngineConfig};
 use mosaica_lifecycle::command::UnallocatedRow;
 use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_store::read::open_bundle;
-use mosaica_types::{EntityId, TermId, TesseraId};
+use mosaica_types::{EntityId, TermId, MosaicaId};
 
 /// A fixture bundle and an engine over it, with the executor running and the background refresh
 /// off.
@@ -390,7 +390,7 @@ fn all_three_halves_of_one_deletion() {
 /// Every surviving entity resolves to a row, the row count is exactly the survivors, and the item
 /// each entity resolves to is the same one. The last is what a dequantise-then-requantise round
 /// trip in pass 1 would break — silently, since no row count would show it — and it is checked
-/// through `tessera_id`, which the segment stores and which inverts to the entity.
+/// through `mosaica_id`, which the segment stores and which inverts to the entity.
 ///
 /// **Mutation this kills:** scattering `permutation.bin` from an input row index rather than a
 /// count of rows emitted (every row after the dropped one is then off by one, so the entities and
@@ -437,11 +437,11 @@ fn every_surviving_row_keeps_its_own_identity_and_row_space_is_dense() {
             Some(row) => {
                 assert!(!deleted.contains(&entity));
                 assert!(rows_seen.insert(row.raw()), "two entities claim one row");
-                // The stored `tessera_id` at that row must invert to this entity: the row is the
+                // The stored `mosaica_id` at that row must invert to this entity: the row is the
                 // entity's own, not the one that used to sit there.
                 assert_eq!(
-                    segment.columns.tessera_id()[row.raw() as usize],
-                    engine.tessera_id_of(entity).unwrap().raw(),
+                    segment.columns.mosaica_id()[row.raw() as usize],
+                    engine.mosaica_id_of(entity).unwrap().raw(),
                     "the row at {row:?} belongs to a different entity than the permutation says"
                 );
             }
@@ -1634,7 +1634,7 @@ fn masked_counts_are_identical_across_the_flip_for_every_principal() {
 /// mounted verb the fold's unmasked read could just as easily leak through. Three cases in one
 /// fold: an item a restricted principal cannot see must answer nothing for it, both before and
 /// after; an item the full-coverage principal can see must keep answering after the fold, at its
-/// unchanged `tessera_id`; and an entity deleted before the fold — folded away, so both rowless and
+/// unchanged `mosaica_id`; and an entity deleted before the fold — folded away, so both rowless and
 /// postingless afterwards — must answer nothing even to the full-coverage principal, or Rule F's
 /// retirement has re-exposed it through the one verb the counts test does not exercise.
 ///
@@ -1659,8 +1659,8 @@ fn item_lookup_answers_exactly_m_auth_across_a_fold() {
     let full = engine.authorise(&full_coverage_credential()).unwrap();
     let subset = engine.authorise(&subset_credential()).unwrap();
 
-    let restricted_id: TesseraId = engine.tessera_id_of(restricted).unwrap();
-    let deleted_id: TesseraId = engine.tessera_id_of(deleted).unwrap();
+    let restricted_id: MosaicaId = engine.mosaica_id_of(restricted).unwrap();
+    let deleted_id: MosaicaId = engine.mosaica_id_of(deleted).unwrap();
 
     // Before the fold: the ordinary masking rule, and confirmation the fixture set the case up as
     // intended (a delete on an item nobody could resurrect from proves nothing).
@@ -1699,7 +1699,7 @@ fn item_lookup_answers_exactly_m_auth_across_a_fold() {
 /// session object, never re-authorised, across the flip.
 ///
 /// The sibling cases above authorise once and read counts, or read `Engine::item`. This one pins
-/// the marks: the served `tessera_id` list, which is what a viewer actually draws, is where a
+/// the marks: the served `mosaica_id` list, which is what a viewer actually draws, is where a
 /// retired entity would appear point by point rather than as a number one smaller than expected.
 /// A session's fragment is frozen at authorise and a fold advances no watermark, so what decides
 /// whether that fragment is reused is the bundle-identity comparison in `Engine::fragment_for` —
@@ -1714,8 +1714,8 @@ fn a_session_from_before_a_fold_is_never_served_the_entity_the_fold_retired() {
     // source 5 is never deleted and is the control.
     let doomed = entity_of_source(&root, "v00000", 6);
     let survivor = entity_of_source(&root, "v00000", 5);
-    let doomed_id: TesseraId = engine.tessera_id_of(doomed).unwrap();
-    let survivor_id: TesseraId = engine.tessera_id_of(survivor).unwrap();
+    let doomed_id: MosaicaId = engine.mosaica_id_of(doomed).unwrap();
+    let survivor_id: MosaicaId = engine.mosaica_id_of(survivor).unwrap();
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let before = marks(&engine, &session);
@@ -1771,7 +1771,7 @@ fn tombstoned(manifest: &mosaica_store::manifest::SegmentsManifest, entity: Enti
         .contains(entity.raw() as u32)
 }
 
-/// The `tessera_id`s a whole-map request serves this session, which is the mark set a viewer draws.
+/// The `mosaica_id`s a whole-map request serves this session, which is the mark set a viewer draws.
 fn marks(engine: &Engine, session: &mosaica_engine::Session) -> Vec<u64> {
     engine
         .viewport(
@@ -1785,7 +1785,7 @@ fn marks(engine: &Engine, session: &mosaica_engine::Session) -> Vec<u64> {
         )
         .unwrap()
         .points
-        .tessera_ids
+        .mosaica_ids
 }
 
 /// **The drill-down's satisfied labels survive a fold, and a folded-away entity's list is gone**
@@ -1808,8 +1808,8 @@ fn an_items_labels_survive_a_fold_and_a_folded_away_entitys_list_goes_with_it() 
     let kept = entity_of_source(&root, "v00000", 3);
     let deleted = entity_of_source(&root, "v00000", 6);
     let full = engine.authorise(&full_coverage_credential()).unwrap();
-    let kept_id: TesseraId = engine.tessera_id_of(kept).unwrap();
-    let deleted_id: TesseraId = engine.tessera_id_of(deleted).unwrap();
+    let kept_id: MosaicaId = engine.mosaica_id_of(kept).unwrap();
+    let deleted_id: MosaicaId = engine.mosaica_id_of(deleted).unwrap();
 
     let before = engine.item(&full, kept_id).unwrap().unwrap().labels;
     assert!(

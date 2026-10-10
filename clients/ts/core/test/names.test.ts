@@ -23,9 +23,9 @@ describe('artifactName', () => {
     const attached = new Map([[2n, 'decoders, thresholds']]);
     expect(artifactName(cluster(1n, ['']))).toBeNull();
     expect(artifactName(cluster(2n, ['']), attached)).toBe('decoders, thresholds');
-    expect(artifactName({tesseraId: 1n, name: ''})).toBeNull();
-    expect(artifactName({tesseraId: 1n, name: null})).toBeNull();
-    expect(artifactName({tesseraId: 1n, name: 'Neoplasms'})).toBe('Neoplasms');
+    expect(artifactName({mosaicaId: 1n, name: ''})).toBeNull();
+    expect(artifactName({mosaicaId: 1n, name: null})).toBeNull();
+    expect(artifactName({mosaicaId: 1n, name: 'Neoplasms'})).toBe('Neoplasms');
   });
 });
 
