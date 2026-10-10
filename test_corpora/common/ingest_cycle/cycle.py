@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import datetime
+import itertools
 import json
 import random
 import shutil
@@ -9,6 +10,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Iterable
 
 import numpy as np
 import pyarrow as pa
@@ -340,22 +342,22 @@ class Cycle:
         self.result["failures"] = self.failures()
         return self.result
 
-    def serve_base(self, base_dir: Path) -> Deployment | None:
-        """Serve a copy of the base bundle on this run's own ports; None where it would not
-        open. A base served directly is a different base once a publication or flush writes."""
+    def serve_copy(self, source_dir: Path, bundle: Path, scratch: Path) -> Deployment | None:
+        """Serve a copy of `bundle` under `scratch`, with `source_dir`'s declaration and
+        deployment file, on this run's own ports; None where it would not open. A bundle served
+        directly is a different bundle once a publication or flush writes to it."""
         args = self.args
-        scratch = self.work / f"serve-{args.fraction:g}"
-        bundle = scratch / "bundle"
-        if bundle.exists():
-            shutil.rmtree(bundle)
+        copy = scratch / "bundle"
+        if copy.exists():
+            shutil.rmtree(copy)
         scratch.mkdir(parents=True, exist_ok=True)
         t0 = time.perf_counter()
-        shutil.copytree(base_dir / "bundle", bundle)
-        self.result["base_copy_s"] = round(time.perf_counter() - t0, 2)
-        self.log(f"copied the base bundle in {self.result['base_copy_s']} s")
+        shutil.copytree(bundle, copy)
+        self.result["copy_s"] = round(time.perf_counter() - t0, 2)
+        self.log(f"copied {bundle} in {self.result['copy_s']} s")
         served = Deployment(
-            base_dir,
-            bundle,
+            source_dir,
+            copy,
             scratch,
             (args.port0, args.port0 + 1, args.port0 + 2),
             self.binary,
@@ -377,6 +379,15 @@ class Cycle:
         self.served = served
         return served
 
+    def read_ranks(self) -> list[dict]:
+        """The principal ladder's ranks: `--ranks`, else the rung's own file, else one derived
+        into `--work`, which `ranks` in the result records."""
+        if self.args.ranks:
+            path = Path(self.args.ranks)
+        else:
+            path, self.result["ranks"] = ranks_for(self.rung, self.work)
+        return json.loads(path.read_text())
+
     def read_views(self) -> None:
         """Every declared view, the anchor first, each group's views among them, with the file
         each one's pass reads: a row in a second view joins an entity that must already exist."""
@@ -384,10 +395,12 @@ class Cycle:
         self.result["views"] = self.view_names
 
     def open_session(self, served: Deployment, ranks: list[dict]) -> None:
-        """The 100% principal's terms, every view's frame off `/v1/meta`, and the base's count."""
-        self.sessions = serve_battery.Sessions(
-            served.session, served.control, served.operator_credential()
-        )
+        """The 100% principal's terms, every view's frame off `/v1/meta`, and the base's count,
+        through the `Sessions` a caller made first where it made one."""
+        if self.sessions is None:
+            self.sessions = serve_battery.Sessions(
+                served.session, served.control, served.operator_credential()
+            )
         self.all_terms = sorted(r["term"] for r in ranks)
         token, _ = self.sessions.authorise(self.all_terms)
         m = serve_battery.meta(served.viewer, token)
@@ -463,16 +476,14 @@ class Cycle:
             return
         self.result["driver_rss"] = {"after_base": driver_rss()}
 
-        served = self.serve_base(base_dir)
+        served = self.serve_copy(
+            base_dir, base_dir / "bundle", self.work / f"serve-{args.fraction:g}"
+        )
         if served is None:
             return
         try:
             self.read_views()
-            if self.args.ranks:
-                ranks_path = Path(self.args.ranks)
-            else:
-                ranks_path, self.result["ranks"] = ranks_for(self.rung, self.work)
-            ranks = json.loads(ranks_path.read_text())
+            ranks = self.read_ranks()
             self.open_session(served, ranks)
 
             control = self.control_for(served, self.anchor)
@@ -832,10 +843,16 @@ class Cycle:
         before = control.status()["compaction"]
         code = control.compact().status_code
 
-        # A fold the server discarded counts a failure and never lands, so either ends the wait.
+        # A fold the server discarded counts a failure and never lands, and a fold refused for want
+        # of memory or disc counts a refusal and is not asked again, so any of the three ends the
+        # wait.
         def settled() -> bool:
             now = control.status()["compaction"]
-            return now["folds"] > before["folds"] or now["fold_failures"] > before["fold_failures"]
+            return (
+                now["folds"] > before["folds"]
+                or now["fold_failures"] > before["fold_failures"]
+                or now.get("fold_refusals", 0) > before.get("fold_refusals", 0)
+            )
 
         settled_in_time, wall = wait_for(settled, timeout=self.args.fold_timeout, interval=1.0)
         compaction = control.status()["compaction"]
@@ -848,6 +865,8 @@ class Cycle:
             "fold_peak_rss_bytes": compaction.get("last_rss_bytes"),
             "folds": compaction.get("folds"),
             "fold_failures": compaction.get("fold_failures", 0) - before.get("fold_failures", 0),
+            "fold_refusals": compaction.get("fold_refusals", 0) - before.get("fold_refusals", 0),
+            "last_refusal": compaction.get("last_refusal"),
             "live_rows": compaction.get("live_rows"),
         }
 
@@ -1046,16 +1065,19 @@ class Cycle:
         out["incomplete"] = incomplete_sentences(before) + incomplete_sentences(after)
         return out
 
-    def send_changes(self, control, items: list[dict]) -> tuple[requests.Response, float]:
-        """Every change, paged by the route's published record count. Returns the first refusal
-        or the last acknowledgement, and the pages' total wall."""
+    def send_changes(self, control, items: Iterable[dict]) -> tuple[requests.Response, float]:
+        """Every change, paged by the route's published record count, each page drawn from
+        `items` only when it is sent. Returns the first refusal or the last acknowledgement, and
+        the pages' total wall."""
         assert self.limits is not None, "the limits block is read before any change is sent"
         per_page = int(self.limits["changes"]["max_changes_per_request"])
-        r, wall = control.changes(items[:per_page])
-        for start in range(per_page, len(items), per_page):
-            if r.status_code != 200:
-                return r, wall
-            r, page_wall = control.changes(items[start : start + per_page])
+        pages = iter(items)
+        r, wall = control.changes(list(itertools.islice(pages, per_page)))
+        while r.status_code == 200:
+            page = list(itertools.islice(pages, per_page))
+            if not page:
+                break
+            r, page_wall = control.changes(page)
             wall += page_wall
         return r, wall
 
@@ -1160,7 +1182,15 @@ class Cycle:
         folded = self.do_fold(control)
         out["fold"] = {
             key: folded[key]
-            for key in ("completed", "observed_s", "fold_s", "fold_peak_rss_bytes", "fold_failures")
+            for key in (
+                "completed",
+                "observed_s",
+                "fold_s",
+                "fold_peak_rss_bytes",
+                "fold_failures",
+                "fold_refusals",
+                "last_refusal",
+            )
         }
         for name, counts in by_view.items():
             counts["expected"] = counts["before"] - counts["suppressed"]
@@ -1434,12 +1464,8 @@ class Cycle:
             )
         for name in ("fold", "write_cycle"):
             fold = (result.get(name) or {}) if name == "fold" else (result.get(name) or {}).get("fold") or {}
-            if not isinstance(fold, dict) or not fold:
-                continue
-            if fold.get("completed") is False:
-                out.append(f"the {name}'s fold did not complete")
-            if fold.get("fold_failures"):
-                out.append(f"the {name}'s fold reported {fold['fold_failures']} failure(s)")
+            if isinstance(fold, dict) and fold:
+                out += fold_sentences(f"the {name}'s fold", fold)
         equivalence = result.get("equivalence") or {}
         for name, compared in (equivalence.get("views") or {}).items():
             if not compared.get("equal"):
@@ -1524,6 +1550,18 @@ class Cycle:
             if not restart.get("census_equal"):
                 out.append("the census after the restart is not the census before it")
         return out
+
+
+def fold_sentences(which: str, fold: dict) -> list[str]:
+    """A sentence per way one [`Cycle.do_fold`] did not land, `which` naming the fold."""
+    out = []
+    if fold.get("completed") is False:
+        out.append(f"{which} did not complete")
+    if fold.get("fold_failures"):
+        out.append(f"{which} reported {fold['fold_failures']} failure(s)")
+    if fold.get("fold_refusals"):
+        out.append(f"{which} was refused: {fold.get('last_refusal')}")
+    return out
 
 
 def reingest_failures(reingest: dict) -> list[str]:

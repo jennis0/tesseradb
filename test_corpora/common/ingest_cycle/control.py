@@ -57,6 +57,15 @@ class Control:
         )
         return r, time.perf_counter() - t0
 
+    def end_sessions(self, principal: str):
+        """`POST /control/sessions/end`: every session of one local principal."""
+        return requests.post(
+            f"{self.base}/control/sessions/end",
+            headers=self.headers,
+            json={"principal": principal},
+            timeout=60,
+        )
+
     def flush(self):
         return requests.post(f"{self.base}/control/flush", headers=self.headers, timeout=60)
 

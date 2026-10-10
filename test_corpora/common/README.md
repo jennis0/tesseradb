@@ -8,7 +8,7 @@ compaction.
 |---|---|
 | [`deployment.py`](deployment.py) | boots a `mosaica serve` over an existing bundle, on its own ports and scratch state, inside a transient cgroup scope |
 | [`serve_battery.py`](serve_battery.py) | the view-latency battery — a principal ladder, density-decile locations, three conditions |
-| [`ingest_cycle/`](ingest_cycle/) | split, build the complement's points and declarations, ingest the hold-out, publish every layer's artifacts, flush, fold, and an equivalence census |
+| [`ingest_cycle/`](ingest_cycle/) | split, build the complement's points and declarations, ingest the hold-out, publish every layer's artifacts, flush, fold, and an equivalence census; with `--churn-rounds`, [the churn](#the-churn) instead |
 | [`workload.py`](workload.py) | one rung through all of it — build, verify, battery, cycle — and a report of what held and what it cost |
 | `scripts/campaign_report.py assemble` | collates a rung's driver outputs into a committed `measurements.json`, on the schema below |
 
@@ -43,8 +43,8 @@ Each run writes `$MOSAICA_LADDER/<rung>/workload-results/<timestamp>-<commit>.js
 driver results whole. These are not committed: `data/` is git-ignored and they are one box's
 figures.
 
-Ports run from `--port0`, default 8171: the battery takes three, the cycle six. 8111–8143 are not
-available; other sessions on this checkout use them.
+Ports run from `--port0`, default 8171: the battery takes three, the cycle six and the churn
+three. 8111–8143 are not available; other sessions on this checkout use them.
 
 The drivers also run on their own, for a sweep of one knob:
 
@@ -72,6 +72,81 @@ cycle compares against, and the frame `--state-extent` states into the base decl
 `--cap-bytes` is `MemoryMax` on every served deployment's transient scope; absent is no cap. Every
 deployment the cycle serves is a copy of a bundle on its own scratch state, since a bundle served
 directly is a different bundle once a publication or flush writes to it.
+
+## The churn
+
+The ingest cycle's second mode measures what steady deletion and re-insertion does to a built
+corpus: the first stage of [`../../docs/sharding.md`](../../docs/sharding.md) reuses a deleted
+item's number, and its §8.4 names the figures that stage must show. The churn serves a copy of the
+all-in bundle and, each round, deletes `--churn-fraction` of the items through `/control/changes`,
+ingests the same rows again as new items through `/control/ingest`, flushes and compacts. Nothing
+else of the cycle runs. There is no split, base build, publication or census, so a built rung is
+all it needs.
+
+```bash
+python3 -m test_corpora.common.ingest_cycle --rung-dir <rung> --work <scratch> \
+    --binary <mosaica> --all-in-bundle <bundle> --churn-rounds 10 \
+    --cap-bytes 17179869184 --out churn-geonames.json
+```
+
+Every item gets a position in [0, 1) from `--seed`. Round `r` takes the items whose position falls
+in a window `--churn-fraction` wide, starting `(r - 1) × fraction` along and wrapping at 1. At the
+default of one half the rounds alternate halves, so every item is deleted and inserted again every
+second round. The deletes are paged by `limits.changes.max_changes_per_request`. An item's rows go
+back into every view it was in, the anchor's first, and the anchor's batches carry each
+column-route layer's member list. Not built yet: a publication-route layer's memberships of a
+deleted item are not published again, so after round 1 such a layer serves fewer members than the
+fresh build. `churn.layers_not_republished` names those layers.
+
+The run keeps one copy of the bundle, under `<work>/churn/bundle`, which each compaction rewrites
+as a new version. Nothing is kept per round. Each row's `bundle_bytes` says what that directory
+holds.
+
+Round 0 is the copy as built, before any change: the fresh build of the same items, which every
+later round is read against. Each round's row is appended to `--out` with the suffix `.jsonl` as
+the round ends. `--out` holds the whole result once the run ends, the rows under `churn_rounds`
+and the run's parameters under `churn`, and a table of the rows is printed.
+
+| field | unit | how it was measured |
+|---|---|---|
+| `round`, `deleted` | count | the round, and the items it deleted and ingested again |
+| `delete` | — | `status` of the last page sent, `wall_s` of every page, and a refusal's `body`; a refused page ends the churn |
+| `live_after_delete` | count | the anchor view's zoom-0 `visible` under every term once the deletes were answered, since a deletion is in force from its answer |
+| `ingest_by_view` | — | each view's pass, on the shape §3 gives `ingest` |
+| `flush` | — | `POST /control/flush` until its publication lands, then the wait for `live` to return to round 0's |
+| `sessions_ended` | — | `POST /control/sessions/end`'s status for each principal, sent before the compaction |
+| `fold` | — | the cycle's fold: `fold_s` is the server's `compaction.last_secs`, `observed_s` the driver's wait, and `fold_refusals` with `last_refusal` a fold refused for want of memory or disc |
+| `live`, `live_by_view` | count | zoom-0 `visible` under every term after the compaction, on the anchor view and, where there are several, on each |
+| `entity_id_high_water`, `high_water_rise` | count | `/control/status`, and the rise since the row before |
+| `free_ids`, `held_ids` | count | the newest side-manifest's `free_entities`, the freed ids the allocator issues before its high water, and `held_entities`, those held back until the log rotates; null where the side-manifest has no such field |
+| `prefix` | — | the bundle version `CURRENT` names |
+| `postings_bytes`, `fresh_postings_bytes`, `postings_vs_fresh` | bytes | the term index on disc, `partitions/<p>/terms/postings.arrow` and every delta tier the newest side-manifest lists, on the served copy and on the all-in bundle, and their ratio |
+| `term_images_bytes`, `fresh_term_images_bytes` | bytes | the side-manifest's `term_image_extents`, on each |
+| `bundle_bytes` | bytes | every file under the served copy, a version not yet removed included |
+| `principals[]` | — | the narrowest and the broadest principal of `--targets`' ladder |
+| `principals[].authorise_ms`, `.fragment_rebuilds` | ms, count | one `session/authorise`, wall, and `fragment_cache.rebuilds` on `/control/status` across it |
+| `principals[].union_ms` | ms | `authorise_ms` where `fragment_rebuilds` is 1, which is an authorise that built the union of the principal's postings; null where the fragment cache already held it |
+| `principals[].visible`, `.first_viewport_ms`, `.first_viewport_shed`, `.first_viewport_failed` | — | a fresh session's whole-extent viewport at the battery's budget depth |
+| `principals[].wall_ms`, `.server_ms`, `.stream_ms`, `.served`, `.response_bytes` | — | percentiles over `--churn-samples` requests at each latency box, pooled over the boxes, as §2's `conditions.*` gives them for one cell |
+| `principals[].shed`, `.failed` | count | of those requests, the streams the server cut and the requests that did not answer |
+
+The latency boxes are chosen once, on round 0. At each `--churn-zooms` zoom, `--churn-candidates`
+boxes are ranked by `visible` under the broadest principal, as the battery ranks them, and the
+first box of each density decile is kept: the box the battery's first cell of that decile
+measures. Every request is the battery's, at its budget depth with `k` the deployment's
+`selection.max_k` and every layer.
+
+The union cost is the authorise's wall, the session plane's work and the round trip included. An
+authorise whose fragment the cache holds computes no union, and the refresh that follows each
+publication rebuilds the fragment of every session still resident. So round 0 authorises each
+principal before anything else asks for its fragment, and every later round ends both principals'
+sessions before it compacts. `union_ms` is null wherever that did not leave the authorise to build
+the fragment.
+
+`failures` holds a sentence for each round whose deletes were refused or whose count after them
+was not round 0's less the anchor rows deleted, whose ingest was refused or short, whose flush did
+not land, whose count at its end was not round 0's, or whose compaction did not complete. A rising
+high water is not a failure; the table shows it.
 
 ## The workload's own result file
 
@@ -215,7 +290,7 @@ view's, under `ingest_by_view` (below, under "Beyond the schema").
 | `bodies_over_cap` | count | single-row bodies over the cap, sent as they are and refused 422 |
 | `flush_s` | seconds | `POST /control/flush` to `/control/status`'s `publication` reaching the number the flush answered: the cycle carrying every buffered row has published |
 | `visibility_s` | seconds | the same request to a zoom-0 viewport reaching the expected count, not `flush_s` |
-| `fold_s` | seconds | the server's own `compaction.last_secs`; compact answers 202 at once, and the wait ends when a fold lands or the server counts one discarded |
+| `fold_s` | seconds | the server's own `compaction.last_secs`; compact answers 202 at once, and the wait ends when a fold lands or the server counts one discarded or refused |
 | `fold_peak_rss` | bytes | the server's own `compaction.last_rss_bytes` |
 | `driver_peak_rss` | bytes/`null` | the driver's own `VmHWM` at the cell's end, not the server's |
 | `equivalence` | — | the masked-count equivalence test, by surface — below |
