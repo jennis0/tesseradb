@@ -117,6 +117,8 @@ pub(crate) struct PrefixRotation {
     pub(crate) unique: Arc<mosaica_store::unique::UniqueIndexes>,
     /// The new prefix's edited-items runs, on the unique indexes' rule.
     pub(crate) edited: Arc<mosaica_store::edited::EditedIndex>,
+    /// The new prefix's tenancy index, on the unique indexes' rule.
+    pub(crate) tenancy: Arc<mosaica_store::tenancy::TenancyIndex>,
     /// The executed deletions leaving `deleted` in this swap — Rule F, and empty for a rotation
     /// that retires nothing. **The caller's obligation is compaction §5's rule**, restated at
     /// `mosaica_lifecycle::Overlay::retire`: only entities whose row *and* postings this
@@ -345,13 +347,8 @@ pub(crate) fn check_manifest_publishable(
 
 #[cfg(test)]
 mod tests {
-    
-    
 
     use mosaica_lifecycle::{IngestBuffer, Overlay};
-    
-    
-    
 
     use super::*;
 

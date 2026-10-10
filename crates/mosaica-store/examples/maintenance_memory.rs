@@ -97,6 +97,7 @@ fn write_inputs(root: &Path, rows: u64, segments: u64) -> Vec<MergeInput> {
                 .map(|e| FlushRow {
                     entity_id: EntityId::new(e),
                     number: EntityId::new(e),
+                    tenancy: mosaica_types::Tenancy::ZERO,
                     x: (((e * 7 + s * 13) % 65_521) as f64) / 65_521.0,
                     y: (((e * 31 + s * 17) % 65_519) as f64) / 65_519.0,
                     scalars: vec![],

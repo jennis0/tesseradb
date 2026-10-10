@@ -18,7 +18,6 @@ use arrow::array::{UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use common::*;
-use parquet::arrow::ArrowWriter;
 use mosaica_authz::{PostingRef, PostingsReader};
 use mosaica_build::{build, BuildArgs};
 use mosaica_engine::viewport::ViewportRequest;
@@ -26,7 +25,8 @@ use mosaica_engine::{Engine, EngineConfig};
 use mosaica_lifecycle::command::UnallocatedRow;
 use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_store::read::open_bundle;
-use mosaica_types::{EntityId, TermId, MosaicaId};
+use mosaica_types::{EntityId, MosaicaId, TermId};
+use parquet::arrow::ArrowWriter;
 
 /// A fixture bundle and an engine over it, with the executor running and the background refresh
 /// off.
@@ -40,13 +40,8 @@ fn engine_over_fixture(tmp: &Path, root: &Path, config: EngineConfig) -> Engine 
         &tmp.join("points.parquet"),
         &tmp.join("pairs.parquet"),
     );
-    let mut engine = Engine::open(
-        root,
-        &tmp.join("cache"),
-        &tmp.join("wal.log"),
-        config,
-    )
-    .expect("engine should open against a freshly built bundle");
+    let mut engine = Engine::open(root, &tmp.join("cache"), &tmp.join("wal.log"), config)
+        .expect("engine should open against a freshly built bundle");
     engine.start_write_executor(8).expect("the executor starts");
     engine.set_background_refresh_for_test(false);
     engine
@@ -122,7 +117,10 @@ fn build_fixture_with_sparse_term(out: &Path, points_path: &Path, pairs_path: &P
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: mosaica_build::config::AttributeSource::over(points_path.to_path_buf(), &id_schema()),
+        attribute_sources: mosaica_build::config::AttributeSource::over(
+            points_path.to_path_buf(),
+            &id_schema(),
+        ),
         out: out.to_path_buf(),
         // No declared columns: this fixture's subject is the sparse *term*, not the scalar tail,
         // and an empty schema is what `common`'s builder uses for the same reason.
@@ -150,13 +148,8 @@ fn engine_over_fixture_with_sparse_term(tmp: &Path, root: &Path, config: EngineC
         &tmp.join("points.parquet"),
         &tmp.join("pairs.parquet"),
     );
-    let mut engine = Engine::open(
-        root,
-        &tmp.join("cache"),
-        &tmp.join("wal.log"),
-        config,
-    )
-    .expect("engine should open against a freshly built bundle");
+    let mut engine = Engine::open(root, &tmp.join("cache"), &tmp.join("wal.log"), config)
+        .expect("engine should open against a freshly built bundle");
     engine.start_write_executor(8).expect("the executor starts");
     engine.set_background_refresh_for_test(false);
     engine
@@ -520,8 +513,7 @@ fn wait_ticking(engine: &Engine, what: &str, mut cond: impl FnMut() -> bool) {
 /// The shape both suspension cases need: `tier_width` is 4, so three published segments are one
 /// short of a selectable merge and the fourth is what makes one.
 fn publish_one_segment(engine: &Engine, round: &mut usize) {
-    ingest(engine, &format!("s{}", *round))
-    .expect("ingest is accepted");
+    ingest(engine, &format!("s{}", *round)).expect("ingest is accepted");
     *round += 1;
     let flushes = engine.write_executor_stats().flushes;
     engine.request_flush();
@@ -867,13 +859,8 @@ fn a_restart_before_the_rotation_resurrects_the_retirement_harmlessly_and_perman
 
     // The restart: the folded bundle, and the WAL as it stood before the rotation.
     restore_wal(tmp.path(), &pre_rotation);
-    let restarted = Engine::open(
-        &root,
-        &tmp.path().join("cache"),
-        &wal,
-        config_uncapped(),
-    )
-    .expect("the folded prefix opens");
+    let restarted = Engine::open(&root, &tmp.path().join("cache"), &wal, config_uncapped())
+        .expect("the folded prefix opens");
     let mut restarted = restarted;
     restarted
         .start_write_executor(8)
@@ -989,7 +976,9 @@ fn a_merge_cap_above_the_base_segment_is_obeyed() {
     let folded_away = entity_of_source(&root, "v00000", 4);
     let suppressed = entity_of_source(&root, "v00000", 8);
     engine.accept_change(folded_away, ChangeOp::Delete).unwrap();
-    engine.accept_change(suppressed, ChangeOp::Suppress).unwrap();
+    engine
+        .accept_change(suppressed, ChangeOp::Suppress)
+        .unwrap();
     fold(&engine);
     assert_eq!(engine.generation().prefix, "v00001");
     let base = engine.generation().bundle.partitions["default"].views["s0"].segments[0]
@@ -1000,8 +989,7 @@ fn a_merge_cap_above_the_base_segment_is_obeyed() {
     let merges = engine.write_executor_stats().merges;
     let mut flushed = Vec::new();
     for round in 0..4 {
-        let entity = ingest(&engine, &format!("c{round}"))
-            .expect("ingest is accepted");
+        let entity = ingest(&engine, &format!("c{round}")).expect("ingest is accepted");
         flushed.push(entity);
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();
@@ -1021,7 +1009,11 @@ fn a_merge_cap_above_the_base_segment_is_obeyed() {
             .collect()
     };
     let segments = segment_ids(&engine);
-    assert_eq!(segments.len(), 2, "the folded base and the one merged segment");
+    assert_eq!(
+        segments.len(),
+        2,
+        "the folded base and the one merged segment"
+    );
     assert_eq!(segments[0], base, "the base is not merged");
 
     let expected = N_ITEMS - 2 + 3;
@@ -1036,11 +1028,17 @@ fn a_merge_cap_above_the_base_segment_is_obeyed() {
         config(),
     )
     .expect("the bundle reopens after a fold and a merge under the cap");
-    restarted.start_write_executor(8).expect("the executor starts");
+    restarted
+        .start_write_executor(8)
+        .expect("the executor starts");
     restarted.set_background_refresh_for_test(false);
     let generation = restarted.generation();
     assert_eq!(generation.prefix, "v00001");
-    assert_eq!(segment_ids(&restarted), segments, "the base is still unmerged after a restart");
+    assert_eq!(
+        segment_ids(&restarted),
+        segments,
+        "the base is still unmerged after a restart"
+    );
     assert!(generation.overlay.is_deleted(flushed[0]));
 
     let session = restarted.authorise(&full_coverage_credential()).unwrap();
@@ -1083,7 +1081,10 @@ fn a_merge_cap_above_the_base_segment_is_obeyed() {
     // A generation or a session still held pins the prefix it was served from.
     drop((generation, session, revealed));
     fold(&restarted);
-    assert!(!root.join("v00001").exists(), "the next fold reclaims the merge's inputs");
+    assert!(
+        !root.join("v00001").exists(),
+        "the next fold reclaims the merge's inputs"
+    );
     let live: Vec<String> = restarted.generation().bundle.partitions["default"].views["s0"]
         .segments
         .iter()
@@ -1103,7 +1104,12 @@ fn unnamed_files(root: &Path, prefix: &str, live: &[&str]) -> usize {
         .manifest
         .files
         .keys()
-        .chain(bundle.partitions.values().flat_map(|p| p.manifest.files.keys()))
+        .chain(
+            bundle
+                .partitions
+                .values()
+                .flat_map(|p| p.manifest.files.keys()),
+        )
         .map(String::as_str)
         .collect();
     let prefix_dir = root.join(prefix);
@@ -1116,7 +1122,11 @@ fn unnamed_files(root: &Path, prefix: &str, live: &[&str]) -> usize {
                 pending.push(path);
                 continue;
             }
-            let rel = path.strip_prefix(&prefix_dir).unwrap().to_string_lossy().into_owned();
+            let rel = path
+                .strip_prefix(&prefix_dir)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
             if named.contains(rel.as_str()) {
                 continue;
             }
@@ -1128,7 +1138,10 @@ fn unnamed_files(root: &Path, prefix: &str, live: &[&str]) -> usize {
                 .split_once("/segments/")
                 .and_then(|(_, rest)| rest.split('/').next())
                 .unwrap_or_else(|| panic!("{rel} is named by no manifest"));
-            assert!(!live.contains(&seg_id), "{rel} belongs to a live segment and is not named");
+            assert!(
+                !live.contains(&seg_id),
+                "{rel} belongs to a live segment and is not named"
+            );
             stale.insert(seg_id.to_string());
         }
     }
@@ -1443,8 +1456,7 @@ fn the_watermark_and_high_water_published_are_the_live_ones_not_the_snapshot() {
         .manifest
         .entity_id_high_water;
 
-    let (_, mid_flight_watermark, mid_flight_high_water) =
-        fold_with_a_flush_in_flight(&engine);
+    let (_, mid_flight_watermark, mid_flight_high_water) = fold_with_a_flush_in_flight(&engine);
 
     assert!(
         mid_flight_watermark > baseline_watermark,
@@ -2275,8 +2287,7 @@ fn the_dead_bytes_route_dispatches_a_fold_on_a_bundle_with_nothing_deleted() {
     // Four flush segments and the merge that consumes them: the consumed segments stay on disc,
     // named by no live manifest, which is exactly the dead weight this route is about.
     for round in 0..4 {
-        ingest(&engine, &format!("d{round}"))
-        .expect("ingest is accepted");
+        ingest(&engine, &format!("d{round}")).expect("ingest is accepted");
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();
         wait_for("a flush to publish", || {
@@ -2311,7 +2322,11 @@ fn the_dead_bytes_route_dispatches_a_fold_on_a_bundle_with_nothing_deleted() {
         prefix.join(format!("partitions/default/SEGMENTS-{segments_n}.json")),
     ]
     .iter()
-    .map(|path| std::fs::metadata(path).expect("the manifest is on disc").len())
+    .map(|path| {
+        std::fs::metadata(path)
+            .expect("the manifest is on disc")
+            .len()
+    })
     .sum::<u64>();
     assert_eq!(
         unnamed_and_named(&root, &engine).0,
@@ -2721,11 +2736,60 @@ fn a_fold_publishes_when_a_dropped_view_held_the_highest_bound_entity() {
     let dropped = engine
         .drop_view("quarter".into(), "q2".into())
         .expect("the view drops");
-    assert_eq!(dropped.deleted, 1, "the drop deletes the item it leaves in no view");
+    assert_eq!(
+        dropped.deleted, 1,
+        "the drop deletes the item it leaves in no view"
+    );
 
     fold(&engine);
     assert!(
         !engine.generation().overlay.is_deleted(entity) && engine.overlay_depth() == 0,
         "the fold removed the dropped item's row, so its deletion retired"
+    );
+}
+
+/// A fold carries the tenancy index into the new prefix: each number keeps its tenancy through
+/// the flip and a restart onto the folded prefix, and an identifier at another tenancy still names
+/// nothing.
+#[test]
+fn a_fold_carries_each_numbers_tenancy() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let entity = entity_of_source(&root, "v00000", 4);
+    set_tenancy(&root, entity, 6);
+    let at = |tenancy: u16| {
+        let high = mosaica_types::ItemHigh::new(0, mosaica_types::Tenancy::new(tenancy).unwrap());
+        test_key().forward(high, entity).unwrap()
+    };
+    let open = || {
+        Engine::open(
+            &root,
+            &tmp.path().join("cache"),
+            &tmp.path().join("wal.log"),
+            config_uncapped(),
+        )
+        .expect("the bundle opens")
+    };
+
+    let mut engine = open();
+    engine.start_write_executor(8).expect("the executor starts");
+    fold(&engine);
+    assert_eq!(engine.generation().prefix, "v00001");
+    assert_eq!(
+        engine.resolve_mosaica_ids(&[at(6), at(0)]).unwrap(),
+        vec![Some(entity), None]
+    );
+    drop(engine);
+
+    let restarted = open();
+    assert_eq!(restarted.generation().prefix, "v00001");
+    assert_eq!(
+        restarted.resolve_mosaica_ids(&[at(6), at(0)]).unwrap(),
+        vec![Some(entity), None]
     );
 }

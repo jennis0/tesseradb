@@ -1386,6 +1386,16 @@ pub struct HeldEntities {
     pub entities: EntitySet,
 }
 
+/// One file of the tenancy index in [`SegmentsManifest::tenancy_index`]: the numbers whose tenancy
+/// has bit `bit` set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TenancyBit {
+    pub bit: u32,
+    /// Prefix-relative.
+    pub path: String,
+}
+
 impl Default for EntitySet {
     fn default() -> Self {
         EntitySet::of(&croaring::Bitmap::new())
@@ -2216,6 +2226,17 @@ pub struct SegmentsManifest {
     /// Freed entity ids the allocator holds back until the log keeps no record older than the
     /// position beside them.
     pub held_entities: Vec<HeldEntities>,
+    /// The tenancy index's files ([`crate::tenancy`]), one for each bit some number's tenancy
+    /// sets, so none in a shard where no number has been freed.
+    ///
+    /// No `serde(default)`: an absent list would read every number as tenancy 0, and an
+    /// identifier given to a number's earlier holder would name the item holding it now.
+    pub tenancy_index: Vec<TenancyBit>,
+    /// The numbers whose last entity a compaction removed at [`mosaica_types::Tenancy::MAX`],
+    /// which are never issued again.
+    ///
+    /// No `serde(default)`: a manifest omitting it is malformed, not retirement-free.
+    pub retired_numbers: EntitySet,
     /// The entities already deleted whose rows a fold has not yet removed — see [`EntitySet`].
     #[serde(default)]
     pub tombstones: EntitySet,
@@ -2362,6 +2383,8 @@ impl SegmentsManifest {
             edited_items: EditedItemsRuns::default(),
             free_entities: EntitySet::default(),
             held_entities: Vec::new(),
+            tenancy_index: Vec::new(),
+            retired_numbers: EntitySet::default(),
             tombstones: EntitySet::default(),
             deny: EntitySet::default(),
             vocabulary_extensions: Vec::new(),
@@ -2609,6 +2632,32 @@ mod tests {
             serde_json::from_slice::<SegmentsManifest>(&without).is_err(),
             "a manifest with no term-image list must not parse"
         );
+    }
+
+    #[test]
+    fn the_tenancy_index_and_retired_numbers_round_trip_and_an_absent_one_is_refused() {
+        let mut manifest = SegmentsManifest::empty();
+        manifest.tenancy_index.push(TenancyBit {
+            bit: 3,
+            path: "partitions/default/tenancy/bit-03.tenancy".to_string(),
+        });
+        manifest.retired_numbers = EntitySet::of(&croaring::Bitmap::of(&[7, 9]));
+        let bytes = serde_json::to_vec(&manifest).expect("a manifest serialises");
+        let parsed: SegmentsManifest = serde_json::from_slice(&bytes).expect("and parses back");
+        assert_eq!(parsed.tenancy_index, manifest.tenancy_index);
+        assert_eq!(
+            parsed.retired_numbers.entities(),
+            Some(&croaring::Bitmap::of(&[7, 9]))
+        );
+        for field in ["tenancy_index", "retired_numbers"] {
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            value.as_object_mut().unwrap().remove(field);
+            let without = serde_json::to_vec(&value).unwrap();
+            assert!(
+                serde_json::from_slice::<SegmentsManifest>(&without).is_err(),
+                "a manifest with no {field} must not parse"
+            );
+        }
     }
 
     #[test]

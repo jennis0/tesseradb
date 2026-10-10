@@ -114,10 +114,14 @@ impl ViewData {
         let segments = self
             .segments_by_row_base()
             .map_err(|seg_id| format!("segment '{seg_id}' has no row base in its view"))?;
-        let slices: Vec<Option<ScalarSlice<'_>>> =
-            segments.iter().map(|(segment, _)| segment.columns.scalar(column)).collect();
+        let slices: Vec<Option<ScalarSlice<'_>>> = segments
+            .iter()
+            .map(|(segment, _)| segment.columns.scalar(column))
+            .collect();
         for entity in entities.iter() {
-            let Some(row) = self.row_space.row_of(mosaica_types::EntityId::new(u64::from(entity)))
+            let Some(row) = self
+                .row_space
+                .row_of(mosaica_types::EntityId::new(u64::from(entity)))
             else {
                 continue;
             };
@@ -1079,6 +1083,22 @@ fn ensure_verified(
             path: full_path.to_path_buf(),
         })
     }
+}
+
+/// The tenancy index `segments_manifest` names, mapped, and empty where it names no file. Each file
+/// must be one a `files` map digests, as every file the loader reads must be.
+pub fn open_tenancy_index(
+    prefix_dir: &Path,
+    segments_manifest: &SegmentsManifest,
+    manifest_files: &BTreeMap<String, FileDigest>,
+) -> Result<crate::tenancy::TenancyIndex> {
+    let mut files = Vec::with_capacity(segments_manifest.tenancy_index.len());
+    for entry in &segments_manifest.tenancy_index {
+        let path = safe_join(prefix_dir, &entry.path)?;
+        ensure_verified(&entry.path, segments_manifest, manifest_files, &path)?;
+        files.push((entry.bit, path));
+    }
+    crate::tenancy::TenancyIndex::open(&files)
 }
 
 /// Map one view's term images, or answer `None` where it has none to map.
@@ -2491,7 +2511,11 @@ pub fn tile_ranges(seg: &SegmentData, tile: &Tile) -> Range<u32> {
 
 /// The row at which cell `cell` begins, or the segment's row count past its last cell.
 fn cell_row(seg: &SegmentData, cell: usize) -> u32 {
-    seg.cuts.starts().get(cell).copied().unwrap_or(seg.row_count)
+    seg.cuts
+        .starts()
+        .get(cell)
+        .copied()
+        .unwrap_or(seg.row_count)
 }
 
 /// [`tile_ranges`], but searching the Morton column over `within` alone.

@@ -2583,6 +2583,11 @@ fn verified_open(
             &prefix_dir,
             None,
         )?;
+        let tenancy = mosaica_store::read::open_tenancy_index(
+            &prefix_dir,
+            &partition.manifest,
+            &bundle.manifest.files,
+        )?;
         for (view_id, view) in &partition.views {
             views += 1;
             segments += view.segments.len();
@@ -2605,6 +2610,7 @@ fn verified_open(
                     key: &identity_key,
                     shard_id,
                     edited: &edited,
+                    tenancy: &tenancy,
                 },
             )?;
         }
@@ -2940,17 +2946,18 @@ fn claim_rows(
     Ok(claimed)
 }
 
-/// The rows of `[lo, hi)` that a segment holds, in row order: each one's entity from `window`, and
-/// its stored `mosaica_id` against what the key derives for that entity.
-/// What a row's `mosaica_id` is checked against: the key and shard it is derived under, and the
-/// edited items a moved row's entity is found in.
+/// What a row's `mosaica_id` is checked against: the key and shard it is derived under, the
+/// edited items a moved row's entity is found in, and the tenancy of each number.
 #[derive(Clone, Copy)]
 struct Identity<'a> {
     key: &'a IdentityKey,
     shard_id: u32,
     edited: &'a mosaica_store::edited::EditedIndex,
+    tenancy: &'a mosaica_store::tenancy::TenancyIndex,
 }
 
+/// The rows of `[lo, hi)` that a segment holds, in row order: each one's entity from `window`, and
+/// its stored `mosaica_id` against what the key derives for that entity.
 fn walk_window(
     view_id: &str,
     layout: &[SegmentRows<'_>],
@@ -2960,8 +2967,11 @@ fn walk_window(
     identity: Identity<'_>,
 ) -> Result<()> {
     let identity_key = identity.key;
-    // Every number is at tenancy 0: no number in a bundle has been held by a second item.
-    let item = ItemHigh::new(identity.shard_id, Tenancy::ZERO);
+    let item = |tenancy| ItemHigh::new(identity.shard_id, tenancy);
+    // A row's entity is its number unless an edit moved it.
+    let tenancies = identity
+        .tenancy
+        .of_each(window.iter().map(|entity| EntityId::new(*entity)));
     for (row_base, rows, segment) in layout {
         let from = (*row_base).max(lo);
         let to = (row_base + u64::from(*rows)).min(hi);
@@ -2989,7 +2999,7 @@ fn walk_window(
                 )));
             }
             let expected = identity_key
-                .forward(item, EntityId::new(entity))
+                .forward(item(tenancies[(row - lo) as usize]), EntityId::new(entity))
                 .map_err(BuildError::Identity)?
                 .raw();
             if id == expected {
@@ -3001,7 +3011,7 @@ fn walk_window(
                 && identity_key
                     .invert(mosaica_types::MosaicaId::new(id))
                     .is_some_and(|(high, number)| {
-                        high == item
+                        high == item(identity.tenancy.of(number))
                             && u32::try_from(number.raw()).is_ok_and(|number| {
                                 identity.edited.entities_of(&[number]).is_ok_and(|held| {
                                     held.iter().any(|(_, e)| u64::from(*e) == entity)

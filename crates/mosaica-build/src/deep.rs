@@ -118,6 +118,11 @@ pub struct VerifyDeepReport {
     pub edited_pairs: u64,
     /// Segment rows whose entity is not their number, each confirmed to be a pair of the map.
     pub edited_rows: u64,
+    /// Numbers the tenancy index holds above tenancy 0, each confirmed to have been issued
+    /// ([`check_tenancy`]); 0 where no number has been freed.
+    pub reissued_numbers: u64,
+    /// Retired numbers, each confirmed to be at the highest tenancy and to hold nothing.
+    pub retired_numbers: u64,
 }
 
 /// Deep-verify the bundle at `root`: the shallow [`crate::verify`] pass, then §11's structural
@@ -152,6 +157,8 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
         unique_entries: 0,
         edited_pairs: 0,
         edited_rows: 0,
+        reissued_numbers: 0,
+        retired_numbers: 0,
     };
 
     // Sorted so two runs over the same defective bundle refuse with the same message.
@@ -186,10 +193,90 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
             partition,
             &mut report,
         )?;
-        check_edited_items(&prefix_dir, phash, &bundle.manifest, partition, &mut report)?;
+        let tenancy = mosaica_store::read::open_tenancy_index(
+            &prefix_dir,
+            &partition.manifest,
+            &bundle.manifest.files,
+        )?;
+        check_edited_items(
+            &prefix_dir,
+            phash,
+            &bundle.manifest,
+            partition,
+            &tenancy,
+            &mut report,
+        )?;
+        check_tenancy(phash, partition, &tenancy, &mut report)?;
     }
 
     Ok(report)
+}
+
+/// **The tenancy index and the retired numbers agree with the allocator.** Every number the index
+/// holds is below the high water, so was issued. Every retired number decodes, is at the highest
+/// tenancy, holds no row, and is neither free nor held back. A row's own tenancy is checked by the
+/// shallow pass, and a moved row's by [`check_edited_items`].
+fn check_tenancy(
+    phash: &str,
+    partition: &mosaica_store::read::PartitionData,
+    tenancy: &mosaica_store::tenancy::TenancyIndex,
+    report: &mut VerifyDeepReport,
+) -> Result<()> {
+    let manifest = &partition.manifest;
+    let mut held = croaring::Bitmap::new();
+    for bit in 0..mosaica_store::tenancy::TENANCY_BITS {
+        if let Some(numbers) = tenancy.bit(bit) {
+            held.or_inplace(numbers);
+        }
+    }
+    if let Some(number) = held.maximum() {
+        if u64::from(number) >= manifest.entity_id_high_water {
+            return Err(BuildError::Invalid(format!(
+                "partition {phash}: the tenancy index holds number {number}, at or above the high \
+                 water {}, which no item has been given",
+                manifest.entity_id_high_water
+            )));
+        }
+    }
+    report.reissued_numbers += held.cardinality();
+
+    let Some(retired) = manifest.retired_numbers.entities() else {
+        return Err(BuildError::Invalid(format!(
+            "partition {phash}: the retired numbers do not decode"
+        )));
+    };
+    let issuable = manifest
+        .held_entities
+        .iter()
+        .filter_map(|held| held.entities.entities())
+        .chain(manifest.free_entities.entities())
+        .fold(croaring::Bitmap::new(), |all, ids| all.or(ids));
+    for number in retired.iter() {
+        let entity = mosaica_types::EntityId::new(u64::from(number));
+        let at = tenancy.of(entity);
+        if at != mosaica_types::Tenancy::MAX {
+            return Err(BuildError::Invalid(format!(
+                "partition {phash}: number {number} is retired at tenancy {}, below the highest",
+                at.raw()
+            )));
+        }
+        if issuable.contains(number) {
+            return Err(BuildError::Invalid(format!(
+                "partition {phash}: number {number} is retired and still free to be issued"
+            )));
+        }
+        if partition
+            .views
+            .values()
+            .any(|data| data.row_space.row_of(entity).is_some())
+        {
+            return Err(BuildError::Invalid(format!(
+                "partition {phash}: number {number} is retired and still holds a row"
+            )));
+        }
+    }
+    report.retired_numbers += retired.cardinality();
+    Ok(())
 }
 
 /// **The edited-items map agrees with itself and with the rows.** Its two directions hold the same
@@ -200,6 +287,7 @@ fn check_edited_items(
     phash: &str,
     manifest: &mosaica_store::manifest::Manifest,
     partition: &mosaica_store::read::PartitionData,
+    tenancy: &mosaica_store::tenancy::TenancyIndex,
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
     use std::collections::{BTreeMap, BTreeSet};
@@ -287,13 +375,15 @@ fn check_edited_items(
                     ))
                 })?;
                 let shard = manifest.identity.shard_id;
-                let Some((_, number)) = key
-                    .invert(MosaicaId::new(mosaica_id))
-                    .filter(|(high, _)| high.shard == shard)
+                let Some((_, number)) =
+                    key.invert(MosaicaId::new(mosaica_id))
+                        .filter(|(high, number)| {
+                            high.shard == shard && high.tenancy == tenancy.of(*number)
+                        })
                 else {
                     return Err(BuildError::Invalid(format!(
                         "view {view}, segment {}: moved row {row}'s mosaica_id names no item of \
-                         shard {shard}",
+                         shard {shard} at its number's tenancy",
                         segment.seg_id
                     )));
                 };

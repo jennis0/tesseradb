@@ -484,22 +484,27 @@ impl Executor {
                 None => false,
             });
         // An entity the handler resolved can since have been retired by a fold, freed, and issued
-        // to another item: each must still hold the item the handler resolved it to.
+        // to another item: each must still hold the item the handler resolved it to, and its
+        // number must still be at the tenancy the identifier carries.
         let stale = stale || {
             let key = &self.deps.identity_key;
             let number_of = |mosaica_id: u64| {
-                key.invert(mosaica_types::MosaicaId::new(mosaica_id))
-                    .map(|(_, number)| number)
+                crate::edited::number_named(
+                    key,
+                    &generation,
+                    mosaica_types::MosaicaId::new(mosaica_id),
+                )
             };
-            let mut named: Vec<(EntityId, Option<EntityId>)> = edits
-                .iter()
-                .map(|submitted| (submitted.edit.old, Some(submitted.edit.number)))
-                .collect();
+            let mut named: Vec<(EntityId, Option<EntityId>)> = Vec::new();
             for slot in &slots {
                 match slot {
                     mosaica_lifecycle::Slot::Unchanged { entity, mosaica_id }
                     | mosaica_lifecycle::Slot::Joined { entity, mosaica_id } => {
                         named.push((*entity, number_of(*mosaica_id)));
+                    }
+                    mosaica_lifecycle::Slot::Edited { edit, mosaica_id } => {
+                        let old = edits.get(*edit as usize).map(|e| e.edit.old);
+                        named.extend(old.map(|old| (old, number_of(*mosaica_id))));
                     }
                     mosaica_lifecycle::Slot::Written {
                         row,
@@ -604,16 +609,18 @@ impl Executor {
         let started = window.opened_at();
         let mut mark = StageMark::now();
 
-        let (identity, shard) = (
-            self.deps.identity_key,
-            self.generation.load().bundle.manifest.identity.shard_id,
-        );
+        let (identity, shard, tenancy) = {
+            let generation = self.generation.load();
+            (
+                self.deps.identity_key,
+                generation.bundle.manifest.identity.shard_id,
+                Arc::clone(&generation.tenancy),
+            )
+        };
         let mosaica_id_of = |entity: EntityId| {
+            let high = mosaica_types::ItemHigh::new(shard, tenancy.of(entity));
             identity
-                .forward(
-                    mosaica_types::ItemHigh::new(shard, mosaica_types::Tenancy::ZERO),
-                    entity,
-                )
+                .forward(high, entity)
                 .map(|id| id.raw())
                 .expect("the allocator issues entities inside the identity space")
         };

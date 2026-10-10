@@ -67,7 +67,8 @@ pub(super) struct Executor {
     /// So the first tick lands one period after construction, not immediately.
     pub(super) last_tick: std::time::Instant,
     /// What every accepted write since the last tick did to each level's row forms.
-    pub(super) pending_forms: std::collections::BTreeMap<(String, u32), Vec<crate::artifacts::LevelDelta>>,
+    pub(super) pending_forms:
+        std::collections::BTreeMap<(String, u32), Vec<crate::artifacts::LevelDelta>>,
     #[cfg(feature = "fault-injection")]
     pub(super) faults: Option<Arc<mosaica_lifecycle::faults::FaultSwitchboard>>,
 }
@@ -82,7 +83,8 @@ impl Executor {
     /// Drop the region decompositions of generations older than the retention depth.
     pub(super) fn prune_region_cache(&self, segments_version: u64) {
         let floor = segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS);
-        self.deps.region_cache
+        self.deps
+            .region_cache
             .retain_keys(|key| key.segments_version >= floor);
     }
 
@@ -338,7 +340,6 @@ impl Executor {
             _ => (Arc::clone(&previous.overlay), previous.overlay_version),
         };
 
-
         let next = previous.with(|g| {
             g.prefix = prefix;
             g.segments_version = segments_version;
@@ -352,6 +353,7 @@ impl Executor {
                 g.fragments = Arc::clone(&r.fragments);
                 g.unique = Arc::clone(&r.unique);
                 g.edited = Arc::clone(&r.edited);
+                g.tenancy = Arc::clone(&r.tenancy);
                 // The retired entities' pairs leave the live map with their runs' entries, or an id
                 // freed here and issued again would answer its previous holder's number.
                 if !r.retired.is_empty() {

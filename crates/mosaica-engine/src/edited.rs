@@ -12,8 +12,11 @@
 //! entries that the generation holds and has not deleted, or, where the number has no entries,
 //! the number itself.
 //!
-//! Every number is at tenancy 0, since no number has been held by a second item. An artifact or a
-//! layer is an entity that is never freed, so its identifier is at tenancy 0 as well.
+//! A number's `mosaica_id` carries the number's tenancy, which the generation's tenancy index holds
+//! ([`mosaica_store::tenancy`]). An identifier is formed at the tenancy the index holds for its
+//! number, and names the number only while the index still holds that tenancy for it. An artifact
+//! or a layer is an entity that is never freed, so its identifier is at tenancy 0 and the index is
+//! not read for it.
 
 use mosaica_store::StoreError;
 use mosaica_types::{EntityId, IdentityError, IdentityKey, ItemHigh, MosaicaId, Tenancy};
@@ -289,9 +292,42 @@ pub(crate) fn number_named(
     generation: &Generation,
     id: MosaicaId,
 ) -> Option<EntityId> {
+    let (number, current) = number_and_tenancy_named(key, generation, id)?;
+    current.then_some(number)
+}
+
+/// The number `id` names in `generation`'s shard, and whether `id` carries the tenancy the index
+/// holds for that number; `None` where `id` names no item or an item of another shard. The index
+/// is read for every identifier that reaches it.
+pub(crate) fn number_and_tenancy_named(
+    key: &IdentityKey,
+    generation: &Generation,
+    id: MosaicaId,
+) -> Option<(EntityId, bool)> {
     let (high, number) = key.invert(id)?;
     let shard = generation.bundle.manifest.identity.shard_id;
-    (high == ItemHigh::new(shard, Tenancy::ZERO)).then_some(number)
+    (high.shard == shard).then(|| (number, generation.tenancy.of(number) == high.tenancy))
+}
+
+/// The `mosaica_id` of the item holding each of `numbers` as its number, at the tenancy the index
+/// holds for it.
+pub(crate) fn ids_of_numbers(
+    key: &IdentityKey,
+    generation: &Generation,
+    numbers: &[EntityId],
+) -> Result<Vec<MosaicaId>, StoreError> {
+    let shard = generation.bundle.manifest.identity.shard_id;
+    let tenancies = generation.tenancy.of_each(numbers.iter().copied());
+    numbers
+        .iter()
+        .zip(tenancies)
+        .map(|(number, tenancy)| {
+            key.forward(ItemHigh::new(shard, tenancy), *number)
+                .map_err(|e| StoreError::MalformedBundle {
+                    detail: format!("an issued entity lies outside the identity space: {e}"),
+                })
+        })
+        .collect()
 }
 
 /// The `mosaica_id` of the artifact or layer `entity` in `shard`.
@@ -317,17 +353,11 @@ impl crate::Engine {
         generation: &Generation,
         entities: &[EntityId],
     ) -> Result<Vec<MosaicaId>, StoreError> {
-        let shard = generation.bundle.manifest.identity.shard_id;
-        numbers_of(generation, entities)?
-            .into_iter()
-            .map(|number| {
-                self.identity_key
-                    .forward(ItemHigh::new(shard, Tenancy::ZERO), number)
-                    .map_err(|e| StoreError::MalformedBundle {
-                        detail: format!("an issued entity lies outside the identity space: {e}"),
-                    })
-            })
-            .collect()
+        ids_of_numbers(
+            &self.identity_key,
+            generation,
+            &numbers_of(generation, entities)?,
+        )
     }
 
     /// [`Self::mosaica_ids_of_in`] for one entity.
@@ -337,5 +367,78 @@ impl crate::Engine {
         entity: EntityId,
     ) -> Result<MosaicaId, StoreError> {
         Ok(self.mosaica_ids_of_in(generation, &[entity])?[0])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use mosaica_lifecycle::{IngestBuffer, Overlay};
+    use mosaica_store::tenancy::{TenancyIndex, TENANCY_BITS};
+
+    use super::*;
+
+    const KEY: &str = "000102030405060708090a0b0c0d0e0f";
+
+    /// A generation of shard 0 whose index holds each `(number, tenancy)`.
+    fn generation_with(dir: &std::path::Path, held: &[(u32, u16)]) -> Generation {
+        let mut bits: [croaring::Bitmap; TENANCY_BITS] = Default::default();
+        for &(number, tenancy) in held {
+            for (bit, numbers) in bits.iter_mut().enumerate() {
+                if tenancy & (1 << bit) != 0 {
+                    numbers.add(number);
+                }
+            }
+        }
+        let files = mosaica_store::tenancy::write(dir, &bits).unwrap();
+        let index = Arc::new(TenancyIndex::open(&files).unwrap());
+        Generation::synthetic("v00000", 1, 0, Overlay::new(), IngestBuffer::new())
+            .with(|g| g.tenancy = index)
+    }
+
+    fn id(key: &IdentityKey, shard: u32, tenancy: u16, number: u64) -> MosaicaId {
+        let high = ItemHigh::new(shard, Tenancy::new(tenancy).unwrap());
+        key.forward(high, EntityId::new(number)).unwrap()
+    }
+
+    #[test]
+    fn an_identifier_names_its_number_only_at_the_tenancy_the_index_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let generation = generation_with(dir.path(), &[(7, 3), (9, 4095)]);
+        let key = IdentityKey::from_hex(KEY).unwrap();
+        let named = |id| number_named(&key, &generation, id);
+
+        assert_eq!(named(id(&key, 0, 3, 7)), Some(EntityId::new(7)));
+        assert_eq!(
+            named(id(&key, 0, 0, 7)),
+            None,
+            "an earlier holder's identifier"
+        );
+        assert_eq!(named(id(&key, 0, 4, 7)), None, "a tenancy not yet reached");
+        assert_eq!(named(id(&key, 0, 4095, 9)), Some(EntityId::new(9)));
+        assert_eq!(
+            named(id(&key, 0, 0, 8)),
+            Some(EntityId::new(8)),
+            "never freed"
+        );
+        assert_eq!(named(id(&key, 1, 3, 7)), None, "another shard's");
+        assert_eq!(
+            number_and_tenancy_named(&key, &generation, id(&key, 0, 2, 7)),
+            Some((EntityId::new(7), false))
+        );
+    }
+
+    #[test]
+    fn an_identifier_is_formed_at_the_tenancy_the_index_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let generation = generation_with(dir.path(), &[(7, 3)]);
+        let key = IdentityKey::from_hex(KEY).unwrap();
+        let numbers = numbers_of(&generation, &[EntityId::new(7), EntityId::new(8)]).unwrap();
+        let ids = ids_of_numbers(&key, &generation, &numbers).unwrap();
+        assert_eq!(ids, [id(&key, 0, 3, 7), id(&key, 0, 0, 8)]);
+        assert!(ids
+            .iter()
+            .all(|id| number_named(&key, &generation, *id).is_some()));
     }
 }

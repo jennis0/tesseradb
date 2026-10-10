@@ -25,6 +25,7 @@ fn row(entity: u64, x: f64, y: f64) -> FlushRow {
     FlushRow {
         entity_id: EntityId::new(entity),
         number: EntityId::new(entity),
+        tenancy: mosaica_types::Tenancy::ZERO,
         x,
         y,
         scalars: vec![],
@@ -106,12 +107,7 @@ fn every_file_written_is_named_and_digested() {
     let dir = tempfile::tempdir().unwrap();
     build_bundle(dir.path(), 50);
     let prefix = dir.path().join("v00000");
-    let out = flush(
-        &prefix,
-        "seg-flush",
-        vec![row(50, 0.1, 0.1)],
-        50,
-    );
+    let out = flush(&prefix, "seg-flush", vec![row(50, 0.1, 0.1)], 50);
 
     let seg_dir = prefix.join(format!(
         "partitions/{PARTITION}/views/{VIEW}/segments/seg-flush"
@@ -147,11 +143,7 @@ fn the_extent_addresses_exactly_the_rows_the_segment_holds() {
     let out = flush(
         &dir.path().join("v00000"),
         "seg-flush",
-        vec![
-            row(50, 0.9, 0.9),
-            row(51, 0.1, 0.1),
-            row(52, 0.5, 0.5),
-        ],
+        vec![row(50, 0.9, 0.9), row(51, 0.1, 0.1), row(52, 0.5, 0.5)],
         50,
     );
 

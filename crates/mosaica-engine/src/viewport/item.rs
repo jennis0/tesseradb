@@ -146,16 +146,19 @@ impl Engine {
     /// visibility in entity space, and only then locate a row and read its scalars.
     /// Returns `Ok(None)` both when `id` names nothing in this bundle and when it names an item the
     /// principal may not see: one outcome from one code path.
-    /// The timing channel is kept small. Inversion is a pure function and the edited-items map is
-    /// probed for every identifier, edited or not. The visibility test that follows is an
+    /// The timing channel is kept small. Inversion is a pure function, and the tenancy index and
+    /// the edited-items map are probed for every identifier of this shard, edited or not, and
+    /// whether or not its tenancy is the number's. The visibility test that follows is an
     /// entity-space question — three constant-time probes — and is the same three probes for an
-    /// identifier that names nothing and one that names an invisible item: no `RowProjection` is
-    /// constructed or read, so there is no per-ID cost to correlate against. A row is located only
-    /// after the answer is already visible.
+    /// identifier that names nothing, one that names an invisible item and one at a tenancy its
+    /// number is not at: no `RowProjection` is constructed or read, so there is no per-ID cost to
+    /// correlate against. A row is located only after the answer is already visible.
     pub fn item(&self, session: &Session, id: MosaicaId) -> Result<Option<ItemOut>> {
         let generation = self.generation.load_full();
 
-        let Some(number) = crate::edited::number_named(&self.identity_key, &generation, id) else {
+        let Some((number, current)) =
+            crate::edited::number_and_tenancy_named(&self.identity_key, &generation, id)
+        else {
             return Ok(None);
         };
         // The item's current entity, the edited-items map probed whether or not it holds the
@@ -185,8 +188,9 @@ impl Engine {
             None => self.fragment_for(session, &generation)?,
         };
 
-        // ONE BIT, in entity space, O(1), before anything is looked up in row space.
-        if !self.visible_to(&fragment, session, &generation, entity) {
+        // ONE BIT, in entity space, O(1), before anything is looked up in row space. Run too for
+        // an identifier at a tenancy its number is not at, which names nothing.
+        if !self.visible_to(&fragment, session, &generation, entity) || !current {
             return Ok(None);
         }
 

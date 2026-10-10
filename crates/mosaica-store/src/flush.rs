@@ -59,6 +59,8 @@ pub struct FlushRow {
     /// The item's number, which its `mosaica_id` is taken from: `entity_id` for an item never
     /// edited, and the entity it was first given for one an edit moved ([`crate::edited`]).
     pub number: EntityId,
+    /// The number's tenancy, which a live number holds unchanged.
+    pub tenancy: Tenancy,
     pub x: f64,
     pub y: f64,
     /// One value per **render** column, in declared order, then one per column of
@@ -165,7 +167,11 @@ pub fn write_flush_segment(
     let mut items: Vec<TilerItem> = Vec::with_capacity(input.rows.len());
     for row in &input.rows {
         items.push(TilerItem {
-            mosaica_id: mosaica_id_of(input.identity_key, input.shard_id, row.number)?,
+            mosaica_id: mosaica_id_of(
+                input.identity_key,
+                ItemHigh::new(input.shard_id, row.tenancy),
+                row.number,
+            )?,
             qx: fixed32(row.x, q.x_min, q.x_max),
             qy: fixed32(row.y, q.y_min, q.y_max),
             scalars: row.scalars.clone(),
@@ -283,8 +289,8 @@ pub fn write_flush_segment(
     })
 }
 
-fn mosaica_id_of(key: &IdentityKey, shard_id: u32, entity: EntityId) -> Result<MosaicaId> {
-    key.forward(ItemHigh::new(shard_id, Tenancy::ZERO), entity)
+fn mosaica_id_of(key: &IdentityKey, high: ItemHigh, entity: EntityId) -> Result<MosaicaId> {
+    key.forward(high, entity)
         .map_err(|e| StoreError::MalformedBundle {
             detail: format!(
                 "write_flush_segment: mosaica_id for entity {}: {e}",
@@ -412,6 +418,7 @@ mod tests {
         FlushRow {
             entity_id: EntityId::new(entity),
             number: EntityId::new(entity),
+            tenancy: Tenancy::ZERO,
             x,
             y: 0.0,
             scalars: vec![score],
@@ -506,5 +513,26 @@ mod tests {
 
         let columns = ColumnsRef::load(&seg_dir.join("columns.arrow")).expect("columns");
         assert!((0..2).all(|row| columns.presence("score").contains(row)));
+    }
+
+    /// Each row's `mosaica_id` is its number's at the tenancy the row carries.
+    #[test]
+    fn a_flushed_row_is_named_at_its_numbers_tenancy() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut held = row(0, 0.1, ScalarValue::I32(7));
+        held.tenancy = Tenancy::new(5).unwrap();
+        let (_, seg_dir) = flush(dir.path(), vec![held, row(1, 0.9, ScalarValue::I32(8))]);
+
+        let key = IdentityKey::from_hex(KEY_HEX).unwrap();
+        let named = |tenancy: u16, number: u64| {
+            key.forward(
+                ItemHigh::new(0, Tenancy::new(tenancy).unwrap()),
+                EntityId::new(number),
+            )
+            .unwrap()
+            .raw()
+        };
+        let columns = ColumnsRef::load(&seg_dir.join("columns.arrow")).expect("columns");
+        assert_eq!(columns.mosaica_id(), [named(5, 0), named(0, 1)]);
     }
 }

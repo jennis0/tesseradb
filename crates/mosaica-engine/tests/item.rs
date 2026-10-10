@@ -98,6 +98,42 @@ fn an_unknown_id_and_an_invisible_one_are_indistinguishable() {
     assert_eq!(engine.item(&session, invisible_id).unwrap(), None);
 }
 
+/// An identifier at a tenancy its number is not at names nothing, at the item card and at the
+/// resolver, and costs the card no row projection; one at the tenancy the bundle's index holds
+/// names the item. The index here puts a built item's number at tenancy 3.
+#[test]
+fn an_identifier_at_a_tenancy_its_number_is_not_at_names_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let entity = EntityId::new(source_to_new_map(&bundle_root, "v00000")[&0]);
+    set_tenancy(&bundle_root, entity, 3);
+
+    let engine = open_engine(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let at = |tenancy: u16| {
+        let high = ItemHigh::new(0, Tenancy::new(tenancy).unwrap());
+        test_key().forward(high, entity).unwrap()
+    };
+
+    assert_eq!(
+        engine.resolve_mosaica_ids(&[at(3), at(0), at(2)]).unwrap(),
+        vec![Some(entity), None, None]
+    );
+    assert_eq!(engine.item(&session, at(0)).unwrap(), None);
+    assert_eq!(engine.item(&session, at(2)).unwrap(), None);
+    assert_eq!(engine.row_projection_cache_len(), 0);
+    assert!(engine.item(&session, at(3)).unwrap().is_some());
+}
+
 /// The timing channel is closed rather than narrowed: the entity-space visibility test never
 /// constructs a `RowProjection` (the cached artefact that costs 9.5-19.3s at 10^9), for an unknown
 /// id or an

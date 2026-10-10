@@ -444,6 +444,7 @@ mod tests {
             .map(|(entity, x, score)| FlushRow {
                 entity_id: EntityId::new(*entity),
                 number: EntityId::new(*entity),
+                tenancy: mosaica_types::Tenancy::ZERO,
                 x: *x,
                 y: 0.0,
                 scalars: vec![score.clone()],

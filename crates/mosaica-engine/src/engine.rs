@@ -5,9 +5,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use rand::rngs::OsRng;
-use rand::RngCore;
-use rustc_hash::FxHashMap;
 use mosaica_authz::{DeltaTier, Dict, FragmentCache, PostingsReader};
 use mosaica_lifecycle::Overlay;
 use mosaica_store::manifest::{CurrentPointer, Declarations};
@@ -15,6 +12,9 @@ use mosaica_store::read::open_bundle;
 use mosaica_store::vocabulary::Vocabularies;
 use mosaica_store::Bundle;
 use mosaica_types::IdentityKey;
+use rand::rngs::OsRng;
+use rand::RngCore;
+use rustc_hash::FxHashMap;
 
 use crate::cache::RowProjectionCache;
 use crate::config::{coalesce_policy, merge_policy, EngineConfig};
@@ -778,6 +778,15 @@ fn first_generation(
         .map_err(EngineError::Store)?,
         None => mosaica_store::edited::EditedIndex::default(),
     };
+    let tenancy = match bundle.partitions.values().next() {
+        Some(partition) => mosaica_store::read::open_tenancy_index(
+            prefix_dir,
+            &partition.manifest,
+            &bundle.manifest.files,
+        )
+        .map_err(EngineError::Store)?,
+        None => mosaica_store::tenancy::TenancyIndex::default(),
+    };
 
     // Built synchronously at open, not lazily, so a first keystroke never pays the sort as a
     // cold start; only for the vocabularies a declared category column draws on.
@@ -818,6 +827,7 @@ fn first_generation(
             unique_live: Arc::new(crate::unique::UniqueLive::derive(&bundle.manifest, &buffer)),
             edited: Arc::new(edited),
             edited_live: Arc::new(state.edited_live.clone()),
+            tenancy: Arc::new(tenancy),
             edit_epoch: 0,
             deny_epoch: 0,
             fold_epoch: 0,
@@ -1062,7 +1072,11 @@ impl Engine {
         // The rows the log held and no flush wrote, which the occupancy bound and the row trigger
         // count from the first request, not from the first write.
         let buffered = engine.generation().buffer.len();
-        engine.write.health().buffered_items.store(buffered, Ordering::SeqCst);
+        engine
+            .write
+            .health()
+            .buffered_items
+            .store(buffered, Ordering::SeqCst);
         Ok(engine)
     }
 
@@ -1266,6 +1280,14 @@ pub(crate) fn open_rotation(
         )
         .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,
     );
+    let tenancy = Arc::new(
+        mosaica_store::read::open_tenancy_index(
+            &prefix_dir,
+            &partition.manifest,
+            &bundle.manifest.files,
+        )
+        .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,
+    );
 
     Ok((
         bundle,
@@ -1275,6 +1297,7 @@ pub(crate) fn open_rotation(
             filter_columns,
             unique,
             edited,
+            tenancy,
             retired,
         },
     ))

@@ -66,6 +66,10 @@ pub struct GenerationParts {
     pub(crate) edited: Arc<mosaica_store::edited::EditedIndex>,
     /// The edited-items pairs no run holds yet, published with the buffer.
     pub(crate) edited_live: Arc<crate::edited::EditedLive>,
+    /// Each number's tenancy, from the files the partition manifest names: what an item's
+    /// `mosaica_id` is formed and resolved at ([`crate::edited`]). Replaced only by a publication
+    /// into a new prefix.
+    pub(crate) tenancy: Arc<mosaica_store::tenancy::TenancyIndex>,
     /// How many commit windows have committed an edit, and how many folds have retired entities,
     /// since the process started: what a command resolved against an earlier generation compares
     /// to learn whether an entity it names has moved ([`crate::edited::Stamp`]).
@@ -121,7 +125,6 @@ pub struct GenerationParts {
     /// [`Generation::vocabularies`] does and travels with it.
     pub suggest: Arc<crate::suggest::SuggestIndexes>,
 }
-
 
 /// One immutable, atomically-swappable snapshot of engine state (lifecycle §1.1).
 ///
@@ -200,8 +203,8 @@ fn deny_versions(
                 let before = previous.denied.get(view).map(|rows| below(rows, base_rows));
                 (before == now).then_some(version)
             });
-            let version = carried
-                .unwrap_or_else(|| NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+            let version =
+                carried.unwrap_or_else(|| NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
             out.insert(view.clone(), version);
         }
     }
@@ -234,7 +237,11 @@ impl Generation {
     }
 
     /// The deny versions of a generation whose mask is `denied` over `parts`, following this one.
-    fn next_deny_versions(&self, denied: &Arc<DenyMask>, parts: &GenerationParts) -> Arc<DenyVersions> {
+    fn next_deny_versions(
+        &self,
+        denied: &Arc<DenyMask>,
+        parts: &GenerationParts,
+    ) -> Arc<DenyVersions> {
         if Arc::ptr_eq(denied, &self.denied) && parts.prefix == self.parts.prefix {
             return Arc::clone(&self.deny_versions);
         }
@@ -464,6 +471,7 @@ impl Generation {
             unique_live: Arc::default(),
             edited: Arc::default(),
             edited_live: Arc::default(),
+            tenancy: Arc::default(),
             edit_epoch: 0,
             fold_epoch: 0,
             deny_epoch: 0,

@@ -13,7 +13,6 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
 use mosaica_authz::{write_delta_tier, DeltaTier, Dict, DictStreamWriter};
 use mosaica_lifecycle::wal::WalScalar;
 use mosaica_lifecycle::{BufferedItem, Overlay};
@@ -23,6 +22,7 @@ use mosaica_store::permutation::SegmentExtent;
 use mosaica_store::read::SegmentData;
 use mosaica_store::{write_flush_segment, FlushInput, FlushRow};
 use mosaica_types::{EntityId, IdentityKey, TermId};
+use rustc_hash::FxHashMap;
 
 use crate::write::StageMark;
 use crate::Generation;
@@ -459,6 +459,9 @@ pub(crate) struct FlushContext {
     /// The edited-items map when planned: each planned entity's number is read from it on the pool.
     pub(crate) edited: Arc<mosaica_store::edited::EditedIndex>,
     pub(crate) edited_live: Arc<crate::edited::EditedLive>,
+    /// The tenancy index when planned: each row is named at its number's tenancy, read from it,
+    /// which does not change while an item holds the number.
+    pub(crate) tenancy: Arc<mosaica_store::tenancy::TenancyIndex>,
 }
 
 /// A flush whose files are durable, awaiting manifest assembly and the swap on the executor. The side-manifest is
@@ -566,6 +569,7 @@ fn execute_flush_stages(
 ) -> Result<CompletedFlush, MaintenanceFailed> {
     let consumed: Vec<EntityId> = plan.items.iter().map(|(entity, _)| *entity).collect();
     let numbers = numbers_of(&plan, &ctx)?;
+    let tenancies = ctx.tenancy.of_each(numbers.iter().copied());
 
     // ---- promotion: term ids allocated downward from `u32::MAX` stay unsatisfiable until promoted here.
     let promotion = promote(&plan, &ctx)?;
@@ -574,7 +578,7 @@ fn execute_flush_stages(
 
     // ---- the segment: scalars narrowed to the render subset.
     let mut rows: Vec<FlushRow> = Vec::with_capacity(plan.items.len());
-    for ((entity, item), number) in plan.items.iter().zip(&numbers) {
+    for (((entity, item), number), tenancy) in plan.items.iter().zip(&numbers).zip(tenancies) {
         let mut scalars = Vec::with_capacity(ctx.render_indices.len() + ctx.scoped_render.len());
         // Positionally parallel to `render_indices`, the render subset in declaration order.
         for &index in &ctx.render_indices {
@@ -597,6 +601,7 @@ fn execute_flush_stages(
         rows.push(FlushRow {
             entity_id: *entity,
             number: *number,
+            tenancy,
             x: item.x,
             y: item.y,
             scalars,
@@ -765,10 +770,7 @@ fn execute_flush_stages(
 
     // ---- the digests, one pass over everything written above ---------------------------------
     for rel in to_digest {
-        files.insert(
-            rel.clone(),
-            digest_of(&ctx.prefix_dir.join(&rel))?,
-        );
+        files.insert(rel.clone(), digest_of(&ctx.prefix_dir.join(&rel))?);
     }
     *mark = laps.lap(FlushStage::Digests, *mark);
 
@@ -847,7 +849,11 @@ fn execute_flush_stages(
         dict: promotion.dict,
         promoted_from_dict_len: promoted_from,
         prefix: ctx.prefix,
-        unique_columns: ctx.unique_schema.iter().map(|(name, _, _)| name.clone()).collect(),
+        unique_columns: ctx
+            .unique_schema
+            .iter()
+            .map(|(name, _, _)| name.clone())
+            .collect(),
         unique_runs,
         edited_runs,
     };
@@ -1189,7 +1195,11 @@ fn write_value_extent(
     column: &ExtentColumn<'_>,
 ) -> Result<crate::filter::OpenedExtent, MaintenanceFailed> {
     let scoped = view.is_some();
-    let what = if scoped { "scoped extent" } else { "filter extent" };
+    let what = if scoped {
+        "scoped extent"
+    } else {
+        "filter extent"
+    };
     let (values_path, presence_path, dict_path) = mosaica_filter::write_extent(
         column_dir,
         &ctx.seg_id,
@@ -1205,7 +1215,10 @@ fn write_value_extent(
             .and_then(|p| p.to_str())
             .map(str::to_string)
             .ok_or_else(|| {
-                MaintenanceFailed(format!("{what} path {} is not under the prefix", path.display()))
+                MaintenanceFailed(format!(
+                    "{what} path {} is not under the prefix",
+                    path.display()
+                ))
             })
     };
     let values =
@@ -1416,7 +1429,10 @@ fn entity_scoped_rows<'a>(
     let mut out = Vec::with_capacity(plan.items.len());
     for (entity, item) in plan.value_rows() {
         let entity = narrow_entity(*entity)?;
-        out.push((entity, buffered_value(item, BufferedPlace::Entity(spec.index))));
+        out.push((
+            entity,
+            buffered_value(item, BufferedPlace::Entity(spec.index)),
+        ));
     }
     Ok(out)
 }
@@ -1430,7 +1446,10 @@ fn scoped_rows<'a>(
     let mut out = Vec::with_capacity(plan.items.len());
     for (entity, item) in plan.scoped_value_rows() {
         let entity = narrow_entity(*entity)?;
-        out.push((entity, buffered_value(item, BufferedPlace::Scoped(spec.index))));
+        out.push((
+            entity,
+            buffered_value(item, BufferedPlace::Scoped(spec.index)),
+        ));
     }
     Ok(out)
 }
@@ -2087,15 +2106,10 @@ fn is_deleted(overlay: &Overlay, entity: EntityId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-
-    
 
     use mosaica_lifecycle::wal::{ChangeOp, WalRow, WalScalar};
     use mosaica_lifecycle::IngestBuffer;
-    
-    
-    
+
     use mosaica_types::TermId;
 
     const VIEW: &str = "s0";

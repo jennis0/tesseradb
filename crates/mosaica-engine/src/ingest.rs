@@ -33,7 +33,7 @@ use mosaica_lifecycle::{
 };
 use mosaica_store::manifest::DeclaredScalar;
 use mosaica_store::unique::{key_of, value_text, KeyKind, UniqueKey};
-use mosaica_types::{EntityId, ItemHigh, MosaicaId, Tenancy, TermId};
+use mosaica_types::{EntityId, MosaicaId, TermId};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::engine::Engine;
@@ -396,21 +396,16 @@ impl Engine {
         }
         // Each named item's number, which its `mosaica_id` is taken from and an edit keeps.
         let entities: Vec<EntityId> = order.iter().map(|(entity, _)| *entity).collect();
-        let numbers: FxHashMap<EntityId, EntityId> = entities
+        let unreadable = |e: mosaica_store::StoreError| AcceptError::Unreadable(e.to_string());
+        let held = crate::edited::numbers_of(generation, &entities).map_err(unreadable)?;
+        let ids = crate::edited::ids_of_numbers(&self.identity_key, generation, &held)
+            .map_err(unreadable)?;
+        let numbers: FxHashMap<EntityId, EntityId> = entities.iter().copied().zip(held).collect();
+        let ids: FxHashMap<EntityId, u64> = entities
             .iter()
             .copied()
-            .zip(
-                crate::edited::numbers_of(generation, &entities)
-                    .map_err(|e| AcceptError::Unreadable(e.to_string()))?,
-            )
+            .zip(ids.into_iter().map(|id| id.raw()))
             .collect();
-        let shard = manifest.identity.shard_id;
-        let tid_of = |entity: &EntityId| -> Result<u64, AcceptError> {
-            self.identity_key
-                .forward(ItemHigh::new(shard, Tenancy::ZERO), numbers[entity])
-                .map(|id| id.raw())
-                .map_err(|e| AcceptError::Unreadable(e.to_string()))
-        };
 
         for (at, (row, item)) in request.rows.iter().zip(&named).enumerate() {
             if let Some(reason) = refused[at] {
@@ -445,19 +440,19 @@ impl Engine {
                 Some(entity) => match decided.remove(&at).expect("every named row was decided") {
                     Decided::Unchanged => slots.push(Slot::Unchanged {
                         entity: *entity,
-                        mosaica_id: tid_of(entity)?,
+                        mosaica_id: ids[entity],
                     }),
                     Decided::Joined => {
                         slots.push(Slot::Joined {
                             entity: *entity,
-                            mosaica_id: tid_of(entity)?,
+                            mosaica_id: ids[entity],
                         });
                         joined_from.push(at);
                     }
                     Decided::Added(join) => {
                         slots.push(Slot::Written {
                             row: rows.len() as u32,
-                            mosaica_id: Some(tid_of(entity)?),
+                            mosaica_id: Some(ids[entity]),
                         });
                         written_from.push(at);
                         rows.push(*join);
@@ -480,7 +475,7 @@ impl Engine {
                         keys.extend(identities[at].unique.iter().copied());
                         slots.push(Slot::Edited {
                             edit: edits.len() as u32,
-                            mosaica_id: tid_of(entity)?,
+                            mosaica_id: ids[entity],
                         });
                         edited_from.push(at);
                         edits.push(edit);

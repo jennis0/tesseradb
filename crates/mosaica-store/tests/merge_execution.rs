@@ -46,6 +46,7 @@ fn segment(root: &Path, seg_id: &str, entity_lo: u64, count: u64, stride: u64) -
         .map(|e| FlushRow {
             entity_id: EntityId::new(e),
             number: EntityId::new(e),
+            tenancy: mosaica_types::Tenancy::ZERO,
             x: (((e * stride) % 97) as f64) / 97.0,
             y: (((e * 53) % 89) as f64) / 89.0,
             scalars: vec![score_of(e)],

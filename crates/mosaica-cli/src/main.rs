@@ -539,7 +539,10 @@ fn readyz(mut addr: std::net::SocketAddr, timeout: std::time::Duration) -> Resul
         .send()
         .map_err(|e| {
             if e.is_timeout() {
-                format!("{addr} did not answer /readyz within {} s", timeout.as_secs())
+                format!(
+                    "{addr} did not answer /readyz within {} s",
+                    timeout.as_secs()
+                )
             } else if e.is_connect() {
                 format!("no server answering at {addr}: {}", innermost(&e))
             } else {
@@ -667,10 +670,7 @@ fn resolve_declaration(
     let bindings = collect_bindings(file)?;
     let config = mosaica_build::config::Config::parse_with(&schema_path, &bindings, strictness)
         .map_err(|e| e.to_string())?;
-    Ok(Declaration {
-        deployment,
-        config,
-    })
+    Ok(Declaration { deployment, config })
 }
 
 /// The `--file` bindings as one map, refusing a key bound twice.
@@ -1157,10 +1157,7 @@ fn main() -> ExitCode {
             // whole build. Every rule in `mosaica_build::config`
             // fires here, against no data at all — which is also the whole of what `mosaica check`
             // does, through this same function.
-            let Declaration {
-                deployment,
-                config,
-            } = match resolve_declaration(
+            let Declaration { deployment, config } = match resolve_declaration(
                 deployment.as_deref(),
                 config,
                 file,
@@ -1589,7 +1586,7 @@ fn main() -> ExitCode {
                              record(s), {} record blob row(s), {} scoped render lane(s), {} \
                              Morton cell(s), {} band entr(ies), {} band label cop(ies), {} row \
                              member file(s), {} unique index entr(ies), {} edited item(s) over {} \
-                             row(s)",
+                             row(s), {} number(s) above tenancy 0, {} retired number(s)",
                             report.terms,
                             report.delta_tiers,
                             report.pairs_rows,
@@ -1602,7 +1599,9 @@ fn main() -> ExitCode {
                             report.row_member_files,
                             report.unique_entries,
                             report.edited_pairs,
-                            report.edited_rows
+                            report.edited_rows,
+                            report.reissued_numbers,
+                            report.retired_numbers
                         );
                         ExitCode::SUCCESS
                     }
