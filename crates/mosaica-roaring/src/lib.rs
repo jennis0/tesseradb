@@ -17,12 +17,16 @@
 //! [`BlockRanks`] answers a member's rank in constant time, where croaring's own rank sums every
 //! container below the value.
 //!
+//! [`count_ranges`] counts a bitmap over many ranges in one walk of its containers.
+//!
 //! The crate sits below `mosaica-filter` and `mosaica-store` because both use it and neither may
 //! depend on the other.
 
+mod counts;
 mod ranks;
 mod runs;
 
+pub use counts::count_ranges;
 pub use ranks::BlockRanks;
 pub use runs::{for_each_run_in, split_by_cardinality, RankedRuns, Runs};
 
@@ -254,7 +258,12 @@ impl Sink {
             let base = u32::from(key) << 16;
             members.clear();
             if self.cards[i] > ARRAY_MAX {
-                for (wi, w) in self.payload[start..end].as_chunks::<8>().0.iter().enumerate() {
+                for (wi, w) in self.payload[start..end]
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .enumerate()
+                {
                     let mut w = u64::from_le_bytes(*w);
                     while w != 0 {
                         members.push(base + (wi as u32) * 64 + w.trailing_zeros());

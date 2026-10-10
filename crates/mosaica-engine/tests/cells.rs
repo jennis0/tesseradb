@@ -17,9 +17,6 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use common::*;
 use croaring::Bitmap;
-use parquet::arrow::ArrowWriter;
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
 use mosaica_build::config::Config;
 use mosaica_build::{build, BuildArgs};
 use mosaica_engine::cells::{
@@ -30,6 +27,9 @@ use mosaica_engine::viewport::segments_with_row_bases;
 use mosaica_engine::Engine;
 use mosaica_lifecycle::{UnallocatedRow, WalScalar};
 use mosaica_store::read::{ScalarSlice, SegmentData};
+use parquet::arrow::ArrowWriter;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 
 const N: u64 = 5_000;
 
@@ -304,7 +304,7 @@ fn every_table_of_the_pass_is_the_one_counted_row_by_row() {
             );
             if depth <= 16 {
                 let ranged = count_by_ranges(whole_view(), depth, 0..1u64 << (2 * depth), &|r| {
-                    set.count(r)
+                    set.count_ranges(r)
                 });
                 let cells: Vec<(u64, u64)> = alone.iter().map(|e| (e.cell, e.count)).collect();
                 assert_eq!(ranged.cells, cells, "{what}, depth {depth}, range counts");

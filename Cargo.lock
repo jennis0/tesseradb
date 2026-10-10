@@ -2262,6 +2262,7 @@ name = "mosaica-roaring"
 version = "0.1.0"
 dependencies = [
  "croaring",
+ "croaring-sys",
  "rand 0.8.7",
 ]
 

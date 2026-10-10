@@ -1,7 +1,7 @@
 //! The tile sweep and the gather: one tile's count and selection, and the columns it emits.
 
-use super::*;
 use super::out::flat_families;
+use super::*;
 use mosaica_store::bands::{element, page_size, will_need, CopyType, CopyValue};
 
 /// The emit pass's hard per-frame accumulation cap, applied under any `flush_bytes` — including
@@ -36,7 +36,11 @@ pub const SERIAL_FALLBACK_MAX_ROWS: u64 = 500_000_000;
 /// Two terms, either of which fires the fan-out: the row term above, and the tile term
 /// ([`TILE_PAR_MIN_TILES`]).
 #[inline]
-pub(super) fn should_fold_serially(total_rows_in_ranges: u64, threshold: u64, tiles: usize) -> bool {
+pub(super) fn should_fold_serially(
+    total_rows_in_ranges: u64,
+    threshold: u64,
+    tiles: usize,
+) -> bool {
     total_rows_in_ranges < threshold && tiles < TILE_PAR_MIN_TILES
 }
 
@@ -432,7 +436,7 @@ pub(super) fn tile_sweep<'a>(
                 .map(|part| (part.segment, part.row_base, part.range.clone())),
             zoom + offset,
             first..first + (1u64 << (2 * offset as u32)),
-            &|rows| mask.count_range(rows),
+            &|rows| mask.count_ranges(rows),
         );
         sub_cells = counted
             .cells
@@ -523,8 +527,10 @@ impl Engine {
         // Read from `self`, not the constant, so a test can override it per-`Engine` via
         // `Engine::set_serial_fallback_max_rows_for_test`; a shipped binary always reads
         // `SERIAL_FALLBACK_MAX_ROWS` here.
-        let serial_fallback_max_rows =
-            self.switches.serial_fallback_max_rows.load(Ordering::Relaxed);
+        let serial_fallback_max_rows = self
+            .switches
+            .serial_fallback_max_rows
+            .load(Ordering::Relaxed);
         let tile_outcomes: Vec<Result<Option<TileSweepOut>>> = if should_fold_serially(
             total_rows_in_ranges,
             serial_fallback_max_rows,
@@ -763,7 +769,12 @@ pub(crate) enum RowPresence<'a> {
 
 impl<'a> RowPresence<'a> {
     pub(crate) fn of(segment: &'a SegmentData, name: &str, category: bool) -> Self {
-        Self::read(segment, name, category, segment.columns.scalar(name).is_some())
+        Self::read(
+            segment,
+            name,
+            category,
+            segment.columns.scalar(name).is_some(),
+        )
     }
 
     /// [`Self::of`] where the caller has already looked up whether the segment holds the column.
@@ -950,7 +961,11 @@ fn is_scattered(ts: &TileSweepOut<'_>) -> bool {
     if ts.entries.is_some() {
         return true;
     }
-    let spanned: u64 = ts.tile_parts.iter().map(|(_, r)| (r.end - r.start) as u64).sum();
+    let spanned: u64 = ts
+        .tile_parts
+        .iter()
+        .map(|(_, r)| (r.end - r.start) as u64)
+        .sum();
     spanned >= ts.rows.len() as u64 * SPARSE_ROWS_PER_POINT
 }
 
@@ -998,12 +1013,9 @@ impl<'a> Gather<'a> {
                 .iter()
                 .zip(&resolved)
                 .map(|(segment, r)| match (segment, r) {
-                    (Some(segment), Some(r)) => RowPresence::read(
-                        segment,
-                        &d.name,
-                        d.vocabulary.is_some(),
-                        r[ci].is_some(),
-                    ),
+                    (Some(segment), Some(r)) => {
+                        RowPresence::read(segment, &d.name, d.vocabulary.is_some(), r[ci].is_some())
+                    }
                     _ => RowPresence::NoRow,
                 })
                 .collect();

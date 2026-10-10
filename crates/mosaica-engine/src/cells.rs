@@ -18,10 +18,10 @@
 use std::ops::Range;
 
 use croaring::Bitmap;
-use rayon::prelude::*;
-use rustc_hash::FxHashMap;
 use mosaica_store::read::{first_code_at_or_past, ScalarSlice, SegmentData};
 use mosaica_store::RowEntities;
+use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 
 use crate::compose::EffectiveMask;
 use crate::filter::EntityCodes;
@@ -45,6 +45,14 @@ impl CellSet<'_> {
         match self {
             CellSet::Mask(mask) => mask.count_range(rows),
             CellSet::Rows(set) => set.range_cardinality(rows),
+        }
+    }
+
+    /// [`Self::count`] over each of `ranges`, in one walk of each bitmap.
+    pub fn count_ranges(&self, ranges: &[Range<u32>]) -> Vec<u64> {
+        match self {
+            CellSet::Mask(mask) => mask.count_ranges(ranges),
+            CellSet::Rows(set) => mosaica_roaring::count_ranges(set, ranges),
         }
     }
 
@@ -72,34 +80,46 @@ pub struct RangeCounts {
 }
 
 /// Count every depth-`depth` cell in `cells` over the segment-local row ranges `parts`, each given
-/// with its segment and the segment's first row in view row space, by `count` over view rows.
-/// Moves from one occupied cell to the next by binary search, so an empty cell costs nothing.
+/// with its segment and the segment's first row in view row space. `count` takes one segment's
+/// occupied cells as view row ranges, ascending and adjacent, and returns each one's count, so a
+/// batched count walks the set once per segment. Moves from one occupied cell to the next by
+/// binary search, so an empty cell costs nothing.
 pub fn count_by_ranges<'a>(
     parts: impl IntoIterator<Item = (&'a SegmentData, u32, Range<u32>)>,
     depth: u8,
     cells: Range<u64>,
-    count: &dyn Fn(Range<u32>) -> u64,
+    count: &dyn Fn(&[Range<u32>]) -> Vec<u64>,
 ) -> RangeCounts {
     assert!(depth <= 16, "a cell deeper than 16 is not a row range");
     let shift = 32 - 2 * u32::from(depth);
     let mut found: Vec<(u64, u64)> = Vec::new();
     let mut visited = 0u64;
     let mut several = false;
+    let mut occupied: Vec<u64> = Vec::new();
+    let mut rows: Vec<Range<u32>> = Vec::new();
     for (k, (segment, row_base, within)) in parts.into_iter().enumerate() {
         several |= k > 0;
         let codes = segment.morton.u32();
         let start = first_code_at_or_past(segment, cells.start << shift, within.clone());
         let end = first_code_at_or_past(segment, cells.end << shift, start..within.end) as usize;
+        occupied.clear();
+        rows.clear();
         let mut i = start as usize;
         while i < end {
             let cell = u64::from(codes[i]) >> shift;
             let j = i + codes[i..end].partition_point(|&c| u64::from(c) >> shift <= cell);
-            visited += 1;
-            let n = count(row_base + i as u32..row_base + j as u32);
-            if n > 0 {
-                found.push((cell, n));
-            }
+            occupied.push(cell);
+            rows.push(row_base + i as u32..row_base + j as u32);
             i = j;
+        }
+        visited += rows.len() as u64;
+        if rows.is_empty() {
+            continue;
+        }
+        for (cell, n) in occupied.iter().zip(count(&rows)) {
+            if n > 0 {
+                found.push((*cell, n));
+            }
         }
     }
     if several {
@@ -619,7 +639,7 @@ pub(crate) fn count_chunk_by_ranges(
             .map(|&(segment, row_base)| (segment, row_base, 0..segment.row_count)),
         depth,
         prefixes,
-        &|rows| set.count(rows),
+        &|rows| set.count_ranges(rows),
     )
 }
 

@@ -884,11 +884,14 @@ fn run_depth(args: &Args, case: &Case<'_>, depth: u8, cells: &mut Vec<Cell>) {
     };
 
     // A part with no visible row adds no row to a tile's selection, so leaving it out serves the
-    // same rows. Checked on every tile, outside the timers.
+    // same rows. Selection does not order what it returns, and the response sorts a tile's points
+    // by identifier, so the rows are compared as sets. Checked on every tile, outside the timers.
     if wants("select_parts") {
         for t in 0..tiles {
-            let all = select(t, &tile_parts(t, false));
-            let held = select(t, &tile_parts(t, true));
+            let mut all = select(t, &tile_parts(t, false));
+            let mut held = select(t, &tile_parts(t, true));
+            all.sort_unstable();
+            held.sort_unstable();
             assert_eq!(
                 all, held,
                 "skipping empty parts changed tile {t}'s selection"
@@ -912,8 +915,8 @@ fn run_depth(args: &Args, case: &Case<'_>, depth: u8, cells: &mut Vec<Cell>) {
     if wants("select_tiles") {
         let us = measure(args.warmup, args.samples, || {
             let mut served = 0usize;
-            for t in 0..tiles {
-                if visible[t].iter().any(|v| *v > 0) {
+            for (t, vis) in visible.iter().enumerate() {
+                if vis.iter().any(|v| *v > 0) {
                     served += select(t, &tile_parts(t, false)).len();
                 }
             }
@@ -926,8 +929,8 @@ fn run_depth(args: &Args, case: &Case<'_>, depth: u8, cells: &mut Vec<Cell>) {
     if wants("select_parts") {
         let us = measure(args.warmup, args.samples, || {
             let mut served = 0usize;
-            for t in 0..tiles {
-                if visible[t].iter().any(|v| *v > 0) {
+            for (t, vis) in visible.iter().enumerate() {
+                if vis.iter().any(|v| *v > 0) {
                     served += select(t, &tile_parts(t, true)).len();
                 }
             }

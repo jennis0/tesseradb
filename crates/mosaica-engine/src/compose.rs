@@ -304,6 +304,21 @@ impl EffectiveMask {
         base_count - minus_count + plus_count
     }
 
+    /// [`Self::count_range`] over each of `ranges`, each bitmap walked once
+    /// ([`mosaica_roaring::count_ranges`]).
+    pub fn count_ranges(&self, ranges: &[Range<u32>]) -> Vec<u64> {
+        let mut counts = mosaica_roaring::count_ranges(self.base.bitmap(), ranges);
+        if !self.minus.is_empty() {
+            let minus = mosaica_roaring::count_ranges(&self.minus, ranges);
+            counts.iter_mut().zip(minus).for_each(|(c, m)| *c -= m);
+        }
+        if !self.plus.is_empty() {
+            let plus = mosaica_roaring::count_ranges(&self.plus, ranges);
+            counts.iter_mut().zip(plus).for_each(|(c, p)| *c += p);
+        }
+        counts
+    }
+
     /// The total number of visible rows in this mask, over the whole row space — the quantity
     /// θ's anchor is derived from ([`crate::select::Threshold::at_depth`]; [`crate::occupancy`]
     /// takes the same rule for `N_occ(d)`). The composed figure, not the projection's: `base` is
@@ -720,14 +735,14 @@ mod walk_tests {
 
     use super::*;
 
-    use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
-    use rustc_hash::FxHashSet;
-    use mosaica_types::TermId;
     use mosaica_lifecycle::wal::WalRow;
     use mosaica_lifecycle::ChangeOp;
     use mosaica_store::write::write_permutation;
     use mosaica_store::Permutation;
+    use mosaica_types::TermId;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+    use rustc_hash::FxHashSet;
 
     const BOUND: u64 = 2_000;
 
