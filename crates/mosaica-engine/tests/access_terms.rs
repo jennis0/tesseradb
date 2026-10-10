@@ -35,7 +35,7 @@ use mosaica_engine::{
     Session, SinkResult,
 };
 use mosaica_lifecycle::{ChangeOp, IngestRow};
-use mosaica_types::TesseraId;
+use mosaica_types::MosaicaId;
 use mosaica_build::config::{AccessInput, AccessSource};
 use mosaica_build::{build, BuildArgs};
 
@@ -557,7 +557,7 @@ fn a_quoted_term_with_spaces_at_its_ends_is_refused_as_a_points_label() {
             body_hash,
             view: Some("s0".to_string()),
             rows: vec![IngestRow {
-                tessera_id: None,
+                mosaica_id: None,
                 labels: Some(vec![label.as_bytes().to_vec()]),
                 position: Some((30.0, 30.0)),
                 scalars: Vec::new(),
@@ -566,7 +566,7 @@ fn a_quoted_term_with_spaces_at_its_ends_is_refused_as_a_points_label() {
             }],
             artifacts: Default::default(),
             strict: false,
-            tessera_id_column: false,
+            mosaica_id_column: false,
         });
         assert_eq!(outcome.is_ok(), batch == "inner", "{label}");
     }
@@ -587,8 +587,8 @@ impl RecordsSink for Pages {
     }
 }
 
-/// Every row a bulk read of `s0` serves `session`: its `tessera_id` and its `labels` column.
-fn rows(engine: &Engine, session: &Session) -> Vec<(TesseraId, Vec<String>)> {
+/// Every row a bulk read of `s0` serves `session`: its `mosaica_id` and its `labels` column.
+fn rows(engine: &Engine, session: &Session) -> Vec<(MosaicaId, Vec<String>)> {
     let system = ["labels".to_string()];
     let mut pages = Pages::default();
     engine
@@ -627,14 +627,14 @@ fn rows(engine: &Engine, session: &Session) -> Vec<(TesseraId, Vec<String>)> {
             let row = labels.value(row);
             let row = row.as_any().downcast_ref::<StringArray>().unwrap();
             let labels = row.iter().map(|l| l.unwrap().to_string()).collect();
-            rows.push((TesseraId::new(id), labels));
+            rows.push((MosaicaId::new(id), labels));
         }
     }
     rows
 }
 
 /// The `labels` column a bulk read of `s0` serves `session` for the item `id`.
-fn labels_column(engine: &Engine, session: &Session, id: TesseraId) -> Vec<String> {
+fn labels_column(engine: &Engine, session: &Session, id: MosaicaId) -> Vec<String> {
     rows(engine, session)
         .into_iter()
         .find_map(|(served, labels)| (served == id).then_some(labels))
@@ -642,13 +642,13 @@ fn labels_column(engine: &Engine, session: &Session, id: TesseraId) -> Vec<Strin
 }
 
 /// One batch of rows creating items at `positions`, each with its labels.
-fn create(engine: &Engine, batch: &str, rows: &[(&[&str], (f64, f64))]) -> Vec<TesseraId> {
+fn create(engine: &Engine, batch: &str, rows: &[(&[&str], (f64, f64))]) -> Vec<MosaicaId> {
     let mut body_hash = [0u8; 32];
     body_hash[..batch.len()].copy_from_slice(batch.as_bytes());
     let rows = rows
         .iter()
         .map(|(labels, at)| IngestRow {
-            tessera_id: None,
+            mosaica_id: None,
             labels: Some(labels.iter().map(|l| l.as_bytes().to_vec()).collect()),
             position: Some(*at),
             scalars: Vec::new(),
@@ -664,12 +664,12 @@ fn create(engine: &Engine, batch: &str, rows: &[(&[&str], (f64, f64))]) -> Vec<T
             rows,
             artifacts: Default::default(),
             strict: false,
-            tessera_id_column: false,
+            mosaica_id_column: false,
         })
         .unwrap_or_else(|e| panic!("{batch} is accepted: {e}"))
-        .tessera_ids
+        .mosaica_ids
         .into_iter()
-        .map(|id| id.expect("an accepted row has a tessera_id"))
+        .map(|id| id.expect("an accepted row has a mosaica_id"))
         .collect()
 }
 
@@ -701,7 +701,7 @@ fn an_ingested_conjunction_is_served_as_a_built_one_and_survives_a_restart() {
         body_hash: [1u8; 32],
         view: Some("s0".to_string()),
         rows: vec![IngestRow {
-            tessera_id: None,
+            mosaica_id: None,
             labels: Some(vec![b"ir:new|".to_vec()]),
             position: Some((30.0, 30.0)),
             scalars: Vec::new(),
@@ -710,7 +710,7 @@ fn an_ingested_conjunction_is_served_as_a_built_one_and_survives_a_restart() {
         }],
         artifacts: Default::default(),
         strict: false,
-        tessera_id_column: false,
+        mosaica_id_column: false,
     });
     assert!(refused.is_err(), "a label that does not parse refuses the batch");
 
@@ -903,12 +903,12 @@ fn deletions_and_suppressions_hide_items_from_a_read_all_session() {
     assert_eq!(served.len(), N as usize);
     let (deleted, suppressed) = (served[0].0, served[1].0);
     for (id, op) in [(deleted, ChangeOp::Delete), (suppressed, ChangeOp::Suppress)] {
-        let entity = engine.resolve_tessera_ids(&[id]).unwrap()[0].expect("a built item");
+        let entity = engine.resolve_mosaica_ids(&[id]).unwrap()[0].expect("a built item");
         engine.accept_change(entity, op).unwrap();
     }
 
     for session in [&all, &engine.authorise_all().unwrap()] {
-        let left: Vec<TesseraId> = rows(&engine, session).into_iter().map(|(id, _)| id).collect();
+        let left: Vec<MosaicaId> = rows(&engine, session).into_iter().map(|(id, _)| id).collect();
         assert_eq!(left.len(), N as usize - 2);
         assert!(!left.contains(&deleted) && !left.contains(&suppressed));
         assert!(engine.item(session, deleted).unwrap().is_none());

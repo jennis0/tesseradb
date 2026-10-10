@@ -34,7 +34,7 @@ use sha2::{Digest, Sha256};
 
 use mosaica_spatial::fixed32;
 use mosaica_spatial::tiler::{sort_batch, ScalarType, ScalarValue, TilerItem};
-use mosaica_types::{EntityId, IdentityKey, TesseraId};
+use mosaica_types::{EntityId, IdentityKey, MosaicaId};
 
 use crate::error::{Result, StoreError};
 use crate::manifest::{FileDigest, Quantisation, SegmentDescriptor};
@@ -56,7 +56,7 @@ use crate::write::write_segment;
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlushRow {
     pub entity_id: EntityId,
-    /// The item's number, which its `tessera_id` is taken from: `entity_id` for an item never
+    /// The item's number, which its `mosaica_id` is taken from: `entity_id` for an item never
     /// edited, and the entity it was first given for one an edit moved ([`crate::edited`]).
     pub number: EntityId,
     pub x: f64,
@@ -165,7 +165,7 @@ pub fn write_flush_segment(
     let mut items: Vec<TilerItem> = Vec::with_capacity(input.rows.len());
     for row in &input.rows {
         items.push(TilerItem {
-            tessera_id: tessera_id_of(input.identity_key, input.shard_id, row.number)?,
+            mosaica_id: mosaica_id_of(input.identity_key, input.shard_id, row.number)?,
             qx: fixed32(row.x, q.x_min, q.x_max),
             qy: fixed32(row.y, q.y_min, q.y_max),
             scalars: row.scalars.clone(),
@@ -237,7 +237,7 @@ pub fn write_flush_segment(
         ),
     })?;
 
-    // The rows whose entity is not their number, which their `tessera_id` cannot name.
+    // The rows whose entity is not their number, which their `mosaica_id` cannot name.
     let edited: Vec<(u32, u32)> = entity_ids
         .iter()
         .enumerate()
@@ -283,11 +283,11 @@ pub fn write_flush_segment(
     })
 }
 
-fn tessera_id_of(key: &IdentityKey, shard_id: u32, entity: EntityId) -> Result<TesseraId> {
+fn mosaica_id_of(key: &IdentityKey, shard_id: u32, entity: EntityId) -> Result<MosaicaId> {
     key.forward(shard_id, entity)
         .map_err(|e| StoreError::MalformedBundle {
             detail: format!(
-                "write_flush_segment: tessera_id for entity {}: {e}",
+                "write_flush_segment: mosaica_id for entity {}: {e}",
                 entity.raw()
             ),
         })

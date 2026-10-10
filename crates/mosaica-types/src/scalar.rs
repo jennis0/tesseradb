@@ -1,6 +1,6 @@
 //! A declared scalar column's type, and the value one of its rows carries.
 
-/// A declared-scalar value carried alongside the fixed columns (`tessera_id`, `residual`).
+/// A declared-scalar value carried alongside the fixed columns (`mosaica_id`, `residual`).
 /// The kinds below are the whole set.
 ///
 /// Also the value a write-ahead log row carries. Postcard encodes a variant by its index, so

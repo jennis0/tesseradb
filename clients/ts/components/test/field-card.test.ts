@@ -366,7 +366,7 @@ describe('<mosaica-field-card> on a date', () => {
 });
 
 describe('<mosaica-field-card> on a layer', () => {
-  const row = (id: bigint, name: string, parentIds: bigint[] = []) => ({tesseraId: id, key: null, name, maskedCount: 10n, matchedCount: null, rung: 1, parentIds, childCount: 0, slot: null});
+  const row = (id: bigint, name: string, parentIds: bigint[] = []) => ({mosaicaId: id, key: null, name, maskedCount: 10n, matchedCount: null, rung: 1, parentIds, childCount: 0, slot: null});
 
   it('ranks the clusters the map draws by their counts in view, leaving out its own clauses, and names each as its table does, with its path from browse pages', async () => {
     const host = await mount('<mosaica-field-card field="cluster:topics"></mosaica-field-card>');
@@ -484,8 +484,8 @@ describe('<mosaica-field-card> on a layer', () => {
     expect(ids('other')).toEqual([7n]);
     expect(swatch().getAttribute('style')).toContain('rgb(225, 87, 89)');
     expect(chosen).toEqual([
-      {layer: 'topics', changes: [{tesseraId: '7', colour: '#0a0b0c'}]},
-      {layer: 'topics', changes: [{tesseraId: '7', colour: null}]}
+      {layer: 'topics', changes: [{mosaicaId: '7', colour: '#0a0b0c'}]},
+      {layer: 'topics', changes: [{mosaicaId: '7', colour: null}]}
     ]);
   });
 
@@ -503,7 +503,7 @@ describe('<mosaica-field-card> on a layer', () => {
 
 describe('<mosaica-field-card> across a change of viewer', () => {
   it('drops a browse page still loading for the viewer before, so nothing it met names a cluster to the next', async () => {
-    const row = (id: bigint, name: string, parentIds: bigint[] = []) => ({tesseraId: id, key: null, name, maskedCount: 10n, matchedCount: null, rung: 0, parentIds, childCount: 0, slot: null});
+    const row = (id: bigint, name: string, parentIds: bigint[] = []) => ({mosaicaId: id, key: null, name, maskedCount: 10n, matchedCount: null, rung: 0, parentIds, childCount: 0, slot: null});
     const host = await mount('<mosaica-field-card field="cluster:topics"></mosaica-field-card>');
     const card = host.querySelector('mosaica-field-card') as MosaicaFieldCard;
     const before = fakeStore({meta: META, status: status({}), filters: filtersOf({filter: {}, highlight: {}})});

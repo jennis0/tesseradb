@@ -91,7 +91,7 @@ async fn ingest(server: &TestServer, batch_id: &str, tag: &str, i: usize) {
     assert_eq!(resp.status(), 200, "{batch_id} lands");
 }
 
-/// The `tessera_id`s a filtered full viewport serves.
+/// The `mosaica_id`s a filtered full viewport serves.
 async fn matched(server: &TestServer, token: &str, filter: Value) -> BTreeSet<u64> {
     let resp = settled(async || {
         server

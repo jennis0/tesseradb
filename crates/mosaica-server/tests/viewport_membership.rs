@@ -1,7 +1,7 @@
 //! **The per-point membership column over HTTP** (D12, `client-components.md` §5.10): a request
 //! naming a layer gets one nullable `membership:<layer>` column in its points frames; `layers: []`
 //! gets none; a response that serves no artifact carries none. And the join, at the wire: every
-//! value the column carries is a `tessera_id` in the same body's artifacts frame.
+//! value the column carries is a `mosaica_id` in the same body's artifacts frame.
 //!
 //! **And the `layers` field's two spellings** (D9; owner ruling 2026-08-25): omitted or `[]` is
 //! no layers, `"all"` is every reachable one, anything else a `422` — and `all` cannot be a
@@ -160,7 +160,7 @@ async fn a_request_naming_a_layer_gets_its_column_and_the_column_joins_the_artif
     let body = viewport(&server, token, json!([TREE])).await;
     let decoded = decode_viewport_frames(&body);
     let rows = artifacts(&server, token, json!([TREE])).await.unwrap_or_default();
-    let served: BTreeSet<u64> = rows.iter().map(|a| a.tessera_id).collect();
+    let served: BTreeSet<u64> = rows.iter().map(|a| a.mosaica_id).collect();
     let keys: BTreeSet<&str> = rows.iter().filter_map(|a| a.key.as_deref()).collect();
     assert_eq!(keys, BTreeSet::from(["a1", "a2", "b"]));
 

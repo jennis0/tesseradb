@@ -6,7 +6,7 @@
 //! a layer with no lineage the cut serves every artifact that passes, so an artifact holding a
 //! served point is served exactly when it passes its verdict and its content can be read. A point
 //! is therefore tagged with the finest selected level at which a label of its row passes, and the
-//! lowest `tessera_id` where several labels at that level pass.
+//! lowest `mosaica_id` where several labels at that level pass.
 //!
 //! A row's labels are read from the band-order copy where the point came from a band entry of the
 //! segment the copy follows, from the level's row column where it is served from one, and from
@@ -284,7 +284,7 @@ impl Engine {
             };
             let mut contents: Option<Arc<crate::artifact_content::LevelContent>> = None;
             let mut verdicts = Verdicts::over(rows.len());
-            let mut tessera_id = |ordinal: u32| -> Option<u64> {
+            let mut mosaica_id = |ordinal: u32| -> Option<u64> {
                 verdicts.get_or(ordinal, || {
                     let entity = runs.entity_of(ordinal as u64).map(EntityId::new)?;
                     let rank = view.serves_visible_member(entity, ordinal).ok()?;
@@ -325,7 +325,7 @@ impl Engine {
                 })
             };
             let mut lowest = |labels: &[u32]| -> Option<u64> {
-                labels.iter().filter_map(|&ordinal| tessera_id(ordinal)).min()
+                labels.iter().filter_map(|&ordinal| mosaica_id(ordinal)).min()
             };
 
             let mut still_open = Vec::new();

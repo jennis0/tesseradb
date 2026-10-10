@@ -2,7 +2,7 @@ import type {AggregateEntry, AggregateSpec, AggregateSpecGrouping, AggregateTabl
 
 /**
  * One listed group of an aggregate table: its key (a vocabulary key for a field, an artifact's
- * `tessera_id` in decimal for a layer), its title (a field value's, else `null`), its count, and
+ * `mosaica_id` in decimal for a layer), its title (a field value's, else `null`), its count, and
  * on a layer asked with a palette size its slot (else `null`).
  */
 export type GroupCount = {key: string; title: string | null; count: number; slot: number | null};
@@ -83,7 +83,7 @@ export function rankedGrouping(layer: Pick<Layer, 'name' | 'hierarchy' | 'levels
  */
 export function artifactGroupings(
   layer: Pick<Layer, 'name' | 'levels'>,
-  artifacts: readonly {tesseraId: bigint; rung: number}[],
+  artifacts: readonly {mosaicaId: bigint; rung: number}[],
   limits: Meta['selection'],
   paletteSize?: number | 'drawn'
 ): AggregateSpec['groupings'] {
@@ -92,7 +92,7 @@ export function artifactGroupings(
     const at = countedByLevel(layer) ? a.rung : -1;
     if (!byLevel.has(at) && byLevel.size >= limits.maxAggregateGroupings) continue;
     const ids = byLevel.get(at) ?? [];
-    if (ids.length < limits.maxAggregateNamed && !ids.includes(a.tesseraId)) ids.push(a.tesseraId);
+    if (ids.length < limits.maxAggregateNamed && !ids.includes(a.mosaicaId)) ids.push(a.mosaicaId);
     byLevel.set(at, ids);
   }
   return [...byLevel]

@@ -21,7 +21,7 @@ pub(crate) enum Fixed<'a> {
     Coordinate(&'a str),
     Access,
     NodeId,
-    TesseraId,
+    MosaicaId,
 }
 
 impl Fixed<'_> {
@@ -30,7 +30,7 @@ impl Fixed<'_> {
             Fixed::Coordinate(name) => name,
             Fixed::Access => "access",
             Fixed::NodeId => "node_id",
-            Fixed::TesseraId => "tessera_id",
+            Fixed::MosaicaId => "mosaica_id",
         }
     }
 }

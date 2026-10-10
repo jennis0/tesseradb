@@ -51,7 +51,7 @@ describe('<mosaica-explorer> parts', () => {
     const host = await mount('<mosaica-explorer></mosaica-explorer>');
     const el = host.querySelector('mosaica-explorer') as HTMLElement & {store: unknown};
     const store = fakeStore({meta: {...META, layers: [mesh]}, status: status({})});
-    store.setBrowse('roots', {artifacts: [{tesseraId: 1n, key: 'k-1', name: 'Neoplasms', maskedCount: 9n, matchedCount: null, rung: 0, parentIds: [], childCount: 0, slot: null}], parents: [], next: 'more'});
+    store.setBrowse('roots', {artifacts: [{mosaicaId: 1n, key: 'k-1', name: 'Neoplasms', maskedCount: 9n, matchedCount: null, rung: 0, parentIds: [], childCount: 0, slot: null}], parents: [], next: 'more'});
     el.store = store;
     await settle(host);
     const shadow = el.shadowRoot!;
@@ -842,8 +842,8 @@ describe('<mosaica-explorer> Edit colours', () => {
       {
         layer: 'topics',
         changes: [
-          {tesseraId: '7', colour: null},
-          {tesseraId: '8', colour: null}
+          {mosaicaId: '7', colour: null},
+          {mosaicaId: '8', colour: null}
         ]
       }
     ]);

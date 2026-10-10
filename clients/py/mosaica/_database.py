@@ -646,7 +646,7 @@ class Database:
         - the other keywords: which column of the table holds each thing the target needs, such as
           `x=`, `y=` and `access=` for a view.
 
-        A table names the item each row belongs to by its `tessera_id` column and the columns it
+        A table names the item each row belongs to by its `mosaica_id` column and the columns it
         carries of the attributes declared `unique`: the column of the attribute's name, or the
         one `columns=` names. A view's row naming no item is an item of its own. A row of any
         other table must name one, and a row naming none, or two, is left out at the commit and
@@ -885,7 +885,7 @@ class Database:
     def _item_columns(
         self, target: str, kind: str, role: str, data: Any, columns: dict | None, named: dict
     ) -> dict:
-        """The columns a table names its items by, as `{name: column}`: its `tessera_id` column,
+        """The columns a table names its items by, as `{name: column}`: its `mosaica_id` column,
         and the unique attributes it carries.
 
         A table carries a unique attribute in the column `columns=` names for it, else in the
@@ -922,7 +922,7 @@ class Database:
                     f"columns= has nothing to say; drop it"
                 )
             return {}
-        items = {"tessera_id": "tessera_id"} if "tessera_id" in schema else {}
+        items = {"mosaica_id": "mosaica_id"} if "mosaica_id" in schema else {}
         for name in unique:
             column = (columns or {}).get(name) or self._unique_column(name)
             if column in schema and column != named.get("view"):
@@ -1513,17 +1513,17 @@ class Database:
         self._refuse_before_the_first_commit("meta")
         return self.viewer().meta()
 
-    def item(self, tessera_id) -> dict:
+    def item(self, mosaica_id) -> dict:
         """One item's full record.
 
-        - `tessera_id`: the item's id, as a sample's `tessera_id` column or a map pick gives it.
+        - `mosaica_id`: the item's id, as a sample's `mosaica_id` column or a map pick gives it.
 
         The record has `fields`, `labels` and `views` as `Viewer.item` describes.
 
-            db.item(db.view("papers").sample(k=1).column("tessera_id")[0].as_py())
+            db.item(db.view("papers").sample(k=1).column("mosaica_id")[0].as_py())
         """
         self._refuse_before_the_first_commit("item")
-        return self.viewer().item(tessera_id)
+        return self.viewer().item(mosaica_id)
 
     def items(self, view: str, fields: Sequence[str], **options):
         """Every item in `view`, with the fields named, as one pyarrow table.
@@ -1627,7 +1627,7 @@ class Database:
         if not unique:
             return (
                 "no attribute is declared unique, so each row of the points is an item of its "
-                "own, named by its tessera_id"
+                "own, named by its mosaica_id"
             )
         return (
             f"a row names its item by its values of {', '.join(repr(one) for one in unique)}, "
@@ -1648,16 +1648,16 @@ class Database:
     def remove(self, items: Any, strict: bool = False) -> ChangeReport:
         """Delete items, and return a report.
 
-        - `items`: the items, as a list of their `tessera_id`s, or as a table (a pandas or polars
+        - `items`: the items, as a list of their `mosaica_id`s, or as a table (a pandas or polars
           data frame, a pyarrow table, or a dict of columns) whose rows each name one item by the
-          values they carry in its `tessera_id` column and its unique attributes' columns. A
+          values they carry in its `mosaica_id` column and its unique attributes' columns. A
           unique attribute is read from the column an insert reads it from: the `field` its block
           declares, or its name.
         - `strict`: `True` refuses the whole request at a row that names no item, or names two.
 
         A row naming no item, or two, is refused and the report lists it; the other rows are
         applied. A `None` in the list, or a row whose cells are all null, names no item. A column
-        that is neither `tessera_id` nor a unique attribute is not sent, and the report names it
+        that is neither `mosaica_id` nor a unique attribute is not sent, and the report names it
         in `ignored_columns`; a table with no other column is refused before anything is sent.
         The items stop being served at once. Their rows are removed from disk at the next
         compaction; `compact()` asks for one.
@@ -1665,7 +1665,7 @@ class Database:
         A call whose every request the server refused raises `Refusal`, with the report as its
         `report`: a strict call naming a row it refuses is one.
 
-            db.remove([tessera_id])
+            db.remove([mosaica_id])
             db.remove({"paper": ["paper-17", "paper-23"]})
         """
         return self._changes(items, "delete", strict)
@@ -1689,9 +1689,9 @@ class Database:
     def addresses(self, items: Any) -> list[dict]:
         """The items given, as the rows that name them in the server's change requests.
 
-        A list is read as `tessera_id`s, and each becomes `{"tessera_id": ...}`, a `None` staying
+        A list is read as `mosaica_id`s, and each becomes `{"mosaica_id": ...}`, a `None` staying
         `None`. A table (a pandas or polars data frame, a pyarrow table, or a dict of columns)
-        gives one row per table row, `{name: value}` for its `tessera_id` column and each unique
+        gives one row per table row, `{name: value}` for its `mosaica_id` column and each unique
         attribute's column under the attribute's name, a null cell staying `None`. Its other
         columns are left out. Every value travels as text: an integer in decimal digits, a
         timestamp as the decimal digits of its microseconds since the epoch, and a string as
@@ -1705,16 +1705,16 @@ class Database:
         if isinstance(items, (str, bytes)):
             raise Refusal(
                 f"{verb}: items is the text {items!r}, which would be read one character per "
-                f"item. Pass a list of tessera_ids, such as [{items!r}], or a table of columns"
+                f"item. Pass a list of mosaica_ids, such as [{items!r}], or a table of columns"
             )
         if not (isinstance(items, dict) or hasattr(items, "columns")):
             items = list(items)
             if any(isinstance(one, dict) for one in items):
                 raise Refusal(
                     f"{verb}: items is a list of dicts. Pass a table instead: a dict of columns, "
-                    f"such as {{'tessera_id': [...], 'paper': [...]}}, or a data frame"
+                    f"such as {{'mosaica_id': [...], 'paper': [...]}}, or a data frame"
                 )
-            return {"tessera_id": [None if one is None else C.text(one) for one in items]}, []
+            return {"mosaica_id": [None if one is None else C.text(one) for one in items]}, []
         table = _address_table(items, verb)
         naming = self._identifying_columns()
         sent = {
@@ -1728,16 +1728,16 @@ class Database:
         if table.num_rows and not sent:
             raise Refusal(
                 f"{verb}: the table's columns {', '.join(ignored)} name no item, since none is "
-                f"tessera_id or a unique attribute's column ({', '.join(naming)}). Pass the "
-                f"items' tessera_ids or their unique values in one of those columns"
+                f"mosaica_id or a unique attribute's column ({', '.join(naming)}). Pass the "
+                f"items' mosaica_ids or their unique values in one of those columns"
             )
         return sent, ignored
 
     def _identifying_columns(self) -> dict[str, str]:
         """The column a table names items by, mapped to the name the server reads it under:
-        `tessera_id`, and each unique attribute's column as an insert reads it."""
+        `mosaica_id`, and each unique attribute's column as an insert reads it."""
         named = {self._unique_column(one): one for one in self.blocks.unique_names()}
-        return {"tessera_id": "tessera_id", **named}
+        return {"mosaica_id": "mosaica_id", **named}
 
     def _changes(self, items: Any, op: str, strict: bool) -> ChangeReport:
         self._refuse_before_the_first_commit(op)
@@ -1768,8 +1768,8 @@ class Database:
 
         - `layer`: the label set.
         - `key`: the label's key.
-        - `items`: the items to take out, as for `remove`: a list of `tessera_id`s, or a table
-          whose columns are `tessera_id` and unique attributes.
+        - `items`: the items to take out, as for `remove`: a list of `mosaica_id`s, or a table
+          whose columns are `mosaica_id` and unique attributes.
         - `rank`: which of the label's texts, where it has several. The default is 0, the first.
         - `level`: the level the label is at. The default is 0.
         - `view`: the view the label belongs to, on a layer scoped to a group.

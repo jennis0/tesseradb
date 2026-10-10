@@ -154,7 +154,7 @@ describe('bulk reads against a live server', () => {
     expect(read.identityKey).toBe(identityKey);
     expect(identityKey).not.toBe('');
     for (const t of tables) expect(t.numRows).toBeLessThanOrEqual(400);
-    const ids = column(tables, 'tessera_id') as bigint[];
+    const ids = column(tables, 'mosaica_id') as bigint[];
     expect(ids.length).toBe(visible);
     expect(new Set(ids).size).toBe(ids.length);
 
@@ -197,7 +197,7 @@ describe('bulk reads against a live server', () => {
   it('throws a refused follow-up’s MosaicaError, and resumes from its cursor', async (ctx) => {
     live(ctx);
     const request: ItemsRequest = {view: 's0', fields: [], pageRows: 500, pages: 1};
-    const whole = column((await items(request)).tables, 'tessera_id');
+    const whole = column((await items(request)).tables, 'mosaica_id');
     const read = await client.items(session.token, request);
     const first = await read.next();
     expect(first.done).toBe(false);
@@ -211,7 +211,7 @@ describe('bulk reads against a live server', () => {
     for (const holder of holders) await holder.return();
     await lanesFree();
     const rest = await items({...request, cursor: read.cursor!});
-    expect([...column([first.value as Table], 'tessera_id'), ...column(rest.tables, 'tessera_id')]).toEqual(whole);
+    expect([...column([first.value as Table], 'mosaica_id'), ...column(rest.tables, 'mosaica_id')]).toEqual(whole);
   });
 
   it('gives a read that finds nothing one page of no rows, with the columns and types of a page with rows', async (ctx) => {
@@ -229,7 +229,7 @@ describe('bulk reads against a live server', () => {
     // The children of an artifact that has none.
     const layer: ArtifactsRequest = {view: 's0', layer: 'taxonomy/arxiv', fields: ['key', 'level', 'masked_count', 'parents'], level: 1, pageRows: 5};
     const leaves = await firstPage(client.artifacts(session.token, layer));
-    const leaf = leaves.getChild('tessera_id')!.get(0) as bigint;
+    const leaf = leaves.getChild('mosaica_id')!.get(0) as bigint;
     const children = await artifacts({...layer, level: undefined, parent: leaf});
     expect(children.tables.map((t) => t.numRows)).toEqual([0]);
     expect(typesOf(children.tables[0]!)).toEqual(typesOf(leaves));
@@ -269,7 +269,7 @@ describe('bulk reads against a live server', () => {
     const ids = async (order: 'map' | 'stored') => {
       const {tables, read} = await items({view: 's0', fields: [], order, pageRows: 600, pages: 2});
       expect(read.head.order).toBe(order);
-      return (column(tables, 'tessera_id') as bigint[]).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+      return (column(tables, 'mosaica_id') as bigint[]).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     };
     expect(await ids('stored')).toEqual(await ids('map'));
   });
@@ -307,12 +307,12 @@ describe('bulk reads against a live server', () => {
     const queue = await page({});
     while (queue.length > 0) {
       const row = queue.pop()!;
-      if (browsed.has(row.tesseraId)) continue;
-      browsed.set(row.tesseraId, row);
-      queue.push(...(await page({parent: row.tesseraId})));
+      if (browsed.has(row.mosaicaId)) continue;
+      browsed.set(row.mosaicaId, row);
+      queue.push(...(await page({parent: row.mosaicaId})));
     }
 
-    const ids = column(tables, 'tessera_id') as bigint[];
+    const ids = column(tables, 'mosaica_id') as bigint[];
     expect(read.head.served).toBe(ids.length);
     expect(new Set(ids).size).toBe(ids.length);
     expect(new Set(ids)).toEqual(new Set(browsed.keys()));
@@ -367,7 +367,7 @@ describe('bulk reads against a live server', () => {
       const targets = column(tables, 'target') as bigint[];
       const texts = column(tables, 'content').map((list) => [...(list as Iterable<string>)][0]);
       for (const x of a.colourServed) {
-        const i = targets.indexOf(x.tesseraId);
+        const i = targets.indexOf(x.mosaicaId);
         expect(artifactName(x, a.attached)).toBe(i === -1 ? null : texts[i]);
       }
 
@@ -412,7 +412,7 @@ describe('bulk reads against a live server', () => {
   it('treats a connection cut before a trailer as an incomplete body, in the first response or a later one, and resumes from the last page end', async (ctx) => {
     live(ctx);
     const request: ItemsRequest = {view: 's0', fields: ['title'], pageRows: 200, pages: 5};
-    const whole = column((await items(request)).tables, 'tessera_id');
+    const whole = column((await items(request)).tables, 'mosaica_id');
     // After a response's second page end, and halfway through its third records frame.
     const cuts: Record<string, (body: Uint8Array) => number> = {
       'on a frame boundary': (body) => {
@@ -442,7 +442,7 @@ describe('bulk reads against a live server', () => {
           expect(read.trailer).toBeNull();
           expect(read.cursor, label).toBe(read.pageEnd!.next);
           const rest = await items({...request, cursor: read.cursor!});
-          expect([...column(got, 'tessera_id'), ...column(rest.tables, 'tessera_id')], label).toEqual(whole);
+          expect([...column(got, 'mosaica_id'), ...column(rest.tables, 'mosaica_id')], label).toEqual(whole);
         } finally {
           proxy.close();
         }
@@ -470,6 +470,6 @@ describe('bulk reads against a live server', () => {
     await lanesFree();
     const {visible} = await viewportCounts();
     const again = await items({view: 's0', fields: [], pageRows: 5000});
-    expect(column(again.tables, 'tessera_id').length).toBe(visible);
+    expect(column(again.tables, 'mosaica_id').length).toBe(visible);
   });
 });

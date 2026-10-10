@@ -55,7 +55,7 @@ function channel(client: MosaicaClient, over: Partial<ArtifactChannelOptions> = 
 }
 
 const asked = (fn: ReturnType<typeof fakeClient>['viewportArtifacts'], call = 0) => fn.mock.calls[call]![1];
-const served = (ch: ArtifactChannel) => ch.current.artifacts.map((a) => a.tesseraId).sort((a, b) => (a < b ? -1 : 1));
+const served = (ch: ArtifactChannel) => ch.current.artifacts.map((a) => a.mosaicaId).sort((a, b) => (a < b ? -1 : 1));
 
 describe('the artifact channel asks by tile', () => {
   it('debounces: a request goes out once the view settles, not per schedule', async () => {
@@ -126,7 +126,7 @@ describe('the artifact channel asks by tile', () => {
     ch.refresh(view, 200, 150);
     await settle();
     expect(ch.current.artifacts).toHaveLength(1);
-    expect(ch.current.artifacts[0]).toMatchObject({tesseraId: 1n, matched: true, parentIds: [9n]});
+    expect(ch.current.artifacts[0]).toMatchObject({mosaicaId: 1n, matched: true, parentIds: [9n]});
   });
 
   it('draws each tile as it lands, before the response resolves', async () => {
@@ -398,7 +398,7 @@ describe('a tag no held tile carries', () => {
     const {client, artifacts} = fakeClient(() => []);
     const page = {
       numRows: 1,
-      getChild: (name: string) => ({get: () => ({tessera_id: 77n, level: 2, parents: [5n], centroid_x: 25, centroid_y: 75})[name]})
+      getChild: (name: string) => ({get: () => ({mosaica_id: 77n, level: 2, parents: [5n], centroid_x: 25, centroid_y: 75})[name]})
     };
     artifacts.mockImplementation(async () => ({
       async *[Symbol.asyncIterator]() {
@@ -410,7 +410,7 @@ describe('a tag no held tile carries', () => {
     ch.refresh(view, 200, 150);
     await settle();
     // The point path named it, with nothing but its identity.
-    const [ordinal] = table.take([{tesseraId: 77n, layer: 'clusters/x', parentIds: []}]);
+    const [ordinal] = table.take([{mosaicaId: 77n, layer: 'clusters/x', parentIds: []}]);
     await ch.lookUp([ordinal!]);
     await ch.lookUp([ordinal!]);
     expect(artifacts).toHaveBeenCalledTimes(1);
@@ -428,7 +428,7 @@ describe('a tag no held tile carries', () => {
     ch.setLayer('clusters/x');
     ch.refresh(view, 200, 150);
     await settle();
-    const [ordinal] = table.take([{tesseraId: 77n, layer: 'clusters/x', parentIds: []}]);
+    const [ordinal] = table.take([{mosaicaId: 77n, layer: 'clusters/x', parentIds: []}]);
     await ch.lookUp([ordinal!]);
     // Within the wait nothing is asked, so a shed read is not repeated at once.
     await ch.lookUp([ordinal!]);

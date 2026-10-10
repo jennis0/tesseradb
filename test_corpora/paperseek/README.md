@@ -185,7 +185,7 @@ without moving the visible one — 36,695 of 1,000,000 for `network`, 0 for a to
 not carry.
 
 ⊘ **The item and artifact drill-downs return 404 and 422.** `drive.py` asks for handles 1…20, which
-are not `tessera_id`s, so nothing resolves — the same shape the memory-cap probe recorded, and it
+are not `mosaica_id`s, so nothing resolves — the same shape the memory-cap probe recorded, and it
 measures the route's cost rather than a drill-down. The 422 on the artifact route is rung 3's open
 attached-layer finding, not this rung's.
 

@@ -71,7 +71,7 @@ describe('<mosaica-colour-editor> on a tree layer', () => {
   it('finds a cluster outside the listed rows with the search box over the whole tree, and lists it first with its count', async () => {
     const {host, store} = await open('cluster:topics');
     answerAggregate(store, 'colours-ranked', aggregateEntry([{rows: CUT, groups: 3}], 's0', undefined, 'tableau10'));
-    store.setBrowse('q:holo', {artifacts: [{tesseraId: 42n, key: null, name: 'holography', maskedCount: 3n, matchedCount: null, rung: 4, parentIds: [], childCount: 0, slot: null}], parents: [], next: null});
+    store.setBrowse('q:holo', {artifacts: [{mosaicaId: 42n, key: null, name: 'holography', maskedCount: 3n, matchedCount: null, rung: 4, parentIds: [], childCount: 0, slot: null}], parents: [], next: null});
     await settle(host);
     const input = deep(host, 'mosaica-cluster-filter')!.shadowRoot!.querySelector('[part="entry"]') as HTMLInputElement;
     input.focus();
@@ -114,8 +114,8 @@ describe('<mosaica-colour-editor> on a tree layer', () => {
       {
         layer: 'topics',
         changes: [
-          {tesseraId: '7', colour: '#123456'},
-          {tesseraId: '9', colour: '#123456'}
+          {mosaicaId: '7', colour: '#123456'},
+          {mosaicaId: '9', colour: '#123456'}
         ]
       }
     ]);
@@ -142,8 +142,8 @@ describe('<mosaica-colour-editor> on a tree layer', () => {
     expect(seen).toHaveLength(1);
     expect(new Set((seen[0] as {changes: unknown[]}).changes)).toEqual(
       new Set([
-        {tesseraId: '7', colour: null},
-        {tesseraId: '12', colour: null}
+        {mosaicaId: '7', colour: null},
+        {mosaicaId: '12', colour: null}
       ])
     );
     expect([...store.get('artifacts').overrides.keys()]).toEqual(['bands']);
@@ -191,7 +191,7 @@ describe('<mosaica-colour-editor> on a tree layer', () => {
     await settle(host);
     (deepAll(host, '[part="choice"]')[1] as HTMLButtonElement).click();
     await settle(host);
-    expect(seen).toEqual([{layer: 'topics', changes: [{tesseraId: '7', colour: '#f28e2b'}]}]);
+    expect(seen).toEqual([{layer: 'topics', changes: [{mosaicaId: '7', colour: '#f28e2b'}]}]);
     // A field that is neither a category nor a layer: the dialog closes, once.
     editor.field = 'year';
     await settle(host);

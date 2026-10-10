@@ -29,7 +29,7 @@ def test_the_catalogue_bundle_identity_column_is_the_manifest_keys_permutation(
 ):
     """The one artefact the §7.2 oracle shares with the engine, checked rather than trusted.
 
-    `viewport.Selection` sorts by the segment's stored `tessera_id` column, and so does the engine.
+    `viewport.Selection` sorts by the segment's stored `mosaica_id` column, and so does the engine.
     That is a shared artefact on the exact quantity the I7 differential exists to referee: a build
     writing a wrong-but-self-consistent identity column — say one still correlated with
     term-signature order, the r21 disclosure the negative control's docstring invokes — would be
@@ -40,14 +40,14 @@ def test_the_catalogue_bundle_identity_column_is_the_manifest_keys_permutation(
     1. the stored column **is** `forward(key, shard_id, entity_id)` for a sample of rows, where the
        entity id comes from the permutation (key-independent) and the identity from the column;
     2. the rows are **stored in the order that key implies** — re-derived from `(x, y)` and the
-       permutation, never from the stored `morton`/`tessera_id` columns — so `derive_row_order` is
+       permutation, never from the stored `morton`/`mosaica_id` columns — so `derive_row_order` is
        the identity permutation.
     """
     catalogue_bundle.verify_identity_cross_check(cat.VIEW_ID)
 
     order = catalogue_bundle.derive_row_order(cat.VIEW_ID)
     assert np.array_equal(order, np.arange(len(order))), (
-        "the catalogue's rows are not stored in (morton, tessera_id) order re-derived from "
+        "the catalogue's rows are not stored in (morton, mosaica_id) order re-derived from "
         "geometry and the identity key — so the stored order is not the order §7.2 selects in"
     )
 
@@ -192,11 +192,11 @@ def test_fx_key_is_served_in_the_points_batch(catalogue_bundle: Bundle, catalogu
     planted = cat.fx_keys()
     source_of = {e: s for s, e in cat.entities_by_source(catalogue_bundle).items()}
     seg = catalogue_bundle.segment(cat.VIEW_ID)
-    entity_of = {int(seg.tessera_id[row]): int(seg.entity_id[row]) for row in range(seg.row_count)}
-    for ident, key in zip(points.column("tessera_id").to_pylist(), points.column("fx_key").to_pylist()):
+    entity_of = {int(seg.mosaica_id[row]): int(seg.entity_id[row]) for row in range(seg.row_count)}
+    for ident, key in zip(points.column("mosaica_id").to_pylist(), points.column("fx_key").to_pylist()):
         source = source_of[entity_of[ident]]
         assert key == planted[source], (
-            f"served fx_key {key} for tessera_id {ident} (entity {entity_of[ident]}, source "
+            f"served fx_key {key} for mosaica_id {ident} (entity {entity_of[ident]}, source "
             f"{source}) is not the planted key {planted[source]} — the join the whole catalogue "
             "depends on is wrong"
         )

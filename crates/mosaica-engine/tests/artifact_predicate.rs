@@ -538,7 +538,7 @@ fn an_absolute_criterion_fires_on_an_attribute_predicate() {
 
 /// The entity behind a served artifact, through the admin plane's own resolver — the address a
 /// suppression names, and the one drill-down inverts.
-fn served_entity(engine: &Engine, grant: &str, layer: &str, key: &str) -> mosaica_types::TesseraId {
+fn served_entity(engine: &Engine, grant: &str, layer: &str, key: &str) -> mosaica_types::MosaicaId {
     let session = engine.authorise(&grant_credential(grant)).unwrap();
     let names = [layer];
     let mut request = mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX);
@@ -550,7 +550,7 @@ fn served_entity(engine: &Engine, grant: &str, layer: &str, key: &str) -> mosaic
         .into_iter()
         .find(|artifact| artifact.key.as_deref() == Some(key))
         .unwrap_or_else(|| panic!("{key} is not served"))
-        .tessera_id
+        .mosaica_id
 }
 
 /// **Drill-down answers the same predicate the viewport does**, over a membership nothing stores.
@@ -623,7 +623,7 @@ fn a_label_attached_to_a_predicate_artifact_follows_its_target() {
 
     // Suppress the band; the label goes with it, without anything being said about the label.
     let id = served_entity(&fx.engine, grant, BANDS, &anchor);
-    let entity = fx.engine.resolve_tessera_ids(&[id]).unwrap()[0]
+    let entity = fx.engine.resolve_mosaica_ids(&[id]).unwrap()[0]
         .expect("a served artifact's identifier names an entity");
     fx.engine
         .accept_change(entity, mosaica_lifecycle::wal::ChangeOp::Suppress)
@@ -651,7 +651,7 @@ fn a_suppressed_values_key_never_mints_again() {
     let grant = "0";
     let anchor = anchor_value(&fx.corpus).to_string();
     let id = served_entity(&fx.engine, grant, BANDS, &anchor);
-    let entity = fx.engine.resolve_tessera_ids(&[id]).unwrap()[0].unwrap();
+    let entity = fx.engine.resolve_mosaica_ids(&[id]).unwrap()[0].unwrap();
     fx.engine
         .accept_change(entity, mosaica_lifecycle::wal::ChangeOp::Suppress)
         .expect("a suppression is accepted");
@@ -684,14 +684,14 @@ fn a_suppressed_values_key_never_mints_again() {
 /// case above. A **deletion** retires at the fold that executes it, and that fold takes the key out
 /// of the store's index with the artifact's own entity. A point carrying the value afterwards
 /// therefore creates a *new* artifact on a *new* entity, which is precisely what a deletion means:
-/// the old identity is gone and no `tessera_id` a caller holds names the new one.
+/// the old identity is gone and no `mosaica_id` a caller holds names the new one.
 #[test]
 fn a_deleted_values_key_returns_as_a_new_artifact() {
     let fx = own_fixture("\"none\"");
     let grant = "0";
     let anchor = anchor_value(&fx.corpus).to_string();
     let before_id = served_entity(&fx.engine, grant, BANDS, &anchor);
-    let entity = fx.engine.resolve_tessera_ids(&[before_id]).unwrap()[0].unwrap();
+    let entity = fx.engine.resolve_mosaica_ids(&[before_id]).unwrap()[0].unwrap();
 
     fx.engine
         .accept_change(entity, mosaica_lifecycle::wal::ChangeOp::Delete)

@@ -516,7 +516,7 @@ describe('the projections follow the view being entered', () => {
     expect(inFar.length).toBeGreaterThan(0);
     store.setCurrentView('v0');
     expect(store.get('artifacts').served).not.toBe(inFar);
-    expect(store.get('artifacts').served.map((a) => a.tesseraId)).toEqual(inV0.map((a) => a.tesseraId));
+    expect(store.get('artifacts').served.map((a) => a.mosaicaId)).toEqual(inV0.map((a) => a.mosaicaId));
   });
 
   it('holds a cold switch at loading through the first partial frame', async () => {

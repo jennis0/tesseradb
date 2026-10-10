@@ -4,7 +4,7 @@
 //! and **4 550 ms** for the primitive alone (`probes/2026-08-04-refresh-ladder/`). Neither says
 //! *which* stage the time is in, and the second is measured over a permutation `refresh_probe`
 //! builds as the **identity** map — entity `e` at row `e`. A build orders rows by
-//! `(morton, tessera_id)`, uncorrelated with entity-issue order, so a real slot array scatters.
+//! `(morton, mosaica_id)`, uncorrelated with entity-issue order, so a real slot array scatters.
 //! Under the identity map the gathered rows come out already sorted and `par_sort_unstable` — a
 //! run-detecting pdqsort — charges almost nothing, which makes that figure an *underestimate* of
 //! the stage this probe exists to size.
@@ -84,7 +84,7 @@ fn splitmix64(x: u64) -> u64 {
 ///
 /// A bijection on the larger domain, restricted by walking, is a bijection on `[0, n)` — which is
 /// what `permutation.bin` requires (`Permutation::validate_rows` rejects anything else). This
-/// stands in for the `(morton, tessera_id)` order a real build produces: what matters to every
+/// stands in for the `(morton, mosaica_id)` order a real build produces: what matters to every
 /// stage below is only that the map is uncorrelated with entity order, not which order it is.
 struct Shuffle {
     half_bits: u32,

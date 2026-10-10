@@ -3,9 +3,9 @@ import {NO_ORDINAL, type ArtifactsProjection, type Band} from '@mosaicajs/client
 /**
  * What {@link resolvePick} found under the pointer, by `kind`:
  *
- * - `mark`: an item's mark. `id` is the item's `tesseraId`. `worldXY` is the mark's position in
+ * - `mark`: an item's mark. `id` is the item's `mosaicaId`. `worldXY` is the mark's position in
  *   world units, or the pointer's where the sublayer holds no positions, or `null` with neither.
- * - `artifact`: an artifact's name label. `id` is the artifact's `tesseraId`.
+ * - `artifact`: an artifact's name label. `id` is the artifact's `mosaicaId`.
  * - `miss`: nothing under the pointer.
  * - `broken`: a hit on a sublayer with no id array, or at an `index` past its end. This is a defect
  *   in the layer, reported apart from a miss so the host can show it. `layer` is the sublayer's
@@ -37,7 +37,7 @@ export type PickInfo = {
 export function resolvePick(info: PickInfo): Picked {
   if (info.index < 0) return {kind: 'miss'};
   const layer = info.sourceLayer ?? info.layer;
-  const props = (layer?.props ?? {}) as {tesseraIds?: BigUint64Array; mosaicaPositions?: Float32Array; artifactIds?: bigint[]};
+  const props = (layer?.props ?? {}) as {mosaicaIds?: BigUint64Array; mosaicaPositions?: Float32Array; artifactIds?: bigint[]};
   // A label hit. `artifactIds` maps each text row to its artifact. Contours are not pickable;
   // `hoverAt` resolves them in JS.
   if (props.artifactIds) {
@@ -47,7 +47,7 @@ export function resolvePick(info: PickInfo): Picked {
     }
     return {kind: 'artifact', id};
   }
-  const ids = props.tesseraIds;
+  const ids = props.mosaicaIds;
   if (!ids || info.index >= ids.length) {
     return {kind: 'broken', index: info.index, layer: layer?.id ?? null, hasIds: ids !== undefined, idCount: ids?.length ?? 0};
   }
@@ -77,5 +77,5 @@ export function artifactOfMark(band: Band, i: number, artifacts: ArtifactsProjec
   const ordinal = column.ordinals[i] ?? NO_ORDINAL;
   const served = artifacts.table.resolve(ordinal, artifacts.servedOrdinals, level);
   if (served === NO_ORDINAL) return null;
-  return artifacts.table.entry(served)?.tesseraId ?? null;
+  return artifacts.table.entry(served)?.mosaicaId ?? null;
 }

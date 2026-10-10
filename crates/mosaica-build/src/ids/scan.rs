@@ -10,18 +10,18 @@ use arrow::record_batch::RecordBatch;
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_store::unique::{key_of_integer, UniqueKey};
 
-use super::{CarriedField, LimitRead, TESSERA_ID_COLUMN};
+use super::{CarriedField, LimitRead, MOSAICA_ID_COLUMN};
 use crate::config::ViewSelector;
 use crate::error::{BuildError, Result};
 use crate::row_groups::FileGroups;
 
-/// One file as the rule reads it: the unique fields it carries, whether it has a `tessera_id`
+/// One file as the rule reads it: the unique fields it carries, whether it has a `mosaica_id`
 /// column, the view whose rows are its rows where it holds several views', and the limit.
 pub(crate) struct FileRead<'a> {
     pub path: &'a Path,
     pub groups: &'a FileGroups,
     pub carried: &'a [CarriedField],
-    pub tessera: bool,
+    pub mosaica: bool,
     pub select: Option<&'a ViewSelector>,
     /// How `--limit` reads the file's rows.
     pub limit: Option<LimitRead<'a>>,
@@ -42,8 +42,8 @@ pub(crate) struct Scanned {
     /// Whether each row read is left out unless it names an item the build holds
     /// ([`LimitRead::Named`]). `None` where no row is.
     pub left_out: Option<Vec<bool>>,
-    /// Whether each row carries a `tessera_id`, where the file has the column.
-    pub tessera: Option<Vec<bool>>,
+    /// Whether each row carries a `mosaica_id`, where the file has the column.
+    pub mosaica: Option<Vec<bool>>,
 }
 
 impl<'a> FileRead<'a> {
@@ -58,7 +58,7 @@ impl<'a> FileRead<'a> {
             path,
             groups,
             carried,
-            tessera: groups.schema().column_with_name(TESSERA_ID_COLUMN).is_some(),
+            mosaica: groups.schema().column_with_name(MOSAICA_ID_COLUMN).is_some(),
             select,
             limit,
         }
@@ -71,9 +71,9 @@ impl<'a> FileRead<'a> {
 
     /// The row groups that can hold a row of the read: where `--limit` reads a prefix, those it
     /// cannot rule out from the column's own statistics. Every group of any other file is read,
-    /// and every group of a file with a `tessera_id` column, whose rows are refused.
+    /// and every group of a file with a `mosaica_id` column, whose rows are refused.
     pub(crate) fn kept_groups(&self) -> Option<Vec<usize>> {
-        let Some(LimitRead::Prefix { column, below }) = self.limit.filter(|_| !self.tessera) else {
+        let Some(LimitRead::Prefix { column, below }) = self.limit.filter(|_| !self.mosaica) else {
             return None;
         };
         let index = self.groups.schema().column_with_name(column)?.0;
@@ -100,8 +100,8 @@ impl<'a> FileRead<'a> {
         for field in self.carried {
             index_of(&field.column)?;
         }
-        if self.tessera {
-            index_of(TESSERA_ID_COLUMN)?;
+        if self.mosaica {
+            index_of(MOSAICA_ID_COLUMN)?;
         }
         if let Some(select) = self.select {
             index_of(&select.column)?;
@@ -171,21 +171,21 @@ impl<'a> FileRead<'a> {
         for field in self.carried {
             keys.push(keys_of(self.path, column(&field.column)?, field)?);
         }
-        let tessera: Option<Vec<bool>> = match self.tessera {
+        let mosaica: Option<Vec<bool>> = match self.mosaica {
             true => {
-                let column = column(TESSERA_ID_COLUMN)?;
+                let column = column(MOSAICA_ID_COLUMN)?;
                 Some((0..len).map(|row| !column.is_null(row)).collect())
             }
             false => None,
         };
-        let carries_tessera = |row: usize| tessera.as_ref().is_some_and(|t| t[row]);
+        let carries_mosaica = |row: usize| mosaica.as_ref().is_some_and(|t| t[row]);
         // Whether each row's value of the limit's attribute is at or above it, or null. A row
-        // carrying a `tessera_id` is read whatever its value, and refused for it.
+        // carrying a `mosaica_id` is read whatever its value, and refused for it.
         let beyond = |name: &str, below: u64| -> Result<Vec<bool>> {
             let values = crate::input::id_values(self.path, column(name)?.as_ref(), name)?;
             Ok((0..len)
                 .map(|row| {
-                    (values.is_null(row) || values.value(row) >= below) && !carries_tessera(row)
+                    (values.is_null(row) || values.value(row) >= below) && !carries_mosaica(row)
                 })
                 .collect())
         };
@@ -215,7 +215,7 @@ impl<'a> FileRead<'a> {
             }) => {
                 left_out = Some(match (every_row, column) {
                     (false, Some(column)) => beyond(column, below)?,
-                    _ => (0..len).map(|row| !carries_tessera(row)).collect(),
+                    _ => (0..len).map(|row| !carries_mosaica(row)).collect(),
                 });
             }
         }
@@ -226,12 +226,12 @@ impl<'a> FileRead<'a> {
             keys,
             outside,
             left_out,
-            tessera,
+            mosaica,
         })
     }
 
     /// Each of `rows` as a report names it: `field = value` for each unique value it carries and a
-    /// `tessera_id` where it carries one, or its position in the file where it carries neither.
+    /// `mosaica_id` where it carries one, or its position in the file where it carries neither.
     pub(crate) fn values_at(&self, rows: &[u64]) -> Result<BTreeMap<u64, String>> {
         let mut out = BTreeMap::new();
         if rows.is_empty() {
@@ -257,10 +257,10 @@ impl<'a> FileRead<'a> {
                             parts.push(format!("{} = {text}", field.attribute));
                         }
                     }
-                    if self.tessera {
-                        let column = batch.column_by_name(TESSERA_ID_COLUMN).expect("projected");
+                    if self.mosaica {
+                        let column = batch.column_by_name(MOSAICA_ID_COLUMN).expect("projected");
                         if let Some(text) = value_text(column.as_ref(), at) {
-                            parts.push(format!("{TESSERA_ID_COLUMN} = {text}"));
+                            parts.push(format!("{MOSAICA_ID_COLUMN} = {text}"));
                         }
                     }
                     out.insert(

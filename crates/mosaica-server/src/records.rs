@@ -70,12 +70,12 @@ pub(crate) struct ArtifactsReq {
     fields: Vec<String>,
     #[serde(default)]
     level: Option<u32>,
-    /// A `tessera_id`, as a number or its decimal string.
+    /// A `mosaica_id`, as a number or its decimal string.
     #[serde(default)]
     parent: Option<serde_json::Value>,
     #[serde(default)]
     q: Option<String>,
-    /// `tessera_id`s, each a number or its decimal string: only the artifacts they name.
+    /// `mosaica_id`s, each a number or its decimal string: only the artifacts they name.
     #[serde(default)]
     ids: Option<Vec<serde_json::Value>>,
     #[serde(default)]
@@ -122,7 +122,7 @@ pub(crate) struct Opening {
 }
 
 /// The engine's [`RecordsSink`]: the head to the handler, then each page as a records frame and a
-/// page end. The engine's batches carry `tessera_id` and the named columns only.
+/// page end. The engine's batches carry `mosaica_id` and the named columns only.
 pub(crate) struct FrameSink {
     pub(crate) producer: Producer<Opening>,
     /// Held until the response ends: a bulk read computes for its whole length.
@@ -439,7 +439,7 @@ fn run_artifacts(
     let parent = match req
         .parent
         .as_ref()
-        .map(|value| crate::filter_dto::tessera_id(Some(value), "parent"))
+        .map(|value| crate::filter_dto::mosaica_id(Some(value), "parent"))
         .transpose()
     {
         Ok(parent) => parent,
@@ -449,7 +449,7 @@ fn run_artifacts(
         .ids
         .iter()
         .flatten()
-        .map(|value| crate::filter_dto::tessera_id(Some(value), "ids"))
+        .map(|value| crate::filter_dto::mosaica_id(Some(value), "ids"))
         .collect::<Result<Vec<_>, _>>()
     {
         Ok(ids) => req.ids.is_some().then_some(ids),

@@ -180,7 +180,7 @@ async fn read_all(server: &TestServer, token: &str, body: &Value) -> Vec<Decoded
 }
 
 fn ids_of(responses: &[DecodedRecords]) -> Vec<u64> {
-    responses.iter().flat_map(DecodedRecords::tessera_ids).collect()
+    responses.iter().flat_map(DecodedRecords::mosaica_ids).collect()
 }
 
 /// The viewport's visible and matched counts over the whole view.
@@ -263,7 +263,7 @@ async fn a_full_read_returns_every_visible_row_once_in_either_order() {
     }
 }
 
-/// **The columns are the ones asked for, in the order asked for**: `tessera_id`, the named fields,
+/// **The columns are the ones asked for, in the order asked for**: `mosaica_id`, the named fields,
 /// the system fields, then `mosaica:matched` under `keep_unmatched`, which then returns every
 /// visible row.
 #[tokio::test]
@@ -295,7 +295,7 @@ async fn the_page_schema_is_the_named_fields_then_the_system_fields() {
     assert_eq!(
         names,
         vec![
-            "tessera_id",
+            "mosaica_id",
             "note",
             "archive",
             "year",

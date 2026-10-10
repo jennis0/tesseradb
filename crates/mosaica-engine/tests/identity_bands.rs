@@ -207,7 +207,7 @@ fn every_segment_carries_its_bands_through_a_flush_a_deletion_a_fold_and_a_resta
         .find(|&&id| band_of(id) >= FIRST_BAND)
         .unwrap();
     let entity = engine
-        .resolve_tessera_ids(&[mosaica_types::TesseraId::new(gone)])
+        .resolve_mosaica_ids(&[mosaica_types::MosaicaId::new(gone)])
         .unwrap()[0]
         .expect("a band entry names an item");
     engine.accept_change(entity, ChangeOp::Delete).unwrap();

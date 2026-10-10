@@ -260,7 +260,7 @@ section shows, then send again any changes made while the old bundle was served.
 ## Replace the bundle
 
 [Rebuild and replace the bundle](rebuild.md) explains why a rebuild gives every item a new
-`tessera_id` and why the old log goes aside with the old bundle. Under Compose, copy the changed
+`mosaica_id` and why the old log goes aside with the old bundle. Under Compose, copy the changed
 sources into `config/`, here the Parquet file with Saint Patrick's Bridge corrected, and build into
 a new directory in the volume.
 

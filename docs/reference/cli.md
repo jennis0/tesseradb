@@ -16,7 +16,7 @@ Build a bundle from the corpus declaration and the source files it names.
 
 `mosaica build` needs no flags. It reads `mosaica.toml` from the working directory, or from the nearest directory above it that has one. That file names the corpus declaration in `[build] schema` (default `schema.toml`) and the bundle directory in `[bundle] path`, each relative to the file's own directory. The declaration names the source files.
 
-Every build creates a new bundle with a new key for its `tessera_id`s, so a `tessera_id` read from an earlier bundle does not name an item in this one. A copy of a bundle keeps its `tessera_id`s.
+Every build creates a new bundle with a new key for its `mosaica_id`s, so a `mosaica_id` read from an earlier bundle does not name an item in this one. A copy of a bundle keeps its `mosaica_id`s.
 
 The other flags override `mosaica.toml` or tune the build.
 
@@ -61,9 +61,9 @@ It cannot check anything that needs a row: whether a closed vocabulary covers th
 mosaica verify [OPTIONS] <BUNDLE>
 ```
 
-Verify a bundle's files and every row's `tessera_id`.
+Verify a bundle's files and every row's `mosaica_id`.
 
-It opens the bundle as the server does. That checks every manifest digest, the size and SHA-256 of every file except the unique indexes' runs, and that each segment's permutation maps one-to-one onto its rows. `--deep` hashes those runs too. It then confirms that the row space holds exactly the rows the segments claim, and computes each row's `tessera_id` again from the identity key, failing on the first row that differs.
+It opens the bundle as the server does. That checks every manifest digest, the size and SHA-256 of every file except the unique indexes' runs, and that each segment's permutation maps one-to-one onto its rows. `--deep` hashes those runs too. It then confirms that the row space holds exactly the rows the segments claim, and computes each row's `mosaica_id` again from the identity key, failing on the first row that differs.
 
 It also prints to stderr each indexed keyword column's count of distinct values against its rows, with a warning for a column whose values are unique per row. A warning does not fail the verify.
 
@@ -119,7 +119,7 @@ Read every item a session token may see in one view, with the fields named, from
 
 The server answers `POST /v1/items` a page at a time, several pages to a response, and ends each response with a cursor for the next. This requests responses until no row remains and writes each page as it arrives. Each of the route's fields is the argument of the same name, sent only when given, so the server's own setting applies otherwise.
 
-The columns are `tessera_id`, the fields in the order named, the system fields in the order named, then `mosaica:matched` under `--keep-unmatched`. A category field is a dictionary column of its value keys, each page's dictionary holding the keys of its own rows. A read that returns no row writes these columns with no rows.
+The columns are `mosaica_id`, the fields in the order named, the system fields in the order named, then `mosaica:matched` under `--keep-unmatched`. A category field is a dictionary column of its value keys, each page's dictionary holding the keys of its own rows. A read that returns no row writes these columns with no rows.
 
 A read cut short leaves the whole pages read before it in the output, exits 1 and prints the cursor to read the rest with. The first response's head, with the counts under `--count`, is printed on stderr at the end.
 
@@ -128,7 +128,7 @@ For example, `mosaica items --server http://127.0.0.1:8080 --view papers --field
 | Argument | Value | Default | Description |
 | --- | --- | --- | --- |
 | `--view` | `VIEW` |  | The view to read, as `/v1/meta` names it. An item with no position in it is not returned. |
-| `--fields` | `NAMES` |  | The declared fields to return, comma-separated, in the order wanted. `--fields ''` returns `tessera_id` alone. A field declared for a view group, read under a view outside that group, is named `<field>@<key>`. An undeclared or repeated field is refused. |
+| `--fields` | `NAMES` |  | The declared fields to return, comma-separated, in the order wanted. `--fields ''` returns `mosaica_id` alone. A field declared for a view group, read under a view outside that group, is named `<field>@<key>`. An undeclared or repeated field is refused. |
 | `--system-fields` | `NAMES` |  | Any of `position` and `labels`, comma-separated, in the order wanted: the columns `mosaica:x` and `mosaica:y`, and `mosaica:labels`. Any other name is refused. |
 | `--filters` | `JSON` |  | A filter expression as JSON, such as `{"year": {"range": {"gte": 2020}}}`. Only the items that match are returned. |
 | `--keep-unmatched` |  |  | Return every item, with a `mosaica:matched` column saying whether it matches `--filters`. |
@@ -151,7 +151,7 @@ mosaica artifacts [OPTIONS] --view <VIEW> --layer <LAYER> --fields <NAMES> --ser
 
 Read every artifact of one layer a session token is served, with the properties named, from a running server, and write them as Arrow IPC or Parquet.
 
-An artifact is one member of a layer: a cluster, a region, a node in a taxonomy. The read is carried across `POST /v1/artifacts` responses, and written, as `mosaica items` carries and writes one. The columns are `tessera_id`, the properties in the order named, then `matched_count` under `--filters`. The rows are in order of level, and in the order they were published within a level.
+An artifact is one member of a layer: a cluster, a region, a node in a taxonomy. The read is carried across `POST /v1/artifacts` responses, and written, as `mosaica items` carries and writes one. The columns are `mosaica_id`, the properties in the order named, then `matched_count` under `--filters`. The rows are in order of level, and in the order they were published within a level.
 
 For example, `mosaica artifacts --server http://127.0.0.1:8080 --view papers --layer clusters --fields key,masked_count --format ipc > clusters.arrows`.
 
@@ -162,9 +162,9 @@ For example, `mosaica artifacts --server http://127.0.0.1:8080 --view papers --l
 | `--fields` | `NAMES` |  | Any of `key`, `level`, `parents`, `target`, `masked_count`, `content`, `centroid`, `box`, `shape` and `slot`, comma-separated, in the order wanted. Any other name, or one repeated, is refused. |
 | `--palette-size` | `N` |  | The number of colours, 2 to 32, the `slot` field picks among: each artifact's slot is chosen so that artifacts drawn beside each other differ. Without it, `slot` is null. |
 | `--level` | `LEVEL` |  | Only the artifacts at this level of a levelled layer. Refused on a layer with one level, and past the levels the layer holds. |
-| `--parent` | `TESSERA_ID` |  | Only the children of this artifact, by its `tessera_id`. Refused with `--q`. |
+| `--parent` | `MOSAICA_ID` |  | Only the children of this artifact, by its `mosaica_id`. Refused with `--q`. |
 | `--q` | `TEXT` |  | Only the artifacts whose key, or first text, contains this, ignoring case. Refused with `--parent`. |
-| `--ids` | `TESSERA_IDS` |  | Only the artifacts these `tessera_id`s name, comma-separated, such as the tags a points read returned. One the token is not served has no row, as one naming nothing does. |
+| `--ids` | `MOSAICA_IDS` |  | Only the artifacts these `mosaica_id`s name, comma-separated, such as the tags a points read returned. One the token is not served has no row, as one naming nothing does. |
 | `--filters` | `JSON` |  | A filter expression as JSON. Only the artifacts with a visible member that matches are returned, each with a `matched_count` column. |
 | `--keep-unmatched` |  |  | With `--filters`, return every artifact, those with no matching member included. |
 | `--count` |  |  | Count the artifacts served and those that match. The counts are printed on stderr at the end. Refused with `--cursor`. |

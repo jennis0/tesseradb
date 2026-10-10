@@ -163,7 +163,7 @@ def tiles_for_bbox(
 #
 # It was `(splitmix64(entity_id) >> 48) as u16` — an *unkeyed* residue of the entity ID, and a
 # second hash construction alongside the identity's own. Contracts §2.6 r6 redefines `priority` as
-# `high16(tessera_id)`, a prefix of the keyed bijection, so there is exactly one hash construction
+# `high16(mosaica_id)`, a prefix of the keyed bijection, so there is exactly one hash construction
 # in the format and `identity.forward()` is the only place it lives. This deletion is on the memo's
 # own change list; reintroducing a standalone priority function here would give the oracle a second
 # source of truth for the sort order and for selection, which is the whole thing the fold removed.

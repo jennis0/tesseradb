@@ -15,7 +15,7 @@ use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
-use mosaica_types::{EntityId, TesseraId};
+use mosaica_types::{EntityId, MosaicaId};
 
 fn declaration(name: &str, criterion: Option<ExistenceCriterion>) -> LayerDeclaration {
     LayerDeclaration {
@@ -109,7 +109,7 @@ fn the_count_beside_a_cluster_is_the_viewers_own() {
     );
     // Same cluster, same identity, two answers. The identifier is stable across principals by
     // construction (C17); only the number beside it moves.
-    assert_eq!(broad[0].tessera_id, narrow[0].tessera_id);
+    assert_eq!(broad[0].mosaica_id, narrow[0].mosaica_id);
     assert_eq!(broad[0].key.as_deref(), Some("c0"));
 }
 
@@ -257,7 +257,7 @@ fn a_drill_down_agrees_with_the_viewport_that_served_the_identifier() {
 
     let broad_session = engine.authorise(&full_coverage_credential()).unwrap();
     let served = artifacts_of(&engine, &full_coverage_credential());
-    let id = served[0].tessera_id;
+    let id = served[0].mosaica_id;
     let drilled = engine
         .artifact(&broad_session, id, "s0", None)
         .unwrap()
@@ -275,7 +275,7 @@ fn a_drill_down_agrees_with_the_viewport_that_served_the_identifier() {
     // An identifier naming a point rather than an artifact is the same answer as an artifact
     // withheld. Taken from the response's own points, so it is genuinely an identifier this
     // deployment issued rather than an invented one.
-    let point_id = TesseraId::new(
+    let point_id = MosaicaId::new(
         engine
             .viewport(
                 &broad_session,
@@ -283,7 +283,7 @@ fn a_drill_down_agrees_with_the_viewport_that_served_the_identifier() {
             )
             .unwrap()
             .points
-            .tessera_ids[0],
+            .mosaica_ids[0],
     );
     assert!(engine
         .artifact(&broad_session, point_id, "s0", None)
@@ -318,7 +318,7 @@ fn suppressing_an_artifact_removes_it_from_the_viewport_and_from_drill_down_at_t
         .iter()
         .find(|a| a.key.as_deref() == Some("c0"))
         .expect("c0 is served")
-        .tessera_id;
+        .mosaica_id;
 
     let entity = artifact_entity(&engine, c0);
     engine.accept_change(entity, ChangeOp::Suppress).unwrap();

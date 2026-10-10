@@ -199,7 +199,7 @@ pub struct StageTimings {
     /// structurally invisible.
     ///
     /// It pins the **implemented route**, not the definition, and the route reads fewer than
-    /// Σvisible rows where a tile's mask decodes as ranges: the `tessera_id` column is sorted
+    /// Σvisible rows where a tile's mask decodes as ranges: the `mosaica_id` column is sorted
     /// within a leaf Morton cell, so `C_θ` there is a binary search and the heap feed leaves the
     /// cell at the first identity it rejects (`crate::select`). Against `sigma_visible` this
     /// counter is therefore at or below it on those tiles and equal to it on the scattered ones;

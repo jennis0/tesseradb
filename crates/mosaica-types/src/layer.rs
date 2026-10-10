@@ -457,7 +457,7 @@ impl ComputedProperty {
     pub const VOCABULARY: [&'static str; 3] = ["centroid", "box", "hull"];
 
     /// **The ask vocabulary**: what a `POST /v1/artifacts/viewport` request's `computed` may
-    /// name. A shape is read by an artifact's `tessera_id`, never with a tile's artifacts.
+    /// name. A shape is read by an artifact's `mosaica_id`, never with a tile's artifacts.
     pub const ASK_VOCABULARY: [&'static str; 2] = ["centroid", "box"];
 
     /// Parse a request's `computed` word.
@@ -473,7 +473,7 @@ impl ComputedProperty {
 /// Which of the three kinds a layer's **one drawn geometry** is (`polygon-membership.md` §7.1,
 /// owner ruling 2026-08-29). Published per layer in `/v1/meta` as `shape`, so a client knows
 /// whether the outline moves with the principal — which decides whether it may hold the geometry
-/// against a `tessera_id` across principals.
+/// against a `mosaica_id` across principals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DrawnShape {
@@ -671,7 +671,7 @@ pub struct LayerDeclaration {
     // The content-level key of the same name was removed by decision 0135; a declaration still
     // carrying it is refused by name (`ContentDeclaration`'s `Deserialize`).
     /// The layers this one's edges point into. A layer named here needs keys, because an
-    /// edge names its target and at publish time the caller has no `tessera_id` for it.
+    /// edge names its target and at publish time the caller has no `mosaica_id` for it.
     #[serde(default)]
     pub depends_on: Vec<String>,
     /// Empty for a treed or flat layer.

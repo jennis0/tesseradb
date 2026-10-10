@@ -1103,7 +1103,7 @@ impl Permutation {
     /// covers it on the same ruling.
     ///
     /// The invariant this file carries is I4 — it is the only EntityId→RowId path — and both
-    /// routes keep it, neither handing an entity id or a `tessera_id` to a caller, so I10 stands
+    /// routes keep it, neither handing an entity id or a `mosaica_id` to a caller, so I10 stands
     /// where it stood.
     pub fn project(&self, mask: &croaring::Bitmap) -> croaring::Bitmap {
         self.project_with(mask, &mut ProjectScratch::default())
@@ -1469,7 +1469,7 @@ impl SegmentExtent {
     ///
     /// The alternative was to write `rows` beside `morton.u32` (4 bytes × entities in the segment,
     /// one more file, one more manifest field, a contracts §2.1 change). This construction stores
-    /// only the rows an edit moved: `columns.arrow` already carries `tessera_id` at the row, the
+    /// only the rows an edit moved: `columns.arrow` already carries `mosaica_id` at the row, the
     /// identity is a bijection over 2⁶⁴ ([`mosaica_types::IdentityKey`]) from an item's number,
     /// and `MANIFEST.json` already carries the key, so a row's entity is its number's unless the
     /// segment's edited rows list another ([`crate::edited`]). An entity under `entity_lo` goes to
@@ -1477,7 +1477,7 @@ impl SegmentExtent {
     ///
     /// **The invariant it spends, stated so it is not spent again silently.** Row space above the
     /// build bound is now recoverable *only* while the identity permutation is invertible at open.
-    /// A future construction that made `tessera_id` one-way — a keyed hash, a key held outside the
+    /// A future construction that made `mosaica_id` one-way — a keyed hash, a key held outside the
     /// bundle, a per-session blinding — would silently strand every flushed entity's row, exactly
     /// the failure this replaces. I10 is unaffected: nothing here leaves the engine, and the
     /// inversion is the same one `Engine::item` already performs per request.
@@ -1493,9 +1493,9 @@ impl SegmentExtent {
         key: &mosaica_types::IdentityKey,
         shard_id: u32,
     ) -> Result<Self> {
-        let (seg_id, tessera_ids) = (segment.seg_id.as_str(), segment.columns.tessera_id());
-        let mut entities = Vec::with_capacity(tessera_ids.len());
-        for (local, &raw) in tessera_ids.iter().enumerate() {
+        let (seg_id, mosaica_ids) = (segment.seg_id.as_str(), segment.columns.mosaica_id());
+        let mut entities = Vec::with_capacity(mosaica_ids.len());
+        for (local, &raw) in mosaica_ids.iter().enumerate() {
             // A wrong shard means this segment was written under a different identity
             // configuration than the manifest declares — corruption, not a row to skip. Serving
             // past it would put a row under an entity id that names a different item.
@@ -1509,7 +1509,7 @@ impl SegmentExtent {
         SegmentExtent::from_rows(seg_id, row_base, (entity_lo, entity_hi), entities).ok_or_else(
             || StoreError::MalformedBundle {
                 detail: format!(
-                    "segment '{seg_id}': the extent rebuilt from its tessera_id column is not a \
+                    "segment '{seg_id}': the extent rebuilt from its mosaica_id column is not a \
                      bijection onto its own rows at or below the descriptor's entity \
                      {entity_hi}"
                 ),

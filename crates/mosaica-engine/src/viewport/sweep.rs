@@ -457,7 +457,7 @@ pub(super) fn tile_sweep<'a>(
 /// sub-cells and then consumed by the emit pass, which gathers `rows`. Not part of this crate's
 /// public API.
 ///
-/// `rows` are view-space rows ascending by `tessera_id` — the order the wire requires within a
+/// `rows` are view-space rows ascending by `mosaica_id` — the order the wire requires within a
 /// tile, and the property every mid-stream cut's validity rests on.
 pub(super) struct TileSweepOut<'a> {
     pub(super) count: TileCount,
@@ -826,7 +826,7 @@ fn gather_column<T>(
 /// for a segment no tile touches.
 #[derive(Default)]
 struct SegmentRows<'a> {
-    tessera_id: &'a [u64],
+    mosaica_id: &'a [u64],
     morton: &'a [u32],
     residual: &'a [u32],
     band_ids: &'a [u64],
@@ -961,7 +961,7 @@ fn will_need_visible_identities(mask: &EffectiveMask, parts: &[SelectionPart<'_>
     let page = page_size();
     let mut pages = Vec::new();
     for part in parts {
-        let ids = part.segment.columns.tessera_id();
+        let ids = part.segment.columns.mosaica_id();
         let base = part.row_base;
         mask.for_each_run_holding_visible(base + part.range.start..base + part.range.end, |run| {
             let last = element(ids, (run.end - 1 - base) as usize);
@@ -1044,7 +1044,7 @@ impl<'a> Gather<'a> {
                 .iter()
                 .map(|segment| {
                     segment.map_or_else(SegmentRows::default, |segment| SegmentRows {
-                        tessera_id: segment.columns.tessera_id(),
+                        mosaica_id: segment.columns.mosaica_id(),
                         morton: segment.morton.u32(),
                         residual: segment.columns.residual(),
                         band_ids: segment.bands.ids(),
@@ -1086,7 +1086,7 @@ impl<'a> Gather<'a> {
                         self.pages.push(element(rows.band_residuals, e));
                     }
                     None => {
-                        self.pages.push(element(rows.tessera_id, local));
+                        self.pages.push(element(rows.mosaica_id, local));
                         self.pages.push(element(rows.morton, local));
                         self.pages.push(element(rows.residual, local));
                     }
@@ -1127,7 +1127,7 @@ impl<'a> Gather<'a> {
     }
 
     /// Gather one tile's selected rows column-major. `rows` are view-space, ascending by
-    /// `tessera_id` and not by segment, so consecutive rows can land in different segments; they
+    /// `mosaica_id` and not by segment, so consecutive rows can land in different segments; they
     /// are placed as `(segment, local)` once, and every column then walks that placement, leaving
     /// the inner loop a bounds-checked index into a typed slice.
     ///
@@ -1147,14 +1147,14 @@ impl<'a> Gather<'a> {
         let placed = &self.placed;
         let entries = ts.entries.as_deref();
 
-        let mut tessera_ids = Vec::with_capacity(placed.len());
+        let mut mosaica_ids = Vec::with_capacity(placed.len());
         let mut codes = Vec::with_capacity(placed.len());
         match entries {
             Some(entries) => {
                 for (&(segment, _), &e) in placed.iter().zip(entries) {
                     let rows = &self.segments[segment as usize];
                     let e = e as usize;
-                    tessera_ids.push(rows.band_ids[e]);
+                    mosaica_ids.push(rows.band_ids[e]);
                     codes.push(((rows.band_codes[e] as u64) << 32) | rows.band_residuals[e] as u64);
                 }
             }
@@ -1162,7 +1162,7 @@ impl<'a> Gather<'a> {
                 for &(segment, local) in placed {
                     let rows = &self.segments[segment as usize];
                     let idx = local as usize;
-                    tessera_ids.push(rows.tessera_id[idx]);
+                    mosaica_ids.push(rows.mosaica_id[idx]);
                     codes.push(((rows.morton[idx] as u64) << 32) | rows.residual[idx] as u64);
                 }
             }
@@ -1235,7 +1235,7 @@ impl<'a> Gather<'a> {
         }
 
         PointColumns {
-            tessera_ids,
+            mosaica_ids,
             codes,
             scalars,
             membership: Vec::new(),

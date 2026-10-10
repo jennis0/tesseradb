@@ -222,7 +222,7 @@ async fn shapes_by_layer(
         .artifacts
         .expect("an artifact is served")
     {
-        let shape = shape_by_id(server, token, "s0", row.tessera_id, 0).await;
+        let shape = shape_by_id(server, token, "s0", row.mosaica_id, 0).await;
         shapes.insert(row.layer, shape.expect("a drawn geometry"));
     }
     shapes

@@ -71,7 +71,7 @@ from it.
   category's on the tail, which is its reserved code 0. The declaration's own key→code table
   decides a category's code ([`Declaration`], parsed from the materialised `config.toml` rather
   than restated here).
-- **The render columns are read by position.** The points tail is `tessera_id` and `code`, then
+- **The render columns are read by position.** The points tail is `mosaica_id` and `code`, then
   the render columns in manifest order, each named by its column. [`check_points`] reads the join
   column and `code` by name and the render columns by position, and
   `test_the_points_tail_is_named_by_its_render_declaration` checks their names, so a misnamed
@@ -733,7 +733,7 @@ def verify_rows(
     seed: int,
     declaration: Declaration,
     denied_fx: frozenset[int],
-    fx_of_tessera: Mapping[int, int],
+    fx_of_mosaica: Mapping[int, int],
 ) -> int:
     """The row half over one recording: every row of every response, one expectation call per
     response (module doc). Returns the number of rows verified; raises on any disagreement, and
@@ -743,7 +743,7 @@ def verify_rows(
     rows = 0
     item_queries = [q for q in recorded if isinstance(q, Item)]
     drilldown_expected = expected_items(
-        seed, [fx_of_tessera[q.tessera_id] for q in item_queries]
+        seed, [fx_of_mosaica[q.mosaica_id] for q in item_queries]
     )
     for query, canon in recorded.items():
         if isinstance(query, Viewport):
@@ -764,9 +764,9 @@ def verify_rows(
                 reasons=reasons,
             )
         elif isinstance(query, Item):
-            fx = fx_of_tessera[query.tessera_id]
+            fx = fx_of_mosaica[query.mosaica_id]
             rows += check_item(
-                f"items/{query.tessera_id}",
+                f"items/{query.mosaica_id}",
                 canon,
                 drilldown_expected[fx],
                 declaration=declaration,

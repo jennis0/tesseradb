@@ -97,7 +97,7 @@ enum SystemColumn {
 /// The columns of the rows a page has taken, and the bytes their buffers hold.
 struct PageValues {
     rows: usize,
-    tessera_ids: UInt64Builder,
+    mosaica_ids: UInt64Builder,
     named: Vec<(String, ScalarType, Column)>,
     system: Vec<SystemColumn>,
     /// Present under `keep_unmatched`.
@@ -536,7 +536,7 @@ impl PageValues {
     fn new(plan: &FieldPlan, keep_unmatched: bool) -> PageValues {
         let mut page = PageValues {
             rows: 0,
-            tessera_ids: UInt64Builder::new(),
+            mosaica_ids: UInt64Builder::new(),
             named: plan
                 .named
                 .iter()
@@ -563,7 +563,7 @@ impl PageValues {
 
     /// The bytes every column's buffers hold.
     fn measure(&self) -> usize {
-        std::mem::size_of_val(self.tessera_ids.values_slice())
+        std::mem::size_of_val(self.mosaica_ids.values_slice())
             + self.named.iter().map(|(_, _, c)| c.bytes()).sum::<usize>()
             + self.system.iter().map(SystemColumn::bytes).sum::<usize>()
             + self.matched.as_ref().map_or(0, |b| b.values_slice().len())
@@ -643,7 +643,7 @@ impl PageValues {
             if self.rows > 0 && self.bytes + row_bytes > max_bytes {
                 return Ok(false);
             }
-            self.tessera_ids.append_value(row.tessera_id);
+            self.mosaica_ids.append_value(row.mosaica_id);
             if let Some(matched) = &mut self.matched {
                 matched.append_value(row.matched);
             }
@@ -671,11 +671,11 @@ impl PageValues {
         Ok(true)
     }
 
-    /// The page as one batch: `tessera_id`, the named fields, the system fields, then the
+    /// The page as one batch: `mosaica_id`, the named fields, the system fields, then the
     /// matched column.
     fn into_batch(mut self) -> Result<RecordBatch> {
-        let mut fields: Vec<Field> = vec![Field::new("tessera_id", DataType::UInt64, false)];
-        let mut arrays: Vec<ArrayRef> = vec![Arc::new(self.tessera_ids.finish())];
+        let mut fields: Vec<Field> = vec![Field::new("mosaica_id", DataType::UInt64, false)];
+        let mut arrays: Vec<ArrayRef> = vec![Arc::new(self.mosaica_ids.finish())];
         for (name, _, column) in self.named {
             let array = column.finish()?;
             fields.push(Field::new(name, array.data_type().clone(), true));

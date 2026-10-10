@@ -76,14 +76,14 @@ export type RowAnswer = Answer<IngestResponse> & {
 
 /**
  * Why the identity rule refused a row. `names_two_items`: the row's values name more than one
- * item. `unknown_tessera_id`: its `tessera_id` names no live or suppressed item. `names_no_item`:
+ * item. `unknown_mosaica_id`: its `mosaica_id` names no live or suppressed item. `names_no_item`:
  * its values name no item, in a request that creates none. `one_item_twice`: an earlier row of the
  * batch names the same item. `one_value_twice`: an earlier row of the batch sets the same unique
  * value. The last two are given by `ingest` only.
  *
  * @category Control plane
  */
-export type RefusalReason = 'names_two_items' | 'unknown_tessera_id' | 'names_no_item' | 'one_item_twice' | 'one_value_twice';
+export type RefusalReason = 'names_two_items' | 'unknown_mosaica_id' | 'names_no_item' | 'one_item_twice' | 'one_value_twice';
 
 /**
  * A row the identity rule refused.
@@ -114,30 +114,30 @@ export type RefusedMember = {
 };
 
 /**
- * One item, named by its `tessera_id` and the values of fields declared unique, keyed by column.
+ * One item, named by its `mosaica_id` and the values of fields declared unique, keyed by column.
  * A unique field's value is a string for a keyword, and a number or a string of decimal digits
  * for an integer or a timestamp. `null` names nothing. Every value names the item that holds it;
- * a row naming no item, or two, is refused. A key that is neither `tessera_id` nor a unique field
+ * a row naming no item, or two, is refused. A key that is neither `mosaica_id` nor a unique field
  * names nothing: it is ignored and listed in the answer's `ignored_columns`.
  *
  * @category Control plane
  */
 export type AddressRow = {
-  /** The item's `tessera_id`, a string of decimal digits. */
-  tessera_id?: string | null;
+  /** The item's `mosaica_id`, a string of decimal digits. */
+  mosaica_id?: string | null;
 } & {[field: string]: string | number | null};
 
 /**
- * Items, one row per item, as columns of equal length keyed by `tessera_id` and unique field
+ * Items, one row per item, as columns of equal length keyed by `mosaica_id` and unique field
  * names. A cell is as in an {@link AddressRow}, and `null` where its column does not name the
  * row's item. `{}` holds no item. Columns of different lengths are refused with `422`; a column that
- * is neither `tessera_id` nor a unique field is ignored and listed in `ignored_columns`.
+ * is neither `mosaica_id` nor a unique field is ignored and listed in `ignored_columns`.
  *
  * @category Control plane
  */
 export type MemberTable = {
-  /** Each row's `tessera_id`, a string of decimal digits. */
-  tessera_id?: (string | null)[];
+  /** Each row's `mosaica_id`, a string of decimal digits. */
+  mosaica_id?: (string | null)[];
 } & {[column: string]: (string | number | null)[]};
 
 /**
@@ -312,7 +312,7 @@ export type IngestResponse = PublicationAck & {
   /** Rows whose coordinates lay outside the view's extent, stored on its edge. */
   clamped: number;
   /** One per row in the order sent: the item the row created or named, and `null` for a refused row. */
-  tessera_ids: (string | null)[];
+  mosaica_ids: (string | null)[];
   /** The rows the identity rule refused. Empty with `strict`, which refuses the batch instead. */
   refused: RefusedRow[];
   /** Artifacts the batch's layer columns created. */
@@ -333,7 +333,7 @@ export type ChangesApplied = PublicationAck & {
   accepted: number;
   /** The changes refused, in the order sent. Empty with `strict`. */
   refused: RefusedRow[];
-  /** The `match` keys that are neither `tessera_id` nor a unique field, which named nothing and were ignored. */
+  /** The `match` keys that are neither `mosaica_id` nor a unique field, which named nothing and were ignored. */
   ignored_columns: string[];
 };
 
@@ -369,8 +369,8 @@ export type ShapeReport = {
  * @category Control plane
  */
 export type ArtifactsPublished = PublicationAck & {
-  /** One per artifact in the order sent, with the held artifact's own `tessera_id` where the key was held. */
-  artifacts: {key: string | null; tessera_id: string}[];
+  /** One per artifact in the order sent, with the held artifact's own `mosaica_id` where the key was held. */
+  artifacts: {key: string | null; mosaica_id: string}[];
   /** Artifacts the request created. */
   created: number;
   /** Of those, the ones with no content on a layer that declares some. */
@@ -381,7 +381,7 @@ export type ArtifactsPublished = PublicationAck & {
   joined: number;
   /** The members the identity rule refused, which the artifacts were published without. Empty with `strict`. */
   refused: RefusedMember[];
-  /** The member tables' columns that are neither `tessera_id` nor a unique field, which named nothing and were ignored. */
+  /** The member tables' columns that are neither `mosaica_id` nor a unique field, which named nothing and were ignored. */
   ignored_columns: string[];
   /** Present where the request carried a shape or authored shape content. */
   shapes?: ShapeReport[];
@@ -394,10 +394,10 @@ export type ArtifactsPublished = PublicationAck & {
  */
 export type MembershipsGrown = PublicationAck & {
   /** One per artifact in the order sent. */
-  artifacts: {key: string; tessera_id: string; joined: number; filled: number; left: number; withdrawn?: number}[];
+  artifacts: {key: string; mosaica_id: string; joined: number; filled: number; left: number; withdrawn?: number}[];
   /** The members the identity rule refused, which the artifacts were grown without. Empty with `strict`. */
   refused: RefusedMember[];
-  /** The member tables' columns that are neither `tessera_id` nor a unique field, which named nothing and were ignored. */
+  /** The member tables' columns that are neither `mosaica_id` nor a unique field, which named nothing and were ignored. */
   ignored_columns: string[];
   /** Present where the request filled authored shape content. */
   shapes?: ShapeReport[];
@@ -745,7 +745,7 @@ function pause(seconds: number, signal: AbortSignal | undefined): Promise<void> 
  * The server holds each accepted batch id against its body, so the same bytes sent again under it
  * are answered as a replay with `replayed: true` and no effect, and different bytes under it are
  * refused with `409`. The id is never derived from the body. The same rows sent in two calls are
- * resolved twice: a row naming its item by `tessera_id` or a unique value names in
+ * resolved twice: a row naming its item by `mosaica_id` or a unique value names in
  * the second call the item the first created, and changes nothing.
  *
  * @category Control plane
@@ -834,19 +834,19 @@ export class Control {
 
   /**
    * `POST /control/ingest`: one page of rows, given as an Arrow IPC stream. A row names an item by
-   * its `tessera_id` and the value of every unique column it carries; a row naming none creates an
+   * its `mosaica_id` and the value of every unique column it carries; a row naming none creates an
    * item at its position, one naming an item it matches changes nothing, one naming an item with
-   * no row in the view adds it there, and any other edits the item, which keeps its `tessera_id`.
+   * no row in the view adds it there, and any other edits the item, which keeps its `mosaica_id`.
    * A row without coordinates changes only what it carries. Any column may be left out, which
    * keeps what the item stores; a null clears it. The answer's body counts the rows `created`,
    * `edited`, `added`, `unchanged`, `clipped` and `clamped`, counts in `joined` the annotation
-   * memberships the rows added, lists each row's `tessera_id` in request order as a decimal
+   * memberships the rows added, lists each row's `mosaica_id` in request order as a decimal
    * string, and names the `publication` the rows become visible in. A row that only places its
    * item in an annotation changes the annotation, not the item, and is counted `unchanged`.
    *
-   * A row whose values name two items, whose `tessera_id` names no item, or which names an item or
+   * A row whose values name two items, whose `mosaica_id` names no item, or which names an item or
    * sets a unique value an earlier row of the page does, is refused: it is listed in `refused`
-   * with its reason, its `tessera_id` is `null`, and the other rows are stored. With `strict` the
+   * with its reason, its `mosaica_id` is `null`, and the other rows are stored. With `strict` the
    * page is refused with `409` at its first refused row, and nothing is stored.
    */
   ingest(body: Uint8Array, options: RowOptions = {}): Promise<RowAnswer> {
@@ -855,7 +855,7 @@ export class Control {
 
   /**
    * `PUT /control/layers`: declares one annotation layer. The answer is `201` with the layer's
-   * `name` and `tessera_id`; a declaration that breaks the deployment's rules is refused with `422`
+   * `name` and `mosaica_id`; a declaration that breaks the deployment's rules is refused with `422`
    * saying why.
    */
   declareLayer(declaration: object, options: WriteOptions = {}): Promise<Answer> {
@@ -923,7 +923,7 @@ export class Control {
 
   /**
    * `PUT /control/layers/{name}/artifacts`: publishes artifacts into one level of a layer, with a
-   * first page of each one's members, and answers with each artifact's `tessera_id`. Members,
+   * first page of each one's members, and answers with each artifact's `mosaica_id`. Members,
    * excluded items and a content's `generated_from` are each a {@link MemberTable}. A member
    * naming no item, or two, is left out and listed in `refused`, and the rest are published; with
    * `strict` the request is refused at the first, `404` where it names no item and `409` where it

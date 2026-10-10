@@ -61,17 +61,17 @@ const settled = async (limitMs = 45_000) => {
 
 /**
  * The artifacts served, from the explorer's store: the channel's state, how many were served, and
- * each one's count and name, keyed by `tessera_id`, which is the same for every principal.
+ * each one's count and name, keyed by `mosaica_id`, which is the same for every principal.
  */
 const artifactList = async () =>
   page.evaluate(() => {
-    const explorer = /** @type {{activeStore: {get(name: 'artifacts'): {status: string; served: {tesseraId: bigint; maskedCount: bigint; content: string[]}[]}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')));
+    const explorer = /** @type {{activeStore: {get(name: 'artifacts'): {status: string; served: {mosaicaId: bigint; maskedCount: bigint; content: string[]}[]}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')));
     const artifacts = explorer?.activeStore?.get('artifacts');
     const counts = {};
     const names = {};
     for (const a of artifacts?.served ?? []) {
-      counts[String(a.tesseraId)] = Number(a.maskedCount);
-      names[String(a.tesseraId)] = a.content[0] ?? '';
+      counts[String(a.mosaicaId)] = Number(a.maskedCount);
+      names[String(a.mosaicaId)] = a.content[0] ?? '';
     }
     const served = artifacts?.served.length ?? null;
     return {state: artifacts?.status ?? null, served, empty: served === 0, counts, names};
@@ -153,10 +153,10 @@ for (const p of [Math.max(0, principals - 3), principals - 1]) {
 let openedDrawn = null;
 {
   const opened = await page.evaluate(() => {
-    const store = /** @type {{activeStore: {get(name: 'artifacts'): {served: {tesseraId: bigint}[]}; openArtifact(id: bigint): Promise<void>} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')))?.activeStore;
+    const store = /** @type {{activeStore: {get(name: 'artifacts'): {served: {mosaicaId: bigint}[]}; openArtifact(id: bigint): Promise<void>} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')))?.activeStore;
     const first = store?.get('artifacts').served[0];
     if (!store || !first) return false;
-    void store.openArtifact(first.tesseraId);
+    void store.openArtifact(first.mosaicaId);
     return true;
   });
   if (opened) {

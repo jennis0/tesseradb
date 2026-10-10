@@ -120,7 +120,7 @@ async fn assert_refusal_to(
 
 /// The `responses` the description declares for the route `path` was sent to, under `method`.
 /// A literal segment outranks a parameter, so `/v1/artifacts/browse` is not read as
-/// `/v1/artifacts/{tessera_id}`. With no `method`, the path must have one operation.
+/// `/v1/artifacts/{mosaica_id}`. With no `method`, the path must have one operation.
 fn described_responses<'a>(
     doc: &'a Value,
     method: Option<&reqwest::Method>,
@@ -345,7 +345,7 @@ async fn publish_layer(server: &TestServer) -> Vec<String> {
         .as_array()
         .unwrap()
         .iter()
-        .map(|a| a["tessera_id"].as_str().unwrap().to_string())
+        .map(|a| a["mosaica_id"].as_str().unwrap().to_string())
         .collect()
 }
 
@@ -471,11 +471,11 @@ fn the_description_names_every_route_on_the_three_planes_and_no_other() {
             "/v1/artifacts",
             "/v1/artifacts/browse",
             "/v1/artifacts/viewport",
-            "/v1/artifacts/{tessera_id}",
+            "/v1/artifacts/{mosaica_id}",
             "/v1/categories/{column}",
             "/v1/categories/{column}/suggest",
             "/v1/items",
-            "/v1/items/{tessera_id}",
+            "/v1/items/{mosaica_id}",
             "/v1/login",
             "/v1/logout",
             "/v1/meta",
@@ -1789,7 +1789,7 @@ async fn items_match_the_description_with_every_refusal() {
     // An identifier this principal can see, taken from a viewport response.
     let resp = viewport(&f.server, token, &viewport_body(json!({}))).await;
     let decoded = decode_viewport_frames(&resp.bytes().await.unwrap());
-    let (tessera_id, _) = decoded.points[0];
+    let (mosaica_id, _) = decoded.points[0];
 
     let body = json!({});
     assert_valid(&doc, "ItemRequest", &body);
@@ -1801,7 +1801,7 @@ async fn items_match_the_description_with_every_refusal() {
             .json(&body)
             .send()
     };
-    let resp = post(tessera_id, body, token).await.unwrap();
+    let resp = post(mosaica_id, body, token).await.unwrap();
     assert_eq!(resp.status().as_u16(), 200);
     let item: Value = resp.json().await.unwrap();
     assert_valid(&doc, "ItemResponse", &item);
@@ -1814,7 +1814,7 @@ async fn items_match_the_description_with_every_refusal() {
 
     // Refusals: an item nobody with zero terms may see is a 404 (identical to nonexistence).
     let nobody = authorise_checked(&doc, &f.server, &[]).await;
-    let resp = post(tessera_id, json!({}), nobody["token"].as_str().unwrap())
+    let resp = post(mosaica_id, json!({}), nobody["token"].as_str().unwrap())
         .await
         .unwrap();
     assert_refusal(&doc, resp, 404, "unknown").await;
@@ -2406,7 +2406,7 @@ enum Malformed {
     UnknownField,
     /// A request the route accepts, with a `pin` that carries one field `Pin` does not name.
     UnknownPinField,
-    /// `{tessera_id}` that is not a number.
+    /// `{mosaica_id}` that is not a number.
     Identifier,
 }
 
@@ -2427,19 +2427,19 @@ fn malformed_viewer_requests(method: &reqwest::Method, path: &str) -> Vec<(Malfo
         ]);
         if matches!(
             path,
-            "/v1/viewport" | "/v1/artifacts/viewport" | "/v1/items/{tessera_id}"
+            "/v1/viewport" | "/v1/artifacts/viewport" | "/v1/items/{mosaica_id}"
         ) {
             kinds.push((Malformed::UnknownPinField, 422));
         }
     }
-    if path.contains("{tessera_id}") {
+    if path.contains("{mosaica_id}") {
         kinds.push((Malformed::Identifier, 400));
     }
     kinds
 }
 
 /// Send `method path` to the viewer listener, malformed as `kind`, with `credential` as its bearer.
-/// A path parameter is `1`, which satisfies both `{tessera_id}` and `{column}` and need not name
+/// A path parameter is `1`, which satisfies both `{mosaica_id}` and `{column}` and need not name
 /// anything.
 async fn send_viewer_probe(
     server: &TestServer,
@@ -2451,7 +2451,7 @@ async fn send_viewer_probe(
     let concrete = path
         .split('/')
         .map(|s| match s {
-            "{tessera_id}" if kind == Malformed::Identifier => "not-a-number",
+            "{mosaica_id}" if kind == Malformed::Identifier => "not-a-number",
             s if s.starts_with('{') => "1",
             s => s,
         })
@@ -2564,9 +2564,9 @@ fn viewer_body(path: &str) -> Value {
         "/v1/viewport" => viewport_body(json!({})),
         "/v1/artifacts/viewport" => artifacts_body(json!({})),
         "/v1/items" => json!({ "view": "s0", "fields": [] }),
-        "/v1/items/{tessera_id}" => json!({}),
+        "/v1/items/{mosaica_id}" => json!({}),
         "/v1/artifacts" => json!({ "view": "s0", "layer": LAYER, "fields": [] }),
-        "/v1/artifacts/{tessera_id}" => json!({ "view": "s0" }),
+        "/v1/artifacts/{mosaica_id}" => json!({ "view": "s0" }),
         "/v1/artifacts/browse" => json!({ "view": "s0", "layer": "clusters/none" }),
         "/v1/categories/{column}/suggest" => json!({ "q": "a" }),
         "/v1/aggregate" => json!({ "view": "s0", "groupings": [{}] }),
@@ -2694,7 +2694,7 @@ async fn ingest_matches_the_description() {
         .unwrap();
     let answer = assert_answer(&doc, &post, resp, 200).await;
     assert_eq!(answer["created"], 2);
-    assert_eq!(answer["tessera_ids"].as_array().unwrap().len(), 2);
+    assert_eq!(answer["mosaica_ids"].as_array().unwrap().len(), 2);
     assert!(answer.get("replayed").is_none() && answer.get("visible").is_none());
 
     // The same bytes again are a replay; different bytes under the same id are a conflict.
@@ -2707,7 +2707,7 @@ async fn ingest_matches_the_description() {
     let replay = assert_answer(&doc, &post, resp, 200).await;
     assert_eq!(replay["replayed"], true);
     assert_eq!(replay["created"], 0);
-    assert_eq!(replay["tessera_ids"], answer["tessera_ids"]);
+    assert_eq!(replay["mosaica_ids"], answer["mosaica_ids"]);
     let resp = ingest("openapi-json")
         .json(&json!([]))
         .send()
@@ -2726,10 +2726,10 @@ async fn ingest_matches_the_description() {
     let created = assert_answer(&doc, &post, resp, 200).await;
     assert_eq!(created["created"], 1);
 
-    // The row again, naming the item by its `tessera_id` alone, changes nothing; a row naming no
+    // The row again, naming the item by its `mosaica_id` alone, changes nothing; a row naming no
     // item and carrying no position creates nothing and is refused; a batch of such rows with no
     // column to name items by is `422`.
-    let named = json!([{ "tessera_id": created["tessera_ids"][0] }]);
+    let named = json!([{ "mosaica_id": created["mosaica_ids"][0] }]);
     assert_valid(&doc, "IngestRecords", &named);
     let resp = ingest("openapi-named")
         .header("content-type", "application/json")
@@ -2755,7 +2755,7 @@ async fn ingest_matches_the_description() {
         .unwrap();
     let refused = assert_answer(&doc, &post, resp, 200).await;
     assert_eq!(refused["created"], 0);
-    assert_eq!(refused["tessera_ids"], json!([null]));
+    assert_eq!(refused["mosaica_ids"], json!([null]));
     assert_eq!(refused["refused"], json!([{ "row": 0, "reason": "names_no_item" }]));
     let resp = control(&f.server, &post, "/control/ingest?strict=true")
         .header("x-mosaica-batch-id", "openapi-unplaced-strict")
@@ -2836,12 +2836,12 @@ async fn ingest_matches_the_description() {
     );
 }
 
-/// A built item's `tessera_id`, as a string: the first point a viewport serves.
+/// A built item's `mosaica_id`, as a string: the first point a viewport serves.
 async fn answer_id(server: &TestServer) -> String {
     let token = token_for(server, &["0"]).await;
     let resp = viewport(server, &token, &viewport_body(json!({}))).await;
-    let (tessera_id, _) = decode_viewport_frames(&resp.bytes().await.unwrap()).points[0];
-    tessera_id.to_string()
+    let (mosaica_id, _) = decode_viewport_frames(&resp.bytes().await.unwrap()).points[0];
+    mosaica_id.to_string()
 }
 
 /// `POST /control/changes`: each op, both address forms, and the refusals, none of which applies
@@ -2857,10 +2857,10 @@ async fn changes_match_the_description() {
             .send()
     };
 
-    let tessera_id = answer_id(&f.server).await;
+    let mosaica_id = answer_id(&f.server).await;
     let body = json!([
         { "op": "suppress", "match": { "id": member(5) } },
-        { "op": "suppress", "match": { "tessera_id": tessera_id } },
+        { "op": "suppress", "match": { "mosaica_id": mosaica_id } },
     ]);
     for item in body.as_array().unwrap() {
         assert_valid(&doc, "ChangeItem", item);
@@ -2892,10 +2892,10 @@ async fn changes_match_the_description() {
     // Refusals. The schema refuses the shapes the server refuses.
     for item in [
         json!({ "op": "predicate", "match": { "id": member(5) } }),
-        json!({ "op": "suppress", "match": { "id": member(5) }, "tessera_id": tessera_id }),
+        json!({ "op": "suppress", "match": { "id": member(5) }, "mosaica_id": mosaica_id }),
         json!({ "field": "id", "value": member(5), "op": "suppress" }),
         json!({ "op": "suppress" }),
-        json!({ "op": "suppress", "match": { "tessera_id": 12345 } }),
+        json!({ "op": "suppress", "match": { "mosaica_id": 12345 } }),
         json!({ "op": "suppress", "match": { "id": member(5) }, "unknown": 1 }),
     ] {
         assert_invalid(&doc, "ChangeItem", &item);

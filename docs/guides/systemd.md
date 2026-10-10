@@ -127,7 +127,7 @@ built /srv/mosaica/bundle (v00000): 29935 items, 1 terms, 29935 pairs, 2181446 b
 ```
 
 A later build is different, because the running server changes the bundle and a browser may hold a
-`tessera_id` from it. [Rebuild and replace the bundle](rebuild.md) covers it.
+`mosaica_id` from it. [Rebuild and replace the bundle](rebuild.md) covers it.
 
 ## Start it by hand
 

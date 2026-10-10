@@ -29,7 +29,7 @@ pub(crate) struct ItemsArgs {
     #[arg(long)]
     view: String,
     /// The declared fields to return, comma-separated, in the order wanted. `--fields ''`
-    /// returns `tessera_id` alone. A field declared for a view group, read under a view outside
+    /// returns `mosaica_id` alone. A field declared for a view group, read under a view outside
     /// that group, is named `<field>@<key>`. An undeclared or repeated field is refused.
     #[arg(long, value_name = "NAMES")]
     fields: String,
@@ -82,16 +82,16 @@ pub(crate) struct ArtifactsArgs {
     /// and past the levels the layer holds.
     #[arg(long)]
     level: Option<u32>,
-    /// Only the children of this artifact, by its `tessera_id`. Refused with `--q`.
-    #[arg(long, value_name = "TESSERA_ID")]
+    /// Only the children of this artifact, by its `mosaica_id`. Refused with `--q`.
+    #[arg(long, value_name = "MOSAICA_ID")]
     parent: Option<u64>,
     /// Only the artifacts whose key, or first text, contains this, ignoring case. Refused with
     /// `--parent`.
     #[arg(long, value_name = "TEXT")]
     q: Option<String>,
-    /// Only the artifacts these `tessera_id`s name, comma-separated, such as the tags a points
+    /// Only the artifacts these `mosaica_id`s name, comma-separated, such as the tags a points
     /// read returned. One the token is not served has no row, as one naming nothing does.
-    #[arg(long, value_name = "TESSERA_IDS", value_delimiter = ',')]
+    #[arg(long, value_name = "MOSAICA_IDS", value_delimiter = ',')]
     ids: Option<Vec<u64>>,
     /// A filter expression as JSON. Only the artifacts with a visible member that matches are
     /// returned, each with a `matched_count` column.
@@ -233,7 +233,7 @@ pub(crate) fn artifacts(args: ArtifactsArgs) -> ExitCode {
             request.insert("palette_size".into(), size.into());
         }
         if let Some(ids) = &args.ids {
-            // Decimal strings: a `tessera_id` past 2^53 is not exact as a JSON number.
+            // Decimal strings: a `mosaica_id` past 2^53 is not exact as a JSON number.
             let ids = ids.iter().map(|id| Value::from(id.to_string())).collect();
             request.insert("ids".into(), Value::Array(ids));
         }

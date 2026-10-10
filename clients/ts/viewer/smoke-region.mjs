@@ -114,8 +114,8 @@ const roster = async () =>
 
 const served = async () =>
   page.evaluate(() => {
-    const explorer = /** @type {{store: {get(name: 'artifacts'): {served: {tesseraId: bigint; layer: string; box: number[] | null; parentIds: bigint[]; maskedCount: bigint}[]}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')));
-    return (explorer?.store?.get('artifacts')?.served ?? []).map((x) => ({id: String(x.tesseraId), layer: x.layer, box: x.box, parents: x.parentIds.map((p) => String(p)), count: Number(x.maskedCount)}));
+    const explorer = /** @type {{store: {get(name: 'artifacts'): {served: {mosaicaId: bigint; layer: string; box: number[] | null; parentIds: bigint[]; maskedCount: bigint}[]}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')));
+    return (explorer?.store?.get('artifacts')?.served ?? []).map((x) => ({id: String(x.mosaicaId), layer: x.layer, box: x.box, parents: x.parentIds.map((p) => String(p)), count: Number(x.maskedCount)}));
   });
 
 /** Tick exactly one layer in the picker, or none. */

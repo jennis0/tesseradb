@@ -5,7 +5,7 @@
 //! client got when any of them bit. All of it existed for **one** thing — answering a later request
 //! against an *earlier* generation — and `geometry-pinning.md` is the argument that nothing a
 //! client holds needs that. A tile is a Morton prefix and a depth, resolvable against any
-//! generation's own sorted codes; an item is a `tessera_id`, invertible to an entity independently
+//! generation's own sorted codes; an item is a `mosaica_id`, invertible to an entity independently
 //! of geometry. So a re-issued request re-locates everything it needs, and the retention was paying
 //! ~94 GB of mapped files (lifecycle §2.2's depth-2 sizing against a *measured* 47.02 GB bundle) for
 //! a capability nothing exercised.

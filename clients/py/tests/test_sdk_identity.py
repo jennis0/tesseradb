@@ -2,7 +2,7 @@
 
 A table names each row's item by the columns it carries of the attributes the user declared
 `unique`, at the build and on every later route. A row of the points that carries none is an item
-of its own, addressable by the `tessera_id` the server hands back. The SDK keeps no map between
+of its own, addressable by the `mosaica_id` the server hands back. The SDK keeps no map between
 them: what is inserted is what is written, and what is sent is what the column holds.
 """
 
@@ -128,7 +128,7 @@ def unnamed(db) -> None:
     )
 
 
-def test_an_unnamed_index_is_the_tessera_id_route_and_remove_addresses_by_it(served, corpus):
+def test_an_unnamed_index_is_the_mosaica_id_route_and_remove_addresses_by_it(served, corpus):
     """No attribute is declared unique, and a row is addressed by the id the server hands back."""
     pytest.importorskip("pandas")
     db = served(unnamed)
@@ -151,12 +151,12 @@ def test_a_row_carrying_no_unique_column_creates_an_item_after_the_first_commit(
     report = db.commit()
     assert report.ok, report
     assert report.rows_accepted == {"map": 3} and report.refused == []
-    assert len(report.tessera_ids) == 3 and None not in report.tessera_ids
+    assert len(report.mosaica_ids) == 3 and None not in report.mosaica_ids
     assert viewport(db, "map", FRAME)["counts"]["visible"] == 23
 
 
 def test_a_row_repeating_an_earlier_rows_unique_value_is_left_out_and_counted(served, corpus):
-    """The first row of a repeated value is kept; the later one is refused, has no `tessera_id`,
+    """The first row of a repeated value is kept; the later one is refused, has no `mosaica_id`,
     and the report counts it by its row in the table inserted."""
     db = served(string_ids)
     db.insert("map", papers(["r0", "r0", "r1"], x=30.0), x="x", y="y", access="labels")
@@ -165,18 +165,18 @@ def test_a_row_repeating_an_earlier_rows_unique_value_is_left_out_and_counted(se
     assert report.rows_accepted == {"map": 2}
     assert [one["row"] for one in report.refused] == [1]
     assert sum(report.refused_by_reason.values()) == 1
-    assert report.tessera_ids[1] is None and None not in (report.tessera_ids[0], report.tessera_ids[2])
+    assert report.mosaica_ids[1] is None and None not in (report.mosaica_ids[0], report.mosaica_ids[2])
     assert viewport(db, "map", FRAME)["counts"]["visible"] == 22
 
 
-def test_remove_names_items_by_a_unique_column_or_by_a_list_of_tessera_ids(served, corpus):
-    """A table's rows name items by the unique columns they carry; a bare list is `tessera_id`s."""
+def test_remove_names_items_by_a_unique_column_or_by_a_list_of_mosaica_ids(served, corpus):
+    """A table's rows name items by the unique columns they carry; a bare list is `mosaica_id`s."""
     db = served(string_ids)
     report = db.remove({"paper": ["p0", "p1"]})
     assert report.ok and report.accepted == 2 and report.refused == [], report
     assert viewport(db, "map", FRAME)["counts"]["visible"] == 18
 
-    held = db.lookup("map", "paper", ["p2", "p3"]).column("tessera_id").to_pylist()
+    held = db.lookup("map", "paper", ["p2", "p3"]).column("mosaica_id").to_pylist()
     report = db.remove(held)
     assert report.ok and report.accepted == 2, report
     assert viewport(db, "map", FRAME)["counts"]["visible"] == 16
@@ -209,7 +209,7 @@ def test_a_remove_naming_nothing_is_refused_by_row_and_strict_refuses_the_whole_
 
 
 def test_a_column_naming_no_item_is_ignored_and_named_in_the_report(served, corpus):
-    """A column that is neither `tessera_id` nor a unique attribute is not sent, and the report
+    """A column that is neither `mosaica_id` nor a unique attribute is not sent, and the report
     names it; the rows are applied by the columns that name items."""
     db = served(string_ids)
     report = db.remove({"paper": ["p0", "p1"], "title": ["one", "two"]})
@@ -233,7 +233,7 @@ def test_items_the_call_would_misread_are_refused_and_nothing_is_applied(served,
     for items in (
         "p0",
         [{"paper": "p0"}],
-        {"paper": ["p0", "p1"], "tessera_id": ["1"]},
+        {"paper": ["p0", "p1"], "mosaica_id": ["1"]},
         {"paper": "p0"},
         {"title": ["p0"]},
     ):
@@ -247,10 +247,10 @@ def test_items_the_call_would_misread_are_refused_and_nothing_is_applied(served,
 
 
 def test_a_none_in_a_list_names_no_item_and_is_refused_by_row(served, corpus):
-    """A `None` among `tessera_id`s is sent as a null, which names no item: the server refuses
+    """A `None` among `mosaica_id`s is sent as a null, which names no item: the server refuses
     that row and applies the rest, whether it is the only row or not."""
     db = served(string_ids)
-    [held] = db.lookup("map", "paper", ["p0"]).column("tessera_id").to_pylist()
+    [held] = db.lookup("map", "paper", ["p0"]).column("mosaica_id").to_pylist()
     report = db.remove([None, held])
     assert report.ok and report.accepted == 1, report
     assert report.refused == [{"row": 0, "reason": "names_no_item"}]
@@ -265,11 +265,11 @@ def test_a_none_in_a_list_names_no_item_and_is_refused_by_row(served, corpus):
     assert viewport(db, "map", FRAME)["counts"]["visible"] == 18
 
 
-def test_members_are_named_by_any_mix_of_tessera_id_and_unique_columns(served, corpus):
-    """A members table carrying `tessera_id` and a unique column names each member by whichever
+def test_members_are_named_by_any_mix_of_mosaica_id_and_unique_columns(served, corpus):
+    """A members table carrying `mosaica_id` and a unique column names each member by whichever
     its row carries; a member naming nothing is left out and counted."""
     db = served(string_ids)
-    [by_id] = db.lookup("map", "paper", ["p1"]).column("tessera_id").to_pylist()
+    [by_id] = db.lookup("map", "paper", ["p1"]).column("mosaica_id").to_pylist()
     db.insert(
         "clusters",
         artifacts=pa.table({"level": pa.array([0], pa.uint32()), "key": pa.array(["c1"])}),
@@ -282,7 +282,7 @@ def test_members_are_named_by_any_mix_of_tessera_id_and_unique_columns(served, c
             {
                 "level": pa.array([0, 0, 0], pa.uint32()),
                 "key": pa.array(["c1", "c1", "c1"]),
-                "tessera_id": pa.array([str(by_id), None, None]),
+                "mosaica_id": pa.array([str(by_id), None, None]),
                 "paper": pa.array([None, "p2", "nobody"]),
             }
         ),
@@ -310,12 +310,12 @@ def test_members_are_named_by_any_mix_of_tessera_id_and_unique_columns(served, c
 def test_a_member_structs_fields_naming_no_item_are_ignored_and_named_in_the_report(
     served, corpus
 ):
-    """A member struct is read by its `tessera_id` and unique fields, as a table's columns are;
+    """A member struct is read by its `mosaica_id` and unique fields, as a table's columns are;
     another field is not sent, and the plan and the commit name it."""
     db = served(string_ids)
-    [by_id] = db.lookup("map", "paper", ["p3"]).column("tessera_id").to_pylist()
+    [by_id] = db.lookup("map", "paper", ["p3"]).column("mosaica_id").to_pylist()
     member = pa.struct(
-        [("paper", pa.string()), ("tessera_id", pa.string()), ("note", pa.string())]
+        [("paper", pa.string()), ("mosaica_id", pa.string()), ("note", pa.string())]
     )
     db.insert(
         "clusters",
@@ -324,8 +324,8 @@ def test_a_member_structs_fields_naming_no_item_are_ignored_and_named_in_the_rep
                 "level": pa.array([0], pa.uint32()),
                 "key": pa.array(["c2"]),
                 "members": pa.array(
-                    [[{"paper": "p1", "tessera_id": None, "note": "x"},
-                      {"paper": None, "tessera_id": str(by_id), "note": "y"}]],
+                    [[{"paper": "p1", "mosaica_id": None, "note": "x"},
+                      {"paper": None, "mosaica_id": str(by_id), "note": "y"}]],
                     pa.list_(member),
                 ),
             }

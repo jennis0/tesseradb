@@ -3,7 +3,7 @@
 //!
 //! The oracle is the fixture's own generator: which items exist, where each is placed, what each
 //! carries and which terms it holds are functions of its source id, restated here and never read
-//! back from the bundle. Map order is `(cell, tessera_id)`, with the cell computed from the
+//! back from the bundle. Map order is `(cell, mosaica_id)`, with the cell computed from the
 //! generator's position through the build's own quantisation, and stored order is ascending item
 //! number, read from the index of the unique `id` the build joins on.
 
@@ -46,7 +46,7 @@ use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
-use mosaica_types::{AttrLocalId, EntityId, IdentityKey, TesseraId};
+use mosaica_types::{AttrLocalId, EntityId, IdentityKey, MosaicaId};
 
 const N: u64 = 2000;
 const GEO: &str = "geo";
@@ -684,7 +684,7 @@ fn ids_of(batch: &RecordBatch) -> Vec<u64> {
         .column(0)
         .as_any()
         .downcast_ref::<UInt64Array>()
-        .expect("tessera_id is the first column")
+        .expect("mosaica_id is the first column")
         .values()
         .to_vec()
 }
@@ -757,8 +757,8 @@ fn viewport_counts(
 }
 
 /// Publish one artifact of `members` in a new flat layer `layer` over `s0`, and answer its
-/// `tessera_id`.
-fn publish_cluster(fx: &Fx, layer: &str, members: Range<u64>) -> TesseraId {
+/// `mosaica_id`.
+fn publish_cluster(fx: &Fx, layer: &str, members: Range<u64>) -> MosaicaId {
     fx.engine
         .register_layer(LayerDeclaration {
             scope: Default::default(),
@@ -803,7 +803,7 @@ fn publish_cluster(fx: &Fx, layer: &str, members: Range<u64>) -> TesseraId {
         )
         .unwrap()
         .artifacts()[0]
-        .tessera_id
+        .mosaica_id
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1377,7 +1377,7 @@ fn pages_of(
         .collect()
 }
 
-/// Source id by `tessera_id`, over the built items.
+/// Source id by `mosaica_id`, over the built items.
 fn sources_by_tid(fx: &Fx) -> BTreeMap<u64, u64> {
     fx.entity.keys().map(|&s| (fx.tid(s), s)).collect()
 }
@@ -1394,11 +1394,11 @@ fn absent_values_are_nulls_in_every_home() {
     let mut seen = 0;
     for batch in pages_of(&fx, &session, "s0", &fields, &[]) {
         let schema = batch.schema();
-        let expected_names: Vec<&str> = std::iter::once("tessera_id")
+        let expected_names: Vec<&str> = std::iter::once("mosaica_id")
             .chain(fields.iter().map(String::as_str))
             .collect();
         let got_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        assert_eq!(got_names, expected_names, "tessera_id, then the fields in the order named");
+        assert_eq!(got_names, expected_names, "mosaica_id, then the fields in the order named");
         assert_eq!(
             schema.field_with_name("when").unwrap().data_type(),
             &DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
@@ -1743,7 +1743,7 @@ fn a_joined_item_whose_own_record_is_unflushed_has_null_record_fields() {
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let fields = names(&["note", "tag"]);
-    let mark = engine.tessera_id_of(joiner).unwrap().raw();
+    let mark = engine.mosaica_id_of(joiner).unwrap().raw();
     for order in [RecordsOrder::Map, RecordsOrder::Stored] {
         let mut req = request(GEO, &fields);
         req.order = Some(order);
@@ -2702,7 +2702,7 @@ fn a_columns_first_null_is_counted_against_the_ceiling() {
         let whole = read_all(&fx.engine, &session, &req);
         let scores = col::<Int32Array>(&whole.pages[0].0, "score");
         let at = (0..scores.len()).find(|&i| scores.is_null(i)).expect("one score is absent");
-        // Each row before the null is a `tessera_id` and a score, twelve bytes.
+        // Each row before the null is a `mosaica_id` and a score, twelve bytes.
         let full = 12 * at;
         for ceiling in full..full + 12 + (at + 1).div_ceil(8) + 4 {
             req.limits.max_page_bytes = ceiling;

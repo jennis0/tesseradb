@@ -256,13 +256,13 @@ or been revoked; a corpus change on its own produces no such refusal.
 
 ## The identity key
 
-The `tessera_id` a client holds for an item is derived from the item's
+The `mosaica_id` a client holds for an item is derived from the item's
 [entity id](data-model.md#what-an-item-carries) by a keyed permutation
 ([security](security.md#a-client-never-sees-an-entity-id) covers what that hides). The key is
 drawn at random by `mosaica build` each time it creates a bundle and is stored in the bundle's
 manifest. Nobody configures, supplies or changes it. A rebuild creates a new bundle with a new key,
-so every `tessera_id` changes, and one from the old bundle does not name an item in the new one.
-The change takes effect on the restart that loads the new bundle. A client holding `tessera_id`s
+so every `mosaica_id` changes, and one from the old bundle does not name an item in the new one.
+The change takes effect on the restart that loads the new bundle. A client holding `mosaica_id`s
 from the old bundle reads its items again, by a unique field's values or afresh.
 
 ## Where this is tested and where it lives

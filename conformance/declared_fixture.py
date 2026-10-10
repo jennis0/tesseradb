@@ -18,7 +18,7 @@ live ingest appends), so anything carrying an identifier is rekeyed here, and on
   them. Whatever the live side serves is held to one code per key across every principal and
   every stage.
 
-Rows whose order is set by `tessera_id` (points within a tile, browse rows with equal counts)
+Rows whose order is set by `mosaica_id` (points within a tile, browse rows with equal counts)
 are sorted by the rekeyed identity instead. The artifacts frame's rows are compared by key, and
 the order they were served in is kept beside them as its own answer: a build serves a level's
 artifacts in key order and a running service in the order they were published, which the test
@@ -525,11 +525,11 @@ def _observe_one(
             out[f"viewport {label}"] = normalise_viewport(canon, keys_of, fx_of, artifact_of)
 
     for i in plan.items:
-        tessera = next((t for t, fx in fx_of.items() if fx == i), None)
-        if tessera is None:
+        mosaica = next((t for t, fx in fx_of.items() if fx == i), None)
+        if mosaica is None:
             out[f"item {i}"] = "not served"
             continue
-        out[f"item {i}"] = record_one(server, token, Item(tessera)).payload
+        out[f"item {i}"] = record_one(server, token, Item(mosaica)).payload
 
     for layer in plan.layers:
         for view in plan.views:
@@ -545,12 +545,12 @@ def _observe_one(
                         filtered, artifact_of
                     )
             held = sorted((k, t) for t, (lay, k) in artifact_of.items() if lay == layer)
-            for key, tessera in held:
-                children = record_one(server, token, Browse(view, layer, parent=tessera)).payload
+            for key, mosaica in held:
+                children = record_one(server, token, Browse(view, layer, parent=mosaica)).payload
                 out[f"browse {layer} {view} children of {key}"] = normalise_browse(
                     children, artifact_of
                 )
-                card = record_one(server, token, ArtifactCard(tessera, view)).payload
+                card = record_one(server, token, ArtifactCard(mosaica, view)).payload
                 out[f"artifact {layer} {key} on {view}"] = card
     return out, served_codes
 
@@ -574,7 +574,7 @@ def normalise_viewport(
 ) -> dict:
     """The five surfaces of one viewport answer, with points named by `fx` and artifacts by key.
 
-    Records every `tessera_id -> fx` and `tessera_id -> (layer, key)` it sees into the two maps,
+    Records every `mosaica_id -> fx` and `mosaica_id -> (layer, key)` it sees into the two maps,
     which the item and browse requests then read.
     """
     tiles = streams_table(canon.tiles)
@@ -587,20 +587,20 @@ def normalise_viewport(
 
     artifacts = streams_table(canon.artifacts)
     rows = artifacts.to_pylist() if artifacts is not None else []
-    local = {row["tessera_id"]: (row["layer"], row["key"]) for row in rows}
+    local = {row["mosaica_id"]: (row["layer"], row["key"]) for row in rows}
     artifact_of.update(local)
 
-    def key(tessera):
-        if tessera is None:
+    def key(mosaica):
+        if mosaica is None:
             return None
-        return local[tessera][1] if tessera in local else f"unserved artifact {tessera}"
+        return local[mosaica][1] if mosaica in local else f"unserved artifact {mosaica}"
 
     # Kept apart from the rows, which are compared by key, so an order difference is reported as
     # one and cannot hide a difference in what is served. A tile's rows go by count and then by
-    # `tessera_id`, which each deployment draws for itself, so the order compared is the counts'.
+    # `mosaica_id`, which each deployment draws for itself, so the order compared is the counts'.
     out["artifact order"] = [[row["tile"], row["layer"], row["masked_count"]] for row in rows]
     for row in rows:
-        row.pop("tessera_id")
+        row.pop("mosaica_id")
         row["parent_ids"] = sorted(key(p) for p in row.get("parent_ids") or [])
         if "target" in row:
             row["target"] = key(row["target"])
@@ -611,7 +611,7 @@ def normalise_viewport(
     points = streams_table(canon.points)
     served = []
     for row in points.to_pylist() if points is not None else []:
-        fx_of[row.pop("tessera_id")] = row["fx"]
+        fx_of[row.pop("mosaica_id")] = row["fx"]
         for name, value in row.items():
             if name in keys_of:
                 row[name] = keys_of[name].get(value, value) if value else None
@@ -631,7 +631,7 @@ class Unordered(Exception):
 def normalise_browse(answer: dict, artifact_of: dict[int, tuple[str, str]]) -> dict:
     """A browse page with identifiers replaced by keys.
 
-    The page is ordered by count, descending, and then by `tessera_id`, which the two deployments
+    The page is ordered by count, descending, and then by `mosaica_id`, which the two deployments
     number differently. So each side's counts are checked never to rise down the page, and rows
     are re-sorted by key only within a run of equal counts.
     """
@@ -639,9 +639,9 @@ def normalise_browse(answer: dict, artifact_of: dict[int, tuple[str, str]]) -> d
         return answer
     body = json.loads(json.dumps(answer["body"]))
 
-    def key(tessera: str) -> str:
-        found = artifact_of.get(int(tessera))
-        return found[1] if found else f"unmapped:{tessera}"
+    def key(mosaica: str) -> str:
+        found = artifact_of.get(int(mosaica))
+        return found[1] if found else f"unmapped:{mosaica}"
 
     for group in ("artifacts", "parents"):
         rows = body.get(group, [])
@@ -649,8 +649,8 @@ def normalise_browse(answer: dict, artifact_of: dict[int, tuple[str, str]]) -> d
         if any(later > earlier for earlier, later in zip(counts, counts[1:])):
             raise Unordered(f"browse {group} counts rise down the page: {counts}")
         for row in rows:
-            artifact_of.setdefault(int(row["tessera_id"]), (None, row.get("key")))
-            row["tessera_id"] = key(row["tessera_id"])
+            artifact_of.setdefault(int(row["mosaica_id"]), (None, row.get("key")))
+            row["mosaica_id"] = key(row["mosaica_id"])
             row["parent_ids"] = sorted(key(p) for p in row["parent_ids"])
         runs: list[list[dict]] = []
         for row, count in zip(rows, counts):
@@ -659,7 +659,7 @@ def normalise_browse(answer: dict, artifact_of: dict[int, tuple[str, str]]) -> d
             else:
                 runs.append([(row, count)])
         body[group] = [
-            row for run in runs for row, _ in sorted(run, key=lambda rc: rc[0]["tessera_id"])
+            row for run in runs for row, _ in sorted(run, key=lambda rc: rc[0]["mosaica_id"])
         ]
     if "next" in body:
         body["next"] = "present"

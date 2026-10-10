@@ -13,7 +13,7 @@
 //!    cursor over runs, or a batched value walk (`compose.rs` `for_each_run_in` and
 //!    `decode_source`, on the diffs-empty route the steady state takes).
 //! 3. **select** — `Selection::of` itself, unchanged, with N parts per tile: the m smallest
-//!    `tessera_id`s across the parts with the bounded heap.
+//!    `mosaica_id`s across the parts with the bounded heap.
 //!
 //! A fourth column, **rows_in_range**, is `EffectiveMask::rows_in_range`'s materialised
 //! `leaf ∩ range`, which is what the decode pays instead when the overlay diffs are non-empty.
@@ -362,7 +362,7 @@ fn view_space_mask(map: &Treemap, scratch: &Path) -> EffectiveMask {
 
 /// A segment whose identity column is `rows` random `u64`s, each row in a leaf cell of its own.
 ///
-/// **One row a cell, because the identities are random.** Row order is `(morton, tessera_id)`, so
+/// **One row a cell, because the identities are random.** Row order is `(morton, mosaica_id)`, so
 /// identities ascend within a cell and selection reads them expecting that; a segment claiming one
 /// cell over unsorted identities would be a segment no producer can write. One row a cell is the
 /// shape that asks nothing of the identities, and it is the shape that makes selection read every
@@ -373,7 +373,7 @@ fn synthetic_segment(rows: usize, seed: u64, scratch: &Path) -> SegmentData {
     for row in 0..rows as u32 {
         writer
             .append(SegmentRow {
-                tessera_id: mosaica_types::TesseraId::new(rng.next()),
+                mosaica_id: mosaica_types::MosaicaId::new(rng.next()),
                 morton: row,
                 residual: 0,
                 scalars: &[],

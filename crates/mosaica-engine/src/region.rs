@@ -1,4 +1,4 @@
-//! The region operand — a drawn shape, or a published one named by its `tessera_id`, as a set of
+//! The region operand — a drawn shape, or a published one named by its `mosaica_id`, as a set of
 //! rows over the whole view (`selection-operand.md`; `polygon-membership.md` §8).
 //!
 //! **What is cached and what is not, and why the line sits where it does.** A shape's

@@ -1,12 +1,12 @@
 //! Per-user LOD selection — design §7.2's definition, evaluated inside the mask (I7).
 //!
-//! For a tile *T* at depth *d*, with `vis(T)` its visible row set ordered ascending by `tessera_id`:
+//! For a tile *T* at depth *d*, with `vis(T)` its visible row set ordered ascending by `mosaica_id`:
 //!
 //! ```text
 //! cap    = min(request_k, k_max_marks)
-//! C_θ(T) = |{ i ∈ vis(T) : tessera_id(i) < P_d }|
+//! C_θ(T) = |{ i ∈ vis(T) : mosaica_id(i) < P_d }|
 //! m(T)   = min(cap, max(min(k_min, cap), C_θ(T)))
-//! served(T) = the min(m(T), |vis(T)|) smallest members of vis(T) by tessera_id
+//! served(T) = the min(m(T), |vis(T)|) smallest members of vis(T) by mosaica_id
 //! ```
 //!
 //! A **floor** of `k_min` (the I7 guarantee — the sparsest principals' maps are never empty), a
@@ -14,7 +14,7 @@
 //! tiles are equal screen area, so mark count *is* density), and a **cap**. §7.2 carries the
 //! reasoning, the nesting proof and the accepted residuals; this module implements it.
 //!
-//! **Two routes through the definition, one answer.** Rows are stored in `(morton, tessera_id)`
+//! **Two routes through the definition, one answer.** Rows are stored in `(morton, mosaica_id)`
 //! order, so within a leaf Morton cell the identities ascend: `C_θ` for that cell is a prefix
 //! length and the cell's smallest visible identities are the head of it. Where a tile's mask is
 //! dense enough to decode as ranges, and the segment's cells are long enough to pay for a cell
@@ -60,7 +60,7 @@
 //!   sees one request at a time and cannot enforce it; contracts §3.2 states it as a client
 //!   obligation. Recorded here because §7.2 keeps its bit-reversal note for exactly this class of
 //!   mistake being re-derived.
-//! - **The comparator is the full `tessera_id`, not the `priority` prefix**, and no
+//! - **The comparator is the full `mosaica_id`, not the `priority` prefix**, and no
 //!   prefix-scan-then-fall-through path exists (§7.2 r21 directs that none be built).
 //!   The two orders are identical because `priority` is a prefix, so this costs no correctness —
 //!   only 8 B/row of scanned column where 2 B would do. Design Appendix A records that cost and
@@ -70,7 +70,7 @@
 //!
 //! **NO CANDIDATE-LIST ROUTE.** Everything below evaluates the definition *directly* from the
 //! mask, at every coverage. §7.2 specifies a second route — per-node precomputed lists of the
-//! top `c·k` items by `tessera_id`, unmasked, filtered at query time — and the owner has
+//! top `c·k` items by `mosaica_id`, unmasked, filtered at query time — and the owner has
 //! **declined** it (`docs/decisions/0008-candidate-list-route-declined.md`). This block records
 //! why, with the evidence,
 //! because a claim without its evidence gets re-litigated and the deletion of the direct path
@@ -138,11 +138,11 @@ use crate::compose::EffectiveMask;
 ///
 /// `Saturated` is a first-class state, **not** a value clamped to `u64::MAX`: at θ ≥ 1 the
 /// threshold must admit *every* identity, and `Cut(u64::MAX)` would wrongly exclude the single row
-/// whose `tessera_id` is `u64::MAX`. That exactness is what lets [`Selection::of`]'s fast path be
+/// whose `mosaica_id` is `u64::MAX`. That exactness is what lets [`Selection::of`]'s fast path be
 /// exact rather than conservative — see its doc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Threshold {
-    /// Admits `tessera_id < cut`.
+    /// Admits `mosaica_id < cut`.
     Cut(u64),
     /// θ_d ≥ 1: admits every identity.
     Saturated,
@@ -228,11 +228,11 @@ pub struct SelectParams {
     /// of `k = 1` against `k_min = 2` cannot produce `m > cap`.
     pub k_min: usize,
     /// `min(request_k, k_max_marks)`. Applied *inside* the definition, which is free: `served(T)`
-    /// is a `tessera_id` prefix, so computing at `min(k, k_max_marks)` and computing at
+    /// is a `mosaica_id` prefix, so computing at `min(k, k_max_marks)` and computing at
     /// `k_max_marks` then truncating to `k` give identical output. Doing it inside bounds the
     /// selection heap and the output gather. **It does not bound `C_θ`**, which is a masked count
     /// over the whole tile — but the route does not read the whole tile to obtain it: storage
-    /// order is `(morton, tessera_id)`, so identities ascend within a leaf Morton cell, and the
+    /// order is `(morton, mosaica_id)`, so identities ascend within a leaf Morton cell, and the
     /// rows below `P_d` are a prefix of each cell that a binary search finds. The two dense tiers
     /// evaluate per cell ([`scan_cell_piece`]); the value tier scans, which is what costs least
     /// where the visible rows are scattered over many cells.
@@ -461,7 +461,7 @@ impl<'a> SelectionPart<'a> {
 /// **The union is a genuine union, not a concatenation, and that is §7.2's requirement rather than
 /// a convenience.** `cap` and `k_min` are per *tile*: a tile spanning three segments has one `k`
 /// budget to spend across all three, one `C_θ` counted over all three, and one served set that is
-/// the `m` smallest `tessera_id`s in the union. Selecting per segment and concatenating would
+/// the `m` smallest `mosaica_id`s in the union. Selecting per segment and concatenating would
 /// serve up to `parts × cap` marks and would break I7's floor in the other direction too — a tile
 /// with one visible row in each of three segments would draw `3·k_min`, not `k_min`.
 pub struct SelectionParts<'a> {
@@ -499,13 +499,13 @@ impl<'a> SelectionParts<'a> {
 
     fn id_at(&self, view_row: u32) -> u64 {
         let (segment, local) = self.resolve(view_row);
-        segment.columns.tessera_id()[local as usize]
+        segment.columns.mosaica_id()[local as usize]
     }
 }
 
 /// Where the leaf Morton cell being walked ends, and what is already settled about it.
 ///
-/// Storage order is `(morton, tessera_id)`, so identities ascend **within** a leaf cell and not
+/// Storage order is `(morton, mosaica_id)`, so identities ascend **within** a leaf cell and not
 /// across one. Both of selection's quantities are therefore prefix questions per cell, and both
 /// answer themselves before the cell is exhausted: the rows below `P_d` are a prefix, and the rows
 /// that can still enter the heap are a prefix. `count_done` and `heap_done` are those two prefixes
@@ -701,9 +701,9 @@ fn scan_row_piece(
     *rows_visited += slice.len() as u64;
 }
 
-/// One tile's selected rows, ascending by `tessera_id`.
+/// One tile's selected rows, ascending by `mosaica_id`.
 pub struct Selection {
-    /// Row indices in **view row space**, **ascending by the row's `tessera_id`** — not by row
+    /// Row indices in **view row space**, **ascending by the row's `mosaica_id`** — not by row
     /// index. Resolve each to its segment with [`SelectionParts::resolve`] before gathering.
     pub rows: Vec<u32>,
     /// How many rows this call actually read, counted **inside** the loops that read them.
@@ -727,7 +727,7 @@ pub struct Selection {
 impl Selection {
     /// Evaluate §7.2's definition over `range` under `mask`.
     ///
-    /// Rows come back ascending by `tessera_id` whichever branch runs — the nesting argument's
+    /// Rows come back ascending by `mosaica_id` whichever branch runs — the nesting argument's
     /// client-truncation clause needs the payload to be a *prefix*, and a branch-dependent order
     /// would be a differential-oracle landmine.
     ///
@@ -852,7 +852,7 @@ impl Selection {
                 }
             }
             // One sort over the union, not one per part followed by a merge: the payload must be
-            // a single `tessera_id` prefix across the whole tile (the nesting argument's
+            // a single `mosaica_id` prefix across the whole tile (the nesting argument's
             // client-truncation clause), and a per-part sort would only be a prefix within each
             // segment.
             rows.sort_unstable_by_key(|&row| parts.id_at(row));
@@ -896,7 +896,7 @@ impl Selection {
                 if part.is_empty() {
                     continue;
                 }
-                let ids = part.segment.columns.tessera_id();
+                let ids = part.segment.columns.mosaica_id();
                 let base = part.row_base;
                 let view_range = part.view_range();
                 let range_len = u64::from(view_range.end - view_range.start);
@@ -1035,7 +1035,7 @@ impl Selection {
         debug_assert!(
             rows.windows(2)
                 .all(|w| parts.id_at(w[0]) != parts.id_at(w[1])),
-            "two rows in one tile share a tessera_id — the identity is a bijection over 2^64 with \
+            "two rows in one tile share a mosaica_id — the identity is a bijection over 2^64 with \
              one row per entity (contracts §2.6), and the determinism of the whole selection rests \
              on that being true"
         );

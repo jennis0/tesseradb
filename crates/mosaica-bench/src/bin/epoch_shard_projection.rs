@@ -166,7 +166,7 @@ fn splitmix64(x: u64) -> u64 {
 ///
 /// The construction `crates/mosaica-store/examples/project_decomposition.rs` used for the 1 277 ms
 /// figure, with a seed so that shards differ from one another. It stands in for the
-/// `(morton, tessera_id)` order a build produces: `project`'s cost depends only on the map being
+/// `(morton, mosaica_id)` order a build produces: `project`'s cost depends only on the map being
 /// uncorrelated with entity order. A bijection on the larger domain restricted by walking is a
 /// bijection on `[0, n)`; `Permutation::validate_rows` checks that below.
 struct Shuffle {

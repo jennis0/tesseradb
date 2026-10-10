@@ -23,7 +23,7 @@
 //! **P1's rebuild row is superseded** (`probes/2026-08-14-project-decomposition/`): it measures the
 //! rebuild over the *identity* permutation this file writes, where the gathered rows come out
 //! already sorted and the sort it was meant to size charges almost nothing. A build orders rows by
-//! `(morton, tessera_id)`, so a real slot array scatters. The other three rungs are unaffected —
+//! `(morton, mosaica_id)`, so a real slot array scatters. The other three rungs are unaffected —
 //! they walk the same bitmap whatever the permutation is, which is what this probe is good for.
 //!
 //! The earlier 10.7 s / 125.12 MB figures came from a

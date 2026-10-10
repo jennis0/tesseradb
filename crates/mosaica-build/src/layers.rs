@@ -31,7 +31,7 @@
 //! A member is named by the values of the unique fields it carries, in a members file's columns
 //! or as a struct per member in an artifact row's list, and the rule decides which item each
 //! names ([`crate::ids`]), exactly as it decides a points row's. A member naming no item is a row
-//! the rule refused and the build reports, and the artifact holds the rest. A `tessera_id` would
+//! the rule refused and the build reports, and the artifact holds the rest. A `mosaica_id` would
 //! be meaningless here: it is a keyed permutation of an entity space this build is in the middle
 //! of assigning.
 //!

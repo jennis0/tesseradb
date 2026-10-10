@@ -269,7 +269,7 @@ async fn viewport(
         .unwrap()
 }
 
-/// The `tessera_id`s a view answers with under a filter — an **entity** set, since an identifier is
+/// The `mosaica_id`s a view answers with under a filter — an **entity** set, since an identifier is
 /// the entity's wherever it appears (`views.md` §1), which is what lets two views' answers be
 /// compared directly.
 async fn ids(served: &Served, view: &str, filters: Option<Value>) -> BTreeSet<u64> {

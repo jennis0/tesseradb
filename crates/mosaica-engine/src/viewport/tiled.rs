@@ -1,6 +1,6 @@
 //! **What things are here**: the artifacts of each requested layer that this viewer is served and
 //! that hold a member the viewer can see inside a tile, tile by tile in the request's order. Within
-//! one tile and one level they go by whole visible count, largest first, then by `tessera_id`, up
+//! one tile and one level they go by whole visible count, largest first, then by `mosaica_id`, up
 //! to the request's quota. An artifact with visible members in several tiles is served in each,
 //! with the same whole figures.
 //!
@@ -191,7 +191,7 @@ impl ViewportArtifactsOut {
         self.frames
             .iter()
             .flat_map(|frame| &frame.artifacts)
-            .filter(|artifact| seen.insert(artifact.tessera_id))
+            .filter(|artifact| seen.insert(artifact.mosaica_id))
             .cloned()
             .collect()
     }
@@ -239,7 +239,7 @@ struct LevelState {
 /// An artifact the gate passed, its identifier formed and its content read: what its assembly
 /// needs beyond its tile.
 struct Admitted {
-    tessera_id: u64,
+    mosaica_id: u64,
     passing: Passing,
     content: Vec<String>,
 }
@@ -489,7 +489,7 @@ impl Engine {
     }
 
     /// One level's artifacts in one tile: the first `per_tile` of those served and present there,
-    /// by whole visible count and then `tessera_id`, assembled into `walked` with their filter
+    /// by whole visible count and then `mosaica_id`, assembled into `walked` with their filter
     /// bits taken inside the tile. A dependent whose target the frame does not hold takes no place
     /// in the quota, since the frame would drop it.
     fn serve_tile_level(
@@ -609,7 +609,7 @@ impl Engine {
     }
 
     /// The first `per_tile` of `candidates` that are served, `targeted` and `present`, by the
-    /// level's figures: count descending, then `tessera_id`. Candidates are taken a count at a
+    /// level's figures: count descending, then `mosaica_id`. Candidates are taken a count at a
     /// time, so a verdict and a presence test are paid only down to the count that fills the quota.
     #[allow(clippy::too_many_arguments)]
     fn by_count(
@@ -646,7 +646,7 @@ impl Engine {
                 .filter_map(|&ordinal| self.admitted(level, view, state, ordinal))
                 .filter(|admitted| targeted(admitted.passing.0))
                 .collect();
-            ranked.sort_unstable_by_key(|admitted| admitted.tessera_id);
+            ranked.sort_unstable_by_key(|admitted| admitted.mosaica_id);
             for admitted in ranked {
                 if chosen.len() == per_tile {
                     break;
@@ -660,7 +660,7 @@ impl Engine {
     }
 
     /// The first `per_tile` artifacts the tile index proposes in the tile that hold a visible
-    /// member there and are served and `targeted`, by whole visible count and then `tessera_id`.
+    /// member there and are served and `targeted`, by whole visible count and then `mosaica_id`.
     fn by_index(
         &self,
         level: &LevelPass<'_>,
@@ -688,7 +688,7 @@ impl Engine {
             }
         }
         ranked.sort_unstable_by(|a, b| {
-            (b.passing.2.cmp(&a.passing.2)).then(a.tessera_id.cmp(&b.tessera_id))
+            (b.passing.2.cmp(&a.passing.2)).then(a.mosaica_id.cmp(&b.mosaica_id))
         });
         ranked.truncate(per_tile);
         ranked
@@ -724,9 +724,9 @@ impl Engine {
                 true,
                 contents,
             )?;
-            let tessera_id = self.identity_key.forward(pass.shard, entity).ok()?.raw();
+            let mosaica_id = self.identity_key.forward(pass.shard, entity).ok()?.raw();
             Some(Arc::new(Admitted {
-                tessera_id,
+                mosaica_id,
                 passing: (ordinal, entity, masked_count, rank),
                 content: supplied.values,
             }))

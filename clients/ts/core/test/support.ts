@@ -278,11 +278,11 @@ export function tileAnswers(
 }
 
 /** An artifact on layer `l` at rung 0 with no geometry, parents or content. */
-export function artifact(tesseraId: bigint, over: Partial<Artifact> = {}): Artifact {
+export function artifact(mosaicaId: bigint, over: Partial<Artifact> = {}): Artifact {
   return {
     layer: 'l',
-    tesseraId,
-    key: `a${tesseraId}`,
+    mosaicaId,
+    key: `a${mosaicaId}`,
     maskedCount: 1n,
     centroid: null,
     box: null,

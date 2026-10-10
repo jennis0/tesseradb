@@ -5,7 +5,7 @@
 //! k-way merge takes a *contiguous, non-overlapping* window of adjacent segments. This pass takes
 //! **every live segment of one (partition, view)** — the base plus every extent, named by the
 //! fold's plan-time snapshot — and merges them the same way `execute_merge` does: a heap over one
-//! `(morton, tessera_id)` key per input cursor, each cursor an index into a pair of mapped files.
+//! `(morton, mosaica_id)` key per input cursor, each cursor an index into a pair of mapped files.
 //! Nothing here decodes a batch and nothing here re-sorts; the merged order falls out of the heap
 //! because every input already carries it (contracts §2.6).
 //!
@@ -18,7 +18,7 @@
 //!    contiguity says nothing about spatial locality). Entity space itself stays partitioned across
 //!    live segments the way it always has (row space is a bijection — one row per live entity), but
 //!    this pass never checks or relies on that; it needs only that each input is internally
-//!    `(morton, tessera_id)`-ascending, which `MortonSlice::load` already guarantees. Accordingly
+//!    `(morton, mosaica_id)`-ascending, which `MortonSlice::load` already guarantees. Accordingly
 //!    [`FoldSegmentInput`] carries no entity range, unlike [`crate::merge::MergeInput`] — requiring
 //!    one here would reimport exactly the precondition this pass must not inherit.
 //! 2. **Rows are dropped.** A row whose entity is in the caller's tombstone set is never appended
@@ -52,7 +52,7 @@
 //!
 //! `execute_merge` learns its extent in row order and can fill an in-memory `Vec` sized to its
 //! (bounded, policy-capped) entity span. This pass has no such bound — its span is the *whole*
-//! entity space — and it learns `perm[entity] = row` in `(morton, tessera_id)` order, which is not
+//! entity space — and it learns `perm[entity] = row` in `(morton, mosaica_id)` order, which is not
 //! entity order. [`PermutationWriter`] exists precisely for this: it scatters into a memory-mapped
 //! `permutation.bin` in whatever order rows arrive, at the cost of `bound × 4` bytes of `0xFF`
 //! written up front (dirty shared mapping, not anonymous — 4 GB at a 10⁹-entity bound, compaction
@@ -80,7 +80,7 @@ use std::path::{Path, PathBuf};
 use croaring::Bitmap;
 
 use mosaica_spatial::tiler::ScalarType;
-use mosaica_types::{IdentityKey, TesseraId};
+use mosaica_types::{IdentityKey, MosaicaId};
 
 use crate::error::{Result, StoreError};
 use crate::segment_cursor::{gather_scalars, SegmentCursor};
@@ -108,7 +108,7 @@ pub struct FoldSegmentInput {
 pub struct FoldRowSpaceSpec<'a> {
     /// Every live segment of one (partition, view) at the fold's snapshot — the base plus every
     /// extent. Order does not matter: the merge is driven entirely by the heap over each cursor's
-    /// `(morton, tessera_id)` key.
+    /// `(morton, mosaica_id)` key.
     pub inputs: &'a [FoldSegmentInput],
     pub identity_key: &'a IdentityKey,
     pub shard_id: u32,
@@ -246,13 +246,13 @@ pub fn fold_row_space(
         .collect();
 
     // The merged order, from a heap over one key per live cursor — identical shape to
-    // `execute_merge`'s. Two rows share a `tessera_id` only where an edit left an item's deleted
+    // `execute_merge`'s. Two rows share a `mosaica_id` only where an edit left an item's deleted
     // entity beside its new one, and the deleted one is dropped below, so the `index` tiebreak
     // gives `BinaryHeap` a total order and decides no surviving row's place.
     let mut heap: BinaryHeap<Reverse<(u32, u64, usize)>> = BinaryHeap::with_capacity(cursors.len());
     for (index, cursor) in cursors.iter().enumerate() {
-        if let Some((morton, tessera_id)) = cursor.key() {
-            heap.push(Reverse((morton, tessera_id, index)));
+        if let Some((morton, mosaica_id)) = cursor.key() {
+            heap.push(Reverse((morton, mosaica_id, index)));
         }
     }
 
@@ -260,10 +260,10 @@ pub fn fold_row_space(
     // anything computed before this row's drop decision. This is what makes the shift a dropped
     // row causes to every later row automatic rather than something tracked.
     let mut row_count: u32 = 0;
-    while let Some(Reverse((morton, tessera_raw, index))) = heap.pop() {
+    while let Some(Reverse((morton, mosaica_raw, index))) = heap.pop() {
         let cursor = &mut cursors[index];
         let row = cursor.row;
-        let tessera_id = TesseraId::new(tessera_raw);
+        let mosaica_id = MosaicaId::new(mosaica_raw);
         let entity = cursor.entity(spec.identity_key, spec.shard_id)?;
 
         // Advance the cursor and refill the heap before the drop decision below, so an early
@@ -295,7 +295,7 @@ pub fn fold_row_space(
         };
         writer
             .append(SegmentRow {
-                tessera_id,
+                mosaica_id,
                 morton,
                 residual: reading.columns.residual()[row],
                 scalars: &scalars,

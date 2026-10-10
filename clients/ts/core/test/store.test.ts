@@ -926,7 +926,7 @@ describe('clusters are coloured by the slot the server gives each, in the chosen
     expect(colourOf(2n)).toEqual(PALETTES['okabe-ito'].colours[2]);
   });
 
-  it('puts a colour chosen by layer and tessera_id over the slot’s, until a later call leaves it out', async () => {
+  it('puts a colour chosen by layer and mosaica_id over the slot’s, until a later call leaves it out', async () => {
     const {store, colourOf} = await slotted();
     const chosen = [1, 2, 3, 255] as const;
     store.setArtifactColours(new Map([['clusters/a', new Map([[2n, chosen], [4n, chosen]])], ['clusters/b', new Map([[1n, chosen]])]]));
@@ -971,7 +971,7 @@ describe('clusters are coloured by the slot the server gives each, in the chosen
     const {store, colourOf} = await slotted();
     // A point's tag naming artifact 4 with a slot from Tableau 10, as a lookup by identifier left it.
     const table = store.get('artifacts').table as unknown as {take(refs: unknown[]): Uint32Array};
-    table.take([{tesseraId: 9n, layer: 'clusters/a', parentIds: [], slot: {slot: 6, paletteSize: 10}}]);
+    table.take([{mosaicaId: 9n, layer: 'clusters/a', parentIds: [], slot: {slot: 6, paletteSize: 10}}]);
     store.setPalette('kelly');
     expect(colourOf(9n)).toEqual(PALETTES.tableau10.colours[6]);
   });
@@ -1226,7 +1226,7 @@ describe('clear() and a refused request reach the region and the shapes', () => 
     await clock.advance(600);
     scheduler.flush();
     await clock.advance(600);
-    expect(store.get('artifacts').served.map((a) => a.tesseraId)).toEqual([2n]);
+    expect(store.get('artifacts').served.map((a) => a.mosaicaId)).toEqual([2n]);
     store.needShape(2n);
     await clock.advance(1);
     store.select({kind: 'box', bbox: [0, 0, 1, 1]});
@@ -1318,7 +1318,7 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
     if (req.k !== 0) {
       for (const name of named) {
         const first = ROWS[name]?.[0];
-        if (first && first.target === null && name !== 'mesh') membership[name] = {index: Uint16Array.from(r.result.ids, () => 1), ids: BigUint64Array.of(first.tesseraId)};
+        if (first && first.target === null && name !== 'mesh') membership[name] = {index: Uint16Array.from(r.result.ids, () => 1), ids: BigUint64Array.of(first.mosaicaId)};
       }
     }
     return {...r, layersAsked: named, result: {...r.result, membership}};
@@ -1727,7 +1727,7 @@ describe('a store serves one viewer', () => {
     for (const t of store.get('tiles').tiles) {
       if (t.counts) who.add(t.counts.visible === VIEWERS.a.visible ? 'ik-a' : 'ik-b');
     }
-    for (const a of store.get('artifacts').served) who.add(a.tesseraId === VIEWERS.a.artifact ? 'ik-a' : 'ik-b');
+    for (const a of store.get('artifacts').served) who.add(a.mosaicaId === VIEWERS.a.artifact ? 'ik-a' : 'ik-b');
     return who;
   }
 
@@ -1837,7 +1837,7 @@ describe('a store serves one viewer', () => {
     expect(late).toEqual([]);
     expect(store.get('marks').bands.length).toBeGreaterThan(0);
     expect(showing(store)).toEqual(new Set(['ik-b']));
-    expect(store.get('artifacts').served.map((a) => a.tesseraId)).toEqual([VIEWERS.b.artifact]);
+    expect(store.get('artifacts').served.map((a) => a.mosaicaId)).toEqual([VIEWERS.b.artifact]);
     expect(store.get('artifacts').shapes.has(VIEWERS.a.artifact)).toBe(false);
     expect(await store.describe(7n)).toEqual({asked: 't2'});
   });
@@ -2007,7 +2007,7 @@ describe('a store serves one viewer', () => {
     const marks = store.get('marks');
     for (const band of [...marks.bands, ...marks.standIn.map((piece) => piece.band)]) who.add(band.identityKey.split(':')[0] as Who);
     for (const t of store.get('tiles').tiles) if (t.counts) who.add(t.counts.visible === VIEWERS.a.visible ? 'a' : 'b');
-    for (const a of store.get('artifacts').served) who.add(a.tesseraId === VIEWERS.a.artifact ? 'a' : 'b');
+    for (const a of store.get('artifacts').served) who.add(a.mosaicaId === VIEWERS.a.artifact ? 'a' : 'b');
     if (store.get('meta') === metas.a) who.add('a');
     if (store.get('meta') === metas.b) who.add('b');
     return who;
@@ -2199,7 +2199,7 @@ describe('a store serves one viewer', () => {
       }
       expect(interrupted).toBe(true);
       const table = store.get('artifacts').table;
-      const ids = table.liveEntries().map(({entry}) => entry.tesseraId);
+      const ids = table.liveEntries().map(({entry}) => entry.mosaicaId);
       expect(ids.length).toBe(N);
       expect(ids.every((id) => id >= 5_000n)).toBe(true);
     } finally {

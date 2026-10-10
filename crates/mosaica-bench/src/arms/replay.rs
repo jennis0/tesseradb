@@ -113,9 +113,9 @@ fn route_template(method: &str, path: &str) -> String {
     let template = match segments.as_slice() {
         ["v1", "categories", _] => "/v1/categories/{column}",
         ["v1", "categories", _, "suggest"] => "/v1/categories/{column}/suggest",
-        ["v1", "items", _] => "/v1/items/{tessera_id}",
+        ["v1", "items", _] => "/v1/items/{mosaica_id}",
         ["v1", "artifacts", "browse"] => "/v1/artifacts/browse",
-        ["v1", "artifacts", _] => "/v1/artifacts/{tessera_id}",
+        ["v1", "artifacts", _] => "/v1/artifacts/{mosaica_id}",
         _ => path,
     };
     format!("{method} {template}")

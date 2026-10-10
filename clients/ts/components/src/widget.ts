@@ -36,7 +36,7 @@ import './explorer.js';
  * `value_colours` and `cluster_colours`, sent up as each colour is chosen on a card or in Edit
  * colours; `selected`, `selected_artifact` and `region` go up. Up-syncs happen at the settle (a new
  * composition shown, or a region's counts), not per frame. Ids cross as decimal strings, since a
- * `tessera_id` is a `u64`.
+ * `mosaica_id` is a `u64`.
  *
  * The token is per model; the store and camera are per view, since a store has one view input.
  * Each view builds its own store over the shared supplier, which returns a held token without a
@@ -440,7 +440,7 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
   model.on('change:url', rebuildAll);
   model.on('change:artifacts_per_tile', rebuildAll);
   // A view change calls `setCurrentView` on each store; a store holds several views, so stepping
-  // through a roster rebuilds nothing. A `url` change rebuilds, since a `tessera_id` from one
+  // through a roster rebuilds nothing. A `url` change rebuilds, since a `mosaica_id` from one
   // bundle means nothing in another. A switch made in one view reaches only that view's store,
   // through the echo guard; one written from the kernel reaches every view.
   model.on('change:view', () => {
@@ -585,7 +585,7 @@ function applyBudget(explorer: MosaicaExplorer, model: WidgetModel): void {
   if (typeof clustersMax === 'number') explorer.clusterBudgetMax = clustersMax;
 }
 
-/** The cluster colours `store` holds, by layer and `tessera_id`, as `#rrggbb`. */
+/** The cluster colours `store` holds, by layer and `mosaica_id`, as `#rrggbb`. */
 function clusterColoursOf(store: Store): Record<string, Record<string, string>> {
   const out: Record<string, Record<string, string>> = {};
   for (const [layer, ids] of store.get('artifacts').overrides) {

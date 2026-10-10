@@ -172,7 +172,7 @@ fn a_merged_segment_carries_its_own_bands() {
     // Each entry's indexed value is its own item's, carried from the input it came from.
     let copy = segment.bands.copy("score").expect("the indexed column is copied");
     for (e, &id) in segment.bands.ids().iter().enumerate() {
-        let entity = key().invert(mosaica_types::TesseraId::new(id)).1.raw();
+        let entity = key().invert(mosaica_types::MosaicaId::new(id)).1.raw();
         let held = copy.holds(e).then(|| copy.value_at(e));
         let expected = match score_of(entity) {
             mosaica_spatial::tiler::ScalarValue::Null => None,
@@ -187,7 +187,7 @@ fn a_merged_segment_carries_its_own_bands() {
 /// position identical to its input's. Dequantise-and-re-quantise would move points by up to a
 /// quantisation step, silently, on every merge.
 ///
-/// Asserted as a multiset over `(tessera_id, code, residual)`: the *order* changes, and nothing
+/// Asserted as a multiset over `(mosaica_id, code, residual)`: the *order* changes, and nothing
 /// else may.
 #[test]
 fn a_merge_moves_no_point() {
@@ -205,7 +205,7 @@ fn a_merge_moves_no_point() {
         let cols = ColumnsRef::load(&d.join("columns.arrow")).unwrap();
         for row in 0..codes.u32().len() {
             before.push((
-                cols.tessera_id()[row],
+                cols.mosaica_id()[row],
                 codes.u32()[row],
                 cols.residual()[row],
             ));
@@ -220,7 +220,7 @@ fn a_merge_moves_no_point() {
     let mut after: Vec<(u64, u32, u32)> = (0..codes.u32().len())
         .map(|row| {
             (
-                cols.tessera_id()[row],
+                cols.mosaica_id()[row],
                 codes.u32()[row],
                 cols.residual()[row],
             )
@@ -251,8 +251,8 @@ fn the_extent_maps_every_entity_to_its_merged_row() {
     for entity in (100..106).chain(200..205) {
         let row = out.extent.rows[(entity - 100) as usize];
         assert_ne!(row, mosaica_types::ROW_ABSENT, "entity {entity} has a row");
-        let (shard, back) = key().invert(mosaica_types::TesseraId::new(
-            cols.tessera_id()[row as usize],
+        let (shard, back) = key().invert(mosaica_types::MosaicaId::new(
+            cols.mosaica_id()[row as usize],
         ));
         assert_eq!(shard, 0);
         assert_eq!(
@@ -394,7 +394,7 @@ fn a_column_declared_since_the_inputs_is_absent_in_every_row_rather_than_shiftin
         "every row came from an input without the column, so every row is absent"
     );
     assert_eq!(
-        cols.tessera_id().len(),
+        cols.mosaica_id().len(),
         10,
         "the fixed columns keep every row"
     );
@@ -413,7 +413,7 @@ fn a_column_declared_since_the_inputs_is_absent_in_every_row_rather_than_shiftin
 /// The fixture interleaves deliberately (see [`segment`]'s `stride`), so the two producers
 /// genuinely disagree about input order and agree only about output order.
 ///
-/// **Mutations this kills:** dropping the `tessera_id` component of the heap key (ties inside one
+/// **Mutations this kills:** dropping the `mosaica_id` component of the heap key (ties inside one
 /// Morton cell then order by input, not by identity); reading the residual from the wrong cursor;
 /// spooling a column little-endian where arrow reads it native; emitting the extent's ordinal
 /// rather than the emission ordinal.
@@ -422,7 +422,7 @@ fn the_k_way_merge_emits_exactly_what_a_concatenate_and_sort_would() {
     use mosaica_spatial::tiler::TilerItem;
     use mosaica_spatial::unsplit32;
     use mosaica_store::write::write_segment;
-    use mosaica_types::{MortonCode, TesseraId};
+    use mosaica_types::{MortonCode, MosaicaId};
 
     let dir = tempfile::TempDir::new().unwrap();
     build_bundle(dir.path(), 10);
@@ -433,7 +433,7 @@ fn the_k_way_merge_emits_exactly_what_a_concatenate_and_sort_would() {
     ];
 
     // What the superseded path did: read every input's rows, concatenate, sort by
-    // `(morton, tessera_id)`, write through the one segment writer.
+    // `(morton, mosaica_id)`, write through the one segment writer.
     let mut items: Vec<TilerItem> = Vec::new();
     let mut entity_ids: Vec<mosaica_types::EntityId> = Vec::new();
     for input in &inputs {
@@ -441,15 +441,15 @@ fn the_k_way_merge_emits_exactly_what_a_concatenate_and_sort_would() {
         let codes = MortonSlice::load(&d.join("morton.u32")).unwrap();
         let cols = ColumnsRef::load(&d.join("columns.arrow")).unwrap();
         for row in 0..codes.u32().len() {
-            let tessera_id = TesseraId::new(cols.tessera_id()[row]);
+            let mosaica_id = MosaicaId::new(cols.mosaica_id()[row]);
             let (qx, qy) = unsplit32(MortonCode::new(codes.u32()[row]), cols.residual()[row]);
             items.push(TilerItem {
-                tessera_id,
+                mosaica_id,
                 qx,
                 qy,
                 scalars: vec![],
             });
-            entity_ids.push(key().invert(tessera_id).1);
+            entity_ids.push(key().invert(mosaica_id).1);
         }
     }
     let expected_dir = dir.path().join("expected");

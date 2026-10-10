@@ -288,7 +288,7 @@ export type FilterExpr =
  * - `bbox`: `[x0, y0, x1, y1]`, closed on every side.
  * - `circle`: `[cx, cy, r]`.
  * - `ellipse`: `[cx, cy, a, b, angle_degrees]`.
- * - `artifact`: a published artifact's `tessera_id` as a decimal string, matching its members.
+ * - `artifact`: a published artifact's `mosaica_id` as a decimal string, matching its members.
  *   An id naming nothing, an artifact this principal would not be served, one on another view and
  *   one whose layer draws an authored shape all match nothing.
  *
@@ -321,7 +321,7 @@ export type MemberOfOperand = {
   /** The layer's name, as `/v1/meta` lists it. */
   layer: string;
   /**
-   * The artifact's `tessera_id` as a decimal string. A JSON number cannot hold every 64-bit id,
+   * The artifact's `mosaica_id` as a decimal string. A JSON number cannot hold every 64-bit id,
    * so a number here would lose the top of the range.
    */
   artifact: string;
@@ -406,7 +406,7 @@ export type Layer = {
   /**
    * The kind of the layer's one drawn outline, or `null` where it draws none. A `derived` shape is
    * the hull of the members this principal can see and differs between principals, so it must not
-   * be kept against a `tesseraId` across a change of principal. A `predicate` shape (a spatial
+   * be kept against a `mosaicaId` across a change of principal. A `predicate` shape (a spatial
    * layer's membership shape) and an `authored` one (supplied by the publisher) are the same for
    * every principal served the artifact and may be kept.
    */
@@ -784,10 +784,10 @@ export type ViewportRequest = {
   highlight?: FilterExpr | null;
   /**
    * Which columns each served point carries. `'full'`, the default, is every render column. A list
-   * names the render columns to carry: each point is its `tessera_id`, its position and those
+   * names the render columns to carry: each point is its `mosaica_id`, its position and those
    * columns, with the highlight bit and the membership columns as under `'full'`, and the server
    * reads no other render column. `[]` is the position alone. A name that is not a render column
-   * of the view is refused with `422`. `'highlight'` is the `tessera_id` and the highlight bit
+   * of the view is refused with `422`. `'highlight'` is the `mosaica_id` and the highlight bit
    * only, for a client that changed only its highlight and already holds the points; once
    * {@link ViewportResponse.stale} is `true`, ask again with the columns. Without a `highlight`,
    * `'highlight'` is answered as `'full'`. The points served, and each tile's `served` count, are
@@ -936,7 +936,7 @@ export type SubCell = {
  * One annotation artifact (a cluster, a boundary, a topic) as an artifacts frame serves it.
  *
  * `maskedCount` is how many of the artifact's members this principal can see. It is not the
- * artifact's size, and two principals can get different numbers for the same `tesseraId`. It
+ * artifact's size, and two principals can get different numbers for the same `mosaicaId`. It
  * counts members out of view too, so it does not change as the map moves, and an artifact served
  * in several tiles carries the same figures in each.
  *
@@ -948,8 +948,8 @@ export type SubCell = {
 export type Artifact = {
   /** The name of the layer the artifact belongs to. */
   layer: string;
-  /** The artifact's `tessera_id`, the same for every principal and session. */
-  tesseraId: bigint;
+  /** The artifact's `mosaica_id`, the same for every principal and session. */
+  mosaicaId: bigint;
   /** The publisher's own key, or `null` where none was supplied. */
   key: string | null;
   /** How many of the artifact's members this principal can see. */
@@ -967,11 +967,11 @@ export type Artifact = {
    * The publisher's supplied content (label text, a name, a polygon), one entry per type in the
    * layer's {@link Layer.suppliedContent}. Empty where the layer declares none. Where an artifact
    * has several ranked descriptions, this is the one this principal qualifies for, so two
-   * principals may see different text for one `tesseraId`.
+   * principals may see different text for one `mosaicaId`.
    */
   content: string[];
   /**
-   * The artifact's parents that are also in this frame, ascending by `tesseraId`. A tree gives
+   * The artifact's parents that are also in this frame, ascending by `mosaicaId`. A tree gives
    * at most one; a `dag` layer may give several, and the first is the same one every time. Empty
    * for a root, for a flat artifact and for one whose parent this principal was not served; the
    * three are not told apart. Treat an artifact with no parent here as a root.
@@ -997,7 +997,7 @@ export type Artifact = {
    */
   highlighted: boolean | null;
   /**
-   * The `tesseraId` of the artifact this one attaches to, as a topic label attaches to its
+   * The `mosaicaId` of the artifact this one attaches to, as a topic label attaches to its
    * cluster; `null` where it attaches to nothing. The target is in the same frame or in the
    * response's treed frame: an artifact whose target is not served is not served either. An attached artifact's
    * `matched` and `highlighted` are its target's. Its `maskedCount` counts its own members, or its
@@ -1020,7 +1020,7 @@ export type Artifact = {
 export type ViewportResult = {
   /** One entry per tile with anything visible to this principal, in the response's tile order. */
   tiles: TileCounts[];
-  /** Each served point's `tessera_id`. */
+  /** Each served point's `mosaica_id`. */
   ids: BigUint64Array;
   /**
    * Each point's 64-bit Morton position code, its two 32-bit grid coordinates interleaved. The
@@ -1043,7 +1043,7 @@ export type ViewportResult = {
   /**
    * One column per layer the request named that tags some point, keyed by layer name. For point
    * `i`, `index[i]` is `0` where the point is under no artifact of the layer this principal is
-   * served, and otherwise `1 + d`, where `ids[d]` is the `tessera_id` of the deepest such artifact
+   * served, and otherwise `1 + d`, where `ids[d]` is the `mosaica_id` of the deepest such artifact
    * holding it. {@link MosaicaClient.artifacts} with `ids` reads those artifacts.
    */
   membership: Record<string, MembershipColumn>;
@@ -1056,7 +1056,7 @@ export type ViewportResult = {
    * Which columns the points came with. `'full'` for an ordinary response. `'highlight'` carries
    * `ids` and `highlighted` only: {@link codes}, {@link positions}, {@link world}, {@link scalars}
    * and {@link membership} are empty, and a caller joins the bits to the points it holds by
-   * `tessera_id`.
+   * `mosaica_id`.
    */
   pointsProjection: 'full' | 'highlight';
   /** The underlay's cells, where the request set `underlayOffset`; `null` otherwise. */
@@ -1074,7 +1074,7 @@ export type MembershipColumn = {
    * holding the point. A `Uint16Array` when there are at most 65,535 points.
    */
   index: Uint16Array | Uint32Array;
-  /** The distinct artifact `tessera_id`s the column names, in the order first seen. */
+  /** The distinct artifact `mosaica_id`s the column names, in the order first seen. */
   ids: BigUint64Array;
 };
 
@@ -1265,7 +1265,7 @@ export type ViewportArtifactsFrame = {
   tile: bigint | null;
   /**
    * The artifacts of each named layer and level that hold a member this principal can see inside
-   * the tile, at most `perTile` per level, largest first: by `maskedCount`, then by `tesseraId`.
+   * the tile, at most `perTile` per level, largest first: by `maskedCount`, then by `mosaicaId`.
    */
   artifacts: Artifact[];
 };
@@ -1348,7 +1348,7 @@ export type ItemViewPosition = {
 };
 
 /**
- * One artifact opened by `tessera_id`, as {@link MosaicaClient.artifact} returns it. Its count and
+ * One artifact opened by `mosaica_id`, as {@link MosaicaClient.artifact} returns it. Its count and
  * geometry are those the viewport serves for the same artifact in the same view. It carries no
  * member list and no unmasked size.
  *
@@ -1388,7 +1388,7 @@ export type ArtifactDetail = {
  *   ignoring case.
  *
  * Sending both `parent` and `q` is a `422`. Pages are ordered by `matchedCount` where `filters` is
- * set and by `maskedCount` otherwise, then by `tesseraId` ascending, so a cursor neither repeats
+ * set and by `maskedCount` otherwise, then by `mosaicaId` ascending, so a cursor neither repeats
  * nor skips a row.
  *
  * @category Requests and responses
@@ -1407,7 +1407,7 @@ export type BrowseRequest = {
    */
   level?: number;
   /**
-   * The children form's parent, by `tessera_id`. An id naming nothing, an artifact of another
+   * The children form's parent, by `mosaica_id`. An id naming nothing, an artifact of another
    * layer, a suppressed one and one this principal is not served all answer an empty page.
    */
   parent?: bigint;
@@ -1433,8 +1433,8 @@ export type BrowseRequest = {
  * @category Requests and responses
  */
 export type BrowseRow = {
-  /** The artifact's `tessera_id`. */
-  tesseraId: bigint;
+  /** The artifact's `mosaica_id`. */
+  mosaicaId: bigint;
   /** The publisher's own key, or `null` where none was supplied. */
   key: string | null;
   /**
@@ -1483,7 +1483,7 @@ export type BrowsePage = {
  * principal may see in `view` that matches `filters`. A field left unset is not sent, and the
  * server's default applies.
  *
- * The columns of each page are `tessera_id` (`uint64`), the named fields in the order named, the
+ * The columns of each page are `mosaica_id` (`uint64`), the named fields in the order named, the
  * system fields in the order named, then `mosaica:matched` (`bool`) under `keepUnmatched`. Every
  * named field is present whether or not an item carries a value, and an absent value is null. A
  * category field is a dictionary column of its keys, each page's dictionary holding only the keys
@@ -1496,7 +1496,7 @@ export type ItemsRequest = {
   view: string;
   /**
    * Declared fields, by name, each once, in the order their columns come back. A group-scoped
-   * field outside its group is pinned as `<field>@<key>`. An empty list returns `tessera_id`
+   * field outside its group is pinned as `<field>@<key>`. An empty list returns `mosaica_id`
    * alone. An undeclared or repeated field is a `422`.
    */
   fields: string[];
@@ -1520,7 +1520,7 @@ export type ItemsRequest = {
    */
   count?: boolean;
   /**
-   * `map` returns rows by map cell in `view`, then by `tessera_id`. `stored` returns them in the
+   * `map` returns rows by map cell in `view`, then by `mosaica_id`. `stored` returns them in the
    * order the record store holds items, which is faster for a field held only there. Unset takes
    * the cursor's order, or with no cursor the server's choice. A value different from the
    * cursor's is a `422`.
@@ -1544,7 +1544,7 @@ export type ItemsRequest = {
  * `layer` this principal is served, ordered by level and then by publication order within the
  * level. A field left unset is not sent, and the server's default applies.
  *
- * The columns of each page are `tessera_id` (`uint64`), the named properties in the order named,
+ * The columns of each page are `mosaica_id` (`uint64`), the named properties in the order named,
  * then `matched_count` (`uint64`) where the request carries `filters`.
  *
  * @category Requests and responses
@@ -1569,7 +1569,7 @@ export type ArtifactsRequest = {
   /** Only the artifacts whose key, or first served text content, contains this, ignoring case. A `422` together with `parent`. */
   q?: string;
   /**
-   * Only the artifacts of `layer` these `tessera_id`s name, such as a point's tags. One this
+   * Only the artifacts of `layer` these `mosaica_id`s name, such as a point's tags. One this
    * principal is not served has no row, as one naming nothing does.
    */
   ids?: bigint[];
@@ -1740,7 +1740,7 @@ export type Grouping = {
  * `meta.selection.maxAggregateBins`; a grouping by bins takes no `cells`.
  *
  * With `bins` and a `sample`, a set of more than `sample` items is counted over its items whose
- * `tessera_id` is below one cut, `sample / total` of the identity range, about `sample` of them, and
+ * `mosaica_id` is below one cut, `sample / total` of the identity range, about `sample` of them, and
  * each count is scaled to the set's `total`. Default edges are the exact ones, as without a
  * `sample`. A set of at most `sample` items is counted exactly, and so is one where `sample` is
  * more than about one item in 64 of the set. The table's {@link AggregateTable.sample} says how it
@@ -1801,7 +1801,7 @@ export type AggregateCells = {
  * its rows.
  *
  * The columns are, in this order and each only where stated: `group` (`listed`, `rest` or `none`,
- * with `by`); `key` (a vocabulary key, or an artifact's `tessera_id` as a `bigint`, with `by`; null
+ * with `by`); `key` (a vocabulary key, or an artifact's `mosaica_id` as a `bigint`, with `by`; null
  * on `rest` and `none`); `title` (a value's title, or an artifact's name as
  * {@link MosaicaClient.browse} gives it, with `by`; null where there is none); `slot` (a layer's
  * artifact's palette slot, as {@link Artifact.slot} is, with `by` on a `layer` and null without its

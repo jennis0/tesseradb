@@ -153,7 +153,7 @@ async fn post_ingest(
     (status, json)
 }
 
-/// Every served point's 64-bit position, by `tessera_id`.
+/// Every served point's 64-bit position, by `mosaica_id`.
 fn served_positions(engine: &Engine, k: usize) -> BTreeMap<u64, u64> {
     served_positions_in(engine, k, [0.0, 0.0, 1.0, 1.0])
 }
@@ -180,11 +180,11 @@ fn position_of(engine: &Engine, positions: &BTreeMap<u64, u64>, id: u64) -> u64 
     let entity = unique_holders(engine, "id", &[id.to_string()])
         .expect("`id` is a declared unique attribute")[0]
         .unwrap_or_else(|| panic!("no item holds id {id}"));
-    let tessera_id = engine
-        .tessera_id_of(entity)
+    let mosaica_id = engine
+        .mosaica_id_of(entity)
         .expect("a live entity has an identifier");
     *positions
-        .get(&tessera_id.raw())
+        .get(&mosaica_id.raw())
         .unwrap_or_else(|| panic!("the item holding id {id} was not served"))
 }
 

@@ -3,7 +3,7 @@
 //! For each file, in declaration order:
 //!
 //! 1. **Scan.** Each unique field the file carries goes into an external sort as `(key, row)`
-//!    ([`KeySpill`]). A row carrying a `tessera_id` is refused here.
+//!    ([`KeySpill`]). A row carrying a `mosaica_id` is refused here.
 //! 2. **Merge.** Each field's sorted rows are merged against the run of `(key, item)` the earlier
 //!    files built for that field. A row whose key is held names that item. Where the file carries
 //!    one field, the later rows of a run of equal keys are refused here, one item or one value
@@ -52,7 +52,7 @@ const PENDING: u32 = u32::MAX;
 const LEFT_OUT: u32 = u32::MAX - 1;
 
 /// A decision about one row, routed by row: an item it names (`item + 1`), or a refusal.
-const UNKNOWN_TESSERA_ID: u32 = u32::MAX;
+const UNKNOWN_MOSAICA_ID: u32 = u32::MAX;
 const ONE_ITEM_TWICE: u32 = u32::MAX - 1;
 const ONE_VALUE_TWICE: u32 = u32::MAX - 2;
 
@@ -383,7 +383,7 @@ impl Pass {
                     .and_then(|l| l.read(&carried, creates));
                 let file = FileRead::new(path, &groups, &carried, select.as_ref(), limit);
                 if !creates {
-                    resolve::require_identifier(file.tessera, carried.len()).map_err(|_| {
+                    resolve::require_identifier(file.mosaica, carried.len()).map_err(|_| {
                         BuildError::Invalid(super::no_identifier(&read.object, path))
                     })?;
                 }
@@ -424,12 +424,12 @@ impl Pass {
     }
 
     fn number_rows(&mut self, read: &Read, input: Input<'_>) -> Result<(ReadRows, Tally)> {
-        let (carried, total, takes_every_row, tessera) = match &input {
+        let (carried, total, takes_every_row, mosaica) = match &input {
             Input::File(file) => (
                 file.carried,
                 file.groups.rows(),
                 file.takes_every_row(),
-                file.tessera,
+                file.mosaica,
             ),
             Input::Lists(lists, _) => (lists.carried.as_slice(), lists.len() as u64, true, false),
         };
@@ -445,7 +445,7 @@ impl Pass {
         let mut tally = Tally::default();
 
         // A file of new items with nothing to name them by: each row is the next item.
-        if creates && carried.is_empty() && !tessera && takes_every_row {
+        if creates && carried.is_empty() && !mosaica && takes_every_row {
             return self.offset(base, total).map(|rows| (rows, tally));
         }
 
@@ -487,7 +487,7 @@ impl Pass {
         // A names file carrying the one field a single creating file set, compared with that file
         // row by row: a row whose value is the one at its position there names that row's item.
         let zip = match (&input, read.batch) {
-            (Input::File(_), Batch::Names) if single && !tessera => {
+            (Input::File(_), Batch::Names) if single && !mosaica => {
                 match self.held.get(&carried[0].position).map(Vec::as_slice) {
                     Some(
                         [HeldRun {
@@ -525,8 +525,8 @@ impl Pass {
                     }
                     continue;
                 }
-                if scanned.tessera.as_ref().is_some_and(|t| t[offset]) {
-                    push(&mut updates, row as u32, UNKNOWN_TESSERA_ID)?;
+                if scanned.mosaica.as_ref().is_some_and(|t| t[offset]) {
+                    push(&mut updates, row as u32, UNKNOWN_MOSAICA_ID)?;
                     decided += 1;
                     continue;
                 }
@@ -1356,7 +1356,7 @@ fn decide_row(
 ) -> Result<()> {
     let codes = || decisions.iter().map(|&(_, code)| code);
     let refusal = [
-        (UNKNOWN_TESSERA_ID, Refusal::UNKNOWN_TESSERA_ID),
+        (UNKNOWN_MOSAICA_ID, Refusal::UNKNOWN_MOSAICA_ID),
         (ONE_ITEM_TWICE, Refusal::ONE_ITEM_TWICE),
         (ONE_VALUE_TWICE, Refusal::ONE_VALUE_TWICE),
     ]

@@ -56,7 +56,7 @@ pub(crate) enum ArtifactRows {
     /// Every column.
     #[default]
     Full,
-    /// `layer`, `tessera_id`, `rung`, `matched`: what tagging points from the walk reads.
+    /// `layer`, `mosaica_id`, `rung`, `matched`: what tagging points from the walk reads.
     Identity,
 }
 
@@ -68,10 +68,10 @@ pub enum PointRows<'a> {
     /// Every render column — the default, and the answer a caller who has read nothing receives.
     #[default]
     Full,
-    /// `tessera_id` and `highlighted` alone. Without a `highlight` on the request there is
+    /// `mosaica_id` and `highlighted` alone. Without a `highlight` on the request there is
     /// nothing to project to, so this answers as [`PointRows::Full`] does.
     Highlight,
-    /// `tessera_id`, the position and these render columns, in declaration order; no other render
+    /// `mosaica_id`, the position and these render columns, in declaration order; no other render
     /// column is read. A name that is not one of the view's render columns is refused.
     Columns(&'a [String]),
 }

@@ -1,8 +1,8 @@
 """**The identity rule at the service, against its model** (`oracle.naming`).
 
-Every write names items by `tessera_id` and by the values of fields declared unique. This module
+Every write names items by `mosaica_id` and by the values of fields declared unique. This module
 sends ingest batches, changes and member tables to a real `mosaica serve` and compares each answer
-with the model's: which rows were refused and why, the receipt's counts and `tessera_ids`, the
+with the model's: which rows were refused and why, the receipt's counts and `mosaica_ids`, the
 status a strict request is refused with, and what the deployment then serves, read back through
 `/v1/items`.
 
@@ -163,7 +163,7 @@ class Deployment:
         return pa.concat_tables(tables)
 
     def served(self) -> dict[int, dict]:
-        """Every served item by `tessera_id`, with the values it holds. A position is rounded to
+        """Every served item by `mosaica_id`, with the values it holds. A position is rounded to
         the integer it was given at, after checking it is within the grid's half step of one."""
         table = self._read(["code", "num"]).to_pylist()
         out = {}
@@ -176,13 +176,13 @@ class Deployment:
                 got = row[f"mosaica:{column}"]
                 assert abs(got - round(got)) < 1e-3, row
                 values[column] = float(round(got))
-            out[int(row["tessera_id"])] = values
+            out[int(row["mosaica_id"])] = values
         return out
 
     def members(self, layer: str, artifact: str) -> set[int]:
         """The served items the artifact `artifact` of `layer` holds."""
         leaf = {"member_of": {"layer": layer, "artifact": artifact}}
-        return {int(t) for t in self._read([], leaf).column("tessera_id").to_pylist()}
+        return {int(t) for t in self._read([], leaf).column("mosaica_id").to_pylist()}
 
     def assert_serves_the_model(self) -> None:
         self.server.refreshed()
@@ -294,7 +294,7 @@ def fresh_position() -> dict:
     return {"x": float(41 + n % 24 * 40), "y": float(41 + n // 24 * 40 % 960)}
 
 
-def unissued_tessera_id(rng: random.Random, holdings: Holdings) -> str:
+def unissued_mosaica_id(rng: random.Random, holdings: Holdings) -> str:
     while True:
         candidate = rng.getrandbits(63)
         if candidate not in holdings.items:
@@ -303,7 +303,7 @@ def unissued_tessera_id(rng: random.Random, holdings: Holdings) -> str:
 
 def identifiers_of(rng: random.Random, item: int, values: dict) -> dict:
     """A non-empty choice of the identifiers that name `item`."""
-    choices = [("tessera_id", str(item))]
+    choices = [("mosaica_id", str(item))]
     choices += [(column, values[column]) for column in UNIQUE if column in values]
     picked = [c for c in choices if rng.random() < 0.5] or [rng.choice(choices)]
     row = dict(picked)
@@ -357,8 +357,8 @@ def generate_batch(rng: random.Random, holdings: Holdings, n: int) -> list[dict]
             if not clash:
                 continue
             row[clash[0]] = other[clash[0]]
-        elif kind == 7:  # a tessera_id naming nothing
-            row = {"tessera_id": unissued_tessera_id(rng, holdings)}
+        elif kind == 7:  # a mosaica_id naming nothing
+            row = {"mosaica_id": unissued_mosaica_id(rng, holdings)}
             if rng.random() < 0.5:
                 row.update(fresh_position())
         elif kind == 8 and named_here:  # an item an earlier row of this batch names
@@ -367,11 +367,11 @@ def generate_batch(rng: random.Random, holdings: Holdings, n: int) -> list[dict]
         elif kind == 9:  # names nothing, and has no position to create with
             row = {"code": fresh_code()} if rng.random() < 0.5 else {"num": fresh_num()}
         elif kind == 10:  # nulls and a position
-            row = {"tessera_id": None, "code": None, "num": None, **fresh_position()}
+            row = {"mosaica_id": None, "code": None, "num": None, **fresh_position()}
         elif kind == 11 and set_here:  # a held item with a value an earlier row set, then again
             item = rng.choice(held)
             column, value = rng.choice(set_here)
-            rows.append({"tessera_id": str(item), column: value})
+            rows.append({"mosaica_id": str(item), column: value})
             row = identifiers_of(rng, item, holdings.items[item])
             named_here.append(item)
         else:
@@ -390,7 +390,7 @@ def as_arrow(rows: list[dict]) -> tuple[bytes, list[dict]]:
     every column, so a cell a JSON row leaves out is a null there, which clears what an item holds;
     a null position is no position."""
     types = {
-        "tessera_id": pa.string(),
+        "mosaica_id": pa.string(),
         "code": pa.string(),
         "num": pa.uint64(),
         "x": pa.float64(),
@@ -421,7 +421,7 @@ def check_ingest(dep: Deployment, rows: list[dict], *, arrow: bytes | None = Non
     assert resp.status_code == 200, resp.text
     receipt = resp.json()
     assert receipt["refused"] == naming.refused(verdicts), rows
-    ids = receipt["tessera_ids"]
+    ids = receipt["mosaica_ids"]
     assert len(ids) == len(rows)
     created = {}
     for i, (verdict, tid) in enumerate(zip(verdicts, ids)):
@@ -495,19 +495,19 @@ def test_a_null_clears_a_unique_value_and_a_deleted_item_frees_its_values(deploy
     code_cleared = dep.holdings.items[cleared]["code"]
     code_deleted = dep.holdings.items[deleted]["code"]
 
-    check_ingest(dep, [{"tessera_id": str(cleared), "code": None}])
+    check_ingest(dep, [{"mosaica_id": str(cleared), "code": None}])
     assert "code" not in dep.holdings.items[cleared]
-    check_changes(dep, [{"op": "delete", "match": {"tessera_id": str(deleted)}}])
+    check_changes(dep, [{"op": "delete", "match": {"mosaica_id": str(deleted)}}])
 
     verdicts = check_ingest(
         dep,
         [
             {"code": code_cleared, **fresh_position()},
             {"code": code_deleted, **fresh_position()},
-            {"tessera_id": str(deleted), **fresh_position()},
+            {"mosaica_id": str(deleted), **fresh_position()},
         ],
     )
-    assert verdicts == [Creates(), Creates(), Refused(naming.UNKNOWN_TESSERA_ID)]
+    assert verdicts == [Creates(), Creates(), Refused(naming.UNKNOWN_MOSAICA_ID)]
 
 
 def test_a_strict_batch_is_refused_whole_at_its_first_refused_row(deployment):
@@ -528,7 +528,7 @@ def test_a_strict_batch_is_refused_whole_at_its_first_refused_row(deployment):
     assert resp.status_code == 200, resp.text
     receipt = resp.json()
     assert receipt["refused"] == []
-    created = {i: int(t) for i, (t, v) in enumerate(zip(receipt["tessera_ids"], clean_verdicts))
+    created = {i: int(t) for i, (t, v) in enumerate(zip(receipt["mosaica_ids"], clean_verdicts))
                if isinstance(v, Creates)}
     counts = naming.apply_ingest(dep.holdings, clean, clean_verdicts, created)
     assert {k: receipt[k] for k in counts} == counts
@@ -536,7 +536,7 @@ def test_a_strict_batch_is_refused_whole_at_its_first_refused_row(deployment):
 
 
 def test_a_replayed_batch_answers_its_first_acceptance(deployment):
-    """A retry answers the first acceptance's `tessera_ids` and `refused` whatever `strict` says.
+    """A retry answers the first acceptance's `mosaica_ids` and `refused` whatever `strict` says.
     The retries are sent before any flush, since a flush forgets the batch ids below the write-ahead
     log it keeps."""
     dep = deployment
@@ -548,7 +548,7 @@ def test_a_replayed_batch_answers_its_first_acceptance(deployment):
         again = dep.ingest(rows, strict=strict, batch_id="identity-replay", wait=False)
         assert again.status_code == 200, again.text
         assert again.json().get("replayed") is True, (first.json(), again.json())
-        assert again.json()["tessera_ids"] == first.json()["tessera_ids"]
+        assert again.json()["mosaica_ids"] == first.json()["mosaica_ids"]
         assert again.json()["refused"] == first.json()["refused"]
         assert again.json()["created"] == 0
 
@@ -580,14 +580,14 @@ def test_changes_name_items_by_every_identifier_and_refuse_row_by_row(deployment
     verdicts = check_changes(
         dep,
         [
-            {"op": "suppress", "match": {"tessera_id": str(a)}},
+            {"op": "suppress", "match": {"mosaica_id": str(a)}},
             {"op": "suppress", "match": {"code": v[b]["code"]}},
             {"op": "suppress", "match": {"num": v[c]["num"]}},
-            {"op": "suppress", "match": {"num": str(v[d]["num"]), "tessera_id": str(d)}},
+            {"op": "suppress", "match": {"num": str(v[d]["num"]), "mosaica_id": str(d)}},
             {"op": "suppress", "match": {"code": v[e]["code"], "num": v[f]["num"]}},
             {"op": "suppress", "match": {"code": fresh_code()}},
             {"op": "suppress", "match": {}},
-            {"op": "suppress", "match": {"tessera_id": unissued_tessera_id(rng, dep.holdings)}},
+            {"op": "suppress", "match": {"mosaica_id": unissued_mosaica_id(rng, dep.holdings)}},
             {"op": "suppress", "match": {"code": None, "num": v[a]["num"]}},
         ],
     )
@@ -596,7 +596,7 @@ def test_changes_name_items_by_every_identifier_and_refuse_row_by_row(deployment
         naming.NAMES_TWO_ITEMS,
         naming.NAMES_NO_ITEM,
         naming.NAMES_NO_ITEM,
-        naming.UNKNOWN_TESSERA_ID,
+        naming.UNKNOWN_MOSAICA_ID,
     ]
 
     # A suppressed item is still named; a deleted one names nothing.
@@ -604,20 +604,20 @@ def test_changes_name_items_by_every_identifier_and_refuse_row_by_row(deployment
         dep,
         [
             {"op": "unsuppress", "match": {"code": v[b]["code"]}},
-            {"op": "delete", "match": {"tessera_id": str(c)}},
+            {"op": "delete", "match": {"mosaica_id": str(c)}},
         ],
     )
     assert verdicts == [Names(b), Names(c)]
     verdicts = check_changes(
         dep,
         [
-            {"op": "suppress", "match": {"tessera_id": str(c)}},
+            {"op": "suppress", "match": {"mosaica_id": str(c)}},
             {"op": "suppress", "match": {"code": items[c]["code"]}},
-            {"op": "unsuppress", "match": {"tessera_id": str(a)}},
+            {"op": "unsuppress", "match": {"mosaica_id": str(a)}},
         ],
     )
     assert [x.reason if isinstance(x, Refused) else x for x in verdicts] == [
-        naming.UNKNOWN_TESSERA_ID,
+        naming.UNKNOWN_MOSAICA_ID,
         naming.NAMES_NO_ITEM,
         Names(a),
     ]
@@ -629,9 +629,9 @@ def test_a_strict_change_request_is_refused_whole_with_the_status_of_its_first_r
     dep = deployment
     items = sorted(t for t, v in dep.holdings.items.items() if "code" in v and "num" in v)
     v = dep.holdings.items
-    ok = {"op": "suppress", "match": {"tessera_id": str(items[0])}}
+    ok = {"op": "suppress", "match": {"mosaica_id": str(items[0])}}
     nothing = {"op": "suppress", "match": {"code": fresh_code()}}
-    unknown = {"op": "suppress", "match": {"tessera_id": unissued_tessera_id(random.Random(9), dep.holdings)}}
+    unknown = {"op": "suppress", "match": {"mosaica_id": unissued_mosaica_id(random.Random(9), dep.holdings)}}
     two = {"op": "suppress", "match": {"code": v[items[1]]["code"], "num": v[items[2]]["num"]}}
     before = dep.served()
     for changes in ([ok, nothing, two], [ok, unknown, two], [ok, two, nothing]):
@@ -652,7 +652,7 @@ def test_a_match_key_naming_nothing_is_ignored_and_a_match_left_empty_names_no_i
     verdicts = check_changes(
         dep,
         [
-            {"op": "suppress", "match": {"tessera_id": str(items[0]), "colour": "red", "weight": 0.5}},
+            {"op": "suppress", "match": {"mosaica_id": str(items[0]), "colour": "red", "weight": 0.5}},
             {"op": "suppress", "match": {"colour": "blue"}},
             {"op": "suppress", "match": {}},
             {"op": "suppress", "match": {"code": v[items[1]]["code"], "size": 3, "tags": [True, {}]}},
@@ -691,7 +691,7 @@ def member_table(rows: list[dict]) -> dict:
 
 def generate_members(rng: random.Random, holdings: Holdings, n: int) -> list[dict]:
     """Member rows naming one item in most rows, and nothing, two items or an unknown
-    `tessera_id` in the rest. Several rows may name one item."""
+    `mosaica_id` in the rest. Several rows may name one item."""
     held = sorted(holdings.items)
     rows = []
     while len(rows) < n:
@@ -703,9 +703,9 @@ def generate_members(rng: random.Random, holdings: Holdings, n: int) -> list[dic
             rows.append({"code": fresh_code()} if rng.random() < 0.5 else {"code": None})
         elif kind == 7:
             a, b = rng.sample([t for t in held if "code" in holdings.items[t]], 2)
-            rows.append({"tessera_id": str(a), "code": holdings.items[b]["code"]})
+            rows.append({"mosaica_id": str(a), "code": holdings.items[b]["code"]})
         elif kind == 8:
-            rows.append({"tessera_id": unissued_tessera_id(rng, holdings)})
+            rows.append({"mosaica_id": unissued_mosaica_id(rng, holdings)})
     return rows
 
 
@@ -728,7 +728,7 @@ def test_a_publication_and_its_growth_name_members_by_the_rule(deployment):
     rng = random.Random(31)
     # Some members are suppressed: they are named, and simply not served.
     suppressed = sorted(dep.holdings.items)[::17]
-    check_changes(dep, [{"op": "suppress", "match": {"tessera_id": str(t)}} for t in suppressed])
+    check_changes(dep, [{"op": "suppress", "match": {"mosaica_id": str(t)}} for t in suppressed])
 
     members = [generate_members(rng, dep.holdings, 30) for _ in range(2)]
     excluding = generate_members(rng, dep.holdings, 20)
@@ -746,7 +746,7 @@ def test_a_publication_and_its_growth_name_members_by_the_rule(deployment):
     published = resp.json()
     assert published["refused"] == expected_refused(dep.holdings, lists)
     assert published["ignored_columns"] == []
-    ids = {row["key"]: row["tessera_id"] for row in published["artifacts"]}
+    ids = {row["key"]: row["mosaica_id"] for row in published["artifacts"]}
 
     visible = dep.holdings.visible()
     held = set(dep.holdings.items)
@@ -781,25 +781,25 @@ def test_a_member_table_may_name_members_by_any_mix_of_columns(deployment):
     items = sorted(t for t, v in dep.holdings.items.items() if "code" in v and "num" in v)[:4]
     v = dep.holdings.items
     table = {
-        "tessera_id": [str(items[0]), None, None, str(items[3])],
+        "mosaica_id": [str(items[0]), None, None, str(items[3])],
         "code": [None, v[items[1]]["code"], None, v[items[3]]["code"]],
         "num": [None, None, str(v[items[2]]["num"]), None],
     }
     resp = dep.artifacts("PUT", GROUPS, {"artifacts": [{"key": "mixed", "members": table}]})
     assert resp.status_code == 201, resp.text
     assert resp.json()["refused"] == []
-    tid = resp.json()["artifacts"][0]["tessera_id"]
+    tid = resp.json()["artifacts"][0]["mosaica_id"]
     assert dep.members(GROUPS, tid) == set(items)
 
 
 def test_a_member_table_column_naming_nothing_is_ignored(deployment):
-    """A column that is neither `tessera_id` nor a unique field is ignored, on a publication and a
+    """A column that is neither `mosaica_id` nor a unique field is ignored, on a publication and a
     growth; a table left with no identifying column names nothing in each row, and a request in
     which no table has one is malformed."""
     dep = deployment
     items = sorted(t for t, v in dep.holdings.items.items() if "code" in v)
     v = dep.holdings.items
-    tagged = [{"tessera_id": str(items[0]), "colour": "red"}, {"code": v[items[1]]["code"], "colour": None}]
+    tagged = [{"mosaica_id": str(items[0]), "colour": "red"}, {"code": v[items[1]]["code"], "colour": None}]
     untagged = [{"colour": "blue"}, {"colour": "green"}]
     body = {
         "artifacts": [
@@ -814,11 +814,11 @@ def test_a_member_table_column_naming_nothing_is_ignored(deployment):
     assert published["refused"] == expected_refused(
         dep.holdings, [(0, "members", tagged), (1, "members", untagged)]
     )
-    ids = {row["key"]: row["tessera_id"] for row in published["artifacts"]}
+    ids = {row["key"]: row["mosaica_id"] for row in published["artifacts"]}
     assert dep.members(GROUPS, ids["tagged"]) == {items[0], items[1]}
     assert dep.members(GROUPS, ids["untagged"]) == set()
 
-    joining = [{"tessera_id": str(items[2]), "weight": 2}]
+    joining = [{"mosaica_id": str(items[2]), "weight": 2}]
     resp = dep.artifacts("PATCH", GROUPS, {"artifacts": [{"key": "untagged", "members": member_table(joining)}]})
     assert resp.status_code == 200, resp.text
     assert set(resp.json()["ignored_columns"]) == naming.ignored_columns(dep.holdings, joining)
@@ -840,12 +840,12 @@ def test_a_strict_member_request_is_refused_whole_with_the_status_of_its_first_r
     items = sorted(t for t, v in dep.holdings.items.items() if "code" in v)
     v = dep.holdings.items
     if method == "PATCH":
-        resp = dep.artifacts("PUT", GROUPS, {"artifacts": [{"key": "held", "members": {"tessera_id": [str(items[0])]}}]})
+        resp = dep.artifacts("PUT", GROUPS, {"artifacts": [{"key": "held", "members": {"mosaica_id": [str(items[0])]}}]})
         assert resp.status_code == 201, resp.text
-        held_id = resp.json()["artifacts"][0]["tessera_id"]
-    ok = {"tessera_id": str(items[1])}
+        held_id = resp.json()["artifacts"][0]["mosaica_id"]
+    ok = {"mosaica_id": str(items[1])}
     nothing = {"code": fresh_code()}
-    two = {"tessera_id": str(items[2]), "code": v[items[3]]["code"]}
+    two = {"mosaica_id": str(items[2]), "code": v[items[3]]["code"]}
     for rows in ([ok, nothing, two], [ok, two, nothing]):
         key = "held" if method == "PATCH" else "strict"
         verdicts = naming.resolve_addresses(dep.holdings, rows)
@@ -865,10 +865,10 @@ def test_a_generating_set_naming_nothing_or_two_items_refuses_the_publication(de
     dep = deployment
     items = sorted(t for t, v in dep.holdings.items.items() if "code" in v)
     v = dep.holdings.items
-    good = [{"tessera_id": str(items[0])}, {"code": v[items[1]]["code"]}]
+    good = [{"mosaica_id": str(items[0])}, {"code": v[items[1]]["code"]}]
     for extra, status in (
         ({"code": fresh_code()}, 404),
-        ({"tessera_id": str(items[2]), "code": v[items[3]]["code"]}, 409),
+        ({"mosaica_id": str(items[2]), "code": v[items[3]]["code"]}, 409),
     ):
         rows = good + [extra]
         body = {
@@ -899,7 +899,7 @@ def test_a_generating_set_naming_nothing_or_two_items_refuses_the_publication(de
     assert resp.json()["refused"] == []
 
     # Leaving a generating set names members by the same rule, row by row.
-    leaving = [{"code": v[items[1]]["code"]}, {"code": fresh_code()}, {"tessera_id": str(items[0]), "code": v[items[2]]["code"]}]
+    leaving = [{"code": v[items[1]]["code"]}, {"code": fresh_code()}, {"mosaica_id": str(items[0]), "code": v[items[2]]["code"]}]
     grow = {"artifacts": [{"key": "t0", "rank": 0, "leaving": member_table(leaving)}]}
     resp = dep.artifacts("PATCH", TOPICS, grow)
     assert resp.status_code == 200, resp.text
@@ -916,18 +916,18 @@ def test_members_joining_a_generating_set_that_name_nothing_or_two_refuse_the_gr
         "artifacts": [
             {
                 "key": "t0",
-                "members": {"tessera_id": [str(t) for t in items[:4]]},
-                "content": [{"values": ["a topic"], "generated_from": {"tessera_id": [str(items[0])]}}],
+                "members": {"mosaica_id": [str(t) for t in items[:4]]},
+                "content": [{"values": ["a topic"], "generated_from": {"mosaica_id": [str(items[0])]}}],
             }
         ]
     }
     resp = dep.artifacts("PUT", TOPICS, body)
     assert resp.status_code == 201, resp.text
-    tid = resp.json()["artifacts"][0]["tessera_id"]
+    tid = resp.json()["artifacts"][0]["mosaica_id"]
     before = dep.members(TOPICS, tid)
-    joining = {"tessera_id": str(items[1])}
-    unknown = {"tessera_id": unissued_tessera_id(random.Random(3), dep.holdings)}
-    for bad in ({"code": fresh_code()}, unknown, {"tessera_id": str(items[2]), "code": v[items[3]]["code"]}):
+    joining = {"mosaica_id": str(items[1])}
+    unknown = {"mosaica_id": unissued_mosaica_id(random.Random(3), dep.holdings)}
+    for bad in ({"code": fresh_code()}, unknown, {"mosaica_id": str(items[2]), "code": v[items[3]]["code"]}):
         rows = [joining, bad]
         _, reason = naming.first_refusal(naming.resolve_addresses(dep.holdings, rows))
         grow = {"artifacts": [{"key": "t0", "rank": 0, "members": member_table(rows)}]}
@@ -948,16 +948,16 @@ def test_the_arrow_growth_names_members_by_the_struct_fields(deployment):
     v = dep.holdings.items
     resp = dep.artifacts("PUT", GROUPS, {"artifacts": [{"key": "arrow", "members": {}}]})
     assert resp.status_code == 201, resp.text
-    tid = resp.json()["artifacts"][0]["tessera_id"]
+    tid = resp.json()["artifacts"][0]["mosaica_id"]
 
     rows = [
-        {"tessera_id": str(items[0]), "num": None},
-        {"tessera_id": None, "num": v[items[1]]["num"]},
-        {"tessera_id": str(items[2]), "num": v[items[2]]["num"]},
-        {"tessera_id": None, "num": fresh_num()},
-        {"tessera_id": str(items[3]), "num": v[items[4]]["num"]},
+        {"mosaica_id": str(items[0]), "num": None},
+        {"mosaica_id": None, "num": v[items[1]]["num"]},
+        {"mosaica_id": str(items[2]), "num": v[items[2]]["num"]},
+        {"mosaica_id": None, "num": fresh_num()},
+        {"mosaica_id": str(items[3]), "num": v[items[4]]["num"]},
     ]
-    member = pa.struct([("tessera_id", pa.string()), ("num", pa.uint64())])
+    member = pa.struct([("mosaica_id", pa.string()), ("num", pa.uint64())])
     schema = pa.schema([("key", pa.string()), ("members", pa.list_(member))], metadata={"level": "0"})
     batch = pa.record_batch([pa.array(["arrow"]), pa.array([rows], pa.list_(member))], schema=schema)
     sink = io.BytesIO()
@@ -975,7 +975,7 @@ def test_the_arrow_growth_names_members_by_the_struct_fields(deployment):
 
 
 def test_an_ingest_that_can_only_edit_and_names_items_by_no_column_is_malformed(deployment):
-    """A batch in which no row carries a position can only edit items, so it needs `tessera_id` or
+    """A batch in which no row carries a position can only edit items, so it needs `mosaica_id` or
     a unique column to name them by. One carrying either, or a row that can create, is resolved row
     by row."""
     dep = deployment
@@ -988,6 +988,6 @@ def test_an_ingest_that_can_only_edit_and_names_items_by_no_column_is_malformed(
     assert resp.status_code == 422, resp.text
     assert dep.served() == before
 
-    for rows in ([{}, {"code": None}], [{"tessera_id": None}], [{}, fresh_position()]):
+    for rows in ([{}, {"code": None}], [{"mosaica_id": None}], [{}, fresh_position()]):
         assert not naming.malformed_ingest(dep.holdings, rows)
         check_ingest(dep, rows)

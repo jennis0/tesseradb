@@ -34,7 +34,7 @@ TILES = pa.schema(
         ("highlighted", U64),
     ]
 )
-POINTS = pa.schema([("tessera_id", U64), ("code", U64)])
+POINTS = pa.schema([("mosaica_id", U64), ("code", U64)])
 CELLS = pa.schema([("cell", U64), ("count", U64)])
 
 

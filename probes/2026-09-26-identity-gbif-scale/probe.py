@@ -167,7 +167,7 @@ class Server:
         return json.loads(data)
 
     def items(self, token: str, payload: dict) -> dict:
-        """One whole read, cursor after cursor: the head, every row's `tessera_id` and `gbifid`
+        """One whole read, cursor after cursor: the head, every row's `mosaica_id` and `gbifid`
         where named, the server's own time summed over the responses' trailers, and the wall
         time. A body over the viewer plane's limit is sent with curl, which reads the answer the
         server gives before it closes the connection."""

@@ -40,7 +40,7 @@ a roll-up; between levels it is containment. A dependency edge attaches one arti
 Content is derived or supplied per artifact.*
 
 An artifact's position within its layer and level never reaches a client. On the wire it is a
-`tessera_id`, exactly like a point's, resolved by the server on every request.
+`mosaica_id`, exactly like a point's, resolved by the server on every request.
 
 ## Declaring a layer
 
@@ -172,7 +172,7 @@ A `flat`, `stacked` or `tiered` layer is served tile by tile
 most artifacts one level shows in one tile. For each tile and each level, the server takes the
 artifacts this viewer is served that have at least one member the viewer can see inside the tile.
 It orders them by the viewer's count of the artifact's visible members across the whole view,
-largest first, breaks a tie by `tessera_id`, and sends the first `per_tile` of them.
+largest first, breaks a tie by `mosaica_id`, and sends the first `per_tile` of them.
 
 An artifact with visible members in several tiles is served in each of those tiles, with the same
 count, centroid and box in every one. Each of those numbers is taken over all the members the
@@ -314,7 +314,7 @@ already infer from the count and the members drawn on the map.
 
 Supplied content, the count, the centroid, the box and the two flags reach a client with the
 [artifacts of each tile](queries.md#the-artifacts-in-each-tile). A hull or an authored shape is read
-by the artifact's `tessera_id`, or in a [bulk read](queries.md#what-a-read-of-artifacts-returns) of
+by the artifact's `mosaica_id`, or in a [bulk read](queries.md#what-a-read-of-artifacts-returns) of
 its layer.
 
 ### Colour slots
@@ -340,7 +340,7 @@ slots fills that same entry where nothing has yet, so browse, a bulk read and an
 cut serve the slots the map serves; a request without a palette size fills nothing for them.
 
 Elsewhere a centre is the mean position of the artifact's members in a sample of the viewer's
-visible items: those whose `tessera_id` is below `⌊2¹⁹ · 2⁶⁴ / N⌋`, `N` being the viewer's visible
+visible items: those whose `mosaica_id` is below `⌊2¹⁹ · 2⁶⁴ / N⌋`, `N` being the viewer's visible
 count, read from the narrowest identity band that holds the cut, or every visible item where there
 are no more than 2¹⁹. The cut follows `N` with no step, so a change in the visible count moves only
 the centres of the artifacts holding an item between the old cut and the new. An artifact with no
@@ -348,8 +348,8 @@ member in the sample takes its nearest centred ancestor's centre, moved by up to
 and one with no such ancestor has no centre and no neighbours. For artifacts far smaller than the
 sample resolves, which neighbours they are kept apart from is therefore approximate.
 
-Every artifact has an order of the slots and a rank, both drawn from its `tessera_id`. A parent's
-heir is its child with the most visible members, ties going to the lower `tessera_id`; on a
+Every artifact has an order of the slots and a rank, both drawn from its `mosaica_id`. A parent's
+heir is its child with the most visible members, ties going to the lower `mosaica_id`; on a
 `tiered` layer it is chosen among the parent's children at the shallowest level holding one the
 viewer is served, so a grandchild reached through a withheld level is the heir only where the
 parent has no child above it. The heir
@@ -360,8 +360,8 @@ the higher rank wins. An artifact takes the first slot in its list that no neigh
 except that it keeps what it asked for against a neighbour of lower rank asking the same; where
 every slot is asked for, it takes the slot its farthest neighbour asks for.
 
-So a slot depends on the artifact's own `tessera_id`, its parents' slots and which parent it is
-heir to, and on each neighbour's `tessera_id`, which parent it is heir to, its parents' slots, and
+So a slot depends on the artifact's own `mosaica_id`, its parents' slots and which parent it is
+heir to, and on each neighbour's `mosaica_id`, which parent it is heir to, its parents' slots, and
 the slot of a neighbour coloured at an earlier depth; never on the slot a neighbour takes at the
 same depth. A change reaches the artifacts whose neighbours it changes at a depth, those beside an
 artifact that appeared, went or moved; where it changes a parent's heir, the old and the new heir
@@ -494,7 +494,7 @@ so it costs no more at request time than an enumerated one.
 | Merge | Segments are combined and rows renumbered within the merged span. No membership or content changes. Each held row form is rebased onto the new numbering when the merge is published | Nothing, except for a request whose row space was taken before the merge was published and which finds the held form already rebased. That request builds its own row form from the artifact store over its own row space, so its counts include every growth and publication accepted since the held form was last published. The request after it is served the published form again, so a count can fall back by those writes until they are next published. Neither answer counts a membership the store does not hold or a point the viewer cannot see |
 | Deletion of a member | At accept, the member leaves every masked count, for every membership source alike. Content generated from it stops serving at the same moment: its generating set no longer matches every member a viewer can see, so containment fails for everyone | The count falls, and any content generated from the deleted point disappears, on the next request after the deletion is accepted |
 | Compaction | The deleted member's row is dropped, and each enumerated or shape level served from a column has its column, member bitmaps and coverings written again over the new rows. What happens to content generated from the deleted member follows the layer's own declaration (below) | For content that was already withdrawn at the deletion, nothing changes; content declared permissive, and generated from more than the one deleted point, resumes serving |
-| An edit of a member: an ingest row changing its values, label or position ([edits](write-path.md#edits)) | The item moves to a new entity and keeps its `tessera_id`. The new entity joins every enumerated artifact the old one was a member of, and every generating set it took part in; the old entity leaves them | Nothing changes in its memberships. The item leaves every view, and so every count, until the flush that places its new rows, and is counted again from the publication the edit's receipt names |
+| An edit of a member: an ingest row changing its values, label or position ([edits](write-path.md#edits)) | The item moves to a new entity and keeps its `mosaica_id`. The new entity joins every enumerated artifact the old one was a member of, and every generating set it took part in; the old entity leaves them | Nothing changes in its memberships. The item leaves every view, and so every count, until the flush that places its new rows, and is counted again from the publication the edit's receipt names |
 | Suppression of the artifact itself | The artifact stops being served immediately. Nothing about it is stored differently; it resumes only on an explicit unsuppress | The artifact disappears the moment the suppression is accepted, and stays gone until an explicit unsuppress |
 | Deletion of the artifact itself | The artifact stops being served immediately. Its record, and every edge naming it, are removed at the next fold. Deleting it does not lift a suppression already on it: only an [explicit unsuppress](write-path.md#denies) does | The artifact disappears the moment the deletion is accepted, and never returns |
 

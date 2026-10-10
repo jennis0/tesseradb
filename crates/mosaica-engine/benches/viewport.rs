@@ -41,7 +41,7 @@ use mosaica_types::{IdentityKey, TermId};
 const ITEM_LIMIT: u64 = 2_422_486;
 
 /// The same fixed, non-degenerate test key `tests/viewport.rs` and `mosaica-build`'s own fixture
-/// tests use — arbitrary here (this bench never inverts a `tessera_id`), but a real key all the
+/// tests use — arbitrary here (this bench never inverts a `mosaica_id`), but a real key all the
 /// same, since `IdentityKey::from_hex` refuses degenerate ones.
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
@@ -180,7 +180,7 @@ fn bench_viewport(c: &mut Criterion) {
         // The production defaults, deliberately: this bench exists to measure what the server
         // actually does, so θ is live here rather than saturated the way the correctness tests
         // configure it. Note that recorded baselines from before §7.2's density rule landed are
-        // **not** comparable — the selection path now reads `tessera_id` per visible row where the
+        // **not** comparable — the selection path now reads `mosaica_id` per visible row where the
         // placeholder read nothing, and the number of gathered points is θ-dependent rather than
         // `min(k, visible)`.
         EngineConfig {

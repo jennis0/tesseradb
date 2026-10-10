@@ -159,7 +159,7 @@ fn a_wal_row_round_trips_a_coordinate_no_f32_holds() {
 /// length for the edits'. **28** is the version before a view drop carried its deletions: a 28 drop
 /// read at 29 takes the next record's leading bytes for them. **29** is the version before a row
 /// lost its external id: a 29 row read at 30 takes the external id's tag for its entity. **30** is
-/// the version before a receipt's `tessera_id` was optional: a 30 receipt read at 31 takes the
+/// the version before a receipt's `mosaica_id` was optional: a 30 receipt read at 31 takes the
 /// identifier's first byte for the option's tag. **31** is the version before a row's descriptors
 /// were the keys an access expression is indexed under: a 31 row's labels read at 32 would index
 /// an item under a key nobody's label meant. **32** is the version before a row's descriptors were

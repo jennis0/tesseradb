@@ -7,7 +7,7 @@ and contracts §5 can read a response. `docs/openapi/README.md` walks it.
     python3 reference/examples/decode_viewport.py <body.bin>
 
 prints every frame — kind, payload length, and for an Arrow payload its row count and columns —
-then the first rows of each batch. A `tessera_id` is a `u64` and is printed as a decimal integer.
+then the first rows of each batch. A `mosaica_id` is a `u64` and is printed as a decimal integer.
 
 The framing (contracts §5): `u8 kind`, `u32` little-endian payload length, payload, repeated.
 Every Arrow payload is a complete IPC stream, decodable alone; the trailer is JSON. A viewport
@@ -15,12 +15,12 @@ body's kinds:
 
     1  tiles       exactly one, first          (tile, visible, matched, served, highlighted)
     2  sub-cells   exactly one iff requested   (cell, count)
-    3  points      zero or more                (tessera_id, code, ...render columns)
+    3  points      zero or more                (mosaica_id, code, ...render columns)
     4  trailer     exactly one, last           JSON — its presence marks the response complete
 
 An artifacts viewport body's:
 
-    5  artifacts   one per tile, in request    (layer, tessera_id, key, masked_count, ...,
+    5  artifacts   one per tile, in request    (layer, mosaica_id, key, masked_count, ...,
                    order, after one for the     rung, matched, highlighted, target, tile)
                    treed layers where it holds
                    a row

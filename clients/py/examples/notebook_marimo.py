@@ -576,7 +576,7 @@ def _(mo):
 @app.cell
 def _(black_holes, db, papers):
     _drawn = papers.filter(black_holes).sample(k=1)
-    db.item(_drawn["tessera_id"][0].as_py())
+    db.item(_drawn["mosaica_id"][0].as_py())
     return
 
 
@@ -757,7 +757,7 @@ def _(mo):
     mo.md("""
     `suppress()` hides papers from every reader from the moment it is accepted, without
     deleting them, and `unsuppress()` shows them again. `remove()` deletes. Each takes a list of
-    `tessera_id`s, or a table whose columns are `tessera_id` or unique columns, each row naming
+    `mosaica_id`s, or a table whose columns are `mosaica_id` or unique columns, each row naming
     one paper. The cell below suppresses five of the new machine-learning papers by their
     `entity_id`, and counts what the database and the machine-learning reader see at each step.
     """)

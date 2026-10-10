@@ -1338,7 +1338,7 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
 ///
 /// This is the first assertion that the filter reaches the *served* answer rather than an
 /// entity-space bitmap a test built itself. The expected set comes from the fixture's inputs, and
-/// the comparison is on `tessera_id` rather than row, because the served order is the engine's.
+/// the comparison is on `mosaica_id` rather than row, because the served order is the engine's.
 /// **A filtered viewport composes the fragment brought forward, not the session's own.**
 ///
 /// A session's fragment is fixed at authorise, and composition treats every entity below the live
@@ -1403,9 +1403,9 @@ fn a_filtered_viewport_sees_entities_flushed_since_the_session_authorised() {
     );
 
     let stale_ids: std::collections::HashSet<u64> =
-        stale.points.tessera_ids.iter().copied().collect();
+        stale.points.mosaica_ids.iter().copied().collect();
     let fresh_ids: std::collections::HashSet<u64> =
-        fresh.points.tessera_ids.iter().copied().collect();
+        fresh.points.mosaica_ids.iter().copied().collect();
     assert_eq!(
         stale_ids, fresh_ids,
         "and the same identities, not merely as many"
@@ -1448,8 +1448,8 @@ fn a_filtered_viewport_serves_only_matching_marks() {
     // Every filtered mark is one the unfiltered request also served — a filter narrows and never
     // widens (I12), asserted on the served identities rather than on counts alone.
     let unfiltered_ids: std::collections::HashSet<u64> =
-        unfiltered.points.tessera_ids.iter().copied().collect();
-    for id in &filtered.points.tessera_ids {
+        unfiltered.points.mosaica_ids.iter().copied().collect();
+    for id in &filtered.points.mosaica_ids {
         assert!(unfiltered_ids.contains(id));
     }
 }
@@ -1515,7 +1515,7 @@ fn a_filter_serves_every_match_up_to_the_cap_even_with_theta_live() {
     }
 
     // The cap still caps: a request `k` below the match count serves exactly `k`, and the
-    // truncated set is the `tessera_id` prefix of the full one — the nesting argument's
+    // truncated set is the `mosaica_id` prefix of the full one — the nesting argument's
     // client-truncation clause holds for the match layer too. One tile at zoom 0, so the
     // response's point order is the tile's ascending-id order and a slice comparison is exact.
     let capped = engine
@@ -1530,8 +1530,8 @@ fn a_filter_serves_every_match_up_to_the_cap_even_with_theta_live() {
         "the cap governs when matches exceed it"
     );
     assert_eq!(
-        capped.points.tessera_ids,
-        filtered.points.tessera_ids[..5],
+        capped.points.mosaica_ids,
+        filtered.points.mosaica_ids[..5],
         "the capped served set is the id-prefix of the uncapped one"
     );
 }
@@ -1617,7 +1617,7 @@ fn a_narrow_viewport_over_a_broad_filter_tests_its_own_rows() {
     );
 
     let ids = |out: &mosaica_engine::ViewportOut| -> std::collections::BTreeSet<u64> {
-        out.points.tessera_ids.iter().copied().collect()
+        out.points.mosaica_ids.iter().copied().collect()
     };
     let (narrow_all, narrow_matched, full_matched) = (
         ids(&unfiltered_narrow),
@@ -3256,7 +3256,7 @@ fn a_session_from_before_a_fold_is_never_offered_the_retired_entitys_only_value(
         "the suggestion page offered a value whose only member the fold retired"
     );
     let after = served(ops);
-    assert!(after.points.tessera_ids.is_empty(), "and nothing is drawn");
+    assert!(after.points.mosaica_ids.is_empty(), "and nothing is drawn");
     assert_eq!(
         after.tiles.iter().map(|tile| tile.matched).sum::<u64>(),
         0,
@@ -3267,7 +3267,7 @@ fn a_session_from_before_a_fold_is_never_offered_the_retired_entitys_only_value(
     // by an empty answer everywhere.
     assert!(offered(&engine, &session, "department", 4).contains(&"eng".to_string()));
     assert!(suggested().contains(&"eng".to_string()));
-    assert!(!served(eng).points.tessera_ids.is_empty());
+    assert!(!served(eng).points.mosaica_ids.is_empty());
 }
 
 /// **A suppression changes no attribute artefact at all** (Rule S), and the fold is where that is
@@ -3976,7 +3976,7 @@ fn keyword_answers(
                     .filter(leaf("title", operand.clone())),
             )
             .expect("a filtered viewport answers");
-        let mut ids: Vec<u64> = served.points.tessera_ids.clone();
+        let mut ids: Vec<u64> = served.points.mosaica_ids.clone();
         ids.sort_unstable();
         out.push((format!("viewport {operand:?}"), ids));
     }
@@ -4341,7 +4341,7 @@ fn suppression_is_a_differential_on(fx: &Fixture, family: &str, predicate: Filte
     let source = 1u64;
     let entity = fx.entity_of[&source];
     let id = engine
-        .tessera_id_of(mosaica_types::EntityId::new(entity))
+        .mosaica_id_of(mosaica_types::EntityId::new(entity))
         .expect("identity is computable");
     let raw = id.raw();
 
@@ -4362,7 +4362,7 @@ fn suppression_is_a_differential_on(fx: &Fixture, family: &str, predicate: Filte
         "{family}: this differential is about the row route, and the request did not take it"
     );
     let drawn: std::collections::BTreeSet<u64> =
-        before.points.tessera_ids.iter().copied().collect();
+        before.points.mosaica_ids.iter().copied().collect();
     assert!(
         drawn.contains(&raw),
         "{family}: the fixture is degenerate — the entity must match the filter before it is \
@@ -4382,7 +4382,7 @@ fn suppression_is_a_differential_on(fx: &Fixture, family: &str, predicate: Filte
     // A session authorised before the suppression must not still see it: the mask composes
     // against the live overlay, not the one that existed at authorise.
     let after = filtered(&engine, &session);
-    let drawn: std::collections::BTreeSet<u64> = after.points.tessera_ids.iter().copied().collect();
+    let drawn: std::collections::BTreeSet<u64> = after.points.mosaica_ids.iter().copied().collect();
     assert!(
         !drawn.contains(&raw),
         "{family}: a suppressed entity was drawn as a mark by a render-column filter"
@@ -4408,7 +4408,7 @@ fn suppression_is_a_differential_on(fx: &Fixture, family: &str, predicate: Filte
         .expect("an unsuppress is accepted");
     let restored = filtered(&engine, &session);
     let drawn: std::collections::BTreeSet<u64> =
-        restored.points.tessera_ids.iter().copied().collect();
+        restored.points.mosaica_ids.iter().copied().collect();
     assert!(
         drawn.contains(&raw),
         "{family}: the unsuppress must reveal the entity through the same filter — proving its \
@@ -4450,7 +4450,7 @@ fn the_row_route_and_the_entity_route_agree_over_the_domain() {
             .collect(),
     );
     let ids = |out: &mosaica_engine::ViewportOut| -> std::collections::BTreeSet<u64> {
-        out.points.tessera_ids.iter().copied().collect()
+        out.points.mosaica_ids.iter().copied().collect()
     };
 
     // A narrow window: few rows in range, so the row route is the cheaper one and is chosen.
@@ -4534,7 +4534,7 @@ fn the_row_route_and_the_entity_route_agree_over_a_numeric_range() {
         },
     );
     let ids = |out: &mosaica_engine::ViewportOut| -> std::collections::BTreeSet<u64> {
-        out.points.tessera_ids.iter().copied().collect()
+        out.points.mosaica_ids.iter().copied().collect()
     };
 
     // A narrow window: few rows in range, so the row route is the cheaper one and is chosen.
@@ -4590,7 +4590,7 @@ fn the_row_route_and_the_entity_route_agree_over_a_numeric_range() {
         .filter_map(|e| fx.entity_of.get(&e).copied())
         .filter_map(|entity| {
             engine
-                .tessera_id_of(mosaica_types::EntityId::new(entity))
+                .mosaica_id_of(mosaica_types::EntityId::new(entity))
                 .ok()
         })
         .map(|id| id.raw())
@@ -4675,9 +4675,9 @@ fn a_render_column_filter_narrows_the_selection_without_moving_the_anchor() {
             "{family}: the filter must actually have narrowed the matched set beneath the anchor"
         );
         let drawn: std::collections::BTreeSet<u64> =
-            filtered.points.tessera_ids.iter().copied().collect();
+            filtered.points.mosaica_ids.iter().copied().collect();
         let all: std::collections::BTreeSet<u64> =
-            unfiltered.points.tessera_ids.iter().copied().collect();
+            unfiltered.points.mosaica_ids.iter().copied().collect();
         assert!(
             drawn.is_subset(&all) && drawn.len() < all.len(),
             "{family}: a filter may only narrow (I12), and this one must actually have narrowed"

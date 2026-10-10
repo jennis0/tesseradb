@@ -23,7 +23,7 @@
 //! left the visible set and one entered it; what changed is *which*. Every count assertion in
 //! this file passes against that bug.
 //!
-//! So these cases assert on the served `tessera_id` set. `tessera_id` is a blinding permutation of
+//! So these cases assert on the served `mosaica_id` set. `mosaica_id` is a blinding permutation of
 //! the entity id under the bundle's key (I10, decision 0014) — a function of the entity, never
 //! of the row — so it is stable across a merge by construction, and set equality across the swap
 //! is exactly the discrimination a count cannot make. `publish_merge` re-derives the mask over the
@@ -148,15 +148,15 @@ fn viewport(
 /// segment more than once and no row's position is a coincidence of the first cycle.
 const ROWS_EACH: usize = 8;
 
-/// The served set as `tessera_id`s.
+/// The served set as `mosaica_id`s.
 ///
-/// `tessera_id` is a blinding permutation of the entity id under the bundle's key (I10) — a
+/// `mosaica_id` is a blinding permutation of the entity id under the bundle's key (I10) — a
 /// function of the entity, never of the row — so it is stable across a merge by construction, and
 /// set equality across the swap is the discrimination a count cannot make.
 fn served_ids(
     engine: &Engine,
     session: &mosaica_engine::Session,
-) -> BTreeSet<mosaica_types::TesseraId> {
+) -> BTreeSet<mosaica_types::MosaicaId> {
     viewport(engine, session)
         .points
         .iter()
@@ -286,7 +286,7 @@ fn run_merge(engine: &Engine, entities: &[EntityId]) {
 /// avoid, and the one `crate::merge`'s own module doc names as its mutation: carry the mask
 /// forward instead, and every denied row id keeps denying a row that now belongs to a different
 /// entity. Two items are suppressed here and two stay hidden either way — so the assertion is set
-/// equality on the served `tessera_id`s, which tells "the same two are hidden" from "two are
+/// equality on the served `mosaica_id`s, which tells "the same two are hidden" from "two are
 /// hidden".
 ///
 /// **One suppression sits inside the merged span and one outside it.** The merge consumes the four

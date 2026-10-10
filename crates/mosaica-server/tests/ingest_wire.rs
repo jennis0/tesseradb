@@ -369,14 +369,14 @@ async fn viewport(
 
 /// The drill-down of one item, with the two identifiers that differ by construction removed,
 /// at every depth, so two rows carrying the same values compare equal.
-async fn record_without_ids(server: &TestServer, token: &str, tessera_id: u64) -> Value {
-    let resp = post_item(server, token, tessera_id).await;
+async fn record_without_ids(server: &TestServer, token: &str, mosaica_id: u64) -> Value {
+    let resp = post_item(server, token, mosaica_id).await;
     assert_eq!(resp.status().as_u16(), 200);
     let mut body: Value = resp.json().await.unwrap();
     fn strip(value: &mut Value) {
         match value {
             Value::Object(map) => {
-                map.remove("tessera_id");
+                map.remove("mosaica_id");
                 map.remove("id");
                 for v in map.values_mut() {
                     strip(v);
@@ -1153,10 +1153,10 @@ fn widths_body(ids: &[u64], grades: &[Option<i64>]) -> Vec<u8> {
 }
 
 /// One item's drill-down fields.
-async fn fields_of(server: &TestServer, tessera_id: u64) -> Value {
+async fn fields_of(server: &TestServer, mosaica_id: u64) -> Value {
     let auth = authorise(server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
-    let resp = post_item(server, token, tessera_id).await;
+    let resp = post_item(server, token, mosaica_id).await;
     assert_eq!(resp.status().as_u16(), 200);
     let body: Value = resp.json().await.unwrap();
     body["fields"].clone()
@@ -1210,17 +1210,17 @@ async fn an_arrow_integer_outside_its_declaration_is_refused_naming_the_row() {
     );
 }
 
-/// A row without coordinates naming an existing item by `tessera_id`, as Arrow, setting `grade`
+/// A row without coordinates naming an existing item by `mosaica_id`, as Arrow, setting `grade`
 /// from an `int64` column.
-fn grade_row_body(tessera_id: u64, grade: i64) -> Vec<u8> {
+fn grade_row_body(mosaica_id: u64, grade: i64) -> Vec<u8> {
     let schema = Arc::new(Schema::new(vec![
-        Field::new("tessera_id", DataType::Utf8, true),
+        Field::new("mosaica_id", DataType::Utf8, true),
         Field::new("grade", DataType::Int64, true),
     ]));
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(StringArray::from_iter_values([tessera_id.to_string()])),
+            Arc::new(StringArray::from_iter_values([mosaica_id.to_string()])),
             Arc::new(Int64Array::from(vec![grade])),
         ],
     )
@@ -1254,19 +1254,19 @@ async fn an_arrow_column_on_a_row_without_coordinates_at_another_width_is_read_a
     declare_widths(&server).await;
     let (status, answer) = ingest(&server, "rows", Some(ARROW), widths_body(&[800], &[None])).await;
     assert_eq!(status, 200, "{answer}");
-    let tessera_id = ingested_ids(&answer)[0];
+    let mosaica_id = ingested_ids(&answer)[0];
     drain(&server).await;
 
-    let (status, answer) = post_rows(&server, "too-wide", grade_row_body(tessera_id, 300)).await;
+    let (status, answer) = post_rows(&server, "too-wide", grade_row_body(mosaica_id, 300)).await;
     assert_eq!(status, 422, "{answer}");
     assert_eq!(answer["error"], "contract");
     let detail = answer["detail"].as_str().unwrap();
     assert!(names_cell(detail, 0, "grade"), "{detail}");
 
-    let (status, answer) = post_rows(&server, "fits", grade_row_body(tessera_id, 42)).await;
+    let (status, answer) = post_rows(&server, "fits", grade_row_body(mosaica_id, 42)).await;
     assert_eq!(status, 200, "{answer}");
     drain(&server).await;
-    assert_eq!(fields_of(&server, tessera_id).await["grade"], json!(42));
+    assert_eq!(fields_of(&server, mosaica_id).await["grade"], json!(42));
 }
 
 /// A closed vocabulary `venues` and a category column `venue` over it, both declared live.
@@ -1304,17 +1304,17 @@ fn venue_ingest_body(venues: &[Option<&str>]) -> Vec<u8> {
     body_of(columns)
 }
 
-/// A row without coordinates setting one item's `venue`, naming the item by `tessera_id` and its
+/// A row without coordinates setting one item's `venue`, naming the item by `mosaica_id` and its
 /// key as `large_utf8`.
-fn venue_row_body(tessera_id: u64, venue: &str) -> Vec<u8> {
+fn venue_row_body(mosaica_id: u64, venue: &str) -> Vec<u8> {
     let schema = Arc::new(Schema::new(vec![
-        Field::new("tessera_id", DataType::Utf8, true),
+        Field::new("mosaica_id", DataType::Utf8, true),
         Field::new("venue", DataType::LargeUtf8, true),
     ]));
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(StringArray::from_iter_values([tessera_id.to_string()])),
+            Arc::new(StringArray::from_iter_values([mosaica_id.to_string()])),
             Arc::new(arrow::array::LargeStringArray::from_iter_values([venue])),
         ],
     )
@@ -1392,8 +1392,8 @@ async fn a_column_of_the_null_type_is_a_declared_column_with_no_values() {
     let (status, answer) = ingest(&server, "null-type", Some(ARROW), body_of(columns)).await;
     assert_eq!(status, 200, "{answer}");
     drain(&server).await;
-    for tessera_id in ingested_ids(&answer) {
-        let fields = fields_of(&server, tessera_id).await;
+    for mosaica_id in ingested_ids(&answer) {
+        let fields = fields_of(&server, mosaica_id).await;
         assert_eq!(fields, json!({}), "no row holds a value: {fields}");
     }
 }

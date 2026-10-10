@@ -60,7 +60,7 @@
 //!    pins is the honest contract rather than an instantaneous one.
 //! 2. **Identity is preserved in both directions**, sampled across every round, including rows
 //!    whose segments have since been merged and whose key runs have since been coalesced.
-//! 3. **Position is byte-exact.** Each round plants probe rows whose `(tessera_id, code)` pairs are
+//! 3. **Position is byte-exact.** Each round plants probe rows whose `(mosaica_id, code)` pairs are
 //!    captured at the round's own flush and re-checked at the end and after the restart. A merge
 //!    that dequantised and requantised, rather than carrying the Morton code through, fails here
 //!    and passes every count.
@@ -106,7 +106,7 @@ use std::time::{Duration, Instant};
 use common::*;
 use mosaica_engine::{Engine, EngineConfig, Session, ViewportRequest, WriteStage};
 use mosaica_lifecycle::{ChangeOp, UnallocatedRow};
-use mosaica_types::{EntityId, TesseraId};
+use mosaica_types::{EntityId, MosaicaId};
 
 const WAIT: Duration = Duration::from_secs(600);
 
@@ -465,7 +465,7 @@ fn ingest_round(engine: &Engine, round: usize, batch: usize) -> (Vec<Planted>, R
     )
 }
 
-/// The `(tessera_id, code)` of each probe, read from a narrow viewport around it.
+/// The `(mosaica_id, code)` of each probe, read from a narrow viewport around it.
 ///
 /// Narrow rather than whole-extent because the assertion is about *this row's* code: a
 /// whole-extent request at this size would serve millions of points to check four of them.
@@ -473,11 +473,11 @@ fn probe_codes(
     engine: &Engine,
     session: &Session,
     probes: &[Planted],
-) -> BTreeMap<String, (TesseraId, u64)> {
+) -> BTreeMap<String, (MosaicaId, u64)> {
     let mut out = BTreeMap::new();
     for probe in probes {
-        let tessera_id = engine
-            .tessera_id_of(probe.entity)
+        let mosaica_id = engine
+            .mosaica_id_of(probe.entity)
             .expect("a planted entity has a wire identity");
         let (x, y) = (probe.x, probe.y);
         let bbox = [
@@ -490,14 +490,14 @@ fn probe_codes(
         let found = served
             .points
             .iter()
-            .find(|(id, _)| *id == tessera_id)
+            .find(|(id, _)| *id == mosaica_id)
             .unwrap_or_else(|| {
                 panic!(
                     "{} is not served in a viewport around its own coordinates ({}, {})",
                     probe.key, probe.x, probe.y
                 )
             });
-        out.insert(probe.key.clone(), (tessera_id, found.1));
+        out.insert(probe.key.clone(), (mosaica_id, found.1));
     }
     out
 }
@@ -513,11 +513,11 @@ fn assert_identity(engine: &Engine, samples: &[Planted]) {
             "{} lost its item",
             planted.key
         );
-        let tessera_id = engine.tessera_id_of(planted.entity).expect("an opaque id");
+        let mosaica_id = engine.mosaica_id_of(planted.entity).expect("an opaque id");
         assert_eq!(
-            engine.resolve_tessera_ids(&[tessera_id]).expect("resolvable")[0],
+            engine.resolve_mosaica_ids(&[mosaica_id]).expect("resolvable")[0],
             Some(planted.entity),
-            "{} lost its tessera_id",
+            "{} lost its mosaica_id",
             planted.key
         );
         assert!(
@@ -572,7 +572,7 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
 
     // ---- the rounds -------------------------------------------------------------------------
     let mut probes: Vec<Planted> = Vec::new();
-    let mut codes: BTreeMap<String, (TesseraId, u64)> = BTreeMap::new();
+    let mut codes: BTreeMap<String, (MosaicaId, u64)> = BTreeMap::new();
     for round in 0..rounds {
         let (round_probes, timings) = ingest_round(&engine, round, batch);
 
@@ -777,12 +777,12 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
         sx + PROBE_HALF_WIDTH,
         sy + PROBE_HALF_WIDTH,
     ];
-    let tessera_id = engine.tessera_id_of(suppressed.entity).unwrap();
+    let mosaica_id = engine.mosaica_id_of(suppressed.entity).unwrap();
     assert!(
         !viewport(&engine, &full, bbox, PROBE_ZOOM)
             .points
             .iter()
-            .any(|(id, _)| id == tessera_id),
+            .any(|(id, _)| id == mosaica_id),
         "and it is the suppressed entity that is gone, not merely one item"
     );
 

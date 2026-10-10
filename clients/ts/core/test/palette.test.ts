@@ -30,13 +30,13 @@ describe('the cluster palettes', () => {
   it('colour each ordinal by its slot in the palette of the size it was served for, a size no palette has neutral, and a colour chosen for its layer over it', () => {
     const colours = artifactColours(
       [
-        {ordinal: 1, layer: 'a', tesseraId: 10n, slot: 2, paletteSize: 10},
-        {ordinal: 2, layer: 'a', tesseraId: 11n, slot: 2, paletteSize: 8},
-        {ordinal: 3, layer: 'a', tesseraId: 12n, slot: null, paletteSize: 10},
-        {ordinal: 4, layer: 'a', tesseraId: 13n, slot: 5, paletteSize: 10},
-        {ordinal: 5, layer: 'a', tesseraId: 14n, slot: 2, paletteSize: 9},
-        {ordinal: 6, layer: 'a', tesseraId: 15n, slot: null, paletteSize: null},
-        {ordinal: 7, layer: 'b', tesseraId: 13n, slot: 2, paletteSize: 10}
+        {ordinal: 1, layer: 'a', mosaicaId: 10n, slot: 2, paletteSize: 10},
+        {ordinal: 2, layer: 'a', mosaicaId: 11n, slot: 2, paletteSize: 8},
+        {ordinal: 3, layer: 'a', mosaicaId: 12n, slot: null, paletteSize: 10},
+        {ordinal: 4, layer: 'a', mosaicaId: 13n, slot: 5, paletteSize: 10},
+        {ordinal: 5, layer: 'a', mosaicaId: 14n, slot: 2, paletteSize: 9},
+        {ordinal: 6, layer: 'a', mosaicaId: 15n, slot: null, paletteSize: null},
+        {ordinal: 7, layer: 'b', mosaicaId: 13n, slot: 2, paletteSize: 10}
       ],
       new Map([['a', new Map([[13n, [9, 9, 9, 255] as const]])]])
     );

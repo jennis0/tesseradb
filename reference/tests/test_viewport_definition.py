@@ -30,7 +30,7 @@ TWO_64 = 1 << 64
 
 # The fixture, laid out as a table so a reader can check every expected answer against it.
 #
-#  row  tile  entity  tessera_id            below 2**63?
+#  row  tile  entity  mosaica_id            below 2**63?
 #    0     0     100   0x9000_0000_0000_0000   no
 #    1     0     101   0x1000_0000_0000_0000   yes
 #    2     0     102   0x3000_0000_0000_0000   yes
@@ -42,7 +42,7 @@ TWO_64 = 1 << 64
 #    8     1     108   0x5000_0000_0000_0000   yes
 #    9     2     109   0x6000_0000_0000_0000   yes -- outside DEFAULT_MASK, so tile 2 is empty
 #
-# Rows are deliberately not in `tessera_id` order: §7.2's order is imposed at selection time, and a
+# Rows are deliberately not in `mosaica_id` order: §7.2's order is imposed at selection time, and a
 # fixture already in that order could not tell an explicit sort from an inherited one.
 ROWS = [
     (0, 100, 0x9000_0000_0000_0000),
@@ -90,7 +90,7 @@ class _StubBundle:
             residual=np.zeros(len(rows), dtype=np.uint32),
             morton=np.zeros(len(rows), dtype=np.uint32),
             row_count=len(rows),
-            tessera_id=np.array([tid for _, _, tid in rows], dtype=np.uint64),
+            mosaica_id=np.array([tid for _, _, tid in rows], dtype=np.uint64),
         )
 
     def segment(self, view_id: str) -> Segment:
@@ -313,7 +313,7 @@ def test_served_is_the_theta_count_when_it_sits_between_floor_and_cap(selection)
 
     Working: at P_1 = 2⁶³ the visible identities below the cut are 0x1000…, 0x3000… and 0x2000…
     — rows 1, 2 and 4 — so C_θ = 3. 0x8000… is exactly 2⁶³ and the comparison is strict, so row 5
-    is above. m = min(4, max(2, 3)) = 3, and the three smallest by `tessera_id` are 0x1000… (row
+    is above. m = min(4, max(2, 3)) = 3, and the three smallest by `mosaica_id` are 0x1000… (row
     1), 0x2000… (row 4), 0x3000… (row 2), in that order.
 
     Kills: `<=` for the threshold comparison (row 5 would join, giving four); selecting in storage
@@ -350,7 +350,7 @@ def test_the_floor_serves_k_min_when_nothing_is_below_the_cut(selection):
 def test_masking_precedes_selection(selection):
     """Sampling happens **after** masking (**I7**) — the unauthorised row never displaces one.
 
-    Working: row 6 carries `tessera_id` 1, the smallest identity in the fixture, and its entity is
+    Working: row 6 carries `mosaica_id` 1, the smallest identity in the fixture, and its entity is
     outside the mask. Under the mask it is absent from `vis(T)` entirely, so C_θ = 3 and the served
     set is unchanged. Widen the mask to admit it and the answer changes in both quantities —
     C_θ = 4, m = min(4, max(2, 4)) = 4 — and row 6 leads the served set. Same tile, same
@@ -461,16 +461,16 @@ def test_a_deeper_tiling_partitions_the_shallower_one(selection):
 
 
 def test_a_pre_r6_segment_is_refused_rather_than_selected_from():
-    """A segment with no stored `tessera_id` cannot be ordered, so `Selection` refuses.
+    """A segment with no stored `mosaica_id` cannot be ordered, so `Selection` refuses.
 
-    §7.2's order is over `tessera_id`; without the column there is no order, and an oracle that
+    §7.2's order is over `mosaica_id`; without the column there is no order, and an oracle that
     fell back to storage order would silently become its own negative control.
 
     Kills: a fallback to `entity_id` order; a `None` reaching the sort as an opaque key.
     """
     bundle = _StubBundle(ROWS)
-    bundle.segment(VIEW).tessera_id = None
-    with pytest.raises(ValueError, match="tessera_id"):
+    bundle.segment(VIEW).mosaica_id = None
+    with pytest.raises(ValueError, match="mosaica_id"):
         viewport.Selection(bundle, DEFAULT_MASK, VIEW, 1)
 
 

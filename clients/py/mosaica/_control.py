@@ -185,15 +185,15 @@ class Control:
     ) -> Answer:
         """`POST /control/ingest`: create items, edit them, or add them to a view.
 
-        A row names items by its `tessera_id` and its values of the unique columns. A row naming
+        A row names items by its `mosaica_id` and its values of the unique columns. A row naming
         none creates an item at its position; one carrying what the item stores changes nothing;
         one naming an item with no row in the view adds it there; any other edits the item,
-        which keeps its `tessera_id`. A row naming two items, or an item or a unique value an
+        which keeps its `mosaica_id`. A row naming two items, or an item or a unique value an
         earlier row of the batch names, is refused, and the rest are applied. A row without
         coordinates changes only what it carries. Any column may be left out, keeping what the
         item stores, and a null clears it. The answer counts the rows `created`, `edited`,
         `added` and `unchanged`, and in `joined` the annotation memberships the rows added; it
-        gives each row's `tessera_id`, `None` for a refused row, and lists the refused rows in
+        gives each row's `mosaica_id`, `None` for a refused row, and lists the refused rows in
         `refused` by position and reason. A row that only places its item in an annotation
         changes the annotation, not the item, and is counted unchanged.
 
@@ -212,7 +212,7 @@ class Control:
         """`PUT /control/layers`: declare one annotation layer.
 
         `payload` is the layer's block as `mosaica check --payloads` prints it. The answer carries
-        the layer's `tessera_id`.
+        the layer's `mosaica_id`.
         """
         return self._send(
             "PUT", "/control/layers", json.dumps(payload).encode(), {"content-type": JSON}
@@ -268,7 +268,7 @@ class Control:
         item, or two, is left out and listed in the answer's `refused`, and the request is
         otherwise applied whole or not at all. `strict=True` refuses the request at its first
         refused member instead, with `404` or `409`. The answer gives each annotation's
-        `tessera_id`.
+        `mosaica_id`.
         """
         return self._send(
             "PUT", _artifacts(layer) + _query(strict=strict), body, {"content-type": JSON}
@@ -291,7 +291,7 @@ class Control:
 
         `items` is one record per change, `{"op": ..., "match": {column: value, ...}}`: `op` is
         `"delete"`, `"suppress"` or `"unsuppress"`, and `match` names the item by its
-        `tessera_id` and its values of unique columns, as `Database.addresses` gives it. A change
+        `mosaica_id` and its values of unique columns, as `Database.addresses` gives it. A change
         naming no item, or two, is listed in the answer's `refused` and the others are applied;
         `strict=True` refuses the request at its first such change instead, with `404` or `409`.
         A deletion or suppression applies to every request from the moment it is accepted. This

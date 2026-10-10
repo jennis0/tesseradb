@@ -542,7 +542,7 @@ async fn an_artifact_grouping_counts_the_members_the_viewer_sees() {
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
-        let ids = decoded.tessera_ids();
+        let ids = decoded.mosaica_ids();
         keys.iter()
             .zip(ids)
             .map(|(key, id)| (key.unwrap().to_string(), id))
@@ -1542,7 +1542,7 @@ async fn a_tree_is_ranked_at_the_cut_the_map_draws() {
             .iter()
             .filter(|(tile, _)| tile.is_none())
             .flat_map(|(_, rows)| rows)
-            .map(|row| (row.tessera_id, row.masked_count))
+            .map(|row| (row.mosaica_id, row.masked_count))
             .collect();
         drawn.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         let mut cut = json!({ "zoom": zoom, "bbox": bbox });
@@ -1657,7 +1657,7 @@ async fn a_layer_rows_title_is_the_name_browse_gives() {
             .unwrap()
             .iter()
             .map(|row| {
-                let id = row["tessera_id"].as_str().unwrap().parse().unwrap();
+                let id = row["mosaica_id"].as_str().unwrap().parse().unwrap();
                 (id, row["name"].as_str().map(str::to_string))
             })
             .collect();
@@ -1733,7 +1733,7 @@ async fn a_cluster_carries_one_slot_wherever_it_is_served() {
         assert_eq!(resp.status().as_u16(), 200);
         let decoded = decode_artifact_frames(&resp.bytes().await.unwrap());
         for row in decoded.frames.iter().flat_map(|(_, rows)| rows) {
-            agree(&mut slots, row.tessera_id, row.slot, "viewport");
+            agree(&mut slots, row.mosaica_id, row.slot, "viewport");
         }
     }
     assert_eq!(slots.len(), 25, "every node was drawn at some budget");
@@ -1770,7 +1770,7 @@ async fn a_cluster_carries_one_slot_wherever_it_is_served() {
     let rows = body["artifacts"].as_array().unwrap();
     assert_eq!(rows.len(), 24);
     for row in rows {
-        let id = row["tessera_id"].as_str().unwrap().parse().unwrap();
+        let id = row["mosaica_id"].as_str().unwrap().parse().unwrap();
         agree(&mut slots, id, row["slot"].as_u64().map(|s| s as u8), "browse");
     }
 
@@ -1785,7 +1785,7 @@ async fn a_cluster_carries_one_slot_wherever_it_is_served() {
     let mut read = 0;
     for (batch, _) in decode_records(&resp.bytes().await.unwrap()).pages {
         let ids = batch
-            .column_by_name("tessera_id")
+            .column_by_name("mosaica_id")
             .unwrap()
             .as_any()
             .downcast_ref::<arrow::array::UInt64Array>()

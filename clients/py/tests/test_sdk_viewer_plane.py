@@ -43,7 +43,7 @@ def test_the_tiles_serve_the_artifacts_of_the_layers_asked_for(db):
     assert len(tiles) == 4
     assert {row["layer"] for row in served.to_pylist()} == {"clusters"}
     assert {row["masked_count"] for row in served.to_pylist()} == {20}
-    assert len({row["tessera_id"] for row in served.to_pylist()}) == 1
+    assert len({row["mosaica_id"] for row in served.to_pylist()}) == 1
     assert {row["tile"] for row in served.to_pylist()} <= {0, 1, 2, 3}
     assert sum(table.num_rows for table in tiles) == served.num_rows
 
@@ -67,16 +67,16 @@ def test_every_route_gives_a_cluster_the_one_slot_below_the_palette_size_asked_f
     slots = {}
     for row in tiles.to_pylist():
         assert 0 <= row["slot"] < 8
-        assert slots.setdefault(row["tessera_id"], row["slot"]) == row["slot"]
+        assert slots.setdefault(row["mosaica_id"], row["slot"]) == row["slot"]
     assert len(slots) == 5
     assert len(set(slots.values())) > 1
 
     browsed = viewer.browse_artifacts("map", "clusters", palette_size=8)["artifacts"]
-    assert {int(row["tessera_id"]): row["slot"] for row in browsed} == slots
+    assert {int(row["mosaica_id"]): row["slot"] for row in browsed} == slots
     assert {row.get("slot") for row in viewer.browse_artifacts("map", "clusters")["artifacts"]} == {None}
 
     read = db.artifacts("map", "clusters", ["slot"], palette_size=8)
-    assert dict(zip(read.column("tessera_id").to_pylist(), read.column("slot").to_pylist())) == slots
+    assert dict(zip(read.column("mosaica_id").to_pylist(), read.column("slot").to_pylist())) == slots
     assert read.schema.field("slot").type == pa.uint8()
 
     (top,) = db.aggregate("map", [{"by": {"layer": "clusters", "top": 5, "palette_size": 8}}])
@@ -93,14 +93,14 @@ def test_a_sample_tags_its_points_and_the_tags_are_read_by_identifier(db):
     tags = {tag for tag in sample.column("membership:clusters").to_pylist() if tag is not None}
     assert len(tags) == 1
     read = db.viewer().artifacts("map", "clusters", ["masked_count"], ids=[*tags, 1])
-    assert read.column("tessera_id").to_pylist() == list(tags)
+    assert read.column("mosaica_id").to_pylist() == list(tags)
     assert read.column("masked_count").to_pylist() == [20]
 
 
 def test_a_sample_reads_as_its_points_table(db):
     """The points, their columns and the counts in the metadata."""
     served = db.view("map").sample(k=8, layers="all")
-    assert "tessera_id" in served.column_names
+    assert "mosaica_id" in served.column_names
     assert served.num_rows == len(served) == served.points.num_rows
     assert counts(served)["visible"] == 20
 
@@ -133,7 +133,7 @@ def test_a_sample_serves_a_null_where_an_item_has_no_rendered_value(served, corp
 
 def test_a_highlight_lights_the_served_set_without_moving_it(db):
     """One request, two expressions: the served set is identical and the counts gain one."""
-    one = db.viewer().browse_artifacts("map", "clusters")["artifacts"][0]["tessera_id"]
+    one = db.viewer().browse_artifacts("map", "clusters")["artifacts"][0]["mosaica_id"]
     plain = db.view("map").sample(k=512)
     dark = db.view("map").sample(k=512, highlight={"any_of": []})
     lit = db.view("map").sample(
@@ -189,13 +189,13 @@ def test_browse_and_artifact_agree_on_one_annotation(db):
     assert [row["key"] for row in page["artifacts"]] == ["c0"]
     one = page["artifacts"][0]
 
-    record = viewer.artifact(one["tessera_id"], "map")
+    record = viewer.artifact(one["mosaica_id"], "map")
     assert record["layer"] == "clusters"
     assert record["key"] == "c0"
     assert record["masked_count"] == int(one["masked_count"]) == 20
     # A flat layer's annotation has no children.
     assert one["child_count"] == 0
-    assert viewer.browse_artifacts("map", "clusters", parent=one["tessera_id"])["artifacts"] == []
+    assert viewer.browse_artifacts("map", "clusters", parent=one["mosaica_id"])["artifacts"] == []
 
 
 def test_an_artifact_a_principal_may_not_see_is_not_found(db):

@@ -1,7 +1,7 @@
 {
   "artifacts": [
     {
-      "tessera_id": "1411992542627935951",
+      "mosaica_id": "1411992542627935951",
       "key": "km-000016",
       "masked_count": 779,
       "rung": 0,
@@ -10,7 +10,7 @@
       "slot": 8
     },
     {
-      "tessera_id": "1142530805619044861",
+      "mosaica_id": "1142530805619044861",
       "key": "km-000015",
       "masked_count": 747,
       "rung": 0,
@@ -19,7 +19,7 @@
       "slot": 7
     },
     {
-      "tessera_id": "4380754068165536986",
+      "mosaica_id": "4380754068165536986",
       "key": "km-000026",
       "masked_count": 635,
       "rung": 0,
@@ -28,7 +28,7 @@
       "slot": 4
     },
     {
-      "tessera_id": "2521422233448566155",
+      "mosaica_id": "2521422233448566155",
       "key": "km-000012",
       "masked_count": 618,
       "rung": 0,

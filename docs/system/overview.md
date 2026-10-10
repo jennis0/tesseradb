@@ -83,7 +83,7 @@ flowchart LR
 
 Sampling happens after masking: a sparse viewer's sample is drawn from what they can see, never a
 global sample with the hidden points removed. The identifier a client receives in place of an
-item's own identity, its `tessera_id`, is a keyed permutation rather than encryption, and no
+item's own identity, its `mosaica_id`, is a keyed permutation rather than encryption, and no
 defence against anyone holding the underlying bundle. The security chapter states these properties
 in full, the threat model they answer to, and the disclosures accepted rather than closed.
 

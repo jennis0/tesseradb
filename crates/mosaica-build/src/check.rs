@@ -502,11 +502,11 @@ fn identify(
             return;
         }
     };
-    let tessera = schema
-        .column_with_name(crate::ids::TESSERA_ID_COLUMN)
+    let mosaica = schema
+        .column_with_name(crate::ids::MOSAICA_ID_COLUMN)
         .is_some();
     if addresses {
-        if let Err(missing) = mosaica_lifecycle::resolve::require_identifier(tessera, carried.len())
+        if let Err(missing) = mosaica_lifecycle::resolve::require_identifier(mosaica, carried.len())
         {
             report.note(object, format!("its rows address items, and {missing}"));
             return;

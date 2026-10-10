@@ -22,7 +22,7 @@ const meta = {
 } as never;
 
 const row = (id: bigint, name: string, masked: bigint, matched: bigint, parents: bigint[] = []) =>
-  ({tesseraId: id, key: `D${id}`, name, maskedCount: masked, matchedCount: matched, rung: 0, parentIds: parents});
+  ({mosaicaId: id, key: `D${id}`, name, maskedCount: masked, matchedCount: matched, rung: 0, parentIds: parents});
 
 const pages: Record<string, BrowsePage> = {
   roots: {artifacts: [row(1n, 'Neoplasms', 4_812_004n, 21_309n), row(2n, 'Anatomy', 9_115_442n, 44_002n), row(3n, 'Chemicals and Drugs', 8_240_119n, 39_551n)], parents: [], next: 'p2'},

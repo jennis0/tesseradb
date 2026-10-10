@@ -73,7 +73,7 @@ describe('decodeViewport', () => {
     for (const c of withUnderlay.subCells!) expect(c.count).toBeGreaterThan(0n);
   });
 
-  it('never narrows a tessera_id to a double', () => {
+  it('never narrows a mosaica_id to a double', () => {
     const r = decodeViewport(fixture('viewport-plain.bin'));
     expect(r.ids).toBeInstanceOf(BigUint64Array);
   });

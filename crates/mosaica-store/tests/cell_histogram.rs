@@ -18,16 +18,16 @@ use mosaica_store::manifest::{
     Quantisation, SegmentDescriptor, SegmentsManifest, ViewDescriptor,
 };
 use mosaica_store::write::{write_permutation, write_segment};
-use mosaica_types::{EntityId, TesseraId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+use mosaica_types::{EntityId, MosaicaId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
-/// A synthetic `tessera_id`-shaped value (splitmix64 over a seed) — same stand-in as
+/// A synthetic `mosaica_id`-shaped value (splitmix64 over a seed) — same stand-in as
 /// `bundle_read.rs`; the identity construction itself is not under test here.
-fn synthetic_tessera_id(seed: u64) -> TesseraId {
+fn synthetic_mosaica_id(seed: u64) -> MosaicaId {
     let mut z = seed.wrapping_add(0x9E3779B97F4A7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
     z ^= z >> 31;
-    TesseraId::new(z)
+    MosaicaId::new(z)
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
@@ -74,7 +74,7 @@ fn build_bundle(root: &Path) {
     for &(cx, cy, rows) in &CELLS {
         for _ in 0..rows {
             items.push(TilerItem {
-                tessera_id: synthetic_tessera_id(items.len() as u64),
+                mosaica_id: synthetic_mosaica_id(items.len() as u64),
                 qx: fixed32((f64::from(cx) + 0.5) / 65536.0, 0.0, 1.0),
                 qy: fixed32((f64::from(cy) + 0.5) / 65536.0, 0.0, 1.0),
                 scalars: vec![],

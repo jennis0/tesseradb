@@ -2,7 +2,7 @@
 //!
 //! **The stage that could not complete at rung 6 under any budget.** What it replaced collected a
 //! 12 B record for every row of the view into one heap vector — 42 GB over 3.5×10⁹ rows — sorted
-//! it there, and then built the row→entity, residual and `tessera_id` columns as three more
+//! it there, and then built the row→entity, residual and `mosaica_id` columns as three more
 //! vectors beside it, a 70 GB peak against a residency model with no term for any of them. Before
 //! that it scattered the view's geometry into two entity-order files nothing else reads, which is
 //! the write-back-and-re-dirty pattern of the whole-corpus observations
@@ -18,8 +18,8 @@
 //! 2. **Row partition.** The walk again, pushing a 12 B `(morton, residual, entity)` record per
 //!    present ordinal into the Morton buckets. `priority` is not carried: it is `forward(entity)`'s
 //!    prefix and is recomputed when a bucket is loaded.
-//! 3. **Per bucket, in Morton order.** Load, taking each record's `tessera_id` as it is read,
-//!    sort by `(morton, tessera_id)` in parallel, and emit: `morton.u32` and `row-entity.u32` are
+//! 3. **Per bucket, in Morton order.** Load, taking each record's `mosaica_id` as it is read,
+//!    sort by `(morton, mosaica_id)` in parallel, and emit: `morton.u32` and `row-entity.u32` are
 //!    appended, the identity and the residual go into `columns.arrow`'s body at their own offsets,
 //!    the occupancy counter is fed the codes, and `(entity, row)` is pushed to a second partition.
 //! 4. **The permutation and the render lanes, from one pass over the pairs.** Each entity-range
@@ -86,8 +86,8 @@ const COLUMN_CHUNK_ROWS: usize = 1 << 16;
 /// **The identity is carried rather than recomputed.** It was the `priority` prefix here and a
 /// second `forward(entity)` at the emit, so every row of every view paid eight `splitmix64` rounds
 /// twice. `forward` is pure, so one call and the full 64-bit compare give exactly the order the
-/// prefix-then-refine comparator gave: `priority` is `tessera_id`'s leading 16 bits
-/// (`TesseraId::priority`), so ordering by the whole word orders by the prefix first.
+/// prefix-then-refine comparator gave: `priority` is `mosaica_id`'s leading 16 bits
+/// (`MosaicaId::priority`), so ordering by the whole word orders by the prefix first.
 /// Eight bytes a record against six, over one bucket.
 ///
 /// **24 B a record, which is what the pre-flight charges** (`crate::residency`). `repr(C)` rounds
@@ -104,10 +104,10 @@ pub(crate) struct RowRec {
 }
 
 impl RowRec {
-    /// `(morton, tessera_id)` ascending, with no further tiebreak (contracts §2.6 r6).
+    /// `(morton, mosaica_id)` ascending, with no further tiebreak (contracts §2.6 r6).
     ///
-    /// `row_rec_comparator_agrees_with_a_full_tessera_id_sort_over_engineered_ties` checks the
-    /// order against a naive full-`tessera_id` sort over a batch engineered to contain prefix ties,
+    /// `row_rec_comparator_agrees_with_a_full_mosaica_id_sort_over_engineered_ties` checks the
+    /// order against a naive full-`mosaica_id` sort over a batch engineered to contain prefix ties,
     /// which is what it checked of the comparator this replaced.
     pub(crate) fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.morton
@@ -116,7 +116,7 @@ impl RowRec {
     }
 }
 
-/// The `tessera_id` of one entity. **Unreachable as an error in practice** — the allocator caps
+/// The `mosaica_id` of one entity. **Unreachable as an error in practice** — the allocator caps
 /// entity ids below `u32::MAX` (I-1), which is what makes `forward` infallible for any entity a
 /// build assigns — but `expect` rather than a fallback, because a silently wrong identity here is
 /// a silently wrong row order.
@@ -136,7 +136,7 @@ fn identity_of(key: &IdentityKey, shard: u32, entity: u32) -> u64 {
 /// pass counts `morton >> 8` and takes the smallest prefixes whose counts fit the target; a bin
 /// over the target on its own is counted again over its 256 full codes; and a single code still
 /// over the target is split by the `priority` prefix of the identity, which is sound because the
-/// row order is `(morton, tessera_id)` and `priority` is that identity's leading 16 bits. So a
+/// row order is `(morton, mosaica_id)` and `priority` is that identity's leading 16 bits. So a
 /// boundary is a `(morton, priority)` pair, with `priority` zero everywhere no code needed
 /// splitting — which is every bucket of every corpus measured so far.
 #[derive(Debug)]
@@ -329,7 +329,7 @@ pub(crate) fn morton_boundaries(
                             "the segment assembly's Morton boundaries: {priority_count} rows \
                              share cell {code} and identity prefix {priority}, against a bucket \
                              target of {target} over {} rows. There is no finer key to split them \
-                             by — the row order `(morton, tessera_id)` places two such rows only \
+                             by — the row order `(morton, mosaica_id)` places two such rows only \
                              by their full identities, which are not a range",
                             histogram.rows
                         ))
@@ -650,7 +650,7 @@ pub(crate) fn write_segment(
         loaded.par_sort_unstable_by(|a, b| a.cmp(b));
         debug_assert!(
             loaded.windows(2).all(|pair| pair[0].cmp(&pair[1]).is_lt()),
-            "two rows of one view share a (morton, tessera_id): the order would depend on how the \
+            "two rows of one view share a (morton, mosaica_id): the order would depend on how the \
              parallel sort divided the bucket"
         );
 
@@ -1045,23 +1045,23 @@ mod tests {
     }
 
     /// The tie path: comparing the `priority` prefix first and refining on a tie by recomputing
-    /// the full `tessera_id` from `entity` must produce **exactly** the same row order as sorting
-    /// by the full `tessera_id` directly — not merely "usually agrees". Fixed `morton` across
+    /// the full `mosaica_id` from `entity` must produce **exactly** the same row order as sorting
+    /// by the full `mosaica_id` directly — not merely "usually agrees". Fixed `morton` across
     /// every row so the fixture ties on the first comparator field too.
     #[test]
-    fn row_rec_comparator_agrees_with_a_full_tessera_id_sort_over_engineered_ties() {
+    fn row_rec_comparator_agrees_with_a_full_mosaica_id_sort_over_engineered_ties() {
         let key = IdentityKey::from_hex("000102030405060708090a0b0c0d0e0f").unwrap();
         let shard = 0u32;
         let morton = 42u32;
 
         let rows: Vec<RowRec> = (0..4000u32)
             .map(|entity| {
-                let tessera_id = key.forward(shard, EntityId::new(entity as u64)).unwrap();
+                let mosaica_id = key.forward(shard, EntityId::new(entity as u64)).unwrap();
                 RowRec {
                     morton,
                     entity,
                     residual: 0,
-                    identity: tessera_id.raw(),
+                    identity: mosaica_id.raw(),
                 }
             })
             .collect();
@@ -1092,7 +1092,7 @@ mod tests {
                 .map(|r| r.entity)
                 .collect::<Vec<u32>>(),
             naive.iter().map(|r| r.entity).collect::<Vec<u32>>(),
-            "the prefix-then-recompute comparator must agree with a full tessera_id sort"
+            "the prefix-then-recompute comparator must agree with a full mosaica_id sort"
         );
     }
 }

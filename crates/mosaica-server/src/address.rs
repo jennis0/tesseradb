@@ -1,16 +1,16 @@
 //! Rows that address items: a change's `match`, and the member tables of a publication or a
-//! growth. Each row names an item by a `tessera_id` column and a column for each unique field,
+//! growth. Each row names an item by a `mosaica_id` column and a column for each unique field,
 //! and every row of a request is resolved in one call, by the identity rule
 //! ([`mosaica_engine::Engine::name_items`]). A row naming no item, or naming two, is refused:
 //! listed in the answer with its reason while the rest apply, or, in a strict request, refusing
-//! the request whole. A column that is neither `tessera_id` nor a unique field names nothing and
+//! the request whole. A column that is neither `mosaica_id` nor a unique field names nothing and
 //! is ignored, as a build ignores it, and the answer names it.
 
 use std::collections::BTreeMap;
 
 use mosaica_engine::{AddressTable, AddressValue};
 use mosaica_lifecycle::resolve::{Reason, Verdict};
-use mosaica_types::{EntityId, TesseraId};
+use mosaica_types::{EntityId, MosaicaId};
 
 use crate::error::{map_engine_error, ApiError};
 use crate::state::AppState;
@@ -28,7 +28,7 @@ impl Table {
         self.rows
     }
 
-    /// A table as a body carries it: columns of equal length keyed by `tessera_id` and unique
+    /// A table as a body carries it: columns of equal length keyed by `mosaica_id` and unique
     /// field names. `what` names the table in a refusal.
     pub(crate) fn from_wire(what: &str, wire: WireTable) -> Result<Table, ApiError> {
         let mut table = Table::default();
@@ -170,12 +170,12 @@ impl Merged {
                     None => cells.resize(cells.len() + one.rows, None),
                 }
             }
-            if name == "tessera_id" {
+            if name == "mosaica_id" {
                 let ids = cells
                     .into_iter()
-                    .map(|cell| cell.map(tessera_id_of).transpose())
+                    .map(|cell| cell.map(mosaica_id_of).transpose())
                     .collect::<Result<_, _>>()?;
-                table.tessera_id = Some(ids);
+                table.mosaica_id = Some(ids);
             } else {
                 table.columns.push((name, cells));
             }
@@ -206,17 +206,17 @@ impl Merged {
     }
 }
 
-/// A `tessera_id` cell, which is a base-10 string.
-fn tessera_id_of(value: AddressValue) -> Result<TesseraId, ApiError> {
+/// A `mosaica_id` cell, which is a base-10 string.
+fn mosaica_id_of(value: AddressValue) -> Result<MosaicaId, ApiError> {
     let refuse = |shown: String| {
         ApiError::Contract(format!(
-            "{shown} is not a tessera_id; send a tessera_id as a base-10 string, such as \"12345\""
+            "{shown} is not a mosaica_id; send a mosaica_id as a base-10 string, such as \"12345\""
         ))
     };
     match value {
         AddressValue::Text(text) => text
             .parse::<u64>()
-            .map(TesseraId::new)
+            .map(MosaicaId::new)
             .map_err(|_| refuse(format!("'{text}'"))),
         // A JSON number loses `u64` precision past 2^53 in JavaScript.
         AddressValue::Integer(n) => Err(refuse(format!("the number {n}"))),
@@ -228,7 +228,7 @@ fn tessera_id_of(value: AddressValue) -> Result<TesseraId, ApiError> {
 /// the row names no item, 409 where it names two. The row is named by position, never by a value.
 pub(crate) fn strict_refusal(what: &str, row: usize, reason: Reason) -> ApiError {
     match reason {
-        Reason::NamesNoItem | Reason::UnknownTesseraId => ApiError::Unknown(format!(
+        Reason::NamesNoItem | Reason::UnknownMosaicaId => ApiError::Unknown(format!(
             "row {row} of {what} names nothing this deployment holds"
         )),
         Reason::NamesTwo => ApiError::Conflict(format!(

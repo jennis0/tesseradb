@@ -8,7 +8,7 @@
 //! its write-ahead log replays.
 //!
 //! The corpus has three views' points, two of them a view group's; an attribute file whose rows
-//! can carry a `tessera_id`; a group-scoped attribute's file, whose rows for each view of the
+//! can carry a `mosaica_id`; a group-scoped attribute's file, whose rows for each view of the
 //! group the service is sent as one batch naming that view; an access relation, which the service
 //! is sent as a batch naming each item once with its labels; and a members file, which it is sent
 //! as one publication.
@@ -96,7 +96,7 @@ struct Rows {
     /// A group-scoped attribute's rows: the key of the view each row is for, and its value.
     which: Option<Vec<String>>,
     grade: Option<Vec<i64>>,
-    tessera_id: Option<Vec<Option<String>>>,
+    mosaica_id: Option<Vec<Option<String>>>,
     /// `rid`, a unique field only the points carry, one value per row, which no file edits: the
     /// access relation names items by it.
     rid: Option<Vec<u64>>,
@@ -150,10 +150,10 @@ impl Rows {
         if let Some(grade) = &self.grade {
             columns.push(("grade", Arc::new(Int64Array::from(grade[..n].to_vec()))));
         }
-        if let Some(tessera_id) = &self.tessera_id {
+        if let Some(mosaica_id) = &self.mosaica_id {
             columns.push((
-                "tessera_id",
-                Arc::new(StringArray::from(tessera_id[..n].to_vec())),
+                "mosaica_id",
+                Arc::new(StringArray::from(mosaica_id[..n].to_vec())),
             ));
         }
         if let Some(term) = &self.term {
@@ -198,8 +198,8 @@ impl Rows {
                 if let Some(grade) = &self.grade {
                     row.insert("grade".into(), json!(grade[i]));
                 }
-                if let Some(Some(id)) = self.tessera_id.as_ref().map(|t| &t[i]) {
-                    row.insert("tessera_id".into(), json!(id));
+                if let Some(Some(id)) = self.mosaica_id.as_ref().map(|t| &t[i]) {
+                    row.insert("mosaica_id".into(), json!(id));
                 }
                 Value::Object(row)
             })
@@ -297,8 +297,8 @@ impl Rows {
         if let Some(score) = &self.score {
             parts.push(format!("score = {}", score[row]));
         }
-        if let Some(Some(id)) = self.tessera_id.as_ref().map(|t| &t[row]) {
-            parts.push(format!("tessera_id = {id}"));
+        if let Some(Some(id)) = self.mosaica_id.as_ref().map(|t| &t[row]) {
+            parts.push(format!("mosaica_id = {id}"));
         }
         match parts.is_empty() {
             true => format!("row {row}"),
@@ -363,7 +363,7 @@ impl Corpus {
         near.rid = Some((2000..2020).collect());
         let mut notes = rows(&mut d, 25, 50, false);
         notes.score = Some((0..25).map(|i| 100 + i).collect());
-        notes.tessera_id = Some(
+        notes.mosaica_id = Some(
             (0..25)
                 .map(|i| (i % 6 == 5).then(|| format!("9999999999{i}")))
                 .collect(),
@@ -379,7 +379,7 @@ impl Corpus {
             let (x, y) = (held[0], held[1]);
             notes.a[0..3].copy_from_slice(&[Some(x), Some(y), Some(y)]);
             b[0..3].clone_from_slice(&[Some("bz".to_string()), Some("bz".to_string()), None]);
-            notes.tessera_id.as_mut().unwrap()[0..3].fill(None);
+            notes.mosaica_id.as_mut().unwrap()[0..3].fill(None);
         }
         // Every point row's `rid` gets a term: every fifth the narrower one alone, the rest the
         // one everyone holds. A build gives an item the relation names nothing no label at all,
@@ -835,7 +835,7 @@ async fn state(server: &TestServer, two_fields: bool) -> BTreeMap<String, Value>
             let mut held = BTreeMap::new();
             for artifact in artifacts {
                 let filter = json!({ "member_of": {
-                    "layer": LAYER, "artifact": artifact.tessera_id.to_string()
+                    "layer": LAYER, "artifact": artifact.mosaica_id.to_string()
                 } });
                 let members = seen(server, &token, view, two_fields, Some(filter)).await;
                 held.insert(
@@ -1056,7 +1056,7 @@ async fn a_build_answers_as_its_files_ingested_into_an_empty_database() {
         "names_no_item",
         "one_item_twice",
         "one_value_twice",
-        "unknown_tessera_id",
+        "unknown_mosaica_id",
     ] {
         assert!(
             reasons.contains(reason),

@@ -422,7 +422,7 @@ fn each_view_serves_its_own_copy_of_the_key() {
     let session = engine
         .authorise(br#"{"terms": ["1"]}"#)
         .expect("the credential covers every entity");
-    let mut served: Vec<(&str, mosaica_types::TesseraId)> = Vec::new();
+    let mut served: Vec<(&str, mosaica_types::MosaicaId)> = Vec::new();
     for view in ["slices:a", "slices:b"] {
         let out = engine
             .browse(
@@ -458,7 +458,7 @@ fn each_view_serves_its_own_copy_of_the_key() {
             [12],
             "{view} serves its own copy of the key and nothing of the other view's: {counts:?}"
         );
-        served.push((view, out.artifacts[0].tessera_id));
+        served.push((view, out.artifacts[0].mosaica_id));
     }
 
     // **And not by the identifier either.** Browse withholding a row while the drill-down answered

@@ -176,7 +176,7 @@ describe('MosaicaClient against a live server', () => {
     const response = await client.viewportArtifacts(session.token, {view, zoom, bbox, layers: ['taxonomy/arxiv'], perTile: 5});
     const first = response.frames.flatMap((f) => f.artifacts)[0]!;
     expect(first.layer).toBe('taxonomy/arxiv');
-    const opened = await client.artifact(session.token, first.tesseraId, {view: 's0'});
+    const opened = await client.artifact(session.token, first.mosaicaId, {view: 's0'});
     expect(opened).toMatchObject({layer: first.layer, key: first.key, maskedCount: first.maskedCount, centroid: first.centroid, box: first.box});
     expect(opened.maskedCount).toBeGreaterThan(0n);
     await expect(client.artifact(session.token, 1n, {view: 's0'})).rejects.toMatchObject({status: 404});
@@ -194,8 +194,8 @@ describe('MosaicaClient against a live server', () => {
       expect(frame.artifacts.length).toBeLessThanOrEqual(3);
       for (const a of frame.artifacts) {
         const these = `${a.maskedCount}|${a.centroid}|${a.box}`;
-        expect(figures.get(a.tesseraId) ?? these).toBe(these);
-        figures.set(a.tesseraId, these);
+        expect(figures.get(a.mosaicaId) ?? these).toBe(these);
+        figures.set(a.mosaicaId, these);
       }
     }
     expect(figures.size).toBeGreaterThan(0);
@@ -212,7 +212,7 @@ describe('MosaicaClient against a live server', () => {
     const rows: {id: bigint; level: number; count: bigint}[] = [];
     for await (const page of read) {
       for (let i = 0; i < page.numRows; i++) {
-        rows.push({id: BigInt(page.getChild('tessera_id')!.get(i)), level: Number(page.getChild('level')!.get(i)), count: BigInt(page.getChild('masked_count')!.get(i))});
+        rows.push({id: BigInt(page.getChild('mosaica_id')!.get(i)), level: Number(page.getChild('level')!.get(i)), count: BigInt(page.getChild('masked_count')!.get(i))});
       }
     }
     expect(rows.map((r) => r.id).sort()).toEqual([...ids].sort());
@@ -232,15 +232,15 @@ describe('MosaicaClient against a live server', () => {
     for (const a of response.frames.flatMap((f) => f.artifacts)) {
       expect(a.slot).toBeTypeOf('number');
       expect(a.slot!).toBeLessThan(8);
-      expect(slots.get(a.tesseraId) ?? a.slot).toBe(a.slot);
-      slots.set(a.tesseraId, a.slot);
+      expect(slots.get(a.mosaicaId) ?? a.slot).toBe(a.slot);
+      slots.set(a.mosaicaId, a.slot);
     }
     expect(slots.size).toBeGreaterThan(1);
     const roots = await client.browse(session.token, {view: 's0', layer: 'clusters/kmeans', paletteSize: 8});
-    for (const row of roots.artifacts) if (slots.has(row.tesseraId)) expect(row.slot).toBe(slots.get(row.tesseraId));
+    for (const row of roots.artifacts) if (slots.has(row.mosaicaId)) expect(row.slot).toBe(slots.get(row.mosaicaId));
     const read = await client.artifacts(session.token, {view: 's0', layer: 'clusters/kmeans', ids: [...slots.keys()], fields: ['slot'], paletteSize: 8});
     for await (const page of read) {
-      for (let i = 0; i < page.numRows; i++) expect(page.getChild('slot')!.get(i)).toBe(slots.get(BigInt(page.getChild('tessera_id')!.get(i))));
+      for (let i = 0; i < page.numRows; i++) expect(page.getChild('slot')!.get(i)).toBe(slots.get(BigInt(page.getChild('mosaica_id')!.get(i))));
     }
     const {tables} = await client.aggregate(session.token, {view: 's0', groupings: [{by: {layer: 'clusters/kmeans', top: 5, paletteSize: 8}}]});
     const rows = tables[0]!.rows;
@@ -258,19 +258,19 @@ describe('MosaicaClient against a live server', () => {
     expect(roots.artifacts.length).toBeGreaterThan(0);
     for (const row of roots.artifacts) expect(row.rung).toBe(0);
     const root = roots.artifacts[0]!;
-    const opened = await client.artifact(session.token, root.tesseraId, {view: 's0'});
+    const opened = await client.artifact(session.token, root.mosaicaId, {view: 's0'});
     expect(root.maskedCount).toBe(opened.maskedCount);
 
     // The children form carries the named artifact's own parents, which a root has none of.
-    const children = await client.browse(session.token, {view: 's0', layer: 'taxonomy/arxiv', parent: root.tesseraId});
+    const children = await client.browse(session.token, {view: 's0', layer: 'taxonomy/arxiv', parent: root.mosaicaId});
     expect(children.parents).toEqual([]);
     expect(children.artifacts.length).toBeGreaterThan(0);
     for (const child of children.artifacts) {
       expect(child.rung).toBe(1);
-      expect(child.parentIds).toContain(root.tesseraId);
+      expect(child.parentIds).toContain(root.mosaicaId);
     }
-    const leaf = await client.browse(session.token, {view: 's0', layer: 'taxonomy/arxiv', parent: children.artifacts[0]!.tesseraId});
-    expect(leaf.parents.map((p) => p.tesseraId)).toEqual([root.tesseraId]);
+    const leaf = await client.browse(session.token, {view: 's0', layer: 'taxonomy/arxiv', parent: children.artifacts[0]!.mosaicaId});
+    expect(leaf.parents.map((p) => p.mosaicaId)).toEqual([root.mosaicaId]);
     expect(leaf.parents[0]!.maskedCount).toBe(root.maskedCount);
   });
 

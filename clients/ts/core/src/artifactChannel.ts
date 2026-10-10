@@ -141,9 +141,9 @@ export function requestLevels(declarations: ReadonlyMap<string, Pick<Layer, 'hie
   return any ? [...out].sort((a, b) => a - b) : undefined;
 }
 
-/** `(layer, tessera_id)`: ids are unique within a layer. */
-function keyOf(a: {layer: string; tesseraId: bigint}): string {
-  return `${a.layer}\u0000${a.tesseraId}`;
+/** `(layer, mosaica_id)`: ids are unique within a layer. */
+function keyOf(a: {layer: string; mosaicaId: bigint}): string {
+  return `${a.layer}\u0000${a.mosaicaId}`;
 }
 
 /** A held tile's key: the filter its bits answer, its depth and its prefix. */
@@ -485,7 +485,7 @@ export class ArtifactChannel {
   private name(rows: readonly Artifact[], paletteSize: number | undefined): void {
     const table = this.table;
     const ref = (a: Artifact): ArtifactRef => ({
-      tesseraId: a.tesseraId,
+      mosaicaId: a.mosaicaId,
       layer: a.layer,
       parentIds: a.parentIds,
       centroid: a.centroid,
@@ -834,7 +834,7 @@ export class ArtifactChannel {
       if (this.named.has(key) || this.looked.has(key)) continue;
       this.looked.add(key);
       const ids = byLayer.get(entry.layer) ?? [];
-      ids.push(entry.tesseraId);
+      ids.push(entry.mosaicaId);
       byLayer.set(entry.layer, ids);
     }
     if (byLayer.size === 0) return;
@@ -855,7 +855,7 @@ export class ArtifactChannel {
         });
         const refs: ArtifactRef[] = [];
         for await (const page of read) {
-          const id = page.getChild('tessera_id')!;
+          const id = page.getChild('mosaica_id')!;
           const level = page.getChild('level')!;
           const parents = page.getChild('parents')!;
           const cx = page.getChild('centroid_x')!;
@@ -865,7 +865,7 @@ export class ArtifactChannel {
             const x = cx.get(i) as number | null;
             const y = cy.get(i) as number | null;
             refs.push({
-              tesseraId: BigInt(id.get(i) as bigint),
+              mosaicaId: BigInt(id.get(i) as bigint),
               layer,
               parentIds: Array.from((parents.get(i) as Iterable<bigint> | null) ?? [], (p) => BigInt(p)),
               centroid: x === null || y === null ? null : gridOfData(x, y, projection, q),
@@ -881,7 +881,7 @@ export class ArtifactChannel {
         // A tag left unread keeps the neutral colour. It is asked again by the next check once
         // the wait is out, each wait twice the last, so a shed read is not repeated at once.
         if (this.heldUnder !== keys) return;
-        for (const id of ids) this.looked.delete(keyOf({layer, tesseraId: id}));
+        for (const id of ids) this.looked.delete(keyOf({layer, mosaicaId: id}));
         if (this.lookPaused === null) {
           this.lookPaused = this.clock.after(this.lookWait, () => (this.lookPaused = null));
           this.lookWait = Math.min(this.lookWait * 2, LOOK_RETRY_MAX_MS);
@@ -912,10 +912,10 @@ function merged(a: Artifact, b: Artifact): Artifact {
  * @category Projections
  */
 export type ServedLineage = {
-  /** Every served artifact, by `tesseraId`. */
+  /** Every served artifact, by `mosaicaId`. */
   byId: Map<bigint, Artifact>;
   /**
-   * A parent's served children, by the parent's `tesseraId`; on a `dag` layer one child may be
+   * A parent's served children, by the parent's `mosaicaId`; on a `dag` layer one child may be
    * under several. Absent where none was served.
    */
   childrenOf: Map<bigint, Artifact[]>;
@@ -927,7 +927,7 @@ export type ServedLineage = {
 
 /** @internal */
 export function servedLineage(artifacts: readonly Artifact[]): ServedLineage {
-  const byId = new Map(artifacts.map((a) => [a.tesseraId, a]));
+  const byId = new Map(artifacts.map((a) => [a.mosaicaId, a]));
   const childrenOf = new Map<bigint, Artifact[]>();
   const roots: Artifact[] = [];
   for (const artifact of artifacts) {
@@ -936,9 +936,9 @@ export function servedLineage(artifacts: readonly Artifact[]): ServedLineage {
       const parent = byId.get(parentId);
       if (!parent) continue;
       linked = true;
-      const siblings = childrenOf.get(parent.tesseraId);
+      const siblings = childrenOf.get(parent.mosaicaId);
       if (siblings) siblings.push(artifact);
-      else childrenOf.set(parent.tesseraId, [artifact]);
+      else childrenOf.set(parent.mosaicaId, [artifact]);
     }
     if (!linked) roots.push(artifact);
   }
@@ -946,7 +946,7 @@ export function servedLineage(artifacts: readonly Artifact[]): ServedLineage {
 }
 
 /**
- * The `tesseraId`s of `root` and of every artifact served beneath it, following the parent links
+ * The `mosaicaId`s of `root` and of every artifact served beneath it, following the parent links
  * in `lineage`. `root` is included even where `lineage` does not hold it. A `dag` layer's cycles
  * end the walk.
  *
@@ -959,7 +959,7 @@ export function subtreeOf(lineage: ServedLineage, root: bigint): Set<bigint> {
     const id = stack.pop()!;
     if (seen.has(id)) continue;
     seen.add(id);
-    for (const child of lineage.childrenOf.get(id) ?? []) stack.push(child.tesseraId);
+    for (const child of lineage.childrenOf.get(id) ?? []) stack.push(child.mosaicaId);
   }
   return seen;
 }

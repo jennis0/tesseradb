@@ -28,7 +28,7 @@ use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
-use mosaica_types::{EntityId, TesseraId};
+use mosaica_types::{EntityId, MosaicaId};
 
 const WAIT: Duration = Duration::from_secs(30);
 
@@ -300,7 +300,7 @@ fn declaration(name: &str, criterion: Option<ExistenceCriterion>) -> LayerDeclar
     }
 }
 
-fn by_artifact(id: TesseraId) -> FilterExpr {
+fn by_artifact(id: MosaicaId) -> FilterExpr {
     FilterExpr::Region(RegionLeaf::Artifact(id))
 }
 
@@ -342,7 +342,7 @@ fn the_leaf_by_artifact_is_its_masked_count_and_an_empty_operand_wherever_the_ar
         .unwrap()
         .artifacts();
     assert_eq!(served.len(), 1, "the broad principal is served the cluster");
-    let id = served[0].tessera_id;
+    let id = served[0].mosaica_id;
     assert_eq!(served[0].masked_count, 300);
 
     // The leaf is the artifact's own membership, under this principal's mask.
@@ -361,7 +361,7 @@ fn the_leaf_by_artifact_is_its_masked_count_and_an_empty_operand_wherever_the_ar
     let unknown = viewport(
         &engine,
         &subset_credential(),
-        Some(by_artifact(TesseraId::new(0x7777_7777_7777_7777))),
+        Some(by_artifact(MosaicaId::new(0x7777_7777_7777_7777))),
     );
     let withheld = viewport(&engine, &subset_credential(), Some(by_artifact(id)));
     assert_eq!(matched(&unknown), 0);
@@ -379,13 +379,13 @@ fn the_leaf_by_artifact_is_its_masked_count_and_an_empty_operand_wherever_the_ar
     assert_eq!(matched(&outside_withheld), visible(&outside_withheld));
 
     // Suppressed: the broad principal, who was served it, now gets the empty operand too.
-    let entity = engine.resolve_tessera_ids(&[id]).unwrap()[0].unwrap();
+    let entity = engine.resolve_mosaica_ids(&[id]).unwrap()[0].unwrap();
     engine.accept_change(entity, ChangeOp::Suppress).unwrap();
     let suppressed = viewport(&engine, &full_coverage_credential(), Some(by_artifact(id)));
     let unknown_full = viewport(
         &engine,
         &full_coverage_credential(),
-        Some(by_artifact(TesseraId::new(0x7777_7777_7777_7777))),
+        Some(by_artifact(MosaicaId::new(0x7777_7777_7777_7777))),
     );
     assert_eq!(matched(&suppressed), 0);
     assert_eq!(
@@ -606,7 +606,7 @@ fn region_viewport(engine: &Engine, credential: &[u8], shape: &Arc<Shape>) -> Vi
     }
 }
 
-fn served_ids(out: &ViewportOut) -> std::collections::BTreeSet<TesseraId> {
+fn served_ids(out: &ViewportOut) -> std::collections::BTreeSet<MosaicaId> {
     out.points.iter().map(|(id, _)| id).collect()
 }
 
@@ -622,7 +622,7 @@ fn served_ids(out: &ViewportOut) -> std::collections::BTreeSet<TesseraId> {
 ///
 /// The shape takes a proper subset of the merged span and no built item, so a stale answer is a
 /// different **set** of items rather than merely a different count — which is the discrimination
-/// `tests/merge.rs`'s module doc explains a count cannot make, since `tessera_id` is a function of
+/// `tests/merge.rs`'s module doc explains a count cannot make, since `mosaica_id` is a function of
 /// the entity and never of the row (I10).
 ///
 /// **The two asks are taken at the same segment count, and that is load-bearing.** A stale

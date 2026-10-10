@@ -7,12 +7,12 @@
 //!
 //! # Why a file rather than the inversion that was already available
 //!
-//! The mapping is recoverable without storing anything — `columns.arrow` carries `tessera_id` at
+//! The mapping is recoverable without storing anything — `columns.arrow` carries `mosaica_id` at
 //! the row, the identity is a keyed bijection, and `MANIFEST.json` carries the key, which is
 //! exactly how [`crate::permutation::SegmentExtent`] recovers a *segment's* rows at open. That
 //! route was measured and is too dear for a per-row path:
 //! `probes/2026-08-11-viewport-crossing/` attributes **~17.5 ns per row** to `IdentityKey::invert`
-//! against ~0.4 ns for reading the `tessera_id` beside it, and batching a whole tile's inversions
+//! against ~0.4 ns for reading the `mosaica_id` beside it, and batching a whole tile's inversions
 //! into a scratch buffer before testing recovers none of it (6.22 ms against 6.00 ms interleaved —
 //! it is the four Feistel rounds, not a stalled pipeline). Over a 300,000-row viewport that is the
 //! difference between 6.0 ms and 0.7 ms on a clumped result, and 18.5 ms against 11.1 ms on a

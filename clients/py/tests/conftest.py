@@ -160,18 +160,18 @@ def viewport(db, view: str, bbox, zoom: int = 0, k: int = 512, filters: dict | N
                     counts[name] = sum(int(v) for v in table.column(name).to_pylist())
         elif kind == 3:
             table = ipc.open_stream(io.BytesIO(payload)).read_all()
-            if "tessera_id" in table.column_names:
-                ids += [str(v) for v in table.column("tessera_id").to_pylist()]
+            if "mosaica_id" in table.column_names:
+                ids += [str(v) for v in table.column("mosaica_id").to_pylist()]
         elif kind == 4:
             trailer = _json.loads(payload.decode())
     return {"counts": counts, "trailer": trailer, "ids": ids, "complete": bool(trailer)}
 
 
-def item(db, tessera_id: str, terms=None) -> dict:
+def item(db, mosaica_id: str, terms=None) -> dict:
     import json as _json
 
     return _json.loads(
-        post(f"{db.viewer_url}/v1/items/{tessera_id}", db.token(terms).token, {})
+        post(f"{db.viewer_url}/v1/items/{mosaica_id}", db.token(terms).token, {})
     )
 
 

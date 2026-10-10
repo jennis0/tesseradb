@@ -24,16 +24,16 @@ use mosaica_store::permutation::SegmentExtent;
 use mosaica_store::read::SegmentData;
 use mosaica_store::write::{write_permutation, write_segment};
 use mosaica_store::{write_flush_segment, Bundle, FlushInput, FlushRow};
-use mosaica_types::{EntityId, IdentityKey, TesseraId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+use mosaica_types::{EntityId, IdentityKey, MosaicaId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
 pub const PARTITION: &str = "default";
 pub const VIEW: &str = "main";
 
-fn synthetic_tessera_id(seed: u64) -> TesseraId {
+fn synthetic_mosaica_id(seed: u64) -> MosaicaId {
     let mut z = seed.wrapping_add(0x9E3779B97F4A7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-    TesseraId::new(z ^ (z >> 31))
+    MosaicaId::new(z ^ (z >> 31))
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
@@ -56,7 +56,7 @@ fn file_digest(path: &Path) -> FileDigest {
 fn items_for(entity_lo: u64, count: u64) -> Vec<TilerItem> {
     (entity_lo..entity_lo + count)
         .map(|e| TilerItem {
-            tessera_id: synthetic_tessera_id(e),
+            mosaica_id: synthetic_mosaica_id(e),
             qx: fixed32(((e * 37) % 100) as f64 / 100.0, 0.0, 1.0),
             qy: fixed32(((e * 61) % 100) as f64 / 100.0, 0.0, 1.0),
             scalars: vec![],

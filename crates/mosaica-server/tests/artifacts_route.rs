@@ -159,7 +159,7 @@ fn keys_of(responses: &[DecodedRecords]) -> Vec<String> {
 }
 
 fn ids_of(responses: &[DecodedRecords]) -> Vec<u64> {
-    responses.iter().flat_map(DecodedRecords::tessera_ids).collect()
+    responses.iter().flat_map(DecodedRecords::mosaica_ids).collect()
 }
 
 /// The identifiers the tile route serves in the layer over the whole map.
@@ -174,7 +174,7 @@ async fn viewport_ids(server: &TestServer, token: &str) -> HashSet<u64> {
         .artifacts
         .unwrap_or_default()
         .into_iter()
-        .map(|a| a.tessera_id)
+        .map(|a| a.mosaica_id)
         .collect()
 }
 
@@ -319,7 +319,7 @@ async fn a_withheld_parent_answers_as_a_parent_with_no_children() {
     assert_eq!(pages.len(), 1);
     let (schema, rows, end) = &pages[0];
     let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-    assert_eq!((names, *rows), (vec!["tessera_id", "key"], 0));
+    assert_eq!((names, *rows), (vec!["mosaica_id", "key"], 0));
     assert_eq!(schema.field(1).data_type(), &arrow::datatypes::DataType::Utf8);
     assert_eq!(end, &json!({ "next": null, "ended_by": "end" }));
     assert_eq!((&trailer["pages"], &trailer["rows"]), (&json!(1), &json!(0)));

@@ -849,7 +849,7 @@ fn limit_keeps_a_row_group_whose_signed_ids_start_below_zero() {
     assert_eq!(report.items, 100, "ids 0 to 99 are below the limit");
 }
 
-/// `mosaica verify` re-derives every row's `tessera_id` from `(identity.key, identity.shard_id,
+/// `mosaica verify` re-derives every row's `mosaica_id` from `(identity.key, identity.shard_id,
 /// entity_id)` and fails if a single row disagrees (contracts §2.6 r6). A freshly built bundle
 /// must verify clean.
 #[test]
@@ -899,10 +899,10 @@ fn verify_accepts_a_freshly_built_bundle() {
 }
 
 /// Contracts §2.6 r6: "`mosaica verify` checks the whole column against" the key. Corrupts one
-/// row's stored `tessera_id` (keeping every digest self-consistent, so the failure is the
+/// row's stored `mosaica_id` (keeping every digest self-consistent, so the failure is the
 /// identity check itself and not an earlier digest-mismatch error) and asserts `verify` refuses.
 #[test]
-fn verify_rejects_a_columns_file_whose_tessera_ids_do_not_match_the_key() {
+fn verify_rejects_a_columns_file_whose_mosaica_ids_do_not_match_the_key() {
     use sha2::{Digest, Sha256};
 
     let tmp = tempfile::tempdir().unwrap();
@@ -947,19 +947,19 @@ fn verify_rejects_a_columns_file_whose_tessera_ids_do_not_match_the_key() {
     let columns_rel = "partitions/default/views/s0/segments/seg-0/columns.arrow".to_string();
     let columns_path = out.join(&report.prefix).join(&columns_rel);
 
-    // ---- corrupt row 0's tessera_id, keeping the schema and every other value intact --------
+    // ---- corrupt row 0's mosaica_id, keeping the schema and every other value intact --------
     let file = File::open(&columns_path).unwrap();
     let reader = arrow::ipc::reader::FileReader::try_new(file, None).unwrap();
     let schema = reader.schema();
     let batches: Vec<RecordBatch> = reader.map(|b| b.unwrap()).collect();
     assert_eq!(batches.len(), 1, "the build writes one record batch");
     let batch = &batches[0];
-    let tessera_id = batch
+    let mosaica_id = batch
         .column(0)
         .as_any()
         .downcast_ref::<UInt64Array>()
         .unwrap();
-    let mut corrupted: Vec<u64> = tessera_id.iter().map(|v| v.unwrap()).collect();
+    let mut corrupted: Vec<u64> = mosaica_id.iter().map(|v| v.unwrap()).collect();
     corrupted[0] ^= 1; // flip the low bit: still a plausible-looking u64, still wrong
     let mut columns: Vec<Arc<dyn arrow::array::Array>> = Vec::new();
     columns.push(Arc::new(UInt64Array::from(corrupted)));
@@ -1014,13 +1014,13 @@ fn verify_rejects_a_columns_file_whose_tessera_ids_do_not_match_the_key() {
     .unwrap();
 
     let err = mosaica_build::verify(&out)
-        .expect_err("a corrupted tessera_id column must fail verification");
+        .expect_err("a corrupted mosaica_id column must fail verification");
     assert!(
         matches!(err, mosaica_build::BuildError::Invalid(_)),
         "expected BuildError::Invalid, got {err:?}"
     );
     assert!(
-        format!("{err}").contains("tessera_id"),
+        format!("{err}").contains("mosaica_id"),
         "the error should name the identity check, got: {err}"
     );
 }

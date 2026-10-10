@@ -705,7 +705,7 @@ fn every_route_agrees_across_a_delete_and_a_suppression() {
         engine.viewport(&session, whole_extent()).expect("serves");
         for entity in [deleted, suppressed] {
             let id = engine
-                .tessera_id_of(entity)
+                .mosaica_id_of(entity)
                 .expect("the identity is computable");
             assert!(
                 engine

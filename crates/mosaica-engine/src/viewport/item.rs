@@ -155,7 +155,7 @@ impl Engine {
     pub fn item(
         &self,
         session: &Session,
-        id: TesseraId,
+        id: MosaicaId,
     ) -> Result<Option<ItemOut>> {
         let generation = self.generation.load_full();
 

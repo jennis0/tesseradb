@@ -1226,13 +1226,13 @@ pub fn member(source_id: u64) -> String {
     source_id.to_string()
 }
 
-/// The `tessera_id` of the live item holding `id` ([`id_schema`]) `source_id`: what a client
+/// The `mosaica_id` of the live item holding `id` ([`id_schema`]) `source_id`: what a client
 /// reads off an ingest answer or a viewport, read here from the engine.
-pub fn tessera_id_of(server: &TestServer, source_id: u64) -> u64 {
+pub fn mosaica_id_of(server: &TestServer, source_id: u64) -> u64 {
     let engine = &server.state.engine;
     let entity = unique_holders(engine, "id", &[source_id.to_string()]).unwrap()[0]
         .unwrap_or_else(|| panic!("no live item holds id {source_id}"));
-    engine.tessera_id_of(entity).unwrap().raw()
+    engine.mosaica_id_of(entity).unwrap().raw()
 }
 
 /// A member table naming each of `source_ids` by [`id_schema`]'s `id`.
@@ -1286,10 +1286,10 @@ pub fn arrow_member_lists(tables: &[serde_json::Value]) -> arrow::array::ListArr
     )
 }
 
-/// A member table naming each of `tessera_ids`.
-pub fn members_by_tessera_id(tessera_ids: impl IntoIterator<Item = u64>) -> serde_json::Value {
+/// A member table naming each of `mosaica_ids`.
+pub fn members_by_mosaica_id(mosaica_ids: impl IntoIterator<Item = u64>) -> serde_json::Value {
     serde_json::json!({
-        "tessera_id": tessera_ids.into_iter().map(|id| id.to_string()).collect::<Vec<_>>()
+        "mosaica_id": mosaica_ids.into_iter().map(|id| id.to_string()).collect::<Vec<_>>()
     })
 }
 
@@ -1555,26 +1555,26 @@ pub async fn flush_and_fold(server: &TestServer, view: Option<&str>) {
     fold(server).await;
 }
 
-/// The `tessera_id` an ingest answer gives each row, in row order. Panics unless each is sent as
+/// The `mosaica_id` an ingest answer gives each row, in row order. Panics unless each is sent as
 /// a decimal string.
 pub fn ingested_ids(answer: &serde_json::Value) -> Vec<u64> {
-    answer["tessera_ids"]
+    answer["mosaica_ids"]
         .as_array()
-        .unwrap_or_else(|| panic!("the ingest answer carries tessera_ids: {answer}"))
+        .unwrap_or_else(|| panic!("the ingest answer carries mosaica_ids: {answer}"))
         .iter()
         .map(|id| {
             id.as_str()
                 .and_then(|digits| digits.parse().ok())
-                .unwrap_or_else(|| panic!("{id} is not a tessera_id as a decimal string"))
+                .unwrap_or_else(|| panic!("{id} is not a mosaica_id as a decimal string"))
         })
         .collect()
 }
 
-/// `POST /v1/items/{tessera_id}` with no body fields set.
-pub async fn post_item(server: &TestServer, token: &str, tessera_id: u64) -> reqwest::Response {
+/// `POST /v1/items/{mosaica_id}` with no body fields set.
+pub async fn post_item(server: &TestServer, token: &str, mosaica_id: u64) -> reqwest::Response {
     server
         .client
-        .post(server.viewer_url(&format!("/v1/items/{tessera_id}")))
+        .post(server.viewer_url(&format!("/v1/items/{mosaica_id}")))
         .bearer_auth(token)
         .json(&serde_json::json!({}))
         .send()
@@ -1590,7 +1590,7 @@ pub struct DecodedViewport {
     /// `(tile, visible, matched)` per row.
     pub tiles: Vec<TileRow>,
     pub served: Vec<u64>,
-    /// `(tessera_id, code)` per point, concatenated across every kind-3 frame in order.
+    /// `(mosaica_id, code)` per point, concatenated across every kind-3 frame in order.
     pub points: Vec<PointRow>,
     /// `(cell, count)`, or `None` where no underlay was asked for.
     pub sub_cells: Option<Vec<(u64, u64)>>,
@@ -1608,7 +1608,7 @@ pub struct DecodedViewport {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArtifactRow {
     pub layer: String,
-    pub tessera_id: u64,
+    pub mosaica_id: u64,
     pub key: Option<String>,
     /// How many members this principal can see, not how many the artifact has.
     pub masked_count: u64,
@@ -1628,7 +1628,7 @@ pub struct ArtifactRow {
     pub matched: Option<bool>,
     /// The same bit for the filter and the highlight together.
     pub highlighted: Option<bool>,
-    /// The `tessera_id` of the artifact this row is attached to, in the same frame or the frame
+    /// The `mosaica_id` of the artifact this row is attached to, in the same frame or the frame
     /// of treed layers. `None` for an artifact attached to nothing.
     pub target: Option<u64>,
     /// The tile whose visible members put the row in its frame; `None` for a treed layer's.
@@ -1722,10 +1722,10 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                 let reader = StreamReader::try_new(Cursor::new(payload.to_vec()), None).unwrap();
                 for batch in reader {
                     let batch = batch.unwrap();
-                    let tessera_id = u64_col(&batch, 0);
+                    let mosaica_id = u64_col(&batch, 0);
                     let code = u64_col(&batch, 1);
                     for i in 0..batch.num_rows() {
-                        points.push((tessera_id.value(i), code.value(i)));
+                        points.push((mosaica_id.value(i), code.value(i)));
                     }
                 }
                 deterministic_end = at + frame_len;
@@ -1822,7 +1822,7 @@ pub fn decode_artifact_frames(bytes: &[u8]) -> DecodedArtifacts {
     );
     let mut merged: Vec<ArtifactRow> = Vec::new();
     for row in decoded.iter().flat_map(|(_, rows)| rows) {
-        match merged.iter_mut().find(|held| held.tessera_id == row.tessera_id) {
+        match merged.iter_mut().find(|held| held.mosaica_id == row.mosaica_id) {
             Some(held) => {
                 held.matched = held.matched.zip(row.matched).map(|(a, b)| a || b);
                 held.highlighted = held.highlighted.zip(row.highlighted).map(|(a, b)| a || b);
@@ -1859,7 +1859,7 @@ pub fn decode_artifact_rows(payload: &[u8]) -> Vec<ArtifactRow> {
             .as_any()
             .downcast_ref::<arrow::array::StringArray>()
             .unwrap();
-        let tessera_id = u64_col(&batch, 1);
+        let mosaica_id = u64_col(&batch, 1);
         let key = str_col(&batch, 2);
         let masked_count = u64_col(&batch, 3);
         let f64_at = |col: usize, i: usize| {
@@ -1892,7 +1892,7 @@ pub fn decode_artifact_rows(payload: &[u8]) -> Vec<ArtifactRow> {
             let parents = parents.as_any().downcast_ref::<UInt64Array>().unwrap();
             rows.push(ArtifactRow {
                 layer: layer_values.value(layer.key(i).expect("layer is never null")).to_string(),
-                tessera_id: tessera_id.value(i),
+                mosaica_id: mosaica_id.value(i),
                 key: key.is_valid(i).then(|| key.value(i).to_string()),
                 masked_count: masked_count.value(i),
                 centroid: f64_at(4, i).map(|x| [x, f64_at(5, i).expect("both axes or neither")]),
@@ -1931,18 +1931,18 @@ pub fn artifacts_request(mut viewport: serde_json::Value) -> serde_json::Value {
     viewport
 }
 
-/// One artifact's drawn shape as `POST /v1/artifacts/{tessera_id}` serves it at depth `zoom`, as
+/// One artifact's drawn shape as `POST /v1/artifacts/{mosaica_id}` serves it at depth `zoom`, as
 /// parts of rings of `[x, y]`; `None` where it serves none.
 pub async fn shape_by_id(
     server: &TestServer,
     token: &str,
     view: &str,
-    tessera_id: u64,
+    mosaica_id: u64,
     zoom: u8,
 ) -> Option<Vec<Vec<Vec<[u32; 2]>>>> {
     let resp = server
         .client
-        .post(server.viewer_url(&format!("/v1/artifacts/{tessera_id}")))
+        .post(server.viewer_url(&format!("/v1/artifacts/{mosaica_id}")))
         .bearer_auth(token)
         .json(&serde_json::json!({ "view": view, "zoom": zoom }))
         .send()
@@ -1969,7 +1969,7 @@ pub async fn post_viewport_artifacts(
         .unwrap()
 }
 
-/// A viewport body's tiles as `(tile, visible, matched)` and points as `(tessera_id, code)`.
+/// A viewport body's tiles as `(tile, visible, matched)` and points as `(mosaica_id, code)`.
 pub fn decode_viewport(bytes: &[u8]) -> (Vec<TileRow>, Vec<PointRow>) {
     let decoded = decode_viewport_frames(bytes);
     (decoded.tiles, decoded.points)
@@ -2061,17 +2061,17 @@ pub struct DecodedRecords {
 }
 
 impl DecodedRecords {
-    /// Every page's `tessera_id` column, in order.
-    pub fn tessera_ids(&self) -> Vec<u64> {
+    /// Every page's `mosaica_id` column, in order.
+    pub fn mosaica_ids(&self) -> Vec<u64> {
         self.pages
             .iter()
             .flat_map(|(batch, _)| {
                 batch
-                    .column_by_name("tessera_id")
-                    .expect("every page leads with tessera_id")
+                    .column_by_name("mosaica_id")
+                    .expect("every page leads with mosaica_id")
                     .as_any()
                     .downcast_ref::<UInt64Array>()
-                    .expect("tessera_id is uint64")
+                    .expect("mosaica_id is uint64")
                     .values()
                     .to_vec()
             })
@@ -2182,7 +2182,7 @@ pub fn decode_aggregate(bytes: &[u8]) -> DecodedAggregate {
     }
 }
 
-/// A group's key: a vocabulary key, or an artifact's `tessera_id`.
+/// A group's key: a vocabulary key, or an artifact's `mosaica_id`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AggregateKey {
     Text(String),
@@ -2256,7 +2256,7 @@ pub fn unique_holders(
 ) -> Result<Vec<Option<mosaica_types::EntityId>>, mosaica_engine::EngineError> {
     let table = mosaica_engine::AddressTable {
         rows: values.len(),
-        tessera_id: None,
+        mosaica_id: None,
         columns: vec![(
             field.to_string(),
             values

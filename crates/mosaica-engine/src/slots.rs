@@ -10,7 +10,7 @@
 //! Only what this viewer is served: the clusters whose verdict passes over the viewer's visible
 //! set and that hold an item the viewer sees (one that holds none draws nothing and has no slot),
 //! the viewer's tree over those clusters (a withheld cluster occupies no place in it, as in
-//! [`crate::cut`]), each cluster's visible count, its `tessera_id`, and a centre over its visible
+//! [`crate::cut`]), each cluster's visible count, its `mosaica_id`, and a centre over its visible
 //! members. A cluster the viewer is not served is no input, so a viewer's slots are those of a
 //! corpus without it.
 //!
@@ -28,14 +28,14 @@
 //! has; a request without a palette size reads nothing for slots.
 //!
 //! **Elsewhere centres come from a sample.** The items sampled are the visible items whose
-//! `tessera_id` is below the cut `⌊S · 2⁶⁴ / N⌋`, `S` being [`SAMPLE`] and `N` the visible count, or
+//! `mosaica_id` is below the cut `⌊S · 2⁶⁴ / N⌋`, `S` being [`SAMPLE`] and `N` the visible count, or
 //! every visible item where `N <= S`. They are read from the narrowest identity band holding the cut
 //! ([`mosaica_store::bands`]), or from the segment's columns where no band does, with a column
 //! level's labels read from its band-order copy where it has one. The cut moves in proportion to
 //! `N`, with no step, so a change in the visible count moves the centres only of the clusters
 //! holding an item between the old cut and the new. A cluster's centre is the mean position of its
 //! sampled members. A cluster with none takes its nearest centred ancestor's centre, moved by at
-//! most [`JITTER`] grid units drawn from its own `tessera_id`, and one with no such ancestor has no
+//! most [`JITTER`] grid units drawn from its own `mosaica_id`, and one with no such ancestor has no
 //! centre and no neighbours. So for clusters far smaller than the sample resolves, which neighbours
 //! they are told apart from is approximate.
 
@@ -51,13 +51,13 @@
 //!
 //! Two clusters are neighbours at a depth where the edge between their centres is in the Delaunay
 //! triangulation of the centres drawn there. Clusters sharing a centre are first set on a ring about
-//! it, a grid unit apart in order of `tessera_id`; a cluster with no centre has no neighbours.
+//! it, a grid unit apart in order of `mosaica_id`; a cluster with no centre has no neighbours.
 //!
 //! # The rule
 //!
-//! Every cluster has an order of the `N` slots, a permutation drawn from its `tessera_id` and `N`,
-//! and a rank drawn from its `tessera_id`. A parent's **heir** is its child with the most visible
-//! items, ties going to the lower `tessera_id`; a child that is heir to several parents inherits
+//! Every cluster has an order of the `N` slots, a permutation drawn from its `mosaica_id` and `N`,
+//! and a rank drawn from its `mosaica_id`. A parent's **heir** is its child with the most visible
+//! items, ties going to the lower `mosaica_id`; a child that is heir to several parents inherits
 //! from the one with the most visible items, ties likewise. On a tiered layer the heir is chosen
 //! among the parent's children at the shallowest level holding any it is served: a child reached
 //! through a withheld level between is its heir only where it has no child above that, and that
@@ -77,8 +77,8 @@
 //!
 //! # What a change reaches
 //!
-//! A slot depends on the cluster's own `tessera_id`, its parents' slots and which parent it is heir
-//! to, and on each neighbour's `tessera_id`, which parent the neighbour is heir to, the neighbour's
+//! A slot depends on the cluster's own `mosaica_id`, its parents' slots and which parent it is heir
+//! to, and on each neighbour's `mosaica_id`, which parent the neighbour is heir to, the neighbour's
 //! parents' slots, and the slot of a neighbour coloured at an earlier depth. It never depends on the
 //! slot a neighbour takes at the same depth. So a change reaches:
 //!
@@ -1033,7 +1033,7 @@ fn beside_ancestor(clusters: &[Cluster], own: &[Option<[f64; 2]>], c: u32) -> Op
     None
 }
 
-/// The `tessera_id` below which a visible item is in the sample, out of `visible` items for a
+/// The `mosaica_id` below which a visible item is in the sample, out of `visible` items for a
 /// sample of about `size`: every item where there are no more than `size`.
 fn sample_cut(visible: u64, size: u64) -> u64 {
     if visible <= size {
@@ -1057,7 +1057,7 @@ struct Sampled {
     entry: Option<usize>,
 }
 
-/// The visible items whose `tessera_id` is below `cut`, ascending by row: read from the narrowest
+/// The visible items whose `mosaica_id` is below `cut`, ascending by row: read from the narrowest
 /// band holding the cut, or from each segment's columns where no band does.
 fn sample(
     served: &ServedView<'_>,
@@ -1088,7 +1088,7 @@ fn sample(
             continue;
         }
         let (ids, morton, residual) = (
-            segment.columns.tessera_id(),
+            segment.columns.mosaica_id(),
             segment.morton.u32(),
             segment.columns.residual(),
         );
@@ -1111,7 +1111,7 @@ fn sample(
 /// A cluster as the rule reads it.
 #[derive(Debug, Clone)]
 pub(crate) struct Cluster {
-    /// Its `tessera_id`.
+    /// Its `mosaica_id`.
     pub(crate) seed: u64,
     /// Its visible items.
     pub(crate) count: u64,
@@ -1273,7 +1273,7 @@ pub(crate) fn assign(
 
 /// Each cluster's parent it is heir to, where it is heir to one: of the parents whose child with
 /// the most visible items it is, among the parent's children at the shallowest tier holding any,
-/// the one with the most visible items, ties going to the lower `tessera_id` both times.
+/// the one with the most visible items, ties going to the lower `mosaica_id` both times.
 fn heirs(clusters: &[Cluster]) -> Vec<Option<u32>> {
     let weight = |c: u32| {
         let cluster = &clusters[c as usize];

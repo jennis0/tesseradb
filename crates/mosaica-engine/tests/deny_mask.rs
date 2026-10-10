@@ -121,7 +121,7 @@ fn visible_in_entity_space(
     entity: EntityId,
 ) -> bool {
     let id = engine
-        .tessera_id_of(entity)
+        .mosaica_id_of(entity)
         .expect("identity is computable");
     engine
         .item(session, id)
@@ -129,7 +129,7 @@ fn visible_in_entity_space(
         .is_some()
 }
 
-/// The row-space route: every mark the viewport draws, by `tessera_id`.
+/// The row-space route: every mark the viewport draws, by `mosaica_id`.
 fn drawn_marks(
     engine: &Engine,
     session: &mosaica_engine::Session,
@@ -263,7 +263,7 @@ fn visible_to_agrees_with_contains_row_for_every_disposition() {
     for entity in [deleted, suppressed, unsuppressed, untouched] {
         let row = row_of(&engine, entity);
         let by_entity = visible_in_entity_space(&engine, &session, entity);
-        let by_row = drawn.contains(&engine.tessera_id_of(entity).unwrap().raw());
+        let by_row = drawn.contains(&engine.mosaica_id_of(entity).unwrap().raw());
         assert_eq!(
             by_entity,
             by_row,
@@ -441,7 +441,7 @@ fn a_join_published_before_the_entitys_own_row_is_drawn_from_the_buffer() {
             response.points.iter().map(|(id, _)| id.raw()).collect();
         (counted, drawn)
     };
-    let mark = engine.tessera_id_of(joiner).unwrap().raw();
+    let mark = engine.mosaica_id_of(joiner).unwrap().raw();
 
     let (counted, drawn) = served(&entitled);
     assert!(
@@ -608,7 +608,7 @@ fn an_entrys_whole_life_serves_the_same_answer_at_every_step() {
 
     let mark = {
         let (engine, _faults) = engine_flushing_only_on_request(tmp.path(), &root);
-        let mark = engine.tessera_id_of(joiner).expect("identity is computable").raw();
+        let mark = engine.mosaica_id_of(joiner).expect("identity is computable").raw();
 
         // Restart one, before the entity's own flush: replay buffers its own row again, and the
         // join row it dropped is the one `s1` already holds.

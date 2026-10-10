@@ -7,7 +7,7 @@ use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_store::manifest::DeclaredScalar;
 use mosaica_store::unique::{KeyKind, UniqueKey};
 use mosaica_store::StoreError;
-use mosaica_types::{EntityId, TermId, TesseraId};
+use mosaica_types::{EntityId, TermId, MosaicaId};
 
 use crate::engine::Engine;
 use crate::write::joined::flushed_terms_of;
@@ -26,9 +26,9 @@ impl Engine {
     }
 
     /// Which item each row of a call that addresses items names, under the identity rule
-    /// ([`mosaica_lifecycle::resolve`]): a row names the item its `tessera_id` and unique values
+    /// ([`mosaica_lifecycle::resolve`]): a row names the item its `mosaica_id` and unique values
     /// name, and a row naming none, or naming two, is refused. Many rows may name one item. A
-    /// column that is neither `tessera_id` nor a unique field names nothing and is ignored, as a
+    /// column that is neither `mosaica_id` nor a unique field names nothing and is ignored, as a
     /// build ignores it; the answer names it.
     ///
     /// Refused with [`crate::EngineError::AddressMalformed`] where a table with rows is left with
@@ -41,13 +41,13 @@ impl Engine {
     }
 }
 
-/// The rows of a call that addresses items, as the caller wrote them: an optional `tessera_id`
+/// The rows of a call that addresses items, as the caller wrote them: an optional `mosaica_id`
 /// column and the other columns by name, `None` where a cell is null. An integer the field cannot
 /// hold names nothing.
 #[derive(Debug, Clone, Default)]
 pub struct AddressTable {
     pub rows: usize,
-    pub tessera_id: Option<Vec<Option<TesseraId>>>,
+    pub mosaica_id: Option<Vec<Option<MosaicaId>>>,
     /// `(column, cells)`, one cell per row.
     pub columns: Vec<(String, Vec<Option<AddressValue>>)>,
 }
@@ -96,27 +96,27 @@ pub(crate) fn name_items_in(
             ignored,
         });
     }
-    resolve::require_identifier(table.tessera_id.is_some(), unique.len()).map_err(|e| {
+    resolve::require_identifier(table.mosaica_id.is_some(), unique.len()).map_err(|e| {
         crate::EngineError::AddressMalformed(format!("This request cannot address items: {e}"))
     })?;
     let store = crate::EngineError::Store;
     let no_item = |row| Verdict::Refused(resolve::Refusal::NamesNoItem { row });
 
     // One column alone, the common case, is decided without a row's identity per row.
-    let verdicts = match (&table.tessera_id, unique.as_slice()) {
+    let verdicts = match (&table.mosaica_id, unique.as_slice()) {
         (Some(ids), []) => {
-            let present: Vec<(usize, TesseraId)> = ids
+            let present: Vec<(usize, MosaicaId)> = ids
                 .iter()
                 .enumerate()
                 .filter_map(|(at, id)| id.map(|id| (at, id)))
                 .collect();
-            let wanted: Vec<TesseraId> = present.iter().map(|(_, id)| *id).collect();
+            let wanted: Vec<MosaicaId> = present.iter().map(|(_, id)| *id).collect();
             let mut verdicts: Vec<Verdict> = (0..table.rows).map(no_item).collect();
-            let found = engine.tessera_ids_in(generation, &wanted).map_err(store)?;
+            let found = engine.mosaica_ids_in(generation, &wanted).map_err(store)?;
             for ((at, _), entity) in present.iter().zip(found) {
                 verdicts[*at] = match entity {
                     Some(entity) => Verdict::Names(entity),
-                    None => Verdict::Refused(resolve::Refusal::UnknownTesseraId { row: *at }),
+                    None => Verdict::Refused(resolve::Refusal::UnknownMosaicaId { row: *at }),
                 };
             }
             verdicts
@@ -150,9 +150,9 @@ pub(crate) fn name_items_in(
         }
         _ => {
             let mut rows = vec![RowIdentity::default(); table.rows];
-            if let Some(ids) = &table.tessera_id {
+            if let Some(ids) = &table.mosaica_id {
                 for (row, id) in rows.iter_mut().zip(ids) {
-                    row.tessera_id = *id;
+                    row.mosaica_id = *id;
                 }
             }
             for (position, d, cells) in &unique {
@@ -209,7 +209,7 @@ fn key_of_value(
 }
 
 /// Who holds what for a call that addresses items: the unique indexes and their live entries,
-/// and every `tessera_id` [`Engine::resolve_tessera_ids`] resolves, deleted items left out.
+/// and every `mosaica_id` [`Engine::resolve_mosaica_ids`] resolves, deleted items left out.
 struct Addressed<'a> {
     engine: &'a Engine,
     generation: &'a Generation,
@@ -232,32 +232,32 @@ impl resolve::Holdings for Addressed<'_> {
         crate::unique::holders(self.generation, &declared.name, &keys)
     }
 
-    fn tessera_holders(&self, ids: &[TesseraId]) -> Result<Vec<Option<EntityId>>, StoreError> {
-        self.engine.tessera_ids_in(self.generation, ids)
+    fn mosaica_holders(&self, ids: &[MosaicaId]) -> Result<Vec<Option<EntityId>>, StoreError> {
+        self.engine.mosaica_ids_in(self.generation, ids)
     }
 }
 
 impl Engine {
-    /// Resolve `tessera_id`s to the entities holding them for the admin plane: `None` per
+    /// Resolve `mosaica_id`s to the entities holding them for the admin plane: `None` per
     /// position for an identifier that names nothing. Points sit below the high-water mark;
     /// row-less entities sit at or above the low-water mark, so testing only `entity < high_water`
     /// would refuse every layer identifier ever issued.
-    pub fn resolve_tessera_ids(
+    pub fn resolve_mosaica_ids(
         &self,
-        ids: &[TesseraId],
+        ids: &[MosaicaId],
     ) -> std::result::Result<Vec<Option<EntityId>>, StoreError> {
-        self.tessera_ids_in(&self.generation.load_full(), ids)
+        self.mosaica_ids_in(&self.generation.load_full(), ids)
     }
 
-    /// [`Self::resolve_tessera_ids`] against `generation`. An identifier's number names the entity
+    /// [`Self::resolve_mosaica_ids`] against `generation`. An identifier's number names the entity
     /// the edited-items map holds for it, or the number itself where it has none
     /// ([`crate::edited`]). An item is named while `generation` holds it ([`holds_item`]) and has
     /// not deleted it: a fold that removes a deleted item also drops its deletion, so the overlay
     /// alone no longer says it is gone.
-    pub(crate) fn tessera_ids_in(
+    pub(crate) fn mosaica_ids_in(
         &self,
         generation: &Generation,
-        ids: &[TesseraId],
+        ids: &[MosaicaId],
     ) -> std::result::Result<Vec<Option<EntityId>>, StoreError> {
         let shard = generation.bundle.manifest.identity.shard_id;
         let high_water = self.allocator_high_water();
@@ -313,10 +313,10 @@ impl Engine {
             .map(|(hash, _)| hash)
     }
 
-    /// The wire `tessera_id` of the item `entity` holds: the permutation of its number, returned
+    /// The wire `mosaica_id` of the item `entity` holds: the permutation of its number, returned
     /// instead of the raw `EntityId`, which never crosses the trust boundary.
-    pub fn tessera_id_of(&self, entity: EntityId) -> std::result::Result<TesseraId, StoreError> {
-        self.tessera_id_in(&self.generation.load_full(), entity)
+    pub fn mosaica_id_of(&self, entity: EntityId) -> std::result::Result<MosaicaId, StoreError> {
+        self.mosaica_id_in(&self.generation.load_full(), entity)
     }
 
     /// Request a flush. Accepted at any time and executed promptly: the flag pulls the tick's
@@ -385,12 +385,12 @@ impl Engine {
         self.write.live().registered_layer(name)
     }
 
-    /// Register an annotation layer, returning its `tessera_id`, the only address it can later
+    /// Register an annotation layer, returning its `mosaica_id`, the only address it can later
     /// be suppressed by — entity ids never cross the boundary.
     pub fn register_layer(
         &self,
         declaration: mosaica_types::layer::LayerDeclaration,
-    ) -> std::result::Result<TesseraId, crate::write::AcceptError> {
+    ) -> std::result::Result<MosaicaId, crate::write::AcceptError> {
         let entity = self.write.register_layer(declaration)?;
         // The blinding is total over the space the allocator will issue, so a row-less entity is
         // always inside it and this conversion cannot fail in practice.
@@ -398,12 +398,12 @@ impl Engine {
         self.issued_id(generation.bundle.manifest.identity.shard_id, entity)
     }
 
-    /// The `tessera_id` of an entity a layer write just allocated, or the write's refusal.
+    /// The `mosaica_id` of an entity a layer write just allocated, or the write's refusal.
     fn issued_id(
         &self,
         shard: u32,
         entity: EntityId,
-    ) -> std::result::Result<TesseraId, crate::write::AcceptError> {
+    ) -> std::result::Result<MosaicaId, crate::write::AcceptError> {
         self.identity_key.forward(shard, entity).map_err(|_| {
             crate::write::AcceptError::Exec(mosaica_lifecycle::ExecError::LayerRefused {
                 detail: "an allocated entity id lies outside the identity space".to_string(),
@@ -544,7 +544,7 @@ impl Engine {
         self.write.drop_view(group, key)
     }
 
-    /// Put a batch of artifacts into one level of a layer, returning a `tessera_id` per artifact
+    /// Put a batch of artifacts into one level of a layer, returning a `mosaica_id` per artifact
     /// and the batch's counts. A held key is filled; an unheld key is published. Members must be
     /// points: a row-less entity counts towards the declared size while visible to nobody.
     pub fn put_artifacts(
@@ -602,13 +602,13 @@ impl Engine {
             .write
             .publish_artifacts(layer, level, artifacts, stamp)?;
         let shard = generation.bundle.manifest.identity.shard_id;
-        let tessera_ids = batch
+        let mosaica_ids = batch
             .entities
             .into_iter()
             .map(|entity| self.issued_id(shard, entity))
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(PublishedArtifacts {
-            tessera_ids,
+            mosaica_ids,
             created: batch.created,
             without_content: batch.without_content,
             filled: batch.filled,
@@ -623,9 +623,9 @@ impl Engine {
         layer: String,
         level: u32,
         artifacts: Vec<mosaica_lifecycle::IncomingArtifact>,
-    ) -> std::result::Result<Vec<TesseraId>, crate::write::AcceptError> {
+    ) -> std::result::Result<Vec<MosaicaId>, crate::write::AcceptError> {
         self.put_artifacts(layer, level, artifacts)
-            .map(|published| published.tessera_ids)
+            .map(|published| published.mosaica_ids)
     }
 
     /// Add points to the memberships of artifacts that already exist, each named by its published
@@ -682,7 +682,7 @@ impl Engine {
             .into_iter()
             .map(|receipt| {
                 Ok(GrownMembership {
-                    tessera_id: self.issued_id(shard, receipt.entity)?,
+                    mosaica_id: self.issued_id(shard, receipt.entity)?,
                     joined: receipt.joined,
                     filled: receipt.filled,
                     left: receipt.left,
@@ -719,7 +719,7 @@ impl Engine {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrownMembership {
     /// The artifact's identifier, the same one its publication answered with.
-    pub tessera_id: TesseraId,
+    pub mosaica_id: MosaicaId,
     /// How many of the joining members were not already in the membership.
     pub joined: u64,
     /// How many of the fixed parts the join carried were absent and are now held.
@@ -736,7 +736,7 @@ pub struct GrownMembership {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishedArtifacts {
     /// One per artifact in the caller's order: a held artifact's own, or the new one's.
-    pub tessera_ids: Vec<TesseraId>,
+    pub mosaica_ids: Vec<MosaicaId>,
     /// How many artifacts the batch created; the rest were held.
     pub created: u64,
     /// How many created artifacts carry no content on a layer declaring some.

@@ -27,7 +27,7 @@ def expression_server(tmp_path_factory):
 
 
 def read_all(server, token: str) -> dict[int, tuple[int, list[str]]]:
-    """Every item a bulk read returns, as `source id -> (tessera_id, labels)`."""
+    """Every item a bulk read returns, as `source id -> (mosaica_id, labels)`."""
     body = {
         "view": fx.VIEW_ID,
         "fields": [JOIN_FIELD],
@@ -44,12 +44,12 @@ def read_all(server, token: str) -> dict[int, tuple[int, list[str]]]:
                 for batch in reader:
                     rows = zip(
                         batch.column(JOIN_FIELD).to_pylist(),
-                        batch.column("tessera_id").to_pylist(),
+                        batch.column("mosaica_id").to_pylist(),
                         batch.column("mosaica:labels").to_pylist(),
                     )
-                    for source_id, tessera_id, labels in rows:
+                    for source_id, mosaica_id, labels in rows:
                         assert source_id not in out, f"source id {source_id} returned twice"
-                        out[source_id] = (tessera_id, labels)
+                        out[source_id] = (mosaica_id, labels)
         cursor = decoded.trailer["next"]
         if cursor is None:
             return out
@@ -62,10 +62,10 @@ def test_the_items_and_their_labels_are_the_oracle_s(expression_server, terms):
     served = read_all(expression_server, token)
 
     assert set(served) == fx.visible_to(terms)
-    for source_id, (tessera_id, labels) in served.items():
+    for source_id, (mosaica_id, labels) in served.items():
         expected = fx.card_of(source_id, terms)
         assert labels == expected, (source_id, fx.labels_of(source_id))
-        card = expression_server.item(token, tessera_id)
+        card = expression_server.item(token, mosaica_id)
         assert card.status_code == 200, card.text
         assert card.json()["labels"] == expected, (source_id, fx.labels_of(source_id))
 

@@ -297,14 +297,14 @@ describe('the artifacts viewport, read from a captured response', () => {
     for (const {artifacts} of frames) {
       for (let i = 1; i < artifacts.length; i++) expect(artifacts[i - 1]!.maskedCount >= artifacts[i]!.maskedCount).toBe(true);
       for (const a of artifacts) {
-        expect(a.tesseraId).toBeTypeOf('bigint');
+        expect(a.mosaicaId).toBeTypeOf('bigint');
         expect(a.maskedCount).toBeGreaterThan(0n);
         const figures = `${a.maskedCount}|${a.centroid}|${a.box}`;
-        if (seen.has(a.tesseraId)) {
+        if (seen.has(a.mosaicaId)) {
           repeated += 1;
-          expect(figures).toBe(seen.get(a.tesseraId));
+          expect(figures).toBe(seen.get(a.mosaicaId));
         }
-        seen.set(a.tesseraId, figures);
+        seen.set(a.mosaicaId, figures);
       }
     }
     expect(repeated).toBeGreaterThan(0);
@@ -316,8 +316,8 @@ describe('the artifacts viewport, read from a captured response', () => {
     for (const a of frames.flatMap((f) => f.artifacts)) {
       expect(a.slot).toBeTypeOf('number');
       expect(a.slot!).toBeLessThan(10);
-      if (slots.has(a.tesseraId)) expect(a.slot).toBe(slots.get(a.tesseraId));
-      slots.set(a.tesseraId, a.slot);
+      if (slots.has(a.mosaicaId)) expect(a.slot).toBe(slots.get(a.mosaicaId));
+      slots.set(a.mosaicaId, a.slot);
     }
     // One slot on every row would mean row 0 was read for all.
     expect(new Set(slots.values()).size).toBeGreaterThan(1);
@@ -325,7 +325,7 @@ describe('the artifacts viewport, read from a captured response', () => {
 
   it('carries the derived geometry in the same grid units as the points', async () => {
     const {frames} = await read('viewport-artifacts.bin');
-    const artifacts = new Map(frames.flatMap((f) => f.artifacts).map((a) => [a.tesseraId, a]));
+    const artifacts = new Map(frames.flatMap((f) => f.artifacts).map((a) => [a.mosaicaId, a]));
     for (const a of artifacts.values()) {
       const [cx, cy] = a.centroid!;
       const [minX, minY, maxX, maxY] = a.box!;

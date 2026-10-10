@@ -44,7 +44,7 @@ homes! {
     TermPostings,
     /// A unique column's index from value to item.
     UniqueIndex,
-    /// The edited-items map from the item's number to its entity, which its `tessera_id` is
+    /// The edited-items map from the item's number to its entity, which its `mosaica_id` is
     /// resolved through.
     EditedItems,
     /// The item's memberships of an enumerated layer's artifacts.

@@ -405,7 +405,7 @@ fn manifest_of(root: &Path) -> mosaica_store::manifest::SegmentsManifest {
 /// **The headline: a built bundle carries its layers, and the mark that keeps their ids theirs.**
 ///
 /// A manifest without `entity_id_low_water` below the ceiling would hand the next online
-/// registration ids these layers already hold — two entities under one `tessera_id`.
+/// registration ids these layers already hold — two entities under one `mosaica_id`.
 #[test]
 fn a_build_registers_its_layers_and_publishes_their_artifacts() {
     let inputs = inputs();

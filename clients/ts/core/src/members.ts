@@ -14,7 +14,7 @@ import type {FilterExpr, MemberOfOperand} from './types.js';
 
 /**
  * The `member_of` operand for an artifact held as a `bigint`: the layer name, and the artifact's
- * `tessera_id` as a decimal string.
+ * `mosaica_id` as a decimal string.
  *
  * @category Filters
  */
@@ -32,7 +32,7 @@ export function memberOf(layer: string, artifact: bigint): MemberOfOperand {
 export type MemberClause = {
   /** The artifact's layer. */
   layer: string;
-  /** The artifact's `tessera_id`. */
+  /** The artifact's `mosaica_id`. */
   artifact: bigint;
   /** Whether the clause selects everything outside the artifact (`none_of` over the leaf) in place of its members. */
   outside: boolean;

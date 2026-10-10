@@ -22,7 +22,7 @@ every frame. `budget` goes both ways, and up when the map's Most points slider i
 `palette` goes both ways, and up when one is chosen in the map's Colour section;
 `value_colours` and `cluster_colours` go both ways, and up as each colour is chosen in the map.
 `selected` and `selected_artifact` go up on a pick, and `region` when a region's
-counts arrive. Ids are decimal strings, because a `tessera_id` is a `u64`, which is not a
+counts arrive. Ids are decimal strings, because a `mosaica_id` is a `u64`, which is not a
 JavaScript number, and a `BigInt` does not serialise.
 """
 
@@ -61,14 +61,14 @@ def _decimal_id(value: Any, name: str) -> Optional[str]:
     if value is None:
         return None
     if isinstance(value, bool):
-        raise traitlets.TraitError(f"{name} is a tessera_id as a decimal string, not {value!r}")
+        raise traitlets.TraitError(f"{name} is a mosaica_id as a decimal string, not {value!r}")
     if isinstance(value, int):
         if not 0 <= value <= U64_MAX:
             raise traitlets.TraitError(f"{name} {value} is outside u64")
         return str(value)
     if isinstance(value, str) and value.isdecimal() and 0 <= int(value) <= U64_MAX:
         return value
-    raise traitlets.TraitError(f"{name} is a tessera_id as a decimal string, not {value!r}")
+    raise traitlets.TraitError(f"{name} is a mosaica_id as a decimal string, not {value!r}")
 
 
 def _hex(value: Any, name: str) -> str:
@@ -113,7 +113,7 @@ class Map(anywidget.AnyWidget):
       `{column: {value: "#rrggbb"}}`, in place of their palette colours. `None`, the default,
       leaves the colours chosen in the map; `{}` gives every value its palette colour.
     - `cluster_colours`: colours for single annotations, per layer, as
-      `{layer: {tessera_id: "#rrggbb"}}` with each `tessera_id` a decimal string, in place of
+      `{layer: {mosaica_id: "#rrggbb"}}` with each `mosaica_id` a decimal string, in place of
       their palette colours under `"cluster:<layer>"`. `None`, the default, leaves the colours
       chosen in the map; `{}` gives every annotation its palette colour.
     - `size_by`: a number column to size points by. `None`, the default, draws every point at
@@ -152,9 +152,9 @@ class Map(anywidget.AnyWidget):
 
     Read the widget's attributes in a later cell:
 
-    - `selected`: the `tessera_id` of the picked item, as a decimal string, or `None`. It
+    - `selected`: the `mosaica_id` of the picked item, as a decimal string, or `None`. It
       changes on a pick.
-    - `selected_artifact`: the `tessera_id` of the opened annotation, likewise.
+    - `selected_artifact`: the `mosaica_id` of the opened annotation, likewise.
     - `region`: the drawn box or lasso, as a dictionary: its `shape` and `status`, the counts
       `visible`, `matched` and `served` inside it, `verdict`, which says whether the counts are
       exact for the shape or over the grid cells covering it, and `refusal` where the server
@@ -359,7 +359,7 @@ class Map(anywidget.AnyWidget):
                 _decimal_id(k, f"a cluster_colours[{layer!r}] key"): _hex(v, f"cluster_colours[{layer!r}][{k!r}]")
                 for k, v in ids.items()
             }
-            for layer, ids in _by_name(proposal["value"], "cluster_colours", "layer", "tessera_id").items()
+            for layer, ids in _by_name(proposal["value"], "cluster_colours", "layer", "mosaica_id").items()
         }
 
     @traitlets.validate("layers")

@@ -45,8 +45,8 @@ class _StubServer:
     def status(self):
         return {"entity_id_high_water": self.high_water}
 
-    def change(self, tessera_id, op, *, strict=False):
-        self.change_calls.append((tessera_id, op))
+    def change(self, mosaica_id, op, *, strict=False):
+        self.change_calls.append((mosaica_id, op))
         return self.next_change
 
     def changes(self, items, *, strict=False):
@@ -59,12 +59,12 @@ class _StubServer:
 
 
 class _StubBundle:
-    """Just enough `Bundle` for the journal: tessera ids and a term dictionary."""
+    """Just enough `Bundle` for the journal: mosaica ids and a term dictionary."""
 
     dictionary = {0: b"term-zero", 1: b"term-one"}
 
     @staticmethod
-    def tessera_id_of(entity_id: int) -> int:
+    def mosaica_id_of(entity_id: int) -> int:
         return 1000 + entity_id
 
 
@@ -113,7 +113,7 @@ def test_an_acked_batch_journals_every_item_in_order(stub):
     assert not journal.refused
 
     sent = server.batch_calls[0]
-    assert sent[0]["match"] == {"tessera_id": "1007"}
+    assert sent[0]["match"] == {"mosaica_id": "1007"}
     assert all(set(item) == {"op", "match"} for item in sent)
 
     # `predicate` with an empty term set removes the item from any session's mask via `L`, which is
@@ -132,7 +132,7 @@ def test_an_acked_ingest_is_not_an_applied_one(stub):
     """
     server, journal = stub
     server.high_water = 100
-    server.next_ingest = _Response(200, {"created": 3, "tessera_ids": ["11", "12", "13"]})
+    server.next_ingest = _Response(200, {"created": 3, "mosaica_ids": ["11", "12", "13"]})
 
     journal.ingest(b"arrow-bytes", "batch-1")
 

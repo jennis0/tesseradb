@@ -246,11 +246,11 @@ class Cycle:
         return limits
 
     def run_ingest(
-        self, control: Control, source, label: str, tessera_ids: dict | None = None
+        self, control: Control, source, label: str, mosaica_ids: dict | None = None
     ) -> dict:
         """Put `source`'s batches through `/control/ingest` at `C` concurrent callers. `source`
         yields `(first row index, body, rows)` as a generator, fed through a bounded window so
-        a fast producer cannot outrun a slower server. `tessera_ids`, where given, collects the
+        a fast producer cannot outrun a slower server. `mosaica_ids`, where given, collects the
         id answered for each row, by row index.
         """
         run_id = uuid.uuid4().hex[:8]
@@ -292,8 +292,8 @@ class Cycle:
                     done, pending = concurrent.futures.wait(
                         pending, return_when=concurrent.futures.FIRST_COMPLETED
                     )
-                    self._collect(done, acks, totals, tessera_ids)
-            self._collect(pending, acks, totals, tessera_ids)
+                    self._collect(done, acks, totals, mosaica_ids)
+            self._collect(pending, acks, totals, mosaica_ids)
         wall = time.perf_counter() - t0
         return {
             "batches": totals["batches"],
@@ -308,7 +308,7 @@ class Cycle:
             "statuses": statuses,
         }
 
-    def _collect(self, futures, acks: list, totals: dict, tessera_ids: dict | None) -> None:
+    def _collect(self, futures, acks: list, totals: dict, mosaica_ids: dict | None) -> None:
         for future in futures:
             r, dt, rows, start = future.result()
             acks.append(dt * 1000.0)
@@ -321,8 +321,8 @@ class Cycle:
                 totals["edited"] += body.get("edited", 0)
                 totals["unchanged"] += body.get("unchanged", 0)
                 totals["minted"] += body.get("minted", 0)
-                if tessera_ids is not None:
-                    tessera_ids.update(enumerate(body.get("tessera_ids") or [], start))
+                if mosaica_ids is not None:
+                    mosaica_ids.update(enumerate(body.get("mosaica_ids") or [], start))
             elif "first_refusal" not in self.result:
                 self.result["first_refusal"] = {"status": r.status_code, "body": r.text[:1500]}
             if totals["batches"] % 100 == 0:
@@ -1085,7 +1085,7 @@ class Cycle:
         blocks a re-ingest of. A re-ingest sends the item's rows in every view it was in, the
         anchor's first, and each view must end at its count less the suppressed items it holds. An
         edit sends a live item's anchor row once as it is, which changes nothing, and once moved,
-        which edits it: both answer the item's own tessera_id, and no count moves."""
+        which edits it: both answer the item's own mosaica_id, and no count moves."""
         if hold.head is None or hold.head.num_rows < 2:
             return {"skipped": "hold-out too small for a write cycle"}
         entities = hold.head.column("entity_id").to_numpy()
@@ -1129,7 +1129,7 @@ class Cycle:
         for figures in passes:
             for status, count in figures["statuses"].items():
                 out["reingest"]["statuses"][status] = out["reingest"]["statuses"].get(status, 0) + count
-        # One value of the unique field is one entity: every view's pass answers it with one tessera_id.
+        # One value of the unique field is one entity: every view's pass answers it with one mosaica_id.
         out["reingest"]["items_with_several_ids"] = sum(1 for tids in answered.values() if len(tids) > 1)
 
         # The third n items, live and neither deleted nor suppressed, restated and then moved in
@@ -1150,7 +1150,7 @@ class Cycle:
             "edited": edited["edited"],
             "edit_unchanged": edited["unchanged"],
             "created_or_added": restated["accepted"] + edited["accepted"],
-            "items_whose_tessera_id_moved": sum(
+            "items_whose_mosaica_id_moved": sum(
                 1 for entity, tids in edited_ids.items() if tids != restated_ids.get(entity)
             ),
             "ack_ms": edited["ack_ms"],
@@ -1175,7 +1175,7 @@ class Cycle:
         view with its member columns, first as it was ingested and then with one entity in a
         hundred moved. The first pass edits back the items a write cycle left moved, one entity id
         each, and changes nothing else; the second edits each moved item and takes one entity id
-        for each. Both answer every item's own tessera_id."""
+        for each. Both answer every item's own mosaica_id."""
         anchor = [view for view in self.views if view["name"] == self.anchor]
         out: dict = {
             "rows": len(self.held),
@@ -1199,7 +1199,7 @@ class Cycle:
             figures["moved"] = int(np.count_nonzero(self.held % 100 == 0)) if nudge else 0
             answered[label] = ids
             out[label] = figures
-        out["items_whose_tessera_id_moved"] = sum(
+        out["items_whose_mosaica_id_moved"] = sum(
             1 for entity, tids in answered["one_in_a_hundred_moved"].items()
             if tids != answered["unchanged"].get(entity)
         )
@@ -1231,7 +1231,7 @@ class Cycle:
         nudge_every: int = 1,
     ) -> tuple[dict, dict]:
         """`entities`' rows in each of `views`, one pass per view in order, and each entity's
-        answered tessera_ids across the passes. `members(view)` names the column-route layers
+        answered mosaica_ids across the passes. `members(view)` names the column-route layers
         whose member columns that view's pass carries; `nudge` moves the rows of every
         `nudge_every`th entity."""
         figures: dict = {}
@@ -1250,14 +1250,14 @@ class Cycle:
                 nudge=nudge,
                 nudge_every=nudge_every,
             )
-            tessera_ids: dict[int, str] = {}
+            mosaica_ids: dict[int, str] = {}
             figures[name] = self.run_ingest(
-                self.control_for(self.served, name), source.batches(), f"{label}-{name}", tessera_ids
+                self.control_for(self.served, name), source.batches(), f"{label}-{name}", mosaica_ids
             )
             for key in ("bodies_split", "largest_body_bytes"):
                 figures[name][key] = source.body_stats[key]
             figures[name]["bodies_over_cap"] = source.body_stats["over_cap"]
-            for row, tid in tessera_ids.items():
+            for row, tid in mosaica_ids.items():
                 answered.setdefault(source.order[row], set()).add(tid)
         return figures, answered
 
@@ -1482,7 +1482,7 @@ class Cycle:
             if reingest.get("items_with_several_ids"):
                 out.append(
                     f"the write cycle's re-ingest answered {reingest['items_with_several_ids']} "
-                    f"item(s) with a different tessera_id in different views"
+                    f"item(s) with a different mosaica_id in different views"
                 )
             moved = cycle.get("edit") or {}
             if moved.get("restated_unchanged") != moved.get("n"):
@@ -1499,10 +1499,10 @@ class Cycle:
                     f"{moved.get('edit_unchanged')} unchanged and "
                     f"{moved.get('created_or_added')} created or added"
                 )
-            if moved.get("items_whose_tessera_id_moved"):
+            if moved.get("items_whose_mosaica_id_moved"):
                 out.append(
-                    f"the write cycle's edits answered {moved['items_whose_tessera_id_moved']} "
-                    f"item(s) with another tessera_id than the item held"
+                    f"the write cycle's edits answered {moved['items_whose_mosaica_id_moved']} "
+                    f"item(s) with another mosaica_id than the item held"
                 )
             if cycle.get("flushed") is False:
                 out.append("the write cycle's flush did not reach its publication")
@@ -1529,7 +1529,7 @@ class Cycle:
 def reingest_failures(reingest: dict) -> list[str]:
     """What a nightly re-ingest owes: the restated hold-out edits back only the items a write cycle
     left moved, one entity id each, and the moved one edits exactly the items moved, one entity id
-    each, none changing its tessera_id."""
+    each, none changing its mosaica_id."""
     if not reingest or reingest.get("failed"):
         return [f"the re-ingest failed: {reingest['failed']}"] if reingest.get("failed") else []
     out = []
@@ -1550,10 +1550,10 @@ def reingest_failures(reingest: dict) -> list[str]:
             f"the re-ingest moved {moved.get('moved')} items and answered {moved.get('edited')} "
             f"edited, taking {moved.get('entity_ids_used')} entity id(s)"
         )
-    if reingest.get("items_whose_tessera_id_moved"):
+    if reingest.get("items_whose_mosaica_id_moved"):
         out.append(
-            f"the re-ingest answered {reingest['items_whose_tessera_id_moved']} item(s) with "
-            f"another tessera_id than the item held"
+            f"the re-ingest answered {reingest['items_whose_mosaica_id_moved']} item(s) with "
+            f"another mosaica_id than the item held"
         )
     if reingest.get("flushed") is False:
         out.append("the re-ingest's flush did not reach its publication")
@@ -1586,7 +1586,7 @@ def recreate_failures(recreate: dict) -> list[str]:
     if recreate.get("items_with_several_ids"):
         out.append(
             f"the recreated views answered {recreate['items_with_several_ids']} item(s) "
-            f"with a different tessera_id in each"
+            f"with a different mosaica_id in each"
         )
     for step in ("publish_rosters", "publish"):
         for layer, entry in (recreate.get(step) or {}).items():

@@ -73,7 +73,7 @@
 //!
 //! The large sorts run under rayon (`par_sort_unstable*`). Every parallel sort site is a
 //! **total order on unique keys** — the pre-sort triple carries the ordinal, the tiler
-//! comparator refines through the full `tessera_id` bijection, and `packed`'s duplicates are bit-identical `u64`s — so an unstable,
+//! comparator refines through the full `mosaica_id` bijection, and `packed`'s duplicates are bit-identical `u64`s — so an unstable,
 //! nondeterministically-scheduled sort still has exactly one output. The equivalence suite's
 //! byte-identity assertion is the oracle that keeps this true.
 //!
@@ -1905,7 +1905,7 @@ fn build_bundle(
         //
         // **No entity-order geometry.** What stood here permuted `x` and `y` into two
         // entity-indexed files at a scattered index, sorted a 12 B record per row of the view on
-        // the heap, and built the row→entity, residual and `tessera_id` columns as three more
+        // the heap, and built the row→entity, residual and `mosaica_id` columns as three more
         // vectors beside it. At rung 6 that was a 70 GB peak the residency model had no term for.
         // `crate::assembly` is the same rows in the same order with one bucket held at a time.
         let (partitioned, boundaries, page_plan) = {

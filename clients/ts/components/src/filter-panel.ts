@@ -424,7 +424,7 @@ export class MosaicaFilterPanel extends MosaicaElement {
    */
   private memberText(clause: MemberClause): string {
     const artifacts = this.resolvedStore?.get('artifacts');
-    const served = artifacts?.served.find((a) => a.tesseraId === clause.artifact && a.layer === clause.layer);
+    const served = artifacts?.served.find((a) => a.mosaicaId === clause.artifact && a.layer === clause.layer);
     const name = clause.label ?? (served ? artifactName(served, artifacts!.attached) : null) ?? UNNAMED;
     return clause.outside ? `Outside ${name}` : name;
   }

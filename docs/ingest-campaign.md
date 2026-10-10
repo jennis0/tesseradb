@@ -1665,7 +1665,7 @@ depth, `parent_ids` on the wire and the client — the engine and client tracks'
 
 **Found at rung 3, not owned by this campaign**
 
-- ⊘ **The artifact drill-down omits the DAG's edges.** `POST /v1/artifacts/{tessera_id}` answers
+- ⊘ **The artifact drill-down omits the DAG's edges.** `POST /v1/artifacts/{mosaica_id}` answers
   `layer`, `key`, `masked_count`, `centroid`, `box`, `shape`, `content` and `rung`
   (`mosaica-server/src/viewer.rs`, the `ArtifactResp` construction) — **no `parent_ids`**, where the
   viewport's artifact frame carries them (`mosaica-wire/src/payload.rs`, `ArtifactRow::parent_ids`;

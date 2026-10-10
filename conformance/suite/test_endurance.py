@@ -842,7 +842,7 @@ def total_verify(
         seed=p.seed,
         declaration=declaration,
         denied_fx=t.denied_fx(),
-        fx_of_tessera=h.fx_by_tessera,
+        fx_of_mosaica=h.fx_by_mosaica,
     )
     denied = [*t.suppressed, *t.deleted]
     denied_expected = expected_items(p.seed, [r.fx for r in denied]) if denied else {}
@@ -966,8 +966,8 @@ def test_endurance_long_life(tmp_path_factory):
         # Deny planning needs the establishment recording: the built pool is every item the
         # principal was served, minus the battery's own drill-down items (which must stay alive
         # for the whole run so their surface keeps answering 200).
-        battery_fx = {h.fx_by_tessera[i] for i in h.item_ids}
-        pool = sorted(set(h.fx_by_tessera.values()) - battery_fx)
+        battery_fx = {h.fx_by_mosaica[i] for i in h.item_ids}
+        pool = sorted(set(h.fx_by_mosaica.values()) - battery_fx)
         need = 2 * p.folds + 4
         assert len(pool) >= need, (
             f"only {len(pool)} visible non-battery items for {need} planned deny targets — "

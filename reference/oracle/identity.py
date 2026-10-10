@@ -1,25 +1,25 @@
-"""The `tessera_id` keyed bijection — Reference Sheet independent re-derivation.
+"""The `mosaica_id` keyed bijection — Reference Sheet independent re-derivation.
 
 Written from `docs/evidence/memos/2026-07-30-tessera-id-construction.md` §1 alone, **without
 reading `crates/mosaica-types/src/identity.rs`**. The oracle's independence from the Rust
 implementation is the only thing that makes their agreement over
-`reference/vectors/tessera_id.json` evidence of anything (memo, "Why this document exists at
+`reference/vectors/mosaica_id.json` evidence of anything (memo, "Why this document exists at
 all"): if this module were a port, an agreement with the Rust would prove only that
 copy-paste works.
 
-`tessera_id = FPE_k(shard_id: u32 || entity_id: u32) -> u64`: a balanced Feistel network, 8
+`mosaica_id = FPE_k(shard_id: u32 || entity_id: u32) -> u64`: a balanced Feistel network, 8
 rounds, 32-bit halves, keyed by a 128-bit per-deployment key. It is a **blinding permutation**,
 not encryption (memo, "Vocabulary, deliberately") — `splitmix64` is not a cryptographic PRF,
 and the defended property is narrower than confidentiality (memo §3, §8).
 
-`priority` is the high 16 bits of `tessera_id` — a *prefix* of the identity, not an
+`priority` is the high 16 bits of `mosaica_id` — a *prefix* of the identity, not an
 independent function (the 2026-07-30 fold recorded in
 `docs/evidence/memos/2026-07-30-priority-as-identity-prefix.md` and landed in the plan at
 commit `199a6b3`). The construction memo's own §6 still describes the pre-fold
 `(morton, priority, entity_id)` tiebreak and an unkeyed `splitmix64(entity_id)` priority;
 both are superseded by the fold for any bundle built after it, which is the only kind this
-oracle now reads. Storage sort order is therefore `(morton, tessera_id)` ascending, with no
-further tiebreak needed -- `tessera_id` is already unique.
+oracle now reads. Storage sort order is therefore `(morton, mosaica_id)` ascending, with no
+further tiebreak needed -- `mosaica_id` is already unique.
 
 Mind Python's unbounded integers: every intermediate the memo specifies as 64-bit is masked
 with `& MASK64` after each add/xor/multiply, and every 32-bit half with `& MASK32` --
@@ -175,7 +175,7 @@ def _round_function(key: IdentityKey, i: int, r: int) -> int:
 
 
 def forward(key: IdentityKey, shard_id: int, entity_id: int) -> int:
-    """tessera_id = FPE_k(shard_id || entity_id) -- the forward Feistel rounds (memo §1.6).
+    """mosaica_id = FPE_k(shard_id || entity_id) -- the forward Feistel rounds (memo §1.6).
 
     Both halves are u32; `forward` takes a checked entity id (memo §1.8) rather than a
     truncating cast -- an `entity_id` above `u32::MAX` raises rather than silently colliding
@@ -198,20 +198,20 @@ def forward(key: IdentityKey, shard_id: int, entity_id: int) -> int:
     return ((left & MASK32) << 32) | (right & MASK32)
 
 
-def invert(key: IdentityKey, tessera_id: int) -> tuple[int, int]:
-    """(shard_id, entity_id) = FPE_k^-1(tessera_id) -- the inverse Feistel rounds (memo §1.7).
+def invert(key: IdentityKey, mosaica_id: int) -> tuple[int, int]:
+    """(shard_id, entity_id) = FPE_k^-1(mosaica_id) -- the inverse Feistel rounds (memo §1.7).
 
     The round index runs 7, 6, ..., 0 descending -- the same eight rounds in reverse order,
     again longhand deliberately. Inversion is total over 2**64: an arbitrary u64 inverts to
     *some* (shard_id, entity_id), and the caller is responsible for validating the result
     (shard match, entity existence) -- this function never raises for a structurally valid
-    u64 input, matching the memo's "every tessera_id inverts".
+    u64 input, matching the memo's "every mosaica_id inverts".
     """
-    if not (0 <= tessera_id <= MASK64):
-        raise IdentityError(f"tessera_id out of u64 range: {tessera_id}")
+    if not (0 <= mosaica_id <= MASK64):
+        raise IdentityError(f"mosaica_id out of u64 range: {mosaica_id}")
 
-    left = (tessera_id >> 32) & MASK32
-    right = tessera_id & MASK32
+    left = (mosaica_id >> 32) & MASK32
+    right = mosaica_id & MASK32
     for i in reversed(range(ROUNDS)):  # 7, 6, 5, 4, 3, 2, 1, 0 -- descending, longhand
         new_right = left
         new_left = (right ^ _round_function(key, i, left)) & MASK32
@@ -221,22 +221,22 @@ def invert(key: IdentityKey, tessera_id: int) -> tuple[int, int]:
     return shard_id, entity_id
 
 
-def priority_of(tessera_id: int) -> int:
-    """priority = high 16 bits of tessera_id -- a *prefix* of the identity, not an
+def priority_of(mosaica_id: int) -> int:
+    """priority = high 16 bits of mosaica_id -- a *prefix* of the identity, not an
     independent function (the priority-as-identity-prefix fold). Contracts §2.6 post-fold;
     supersedes the pre-fold `morton.priority(entity_id)` (unkeyed splitmix64 over the entity
     id), which remains in `oracle/morton.py` only as a historical artefact of the pre-fold
     format and must not be used for any bundle built after the fold.
     """
-    if not (0 <= tessera_id <= MASK64):
-        raise IdentityError(f"tessera_id out of u64 range: {tessera_id}")
-    return (tessera_id >> 48) & 0xFFFF
+    if not (0 <= mosaica_id <= MASK64):
+        raise IdentityError(f"mosaica_id out of u64 range: {mosaica_id}")
+    return (mosaica_id >> 48) & 0xFFFF
 
 
 def row_sort_key(
     key: IdentityKey, shard_id: int, entity_id: int, morton_code: int
 ) -> tuple[int, int]:
-    """The post-fold row order: `(morton, tessera_id)` ascending, no further tiebreak
+    """The post-fold row order: `(morton, mosaica_id)` ascending, no further tiebreak
     (`docs/evidence/memos/2026-07-30-priority-as-identity-prefix.md`, "The decision"). Row
     order is therefore key-dependent, where it previously was not -- this is what makes
     `identity.key`/`identity.shard_id` (read from MANIFEST) a dependency of row-order

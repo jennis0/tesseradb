@@ -106,7 +106,7 @@ describe('point_rows = "highlight", against the full answer to the same request'
 });
 
 describe('POST /v1/artifacts/browse, off served pages', () => {
-  type Row = {tessera_id: string; key: string; rung: number; parent_ids: string[]; masked_count: number; matched_count?: number};
+  type Row = {mosaica_id: string; key: string; rung: number; parent_ids: string[]; masked_count: number; matched_count?: number};
   type Page = {artifacts: Row[]; parents: Row[]; next?: string};
   const pages = ['browse-roots.json', 'browse-children-filtered.json', 'browse-search.json'].map((name) => page(name) as unknown as Page);
   const [roots, children, search] = pages as [Page, Page, Page];
@@ -116,7 +116,7 @@ describe('POST /v1/artifacts/browse, off served pages', () => {
     expect(roots.artifacts).toHaveLength(4);
     // `parents` is the children form's and is `[]` on the other two.
     expect(roots.parents).toEqual([]);
-    // A cursor over a total order (count descending, then `tessera_id` ascending), so paging neither
+    // A cursor over a total order (count descending, then `mosaica_id` ascending), so paging neither
     // repeats nor drops.
     expect(typeof roots.next).toBe('string');
     const counts = roots.artifacts.map((a) => a.masked_count);
@@ -138,7 +138,7 @@ describe('POST /v1/artifacts/browse, off served pages', () => {
   });
 
   it('writes every identifier as a decimal string, which keeps a u64 whole', () => {
-    const ids = pages.flatMap((p) => [...p.artifacts, ...p.parents].flatMap((row) => [row.tessera_id, ...row.parent_ids]));
+    const ids = pages.flatMap((p) => [...p.artifacts, ...p.parents].flatMap((row) => [row.mosaica_id, ...row.parent_ids]));
     for (const id of ids) {
       expect(typeof id).toBe('string');
       expect(BigInt(id).toString()).toBe(id);
@@ -165,7 +165,7 @@ describe('POST /v1/artifacts/browse, off served pages', () => {
       const decoded: BrowsePage = await client.browse('tok', {view: 's0', layer: 'clusters/kmeans'});
       expect(decoded.artifacts).toHaveLength(roots.artifacts.length);
       const first = roots.artifacts[0]!;
-      expect(decoded.artifacts[0]!.tesseraId).toBe(BigInt(first.tessera_id));
+      expect(decoded.artifacts[0]!.mosaicaId).toBe(BigInt(first.mosaica_id));
       expect(decoded.artifacts[0]!.maskedCount).toBe(BigInt(first.masked_count));
       expect(decoded.artifacts[0]!.matchedCount).toBeNull();
       expect(decoded.artifacts[0]!.parentIds).toEqual([]);

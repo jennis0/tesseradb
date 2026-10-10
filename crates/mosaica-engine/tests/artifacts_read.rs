@@ -34,7 +34,7 @@ use mosaica_types::layer::{
     LayerDeclaration, LevelDeclaration, MembershipSource, ShapeDeclaration, ShapeKind,
     SuppliedContent, SuppliedRequirement,
 };
-use mosaica_types::{EntityId, TesseraId};
+use mosaica_types::{EntityId, MosaicaId};
 
 const N: u64 = 900;
 const TREE: &str = "clusters/tree";
@@ -168,7 +168,7 @@ impl Fx {
 
     /// An artifact's entity, by the identifier a read served.
     fn entity_of(&self, id: u64) -> EntityId {
-        artifact_entity(self.engine(), TesseraId::new(id))
+        artifact_entity(self.engine(), MosaicaId::new(id))
     }
 }
 
@@ -477,7 +477,7 @@ fn column<'a, T: 'static>(batch: &'a RecordBatch, name: &str) -> &'a T {
 fn ids(pages: &[RecordBatch]) -> Vec<u64> {
     pages
         .iter()
-        .flat_map(|b| column::<UInt64Array>(b, "tessera_id").values().to_vec())
+        .flat_map(|b| column::<UInt64Array>(b, "mosaica_id").values().to_vec())
         .collect()
 }
 
@@ -505,7 +505,7 @@ fn viewport_ids(engine: &Engine, credential: &[u8], layer: &str) -> HashSet<u64>
     artifacts_of(engine, credential)
         .into_iter()
         .filter(|a| a.layer == layer)
-        .map(|a| a.tessera_id.raw())
+        .map(|a| a.mosaica_id.raw())
         .collect()
 }
 
@@ -636,7 +636,7 @@ type TaxonRow = (u64, String, u32, Vec<u64>, u64, Option<(f64, f64)>);
 fn taxon_rows(pages: &[RecordBatch]) -> Vec<TaxonRow> {
     let mut out = Vec::new();
     for batch in pages {
-        let ids = column::<UInt64Array>(batch, "tessera_id");
+        let ids = column::<UInt64Array>(batch, "mosaica_id");
         let keys = column::<StringArray>(batch, "key");
         let levels = column::<UInt32Array>(batch, "level");
         let parents = column::<ListArray>(batch, "parents");
@@ -672,7 +672,7 @@ fn a_read_by_identifier_reads_only_the_levels_it_names() {
 
     let fields = names(&["key", "level", "parents", "masked_count", "centroid"]);
     let fills = || engine.figures_stats().fills;
-    let read_by_ids = |session: &Session, ids: &[TesseraId]| {
+    let read_by_ids = |session: &Session, ids: &[MosaicaId]| {
         let mut req = request(TAXA, &fields);
         req.ids = Some(ids);
         taxon_rows(&read_all(engine, session, &req))
@@ -680,11 +680,11 @@ fn a_read_by_identifier_reads_only_the_levels_it_names() {
     let every_level = |session: &Session| taxon_rows(&read_all(engine, session, &request(TAXA, &fields)));
 
     let full = engine.authorise(&full_coverage_credential()).unwrap();
-    let at_level = |level: u32| -> Vec<TesseraId> {
+    let at_level = |level: u32| -> Vec<MosaicaId> {
         every_level(&full)
             .into_iter()
             .filter(|row| row.2 == level)
-            .map(|row| TesseraId::new(row.0))
+            .map(|row| MosaicaId::new(row.0))
             .collect()
     };
     let (families, species) = (at_level(0), at_level(2));
@@ -750,14 +750,14 @@ fn a_read_by_identifier_reads_only_the_target_levels_its_artifacts_hang_from() {
     let full = engine.authorise(&full_coverage_credential()).unwrap();
     let key_only = names(&["key"]);
     let every = ids(&read_all(engine, &full, &request(SPECIES_NAMES, &key_only)));
-    let some: Vec<TesseraId> = every.iter().step_by(2).map(|&id| TesseraId::new(id)).collect();
+    let some: Vec<MosaicaId> = every.iter().step_by(2).map(|&id| MosaicaId::new(id)).collect();
     let (filter, _) = middle();
     let with_target = names(&["key", "target"]);
     for (session, fields, filter) in [
         (engine.authorise(&subset_credential()).unwrap(), &with_target, None),
         (engine.authorise_all().unwrap(), &key_only, Some(filter)),
     ] {
-        let read = |ids: Option<&[TesseraId]>| {
+        let read = |ids: Option<&[MosaicaId]>| {
             let mut req = request(SPECIES_NAMES, fields);
             req.ids = ids;
             req.filter = filter.clone();
@@ -906,7 +906,7 @@ fn a_withheld_parent_answers_as_a_parent_with_no_children() {
 
     let answer = |parent: u64| {
         let mut req = request(TREE, &fields);
-        req.parent = Some(TesseraId::new(parent));
+        req.parent = Some(MosaicaId::new(parent));
         req.count = true;
         let (sink, trailer) = respond(engine, &full, req).unwrap();
         let head = sink.head.unwrap();
@@ -924,7 +924,7 @@ fn a_withheld_parent_answers_as_a_parent_with_no_children() {
     assert_eq!(answer(0x7777_7777_7777_7777), answer(leaf));
 
     let mut req = request(TREE, &fields);
-    req.parent = Some(TesseraId::new(served_root));
+    req.parent = Some(MosaicaId::new(served_root));
     assert_eq!(
         keys(&read_all(engine, &full, &req)),
         (0..3).map(|c| child_key(0, c)).collect::<Vec<_>>()
@@ -969,7 +969,7 @@ fn a_parent_with_no_children_gives_one_typed_page_of_no_rows() {
         keys(&pages).into_iter().zip(ids(&pages)).collect()
     };
     let mut none = base.clone();
-    none.parent = Some(TesseraId::new(ids_by_key[&child_key(0, 0)]));
+    none.parent = Some(MosaicaId::new(ids_by_key[&child_key(0, 0)]));
     none.count = true;
     let (sink, trailer) = respond(engine, &session, none).unwrap();
     assert_eq!(sink.pages.len(), 1);
@@ -1241,7 +1241,7 @@ fn malformed_requests_are_refused() {
         (
             "parent with q",
             ArtifactsRequest {
-                parent: Some(TesseraId::new(1)),
+                parent: Some(MosaicaId::new(1)),
                 q: Some("r"),
                 ..request(TREE, &fields)
             },
@@ -1769,7 +1769,7 @@ fn an_authored_shape_names_no_other_view_on_the_drill_down() {
     let a = authored();
     let session = a.engine.authorise(&full_coverage_credential()).unwrap();
     let pages = read_all(&a.engine, &session, &request(AUTHORED, &names(&["key"])));
-    let id = TesseraId::new(ids(&pages)[0]);
+    let id = MosaicaId::new(ids(&pages)[0]);
     let out = a
         .engine
         .artifact(&session, id, "s0", None)
@@ -1911,7 +1911,7 @@ fn an_attached_artifact_takes_its_targets_matched_count() {
         let root_ids: HashMap<String, u64> = keys(&roots).into_iter().zip(ids(&roots)).collect();
         let filter = FilterExpr::MemberOf(mosaica_engine::filter::MemberOfLeaf {
             layer: TREE.into(),
-            artifact: TesseraId::new(root_ids[&root_key(2)]),
+            artifact: MosaicaId::new(root_ids[&root_key(2)]),
         });
         let served: Vec<u64> = (0..ROOTS).filter(|&r| r != LABELLED_ROOT || !broad).collect();
         let count_of = |r: u64| {

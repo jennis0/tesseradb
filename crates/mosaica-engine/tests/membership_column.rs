@@ -243,7 +243,7 @@ fn joined(out: &Answer) -> BTreeMap<u64, BTreeMap<String, String>> {
     let by_id: BTreeMap<(String, u64), &ArtifactOut> = out
         .artifacts
         .iter()
-        .map(|a| ((a.layer.clone(), a.tessera_id.raw()), a))
+        .map(|a| ((a.layer.clone(), a.mosaica_id.raw()), a))
         .collect();
     let mut joined: BTreeMap<u64, BTreeMap<String, String>> = BTreeMap::new();
     for column in &out.points.membership {
@@ -257,7 +257,7 @@ fn joined(out: &Answer) -> BTreeMap<u64, BTreeMap<String, String>> {
             "a column exists only for a layer with an artifact in this response: {}",
             column.layer
         );
-        for (point, id) in out.points.tessera_ids.iter().zip(&column.ids) {
+        for (point, id) in out.points.mosaica_ids.iter().zip(&column.ids) {
             let Some(id) = id else { continue };
             let artifact = by_id.get(&(column.layer.clone(), *id)).unwrap_or_else(|| {
                 panic!(
@@ -298,7 +298,7 @@ fn assert_tree_column(fx: &Fixture, out: &Answer, sources: impl Iterator<Item = 
     let mut checked = 0usize;
     for source in sources {
         let id = fx.point_id(source);
-        if !out.points.tessera_ids.contains(&id) {
+        if !out.points.mosaica_ids.contains(&id) {
             continue;
         }
         checked += 1;
@@ -442,7 +442,7 @@ fn a_masked_principal_is_named_the_coarser_served_ancestor() {
     let a1_point = (0..100)
         .filter(|s| terms_of(*s).contains(&SUBSET_TERM))
         .map(|s| fx.point_id(s))
-        .find(|id| narrow.points.tessera_ids.contains(id))
+        .find(|id| narrow.points.mosaica_ids.contains(id))
         .expect("a visible member of a1 is served in a whole-map viewport");
     assert_eq!(by_point[&a1_point][TREE], "a");
     assert!(
@@ -598,7 +598,7 @@ fn a_dependent_layer_resolves_over_the_membership_it_is_served_over() {
     let served_from = |range: std::ops::Range<u64>| {
         range
             .map(|s| fx.point_id(s))
-            .find(|id| out.points.tessera_ids.contains(id))
+            .find(|id| out.points.mosaica_ids.contains(id))
             .expect("a member is served in a whole-map viewport")
     };
     let a1_point = served_from(0..100);
@@ -706,11 +706,11 @@ fn the_two_layouts_answer_identically() {
                     let served_keys: BTreeMap<u64, String> = out
                         .artifacts
                         .iter()
-                        .map(|a| (a.tessera_id.raw(), a.key.clone().unwrap()))
+                        .map(|a| (a.mosaica_id.raw(), a.key.clone().unwrap()))
                         .collect();
                     let case: Case = out
                         .points
-                        .tessera_ids
+                        .mosaica_ids
                         .iter()
                         .enumerate()
                         .map(|(i, id)| {
@@ -826,7 +826,7 @@ fn measure_the_column_cost() {
 /// **A label names its cluster by identifier, and its count is its own** (owner ruling,
 /// 2026-09-18).
 ///
-/// `target` is the `tessera_id` this same response served the cluster under, so a client attaches
+/// `target` is the `mosaica_id` this same response served the cluster under, so a client attaches
 /// the two exactly rather than by matching numbers — the join that left a label unattached
 /// wherever two clusters happened to share a count. The count copy is gone with it: this label
 /// declares ten members of its own, so by
@@ -884,7 +884,7 @@ fn a_dependent_artifact_names_its_target_and_carries_its_own_count() {
                     .expect("the label is served beside its cluster");
                 assert_eq!(
                     label.target,
-                    Some(target.tessera_id),
+                    Some(target.mosaica_id),
                     "the label names its cluster by the identifier this response served it under"
                 );
                 assert_eq!(
@@ -900,7 +900,7 @@ fn a_dependent_artifact_names_its_target_and_carries_its_own_count() {
                 assert!(out
                     .artifacts
                     .iter()
-                    .any(|a| Some(a.tessera_id) == label.target));
+                    .any(|a| Some(a.mosaica_id) == label.target));
                 // A cluster is attached to nothing, and says so.
                 assert_eq!(target.target, None);
             }
@@ -950,7 +950,7 @@ fn flat_overlapping(layout: ServingLayout) -> LayerDeclaration {
     declaration
 }
 
-/// **On a flat layer with overlapping artifacts the tie is the lowest `tessera_id`, on both
+/// **On a flat layer with overlapping artifacts the tie is the lowest `mosaica_id`, on both
 /// layouts** (`dag-hierarchies.md` §6). Two served artifacts hold every point of the overlap at
 /// one depth; the artifact-major route iterates a map of the served set and would otherwise
 /// answer in whichever order it met them, and the row-major route reads a list of labels and
@@ -995,7 +995,7 @@ fn a_flat_overlap_names_the_lowest_identifier_on_both_layouts() {
         let by_key: BTreeMap<&str, u64> = out
             .artifacts
             .iter()
-            .map(|a| (a.key.as_deref().unwrap(), a.tessera_id.raw()))
+            .map(|a| (a.key.as_deref().unwrap(), a.mosaica_id.raw()))
             .collect();
         assert_eq!(by_key.len(), 2, "both artifacts pass and both are served");
         let lowest = if by_key["left"] < by_key["right"] {
@@ -1008,7 +1008,7 @@ fn a_flat_overlap_names_the_lowest_identifier_on_both_layouts() {
         let mut on_overlap = 0usize;
         for source in 0..N_ITEMS {
             let id = fx.point_id(source);
-            if !out.points.tessera_ids.contains(&id) {
+            if !out.points.mosaica_ids.contains(&id) {
                 continue;
             }
             let got = joined

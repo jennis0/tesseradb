@@ -217,18 +217,18 @@ def test_the_leaf_by_artifact_is_its_masked_count_and_composes_with_a_category(r
         served = [a for a in decode_viewport_artifacts(body) if a.layer in (SHAPES, BOXES)]
         assert served, f"principal {terms}: the shape layers serve artifacts"
         for artifact in served:
-            got, verdict = matched_sum(server, token, {"region": {"artifact": str(artifact.tessera_id)}})
+            got, verdict = matched_sum(server, token, {"region": {"artifact": str(artifact.mosaica_id)}})
             assert got == artifact.masked_count, f"{artifact.layer}/{artifact.key}: {got} != {artifact.masked_count}"
             assert verdict == "exact"
         # Composed with a numeric leaf: the members whose `fx_key` (the source id) is below a bound.
         artifact = max(served, key=lambda a: a.masked_count)
         bound = 1500
-        composed = {"all_of": [{"region": {"artifact": str(artifact.tessera_id)}}, {"fx_key": {"range": {"lt": bound}}}]}
+        composed = {"all_of": [{"region": {"artifact": str(artifact.mosaica_id)}}, {"fx_key": {"range": {"lt": bound}}}]}
         got, _ = matched_sum(server, token, composed)
         # The oracle: the artifact's members are the points inside its shape, which the shape
         # test's `containing` already defines; here the artifact's own served count bounds it and
         # the bound narrows it.
-        column = region_column(points, {str(artifact.tessera_id): _members_of(points, artifact, terms)})
+        column = region_column(points, {str(artifact.mosaica_id): _members_of(points, artifact, terms)})
         candidate = {p[0] for p in visible(points, terms)}
         expected = len(evaluate(composed, {"region": column, "fx_key": NumericColumn({p[0]: p[0] for p in points})}, candidate))
         assert got == expected, f"{artifact.layer}/{artifact.key} ∧ fx_key < {bound}: {got} != {expected}"
@@ -277,7 +277,7 @@ def test_an_unknown_a_suppressed_and_a_withheld_artifact_are_one_response(region
         return frames, headers
 
     unknown = {"region": {"artifact": "8589934593"}}
-    withheld = {"region": {"artifact": str(strip.tessera_id)}}
+    withheld = {"region": {"artifact": str(strip.mosaica_id)}}
     body_unknown, head_unknown = bytes_of(narrow, unknown)
     body_withheld, head_withheld = bytes_of(narrow, withheld)
     assert body_withheld == body_unknown and head_withheld == head_unknown
@@ -287,12 +287,12 @@ def test_an_unknown_a_suppressed_and_a_withheld_artifact_are_one_response(region
     # Suppressed: served to the broad principal a moment ago, and an empty operand from the ack.
     before, _ = matched_sum(server, broad, withheld)
     assert before == strip.masked_count
-    resp = server.changes([{"op": "suppress", "match": {"tessera_id": str(strip.tessera_id)}}], strict=True)
+    resp = server.changes([{"op": "suppress", "match": {"mosaica_id": str(strip.mosaica_id)}}], strict=True)
     assert resp.status_code in (200, 202), resp.text
     body_suppressed, head_suppressed = bytes_of(broad, withheld)
     body_unknown_broad, head_unknown_broad = bytes_of(broad, unknown)
     assert body_suppressed == body_unknown_broad and head_suppressed == head_unknown_broad
-    resp = server.changes([{"op": "unsuppress", "match": {"tessera_id": str(strip.tessera_id)}}], strict=True)
+    resp = server.changes([{"op": "unsuppress", "match": {"mosaica_id": str(strip.mosaica_id)}}], strict=True)
     assert resp.status_code in (200, 202), resp.text
     after, _ = matched_sum(server, broad, withheld)
     assert after == before

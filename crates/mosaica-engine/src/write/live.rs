@@ -5,7 +5,7 @@ use super::*;
 // =================================================================================================
 
 /// One accepted batch, as the idempotency index holds it: what each row of the request became,
-/// so a byte-identical replay answers the `tessera_id`s the first acceptance did.
+/// so a byte-identical replay answers the `mosaica_id`s the first acceptance did.
 #[derive(Clone)]
 pub(in crate::write) struct AcceptedBatch {
     pub(in crate::write) body_hash: [u8; 32],

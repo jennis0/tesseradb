@@ -298,8 +298,8 @@ fn a_built_edge_withholds_its_label_when_the_cluster_is_suppressed() {
     let fx = fixture();
     let engine = fx.open();
     let served = artifacts_of(&engine, &full_coverage_credential());
-    let label_id = of_layer(&served, LABELS)[0].tessera_id;
-    let cluster_id = of_layer(&served, CLUSTERS)[0].tessera_id;
+    let label_id = of_layer(&served, LABELS)[0].mosaica_id;
+    let cluster_id = of_layer(&served, CLUSTERS)[0].mosaica_id;
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     assert!(engine
         .artifact(&session, label_id, "s0", None)
@@ -370,14 +370,14 @@ fn a_built_bundle_takes_an_online_publication_beside_its_own() {
 }
 
 /// **The mark the build spent must survive into the manifest**, or the first online registration
-/// is handed ids the built layers already hold — two entities under one `tessera_id`.
+/// is handed ids the built layers already hold — two entities under one `mosaica_id`.
 #[test]
 fn a_later_online_registration_does_not_reissue_the_builds_ids() {
     let fx = fixture();
     let engine = fx.open();
     let built: Vec<EntityId> = artifacts_of(&engine, &full_coverage_credential())
         .iter()
-        .map(|a| artifact_entity(&engine, a.tessera_id))
+        .map(|a| artifact_entity(&engine, a.mosaica_id))
         .collect();
     assert_eq!(built.len(), 2);
 

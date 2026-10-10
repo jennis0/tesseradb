@@ -190,7 +190,7 @@ fn publish(
     fx: &Fixture,
     engine: &Engine,
     sources: std::ops::Range<u64>,
-) -> mosaica_types::TesseraId {
+) -> mosaica_types::MosaicaId {
     engine.register_layer(declaration("clusters/a")).unwrap();
     let ids = engine
         .publish_artifacts(
@@ -1323,7 +1323,7 @@ fn labels_over(target: &str) -> LayerDeclaration {
 ///
 /// The hole is the whole of the durable state: an ordinal is identity, so packing around the gap
 /// would hand every later artifact in the level the identity of its neighbour, and every
-/// `tessera_id` a caller holds beyond it would resolve to the wrong cluster.
+/// `mosaica_id` a caller holds beyond it would resolve to the wrong cluster.
 #[test]
 fn a_deleted_artifact_leaves_the_level_at_the_fold_and_its_ordinal_stays_a_hole() {
     let fx = fixture();
@@ -1382,7 +1382,7 @@ fn a_deleted_artifact_leaves_the_level_at_the_fold_and_its_ordinal_stays_a_hole(
 /// records alone still comes back the right length. A hole at the end is implied by nothing: the
 /// level comes back short, the next ordinal regresses onto it, and the next publication is handed
 /// the ordinal — and therefore the entity, which is a function of it — that the artifact this fold
-/// deleted was published under. Two artifacts, one `tessera_id`, the second answering for the first.
+/// deleted was published under. Two artifacts, one `mosaica_id`, the second answering for the first.
 #[test]
 fn deleting_the_last_artifact_of_a_level_does_not_hand_its_identity_to_the_next_publication() {
     let fx = fixture();

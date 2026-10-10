@@ -341,7 +341,7 @@ def test_every_artifact_table_is_the_oracles(member_server, terms):  # noqa: F81
     server, points = member_server
     token = server.authorise(terms)["token"]
     served = decode_viewport_artifacts(server.artifacts_viewport(token, SHAPES_VIEW, 0, WHOLE_MAP))
-    ids = {(a.layer, a.key): a.tessera_id for a in served}
+    ids = {(a.layer, a.key): a.mosaica_id for a in served}
     position = {p[0]: _position(p[1], p[2]) for p in points}
     m_auth = {p[0] for p in visible(points, terms)}
     fx = NumericColumn({p[0]: p[0] for p in points})
@@ -397,7 +397,7 @@ def _served_ids(server, terms) -> dict[tuple[str, str], int]:
     body = server.artifacts_viewport(
         token, lfx.VIEW_ID, 0, [0.0, 0.0, lfx.EXTENT_MAX, lfx.EXTENT_MAX], budget=1000
     )
-    return {(a.layer, a.key): a.tessera_id for a in decode_viewport_artifacts(body)}
+    return {(a.layer, a.key): a.mosaica_id for a in decode_viewport_artifacts(body)}
 
 
 @pytest.mark.parametrize("terms", lfx.PRINCIPALS, ids=["-".join(t) for t in lfx.PRINCIPALS])
@@ -415,8 +415,8 @@ def test_overlapping_and_withheld_artifacts_are_the_oracles(label_server, terms)
         lfx.TEAMS: {key: set(members) for key, members, _l, _p in lfx.TEAM_ROWS},
         lfx.SEALED: {key: set(members) for key, members, _l in lfx.SEALED_ROWS},
     }
-    # The entity ids behind the tessera_ids differ from the sources, so the oracle's groups are
-    # keyed by tessera_id and hold source ids, and the set is the visible sources.
+    # The entity ids behind the mosaica_ids differ from the sources, so the oracle's groups are
+    # keyed by mosaica_id and hold source ids, and the set is the visible sources.
     for layer, members_of in rows_of.items():
         assert all((layer, key) in every for key in members_of), f"{layer}: the widest is served all"
         groups = {every[(layer, key)]: members_of[key] for key in members_of if (layer, key) in served}
@@ -486,7 +486,7 @@ def test_a_tree_lists_the_cut_the_map_draws(label_server, terms):
     """`top` on the tree at a cut is the oracle's: the teams this principal is served with a
     visible member in the cut's tiles, cut to the budget over the principal's own tree, those with
     nothing drawn beneath them, counted over the visible items the filter admits, by count then
-    `tessera_id`, with `rest` and `none` against them; and `top` without a cut is refused."""
+    `mosaica_id`, with `rest` and `none` against them; and `top` without a cut is refused."""
     every = _served_ids(label_server, lfx.PRINCIPALS[-2])
     token = label_server.authorise(terms)["token"]
     visible_items = lfx.visible_to(terms)

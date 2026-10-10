@@ -7,9 +7,9 @@ import type {Artifact, BrowseRow, Layer} from './types.js';
  *
  * @category Artifacts
  */
-export function artifactName(a: Pick<Artifact, 'tesseraId' | 'content'> | Pick<BrowseRow, 'tesseraId' | 'name'>, attached: ReadonlyMap<bigint, string> = NONE): string | null {
+export function artifactName(a: Pick<Artifact, 'mosaicaId' | 'content'> | Pick<BrowseRow, 'mosaicaId' | 'name'>, attached: ReadonlyMap<bigint, string> = NONE): string | null {
   const own = 'content' in a ? a.content[0] : a.name;
-  return own !== undefined && own !== null && own.length > 0 ? own : (attached.get(a.tesseraId) ?? null);
+  return own !== undefined && own !== null && own.length > 0 ? own : (attached.get(a.mosaicaId) ?? null);
 }
 
 const NONE: ReadonlyMap<bigint, string> = new Map();

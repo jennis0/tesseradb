@@ -3,7 +3,7 @@
 //!
 //! The oracle reads the visible points tile by tile from an uncapped viewport, and for each tile
 //! names the artifacts with a visible member there, ordered by whole visible count and then by
-//! `tessera_id`, the first `per_tile` of them. The engine's frames must say exactly that, for a
+//! `mosaica_id`, the first `per_tile` of them. The engine's frames must say exactly that, for a
 //! level stored by row with its members and coverings, for an overlapping level pinned to be stored
 //! by artifact, and for an overlapping level of a dozen artifacts with no pin, which is stored by
 //! row in the list form, at several depths, for viewers who see everything, a third, and nothing.
@@ -23,7 +23,7 @@ use mosaica_lifecycle::IncomingArtifact;
 use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource, ServingLayout,
 };
-use mosaica_types::{EntityId, TesseraId};
+use mosaica_types::{EntityId, MosaicaId};
 
 /// A partition of the corpus, stored by row: every artifact is a run of source ids, which the
 /// fixture scatters over the whole map, in a handful of sizes so counts tie.
@@ -170,13 +170,13 @@ fn visible_by_tile(fx: &Fixture, credential: &[u8], zoom: u8) -> BTreeMap<u64, B
                 .layers(LayerSelection::Named(&[])),
         )
         .unwrap();
-    let ids: Vec<TesseraId> = out
+    let ids: Vec<MosaicaId> = out
         .points
-        .tessera_ids
+        .mosaica_ids
         .iter()
-        .map(|&id| TesseraId::new(id))
+        .map(|&id| MosaicaId::new(id))
         .collect();
-    let entities = fx.engine.resolve_tessera_ids(&ids).unwrap();
+    let entities = fx.engine.resolve_mosaica_ids(&ids).unwrap();
     let mut points = entities
         .into_iter()
         .map(|e| fx.source_of[&e.unwrap().raw()]);
@@ -226,13 +226,13 @@ fn frames(out: &ViewportArtifactsOut) -> BTreeMap<u64, Vec<(String, u64)>> {
                         held.masked_count,
                         held.derived.centroid,
                         held.derived.bbox,
-                        held.tessera_id
+                        held.mosaica_id
                     ),
                     (
                         a.masked_count,
                         a.derived.centroid,
                         a.derived.bbox,
-                        a.tessera_id
+                        a.mosaica_id
                     ),
                     "{key} is served with other figures in tile {tile}"
                 );
@@ -286,7 +286,7 @@ fn oracle(
 }
 
 /// **Each tile's frame is the oracle's**: the artifacts with a visible member in it, by whole
-/// visible count and then `tessera_id`, the first `per_tile`; a tile with nothing visible is a frame
+/// visible count and then `mosaica_id`, the first `per_tile`; a tile with nothing visible is a frame
 /// of no rows; and an artifact in several tiles carries the same figures in each.
 #[test]
 fn each_tile_serves_what_the_oracle_names_in_its_order() {
@@ -303,7 +303,7 @@ fn each_tile_serves_what_the_oracle_names_in_its_order() {
                 let ids: BTreeMap<String, u64> = whole
                     .artifacts()
                     .into_iter()
-                    .map(|a| (a.key.unwrap(), a.tessera_id.raw()))
+                    .map(|a| (a.key.unwrap(), a.mosaica_id.raw()))
                     .collect();
                 for per_tile in [usize::MAX, 3] {
                     let at = format!("{layer}, zoom {zoom}, per_tile {per_tile}");
@@ -525,5 +525,5 @@ fn a_dependent_whose_target_the_frame_lacks_takes_no_place_in_the_quota() {
         "the cluster level first, then the one label whose cluster the tile holds"
     );
     let served = &out.frames[0].artifacts;
-    assert_eq!(served[1].target, Some(served[0].tessera_id));
+    assert_eq!(served[1].target, Some(served[0].mosaica_id));
 }

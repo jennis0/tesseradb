@@ -1,5 +1,5 @@
 {
-  "_comment": "What both worked decodes, clients/ts/wire-example (apache-arrow) and reference/examples/decode_viewport.py (pyarrow), must agree on over the golden fixtures in clients/ts/core/test/fixtures: frame kinds in order, row counts (the tiles frame null in an artifacts body, the artifacts frames summed), and the first tessera_id of the points and artifacts as decimal strings. Written by clients/ts/scripts/capture-golden.mjs with the fixtures.",
+  "_comment": "What both worked decodes, clients/ts/wire-example (apache-arrow) and reference/examples/decode_viewport.py (pyarrow), must agree on over the golden fixtures in clients/ts/core/test/fixtures: frame kinds in order, row counts (the tiles frame null in an artifacts body, the artifacts frames summed), and the first mosaica_id of the points and artifacts as decimal strings. Written by clients/ts/scripts/capture-golden.mjs with the fixtures.",
   "viewport-plain.bin": {
     "frames": [
       1,
@@ -10,8 +10,8 @@
     "sub_cells": null,
     "artifacts": null,
     "points": 278,
-    "first_point_tessera_id": "61013160418742605",
-    "first_artifact_tessera_id": null
+    "first_point_mosaica_id": "61013160418742605",
+    "first_artifact_mosaica_id": null
   },
   "viewport-underlay.bin": {
     "frames": [
@@ -24,8 +24,8 @@
     "sub_cells": 256,
     "artifacts": null,
     "points": 278,
-    "first_point_tessera_id": "61013160418742605",
-    "first_artifact_tessera_id": null
+    "first_point_mosaica_id": "61013160418742605",
+    "first_artifact_mosaica_id": null
   },
   "viewport-artifacts.bin": {
     "frames": [
@@ -51,8 +51,8 @@
     "sub_cells": null,
     "artifacts": 114,
     "points": 0,
-    "first_point_tessera_id": null,
-    "first_artifact_tessera_id": "9414986064166786326"
+    "first_point_mosaica_id": null,
+    "first_artifact_mosaica_id": "9414986064166786326"
   },
   "viewport-membership.bin": {
     "frames": [
@@ -64,7 +64,7 @@
     "sub_cells": null,
     "artifacts": null,
     "points": 255,
-    "first_point_tessera_id": "294126209505610425",
-    "first_artifact_tessera_id": null
+    "first_point_mosaica_id": "294126209505610425",
+    "first_artifact_mosaica_id": null
   }
 }

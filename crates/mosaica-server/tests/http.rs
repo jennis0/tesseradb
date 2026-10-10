@@ -137,7 +137,7 @@ async fn viewport_serves_an_etag_and_an_identity_key_that_are_stable_across_requ
 }
 
 /// **The identity coordinate belongs to one bundle.** Every build generates its own identity key
-/// and so gives every item a new `tessera_id`, and a client's held bands carry the old ones: two
+/// and so gives every item a new `mosaica_id`, and a client's held bands carry the old ones: two
 /// builds of the same data must give the same credential and view different coordinates. One
 /// bundle gives the same coordinate after a restart, so a restart drops nothing a client holds.
 #[tokio::test]
@@ -170,11 +170,11 @@ async fn the_identity_coordinate_changes_with_the_bundle_and_survives_a_restart(
     );
 }
 
-/// **A `tessera_id` names an item only in the bundle that issued it.** The same data built under
+/// **A `mosaica_id` names an item only in the bundle that issued it.** The same data built under
 /// another key serves other identifiers: every one bundle A served is an unknown item to bundle B,
-/// and a delete naming them by `tessera_id` is refused with nothing deleted.
+/// and a delete naming them by `mosaica_id` is refused with nothing deleted.
 #[tokio::test]
-async fn a_tessera_id_from_another_bundle_names_nothing() {
+async fn a_mosaica_id_from_another_bundle_names_nothing() {
     let (first, second) = (TempDir::new().unwrap(), TempDir::new().unwrap());
     let first_bundle = build_under_key(first.path(), "000102030405060708090a0b0c0d0e0f");
     let second_bundle = build_under_key(second.path(), "0f0e0d0c0b0a09080706050403020100");
@@ -187,7 +187,7 @@ async fn a_tessera_id_from_another_bundle_names_nothing() {
     .await;
     let token = token_for(&a, &["0"]).await;
     let (_, points) = decode_viewport(&whole_map(&a, &token, N_ITEMS as usize).await);
-    let issued: Vec<u64> = points.iter().map(|(tessera_id, _)| *tessera_id).collect();
+    let issued: Vec<u64> = points.iter().map(|(mosaica_id, _)| *mosaica_id).collect();
     assert!(issued.len() > 100, "bundle A serves its items: {}", issued.len());
     drop(a);
 
@@ -203,16 +203,16 @@ async fn a_tessera_id_from_another_bundle_names_nothing() {
         tiles.iter().map(|(_, visible, _)| *visible).sum()
     };
     let before = visible(whole_map(&b, &token, 5).await);
-    for &tessera_id in &issued {
+    for &mosaica_id in &issued {
         assert_eq!(
-            post_item(&b, &token, tessera_id).await.status(),
+            post_item(&b, &token, mosaica_id).await.status(),
             404,
-            "bundle B answered bundle A's tessera_id {tessera_id}"
+            "bundle B answered bundle A's mosaica_id {mosaica_id}"
         );
     }
     let deletes: Vec<serde_json::Value> = issued
         .iter()
-        .map(|id| serde_json::json!({ "op": "delete", "match": { "tessera_id": id.to_string() } }))
+        .map(|id| serde_json::json!({ "op": "delete", "match": { "mosaica_id": id.to_string() } }))
         .collect();
     let resp = b
         .client
@@ -228,7 +228,7 @@ async fn a_tessera_id_from_another_bundle_names_nothing() {
     let refused = answer["refused"].as_array().unwrap();
     assert_eq!(refused.len(), issued.len(), "{answer}");
     assert!(
-        refused.iter().all(|row| row["reason"] == "unknown_tessera_id"),
+        refused.iter().all(|row| row["reason"] == "unknown_mosaica_id"),
         "{answer}"
     );
     assert_eq!(

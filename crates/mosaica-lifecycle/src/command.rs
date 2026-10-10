@@ -34,7 +34,7 @@ use crate::wal::{WalError, WalRow, WalScalar};
 /// its absence in `scalars` or `scoped`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IngestRow {
-    pub tessera_id: Option<mosaica_types::TesseraId>,
+    pub mosaica_id: Option<mosaica_types::MosaicaId>,
     /// The row's access labels. `None` where the row left its label out, which keeps a named
     /// item's label and gives a new item the view's default. `Some` of an empty list is no label.
     pub labels: Option<Vec<Vec<u8>>>,
@@ -194,7 +194,7 @@ impl BatchArtifacts {
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnallocatedEdit {
     pub old: EntityId,
-    /// The entity the item was first given, which its `tessera_id` is taken from.
+    /// The entity the item was first given, which its `mosaica_id` is taken from.
     pub number: EntityId,
     /// The first row carries the item's label and every declared value, and its `terms`; each
     /// other row places the item in one more view and carries that view's position and
@@ -326,7 +326,7 @@ impl std::error::Error for SubmitError {}
 /// One join's receipt: what a membership growth did to the artifact one join named.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MembershipGrown {
-    /// The artifact's own entity: the address its `tessera_id` blinds, and the one a later
+    /// The artifact's own entity: the address its `mosaica_id` blinds, and the one a later
     /// suppression names.
     pub entity: EntityId,
     /// How many of the joining members were not already in the membership. Zero where the join
@@ -497,7 +497,7 @@ pub enum ExecError {
     VocabularyConflict { detail: String },
     /// A row would give an item a value of a unique column that another live or suppressed item
     /// holds, or a column declared unique already holds a value twice → HTTP **409**, no effect.
-    /// The detail names the values and, for an ingest, the holders' `tessera_id`s; never an entity
+    /// The detail names the values and, for an ingest, the holders' `mosaica_id`s; never an entity
     /// id.
     UniqueTaken { detail: String },
     /// What the handler resolved a batch against has changed since: an item a row names was

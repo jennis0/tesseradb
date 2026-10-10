@@ -1,10 +1,10 @@
 //! The tiler: sorts a batch of items into Morton/row order.
 //!
 //! One implementation shared by a build and a streaming flush, free of I/O. Priority is not
-//! computed here: it is the leading 16 bits of the `tessera_id` the caller supplies.
+//! computed here: it is the leading 16 bits of the `mosaica_id` the caller supplies.
 
 pub use mosaica_types::scalar::{ScalarType, ScalarValue};
-use mosaica_types::{EntityId, TesseraId};
+use mosaica_types::{EntityId, MosaicaId};
 
 use crate::morton::split32;
 
@@ -13,7 +13,7 @@ use crate::morton::split32;
 /// ([`crate::fixed32`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TilerItem {
-    pub tessera_id: TesseraId,
+    pub mosaica_id: MosaicaId,
     /// 32-bit fixed-point x against the build extent; `qx >> 16` is the cell.
     pub qx: u32,
     /// 32-bit fixed-point y against the build extent; `qy >> 16` is the cell.
@@ -21,7 +21,7 @@ pub struct TilerItem {
     pub scalars: Vec<ScalarValue>,
 }
 
-/// Sort `items` into segment (row) order: `(morton, tessera_id)` ascending. `tessera_id` is a
+/// Sort `items` into segment (row) order: `(morton, mosaica_id)` ascending. `mosaica_id` is a
 /// bijection over 2^64 with one row per entity, so no further tiebreak is needed. The entity ID
 /// is not a sort key; it is passed alongside to keep `permutation.bin` aligned with the new row
 /// order.
@@ -45,7 +45,7 @@ pub fn sort_batch(items: &mut Vec<TilerItem>, entity_ids: &mut Vec<EntityId>) ->
     order.sort_by(|&a, &b| {
         codes[a]
             .cmp(&codes[b])
-            .then_with(|| items[a].tessera_id.cmp(&items[b].tessera_id))
+            .then_with(|| items[a].mosaica_id.cmp(&items[b].mosaica_id))
     });
 
     // Each index appears once in `order`, so every item moves and none is cloned.
@@ -71,10 +71,10 @@ mod tests {
 
     /// An item at coordinate `(x, y)`, quantised against the unit extent the way the importer
     /// quantises: the tiler itself never sees a coordinate.
-    fn item(tessera_id: u64, x: f64, y: f64) -> TilerItem {
+    fn item(mosaica_id: u64, x: f64, y: f64) -> TilerItem {
         let e = unit_extent();
         TilerItem {
-            tessera_id: TesseraId::new(tessera_id),
+            mosaica_id: MosaicaId::new(mosaica_id),
             qx: crate::morton::fixed32(x, e.x_min, e.x_max),
             qy: crate::morton::fixed32(y, e.y_min, e.y_max),
             scalars: vec![],
@@ -82,14 +82,14 @@ mod tests {
     }
 
     #[test]
-    fn sorts_by_morton_then_tessera_id() {
+    fn sorts_by_morton_then_mosaica_id() {
         // Two items at the identical coordinate plus a third sharing the leading 16 bits: must
-        // order purely by ascending `tessera_id`, or the Morton collision proves nothing.
+        // order purely by ascending `mosaica_id`, or the Morton collision proves nothing.
         let mut items = vec![item(9, 0.5, 0.5), item(2, 0.5, 0.5), item(1, 0.5, 0.5)];
         let mut entity_ids = vec![EntityId::new(90), EntityId::new(20), EntityId::new(10)];
         let codes = sort_batch(&mut items, &mut entity_ids);
         assert_eq!(
-            items.iter().map(|i| i.tessera_id.raw()).collect::<Vec<_>>(),
+            items.iter().map(|i| i.mosaica_id.raw()).collect::<Vec<_>>(),
             vec![1, 2, 9]
         );
         // `entity_ids` must be permuted identically to `items`.
@@ -104,14 +104,14 @@ mod tests {
 
     #[test]
     fn ordering_by_the_priority_prefix_then_the_full_id_equals_ordering_by_the_id() {
-        // `priority` is a prefix of `tessera_id`, so the two orders are the same order. Ids
+        // `priority` is a prefix of `mosaica_id`, so the two orders are the same order. Ids
         // share their high 16 bits so the test proves something about the tie.
-        let ids: Vec<TesseraId> = vec![
-            TesseraId::new(0x0001_0000_0000_0005),
-            TesseraId::new(0x0001_0000_0000_0002),
-            TesseraId::new(0x0001_0000_0000_0009),
-            TesseraId::new(0x0002_0000_0000_0000),
-            TesseraId::new(0x0000_ffff_ffff_ffff),
+        let ids: Vec<MosaicaId> = vec![
+            MosaicaId::new(0x0001_0000_0000_0005),
+            MosaicaId::new(0x0001_0000_0000_0002),
+            MosaicaId::new(0x0001_0000_0000_0009),
+            MosaicaId::new(0x0002_0000_0000_0000),
+            MosaicaId::new(0x0000_ffff_ffff_ffff),
         ];
 
         let mut by_id = ids.clone();
@@ -145,7 +145,7 @@ mod tests {
         for (i, it) in items.iter().enumerate() {
             let &(_, x, y) = coords
                 .iter()
-                .find(|&&(id, _, _)| id == it.tessera_id.raw())
+                .find(|&&(id, _, _)| id == it.mosaica_id.raw())
                 .expect("every sorted item came from a source coordinate");
             assert_eq!(
                 codes[i],
