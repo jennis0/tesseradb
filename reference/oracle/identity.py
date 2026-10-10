@@ -221,6 +221,60 @@ def invert(key: IdentityKey, mosaica_id: int) -> tuple[int, int]:
     return shard_id, entity_id
 
 
+# The 32-bit high half of an identifier's input, most significant bit first: the kind (1 bit, 0
+# for an item and 1 for an artifact), the shard (19 bits) and the tenancy (12 bits), the number of
+# items that held the low half as their number before. Written from `docs/sharding.md` §1.2 without
+# reading the Rust. `forward` and `invert` take and return the high half unpacked, so every
+# identifier they produced before the layout existed is an item at shard 0 and tenancy 0.
+
+KIND_ITEM = 0
+KIND_ARTIFACT = 1
+SHARD_BITS = 19
+TENANCY_BITS = 12
+MAX_SHARD = (1 << SHARD_BITS) - 1
+MAX_TENANCY = (1 << TENANCY_BITS) - 1
+
+
+def pack_high(kind: int, shard: int, tenancy: int) -> int:
+    """`kind << 31 | shard << 12 | tenancy`, refusing a field too wide for its bits."""
+    if kind not in (KIND_ITEM, KIND_ARTIFACT):
+        raise IdentityError(f"kind must be 0 or 1; got {kind}")
+    if not (0 <= shard <= MAX_SHARD):
+        raise IdentityError(f"shard must be below 2**{SHARD_BITS}; got {shard}")
+    if not (0 <= tenancy <= MAX_TENANCY):
+        raise IdentityError(f"tenancy must be below 2**{TENANCY_BITS}; got {tenancy}")
+    return (kind << (SHARD_BITS + TENANCY_BITS)) | (shard << TENANCY_BITS) | tenancy
+
+
+def unpack_high(high: int) -> tuple[int, int, int]:
+    """(kind, shard, tenancy) of a 32-bit high half. Every u32 unpacks."""
+    if not (0 <= high <= MASK32):
+        raise IdentityError(f"high half out of u32 range: {high}")
+    kind = high >> (SHARD_BITS + TENANCY_BITS)
+    shard = (high >> TENANCY_BITS) & MAX_SHARD
+    tenancy = high & MAX_TENANCY
+    return kind, shard, tenancy
+
+
+def pack_item_high(shard: int, tenancy: int) -> int:
+    """The high half of an item's identifier: kind 0."""
+    return pack_high(KIND_ITEM, shard, tenancy)
+
+
+def forward_item(key: IdentityKey, shard: int, tenancy: int, number: int) -> int:
+    """The `mosaica_id` of the item in `shard` holding `number` at `tenancy`."""
+    return forward(key, pack_item_high(shard, tenancy), number)
+
+
+def invert_item(key: IdentityKey, mosaica_id: int) -> tuple[int, int, int, int]:
+    """(kind, shard, tenancy, number) of any `mosaica_id`. The kind is reported, not checked: an
+    identifier of kind 1 names no item, and its other 31 high bits are split as an item's would be,
+    so a caller resolving an item compares the kind first."""
+    high, number = invert(key, mosaica_id)
+    kind, shard, tenancy = unpack_high(high)
+    return kind, shard, tenancy, number
+
+
 def priority_of(mosaica_id: int) -> int:
     """priority = high 16 bits of mosaica_id -- a *prefix* of the identity, not an
     independent function (the priority-as-identity-prefix fold). Contracts §2.6 post-fold;

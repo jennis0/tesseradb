@@ -29,7 +29,7 @@ use mosaica_engine::{AcceptError, Engine, EngineConfig};
 use mosaica_lifecycle::command::UnallocatedRow;
 use mosaica_lifecycle::{Wal, WalRecord, WalScalar};
 use mosaica_store::read::{open_bundle, ColumnsRef, ScalarSlice};
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, ItemHigh, Tenancy};
 
 /// A discovered `department` vocabulary, wide enough that ordinary tests never see exhaustion.
 const DISCOVERED_WIDE: &str = r#"
@@ -173,13 +173,8 @@ fn build_fixture_with_schema(out: &Path, tmp: &Path, schema_toml: &str, column: 
 }
 
 fn engine_over(tmp: &Path, root: &Path, config: EngineConfig) -> Engine {
-    let mut engine = Engine::open(
-        root,
-        &tmp.join("cache"),
-        &tmp.join("wal.log"),
-        config,
-    )
-    .expect("the engine opens against a bundle carrying a discovered vocabulary");
+    let mut engine = Engine::open(root, &tmp.join("cache"), &tmp.join("wal.log"), config)
+        .expect("the engine opens against a bundle carrying a discovered vocabulary");
     engine.start_write_executor(8).expect("the executor starts");
     engine.set_background_refresh_for_test(false);
     engine
@@ -212,7 +207,10 @@ fn stored_code_of(root: &Path, column: &str, entity: EntityId) -> Option<u32> {
         serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT is readable"))
             .expect("CURRENT parses");
     let prefix = &current.prefix;
-    let mosaica_id = test_key().forward(0, entity).unwrap().raw();
+    let mosaica_id = test_key()
+        .forward(ItemHigh::new(0, Tenancy::ZERO), entity)
+        .unwrap()
+        .raw();
     for (phash, partition) in &bundle.partitions {
         for segment in &partition.manifest.segments {
             let dir = root
@@ -335,11 +333,7 @@ fn two_rows_in_one_window_with_the_same_novel_key_mint_once() {
     };
 
     let entities = engine
-        .ingest_rows(
-            vec![row(), row()],
-            "batch-finance".to_string(),
-            [1u8; 32],
-        )
+        .ingest_rows(vec![row(), row()], "batch-finance".to_string(), [1u8; 32])
         .expect("one window, two rows, one novel key");
     assert_eq!(entities.len(), 2);
 

@@ -295,7 +295,7 @@ fn source_of_row(out: &Path, columns: &ColumnsRef) -> Vec<u64> {
         .mosaica_id()
         .iter()
         .map(|&id| {
-            let (_, entity) = key.invert(mosaica_types::MosaicaId::new(id));
+            let (_, entity) = key.invert(mosaica_types::MosaicaId::new(id)).unwrap();
             sources[&(entity.raw() as u32)]
         })
         .collect()

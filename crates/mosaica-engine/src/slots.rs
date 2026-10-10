@@ -98,11 +98,11 @@ use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use croaring::Bitmap;
-use rustc_hash::{FxHashMap, FxHashSet};
 use mosaica_lifecycle::membership::Attachment;
-use mosaica_types::layer::{HierarchyKind, RegisteredLayer};
 use mosaica_store::bands::BandLabels;
+use mosaica_types::layer::{HierarchyKind, RegisteredLayer};
 use mosaica_types::{EntityId, MortonCode};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::artifacts::ArtifactVerdict;
 use crate::compose::{EffectiveMask, WholeMask};
@@ -399,7 +399,11 @@ impl Engine {
                     level,
                     palette,
                 };
-                let mut all = self.slots.wanted.lock().unwrap_or_else(PoisonError::into_inner);
+                let mut all = self
+                    .slots
+                    .wanted
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
                 let list = all.entry(served.session.token_id()).or_default();
                 if !list.contains(&wanted) {
                     list.push(wanted);
@@ -519,11 +523,10 @@ impl Engine {
             declaration.require_member_visibility,
             Some(mosaica_types::layer::ExistenceCriterion::Fraction(_))
         );
-        let contained = declaration
-            .content
-            .supplied
-            .iter()
-            .any(|c| c.require_member_visibility == mosaica_types::layer::SuppliedRequirement::All);
+        let contained =
+            declaration.content.supplied.iter().any(|c| {
+                c.require_member_visibility == mosaica_types::layer::SuppliedRequirement::All
+            });
         (
             WithheldKey {
                 terms: id.terms,
@@ -594,7 +597,11 @@ impl Engine {
                     for level in first..=wanted.level {
                         let (withheld, added) =
                             self.slot_keys(served, layer, level, wanted.palette);
-                        if self.slots.held(&withheld).is_some_and(|(at, _)| at == added) {
+                        if self
+                            .slots
+                            .held(&withheld)
+                            .is_some_and(|(at, _)| at == added)
+                        {
                             continue;
                         }
                         self.build_and_hold(
@@ -670,17 +677,23 @@ impl Engine {
         layer: &str,
         palette: u8,
     ) -> Result<SlotStats> {
-        self.with_slot_view(session, view, layer, &None, |served, mask, registered, gate| {
-            let mut stats = SlotStats::default();
-            for level in 0..registered.runs.len() as u32 {
-                if let Some(slots) =
-                    self.cluster_slots(served, mask, registered, level, palette, gate)?
-                {
-                    stats = stats.and(slots.stats);
+        self.with_slot_view(
+            session,
+            view,
+            layer,
+            &None,
+            |served, mask, registered, gate| {
+                let mut stats = SlotStats::default();
+                for level in 0..registered.runs.len() as u32 {
+                    if let Some(slots) =
+                        self.cluster_slots(served, mask, registered, level, palette, gate)?
+                    {
+                        stats = stats.and(slots.stats);
+                    }
                 }
-            }
-            Ok(stats)
-        })
+                Ok(stats)
+            },
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -747,7 +760,7 @@ impl Engine {
                 {
                     continue;
                 }
-                let Ok(id) = self.identity_key.forward(shard, entity) else {
+                let Ok(id) = crate::edited::artifact_id(&self.identity_key, shard, entity) else {
                     continue;
                 };
                 at[ordinal as usize] = clusters.len() as u32;
@@ -758,7 +771,11 @@ impl Engine {
                     centre: settled.and_then(|slots| slots.centre(ordinal)),
                     tier: at_level,
                 });
-                preset.push(settled.and_then(|slots| slots.get(ordinal)).unwrap_or(NO_SLOT));
+                preset.push(
+                    settled
+                        .and_then(|slots| slots.get(ordinal))
+                        .unwrap_or(NO_SLOT),
+                );
                 if at_level == level {
                     ordinals.push(ordinal);
                 }
@@ -791,10 +808,7 @@ impl Engine {
                 .with_artifacts(|store| store.lineage_version(&layer.declaration.name, level));
             let lineage = self.level_lineage(layer, level, lineage_version, &read.rows);
             let of = |served: Vec<u32>| -> Vec<u32> {
-                served
-                    .into_iter()
-                    .map(|o| here[o as usize])
-                    .collect()
+                served.into_iter().map(|o| here[o as usize]).collect()
             };
             crate::cut::depths(&lineage, &ordinals)
                 .into_iter()
@@ -1199,7 +1213,12 @@ pub(crate) fn assign(
             .iter()
             .copied()
             .filter(|&c| slots[c as usize] == NO_SLOT)
-            .map(|c| (c, preferences(clusters, &slots, heirs[c as usize], c, palette)))
+            .map(|c| {
+                (
+                    c,
+                    preferences(clusters, &slots, heirs[c as usize], c, palette),
+                )
+            })
             .collect();
         let mut claims: Vec<Claim> = placed
             .iter()
@@ -1277,7 +1296,11 @@ pub(crate) fn assign(
 fn heirs(clusters: &[Cluster]) -> Vec<Option<u32>> {
     let weight = |c: u32| {
         let cluster = &clusters[c as usize];
-        (std::cmp::Reverse(cluster.tier), cluster.count, std::cmp::Reverse(cluster.seed))
+        (
+            std::cmp::Reverse(cluster.tier),
+            cluster.count,
+            std::cmp::Reverse(cluster.seed),
+        )
     };
     let mut heir_of: Vec<Option<u32>> = vec![None; clusters.len()];
     for (c, cluster) in clusters.iter().enumerate() {
@@ -1518,7 +1541,11 @@ mod tests {
         let mut passes: Vec<Pass> = Vec::new();
         let mut leaves: Vec<u32> = Vec::new();
         for level in levels {
-            let level: Vec<u32> = level.iter().copied().filter(|c| !gone.contains(c)).collect();
+            let level: Vec<u32> = level
+                .iter()
+                .copied()
+                .filter(|c| !gone.contains(c))
+                .collect();
             let mut drawn = leaves.clone();
             drawn.extend_from_slice(&level);
             passes.push(Pass {
@@ -1580,25 +1607,34 @@ mod tests {
                 let (clusters, levels) = tree(seed, 4, 6);
                 let passes = passes(&clusters, &levels, &[]);
                 let (slots, assigned) = colour(&clusters, &passes, palette);
-                assert!(slots.iter().all(|&s| s < palette), "every cluster is coloured");
+                assert!(
+                    slots.iter().all(|&s| s < palette),
+                    "every cluster is coloured"
+                );
                 let pairs: FxHashSet<(u32, u32)> = graphs(&clusters, &passes)
                     .iter()
                     .flat_map(|graph| {
-                        graph.iter().flat_map(|(&a, near)| {
-                            near.iter().map(move |&b| (a.min(b), a.max(b)))
-                        })
+                        graph
+                            .iter()
+                            .flat_map(|(&a, near)| near.iter().map(move |&b| (a.min(b), a.max(b))))
                     })
                     .collect();
                 let shared = pairs
                     .iter()
                     .filter(|&&(a, b)| slots[a as usize] == slots[b as usize])
                     .count() as u64;
-                assert_eq!((assigned.edges, assigned.clashes), (pairs.len() as u64, shared));
+                assert_eq!(
+                    (assigned.edges, assigned.clashes),
+                    (pairs.len() as u64, shared)
+                );
                 edges += assigned.edges;
                 clashes += assigned.clashes;
             }
             let rate = clashes as f64 / edges as f64;
-            assert!(rate < 0.05, "{clashes} of {edges} pairs clash at N = {palette}");
+            assert!(
+                rate < 0.05,
+                "{clashes} of {edges} pairs clash at N = {palette}"
+            );
         }
     }
 
@@ -1670,12 +1706,18 @@ mod tests {
                     if c == gone || before[c as usize] == after[c as usize] {
                         continue;
                     }
-                    assert!(reach.contains(&c), "seed {seed}: {c} moved when {gone} went");
+                    assert!(
+                        reach.contains(&c),
+                        "seed {seed}: {c} moved when {gone} went"
+                    );
                     moved_beyond_neighbours += u32::from(!last_before[&gone].contains(&c));
                 }
             }
         }
-        assert!(moved_beyond_neighbours > 0, "a new heir and its neighbours do move");
+        assert!(
+            moved_beyond_neighbours > 0,
+            "a new heir and its neighbours do move"
+        );
     }
 
     /// **A slot depends only on the inputs the module doc lists**: withdrawing a cluster at any
@@ -1730,7 +1772,10 @@ mod tests {
                         let inputs_moved = claim_moved(c)
                             || old_near != new_near
                             || old_near.iter().any(|&n| claim_moved(n));
-                        assert!(inputs_moved, "seed {seed}: {c} moved with its inputs unmoved");
+                        assert!(
+                            inputs_moved,
+                            "seed {seed}: {c} moved with its inputs unmoved"
+                        );
                     }
                 }
             }
@@ -1751,10 +1796,16 @@ mod tests {
         assert_eq!(points[3], [9.0, 2.0]);
         let near = neighbours(&points);
         for i in 0..3u32 {
-            assert!(near.of(i).iter().any(|&j| j < 3), "{i} is beside one of its spot");
+            assert!(
+                near.of(i).iter().any(|&j| j < 3),
+                "{i} is beside one of its spot"
+            );
         }
         let line = neighbours(&[[0.0, 0.0], [2.0, 0.0], [1.0, 0.0]]);
-        assert_eq!((line.of(0), line.of(1), line.of(2)), (&[2][..], &[2][..], &[0, 1][..]));
+        assert_eq!(
+            (line.of(0), line.of(1), line.of(2)),
+            (&[2][..], &[2][..], &[0, 1][..])
+        );
     }
 
     /// **The sample's cut has no step**: a small change in the visible count changes which items
@@ -1767,10 +1818,23 @@ mod tests {
             let cut = sample_cut(visible, 4_000);
             ids.iter().filter(|&&id| id < cut).count() as i64
         };
-        for visible in [8_000u64, 15_999, 16_000, 16_001, 31_999, 32_000, 64_000, 1 << 20] {
+        for visible in [
+            8_000u64,
+            15_999,
+            16_000,
+            16_001,
+            31_999,
+            32_000,
+            64_000,
+            1 << 20,
+        ] {
             let (a, b) = (sampled(visible), sampled(visible + visible / 100));
             assert!((a - b).abs() <= a / 50 + 10, "{visible}: {a} then {b}");
         }
-        assert_eq!(sample_cut(3_000, 4_000), u64::MAX, "few enough are all sampled");
+        assert_eq!(
+            sample_cut(3_000, 4_000),
+            u64::MAX,
+            "few enough are all sampled"
+        );
     }
 }

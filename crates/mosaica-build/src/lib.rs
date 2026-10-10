@@ -71,29 +71,29 @@ use mosaica_authz::{write_postings, DictWriter};
 use mosaica_spatial::tiler::{sort_batch, ScalarValue, TilerItem};
 use mosaica_spatial::{split32, Bounds};
 use mosaica_store::manifest::{
-    CurrentPointer, DeclaredScalar, DictExtent, FileDigest,
-    IdentityDescriptor, Manifest, ManifestVocabulary, ManifestVocabularyValue, PartitionDescriptor,
-    SegmentDescriptor, SegmentsManifest, ViewDescriptor,
+    CurrentPointer, DeclaredScalar, DictExtent, FileDigest, IdentityDescriptor, Manifest,
+    ManifestVocabulary, ManifestVocabularyValue, PartitionDescriptor, SegmentDescriptor,
+    SegmentsManifest, ViewDescriptor,
 };
 use mosaica_store::write::{write_permutation, write_segment};
 use mosaica_store::{write_current, write_manifest_json, PairsParquetWriter};
 use mosaica_types::{
-    EntityId, IdentityKey, TermId, BUNDLE_FORMAT, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS,
-    SMALL_TERM_THRESHOLD_DEFAULT,
+    EntityId, IdentityKey, ItemHigh, Tenancy, TermId, BUNDLE_FORMAT, IDENTITY_CONSTRUCTION,
+    IDENTITY_ROUNDS, SMALL_TERM_THRESHOLD_DEFAULT,
 };
 
 pub use deep::{verify_deep, VerifyDeepReport, VerifyOpts};
-pub use ids::RefusedRows;
 pub use disclosure::write_disclosure_report;
 pub use error::{BuildError, Result};
+pub use ids::RefusedRows;
 // [`BuildArgs::groups`]' own types. A caller assembling build arguments has to name them, and a
 // caller that cannot reach `mosaica-store` — every test above the store layer — could not
 // otherwise declare a group at all (`views.md` §3.2).
-pub use observer::{BuildObserver, BuildStage, NoopObserver};
 pub use mosaica_store::manifest::{
     GroupDescriptor, GroupMetadataField, GroupViewDescriptor, Quantisation, ViewMetadataType,
     ViewMetadataValue,
 };
+pub use observer::{BuildObserver, BuildStage, NoopObserver};
 pub use unique_key::{
     footer_distinct_count, keyword_cardinalities, FooterCount, KeywordCardinality,
     UNIQUE_KEY_FRACTION,
@@ -1027,10 +1027,10 @@ pub(crate) fn attribute_scans<'a>(
     };
     let mut scans = Vec::new();
     let extra = |scans: &mut Vec<AttributeScan<'a>>,
-                     path: &'a Path,
-                     fields: &'a config::Fields,
-                     rows: &'a ids::ReadRows,
-                     own: &[usize]|
+                 path: &'a Path,
+                 fields: &'a config::Fields,
+                 rows: &'a ids::ReadRows,
+                 own: &[usize]|
      -> Result<()> {
         let unique: Vec<usize> = carried(path, fields)?
             .into_iter()
@@ -1076,7 +1076,13 @@ pub(crate) fn attribute_scans<'a>(
             attributes: group.attributes.clone(),
             group: Some(group_index),
         });
-        extra(&mut scans, &group.path, &group.fields, rows, &group.attributes)?;
+        extra(
+            &mut scans,
+            &group.path,
+            &group.fields,
+            rows,
+            &group.attributes,
+        )?;
     }
     for (family_index, family) in args.scoped_attributes.iter().enumerate() {
         let Some(source) = &family.source else {
@@ -1117,6 +1123,9 @@ pub fn describe_refused(refused: &[RefusedRows]) -> Vec<String> {
 
 /// Argument and destination checks shared by both build implementations.
 fn validate_args(args: &BuildArgs) -> Result<()> {
+    ItemHigh::new(args.shard_id, Tenancy::ZERO)
+        .pack()
+        .map_err(BuildError::Identity)?;
     if args.views.is_empty() {
         return Err(BuildError::Invalid(
             "this build materialises no view, so it has no coordinate system to write a row \
@@ -1382,13 +1391,18 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // sorted vocabulary, or the relation's own integers (`AccessPlan`).
     let access = plan_access(args, &numbering)?;
     let mut pairs_by_source: HashMap<u64, Vec<u64>> = HashMap::new();
-    let fill = scan_access(args, &access, &numbering, |_view, source_id, source_term| {
-        pairs_by_source
-            .entry(source_id)
-            .or_default()
-            .push(source_term);
-        std::ops::ControlFlow::Continue(())
-    })?;
+    let fill = scan_access(
+        args,
+        &access,
+        &numbering,
+        |_view, source_id, source_term| {
+            pairs_by_source
+                .entry(source_id)
+                .or_default()
+                .push(source_term);
+            std::ops::ControlFlow::Continue(())
+        },
+    )?;
     report_access_fill(args, fill);
     // Sorted and deduplicated per item: the label set is a *set*, and the signature key and the
     // postings writer both depend on it being one.
@@ -1561,7 +1575,9 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     let mut tiler_items: Vec<TilerItem> = Vec::with_capacity(n as usize);
     for (position, item) in staged.iter().enumerate() {
         let entity_id = EntityId::new(position as u64);
-        let mosaica_id = args.identity_key.forward(args.shard_id, entity_id)?;
+        let mosaica_id = args
+            .identity_key
+            .forward(ItemHigh::new(args.shard_id, Tenancy::ZERO), entity_id)?;
         tiler_items.push(TilerItem {
             mosaica_id,
             qx: item.qx,
@@ -1675,8 +1691,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 true => staged.len(),
                 false => met[index].iter().filter(|met| !**met).count(),
             };
-            if let Some(refusal) = input::items_without_a_row(&group.path, &columns, unmet as u64)
-            {
+            if let Some(refusal) = input::items_without_a_row(&group.path, &columns, unmet as u64) {
                 return Err(refusal);
             }
             attribute_coverage.push(AttributeCoverage {
@@ -1885,8 +1900,14 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         }
     }
 
-    write_segment(&segment_dir, &tiler_items, &codes, &scalar_schema, &band_schema)
-        .map_err(|e| BuildError::io(&segment_dir, e))?;
+    write_segment(
+        &segment_dir,
+        &tiler_items,
+        &codes,
+        &scalar_schema,
+        &band_schema,
+    )
+    .map_err(|e| BuildError::io(&segment_dir, e))?;
     for name in mosaica_store::SEGMENT_FILES {
         fsync_file(&segment_dir.join(name))?;
     }
@@ -2180,7 +2201,9 @@ pub(crate) fn band_copied_columns(
 }
 
 /// The columns the identity bands copy beside the render columns, in declared order.
-fn band_schema_of(schema: &crate::config::Schema) -> Vec<(String, mosaica_spatial::tiler::ScalarType)> {
+fn band_schema_of(
+    schema: &crate::config::Schema,
+) -> Vec<(String, mosaica_spatial::tiler::ScalarType)> {
     band_copied_columns(schema)
         .map(|(_, a)| (a.name.clone(), a.ty))
         .collect()
@@ -2235,7 +2258,12 @@ fn write_manifests(
         .dict_paths
         .iter()
         .chain(&files.other_paths)
-        .chain(files.unique.iter().flat_map(|(_, runs)| runs.iter().map(|run| &run.path)))
+        .chain(
+            files
+                .unique
+                .iter()
+                .flat_map(|(_, runs)| runs.iter().map(|run| &run.path)),
+        )
         .collect();
     let unique_indexes = files
         .unique
@@ -2931,7 +2959,9 @@ fn walk_window(
     hi: u64,
     identity: Identity<'_>,
 ) -> Result<()> {
-    let (identity_key, shard_id) = (identity.key, identity.shard_id);
+    let identity_key = identity.key;
+    // Every number is at tenancy 0: no number in a bundle has been held by a second item.
+    let item = ItemHigh::new(identity.shard_id, Tenancy::ZERO);
     for (row_base, rows, segment) in layout {
         let from = (*row_base).max(lo);
         let to = (row_base + u64::from(*rows)).min(hi);
@@ -2959,7 +2989,7 @@ fn walk_window(
                 )));
             }
             let expected = identity_key
-                .forward(shard_id, EntityId::new(entity))
+                .forward(item, EntityId::new(entity))
                 .map_err(BuildError::Identity)?
                 .raw();
             if id == expected {
@@ -2967,15 +2997,17 @@ fn walk_window(
             }
             // A row an edit moved records its entity, and its `mosaica_id` is its number's, whose
             // entries in the edited items name the entity.
-            let (shard, number) = identity_key.invert(mosaica_types::MosaicaId::new(id));
             let moved = recorded.is_some()
-                && shard == shard_id
-                && u32::try_from(number.raw()).is_ok_and(|number| {
-                    identity
-                        .edited
-                        .entities_of(&[number])
-                        .is_ok_and(|held| held.iter().any(|(_, e)| u64::from(*e) == entity))
-                });
+                && identity_key
+                    .invert(mosaica_types::MosaicaId::new(id))
+                    .is_some_and(|(high, number)| {
+                        high == item
+                            && u32::try_from(number.raw()).is_ok_and(|number| {
+                                identity.edited.entities_of(&[number]).is_ok_and(|held| {
+                                    held.iter().any(|(_, e)| u64::from(*e) == entity)
+                                })
+                            })
+                    });
             if !moved {
                 return Err(BuildError::Invalid(format!(
                     "view '{view_id}' segment '{}' row {local}: mosaica_id {id:#x} does not \

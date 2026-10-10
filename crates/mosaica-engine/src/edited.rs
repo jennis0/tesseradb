@@ -11,10 +11,13 @@
 //! A `mosaica_id` names the entity [`entities_of_numbers`] answers: an entity of the number's
 //! entries that the generation holds and has not deleted, or, where the number has no entries,
 //! the number itself.
+//!
+//! Every number is at tenancy 0, since no number has been held by a second item. An artifact or a
+//! layer is an entity that is never freed, so its identifier is at tenancy 0 as well.
 
-use rustc_hash::FxHashMap;
 use mosaica_store::StoreError;
-use mosaica_types::{EntityId, MosaicaId};
+use mosaica_types::{EntityId, IdentityError, IdentityKey, ItemHigh, MosaicaId, Tenancy};
+use rustc_hash::FxHashMap;
 
 use crate::Generation;
 
@@ -279,6 +282,34 @@ impl Stamp {
     }
 }
 
+/// The number `id` names in `generation`'s shard, or `None` where `id` names no item, an item of
+/// another shard, or its number at a tenancy the number is not held at.
+pub(crate) fn number_named(
+    key: &IdentityKey,
+    generation: &Generation,
+    id: MosaicaId,
+) -> Option<EntityId> {
+    let (high, number) = key.invert(id)?;
+    let shard = generation.bundle.manifest.identity.shard_id;
+    (high == ItemHigh::new(shard, Tenancy::ZERO)).then_some(number)
+}
+
+/// The `mosaica_id` of the artifact or layer `entity` in `shard`.
+pub(crate) fn artifact_id(
+    key: &IdentityKey,
+    shard: u32,
+    entity: EntityId,
+) -> Result<MosaicaId, IdentityError> {
+    key.forward(ItemHigh::new(shard, Tenancy::ZERO), entity)
+}
+
+/// The entity `id` names in `shard` as [`artifact_id`] forms it, or `None` where it names none.
+/// Whether that entity is an artifact is the caller's question.
+pub(crate) fn artifact_named(key: &IdentityKey, shard: u32, id: MosaicaId) -> Option<EntityId> {
+    let (high, entity) = key.invert(id)?;
+    (high == ItemHigh::new(shard, Tenancy::ZERO)).then_some(entity)
+}
+
 impl crate::Engine {
     /// The `mosaica_id` of each of `entities`, against `generation`: its number's permutation.
     pub(crate) fn mosaica_ids_of_in(
@@ -291,7 +322,7 @@ impl crate::Engine {
             .into_iter()
             .map(|number| {
                 self.identity_key
-                    .forward(shard, number)
+                    .forward(ItemHigh::new(shard, Tenancy::ZERO), number)
                     .map_err(|e| StoreError::MalformedBundle {
                         detail: format!("an issued entity lies outside the identity space: {e}"),
                     })

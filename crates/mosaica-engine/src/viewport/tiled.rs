@@ -724,7 +724,9 @@ impl Engine {
                 true,
                 contents,
             )?;
-            let mosaica_id = self.identity_key.forward(pass.shard, entity).ok()?.raw();
+            let mosaica_id = crate::edited::artifact_id(&self.identity_key, pass.shard, entity)
+                .ok()?
+                .raw();
             Some(Arc::new(Admitted {
                 mosaica_id,
                 passing: (ordinal, entity, masked_count, rank),

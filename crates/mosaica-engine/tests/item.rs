@@ -8,7 +8,7 @@ mod common;
 
 use tempfile::TempDir;
 
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, ItemHigh, Tenancy};
 
 use common::*;
 
@@ -44,7 +44,9 @@ fn item_lookup_resolves_a_row_far_from_the_segments_start() {
     let source_to_new = source_to_new_map(&bundle_root, "v00000");
     let last_source = N_ITEMS - 1;
     let entity = EntityId::new(source_to_new[&last_source]);
-    let id = test_key().forward(0, entity).unwrap();
+    let id = test_key()
+        .forward(ItemHigh::new(0, Tenancy::ZERO), entity)
+        .unwrap();
 
     let out = engine.item(&session, id).unwrap();
     assert!(
@@ -52,7 +54,10 @@ fn item_lookup_resolves_a_row_far_from_the_segments_start() {
         "an item far from segment start must still resolve through the permutation"
     );
     let fields = out.unwrap().fields;
-    let held = fields.iter().find(|f| f.name == "id").map(|f| f.value.clone());
+    let held = fields
+        .iter()
+        .find(|f| f.name == "id")
+        .map(|f| f.value.clone());
     assert_eq!(held, Some(mosaica_engine::ScalarOut::U64(last_source)));
 }
 
@@ -77,14 +82,19 @@ fn an_unknown_id_and_an_invisible_one_are_indistinguishable() {
 
     // Unknown: an entity id far beyond anything this bundle ever allocated.
     let unknown_id = test_key()
-        .forward(0, EntityId::new(N_ITEMS + 1_000_000))
+        .forward(
+            ItemHigh::new(0, Tenancy::ZERO),
+            EntityId::new(N_ITEMS + 1_000_000),
+        )
         .unwrap();
     assert_eq!(engine.item(&session, unknown_id).unwrap(), None);
 
     // Known but invisible: a zero-term session sees nothing, so any real item is invisible.
     let source_to_new = source_to_new_map(&bundle_root, "v00000");
     let entity = EntityId::new(source_to_new[&0]);
-    let invisible_id = test_key().forward(0, entity).unwrap();
+    let invisible_id = test_key()
+        .forward(ItemHigh::new(0, Tenancy::ZERO), entity)
+        .unwrap();
     assert_eq!(engine.item(&session, invisible_id).unwrap(), None);
 }
 
@@ -114,7 +124,9 @@ fn the_item_path_never_constructs_a_row_projection() {
         "no viewport drawn yet"
     );
 
-    let unknown_id = test_key().forward(0, EntityId::new(N_ITEMS + 1)).unwrap();
+    let unknown_id = test_key()
+        .forward(ItemHigh::new(0, Tenancy::ZERO), EntityId::new(N_ITEMS + 1))
+        .unwrap();
     engine.item(&session, unknown_id).unwrap();
     assert_eq!(
         engine.row_projection_cache_len(),
@@ -124,7 +136,9 @@ fn the_item_path_never_constructs_a_row_projection() {
 
     let source_to_new = source_to_new_map(&bundle_root, "v00000");
     let entity = EntityId::new(source_to_new[&0]);
-    let visible_id = test_key().forward(0, entity).unwrap();
+    let visible_id = test_key()
+        .forward(ItemHigh::new(0, Tenancy::ZERO), entity)
+        .unwrap();
     engine.item(&session, visible_id).unwrap();
     assert_eq!(
         engine.row_projection_cache_len(),
@@ -155,7 +169,9 @@ fn drill_down_works_on_a_session_that_has_never_drawn_a_viewport() {
 
     let source_to_new = source_to_new_map(&bundle_root, "v00000");
     let entity = EntityId::new(source_to_new[&0]);
-    let id = test_key().forward(0, entity).unwrap();
+    let id = test_key()
+        .forward(ItemHigh::new(0, Tenancy::ZERO), entity)
+        .unwrap();
 
     let out = engine.item(&session, id).unwrap();
     assert!(

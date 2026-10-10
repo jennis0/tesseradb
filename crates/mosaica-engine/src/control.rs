@@ -7,7 +7,7 @@ use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_store::manifest::DeclaredScalar;
 use mosaica_store::unique::{KeyKind, UniqueKey};
 use mosaica_store::StoreError;
-use mosaica_types::{EntityId, TermId, MosaicaId};
+use mosaica_types::{EntityId, MosaicaId, TermId};
 
 use crate::engine::Engine;
 use crate::write::joined::flushed_terms_of;
@@ -259,23 +259,24 @@ impl Engine {
         generation: &Generation,
         ids: &[MosaicaId],
     ) -> std::result::Result<Vec<Option<EntityId>>, StoreError> {
-        let shard = generation.bundle.manifest.identity.shard_id;
         let high_water = self.allocator_high_water();
         let low_water = self.allocator_low_water();
-        let inverted: Vec<(u32, EntityId)> =
-            ids.iter().map(|id| self.identity_key.invert(*id)).collect();
-        let numbers: Vec<EntityId> = inverted.iter().map(|(_, number)| *number).collect();
-        let held = crate::edited::entities_of_numbers(generation, &numbers, |entity| {
+        let named: Vec<Option<EntityId>> = ids
+            .iter()
+            .map(|id| crate::edited::number_named(&self.identity_key, generation, *id))
+            .collect();
+        let numbers: Vec<EntityId> = named.iter().flatten().copied().collect();
+        let mut held = crate::edited::entities_of_numbers(generation, &numbers, |entity| {
             if entity.raw() < high_water {
                 holds_item(generation, entity) && !generation.overlay.is_deleted(entity)
             } else {
                 entity.raw() >= low_water
             }
-        })?;
-        Ok(inverted
+        })?
+        .into_iter();
+        Ok(named
             .iter()
-            .zip(held)
-            .map(|((id_shard, _), entity)| entity.filter(|_| *id_shard == shard))
+            .map(|number| number.and_then(|_| held.next().flatten()))
             .collect())
     }
 
@@ -404,7 +405,7 @@ impl Engine {
         shard: u32,
         entity: EntityId,
     ) -> std::result::Result<MosaicaId, crate::write::AcceptError> {
-        self.identity_key.forward(shard, entity).map_err(|_| {
+        crate::edited::artifact_id(&self.identity_key, shard, entity).map_err(|_| {
             crate::write::AcceptError::Exec(mosaica_lifecycle::ExecError::LayerRefused {
                 detail: "an allocated entity id lies outside the identity space".to_string(),
             })

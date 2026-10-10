@@ -26,7 +26,7 @@ use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource, ServingLayout, SuppliedContent, SuppliedRequirement,
 };
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, ItemHigh, Tenancy};
 
 const TREE: &str = "clusters/tree";
 const LABELS: &str = "clusters/labels";
@@ -141,7 +141,10 @@ impl Fixture {
     /// The wire identity of a source id's point — `shard 0`, as the fixture builds.
     fn point_id(&self, source: u64) -> u64 {
         test_key()
-            .forward(0, EntityId::new(self.map[&source]))
+            .forward(
+                ItemHigh::new(0, Tenancy::ZERO),
+                EntityId::new(self.map[&source]),
+            )
             .unwrap()
             .raw()
     }
@@ -799,8 +802,7 @@ fn measure_the_column_cost() {
             let served = engine
                 .viewport_artifacts(
                     &session,
-                    ViewportArtifactsRequest::new("s0", 2, WHOLE_MAP, usize::MAX)
-                        .budget(budget),
+                    ViewportArtifactsRequest::new("s0", 2, WHOLE_MAP, usize::MAX).budget(budget),
                 )
                 .unwrap()
                 .artifacts()

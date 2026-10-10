@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_spatial::Projection;
 use mosaica_types::layer::{RegisteredLayer, ServingLayout};
-use mosaica_types::{IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+use mosaica_types::{ItemHigh, Tenancy, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
 use crate::error::{Result, StoreError};
 
@@ -338,7 +338,7 @@ impl IdentityDescriptor {
     /// Reject an unknown `construction` or a `rounds` other than [`IDENTITY_ROUNDS`]: a bundle
     /// written by a different construction must not be silently read by this one (contracts
     /// §2.6 r6 — "changing the construction, the round count or the round function is a
-    /// `bundle_format` bump").
+    /// `bundle_format` bump"). Reject a `shard_id` that does not fit an item's identifier.
     pub fn validate(&self) -> Result<()> {
         if self.construction != IDENTITY_CONSTRUCTION {
             return Err(StoreError::InvalidIdentity {
@@ -356,6 +356,11 @@ impl IdentityDescriptor {
                 ),
             });
         }
+        ItemHigh::new(self.shard_id, Tenancy::ZERO)
+            .pack()
+            .map_err(|e| StoreError::InvalidIdentity {
+                detail: e.to_string(),
+            })?;
         Ok(())
     }
 }
@@ -1215,7 +1220,10 @@ impl Manifest {
             let group = &mut manifest.groups[g];
             if position.as_ref().is_none_or(|(held, _)| *held != g) {
                 let ids = group.views.iter().enumerate().map(|(i, v)| {
-                    (format!("{}{}{}", group.name, crate::GROUP_SEPARATOR, v.key), i)
+                    (
+                        format!("{}{}{}", group.name, crate::GROUP_SEPARATOR, v.key),
+                        i,
+                    )
                 });
                 position = Some((g, ids.collect()));
             }
@@ -1270,7 +1278,8 @@ impl Manifest {
     /// numbers and timestamps that are not drawn ([`crate::bands::copied_beside`]), in declared
     /// order.
     pub fn band_scalars(&self) -> impl Iterator<Item = &DeclaredScalar> {
-        self.band_indices().map(|index| &self.declared_scalars[index])
+        self.band_indices()
+            .map(|index| &self.declared_scalars[index])
     }
 
     /// Where each of [`Self::band_scalars`] sits in the full declaration, which a buffered row's
@@ -2405,28 +2414,30 @@ impl SegmentsManifest {
         .filter(|(_, undecodable)| *undecodable)
         .map(|(name, _)| name)
         .collect();
-        fields.extend([
-            ("deltas", !self.deltas.is_empty()),
-            (
-                "vocabulary_extensions",
-                !self.vocabulary_extensions.is_empty(),
-            ),
-            ("layers", !self.layers.is_empty()),
-            ("layer_tombstones", !self.layer_tombstones.is_empty()),
-            ("views", !self.views.is_empty()),
-            (
-                "dead_view_incarnations",
-                !self.dead_view_incarnations.is_empty(),
-            ),
-            ("attributes", !self.attributes.is_empty()),
-            ("scoped_attributes", !self.scoped_attributes.is_empty()),
-            ("vocabularies", !self.vocabularies.is_empty()),
-            ("groups", !self.groups.is_empty()),
-            ("plain_views", !self.plain_views.is_empty()),
-        ]
-        .into_iter()
-        .filter(|(name, carried)| *carried && !HONOURED_STATE.contains(name))
-        .map(|(name, _)| name));
+        fields.extend(
+            [
+                ("deltas", !self.deltas.is_empty()),
+                (
+                    "vocabulary_extensions",
+                    !self.vocabulary_extensions.is_empty(),
+                ),
+                ("layers", !self.layers.is_empty()),
+                ("layer_tombstones", !self.layer_tombstones.is_empty()),
+                ("views", !self.views.is_empty()),
+                (
+                    "dead_view_incarnations",
+                    !self.dead_view_incarnations.is_empty(),
+                ),
+                ("attributes", !self.attributes.is_empty()),
+                ("scoped_attributes", !self.scoped_attributes.is_empty()),
+                ("vocabularies", !self.vocabularies.is_empty()),
+                ("groups", !self.groups.is_empty()),
+                ("plain_views", !self.plain_views.is_empty()),
+            ]
+            .into_iter()
+            .filter(|(name, carried)| *carried && !HONOURED_STATE.contains(name))
+            .map(|(name, _)| name),
+        );
         fields
     }
 
@@ -2555,6 +2566,18 @@ mod tests {
             json.contains(KEY_HEX),
             "MANIFEST must carry the key: {json}"
         );
+    }
+
+    #[test]
+    fn a_shard_id_that_does_not_fit_an_identifier_is_refused() {
+        let mut identity = descriptor();
+        identity.shard_id = ItemHigh::SHARD_LIMIT - 1;
+        assert!(identity.validate().is_ok());
+        identity.shard_id = ItemHigh::SHARD_LIMIT;
+        assert!(matches!(
+            identity.validate(),
+            Err(StoreError::InvalidIdentity { .. })
+        ));
     }
 
     /// The term-image list survives a round trip, and a manifest that omits it is refused.
@@ -2960,7 +2983,8 @@ mod tests {
                 .iter()
                 .any(|f| f.views.contains(&view_id))
         };
-        let rostered = |manifest: &Manifest| manifest.groups[0].views.iter().any(|v| v.key == "2026-Q1");
+        let rostered =
+            |manifest: &Manifest| manifest.groups[0].views.iter().any(|v| v.key == "2026-Q1");
 
         // Recreated: the predecessor's death leaves it alone.
         let recreated = folded.with_roster(&[created(1)], &[stone(0)]);

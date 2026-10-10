@@ -8,11 +8,15 @@
 //! them, and cannot count the gaps between them; and the key must never leave the server,
 //! on any plane, in any response, log line or metric label.
 //!
-//! `mosaica_id = FPE_k(shard_id: u32 ‖ entity_id: u32) -> u64`: a balanced Feistel network,
+//! `mosaica_id = FPE_k(high: u32 ‖ number: u32) -> u64`: a balanced Feistel network,
 //! 8 rounds, 32-bit halves, round function `splitmix64` (a non-cryptographic mixer — see
 //! the memo §8 for the ruling that keeps it, and §3 for why a cryptographic PRF is not
 //! required here). Do not change the round count, the round function, the packing or the
 //! key schedule: see the memo §1.
+//!
+//! An item's high half is [`ItemHigh`]: from the most significant bit, a kind bit of 0, the
+//! shard in 19 bits and the item's [`Tenancy`] in 12. The low half is the item's number, the
+//! entity id it holds. An identifier whose kind bit is 1 names no item.
 
 use crate::EntityId;
 
@@ -23,8 +27,7 @@ pub const IDENTITY_ROUNDS: u32 = 8;
 /// Identifies the construction, as recorded in MANIFEST's `identity.construction` field.
 pub const IDENTITY_CONSTRUCTION: &str = "feistel-splitmix64-v1";
 
-/// Errors from key parsing and from the checked `shard_id ‖ entity_id -> mosaica_id`
-/// conversion.
+/// Errors from key parsing and from the checked `high ‖ entity_id -> mosaica_id` conversion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityError {
     /// The hex string was not exactly 32 lowercase hexadecimal characters.
@@ -40,6 +43,10 @@ pub enum IdentityError {
     /// `forward`'s entity input exceeded `u32::MAX`. Plan Important I-1: a truncating
     /// cast would make "collision-free by construction" false. See memo §1.8.
     EntityOutOfRange { entity: u64 },
+    /// A shard id does not fit the 19 bits [`ItemHigh`] gives it.
+    ShardOutOfRange { shard: u32 },
+    /// A tenancy does not fit the 12 bits [`ItemHigh`] gives it.
+    TenancyOutOfRange { tenancy: u16 },
 }
 
 impl std::fmt::Display for IdentityError {
@@ -70,6 +77,20 @@ impl std::fmt::Display for IdentityError {
                 write!(
                     f,
                     "entity id {entity} exceeds u32::MAX; cannot form a mosaica_id"
+                )
+            }
+            IdentityError::ShardOutOfRange { shard } => {
+                write!(
+                    f,
+                    "shard id {shard} does not fit in 19 bits; a shard id must be below {}",
+                    ItemHigh::SHARD_LIMIT
+                )
+            }
+            IdentityError::TenancyOutOfRange { tenancy } => {
+                write!(
+                    f,
+                    "tenancy {tenancy} does not fit in 12 bits; a tenancy must be at most {}",
+                    Tenancy::MAX.0
                 )
             }
         }
@@ -103,6 +124,73 @@ impl MosaicaId {
     #[inline]
     pub fn priority(&self) -> u16 {
         (self.0 >> 48) as u16
+    }
+}
+
+/// How many items have held an entity id as their number before the item that holds it now.
+/// Twelve bits, so at most [`Tenancy::MAX`].
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
+pub struct Tenancy(u16);
+
+impl Tenancy {
+    pub const BITS: u32 = 12;
+    pub const ZERO: Tenancy = Tenancy(0);
+    pub const MAX: Tenancy = Tenancy((1 << Self::BITS) - 1);
+
+    pub fn new(raw: u16) -> Result<Tenancy, IdentityError> {
+        if raw > Self::MAX.0 {
+            return Err(IdentityError::TenancyOutOfRange { tenancy: raw });
+        }
+        Ok(Tenancy(raw))
+    }
+
+    #[inline]
+    pub fn raw(self) -> u16 {
+        self.0
+    }
+
+    /// The tenancy one higher, or `None` at [`Tenancy::MAX`].
+    pub fn next(self) -> Option<Tenancy> {
+        (self < Self::MAX).then_some(Tenancy(self.0 + 1))
+    }
+}
+
+/// The high 32 bits of an item's `mosaica_id` input: `0 << 31 | shard << 12 | tenancy`.
+/// [`ItemHigh::pack`] refuses a shard of [`ItemHigh::SHARD_LIMIT`] or more.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct ItemHigh {
+    pub shard: u32,
+    pub tenancy: Tenancy,
+}
+
+impl ItemHigh {
+    pub const SHARD_BITS: u32 = 19;
+    /// The lowest shard id that does not fit.
+    pub const SHARD_LIMIT: u32 = 1 << Self::SHARD_BITS;
+    const KIND_BIT: u32 = 1 << (Self::SHARD_BITS + Tenancy::BITS);
+
+    #[inline]
+    pub const fn new(shard: u32, tenancy: Tenancy) -> Self {
+        ItemHigh { shard, tenancy }
+    }
+
+    pub fn pack(self) -> Result<u32, IdentityError> {
+        if self.shard >= Self::SHARD_LIMIT {
+            return Err(IdentityError::ShardOutOfRange { shard: self.shard });
+        }
+        Ok((self.shard << Tenancy::BITS) | self.tenancy.0 as u32)
+    }
+
+    /// The item high half packed in `high`, or `None` when its kind bit is set and it names
+    /// something other than an item.
+    pub fn unpack(high: u32) -> Option<ItemHigh> {
+        if high & Self::KIND_BIT != 0 {
+            return None;
+        }
+        Some(ItemHigh {
+            shard: high >> Tenancy::BITS,
+            tenancy: Tenancy((high & Tenancy::MAX.0 as u32) as u16),
+        })
     }
 }
 
@@ -205,16 +293,29 @@ impl IdentityKey {
         (splitmix64((r as u64) ^ self.round_key(i)) >> 32) as u32
     }
 
-    /// `mosaica_id = FPE_k(shard_id ‖ entity_id)`. Fallible: `entity` must fit in `u32`
-    /// (plan Important I-1, memo §1.8) — a truncating cast would let two entities differing
-    /// only above bit 32 share a `mosaica_id`, silently breaking "collision-free by
-    /// construction" and making `invert` return the wrong entity.
-    pub fn forward(&self, shard: u32, entity: EntityId) -> Result<MosaicaId, IdentityError> {
+    /// The `mosaica_id` of the item at `high` holding `entity` as its number. Refuses a shard
+    /// [`ItemHigh::pack`] refuses, and an entity above `u32::MAX` (plan Important I-1, memo
+    /// §1.8): a truncating cast would let two entities differing only above bit 32 share a
+    /// `mosaica_id` and make `invert` return the wrong entity.
+    pub fn forward(&self, high: ItemHigh, entity: EntityId) -> Result<MosaicaId, IdentityError> {
+        self.forward_raw(high.pack()?, entity)
+    }
+
+    /// The item high half and number `id` was formed from, or `None` when `id` names no item.
+    /// Every `u64` inverts (memo §1.7); the caller compares the shard and the tenancy with the
+    /// ones it holds.
+    pub fn invert(&self, id: MosaicaId) -> Option<(ItemHigh, EntityId)> {
+        let (high, entity) = self.invert_raw(id);
+        Some((ItemHigh::unpack(high)?, entity))
+    }
+
+    /// `FPE_k(high ‖ entity)` over any 32-bit high half.
+    fn forward_raw(&self, high: u32, entity: EntityId) -> Result<MosaicaId, IdentityError> {
         let entity_raw = entity.raw();
         if entity_raw > u32::MAX as u64 {
             return Err(IdentityError::EntityOutOfRange { entity: entity_raw });
         }
-        let mut l = shard;
+        let mut l = high;
         let mut r = entity_raw as u32;
         for i in 0..IDENTITY_ROUNDS {
             let new_l = r;
@@ -225,10 +326,8 @@ impl IdentityKey {
         Ok(MosaicaId(((l as u64) << 32) | (r as u64)))
     }
 
-    /// The inverse of `forward`, total over the full `u64` space (memo §1.7): every
-    /// `mosaica_id` inverts to *some* `(shard_id, entity_id)`, meaningful only if the
-    /// caller separately validates shard and entity range/presence.
-    pub fn invert(&self, id: MosaicaId) -> (u32, EntityId) {
+    /// The inverse of [`IdentityKey::forward_raw`], total over the `u64` space.
+    fn invert_raw(&self, id: MosaicaId) -> (u32, EntityId) {
         let raw = id.raw();
         let mut l = (raw >> 32) as u32;
         let mut r = raw as u32;
@@ -256,6 +355,7 @@ mod tests {
     use super::*;
 
     const CANONICAL_KEY: &str = "000102030405060708090a0b0c0d0e0f";
+    const ITEM: ItemHigh = ItemHigh::new(0, Tenancy::ZERO);
 
     /// Loads `reference/vectors/mosaica_id.json`, shared with every test below that reads
     /// from it -- a single load point so a future correction to the file reaches every
@@ -309,8 +409,8 @@ mod tests {
         // failure is a swapped half or an off-by-one round index, and both break here.
         let key = IdentityKey::from_hex(CANONICAL_KEY).unwrap();
         for e in (0u32..1 << 22).step_by(7) {
-            let id = key.forward(0, EntityId::new(e as u64)).unwrap();
-            assert_eq!(key.invert(id), (0, EntityId::new(e as u64)));
+            let id = key.forward(ITEM, EntityId::new(e as u64)).unwrap();
+            assert_eq!(key.invert(id), Some((ITEM, EntityId::new(e as u64))));
         }
     }
 
@@ -321,7 +421,7 @@ mod tests {
         // rests on there being no collision-detection pass anywhere.
         let key = IdentityKey::from_hex(CANONICAL_KEY).unwrap();
         let seen: std::collections::HashSet<u64> = (0u32..1 << 21)
-            .map(|e| key.forward(0, EntityId::new(e as u64)).unwrap().raw())
+            .map(|e| key.forward(ITEM, EntityId::new(e as u64)).unwrap().raw())
             .collect();
         assert_eq!(seen.len(), 1 << 21);
     }
@@ -349,10 +449,10 @@ mod tests {
             let shard = v["shard_id"].as_u64().unwrap() as u32;
             let entity = v["entity_id"].as_u64().unwrap();
             let expected = parse_hex_u64(v["mosaica_id"].as_str().unwrap());
-            let id = key.forward(shard, EntityId::new(entity)).unwrap();
+            let id = key.forward_raw(shard, EntityId::new(entity)).unwrap();
             assert_eq!(id.raw(), expected, "forward shard={shard} entity={entity}");
             assert_eq!(
-                key.invert(MosaicaId::new(expected)),
+                key.invert_raw(MosaicaId::new(expected)),
                 (shard, EntityId::new(entity)),
                 "invert shard={shard} entity={entity}"
             );
@@ -369,11 +469,11 @@ mod tests {
             let shard = v["shard_id"].as_u64().unwrap() as u32;
             let entity = v["entity_id"].as_u64().unwrap();
             assert_eq!(
-                key.invert(MosaicaId::new(id)),
+                key.invert_raw(MosaicaId::new(id)),
                 (shard, EntityId::new(entity))
             );
             assert_eq!(
-                key.forward(shard, EntityId::new(entity)).unwrap().raw(),
+                key.forward_raw(shard, EntityId::new(entity)).unwrap().raw(),
                 id,
                 "forward(*invert({id:#x})) should round-trip"
             );
@@ -390,14 +490,14 @@ mod tests {
             let shard = v["shard_id"].as_u64().unwrap() as u32;
             let entity = v["entity_id"].as_u64().unwrap();
             let expected = parse_hex_u64(v["mosaica_id"].as_str().unwrap());
-            let id = sk_key.forward(shard, EntityId::new(entity)).unwrap();
+            let id = sk_key.forward_raw(shard, EntityId::new(entity)).unwrap();
             assert_eq!(
                 id.raw(),
                 expected,
                 "secondary_key shard={shard} entity={entity}"
             );
             assert_eq!(
-                sk_key.invert(MosaicaId::new(expected)),
+                sk_key.invert_raw(MosaicaId::new(expected)),
                 (shard, EntityId::new(entity)),
                 "secondary_key invert shard={shard} entity={entity}"
             );
@@ -426,9 +526,9 @@ mod tests {
         let key = IdentityKey::from_hex(CANONICAL_KEY).unwrap();
         let n = 10_000u32;
         let mut ascending = 0u32;
-        let mut prev = key.forward(0, EntityId::new(0)).unwrap().raw();
+        let mut prev = key.forward(ITEM, EntityId::new(0)).unwrap().raw();
         for e in 1..n {
-            let cur = key.forward(0, EntityId::new(e as u64)).unwrap().raw();
+            let cur = key.forward(ITEM, EntityId::new(e as u64)).unwrap().raw();
             if cur > prev {
                 ascending += 1;
             }
@@ -445,24 +545,122 @@ mod tests {
     fn a_different_key_gives_a_different_identity_for_the_same_entity() {
         let key_a = IdentityKey::from_hex(CANONICAL_KEY).unwrap();
         let key_b = IdentityKey::from_hex("100f0e0d0c0b0a090807060504030201").unwrap();
-        let id_a = key_a.forward(0, EntityId::new(42)).unwrap();
-        let id_b = key_b.forward(0, EntityId::new(42)).unwrap();
+        let id_a = key_a.forward(ITEM, EntityId::new(42)).unwrap();
+        let id_b = key_b.forward(ITEM, EntityId::new(42)).unwrap();
         assert_ne!(id_a, id_b);
     }
 
     #[test]
-    fn the_shard_prefix_separates_identity_spaces() {
-        // shard 0 and shard 1 must not map any entity to the same u64 -- guaranteed by
-        // bijectivity over the full 64-bit input, asserted because a dropped shard term in
-        // the input encoding would silently collapse them and would pass every other test.
-        // Every caller in this build passes shard_id 0, so this is the ONLY thing keeping a
-        // reserved, never-exercised field from being tidied out of the input encoding.
+    fn the_shard_and_the_tenancy_separate_identity_spaces() {
+        // Every caller in this build passes shard 0, and every number is at tenancy 0, so
+        // this keeps both fields from being tidied out of the input encoding.
         let key = IdentityKey::from_hex(CANONICAL_KEY).unwrap();
+        let shard_one = ItemHigh::new(1, Tenancy::ZERO);
+        let tenancy_one = ItemHigh::new(0, Tenancy::ZERO.next().unwrap());
         for e in 0u32..1000 {
-            let id0 = key.forward(0, EntityId::new(e as u64)).unwrap();
-            let id1 = key.forward(1, EntityId::new(e as u64)).unwrap();
+            let e = EntityId::new(e as u64);
+            let id0 = key.forward(ITEM, e).unwrap();
+            let id1 = key.forward(shard_one, e).unwrap();
+            let id2 = key.forward(tenancy_one, e).unwrap();
             assert_ne!(id0, id1);
+            assert_ne!(id0, id2);
+            assert_ne!(id1, id2);
+            assert_eq!(key.invert(id1), Some((shard_one, e)));
+            assert_eq!(key.invert(id2), Some((tenancy_one, e)));
         }
+    }
+
+    #[test]
+    fn it_matches_the_packed_vectors() {
+        let doc = load_vectors_doc();
+        let packed = &doc["packed"];
+        let key = IdentityKey::from_hex(doc["key"].as_str().unwrap()).unwrap();
+        let sk_key = IdentityKey::from_hex(doc["secondary_key"]["key"].as_str().unwrap()).unwrap();
+
+        let vectors = packed["vectors"].as_array().unwrap();
+        assert_eq!(vectors.len(), 8);
+        let sk_vectors = packed["secondary_key_vectors"].as_array().unwrap();
+        assert_eq!(sk_vectors.len(), 2);
+        let cases = vectors
+            .iter()
+            .map(|v| (&key, v))
+            .chain(sk_vectors.iter().map(|v| (&sk_key, v)));
+        let mut kinds = [0usize; 2];
+        for (key, v) in cases {
+            let kind = v["kind"].as_u64().unwrap();
+            let shard = v["shard"].as_u64().unwrap() as u32;
+            let tenancy = Tenancy::new(v["tenancy"].as_u64().unwrap() as u16).unwrap();
+            let number = EntityId::new(v["number"].as_u64().unwrap());
+            let high = v["high"].as_u64().unwrap() as u32;
+            let id = MosaicaId::new(parse_hex_u64(v["mosaica_id"].as_str().unwrap()));
+            kinds[kind as usize] += 1;
+
+            assert_eq!(key.forward_raw(high, number), Ok(id), "{v}");
+            assert_eq!(key.invert_raw(id), (high, number), "{v}");
+            if kind == 0 {
+                let item = ItemHigh::new(shard, tenancy);
+                assert_eq!(item.pack(), Ok(high), "{v}");
+                assert_eq!(ItemHigh::unpack(high), Some(item), "{v}");
+                assert_eq!(key.forward(item, number), Ok(id), "{v}");
+                assert_eq!(key.invert(id), Some((item, number)), "{v}");
+            } else {
+                assert_eq!(kind, 1);
+                assert_eq!(ItemHigh::unpack(high), None, "{v}");
+                assert_eq!(key.invert(id), None, "{v}");
+            }
+        }
+        assert!(kinds[0] > 0 && kinds[1] > 0);
+
+        let rejected = packed["rejected_packings"].as_array().unwrap();
+        assert_eq!(rejected.len(), 2);
+        for v in rejected {
+            let shard = v["shard"].as_u64().unwrap() as u32;
+            let tenancy = v["tenancy"].as_u64().unwrap() as u16;
+            let refused = Tenancy::new(tenancy).and_then(|t| ItemHigh::new(shard, t).pack());
+            assert!(refused.is_err(), "{v}");
+        }
+    }
+
+    #[test]
+    fn an_item_at_shard_zero_and_tenancy_zero_has_the_raw_identifier() {
+        let doc = load_vectors_doc();
+        let key = IdentityKey::from_hex(doc["key"].as_str().unwrap()).unwrap();
+        for v in doc["vectors"].as_array().unwrap() {
+            if v["shard_id"].as_u64() == Some(0) {
+                let entity = EntityId::new(v["entity_id"].as_u64().unwrap());
+                let id = parse_hex_u64(v["mosaica_id"].as_str().unwrap());
+                assert_eq!(key.forward(ITEM, entity).unwrap().raw(), id);
+            }
+        }
+    }
+
+    #[test]
+    fn the_tenancy_counts_to_its_maximum_and_stops() {
+        assert_eq!(Tenancy::MAX.raw(), 4095);
+        assert_eq!(Tenancy::new(4095), Ok(Tenancy::MAX));
+        assert!(Tenancy::new(4096).is_err());
+        assert_eq!(Tenancy::MAX.next(), None);
+        let mut t = Tenancy::ZERO;
+        for _ in 0..4095 {
+            t = t.next().unwrap();
+        }
+        assert_eq!(t, Tenancy::MAX);
+    }
+
+    #[test]
+    fn a_shard_that_does_not_fit_is_refused() {
+        let key = IdentityKey::from_hex(CANONICAL_KEY).unwrap();
+        let last = ItemHigh::new(ItemHigh::SHARD_LIMIT - 1, Tenancy::MAX);
+        assert_eq!(last.pack(), Ok(0x7fff_ffff));
+        let id = key.forward(last, EntityId::new(9)).unwrap();
+        assert_eq!(key.invert(id), Some((last, EntityId::new(9))));
+        assert!(matches!(
+            key.forward(
+                ItemHigh::new(ItemHigh::SHARD_LIMIT, Tenancy::ZERO),
+                EntityId::new(9)
+            ),
+            Err(IdentityError::ShardOutOfRange { .. })
+        ));
     }
 
     #[test]
@@ -473,10 +671,12 @@ mod tests {
         // u32 cap makes this unreachable; this makes a bypass loud.
         let key = IdentityKey::from_hex(CANONICAL_KEY).unwrap();
         assert!(matches!(
-            key.forward(0, EntityId::new(1u64 << 32)),
+            key.forward(ITEM, EntityId::new(1u64 << 32)),
             Err(IdentityError::EntityOutOfRange { .. })
         ));
-        assert!(key.forward(0, EntityId::new(u32::MAX as u64 - 1)).is_ok());
+        assert!(key
+            .forward(ITEM, EntityId::new(u32::MAX as u64 - 1))
+            .is_ok());
     }
 
     #[test]
@@ -512,7 +712,7 @@ mod tests {
         // being "k lowest by mosaica_id" and the sampler acquires a composite comparator.
         let key = IdentityKey::from_hex(CANONICAL_KEY).unwrap();
         for e in (0u32..1 << 16).step_by(13) {
-            let id = key.forward(0, EntityId::new(e as u64)).unwrap();
+            let id = key.forward(ITEM, EntityId::new(e as u64)).unwrap();
             assert_eq!(id.priority(), (id.raw() >> 48) as u16);
         }
     }
@@ -524,7 +724,7 @@ mod tests {
         // produce exactly sort_by_key(|x| x.raw()).
         let key = IdentityKey::from_hex(CANONICAL_KEY).unwrap();
         let mut ids: Vec<MosaicaId> = (0u32..5000)
-            .map(|e| key.forward(0, EntityId::new(e as u64)).unwrap())
+            .map(|e| key.forward(ITEM, EntityId::new(e as u64)).unwrap())
             .collect();
 
         let mut by_raw = ids.clone();

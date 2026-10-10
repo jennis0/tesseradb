@@ -47,7 +47,10 @@ pub(super) struct TaggedPoint {
 }
 
 /// Every point the emit pass will gather, in its order.
-pub(super) fn tagged_points(served: &ServedView<'_>, swept: &[TileSweepOut<'_>]) -> Vec<TaggedPoint> {
+pub(super) fn tagged_points(
+    served: &ServedView<'_>,
+    swept: &[TileSweepOut<'_>],
+) -> Vec<TaggedPoint> {
     let mut points = Vec::with_capacity(swept.iter().map(|ts| ts.rows.len()).sum());
     for ts in swept {
         for (i, &row) in ts.rows.iter().enumerate() {
@@ -155,7 +158,10 @@ impl Engine {
                 }
                 if !self.switches.tags_from_labels.load(Ordering::Relaxed)
                     || artifacts::lineage_kind(declaration.hierarchy.kind).is_some()
-                    || declaration.depends_on.iter().any(|target| names.contains(target))
+                    || declaration
+                        .depends_on
+                        .iter()
+                        .any(|target| names.contains(target))
                 {
                     return Tagging::Walk;
                 }
@@ -289,8 +295,8 @@ impl Engine {
                     let entity = runs.entity_of(ordinal as u64).map(EntityId::new)?;
                     let rank = view.serves_visible_member(entity, ordinal).ok()?;
                     // The walk withholds an artifact whose content cannot be read back.
-                    let table = (rank.is_some() && !declaration.content.supplied.is_empty())
-                        .then(|| {
+                    let table =
+                        (rank.is_some() && !declaration.content.supplied.is_empty()).then(|| {
                             contents
                                 .get_or_insert_with(|| {
                                     self.level_contents.get_or_build(
@@ -318,14 +324,16 @@ impl Engine {
                         false,
                         table.as_deref(),
                     )?;
-                    self.identity_key
-                        .forward(shard, entity)
+                    crate::edited::artifact_id(&self.identity_key, shard, entity)
                         .ok()
                         .map(|id| id.raw())
                 })
             };
             let mut lowest = |labels: &[u32]| -> Option<u64> {
-                labels.iter().filter_map(|&ordinal| mosaica_id(ordinal)).min()
+                labels
+                    .iter()
+                    .filter_map(|&ordinal| mosaica_id(ordinal))
+                    .min()
             };
 
             let mut still_open = Vec::new();
@@ -344,7 +352,8 @@ impl Engine {
             }
             if !unread.is_empty() {
                 // Each unread point's row, ascending, beside the point it is.
-                let mut at: Vec<(u32, usize)> = unread.iter().map(|&i| (points[i].row, i)).collect();
+                let mut at: Vec<(u32, usize)> =
+                    unread.iter().map(|&i| (points[i].row, i)).collect();
                 at.sort_unstable();
                 let mut set = croaring::Bitmap::new();
                 set.add_many(&at.iter().map(|&(row, _)| row).collect::<Vec<u32>>());

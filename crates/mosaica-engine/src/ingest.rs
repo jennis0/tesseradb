@@ -26,7 +26,6 @@
 
 use std::collections::BTreeMap;
 
-use rustc_hash::{FxHashMap, FxHashSet};
 use mosaica_lifecycle::resolve::{self, Identifier, Key, Reason, Refusal, RowIdentity};
 use mosaica_lifecycle::{
     BatchArtifacts, ExecError, IngestRow, RowOutcome, RowReceipt, Slot, UnallocatedEdit,
@@ -34,7 +33,8 @@ use mosaica_lifecycle::{
 };
 use mosaica_store::manifest::DeclaredScalar;
 use mosaica_store::unique::{key_of, value_text, KeyKind, UniqueKey};
-use mosaica_types::{EntityId, TermId, MosaicaId};
+use mosaica_types::{EntityId, ItemHigh, MosaicaId, Tenancy, TermId};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::engine::Engine;
 use crate::write::joined::{self, BlobRow};
@@ -407,7 +407,7 @@ impl Engine {
         let shard = manifest.identity.shard_id;
         let tid_of = |entity: &EntityId| -> Result<u64, AcceptError> {
             self.identity_key
-                .forward(shard, numbers[entity])
+                .forward(ItemHigh::new(shard, Tenancy::ZERO), numbers[entity])
                 .map(|id| id.raw())
                 .map_err(|e| AcceptError::Unreadable(e.to_string()))
         };

@@ -60,8 +60,8 @@ use crate::filter::FilterExpr;
 use crate::layer_read::{check_level, LayerRefusal, ReadLevel};
 use crate::viewport::{response_rungs, segments_with_row_bases, DependencyContext, ServedView};
 use crate::Engine;
-use mosaica_lifecycle::membership::Attachment;
 use crate::EngineError;
+use mosaica_lifecycle::membership::Attachment;
 
 /// Which of §4's three forms a request takes. One verb, three forms (§9 (a), owner ruling).
 #[derive(Debug, Clone)]
@@ -330,7 +330,12 @@ impl crate::Engine {
             data: view_data,
             segments: segments_with_row_bases(view, view_data)?,
             denied,
-            mask_identity: self.mask_identity(session, &generation, &geometry, key.segments_version),
+            mask_identity: self.mask_identity(
+                session,
+                &generation,
+                &geometry,
+                key.segments_version,
+            ),
             cancel: None,
             turn: Default::default(),
         };
@@ -375,7 +380,8 @@ impl crate::Engine {
                 else {
                     continue;
                 };
-                let Ok(mosaica_id) = self.identity_key.forward(shard, entity) else {
+                let Ok(mosaica_id) = crate::edited::artifact_id(&self.identity_key, shard, entity)
+                else {
                     continue;
                 };
                 // Content decides servability as well as text: a viewer containing no content's
@@ -507,10 +513,7 @@ impl crate::Engine {
                 ids.dedup();
                 ids
             },
-            child_count: children
-                .get(&(g.level, g.ordinal))
-                .copied()
-                .unwrap_or(0),
+            child_count: children.get(&(g.level, g.ordinal)).copied().unwrap_or(0),
             slot: slots
                 .get(g.level as usize)
                 .and_then(Option::as_ref)

@@ -170,9 +170,16 @@ fn a_merged_segment_carries_its_own_bands() {
     assert_eq!(segment.cell_codes.codes(), expected.as_slice());
 
     // Each entry's indexed value is its own item's, carried from the input it came from.
-    let copy = segment.bands.copy("score").expect("the indexed column is copied");
+    let copy = segment
+        .bands
+        .copy("score")
+        .expect("the indexed column is copied");
     for (e, &id) in segment.bands.ids().iter().enumerate() {
-        let entity = key().invert(mosaica_types::MosaicaId::new(id)).1.raw();
+        let entity = key()
+            .invert(mosaica_types::MosaicaId::new(id))
+            .unwrap()
+            .1
+            .raw();
         let held = copy.holds(e).then(|| copy.value_at(e));
         let expected = match score_of(entity) {
             mosaica_spatial::tiler::ScalarValue::Null => None,
@@ -251,10 +258,12 @@ fn the_extent_maps_every_entity_to_its_merged_row() {
     for entity in (100..106).chain(200..205) {
         let row = out.extent.rows[(entity - 100) as usize];
         assert_ne!(row, mosaica_types::ROW_ABSENT, "entity {entity} has a row");
-        let (shard, back) = key().invert(mosaica_types::MosaicaId::new(
-            cols.mosaica_id()[row as usize],
-        ));
-        assert_eq!(shard, 0);
+        let (high, back) = key()
+            .invert(mosaica_types::MosaicaId::new(
+                cols.mosaica_id()[row as usize],
+            ))
+            .unwrap();
+        assert_eq!(high.shard, 0);
         assert_eq!(
             back.raw(),
             entity,
@@ -449,7 +458,7 @@ fn the_k_way_merge_emits_exactly_what_a_concatenate_and_sort_would() {
                 qy,
                 scalars: vec![],
             });
-            entity_ids.push(key().invert(mosaica_id).1);
+            entity_ids.push(key().invert(mosaica_id).unwrap().1);
         }
     }
     let expected_dir = dir.path().join("expected");

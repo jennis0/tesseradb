@@ -46,12 +46,12 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use rayon::slice::ParallelSliceMut;
 use mosaica_spatial::split32;
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_store::columns::{ColumnsFile, ColumnsPlan};
 use mosaica_store::write::{CutWriter, PagePlan, PermutationWriter};
-use mosaica_types::{EntityId, IdentityKey};
+use mosaica_types::{EntityId, IdentityKey, ItemHigh, Tenancy};
+use rayon::slice::ParallelSliceMut;
 
 use crate::column::EntityColumn;
 use crate::error::{BuildError, Result};
@@ -116,14 +116,18 @@ impl RowRec {
     }
 }
 
-/// The `mosaica_id` of one entity. **Unreachable as an error in practice** — the allocator caps
-/// entity ids below `u32::MAX` (I-1), which is what makes `forward` infallible for any entity a
-/// build assigns — but `expect` rather than a fallback, because a silently wrong identity here is
-/// a silently wrong row order.
+/// The `mosaica_id` of one entity, at tenancy 0 since a build holds every number once.
+/// **Unreachable as an error in practice** — `validate_args` refuses a shard that does not fit,
+/// and the allocator caps entity ids below `u32::MAX` (I-1), which is what makes `forward`
+/// infallible for any entity a build assigns — but `expect` rather than a fallback, because a
+/// silently wrong identity here is a silently wrong row order.
 fn identity_of(key: &IdentityKey, shard: u32, entity: u32) -> u64 {
-    key.forward(shard, EntityId::new(entity as u64))
-        .expect("entity ids are capped below u32::MAX by the allocator (I-1)")
-        .raw()
+    key.forward(
+        ItemHigh::new(shard, Tenancy::ZERO),
+        EntityId::new(entity as u64),
+    )
+    .expect("the shard is checked and entity ids are capped below u32::MAX (I-1)")
+    .raw()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -246,9 +250,7 @@ impl MortonHistogram {
     /// 200-row build takes a target of 1 and admits 401 buckets — more than the model charges
     /// writer buffers for. The difference at rung scale is one row in the target.
     pub(crate) fn target(&self) -> u64 {
-        self.rows
-            .div_ceil(spill::PARTITION_BUCKETS as u64)
-            .max(1)
+        self.rows.div_ceil(spill::PARTITION_BUCKETS as u64).max(1)
     }
 }
 
@@ -550,9 +552,12 @@ impl PartitionedRows {
 }
 
 fn priority_of(key: &IdentityKey, shard: u32, entity: u32) -> u16 {
-    key.forward(shard, EntityId::new(entity as u64))
-        .expect("entity ids are capped below u32::MAX by the allocator (I-1)")
-        .priority()
+    key.forward(
+        ItemHigh::new(shard, Tenancy::ZERO),
+        EntityId::new(entity as u64),
+    )
+    .expect("the shard is checked and entity ids are capped below u32::MAX (I-1)")
+    .priority()
 }
 
 /// Steps 3 to 6: the buckets in Morton order, the permutation, the render tail and the framing
@@ -604,8 +609,7 @@ pub(crate) fn write_segment(
     let mut bands_out = mosaica_store::bands::BandWriter::create(job.segment_dir, &indexed)
         .map_err(|e| BuildError::io(job.segment_dir, e))?;
     let mut row_entity_out = std::io::BufWriter::new(
-        std::fs::File::create(&row_entity_path)
-            .map_err(|e| BuildError::io(&row_entity_path, e))?,
+        std::fs::File::create(&row_entity_path).map_err(|e| BuildError::io(&row_entity_path, e))?,
     );
     let mut pairs = Partition::create(
         job.tmp,
@@ -746,7 +750,8 @@ pub(crate) fn write_segment(
     {
         let mut writer = PermutationWriter::create_planned(&permutation_path, &plan)
             .map_err(|e| BuildError::io(&permutation_path, e))?;
-        let mut record = vec![0u8; 4 + lanes.iter().map(|lane| lane.value_bytes).max().unwrap_or(0)];
+        let mut record =
+            vec![0u8; 4 + lanes.iter().map(|lane| lane.value_bytes).max().unwrap_or(0)];
         for bucket in 0..entity_buckets {
             let mut bytes = pairs.load(bucket)?;
             // Sorted by entity before the writes: the pairs arrived in row order, which is Morton
@@ -767,7 +772,9 @@ pub(crate) fn write_segment(
             };
             pairs_in_bucket.par_sort_unstable_by_key(key);
             debug_assert!(
-                pairs_in_bucket.windows(2).all(|pair| key(&pair[0]) < key(&pair[1])),
+                pairs_in_bucket
+                    .windows(2)
+                    .all(|pair| key(&pair[0]) < key(&pair[1])),
                 "two rows of one view carry the same entity: the pairs bucket's order would \
                  depend on how the parallel sort divided it"
             );
@@ -973,7 +980,10 @@ mod tests {
         // writer buffers are charged against.
         let (boundaries, largest) = spill::boundaries_from_histogram(0, counts, 2);
         assert_eq!(boundaries, vec![0, 1, 2, 3]);
-        assert_eq!(largest, 3, "a key over the target keeps its own bucket and stays over it");
+        assert_eq!(
+            largest, 3,
+            "a key over the target keeps its own bucket and stays over it"
+        );
     }
 
     #[test]
@@ -1018,10 +1028,7 @@ mod tests {
             priorities: vec![(7, priorities.clone())],
         };
         let refused = morton_boundaries(&histogram, &refinement).expect_err("over the target");
-        assert!(
-            format!("{refused}").contains("no finer key"),
-            "{refused}"
-        );
+        assert!(format!("{refused}").contains("no finer key"), "{refused}");
 
         // Spread over the prefix, the split lands: two rows a bucket.
         let mut priorities = vec![0u64; 1 << 16];
@@ -1039,7 +1046,9 @@ mod tests {
         assert_eq!(boundaries.route(7, || 0), 0);
         assert_eq!(boundaries.route(7, || 255), 127);
         assert_eq!(
-            boundaries.route(8, || panic!("a code no split reaches must not ask for a priority")),
+            boundaries.route(8, || panic!(
+                "a code no split reaches must not ask for a priority"
+            )),
             127
         );
     }
@@ -1051,7 +1060,7 @@ mod tests {
     #[test]
     fn row_rec_comparator_agrees_with_a_full_mosaica_id_sort_over_engineered_ties() {
         let key = IdentityKey::from_hex("000102030405060708090a0b0c0d0e0f").unwrap();
-        let shard = 0u32;
+        let shard = ItemHigh::new(0, Tenancy::ZERO);
         let morton = 42u32;
 
         let rows: Vec<RowRec> = (0..4000u32)
@@ -1066,10 +1075,7 @@ mod tests {
             })
             .collect();
 
-        let mut priorities: Vec<u16> = rows
-            .iter()
-            .map(|r| (r.identity >> 48) as u16)
-            .collect();
+        let mut priorities: Vec<u16> = rows.iter().map(|r| (r.identity >> 48) as u16).collect();
         priorities.sort_unstable();
         assert!(
             priorities.windows(2).any(|w| w[0] == w[1]),

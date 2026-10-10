@@ -448,7 +448,11 @@ impl EditedRows {
 
     /// Every pair, ascending by row.
     pub fn iter(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
-        self.flat().as_chunks::<2>().0.iter().map(|&[row, entity]| (row, entity))
+        self.flat()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[row, entity]| (row, entity))
     }
 
     /// The entity `row` lists, if it is one an edit moved.
@@ -500,9 +504,10 @@ impl RowEntities {
             RowEntities::Table(_) => {
                 Box::new((0..mosaica_ids.len() as u32).filter_map(move |row| {
                     let entity = self.recorded(row)?;
-                    let (_, number) =
-                        key.invert(mosaica_types::MosaicaId::new(mosaica_ids[row as usize]));
-                    (u64::from(entity) != number.raw()).then_some((row, entity))
+                    let number = key
+                        .invert(mosaica_types::MosaicaId::new(mosaica_ids[row as usize]))
+                        .map(|(_, number)| number.raw());
+                    (number != Some(u64::from(entity))).then_some((row, entity))
                 }))
             }
         }
@@ -520,8 +525,9 @@ impl RowEntities {
         }
     }
 
-    /// The entity `row` belongs to. Refused where its `mosaica_id` inverts to another shard, or
-    /// a base row lies past its table.
+    /// The entity `row` belongs to. Refused where its `mosaica_id` names no item or an item of
+    /// another shard, or a base row lies past its table. The tenancy is not compared: a row
+    /// stores its item's own `mosaica_id`, at whatever tenancy that was formed.
     pub fn entity_of(
         &self,
         row: u32,
@@ -530,12 +536,17 @@ impl RowEntities {
         shard_id: u32,
         seg_id: &str,
     ) -> Result<mosaica_types::EntityId> {
-        let (shard, number) = key.invert(mosaica_types::MosaicaId::new(mosaica_id));
-        if shard != shard_id {
+        let (high, number) = key
+            .invert(mosaica_types::MosaicaId::new(mosaica_id))
+            .ok_or_else(|| StoreError::MalformedBundle {
+                detail: format!("segment '{seg_id}': row {row}'s mosaica_id names no item"),
+            })?;
+        if high.shard != shard_id {
             return Err(StoreError::MalformedBundle {
                 detail: format!(
-                    "segment '{seg_id}': row {row}'s mosaica_id inverts to shard {shard}, but the \
-                     manifest declares shard {shard_id}"
+                    "segment '{seg_id}': row {row}'s mosaica_id inverts to shard {}, but the \
+                     manifest declares shard {shard_id}",
+                    high.shard
                 ),
             });
         }
@@ -634,11 +645,14 @@ mod tests {
         let rows = EditedRows::open(tmp.path(), true).unwrap();
         assert_eq!(rows.iter().collect::<Vec<_>>(), vec![(1, 90), (4, 91)]);
         let key = mosaica_types::IdentityKey::from_hex("0123456789abcdef0123456789abcdef").unwrap();
-        let tid = |n: u64| {
-            key.forward(0, mosaica_types::EntityId::new(n))
+        let id_at = |shard: u32, tenancy: u16, n: u64| {
+            let tenancy = mosaica_types::Tenancy::new(tenancy).unwrap();
+            let high = mosaica_types::ItemHigh::new(shard, tenancy);
+            key.forward(high, mosaica_types::EntityId::new(n))
                 .unwrap()
                 .raw()
         };
+        let tid = |n: u64| id_at(0, 0, n);
         let rows = RowEntities::Listed(Arc::new(rows));
         assert_eq!(
             rows.entity_of(4, tid(5), &key, 0, "s").unwrap(),
@@ -647,6 +661,15 @@ mod tests {
         assert_eq!(
             rows.entity_of(2, tid(5), &key, 0, "s").unwrap(),
             mosaica_types::EntityId::new(5)
+        );
+        assert_eq!(
+            rows.entity_of(2, id_at(0, 3, 5), &key, 0, "s").unwrap(),
+            mosaica_types::EntityId::new(5),
+            "a row whose number was held before resolves to it"
+        );
+        assert!(
+            rows.entity_of(2, id_at(1, 0, 5), &key, 0, "s").is_err(),
+            "a row naming another shard's item is refused"
         );
     }
 }

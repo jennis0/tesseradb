@@ -286,7 +286,17 @@ fn check_edited_items(
                         ids.len()
                     ))
                 })?;
-                let (_, number) = key.invert(MosaicaId::new(mosaica_id));
+                let shard = manifest.identity.shard_id;
+                let Some((_, number)) = key
+                    .invert(MosaicaId::new(mosaica_id))
+                    .filter(|(high, _)| high.shard == shard)
+                else {
+                    return Err(BuildError::Invalid(format!(
+                        "view {view}, segment {}: moved row {row}'s mosaica_id names no item of \
+                         shard {shard}",
+                        segment.seg_id
+                    )));
+                };
                 if !u32::try_from(number.raw()).is_ok_and(|n| forward.contains(&(n, entity))) {
                     return Err(BuildError::Invalid(format!(
                         "view {view}, segment {}: row {row} holds entity {entity}, which the \
@@ -334,8 +344,12 @@ fn check_unique_indexes(
         .ok_or_else(|| {
             BuildError::Invalid(format!("partition {phash}: the tombstones do not decode"))
         })?;
-    let bound = u32::try_from(partition_manifest.entity_id_high_water.max(manifest.entity_id_high_water))
-        .unwrap_or(u32::MAX);
+    let bound = u32::try_from(
+        partition_manifest
+            .entity_id_high_water
+            .max(manifest.entity_id_high_water),
+    )
+    .unwrap_or(u32::MAX);
     for index in &partition_manifest.unique_indexes {
         let attribute = &index.attribute;
         let Some((at, declared)) = served
@@ -450,9 +464,19 @@ fn check_unique_indexes(
                 return Err(e);
             }
         } else {
-            let record_dir = prefix_dir.join("partitions").join(phash).join("attrs").join("record");
-            let base_rel = format!("partitions/{phash}/attrs/record/{}", mosaica_filter::RECORD_BLOCKS_FILE);
-            let base = manifest.files.contains_key(&base_rel).then_some(record_dir.as_path());
+            let record_dir = prefix_dir
+                .join("partitions")
+                .join(phash)
+                .join("attrs")
+                .join("record");
+            let base_rel = format!(
+                "partitions/{phash}/attrs/record/{}",
+                mosaica_filter::RECORD_BLOCKS_FILE
+            );
+            let base = manifest
+                .files
+                .contains_key(&base_rel)
+                .then_some(record_dir.as_path());
             let extents: Vec<mosaica_filter::RecordExtentPaths> = partition_manifest
                 .record_extents
                 .iter()
@@ -531,12 +555,24 @@ fn value_layers(
     manifest: &Manifest,
     partition_manifest: &SegmentsManifest,
     declared: &mosaica_store::manifest::DeclaredScalar,
-) -> Result<Vec<(mosaica_filter::ValueColumn, Option<mosaica_filter::SortedDict>)>> {
+) -> Result<
+    Vec<(
+        mosaica_filter::ValueColumn,
+        Option<mosaica_filter::SortedDict>,
+    )>,
+> {
     let attribute = &declared.name;
-    let dir = prefix_dir.join("partitions").join(phash).join("attrs").join(attribute);
+    let dir = prefix_dir
+        .join("partitions")
+        .join(phash)
+        .join("attrs")
+        .join(attribute);
     let access = mosaica_filter::Access::MappedSequential;
     let mut layers = Vec::new();
-    let base_rel = format!("partitions/{phash}/attrs/{attribute}/{}", mosaica_filter::VALUES_FILE);
+    let base_rel = format!(
+        "partitions/{phash}/attrs/{attribute}/{}",
+        mosaica_filter::VALUES_FILE
+    );
     if manifest.files.contains_key(&base_rel) {
         let values = mosaica_filter::ValueColumn::open_dir(&dir, access)
             .map_err(|e| BuildError::io(&dir, e))?;
@@ -624,7 +660,10 @@ fn check_cut_index(
             let starts = segment.cuts.starts();
             let ids = segment.columns.mosaica_id();
             let where_at = |row: usize| {
-                format!("partition {phash}, view '{view}', segment '{}', row {row}", segment.seg_id)
+                format!(
+                    "partition {phash}, view '{view}', segment '{}', row {row}",
+                    segment.seg_id
+                )
             };
             let mut cell = 0usize;
             for row in 0..codes.len() {
@@ -789,19 +828,20 @@ fn check_bands(
                 let mut values: std::collections::HashMap<u32, mosaica_spatial::ScalarValue> =
                     Default::default();
                 for (layer, _) in layers {
-                    layer.for_each_record_value_in(&wanted, |entity, value| {
-                        // A value column stores a timestamp as its `i64`.
-                        let value = match (declared.arrow_type, record_as_scalar(value)) {
-                            (
-                                mosaica_spatial::ScalarType::TimestampUs,
-                                mosaica_spatial::ScalarValue::I64(t),
-                            ) => mosaica_spatial::ScalarValue::TimestampUs(t),
-                            (_, value) => value,
-                        };
-                        values.insert(entity, value);
-                        Ok::<(), ()>(())
-                    })
-                    .expect("the closure does not fail");
+                    layer
+                        .for_each_record_value_in(&wanted, |entity, value| {
+                            // A value column stores a timestamp as its `i64`.
+                            let value = match (declared.arrow_type, record_as_scalar(value)) {
+                                (
+                                    mosaica_spatial::ScalarType::TimestampUs,
+                                    mosaica_spatial::ScalarValue::I64(t),
+                                ) => mosaica_spatial::ScalarValue::TimestampUs(t),
+                                (_, value) => value,
+                            };
+                            values.insert(entity, value);
+                            Ok::<(), ()>(())
+                        })
+                        .expect("the closure does not fail");
                 }
                 segment
                     .bands
@@ -1137,8 +1177,7 @@ fn check_postings_and_pairs(
     let pairs_rel = format!("partitions/{phash}/terms/pairs.parquet");
     if named(&postings_rel) {
         let path = join_rel(prefix_dir, &postings_rel)?;
-        let reader =
-            PostingsReader::open(&path, false).map_err(|e| BuildError::io(&path, e))?;
+        let reader = PostingsReader::open(&path, false).map_err(|e| BuildError::io(&path, e))?;
 
         let mut pairs = if named(&pairs_rel) {
             Some(PairsCursor::open(&join_rel(prefix_dir, &pairs_rel)?)?)
@@ -1441,8 +1480,8 @@ fn check_dict_extents(
             if bytes.len() - offset < 4 {
                 return Err(truncated("cuts off inside its length field"));
             }
-            let len = u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4 bytes"))
-                as usize;
+            let len =
+                u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4 bytes")) as usize;
             offset += 4;
             if bytes.len() - offset < len {
                 return Err(truncated("overruns the end of the file"));

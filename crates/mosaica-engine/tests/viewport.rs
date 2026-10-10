@@ -131,8 +131,8 @@ fn b_subset_session_sees_exactly_its_terms_items() {
     let new_to_source: BTreeMap<u64, u64> = source_to_new.iter().map(|(&s, &n)| (n, s)).collect();
     let key = test_key();
     for (mosaica_id, _) in out.points.iter() {
-        let (shard, entity) = key.invert(mosaica_id);
-        assert_eq!(shard, 0, "fixture uses shard 0 only");
+        let (high, entity) = key.invert(mosaica_id).expect("a served point is an item");
+        assert_eq!(high.shard, 0, "fixture uses shard 0 only");
         let source = new_to_source[&entity.raw()];
         assert_eq!(
             source % 3,
@@ -637,13 +637,7 @@ fn config_with_underlay(max_cells: usize) -> EngineConfig {
 }
 
 fn open_engine_with(bundle_root: &Path, tmp: &Path, cfg: EngineConfig) -> Engine {
-    Engine::open(
-        bundle_root,
-        &tmp.join("cache"),
-        &tmp.join("wal.log"),
-        cfg,
-    )
-    .unwrap()
+    Engine::open(bundle_root, &tmp.join("cache"), &tmp.join("wal.log"), cfg).unwrap()
 }
 
 /// **I2.** Sub-cell counts are exact *masked* cardinalities, so a tile's sub-cells must sum to that
@@ -1050,13 +1044,17 @@ fn n_occ_falls_when_a_suppression_empties_a_tile() {
         &tmp.path().join("wal_a.log"),
     );
     let session_a = baseline.authorise(&full_coverage_credential()).unwrap();
-    let before = baseline.occupied_tiles_for_test(&session_a, "s0", 16).unwrap();
+    let before = baseline
+        .occupied_tiles_for_test(&session_a, "s0", 16)
+        .unwrap();
     assert_eq!(
         before, 1_000,
         "the fixture's ten thousand items sit on a thousand lattice positions"
     );
     assert_eq!(
-        baseline.occupied_tiles_for_test(&session_a, "s0", 0).unwrap(),
+        baseline
+            .occupied_tiles_for_test(&session_a, "s0", 0)
+            .unwrap(),
         1,
         "depth 0 is one tile whatever the data does"
     );
@@ -1177,7 +1175,9 @@ fn the_background_fill_takes_the_ladder_to_twelve_in_one_walk_off_the_request() 
 
     for depth in [0u8, 3, 6, 9, 12] {
         assert_eq!(
-            filled.occupied_tiles_for_test(&session, "s0", depth).unwrap(),
+            filled
+                .occupied_tiles_for_test(&session, "s0", depth)
+                .unwrap(),
             unfilled
                 .occupied_tiles_for_test(&plain_session, "s0", depth)
                 .unwrap(),
@@ -1458,7 +1458,10 @@ fn a_first_viewport_finishes_while_another_sessions_build_is_held() {
         finished.is_ok(),
         "a second session's first viewport waited for the first session's build"
     );
-    assert_eq!(builds_while_held, 2, "each session builds its own projection");
+    assert_eq!(
+        builds_while_held, 2,
+        "each session builds its own projection"
+    );
 }
 
 /// Byte-format/wire behaviour is unchanged by the D-G refactor: a warm cache must serve output
@@ -1662,7 +1665,10 @@ fn f1_selection_reads_fewer_than_the_visible_set_on_a_dense_tile() {
         .unwrap();
     let t = out.timings;
 
-    assert!(t.enabled, "built with bench-timing, so timings must be real");
+    assert!(
+        t.enabled,
+        "built with bench-timing, so timings must be real"
+    );
     assert_eq!(t.tiles_nonempty, 1, "zoom 0 is one tile");
     assert_eq!(
         decode_tier(t.sigma_visible, t.rows_in_ranges),

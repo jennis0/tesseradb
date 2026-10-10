@@ -303,7 +303,8 @@ impl Engine {
                                 Some(true) => crate::cut::Lineage::dag(edges),
                                 _ => crate::cut::Lineage::new(edges),
                             }
-                        });
+                        },
+                    );
                     // Skipped where the layer declares no supplied content: nothing to read.
                     if !layer.declaration.content.supplied.is_empty() {
                         if let Some(runs) = layer.runs.get(level as usize) {
@@ -343,10 +344,10 @@ impl Engine {
         let (session, generation) = (served.session, served.generation);
         let (view, view_data) = (served.name, served.data);
         let (segments, denied) = (&served.segments[..], served.denied);
-        let (shard, entity) = self.identity_key.invert(id);
-        if shard != generation.bundle.manifest.identity.shard_id {
+        let shard = generation.bundle.manifest.identity.shard_id;
+        let Some(entity) = crate::edited::artifact_named(&self.identity_key, shard, id) else {
             return Ok(None);
-        }
+        };
 
         let Some((name, level, ordinal)) = self.write.live().locate_artifact(entity) else {
             return Ok(None);
@@ -522,8 +523,7 @@ impl Engine {
             cancel: None,
             turn: Default::default(),
         };
-        let Some(gated) = self.gated_artifact(&served, &mask, id)?
-        else {
+        let Some(gated) = self.gated_artifact(&served, &mask, id)? else {
             return Ok(None);
         };
         let GatedArtifact {
@@ -1024,7 +1024,10 @@ impl Engine {
                 });
                 // Built after candidacy: the filter decides nothing about which artifacts are
                 // served.
-                let matched = sets.matched_here.as_ref().map(|here| level.rows.matched(here));
+                let matched = sets
+                    .matched_here
+                    .as_ref()
+                    .map(|here| level.rows.matched(here));
                 let highlighted = sets
                     .highlighted_here
                     .as_ref()
@@ -1493,7 +1496,8 @@ impl Engine {
         check_cancelled(&ask.cancel)?;
         // The blinding is total over the allocator's space; a failure means the manifest and
         // allocator disagree, and dropping the artifact is the fail-closed reading of that.
-        let Ok(mosaica_id) = self.identity_key.forward(pass.shard, entity) else {
+        let Ok(mosaica_id) = crate::edited::artifact_id(&self.identity_key, pass.shard, entity)
+        else {
             return Ok(());
         };
         // From the composed mask, and only from it: every property below is a function of the
@@ -1798,11 +1802,8 @@ pub(super) fn settle_response(
     // it would tell the viewer a coarser artifact exists that they are not cleared to see.
     let mut served = Vec::with_capacity(out.len());
     let mut kept = Vec::with_capacity(out.len());
-    for (((mut artifact, place), dropped), target_bit) in out
-        .into_iter()
-        .zip(&placed)
-        .zip(dropped)
-        .zip(target_bits)
+    for (((mut artifact, place), dropped), target_bit) in
+        out.into_iter().zip(&placed).zip(dropped).zip(target_bits)
     {
         if dropped {
             continue;
@@ -1863,7 +1864,15 @@ pub(super) fn settle_response(
     let served_at = kept
         .into_iter()
         .zip(&served)
-        .map(|(at, artifact)| (at, (artifact.mosaica_id, (artifact.matched, artifact.highlighted))))
+        .map(|(at, artifact)| {
+            (
+                at,
+                (
+                    artifact.mosaica_id,
+                    (artifact.matched, artifact.highlighted),
+                ),
+            )
+        })
         .collect();
     Settled {
         out: served,
@@ -1999,4 +2008,3 @@ fn orphaned_dependents(
     }
     dropped
 }
-

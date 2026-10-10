@@ -1,9 +1,9 @@
 //! The item drill-down: one visible item's record, the views it sits in and its scoped values.
 
-use super::*;
 use super::out::flat_families;
-use rustc_hash::FxHashMap;
+use super::*;
 use mosaica_access::{conjunction_text, Label};
+use rustc_hash::FxHashMap;
 
 use crate::session::SatisfiedKeys;
 
@@ -152,17 +152,12 @@ impl Engine {
     /// identifier that names nothing and one that names an invisible item: no `RowProjection` is
     /// constructed or read, so there is no per-ID cost to correlate against. A row is located only
     /// after the answer is already visible.
-    pub fn item(
-        &self,
-        session: &Session,
-        id: MosaicaId,
-    ) -> Result<Option<ItemOut>> {
+    pub fn item(&self, session: &Session, id: MosaicaId) -> Result<Option<ItemOut>> {
         let generation = self.generation.load_full();
 
-        let (shard, number) = self.identity_key.invert(id);
-        if shard != generation.bundle.manifest.identity.shard_id {
+        let Some(number) = crate::edited::number_named(&self.identity_key, &generation, id) else {
             return Ok(None);
-        }
+        };
         // The item's current entity, the edited-items map probed whether or not it holds the
         // number, so an edited item's card costs what any other's does. An entity the overlay has
         // deleted is not an answer; visibility below decides the rest.
@@ -179,16 +174,13 @@ impl Engine {
         // back to a build only when this session has no entry at or above the retention floor,
         // scoped to this generation's prefix so a fold's flip cannot answer from a replaced term
         // index.
-        let fragment = match self
-            .row_projection_cache
-            .freshest_fragment(
-                session.token_id(),
-                &generation.prefix,
-                generation
-                    .segments_version
-                    .saturating_sub(crate::cache::KEEP_SUPERSEDED_GENERATIONS),
-            )
-        {
+        let fragment = match self.row_projection_cache.freshest_fragment(
+            session.token_id(),
+            &generation.prefix,
+            generation
+                .segments_version
+                .saturating_sub(crate::cache::KEEP_SUPERSEDED_GENERATIONS),
+        ) {
             Some(fragment) => fragment,
             None => self.fragment_for(session, &generation)?,
         };
@@ -231,10 +223,7 @@ impl Engine {
 /// disagree about which rows exist. An O(1) bounds-checked slot read per view rather than a scan,
 /// so the whole array costs O(views). Sorted, because the maps walked here are hash maps, and
 /// each view id appears once: an entity lives in exactly one partition.
-fn rows_of(
-    generation: &Generation,
-    entity: EntityId,
-) -> Result<Vec<(&str, &SegmentData, usize)>> {
+fn rows_of(generation: &Generation, entity: EntityId) -> Result<Vec<(&str, &SegmentData, usize)>> {
     let mut rows: Vec<(&str, &SegmentData, usize)> = Vec::new();
     for partition in generation.bundle.partitions.values() {
         for (view, view_data) in &partition.views {
@@ -475,7 +464,9 @@ pub(crate) fn slice_value(
 ) -> Option<mosaica_filter::RecordValue> {
     use mosaica_filter::RecordValue as RV;
     match slice {
-        ScalarSlice::Bool(a) if local < arrow::array::Array::len(*a) => Some(RV::Bool(a.value(local))),
+        ScalarSlice::Bool(a) if local < arrow::array::Array::len(*a) => {
+            Some(RV::Bool(a.value(local)))
+        }
         ScalarSlice::Utf8(a) if local < arrow::array::Array::len(*a) => {
             Some(RV::Utf8(a.value(local).to_string()))
         }

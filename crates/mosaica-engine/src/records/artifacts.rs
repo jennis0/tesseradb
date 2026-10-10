@@ -31,23 +31,21 @@ use super::columns::ViewFrame;
 use super::cursor::{ArtifactsCursor, Binding, LayerBinding, Route};
 use super::walk::{same_publication, Clock};
 use super::{
-    page_rows_of, refuse_shape, Counted, PageEndedBy, Paged, Pager, RecordsCounts,
-    RecordsLimits, RecordsRefused, RecordsSink, RecordsTrailer, Response, ResponseEndedBy,
+    page_rows_of, refuse_shape, Counted, PageEndedBy, Paged, Pager, RecordsCounts, RecordsLimits,
+    RecordsRefused, RecordsSink, RecordsTrailer, Response, ResponseEndedBy,
 };
 use crate::cancel::CancelToken;
+use crate::compose::EffectiveMask;
 use crate::derived::{ComputedProperty, DerivedContent, RowLocator};
 use crate::engine::Engine;
 use crate::error::{EngineError, Result};
-use crate::filter::FilterExpr;
-use crate::layer_read::{check_level, ReadLevel, LayerRefusal};
 use crate::figures::MaskIdentity;
+use crate::filter::FilterExpr;
+use crate::layer_read::{check_level, LayerRefusal, ReadLevel};
 use crate::region::RegionVerdict;
 use crate::session::Session;
 use crate::shapes::DrawnShape;
-use crate::compose::EffectiveMask;
-use crate::viewport::{
-    authored_rings, filter_refusal, DependencyContext, OpenView, Supplied,
-};
+use crate::viewport::{authored_rings, filter_refusal, DependencyContext, OpenView, Supplied};
 use crate::Generation;
 
 /// How many ordinals are walked between two readings of the clock.
@@ -259,13 +257,21 @@ impl Scope<'_> {
         let entity = self.layer.runs[level as usize]
             .entity_of(u64::from(ordinal))
             .map(EntityId::new)?;
-        let crate::artifacts::ArtifactVerdict::Serve { masked_count, rank } =
-            self.views[level as usize].as_ref()?.verdict(entity, ordinal)
+        let crate::artifacts::ArtifactVerdict::Serve { masked_count, rank } = self.views
+            [level as usize]
+            .as_ref()?
+            .verdict(entity, ordinal)
         else {
             return None;
         };
-        let supplied =
-            read.content(self.engine, self.generation, self.layer, ordinal, entity, rank)?;
+        let supplied = read.content(
+            self.engine,
+            self.generation,
+            self.layer,
+            ordinal,
+            entity,
+            rank,
+        )?;
         let mosaica_id = self.mosaica_id(entity)?;
         Some(Served {
             entity,
@@ -283,9 +289,7 @@ impl Scope<'_> {
     }
 
     fn mosaica_id(&self, entity: EntityId) -> Option<u64> {
-        self.engine
-            .identity_key
-            .forward(self.shard, entity)
+        crate::edited::artifact_id(&self.engine.identity_key, self.shard, entity)
             .ok()
             .map(|id| id.raw())
     }
@@ -427,7 +431,9 @@ impl Engine {
             .readable_layer(session, &generation, req.layer, req.view)
             .map_err(layer_refused)?;
         check_level(&layer, req.level).map_err(layer_refused)?;
-        let named = req.ids.map(|ids| self.named_positions(&generation, &layer, req.level, ids));
+        let named = req
+            .ids
+            .map(|ids| self.named_positions(&generation, &layer, req.level, ids));
         let binding = Binding {
             route: Route::Artifacts,
             view: req.view,
@@ -503,10 +509,7 @@ impl Engine {
         let mut named: Vec<(u32, u32, EntityId)> = ids
             .iter()
             .filter_map(|&id| {
-                let (in_shard, entity) = self.identity_key.invert(id);
-                if in_shard != shard {
-                    return None;
-                }
+                let entity = crate::edited::artifact_named(&self.identity_key, shard, id)?;
                 let (name, at, ordinal) = self.write.live().locate_artifact(entity)?;
                 (name == layer.declaration.name && level.is_none_or(|level| level == at))
                     .then_some((at, ordinal, entity))
@@ -553,8 +556,7 @@ impl ArtifactsPager<'_> {
         }
         if let Some(expr) = &self.req.filter {
             let stale = self.filter.as_ref().is_none_or(|held| {
-                !same_publication(&held.under, generation)
-                    || held.mask != served.mask_identity
+                !same_publication(&held.under, generation) || held.mask != served.mask_identity
             });
             if stale {
                 let (rows, region) =
@@ -632,7 +634,10 @@ impl ArtifactsPager<'_> {
                     .as_ref()
                     .and_then(|read| read.rows.attachment(ordinal))
                 {
-                    if !wanted.iter().any(|(name, at)| *name == a.layer && *at == a.level) {
+                    if !wanted
+                        .iter()
+                        .any(|(name, at)| *name == a.layer && *at == a.level)
+                    {
                         wanted.push((a.layer.clone(), a.level));
                     }
                 }
@@ -784,10 +789,7 @@ impl ArtifactsPager<'_> {
                     row.parents = ids;
                 }
                 Property::Target => {
-                    row.target = read
-                        .rows
-                        .attachment(ordinal)
-                        .and_then(|a| scope.target(a));
+                    row.target = read.rows.attachment(ordinal).and_then(|a| scope.target(a));
                 }
                 Property::Content => row.content = served.supplied.values.clone(),
                 Property::Centroid | Property::Box => {
@@ -869,7 +871,11 @@ impl ArtifactsPager<'_> {
         };
         push(
             "mosaica_id",
-            Arc::new(rows.iter().map(|r| r.mosaica_id).collect::<arrow::array::UInt64Array>()),
+            Arc::new(
+                rows.iter()
+                    .map(|r| r.mosaica_id)
+                    .collect::<arrow::array::UInt64Array>(),
+            ),
             false,
         );
         let f64s = |at: fn(&Row) -> Option<f64>| -> ArrayRef {
@@ -970,10 +976,8 @@ fn locate_in(
     layer: &RegisteredLayer,
     id: MosaicaId,
 ) -> Option<(u32, u32, EntityId)> {
-    let (shard, entity) = engine.identity_key.invert(id);
-    if shard != generation.bundle.manifest.identity.shard_id {
-        return None;
-    }
+    let shard = generation.bundle.manifest.identity.shard_id;
+    let entity = crate::edited::artifact_named(&engine.identity_key, shard, id)?;
     let (name, level, ordinal) = engine.write.live().locate_artifact(entity)?;
     (name == layer.declaration.name).then_some((level, ordinal, entity))
 }
@@ -1063,7 +1067,11 @@ impl Pager for ArtifactsPager<'_> {
             for (walked, (level, ordinal, named)) in pager.positions(scope, None).enumerate() {
                 // The count runs before the first page, so only cancellation ends it.
                 if walked % CHUNK as usize == 0
-                    && pager.req.cancel.as_ref().is_some_and(CancelToken::is_cancelled)
+                    && pager
+                        .req
+                        .cancel
+                        .as_ref()
+                        .is_some_and(CancelToken::is_cancelled)
                 {
                     return Err(EngineError::Cancelled);
                 }
@@ -1169,9 +1177,7 @@ impl Pager for ArtifactsPager<'_> {
     }
 
     fn cursor(&self, engine: &Engine) -> String {
-        let cursor = ArtifactsCursor {
-            scan: self.scan,
-        };
+        let cursor = ArtifactsCursor { scan: self.scan };
         engine.cursor_key.seal(&self.binding, &cursor.encode())
     }
 

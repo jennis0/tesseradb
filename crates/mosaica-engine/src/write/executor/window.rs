@@ -81,7 +81,11 @@ impl ClosingWindow {
         for (i, entry) in self.closed.into_iter().enumerate() {
             for (k, waiter) in entry.waiters.into_iter().enumerate() {
                 // A joined retry was never appended separately, so it has nothing else to be told.
-                let e = if k == 0 { blame.at(i) } else { WalError::Poisoned };
+                let e = if k == 0 {
+                    blame.at(i)
+                } else {
+                    WalError::Poisoned
+                };
                 waiter.fail(ExecError::Wal(e));
             }
         }
@@ -342,7 +346,10 @@ impl Executor {
 
     /// Close `window` and return its replacement, stamped after the close: stamped first, the
     /// replacement would charge its predecessor's whole service to itself.
-    pub(super) fn close_and_reopen(&mut self, window: CommitWindow<Reply<Ingested>>) -> CommitWindow<Reply<Ingested>> {
+    pub(super) fn close_and_reopen(
+        &mut self,
+        window: CommitWindow<Reply<Ingested>>,
+    ) -> CommitWindow<Reply<Ingested>> {
         self.close_window(window);
         CommitWindow::new(self.next_window_seq())
     }
@@ -480,11 +487,13 @@ impl Executor {
         // to another item: each must still hold the item the handler resolved it to.
         let stale = stale || {
             let key = &self.deps.identity_key;
-            let number_of =
-                |mosaica_id: u64| key.invert(mosaica_types::MosaicaId::new(mosaica_id)).1;
-            let mut named: Vec<(EntityId, EntityId)> = edits
+            let number_of = |mosaica_id: u64| {
+                key.invert(mosaica_types::MosaicaId::new(mosaica_id))
+                    .map(|(_, number)| number)
+            };
+            let mut named: Vec<(EntityId, Option<EntityId>)> = edits
                 .iter()
-                .map(|submitted| (submitted.edit.old, submitted.edit.number))
+                .map(|submitted| (submitted.edit.old, Some(submitted.edit.number)))
                 .collect();
             for slot in &slots {
                 match slot {
@@ -508,7 +517,7 @@ impl Executor {
                 Ok(numbers) => named
                     .iter()
                     .zip(numbers)
-                    .any(|((_, resolved), now)| now != *resolved),
+                    .any(|((_, resolved), now)| Some(now) != *resolved),
                 Err(_) => true,
             }
         };
@@ -601,7 +610,10 @@ impl Executor {
         );
         let mosaica_id_of = |entity: EntityId| {
             identity
-                .forward(shard, entity)
+                .forward(
+                    mosaica_types::ItemHigh::new(shard, mosaica_types::Tenancy::ZERO),
+                    entity,
+                )
                 .map(|id| id.raw())
                 .expect("the allocator issues entities inside the identity space")
         };
@@ -765,7 +777,11 @@ impl Executor {
             .chain(growth.iter().map(|(record, _)| record))
             .chain(carried.iter())
             .collect();
-        self.apply_artifact_records(&artifact_records, &positions[artifacts_at..], Publish::AtTick);
+        self.apply_artifact_records(
+            &artifact_records,
+            &positions[artifacts_at..],
+            Publish::AtTick,
+        );
 
         self.record_accepted_batches(closing.entries(), &positions[entries_at..artifacts_at]);
         log_minted_artifacts(&minted_per_entry, &mint_records);

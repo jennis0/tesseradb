@@ -500,7 +500,12 @@ fn entity_columns(bytes: &[u8], key: &mosaica_types::IdentityKey) -> Vec<RecordB
             let entities: UInt64Array = ids
                 .values()
                 .iter()
-                .map(|&id| key.invert(mosaica_types::MosaicaId::new(id)).1.raw())
+                .map(|&id| {
+                    key.invert(mosaica_types::MosaicaId::new(id))
+                        .unwrap()
+                        .1
+                        .raw()
+                })
                 .collect();
             let mut columns = batch.columns().to_vec();
             columns[at] = Arc::new(entities);

@@ -37,6 +37,7 @@ use mosaica_lifecycle::command::IngestRow;
 use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
 use mosaica_lifecycle::UnallocatedRow;
 use mosaica_spatial::shape::{ShapeF64, Space};
+use mosaica_types::{ItemHigh, Tenancy};
 
 const N: u64 = 3_000;
 
@@ -320,11 +321,7 @@ type GatedView<'a> = (&'a str, &'a [Item], Option<Vec<String>>);
 
 /// [`build_views`], each view reached by a viewer holding one of the labels beside it, or by every
 /// viewer where there are none.
-fn build_gated_views(
-    dir: &Path,
-    items: &[Item],
-    views: &[GatedView<'_>],
-) -> PathBuf {
+fn build_gated_views(dir: &Path, items: &[Item], views: &[GatedView<'_>]) -> PathBuf {
     let points = dir.join("points.parquet");
     let pairs = dir.join("pairs.parquet");
     write_points(&points, items);
@@ -1134,7 +1131,13 @@ fn identities(fx: &Fx) -> HashMap<u64, u64> {
                 None => item_of_id(&fx.engine, item.source).unwrap(),
             }
             .expect("every item holds its id");
-            (item.source, test_key().forward(0, entity).unwrap().raw())
+            (
+                item.source,
+                test_key()
+                    .forward(ItemHigh::new(0, Tenancy::ZERO), entity)
+                    .unwrap()
+                    .raw(),
+            )
         })
         .collect()
 }
@@ -1888,7 +1891,11 @@ fn oracle(items: &[&Item], column: &str) -> Figures {
             Val::T(t) => t as f64,
         } / n;
         let next = sum + x;
-        carried += if sum.abs() >= x.abs() { (sum - next) + x } else { (x - next) + sum };
+        carried += if sum.abs() >= x.abs() {
+            (sum - next) + x
+        } else {
+            (x - next) + sum
+        };
         sum = next;
     }
     Figures {
@@ -2064,7 +2071,11 @@ fn a_grant_gets_the_figures_of_the_key_lists_it_satisfies() {
             );
         }
     }
-    assert_eq!(fx.engine.figures_stats().field_fills, 0, "no base row was walked");
+    assert_eq!(
+        fx.engine.figures_stats().field_fills,
+        0,
+        "no base row was walked"
+    );
 }
 
 /// **A summary that cannot be served is refused**: a cell level, a category, a bool and a field
@@ -2221,7 +2232,9 @@ fn a_huge_float_suppressed_leaves_the_mean_of_the_rest() {
     );
     for &source in &huge {
         let entity = item_of_id(&fx.engine, source).unwrap().unwrap();
-        fx.engine.accept_change(entity, ChangeOp::Unsuppress).unwrap();
+        fx.engine
+            .accept_change(entity, ChangeOp::Unsuppress)
+            .unwrap();
     }
     check(&[], "lifted");
 }
@@ -2291,7 +2304,11 @@ fn the_figures_are_the_oracles_through_every_change() {
     {
         let engine = engine_at(tmp.path(), &root, 3600);
         check(&engine, &items, &fates, "built");
-        assert_eq!(engine.figures_stats().field_fills, 0, "the build's tallies are composed, not walked");
+        assert_eq!(
+            engine.figures_stats().field_fills,
+            0,
+            "the build's tallies are composed, not walked"
+        );
 
         // Thirty new items, every third visible to the subset viewer, two holding new extremes.
         let mut added = Vec::new();
@@ -2472,7 +2489,12 @@ fn the_figures_are_the_oracles_through_every_change() {
         for &source in &more {
             fates.entry(source).or_default().suppressed = true;
         }
-        check(&engine, &items, &fates, "suppressed further, past the reserve");
+        check(
+            &engine,
+            &items,
+            &fates,
+            "suppressed further, past the reserve",
+        );
         assert_eq!(
             engine.figures_stats().reserve_spent,
             spent,
@@ -2507,10 +2529,18 @@ fn the_figures_are_the_oracles_through_every_change() {
 
         fold(&engine);
         check(&engine, &items, &fates, "compacted");
-        assert_eq!(engine.figures_stats().field_fills, 0, "the fold's tallies are composed, not walked");
+        assert_eq!(
+            engine.figures_stats().field_fills,
+            0,
+            "the fold's tallies are composed, not walked"
+        );
     }
     let engine = engine_at(tmp.path(), &root, 3600);
     check(&engine, &items, &fates, "restarted");
     assert_eq!(engine.figures_stats().field_mismatches, 0);
-    assert_eq!(engine.figures_stats().field_fills, 0, "nothing was walked after the restart");
+    assert_eq!(
+        engine.figures_stats().field_fills,
+        0,
+        "nothing was walked after the restart"
+    );
 }

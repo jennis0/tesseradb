@@ -17,8 +17,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, DictionaryArray, Float32Array, Float64Array,
-    Int32Array, Int64Array, ListArray, StringArray, TimestampMicrosecondArray, UInt64Array,
+    Array, ArrayRef, BooleanArray, DictionaryArray, Float32Array, Float64Array, Int32Array,
+    Int64Array, ListArray, StringArray, TimestampMicrosecondArray, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Int32Type, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -30,12 +30,14 @@ use mosaica_build::{
     build, BuildArgs, GroupDescriptor, GroupViewDescriptor, Quantisation, ScopedColumnFamily,
     ViewArgs,
 };
-use mosaica_engine::filter::{Endpoint, FilterExpr, FilterOperand, MemberOfLeaf, RegionLeaf, Scalar};
+use mosaica_engine::filter::{
+    Endpoint, FilterExpr, FilterOperand, MemberOfLeaf, RegionLeaf, Scalar,
+};
 use mosaica_engine::shapes::ShapeF64;
 use mosaica_engine::{
-    ColumnBuf, Engine, EngineError, RecordsHead, RecordsLimits, PageEnd, ItemsRequest, RecordsSink,
-    RecordsTrailer, LayerSelection, PageEndedBy, RecordsOrder, RecordsRefused, RegionVerdict,
-    ResponseEndedBy, Session, SinkResult, ViewportRequest,
+    ColumnBuf, Engine, EngineError, ItemsRequest, LayerSelection, PageEnd, PageEndedBy,
+    RecordsHead, RecordsLimits, RecordsOrder, RecordsRefused, RecordsSink, RecordsTrailer,
+    RegionVerdict, ResponseEndedBy, Session, SinkResult, ViewportRequest,
 };
 use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
 use mosaica_lifecycle::{IncomingArtifact, UnallocatedRow};
@@ -46,7 +48,7 @@ use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
-use mosaica_types::{AttrLocalId, EntityId, IdentityKey, MosaicaId};
+use mosaica_types::{AttrLocalId, EntityId, IdentityKey, ItemHigh, MosaicaId, Tenancy};
 
 const N: u64 = 2000;
 const GEO: &str = "geo";
@@ -135,7 +137,10 @@ unique = true
 // ---------------------------------------------------------------------------------------------
 
 fn position(s: u64) -> (f64, f64) {
-    (((s * 37) % 1000) as f64 + 0.25, ((s * 53) % 1000) as f64 + 0.75)
+    (
+        ((s * 37) % 1000) as f64 + 0.25,
+        ((s * 53) % 1000) as f64 + 0.75,
+    )
 }
 
 fn geo_position(s: u64) -> (f64, f64) {
@@ -240,32 +245,44 @@ fn write_world(path: &Path, n: u64) {
     let ids: Vec<u64> = (0..n).collect();
     let mut columns = geometry(&ids, position);
     let strings = |f: &dyn Fn(u64) -> Option<String>| -> ArrayRef {
-        Arc::new(StringArray::from(ids.iter().map(|&s| f(s)).collect::<Vec<_>>()))
+        Arc::new(StringArray::from(
+            ids.iter().map(|&s| f(s)).collect::<Vec<_>>(),
+        ))
     };
     columns.push(column("band", strings(&|s| band_of(s).map(String::from))));
     columns.push(column("kind", strings(&|s| kind_of(s).map(String::from))));
     columns.push(column(
         "score",
-        Arc::new(Int32Array::from(ids.iter().map(|&s| score_of(s)).collect::<Vec<_>>())),
+        Arc::new(Int32Array::from(
+            ids.iter().map(|&s| score_of(s)).collect::<Vec<_>>(),
+        )),
     ));
     columns.push(column(
         "heat",
-        Arc::new(Float32Array::from(ids.iter().map(|&s| heat_of(s)).collect::<Vec<_>>())),
+        Arc::new(Float32Array::from(
+            ids.iter().map(|&s| heat_of(s)).collect::<Vec<_>>(),
+        )),
     ));
     columns.push(column("tag", strings(&tag_of)));
     columns.push(column("note", strings(&note_of)));
     columns.push(column("prose", strings(&|s| Some(prose_of(s)))));
     columns.push(column(
         "when",
-        Arc::new(Int64Array::from(ids.iter().map(|&s| when_of(s)).collect::<Vec<_>>())),
+        Arc::new(Int64Array::from(
+            ids.iter().map(|&s| when_of(s)).collect::<Vec<_>>(),
+        )),
     ));
     columns.push(column(
         "flag",
-        Arc::new(BooleanArray::from(ids.iter().map(|&s| flag_of(s)).collect::<Vec<_>>())),
+        Arc::new(BooleanArray::from(
+            ids.iter().map(|&s| flag_of(s)).collect::<Vec<_>>(),
+        )),
     ));
     columns.push(column(
         "serial",
-        Arc::new(Int64Array::from_iter_values(ids.iter().map(|&s| serial_of(s)))),
+        Arc::new(Int64Array::from_iter_values(
+            ids.iter().map(|&s| serial_of(s)),
+        )),
     ));
     write_parquet(path, columns);
 }
@@ -311,9 +328,8 @@ fn scoped(
             title: None,
             field: None,
             ty,
-            analyser: analyser.map(|name| {
-                mosaica_analyse::identity_of(name).expect("the analyser is carried")
-            }),
+            analyser: analyser
+                .map(|name| mosaica_analyse::identity_of(name).expect("the analyser is carried")),
             vocabulary: None,
             value_set: None,
             index: true,
@@ -393,23 +409,39 @@ fn build_bundle_of(dir: &Path, key: IdentityKey, n: u64) -> PathBuf {
         columns.push(column(
             "blurb",
             Arc::new(StringArray::from(
-                ids.iter().map(|&s| format!("blurb {s}")).collect::<Vec<_>>(),
+                ids.iter()
+                    .map(|&s| format!("blurb {s}"))
+                    .collect::<Vec<_>>(),
             )),
         ));
         write_parquet(&path, columns);
         quarter_views.push(views.len());
-        views.push(view_args(&format!("quarter:{key}"), &path, &pairs, Projection::None, extent()));
+        views.push(view_args(
+            &format!("quarter:{key}"),
+            &path,
+            &pairs,
+            Projection::None,
+            extent(),
+        ));
     }
     let secret = dir.join("secret.parquet");
     let secret_ids: Vec<u64> = SECRET_MEMBERS.collect();
     let mut columns = geometry(&secret_ids, position);
     columns.push(column(
         "hush",
-        Arc::new(Int32Array::from_iter_values(secret_ids.iter().map(|&s| hush(s)))),
+        Arc::new(Int32Array::from_iter_values(
+            secret_ids.iter().map(|&s| hush(s)),
+        )),
     ));
     write_parquet(&secret, columns);
     let secret_view = views.len();
-    views.push(view_args(SECRET, &secret, &pairs, Projection::None, extent()));
+    views.push(view_args(
+        SECRET,
+        &secret,
+        &pairs,
+        Projection::None,
+        extent(),
+    ));
 
     let schema_path = dir.join("schema.toml");
     std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
@@ -425,11 +457,26 @@ fn build_bundle_of(dir: &Path, key: IdentityKey, n: u64) -> PathBuf {
             group("secret", &["k"], Some(vec!["1".to_string()])),
         ],
         scoped_attributes: vec![
-            scoped("sentiment", ScalarType::F32, None, "quarter", quarter_views.clone()),
-            scoped("blurb", ScalarType::Text, Some("unicode"), "quarter", quarter_views),
+            scoped(
+                "sentiment",
+                ScalarType::F32,
+                None,
+                "quarter",
+                quarter_views.clone(),
+            ),
+            scoped(
+                "blurb",
+                ScalarType::Text,
+                Some("unicode"),
+                "quarter",
+                quarter_views,
+            ),
             scoped("hush", ScalarType::I32, None, "secret", vec![secret_view]),
         ],
-        attribute_sources: mosaica_build::config::AttributeSource::over(world.clone(), &with_id(schema.clone())),
+        attribute_sources: mosaica_build::config::AttributeSource::over(
+            world.clone(),
+            &with_id(schema.clone()),
+        ),
         out: out.clone(),
         limit: None,
         strict: false,
@@ -476,7 +523,10 @@ impl Fx {
 
     fn tid(&self, s: u64) -> u64 {
         test_key()
-            .forward(0, EntityId::new(self.entity[&s]))
+            .forward(
+                ItemHigh::new(0, Tenancy::ZERO),
+                EntityId::new(self.entity[&s]),
+            )
             .unwrap()
             .raw()
     }
@@ -653,7 +703,10 @@ struct Read {
 
 impl Read {
     fn ids(&self) -> Vec<u64> {
-        self.pages.iter().flat_map(|(batch, _)| ids_of(batch)).collect()
+        self.pages
+            .iter()
+            .flat_map(|(batch, _)| ids_of(batch))
+            .collect()
     }
 }
 
@@ -790,7 +843,9 @@ fn publish_cluster(fx: &Fx, layer: &str, members: Range<u64>) -> MosaicaId {
             0,
             vec![IncomingArtifact::from_entities(
                 Some("c0".into()),
-                members.map(|s| EntityId::new(fx.entity[&s])).collect::<Vec<_>>(),
+                members
+                    .map(|s| EntityId::new(fx.entity[&s]))
+                    .collect::<Vec<_>>(),
             )],
         )
         .unwrap();
@@ -799,7 +854,8 @@ fn publish_cluster(fx: &Fx, layer: &str, members: Range<u64>) -> MosaicaId {
     fx.engine
         .viewport_artifacts(
             &session,
-            mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX).layers(LayerSelection::All),
+            mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
+                .layers(LayerSelection::All),
         )
         .unwrap()
         .artifacts()[0]
@@ -827,8 +883,16 @@ fn both_orders_return_the_same_rows_once_for_every_leaf_and_page_size() {
         ("no filter", None, Some(all.clone())),
         (
             "category",
-            Some(leaf("band", FilterOperand::Equals(AttrLocalId::new(band_code("mid"))))),
-            Some(all.iter().copied().filter(|&s| band_of(s) == Some("mid")).collect()),
+            Some(leaf(
+                "band",
+                FilterOperand::Equals(AttrLocalId::new(band_code("mid"))),
+            )),
+            Some(
+                all.iter()
+                    .copied()
+                    .filter(|&s| band_of(s) == Some("mid"))
+                    .collect(),
+            ),
         ),
         (
             "numeric range",
@@ -852,7 +916,12 @@ fn both_orders_return_the_same_rows_once_for_every_leaf_and_page_size() {
                     hi: None,
                 },
             }),
-            Some(all.iter().copied().filter(|&s| heat_of(s).is_some_and(|v| v >= 2.0)).collect()),
+            Some(
+                all.iter()
+                    .copied()
+                    .filter(|&s| heat_of(s).is_some_and(|v| v >= 2.0))
+                    .collect(),
+            ),
         ),
         (
             "text match",
@@ -915,7 +984,10 @@ fn both_orders_return_the_same_rows_once_for_every_leaf_and_page_size() {
             }
             if name.starts_with("region") {
                 assert!(
-                    matches!(stored_read.heads[0].region, Some(RegionVerdict::Cover { .. })),
+                    matches!(
+                        stored_read.heads[0].region,
+                        Some(RegionVerdict::Cover { .. })
+                    ),
                     "past the budget the region is a cover, and the head says so"
                 );
             }
@@ -1008,7 +1080,10 @@ fn read_across_a_flush_and_a_merge(order: RecordsOrder, filtered: bool) {
     fx.engine.set_merge_for_test(false);
     for batch in 0..4u64 {
         let start = N + batch * 40;
-        fx.ingest(&format!("pre-{batch}"), &(start..start + 40).collect::<Vec<_>>());
+        fx.ingest(
+            &format!("pre-{batch}"),
+            &(start..start + 40).collect::<Vec<_>>(),
+        );
         publish_buffered(&fx.engine);
     }
     let before: Vec<u64> = (0..N + 160).collect();
@@ -1040,7 +1115,12 @@ fn read_across_a_flush_and_a_merge(order: RecordsOrder, filtered: bool) {
     publish_buffered(&fx.engine);
 
     let cut = *ids.last().expect("the first response returned rows");
-    ids.extend(continue_read(&fx.engine, &session, &base, trailer.next.unwrap()));
+    ids.extend(continue_read(
+        &fx.engine,
+        &session,
+        &base,
+        trailer.next.unwrap(),
+    ));
     assert_each_once(&ids);
 
     // Every row present before the read that the filter admits, and of the rows inserted during
@@ -1101,14 +1181,22 @@ fn a_suppression_and_a_deletion_accepted_between_responses_are_absent_from_the_n
         fx.engine
             .accept_change(EntityId::new(fx.entity[&deleted]), ChangeOp::Delete)
             .unwrap();
-        ids.extend(continue_read(&fx.engine, &session, &base, trailer.next.unwrap()));
+        ids.extend(continue_read(
+            &fx.engine,
+            &session,
+            &base,
+            trailer.next.unwrap(),
+        ));
         assert_each_once(&ids);
         let returned: HashSet<u64> = ids.iter().copied().collect();
         assert!(
             !returned.contains(&fx.tid(suppressed)),
             "{order:?}: the suppressed item was served"
         );
-        assert!(!returned.contains(&fx.tid(deleted)), "{order:?}: the deleted item was served");
+        assert!(
+            !returned.contains(&fx.tid(deleted)),
+            "{order:?}: the deleted item was served"
+        );
     }
     // Both reads together hid four items, and the viewport agrees on what is left.
     let (visible, _) = viewport_counts(&fx.engine, &session, "s0", None);
@@ -1140,7 +1228,10 @@ fn a_narrower_viewer_reads_only_what_they_see_and_counts_as_the_viewport_does() 
     let filters = [
         (
             "category",
-            leaf("band", FilterOperand::Equals(AttrLocalId::new(band_code("low")))),
+            leaf(
+                "band",
+                FilterOperand::Equals(AttrLocalId::new(band_code("low"))),
+            ),
             Some(visible_where(|s| band_of(s) == Some("low"))),
         ),
         ("region", lasso(), None),
@@ -1208,7 +1299,10 @@ fn every_foreign_cursor_is_refused_alike() {
         req.order = order;
         respond(&fx.engine, session, req).map(|_| ())
     };
-    assert!(present("s0", &session, &cursor, None).is_ok(), "the cursor resumes its own read");
+    assert!(
+        present("s0", &session, &cursor, None).is_ok(),
+        "the cursor resumes its own read"
+    );
 
     let mut refusals: Vec<EngineError> = Vec::new();
     // Altered: one character of the sealed text changed.
@@ -1296,13 +1390,22 @@ fn a_sparse_filter_under_no_time_budget_still_advances_and_completes() {
 
         // A response that found nothing carries one page of no rows, with the read's columns,
         // whose page end hands on the trailer's cursor.
-        let schema = read.pages.iter().find(|(b, _)| b.num_rows() > 0).unwrap().0.schema();
+        let schema = read
+            .pages
+            .iter()
+            .find(|(b, _)| b.num_rows() > 0)
+            .unwrap()
+            .0
+            .schema();
         let mut empty = 0;
         let mut at = 0;
         for trailer in &read.trailers {
             let pages = &read.pages[at..at + trailer.pages as usize];
             at += trailer.pages as usize;
-            assert!(trailer.pages >= 1, "{order:?}: every response carries a page");
+            assert!(
+                trailer.pages >= 1,
+                "{order:?}: every response carries a page"
+            );
             if trailer.rows > 0 {
                 continue;
             }
@@ -1328,7 +1431,9 @@ fn a_sparse_filter_under_no_time_budget_still_advances_and_completes() {
 fn a_read_that_finds_no_row_gives_one_typed_page_of_no_rows() {
     let fx = Fx::new();
     let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
-    let fields = names(&["band", "score", "heat", "tag", "note", "prose", "when", "flag", "id"]);
+    let fields = names(&[
+        "band", "score", "heat", "tag", "note", "prose", "when", "flag", "id",
+    ]);
     let system = names(&["position", "labels"]);
     let mut base = request("s0", &fields);
     base.system_fields = &system;
@@ -1347,10 +1452,20 @@ fn a_read_that_finds_no_row_gives_one_typed_page_of_no_rows() {
         assert_eq!(sink.head.unwrap().counts.unwrap().matched, 0);
         assert_eq!(sink.pages.len(), 1, "{order:?}");
         let (batch, end) = &sink.pages[0];
-        assert_eq!((batch.num_rows(), batch.schema()), (0, schema.clone()), "{order:?}");
-        assert_eq!((end.next.as_deref(), end.ended_by), (None, PageEndedBy::End));
+        assert_eq!(
+            (batch.num_rows(), batch.schema()),
+            (0, schema.clone()),
+            "{order:?}"
+        );
+        assert_eq!(
+            (end.next.as_deref(), end.ended_by),
+            (None, PageEndedBy::End)
+        );
         assert_eq!((trailer.pages, trailer.rows), (1, 0));
-        assert_eq!((trailer.next, trailer.ended_by), (None, ResponseEndedBy::End));
+        assert_eq!(
+            (trailer.next, trailer.ended_by),
+            (None, ResponseEndedBy::End)
+        );
     }
 }
 
@@ -1389,7 +1504,9 @@ fn sources_by_tid(fx: &Fx) -> BTreeMap<u64, u64> {
 fn absent_values_are_nulls_in_every_home() {
     let fx = Fx::new();
     let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
-    let fields = names(&["band", "kind", "score", "heat", "tag", "note", "prose", "when", "flag"]);
+    let fields = names(&[
+        "band", "kind", "score", "heat", "tag", "note", "prose", "when", "flag",
+    ]);
     let by_tid = sources_by_tid(&fx);
     let mut seen = 0;
     for batch in pages_of(&fx, &session, "s0", &fields, &[]) {
@@ -1398,15 +1515,26 @@ fn absent_values_are_nulls_in_every_home() {
             .chain(fields.iter().map(String::as_str))
             .collect();
         let got_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        assert_eq!(got_names, expected_names, "mosaica_id, then the fields in the order named");
+        assert_eq!(
+            got_names, expected_names,
+            "mosaica_id, then the fields in the order named"
+        );
         assert_eq!(
             schema.field_with_name("when").unwrap().data_type(),
             &DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
         );
         let band = col::<DictionaryArray<Int32Type>>(&batch, "band");
-        let band_keys = band.values().as_any().downcast_ref::<StringArray>().unwrap();
+        let band_keys = band
+            .values()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         let kind = col::<DictionaryArray<Int32Type>>(&batch, "kind");
-        let kind_keys = kind.values().as_any().downcast_ref::<StringArray>().unwrap();
+        let kind_keys = kind
+            .values()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         let score = col::<Int32Array>(&batch, "score");
         let heat = col::<Float32Array>(&batch, "heat");
         let tag = col::<StringArray>(&batch, "tag");
@@ -1419,13 +1547,33 @@ fn absent_values_are_nulls_in_every_home() {
             let key = |keys: &StringArray, codes: &DictionaryArray<Int32Type>| {
                 codes.key(i).map(|k| keys.value(k).to_string())
             };
-            assert_eq!(key(band_keys, band), band_of(s).map(String::from), "band of {s}");
-            assert_eq!(key(kind_keys, kind), kind_of(s).map(String::from), "kind of {s}");
+            assert_eq!(
+                key(band_keys, band),
+                band_of(s).map(String::from),
+                "band of {s}"
+            );
+            assert_eq!(
+                key(kind_keys, kind),
+                kind_of(s).map(String::from),
+                "kind of {s}"
+            );
             let opt = |a: &dyn Array| a.is_valid(i);
-            assert_eq!(opt(score).then(|| score.value(i)), score_of(s), "score of {s}");
+            assert_eq!(
+                opt(score).then(|| score.value(i)),
+                score_of(s),
+                "score of {s}"
+            );
             assert_eq!(opt(heat).then(|| heat.value(i)), heat_of(s), "heat of {s}");
-            assert_eq!(opt(tag).then(|| tag.value(i).to_string()), tag_of(s), "tag of {s}");
-            assert_eq!(opt(note).then(|| note.value(i).to_string()), note_of(s), "note of {s}");
+            assert_eq!(
+                opt(tag).then(|| tag.value(i).to_string()),
+                tag_of(s),
+                "tag of {s}"
+            );
+            assert_eq!(
+                opt(note).then(|| note.value(i).to_string()),
+                note_of(s),
+                "note of {s}"
+            );
             assert_eq!(prose.value(i), prose_of(s));
             assert_eq!(opt(when).then(|| when.value(i)), when_of(s), "when of {s}");
             assert_eq!(opt(flag).then(|| flag.value(i)), flag_of(s), "flag of {s}");
@@ -1485,12 +1633,19 @@ fn a_viewport_point_is_null_where_its_item_has_no_rendered_value() {
         &out.points.scalars[i]
     };
     let (band, score, heat, flag) = (at("band"), at("score"), at("heat"), at("flag"));
-    let (ColumnBuf::U8(bands), ColumnBuf::I32(scores), ColumnBuf::F32(heats), ColumnBuf::Bool(flags)) =
-        (&band.values, &score.values, &heat.values, &flag.values)
+    let (
+        ColumnBuf::U8(bands),
+        ColumnBuf::I32(scores),
+        ColumnBuf::F32(heats),
+        ColumnBuf::Bool(flags),
+    ) = (&band.values, &score.values, &heat.values, &flag.values)
     else {
         panic!("the render columns came back at the wrong types");
     };
-    assert_eq!(band.present, None, "a category's absence is its code, not a null");
+    assert_eq!(
+        band.present, None,
+        "a category's absence is its code, not a null"
+    );
     let mut served = BTreeSet::new();
     for (i, (tid, _)) in out.points.iter().enumerate() {
         let s = by_tid[&tid.raw()];
@@ -1502,14 +1657,29 @@ fn a_viewport_point_is_null_where_its_item_has_no_rendered_value() {
         } else {
             (score_of(s), heat_of(s), flag_of(s))
         };
-        assert_eq!(score.is_present(i).then_some(scores[i]), want_score, "score of {s}");
-        assert_eq!(heat.is_present(i).then_some(heats[i]), want_heat, "heat of {s}");
-        assert_eq!(flag.is_present(i).then_some(flags[i]), want_flag, "flag of {s}");
+        assert_eq!(
+            score.is_present(i).then_some(scores[i]),
+            want_score,
+            "score of {s}"
+        );
+        assert_eq!(
+            heat.is_present(i).then_some(heats[i]),
+            want_heat,
+            "heat of {s}"
+        );
+        assert_eq!(
+            flag.is_present(i).then_some(flags[i]),
+            want_flag,
+            "flag of {s}"
+        );
     }
     let mut expected: BTreeSet<u64> = (0..N).chain(ingested.iter().copied()).collect();
     expected.insert(ZERO);
     assert_eq!(served, expected, "every item is served");
-    assert!(ingested.iter().any(|&s| score_of(s).is_none()), "an ingested item has no score");
+    assert!(
+        ingested.iter().any(|&s| score_of(s).is_none()),
+        "an ingested item has no score"
+    );
 
     // Filtered to items with a score, every served point holds one.
     let scored = fx
@@ -1520,7 +1690,11 @@ fn a_viewport_point_is_null_where_its_item_has_no_rendered_value() {
         )
         .expect("a filtered viewport");
     assert!(!scored.points.is_empty());
-    let i = scored.scalar_names.iter().position(|n| n == "score").unwrap();
+    let i = scored
+        .scalar_names
+        .iter()
+        .position(|n| n == "score")
+        .unwrap();
     assert_eq!(scored.points.scalars[i].present, None, "no score is absent");
 }
 
@@ -1560,7 +1734,10 @@ fn a_pages_category_dictionary_holds_only_its_own_keys() {
         assert_eq!(dictionary, carried);
         sizes.insert(dictionary.len());
     }
-    assert!(sizes.len() > 1, "pages carried different key sets: {sizes:?}");
+    assert!(
+        sizes.len() > 1,
+        "pages carried different key sets: {sizes:?}"
+    );
 }
 
 /// **A position comes back within one step of the grid** of the coordinate it was placed from:
@@ -1581,8 +1758,16 @@ fn positions_come_back_within_one_grid_step() {
         for (i, tid) in ids_of(&batch).into_iter().enumerate() {
             let s = by_tid[&tid];
             let (px, py) = position(s);
-            assert!((x.value(i) - px).abs() <= step, "x of {s}: {} against {px}", x.value(i));
-            assert!((y.value(i) - py).abs() <= step, "y of {s}: {} against {py}", y.value(i));
+            assert!(
+                (x.value(i) - px).abs() <= step,
+                "x of {s}: {} against {px}",
+                x.value(i)
+            );
+            assert!(
+                (y.value(i) - py).abs() <= step,
+                "y of {s}: {} against {py}",
+                y.value(i)
+            );
             assert_eq!(held.value(i), s);
             checked += 1;
         }
@@ -1597,7 +1782,10 @@ fn positions_come_back_within_one_grid_step() {
         for (i, tid) in ids_of(&batch).into_iter().enumerate() {
             let s = by_tid[&tid];
             let (want_lon, want_lat) = geo_position(s);
-            assert!((lon.value(i) - want_lon).abs() <= 360.0 * unit_step * 1.01, "lon of {s}");
+            assert!(
+                (lon.value(i) - want_lon).abs() <= 360.0 * unit_step * 1.01,
+                "lon of {s}"
+            );
             let (_, got_y) = Projection::WebMercator.forward(lon.value(i), lat.value(i));
             let (_, want_y) = Projection::WebMercator.forward(want_lon, want_lat);
             assert!((got_y - want_y).abs() <= unit_step * 1.01, "lat of {s}");
@@ -1637,12 +1825,21 @@ fn a_group_scoped_field_resolves_as_a_filter_leaf_does() {
     let on_world = sentiment_of(pages_of(&fx, &session, "s0", &pinned, &[]), "sentiment@q2");
     assert_eq!(on_world.len(), N as usize);
     for (s, value) in &on_world {
-        let expected = QUARTERS[1].1.contains(s).then(|| sentiment(1, *s)).flatten();
-        assert_eq!(*value, expected, "q2's value for {s}, read on the world view");
+        let expected = QUARTERS[1]
+            .1
+            .contains(s)
+            .then(|| sentiment(1, *s))
+            .flatten();
+        assert_eq!(
+            *value, expected,
+            "q2's value for {s}, read on the world view"
+        );
     }
 
     let refused = |view: &str, fields: &[String], session: &Session| {
-        respond(&fx.engine, session, request(view, fields)).map(|_| ()).unwrap_err()
+        respond(&fx.engine, session, request(view, fields))
+            .map(|_| ())
+            .unwrap_err()
     };
     assert!(matches!(
         refused("s0", &bare, &session),
@@ -1668,11 +1865,18 @@ fn a_group_scoped_field_resolves_as_a_filter_leaf_does() {
         for (i, tid) in ids_of(&batch).into_iter().enumerate() {
             let s = by_tid[&tid];
             let expected = SECRET_MEMBERS.contains(&s).then(|| hush(s));
-            assert_eq!(values.is_valid(i).then(|| values.value(i)), expected, "hush of {s}");
+            assert_eq!(
+                values.is_valid(i).then(|| values.value(i)),
+                expected,
+                "hush of {s}"
+            );
             hushed += 1;
         }
     }
-    assert_eq!(hushed, N, "a viewer reaching the group reads its field on every row");
+    assert_eq!(
+        hushed, N,
+        "a viewer reaching the group reads its field on every row"
+    );
     let outsider = fx.engine.authorise(&full_coverage_credential()).unwrap();
     assert!(matches!(
         refused("s0", &hush_field, &outsider),
@@ -1738,8 +1942,14 @@ fn a_joined_item_whose_own_record_is_unflushed_has_null_record_fields() {
 
     let generation = engine.generation();
     let views = &generation.bundle.partitions["default"].views;
-    assert!(views[GEO].row_space.row_of(joiner).is_some(), "the join row published");
-    assert!(views["s0"].row_space.row_of(joiner).is_none(), "its own row is still buffered");
+    assert!(
+        views[GEO].row_space.row_of(joiner).is_some(),
+        "the join row published"
+    );
+    assert!(
+        views["s0"].row_space.row_of(joiner).is_none(),
+        "its own row is still buffered"
+    );
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let fields = names(&["note", "tag"]);
@@ -1755,12 +1965,18 @@ fn a_joined_item_whose_own_record_is_unflushed_has_null_record_fields() {
             for (i, tid) in ids_of(batch).into_iter().enumerate() {
                 if tid == mark {
                     found = true;
-                    assert!(note.is_null(i), "{order:?}: the unflushed record's field is null");
+                    assert!(
+                        note.is_null(i),
+                        "{order:?}: the unflushed record's field is null"
+                    );
                     assert!(tag.is_null(i), "{order:?}: and so is its value column's");
                 }
             }
         }
-        assert!(found, "{order:?}: the joined item is returned in the view it has a row in");
+        assert!(
+            found,
+            "{order:?}: the joined item is returned in the view it has a row in"
+        );
     }
     faults.release();
 }
@@ -1786,7 +2002,10 @@ fn keep_unmatched_marks_every_visible_row_and_count_heads_the_response() {
         let (sink, trailer) = respond(&fx.engine, &session, base.clone()).unwrap();
         let counts = sink.head.as_ref().unwrap().counts.unwrap();
         assert_eq!(counts.served, N);
-        assert_eq!(counts.matched, (0..N).filter(|&s| matches(s)).count() as u64);
+        assert_eq!(
+            counts.matched,
+            (0..N).filter(|&s| matches(s)).count() as u64
+        );
         let mut rows = 0;
         let mut pages = sink.pages;
         base.count = false;
@@ -1814,7 +2033,9 @@ fn keep_unmatched_marks_every_visible_row_and_count_heads_the_response() {
     let counts = sink.head.unwrap().counts.unwrap();
     assert_eq!((counts.served, counts.matched), (N, N));
     for (batch, _) in &sink.pages {
-        assert!(col::<BooleanArray>(batch, "mosaica:matched").iter().all(|b| b == Some(true)));
+        assert!(col::<BooleanArray>(batch, "mosaica:matched")
+            .iter()
+            .all(|b| b == Some(true)));
     }
 }
 
@@ -1844,7 +2065,12 @@ fn a_row_larger_than_the_byte_ceiling_is_sent_alone() {
     let (last, whole) = read.pages.split_last().unwrap();
     for (batch, end) in whole {
         assert!(batch.num_rows() > 1, "a page of small rows holds several");
-        assert!(end.bytes <= 4096, "{} rows came to {} bytes", batch.num_rows(), end.bytes);
+        assert!(
+            end.bytes <= 4096,
+            "{} rows came to {} bytes",
+            batch.num_rows(),
+            end.bytes
+        );
     }
     assert!(last.1.bytes <= 4096);
     assert_eq!(read.pages.last().unwrap().1.ended_by, PageEndedBy::End);
@@ -1860,9 +2086,17 @@ fn the_order_follows_the_fields_and_malformed_requests_are_refused() {
         let fields = names(fields);
         let mut req = request("s0", &fields);
         req.pages = Some(1);
-        respond(&fx.engine, &session, req).unwrap().0.head.unwrap().order
+        respond(&fx.engine, &session, req)
+            .unwrap()
+            .0
+            .head
+            .unwrap()
+            .order
     };
-    assert_eq!(order_of(&["band", "score", "tag", "kind"]), Some(RecordsOrder::Map));
+    assert_eq!(
+        order_of(&["band", "score", "tag", "kind"]),
+        Some(RecordsOrder::Map)
+    );
     assert_eq!(order_of(&["band", "note"]), Some(RecordsOrder::Stored));
     assert_eq!(order_of(&["prose"]), Some(RecordsOrder::Stored));
 
@@ -1888,10 +2122,16 @@ fn the_order_follows_the_fields_and_malformed_requests_are_refused() {
     ));
     let mut req = request("s0", &none);
     req.page_rows = Some(0);
-    assert!(matches!(refusal(req), EngineError::RecordsRefused(RecordsRefused::ZeroPageRows)));
+    assert!(matches!(
+        refusal(req),
+        EngineError::RecordsRefused(RecordsRefused::ZeroPageRows)
+    ));
     let mut req = request("s0", &none);
     req.pages = Some(0);
-    assert!(matches!(refusal(req), EngineError::RecordsRefused(RecordsRefused::ZeroPages)));
+    assert!(matches!(
+        refusal(req),
+        EngineError::RecordsRefused(RecordsRefused::ZeroPages)
+    ));
     let mut req = request("s0", &none);
     req.count = true;
     req.cursor = Some("anything");
@@ -1899,7 +2139,10 @@ fn the_order_follows_the_fields_and_malformed_requests_are_refused() {
         refusal(req),
         EngineError::RecordsRefused(RecordsRefused::CountWithCursor)
     ));
-    assert!(matches!(refusal(request("nowhere", &none)), EngineError::UnknownView(_)));
+    assert!(matches!(
+        refusal(request("nowhere", &none)),
+        EngineError::UnknownView(_)
+    ));
 
     // A page size above the ceiling is served at the ceiling, and the head says which.
     let mut req = request("s0", &none);
@@ -1948,7 +2191,10 @@ fn a_response_ends_at_its_pages_its_bytes_and_cancellation_and_the_read_resumes(
     let (sink, trailer) = respond(&fx.engine, &session, req.clone()).unwrap();
     assert_eq!((trailer.pages, trailer.rows), (3, 300));
     assert_eq!(trailer.ended_by, ResponseEndedBy::Pages);
-    assert!(sink.pages.iter().all(|(_, end)| end.ended_by == PageEndedBy::Rows));
+    assert!(sink
+        .pages
+        .iter()
+        .all(|(_, end)| end.ended_by == PageEndedBy::Rows));
     let mut ids: Vec<u64> = sink.pages.iter().flat_map(|(b, _)| ids_of(b)).collect();
 
     // A byte budget of two page ceilings: a third page could take the response past it.
@@ -1977,7 +2223,12 @@ fn a_response_ends_at_its_pages_its_bytes_and_cancellation_and_the_read_resumes(
 
     let mut rest = req.clone();
     rest.pages = None;
-    ids.extend(continue_read(&fx.engine, &session, &rest, trailer.next.unwrap()));
+    ids.extend(continue_read(
+        &fx.engine,
+        &session,
+        &rest,
+        trailer.next.unwrap(),
+    ));
     assert_eq!(ids, everything);
 }
 
@@ -2046,7 +2297,10 @@ fn respond_after<'a>(
     let trailer = engine
         .items_stream(session, req, &mut sink)
         .expect("a response");
-    assert!(sink.after.is_empty(), "the response carried a page for every step");
+    assert!(
+        sink.after.is_empty(),
+        "the response carried a page for every step"
+    );
     (sink.inner, trailer)
 }
 
@@ -2081,10 +2335,18 @@ fn a_suppression_and_a_deletion_between_two_pages_of_one_response_apply_to_the_n
         let engine = &fx.engine;
         let entity = |s: u64| EntityId::new(fx.entity[&s]);
         let (sink, trailer) = respond_between(engine, &session, req, || {
-            engine.accept_change(entity(suppressed), ChangeOp::Suppress).unwrap();
-            engine.accept_change(entity(deleted), ChangeOp::Delete).unwrap();
+            engine
+                .accept_change(entity(suppressed), ChangeOp::Suppress)
+                .unwrap();
+            engine
+                .accept_change(entity(deleted), ChangeOp::Delete)
+                .unwrap();
         });
-        assert_eq!(trailer.ended_by, ResponseEndedBy::End, "{order:?}: one response");
+        assert_eq!(
+            trailer.ended_by,
+            ResponseEndedBy::End,
+            "{order:?}: one response"
+        );
         hidden.extend([suppressed, deleted]);
         let ids: Vec<u64> = sink.pages.iter().flat_map(|(b, _)| ids_of(b)).collect();
         let expected: Vec<u64> = everything
@@ -2106,7 +2368,10 @@ fn a_merge_and_a_flush_between_two_pages_of_one_filtered_response_keep_it_exact(
         fx.engine.set_merge_for_test(false);
         for batch in 0..4u64 {
             let start = N + batch * 40;
-            fx.ingest(&format!("pre-{batch}"), &(start..start + 40).collect::<Vec<_>>());
+            fx.ingest(
+                &format!("pre-{batch}"),
+                &(start..start + 40).collect::<Vec<_>>(),
+            );
             publish_buffered(&fx.engine);
         }
         let before: Vec<u64> = (0..N + 160).collect();
@@ -2132,7 +2397,11 @@ fn a_merge_and_a_flush_between_two_pages_of_one_filtered_response_keep_it_exact(
             *inserted.borrow_mut() = ingest_sources(engine, "later", &later);
             publish_buffered(engine);
         });
-        assert_eq!(trailer.ended_by, ResponseEndedBy::End, "{order:?}: one response");
+        assert_eq!(
+            trailer.ended_by,
+            ResponseEndedBy::End,
+            "{order:?}: one response"
+        );
         for (&s, entity) in later.iter().zip(inserted.into_inner()) {
             fx.entity.insert(s, entity.raw());
         }
@@ -2191,7 +2460,10 @@ fn every_row_is_read_once_across_stretch_boundaries() {
     let filter = FilterExpr::Region(RegionLeaf::Shape(Arc::new(west)));
     let (visible, matched) = viewport_counts(&engine, &session, "s0", Some(filter.clone()));
     assert_eq!(visible, n + 2100);
-    assert!(matched > visible / 3 && matched < visible, "the box holds {matched} rows");
+    assert!(
+        matched > visible / 3 && matched < visible,
+        "the box holds {matched} rows"
+    );
     let fields: Vec<String> = Vec::new();
     for order in [RecordsOrder::Map, RecordsOrder::Stored] {
         for page_rows in [1u32, 4097, 5000] {
@@ -2246,24 +2518,39 @@ fn a_narrower_viewers_rows_and_labels_are_theirs_row_by_row() {
         req.system_fields = &system;
         req.order = Some(order);
         req.page_rows = Some(77);
-        req.filter = Some(leaf("band", FilterOperand::Equals(AttrLocalId::new(band_code("low")))));
+        req.filter = Some(leaf(
+            "band",
+            FilterOperand::Equals(AttrLocalId::new(band_code("low"))),
+        ));
         let filtered = read_all(&fx.engine, &session, &req);
         let expected = in_order(visible.iter().copied().filter(|&s| low(s)).collect());
         assert_eq!(filtered.ids(), fx.tids(&expected), "{order:?}: filtered");
 
         req.keep_unmatched = true;
         let marked = read_all(&fx.engine, &session, &req);
-        assert_eq!(marked.ids(), fx.tids(&in_order(visible.clone())), "{order:?}: marked");
+        assert_eq!(
+            marked.ids(),
+            fx.tids(&in_order(visible.clone())),
+            "{order:?}: marked"
+        );
         for (batch, _) in &marked.pages {
             let matched = col::<BooleanArray>(batch, "mosaica:matched");
             let labels = col::<ListArray>(batch, "mosaica:labels");
             for (i, tid) in ids_of(batch).into_iter().enumerate() {
                 let s = by_tid[&tid];
-                assert_eq!(matched.value(i), low(s), "{order:?}: the matched bit of {s}");
+                assert_eq!(
+                    matched.value(i),
+                    low(s),
+                    "{order:?}: the matched bit of {s}"
+                );
                 let row = labels.value(i);
                 let row = row.as_any().downcast_ref::<StringArray>().unwrap();
                 let got: Vec<&str> = row.iter().map(|l| l.unwrap()).collect();
-                assert_eq!(got, ["1"], "{order:?}: {s} carries \"0\" too, which the viewer lacks");
+                assert_eq!(
+                    got,
+                    ["1"],
+                    "{order:?}: {s} carries \"0\" too, which the viewer lacks"
+                );
             }
         }
     }
@@ -2399,15 +2686,30 @@ fn page_cut_by_time(batches: u64) {
 
         req.limits.response_time = Duration::ZERO;
         let (sink, trailer) = respond(&engine, &session, req.clone()).unwrap();
-        assert_eq!(sink.pages.len(), 1, "{order:?} {batches}: one page before the budget ends it");
+        assert_eq!(
+            sink.pages.len(),
+            1,
+            "{order:?} {batches}: one page before the budget ends it"
+        );
         let (batch, end) = &sink.pages[0];
         assert_eq!(end.ended_by, PageEndedBy::Time, "{order:?}");
-        assert!(batch.num_rows() > 0 && batch.num_rows() < 3000, "{order:?}: a short page");
+        assert!(
+            batch.num_rows() > 0 && batch.num_rows() < 3000,
+            "{order:?}: a short page"
+        );
         assert_eq!(trailer.ended_by, ResponseEndedBy::BudgetTime, "{order:?}");
 
         let mut ids = ids_of(batch);
-        ids.extend(continue_read(&engine, &session, &req, trailer.next.unwrap()));
-        assert_eq!(ids, whole, "{order:?}: the read resumed with nothing lost or repeated");
+        ids.extend(continue_read(
+            &engine,
+            &session,
+            &req,
+            trailer.next.unwrap(),
+        ));
+        assert_eq!(
+            ids, whole,
+            "{order:?}: the read resumed with nothing lost or repeated"
+        );
     }
 }
 
@@ -2434,7 +2736,10 @@ fn cancelled_mid_scan(batches: u64) {
         max_y: 502.0,
     });
     let (_, matched) = viewport_counts(&engine, &session, "s0", Some(band.clone()));
-    assert!(matched > 20 && matched < 1000, "the band holds {matched} items");
+    assert!(
+        matched > 20 && matched < 1000,
+        "the band holds {matched} items"
+    );
     for order in [RecordsOrder::Map, RecordsOrder::Stored] {
         let mut req = request("s0", &fields);
         req.order = Some(order);
@@ -2455,7 +2760,10 @@ fn cancelled_mid_scan(batches: u64) {
             let mut responses = 0;
             loop {
                 responses += 1;
-                assert!(responses <= 200, "{order:?} {batches}: the read made no progress");
+                assert!(
+                    responses <= 200,
+                    "{order:?} {batches}: the read made no progress"
+                );
                 let token = mosaica_engine::CancelToken::new();
                 let deadline = {
                     let token = token.clone();
@@ -2564,7 +2872,10 @@ fn rows_a_refreshed_projection_makes_visible_are_served_and_matched() {
                 let case = format!("{name} {order:?} keep_unmatched={keep_unmatched}");
                 assert_eq!(trailer.ended_by, ResponseEndedBy::End, "{case}");
                 if name == "region edge" {
-                    assert_eq!(sink.head.as_ref().unwrap().region, Some(RegionVerdict::Exact));
+                    assert_eq!(
+                        sink.head.as_ref().unwrap().region,
+                        Some(RegionVerdict::Exact)
+                    );
                 }
                 for (&s, entity) in later.iter().zip(inserted.into_inner()) {
                     fx.entity.insert(s, entity.raw());
@@ -2591,8 +2902,7 @@ fn rows_a_refreshed_projection_makes_visible_are_served_and_matched() {
                     .filter(|&s| keep_unmatched || matches(s))
                     .filter(|&s| before.contains(&s) || rank[&fx.tid(s)] > rank[&cut])
                     .collect();
-                let by_tid: BTreeMap<u64, u64> =
-                    present.iter().map(|&s| (fx.tid(s), s)).collect();
+                let by_tid: BTreeMap<u64, u64> = present.iter().map(|&s| (fx.tid(s), s)).collect();
                 let ids: Vec<u64> = sink.pages.iter().flat_map(|(b, _)| ids_of(b)).collect();
                 assert_eq!(ids, fx.tids(&expected), "{case}: rows");
                 if keep_unmatched {
@@ -2647,8 +2957,15 @@ fn a_pages_bytes_are_its_buffers_and_the_ceiling_holds_on_them() {
         assert_each_once(&read.ids());
         assert_eq!(read.ids().len() as u64, N, "{order:?}");
         for (batch, end) in &read.pages {
-            assert_eq!(end.bytes, buffer_bytes(batch), "{order:?}: the page's buffers");
-            assert!(end.bytes <= 8192 || batch.num_rows() == 1, "{order:?}: the ceiling");
+            assert_eq!(
+                end.bytes,
+                buffer_bytes(batch),
+                "{order:?}: the page's buffers"
+            );
+            assert!(
+                end.bytes <= 8192 || batch.num_rows() == 1,
+                "{order:?}: the ceiling"
+            );
             let encoded = encoded_bytes(batch);
             let framing = 8 * 3 * batch.num_columns() + 4096;
             assert!(
@@ -2691,7 +3008,9 @@ fn a_columns_first_null_is_counted_against_the_ceiling() {
             }
         })
         .collect();
-    fx.engine.ingest_rows(rows, "late".to_string(), [0u8; 32]).unwrap();
+    fx.engine
+        .ingest_rows(rows, "late".to_string(), [0u8; 32])
+        .unwrap();
     publish_buffered(&fx.engine);
     let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
     let fields = names(&["score"]);
@@ -2701,7 +3020,9 @@ fn a_columns_first_null_is_counted_against_the_ceiling() {
         req.filter = Some(leaf("when", range(base + N as i64, base + N as i64 + 599)));
         let whole = read_all(&fx.engine, &session, &req);
         let scores = col::<Int32Array>(&whole.pages[0].0, "score");
-        let at = (0..scores.len()).find(|&i| scores.is_null(i)).expect("one score is absent");
+        let at = (0..scores.len())
+            .find(|&i| scores.is_null(i))
+            .expect("one score is absent");
         // Each row before the null is a `mosaica_id` and a score, twelve bytes.
         let full = 12 * at;
         for ceiling in full..full + 12 + (at + 1).div_ceil(8) + 4 {
@@ -2709,7 +3030,11 @@ fn a_columns_first_null_is_counted_against_the_ceiling() {
             let read = read_all(&fx.engine, &session, &req);
             assert_eq!(read.ids().len(), 600, "{order:?} under {ceiling}");
             for (batch, end) in &read.pages {
-                assert_eq!(end.bytes, buffer_bytes(batch), "{order:?}: the page's buffers");
+                assert_eq!(
+                    end.bytes,
+                    buffer_bytes(batch),
+                    "{order:?}: the page's buffers"
+                );
                 assert!(
                     end.bytes <= ceiling || batch.num_rows() == 1,
                     "{order:?}: {} bytes under a ceiling of {ceiling}",
@@ -2732,12 +3057,18 @@ fn a_row_cut_by_the_ceiling_adds_no_key_to_the_dictionary() {
     req.pages = Some(200);
     let (sink, _) = respond(&fx.engine, &session, req).unwrap();
     assert!(
-        sink.pages.iter().all(|(_, end)| end.ended_by == PageEndedBy::Bytes),
+        sink.pages
+            .iter()
+            .all(|(_, end)| end.ended_by == PageEndedBy::Bytes),
         "every page is cut by the ceiling"
     );
     for (batch, _) in &sink.pages {
         let band = col::<DictionaryArray<Int32Type>>(batch, "band");
-        let keys = band.values().as_any().downcast_ref::<StringArray>().unwrap();
+        let keys = band
+            .values()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         let dictionary: BTreeSet<&str> = keys.iter().map(|k| k.unwrap()).collect();
         let carried: BTreeSet<&str> = (0..band.len())
             .filter_map(|i| band.key(i))
@@ -2851,7 +3182,11 @@ fn a_cell_larger_than_a_stretch_is_read_whole() {
         // Room for every row three times over, so a read that repeats rows ends by its pages.
         req.pages = Some(64);
         let (sink, trailer) = respond(&engine, &session, req).unwrap();
-        assert_eq!(trailer.ended_by, ResponseEndedBy::End, "{order:?}: one response");
+        assert_eq!(
+            trailer.ended_by,
+            ResponseEndedBy::End,
+            "{order:?}: one response"
+        );
         let ids: Vec<u64> = sink.pages.iter().flat_map(|(b, _)| ids_of(b)).collect();
         assert_each_once(&ids);
         assert_eq!(ids.len() as u64, visible, "{order:?}");
@@ -2877,7 +3212,10 @@ fn serials_in(sources: impl IntoIterator<Item = u64>, extra: &[i64]) -> FilterEx
 }
 
 fn serial_eq(s: u64) -> FilterExpr {
-    leaf("serial", FilterOperand::NumEquals(Scalar::Int(serial_of(s).into())))
+    leaf(
+        "serial",
+        FilterOperand::NumEquals(Scalar::Int(serial_of(s).into())),
+    )
 }
 
 /// What one response sent, less its cursors' bytes, which differ between any two cursors for
@@ -2927,7 +3265,11 @@ fn assert_same(driven: &[Sent], walked: &[Sent], what: &str) {
         assert_eq!(shape(d), shape(w), "{what}: response {i}");
         assert!(d == w, "{what}: response {i}'s rows differ");
     }
-    assert_eq!(driven.len(), walked.len(), "{what}: the number of responses");
+    assert_eq!(
+        driven.len(),
+        walked.len(),
+        "{what}: the number of responses"
+    );
 }
 
 /// Which route answers each response of a read.
@@ -2950,7 +3292,12 @@ impl Route {
 }
 
 /// Every response of a read from no cursor to its end, each answered on `route`'s choice.
-fn transcript(engine: &Engine, session: &Session, base: &ItemsRequest<'_>, route: Route) -> Vec<Sent> {
+fn transcript(
+    engine: &Engine,
+    session: &Session,
+    base: &ItemsRequest<'_>,
+    route: Route,
+) -> Vec<Sent> {
     let mut out = Vec::new();
     let mut cursor: Option<String> = None;
     loop {
@@ -2990,7 +3337,10 @@ fn a_read_driven_by_its_matches_sends_what_the_walk_sends() {
     };
     let everywhere: Vec<(&str, FilterExpr)> = vec![
         ("eq", serial_eq(1234)),
-        ("in", serials_in((0..BIG).step_by(3), &[-1, 5, 1_000_000_007])),
+        (
+            "in",
+            serials_in((0..BIG).step_by(3), &[-1, 5, 1_000_000_007]),
+        ),
         (
             "in and a category",
             FilterExpr::AllOf(vec![
@@ -3002,7 +3352,10 @@ fn a_read_driven_by_its_matches_sends_what_the_walk_sends() {
             ]),
         ),
         ("an unseen holder", serial_eq(unseen)),
-        ("no holder", leaf("serial", FilterOperand::NumEquals(Scalar::Int(7.into())))),
+        (
+            "no holder",
+            leaf("serial", FilterOperand::NumEquals(Scalar::Int(7.into()))),
+        ),
         ("past a driven stretch", serials_in(0..4500, &[])),
     ];
     let mut on_s0 = everywhere.clone();
@@ -3022,7 +3375,10 @@ fn a_read_driven_by_its_matches_sends_what_the_walk_sends() {
     ]);
     let fields = names(&["serial", "band"]);
     for (view, cases) in [("s0", &on_s0), (GEO, &everywhere)] {
-        for (viewer, credential) in [("every", full_coverage_credential()), ("third", subset_credential())] {
+        for (viewer, credential) in [
+            ("every", full_coverage_credential()),
+            ("third", subset_credential()),
+        ] {
             let session = fx.engine.authorise(&credential).unwrap();
             for order in [RecordsOrder::Map, RecordsOrder::Stored] {
                 let mut unseen_and_absent = Vec::new();
@@ -3118,12 +3474,18 @@ fn read_through_changes(order: RecordsOrder, route: Route) -> Vec<Sent> {
     fx.engine.set_merge_for_test(false);
     for batch in 0..4u64 {
         let start = BIG + batch * 40;
-        fx.ingest(&format!("pre-{batch}"), &(start..start + 40).collect::<Vec<_>>());
+        fx.ingest(
+            &format!("pre-{batch}"),
+            &(start..start + 40).collect::<Vec<_>>(),
+        );
         publish_buffered(&fx.engine);
     }
     let later_a: Vec<u64> = (BIG + 160..BIG + 210).collect();
     let later_b: Vec<u64> = (BIG + 210..BIG + 260).collect();
-    let named: Vec<u64> = (0..BIG + 160).step_by(3).chain(BIG + 160..BIG + 260).collect();
+    let named: Vec<u64> = (0..BIG + 160)
+        .step_by(3)
+        .chain(BIG + 160..BIG + 260)
+        .collect();
     let fields = names(&["serial"]);
     let mut base = request("s0", &fields);
     base.filter = Some(serials_in(named.iter().copied(), &[]));
@@ -3131,7 +3493,10 @@ fn read_through_changes(order: RecordsOrder, route: Route) -> Vec<Sent> {
     base.page_rows = Some(50);
     base.pages = Some(3);
     let in_order = |fx: &Fx, sources: &[u64]| -> Vec<u64> {
-        let present = sources.iter().copied().filter(|s| fx.entity.contains_key(s));
+        let present = sources
+            .iter()
+            .copied()
+            .filter(|s| fx.entity.contains_key(s));
         match order {
             RecordsOrder::Map => fx.map_order(present, "s0"),
             RecordsOrder::Stored => fx.stored_order(present),
@@ -3149,8 +3514,12 @@ fn read_through_changes(order: RecordsOrder, route: Route) -> Vec<Sent> {
     out.push(sent(sink, &trailer));
     let mut ahead = in_order(&fx, &named).into_iter().rev();
     let (suppressed, deleted) = (ahead.next().unwrap(), ahead.next().unwrap());
-    fx.engine.accept_change(entity(&fx, suppressed), ChangeOp::Suppress).unwrap();
-    fx.engine.accept_change(entity(&fx, deleted), ChangeOp::Delete).unwrap();
+    fx.engine
+        .accept_change(entity(&fx, suppressed), ChangeOp::Suppress)
+        .unwrap();
+    fx.engine
+        .accept_change(entity(&fx, deleted), ChangeOp::Delete)
+        .unwrap();
     hidden.extend([suppressed, deleted]);
 
     // The first row of the second response's second page: the fiftieth matching row past the
@@ -3224,7 +3593,10 @@ fn read_through_changes(order: RecordsOrder, route: Route) -> Vec<Sent> {
     assert_each_once(&ids);
     let served: HashSet<u64> = ids.iter().copied().collect();
     for s in &hidden {
-        assert!(!served.contains(&fx.tid(*s)), "{order:?} {route:?}: a hidden item was served");
+        assert!(
+            !served.contains(&fx.tid(*s)),
+            "{order:?} {route:?}: a hidden item was served"
+        );
     }
     for batch in [&later_a, &later_b] {
         assert!(
@@ -3263,7 +3635,10 @@ fn a_rendered_filter_is_exact_across_segments_and_chunks() {
     fx.engine.set_merge_for_test(false);
     for batch in 0..3u64 {
         let start = BIG + batch * 400;
-        fx.ingest(&format!("b{batch}"), &(start..start + 400).collect::<Vec<_>>());
+        fx.ingest(
+            &format!("b{batch}"),
+            &(start..start + 400).collect::<Vec<_>>(),
+        );
         publish_buffered(&fx.engine);
     }
     let segments = fx.engine.generation().bundle.partitions["default"].views["s0"]
@@ -3295,6 +3670,10 @@ fn a_rendered_filter_is_exact_across_segments_and_chunks() {
             RecordsOrder::Map => fx.map_order(expected.iter().copied(), "s0"),
             RecordsOrder::Stored => fx.stored_order(expected.iter().copied()),
         };
-        assert_eq!(read_all(&fx.engine, &session, &base).ids(), fx.tids(&want), "{order:?}");
+        assert_eq!(
+            read_all(&fx.engine, &session, &base).ids(),
+            fx.tids(&want),
+            "{order:?}"
+        );
     }
 }

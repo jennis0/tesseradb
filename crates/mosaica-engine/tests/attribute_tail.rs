@@ -45,6 +45,7 @@ use mosaica_engine::{ColumnBuf, Engine, EngineConfig, ViewportRequest};
 use mosaica_lifecycle::command::UnallocatedRow;
 use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
 use mosaica_store::read::{open_bundle, ColumnsRef, ScalarSlice};
+use mosaica_types::{ItemHigh, Tenancy};
 
 /// The fixture's schema: a `u8` category, a plain `i64` and a plain `f32`.
 ///
@@ -182,7 +183,10 @@ fn build_placed_fixture(out: &Path, tmp: &Path, n: u64, at: impl Fn(u64) -> (f64
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
+        attribute_sources: mosaica_build::config::AttributeSource::over(
+            points.clone(),
+            &with_id(schema.clone()),
+        ),
         out: out.to_path_buf(),
         limit: None,
         strict: false,
@@ -261,13 +265,8 @@ fn tail_by_identity(root: &Path) -> BTreeMap<u64, (u8, i64, f32)> {
 }
 
 fn engine_over(tmp: &Path, root: &Path, config: EngineConfig) -> Engine {
-    let mut engine = Engine::open(
-        root,
-        &tmp.join("cache"),
-        &tmp.join("wal.log"),
-        config,
-    )
-    .expect("the engine opens against a bundle carrying a declared tail");
+    let mut engine = Engine::open(root, &tmp.join("cache"), &tmp.join("wal.log"), config)
+        .expect("the engine opens against a bundle carrying a declared tail");
     engine.start_write_executor(8).expect("the executor starts");
     engine.set_background_refresh_for_test(false);
     engine
@@ -338,7 +337,10 @@ fn a_build_emits_the_declared_tail_and_records_its_vocabulary() {
     for source in 0..N_ITEMS {
         let entity = entity_of_source[&source];
         let id = key
-            .forward(0, mosaica_types::EntityId::new(entity))
+            .forward(
+                ItemHigh::new(0, Tenancy::ZERO),
+                mosaica_types::EntityId::new(entity),
+            )
             .unwrap();
         let (band, stamp, score) = tail[&id.raw()];
         assert_eq!(band, band_code(source), "source {source}'s band code");
@@ -376,7 +378,10 @@ fn both_build_implementations_write_the_same_tail() {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
+        attribute_sources: mosaica_build::config::AttributeSource::over(
+            points.clone(),
+            &with_id(schema.clone()),
+        ),
         out: out.to_path_buf(),
         limit: None,
         strict: false,
@@ -456,7 +461,9 @@ fn an_ingested_row_carries_the_declared_tail_through_a_flush() {
         N_ITEMS as usize + 1,
         "the flushed row joins the base segment's rows"
     );
-    let id = test_key().forward(0, entity).unwrap();
+    let id = test_key()
+        .forward(ItemHigh::new(0, Tenancy::ZERO), entity)
+        .unwrap();
     assert_eq!(
         tail[&id.raw()],
         (3u8, 1_800_000_000_000_000i64, 12.5f32),
@@ -510,7 +517,9 @@ fn a_merge_carries_every_inputs_tail_forward_against_the_right_identities() {
             )
             .expect("accepted")[0];
         publish_buffered(&engine);
-        let id = test_key().forward(0, entity).unwrap();
+        let id = test_key()
+            .forward(ItemHigh::new(0, Tenancy::ZERO), entity)
+            .unwrap();
         expected.insert(
             id.raw(),
             (
@@ -544,7 +553,10 @@ fn a_merge_carries_every_inputs_tail_forward_against_the_right_identities() {
     for source in [0u64, 1, 2, N_ITEMS - 1] {
         let entity = entity_of_source[&source];
         let id = key
-            .forward(0, mosaica_types::EntityId::new(entity))
+            .forward(
+                ItemHigh::new(0, Tenancy::ZERO),
+                mosaica_types::EntityId::new(entity),
+            )
             .unwrap();
         assert_eq!(
             tail[&id.raw()],
@@ -609,7 +621,9 @@ fn a_fold_rewrites_the_whole_corpus_without_losing_the_tail() {
             "identity {id}'s tail changed across a fold that folded nothing away"
         );
     }
-    let id = test_key().forward(0, ingested).unwrap();
+    let id = test_key()
+        .forward(ItemHigh::new(0, Tenancy::ZERO), ingested)
+        .unwrap();
     assert_eq!(
         after[&id.raw()],
         (2u8, 2_000_000_000_000_000i64, 99.75f32),
@@ -748,7 +762,9 @@ fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
 
     // The flushed row is in a different segment from every other point, so its presence is what
     // proves the per-part resolution is keyed rather than assumed.
-    let flushed = test_key().forward(0, ingested).unwrap();
+    let flushed = test_key()
+        .forward(ItemHigh::new(0, Tenancy::ZERO), ingested)
+        .unwrap();
     let position = out
         .points
         .iter()
@@ -858,9 +874,15 @@ fn every_point_reads_the_segment_that_holds_it_across_tiles_of_several_segments(
     for (at, (segment, _)) in segments.iter().enumerate() {
         let columns = &segment.columns;
         let other = || panic!("segment {} holds the tail at other types", segment.seg_id);
-        let Some(ScalarSlice::U8(band)) = columns.scalar("band") else { other() };
-        let Some(ScalarSlice::I64(stamp)) = columns.scalar("ingested_at") else { other() };
-        let Some(ScalarSlice::F32(score)) = columns.scalar("score") else { other() };
+        let Some(ScalarSlice::U8(band)) = columns.scalar("band") else {
+            other()
+        };
+        let Some(ScalarSlice::I64(stamp)) = columns.scalar("ingested_at") else {
+            other()
+        };
+        let Some(ScalarSlice::F32(score)) = columns.scalar("score") else {
+            other()
+        };
         let presence = columns.presence("score");
         for row in 0..columns.row_count() as usize {
             let high = (segment.morton.u32()[row] as u64) << 32;
@@ -912,7 +934,11 @@ fn every_point_reads_the_segment_that_holds_it_across_tiles_of_several_segments(
                 .unwrap_or_else(|| panic!("point {i} has an id no segment holds"));
             assert!(seen.insert(id), "point {i} is served twice");
             assert_eq!(code, truth.code, "point {i}'s position");
-            assert_eq!(code >> 60, tile.tile, "point {i} lies in the tile it is served under");
+            assert_eq!(
+                code >> 60,
+                tile.tile,
+                "point {i} lies in the tile it is served under"
+            );
             assert_eq!(band[i], truth.band, "point {i}'s band");
             assert_eq!(ingested_at[i], truth.ingested_at, "point {i}'s ingested_at");
             assert_eq!(
@@ -933,7 +959,10 @@ fn every_point_reads_the_segment_that_holds_it_across_tiles_of_several_segments(
     };
     assert_eq!(segments_in(0), BTreeSet::from([0]));
     assert_eq!(segments_in(1), BTreeSet::from([0, 2]));
-    assert!(segments_of_tile[&1].contains(&(2, true)), "(1, 0) serves an unscored flushed row");
+    assert!(
+        segments_of_tile[&1].contains(&(2, true)),
+        "(1, 0) serves an unscored flushed row"
+    );
     assert_eq!(segments_in(4), BTreeSet::from([1]));
     assert_eq!(segments_in(15), BTreeSet::from([0, 1, 2]));
 }
@@ -1092,7 +1121,10 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
+        attribute_sources: mosaica_build::config::AttributeSource::over(
+            points.clone(),
+            &with_id(schema.clone()),
+        ),
         out: out.to_path_buf(),
         limit: None,
         strict: false,
@@ -1267,7 +1299,10 @@ fn a_non_prefix_render_declaration_serves_every_column_under_its_own_name() {
         matches!(counts_only.points.scalars[0].values, ColumnBuf::U8(_)),
         "the seeded empty column carries the render column's type, not the declaration's first"
     );
-    assert!(matches!(counts_only.points.scalars[1].values, ColumnBuf::F32(_)));
+    assert!(matches!(
+        counts_only.points.scalars[1].values,
+        ColumnBuf::F32(_)
+    ));
 }
 
 /// **Drill-down under the same non-prefix declaration: every home's value under its own name.**
@@ -1510,7 +1545,10 @@ fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
+        attribute_sources: mosaica_build::config::AttributeSource::over(
+            points.clone(),
+            &with_id(schema.clone()),
+        ),
         out: out.to_path_buf(),
         limit: None,
         strict: false,
@@ -1876,9 +1914,12 @@ fn a_coalesce_collapses_record_extents_and_every_row_still_answers() {
         "the live stack composes each flush's extent as it publishes"
     );
 
-    tick_until(&engine, "the record extents to coalesce", std::time::Duration::from_secs(60), || {
-        engine.generation().filter_columns.record_layers() < 9
-    });
+    tick_until(
+        &engine,
+        "the record extents to coalesce",
+        std::time::Duration::from_secs(60),
+        || engine.generation().filter_columns.record_layers() < 9,
+    );
 
     // **The live stack shrank with the manifest, before any restart.** The blob's layers ride on
     // `Arc`s from one generation to the next, so a publication that edited only the manifest left
@@ -1903,8 +1944,9 @@ fn a_coalesce_collapses_record_extents_and_every_row_still_answers() {
             .expect("the live stack reads")
             .expect("every ingested entity has a blob row");
         assert!(
-            fields.iter().any(|f| f.value
-                == mosaica_filter::RecordValue::Utf8(note.clone())),
+            fields
+                .iter()
+                .any(|f| f.value == mosaica_filter::RecordValue::Utf8(note.clone())),
             "entity {entity} lost its note to the coalesce's live publication"
         );
     }

@@ -33,7 +33,7 @@
 use std::time::Instant;
 
 use croaring::{Bitmap, Portable};
-use mosaica_types::{EntityId, IdentityKey};
+use mosaica_types::{EntityId, IdentityKey, ItemHigh, Tenancy};
 
 /// Tiles a viewport resolves to (`filter-surface.md` §4 and arm 3 both use ~300).
 const TILES: usize = 300;
@@ -147,7 +147,9 @@ fn route_per_tile_real(
     for &(lo, hi) in tiles {
         for row in lo..hi {
             let id = mosaica_id_by_row[row as usize];
-            let (_shard, entity) = key.invert(mosaica_types::MosaicaId::new(id));
+            let (_, entity) = key
+                .invert(mosaica_types::MosaicaId::new(id))
+                .expect("an item");
             if result.contains(entity.raw() as u32) {
                 out.add(row);
             }
@@ -173,7 +175,9 @@ fn route_per_tile_batched(
         scratch.clear();
         for row in lo..hi {
             let id = mosaica_id_by_row[row as usize];
-            let (_shard, entity) = key.invert(mosaica_types::MosaicaId::new(id));
+            let (_, entity) = key
+                .invert(mosaica_types::MosaicaId::new(id))
+                .expect("an item");
             scratch.push(entity.raw() as u32);
         }
         for (offset, &entity) in scratch.iter().enumerate() {
@@ -254,7 +258,11 @@ fn main() {
     let key = IdentityKey::from_hex("000102030405060708090a0b0c0d0e0f").expect("key");
     let mosaica_id_by_row: Vec<u64> = row_to_entity
         .iter()
-        .map(|&e| key.forward(0, EntityId::new(e as u64)).expect("forward").raw())
+        .map(|&e| {
+            key.forward(ItemHigh::new(0, Tenancy::ZERO), EntityId::new(e as u64))
+                .expect("forward")
+                .raw()
+        })
         .collect();
 
     let build_cells = |cell_width: usize| -> Vec<Bitmap> {

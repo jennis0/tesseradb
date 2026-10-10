@@ -34,7 +34,7 @@ use sha2::{Digest, Sha256};
 
 use mosaica_spatial::fixed32;
 use mosaica_spatial::tiler::{sort_batch, ScalarType, ScalarValue, TilerItem};
-use mosaica_types::{EntityId, IdentityKey, MosaicaId};
+use mosaica_types::{EntityId, IdentityKey, ItemHigh, MosaicaId, Tenancy};
 
 use crate::error::{Result, StoreError};
 use crate::manifest::{FileDigest, Quantisation, SegmentDescriptor};
@@ -212,12 +212,12 @@ pub fn write_flush_segment(
         }
     }
 
-    write_segment(&seg_dir, &items, &codes, input.scalar_schema, input.indexed).map_err(|source| {
-        StoreError::Io {
+    write_segment(&seg_dir, &items, &codes, input.scalar_schema, input.indexed).map_err(
+        |source| StoreError::Io {
             path: seg_dir.join("columns.arrow"),
             source,
-        }
-    })?;
+        },
+    )?;
 
     // Each entity's position in the sorted order, relative to `row_base`. Held here rather than
     // as a `permutation.bin`, whose length is the *bundle's* whole entity space — the wrong shape
@@ -284,7 +284,7 @@ pub fn write_flush_segment(
 }
 
 fn mosaica_id_of(key: &IdentityKey, shard_id: u32, entity: EntityId) -> Result<MosaicaId> {
-    key.forward(shard_id, entity)
+    key.forward(ItemHigh::new(shard_id, Tenancy::ZERO), entity)
         .map_err(|e| StoreError::MalformedBundle {
             detail: format!(
                 "write_flush_segment: mosaica_id for entity {}: {e}",

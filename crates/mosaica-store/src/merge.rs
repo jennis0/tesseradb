@@ -248,7 +248,8 @@ pub fn execute_merge(
         path: out_dir.join("columns.arrow"),
         source,
     };
-    let mut writer = SegmentWriter::create(&out_dir, spec.scalar_schema, spec.indexed).map_err(io)?;
+    let mut writer =
+        SegmentWriter::create(&out_dir, spec.scalar_schema, spec.indexed).map_err(io)?;
     // Each merged row's entity, in emission order: the merged row *is* the emission ordinal, so
     // the extent needs no companion permutation of the entity axis.
     let mut entities: Vec<u64> = Vec::new();
@@ -277,7 +278,12 @@ pub fn execute_merge(
         let row = cursor.row;
         let mosaica_id = MosaicaId::new(mosaica_raw);
         let entity = cursor.entity(spec.identity_key, spec.shard_id)?;
-        if spec.identity_key.invert(mosaica_id).1 != entity {
+        if spec
+            .identity_key
+            .invert(mosaica_id)
+            .map(|(_, number)| number)
+            != Some(entity)
+        {
             edited.push((row_count as u32, entity.raw() as u32));
         }
         let scalars = gather_scalars(
@@ -391,18 +397,14 @@ pub fn execute_merge(
     }
 
     // An input's listed row whose entity lies within the merged span takes its slot there.
-    let extent = SegmentExtent::from_rows(
-        spec.seg_id,
-        spec.row_base,
-        (entity_lo, entity_hi),
-        entities,
-    )
-    .ok_or_else(|| StoreError::MalformedBundle {
-        detail: format!(
+    let extent =
+        SegmentExtent::from_rows(spec.seg_id, spec.row_base, (entity_lo, entity_hi), entities)
+            .ok_or_else(|| StoreError::MalformedBundle {
+                detail: format!(
             "execute_merge: the inputs' rows are not one row per entity at or below entity \
              {entity_hi}"
         ),
-    })?;
+            })?;
     Ok(MergeOutput {
         segment: SegmentDescriptor {
             view: view.to_string(),
