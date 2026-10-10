@@ -383,9 +383,9 @@ in row order, feeding the merge of the shard's parts. Not measured yet.
 Leaving out the parts of a tile with no visible row takes most of N's cost off a narrow viewer.
 Measured with the count batched, a viewer of 0.1% or 1% at depth 8 and deeper pays 1.2 to 3.1 times
 today's single shard at N = 8 and 5 to 12 times at N = 100, against up to 57 times without; a
-viewer of 10% or more changes little (`probes/2026-10-09-shard-read-costs/`, Table 6). Which parts
-are empty depends on where the viewer's items sit, which under reuse depends on other viewers'
-deletions, so the skip is a timing question §6 has to settle before it is built.
+viewer of 10% or more changes little (`probes/2026-10-09-shard-read-costs/`, Table 6). Selection
+leaves them out. Which parts are empty depends on where the viewer's items sit, which under reuse
+depends on other viewers' deletions; §6 accepts the timing difference that adds.
 
 `rows_in_range`, the
 materialised `leaf ∩ range` that selection reads while the overlay holds denies, grows worst: 18 ms
@@ -618,11 +618,11 @@ builds today's bundle, apart from the directory layout and the manifest.
   items reuse ids in the shards other viewers' deletions emptied, so work that skipped such shards
   would vary with other viewers' deletions. A fragment-cache hit is per shard, a finer sample of the
   cache's existing timing channel.
-- Not settled: whether selection may leave out a tile's parts with no visible row (§3.2). Today's
-  sweep skips a tile with no visible row, whose count the response serves. A part's emptiness is
-  not served, and under reuse it depends on other viewers' deletions. The skip saves a seek and a
-  merge entry per empty part, about 0.1 µs measured, which is the size of the timing difference it
-  would add.
+- Selection leaves out a tile's parts with no visible row (§3.2). Today's sweep skips a tile with
+  no visible row, whose count the response serves. A part's emptiness is not served, and under
+  reuse it depends on other viewers' deletions. The skip saves a seek and a merge entry per empty
+  part, about 0.1 µs measured, which is the size of the timing difference it adds. That difference
+  is accepted.
 - An identifier that inverts to a dropped shard or layer space takes the same lookups as one naming
   an item the viewer may not see.
 - A reused number carries nothing of its previous holder (§1.3), and its previous `mosaica_id` never
