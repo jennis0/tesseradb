@@ -779,10 +779,12 @@ their results are in `probes/2026-10-09-shard-read-costs/`, on a 4-core host.
 - Selection batched per shard, added to the mask bench as `select_batched` and measured the same
   way, with tiles that abut as a segment's do (`probes/2026-10-10-batched-selection/`, §3.2).
 
-Two things are left before code:
+Two runs follow the plan, when their hosts are free. Neither holds up stages 1 to 3.
 
-1. `epoch_shard_tile_index` on the MedCPT and PaperSeek bundles, on a host that holds them.
-2. The mask bench again on the 12-core host, so its figures sit beside the 2026-09-04 ones.
+1. `epoch_shard_tile_index` on the MedCPT and PaperSeek bundles, on a host that holds them. It says
+   what a per-shard tile index costs on today's levels, and stage 4 reads it.
+2. The mask bench again on the 12-core host, so its figures sit beside the 2026-09-04 ones. It
+   decides nothing.
 
 ### 8.2 One corpus at several shard sizes
 
@@ -890,11 +892,11 @@ bumps `WAL_VERSION`.
 
 | Stage | What it does | Gate |
 |---|---|---|
-| 0 | §8.1; `count_ranges` in today's engine. Built for the density underlay's and the aggregate's cells, which are 1.4 to 10 times faster for a viewer who sees most of the map (`probes/2026-10-10-batched-cell-counts/`), and for the sweep's tile counts, whose count stage is 4 to 28 times faster for a viewer of 30% or more at depth 6 and deeper, and whose request is 6 to 43% faster for a viewer of 30% (`probes/2026-10-10-tile-counts-and-range-factor/`) | figures recorded in a probe |
+| 0 | §8.1's benches; `count_ranges` in today's engine. Built for the density underlay's and the aggregate's cells, which are 1.4 to 10 times faster for a viewer who sees most of the map (`probes/2026-10-10-batched-cell-counts/`), and for the sweep's tile counts, whose count stage is 4 to 28 times faster for a viewer of 30% or more at depth 6 and deeper, and whose request is 6 to 43% faster for a viewer of 30% (`probes/2026-10-10-tile-counts-and-range-factor/`) | figures recorded in a probe |
 | 1 | the identity input gains the kind bit, the shard field and the tenancy, in the engine and in the oracle's own derivation and its vectors; the tenancy index, written by the compaction that frees numbers and read wherever an identifier is built or resolved; the executor's re-checks compare the tenancy, and a compaction that frees numbers moves the edit stamp; a compaction frees a deleted item's number with its last entity at the next tenancy and retires one at the cap; the threat model's stored-order residual (§6); format bump | reuse, stale identifier, early free, buffered delete and cap fixtures; §8.4 on one shard |
 | 2 | `ShardId`; every per-entity and per-view structure moves under `shards/0/`; the manifest and side-manifest split; `shards.size` declared and recorded, reaching the HTTP API, both clients and the CLI's declaration file, and a size that would open a second shard refused on both paths; the compile-fail tests; format bump | the whole suite on rebuilt bundles |
 | 3 | layer spaces: artifact records, own-label postings, overlay and held shapes move out of the point space; the two-region allocator and its low water go; artifact identifiers take the kind bit; format bump | the whole suite on rebuilt bundles; layer drop and kind routing fixtures |
-| 4 | `ShardedMask`; every route combined as §3.4 says, θ's occupied tiles merged; caches and response keys over every shard (§3.6); projections shared by grant, and the threat model's fourth shared cache; status's corpus-wide figures across shards; a build writes several shards past `shards.size`, and every write to such a bundle is refused | the conformance suite's tests that write nothing, marked as such, in both modes, and the two modes fixture; §8.2 |
+| 4 | `ShardedMask`; every route combined as §3.4 says, θ's occupied tiles merged; caches and response keys over every shard (§3.6); projections shared by grant, and the threat model's fourth shared cache; status's corpus-wide figures across shards; a build writes several shards past `shards.size`, and every write to such a bundle is refused | the conformance suite's tests that write nothing, marked as such, in both modes, and the two modes fixture; §8.1's tile-index run on MedCPT and PaperSeek; §8.2 |
 | 5 | per-shard allocation, pool and target; edits in their shard; denies resolved per shard (§4.4); flush, merge and compaction per shard, with bases tracked per shard; ingest opens shards; a key filter on every unique run; layer publication per shard, and artifact deletions held until every shard has removed them; the partition file as the commit point; format bump | the whole conformance suite in both modes; sealed shard, allocation, unique, build-equals-ingest, restart, stale identifier, commit point, runtime column and artifact delete fixtures; §8.3 and §8.4 at several shards |
 | 6 | seal, drop, status on all four surfaces, the CLI's first control-plane verbs; seal and drop logged, and a drop reconciling generating sets; refuse at open; parallel verification and its record; format bump | dropped and corrupt shard fixtures; seal, drop and the shard list through each surface |
 | 7 | §8.5 | the defaults written into the declaration's reference |
