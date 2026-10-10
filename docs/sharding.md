@@ -420,7 +420,13 @@ few visible rows. Counting and selecting together, a request at N = 8 costs 0.7 
 today's single shard at 10% coverage and above, and 1.9 to 8.1 times for a viewer of 0.1% or 1% at
 depth 8 and deeper, 0.3 to 55 ms. At N = 100 the same figures reach 10 and 64 times. Selection
 is therefore batched per shard as the count is: one cursor walk of a leaf over the request's ranges
-in row order, feeding the merge of the shard's parts. Not measured yet.
+in row order, feeding the merge of the shard's parts. Measured where a request's tiles abut, as
+they do in a segment, it takes a viewer of 0.1% or 1% at depths 8 to 10 to 0.57 to 0.97 of
+selection per part, and a viewer of 1% at depth 8 and N = 100 from 6.1 to 3.9 times today's single
+shard. The gain is the seek between parts that meet: with each part placed on its own it barely
+moves. At depth 11 and deeper the count of the request's parts sets what N costs: 300,000 parts at
+N = 100 take 5.7 to 11.4 ms to count, against 0.3 to 2.2 ms of selection, and a viewer of 0.1% pays
+about 20 times today's (`probes/2026-10-10-batched-selection/`).
 
 Leaving out the parts of a tile with no visible row takes most of N's cost off a narrow viewer.
 Measured with the count batched, a viewer of 0.1% or 1% at depth 8 and deeper pays 1.2 to 3.1 times
@@ -770,12 +776,13 @@ their results are in `probes/2026-10-09-shard-read-costs/`, on a 4-core host.
 - A level's figures walk at N against N = 1, with the sum of the shards' counts timed apart
   (§3.6).
 - Projection per shard against one projection (§3.7).
+- Selection batched per shard, added to the mask bench as `select_batched` and measured the same
+  way, with tiles that abut as a segment's do (`probes/2026-10-10-batched-selection/`, §3.2).
 
-Three things are left before code:
+Two things are left before code:
 
 1. `epoch_shard_tile_index` on the MedCPT and PaperSeek bundles, on a host that holds them.
 2. The mask bench again on the 12-core host, so its figures sit beside the 2026-09-04 ones.
-3. Selection batched per shard, added to the mask bench and measured the same way.
 
 ### 8.2 One corpus at several shard sizes
 
@@ -853,7 +860,8 @@ on one shard, and it decides whether pool ids need handing out in runs (§4.1).
 | an id reaches the tenancy cap in about 1,100 years at 1% daily churn, 110 at 10% | modelled | §1.4 |
 | capacity: 2¹⁹ shards of about 2³² ids, about 2 × 10¹⁵ items | modelled | §2.1, §2.5 |
 | a session's visible set grows more slowly than the corpus | assumed; to be confirmed before any figure above 2³² items is promised | n/a |
-| selection batched per shard; the tile index on today's levels; every route at N on a built bundle; churn locality; the key filter; compaction per shard | not measured | §8 |
+| selection batched per shard, where a request's tiles abut: 0.57 to 0.97 of selection per part for a viewer of 0.1% or 1% at depths 8 to 10; at depth 11 and deeper the count of 300,000 parts, 5.7 to 11.4 ms at N = 100, sets what N costs | measured, synthetic, one thread, 4 cores | `probes/2026-10-10-batched-selection/` |
+| the tile index on today's levels; every route at N on a built bundle; churn locality; the key filter; compaction per shard | not measured | §8 |
 
 ## 10. Stages
 
