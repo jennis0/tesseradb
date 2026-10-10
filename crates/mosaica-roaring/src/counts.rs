@@ -195,8 +195,8 @@ mod tests {
     }
 
     /// Ranges that reach only some containers of a bitmap spanning many, including none at all,
-    /// the first and the last, and ranges from 0 that end past the first container, alone, beside
-    /// later ranges and out of order: the counts are croaring's.
+    /// the first and the last, and ranges from 0 that end past the first container, beside the
+    /// range after them, beside later ones and out of order: the counts are croaring's.
     #[test]
     fn counts_over_a_part_of_a_wide_bitmap_equal_croarings() {
         let mut b = Bitmap::new();
@@ -220,7 +220,7 @@ mod tests {
                 (4 << 16) + 6_000..(4 << 16) + 7_000,
             ],
             vec![past..past + 100, past + 100..u32::MAX],
-            vec![0..(1_500 << 16) + 41_000],
+            vec![0..(1_500 << 16) + 41_000, (1_500 << 16) + 41_000..past],
             vec![
                 0..(3 << 16) + 2,
                 (1_200 << 16)..(1_200 << 16) + 9,
