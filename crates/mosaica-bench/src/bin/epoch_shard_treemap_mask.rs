@@ -15,6 +15,12 @@
 //! 3. **select** — `Selection::of` itself, unchanged, with N parts per tile: the m smallest
 //!    `mosaica_id`s across the parts with the bounded heap.
 //!
+//! **select_batched** is the selection §3.2 of `docs/sharding.md` plans: each leaf walked once by
+//! one cursor over the request's parts in row order, seeking only where a part does not begin where
+//! the last one ended, with every visible row fed into its tile's threshold count and bounded heap,
+//! which carry over from one leaf to the next. Tiles and parts with no visible row are left out,
+//! as `select_parts` leaves them out. It serves what `Selection::of` serves, checked on every tile.
+//!
 //! A fourth column, **rows_in_range**, is `EffectiveMask::rows_in_range`'s materialised
 //! `leaf ∩ range`, which is what the decode pays instead when the overlay diffs are non-empty.
 //!
@@ -59,6 +65,7 @@
 //!     --scratch /tmp/epoch-shard --out result.json
 //! ```
 
+use std::collections::BinaryHeap;
 use std::hint::black_box;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -75,7 +82,8 @@ use serde::Serialize;
 use mosaica_engine::compose::{compose, EffectiveMask};
 use mosaica_engine::projection::RowProjection;
 use mosaica_engine::select::{
-    decode_tier, DecodeTier, SelectParams, Selection, SelectionPart, SelectionParts, Threshold,
+    decode_tier, served_count, DecodeTier, SelectParams, Selection, SelectionPart, SelectionParts,
+    Threshold,
 };
 use mosaica_lifecycle::{IngestBuffer, Overlay};
 use mosaica_store::read::SegmentData;
@@ -136,6 +144,11 @@ struct Args {
     /// block.
     #[arg(long, value_enum, default_value_t = Layout::Random)]
     layout: Layout,
+    /// Tiles next to each other in Morton order share the boundary between them, jittered once,
+    /// as a request's tiles do in a segment. Without it each part is jittered on its own, so
+    /// neighbouring parts neither meet nor stay apart.
+    #[arg(long)]
+    abutting: bool,
     /// Operations to measure, from the list printed in the tables; empty measures every one.
     #[arg(long, value_delimiter = ',')]
     ops: Vec<String>,
@@ -558,12 +571,13 @@ struct Report {
     m_target: u64,
     seed: u64,
     layout: Layout,
+    abutting: bool,
     leaves: Vec<LeafStats>,
     cells: Vec<Cell>,
     figures: Vec<FiguresCell>,
 }
 
-const OPS: [&str; 8] = [
+const OPS: [&str; 9] = [
     "count",
     "count_ranges",
     "count_local",
@@ -572,6 +586,7 @@ const OPS: [&str; 8] = [
     "select",
     "select_tiles",
     "select_parts",
+    "select_batched",
 ];
 
 fn median(xs: &[f64]) -> f64 {
@@ -663,11 +678,24 @@ fn run_depth(args: &Args, case: &Case<'_>, depth: u8, cells: &mut Vec<Cell>) {
     // an unrealistic advantage that a split into N parts would then appear to lose.
     let mut jitter =
         StdRng::seed_from_u64(args.seed ^ (u64::from(depth) << 40) ^ (u64::from(shards) << 8));
+    //
+    // `--abutting` jitters each boundary once instead, by less than a part, so a tile ends where
+    // the tile after it in Morton order begins, and the last boundary of a leaf stays at its end.
+    let boundary = |s: u32, q: u64| -> u64 {
+        if q * part_rows >= shard_rows {
+            return shard_rows;
+        }
+        let key = args.seed ^ (u64::from(depth) << 56) ^ (u64::from(s) << 36) ^ q;
+        q * part_rows + SplitMix(key).next() % part_rows.min(65_536)
+    };
     let parts: Vec<Vec<(u32, Range<u32>)>> = positions
         .iter()
         .map(|&p| {
             (0..shards)
                 .map(|s| {
+                    if args.abutting {
+                        return (s, boundary(s, p) as u32..boundary(s, p + 1) as u32);
+                    }
                     let room = shard_rows - (p + 1) * part_rows;
                     let delta = jitter.gen_range(0..=room.min(65_535));
                     let start = p * part_rows + delta;
@@ -801,7 +829,7 @@ fn run_depth(args: &Args, case: &Case<'_>, depth: u8, cells: &mut Vec<Cell>) {
         record("rows_in_range", us);
     }
 
-    if !["select", "select_tiles", "select_parts"]
+    if !["select", "select_tiles", "select_parts", "select_batched"]
         .iter()
         .any(|op| wants(op))
     {
@@ -816,8 +844,8 @@ fn run_depth(args: &Args, case: &Case<'_>, depth: u8, cells: &mut Vec<Cell>) {
     }
 
     // Each part reads the identity column at its own offset, chosen once here: `off ≤ view_start`
-    // keeps `row_base = view_start − off` non-negative, and `off + part_rows ≤ id_rows` keeps
-    // the slice inside the column.
+    // keeps `row_base = view_start − off` non-negative, and `off + len ≤ id_rows` keeps the slice
+    // inside the column.
     let mut rng = StdRng::seed_from_u64(args.seed ^ (u64::from(depth) << 48) ^ u64::from(shards));
     let offsets: Vec<Vec<u32>> = parts
         .iter()
@@ -825,7 +853,9 @@ fn run_depth(args: &Args, case: &Case<'_>, depth: u8, cells: &mut Vec<Cell>) {
             tile.iter()
                 .map(|(s, r)| {
                     let view_start = u64::from(*s) * shard_rows + u64::from(r.start);
-                    let max_off = view_start.min(case.id_rows - part_rows);
+                    let len = u64::from(r.end - r.start);
+                    assert!(len <= case.id_rows, "a part longer than the id column");
+                    let max_off = view_start.min(case.id_rows - len);
                     rng.gen_range(0..=max_off) as u32
                 })
                 .collect()
@@ -937,6 +967,105 @@ fn run_depth(args: &Args, case: &Case<'_>, depth: u8, cells: &mut Vec<Cell>) {
             black_box(served);
         });
         record("select_parts", us);
+    }
+
+    if wants("select_batched") {
+        // Each leaf's non-empty parts of non-empty tiles, in row order, with where each begins and
+        // ends in view space. A request's ranges come out of the sweep in row order, so this is
+        // sorted outside the timer.
+        let mut walks: Vec<Vec<(usize, usize, u32, u32)>> = vec![Vec::new(); shards as usize];
+        for (t, tile) in parts.iter().enumerate() {
+            if visible[t].iter().all(|v| *v == 0) {
+                continue;
+            }
+            for (p, (s, r)) in tile.iter().enumerate() {
+                if visible[t][p] > 0 {
+                    let start = (u64::from(*s) * shard_rows + u64::from(r.start)) as u32;
+                    walks[*s as usize].push((t, p, start, start + (r.end - r.start)));
+                }
+            }
+        }
+        for walk in &mut walks {
+            walk.sort_unstable_by_key(|&(_, _, start, _)| start);
+        }
+        assert!(
+            mask.diffs_are_empty(),
+            "the walk reads the projection itself"
+        );
+        let source = mask.decode_source(0..u32::MAX);
+        let ids = segment.columns.mosaica_id();
+        let batched = || -> Vec<Vec<u32>> {
+            let mut heaps: Vec<BinaryHeap<(u64, u32)>> = visible
+                .iter()
+                .map(|v| {
+                    let tile_visible: u64 = v.iter().sum();
+                    BinaryHeap::with_capacity(params.cap.min(tile_visible as usize) + 1)
+                })
+                .collect();
+            let mut c_theta = vec![0u64; tiles];
+            let mut buf = [0u32; VALUE_BUF_LEN];
+            for walk in &walks {
+                let mut iter = source.bitmap().iter();
+                let mut at = None;
+                for &(t, p, start, end) in walk {
+                    if at != Some(start) {
+                        iter.reset_at_or_after(start);
+                    }
+                    at = Some(end);
+                    let base = start - offsets[t][p];
+                    let heap = &mut heaps[t];
+                    let mut remaining = visible[t][p];
+                    while remaining > 0 {
+                        let want = remaining.min(VALUE_BUF_LEN as u64) as usize;
+                        let n = iter.next_many(&mut buf[..want]);
+                        if n == 0 {
+                            break;
+                        }
+                        for &row in &buf[..n] {
+                            let id = ids[(row - base) as usize];
+                            if params.threshold.admits(id) {
+                                c_theta[t] += 1;
+                            }
+                            if heap.len() == params.cap {
+                                if id >= heap.peek().expect("non-empty at len == cap").0 {
+                                    continue;
+                                }
+                                heap.pop();
+                            }
+                            heap.push((id, row));
+                        }
+                        remaining -= n as u64;
+                    }
+                }
+            }
+            heaps
+                .into_iter()
+                .enumerate()
+                .map(|(t, heap)| {
+                    let tile_visible: u64 = visible[t].iter().sum();
+                    let m = served_count(c_theta[t], &params, tile_visible);
+                    let mut kept = heap.into_vec();
+                    kept.sort_unstable();
+                    kept.truncate(m);
+                    kept.into_iter().map(|(_, row)| row).collect()
+                })
+                .collect()
+        };
+        // The same rows as `Selection::of` over the tile's non-empty parts, compared as sets.
+        for (t, mut rows) in batched().into_iter().enumerate() {
+            if visible[t].iter().all(|v| *v == 0) {
+                continue;
+            }
+            let mut want = select(t, &tile_parts(t, true));
+            rows.sort_unstable();
+            want.sort_unstable();
+            assert_eq!(rows, want, "the batched walk changed tile {t}'s selection");
+        }
+        let us = measure(args.warmup, args.samples, || {
+            let served: usize = batched().iter().map(Vec::len).sum();
+            black_box(served);
+        });
+        record("select_batched", us);
     }
 }
 
@@ -1245,6 +1374,7 @@ fn main() {
             m_target: M_TARGET,
             seed: args.seed,
             layout: args.layout,
+            abutting: args.abutting,
             leaves,
             cells,
             figures: figures_cells,
