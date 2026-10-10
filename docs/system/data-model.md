@@ -68,8 +68,9 @@ chooses: a dropped key can be reused, and a view created under it starts empty, 
 its predecessor's items.
 
 Dropping a view deletes every item it leaves with a row in no view, flushed or buffered, as any
-deletion does: its number stays reserved, and its rows and values leave at the next compaction. The
-drop's response counts them. An item with a row in another view keeps it and everything it holds.
+deletion does: its rows and values leave at the next compaction, which frees its number for a new
+item under a different `mosaica_id`, so the deleted item's goes on naming nothing. The drop's
+response counts them. An item with a row in another view keeps it and everything it holds.
 
 Two view groups can share one set of views: a quarterly map and a quarterly embedding built over
 the same quarters can use the same keys and per-view facts, rather than declaring them twice.
@@ -103,7 +104,7 @@ Four identifiers name an item or a view, one for each party that needs to addres
 
 | Identifier | Assigned by | Held by | What changes it |
 |---|---|---|---|
-| entity id | the server, at ingest | never leaves the server | an edit, which moves the item to a new one; the id an edit left is issued again once a compaction has removed its rows and the log has rotated past that compaction |
+| entity id | the server, at ingest | never leaves the server | an edit, which moves the item to a new one; the id an edit or a deletion left is issued again once a compaction has removed its rows and the log has rotated past that compaction |
 | `mosaica_id` | derived from the entity id by a keyed permutation, at the same time | the client | a rebuild, which creates a new bundle with a new key |
 | unique value | the operator, in a field declared `unique` | the operator, and any record of a write naming it | an edit of that field |
 | view key | the operator, when a view of a group is created | any request naming that view | a drop frees the key; a later create under it starts a new, empty view |
@@ -115,9 +116,10 @@ one batch sorts the whole corpus as one range. A later ingest commits its own ne
 already exists, in a range sorted the same way within itself but appended after the corpus already
 on disc rather than interleaved with it. The exception is an id a compaction has freed: an edit
 leaves the item's old entity deleted, the compaction that removes its rows frees the id, and the
-allocator issues freed ids, lowest first, before new ones. An item's first entity id is never
-freed, because its `mosaica_id` is derived from it, and neither is one a suppression stands
-against ([freed entity ids](write-path.md#freed-entity-ids) has the rules).
+allocator issues freed ids before new ones. An item's first entity id, its number, is freed only
+once the item is deleted and a compaction has removed its last entity, and the item that takes it
+next has a different `mosaica_id` ([freed entity ids](write-path.md#freed-entity-ids) has the
+rules).
 
 The `mosaica_id` is what a client receives and holds instead of the entity id. The key of the
 permutation is drawn at random by `mosaica build` each time it creates a bundle and is stored in

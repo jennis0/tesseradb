@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use mosaica_authz::{DeltaTier, Dict, FragmentCache, PostingsReader};
-use mosaica_lifecycle::Overlay;
+use mosaica_lifecycle::{ByTenancy, Overlay};
 use mosaica_store::manifest::{CurrentPointer, Declarations};
 use mosaica_store::read::open_bundle;
 use mosaica_store::vocabulary::Vocabularies;
@@ -293,30 +293,34 @@ fn across_partitions<'a, T, I: IntoIterator<Item = T>>(
         .collect()
 }
 
-/// The freed entity ids the newest served side-manifest records, and the sets it holds back.
-/// "Newest" is the partition whose served manifest has the highest number, which is meaningful
-/// while a bundle has one partition, as every bundle has.
+/// The freed entity ids the newest served side-manifest records, and the sets it holds back, each
+/// split by `tenancy`, the index the served prefix names. "Newest" is the partition whose served
+/// manifest has the highest number, which is meaningful while a bundle has one partition, as every
+/// bundle has.
 ///
 /// Every publication records the allocator's sets, which shrink as ids are issued and grow only at
 /// a fold, so an older manifest can list an id issued since. A stepped-down partition serves a
 /// manifest older than one it wrote, so nothing is taken where one is: the ids stay unissued.
-fn freed_of(bundle: &Bundle) -> (croaring::Bitmap, Vec<(u64, croaring::Bitmap)>) {
+fn freed_of(
+    bundle: &Bundle,
+    tenancy: &mosaica_store::tenancy::TenancyIndex,
+) -> (ByTenancy, Vec<(u64, ByTenancy)>) {
     if bundle.partitions.values().any(|p| p.stepped_down()) {
-        return (croaring::Bitmap::new(), Vec::new());
+        return (ByTenancy::new(), Vec::new());
     }
     let Some(newest) = bundle.partitions.values().max_by_key(|p| p.segments_n) else {
-        return (croaring::Bitmap::new(), Vec::new());
+        return (ByTenancy::new(), Vec::new());
     };
     let manifest = &newest.manifest;
     let free = manifest
         .free_entities
         .entities()
-        .cloned()
+        .map(|ids| tenancy.split(ids))
         .unwrap_or_default();
     let held = manifest
         .held_entities
         .iter()
-        .filter_map(|h| Some((h.position, h.entities.entities()?.clone())))
+        .filter_map(|h| Some((h.position, tenancy.split(h.entities.entities()?))))
         .collect();
     (free, held)
 }
@@ -413,6 +417,9 @@ pub(crate) struct PrefixReaders {
     pub(crate) identity_key: IdentityKey,
     /// The key records cursors are sealed under, derived from the same identity key.
     pub(crate) cursor_key: crate::records::CursorKey,
+    /// The partition's tenancy index, which the first generation serves and the allocator's freed
+    /// ids are split by.
+    pub(crate) tenancy: Arc<mosaica_store::tenancy::TenancyIndex>,
 }
 
 impl PrefixReaders {
@@ -468,6 +475,12 @@ impl PrefixReaders {
         let identity_key = IdentityKey::from_hex(&bundle.manifest.identity.key)
             .map_err(|e| EngineError::Malformed(format!("MANIFEST identity.key: {e}")))?;
         let cursor_key = crate::records::CursorKey::of(&bundle.manifest.identity.key);
+        let tenancy = mosaica_store::read::open_tenancy_index(
+            &prefix_dir,
+            &partition.manifest,
+            &bundle.manifest.files,
+        )
+        .map_err(EngineError::Store)?;
 
         Ok(PrefixReaders {
             prefix,
@@ -480,6 +493,7 @@ impl PrefixReaders {
             delta_postings,
             identity_key,
             cursor_key,
+            tenancy: Arc::new(tenancy),
         })
     }
 }
@@ -514,7 +528,7 @@ fn reconstruct_writes(
     // The row-less mark's homes are the side manifests only; `MANIFEST.json` carries no such
     // field.
     let side_manifest_low_waters: Vec<u64> = across_partitions(bundle, |m| [m.entity_id_low_water]);
-    let (free, held) = freed_of(bundle);
+    let (free, held) = freed_of(bundle, &readers.tenancy);
     // One partition today, so this concatenation is the whole registry; at more than one it is
     // the union.
     let manifest_layers: Vec<mosaica_types::layer::RegisteredLayer> =
@@ -778,15 +792,6 @@ fn first_generation(
         .map_err(EngineError::Store)?,
         None => mosaica_store::edited::EditedIndex::default(),
     };
-    let tenancy = match bundle.partitions.values().next() {
-        Some(partition) => mosaica_store::read::open_tenancy_index(
-            prefix_dir,
-            &partition.manifest,
-            &bundle.manifest.files,
-        )
-        .map_err(EngineError::Store)?,
-        None => mosaica_store::tenancy::TenancyIndex::default(),
-    };
 
     // Built synchronously at open, not lazily, so a first keystroke never pays the sort as a
     // cold start; only for the vocabularies a declared category column draws on.
@@ -827,7 +832,7 @@ fn first_generation(
             unique_live: Arc::new(crate::unique::UniqueLive::derive(&bundle.manifest, &buffer)),
             edited: Arc::new(edited),
             edited_live: Arc::new(state.edited_live.clone()),
-            tenancy: Arc::new(tenancy),
+            tenancy: Arc::clone(&readers.tenancy),
             edit_epoch: 0,
             deny_epoch: 0,
             fold_epoch: 0,

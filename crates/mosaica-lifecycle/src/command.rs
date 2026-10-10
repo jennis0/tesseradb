@@ -91,6 +91,7 @@ impl UnallocatedRow {
             // alone.** The entity exists; a second allocation for it would be a second identity
             // for one document, which is the whole of what the join rule prevents.
             entity_id: self.join,
+            edit: false,
         }
     }
 
@@ -606,5 +607,4 @@ mod tests {
             "and the resolved terms come back too"
         );
     }
-
 }

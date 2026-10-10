@@ -609,6 +609,8 @@ impl Executor {
         let started = window.opened_at();
         let mut mark = StageMark::now();
 
+        // The allocator's freed ids are at this index's tenancies: a fold swaps its index in before
+        // it releases the ids it freed, and both run on this thread.
         let (identity, shard, tenancy) = {
             let generation = self.generation.load();
             (

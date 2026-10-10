@@ -1,16 +1,18 @@
-//! Allocator property tests: monotonicity without freed ids, no id live twice across simulated
-//! crashes and folds that free ids, and `assign_sorted`'s contiguous-signature grouping.
+//! Allocator property tests: monotonicity without freed ids, the order a window's ids are taken
+//! in, no id live twice and no identifier naming two items across simulated crashes and folds that
+//! free ids and numbers, and `assign_sorted`'s contiguous-signature grouping.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use proptest::prelude::*;
 
 use croaring::Bitmap;
 use mosaica_lifecycle::alloc::{
-    allocator_floor, assign_sorted, entities_named, high_water_from, Allocator, PendingItem,
+    allocator_floor, assign_sorted, entities_named, high_water_from, union_of, Allocator,
+    ByTenancy, PendingItem,
 };
-use mosaica_lifecycle::wal::{WalRecord, WalRow};
-use mosaica_types::{EntityId, TermId};
+use mosaica_lifecycle::wal::{ChangeOp, WalRecord, WalRow};
+use mosaica_types::{EntityId, Tenancy, TermId};
 
 proptest! {
     /// Interleaved `allocate` calls on a single allocator never overlap and always advance the
@@ -22,7 +24,7 @@ proptest! {
         let mut seen: HashSet<u64> = HashSet::new();
 
         for n in sizes {
-            let ids = alloc.allocate(n).unwrap();
+            let ids = alloc.allocate(0, n).unwrap().items;
             prop_assert_eq!(&ids, &(expected_next..expected_next + n).collect::<Vec<_>>());
             for id in ids {
                 prop_assert!(seen.insert(id), "id {} allocated twice in one session", id);
@@ -59,7 +61,7 @@ proptest! {
             let mut alloc = Allocator::new(seed);
 
             for n in sizes {
-                let range = alloc.allocate(n).unwrap();
+                let range = alloc.allocate(0, n).unwrap().items;
                 for id in range {
                     prop_assert!(!used.contains(&id), "id {} reused across a simulated crash", id);
                     used.insert(id);
@@ -126,7 +128,7 @@ proptest! {
             // value it writes to `MANIFEST.json` strictly lower than the live one.
             let planned_bound = seed;
 
-            for id in alloc.allocate(n).unwrap() {
+            for id in alloc.allocate(0, n).unwrap().items {
                 prop_assert!(!used.contains(&id), "entity id {} reissued", id);
                 used.insert(id);
                 wal.push(WalRecord::IngestBatch {
@@ -164,56 +166,169 @@ proptest! {
         }
     }
 
-    /// **No id holds two items**, across fuzzed rounds of allocation, folds that free ids an edit
-    /// left, publications that record the allocator's sets, rotations that reclaim the log, and
-    /// crashes. A restart seeds the freed ids from the last publication and removes every id a
-    /// kept log record names, which is what stops an id issued after the publication and recorded
-    /// only in the log being issued again.
+    /// **One allocation takes ids in the allocator's order**, over a pool of freed ids at fuzzed
+    /// tenancies: an edit's new entity takes tenancy 0, lowest first, then the high-water; a new
+    /// item takes the lowest tenancy, lowest id first, then the high-water; the edits draw first.
+    /// An allocation the space between the marks cannot hold is refused and takes nothing.
     #[test]
-    fn no_id_holds_two_items_across_folds_that_free_ids(
+    fn a_window_takes_ids_in_the_allocators_order(
+        pool in prop::collection::btree_map(0u32..200, 0u16..4, 0..40),
+        edits in 0u64..30,
+        items in 0u64..30,
+        room in 0u64..60,
+    ) {
+        const HIGH_WATER: u64 = 1_000;
+        let mut alloc = Allocator::with_marks(HIGH_WATER, HIGH_WATER + room);
+        let mut free = ByTenancy::new();
+        for (&id, &tenancy) in &pool {
+            free.entry(Tenancy::new(tenancy).unwrap()).or_default().add(id);
+        }
+        alloc.release_after(0, free.clone());
+        alloc.promote(0);
+
+        let mut by_tenancy: Vec<(u16, u64)> =
+            pool.iter().map(|(&id, &tenancy)| (tenancy, u64::from(id))).collect();
+        by_tenancy.sort_unstable();
+        let mut expected_edits: Vec<u64> = by_tenancy
+            .iter()
+            .filter(|(tenancy, _)| *tenancy == 0)
+            .map(|(_, id)| *id)
+            .take(edits as usize)
+            .collect();
+        by_tenancy.retain(|(_, id)| !expected_edits.contains(id));
+        let mut expected_items: Vec<u64> =
+            by_tenancy.iter().map(|(_, id)| *id).take(items as usize).collect();
+        let edits_fresh = edits - expected_edits.len() as u64;
+        let items_fresh = items - expected_items.len() as u64;
+        expected_edits.extend(HIGH_WATER..HIGH_WATER + edits_fresh);
+        expected_items.extend(HIGH_WATER + edits_fresh..HIGH_WATER + edits_fresh + items_fresh);
+
+        match alloc.allocate(edits, items) {
+            Ok(given) => {
+                prop_assert!(edits_fresh + items_fresh <= room);
+                prop_assert_eq!(given.edits, expected_edits);
+                prop_assert_eq!(given.items, expected_items);
+                prop_assert_eq!(alloc.high_water(), HIGH_WATER + edits_fresh + items_fresh);
+            }
+            Err(_) => {
+                prop_assert!(edits_fresh + items_fresh > room);
+                prop_assert_eq!(alloc.free(), &free, "a refused allocation takes no freed id");
+                prop_assert_eq!(alloc.high_water(), HIGH_WATER);
+            }
+        }
+    }
+
+    /// **No id holds two items and no identifier names two**, across fuzzed rounds of windows
+    /// creating items and editing them, deletions, folds that free the ids edits left at tenancy 0
+    /// and deleted items' numbers one tenancy higher, rotations that reclaim the log, and crashes.
+    /// A fold records the allocator's sets, each as one set of ids, beside the tenancy index; a
+    /// restart splits them by that index and removes every id a kept log record names. An edit's
+    /// new entity is never an id an item has held as its number.
+    #[test]
+    fn no_identifier_names_two_items_across_folds_that_free_numbers(
         rounds in prop::collection::vec(
-            (1u64..16, 0usize..8, any::<bool>(), any::<bool>(), any::<bool>()),
-            1..24,
+            (0u64..6, 0usize..4, 0usize..3, any::<bool>(), any::<bool>(), any::<bool>()),
+            1..32,
         ),
     ) {
-        // Ids holding an item, and ids an edit left that a fold may free.
-        let mut live: HashSet<u64> = HashSet::new();
-        let mut left: Vec<u64> = Vec::new();
-        // The last publication's sets and high-water, and the log since the last rotation.
-        let mut published: (u64, Bitmap, Vec<(u64, Bitmap)>) = (0, Bitmap::new(), Vec::new());
+        // Ids holding something: an item's entity, or a number its item still resolves through.
+        let mut in_use: HashSet<u64> = HashSet::new();
+        // Live items, as (number, entity).
+        let mut items: Vec<(u64, u64)> = Vec::new();
+        // What the next fold frees, each with whether it is an item's number.
+        let mut gone: Vec<(u64, bool)> = Vec::new();
+        let mut index: HashMap<u64, u16> = HashMap::new();
+        let mut identifiers: HashSet<(u16, u64)> = HashSet::new();
+        let mut published = Published::default();
         let mut wal: Vec<WalRecord> = Vec::new();
         let mut position = 0u64;
         let mut retained_from = 0u64;
         let mut alloc = Allocator::new(0);
 
-        for (n, edits, fold, publish, crash) in rounds {
-            for id in alloc.allocate(n).unwrap() {
-                prop_assert!(live.insert(id), "entity id {} holds two items", id);
+        for (created, edits, deletes, fold, rotate, crash) in rounds {
+            let edited = edits.min(items.len());
+            let given = alloc.allocate(edited as u64, created).unwrap();
+            for (at, &entity) in given.edits.iter().enumerate() {
+                prop_assert_eq!(
+                    index.get(&entity).copied().unwrap_or(0),
+                    0,
+                    "an edit took id {} above tenancy 0",
+                    entity
+                );
+                prop_assert!(in_use.insert(entity), "entity id {} holds two items", entity);
+                let (number, old) = items[at];
+                if old != number {
+                    gone.push((old, false));
+                }
+                items[at].1 = entity;
                 position += 1;
-                wal.push(row(id));
+                wal.push(row(entity));
+                wal.push(deletion(old));
             }
-            // An edit leaves an id; the item it held moves to one allocated above.
-            let moved: Vec<u64> = live.iter().copied().take(edits).collect();
-            for id in moved {
-                live.remove(&id);
-                left.push(id);
+            for &number in &given.items {
+                prop_assert!(in_use.insert(number), "entity id {} holds two items", number);
+                let tenancy = index.get(&number).copied().unwrap_or(0);
+                prop_assert!(
+                    identifiers.insert((tenancy, number)),
+                    "the identifier of number {} at tenancy {} names two items",
+                    number,
+                    tenancy
+                );
+                items.push((number, number));
+                position += 1;
+                wal.push(row(number));
             }
-            if fold && !left.is_empty() {
-                let freed = Bitmap::of(&left.drain(..).map(|id| id as u32).collect::<Vec<_>>());
+            for _ in 0..deletes.min(items.len()) {
+                let (number, entity) = items.pop().expect("an item to delete");
+                if entity != number {
+                    gone.push((entity, false));
+                }
+                gone.push((number, true));
+                position += 1;
+                wal.push(deletion(entity));
+            }
+            if fold {
+                let mut freed = ByTenancy::new();
+                for (id, number) in gone.drain(..) {
+                    in_use.remove(&id);
+                    let tenancy = if number {
+                        let tenancy = index.entry(id).or_insert(0);
+                        *tenancy += 1;
+                        *tenancy
+                    } else {
+                        0
+                    };
+                    freed
+                        .entry(Tenancy::new(tenancy).unwrap())
+                        .or_default()
+                        .add(id as u32);
+                }
                 alloc.release_after(position, freed);
-            }
-            if publish {
-                published = (alloc.high_water(), alloc.free().clone(), alloc.held().to_vec());
-                // The rotation after a publication reclaims the log.
-                wal.clear();
-                retained_from = position;
-                alloc.promote(retained_from);
+                published = Published {
+                    high_water: alloc.high_water(),
+                    free: union_of(alloc.free()),
+                    held: alloc.held().iter().map(|(p, ids)| (*p, union_of(ids))).collect(),
+                    index: index.clone(),
+                };
+                if rotate {
+                    wal.clear();
+                    retained_from = position;
+                    alloc.promote(retained_from);
+                }
             }
             if crash {
-                let mut next = Allocator::new(published.0.max(high_water_from(&wal)));
+                let split = |ids: &Bitmap| -> ByTenancy {
+                    let mut sets: BTreeMap<Tenancy, Bitmap> = BTreeMap::new();
+                    for id in ids.iter() {
+                        let tenancy = published.index.get(&u64::from(id)).copied().unwrap_or(0);
+                        sets.entry(Tenancy::new(tenancy).unwrap()).or_default().add(id);
+                    }
+                    sets
+                };
+                let mut next = Allocator::new(published.high_water.max(high_water_from(&wal)));
                 next.seed_freed(
-                    published.1.clone(),
-                    published.2.clone(),
+                    split(&published.free),
+                    published.held.iter().map(|(p, ids)| (*p, split(ids))).collect(),
                     retained_from,
                     &entities_named(&wal),
                 );
@@ -233,6 +348,7 @@ proptest! {
             .map(|sig| PendingItem {
                 terms: sig.iter().map(|&t| TermId::new(t)).collect(),
                 entity_id: None,
+                edit: false,
             })
             .collect();
 
@@ -272,6 +388,22 @@ proptest! {
                 current = Some(sig);
             }
         }
+    }
+}
+
+/// What the last fold published: the high-water, the allocator's sets as one set of ids each,
+/// and the tenancy index.
+#[derive(Default)]
+struct Published {
+    high_water: u64,
+    free: Bitmap,
+    held: Vec<(u64, Bitmap)>,
+    index: HashMap<u64, u16>,
+}
+
+fn deletion(id: u64) -> WalRecord {
+    WalRecord::ChangeBatch {
+        changes: vec![(EntityId::new(id), ChangeOp::Delete)],
     }
 }
 

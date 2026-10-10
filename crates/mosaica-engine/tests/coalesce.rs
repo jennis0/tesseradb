@@ -30,7 +30,12 @@ const RUN_WIDTH: usize = 4;
 
 /// The live key runs of the fixture's unique `id`.
 fn live_runs(manifest: &mosaica_store::manifest::SegmentsManifest) -> &[String] {
-    &manifest.unique_indexes.iter().find(|i| i.attribute == "id").expect("`id` is unique").live
+    &manifest
+        .unique_indexes
+        .iter()
+        .find(|i| i.attribute == "id")
+        .expect("`id` is unique")
+        .live
 }
 
 /// Drive ticks until the tiers are one and the key runs are fewer than a run window, which is
@@ -49,8 +54,16 @@ fn assert_runs_coalesced(
     before: &mosaica_store::manifest::SegmentsManifest,
 ) {
     let base = |m: &mosaica_store::manifest::SegmentsManifest| {
-        let index = m.unique_indexes.iter().find(|i| i.attribute == "id").unwrap();
-        index.base.iter().map(|run| run.path.clone()).collect::<Vec<_>>()
+        let index = m
+            .unique_indexes
+            .iter()
+            .find(|i| i.attribute == "id")
+            .unwrap();
+        index
+            .base
+            .iter()
+            .map(|run| run.path.clone())
+            .collect::<Vec<_>>()
     };
     assert_eq!(base(after), base(before));
     assert!(live_runs(after).len() < RUN_WIDTH);
@@ -181,7 +194,11 @@ fn a_coalesce_bounds_the_three_entity_space_axes_without_moving_geometry() {
 
     // **Every value still names its item, live** — through the swapped index, not the old one.
     for (entity, key) in &ingested {
-        assert_eq!(item_of_key(&engine, key), Some(*entity), "{key} lost its item to the coalesce");
+        assert_eq!(
+            item_of_key(&engine, key),
+            Some(*entity),
+            "{key} lost its item to the coalesce"
+        );
     }
 }
 
@@ -339,7 +356,11 @@ fn a_configured_coalesce_width_reaches_selection_and_changes_when_the_pass_fires
         "two tiers became one at the configured width"
     );
     for (entity, key) in &ingested {
-        assert_eq!(item_of_key(&engine, key), Some(*entity), "{key} lost its item to the coalesce");
+        assert_eq!(
+            item_of_key(&engine, key),
+            Some(*entity),
+            "{key} lost its item to the coalesce"
+        );
     }
 }
 
@@ -581,15 +602,28 @@ struct Answers {
 }
 
 fn assert_same(got: &Answers, expected: &Answers, when: &str) {
-    assert_eq!(got.entities, expected.entities, "an id's item changed at the {when}");
-    assert_eq!(got.tiles, expected.tiles, "a masked count changed at the {when}");
-    assert_eq!(got.items, expected.items, "a drill-down changed at the {when}");
+    assert_eq!(
+        got.entities, expected.entities,
+        "an id's item changed at the {when}"
+    );
+    assert_eq!(
+        got.tiles, expected.tiles,
+        "a masked count changed at the {when}"
+    );
+    assert_eq!(
+        got.items, expected.items,
+        "a drill-down changed at the {when}"
+    );
 }
 
 fn answers(engine: &Engine, bindings: &[(EntityId, u64)]) -> Answers {
     let sessions: Vec<_> = [full_coverage_credential(), subset_credential()]
         .iter()
-        .map(|credential| engine.authorise(credential).expect("the session authorises"))
+        .map(|credential| {
+            engine
+                .authorise(credential)
+                .expect("the session authorises")
+        })
         .collect();
     Answers {
         entities: bindings
@@ -653,7 +687,10 @@ fn a_folds_carried_tiers_and_runs_are_coalesced_and_every_answer_holds_through_a
     let engine = engine_at(tmp.path(), &root);
     // Off until the answers after the fold are recorded, so the coalesce cannot run first.
     engine.set_coalesce_for_test(false);
-    let baseline: u64 = answers(&engine, &bindings).tiles[0].iter().map(|t| t.1).sum();
+    let baseline: u64 = answers(&engine, &bindings).tiles[0]
+        .iter()
+        .map(|t| t.1)
+        .sum();
 
     // Denied before the fold: this deletion is the fold's to retire.
     let deleted_before = base_entity(4);
@@ -698,20 +735,29 @@ fn a_folds_carried_tiers_and_runs_are_coalesced_and_every_answer_holds_through_a
     engine.set_fold_paused_for_test(false);
     wait_until("the fold to publish", WAIT, || {
         let now = engine.write_executor_stats();
-        assert_eq!(now.fold_failures, before_fold.fold_failures, "the fold was discarded");
+        assert_eq!(
+            now.fold_failures, before_fold.fold_failures,
+            "the fold was discarded"
+        );
         now.folds > before_fold.folds
     });
 
     // Every carried entry is digested in the new prefix's MANIFEST.json.
     let folded = manifest_of(&root);
     assert_eq!(folded.deltas.len(), WIDTH, "one carried tier per flush");
-    assert_eq!(live_runs(&folded).len(), WIDTH, "one carried key run per flush");
+    assert_eq!(
+        live_runs(&folded).len(),
+        WIDTH,
+        "one carried key run per flush"
+    );
     let digested = mosaica_store::open_bundle(&root)
         .expect("the bundle opens")
         .manifest
         .files;
     assert!(folded.deltas.iter().all(|tier| digested.contains_key(tier)));
-    assert!(live_runs(&folded).iter().all(|run| digested.contains_key(run)));
+    assert!(live_runs(&folded)
+        .iter()
+        .all(|run| digested.contains_key(run)));
 
     bindings.extend(carried.iter().cloned());
     let expected = answers(&engine, &bindings);
@@ -744,7 +790,8 @@ fn a_folds_carried_tiers_and_runs_are_coalesced_and_every_answer_holds_through_a
 
     // A second fold retires the deletions the first could not, including one whose run the
     // coalesce merged. Every deleted value, the one the first fold retired among them, then names
-    // nothing and can be ingested again as a new entity.
+    // nothing and can be ingested again as a new item: one that takes a retired entity's number
+    // holds it at a higher tenancy.
     fold(&engine);
     let retired = [
         (deleted_before, 4),
@@ -758,8 +805,17 @@ fn a_folds_carried_tiers_and_runs_are_coalesced_and_every_answer_holds_through_a
             "a retired entity's value names nothing"
         );
         let reborn = ingest_with(&engine, *id, &[b"0"], &format!("reborn-{i}"));
-        assert_ne!(reborn, *entity, "a re-ingest takes a fresh entity");
-        assert_eq!(item_of_id(&engine, *id).expect("the index reads"), Some(reborn));
+        let (high, _) = test_key()
+            .invert(engine.mosaica_id_of(reborn).unwrap())
+            .unwrap();
+        assert!(
+            reborn != *entity || high.tenancy.raw() > 0,
+            "a re-ingest is a new item, under a mosaica_id the deleted one never had"
+        );
+        assert_eq!(
+            item_of_id(&engine, *id).expect("the index reads"),
+            Some(reborn)
+        );
     }
 }
 
@@ -788,7 +844,9 @@ struct Interleaved {
 
 fn interleaved_answers(engine: &Engine, entities: &[EntityId]) -> Interleaved {
     use mosaica_engine::filter::{Endpoint, FilterExpr, FilterOperand, Scalar};
-    let session = engine.authorise(&full_coverage_credential()).expect("the session authorises");
+    let session = engine
+        .authorise(&full_coverage_credential())
+        .expect("the session authorises");
     let fields = entities
         .iter()
         .map(|entity| {
@@ -956,11 +1014,18 @@ fn interleaved_extents_from_two_views_coalesce_and_every_entity_answers_the_same
             m.entity_terms_extents.len(),
         ]
     };
-    assert_eq!(lists(&manifest), [WIDTH; 5], "one extent per flush on every list");
+    assert_eq!(
+        lists(&manifest),
+        [WIDTH; 5],
+        "one extent per flush on every list"
+    );
     let before = interleaved_answers(&engine, &entities);
     for fields in &before.fields {
         for name in ["note", "tag", "prose", "weight"] {
-            assert!(fields.iter().any(|f| f.0 == name), "'{name}' is served: {fields:?}");
+            assert!(
+                fields.iter().any(|f| f.0 == name),
+                "'{name}' is served: {fields:?}"
+            );
         }
     }
 
@@ -968,14 +1033,25 @@ fn interleaved_extents_from_two_views_coalesce_and_every_entity_answers_the_same
     let stats = engine.write_executor_stats();
     tick_until(&engine, "the coalesce to publish", WAIT, || {
         let now = engine.write_executor_stats();
-        assert_eq!(now.coalesce_failures, stats.coalesce_failures, "a coalesce failed");
+        assert_eq!(
+            now.coalesce_failures, stats.coalesce_failures,
+            "a coalesce failed"
+        );
         now.coalesces > stats.coalesces
     });
     let after = manifest_of(&root);
     assert_eq!(lists(&after), [1; 5], "every list collapsed to one extent");
-    assert_eq!(interleaved_answers(&engine, &entities), before, "live, after the coalesce");
+    assert_eq!(
+        interleaved_answers(&engine, &entities),
+        before,
+        "live, after the coalesce"
+    );
 
     drop(engine);
     let engine = engine_at(tmp.path(), &root);
-    assert_eq!(interleaved_answers(&engine, &entities), before, "after a restart");
+    assert_eq!(
+        interleaved_answers(&engine, &entities),
+        before,
+        "after a restart"
+    );
 }

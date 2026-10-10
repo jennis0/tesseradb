@@ -84,17 +84,47 @@ pub(super) struct FoldDerived<'a> {
     pub(super) freed: &'a mosaica_store::manifest::HeldEntities,
 }
 
-/// The entities of `executed` the allocator may issue again: each one whose number, the entity
-/// its item was first given, is another. An item's number is never freed, so a `mosaica_id` a
-/// client holds never comes to name another item.
-fn freed_by(
+/// What a fold frees and retires, by the rule [`freeing`] states.
+struct Freeing {
+    /// The ids the allocator may issue again, each at the tenancy it is issued at.
+    ids: mosaica_lifecycle::ByTenancy,
+    /// The numbers among them, each one tenancy higher in the index the fold publishes.
+    raised: croaring::Bitmap,
+    /// The numbers whose last entity the fold removes at the highest tenancy, never issued again.
+    retired: croaring::Bitmap,
+}
+
+/// What the fold that removes `executed` from `live` frees.
+///
+/// An executed entity an edit gave an item is no item's number, and is freed at tenancy 0. Its
+/// number, or the entity itself where it is a number, is freed when the fold removes the number's
+/// last entity: the number and every entity the edited-items map pairs with it is executed here
+/// or already gone, holding no row, buffered or flushed, and no deny record. Until then the number
+/// resolves through the map, so its next holder would resolve to an entity of its last. A freed
+/// number is issued one tenancy above the one the index holds for it, and one at the highest
+/// tenancy is retired instead. An entity at or above `high_water`, the allocator's, is row-less (an
+/// artifact or a layer) and is never freed.
+///
+/// Read before the swap, while the map still holds the pairs of the entities this fold removes,
+/// and on the executor thread, so no window commits between this read and the swap.
+///
+/// A restart after the fold's publication and before the log rotates past it replays the
+/// deletions of what the fold removed, and the next fold frees those numbers again, one tenancy
+/// higher. The tenancy skipped was never issued, since the ids are held until that rotation.
+fn freeing(
     live: &Generation,
     executed: &croaring::Bitmap,
-) -> Result<croaring::Bitmap, mosaica_store::StoreError> {
+    high_water: u64,
+) -> Result<Freeing, mosaica_store::StoreError> {
     const CHUNK: usize = 1 << 16;
-    let mut freed = croaring::Bitmap::new();
+    let mut points = executed.clone();
+    if let Ok(high_water) = u32::try_from(high_water) {
+        points.remove_range(high_water..);
+    }
+    let mut left = croaring::Bitmap::new();
+    let mut candidates = croaring::Bitmap::new();
     let mut entities: Vec<EntityId> = Vec::with_capacity(CHUNK);
-    let mut iter = executed.iter().peekable();
+    let mut iter = points.iter().peekable();
     while iter.peek().is_some() {
         entities.clear();
         entities.extend(
@@ -105,11 +135,105 @@ fn freed_by(
         let numbers = crate::edited::numbers_of(live, &entities)?;
         for (entity, number) in entities.iter().zip(numbers) {
             if number != *entity {
-                freed.add(entity.raw() as u32);
+                left.add(entity.raw() as u32);
+            }
+            candidates.add(number.raw() as u32);
+        }
+    }
+
+    let gone = |entity: EntityId| {
+        executed.contains(entity.raw() as u32)
+            || (!live.overlay.touches(entity) && !crate::edited::holds(live, entity))
+    };
+    let mut numbers = croaring::Bitmap::new();
+    let mut chunk: Vec<u32> = Vec::with_capacity(CHUNK);
+    let mut iter = candidates.iter().peekable();
+    while iter.peek().is_some() {
+        chunk.clear();
+        chunk.extend(iter.by_ref().take(CHUNK));
+        let entries = crate::edited::entries_of(live, &chunk)?;
+        for (number, entries) in chunk.iter().zip(entries) {
+            if gone(EntityId::new(u64::from(*number))) && entries.into_iter().all(gone) {
+                numbers.add(*number);
             }
         }
     }
+
+    let mut freed = Freeing {
+        ids: mosaica_lifecycle::ByTenancy::new(),
+        raised: croaring::Bitmap::new(),
+        retired: croaring::Bitmap::new(),
+    };
+    if !left.is_empty() {
+        freed.ids.insert(mosaica_types::Tenancy::ZERO, left);
+    }
+    for (tenancy, at) in live.tenancy.split(&numbers) {
+        match tenancy.next() {
+            Some(next) => {
+                freed.raised.or_inplace(&at);
+                freed.ids.entry(next).or_default().or_inplace(&at);
+            }
+            None => freed.retired.or_inplace(&at),
+        }
+    }
     Ok(freed)
+}
+
+/// The tenancy index a fold publishes.
+struct NextTenancy {
+    /// The live index's files for the bits the fold leaves as they are, which it links.
+    shared: Vec<mosaica_store::manifest::TenancyBit>,
+    /// The files it wrote for the bits it changes, with their paths, which it digests.
+    written: Vec<(mosaica_store::manifest::TenancyBit, PathBuf)>,
+}
+
+impl NextTenancy {
+    /// Every bit's entry, as the side-manifest names them.
+    fn index(&self) -> Vec<mosaica_store::manifest::TenancyBit> {
+        let mut index: Vec<mosaica_store::manifest::TenancyBit> = self
+            .shared
+            .iter()
+            .cloned()
+            .chain(self.written.iter().map(|(entry, _)| entry.clone()))
+            .collect();
+        index.sort_by_key(|entry| entry.bit);
+        index
+    }
+}
+
+/// Write the tenancy index a fold publishes into `prefix_dir`: each bit `raised` changes as a new
+/// file, fsynced, and each it leaves shared with `live`.
+fn write_next_tenancy_index(
+    prefix_dir: &Path,
+    partition: &str,
+    live: &[mosaica_store::manifest::TenancyBit],
+    raised: &[Option<croaring::Bitmap>; mosaica_store::tenancy::TENANCY_BITS],
+) -> Result<NextTenancy, mosaica_store::StoreError> {
+    use mosaica_store::tenancy::{file_name, write_bit, TENANCY_DIR};
+    let dir_rel = format!("partitions/{partition}/{TENANCY_DIR}");
+    let mut next = NextTenancy {
+        shared: live
+            .iter()
+            .filter(|entry| matches!(raised.get(entry.bit as usize), Some(None)))
+            .cloned()
+            .collect(),
+        written: Vec::new(),
+    };
+    for (bit, numbers) in raised.iter().enumerate() {
+        let Some(numbers) = numbers else { continue };
+        let bit = bit as u32;
+        if let Some(path) = write_bit(&prefix_dir.join(&dir_rel), bit, numbers)? {
+            let path_rel = format!("{dir_rel}/{}", file_name(bit));
+            let entry = mosaica_store::manifest::TenancyBit {
+                bit,
+                path: path_rel,
+            };
+            next.written.push((entry, path));
+        }
+    }
+    let paths: Vec<PathBuf> = next.written.iter().map(|(_, path)| path.clone()).collect();
+    mosaica_store::fsync_written(&paths)?;
+    Ok(next)
 }
 
 /// The fold-written files whose stamped version is the level's now, after the fold's retirement
@@ -515,6 +639,7 @@ pub(super) fn carried_files(
     live_manifest: &SegmentsManifest,
     bundle_files: &std::collections::BTreeMap<String, mosaica_store::manifest::FileDigest>,
     forward: &CarriedExtents,
+    shared_tenancy: &[mosaica_store::manifest::TenancyBit],
 ) -> std::collections::BTreeSet<String> {
     // A segment an earlier fold carried has its files listed in the bundle's manifest.
     let listed =
@@ -565,12 +690,7 @@ pub(super) fn carried_files(
     }
     rels.extend(forward.edited.files().map(String::from));
     rels.extend(live_manifest.dict_extents.iter().map(|e| e.path.clone()));
-    rels.extend(
-        live_manifest
-            .tenancy_index
-            .iter()
-            .map(|bit| bit.path.clone()),
-    );
+    rels.extend(shared_tenancy.iter().map(|bit| bit.path.clone()));
     rels
 }
 
@@ -1159,10 +1279,8 @@ impl Executor {
                     .map(|d| (*d).clone()),
             );
         }
-        // Read before the swap, while the edited-items map still holds the retired entities'
-        // pairs.
-        let freed = match freed_by(&live, &executed) {
-            Ok(freed) => freed,
+        let freeing = match freeing(&live, &executed, self.live.allocator_high_water()) {
+            Ok(freeing) => freeing,
             Err(e) => {
                 discard(&format!(
                     "the entities it retires could not be told apart from items' numbers ({e})"
@@ -1170,6 +1288,24 @@ impl Executor {
                 return;
             }
         };
+        let next_tenancy = match write_next_tenancy_index(
+            &to_prefix_dir,
+            &plan.partition,
+            &live_manifest.tenancy_index,
+            &live.tenancy.raised(&freeing.raised),
+        ) {
+            Ok(next) => next,
+            Err(e) => {
+                discard(&format!("its tenancy index would not be written ({e})"));
+                return;
+            }
+        };
+        let mut retired_numbers = live_manifest
+            .retired_numbers
+            .entities()
+            .cloned()
+            .unwrap_or_default();
+        retired_numbers.or_inplace(&freeing.retired);
         // The suppressions leaving with their entities are logged before the manifest omits
         // them, so a replay of the suppressions the log still holds ends without them. Each entity
         // is deleted until this fold's swap, so the record hides nothing less even if the fold is
@@ -1194,11 +1330,13 @@ impl Executor {
         // carrying what the swap is about to retire would re-seed the overlay at the next restart.
         let mut published_overlay = (*live.overlay).clone();
         published_overlay.retire(&executed);
-        let frees = !freed.is_empty();
+        let frees = !freeing.ids.is_empty();
         // At the log position no later record can name the freed ids at.
         let freed = mosaica_store::manifest::HeldEntities {
             position: self.log.wal.position(),
-            entities: mosaica_store::manifest::EntitySet::of(&freed),
+            entities: mosaica_store::manifest::EntitySet::of(&mosaica_lifecycle::alloc::union_of(
+                &freeing.ids,
+            )),
         };
 
         let (runtime_attributes, runtime_scoped_attributes) =
@@ -1275,10 +1413,8 @@ impl Executor {
                     live: forward.edited.by_entity.live.clone(),
                 },
             },
-            // Live and unchanged, its files linked forward: a fold frees no number, so no number's
-            // tenancy moves.
-            tenancy_index: live_manifest.tenancy_index.clone(),
-            retired_numbers: live_manifest.retired_numbers.clone(),
+            tenancy_index: next_tenancy.index(),
+            retired_numbers: mosaica_store::manifest::EntitySet::of(&retired_numbers),
             ..SegmentsManifest::empty()
         };
         write_deny_state(&mut segments_manifest, &published_overlay);
@@ -1286,11 +1422,23 @@ impl Executor {
         // ---- the new `MANIFEST.json` ----------------------------------------------------------
         let mut bundle_manifest = self.fold_bundle_manifest(&live, &completed, plan);
 
+        for (entry, path) in &next_tenancy.written {
+            match mosaica_store::digest_of(path) {
+                Ok(digest) => {
+                    bundle_manifest.files.insert(entry.path.clone(), digest);
+                }
+                Err(e) => {
+                    discard(&format!("its tenancy index would not digest ({e})"));
+                    return;
+                }
+            }
+        }
         let carried_rels = carried_files(
             &plan.partition,
             live_manifest,
             &live.bundle.manifest.files,
             &forward,
+            &next_tenancy.shared,
         );
         for rel in &carried_rels {
             let Some(digest) = live_manifest
@@ -1460,11 +1608,16 @@ impl Executor {
         // Immediately: the manifest seed no longer carries the executed entries, but the WAL still
         // holds the original delete records until a rotation reclaims them. The freed ids are
         // issued once it has.
-        if let Some(ids) = freed.entities.entities() {
-            let ids = ids.clone();
-            self.live
-                .with_allocator(|alloc| alloc.release_after(freed.position, ids));
-        }
+        let (freed_ids, freed_numbers, retired_now) = (
+            freed
+                .entities
+                .entities()
+                .map_or(0, croaring::Bitmap::cardinality),
+            freeing.raised.cardinality(),
+            freeing.retired.cardinality(),
+        );
+        self.live
+            .with_allocator(|alloc| alloc.release_after(freed.position, freeing.ids));
         self.rotate_wal();
         stairs.record("16 wal");
         self.live.with_attributes(|attributes| {
@@ -1520,6 +1673,9 @@ impl Executor {
             prefix = %completed.prefix,
             segments_version,
             retired = retired_count,
+            freed_ids,
+            freed_numbers,
+            retired_numbers = retired_now,
             carried_entities,
             elapsed_ms = started.elapsed().as_millis() as u64,
             passes = %passes,

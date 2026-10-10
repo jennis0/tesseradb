@@ -70,7 +70,8 @@ pub(crate) struct LiveState {
     pub(in crate::write) vocabularies: Mutex<crate::vocabularies::RuntimeVocabularies>,
     /// The view groups and plain views declared while the service runs and not yet folded, on
     /// the vocabulary list's contract.
-    pub(in crate::write) view_declarations: Mutex<crate::view_declarations::RuntimeViewDeclarations>,
+    pub(in crate::write) view_declarations:
+        Mutex<crate::view_declarations::RuntimeViewDeclarations>,
 }
 
 impl LiveState {
@@ -82,23 +83,26 @@ impl LiveState {
         lock_recover(&self.allocator).low_water()
     }
 
-    /// The allocator's freed ids and the sets it holds back, as a side-manifest records them.
+    /// The allocator's freed ids and the sets it holds back, as a side-manifest records them: each
+    /// set as one set of ids, which a restart splits by the tenancy index published beside it.
     pub(crate) fn allocator_freed(
         &self,
     ) -> (
         mosaica_store::manifest::EntitySet,
         Vec<mosaica_store::manifest::HeldEntities>,
     ) {
+        use mosaica_lifecycle::alloc::union_of;
         let alloc = lock_recover(&self.allocator);
         let held = alloc
             .held()
             .iter()
             .map(|(position, ids)| mosaica_store::manifest::HeldEntities {
                 position: *position,
-                entities: mosaica_store::manifest::EntitySet::of(ids),
+                entities: mosaica_store::manifest::EntitySet::of(&union_of(ids)),
             })
             .collect();
-        (mosaica_store::manifest::EntitySet::of(alloc.free()), held)
+        let free = mosaica_store::manifest::EntitySet::of(&union_of(alloc.free()));
+        (free, held)
     }
 
     /// Runs `f` with both the registry and the allocator held, in that lock order.
@@ -157,7 +161,9 @@ impl LiveState {
 
     /// The supplied content of every artifact not yet in a manifest. See
     /// [`mosaica_lifecycle::membership::ArtifactStore::unpublished_content`].
-    pub(in crate::write) fn unpublished_content(&self) -> Vec<(mosaica_types::EntityId, Vec<(u16, String)>)> {
+    pub(in crate::write) fn unpublished_content(
+        &self,
+    ) -> Vec<(mosaica_types::EntityId, Vec<(u16, String)>)> {
         lock_recover(&self.artifacts).unpublished_content()
     }
 
@@ -259,7 +265,10 @@ impl LiveState {
     /// Apply the fold's executed deletions to the resident artifact store: retired artifacts leave
     /// their levels, retired members leave the memberships that survive, and orphaned content is
     /// withdrawn. Returns the levels the retirement moved.
-    pub(in crate::write) fn retire_artifacts(&self, retired: &croaring::Bitmap) -> Vec<(String, u32)> {
+    pub(in crate::write) fn retire_artifacts(
+        &self,
+        retired: &croaring::Bitmap,
+    ) -> Vec<(String, u32)> {
         lock_recover(&self.artifacts).retire(retired)
     }
 
@@ -345,7 +354,10 @@ impl LiveState {
     }
 
     /// Run `f` with the roster held: the create and drop preparations, and nothing else.
-    pub(in crate::write) fn with_roster<R>(&self, f: impl FnOnce(&mut mosaica_lifecycle::ViewRoster) -> R) -> R {
+    pub(in crate::write) fn with_roster<R>(
+        &self,
+        f: impl FnOnce(&mut mosaica_lifecycle::ViewRoster) -> R,
+    ) -> R {
         let mut roster = lock_recover(&self.roster);
         f(&mut roster)
     }

@@ -25,6 +25,7 @@
 //! that are not a frozen bitmap is undefined, so that the payload is what the writer produced rests
 //! on the bundle's digest sweep, as it does for [`crate::term_images`].
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -289,6 +290,33 @@ impl TenancyIndex {
             .collect()
     }
 
+    /// `numbers` split by the tenancy each is at, with no entry for a tenancy holding none of
+    /// them. Bitmap arithmetic, one pass over the bits the index holds.
+    pub fn split(&self, numbers: &Bitmap) -> BTreeMap<Tenancy, Bitmap> {
+        let mut groups: Vec<(u16, Bitmap)> = vec![(0, numbers.clone())];
+        groups.retain(|(_, ids)| !ids.is_empty());
+        for (bit, mapped) in self.bits.iter().enumerate() {
+            let Some(mapped) = mapped else { continue };
+            groups = groups
+                .into_iter()
+                .flat_map(|(raw, ids)| {
+                    let set = ids.and(&mapped.view);
+                    let unset = ids.andnot(&set);
+                    [(raw | 1 << bit, set), (raw, unset)]
+                })
+                .filter(|(_, ids)| !ids.is_empty())
+                .collect();
+        }
+        groups
+            .into_iter()
+            .map(|(raw, ids)| {
+                let tenancy =
+                    Tenancy::new(raw).expect("twelve bits hold at most the highest tenancy");
+                (tenancy, ids)
+            })
+            .collect()
+    }
+
     /// The bits of the index with each of `numbers` one tenancy higher: `Some` for a bit the raise
     /// changes, possibly to empty, and `None` for one it leaves as it is, whose file the next index
     /// can share. Each bit is the previous one with the numbers carried into it flipped, and the
@@ -396,6 +424,32 @@ mod tests {
             TenancyIndex::default().of_each(asked.iter().copied()),
             vec![Tenancy::ZERO; asked.len()]
         );
+    }
+
+    #[test]
+    fn a_split_puts_each_number_at_the_tenancy_a_lookup_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        let held: Vec<(u32, u16)> = (0..500u32).map(|n| (n * 3, (n % 7) as u16 * 600)).collect();
+        let index = written(dir.path(), &bits_of(&held));
+        let asked = Bitmap::from_range(0..1_600);
+        let split = index.split(&asked);
+        assert_eq!(
+            split.values().map(Bitmap::cardinality).sum::<u64>(),
+            asked.cardinality(),
+            "every number is in exactly one tenancy"
+        );
+        for (tenancy, numbers) in &split {
+            assert!(!numbers.is_empty(), "an empty tenancy has no entry");
+            for number in numbers.iter() {
+                assert_eq!(index.of(EntityId::new(u64::from(number))), *tenancy);
+            }
+        }
+        assert_eq!(
+            TenancyIndex::default().split(&asked),
+            BTreeMap::from([(Tenancy::ZERO, asked.clone())])
+        );
+        assert!(index.split(&Bitmap::new()).is_empty());
+        assert!(TenancyIndex::default().split(&Bitmap::new()).is_empty());
     }
 
     #[test]

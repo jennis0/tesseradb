@@ -62,11 +62,7 @@ fn delete_then_reingest_gives_the_value_to_the_new_item_across_flush_rotation_an
 
     // First life: ingest doc-1, flush it so its value reaches a key run.
     let first = engine
-        .ingest_rows(
-            vec![row(&engine, "doc-1")],
-            "life-1".to_string(),
-            [1u8; 32],
-        )
+        .ingest_rows(vec![row(&engine, "doc-1")], "life-1".to_string(), [1u8; 32])
         .expect("first ingest accepted")[0];
     engine.request_flush();
     wait_until("first flush publishes", WAIT, || {
@@ -81,15 +77,11 @@ fn delete_then_reingest_gives_the_value_to_the_new_item_across_flush_rotation_an
     // Second life: the same value, accepted — the executor's own backstop check is the one this
     // exercises (no HTTP handler in front of it here).
     let second = engine
-        .ingest_rows(
-            vec![row(&engine, "doc-1")],
-            "life-2".to_string(),
-            [2u8; 32],
-        )
+        .ingest_rows(vec![row(&engine, "doc-1")], "life-2".to_string(), [2u8; 32])
         .expect("a deleted holder does not block re-ingest")[0];
     assert_ne!(
         first, second,
-        "I9: the dead entity's id is burned, never reused"
+        "I9: the deleted entity's id is not issued again before a fold frees it"
     );
 
     engine.request_flush();
@@ -129,7 +121,11 @@ fn delete_then_reingest_gives_the_value_to_the_new_item_across_flush_rotation_an
 /// An engine over the fixture in `dir`, its executor running and no flush or fold of its own.
 fn open_engine(dir: &std::path::Path) -> Engine {
     let root = dir.join("bundle");
-    build_fixture(&root, &dir.join("points.parquet"), &dir.join("pairs.parquet"));
+    build_fixture(
+        &root,
+        &dir.join("points.parquet"),
+        &dir.join("pairs.parquet"),
+    );
     let mut engine = Engine::open(
         &root,
         &dir.join("cache"),

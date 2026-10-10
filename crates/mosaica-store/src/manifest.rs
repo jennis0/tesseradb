@@ -2220,8 +2220,8 @@ pub struct SegmentsManifest {
     /// fold has removed.
     pub edited_items: EditedItemsRuns,
     /// The entity ids a fold freed that the allocator issues before its high-water, as of this
-    /// publication (`mosaica_lifecycle::alloc`). Ids that do not decode are read as none, which
-    /// issues nothing twice.
+    /// publication (`mosaica_lifecycle::alloc`), each at the tenancy [`Self::tenancy_index`] holds
+    /// for it. Ids that do not decode are read as none, which issues nothing twice.
     pub free_entities: EntitySet,
     /// Freed entity ids the allocator holds back until the log keeps no record older than the
     /// position beside them.

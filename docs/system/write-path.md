@@ -551,33 +551,47 @@ an explicit unsuppress lifts the suppression of an item that exists (Rule S).
 
 ### Freed entity ids
 
-A compaction also frees entity ids. Every entity it removes is freed, so its id can be given to a
-new entity, except an item's number. An item's first entity id is its number, from which its
-`mosaica_id` is derived, and it stays reserved after the item is deleted, so a `mosaica_id` a client
-holds never comes to name another item. The entities an edit leaves are removed and freed, including
-one an edit made and a later edit or deletion left before any flush placed it: the edited-items map
-keeps its pair until the compaction that removes it, which is how the compaction tells it from a
-number. A restart restores such a pair from the log, and where the log no longer holds the edit the
-entity is removed without being freed. An entity a suppression stood against is freed like any
-other, since the compaction drops its suppression with it, and the item that takes the id is not
-suppressed. An item edited again and again therefore holds its number and at most two other ids: the
-entity it is in, and the one its last edit left, until a compaction frees it. Under repeated edits
-of the same items the high point of the id space stops rising after the second compaction.
+A compaction also frees entity ids. An item's first entity id is its number, from which its
+`mosaica_id` is derived together with the number's tenancy: how many items held the number before
+it. The entities an edit leaves are removed and freed at tenancy 0, including one an edit made and
+a later edit or deletion left before any flush placed it: the edited-items map keeps its pair until
+the compaction that removes it, which is how the compaction tells it from a number. A restart
+restores such a pair from the log, and where the log no longer holds the edit the entity is removed
+without being freed. An entity a suppression stood against is freed like any other, since the
+compaction drops its suppression with it, and the item that takes the id is not suppressed. An item
+edited again and again therefore holds its number and at most two other ids: the entity it is in,
+and the one its last edit left, until a compaction frees it. Under repeated edits of the same items
+the high point of the id space stops rising after the second compaction.
+
+A deleted item's number is freed by the compaction that removes its last entity: the number itself
+and every entity the edited-items map pairs with it. Until then the number resolves through the
+map, so an item edited and then deleted while a compaction runs keeps its number until the next
+compaction. An item deleted before any flush placed it has no rows, and the compaction that retires
+its deletion frees its number. The compaction raises the number's tenancy by one in the tenancy
+index it publishes, so the next item to take the number has a `mosaica_id` no earlier holder had,
+and a deleted item's `mosaica_id` goes on naming nothing. A number at the highest tenancy, 4,095, is
+retired instead: the side-manifest records it, and it is never issued again. Row-less entities,
+artifacts and layers, are never freed.
 
 A freed id is held back until the WAL has rotated past the compaction's publication. Until then a
 restart would replay records naming the id's previous holder, its rows, its deletion and its
-memberships, onto whatever took the id. Once the log keeps no such record, the id is free, and the
-allocator issues free ids, lowest first, before any id from its high point.
+memberships, onto whatever took the id. Once the log keeps no such record, the id is free. The
+allocator issues free ids before any id from its high point. A commit window's edits draw first,
+each from tenancy 0, lowest id first, since an edit's new entity carries its item's `mosaica_id` and
+never becomes a number. Its new items then take the lowest tenancy, lowest id first. A restart
+between a compaction and the rotation after it replays the deletions the compaction executed, so
+the next compaction frees those numbers again, one tenancy higher. The tenancy skipped was never
+issued.
 
 Every side-manifest records the free ids and the held-back ones, each set with the WAL position it
-waits for. A restart takes both from the newest manifest it serves, frees the sets whose position
-the log has passed, and removes every id a replayed record or the overlay names from the free and
-the held sets alike. In a free set such an id was issued after the manifest was written; in a set
-still held it is named by a record of its previous holder, which the replay has applied, so it is
-never freed. The ids an artifact publication or growth names count, as do the rows, deletions and
-snapshots. A partition serving
-an older manifest after a step-down issues no freed id, since the manifest it serves can list an
-id issued since.
+waits for, beside the tenancy index. A restart takes both from the newest manifest it serves,
+splits them by that index, frees the sets whose position the log has passed, and removes every id
+a replayed record or the overlay names from the free and the held sets alike. In a free set such
+an id was issued after the manifest was written; in a set still held it is named by a record of
+its previous holder, which the replay has applied, so that set never frees it. The ids an artifact
+publication or growth names count, as do the rows, deletions and snapshots. A partition serving an
+older manifest after a step-down issues no freed id, since the manifest it serves can list an id
+issued since.
 
 A freed id is lower than the entities a view already has rows for, and so is an older item added to
 a view in place, so a flush cannot place such a row by extending the segment's range of entities

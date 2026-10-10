@@ -84,7 +84,9 @@ fn a_row_acked_during_a_flush_survives_rotation_and_a_restart() {
         // The first flush's rotation opened member 2 before this ingest was acked; the member
         // the next rotation opens is the one that follows the second row's flush.
         wait_until("a rotation", WAIT, || {
-            members(tmp.path()).iter().any(|m| m.as_str() >= "wal-000003.log")
+            members(tmp.path())
+                .iter()
+                .any(|m| m.as_str() >= "wal-000003.log")
         });
         second
     };
@@ -145,8 +147,9 @@ fn a_suppression_accepted_before_a_rotation_is_still_in_force_after_a_restart() 
 /// deletes before flushing therefore stopped reclaiming the log at all, which is the one lane that
 /// structurally cannot be shed.
 ///
-/// The end state asserted here is decision 0047's *forgotten*: no row, no buffer entry, the id
-/// still burned, and the deny still in force across a restart from the rotation's snapshot alone.
+/// The end state asserted here is decision 0047's *forgotten*: no row, no buffer entry, the id not
+/// issued again before a fold frees it, and the deny still in force across a restart from the
+/// rotation's snapshot alone.
 #[test]
 fn a_row_deleted_before_its_first_flush_stops_pinning_the_log() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -191,7 +194,7 @@ fn a_row_deleted_before_its_first_flush_stops_pinning_the_log() {
     );
     assert!(
         reopened.allocator_high_water() >= deleted.raw(),
-        "the id stays burned (I9) — a deletion never returns one to the allocator"
+        "the high-water stays past the deleted id (I9): only a fold frees a deleted item's number"
     );
 }
 

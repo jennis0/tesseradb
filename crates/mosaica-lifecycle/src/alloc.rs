@@ -9,13 +9,19 @@
 //!
 //! An edit moves an item to a new entity and keeps its number, the entity it was first given,
 //! from which its `mosaica_id` is taken. The entity it leaves is deleted, and the fold that
-//! removes its rows frees it. A freed id is issued again before any id from the high-water, so
-//! repeated edits reuse a bounded set of ids rather than growing the id space and everything sized
-//! by it.
+//! removes its rows frees it at tenancy 0. A deleted item's number is freed by the fold that
+//! removes the number's last entity, one tenancy higher than it was, so the item that takes it next
+//! has a `mosaica_id` no earlier holder had; a number at [`Tenancy::MAX`] is retired instead and
+//! never freed. The tenancy index records each number's tenancy (`mosaica_store::tenancy`), and
+//! the free and held sets here are kept by tenancy. A row-less entity is never freed.
 //!
-//! Only an entity that is no item's number is freed. A deleted item's number stays reserved, so a
-//! `mosaica_id` a caller holds never comes to name another item. A suppressed entity is freed like
-//! any other: the fold that removes it drops its suppression with it.
+//! A commit window draws its edits' new entities first, each from tenancy 0, lowest id first, then
+//! from the high-water: an edit's entity carries its item's `mosaica_id` and never becomes a
+//! number, so it takes no id an item has held as its number. Its new items then take freed ids from
+//! the lowest tenancy, lowest id first, then from the high-water. Freed ids are issued before any id
+//! from the high-water, so churn reuses a bounded set of ids rather than growing the id space and
+//! everything sized by it. A suppressed entity is freed like any other: the fold that removes it
+//! drops its suppression with it.
 //!
 //! A fold's freed ids are held back until the log keeps no record older than the fold's
 //! publication ([`Allocator::release_after`], [`Allocator::promote`]). Replay applies every record
@@ -23,10 +29,11 @@
 //! deletion, its memberships. Holding the ids back means a record naming a freed id always names
 //! its current holder.
 //!
-//! The free and held sets are written into every side-manifest. A restart takes them from the
-//! served manifest and removes every id a kept log record or the overlay names from both: an id
-//! issued after that manifest was written appears in one or the other until a later manifest
-//! records it, and a held id a kept record names has had its previous holder's state replayed.
+//! The free and held sets are written into every side-manifest, each as one set of ids. A restart
+//! takes them from the served manifest, splits them by the tenancy index that manifest names, and
+//! removes every id a kept log record or the overlay names from both: an id issued after that
+//! manifest was written appears in one or the other until a later manifest records it, and a held
+//! id a kept record names has had its previous holder's state replayed.
 //!
 //! ## One space, two regions, growing towards each other
 //!
@@ -56,11 +63,12 @@
 //! `mosaica_lifecycle::buffer` already allocates term-extension ids downward from `u32::MAX` on the
 //! same argument in a different space; this is that pattern applied to a second population.
 
+use std::collections::BTreeMap;
 use std::ops::Range;
 
 use croaring::Bitmap;
 use mosaica_types::layer::RESERVED_BLOCK;
-use mosaica_types::{EntityId, TermId};
+use mosaica_types::{EntityId, Tenancy, TermId};
 
 use crate::wal::WalRecord;
 
@@ -117,16 +125,67 @@ impl std::fmt::Display for AllocError {
 
 impl std::error::Error for AllocError {}
 
+/// Freed point ids by the tenancy each is at. A tenancy holding no id has no entry.
+pub type ByTenancy = BTreeMap<Tenancy, Bitmap>;
+
+/// Every id of `sets`, whatever its tenancy.
+pub fn union_of(sets: &ByTenancy) -> Bitmap {
+    sets.values().fold(Bitmap::new(), |all, ids| all.or(ids))
+}
+
+fn cardinality_of(sets: &ByTenancy) -> u64 {
+    sets.values().map(Bitmap::cardinality).sum()
+}
+
+fn absorb(into: &mut ByTenancy, from: ByTenancy) {
+    for (tenancy, ids) in from {
+        if !ids.is_empty() {
+            into.entry(tenancy).or_default().or_inplace(&ids);
+        }
+    }
+}
+
+fn take_out(sets: &mut ByTenancy, ids: &Bitmap) {
+    for held in sets.values_mut() {
+        held.andnot_inplace(ids);
+    }
+    sets.retain(|_, held| !held.is_empty());
+}
+
+/// The lowest `n` ids of `sets` at `tenancy`, taken out of it.
+fn take_lowest(sets: &mut ByTenancy, tenancy: Tenancy, n: u64) -> Vec<u64> {
+    let Some(ids) = sets.get_mut(&tenancy) else {
+        return Vec::new();
+    };
+    let taken: Vec<u64> = ids.iter().take(n as usize).map(u64::from).collect();
+    if let Some(&last) = taken.last() {
+        ids.remove_range(..=last as u32);
+    }
+    if ids.is_empty() {
+        sets.remove(&tenancy);
+    }
+    taken
+}
+
+/// The ids one commit window is given, each list in the order its ids were issued.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Allocation {
+    /// One for each edit's new entity.
+    pub edits: Vec<u64>,
+    /// One for each new item.
+    pub items: Vec<u64>,
+}
+
 /// The entity-ID allocator: both region marks, the freed ids it issues first, and the freed ids it
 /// holds back.
 pub struct Allocator {
     high_water: u64,
     low_water: u64,
-    /// Freed point ids, issued lowest first before any id from `high_water`.
-    free: Bitmap,
+    /// Freed point ids, issued before any id from `high_water` (module doc).
+    free: ByTenancy,
     /// Freed point ids held back until the log keeps no record older than the position beside
     /// them.
-    held: Vec<(u64, Bitmap)>,
+    held: Vec<(u64, ByTenancy)>,
 }
 
 impl Allocator {
@@ -145,7 +204,7 @@ impl Allocator {
         Allocator {
             high_water,
             low_water,
-            free: Bitmap::new(),
+            free: ByTenancy::new(),
             held: Vec::new(),
         }
     }
@@ -168,39 +227,51 @@ impl Allocator {
         Ok(Allocator::with_marks(high_water, low_water))
     }
 
-    /// Allocates `n` **point** entity IDs, ascending: the lowest freed ids first, then ids from
-    /// the high-water mark, which advances past them. Refuses — leaving the allocator unchanged —
-    /// if the ids from the high-water would reach the row-less region: an allocation that overran
-    /// it would put two entities on one `mosaica_id`.
-    pub fn allocate(&mut self, n: u64) -> Result<Vec<u64>, AllocError> {
-        let reused = n.min(self.free.cardinality());
+    /// Allocates **point** entity IDs for a commit window's `edits` new entities and its `items`
+    /// new items, in the order the module doc gives: the edits first, from the freed ids at
+    /// tenancy 0 and then the high-water, and the items after, from the freed ids of the lowest
+    /// tenancy and then the high-water, which advances past every id it gives. Refuses, leaving
+    /// the allocator unchanged, if the ids from the high-water would reach the row-less region: an
+    /// allocation that overran it would put two entities on one `mosaica_id`.
+    pub fn allocate(&mut self, edits: u64, items: u64) -> Result<Allocation, AllocError> {
+        let at_zero = self.free.get(&Tenancy::ZERO).map_or(0, Bitmap::cardinality);
+        let edits_reused = edits.min(at_zero);
+        let items_reused = items.min(cardinality_of(&self.free) - edits_reused);
         let lo = self.high_water;
-        let hi = lo + (n - reused);
+        let mid = lo + (edits - edits_reused);
+        let hi = mid + (items - items_reused);
         if hi > self.low_water {
             return Err(AllocError::Exhausted {
                 high_water: lo,
                 low_water: self.low_water,
             });
         }
-        let mut ids: Vec<u64> = self
-            .free
-            .iter()
-            .take(reused as usize)
-            .map(u64::from)
-            .collect();
-        if let Some(&last) = ids.last() {
-            self.free.remove_range(..=last as u32);
+        let mut allocation = Allocation {
+            edits: take_lowest(&mut self.free, Tenancy::ZERO, edits_reused),
+            items: Vec::with_capacity(items as usize),
+        };
+        allocation.edits.extend(lo..mid);
+        let tenancies: Vec<Tenancy> = self.free.keys().copied().collect();
+        for tenancy in tenancies {
+            let wanted = items_reused - allocation.items.len() as u64;
+            if wanted == 0 {
+                break;
+            }
+            let taken = take_lowest(&mut self.free, tenancy, wanted);
+            allocation.items.extend(taken);
         }
-        ids.extend(lo..hi);
+        allocation.items.extend(mid..hi);
         self.high_water = hi;
-        Ok(ids)
+        Ok(allocation)
     }
 
     /// Hold `ids` back until the log keeps no record older than `position`: a fold's freed ids,
-    /// at the position its publication reached.
-    pub fn release_after(&mut self, position: u64, ids: Bitmap) {
-        if !ids.is_empty() {
-            self.held.push((position, ids));
+    /// at the position its publication reached, each at the tenancy it is issued at.
+    pub fn release_after(&mut self, position: u64, ids: ByTenancy) {
+        let mut held = ByTenancy::new();
+        absorb(&mut held, ids);
+        if !held.is_empty() {
+            self.held.push((position, held));
         }
     }
 
@@ -208,46 +279,55 @@ impl Allocator {
     /// reached. Returns how many ids were freed.
     pub fn promote(&mut self, retained_from: u64) -> u64 {
         let mut freed = 0;
-        self.held.retain(|(position, ids)| {
+        let mut promoted = Vec::new();
+        self.held.retain_mut(|(position, ids)| {
             if *position > retained_from {
                 return true;
             }
-            freed += ids.cardinality();
-            self.free.or_inplace(ids);
+            freed += cardinality_of(ids);
+            promoted.push(std::mem::take(ids));
             false
         });
+        for ids in promoted {
+            absorb(&mut self.free, ids);
+        }
         freed
     }
 
-    /// Seed the freed ids from durable state at open. The held sets the log has been reclaimed
-    /// past, to `retained_from`, are freed first, since a set can be freed and issued after the
-    /// state was written. Then every id in `named` is taken out of the free and the held sets
-    /// alike: an id a kept log record or the overlay names was issued since, or, in a set still
-    /// held, is named by a record of its previous holder, which the replay has applied.
+    /// Seed the freed ids from durable state at open, each set split by the tenancy its ids are
+    /// at. The held sets the log has been reclaimed past, to `retained_from`, are freed first,
+    /// since a set can be freed and issued after the state was written. Then every id in `named`
+    /// is taken out of the free and the held sets alike: an id a kept log record or the overlay
+    /// names was issued since, or, in a set still held, is named by a record of its previous
+    /// holder, which the replay has applied.
     pub fn seed_freed(
         &mut self,
-        free: Bitmap,
-        held: Vec<(u64, Bitmap)>,
+        free: ByTenancy,
+        held: Vec<(u64, ByTenancy)>,
         retained_from: u64,
         named: &Bitmap,
     ) {
-        self.free = free;
-        self.held = held;
+        self.free = ByTenancy::new();
+        absorb(&mut self.free, free);
+        self.held = Vec::new();
+        for (position, ids) in held {
+            self.release_after(position, ids);
+        }
         self.promote(retained_from);
-        self.free.andnot_inplace(named);
+        take_out(&mut self.free, named);
         for (_, ids) in &mut self.held {
-            ids.andnot_inplace(named);
+            take_out(ids, named);
         }
         self.held.retain(|(_, ids)| !ids.is_empty());
     }
 
-    /// The freed ids issued before the high-water.
-    pub fn free(&self) -> &Bitmap {
+    /// The freed ids issued before the high-water, by tenancy.
+    pub fn free(&self) -> &ByTenancy {
         &self.free
     }
 
     /// The freed ids held back, each set with the position the log must be kept from.
-    pub fn held(&self) -> &[(u64, Bitmap)] {
+    pub fn held(&self) -> &[(u64, ByTenancy)] {
         &self.held
     }
 
@@ -512,6 +592,8 @@ pub struct PendingItem {
     pub terms: Vec<TermId>,
     /// Filled in by [`assign_sorted`]; `None` beforehand.
     pub entity_id: Option<EntityId>,
+    /// Whether the id is an edit's new entity, which takes a freed id only at tenancy 0.
+    pub edit: bool,
 }
 
 /// The signature-sorted assignment key (§11.1): an item's sorted, deduplicated term-ID list.
@@ -529,9 +611,11 @@ fn signature_sort_key(terms: &[TermId]) -> Vec<u32> {
     key
 }
 
-/// Assigns entity IDs to `items` in ascending order of `signature_sort_key`, ties in batch order.
-/// Items with identical signatures take adjacent ids from the high-water, which is what makes their postings compress as runs; freed ids come
-/// first and scatter among other signatures' runs.
+/// Assigns entity IDs to `items` in ascending order of `signature_sort_key`, ties in batch order:
+/// the edits' new entities in their own order and the new items in theirs, from one
+/// [`Allocator::allocate`]. Items with identical signatures take adjacent ids from the
+/// high-water, which is what makes their postings compress as runs; freed ids come first and
+/// scatter among other signatures' runs.
 ///
 /// Fallible: propagates [`AllocError::Exhausted`] from the underlying
 /// `Allocator::allocate` rather than swallowing it — a batch that would exhaust the entity-ID
@@ -541,21 +625,33 @@ pub fn assign_sorted(items: &mut [PendingItem], alloc: &mut Allocator) -> Result
     // the comparator — `sort_by`'s comparator can be called O(n log n) times, and
     // `signature_sort_key` allocates, so recomputing it per-comparison would be O(n log n)
     // allocations instead of O(n).
-    let mut order: Vec<(usize, Vec<u32>)> = items
-        .iter()
-        .enumerate()
-        .filter(|(_, item)| item.entity_id.is_none())
-        .map(|(i, item)| (i, signature_sort_key(&item.terms)))
-        .collect();
-    // Stable, so items with one signature keep their order in the batch.
-    order.sort_by(|(_, ka), (_, kb)| ka.cmp(kb));
-
+    //
     // **A row that arrives with an entity is a join** (`views.md` §4): the same document in a
     // second view, whose identity was decided when it was first ingested. It takes no id and no
     // rank — allocating one would mint a second entity for one document, and the join rule exists
     // precisely so that cannot happen — so the allocation is sized by the rows that need one.
-    let ids = alloc.allocate(order.len() as u64)?;
-    for ((idx, _), id) in order.into_iter().zip(ids) {
+    let mut edits: Vec<(usize, Vec<u32>)> = Vec::new();
+    let mut created: Vec<(usize, Vec<u32>)> = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        if item.entity_id.is_none() {
+            let keyed = (i, signature_sort_key(&item.terms));
+            if item.edit {
+                edits.push(keyed);
+            } else {
+                created.push(keyed);
+            }
+        }
+    }
+    // Stable, so items with one signature keep their order in the batch.
+    edits.sort_by(|(_, ka), (_, kb)| ka.cmp(kb));
+    created.sort_by(|(_, ka), (_, kb)| ka.cmp(kb));
+
+    let ids = alloc.allocate(edits.len() as u64, created.len() as u64)?;
+    let assigned = edits
+        .into_iter()
+        .zip(ids.edits)
+        .chain(created.into_iter().zip(ids.items));
+    for ((idx, _), id) in assigned {
         items[idx].entity_id = Some(EntityId::new(id));
     }
     Ok(())
@@ -565,69 +661,133 @@ pub fn assign_sorted(items: &mut [PendingItem], alloc: &mut Allocator) -> Result
 mod tests {
     use super::*;
 
+    /// `ids` at `tenancy`.
+    fn at(tenancy: u16, ids: &[u32]) -> ByTenancy {
+        ByTenancy::from([(Tenancy::new(tenancy).unwrap(), Bitmap::of(ids))])
+    }
+
+    fn listed(sets: &ByTenancy) -> Vec<(u16, Vec<u32>)> {
+        sets.iter()
+            .map(|(tenancy, ids)| (tenancy.raw(), ids.iter().collect()))
+            .collect()
+    }
+
     #[test]
     fn allocate_is_monotone_without_freed_ids() {
         let mut alloc = Allocator::new(10);
-        let a = alloc.allocate(3).unwrap();
-        let b = alloc.allocate(5).unwrap();
-        assert_eq!(a, (10..13).collect::<Vec<_>>());
-        assert_eq!(b, (13..18).collect::<Vec<_>>());
+        let a = alloc.allocate(0, 3).unwrap();
+        let b = alloc.allocate(2, 3).unwrap();
+        assert_eq!(a.items, (10..13).collect::<Vec<_>>());
+        assert_eq!((b.edits, b.items), (vec![13, 14], vec![15, 16, 17]));
         assert_eq!(alloc.high_water(), 18);
     }
 
     #[test]
     fn freed_ids_are_issued_lowest_first_and_once() {
         let mut alloc = Allocator::new(100);
-        alloc.release_after(7, Bitmap::of(&[40, 12, 90]));
+        alloc.release_after(7, at(0, &[40, 12, 90]));
         assert_eq!(
-            alloc.allocate(2).unwrap(),
+            alloc.allocate(0, 2).unwrap().items,
             vec![100, 101],
             "held ids are not issued"
         );
-        assert_eq!(alloc.promote(6), 0, "the log still keeps a record older than 7");
+        assert_eq!(
+            alloc.promote(6),
+            0,
+            "the log still keeps a record older than 7"
+        );
         assert_eq!(alloc.promote(7), 3);
-        assert_eq!(alloc.allocate(2).unwrap(), vec![12, 40]);
-        assert_eq!(alloc.allocate(3).unwrap(), vec![90, 102, 103]);
+        assert_eq!(alloc.allocate(0, 2).unwrap().items, vec![12, 40]);
+        assert_eq!(alloc.allocate(0, 3).unwrap().items, vec![90, 102, 103]);
         assert_eq!(alloc.high_water(), 104);
         assert!(alloc.free().is_empty());
     }
 
     #[test]
-    fn a_refused_allocation_takes_no_freed_id() {
-        let mut alloc = Allocator::with_marks(ROWLESS_CEILING - 1, ROWLESS_CEILING);
-        alloc.release_after(0, Bitmap::of(&[5]));
-        alloc.promote(0);
-        assert!(matches!(alloc.allocate(3), Err(AllocError::Exhausted { .. })));
-        assert_eq!(alloc.free().cardinality(), 1);
-        assert_eq!(alloc.allocate(2).unwrap(), vec![5, ROWLESS_CEILING - 1]);
+    fn edits_take_tenancy_zero_and_new_items_the_lowest_tenancy_first() {
+        let mut alloc = Allocator::new(100);
+        alloc.release_after(1, at(0, &[40, 12]));
+        alloc.release_after(1, at(3, &[2]));
+        alloc.release_after(2, at(1, &[30, 5]));
+        alloc.promote(2);
+        let given = alloc.allocate(3, 4).unwrap();
+        assert_eq!(
+            given.edits,
+            vec![12, 40, 100],
+            "an edit takes tenancy 0, then the high-water"
+        );
+        assert_eq!(
+            given.items,
+            vec![5, 30, 2, 101],
+            "a new item takes the lowest tenancy, lowest id first, then the high-water"
+        );
+        assert!(alloc.free().is_empty());
+
+        alloc.release_after(3, at(0, &[7]));
+        alloc.release_after(3, at(2, &[9]));
+        alloc.promote(3);
+        let given = alloc.allocate(0, 1).unwrap();
+        assert_eq!(
+            given.items,
+            vec![7],
+            "tenancy 0 comes first for a new item too"
+        );
+        let given = alloc.allocate(1, 0).unwrap();
+        assert_eq!(
+            given.edits,
+            vec![102],
+            "an edit takes no id above tenancy 0"
+        );
+        assert_eq!(listed(alloc.free()), vec![(2, vec![9])]);
     }
 
     #[test]
-    fn seeding_drops_every_id_something_names() {
+    fn a_refused_allocation_takes_no_freed_id() {
+        let mut alloc = Allocator::with_marks(ROWLESS_CEILING - 1, ROWLESS_CEILING);
+        alloc.release_after(0, at(0, &[5]));
+        alloc.release_after(0, at(4, &[3]));
+        alloc.promote(0);
+        assert!(matches!(
+            alloc.allocate(1, 3),
+            Err(AllocError::Exhausted { .. })
+        ));
+        assert_eq!(listed(alloc.free()), vec![(0, vec![5]), (4, vec![3])]);
+        assert_eq!(alloc.high_water(), ROWLESS_CEILING - 1);
+        let given = alloc.allocate(1, 2).unwrap();
+        assert_eq!(
+            (given.edits, given.items),
+            (vec![5], vec![3, ROWLESS_CEILING - 1])
+        );
+    }
+
+    #[test]
+    fn seeding_drops_every_id_something_names_and_keeps_each_tenancy() {
         let mut alloc = Allocator::new(50);
+        let mut free = at(0, &[3, 4]);
+        free.extend(at(2, &[9]));
         alloc.seed_freed(
-            Bitmap::of(&[3, 4, 9]),
+            free,
             vec![
-                (12, Bitmap::of(&[20, 21])),
-                (10, Bitmap::of(&[30, 31])),
-                (13, Bitmap::new()),
-                (14, Bitmap::of(&[40])),
+                (12, at(0, &[20, 21])),
+                (10, at(1, &[30, 31])),
+                (13, ByTenancy::new()),
+                (14, at(5, &[40])),
             ],
             11,
             &Bitmap::of(&[4, 21, 31, 40]),
         );
         assert_eq!(
-            alloc.free().iter().collect::<Vec<_>>(),
-            vec![3, 9, 30],
+            listed(alloc.free()),
+            vec![(0, vec![3]), (1, vec![30]), (2, vec![9])],
             "a set the log was reclaimed past is freed, and a named id is taken out of it too"
         );
         assert_eq!(
             alloc
                 .held()
                 .iter()
-                .map(|(p, ids)| (*p, ids.iter().collect::<Vec<_>>()))
+                .map(|(p, ids)| (*p, listed(ids)))
                 .collect::<Vec<_>>(),
-            vec![(12, vec![20])],
+            vec![(12, vec![(0, vec![20])])],
             "a named id leaves a set still held, and an emptied or empty set is dropped"
         );
     }
@@ -638,8 +798,11 @@ mod tests {
         // construction" would rest on the corpus happening to stay small. Past 2^32 two entities
         // would share a mosaica_id and `invert` would return the WRONG one.
         let mut a = Allocator::new(ROWLESS_CEILING - 2);
-        assert!(a.allocate(1).is_ok());
-        assert!(matches!(a.allocate(10), Err(AllocError::Exhausted { .. })));
+        assert!(a.allocate(0, 1).is_ok());
+        assert!(matches!(
+            a.allocate(5, 5),
+            Err(AllocError::Exhausted { .. })
+        ));
         // The failed call must not have moved the high-water mark (the batch has no effect).
         assert_eq!(a.high_water(), ROWLESS_CEILING - 1);
 
@@ -696,8 +859,8 @@ mod tests {
 
         // Upward: the same wall, met from the other side, and the refusal reports both marks so
         // "how much is left" is answerable from the error alone.
-        assert!(a.allocate(RESERVED_BLOCK).is_ok());
-        match a.allocate(1) {
+        assert!(a.allocate(0, RESERVED_BLOCK).is_ok());
+        match a.allocate(0, 1) {
             Err(AllocError::Exhausted {
                 high_water,
                 low_water,
@@ -803,7 +966,7 @@ mod tests {
 
         // And the pair reseeds an allocator that then refuses to reissue either.
         let mut a = Allocator::try_with_marks(high_water_from(&log), low_water_from(&log)).unwrap();
-        assert!(a.allocate(1).unwrap()[0] >= 12);
+        assert!(a.allocate(0, 1).unwrap().items[0] >= 12);
         assert!(a.allocate_rowless(1).unwrap().end <= ROWLESS_CEILING - RESERVED_BLOCK);
     }
 
@@ -855,8 +1018,8 @@ mod tests {
         // Change records carry no entity-ID information beyond an entity already allocated.
         assert_eq!(
             high_water_from(&[WalRecord::ChangeBatch {
-            changes: vec![(EntityId::new(1), crate::wal::ChangeOp::Delete)],
-        }]),
+                changes: vec![(EntityId::new(1), crate::wal::ChangeOp::Delete)],
+            }]),
             0
         );
     }

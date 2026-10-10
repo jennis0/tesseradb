@@ -12,9 +12,10 @@ pub(crate) struct ManifestSeed<'a> {
     /// its declaration carried layers, or the first online registration reissues their ids.
     pub low_water: u64,
     /// The newest served side-manifest's freed ids, and the sets it holds back with their
-    /// positions; empty where no manifest can be trusted to be the newest.
-    pub free: croaring::Bitmap,
-    pub held: Vec<(u64, croaring::Bitmap)>,
+    /// positions, each split by the served tenancy index; empty where no manifest can be trusted
+    /// to be the newest.
+    pub free: mosaica_lifecycle::ByTenancy,
+    pub held: Vec<(u64, mosaica_lifecycle::ByTenancy)>,
     pub layers: &'a [mosaica_types::layer::RegisteredLayer],
     pub tombstones: &'a [String],
     /// The highest layer registry version counter any partition's manifest saved.
@@ -512,5 +513,4 @@ impl WritePath {
             },
         ))
     }
-
 }
