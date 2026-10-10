@@ -263,6 +263,23 @@ const CHANGES_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 /// pages its denies, and none is refused.
 const CHANGES_MAX_ITEMS: usize = 10_000;
 
+/// How many times a write naming items resolves its names and is submitted. The executor refuses
+/// one whose names a fold has made stale since they were resolved, and the names are resolved
+/// again; the last refusal is the caller's 409.
+const NAMING_ATTEMPTS: usize = 3;
+
+/// Whether the executor refused attempt `attempts`, counted from 1, of a write naming items as
+/// stale, and the write may resolve its names and be submitted again.
+fn stale_again<T>(answered: &Result<T, mosaica_engine::AcceptError>, attempts: usize) -> bool {
+    attempts < NAMING_ATTEMPTS
+        && matches!(
+            answered,
+            Err(mosaica_engine::AcceptError::Exec(
+                mosaica_lifecycle::ExecError::Stale
+            ))
+        )
+}
+
 /// A declaration's body cap: axum's `Json` default, which declaration routes inherit, named so
 /// `/control/status` can publish it.
 const DECLARATION_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
@@ -695,12 +712,14 @@ fn run_changes(
     }
     let merged = crate::address::Merged::of(tables)?;
 
-    // An item an edit moved while the request waited, and whose old entity a fold then retired,
-    // is found by resolving the request's names again.
     let mut attempts = 0;
     loop {
         attempts += 1;
-        let (named, ignored) = merged.name(state)?;
+        let crate::address::Names {
+            tables: named,
+            ignored,
+            at,
+        } = merged.name(state)?;
         let mut changes: Vec<(EntityId, ChangeOp)> = Vec::with_capacity(ops.len());
         let mut refused = Vec::new();
         for (index, (named, op)) in named.iter().zip(&ops).enumerate() {
@@ -721,18 +740,13 @@ fn run_changes(
             return Ok(done);
         }
         let applied: Vec<ChangeOp> = changes.iter().map(|(_, op)| *op).collect();
-        match state.engine.accept_changes(changes) {
-            Err(mosaica_engine::AcceptError::Exec(mosaica_lifecycle::ExecError::Stale))
-                if attempts < 3 =>
-            {
-                continue
-            }
-            answered => {
-                return answered
-                    .map(|()| done)
-                    .map_err(|e| map_change_batch_error(&applied, e))
-            }
+        let answered = state.engine.accept_changes_at(changes, at);
+        if stale_again(&answered, attempts) {
+            continue;
         }
+        return answered
+            .map(|()| done)
+            .map_err(|e| map_change_batch_error(&applied, e));
     }
 }
 
@@ -1788,25 +1802,39 @@ struct MemberList {
 }
 
 /// What a request's member tables resolved to: for each list, the entities its accepted rows name,
-/// in row order; the refused rows, as `{artifact, list, row, reason}`; and the columns ignored.
+/// in row order; the refused rows, as `{artifact, list, row, reason}`; the columns ignored; and the
+/// generation they were resolved against.
 struct ResolvedLists {
     entities: Vec<Vec<EntityId>>,
     refused: Vec<serde_json::Value>,
     ignored: Vec<String>,
+    at: mosaica_engine::Stamp,
 }
 
-/// Every member table of a request, resolved in one call. A refused row is dropped and listed, or
-/// refuses the request where it is `strict` or the list is whole.
+/// Every member table of a request, moved into the one table [`resolve_member_lists`] resolves.
+fn merge_member_lists(lists: &mut [MemberList]) -> Result<crate::address::Merged, ApiError> {
+    crate::address::Merged::of(
+        lists
+            .iter_mut()
+            .map(|l| std::mem::take(&mut l.table))
+            .collect(),
+    )
+}
+
+/// Every member table of a request, resolved in one call from `merged`, which
+/// [`merge_member_lists`] made of `lists`. A refused row is dropped and listed, or refuses the
+/// request where it is `strict` or the list is whole.
 fn resolve_member_lists(
     state: &AppState,
-    lists: &mut [MemberList],
+    merged: &crate::address::Merged,
+    lists: &[MemberList],
     strict: bool,
 ) -> Result<ResolvedLists, ApiError> {
-    let tables: Vec<Table> = lists
-        .iter_mut()
-        .map(|l| std::mem::take(&mut l.table))
-        .collect();
-    let (named, ignored) = crate::address::Merged::of(tables)?.name(state)?;
+    let crate::address::Names {
+        tables: named,
+        ignored,
+        at,
+    } = merged.name(state)?;
     let mut refused = Vec::new();
     let mut out = Vec::with_capacity(lists.len());
     for (list, named) in lists.iter().zip(named) {
@@ -1832,6 +1860,7 @@ fn resolve_member_lists(
         entities: out,
         refused,
         ignored,
+        at,
     })
 }
 
@@ -2420,80 +2449,95 @@ async fn publish_artifacts(
                 &mut artifacts,
             )?;
 
-            let ResolvedLists {
-                entities: resolved,
-                refused,
-                ignored,
-            } = resolve_member_lists(state, &mut lists, strict)?;
+            let keys: Vec<Option<String>> = artifacts.iter().map(|a| a.key.clone()).collect();
+            let merged = merge_member_lists(&mut lists)?;
+            let mut attempts = 0;
+            loop {
+                attempts += 1;
+                let ResolvedLists {
+                    entities: resolved,
+                    refused,
+                    ignored,
+                    at,
+                } = resolve_member_lists(state, &merged, &lists, strict)?;
 
-            // Walked back in the order the lists were gathered.
-            let mut resolved = lists
-                .iter()
-                .map(|l| (l.artifact, l.list.as_str()))
-                .zip(resolved)
-                .peekable();
-            let incoming: Vec<mosaica_lifecycle::IncomingArtifact> = artifacts
-                .into_iter()
-                .zip(shapes)
-                .zip(accesses)
-                .enumerate()
-                .map(|(index, ((artifact, shape), access))| {
-                    let mut members: Vec<EntityId> = Vec::new();
-                    let mut excluded: Option<Vec<EntityId>> = None;
-                    let mut sets: Vec<Vec<EntityId>> = Vec::new();
-                    while let Some(((_, list), entities)) =
-                        resolved.next_if(|((at, _), _)| *at == index)
-                    {
-                        match list {
-                            "members" => members = entities,
-                            "excluding" => excluded = Some(entities),
-                            _ => sets.push(entities),
+                // Walked back in the order the lists were gathered.
+                let mut resolved = lists
+                    .iter()
+                    .map(|l| (l.artifact, l.list.as_str()))
+                    .zip(resolved)
+                    .peekable();
+                let incoming: Vec<mosaica_lifecycle::IncomingArtifact> = artifacts
+                    .iter()
+                    .zip(&shapes)
+                    .zip(&accesses)
+                    .enumerate()
+                    .map(|(index, ((artifact, shape), access))| {
+                        let mut members: Vec<EntityId> = Vec::new();
+                        let mut excluded: Option<Vec<EntityId>> = None;
+                        let mut sets: Vec<Vec<EntityId>> = Vec::new();
+                        while let Some(((_, list), entities)) =
+                            resolved.next_if(|((at, _), _)| *at == index)
+                        {
+                            match list {
+                                "members" => members = entities,
+                                "excluding" => excluded = Some(entities),
+                                _ => sets.push(entities),
+                            }
                         }
-                    }
-                    let contents: Vec<mosaica_lifecycle::membership::IncomingContent> = artifact
-                        .content
-                        .into_iter()
-                        .zip(sets)
-                        .map(|(v, set)| mosaica_lifecycle::membership::IncomingContent::new(v.values, set))
-                        .collect();
-                    let attached_to = artifact.attached_to.map(|a| {
-                        mosaica_lifecycle::membership::IncomingAttachment {
-                            layer: a.layer,
-                            level: a.level,
-                            key: a.key,
+                        let contents: Vec<mosaica_lifecycle::membership::IncomingContent> =
+                            artifact
+                                .content
+                                .iter()
+                                .zip(sets)
+                                .map(|(v, set)| {
+                                    mosaica_lifecycle::membership::IncomingContent::new(
+                                        v.values.clone(),
+                                        set,
+                                    )
+                                })
+                                .collect();
+                        let attached_to = artifact.attached_to.as_ref().map(|a| {
+                            mosaica_lifecycle::membership::IncomingAttachment {
+                                layer: a.layer.clone(),
+                                level: a.level,
+                                key: a.key.clone(),
+                            }
+                        });
+                        let mut incoming = match attached_to {
+                            None => mosaica_lifecycle::IncomingArtifact::with_content(
+                                artifact.key.clone(),
+                                members,
+                                contents,
+                            ),
+                            Some(attached_to) => mosaica_lifecycle::IncomingArtifact::attached(
+                                artifact.key.clone(),
+                                members,
+                                contents,
+                                attached_to,
+                            ),
+                        };
+                        incoming.shape = shape.clone();
+                        incoming.parent_keys = artifact.parent.clone();
+                        incoming.view = artifact.view.clone();
+                        incoming.access = access.clone();
+                        // The executor takes the complement against the view's entities.
+                        if let Some(excluded) = excluded {
+                            incoming.exclude(excluded);
                         }
-                    });
-                    let mut incoming = match attached_to {
-                        None => mosaica_lifecycle::IncomingArtifact::with_content(
-                            artifact.key,
-                            members,
-                            contents,
-                        ),
-                        Some(attached_to) => mosaica_lifecycle::IncomingArtifact::attached(
-                            artifact.key,
-                            members,
-                            contents,
-                            attached_to,
-                        ),
-                    };
-                    incoming.shape = shape;
-                    incoming.parent_keys = artifact.parent;
-                    incoming.view = artifact.view;
-                    incoming.access = access;
-                    // The executor takes the complement against the view's entities.
-                    if let Some(excluded) = excluded {
-                        incoming.exclude(excluded);
-                    }
-                    incoming
-                })
-                .collect();
-            let keys: Vec<Option<String>> = incoming.iter().map(|a| a.key.clone()).collect();
+                        incoming
+                    })
+                    .collect();
 
-            let batch = state
-                .engine
-                .put_artifacts(name, level, incoming)
-                .map_err(crate::error::map_accept_error)?;
-            Ok((batch, keys, shape_reports, refused, ignored))
+                let answered = state
+                    .engine
+                    .put_artifacts_at(name.clone(), level, incoming, at);
+                if stale_again(&answered, attempts) {
+                    continue;
+                }
+                let batch = answered.map_err(crate::error::map_accept_error)?;
+                return Ok((batch, keys, shape_reports, refused, ignored));
+            }
         })
         .await?;
 
@@ -2681,58 +2725,67 @@ async fn grow_memberships(
                 &mut artifacts,
             )?;
 
-            // Joining and leaving members are resolved in one pass, joins first in each row, so an
-            // entity named in both resolves to one entity.
-            let ResolvedLists {
-                entities,
-                refused,
-                ignored,
-            } = resolve_member_lists(state, &mut lists, strict)?;
-            let mut entities = entities.into_iter();
+            let keys: Vec<String> = artifacts.iter().map(|a| a.key.clone()).collect();
+            let merged = merge_member_lists(&mut lists)?;
+            let mut attempts = 0;
+            loop {
+                attempts += 1;
+                // Joining and leaving members are resolved in one pass, joins first in each row,
+                // so an entity named in both resolves to one entity.
+                let ResolvedLists {
+                    entities,
+                    refused,
+                    ignored,
+                    at,
+                } = resolve_member_lists(state, &merged, &lists, strict)?;
+                let mut entities = entities.into_iter();
 
-            let joins: Vec<mosaica_lifecycle::IncomingGrowth> = artifacts
-                .into_iter()
-                .zip(shapes)
-                .zip(accesses)
-                .map(|((artifact, shape), access)| {
-                    let members = entities.next().expect("a joining list per artifact");
-                    let leaving = entities.next().expect("a leaving list per artifact");
-                    // Every row carries all its fields; the executor refuses combinations it does
-                    // not take, rather than this dropping them and answering 200.
-                    let mut join = mosaica_lifecycle::IncomingGrowth::page_of_entities(
-                        artifact.key,
-                        artifact.rank,
-                        members,
-                        leaving,
-                    );
-                    join.parts = mosaica_lifecycle::FixedParts {
-                        parent_keys: artifact.parent,
-                        attached_to: artifact.attached_to.map(|a| {
-                            mosaica_lifecycle::membership::IncomingAttachment {
-                                layer: a.layer,
-                                level: a.level,
-                                key: a.key,
-                            }
-                        }),
-                        contents: artifact
-                            .content
-                            .into_iter()
-                            .map(|c| (c.rank, c.values))
-                            .collect(),
-                        shape,
-                        access,
-                    };
-                    join.view = artifact.view;
-                    join
-                })
-                .collect();
-            let keys: Vec<String> = joins.iter().map(|j| j.key.clone()).collect();
+                let joins: Vec<mosaica_lifecycle::IncomingGrowth> = artifacts
+                    .iter()
+                    .zip(&shapes)
+                    .zip(&accesses)
+                    .map(|((artifact, shape), access)| {
+                        let members = entities.next().expect("a joining list per artifact");
+                        let leaving = entities.next().expect("a leaving list per artifact");
+                        // Every row carries all its fields; the executor refuses combinations it
+                        // does not take, rather than this dropping them and answering 200.
+                        let mut join = mosaica_lifecycle::IncomingGrowth::page_of_entities(
+                            artifact.key.clone(),
+                            artifact.rank,
+                            members,
+                            leaving,
+                        );
+                        join.parts = mosaica_lifecycle::FixedParts {
+                            parent_keys: artifact.parent.clone(),
+                            attached_to: artifact.attached_to.as_ref().map(|a| {
+                                mosaica_lifecycle::membership::IncomingAttachment {
+                                    layer: a.layer.clone(),
+                                    level: a.level,
+                                    key: a.key.clone(),
+                                }
+                            }),
+                            contents: artifact
+                                .content
+                                .iter()
+                                .map(|c| (c.rank, c.values.clone()))
+                                .collect(),
+                            shape: shape.clone(),
+                            access: access.clone(),
+                        };
+                        join.view = artifact.view.clone();
+                        join
+                    })
+                    .collect();
 
-            let grown = state
-                .engine
-                .grow_memberships(name, level, joins)
-                .map_err(crate::error::map_accept_error)?;
-            Ok((grown, keys, shape_reports, refused, ignored))
+                let answered = state
+                    .engine
+                    .grow_memberships_at(name.clone(), level, joins, at);
+                if stale_again(&answered, attempts) {
+                    continue;
+                }
+                let grown = answered.map_err(crate::error::map_accept_error)?;
+                return Ok((grown, keys, shape_reports, refused, ignored));
+            }
         })
         .await?;
 

@@ -9,6 +9,7 @@ use mosaica_store::unique::{KeyKind, UniqueKey};
 use mosaica_store::StoreError;
 use mosaica_types::{EntityId, MosaicaId, TermId};
 
+use crate::edited::Stamp;
 use crate::engine::Engine;
 use crate::write::joined::flushed_terms_of;
 use crate::Generation;
@@ -63,11 +64,14 @@ pub enum AddressValue {
     Other(String),
 }
 
-/// What [`Engine::name_items`] decided: one verdict per row, and the columns it ignored.
-#[derive(Debug, Clone, Default)]
+/// What [`Engine::name_items`] decided: one verdict per row, the columns it ignored, and the
+/// generation it resolved them against, which a write naming the items carries
+/// ([`Engine::submit_changes_at`], [`Engine::put_artifacts_at`], [`Engine::grow_memberships_at`]).
+#[derive(Debug, Clone)]
 pub struct NamedItems {
     pub verdicts: Vec<Verdict>,
     pub ignored: Vec<String>,
+    pub at: Stamp,
 }
 
 /// [`Engine::name_items`] against `generation`.
@@ -90,10 +94,12 @@ pub(crate) fn name_items_in(
             None => ignored.push(name.clone()),
         }
     }
+    let at = Stamp::of(generation);
     if table.rows == 0 {
         return Ok(NamedItems {
             verdicts: Vec::new(),
             ignored,
+            at,
         });
     }
     resolve::require_identifier(table.mosaica_id.is_some(), unique.len()).map_err(|e| {
@@ -167,7 +173,11 @@ pub(crate) fn name_items_in(
             resolve::resolve(&rows, &holdings, Batch::Names).map_err(store)?
         }
     };
-    Ok(NamedItems { verdicts, ignored })
+    Ok(NamedItems {
+        verdicts,
+        ignored,
+        at,
+    })
 }
 
 /// A unique value as a caller wrote it, as its field's index keys it.
@@ -343,8 +353,13 @@ impl Engine {
         self.write.wake();
     }
 
-    /// Apply one `/control/changes` request of one change, and wait for its receipt. See
-    /// [`Engine::accept_changes`].
+    /// The stamp of the generation served now: what a write naming entities taken from it, rather
+    /// than from [`Engine::name_items`], carries.
+    fn stamp_now(&self) -> Stamp {
+        Stamp::of(&self.generation.load())
+    }
+
+    /// [`Engine::accept_changes`] for one change.
     pub fn accept_change(
         &self,
         entity: EntityId,
@@ -353,31 +368,46 @@ impl Engine {
         self.accept_changes(vec![(entity, op)])
     }
 
-    /// Apply one `/control/changes` request and wait for its receipt. The request is one log
-    /// record: durable whole or not at all. An `Err` does not mean nothing happened: where the
-    /// append or fsync fails, every deletion and suppression is applied all the same. See
-    /// `ExecError::Wal`.
+    /// [`Engine::accept_changes_at`] for entities as the generation served now holds them.
     pub fn accept_changes(
         &self,
         changes: Vec<(EntityId, ChangeOp)>,
     ) -> std::result::Result<(), crate::write::AcceptError> {
-        self.submit_changes(changes)?.wait()
+        self.accept_changes_at(changes, self.stamp_now())
     }
 
-    /// Enqueue one `/control/changes` request without waiting, so requests from several callers
-    /// reach the deny lane together and share one fsync. Read `PendingChange::wait` before
-    /// treating either half's `Err` as "nothing happened".
+    /// Apply one `/control/changes` request whose entities were resolved at `at`, and wait for its
+    /// receipt. The request is one log record: durable whole or not at all. An `Err` does not mean
+    /// nothing happened: where the append or fsync fails, every deletion and suppression is
+    /// applied all the same. See `ExecError::Wal`.
+    pub fn accept_changes_at(
+        &self,
+        changes: Vec<(EntityId, ChangeOp)>,
+        at: Stamp,
+    ) -> std::result::Result<(), crate::write::AcceptError> {
+        self.submit_changes_at(changes, at)?.wait()
+    }
+
+    /// [`Engine::submit_changes_at`] for entities as the generation served now holds them.
     pub fn submit_changes(
         &self,
         changes: Vec<(EntityId, ChangeOp)>,
     ) -> std::result::Result<crate::write::PendingChange, crate::write::AcceptError> {
-        // A change resolved before an edit moved its item reaches the item where it is now.
-        let mut changes = changes;
-        let generation = self.generation();
-        crate::edited::follow_changes(&generation, &mut changes)
-            .map_err(|e| crate::write::AcceptError::Unreadable(e.to_string()))?;
-        self.write
-            .submit_changes(changes, crate::edited::Stamp::of(&generation))
+        self.submit_changes_at(changes, self.stamp_now())
+    }
+
+    /// Enqueue one `/control/changes` request whose entities were resolved at `at`, without
+    /// waiting, so requests from several callers reach the deny lane together and share one
+    /// fsync. A change naming an entity an edit has moved an item away from since `at` also
+    /// reaches the item where it is now; a request a fold has made stale since `at` is answered
+    /// with `ExecError::Stale`, and its names are resolved again. Read `PendingChange::wait`
+    /// before treating either half's `Err` as "nothing happened".
+    pub fn submit_changes_at(
+        &self,
+        changes: Vec<(EntityId, ChangeOp)>,
+        at: Stamp,
+    ) -> std::result::Result<crate::write::PendingChange, crate::write::AcceptError> {
+        self.write.submit_changes(changes, at)
     }
 
     /// One registered layer's declaration, by name, with no gate. Answers what a declaration
@@ -545,64 +575,34 @@ impl Engine {
         self.write.drop_view(group, key)
     }
 
-    /// Put a batch of artifacts into one level of a layer, returning a `mosaica_id` per artifact
-    /// and the batch's counts. A held key is filled; an unheld key is published. Members must be
-    /// points: a row-less entity counts towards the declared size while visible to nobody.
+    /// [`Engine::put_artifacts_at`] for members as the generation served now holds them.
     pub fn put_artifacts(
         &self,
         layer: String,
         level: u32,
         artifacts: Vec<mosaica_lifecycle::IncomingArtifact>,
     ) -> std::result::Result<PublishedArtifacts, crate::write::AcceptError> {
-        // A member resolved before an edit moved its item is the item where it is now.
-        let mut artifacts = artifacts;
-        let generation = self.generation();
-        crate::edited::follow_artifacts(&generation, &mut artifacts)
-            .map_err(|e| crate::write::AcceptError::Unreadable(e.to_string()))?;
-        let stamp = crate::edited::Stamp::of(&generation);
+        self.put_artifacts_at(layer, level, artifacts, self.stamp_now())
+    }
+
+    /// Put a batch of artifacts into one level of a layer, returning a `mosaica_id` per artifact
+    /// and the batch's counts. A held key is filled; an unheld key is published. Members must be
+    /// points: a row-less entity counts towards the declared size while visible to nobody. The
+    /// members were resolved at `at`, and are followed and stale on
+    /// [`Engine::submit_changes_at`]'s rule. A deleted member refuses the batch; a suppressed one
+    /// is accepted.
+    pub fn put_artifacts_at(
+        &self,
+        layer: String,
+        level: u32,
+        artifacts: Vec<mosaica_lifecycle::IncomingArtifact>,
+        at: Stamp,
+    ) -> std::result::Result<PublishedArtifacts, crate::write::AcceptError> {
+        // A membership spelled by exclusion carries no members here: the complement is taken on
+        // the executor, so this passes over the empty set the record carries.
         self.refuse_rowless(artifacts.iter().map(|a| &a.members))?;
-
-        // A declared member that is deleted refuses the batch; a suppressed one is accepted, being
-        // a live member temporarily outside every mask. The refusal reports a count and a
-        // position, never an entity id. A membership spelled by exclusion carries no members here:
-        // the complement is taken on the executor, so this and the row-less check pass over the
-        // empty set the record carries.
-        let mut deleted = 0u64;
-        let mut first_artifact = None;
-        for (index, artifact) in artifacts.iter().enumerate() {
-            let in_this = artifact
-                .members
-                .iter()
-                .chain(
-                    artifact
-                        .contents
-                        .iter()
-                        .flat_map(|content| content.generated_from.iter()),
-                )
-                .filter(|entity| generation.overlay.is_deleted(EntityId::new(*entity as u64)))
-                .count() as u64;
-            if in_this > 0 {
-                deleted += in_this;
-                first_artifact.get_or_insert(index);
-            }
-        }
-        if let Some(first_artifact) = first_artifact {
-            return Err(crate::write::AcceptError::Exec(
-                mosaica_lifecycle::ExecError::LayerRefused {
-                    detail: format!(
-                        "{deleted} member(s) or content source(s) of this batch are deleted, the \
-                         first in artifact {first_artifact}; a deleted member contributes to no \
-                         count and makes supplied content unservable from birth, so the batch is \
-                         refused rather than published into silence"
-                    ),
-                },
-            ));
-        }
-
-        let batch = self
-            .write
-            .publish_artifacts(layer, level, artifacts, stamp)?;
-        let shard = generation.bundle.manifest.identity.shard_id;
+        let batch = self.write.publish_artifacts(layer, level, artifacts, at)?;
+        let shard = self.generation().bundle.manifest.identity.shard_id;
         let mosaica_ids = batch
             .entities
             .into_iter()
@@ -629,56 +629,35 @@ impl Engine {
             .map(|published| published.mosaica_ids)
     }
 
-    /// Add points to the memberships of artifacts that already exist, each named by its published
-    /// key. A suppressed artifact grows like any other and stays suppressed: the key resolves
-    /// against the store, not what is served. The member checks are `publish_artifacts`'s. A
-    /// point may also name its artifacts via `/control/ingest`'s column; this entry point is for
-    /// correcting points that already exist, and an unknown key is refused here regardless.
-    ///
-    /// One [`GrownMembership`] per join. Neither an ordinal nor a membership size crosses the
-    /// boundary.
+    /// [`Engine::grow_memberships_at`] for members as the generation served now holds them.
     pub fn grow_memberships(
         &self,
         layer: String,
         level: u32,
         joins: Vec<mosaica_lifecycle::IncomingGrowth>,
     ) -> std::result::Result<Vec<GrownMembership>, crate::write::AcceptError> {
-        let mut joins = joins;
-        let generation = self.generation();
-        crate::edited::follow_growth(&generation, &mut joins)
-            .map_err(|e| crate::write::AcceptError::Unreadable(e.to_string()))?;
-        let stamp = crate::edited::Stamp::of(&generation);
+        self.grow_memberships_at(layer, level, joins, self.stamp_now())
+    }
+
+    /// Add points to the memberships of artifacts that already exist, each named by its published
+    /// key. A suppressed artifact grows like any other and stays suppressed: the key resolves
+    /// against the store, not what is served. The members were resolved at `at`, and the member
+    /// checks are [`Engine::put_artifacts_at`]'s. A point may also name its artifacts via
+    /// `/control/ingest`'s column; this entry point is for correcting points that already exist,
+    /// and an unknown key is refused here regardless.
+    ///
+    /// One [`GrownMembership`] per join. Neither an ordinal nor a membership size crosses the
+    /// boundary.
+    pub fn grow_memberships_at(
+        &self,
+        layer: String,
+        level: u32,
+        joins: Vec<mosaica_lifecycle::IncomingGrowth>,
+        at: Stamp,
+    ) -> std::result::Result<Vec<GrownMembership>, crate::write::AcceptError> {
         self.refuse_rowless(joins.iter().map(|j| &j.joining))?;
-
-        // A count and the key of the first join naming one, never an entity id: the detail is the
-        // caller's 422 body.
-        let mut deleted = 0u64;
-        let mut first_key = None;
-        for join in &joins {
-            let in_this = join
-                .joining
-                .iter()
-                .filter(|entity| generation.overlay.is_deleted(EntityId::new(*entity as u64)))
-                .count() as u64;
-            if in_this > 0 {
-                deleted += in_this;
-                first_key.get_or_insert(join.key.as_str());
-            }
-        }
-        if let Some(first_key) = first_key {
-            return Err(crate::write::AcceptError::Exec(
-                mosaica_lifecycle::ExecError::LayerRefused {
-                    detail: format!(
-                        "{deleted} joining member(s) are deleted, the first joining '{first_key}'; a \
-                         deleted member contributes to no count, so the batch is refused rather \
-                         than applied into silence"
-                    ),
-                },
-            ));
-        }
-
-        let grown = self.write.grow_memberships(layer, level, joins, stamp)?;
-        let shard = generation.bundle.manifest.identity.shard_id;
+        let grown = self.write.grow_memberships(layer, level, joins, at)?;
+        let shard = self.generation().bundle.manifest.identity.shard_id;
         grown
             .into_iter()
             .map(|receipt| {

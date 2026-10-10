@@ -389,7 +389,7 @@ pub fn map_accept_error(e: mosaica_engine::AcceptError) -> ApiError {
         AcceptError::Exec(ExecError::VocabularyConflict { detail }) => ApiError::Conflict(detail),
         // The detail names the values and the holders' `mosaica_id`s, never an entity id.
         AcceptError::Exec(ExecError::UniqueTaken { detail }) => ApiError::Conflict(detail),
-        // Reached only where the handler's one re-check was stale too.
+        // Reached only where the handler's last resolution was stale too.
         AcceptError::Exec(e @ ExecError::Stale) => ApiError::Conflict(e.to_string()),
         // The detail names rows by position, values as sent and items by `mosaica_id`.
         AcceptError::Conflict(detail) => ApiError::Conflict(detail),

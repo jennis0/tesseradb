@@ -24,10 +24,11 @@ use common::*;
 use homes::fixture::*;
 use homes::Home;
 use mosaica_engine::filter::{Endpoint, FilterOperand, Scalar};
-use mosaica_engine::{AcceptError, Engine, IngestRequest, ScalarOut};
+use mosaica_engine::{AcceptError, AddressTable, Engine, IngestRequest, NamedItems, ScalarOut};
 use mosaica_lifecycle::membership::{IncomingArtifact, IncomingContent};
+use mosaica_lifecycle::resolve::Verdict;
 use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
-use mosaica_lifecycle::IngestRow;
+use mosaica_lifecycle::{ExecError, IngestRow};
 use mosaica_types::{AttrLocalId, EntityId, MosaicaId};
 
 /// The source of the items the test edits twice: `X` visibly, `W` under a suppression.
@@ -887,6 +888,139 @@ fn an_edit_resolved_before_its_entity_was_freed_does_not_reach_the_new_holder() 
         .map(|f| f.value.clone());
     let expected = if answered.is_ok() { 777 } else { 502 };
     assert_eq!(score, Some(ScalarOut::I32(expected)), "x holds its own score");
+}
+
+/// What `/control/changes` resolves `tid` to: its entity, and the generation it was named in.
+fn named(engine: &Engine, tid: MosaicaId) -> (EntityId, NamedItems) {
+    let named = engine
+        .name_items(&AddressTable {
+            rows: 1,
+            mosaica_id: Some(vec![Some(tid)]),
+            columns: Vec::new(),
+        })
+        .unwrap();
+    let Verdict::Names(entity) = named.verdicts[0] else {
+        panic!("{tid:?} names an item: {:?}", named.verdicts[0]);
+    };
+    (entity, named)
+}
+
+/// An item in `s0` alone, as a new item will be, edited once and flushed, so the entity it holds
+/// is one an edit gave it and a fold frees once it is gone. It holds no unique value, which would
+/// name it where it moves.
+fn edited_item(engine: &Engine) -> MosaicaId {
+    let x = send(engine, "x", "s0", vec![create("0", (700.0, 701.0))])[0];
+    publish_buffered(engine);
+    send(engine, "x1", "s0", vec![rescore(x, 501)]);
+    publish_buffered(engine);
+    x
+}
+
+/// **A deletion resolved before its item moved and its entity was freed does not reach the item
+/// that took the entity.** The deletion is named; an edit moves the item, a fold frees the entity
+/// it named, and a new item takes it. Submitted with the generation it was named in, the deletion
+/// is refused as stale, and both items are served.
+#[test]
+fn a_deletion_resolved_before_its_entity_was_freed_does_not_reach_the_new_holder() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = build_homes(tmp.path());
+    let engine = open(tmp.path(), &root);
+    engine.set_merge_for_test(false);
+    let x = edited_item(&engine);
+    let (resolved, named) = named(&engine, x);
+
+    send(&engine, "x2", "s0", vec![rescore(x, 502)]);
+    publish_buffered(&engine);
+    fold(&engine);
+    publish_buffered(&engine);
+    let z = send(&engine, "z", "s0", vec![create("1", (901.0, 902.0))])[0];
+    assert_eq!(
+        entity_of(&engine, z),
+        resolved,
+        "the new item takes the freed id"
+    );
+    publish_buffered(&engine);
+
+    let answered = engine.accept_changes_at(vec![(resolved, ChangeOp::Delete)], named.at);
+    assert!(
+        matches!(answered, Err(AcceptError::Exec(ExecError::Stale))),
+        "the deletion is refused as stale: {answered:?}"
+    );
+    publish_buffered(&engine);
+    let subset = engine.authorise(&subset_credential()).unwrap();
+    let full = engine.authorise(&full_coverage_credential()).unwrap();
+    assert!(
+        served(&engine, &subset, "s0", None).contains(&z.raw()),
+        "z is served"
+    );
+    assert!(
+        served(&engine, &full, "s0", None).contains(&x.raw()),
+        "x is served"
+    );
+}
+
+/// **A suppression resolved before its item was deleted does not reach the item that took the
+/// entity.** No edit follows the suppression's naming: another request deletes the item, a fold
+/// frees its entity, and a new item takes it. Submitted with the generation it was named in, the
+/// suppression is refused as stale, and the new item is served.
+#[test]
+fn a_suppression_resolved_before_its_item_was_deleted_does_not_reach_the_new_holder() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = build_homes(tmp.path());
+    let engine = open(tmp.path(), &root);
+    engine.set_merge_for_test(false);
+    let x = edited_item(&engine);
+    let (resolved, named) = named(&engine, x);
+
+    engine.accept_change(resolved, ChangeOp::Delete).unwrap();
+    fold(&engine);
+    publish_buffered(&engine);
+    let z = send(&engine, "z", "s0", vec![create("1", (901.0, 902.0))])[0];
+    assert_eq!(
+        entity_of(&engine, z),
+        resolved,
+        "the new item takes the freed id"
+    );
+    publish_buffered(&engine);
+
+    let answered = engine.accept_changes_at(vec![(resolved, ChangeOp::Suppress)], named.at);
+    assert!(
+        matches!(answered, Err(AcceptError::Exec(ExecError::Stale))),
+        "the suppression is refused as stale: {answered:?}"
+    );
+    let subset = engine.authorise(&subset_credential()).unwrap();
+    assert!(
+        served(&engine, &subset, "s0", None).contains(&z.raw()),
+        "z is served"
+    );
+}
+
+/// **A deletion resolved before an edit moved its item reaches the item where it is now.**
+#[test]
+fn a_deletion_resolved_before_an_edit_reaches_the_item_where_it_is_now() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = build_homes(tmp.path());
+    let engine = open(tmp.path(), &root);
+    engine.set_merge_for_test(false);
+    let x = edited_item(&engine);
+    let (resolved, named) = named(&engine, x);
+
+    send(&engine, "x2", "s0", vec![rescore(x, 502)]);
+    publish_buffered(&engine);
+    assert_ne!(entity_of(&engine, x), resolved, "the edit moved x");
+    engine
+        .accept_changes_at(vec![(resolved, ChangeOp::Delete)], named.at)
+        .unwrap();
+    publish_buffered(&engine);
+    let full = engine.authorise(&full_coverage_credential()).unwrap();
+    assert!(
+        !served(&engine, &full, "s0", None).contains(&x.raw()),
+        "x is deleted"
+    );
+    assert!(
+        engine.resolve_mosaica_ids(&[x]).unwrap()[0].is_none(),
+        "x names nothing"
+    );
 }
 
 /// **The freed ids survive a restart.** They are recorded in the fold's side-manifest, and one an

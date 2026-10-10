@@ -366,6 +366,9 @@ impl Executor {
             if rotation.as_ref().is_some_and(|r| !r.retired.is_empty()) {
                 g.fold_epoch = previous.fold_epoch + 1;
             }
+            if rotation.as_ref().is_some_and(|r| r.frees) {
+                g.free_epoch = previous.free_epoch + 1;
+            }
             g.overlay_version = overlay_version;
             g.overlay = overlay;
         });

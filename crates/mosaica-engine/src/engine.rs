@@ -831,6 +831,7 @@ fn first_generation(
             edit_epoch: 0,
             deny_epoch: 0,
             fold_epoch: 0,
+            free_epoch: 0,
             delta_postings: readers.delta_postings.clone(),
             overlay_version: 0,
             overlay: Arc::new(overlay),
@@ -1299,6 +1300,7 @@ pub(crate) fn open_rotation(
             edited,
             tenancy,
             retired,
+            frees: false,
         },
     ))
 }

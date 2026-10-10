@@ -501,9 +501,9 @@ pub enum ExecError {
     /// id.
     UniqueTaken { detail: String },
     /// What the handler resolved a batch against has changed since: an item a row names was
-    /// deleted or joined to the row's view, or a value a row carries has a new holder, or an edit
-    /// moved an item a command names while a fold retired entities. Nothing took effect, and the
-    /// names are resolved again.
+    /// deleted or joined to the row's view, or a value a row carries has a new holder, or a fold
+    /// freed ids since a command's names were resolved, or an edit moved an item a command names
+    /// while a fold retired entities. Nothing took effect, and the names are resolved again.
     Stale,
 }
 

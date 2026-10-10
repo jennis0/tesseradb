@@ -193,6 +193,66 @@ pub(crate) struct PublishedBatch {
     pub(crate) joined: u64,
 }
 
+/// The refusal of a publication naming a deleted member or content source, where it names one.
+/// A suppressed one is accepted, being a live member temporarily outside every mask. A membership
+/// spelled by exclusion carries no members until it is complemented, after this. The detail is the
+/// caller's 422 body, so it gives a count and an artifact's position, never an entity id.
+fn deleted_in_publication(
+    generation: &Generation,
+    artifacts: &[IncomingArtifact],
+) -> Option<ExecError> {
+    let deleted = generation.overlay.deleted_set();
+    let mut count = 0u64;
+    let mut first_artifact = None;
+    for (index, artifact) in artifacts.iter().enumerate() {
+        let in_this = artifact.members.and_cardinality(deleted)
+            + artifact
+                .contents
+                .iter()
+                .map(|content| content.generated_from.and_cardinality(deleted))
+                .sum::<u64>();
+        if in_this > 0 {
+            count += in_this;
+            first_artifact.get_or_insert(index);
+        }
+    }
+    let first_artifact = first_artifact?;
+    Some(ExecError::LayerRefused {
+        detail: format!(
+            "{count} member(s) or content source(s) of this batch are deleted, the first in \
+             artifact {first_artifact}; a deleted member contributes to no count and makes \
+             supplied content unservable from birth, so the batch is refused rather than \
+             published into silence"
+        ),
+    })
+}
+
+/// The refusal of a growth whose joining members include a deleted one, on
+/// [`deleted_in_publication`]'s terms: a count and the key of the first join naming one.
+fn deleted_in_growth(
+    generation: &Generation,
+    joins: &[mosaica_lifecycle::IncomingGrowth],
+) -> Option<ExecError> {
+    let deleted = generation.overlay.deleted_set();
+    let mut count = 0u64;
+    let mut first_key = None;
+    for join in joins {
+        let in_this = join.joining.and_cardinality(deleted);
+        if in_this > 0 {
+            count += in_this;
+            first_key.get_or_insert(join.key.as_str());
+        }
+    }
+    let first_key = first_key?;
+    Some(ExecError::LayerRefused {
+        detail: format!(
+            "{count} joining member(s) are deleted, the first joining '{first_key}'; a deleted \
+             member contributes to no count, so the batch is refused rather than applied into \
+             silence"
+        ),
+    })
+}
+
 impl Executor {
     pub(super) fn execute(&mut self, command: Command) {
         match command {
@@ -219,7 +279,7 @@ impl Executor {
                 stamp,
                 reply,
             } => {
-                if !self.follow_since(stamp, |generation| {
+                if !follow_since(&self.generation.load(), stamp, |generation| {
                     crate::edited::follow_changes(generation, &mut changes)
                 }) {
                     reply.fail(ExecError::Stale);
@@ -277,10 +337,15 @@ impl Executor {
                 stamp,
                 reply,
             } => {
-                if !self.follow_since(stamp, |generation| {
+                let generation = self.generation.load_full();
+                if !follow_since(&generation, stamp, |generation| {
                     crate::edited::follow_artifacts(generation, &mut artifacts)
                 }) {
                     reply.fail(ExecError::Stale);
+                    return;
+                }
+                if let Some(refusal) = deleted_in_publication(&generation, &artifacts) {
+                    reply.fail(refusal);
                     return;
                 }
                 self.commit_artifacts(layer, level, artifacts, reply)
@@ -292,10 +357,15 @@ impl Executor {
                 stamp,
                 reply,
             } => {
-                if !self.follow_since(stamp, |generation| {
+                let generation = self.generation.load_full();
+                if !follow_since(&generation, stamp, |generation| {
                     crate::edited::follow_growth(generation, &mut joins)
                 }) {
                     reply.fail(ExecError::Stale);
+                    return;
+                }
+                if let Some(refusal) = deleted_in_growth(&generation, &joins) {
+                    reply.fail(refusal);
                     return;
                 }
                 self.commit_growth(layer, level, joins, reply)

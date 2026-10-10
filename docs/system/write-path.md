@@ -233,13 +233,15 @@ append:
 - the unique values, which name the new entity from the acknowledgement.
 
 A change, a growth or a publication resolved before an edit moved an item it names reaches the
-item where it is now. The generation counts the windows that committed an edit and the folds that
-retired entities; a command carries the counts it was resolved at, and one that finds an edit
-committed since looks up in the edited-items map where each entity it names that the overlay
-deletes has moved. Where a fold has also retired entities since, which can drop the entry saying
-where an item went, the command is refused as having moved and its names are resolved again,
-which `/control/changes` does itself. A deny that reaches the old entity before the edit commits
-is carried by the check above: the edit is decided again.
+item where it is now. The generation counts the windows that committed an edit, the folds that
+retired entities and the folds that freed ids. A command's names are resolved against one
+generation, and the command carries that generation's counts to the executor. One that finds an
+edit committed since looks up in the edited-items map where each entity it names that the overlay
+deletes has moved. It is refused as stale, and its names are resolved again, where a fold has since
+freed ids, one of which may now name another item, or has retired entities after an edit, which can
+drop the entry saying where an item went. `/control/changes`, a publication and a growth each
+resolve their names again up to three times. A deny that reaches the old entity before the edit
+commits is carried by the check above: the edit is decided again.
 
 The edited-items map says which entity holds each edited item. It has two directions, number to
 entity and entity to number, each a set of run files like a unique field's: a flush writes one run

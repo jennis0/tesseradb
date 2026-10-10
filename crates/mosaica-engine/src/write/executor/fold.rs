@@ -1194,6 +1194,7 @@ impl Executor {
         // carrying what the swap is about to retire would re-seed the overlay at the next restart.
         let mut published_overlay = (*live.overlay).clone();
         published_overlay.retire(&executed);
+        let frees = !freed.is_empty();
         // At the log position no later record can name the freed ids at.
         let freed = mosaica_store::manifest::HeldEntities {
             position: self.log.wal.position(),
@@ -1425,6 +1426,7 @@ impl Executor {
             &live_manifest.deltas,
             &segments_manifest.deltas,
             executed,
+            frees,
         ) {
             self.diverge_from_current(&completed.prefix, &reason);
             return;
@@ -1612,7 +1614,8 @@ impl Executor {
         );
     }
 
-    /// Opens the prefix `CURRENT` now names and swaps onto it.
+    /// Opens the prefix `CURRENT` now names and swaps onto it, retiring `retired` and, where
+    /// `frees`, moving the epoch that makes every write resolved before it stale.
     fn swap_onto_folded_prefix(
         &mut self,
         prefix: &str,
@@ -1620,10 +1623,12 @@ impl Executor {
         live_tiers: &[String],
         folded_tiers: &[String],
         retired: croaring::Bitmap,
+        frees: bool,
     ) -> Result<(), String> {
-        let (bundle, rotation) =
+        let (bundle, mut rotation) =
             crate::engine::open_rotation(&self.deps.bundle_root, prefix, &live.fragments, retired)
                 .map_err(|e| format!("the folded prefix would not open ({e})"))?;
+        rotation.frees = frees;
         let delta_postings = folded_tiers
             .iter()
             .map(|rel| {

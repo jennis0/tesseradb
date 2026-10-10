@@ -245,23 +245,29 @@ pub(crate) fn follow_growth(
     Ok(())
 }
 
-/// The epochs a command's entities were resolved at: a later generation that committed an edit
-/// may have moved one, and one that also retired entities in a fold may have dropped the map
-/// entry that says where to.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct Stamp {
+/// The generation a write's entities were resolved against, which [`crate::Engine::name_items`]
+/// answers with its names and the write carries to the executor. A later generation that
+/// committed an edit may have moved one of the entities; one that also retired entities in a fold
+/// may have dropped the map entry that says where to; and one whose fold freed ids may have issued
+/// one of them to another item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(test, derive(Default))]
+pub struct Stamp {
     edits: u64,
     folds: u64,
+    frees: u64,
 }
 
-/// What has happened to a command's entities since its [`Stamp`].
+/// What has happened to a write's entities since its [`Stamp`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Since {
-    /// No edit committed: every entity is where it was.
+    /// No edit committed and no fold freed an id: every entity is where it was.
     Still,
-    /// An edit committed: [`follow_moves`] finds where each moved entity's item is now.
+    /// An edit committed and no fold retired an entity: [`follow_moves`] finds where each moved
+    /// entity's item is now.
     Edited,
-    /// An edit committed and a fold retired entities: the names must be resolved again.
+    /// A fold freed ids, or an edit committed and a fold retired entities: the names are resolved
+    /// again.
     Folded,
 }
 
@@ -270,10 +276,14 @@ impl Stamp {
         Stamp {
             edits: generation.edit_epoch,
             folds: generation.fold_epoch,
+            frees: generation.free_epoch,
         }
     }
 
     pub(crate) fn since(self, generation: &Generation) -> Since {
+        if generation.free_epoch != self.frees {
+            return Since::Folded;
+        }
         match (
             generation.edit_epoch == self.edits,
             generation.fold_epoch == self.folds,
@@ -426,6 +436,45 @@ mod tests {
         assert_eq!(
             number_and_tenancy_named(&key, &generation, id(&key, 0, 2, 7)),
             Some((EntityId::new(7), false))
+        );
+    }
+
+    /// A write resolved at a stamp follows its entities after an edit alone, and is resolved
+    /// again after a fold that freed ids, edit or none, or after an edit and a fold that retired
+    /// entities.
+    #[test]
+    fn a_stamp_answers_what_has_happened_to_its_entities_since() {
+        let at = Generation::synthetic("v00000", 1, 0, Overlay::new(), IngestBuffer::new());
+        let stamp = Stamp::of(&at);
+        let later = |edits: u64, folds: u64, frees: u64| {
+            at.with(|g| {
+                g.edit_epoch += edits;
+                g.fold_epoch += folds;
+                g.free_epoch += frees;
+            })
+        };
+        assert_eq!(stamp.since(&at), Since::Still, "nothing since");
+        assert_eq!(
+            stamp.since(&later(0, 1, 0)),
+            Since::Still,
+            "a fold freeing nothing"
+        );
+        assert_eq!(stamp.since(&later(1, 0, 0)), Since::Edited, "an edit");
+        assert_eq!(stamp.since(&later(2, 0, 0)), Since::Edited, "two edits");
+        assert_eq!(
+            stamp.since(&later(1, 1, 0)),
+            Since::Folded,
+            "an edit and a fold"
+        );
+        assert_eq!(
+            stamp.since(&later(0, 1, 1)),
+            Since::Folded,
+            "a fold freeing ids"
+        );
+        assert_eq!(
+            stamp.since(&later(1, 1, 1)),
+            Since::Folded,
+            "an edit and a fold freeing ids"
         );
     }
 

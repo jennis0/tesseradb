@@ -70,11 +70,13 @@ pub struct GenerationParts {
     /// `mosaica_id` is formed and resolved at ([`crate::edited`]). Replaced only by a publication
     /// into a new prefix.
     pub(crate) tenancy: Arc<mosaica_store::tenancy::TenancyIndex>,
-    /// How many commit windows have committed an edit, and how many folds have retired entities,
-    /// since the process started: what a command resolved against an earlier generation compares
-    /// to learn whether an entity it names has moved ([`crate::edited::Stamp`]).
+    /// How many commit windows have committed an edit, how many folds have retired entities, and
+    /// how many folds have freed ids the allocator issues again, since the process started: what a
+    /// command resolved against an earlier generation compares to learn whether an entity it names
+    /// has moved or may name another item ([`crate::edited::Stamp`]).
     pub(crate) edit_epoch: u64,
     pub(crate) fold_epoch: u64,
+    pub(crate) free_epoch: u64,
     /// How many publications of deletions, suppressions and unsuppressions since the process
     /// started. An ingest does not move it.
     pub(crate) deny_epoch: u64,
@@ -474,6 +476,7 @@ impl Generation {
             tenancy: Arc::default(),
             edit_epoch: 0,
             fold_epoch: 0,
+            free_epoch: 0,
             deny_epoch: 0,
             delta_postings: Vec::new(),
             overlay_version: 0,
