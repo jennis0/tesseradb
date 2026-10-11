@@ -2762,10 +2762,7 @@ fn a_fold_carries_each_numbers_tenancy() {
     );
     let entity = entity_of_source(&root, "v00000", 4);
     set_tenancy(&root, entity, 6);
-    let at = |tenancy: u16| {
-        let high = mosaica_types::ItemHigh::new(0, mosaica_types::Tenancy::new(tenancy).unwrap());
-        test_key().forward(high, entity).unwrap()
-    };
+    let at = |tenancy: u16| mosaica_id_at(entity, tenancy);
     let open = || {
         Engine::open(
             &root,

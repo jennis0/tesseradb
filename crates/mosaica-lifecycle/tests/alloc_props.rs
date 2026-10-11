@@ -2,7 +2,7 @@
 //! in, no id live twice and no identifier naming two items across simulated crashes and folds that
 //! free ids and numbers, and `assign_sorted`'s contiguous-signature grouping.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use proptest::prelude::*;
 
@@ -179,10 +179,7 @@ proptest! {
     ) {
         const HIGH_WATER: u64 = 1_000;
         let mut alloc = Allocator::with_marks(HIGH_WATER, HIGH_WATER + room);
-        let mut free = ByTenancy::new();
-        for (&id, &tenancy) in &pool {
-            free.entry(Tenancy::new(tenancy).unwrap()).or_default().add(id);
-        }
+        let free = by_tenancy(pool.iter().map(|(&id, &tenancy)| (id, tenancy)));
         alloc.release_after(0, free.clone());
         alloc.promote(0);
 
@@ -288,7 +285,7 @@ proptest! {
                 wal.push(deletion(entity));
             }
             if fold {
-                let mut freed = ByTenancy::new();
+                let mut freed = Vec::new();
                 for (id, number) in gone.drain(..) {
                     in_use.remove(&id);
                     let tenancy = if number {
@@ -298,12 +295,9 @@ proptest! {
                     } else {
                         0
                     };
-                    freed
-                        .entry(Tenancy::new(tenancy).unwrap())
-                        .or_default()
-                        .add(id as u32);
+                    freed.push((id as u32, tenancy));
                 }
-                alloc.release_after(position, freed);
+                alloc.release_after(position, by_tenancy(freed));
                 published = Published {
                     high_water: alloc.high_water(),
                     free: union_of(alloc.free()),
@@ -317,13 +311,10 @@ proptest! {
                 }
             }
             if crash {
-                let split = |ids: &Bitmap| -> ByTenancy {
-                    let mut sets: BTreeMap<Tenancy, Bitmap> = BTreeMap::new();
-                    for id in ids.iter() {
-                        let tenancy = published.index.get(&u64::from(id)).copied().unwrap_or(0);
-                        sets.entry(Tenancy::new(tenancy).unwrap()).or_default().add(id);
-                    }
-                    sets
+                let split = |ids: &Bitmap| {
+                    by_tenancy(ids.iter().map(|id| {
+                        (id, published.index.get(&u64::from(id)).copied().unwrap_or(0))
+                    }))
                 };
                 let mut next = Allocator::new(published.high_water.max(high_water_from(&wal)));
                 next.seed_freed(
@@ -389,6 +380,17 @@ proptest! {
             }
         }
     }
+}
+
+/// Each id of `pairs` in the set of its tenancy.
+fn by_tenancy(pairs: impl IntoIterator<Item = (u32, u16)>) -> ByTenancy {
+    let mut sets = ByTenancy::new();
+    for (id, tenancy) in pairs {
+        sets.entry(Tenancy::new(tenancy).unwrap())
+            .or_default()
+            .add(id);
+    }
+    sets
 }
 
 /// What the last fold published: the high-water, the allocator's sets as one set of ids each,

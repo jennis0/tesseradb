@@ -396,7 +396,7 @@ mod tests {
     use std::sync::Arc;
 
     use mosaica_lifecycle::{IngestBuffer, Overlay};
-    use mosaica_store::tenancy::{TenancyIndex, TENANCY_BITS};
+    use mosaica_store::tenancy::{bits_of, TenancyIndex};
 
     use super::*;
 
@@ -404,15 +404,7 @@ mod tests {
 
     /// A generation of shard 0 whose index holds each `(number, tenancy)`.
     fn generation_with(dir: &std::path::Path, held: &[(u32, u16)]) -> Generation {
-        let mut bits: [croaring::Bitmap; TENANCY_BITS] = Default::default();
-        for &(number, tenancy) in held {
-            for (bit, numbers) in bits.iter_mut().enumerate() {
-                if tenancy & (1 << bit) != 0 {
-                    numbers.add(number);
-                }
-            }
-        }
-        let files = mosaica_store::tenancy::write(dir, &bits).unwrap();
+        let files = mosaica_store::tenancy::write(dir, &bits_of(held)).unwrap();
         let index = Arc::new(TenancyIndex::open(&files).unwrap());
         Generation::synthetic("v00000", 1, 0, Overlay::new(), IngestBuffer::new())
             .with(|g| g.tenancy = index)

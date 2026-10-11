@@ -30,7 +30,7 @@ use mosaica_store::flush::{write_flush_segment, FlushInput, FlushRow};
 use mosaica_store::manifest::{
     CurrentPointer, EntitySet, FileDigest, SegmentsManifest, TenancyBit,
 };
-use mosaica_store::tenancy::TENANCY_BITS;
+use mosaica_store::tenancy::bits_of;
 use mosaica_store::{write_segments_manifest, StoreError};
 use mosaica_types::{EntityId, IdentityKey, TermId, SMALL_TERM_THRESHOLD_DEFAULT};
 
@@ -253,12 +253,7 @@ fn flushed_bundle_at(root: &Path, tenancy: u16) {
         mosaica_store::digest_of(&delta_path).expect("the tier digests"),
     );
 
-    let mut bits: [croaring::Bitmap; TENANCY_BITS] = Default::default();
-    for (bit, numbers) in bits.iter_mut().enumerate() {
-        if tenancy & (1 << bit) != 0 {
-            numbers.add(n as u32 + 1);
-        }
-    }
+    let bits = bits_of(&[(n as u32 + 1, tenancy)]);
     let mut tenancy_index = Vec::new();
     for (bit, path) in mosaica_store::tenancy::write(&prefix_dir.join(TENANCY_REL), &bits).unwrap()
     {
@@ -468,11 +463,10 @@ fn a_row_is_checked_at_its_numbers_tenancy_in_the_index() {
     assert_eq!((deep.raised_numbers, deep.retired_numbers), (1, 0));
 
     edit_side_manifest(&root, |m| m["tenancy_index"] = serde_json::json!([]));
-    let err = verify(&root).expect_err("without the index the row's tenancy is not its number's");
+    let refused = verify(&root);
     assert!(
-        err.to_string()
-            .contains("does not match identity.key's derivation"),
-        "{err}"
+        matches!(refused, Err(BuildError::Invalid(_))),
+        "without the index the row's tenancy is not its number's: {refused:?}"
     );
 
     let temp = tempfile::TempDir::new().unwrap();
@@ -499,7 +493,11 @@ fn a_retired_number_below_the_highest_tenancy_is_refused() {
     edit_side_manifest(&root, |m| {
         m["retired_numbers"] = serde_json::to_value(&retired).unwrap()
     });
-    expect_refusal(&root, "is retired at tenancy 0");
+    let refused = verify_deep(&root, &VerifyOpts::default());
+    assert!(
+        matches!(refused, Err(BuildError::Invalid(_))),
+        "a retired number at tenancy 0: {refused:?}"
+    );
 }
 
 // ---- deliberate damage (§18 obligation 9) --------------------------------------------------
@@ -641,18 +639,10 @@ fn a_dict_extent_with_a_miscounted_declaration_is_refused() {
     let temp = tempfile::TempDir::new().unwrap();
     flushed_bundle(temp.path());
     let root = bundle_root(&temp);
-    let prefix_dir = root.join("v00000");
-
-    let segments_path = prefix_dir.join("partitions/default/SEGMENTS-1.json");
-    let mut segments: serde_json::Value =
-        serde_json::from_slice(&fs::read(&segments_path).unwrap()).unwrap();
-    let declared = segments["dict_extents"][0]["records"].as_u64().unwrap();
-    segments["dict_extents"][0]["records"] = serde_json::json!(declared + 1);
-    fs::write(
-        &segments_path,
-        serde_json::to_vec_pretty(&segments).unwrap(),
-    )
-    .unwrap();
+    edit_side_manifest(&root, |segments| {
+        let declared = segments["dict_extents"][0]["records"].as_u64().unwrap();
+        segments["dict_extents"][0]["records"] = serde_json::json!(declared + 1);
+    });
 
     expect_refusal(&root, "positional");
 }
@@ -783,20 +773,14 @@ fn append_dict_extent_repeating_first_descriptor(root: &Path, k: usize) {
     let rel = format!("dictionary/terms-{k}.dict");
     fs::write(prefix_dir.join(&rel), record).unwrap();
 
-    let segments_path = prefix_dir.join("partitions/default/SEGMENTS-1.json");
-    let mut segments: serde_json::Value =
-        serde_json::from_slice(&fs::read(&segments_path).unwrap()).unwrap();
-    segments["dict_extents"]
-        .as_array_mut()
-        .unwrap()
-        .push(serde_json::json!({ "path": rel, "records": 1 }));
-    segments["files"][&rel] =
-        serde_json::json!({ "size": record.len(), "sha256": hex_sha256(record) });
-    fs::write(
-        &segments_path,
-        serde_json::to_vec_pretty(&segments).unwrap(),
-    )
-    .unwrap();
+    edit_side_manifest(root, |segments| {
+        segments["dict_extents"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({ "path": rel, "records": 1 }));
+        segments["files"][&rel] =
+            serde_json::json!({ "size": record.len(), "sha256": hex_sha256(record) });
+    });
 }
 
 /// **A rendered group-scoped family's lane is verified per (build segment, view)** (`views.md`

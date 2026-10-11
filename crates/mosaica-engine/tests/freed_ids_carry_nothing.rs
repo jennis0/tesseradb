@@ -18,6 +18,7 @@ mod common;
 mod homes;
 
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,7 +26,10 @@ use common::*;
 use homes::fixture::*;
 use homes::Home;
 use mosaica_engine::filter::{Endpoint, FilterOperand, Scalar};
-use mosaica_engine::{AcceptError, AddressTable, Engine, IngestRequest, NamedItems, ScalarOut};
+use mosaica_engine::{
+    AcceptError, AddressTable, Engine, IngestReceipt, IngestRequest, ItemOut, NamedItems,
+    ScalarOut, Session,
+};
 use mosaica_lifecycle::membership::{IncomingArtifact, IncomingContent};
 use mosaica_lifecycle::resolve::Verdict;
 use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
@@ -35,19 +39,29 @@ use mosaica_types::{AttrLocalId, EntityId, MosaicaId};
 /// The source of the items the test edits twice: `X` visibly, `W` under a suppression.
 const W: u64 = 20;
 
-fn send(engine: &Engine, batch: &str, view: &str, rows: Vec<IngestRow>) -> Vec<MosaicaId> {
+/// Send `rows` to `view` as the batch `batch`, whose body hash is its name.
+fn ingest(
+    engine: &Engine,
+    batch: &str,
+    view: &str,
+    rows: Vec<IngestRow>,
+) -> Result<IngestReceipt, AcceptError> {
     let mut body_hash = [0u8; 32];
     body_hash[..batch.len()].copy_from_slice(batch.as_bytes());
-    engine
-        .ingest(IngestRequest {
-            batch_id: batch.to_string(),
-            body_hash,
-            view: Some(view.to_string()),
-            rows,
-            artifacts: Default::default(),
-            strict: false,
-            mosaica_id_column: false,
-        })
+    engine.ingest(IngestRequest {
+        batch_id: batch.to_string(),
+        body_hash,
+        view: Some(view.to_string()),
+        rows,
+        artifacts: Default::default(),
+        strict: false,
+        mosaica_id_column: false,
+    })
+}
+
+/// [`ingest`], accepted: the `mosaica_id` of each row.
+fn send(engine: &Engine, batch: &str, view: &str, rows: Vec<IngestRow>) -> Vec<MosaicaId> {
+    ingest(engine, batch, view, rows)
         .unwrap_or_else(|e| panic!("{batch} is accepted: {e}"))
         .mosaica_ids
         .into_iter()
@@ -86,18 +100,8 @@ fn entity_of(engine: &Engine, tid: MosaicaId) -> EntityId {
         .unwrap_or_else(|| panic!("{tid:?} names an item"))
 }
 
-/// The tenancy `tid` carries.
-fn tenancy_of(tid: MosaicaId) -> u16 {
-    test_key()
-        .invert(tid)
-        .expect("an item's mosaica_id inverts")
-        .0
-        .tenancy
-        .raw()
-}
-
 /// The newest side-manifest's freed ids, free or held, and its retired numbers.
-fn pool(root: &std::path::Path) -> (croaring::Bitmap, croaring::Bitmap) {
+fn pool(root: &Path) -> (croaring::Bitmap, croaring::Bitmap) {
     let bundle = mosaica_store::open_bundle(root).expect("the bundle opens");
     let manifest = &bundle
         .partitions
@@ -189,8 +193,18 @@ fn count_in(engine: &Engine, view: &str, key: &str) -> Option<u64> {
 enum Was {
     /// Edited until its score was this, and served.
     Edited(i32),
-    /// Deleted.
     Deleted,
+}
+
+/// What `/control/changes` resolves `tid` to.
+fn name_one(engine: &Engine, tid: MosaicaId) -> NamedItems {
+    engine
+        .name_items(&AddressTable {
+            rows: 1,
+            mosaica_id: Some(vec![Some(tid)]),
+            columns: Vec::new(),
+        })
+        .unwrap()
 }
 
 /// `x`'s `mosaica_id` names nothing: no card, no entity, and no item to a write that names it.
@@ -207,13 +221,7 @@ fn names_nothing(engine: &Engine, x: MosaicaId, after: &str) {
         vec![None],
         "x names an entity, after {after}"
     );
-    let named = engine
-        .name_items(&AddressTable {
-            rows: 1,
-            mosaica_id: Some(vec![Some(x)]),
-            columns: Vec::new(),
-        })
-        .unwrap();
+    let named = name_one(engine, x);
     assert!(
         !matches!(named.verdicts[0], Verdict::Names(_)),
         "a change naming x names an item, after {after}: {:?}",
@@ -226,120 +234,23 @@ fn names_nothing(engine: &Engine, x: MosaicaId, after: &str) {
 /// principal is served: `x` carries `0` alone and `z` carries `1` alone, so each principal sees
 /// one of them.
 fn check(engine: &Engine, x: MosaicaId, z: MosaicaId, was: Was, after: &str) {
-    let full = engine.authorise(&full_coverage_credential()).unwrap();
-    let subset = engine.authorise(&subset_credential()).unwrap();
-    let (x_score, x_live) = match was {
-        Was::Edited(score) => (score, true),
-        Was::Deleted => {
-            names_nothing(engine, x, after);
-            (score_of(X), false)
-        }
-    };
-    let card = engine
-        .item(&subset, z)
-        .unwrap()
-        .unwrap_or_else(|| panic!("z has a card, after {after}"));
-    let field = |name: &str| {
-        card.fields
-            .iter()
-            .find(|f| f.name == name)
-            .map(|f| f.value.clone())
-    };
-    // A value of `x` names `x` alone for the principal who sees it and never `z` for the one who
-    // sees `z`, and a value of `z` names `z` alone for the one who sees it.
-    let names_alone = |view: &str, column: &str, of_x: FilterOperand, of_z: FilterOperand| {
-        let expected = if x_live {
-            BTreeSet::from([x.raw()])
-        } else {
-            BTreeSet::new()
-        };
-        assert_eq!(
-            served(engine, &full, view, leaf(column, of_x.clone())),
-            expected,
-            "{column} of x names x alone, or nothing once x is deleted, in {view}, after {after}"
-        );
-        assert!(
-            !served(engine, &subset, view, leaf(column, of_x)).contains(&z.raw()),
-            "{column} of x names z in {view}, after {after}"
-        );
-        assert_eq!(
-            served(engine, &subset, view, leaf(column, of_z)),
-            BTreeSet::from([z.raw()]),
-            "{column} of z names z alone in {view}, after {after}"
-        );
-    };
+    let seen = Seen::new(engine, x, z, was, after);
     for home in Home::ALL {
         match home {
-            Home::Row => {
-                assert_eq!(
-                    card.views.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(),
-                    vec![Q1],
-                    "Home::Row: z's views, after {after}"
-                );
-                assert!(served(engine, &subset, Q1, None).contains(&z.raw()));
-            }
-            Home::RenderColumn | Home::RenderPresence => {
-                // Served first, so the projection a fold's refresh may be building is built.
-                assert!(served(engine, &subset, Q1, None).contains(&z.raw()));
-                let out = engine
-                    .viewport(
-                        &subset,
-                        mosaica_engine::ViewportRequest::new(Q1, 0, WHOLE, 10_000),
-                    )
-                    .unwrap();
-                let at = out
-                    .points
-                    .mosaica_ids
-                    .iter()
-                    .position(|t| *t == z.raw())
-                    .expect("q1 serves z");
-                let score = out.scalar_names.iter().position(|n| n == "score").unwrap();
-                let mosaica_engine::ColumnBuf::I32(scores) = &out.points.scalars[score].values
-                else {
-                    panic!("score renders as i32")
-                };
-                assert!(
-                    out.points.scalars[score].is_present(at) && scores[at] == Z_SCORE,
-                    "{home:?}: z renders its own score, after {after}"
-                );
-            }
-            Home::ValueColumn => names_alone(
-                Q1,
+            Home::Row => seen.views(),
+            Home::RenderColumn | Home::RenderPresence => seen.rendered_score(*home),
+            Home::ValueColumn => seen.names_alone(
                 "score",
-                exactly(f64::from(x_score)),
+                exactly(f64::from(seen.x_score)),
                 exactly(f64::from(Z_SCORE)),
             ),
-            Home::CategoryPostings => {
-                let band = |code: u8| FilterOperand::Equals(AttrLocalId::new(u32::from(code)));
-                assert_eq!(
-                    served(engine, &full, Q1, leaf("band", band(band_code(X)))).contains(&x.raw()),
-                    x_live,
-                    "Home::CategoryPostings: x's band names x while it is served, after {after}"
-                );
-                for session in [&full, &subset] {
-                    assert!(
-                        !served(engine, session, Q1, leaf("band", band(band_code(X))))
-                            .contains(&z.raw()),
-                        "Home::CategoryPostings: x's band names z, after {after}"
-                    );
-                }
-                assert!(
-                    served(engine, &subset, Q1, leaf("band", band(Z_BAND))).contains(&z.raw()),
-                    "Home::CategoryPostings: z's band names z, after {after}"
-                );
-                assert!(
-                    !served(engine, &full, Q1, leaf("band", band(Z_BAND))).contains(&z.raw()),
-                    "Home::CategoryPostings: z's band shows z without its label, after {after}"
-                );
-            }
-            Home::KeywordDictionary => names_alone(
-                Q1,
+            Home::CategoryPostings => seen.band_postings(),
+            Home::KeywordDictionary => seen.names_alone(
                 "tag",
                 FilterOperand::TextEquals(tag_of(X)),
                 FilterOperand::TextEquals("tag-z".into()),
             ),
-            Home::TextIndex => names_alone(
-                Q1,
+            Home::TextIndex => seen.names_alone(
                 "prose",
                 FilterOperand::Match {
                     query: format!("p{X}q"),
@@ -350,127 +261,20 @@ fn check(engine: &Engine, x: MosaicaId, z: MosaicaId, was: Was, after: &str) {
                     minimum: None,
                 },
             ),
-            Home::RecordBlob => assert_eq!(
-                (
-                    field("note"),
-                    field("prose"),
-                    field("tag"),
-                    field("band"),
-                    field("ident")
-                ),
-                (
-                    Some(ScalarOut::Utf8("note-z".into())),
-                    Some(ScalarOut::Utf8("zeta pzq".into())),
-                    Some(ScalarOut::Utf8("tag-z".into())),
-                    Some(ScalarOut::Utf8("high".into())),
-                    Some(ScalarOut::U64(Z_IDENT)),
-                ),
-                "Home::RecordBlob: z's stored values, after {after}"
-            ),
-            Home::TermPostings => {
-                let seen_by_full = served(engine, &full, Q1, None);
-                let seen_by_subset = served(engine, &subset, Q1, None);
-                assert!(
-                    seen_by_full.contains(&x.raw()) == x_live && !seen_by_full.contains(&z.raw()),
-                    "Home::TermPostings: the full principal sees x while it is served, and not z, \
-                     after {after}"
-                );
-                assert!(
-                    seen_by_subset.contains(&z.raw()) && !seen_by_subset.contains(&x.raw()),
-                    "Home::TermPostings: the subset principal sees z and not x, after {after}"
-                );
-                assert!(
-                    engine.item(&full, z).unwrap().is_none(),
-                    "Home::TermPostings: z has a card without its label, after {after}"
-                );
-                assert_eq!(
-                    card.labels,
-                    vec!["1".to_string()],
-                    "z's labels, after {after}"
-                );
-            }
-            Home::UniqueIndex => names_alone(
-                Q1,
+            Home::RecordBlob => seen.record(),
+            Home::TermPostings => seen.labels(),
+            Home::UniqueIndex => seen.names_alone(
                 "ident",
                 FilterOperand::NumIn(vec![Scalar::Int(i128::from(ident_of(X)))]),
                 FilterOperand::NumIn(vec![Scalar::Int(i128::from(Z_IDENT))]),
             ),
-            // `z` was created on the freed id, so the id is its number: the fold that freed it
-            // dropped the edited-items pairs naming the id, or `z` would answer `x`'s id or
-            // resolve to an entity of `x`.
-            Home::EditedItems => {
-                let entity = entity_of(engine, z);
-                assert_eq!(
-                    engine.mosaica_id_of(entity).unwrap(),
-                    z,
-                    "Home::EditedItems: z's entity answers another mosaica_id, after {after}"
-                );
-                assert_ne!(x, z, "x and z are one identifier");
-                if x_live {
-                    assert_ne!(entity_of(engine, x), entity, "x and z name one entity");
-                }
-            }
-            // `t0` holds every built item, `x` among them and `W` suppressed: the sixteen `q1`
-            // holds and `W` not one. Its content is generated from `x`, so once `x` is deleted the
-            // fold drops the content and `t0` is withheld. `z` is a member of `tz` alone.
-            Home::Membership => {
-                assert_eq!(
-                    (count_in(engine, Q1, "t0"), count_in(engine, Q1, "tz")),
-                    (
-                        x_live.then_some(QUARTERS[0].1.end - QUARTERS[0].1.start),
-                        Some(1)
-                    ),
-                    "Home::Membership: t0 and tz in q1, after {after}"
-                );
-                let entity = entity_of(engine, z).raw() as u32;
-                let holding = engine
-                    .level_memberships_for_test(LAYER, 0)
-                    .into_iter()
-                    .filter(|(_, members, _)| members.contains(&entity))
-                    .count();
-                assert_eq!(
-                    holding, 1,
-                    "Home::Membership: z's entity is a member of tz alone, after {after}"
-                );
-            }
-            // Once `x` is deleted, the content generated from it is dropped, and `z` on its number
-            // does not bring it back for a principal who sees `z` and `Y`.
-            Home::GeneratingSet => {
-                let credential = if x_live {
-                    full_coverage_credential()
-                } else {
-                    both_credential()
-                };
-                let t0 = artifacts_of(engine, &credential)
-                    .into_iter()
-                    .find(|a| a.key.as_deref() == Some("t0"))
-                    .map(|a| a.content);
-                assert_eq!(
-                    t0,
-                    x_live.then(|| vec![CONTENT.to_string()]),
-                    "Home::GeneratingSet: the content generated from x, after {after}"
-                );
-            }
-            // Served to the subset principal above, so no suppression stands against it.
+            Home::EditedItems => seen.edited_items(),
+            Home::Membership => seen.membership(),
+            Home::GeneratingSet => seen.generated_content(),
+            // Served to the subset principal at `Home::Row`, so no suppression stands against it.
             Home::Suppression => {}
-            Home::ScopedValue => {
-                assert_eq!(
-                    card.scoped
-                        .iter()
-                        .find(|s| s.name == "heat")
-                        .map(|s| s.values.clone()),
-                    Some(vec![("q1".to_string(), ScalarOut::F32(Z_HEAT))]),
-                    "Home::ScopedValue: z's heat, after {after}"
-                );
-                names_alone(
-                    Q1,
-                    "heat@quarter:q1",
-                    exactly(f64::from(heat(0, X))),
-                    exactly(f64::from(Z_HEAT)),
-                );
-            }
-            Home::ScopedProse => names_alone(
-                Q1,
+            Home::ScopedValue => seen.scoped_heat(),
+            Home::ScopedProse => seen.names_alone(
                 "memo@quarter:q1",
                 FilterOperand::Match {
                     query: format!("m0n{X}x"),
@@ -483,6 +287,345 @@ fn check(engine: &Engine, x: MosaicaId, z: MosaicaId, was: Was, after: &str) {
             ),
         }
     }
+}
+
+/// What [`check`] reads after one step: `x` through the principal holding `0`, and `z` and its
+/// card through the one holding `1`.
+struct Seen<'a> {
+    engine: &'a Engine,
+    full: Session,
+    subset: Session,
+    card: ItemOut,
+    x: MosaicaId,
+    z: MosaicaId,
+    /// The score `x` holds, or held before it was deleted.
+    x_score: i32,
+    /// Whether `x` is served.
+    x_live: bool,
+    after: &'a str,
+}
+
+impl<'a> Seen<'a> {
+    fn new(engine: &'a Engine, x: MosaicaId, z: MosaicaId, was: Was, after: &'a str) -> Self {
+        let full = engine.authorise(&full_coverage_credential()).unwrap();
+        let subset = engine.authorise(&subset_credential()).unwrap();
+        let (x_score, x_live) = match was {
+            Was::Edited(score) => (score, true),
+            Was::Deleted => {
+                names_nothing(engine, x, after);
+                (score_of(X), false)
+            }
+        };
+        let card = engine
+            .item(&subset, z)
+            .unwrap()
+            .unwrap_or_else(|| panic!("z has a card, after {after}"));
+        Seen {
+            engine,
+            full,
+            subset,
+            card,
+            x,
+            z,
+            x_score,
+            x_live,
+            after,
+        }
+    }
+
+    fn field(&self, name: &str) -> Option<ScalarOut> {
+        self.card
+            .fields
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| f.value.clone())
+    }
+
+    /// A value of `x` in `column` names `x` alone for the principal who sees it and never `z` for
+    /// the one who sees `z`, and a value of `z` names `z` alone for the one who sees it.
+    fn names_alone(&self, column: &str, of_x: FilterOperand, of_z: FilterOperand) {
+        let (engine, after) = (self.engine, self.after);
+        let expected = if self.x_live {
+            BTreeSet::from([self.x.raw()])
+        } else {
+            BTreeSet::new()
+        };
+        assert_eq!(
+            served(engine, &self.full, Q1, leaf(column, of_x.clone())),
+            expected,
+            "{column} of x names x alone, or nothing once x is deleted, in {Q1}, after {after}"
+        );
+        assert!(
+            !served(engine, &self.subset, Q1, leaf(column, of_x)).contains(&self.z.raw()),
+            "{column} of x names z in {Q1}, after {after}"
+        );
+        assert_eq!(
+            served(engine, &self.subset, Q1, leaf(column, of_z)),
+            BTreeSet::from([self.z.raw()]),
+            "{column} of z names z alone in {Q1}, after {after}"
+        );
+    }
+
+    fn views(&self) {
+        assert_eq!(
+            self.card
+                .views
+                .iter()
+                .map(|v| v.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![Q1],
+            "Home::Row: z's views, after {}",
+            self.after
+        );
+        assert!(served(self.engine, &self.subset, Q1, None).contains(&self.z.raw()));
+    }
+
+    fn rendered_score(&self, home: Home) {
+        let z = self.z.raw();
+        // Served first, so the projection a fold's refresh may be building is built.
+        assert!(served(self.engine, &self.subset, Q1, None).contains(&z));
+        let out = self
+            .engine
+            .viewport(
+                &self.subset,
+                mosaica_engine::ViewportRequest::new(Q1, 0, WHOLE, 10_000),
+            )
+            .unwrap();
+        let at = out
+            .points
+            .mosaica_ids
+            .iter()
+            .position(|t| *t == z)
+            .expect("q1 serves z");
+        let score = out.scalar_names.iter().position(|n| n == "score").unwrap();
+        let mosaica_engine::ColumnBuf::I32(scores) = &out.points.scalars[score].values else {
+            panic!("score renders as i32")
+        };
+        assert!(
+            out.points.scalars[score].is_present(at) && scores[at] == Z_SCORE,
+            "{home:?}: z renders its own score, after {}",
+            self.after
+        );
+    }
+
+    fn band_postings(&self) {
+        let (engine, x, z, after) = (self.engine, self.x.raw(), self.z.raw(), self.after);
+        let band = |code: u8| {
+            leaf(
+                "band",
+                FilterOperand::Equals(AttrLocalId::new(u32::from(code))),
+            )
+        };
+        assert_eq!(
+            served(engine, &self.full, Q1, band(band_code(X))).contains(&x),
+            self.x_live,
+            "Home::CategoryPostings: x's band names x while it is served, after {after}"
+        );
+        for session in [&self.full, &self.subset] {
+            assert!(
+                !served(engine, session, Q1, band(band_code(X))).contains(&z),
+                "Home::CategoryPostings: x's band names z, after {after}"
+            );
+        }
+        assert!(
+            served(engine, &self.subset, Q1, band(Z_BAND)).contains(&z),
+            "Home::CategoryPostings: z's band names z, after {after}"
+        );
+        assert!(
+            !served(engine, &self.full, Q1, band(Z_BAND)).contains(&z),
+            "Home::CategoryPostings: z's band shows z without its label, after {after}"
+        );
+    }
+
+    fn record(&self) {
+        assert_eq!(
+            (
+                self.field("note"),
+                self.field("prose"),
+                self.field("tag"),
+                self.field("band"),
+                self.field("ident")
+            ),
+            (
+                Some(ScalarOut::Utf8("note-z".into())),
+                Some(ScalarOut::Utf8("zeta pzq".into())),
+                Some(ScalarOut::Utf8("tag-z".into())),
+                Some(ScalarOut::Utf8("high".into())),
+                Some(ScalarOut::U64(Z_IDENT)),
+            ),
+            "Home::RecordBlob: z's stored values, after {}",
+            self.after
+        );
+    }
+
+    fn labels(&self) {
+        let (engine, x, z, after) = (self.engine, self.x.raw(), self.z.raw(), self.after);
+        let seen_by_full = served(engine, &self.full, Q1, None);
+        let seen_by_subset = served(engine, &self.subset, Q1, None);
+        assert!(
+            seen_by_full.contains(&x) == self.x_live && !seen_by_full.contains(&z),
+            "Home::TermPostings: the full principal sees x while it is served, and not z, after \
+             {after}"
+        );
+        assert!(
+            seen_by_subset.contains(&z) && !seen_by_subset.contains(&x),
+            "Home::TermPostings: the subset principal sees z and not x, after {after}"
+        );
+        assert!(
+            engine.item(&self.full, self.z).unwrap().is_none(),
+            "Home::TermPostings: z has a card without its label, after {after}"
+        );
+        assert_eq!(
+            self.card.labels,
+            vec!["1".to_string()],
+            "z's labels, after {after}"
+        );
+    }
+
+    /// `z` was created on the freed id, so the id is its number: the fold that freed it dropped
+    /// the edited-items pairs naming the id, or `z` would answer `x`'s id or resolve to an entity
+    /// of `x`.
+    fn edited_items(&self) {
+        let (engine, x, z) = (self.engine, self.x, self.z);
+        let entity = entity_of(engine, z);
+        assert_eq!(
+            engine.mosaica_id_of(entity).unwrap(),
+            z,
+            "Home::EditedItems: z's entity answers another mosaica_id, after {}",
+            self.after
+        );
+        assert_ne!(x, z, "x and z are one identifier");
+        if self.x_live {
+            assert_ne!(entity_of(engine, x), entity, "x and z name one entity");
+        }
+    }
+
+    /// `t0` holds every built item, `x` among them and `W` suppressed: the sixteen `q1` holds and
+    /// `W` not one. Its content is generated from `x`, so once `x` is deleted the fold drops the
+    /// content and `t0` is withheld. `z` is a member of `tz` alone.
+    fn membership(&self) {
+        let (engine, after) = (self.engine, self.after);
+        assert_eq!(
+            (count_in(engine, Q1, "t0"), count_in(engine, Q1, "tz")),
+            (
+                self.x_live
+                    .then_some(QUARTERS[0].1.end - QUARTERS[0].1.start),
+                Some(1)
+            ),
+            "Home::Membership: t0 and tz in q1, after {after}"
+        );
+        let entity = entity_of(engine, self.z).raw() as u32;
+        let holding = engine
+            .level_memberships_for_test(LAYER, 0)
+            .into_iter()
+            .filter(|(_, members, _)| members.contains(&entity))
+            .count();
+        assert_eq!(
+            holding, 1,
+            "Home::Membership: z's entity is a member of tz alone, after {after}"
+        );
+    }
+
+    /// Once `x` is deleted, the content generated from it is dropped, and `z` on its number does
+    /// not bring it back for a principal who sees `z` and `Y`.
+    fn generated_content(&self) {
+        let credential = if self.x_live {
+            full_coverage_credential()
+        } else {
+            both_credential()
+        };
+        let t0 = artifacts_of(self.engine, &credential)
+            .into_iter()
+            .find(|a| a.key.as_deref() == Some("t0"))
+            .map(|a| a.content);
+        assert_eq!(
+            t0,
+            self.x_live.then(|| vec![CONTENT.to_string()]),
+            "Home::GeneratingSet: the content generated from x, after {}",
+            self.after
+        );
+    }
+
+    fn scoped_heat(&self) {
+        assert_eq!(
+            self.card
+                .scoped
+                .iter()
+                .find(|s| s.name == "heat")
+                .map(|s| s.values.clone()),
+            Some(vec![("q1".to_string(), ScalarOut::F32(Z_HEAT))]),
+            "Home::ScopedValue: z's heat, after {}",
+            self.after
+        );
+        self.names_alone(
+            "heat@quarter:q1",
+            exactly(f64::from(heat(0, X))),
+            exactly(f64::from(Z_HEAT)),
+        );
+    }
+}
+
+/// Publish `tz`, an artifact of [`LAYER`] whose one member and generating set is `z`'s entity.
+fn publish_tz(engine: &Engine, z: EntityId) {
+    engine
+        .publish_artifacts(
+            LAYER.into(),
+            0,
+            vec![IncomingArtifact::with_content(
+                Some("tz".into()),
+                vec![z],
+                vec![IncomingContent::new(vec!["z's".to_string()], vec![z])],
+            )],
+        )
+        .expect("an artifact over z publishes");
+    tick(engine);
+}
+
+/// Merge four new segments with the one that lists `z`'s row, fold, and restart, calling `check`
+/// after each. The bundle verifies after the merge and after the restart.
+fn through_merge_and_fold(tmp: &Path, root: &Path, engine: Engine, check: impl Fn(&Engine, &str)) {
+    engine.set_merge_for_test(true);
+    let merges = engine.write_executor_stats().merges;
+    for i in 0..4u64 {
+        send(
+            &engine,
+            &format!("more{i}"),
+            Q1,
+            vec![create("0", (10.0 + i as f64, 20.0))],
+        );
+        publish_buffered(&engine);
+    }
+    tick_until(&engine, "a merge", Duration::from_secs(60), || {
+        engine.write_executor_stats().merges > merges
+    });
+    check(&engine, "a merge");
+    mosaica_build::verify_deep(root, &mosaica_build::VerifyOpts::default())
+        .expect("the merged bundle verifies");
+
+    fold(&engine);
+    check(&engine, "a second fold");
+    drop(engine);
+    let engine = open(tmp, root);
+    check(&engine, "a restart after the second fold");
+    mosaica_build::verify_deep(root, &mosaica_build::VerifyOpts::default())
+        .expect("the folded bundle verifies");
+}
+
+/// Request a fold that holds after its passes, run `during` while it holds, release it, and wait
+/// for it to publish.
+fn fold_while<T>(engine: &Engine, during: impl FnOnce() -> T) -> T {
+    let folds = engine.write_executor_stats().folds;
+    engine.set_fold_paused_for_test(true);
+    engine.request_fold();
+    wait_until("the fold holds", Duration::from_secs(60), || {
+        engine.fold_is_holding_for_test()
+    });
+    let answer = during();
+    engine.set_fold_paused_for_test(false);
+    wait_until("the fold publishes", Duration::from_secs(60), || {
+        engine.write_executor_stats().folds > folds
+    });
+    answer
 }
 
 #[test]
@@ -553,75 +696,30 @@ fn a_freed_id_carries_nothing_of_the_item_that_held_it() {
     );
     let z = made[0];
     publish_buffered(&engine);
-    let unsuppressed = |after: &str| {
+    let unsuppressed = |engine: &Engine, after: &str| {
         let subset = engine.authorise(&subset_credential()).unwrap();
         let full = engine.authorise(&full_coverage_credential()).unwrap();
         assert!(
-            served(&engine, &subset, Q1, None).contains(&made[1].raw()),
+            served(engine, &subset, Q1, None).contains(&made[1].raw()),
             "z2 is served on the id a suppressed entity left, after {after}"
         );
         assert!(
-            !served(&engine, &full, "s0", None).contains(&w.raw()),
+            !served(engine, &full, "s0", None).contains(&w.raw()),
             "w stays suppressed, after {after}"
         );
         assert_eq!(engine.overlay_depth(), 1, "after {after}");
     };
-    unsuppressed("the flush that placed z2");
-    engine
-        .publish_artifacts(
-            LAYER.into(),
-            0,
-            vec![IncomingArtifact::with_content(
-                Some("tz".into()),
-                vec![freed],
-                vec![IncomingContent::new(vec!["z's".to_string()], vec![freed])],
-            )],
-        )
-        .expect("an artifact over z publishes");
-    tick(&engine);
+    unsuppressed(&engine, "the flush that placed z2");
+    publish_tz(&engine, freed);
     check(&engine, x, z, Was::Edited(502), "the flush that placed z");
 
     drop(engine);
     engine = open(tmp.path(), &root);
     check(&engine, x, z, Was::Edited(502), "a restart");
-    let subset = engine.authorise(&subset_credential()).unwrap();
-    let full = engine.authorise(&full_coverage_credential()).unwrap();
-    assert!(served(&engine, &subset, Q1, None).contains(&made[1].raw()));
-    assert!(!served(&engine, &full, "s0", None).contains(&w.raw()));
-    assert_eq!(engine.overlay_depth(), 1, "after a restart");
-
-    // Four more segments, merged with the one that lists z's row.
-    engine.set_merge_for_test(true);
-    let merges = engine.write_executor_stats().merges;
-    for i in 0..4u64 {
-        send(
-            &engine,
-            &format!("more{i}"),
-            Q1,
-            vec![create("0", (10.0 + i as f64, 20.0))],
-        );
-        publish_buffered(&engine);
-    }
-    tick_until(&engine, "a merge", Duration::from_secs(60), || {
-        engine.write_executor_stats().merges > merges
+    unsuppressed(&engine, "a restart");
+    through_merge_and_fold(tmp.path(), &root, engine, |engine, after| {
+        check(engine, x, z, Was::Edited(502), after)
     });
-    check(&engine, x, z, Was::Edited(502), "a merge");
-    mosaica_build::verify_deep(&root, &mosaica_build::VerifyOpts::default())
-        .expect("the merged bundle verifies");
-
-    fold(&engine);
-    check(&engine, x, z, Was::Edited(502), "a second fold");
-    drop(engine);
-    let engine = open(tmp.path(), &root);
-    check(
-        &engine,
-        x,
-        z,
-        Was::Edited(502),
-        "a restart after the second fold",
-    );
-    mosaica_build::verify_deep(&root, &mosaica_build::VerifyOpts::default())
-        .expect("the folded bundle verifies");
 }
 
 /// **An id a kept record names is not issued after a restart.** A row buffered while a fold is in
@@ -644,16 +742,8 @@ fn an_id_a_kept_record_names_is_not_issued_after_a_restart() {
     publish_buffered(&engine);
 
     // The fold holds after its passes while a row is buffered, and publishes with it unflushed.
-    let folds = engine.write_executor_stats().folds;
-    engine.set_fold_paused_for_test(true);
-    engine.request_fold();
-    wait_until("the fold holds", Duration::from_secs(60), || {
-        engine.fold_is_holding_for_test()
-    });
-    let pinned = send(&engine, "pin", "s0", vec![create("0", (5.0, 5.0))]);
-    engine.set_fold_paused_for_test(false);
-    wait_until("the fold publishes", Duration::from_secs(60), || {
-        engine.write_executor_stats().folds > folds
+    let pinned = fold_while(&engine, || {
+        send(&engine, "pin", "s0", vec![create("0", (5.0, 5.0))])
     });
 
     drop(engine);
@@ -709,16 +799,8 @@ fn a_moved_entitys_suppression_stays_withdrawn_after_a_restart_replays_it() {
     publish_buffered(&engine);
     let holds = entity_of(&engine, w);
 
-    let folds = engine.write_executor_stats().folds;
-    engine.set_fold_paused_for_test(true);
-    engine.request_fold();
-    wait_until("the fold holds", Duration::from_secs(60), || {
-        engine.fold_is_holding_for_test()
-    });
-    send(&engine, "pin", "s0", vec![create("0", (5.0, 5.0))]);
-    engine.set_fold_paused_for_test(false);
-    wait_until("the fold publishes", Duration::from_secs(60), || {
-        engine.write_executor_stats().folds > folds
+    fold_while(&engine, || {
+        send(&engine, "pin", "s0", vec![create("0", (5.0, 5.0))])
     });
 
     let check = |engine: &Engine, after: &str| {
@@ -1014,19 +1096,7 @@ fn an_edit_resolved_before_its_entity_was_freed_does_not_reach_the_new_holder() 
     engine.hold_next_write_check_for_test();
     let held = {
         let engine = Arc::clone(&engine);
-        std::thread::spawn(move || {
-            let mut body_hash = [0u8; 32];
-            body_hash[..4].copy_from_slice(b"late");
-            engine.ingest(IngestRequest {
-                batch_id: "late".into(),
-                body_hash,
-                view: Some("s0".into()),
-                rows: vec![rescore(x, 777)],
-                artifacts: Default::default(),
-                strict: false,
-                mosaica_id_column: false,
-            })
-        })
+        std::thread::spawn(move || ingest(&engine, "late", "s0", vec![rescore(x, 777)]))
     };
     wait_until("the edit holds", Duration::from_secs(30), || {
         engine.write_check_is_holding_for_test()
@@ -1072,13 +1142,7 @@ fn an_edit_resolved_before_its_entity_was_freed_does_not_reach_the_new_holder() 
 
 /// What `/control/changes` resolves `tid` to: its entity, and the generation it was named in.
 fn named(engine: &Engine, tid: MosaicaId) -> (EntityId, NamedItems) {
-    let named = engine
-        .name_items(&AddressTable {
-            rows: 1,
-            mosaica_id: Some(vec![Some(tid)]),
-            columns: Vec::new(),
-        })
-        .unwrap();
+    let named = name_one(engine, tid);
     let Verdict::Names(entity) = named.verdicts[0] else {
         panic!("{tid:?} names an item: {:?}", named.verdicts[0]);
     };
@@ -1197,10 +1261,7 @@ fn a_deletion_resolved_before_an_edit_reaches_the_item_where_it_is_now() {
         !served(&engine, &full, "s0", None).contains(&x.raw()),
         "x is deleted"
     );
-    assert!(
-        engine.resolve_mosaica_ids(&[x]).unwrap()[0].is_none(),
-        "x names nothing"
-    );
+    names_nothing(&engine, x, "the deletion");
 }
 
 /// **The freed ids survive a restart.** They are recorded in the fold's side-manifest, and one an
@@ -1297,34 +1358,12 @@ fn a_deleted_items_number_is_issued_again_and_carries_nothing() {
         "z took no id from the high-water"
     );
     publish_buffered(&engine);
-    engine
-        .publish_artifacts(
-            LAYER.into(),
-            0,
-            vec![IncomingArtifact::with_content(
-                Some("tz".into()),
-                vec![number],
-                vec![IncomingContent::new(vec!["z's".to_string()], vec![number])],
-            )],
-        )
-        .expect("an artifact over z publishes");
-    tick(&engine);
+    publish_tz(&engine, number);
     check(&engine, x, z, Was::Deleted, "the flush that placed z");
 
     // A row addressing `x` names no item, and edits nothing.
-    let mut body_hash = [0u8; 32];
-    body_hash[..5].copy_from_slice(b"stale");
-    let receipt = engine
-        .ingest(IngestRequest {
-            batch_id: "stale".into(),
-            body_hash,
-            view: Some(Q1.into()),
-            rows: vec![rescore(x, 777)],
-            artifacts: Default::default(),
-            strict: false,
-            mosaica_id_column: false,
-        })
-        .expect("the batch is answered");
+    let receipt =
+        ingest(&engine, "stale", Q1, vec![rescore(x, 777)]).expect("the batch is answered");
     assert_eq!(
         (receipt.mosaica_ids, receipt.refused.len(), receipt.edited),
         (vec![None], 1, 0),
@@ -1336,38 +1375,9 @@ fn a_deleted_items_number_is_issued_again_and_carries_nothing() {
     drop(engine);
     engine = open(tmp.path(), &root);
     check(&engine, x, z, Was::Deleted, "a restart");
-
-    engine.set_merge_for_test(true);
-    let merges = engine.write_executor_stats().merges;
-    for i in 0..4u64 {
-        send(
-            &engine,
-            &format!("more{i}"),
-            Q1,
-            vec![create("0", (10.0 + i as f64, 20.0))],
-        );
-        publish_buffered(&engine);
-    }
-    tick_until(&engine, "a merge", Duration::from_secs(60), || {
-        engine.write_executor_stats().merges > merges
+    through_merge_and_fold(tmp.path(), &root, engine, |engine, after| {
+        check(engine, x, z, Was::Deleted, after)
     });
-    check(&engine, x, z, Was::Deleted, "a merge");
-    mosaica_build::verify_deep(&root, &mosaica_build::VerifyOpts::default())
-        .expect("the merged bundle verifies");
-
-    fold(&engine);
-    check(&engine, x, z, Was::Deleted, "a second fold");
-    drop(engine);
-    let engine = open(tmp.path(), &root);
-    check(
-        &engine,
-        x,
-        z,
-        Was::Deleted,
-        "a restart after the second fold",
-    );
-    mosaica_build::verify_deep(&root, &mosaica_build::VerifyOpts::default())
-        .expect("the folded bundle verifies");
 }
 
 /// **An item edited, then deleted while a fold is in flight, keeps its number until the fold that
@@ -1387,16 +1397,8 @@ fn an_item_deleted_while_a_fold_is_in_flight_keeps_its_number_until_the_next_fol
     let holds = entity_of(&engine, x);
     assert_ne!(holds, number, "the edit moved x");
 
-    let folds = engine.write_executor_stats().folds;
-    engine.set_fold_paused_for_test(true);
-    engine.request_fold();
-    wait_until("the fold holds", Duration::from_secs(60), || {
-        engine.fold_is_holding_for_test()
-    });
-    engine.accept_change(holds, ChangeOp::Delete).unwrap();
-    engine.set_fold_paused_for_test(false);
-    wait_until("the fold publishes", Duration::from_secs(60), || {
-        engine.write_executor_stats().folds > folds
+    fold_while(&engine, || {
+        engine.accept_change(holds, ChangeOp::Delete).unwrap();
     });
     publish_buffered(&engine);
     let (freed, _) = pool(&root);
@@ -1498,7 +1500,7 @@ fn a_number_at_the_highest_tenancy_is_retired_and_never_issued_again() {
     fold(&engine);
     publish_buffered(&engine);
 
-    let retired = |engine: &Engine, after: &str| {
+    let check_retired = |engine: &Engine, after: &str| {
         let (freed, retired) = pool(&root);
         assert!(
             holds_id(&retired, number) && !holds_id(&freed, number),
@@ -1520,14 +1522,14 @@ fn a_number_at_the_highest_tenancy_is_retired_and_never_issued_again() {
         );
         publish_buffered(engine);
     };
-    retired(&engine, "the fold");
+    check_retired(&engine, "the fold");
     drop(engine);
     engine = open(tmp.path(), &root);
     engine.set_merge_for_test(false);
-    retired(&engine, "a restart");
+    check_retired(&engine, "a restart");
     fold(&engine);
     publish_buffered(&engine);
-    retired(&engine, "a second fold");
+    check_retired(&engine, "a second fold");
     mosaica_build::verify_deep(&root, &mosaica_build::VerifyOpts::default())
         .expect("the bundle verifies");
 }
@@ -1547,16 +1549,8 @@ fn a_restart_before_the_rotation_issues_no_number_twice() {
     let number = entity_of(&engine, y);
     engine.accept_change(number, ChangeOp::Delete).unwrap();
 
-    let folds = engine.write_executor_stats().folds;
-    engine.set_fold_paused_for_test(true);
-    engine.request_fold();
-    wait_until("the fold holds", Duration::from_secs(60), || {
-        engine.fold_is_holding_for_test()
-    });
-    let pinned = send(&engine, "pin", "s0", vec![create("0", (5.0, 5.0))])[0];
-    engine.set_fold_paused_for_test(false);
-    wait_until("the fold publishes", Duration::from_secs(60), || {
-        engine.write_executor_stats().folds > folds
+    let pinned = fold_while(&engine, || {
+        send(&engine, "pin", "s0", vec![create("0", (5.0, 5.0))])[0]
     });
     assert!(
         holds_id(&pool(&root).0, number),

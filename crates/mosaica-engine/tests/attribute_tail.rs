@@ -45,7 +45,6 @@ use mosaica_engine::{ColumnBuf, Engine, EngineConfig, ViewportRequest};
 use mosaica_lifecycle::command::UnallocatedRow;
 use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
 use mosaica_store::read::{open_bundle, ColumnsRef, ScalarSlice};
-use mosaica_types::{ItemHigh, Tenancy};
 
 /// The fixture's schema: a `u8` category, a plain `i64` and a plain `f32`.
 ///
@@ -333,15 +332,9 @@ fn a_build_emits_the_declared_tail_and_records_its_vocabulary() {
     assert_eq!(tail.len(), N_ITEMS as usize);
     let entity_of_source = source_to_new_map(&root, "v00000");
     assert_eq!(entity_of_source.len(), N_ITEMS as usize);
-    let key = test_key();
     for source in 0..N_ITEMS {
         let entity = entity_of_source[&source];
-        let id = key
-            .forward(
-                ItemHigh::new(0, Tenancy::ZERO),
-                mosaica_types::EntityId::new(entity),
-            )
-            .unwrap();
+        let id = mosaica_id_at(mosaica_types::EntityId::new(entity), 0);
         let (band, stamp, score) = tail[&id.raw()];
         assert_eq!(band, band_code(source), "source {source}'s band code");
         assert_eq!(stamp, ingested_at_of(source), "source {source}'s timestamp");
@@ -461,9 +454,7 @@ fn an_ingested_row_carries_the_declared_tail_through_a_flush() {
         N_ITEMS as usize + 1,
         "the flushed row joins the base segment's rows"
     );
-    let id = test_key()
-        .forward(ItemHigh::new(0, Tenancy::ZERO), entity)
-        .unwrap();
+    let id = mosaica_id_at(entity, 0);
     assert_eq!(
         tail[&id.raw()],
         (3u8, 1_800_000_000_000_000i64, 12.5f32),
@@ -517,9 +508,7 @@ fn a_merge_carries_every_inputs_tail_forward_against_the_right_identities() {
             )
             .expect("accepted")[0];
         publish_buffered(&engine);
-        let id = test_key()
-            .forward(ItemHigh::new(0, Tenancy::ZERO), entity)
-            .unwrap();
+        let id = mosaica_id_at(entity, 0);
         expected.insert(
             id.raw(),
             (
@@ -549,15 +538,9 @@ fn a_merge_carries_every_inputs_tail_forward_against_the_right_identities() {
     // And the base segment's rows are untouched by a merge that did not include it — joined
     // through the sidecar, for the reason the build case states.
     let entity_of_source = source_to_new_map(&root, "v00000");
-    let key = test_key();
     for source in [0u64, 1, 2, N_ITEMS - 1] {
         let entity = entity_of_source[&source];
-        let id = key
-            .forward(
-                ItemHigh::new(0, Tenancy::ZERO),
-                mosaica_types::EntityId::new(entity),
-            )
-            .unwrap();
+        let id = mosaica_id_at(mosaica_types::EntityId::new(entity), 0);
         assert_eq!(
             tail[&id.raw()],
             (band_code(source), ingested_at_of(source), score_of(source))
@@ -621,9 +604,7 @@ fn a_fold_rewrites_the_whole_corpus_without_losing_the_tail() {
             "identity {id}'s tail changed across a fold that folded nothing away"
         );
     }
-    let id = test_key()
-        .forward(ItemHigh::new(0, Tenancy::ZERO), ingested)
-        .unwrap();
+    let id = mosaica_id_at(ingested, 0);
     assert_eq!(
         after[&id.raw()],
         (2u8, 2_000_000_000_000_000i64, 99.75f32),
@@ -762,9 +743,7 @@ fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
 
     // The flushed row is in a different segment from every other point, so its presence is what
     // proves the per-part resolution is keyed rather than assumed.
-    let flushed = test_key()
-        .forward(ItemHigh::new(0, Tenancy::ZERO), ingested)
-        .unwrap();
+    let flushed = mosaica_id_at(ingested, 0);
     let position = out
         .points
         .iter()

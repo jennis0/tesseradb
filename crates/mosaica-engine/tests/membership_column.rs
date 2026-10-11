@@ -26,7 +26,7 @@ use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource, ServingLayout, SuppliedContent, SuppliedRequirement,
 };
-use mosaica_types::{EntityId, ItemHigh, Tenancy};
+use mosaica_types::EntityId;
 
 const TREE: &str = "clusters/tree";
 const LABELS: &str = "clusters/labels";
@@ -140,13 +140,7 @@ impl Fixture {
 
     /// The wire identity of a source id's point — `shard 0`, as the fixture builds.
     fn point_id(&self, source: u64) -> u64 {
-        test_key()
-            .forward(
-                ItemHigh::new(0, Tenancy::ZERO),
-                EntityId::new(self.map[&source]),
-            )
-            .unwrap()
-            .raw()
+        mosaica_id_at(EntityId::new(self.map[&source]), 0).raw()
     }
 
     /// Wait for a publication's membership extents to land, which is when a pinned row-major

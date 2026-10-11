@@ -120,7 +120,7 @@ use mosaica_engine::{default_compute_threads, ArtifactOut, Engine, EngineConfig}
 use mosaica_lifecycle::UnallocatedRow;
 use mosaica_spatial::Bounds;
 use mosaica_store::read::open_bundle;
-use mosaica_types::{EntityId, IdentityKey, MosaicaId};
+use mosaica_types::{EntityId, IdentityKey, ItemHigh, MosaicaId, Tenancy};
 
 pub const N_ITEMS: u64 = 10_000;
 pub const ALL_TERM: u64 = 0;
@@ -134,6 +134,22 @@ pub const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
 pub fn test_key() -> IdentityKey {
     IdentityKey::from_hex(TEST_KEY_HEX).unwrap()
+}
+
+/// The `mosaica_id` of the item of shard 0 holding `entity` as its number at `tenancy`.
+pub fn mosaica_id_at(entity: EntityId, tenancy: u16) -> MosaicaId {
+    let high = ItemHigh::new(0, Tenancy::new(tenancy).expect("a tenancy below 4,096"));
+    test_key().forward(high, entity).unwrap()
+}
+
+/// The tenancy `id` carries.
+pub fn tenancy_of(id: MosaicaId) -> u16 {
+    test_key()
+        .invert(id)
+        .expect("an item's mosaica_id inverts")
+        .0
+        .tenancy
+        .raw()
 }
 
 pub fn extent() -> Bounds {
@@ -568,15 +584,10 @@ pub fn source_to_new_map(bundle_root: &Path, prefix: &str) -> BTreeMap<u64, u64>
 /// side-manifest as a publication names it.
 pub fn set_tenancy(bundle_root: &Path, number: EntityId, tenancy: u16) {
     use mosaica_store::manifest::{SegmentsManifest, TenancyBit};
-    use mosaica_store::tenancy::{TENANCY_BITS, TENANCY_DIR};
+    use mosaica_store::tenancy::{bits_of, TENANCY_DIR};
 
     let partition = bundle_root.join("v00000/partitions/default");
-    let mut bits: [croaring::Bitmap; TENANCY_BITS] = Default::default();
-    for (bit, numbers) in bits.iter_mut().enumerate() {
-        if tenancy & (1 << bit) != 0 {
-            numbers.add(number.raw() as u32);
-        }
-    }
+    let bits = bits_of(&[(number.raw() as u32, tenancy)]);
     let path = partition.join("SEGMENTS-0.json");
     let mut manifest: SegmentsManifest =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();

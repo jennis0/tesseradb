@@ -37,7 +37,6 @@ use mosaica_lifecycle::command::IngestRow;
 use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
 use mosaica_lifecycle::UnallocatedRow;
 use mosaica_spatial::shape::{ShapeF64, Space};
-use mosaica_types::{ItemHigh, Tenancy};
 
 const N: u64 = 3_000;
 
@@ -1131,13 +1130,7 @@ fn identities(fx: &Fx) -> HashMap<u64, u64> {
                 None => item_of_id(&fx.engine, item.source).unwrap(),
             }
             .expect("every item holds its id");
-            (
-                item.source,
-                test_key()
-                    .forward(ItemHigh::new(0, Tenancy::ZERO), entity)
-                    .unwrap()
-                    .raw(),
-            )
+            (item.source, mosaica_id_at(entity, 0).raw())
         })
         .collect()
 }

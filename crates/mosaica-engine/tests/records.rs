@@ -48,7 +48,7 @@ use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
-use mosaica_types::{AttrLocalId, EntityId, IdentityKey, ItemHigh, MosaicaId, Tenancy};
+use mosaica_types::{AttrLocalId, EntityId, IdentityKey, MosaicaId};
 
 const N: u64 = 2000;
 const GEO: &str = "geo";
@@ -522,13 +522,7 @@ impl Fx {
     }
 
     fn tid(&self, s: u64) -> u64 {
-        test_key()
-            .forward(
-                ItemHigh::new(0, Tenancy::ZERO),
-                EntityId::new(self.entity[&s]),
-            )
-            .unwrap()
-            .raw()
+        mosaica_id_at(EntityId::new(self.entity[&s]), 0).raw()
     }
 
     /// The sources in `view` in map order: by cell of the generator's position, then identity.

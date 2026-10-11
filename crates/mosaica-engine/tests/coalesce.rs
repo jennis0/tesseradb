@@ -805,11 +805,8 @@ fn a_folds_carried_tiers_and_runs_are_coalesced_and_every_answer_holds_through_a
             "a retired entity's value names nothing"
         );
         let reborn = ingest_with(&engine, *id, &[b"0"], &format!("reborn-{i}"));
-        let (high, _) = test_key()
-            .invert(engine.mosaica_id_of(reborn).unwrap())
-            .unwrap();
         assert!(
-            reborn != *entity || high.tenancy.raw() > 0,
+            reborn != *entity || tenancy_of(engine.mosaica_id_of(reborn).unwrap()) > 0,
             "a re-ingest is a new item, under a mosaica_id the deleted one never had"
         );
         assert_eq!(

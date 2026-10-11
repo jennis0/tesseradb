@@ -29,7 +29,7 @@ use mosaica_engine::{AcceptError, Engine, EngineConfig};
 use mosaica_lifecycle::command::UnallocatedRow;
 use mosaica_lifecycle::{Wal, WalRecord, WalScalar};
 use mosaica_store::read::{open_bundle, ColumnsRef, ScalarSlice};
-use mosaica_types::{EntityId, ItemHigh, Tenancy};
+use mosaica_types::EntityId;
 
 /// A discovered `department` vocabulary, wide enough that ordinary tests never see exhaustion.
 const DISCOVERED_WIDE: &str = r#"
@@ -207,10 +207,7 @@ fn stored_code_of(root: &Path, column: &str, entity: EntityId) -> Option<u32> {
         serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT is readable"))
             .expect("CURRENT parses");
     let prefix = &current.prefix;
-    let mosaica_id = test_key()
-        .forward(ItemHigh::new(0, Tenancy::ZERO), entity)
-        .unwrap()
-        .raw();
+    let mosaica_id = mosaica_id_at(entity, 0).raw();
     for (phash, partition) in &bundle.partitions {
         for segment in &partition.manifest.segments {
             let dir = root

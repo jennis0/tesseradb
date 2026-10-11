@@ -640,6 +640,19 @@ fn open_engine_with(bundle_root: &Path, tmp: &Path, cfg: EngineConfig) -> Engine
     Engine::open(bundle_root, &tmp.join("cache"), &tmp.join("wal.log"), cfg).unwrap()
 }
 
+/// Each tile's sub-cells, `offset` levels below it, sum to the tile's masked `visible` count.
+fn assert_sub_cells_sum_to_tiles(out: &ViewportOut, offset: u8, what: &str) {
+    for tile in &out.tiles {
+        let summed: u64 = out
+            .sub_cells
+            .iter()
+            .filter(|c| c.cell >> (2 * u32::from(offset)) == tile.tile)
+            .map(|c| c.count)
+            .sum();
+        assert_eq!(summed, tile.visible, "{what}, tile {}", tile.tile);
+    }
+}
+
 /// **I2.** Sub-cell counts are exact *masked* cardinalities, so a tile's sub-cells must sum to that
 /// tile's own `visible` — for every principal, not just the fully-authorised one.
 ///
@@ -668,21 +681,7 @@ fn underlay_sub_cells_sum_to_the_tile_s_masked_visible_count() {
                 )
                 .unwrap();
             assert!(!out.sub_cells.is_empty(), "zoom {zoom}: underlay was empty");
-
-            for tile in &out.tiles {
-                let summed: u64 = out
-                    .sub_cells
-                    .iter()
-                    .filter(|c| (c.cell >> (2 * offset as u32)) == tile.tile)
-                    .map(|c| c.count)
-                    .sum();
-                assert_eq!(
-                    summed, tile.visible,
-                    "zoom {zoom} offset {offset}, tile {}: sub-cells summed to {summed} but the \
-                     masked visible count is {} — an unmasked underlay would over-count here (I2)",
-                    tile.tile, tile.visible
-                );
-            }
+            assert_sub_cells_sum_to_tiles(&out, offset, &format!("zoom {zoom} offset {offset}"));
             assert!(
                 out.sub_cells.iter().all(|c| c.count > 0),
                 "empty sub-cells must be omitted, exactly as empty tiles are"
@@ -722,15 +721,7 @@ fn counts_spanning_several_containers_sum_to_the_visible_total() {
                 .unwrap();
             let visible: u64 = out.tiles.iter().map(|t| t.visible).sum();
             assert_eq!(visible, items, "zoom {zoom}: the tiles' counts");
-            for tile in &out.tiles {
-                let summed: u64 = out
-                    .sub_cells
-                    .iter()
-                    .filter(|c| c.cell >> 2 == tile.tile)
-                    .map(|c| c.count)
-                    .sum();
-                assert_eq!(summed, tile.visible, "zoom {zoom}, tile {}", tile.tile);
-            }
+            assert_sub_cells_sum_to_tiles(&out, 1, &format!("zoom {zoom}"));
         }
     }
 }
