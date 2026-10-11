@@ -1,10 +1,12 @@
-"""An attribute and a vocabulary declared after the first commit (python-sdk.md §4.4, §4.5, §6.2).
+"""An attribute, a vocabulary and the shard's size declared after the first commit (python-sdk.md
+§4.4, §4.5, §6.2).
 
-Every test here commits the notebook corpus, declares a column on the running service and reads
+Every column test commits the notebook corpus, declares a column on the running service and reads
 the answer back through the viewer plane. The routes are `PUT /control/attributes`,
 `PUT /control/vocabularies/{name}` and `PATCH /control/vocabularies/{name}/values`; the values
 arrive on rows of `POST /control/ingest` without coordinates, so what is under test is the plan's
-order and the served answer, not a second reading of the contract.
+order and the served answer, not a second reading of the contract. The shard's size is declared
+over a database of two items.
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ from __future__ import annotations
 import pyarrow as pa
 import pytest
 
-from conftest import viewport
+from conftest import small, viewport
 from mosaica._refusal import Refusal
 
 from test_sdk_corpus import declare_notebook
@@ -345,3 +347,46 @@ def test_declare_unique_on_a_held_column_is_sent_at_the_next_commit(served, corp
     assert db.commit().ok
     assert declared(db, "ref")["unique"] is True
     assert db.lookup("s0", "ref", [1_000 + 5]).num_rows == 1
+
+
+# ---------------------------------------------------------------------------- the shard's size
+
+
+def test_a_size_declared_after_the_first_commit_is_sent_where_the_server_reports_another(
+    tmp_path,
+):
+    db, rows = small(tmp_path / "db")
+    try:
+        assert db.commit().ok
+        db.declare_shards(3)
+        db.insert("map", rows.assign(id=[3, 4]), x="x", y="y", access="access")
+        plan = db.check()
+        assert plan.ok, plan
+        assert plan.plan[0] == "declare shard size 3"
+        report = db.commit()
+        # The two rows would take the high water from 2 to 4, past the size 3 sent before them.
+        assert not report.ok
+        assert [one["status"] for one in report.refusals] == [409]
+        assert db.status()["shards"] == {"size": 3}
+        assert [line for line in db.check().plan if line.startswith("declare")] == []
+
+        db.declare_shards(4)
+        db.insert("map", rows.assign(id=[3, 4]), x="x", y="y", access="access")
+        assert db.commit().ok
+        assert (db.status()["shards"], db.status()["entity_id_high_water"]) == ({"size": 4}, 4)
+    finally:
+        db.close()
+
+
+def test_a_size_below_the_high_water_is_refused_at_the_commit(tmp_path):
+    db, _ = small(tmp_path / "db")
+    try:
+        assert db.commit().ok
+        held = db.status()["shards"]["size"]
+        db.declare_shards(1)
+        with pytest.raises(Refusal) as raised:
+            db.commit()
+        assert [one["status"] for one in raised.value.report.refusals] == [409]
+        assert db.status()["shards"]["size"] == held
+    finally:
+        db.close()

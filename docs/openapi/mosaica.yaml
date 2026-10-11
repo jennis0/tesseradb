@@ -1735,10 +1735,8 @@ paths:
         is written. A deleted item names nothing, so its values may be given to a new item. A null
         is no value.
 
-        **The shard's size.** Each row that creates an item, and each that edits one, takes an
-        id: one a deletion freed, or else one past the shard's high water. A batch whose ids would
-        take the high water past the size `PUT /control/shards` declares is `409`, naming the
-        size, the high water and how many ids the batch needed, and writes nothing. Each batch sent
+        **The shard's size.** A batch whose new and edited items would take the shard's high water
+        past the size `PUT /control/shards` declares is `409` and writes nothing. Each batch sent
         beside it is taken or refused on its own.
 
         **Retries.** `x-mosaica-batch-id` names the batch. The same bytes sent again under the same
@@ -1801,7 +1799,7 @@ paths:
             - With `strict=true`, a row is refused: its values name more than one item, as when a row gives an item a unique value another item holds; its `mosaica_id` names no live or suppressed item; it names no item and carries no coordinates; or it names an item, or sets a unique value, an earlier row does
             - An item a row edits changed while the batch was checked; sending it again answers
             - The items the batch names changed while it was checked twice; sending it again answers
-            - The ids the batch's new and edited items take would carry the shard's high water past its size, or past the end of its ids; the detail names the size, the high water and how many ids the batch needed
+            - The ids the batch's new and edited items take would carry the shard's high water past its size, or past the lowest id an annotation layer holds; the detail names the size, the high water and how many ids the batch needed
           content:
             application/json:
               schema:
@@ -2100,14 +2098,12 @@ paths:
       summary: Declare the size of the shard items are stored in.
       description: |
         The body is a corpus declaration's `[shards]` table in JSON. The size is the high water
-        the shard may not pass: each item created and each item edited takes an id, one a deletion
-        freed or else one past the high water, and a batch of `POST /control/ingest` that would
-        take the high water past the size is `409`. Without a declaration the size is
-        4,026,531,840. `GET /control/status` reports it under `shards`.
+        the shard may not pass; `POST /control/ingest` says how a batch is counted against it.
+        Without a declaration the size is 4,026,531,840. `GET /control/status` reports it under
+        `shards`.
 
         Declaring the size the shard has answers `200` and changes nothing. A size below the
-        shard's high water is `409`: the ids the shard has issued would need a second shard, which
-        this version does not open.
+        shard's high water is `409`.
       security:
         - controlCredential: []
       parameters:
@@ -2150,7 +2146,7 @@ paths:
         "422":
           description: |
             - An unknown field
-            - A size of zero, or one that is not a positive integer
+            - A size that is not a positive integer
           content:
             application/json:
               schema:

@@ -9,6 +9,7 @@ lists the insert prints.
 import pyarrow.parquet as pq
 import pytest
 
+from conftest import small
 from mosaica._database import create
 from mosaica._database import open as reopen
 from mosaica._refusal import Refusal
@@ -299,8 +300,6 @@ def test_a_file_carrying_a_unique_attribute_under_another_name_says_so_in_fields
 
 
 def test_a_shard_size_is_the_shards_table_and_is_kept_with_the_declaration(db, checked):
-    """`declare_shards` writes `[shards]`, which a declaration without it does not carry, and the
-    database's own copy of the declaration reopens with it."""
     db.declare_view("s0")
     assert "[shards]" not in db.declaration
     assert db.declare_shards(4096) == {"size": 4096}
@@ -313,3 +312,26 @@ def test_a_shard_size_of_zero_is_refused_by_the_check(db, checked):
     db.declare_view("s0")
     db.declare_shards(0)
     assert not checked(db).ok
+
+
+def test_a_first_commit_creating_more_items_than_the_size_is_refused(tmp_path):
+    db, _ = small(tmp_path / "db", size=1)
+    try:
+        with pytest.raises(Refusal):
+            db.commit()
+    finally:
+        db.close()
+
+
+def test_a_size_declared_at_the_first_commit_refuses_a_later_page_past_it(tmp_path):
+    db, rows = small(tmp_path / "db", size=2)
+    try:
+        assert db.commit().ok
+        assert db.status()["shards"] == {"size": 2}
+        db.insert("map", rows.assign(id=[3, 4]), x="x", y="y", access="access")
+        with pytest.raises(Refusal) as raised:
+            db.commit()
+        assert [one["status"] for one in raised.value.report.refusals] == [409]
+        assert db.status()["entity_id_high_water"] == 2
+    finally:
+        db.close()

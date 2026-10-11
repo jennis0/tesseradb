@@ -571,7 +571,7 @@ without being freed. An entity a suppression stood against is freed like any oth
 compaction drops its suppression with it, and the item that takes the id is not suppressed. An item
 edited again and again therefore holds its number and at most two other ids: the entity it is in,
 and the one its last edit left, until a compaction frees it. Under repeated edits of the same items
-the high point of the id space stops rising after the second compaction.
+the shard's high water stops rising after the second compaction.
 
 A deleted item's number is freed by the compaction that removes its last entity: the number itself
 and every entity the edited-items map pairs with it. Until then the number resolves through the
@@ -586,7 +586,7 @@ artifacts and layers, are never freed.
 A freed id is held back until the WAL has rotated past the compaction's publication. Until then a
 restart would replay records naming the id's previous holder, its rows, its deletion and its
 memberships, onto whatever took the id. Once the log keeps no such record, the id is free. The
-allocator issues free ids before any id from its high point. A commit window's edits draw first,
+allocator issues free ids before any id from its high water. A commit window's edits draw first,
 each from tenancy 0, lowest id first, since an edit's new entity carries its item's `mosaica_id` and
 never becomes a number. Its new items then take the lowest tenancy, lowest id first. A restart
 between a compaction and the rotation after it replays the deletions the compaction executed, so
@@ -594,14 +594,14 @@ the next compaction frees those numbers again, one tenancy higher. The tenancy s
 issued.
 
 Every side-manifest records, in each shard's record, the free ids and the held-back ones, each set
-with the WAL position it waits for, beside the tenancy index. A restart takes both from the newest manifest it serves,
-splits them by that index, frees the sets whose position the log has passed, and removes every id
-a replayed record or the overlay names from the free and the held sets alike. In a free set such
-an id was issued after the manifest was written; in a set still held it is named by a record of
-its previous holder, which the replay has applied, so that set never frees it. The ids an artifact
-publication or growth names count, as do the rows, deletions and snapshots. A partition serving an
-older manifest after a step-down issues no freed id, since the manifest it serves can list an id
-issued since.
+with the WAL position it waits for, beside the tenancy index. A restart takes both from the newest
+manifest it serves, splits them by that index, frees the sets whose position the log has passed,
+and removes every id a replayed record or the overlay names from the free and the held sets alike.
+In a free set such an id was issued after the manifest was written; in a set still held it is named
+by a record of its previous holder, which the replay has applied, so that set never frees it. The
+ids an artifact publication or growth names count, as do the rows, deletions and snapshots. A
+partition serving an older manifest after a step-down issues no freed id, since the manifest it
+serves can list an id issued since.
 
 A freed id is lower than the entities a view already has rows for, and so is an older item added to
 a view in place, so a flush cannot place such a row by extending the segment's range of entities
@@ -612,7 +612,7 @@ compaction folds them into the base like any other.
 
 Measured on the GeoNames corpus (13.5 million items), over five rounds that each send a
 673,193-row hold-out again with the same 6,748 items moved, then flush and compact: the first two
-rounds took 6,748 new ids each and every later round none, so the high point stayed at 13,477,353.
+rounds took 6,748 new ids each and every later round none, so the high water stayed at 13,477,353.
 Freed ids land among other terms' runs in the term index rather than in a run of their own, and
 the compacted base term index measured 82,866 bytes after each of the two rounds on new ids and
 82,674 to 82,930 bytes after the rounds on freed ones; they were 52,018 bytes before the first
@@ -665,9 +665,9 @@ everything the deleted ones carried. Reading back through them is a step down to
 a server that runs out of manifests to step to refuses to serve that partition rather than
 reaching for one old enough to have forgotten a deny.
 
-The entity id allocator resumes from whichever is larger, the shard record's high point or the
-value replay reaches, so an id above the high point is never issued twice. Every side-manifest
-records each shard allocator's own high point, not only the highest entity a segment holds: an item
+The entity id allocator resumes from whichever is larger, the shard record's high water or the
+value replay reaches, so an id above the high water is never issued twice. Every side-manifest
+records each shard allocator's own high water, not only the highest entity a segment holds: an item
 deleted before its flush holds no row, and once the log records naming it are reclaimed, the
 manifest is what keeps its entity id, and so its `mosaica_id`, from being issued to a new item.
 Freed ids are restored from the newest manifest less every id the replay names

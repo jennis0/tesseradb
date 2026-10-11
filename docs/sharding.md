@@ -319,7 +319,9 @@ declaration, and the CLI through the build's declaration file.
 Any positive integer is accepted. A test sets a size small enough that its corpus spans several
 shards, down to a few dozen items, so every behaviour in this document runs on the conformance
 corpora. Lowering the size seals the open shard if its high water is past the new size. Raising it
-lets the open shard go on issuing ids. A sealed shard stays sealed.
+lets the open shard go on issuing ids. A sealed shard stays sealed. Not built yet: sealing. A size
+below the open shard's high water is refused, and so is a batch that would take the high water past
+the size.
 
 The default is 2³² − 2²⁸, 4,026,531,840. A sealed shard keeps the 2²⁸ ids above it for edits of its
 own items (§4.3). The default is chosen again from measurement (§8.5).
@@ -329,12 +331,9 @@ tenancy 4,095.
 
 ### 2.6 Bundle layout
 
-Before stage 2 the tree, under one partition, was `partitions/default/` holding the side-manifest,
-`terms/`, `entities/`, `attrs/`, `views/`, `coalesced/`, `members/`, `term-images/` and the derived
-forms, with each flush's dictionary extent in its segment's directory. Stage 2 builds the tree
-below with one shard, and holds each shard's record in the partition's `SEGMENTS-<n>.json`; stage
-5 gives each shard its own. Nothing global is under `shards/`, so a shard's directory can be linked
-or removed whole.
+Stage 2 builds the tree below with one shard and holds each shard's record in the partition's
+`SEGMENTS-<n>.json`; stage 5 gives each shard its own. Nothing global is under `shards/`, so a
+shard's directory can be linked or removed whole.
 
 ```text
 bundle/
@@ -378,8 +377,8 @@ bundle/
 
 A field a running service changes lives in the partition side-manifest. A compaction folds the
 declarations into `MANIFEST.json`, as today; every publication restates the shard records and
-`shards.size`, as it restates the layers. `MANIFEST.json`'s digest stays the
-bundle's identity; each shard's identity is its own (§3.6).
+`shards.size`, as it restates the layers. `MANIFEST.json`'s digest stays the bundle's identity; each
+shard's identity is its own (§3.6).
 
 `bundle_format` is bumped, and bundles are rebuilt.
 

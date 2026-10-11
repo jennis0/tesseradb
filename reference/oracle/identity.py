@@ -293,7 +293,7 @@ def row_sort_key(
     """The post-fold row order: `(morton, mosaica_id)` ascending, no further tiebreak
     (`docs/evidence/memos/2026-07-30-priority-as-identity-prefix.md`, "The decision"). Row
     order is therefore key-dependent, where it previously was not -- this is what makes
-    `identity.key`/`identity.shard_id` (read from MANIFEST) a dependency of row-order
+    `identity.key` (read from MANIFEST) and the shard a dependency of row-order
     re-derivation rather than an artefact of it.
     """
     return (morton_code, forward(key, shard_id, entity_id))

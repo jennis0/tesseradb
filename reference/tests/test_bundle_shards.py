@@ -12,18 +12,18 @@ import pytest
 
 from oracle.bundle import Bundle
 from oracle.identity import ROUNDS
+from oracle.layout import partition_dir
 
 
-def _bundle(root: Path, records: list[dict], identity_extra: dict | None = None) -> Path:
+def _bundle(root: Path, records: list[dict]) -> Path:
     """A bundle naming no file, with `records` as its side-manifest's shard records."""
     prefix = root / "v00000"
-    partition = prefix / "partitions" / "default"
+    partition = partition_dir(prefix)
     partition.mkdir(parents=True)
     identity = {
         "construction": "feistel-splitmix64-v1",
         "rounds": ROUNDS,
         "key": "000102030405060708090a0b0c0d0e0f",
-        **(identity_extra or {}),
     }
     manifest = json.dumps({"files": {}, "views": [], "identity": identity}).encode()
     (prefix / "MANIFEST.json").write_bytes(manifest)
@@ -42,7 +42,7 @@ def _record(shard: int) -> dict:
 def test_one_shard_numbered_zero_opens_and_its_record_holds_the_high_water(tmp_path):
     bundle = Bundle(_bundle(tmp_path, [_record(0)]))
     assert bundle.shard_record()["high_water"] == 12
-    assert bundle.partition_manifest()["shards"]["size"] == 7
+    assert bundle.side_manifest["shards"]["size"] == 7
 
 
 @pytest.mark.parametrize(
@@ -56,8 +56,3 @@ def test_one_shard_numbered_zero_opens_and_its_record_holds_the_high_water(tmp_p
 def test_any_other_shards_are_refused(tmp_path, records):
     with pytest.raises(ValueError):
         Bundle(_bundle(tmp_path, records))
-
-
-def test_a_shard_named_in_the_identity_is_refused(tmp_path):
-    with pytest.raises(ValueError):
-        Bundle(_bundle(tmp_path, [_record(0)], {"shard_id": 0}))

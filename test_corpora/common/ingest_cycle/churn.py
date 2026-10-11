@@ -395,7 +395,7 @@ def served_state(bundle: Path) -> dict:
     held: list[str] = []
     for partition in sorted(path for path in (root / "partitions").iterdir() if path.is_dir()):
         for record in newest_side_manifest(partition)["shards"]["records"]:
-            postings = shard_dir(partition, record["id"]) / "terms" / "postings.arrow"
+            postings = partition / "shards" / str(record["id"]) / "terms" / "postings.arrow"
             out["postings_bytes"] += postings.stat().st_size
             out["postings_bytes"] += sum((root / path).stat().st_size for path in record["deltas"])
             out["term_images_bytes"] += sum(
@@ -406,11 +406,6 @@ def served_state(bundle: Path) -> dict:
     out["free_ids"] = sum(map(roaring_cardinality, frees))
     out["held_ids"] = sum(map(roaring_cardinality, held))
     return out
-
-
-def shard_dir(partition: Path, shard: int = 0) -> Path:
-    """One point shard's directory in a partition directory: its per-entity and per-view files."""
-    return partition / "shards" / str(shard)
 
 
 def newest_side_manifest(partition: Path) -> dict:

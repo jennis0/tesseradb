@@ -172,18 +172,10 @@ def test_a_request_that_reaches_no_server_is_an_answer_and_not_an_exception():
 
 def test_a_commit_whose_pages_reach_no_server_reports_it_and_does_not_raise(tmp_path, monkeypatch):
     """A page that was never answered is a refusal the report carries, not an exception."""
-    import pandas as pd
+    from conftest import small
+    from mosaica._database import Database
 
-    from conftest import binary
-    from mosaica._database import Database, create
-
-    binary()
-    db = create(tmp_path / "db")
-    db.declare_view("map", extent={"min": 0.0, "max": 8.0})
-    db.declare_attribute("id", type="i64", unique=True)
-    rows = pd.DataFrame({"id": [1, 2], "x": [0.0, 1.0], "y": [0.0, 1.0],
-                         "access": ["public", "public"]})
-    db.insert("map", rows, x="x", y="y", access="access")
+    db, rows = small(tmp_path / "db")
     try:
         assert db.commit().ok
         db.insert("map", rows, x="x", y="y", access="access")
@@ -195,116 +187,5 @@ def test_a_commit_whose_pages_reach_no_server_reports_it_and_does_not_raise(tmp_
         with pytest.raises(Refusal) as raised:
             db.commit()
         assert [one["status"] for one in raised.value.report.refusals] == [UNANSWERED]
-    finally:
-        db.close()
-
-
-
-# ---------------------------------------------------------------------------- the shard's size
-
-
-def _small(path, size=None):
-    """A database of one view and two items, declared at `size` where one is given, and the rows
-    it was given."""
-    import pandas as pd
-
-    from conftest import binary
-
-    binary()
-    db = create(path)
-    db.declare_view("map", extent={"min": 0.0, "max": 8.0})
-    db.declare_attribute("id", type="i64", unique=True)
-    if size is not None:
-        db.declare_shards(size)
-    rows = pd.DataFrame({"id": [1, 2], "x": [0.0, 1.0], "y": [0.0, 1.0],
-                         "access": ["public", "public"]})
-    db.insert("map", rows, x="x", y="y", access="access")
-    return db, rows
-
-
-def test_declare_shards_sets_the_size_the_server_reports(tmp_path):
-    """`Control.declare_shards` against a real server: the size `/control/status` reports, a
-    size it already has answered as existing, and a size below the high water or of zero
-    refused."""
-    db, _ = _small(tmp_path / "db")
-    try:
-        assert db.commit().ok
-        control = db.control
-        high = control.status()["entity_id_high_water"]
-        declared = control.declare_shards({"size": high + 1})
-        assert (declared.status, declared.body["existing"]) == (201, False)
-        again = control.declare_shards({"size": high + 1})
-        assert (again.status, again.body["existing"]) == (200, True)
-        assert control.status()["shards"] == {"size": high + 1}
-        assert control.declare_shards({"size": high - 1}).status == 409
-        assert control.declare_shards({"size": 0}).status == 422
-        assert control.status()["shards"] == {"size": high + 1}
-    finally:
-        db.close()
-
-
-def test_a_first_commit_creating_more_items_than_the_size_is_refused(tmp_path):
-    db, _ = _small(tmp_path / "db", size=1)
-    try:
-        with pytest.raises(Refusal):
-            db.commit()
-    finally:
-        db.close()
-
-
-def test_a_size_declared_at_the_first_commit_refuses_a_later_page_past_it(tmp_path):
-    """The build's size is the server's, and a page of rows that would take the shard past it is
-    refused with nothing written."""
-    db, rows = _small(tmp_path / "db", size=2)
-    try:
-        assert db.commit().ok
-        assert db.status()["shards"] == {"size": 2}
-        db.insert("map", rows.assign(id=[3, 4]), x="x", y="y", access="access")
-        with pytest.raises(Refusal) as raised:
-            db.commit()
-        assert [one["status"] for one in raised.value.report.refusals] == [409]
-        assert db.status()["entity_id_high_water"] == 2
-    finally:
-        db.close()
-
-
-def test_a_size_declared_after_the_first_commit_is_sent_where_the_server_reports_another(
-    tmp_path,
-):
-    """`declare_shards` reaches `PUT /control/shards` at the next commit, ahead of the rows, and a
-    commit after it sends no declaration while `/control/status` reports the size declared."""
-    db, rows = _small(tmp_path / "db")
-    try:
-        assert db.commit().ok
-        db.declare_shards(3)
-        db.insert("map", rows.assign(id=[3, 4]), x="x", y="y", access="access")
-        plan = db.check()
-        assert plan.ok, plan
-        assert plan.plan[0] == "declare shard size 3"
-        report = db.commit()
-        # The size went first, so the page of two rows met it and was refused alone.
-        assert not report.ok
-        assert [one["status"] for one in report.refusals] == [409]
-        assert db.status()["shards"] == {"size": 3}
-        assert [line for line in db.check().plan if line.startswith("declare")] == []
-
-        db.declare_shards(4)
-        db.insert("map", rows.assign(id=[3, 4]), x="x", y="y", access="access")
-        assert db.commit().ok
-        assert (db.status()["shards"], db.status()["entity_id_high_water"]) == ({"size": 4}, 4)
-    finally:
-        db.close()
-
-
-def test_a_size_below_the_high_water_is_refused_at_the_commit(tmp_path):
-    db, _ = _small(tmp_path / "db")
-    try:
-        assert db.commit().ok
-        held = db.status()["shards"]["size"]
-        db.declare_shards(1)
-        with pytest.raises(Refusal) as raised:
-            db.commit()
-        assert [one["status"] for one in raised.value.report.refusals] == [409]
-        assert db.status()["shards"]["size"] == held
     finally:
         db.close()

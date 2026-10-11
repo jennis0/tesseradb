@@ -355,21 +355,20 @@ class Database:
     def declare_shards(self, size: int) -> dict:
         """Declare the size of the shard the items are stored in, and return the `[shards]` table.
 
-        Each new item and each edited item takes an id: one a deletion freed, or else one past the
-        shard's high water. The size is the high water the shard may not pass. Without this
-        declaration it is 4,026,531,840.
+        The size is the high water the shard may not pass. Without this declaration it is
+        4,026,531,840.
 
         - `size`: a positive integer.
 
         Before the first commit the size is written into `schema.toml`, and a first commit whose
         tables create more items than it is refused. After it, the next `commit()` sends the size
-        where the server reports another, and a page of rows that would take the shard past it is
-        refused with `409` while the other pages are sent. A size below the high water the database
-        has reached is refused at that commit.
+        where the server holds another; a page of rows that would take the shard past it is refused
+        with `409` while the other pages are sent, and a size below the database's high water is
+        refused.
 
             db.declare_shards(50_000_000)
         """
-        self.blocks.shards = size
+        self.blocks.shard_size = size
         return self._declared({"size": size})
 
     def declare_unique(self, name: str, unique: bool = True) -> dict:
@@ -1236,7 +1235,7 @@ class Database:
             "inserts": [_stored(insert) for insert in self.inserts],
             "pending": [_stored(insert) for insert in self.pending],
             "blocks": _tagged(self.blocks.blocks),
-            "shards": self.blocks.shards,
+            "shard_size": self.blocks.shard_size,
         }
         path = self.path / ".mosaica" / "declaration.json"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2213,7 +2212,7 @@ def _load(database: Database, state: dict) -> None:
     database.pending = [_restored(one) for one in state.get("pending", [])]
     for kind, blocks in state.get("blocks", {}).items():
         database.blocks.blocks[kind] = [_untagged(block) for block in blocks]
-    database.blocks.shards = state.get("shards")
+    database.blocks.shard_size = state.get("shard_size")
 
 
 #: How an inline TOML table is marked in the JSON copy, to tell it from a block of its own.
