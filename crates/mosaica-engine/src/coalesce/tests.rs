@@ -123,6 +123,7 @@ impl Fixture {
         let ctx = CoalesceContext {
             prefix_dir: self.prefix_dir.clone(),
             prefix: "v00000".to_string(),
+            id: "coalesce-1-1".to_string(),
             out_rel: format!("{}/coalesce-1-1", SHARD.coalesced_rel()),
         };
         execute_coalesce(plan, ctx)
@@ -162,22 +163,26 @@ impl Fixture {
         mosaica_store::write_flush_segment(&self.prefix_dir, PARTITION, "s0", input).unwrap()
     }
 
-    fn write_dict(&self, dir_rel: &str, descriptors: &[String]) -> String {
-        let dir = self.path(dir_rel);
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut writer = DictStreamWriter::new(&dir);
+    fn write_dict(&self, rel: String, descriptors: &[String]) -> String {
+        let path = self.path(&rel);
+        let dir = path.parent().unwrap();
+        std::fs::create_dir_all(dir).unwrap();
+        let mut writer = DictStreamWriter::new(dir);
         for descriptor in descriptors {
             writer.append(descriptor.as_bytes()).unwrap();
         }
         writer.finish().unwrap();
-        format!("{dir_rel}/terms-0.dict")
+        rel
     }
 
     /// What the build leaves: a segment and a dictionary that `MANIFEST.json` digests.
     fn write_build(&mut self) {
         let base = self.write_segment("base", &[0, 1, 2, 3], 0);
         self.build_files.extend(base.files);
-        let path = self.write_dict("terms", &["base-0".into(), "base-1".into()]);
+        let path = self.write_dict(
+            format!("{}/terms-0.dict", mosaica_store::layout::DICTIONARY_DIR),
+            &["base-0".into(), "base-1".into()],
+        );
         self.build_files.insert(path.clone(), self.digest_of(&path));
         self.manifest
             .dict_extents
@@ -199,7 +204,10 @@ impl Fixture {
         self.manifest.deltas.push(tier);
 
         let descriptors: Vec<String> = (0..2).map(|j| format!("flush-{flush}-{j}")).collect();
-        let path = self.write_dict(&seg_rel, &descriptors);
+        let path = self.write_dict(
+            mosaica_store::layout::dictionary_extent_rel(&seg),
+            &descriptors,
+        );
         self.digest([path.as_str()]);
         self.manifest
             .dict_extents

@@ -710,8 +710,8 @@ async fn a_view_outside_the_group_is_byte_identical_to_a_build_without_the_famil
 
     let tmp = TempDir::new().unwrap();
     let without = build_bundle(tmp.path(), false);
-    // `v00000/partitions/<phash>/views/world/segments/<seg>/` — walked rather than spelt, the
-    // partition hash and the segment id being the build's to choose.
+    // `v00000/partitions/<phash>/shards/0/views/world/segments/<seg>/` — walked rather than
+    // spelt, the partition hash and the segment id being the build's to choose.
     let segment_dir = |root: &Path| {
         let one = |dir: &Path| {
             std::fs::read_dir(dir)

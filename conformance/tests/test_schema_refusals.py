@@ -17,6 +17,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from oracle.harness import run_build, write_deployment
+from oracle.layout import shard_dir
 
 N = 8
 
@@ -131,7 +132,7 @@ type = "u32"
         f"schema's\nstderr: {result.stderr}"
     )
     prefix = json.loads((out / "CURRENT").read_text())["prefix"]
-    record_dir = out / prefix / "partitions" / "default" / "attrs" / "record"
+    record_dir = shard_dir(out / prefix) / "attrs" / "record"
     for filename in ("blocks.bin", "hasrow.roaring", "directory.arrow"):
         assert (record_dir / filename).is_file(), (
             f"the build succeeded but wrote no {filename} — the neither-key column was "

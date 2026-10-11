@@ -1,5 +1,5 @@
 //! The build's unique indexes: one per column declared `unique`, written as base runs of
-//! `(key, entity)` entries under `partitions/<p>/entities/unique/<attribute>/`.
+//! `(key, entity)` entries under a shard's `entities/unique/<attribute>/`.
 //!
 //! Each column's values are pushed through a bucketed spill sort under a share of the build's
 //! memory budget ([`mosaica_store::unique::UniqueSpill`]), which reports every key more than one

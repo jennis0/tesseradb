@@ -25,6 +25,7 @@ from pyroaring import BitMap
 
 from . import identity as identity_mod
 from . import morton as morton_mod
+from .layout import shard_dir
 
 #: The separator between a group's name and a view's key in a view id — `quarter:2026-Q3`
 #: (`views.md` §3.2). Transcribed from the design rather than imported from the Rust, like
@@ -425,7 +426,7 @@ class Bundle:
         self.segments_manifest = json.loads(segments_path.read_bytes())
         self._verify_files(self.segments_manifest.get("files", {}))
 
-        self._partition_dir = partition_dir
+        self._shard_dir = shard_dir(self.prefix_dir)
         self._segment_cache: dict[str, Segment] = {}
         self._permutation_cache: dict[str, Permutation] = {}
         # Derived per-view columns: pure functions of geometry and of the permutation, so they
@@ -507,7 +508,7 @@ class Bundle:
         multi-view build writes — so the failure would have been a missing file rather than a
         wrong answer, which is the safe direction and still the wrong path.
         """
-        path = self._partition_dir / "views"
+        path = self._shard_dir / "views"
         for component in view_id.split(GROUP_SEPARATOR, 1):
             path = path / component
         return path
@@ -691,9 +692,8 @@ class Bundle:
         return self._permutation_cache[view_id]
 
     def pairs_path(self, view_id: str = "default") -> Path:
-        # Phase 1 has one partition; pairs.parquet lives at partitions/default/terms/pairs.parquet
-        # regardless of view (postings/pairs are entity-space, not view-scoped).
-        return self._partition_dir / "terms" / "pairs.parquet"
+        # The shard's `terms/pairs.parquet`, whatever the view: pairs are entity-space.
+        return self._shard_dir / "terms" / "pairs.parquet"
 
     def unique_entities(self, attribute: str) -> dict[int, int]:
         """Every value of an integer unique attribute and the entity holding it, read from the
@@ -737,7 +737,7 @@ class Bundle:
     def postings(self, term_id: int) -> np.ndarray:
         """Term `term_id`'s sorted entity-id array, decoded from `terms/postings.arrow`."""
         if not hasattr(self, "_postings_array"):
-            self._postings_array = _read_postings_array(self._partition_dir / "terms" / "postings.arrow")
+            self._postings_array = _read_postings_array(self._shard_dir / "terms" / "postings.arrow")
         record = self._postings_array[term_id].as_py()
         tag = record[0]
         payload = record[1:]

@@ -19,6 +19,12 @@ pub use mosaica_types::view::GROUP_SEPARATOR;
 /// The term dictionary's directory under a prefix, one for the whole bundle.
 pub const DICTIONARY_DIR: &str = "dictionary";
 
+/// The dictionary extent a flush or a coalesce writes, prefix-relative, where `id` is the flush's
+/// segment id or the coalesce's id.
+pub fn dictionary_extent_rel(id: &str) -> String {
+    format!("{DICTIONARY_DIR}/{id}/terms-0.dict")
+}
+
 /// The directory every partition's directory is in, under `prefix_dir`.
 pub fn partitions_dir(prefix_dir: &Path) -> PathBuf {
     prefix_dir.join("partitions")
@@ -56,9 +62,13 @@ impl<'a> ShardLayout<'a> {
         ShardLayout { partition, shard }
     }
 
-    /// The shard's directory, prefix-relative.
+    /// The shard's directory, prefix-relative: `partitions/<partition>/shards/<shard>`.
     pub fn rel(self) -> String {
-        partition_rel(self.partition)
+        format!(
+            "{}/shards/{}",
+            partition_rel(self.partition),
+            self.shard.raw()
+        )
     }
 
     /// The shard's directory under `prefix_dir`.
@@ -153,20 +163,26 @@ mod tests {
     #[test]
     fn a_scoped_columns_path_moves_with_the_incarnation_and_not_at_the_build() {
         let declared = P0.scoped_column_rel("mood", "quarter:2026-Q3", DECLARED_INCARNATION);
-        assert_eq!(declared, "partitions/p0/attrs/mood/quarter/2026-Q3");
+        assert_eq!(
+            declared,
+            "partitions/p0/shards/0/attrs/mood/quarter/2026-Q3"
+        );
         let recreated = P0.scoped_column_rel("mood", "quarter:2026-Q3", 4);
-        assert_eq!(recreated, "partitions/p0/attrs/mood/quarter/2026-Q3@4");
+        assert_eq!(
+            recreated,
+            "partitions/p0/shards/0/attrs/mood/quarter/2026-Q3@4"
+        );
         assert_ne!(
             P0.scoped_column_rel("mood", "quarter:2026-Q3", 4),
             P0.scoped_column_rel("mood", "quarter:2026-Q3", 5)
         );
         assert_eq!(
             P0.scoped_column_rel("mood", "world", DECLARED_INCARNATION),
-            "partitions/p0/attrs/mood/world"
+            "partitions/p0/shards/0/attrs/mood/world"
         );
         assert_eq!(
             P0.scoped_column_rel("mood", "world", 2),
-            "partitions/p0/attrs/mood/world@2"
+            "partitions/p0/shards/0/attrs/mood/world@2"
         );
     }
 
@@ -174,20 +190,20 @@ mod tests {
     fn a_plain_view_is_one_component_and_a_groups_view_is_two() {
         assert_eq!(
             Path::new("/p").join(P0.view_rel("world")),
-            Path::new("/p/partitions/p0/views/world")
+            Path::new("/p/partitions/p0/shards/0/views/world")
         );
         assert_eq!(
             view_path_components("quarter:2026-Q2"),
             ["quarter", "2026-Q2"]
         );
-        assert_eq!(P0.view_rel("world"), "partitions/p0/views/world");
+        assert_eq!(P0.view_rel("world"), "partitions/p0/shards/0/views/world");
         assert_eq!(
             P0.view_rel("quarter:2026-Q2"),
-            "partitions/p0/views/quarter/2026-Q2"
+            "partitions/p0/shards/0/views/quarter/2026-Q2"
         );
         assert_eq!(
             P0.segment_rel("quarter:2026-Q2", "seg-1"),
-            "partitions/p0/views/quarter/2026-Q2/segments/seg-1"
+            "partitions/p0/shards/0/views/quarter/2026-Q2/segments/seg-1"
         );
     }
 }

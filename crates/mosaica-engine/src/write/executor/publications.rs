@@ -202,19 +202,22 @@ impl Executor {
             return;
         };
 
-        let attempt = self.coalesce.next_attempt();
+        // The same never-reused shape a `seg_id` has, and for the same reason: two passes at one
+        // `n` would otherwise write one path, and the second `File::create` truncates files the
+        // first has memory-mapped.
+        let id = format!(
+            "coalesce-{}-{}",
+            partition_data.segments_n,
+            self.coalesce.next_attempt()
+        );
         let ctx = crate::coalesce::CoalesceContext {
             prefix_dir: self.prefix_dir(generation),
             prefix: generation.prefix.clone(),
-            // The same never-reused shape a `seg_id` has, and for the same reason: two passes at
-            // one `n` would otherwise write one path, and the second `File::create` truncates
-            // files the first has memory-mapped.
             out_rel: format!(
-                "{}/coalesce-{}-{}",
-                ShardLayout::new(partition, ShardId::ZERO).coalesced_rel(),
-                partition_data.segments_n,
-                attempt
+                "{}/{id}",
+                ShardLayout::new(partition, ShardId::ZERO).coalesced_rel()
             ),
+            id,
         };
 
         let unit = self.coalesce.start();

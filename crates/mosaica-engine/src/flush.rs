@@ -993,10 +993,11 @@ fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, Maintenanc
         });
     }
 
-    let seg_dir = segment_dir(ctx);
-    std::fs::create_dir_all(&seg_dir)
-        .map_err(|e| MaintenanceFailed(format!("dict extent dir: {e}")))?;
-    let mut writer = DictStreamWriter::new(&seg_dir);
+    let rel = mosaica_store::layout::dictionary_extent_rel(&ctx.seg_id);
+    let path = ctx.prefix_dir.join(&rel);
+    let dir = path.parent().expect("an extent's path names its directory");
+    std::fs::create_dir_all(dir).map_err(|e| MaintenanceFailed(format!("dict extent dir: {e}")))?;
+    let mut writer = DictStreamWriter::new(dir);
     for descriptor in &interned {
         writer
             .append(descriptor)
@@ -1011,10 +1012,7 @@ fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, Maintenanc
         // written.
         dict: Arc::new(ctx.dict.extended_with(&interned)),
         extent: Some(DictExtent {
-            path: format!(
-                "{}/terms-0.dict",
-                ctx.layout().segment_rel(&ctx.view, &ctx.seg_id)
-            ),
+            path: rel,
             records: interned.len() as u64,
         }),
         postings,

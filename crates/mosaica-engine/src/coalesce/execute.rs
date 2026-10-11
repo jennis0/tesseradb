@@ -46,10 +46,12 @@ pub(super) fn coalesce_dicts(
     ctx: &CoalesceContext,
     files: &mut BTreeMap<String, FileDigest>,
 ) -> Result<DictExtent, MaintenanceFailed> {
-    let rel = format!("{}/terms-0.dict", ctx.out_rel);
+    let rel = mosaica_store::layout::dictionary_extent_rel(&ctx.id);
+    let path = ctx.prefix_dir.join(&rel);
+    std::fs::create_dir_all(path.parent().expect("an extent's path names its directory"))
+        .map_err(failed("dictionary extent dir"))?;
     let inputs: Vec<PathBuf> = dicts.iter().map(|e| ctx.prefix_dir.join(&e.path)).collect();
-    let records = coalesce_dict_extents(&inputs, &ctx.prefix_dir.join(&rel))
-        .map_err(failed("dictionary extents"))?;
+    let records = coalesce_dict_extents(&inputs, &path).map_err(failed("dictionary extents"))?;
     // The counts differ only if an input repeated a descriptor, which would renumber every
     // ordinal after it.
     let declared: u64 = dicts.iter().map(|e| e.records).sum();

@@ -151,6 +151,7 @@ import pyarrow.ipc as ipc
 import pytest
 
 from oracle.harness import CLI_BIN
+from oracle.layout import shard_dir
 
 from .battery import Viewport
 from .driver import (
@@ -390,11 +391,9 @@ def read_bundle(bundle_root: Path) -> BundleView:
     for partition, manifest in latest.items():
         for seg in manifest["segments"]:
             seg_dir = (
-                prefix_dir
-                / "partitions"
-                / partition
+                shard_dir(prefix_dir, partition)
                 / "views"
-                / seg["view"]
+                / Path(*seg["view"].split(":", 1))
                 / "segments"
                 / seg["seg_id"]
             )

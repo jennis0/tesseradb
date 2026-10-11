@@ -231,9 +231,12 @@ pub struct GenerationStamp {
 // per key list over the base rows. A 34 bundle lacks the file and is refused.
 // 36: a side-manifest carries `tenancy_index`, the files of each number's tenancy, and
 // `retired_numbers`. A 35 manifest lacks the fields and is refused as malformed.
+// 37: every per-entity and per-view structure is under `partitions/<p>/shards/<s>/`, and every
+// dictionary extent under `dictionary/`. A 36 bundle keeps them in the partition's directory and
+// a segment's, where a 37 reader does not look, and is refused.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility.
-pub const BUNDLE_FORMAT: u32 = 36;
+pub const BUNDLE_FORMAT: u32 = 37;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;

@@ -26,7 +26,7 @@
 //!
 //! ```text
 //! cargo run --release -p mosaica-bench --bin identity_bands_build -- \
-//!     --segment <bundle>/v00000/partitions/default/views/geo/segments/seg-0 --out <dir>
+//!     --segment <bundle>/v00000/partitions/default/shards/0/views/geo/segments/seg-0 --out <dir>
 //! ```
 
 use std::fs::File;
