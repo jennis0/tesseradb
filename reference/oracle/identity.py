@@ -222,10 +222,10 @@ def invert(key: IdentityKey, mosaica_id: int) -> tuple[int, int]:
 
 
 # The 32-bit high half of an identifier's input, most significant bit first: the kind (1 bit, 0
-# for an item and 1 for an artifact), the shard (19 bits) and the tenancy (12 bits), the number of
-# items that held the low half as their number before. Written from `docs/sharding.md` §1.2 without
-# reading the Rust. `forward` and `invert` take and return the high half unpacked, so every
-# identifier they produced before the layout existed is an item at shard 0 and tenancy 0.
+# an item; 1 names no item), the shard (19 bits) and the tenancy (12 bits), the number of items
+# that held the low half as their number before. Written from `docs/sharding.md` §1.2 without
+# reading the Rust. `forward` and `invert` take and return the high half unpacked. A high half of
+# 0 is an item at shard 0, tenancy 0.
 
 KIND_ITEM = 0
 KIND_ARTIFACT = 1

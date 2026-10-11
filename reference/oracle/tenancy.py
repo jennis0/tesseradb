@@ -57,32 +57,36 @@ class HolderCount:
         latest = self.latest(number)
         return None if latest is None else forward_item(self.key, self.shard, latest, number)
 
+    def _item(self, mosaica_id: int) -> tuple[int, int] | None:
+        """The tenancy and number `mosaica_id` inverts to, or `None` where it names no item of
+        this shard."""
+        kind, shard, tenancy, number = invert_item(self.key, mosaica_id)
+        return (tenancy, number) if kind == KIND_ITEM and shard == self.shard else None
+
     def number_of(self, mosaica_id: int) -> tuple[int, int]:
         """The tenancy and number an item's identifier inverts to. An identifier of another kind
         or another shard names no item here and is refused."""
-        kind, shard, tenancy, number = invert_item(self.key, mosaica_id)
-        if kind != KIND_ITEM or shard != self.shard:
-            raise AssertionError(
-                f"mosaica_id {mosaica_id} inverts to kind {kind} in shard {shard}, which is no "
-                f"item of shard {self.shard}"
-            )
-        return tenancy, number
+        item = self._item(mosaica_id)
+        if item is None:
+            raise AssertionError(f"mosaica_id {mosaica_id} names no item of shard {self.shard}")
+        return item
 
     def seen(self, mosaica_id: int) -> bool:
         """Whether `mosaica_id` was issued to an item this count knows, deleted or not."""
-        kind, shard, tenancy, number = invert_item(self.key, mosaica_id)
+        item = self._item(mosaica_id)
+        if item is None:
+            return False
+        tenancy, number = item
         latest = self.latest(number)
-        return kind == KIND_ITEM and shard == self.shard and latest is not None and tenancy <= latest
+        return latest is not None and tenancy <= latest
 
     def live(self, mosaica_id: int) -> bool:
         """Whether `mosaica_id` is its number's latest holder and was not seen deleted."""
-        kind, shard, tenancy, number = invert_item(self.key, mosaica_id)
-        return (
-            kind == KIND_ITEM
-            and shard == self.shard
-            and tenancy == self.latest(number)
-            and mosaica_id not in self.deleted
-        )
+        item = self._item(mosaica_id)
+        if item is None:
+            return False
+        tenancy, number = item
+        return tenancy == self.latest(number) and mosaica_id not in self.deleted
 
     def named(self, mosaica_id: int) -> int:
         """Check the identifier answered for a row naming an item, and answer its number."""

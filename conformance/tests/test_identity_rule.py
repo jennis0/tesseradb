@@ -1010,10 +1010,7 @@ def test_a_deleted_items_number_is_issued_again_and_its_old_identifier_names_not
     next batch's new items take their numbers, the lowest first, one tenancy higher, so no new
     `mosaica_id` is a deleted item's. The deleted items' identifiers then name nothing on the item
     card, in a change, in an ingest row or in a member table, and each new item holds only what its
-    row set.
-
-    Skipped where every new item's number comes from the high water: a server without stage 1 of
-    `docs/sharding.md` keeps a deleted item's number reserved."""
+    row set."""
     dep = deployment
     numbers = dep.holdings.numbers
     deleted = sorted(t for t, v in dep.holdings.items.items() if "code" in v and "num" in v)[:3]

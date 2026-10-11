@@ -28,9 +28,7 @@ What it measures, in order:
 A hold-out is not a random sample: entity ids are assigned differently at ingest than at a build,
 so equivalence compares masked counts, not ids.
 
-With `--churn-rounds` none of this runs. The churn serves a copy of the all-in bundle and, round
-after round, deletes a fraction of its items, ingests the same rows again as new items, flushes
-and compacts (`churn.py`).
+With `--churn-rounds` none of this runs, and the churn in `churn.py` runs instead.
 """
 
 from __future__ import annotations
@@ -38,8 +36,8 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 from .census import artifact_frame_census, census, compare_census
 from .churn import Churn
@@ -109,24 +107,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--churn-rounds",
         type=int,
         default=None,
-        help="run the churn in place of the cycle: serve a copy of the all-in bundle and, this "
-        "many times, delete --churn-fraction of its items, ingest the same rows again as new "
-        "items, flush and compact. One JSON line a round, round 0 the copy as built, goes to "
-        "--out with the suffix .jsonl",
+        help="run this many rounds of the churn in place of the cycle "
+        "(test_corpora/common/README.md, The churn)",
     )
     ap.add_argument(
         "--churn-fraction",
         type=float,
         default=0.5,
-        help="the items each churn round deletes and ingests again: those whose seeded position "
-        "in [0, 1) falls in a window this wide, which moves on by its own width each round, so "
-        "at 0.5 the rounds alternate halves",
+        help="the fraction of the items each churn round deletes and ingests again",
     )
     ap.add_argument(
         "--churn-zooms",
         default="0,3,6,9,12",
-        help="the zooms the churn's latency boxes are drawn at: one box per density decile at "
-        "each, ranked once on the copy as built, as the serve battery ranks its cells",
+        help="the zooms the churn's latency boxes are drawn at, one per density decile at each",
     )
     ap.add_argument(
         "--churn-candidates",

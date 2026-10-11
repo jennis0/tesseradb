@@ -76,8 +76,7 @@ directly is a different bundle once a publication or flush writes to it.
 ## The churn
 
 The ingest cycle's second mode measures what steady deletion and re-insertion does to a built
-corpus: the first stage of [`../../docs/sharding.md`](../../docs/sharding.md) reuses a deleted
-item's number, and its §8.4 names the figures that stage must show. The churn serves a copy of the
+corpus, where a new item may take a number a compaction freed. The churn serves a copy of the
 all-in bundle and, each round, deletes `--churn-fraction` of the items through `/control/changes`,
 ingests the same rows again as new items through `/control/ingest`, flushes and compacts. Nothing
 else of the cycle runs. There is no split, base build, publication or census, so a built rung is
@@ -118,7 +117,7 @@ and the run's parameters under `churn`, and a table of the rows is printed.
 | `fold` | — | the cycle's fold: `fold_s` is the server's `compaction.last_secs`, `observed_s` the driver's wait, and `fold_refusals` with `last_refusal` a fold refused for want of memory or disc |
 | `live`, `live_by_view` | count | zoom-0 `visible` under every term after the compaction, on the anchor view and, where there are several, on each |
 | `entity_id_high_water`, `high_water_rise` | count | `/control/status`, and the rise since the row before |
-| `free_ids`, `held_ids` | count | the newest side-manifest's `free_entities`, the freed ids the allocator issues before its high water, and `held_entities`, those held back until the log rotates; null where the side-manifest has no such field |
+| `free_ids`, `held_ids` | count | the newest side-manifest's `free_entities`, the freed ids the allocator issues before its high water, and `held_entities`, those held back until the log rotates |
 | `prefix` | — | the bundle version `CURRENT` names |
 | `postings_bytes`, `fresh_postings_bytes`, `postings_vs_fresh` | bytes | the term index on disc, `partitions/<p>/terms/postings.arrow` and every delta tier the newest side-manifest lists, on the served copy and on the all-in bundle, and their ratio |
 | `term_images_bytes`, `fresh_term_images_bytes` | bytes | the side-manifest's `term_image_extents`, on each |

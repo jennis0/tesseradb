@@ -605,7 +605,7 @@ class SuiteHarness:
     #: Each number's holders, read from the bundle as built at the Build stage, then raised by every
     #: acked ingest and told of every acked deletion. Every identifier a receipt carries is checked
     #: against it (`oracle.tenancy`).
-    holders: HolderCount | None = None
+    numbers: HolderCount | None = None
     #: The scope unit currently wrapping the server (constrained profile only).
     _scope_unit: str | None = field(default=None, init=False, repr=False)
     #: The last scope memory reading taken before its cgroup was reaped — the walk's measurement.
@@ -1040,7 +1040,7 @@ class Build(Stage):
     label = "build"
 
     def apply(self, h: SuiteHarness) -> None:
-        h.holders = HolderCount.of_bundle(Bundle(h.bundle_root))
+        h.numbers = HolderCount.of_bundle(Bundle(h.bundle_root))
         h.spawn()
         h.authorise()
 
@@ -1102,7 +1102,7 @@ class Write(Stage):
             raise RuntimeError(
                 f"ingest created {created} items where the batch carried {len(self._fx_keys)} rows"
             )
-        h.holders.receipt(resp.json())
+        h.numbers.receipt(resp.json())
 
     def apply(self, h: SuiteHarness) -> None:
         self._ingest(h)
@@ -1269,7 +1269,7 @@ class Deny(Stage):
         if resp.status_code != 200:
             raise RuntimeError(f"{self.op} refused ({resp.status_code}): {resp.text}")
         if self.op == "delete":
-            h.holders.delete(int(mosaica_id))
+            h.numbers.delete(int(mosaica_id))
 
     def entitlement(self) -> Delta:
         if self._fx is None:

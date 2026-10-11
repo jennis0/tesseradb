@@ -1,38 +1,18 @@
 """The churn: a built corpus deleted and inserted again, part by part, round after round.
 
-Serves a copy of the all-in bundle. Each round deletes a fraction of its items through
-`/control/changes`, ingests the same source rows again as new items through `/control/ingest`,
-flushes, and compacts. Every item has a position in [0, 1) drawn from the seed, and round `r` takes
-the items whose position falls in a window of the fraction's width starting `(r - 1) * fraction`
-along, wrapping at 1. At one half the rounds alternate halves, and at any fraction every item is
-taken once in each `1 / fraction` rounds.
-
-Each round writes one JSON line beside `--out`. Round 0 is the copy as built, before any change:
-the fresh build of the same items, which every later round is read against. `/control/status`
-gives the high water and the compaction's own time. The served bundle's newest side-manifest gives
-the term index's files and the freed entity ids. The viewer plane gives the counts and the
-viewport latency, over boxes ranked once before the first round as the serve battery ranks its
-cells.
-
-The union of a principal's postings is timed as the `session/authorise` that builds it, which
-`/control/status`'s `fragment_cache.rebuilds` rising by one shows. A fragment the cache already
-holds costs no union, so round 0 authorises each principal before anything else asks for its
-fragment, and every later round ends the principals' sessions before its compaction: the refresh
-that follows a publication rebuilds the fragment of every session still resident.
-
-Not built yet: a publication-route layer's memberships of a deleted item are not published again,
-so after the first round such a layer serves fewer members than the fresh build. The result names
-those layers under `layers_not_republished`. A column-route layer's member lists travel on the
-ingest batches and are restored.
+Each round deletes a fraction of the items of a served copy of the all-in bundle, ingests the same
+rows again as new items, flushes and compacts, and writes one JSON line of what that left. The
+rounds, the fields of a row and how each is measured are in `test_corpora/common/README.md`, under
+"The churn".
 """
 
 from __future__ import annotations
 
 import base64
+import itertools
 import json
 import os
 import random
-import time
 from pathlib import Path
 
 import numpy as np
@@ -117,7 +97,7 @@ class Churn(Cycle):
             "rounds": args.churn_rounds,
             "fraction": args.churn_fraction,
             "seed": args.seed,
-            "items": int(len(entities)),
+            "items": len(entities),
             "rows": str(self.rows_path),
             "principals": [
                 {"target": p["target"], "terms": p["terms"]} for p in self.principals
@@ -150,7 +130,7 @@ class Churn(Cycle):
         """Delete `chosen`, ingest their rows again in every view they were in, the anchor's first
         and carrying the column-route layers' member lists, flush, and compact."""
         field = self.naming["name"]
-        row: dict = {"round": n, "deleted": int(len(chosen))}
+        row: dict = {"round": n, "deleted": len(chosen)}
         self.log(f"round {n}: deleting {len(chosen):,} items")
         r, wall = self.send_changes(
             control, ({"op": "delete", "match": {field: str(int(e))}} for e in chosen)
@@ -261,10 +241,7 @@ class Churn(Cycle):
         measures, drawn from the seed."""
         token, _ = self.sessions.authorise(self.principals[-1]["terms"])
         selection = serve_battery.meta(self.served.viewer, token).get("selection") or {}
-        self.k = int(selection.get("max_k") or serve_battery.DEFAULT_K)
-        self.max_tiles = int(
-            selection.get("max_tiles_per_request") or serve_battery.DEFAULT_MAX_TILES
-        )
+        self.k, self.max_tiles = serve_battery.selection_limits(selection)
         quant = self.frames[self.anchor]
         rng = random.Random(self.args.seed)
         boxes: list[tuple[int, list[float]]] = []
@@ -320,21 +297,17 @@ class Churn(Cycle):
         return out
 
     def sample(self, token: str, zoom: int, box: list[float]) -> dict:
-        """One viewport on the anchor view at the depth the battery asks `box` at; a request
-        that did not answer is a sample marked `failed`."""
-        depth = serve_battery.budget_zoom(
-            self.frames[self.anchor], box, zoom, serve_battery.BUDGET_DEPTH, self.max_tiles
+        """The battery's sample of `box` on the anchor view."""
+        return serve_battery.sample(
+            self.served.viewer,
+            token,
+            self.anchor,
+            self.frames[self.anchor],
+            zoom,
+            box,
+            self.k,
+            max_tiles=self.max_tiles,
         )
-        t0 = time.perf_counter()
-        try:
-            return serve_battery.viewport(
-                self.served.viewer, token, self.anchor, depth, box, k=self.k
-            )
-        except Exception as e:  # noqa: BLE001 — the failure is the measurement
-            return {
-                "failed": f"{type(e).__name__}: {e}"[:300],
-                "wall_ms": (time.perf_counter() - t0) * 1000.0,
-            }
 
     def failures(self) -> list[str]:
         out = super().failures()
@@ -395,10 +368,11 @@ def high_water_failures(rows: list[dict]) -> list[str]:
     """A sentence per round whose new items took more ids from the high water than the free ids
     left by the round before could not cover."""
     out = []
-    for before, row in zip(rows, rows[1:]):
-        free, rise = before.get("free_ids"), row.get("high_water_rise")
-        if free is None or rise is None or row["delete"]["status"] != 200:
+    for before, row in itertools.pairwise(rows):
+        rise = row.get("high_water_rise")
+        if rise is None or row["delete"]["status"] != 200:
             continue
+        free = before["free_ids"]
         allowed = max(0, row["deleted"] - free)
         if rise > allowed:
             out.append(
@@ -412,16 +386,15 @@ def served_state(bundle: Path) -> dict:
     """What the churn reads off the newest side-manifest of each partition of `bundle`'s current
     version. `postings_bytes` is the term index on disc, the base postings and every live delta
     tier; `term_images_bytes`, every view's term images; `free_ids` and `held_ids`, the freed
-    entity ids the allocator issues next and those it holds back until the log rotates, null
-    where the side-manifest carries no such field."""
+    entity ids the allocator issues next and those it holds back until the log rotates."""
     read = bundle_manifest(bundle)
     if read is None:
         raise FileNotFoundError(f"{bundle} has no CURRENT; state --all-in-bundle as a built bundle")
     prefix, _ = read
     root = bundle / prefix
     out = {"prefix": prefix, "postings_bytes": 0, "term_images_bytes": 0}
-    frees: list[str | None] = []
-    held: list[str | None] = []
+    frees: list[str] = []
+    held: list[str] = []
     for partition in sorted(path for path in (root / "partitions").iterdir() if path.is_dir()):
         side = newest_side_manifest(partition)
         out["postings_bytes"] += (partition / "terms" / "postings.arrow").stat().st_size
@@ -432,13 +405,10 @@ def served_state(bundle: Path) -> dict:
             (root / extent["path"]).stat().st_size
             for extent in side.get("term_image_extents") or []
         )
-        frees.append(side.get("free_entities"))
-        if "held_entities" in side:
-            held += [entry["entities"] for entry in side["held_entities"]]
-        else:
-            held.append(None)
-    out["free_ids"] = None if None in frees else sum(map(roaring_cardinality, frees))
-    out["held_ids"] = None if None in held else sum(map(roaring_cardinality, held))
+        frees.append(side["free_entities"])
+        held += [entry["entities"] for entry in side["held_entities"]]
+    out["free_ids"] = sum(map(roaring_cardinality, frees))
+    out["held_ids"] = sum(map(roaring_cardinality, held))
     return out
 
 

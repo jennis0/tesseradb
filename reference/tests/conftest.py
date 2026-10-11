@@ -28,6 +28,15 @@ from oracle.harness import (  # noqa: F401 (re-exported for tests importing dire
     spawn_server,
     stop_server,
 )
+from oracle.identity import IdentityKey, forward_item
+
+#: The identity key of the tests that build identifiers by hand.
+KEY = IdentityKey.from_hex("000102030405060708090a0b0c0d0e0f")
+
+
+def item(number: int, tenancy: int = 0, shard: int = 0) -> int:
+    """The `mosaica_id` of the item holding `number` at `tenancy`, in `shard`, under `KEY`."""
+    return forward_item(KEY, shard, tenancy, number)
 
 # Task 16, Step 4: `MOSAICA_BUNDLE_ROOT` lets the differential/conformance suites be pointed at
 # the 10^9 bundle for the one-off exit-criteria run, without touching the 250k default any other

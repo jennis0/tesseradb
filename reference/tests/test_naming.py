@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import pytest
 
-from oracle.identity import IdentityKey, forward_item
 from oracle.naming import (
     ADDRESSING_STRICT_STATUS,
     INTEGER,
@@ -34,6 +33,8 @@ from oracle.naming import (
     table_rows,
 )
 from oracle.tenancy import HolderCount
+
+from .conftest import KEY, item
 
 AT = {"x": 1.0, "y": 1.0}
 
@@ -229,18 +230,17 @@ def test_an_identifier_issued_to_one_item_is_refused_for_another():
 def test_a_model_with_a_holder_count_checks_every_identifier_against_it():
     """Items 0 and 1 of a build of two. Item 0 is deleted, so its number may be issued at tenancy
     1; item 1's may not, since item 1 is held."""
-    key = IdentityKey.from_hex("000102030405060708090a0b0c0d0e0f")
-    a, b = (forward_item(key, 0, 0, n) for n in (0, 1))
-    numbers = HolderCount(key=key, shard=0, built=2)
+    a, b = item(0), item(1)
+    numbers = HolderCount(key=KEY, shard=0, built=2)
     holdings = Holdings(unique={}, items={a: {}, b: {}}, numbers=numbers)
     apply_changes(holdings, [{"op": "delete", "match": {"mosaica_id": str(a)}}], [Names(a)])
     with pytest.raises(AssertionError):
-        apply_ingest(holdings, [dict(AT)], [Creates()], created={0: forward_item(key, 0, 1, 1)})
-    reused = forward_item(key, 0, 1, 0)
+        apply_ingest(holdings, [dict(AT)], [Creates()], created={0: item(1, 1)})
+    reused = item(0, 1)
     apply_ingest(holdings, [dict(AT)], [Creates()], created={0: reused})
     assert numbers.live(reused) and not numbers.live(a)
     with pytest.raises(AssertionError):
-        Holdings(unique={}, items={forward_item(key, 0, 1, 1): {}}, numbers=numbers)
+        Holdings(unique={}, items={item(1, 1): {}}, numbers=numbers)
 
 
 def test_a_null_clears_a_held_unique_value_and_frees_it():

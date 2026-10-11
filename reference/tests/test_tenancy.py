@@ -7,14 +7,10 @@ from __future__ import annotations
 
 import pytest
 
-from oracle.identity import KIND_ARTIFACT, IdentityKey, forward, forward_item, pack_high
+from oracle.identity import KIND_ARTIFACT, forward, pack_high
 from oracle.tenancy import HolderCount
 
-KEY = IdentityKey.from_hex("000102030405060708090a0b0c0d0e0f")
-
-
-def item(number: int, tenancy: int = 0, shard: int = 0) -> int:
-    return forward_item(KEY, shard, tenancy, number)
+from .conftest import KEY, item
 
 
 @pytest.fixture

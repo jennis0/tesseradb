@@ -17,15 +17,9 @@ from __future__ import annotations
 
 import pytest
 
-from oracle.identity import IdentityKey, forward_item
 from oracle.journal import AckedJournal, IngestOp
 
-KEY = IdentityKey.from_hex("000102030405060708090a0b0c0d0e0f")
-
-
-def item(number: int, tenancy: int = 0) -> int:
-    """The `mosaica_id` of the item holding `number` at `tenancy`, in shard 0."""
-    return forward_item(KEY, 0, tenancy, number)
+from .conftest import KEY, item
 
 
 def receipt(*numbers: tuple[int, int]) -> dict:

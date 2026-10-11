@@ -9,8 +9,8 @@ import shutil
 import threading
 import time
 import uuid
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 import pyarrow as pa
@@ -187,8 +187,8 @@ class Cycle:
         base_ids, held = split_entities(
             declared_entities(self.rung), self.args.fraction, self.args.seed
         )
-        self.result["base_entities"] = int(len(base_ids))
-        self.result["holdout_entities"] = int(len(held))
+        self.result["base_entities"] = len(base_ids)
+        self.result["holdout_entities"] = len(held)
         self.held = held
         if self.args.reuse_base and (bundle / "CURRENT").exists():
             self.log(f"reusing {bundle}")

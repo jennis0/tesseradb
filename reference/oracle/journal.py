@@ -132,7 +132,7 @@ class AckedJournal:
         self.bundle = bundle
         #: Each number's holders, from the bundle as built and every acked ingest and deletion.
         #: Every identifier an acked receipt carries is checked against it.
-        self.holders = HolderCount.of_bundle(bundle)
+        self.numbers = HolderCount.of_bundle(bundle)
         self.ops: list[ChangeOp] = []
         self.ingests: list[IngestOp] = []
         self.refused: list[Refusal] = []
@@ -178,7 +178,7 @@ class AckedJournal:
         self._sequence += 1
         if response.status_code == 200:
             if op == "delete":
-                self.holders.delete(supplied)
+                self.numbers.delete(supplied)
             self.ops.append(
                 ChangeOp(
                     sequence=self._sequence,
@@ -220,7 +220,7 @@ class AckedJournal:
         if response.status_code == 200:
             for entity_id, op, term_ids in items:
                 if op == "delete":
-                    self.holders.delete(self.bundle.mosaica_id_of(entity_id))
+                    self.numbers.delete(self.bundle.mosaica_id_of(entity_id))
                 self._sequence += 1
                 self.ops.append(
                     ChangeOp(
@@ -250,7 +250,7 @@ class AckedJournal:
         is acked and durable and still invisible, and the I1 differential has to model both facts
         at once.
 
-        Every identifier the receipt carries is checked against `holders` first, and a new item's
+        Every identifier the receipt carries is checked against `numbers` first, and a new item's
         must carry its number's tenancy: how many items the journal has seen hold the number.
         """
         before = int(self.server.status()["entity_id_high_water"])
@@ -258,14 +258,14 @@ class AckedJournal:
         self._sequence += 1
         if response.status_code == 200:
             payload = response.json()
-            numbers = self.holders.receipt(payload)
+            taken = self.numbers.receipt(payload)
             self.ingests.append(
                 IngestOp(
                     sequence=self._sequence,
                     batch_id=batch_id,
                     created=int(payload["created"]),
                     mosaica_ids=tuple(payload["mosaica_ids"]),
-                    required_high_water=max([before, *(n + 1 for n in numbers)]),
+                    required_high_water=max([before, *(n + 1 for n in taken)]),
                 )
             )
         else:

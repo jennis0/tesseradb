@@ -165,6 +165,15 @@ def meta(viewer_base: str, token: str, timeout: float = 30.0) -> dict:
     return r.json()
 
 
+def selection_limits(selection: dict) -> tuple[int, int]:
+    """`k` and the tile ceiling a request is held to: `/v1/meta`'s `selection.max_k` and
+    `selection.max_tiles_per_request`, each at its default where the block has none."""
+    return (
+        int(selection.get("max_k") or DEFAULT_K),
+        int(selection.get("max_tiles_per_request") or DEFAULT_MAX_TILES),
+    )
+
+
 def frames(content: bytes) -> list[tuple[int, bytes]]:
     """The response's frames as `(kind, payload)` in wire order: `u8 kind, u32 little-endian
     length, payload`, repeated. A body cut mid-frame yields only the frames that were whole.
@@ -348,6 +357,43 @@ def budget_zoom(
     while depth > 0 and covered_tiles(quantisation, bbox, depth) > max_tiles:
         depth -= 1
     return depth
+
+
+def sample(
+    viewer_base: str,
+    token: str,
+    view_id: str,
+    quantisation: dict,
+    zoom: int,
+    box: Sequence[float],
+    k: int,
+    budget_depth: int = BUDGET_DEPTH,
+    max_tiles: int = DEFAULT_MAX_TILES,
+    **kw,
+) -> dict:
+    """One [`viewport`] at the depth [`budget_zoom`] gives `box` at `zoom`. A request that raised
+    is a sample with a `failed` field, and a shed stream is one marked `shed`."""
+    depth = budget_zoom(quantisation, box, zoom, budget_depth, max_tiles)
+    t0 = time.perf_counter()
+    try:
+        return viewport(viewer_base, token, view_id, depth, box, k=k, **kw)
+    except Exception as e:  # noqa: BLE001 — the failure is the measurement
+        return {
+            "failed": f"{type(e).__name__}: {e}"[:300],
+            "wall_ms": (time.perf_counter() - t0) * 1000.0,
+            "server_ms": None,
+            "stream_ms": None,
+            "bytes": None,
+            "counts": None,
+            "request_zoom": depth,
+            "k": k,
+            "shed": False,
+            "shed_error": None,
+            "complete": False,
+            "frames_received": 0,
+            "majflt_delta": None,
+            "eviction_failed": False,
+        }
 
 
 # ---------------------------------------------------------------------------------------------
@@ -682,36 +728,17 @@ class Battery:
             self.oom_seen = True
 
     def _sample(self, token, zoom, box, cold: bool, **kw) -> dict:
-        """One request, with the cold proof around it when asked for. A failure is a sample
-        with a `failed` field, not the end of the run; a shed stream is marked `shed` instead."""
-        depth = self._depth(box, zoom)
+        """One [`sample`], with the cold proof around it when asked for."""
         before = self.evictor.majflt() if cold else None
-        t0 = time.perf_counter()
-        try:
-            s = viewport(
-                self.args.viewer, token, self.view_id, depth, box, k=self.k,
-                point_rows=self.point_rows, **kw,
-            )
-        except Exception as e:  # noqa: BLE001 — the failure is the measurement
+        s = sample(
+            self.args.viewer, token, self.view_id, self.quant, zoom, box, self.k,
+            self.args.budget_depth, self.max_tiles, point_rows=self.point_rows, **kw,
+        )
+        if "failed" in s:
             self.failures += 1
-            return {
-                "failed": f"{type(e).__name__}: {e}"[:300],
-                "wall_ms": (time.perf_counter() - t0) * 1000.0,
-                "server_ms": None,
-                "stream_ms": None,
-                "bytes": None,
-                "counts": None,
-                "request_zoom": depth,
-                "k": self.k,
-                "shed": False,
-                "shed_error": None,
-                "complete": False,
-                "frames_received": 0,
-                "majflt_delta": None,
-                "eviction_failed": False,
-            }
-        after = self.evictor.majflt() if cold else None
+            return s
         if cold:
+            after = self.evictor.majflt()
             delta = None if before is None or after is None else after - before
             s["majflt_delta"] = delta
             s["eviction_failed"] = delta == 0
@@ -752,9 +779,9 @@ class Battery:
         self.view_id = self.args.view or m["views"][0]["id"]
         self.quant = next(v for v in m["views"] if v["id"] == self.view_id)["quantisation"]
         selection = m.get("selection") or {}
-        self.max_tiles = int(selection.get("max_tiles_per_request") or DEFAULT_MAX_TILES)
+        k, self.max_tiles = selection_limits(selection)
         if self.args.k is None:
-            self.k = int(selection.get("max_k") or DEFAULT_K)
+            self.k = k
         return selection
 
     def whole_extent(self, token: str) -> dict:
