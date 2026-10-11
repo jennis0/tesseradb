@@ -593,8 +593,8 @@ between a compaction and the rotation after it replays the deletions the compact
 the next compaction frees those numbers again, one tenancy higher. The tenancy skipped was never
 issued.
 
-Every side-manifest records the free ids and the held-back ones, each set with the WAL position it
-waits for, beside the tenancy index. A restart takes both from the newest manifest it serves,
+Every side-manifest records, in each shard's record, the free ids and the held-back ones, each set
+with the WAL position it waits for, beside the tenancy index. A restart takes both from the newest manifest it serves,
 splits them by that index, frees the sets whose position the log has passed, and removes every id
 a replayed record or the overlay names from the free and the held sets alike. In a free set such
 an id was issued after the manifest was written; in a set still held it is named by a record of
@@ -665,9 +665,9 @@ everything the deleted ones carried. Reading back through them is a step down to
 a server that runs out of manifests to step to refuses to serve that partition rather than
 reaching for one old enough to have forgotten a deny.
 
-The entity id allocator resumes from whichever is larger, the manifest's recorded high point or
-the value replay reaches, so an id above the high point is never issued twice. Every side-manifest
-records the allocator's own high point, not only the highest entity a segment holds: an item
+The entity id allocator resumes from whichever is larger, the shard record's high point or the
+value replay reaches, so an id above the high point is never issued twice. Every side-manifest
+records each shard allocator's own high point, not only the highest entity a segment holds: an item
 deleted before its flush holds no row, and once the log records naming it are reclaimed, the
 manifest is what keeps its entity id, and so its `mosaica_id`, from being issued to a new item.
 Freed ids are restored from the newest manifest less every id the replay names
