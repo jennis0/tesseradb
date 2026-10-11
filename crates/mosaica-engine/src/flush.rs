@@ -476,8 +476,7 @@ impl FlushContext {
 /// nothing references, and the next tick re-plans.
 pub(crate) struct CompletedFlush {
     pub(crate) partition: String,
-    /// The shard the flush wrote into.
-    pub(crate) shard: mosaica_types::ShardId,
+    pub(crate) shard: ShardId,
     pub(crate) view: String,
     /// The entity ids removed from the buffer at publication: exactly what was consumed, not a range.
     pub(crate) consumed: Vec<EntityId>,
@@ -643,15 +642,13 @@ fn execute_flush_stages(
     *mark = laps.lap(FlushStage::Segment, *mark);
 
     // ---- the delta postings tier: carries the postings of the entities the segment gave rows.
+    let segment_rel = ctx.layout().segment_rel(&ctx.view, &ctx.seg_id);
     let tier_bits = if out.is_some() {
         let tier_tally = mosaica_lifecycle::window::FragmentationTally::of_tier(
             &promotion.postings,
             plan.items.len() as u64,
         );
-        let tier_rel = format!(
-            "{}/delta.arrow",
-            ctx.layout().segment_rel(&ctx.view, &ctx.seg_id)
-        );
+        let tier_rel = format!("{segment_rel}/delta.arrow");
         let tier_path = ctx.prefix_dir.join(&tier_rel);
         write_delta_tier(&tier_path, &promotion.postings, SMALL_TERM_THRESHOLD)
             .map_err(|e| MaintenanceFailed(format!("delta tier: {e}")))?;
@@ -784,7 +781,7 @@ fn execute_flush_stages(
     let segment = match &out {
         None => None,
         Some(out) => {
-            let seg_dir = segment_dir(&ctx);
+            let seg_dir = ctx.prefix_dir.join(&segment_rel);
             let entities = mosaica_store::edited::RowEntities::Listed(std::sync::Arc::new(
                 mosaica_store::edited::EditedRows::open(
                     &seg_dir,
@@ -2078,13 +2075,6 @@ fn narrow_entity(entity: EntityId) -> Result<u32, MaintenanceFailed> {
             entity.raw()
         ))
     })
-}
-
-/// This flush's segment directory. Both the segment writer and promotion address it; naming it
-/// once keeps them from drifting apart.
-fn segment_dir(ctx: &FlushContext) -> PathBuf {
-    ctx.prefix_dir
-        .join(ctx.layout().segment_rel(&ctx.view, &ctx.seg_id))
 }
 
 /// One file's size and hex SHA-256, by reading it back: `mosaica_store::digest_of` with this

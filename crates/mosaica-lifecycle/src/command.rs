@@ -424,13 +424,11 @@ pub enum ExecError {
     /// So the 500 means "at least one item is in force but not durable, and every deny in the
     /// request was attempted", never "the batch was refused".
     Wal(WalError),
-    /// Row-less entity-ID assignment refused (I9's `u32` ceiling) → HTTP 500, fail closed. The
-    /// command has no effect: `Allocator::allocate_rowless` leaves both marks unchanged on this
-    /// path.
+    /// Row-less entity-ID assignment refused → HTTP 500, fail closed, with no effect:
+    /// `Allocator::allocate_rowless` leaves both marks unchanged.
     Alloc(AllocError),
-    /// A batch needs more ids from the shard's high water than its size or the end of its ids
-    /// leaves → HTTP **409**, no effect. Refused for that batch alone: the other batches of its
-    /// commit window go on.
+    /// A batch needs more ids than the shard's size or the end of its ids leaves → HTTP **409**,
+    /// no effect.
     ShardFull(ShardFull),
     /// A shard size `mosaica_types::check_shard_size` refuses → HTTP **422** for a size of zero,
     /// **409** for one below the high water. No effect.

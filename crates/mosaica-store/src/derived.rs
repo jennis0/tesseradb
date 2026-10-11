@@ -152,6 +152,7 @@ pub fn coarsest_shift(row_count: u32) -> u32 {
 // The shape a level is observed to have, and the pick that reads it
 // ---------------------------------------------------------------------------------------------
 
+
 /// Observe one level's shape in one pass, holding **one membership at a time**.
 ///
 /// Every figure comes from the same walk: the container count is the cost model's own number, the

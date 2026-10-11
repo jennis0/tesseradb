@@ -166,6 +166,18 @@ pub(crate) fn holds(shard: &Shard, entity: EntityId) -> bool {
             .any(|data| data.row_space.row_of(entity).is_some())
 }
 
+/// Whether `shard` holds a row of `entity` in `view`, flushed or buffered. A buffered row is in no
+/// permutation, and missing it would let two batches hand one flush two rows for one entity in one
+/// view.
+pub(crate) fn holds_in_view(shard: &Shard, entity: EntityId, view: &str) -> bool {
+    shard
+        .data
+        .views
+        .get(view)
+        .is_some_and(|data| data.row_space.row_of(entity).is_some())
+        || shard.buffer.contains_in_view(entity, view)
+}
+
 /// The entity holding the item `entity` held, where an edit has moved the item since; `None`
 /// where it has not moved or its item is gone.
 pub(crate) fn moved_to(shard: &Shard, entity: EntityId) -> Result<Option<EntityId>, StoreError> {
@@ -355,7 +367,8 @@ pub(crate) fn id_at(
     key.forward(ItemHigh::new(shard, tenancy), number)
 }
 
-/// The shard an artifact's or a layer's `mosaica_id` is formed in.
+/// The shard an artifact's or a layer's `mosaica_id` is formed in, and whose directory holds its
+/// files.
 pub(crate) const ARTIFACT_SHARD: ShardId = ShardId::ZERO;
 
 /// The entity `id` names as [`crate::Engine::artifact_id`] forms it, or `None` where it names none.

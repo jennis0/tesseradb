@@ -8,12 +8,12 @@ use super::*;
 pub(crate) struct ManifestSeed<'a> {
     /// The shard the marks and freed ids below are of.
     pub shard: ShardId,
-    /// `max(build MANIFEST, side manifests)`: the point region's floor.
+    /// The shard record's `high_water`: the point region's floor.
     pub high_water: u64,
     /// `min(ceiling, side manifests)`: the row-less region's ceiling. A build sets this whenever
     /// its declaration carried layers, or the first online registration reissues their ids.
     pub low_water: u64,
-    /// The served side-manifest's `shards.size`. Replay takes the last `ShardsDeclare` after it.
+    /// The served side-manifest's `shards.size`.
     pub size: u64,
     /// The newest served side-manifest's freed ids, and the sets it holds back with their
     /// positions, by tenancy; empty where no manifest can be trusted to be the newest.
@@ -108,7 +108,7 @@ impl WritePath {
         let mut attributes = seed.attributes;
         let mut served = seed.manifest.clone();
         let mut unique_events: Vec<crate::write::UniqueEvent> = Vec::new();
-        // Every record postdates the manifest, so the last declaration in the log is in force.
+        // Rotation reclaims a prefix of the log, so its last declaration is the newest.
         let mut size = seed.size;
         // Up to the last view drop every row is buffered, flushed or not, because a drop's
         // promotion of a join row to its item's own row reads the buffer. Past it, a row that
@@ -490,8 +490,7 @@ impl WritePath {
                 seed.high_water, seed.low_water,
             ))
         })?;
-        // The rule a declaration was accepted under, so a size no declaration could have left is
-        // refused here rather than at the first batch.
+        // A size no declaration could have left is refused at open, not at the first batch.
         mosaica_types::check_shard_size(size, allocator.high_water()).map_err(|e| {
             EngineError::Malformed(format!(
                 "the shard size the manifest and the WAL leave ({size}) does not hold: {e}"

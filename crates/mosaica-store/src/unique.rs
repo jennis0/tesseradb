@@ -578,11 +578,7 @@ impl UniqueIndex {
     ) -> Result<UniqueIndex> {
         let held = |rel: &str| -> Arc<Slot> {
             reuse
-                .and_then(|index| {
-                    index
-                        .slots()
-                        .find(|slot| slot.rel == rel && slot.kind == kind)
-                })
+                .and_then(|index| index.slots().find(|slot| slot.rel == rel && slot.kind == kind))
                 .cloned()
                 .unwrap_or_else(|| Arc::new(Slot::new(rel, prefix_dir, kind)))
         };
@@ -711,11 +707,8 @@ impl UniqueIndexes {
             .iter()
             .map(|runs| runs.attribute.as_str())
             .collect();
-        let declared: BTreeSet<&str> = partition
-            .unique_columns
-            .iter()
-            .map(String::as_str)
-            .collect();
+        let declared: BTreeSet<&str> =
+            partition.unique_columns.iter().map(String::as_str).collect();
         if indexed != declared {
             return Err(StoreError::MalformedBundle {
                 detail: format!(
@@ -814,9 +807,7 @@ pub fn duplicates_message(attribute: &str, count: u64, examples: &[String]) -> S
 }
 
 /// The declared columns that are unique, with their positions in the declaration.
-pub fn unique_columns(
-    declared: &[DeclaredScalar],
-) -> impl Iterator<Item = (usize, &DeclaredScalar)> {
+pub fn unique_columns(declared: &[DeclaredScalar]) -> impl Iterator<Item = (usize, &DeclaredScalar)> {
     declared.iter().enumerate().filter(|(_, d)| d.unique)
 }
 
@@ -830,16 +821,10 @@ mod tests {
             key_of(ScalarType::U8, &ScalarValue::U8(7)),
             key_of(ScalarType::U64, &ScalarValue::U64(7))
         );
-        assert_eq!(
-            key_of_integer(ScalarType::U8, 7),
-            Some(UniqueKey::unsigned(7))
-        );
+        assert_eq!(key_of_integer(ScalarType::U8, 7), Some(UniqueKey::unsigned(7)));
         assert_eq!(key_of_integer(ScalarType::U8, 256), None);
         assert_eq!(key_of_integer(ScalarType::U64, -1), None);
-        assert_eq!(
-            key_of_integer(ScalarType::I64, -1),
-            Some(UniqueKey::signed(-1))
-        );
+        assert_eq!(key_of_integer(ScalarType::I64, -1), Some(UniqueKey::signed(-1)));
         assert_eq!(
             key_of_integer(ScalarType::U64, u64::MAX as i128),
             Some(UniqueKey::unsigned(u64::MAX))

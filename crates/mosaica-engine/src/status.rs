@@ -72,7 +72,7 @@ pub struct GenerationStatus {
     pub fragment_cache_rebuilds: u64,
 }
 
-fn live_rows_of(generation: &Generation) -> u64 {
+pub(crate) fn live_rows_of(generation: &Generation) -> u64 {
     generation
         .bundle
         .partitions

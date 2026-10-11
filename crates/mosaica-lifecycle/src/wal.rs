@@ -478,8 +478,8 @@ pub enum WalRecord {
         live: Vec<DeclaredRun>,
     },
     /// The point shard's size declared while the service runs (`PUT /control/shards`). The
-    /// side-manifest's `shards.size` is its durable home; replay starts from the served manifest's
-    /// size, and the last of these records after it wins.
+    /// side-manifest's `shards.size` is its durable home; replay takes the last of these the log
+    /// keeps.
     ShardsDeclare { size: u64 },
 }
 
@@ -2927,13 +2927,6 @@ mod tests {
                 size: 4_026_531_841,
             },
         ];
-        // The growth's rank and leaving set are applied by `ArtifactStore::grow_set`, the four
-        // fills by `ArtifactStore::fill`, the attribute declaration by
-        // `Executor::declare_attribute`, the vocabulary declaration by
-        // `Executor::commit_vocabulary_declare`, the two view declarations by
-        // `Executor::commit_view_group_create` and `commit_plain_view_create`, and the shard size
-        // by `Executor::commit_shards_declare`. **Every record of the ingest design is applied
-        // now**, so no arm names a track.
         let tracks: Vec<Option<&str>> = records
             .iter()
             .map(|record| unbuilt_track(record).map(|(_, track)| track))

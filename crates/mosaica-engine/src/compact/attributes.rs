@@ -28,12 +28,7 @@ struct ColumnJob {
 }
 
 impl ColumnJob {
-    fn holds(
-        &self,
-        column: &str,
-        view: Option<&str>,
-        incarnation: Option<ViewIncarnation>,
-    ) -> bool {
+    fn holds(&self, column: &str, view: Option<&str>, incarnation: Option<ViewIncarnation>) -> bool {
         column == self.name && view == self.view.as_deref() && incarnation == self.incarnation
     }
 }
@@ -51,7 +46,7 @@ fn column_jobs(
         .iter()
         .filter(|d| entity(d))
         .map(|d| ColumnJob {
-            rel: ctx.layout(plan).column_rel(&d.name),
+            rel: plan.layout().column_rel(&d.name),
             name: d.name.clone(),
             view: None,
             incarnation: None,
@@ -66,8 +61,8 @@ fn column_jobs(
                 continue;
             };
             jobs.push(ColumnJob {
-                rel: ctx
-                    .layout(plan)
+                rel: plan
+                    .layout()
                     .scoped_column_rel(&family.name, view, incarnation),
                 name: family.name.clone(),
                 view: Some(view.clone()),
@@ -437,7 +432,7 @@ pub(super) fn fold_record_blob(
         ));
     }
     if blob_resident {
-        let record_rel = ctx.layout(plan).record_rel();
+        let record_rel = plan.layout().record_rel();
         let from_dir = ctx.from_prefix_dir.join(&record_rel);
         let to_dir = ctx.to_prefix_dir.join(&record_rel);
         std::fs::create_dir_all(&to_dir).map_err(failed("pass 4a (record blob)"))?;
@@ -521,7 +516,7 @@ pub(super) fn fold_entity_terms(
     ctx: &FoldContext,
     out: &mut FoldOutput,
 ) -> Result<(), MaintenanceFailed> {
-    let terms_rel = ctx.layout(plan).entity_terms_rel();
+    let terms_rel = plan.layout().entity_terms_rel();
     let from_dir = ctx.from_prefix_dir.join(&terms_rel);
     let to_dir = ctx.to_prefix_dir.join(&terms_rel);
     std::fs::create_dir_all(&to_dir).map_err(failed("pass 4c (entity terms)"))?;

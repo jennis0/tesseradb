@@ -291,19 +291,9 @@ impl Engine {
             .collect())
     }
 
-    /// Does `view` hold a row for `entity`? "In the view" is the view's permutation and the
-    /// commit window's buffer: a row accepted but
-    /// not yet flushed is in no permutation, and missing it would let two batches hand one flush
-    /// two rows for one entity in one view.
+    /// Does `view` hold a row for `entity`, flushed or buffered?
     pub fn view_holds(&self, entity: EntityId, view: &str) -> bool {
-        let generation = self.generation();
-        let shard = generation.only_shard();
-        shard
-            .data
-            .views
-            .get(view)
-            .is_some_and(|data| data.row_space.row_of(entity).is_some())
-            || shard.buffer.contains_in_view(entity, view)
+        crate::edited::holds_in_view(self.generation().only_shard(), entity, view)
     }
 
     /// An already-flushed entity's full term set, ascending, once the entity's own row has left

@@ -462,11 +462,7 @@ pub(super) fn coalesce_unique_window(
     files: &mut BTreeMap<String, FileDigest>,
 ) -> Result<Vec<String>, MaintenanceFailed> {
     let attribute = &window.attribute;
-    let inputs: Vec<PathBuf> = window
-        .runs
-        .iter()
-        .map(|rel| ctx.prefix_dir.join(rel))
-        .collect();
+    let inputs: Vec<PathBuf> = window.runs.iter().map(|rel| ctx.prefix_dir.join(rel)).collect();
     let out_rel = format!("{}/unique/{attribute}", ctx.out_rel);
     let written = mosaica_store::unique::merge_unique_runs(
         &inputs,

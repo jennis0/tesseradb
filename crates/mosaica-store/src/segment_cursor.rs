@@ -87,8 +87,7 @@ impl SegmentCursor {
         declared: ScalarType,
         op: &str,
     ) -> std::io::Result<ScalarValue> {
-        let malformed =
-            |detail: String| std::io::Error::new(std::io::ErrorKind::InvalidData, detail);
+        let malformed = |detail: String| std::io::Error::new(std::io::ErrorKind::InvalidData, detail);
         let Some(copy) = self.bands.copy(name) else {
             return Ok(ScalarValue::Null);
         };

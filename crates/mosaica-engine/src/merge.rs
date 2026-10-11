@@ -37,6 +37,12 @@ pub(crate) struct MergePlan {
     pub(crate) row_base: u32,
 }
 
+impl MergePlan {
+    pub(crate) fn layout(&self) -> ShardLayout<'_> {
+        ShardLayout::new(&self.partition, self.shard)
+    }
+}
+
 /// Select a merge over `generation`, or `None` if nothing qualifies.
 ///
 /// Sizes come from the manifest's `files` map rather than stat-ing the filesystem, so selection
@@ -162,7 +168,7 @@ pub(crate) fn execute(
     plan: MergePlan,
     ctx: MergeContext,
 ) -> Result<CompletedMerge, MaintenanceFailed> {
-    let layout = ShardLayout::new(&plan.partition, plan.shard);
+    let layout = plan.layout();
     let output = execute_merge(
         &ctx.prefix_dir,
         layout,
@@ -232,8 +238,9 @@ pub(crate) fn rebase_into(
 
     // Presence bitmaps are removed by prefix because a column with no absence in a given segment
     // has no bitmap file there; the merged segment carries its own, permuted.
+    let layout = plan.layout();
     for seg_id in &consumed {
-        let seg_rel = ShardLayout::new(&plan.partition, plan.shard).segment_rel(&plan.view, seg_id);
+        let seg_rel = layout.segment_rel(&plan.view, seg_id);
         for name in mosaica_store::SEGMENT_FILES {
             manifest
                 .partition

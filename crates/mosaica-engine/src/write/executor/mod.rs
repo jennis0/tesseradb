@@ -347,7 +347,8 @@ impl Executor {
             s.watermark = watermark;
             g.bundle = bundle;
             g.dict = dict;
-            // A rotation carries the new prefix's own columns, or `with` would serve stale entries.
+            // A rotation carries the new prefix's own columns, or the successor would serve stale
+            // entries.
             if let Some(r) = &rotation {
                 s.filter_columns = Arc::clone(&r.filter_columns);
                 s.postings = Arc::clone(&r.postings);

@@ -15,31 +15,55 @@ pub(crate) fn rebased(
         let dict = m.output.clone();
         replace_window(&mut next.partition.dict_extents, &m.consumed, dict, |e| &e.path, all)?;
     }
-    let shard = next.only_shard_mut();
+    let record = next.only_shard_mut();
     if let Some(m) = &completed.tier {
         let tier = m.output.0.clone();
-        replace_window(&mut shard.deltas, &m.consumed, tier, |rel| rel, all)?;
+        replace_window(&mut record.deltas, &m.consumed, tier, |rel| rel, all)?;
     }
     for m in &completed.attrs {
         let (window, attr) = (&m.consumed, m.output.extent.clone());
         let same_column = |e: &AttrExtent| e.key() == window.key();
-        replace_window(&mut shard.attr_extents, &window.extents, attr, |e| &e.values, same_column)?;
+        replace_window(
+            &mut record.attr_extents,
+            &window.extents,
+            attr,
+            |e| &e.values,
+            same_column,
+        )?;
     }
     if let Some(m) = &completed.record {
-        let record = m.output.clone();
-        replace_window(&mut shard.record_extents, &m.consumed, record, |e| &e.blocks, all)?;
+        let blob = m.output.clone();
+        replace_window(
+            &mut record.record_extents,
+            &m.consumed,
+            blob,
+            |e| &e.blocks,
+            all,
+        )?;
     }
     for m in &completed.texts {
         let (window, text) = (&m.consumed, m.output.clone());
         let same_column = |e: &TextExtent| e.key() == window.key();
-        replace_window(&mut shard.text_extents, &window.extents, text, |e| &e.dict, same_column)?;
+        replace_window(
+            &mut record.text_extents,
+            &window.extents,
+            text,
+            |e| &e.dict,
+            same_column,
+        )?;
     }
     if let Some(m) = &completed.terms {
         let terms = m.output.clone();
-        replace_window(&mut shard.entity_terms_extents, &m.consumed, terms, |e| &e.terms, all)?;
+        replace_window(
+            &mut record.entity_terms_extents,
+            &m.consumed,
+            terms,
+            |e| &e.terms,
+            all,
+        )?;
     }
     for m in &completed.unique {
-        let index = shard
+        let index = record
             .unique_indexes
             .iter_mut()
             .find(|index| index.attribute == m.consumed.attribute)?;
@@ -48,8 +72,8 @@ pub(crate) fn rebased(
     }
     for m in &completed.edited {
         let runs = match m.consumed.direction {
-            mosaica_store::edited::Direction::ByNumber => &mut shard.edited_items.by_number,
-            mosaica_store::edited::Direction::ByEntity => &mut shard.edited_items.by_entity,
+            mosaica_store::edited::Direction::ByNumber => &mut record.edited_items.by_number,
+            mosaica_store::edited::Direction::ByEntity => &mut record.edited_items.by_entity,
         };
         let at = contiguous(&runs.live, &m.consumed.runs, |rel| rel)?;
         runs.live.splice(at, m.output.iter().cloned());

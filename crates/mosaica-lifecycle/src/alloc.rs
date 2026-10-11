@@ -1,9 +1,8 @@
 //! The entity-ID allocator, seeded from durable state at boot.
 //!
-//! `Allocator::new` is always seeded from `max(manifest_hw, replayed rows/leases)`: the highest
-//! entity ID any durable artefact (bundle manifest, or a replayed WAL row/lease) has ever claimed.
-//! Above that mark no id has been issued, and as long as the seed never goes backwards across a
-//! restart, no id above it is handed out twice.
+//! `Allocator::new` is seeded from `max(the shard record's high_water, replayed rows)`: the highest
+//! entity ID any durable record has claimed. Above that mark no id has been issued, and as long as
+//! the seed never goes backwards across a restart, no id above it is handed out twice.
 //!
 //! ## Freed ids
 //!
@@ -39,8 +38,9 @@
 //!
 //! Points are allocated **upward from 0**. Row-less entities — an artifact, and the entity a layer
 //! takes so that layer suppression can ride the deny lane — are allocated **downward from the
-//! top**. Both marks live in this one struct, and **exhaustion is the two marks meeting**, which is the
-//! true condition where a fixed ceiling per region would be a guess about the split.
+//! top**. Both marks live in this one struct, and **exhaustion is the two marks meeting**, or the
+//! high water reaching the shard's size. Meeting is the true condition where a fixed ceiling per
+//! region would be a guess about the split.
 //!
 //! **The reason is not identifier supply, which is where a reader looks first.** Three structures
 //! size themselves over entity *ranges* rather than entity counts: a flush or merge segment's row
@@ -88,8 +88,7 @@ pub use mosaica_types::layer::ROWLESS_CEILING;
 /// nor [`Allocator::allocate_rowless`] moves its mark on the error path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllocError {
-    /// The point ids a window needs from the high water would pass the shard's size, or reach the
-    /// row-less mark: [`check_room`]'s refusal.
+    /// [`Allocator::room`]'s refusal.
     Full(ShardFull),
     /// Issuing the requested row-less run would carry the row-less mark into the point region.
     /// Both marks are reported because "how much is left" is the gap between them and neither
@@ -219,7 +218,6 @@ impl Allocator {
         }
     }
 
-    /// The shard's size: the high water may not pass it.
     pub fn size(&self) -> u64 {
         self.size
     }
@@ -268,9 +266,7 @@ impl Allocator {
 
     /// Allocates **point** entity IDs for a commit window's `edits` new entities and its `items`
     /// new items, in the order the module doc gives. The high-water advances past every id it
-    /// gives. Refuses, leaving the allocator unchanged, where [`Allocator::room`] does: the ids
-    /// from the high-water would pass the size, or reach the row-less region, where an allocation
-    /// that overran it would put two entities on one `mosaica_id`.
+    /// gives. Refuses, leaving the allocator unchanged, where [`Allocator::room`] does.
     pub fn allocate(&mut self, edits: u64, items: u64) -> Result<Allocation, AllocError> {
         self.room(edits, items).map_err(AllocError::Full)?;
         let (edits_reused, items_reused) = self.reused(edits, items);
@@ -413,7 +409,8 @@ impl Allocator {
 /// seeding contract — callers should rebuild with
 /// `Allocator::new(manifest_hw.max(high_water_from(&replayed)))` rather than carrying a
 /// pre-crash `Allocator::high_water()` value across a restart, since the allocator itself does
-/// not persist: only what actually made it into the WAL (or the bundle manifest) did.
+/// not persist: only what actually made it into the WAL (or the shard record in a side-manifest)
+/// did.
 pub fn high_water_from<'r>(records: impl IntoIterator<Item = &'r WalRecord>) -> u64 {
     let mut hw = 0u64;
     for rec in records {
@@ -463,9 +460,8 @@ pub fn high_water_from<'r>(records: impl IntoIterator<Item = &'r WalRecord>) -> 
             | WalRecord::UniqueDeclare { .. }
             | WalRecord::VocabularyDeclare { .. }
             | WalRecord::ViewGroupCreate { .. }
-            | WalRecord::PlainViewCreate { .. } => {}
-            // A size bounds the mark and moves it nowhere.
-            WalRecord::ShardsDeclare { .. } => {}
+            | WalRecord::PlainViewCreate { .. }
+            | WalRecord::ShardsDeclare { .. } => {}
         }
     }
     hw
@@ -576,13 +572,13 @@ pub fn low_water_from<'r>(records: impl IntoIterator<Item = &'r WalRecord>) -> u
 /// The ceiling a restart seeds its row-less mark from: the lowest of everything durable that could
 /// name an allocated row-less id.
 ///
-/// The homes are the bundle manifest, every side manifest, and the WAL term that rotation reclaims
-/// ([`low_water_from`]), and only the combination is correct.
-pub fn allocator_ceiling(bundle_low_water: u64, side_manifest_low_waters: &[u64]) -> u64 {
+/// The homes are every side-manifest and the WAL term that rotation reclaims ([`low_water_from`]),
+/// and only the combination is correct.
+pub fn allocator_ceiling(side_manifest_low_waters: &[u64]) -> u64 {
     side_manifest_low_waters
         .iter()
         .copied()
-        .fold(bundle_low_water, u64::min)
+        .fold(ROWLESS_CEILING, u64::min)
 }
 
 /// One item awaiting entity-ID assignment at serve time (append ingest).
@@ -619,9 +615,7 @@ fn signature_sort_key(terms: &[TermId]) -> Vec<u32> {
 /// identical signatures take adjacent ids from the high-water, which is what makes their postings
 /// compress as runs; freed ids come first and scatter among other signatures' runs.
 ///
-/// Fallible: propagates [`AllocError::Full`] from the underlying
-/// `Allocator::allocate` rather than swallowing it — a batch that does not fit has no effect,
-/// exactly as `allocate` leaves the allocator unchanged on that error.
+/// Fails, leaving the allocator unchanged, where [`Allocator::allocate`] does.
 pub fn assign_sorted(items: &mut [PendingItem], alloc: &mut Allocator) -> Result<(), AllocError> {
     // Compute each item's signature sort key once, up front, rather than inside
     // the comparator — `sort_by`'s comparator can be called O(n log n) times, and
@@ -890,8 +884,7 @@ mod tests {
             Err(AllocError::Exhausted { .. })
         ));
 
-        // Upward: the same wall, met from the other side, and the refusal names the high water
-        // and the mark it met.
+        // Upward: the same wall from the other side.
         assert!(a.allocate(0, RESERVED_BLOCK).is_ok());
         assert_eq!(
             a.allocate(0, 1),
@@ -1003,10 +996,9 @@ mod tests {
 
     #[test]
     fn allocator_ceiling_takes_the_minimum() {
-        // The row-less region grows downward, so "furthest along" is the lowest mark.
-        assert_eq!(allocator_ceiling(ROWLESS_CEILING, &[]), ROWLESS_CEILING);
+        assert_eq!(allocator_ceiling(&[]), ROWLESS_CEILING);
         assert_eq!(
-            allocator_ceiling(ROWLESS_CEILING, &[ROWLESS_CEILING - 8, ROWLESS_CEILING - 2]),
+            allocator_ceiling(&[ROWLESS_CEILING - 8, ROWLESS_CEILING - 2]),
             ROWLESS_CEILING - 8
         );
     }

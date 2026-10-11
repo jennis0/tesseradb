@@ -263,10 +263,6 @@ impl Executor {
     /// the last geometry swap. `min`, not `max`, for the low-water mark: the row-less region grows
     /// downward. A fold writes the declarations into its `MANIFEST.json` and sets its own list of
     /// those made since it planned, so `fold` leaves them alone.
-    ///
-    /// The high-water mark is the allocator's, not the highest entity a segment holds: an item
-    /// deleted before its flush holds no row, and once the log records naming it are reclaimed,
-    /// only this keeps its entity id, and so its `mosaica_id`, from being issued again.
     fn write_live_state(&self, manifest: &mut SegmentsManifest, fold: bool) {
         let registry = self.live.registry_for_publication();
         let shard = self.live.only_shard();

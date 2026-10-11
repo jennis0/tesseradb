@@ -54,6 +54,7 @@ use mosaica_lifecycle::{IngestBuffer, Overlay};
 
 use crate::cache::RowProjectionCache;
 use crate::cache::KEEP_SUPERSEDED_GENERATIONS;
+use crate::edited::ARTIFACT_SHARD;
 use crate::geometry::{check_publishable, GeometryPublication, GeometryRefused};
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_store::manifest::{EntitySet, ManifestVocabulary, SegmentsManifest};
@@ -437,31 +438,17 @@ impl WritePath {
         let health = Arc::clone(&self.health);
         let live = Arc::clone(&self.live);
         // Read before the pointer moves into the thread. What the bundle's manifests already carry
-        // is this list's starting point: see the field for why it is held rather than re-cloned
-        // from a (stale) live manifest at each publication.
-        let seeded_membership_extents: Vec<mosaica_store::manifest::MembershipExtent> = generation
-            .load()
-            .bundle
-            .partitions
-            .values()
-            .flat_map(|p| p.only_shard().record.membership_extents.iter().cloned())
-            .collect();
-        // The derived files the last fold or the build wrote, held for the same reason.
-        let seeded_derived_extents: Vec<mosaica_store::manifest::DerivedExtent> = generation
-            .load()
-            .bundle
-            .partitions
-            .values()
-            .flat_map(|p| p.only_shard().record.derived_extents.iter().cloned())
-            .collect();
-        // The content half, seeded identically and for the identical reason.
-        let seeded_content_extents: Vec<mosaica_store::manifest::RecordExtent> = generation
-            .load()
-            .bundle
-            .partitions
-            .values()
-            .flat_map(|p| p.only_shard().record.artifact_record_extents.iter().cloned())
-            .collect();
+        // is where each held artifact list starts: see [`SideManifests`] for why they are held
+        // rather than re-cloned from a (stale) live manifest at each publication.
+        let (seeded_membership_extents, seeded_derived_extents, seeded_content_extents) =
+            match generation.load().bundle.shard(ARTIFACT_SHARD) {
+                Some(shard) => (
+                    shard.record.membership_extents.clone(),
+                    shard.record.derived_extents.clone(),
+                    shard.record.artifact_record_extents.clone(),
+                ),
+                None => Default::default(),
+            };
         // What replay left in the log and no manifest carries: the same publication is owed for
         // it, and without this a node that restarted between a batch and its tick would wait for
         // the next batch to write one.

@@ -568,7 +568,6 @@ pub struct CommitWindow<W> {
     entities: FxHashSet<EntityId>,
     keys: FxHashSet<(u16, u128)>,
     rows: usize,
-    /// The edits and the new items the entries take ids for ([`wanted`]).
     wanted: (u64, u64),
     /// When this window opened. Read by the executor to time the window's service, and by nothing
     /// else: **there is no age bound and no timer**. A window closes on its row bound or on the work
@@ -626,8 +625,7 @@ impl<W> CommitWindow<W> {
         self.seq
     }
 
-    /// The edits and the new items this window's entries take ids for at its close, which
-    /// [`Allocator::room`] is asked about before another entry joins.
+    /// The `(edits, new items)` this window's entries take ids for: [`wanted`] summed.
     pub fn wanted(&self) -> (u64, u64) {
         self.wanted
     }
@@ -998,8 +996,6 @@ mod tests {
         assert!(!w.conflicts(&WindowClaims::of(&[row(&[1])], [], vec![(2, 98), (3, 99)])));
     }
 
-    /// A window counts the ids its entries take: one per edit and per row creating an item, and
-    /// none for a row joining one.
     #[test]
     fn a_window_counts_the_ids_its_entries_take() {
         let mut w: CommitWindow<&'static str> = CommitWindow::new(0);

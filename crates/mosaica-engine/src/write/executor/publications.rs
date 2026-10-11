@@ -34,14 +34,14 @@ pub(super) fn view_row_space<'a>(
 /// fsynced too, so a crash cannot leave a manifest naming a file that was never written.
 pub(super) fn pack_membership_extents(
     prefix_dir: &std::path::Path,
-    shard: ShardLayout<'_>,
+    layout: ShardLayout<'_>,
     n: u64,
     ready: Vec<mosaica_lifecycle::membership::PendingExtent>,
 ) -> mosaica_store::Result<Vec<mosaica_store::manifest::MembershipExtent>> {
     if ready.is_empty() {
         return Ok(Vec::new());
     }
-    let dir_rel = shard.members_rel();
+    let dir_rel = layout.members_rel();
     let dir = prefix_dir.join(&dir_rel);
     std::fs::create_dir_all(&dir).map_err(|source| mosaica_store::StoreError::Io {
         path: dir.clone(),
@@ -105,6 +105,38 @@ pub(super) fn held_tier(
         .zip(rels)
         .find(|(_, live_rel)| live_rel.as_str() == rel)
         .map(|(tier, _)| Arc::clone(tier))
+}
+
+/// `shard`'s unique indexes as `partition` of `bundle` lists them, sharing every run `shard` has
+/// open.
+pub(super) fn reopen_unique(
+    prefix_dir: &std::path::Path,
+    bundle: &mosaica_store::read::Bundle,
+    partition: &mosaica_store::read::PartitionData,
+    shard: &Shard,
+) -> mosaica_store::Result<Arc<mosaica_store::unique::UniqueIndexes>> {
+    mosaica_store::unique::UniqueIndexes::open(
+        &bundle.manifest,
+        &partition.manifest,
+        &partition.only_shard().record,
+        prefix_dir,
+        Some(&shard.unique),
+    )
+    .map(Arc::new)
+}
+
+/// `shard`'s edited-items index as `partition` lists it, sharing every run `shard` has open.
+pub(super) fn reopen_edited(
+    prefix_dir: &std::path::Path,
+    partition: &mosaica_store::read::PartitionData,
+    shard: &Shard,
+) -> mosaica_store::Result<Arc<mosaica_store::edited::EditedIndex>> {
+    mosaica_store::edited::EditedIndex::open(
+        &partition.only_shard().record.edited_items,
+        prefix_dir,
+        Some(&shard.edited),
+    )
+    .map(Arc::new)
 }
 
 /// Whether this layer's memberships are a **stored** set, the kind a record's delta describes.
@@ -185,10 +217,11 @@ impl Executor {
         if partition_data.stepped_down() {
             return;
         }
+        let record = &partition_data.only_shard().record;
         let Some(plan) = crate::coalesce::plan_coalesce(
             partition,
             &partition_data.manifest,
-            &partition_data.only_shard().record,
+            record,
             &generation.bundle.manifest.files,
             self.deps.coalesce_policy,
             // The roster as this generation has it: a scoped column of an incarnation that is no
@@ -203,9 +236,6 @@ impl Executor {
             return;
         };
 
-        // The same never-reused shape a `seg_id` has, and for the same reason: two passes at one
-        // `n` would otherwise write one path, and the second `File::create` truncates files the
-        // first has memory-mapped.
         let id = format!(
             "coalesce-{}-{}",
             partition_data.segments_n,
@@ -214,8 +244,7 @@ impl Executor {
         let ctx = crate::coalesce::CoalesceContext {
             prefix_dir: self.prefix_dir(generation),
             prefix: generation.prefix.clone(),
-            out_rel: ShardLayout::new(partition, partition_data.only_shard().record.id)
-                .coalesced_rel(&id),
+            out_rel: ShardLayout::new(partition, record.id).coalesced_rel(&id),
             id,
         };
 
@@ -574,7 +603,7 @@ impl Executor {
             .collect();
         let merged_seg_id = completed.segment.seg_id.clone();
         let next_bundle = match live.bundle.with_merged(
-            ShardLayout::new(&completed.plan.partition, completed.plan.shard),
+            completed.plan.layout(),
             &completed.plan.view,
             &consumed,
             completed.segment,
@@ -755,6 +784,8 @@ impl Executor {
         // is the flush's arrangement for a text extent, and for its reason: a text layer is three
         // files that must be installed together.
         let prefix_dir = self.prefix_dir(&live);
+        let layout = ShardLayout::new(&completed.partition, shard.id());
+        let record = manifest.only_shard();
         let text_windows: Vec<crate::filter::CoalescedTextWindow> = completed
             .texts
             .iter()
@@ -777,17 +808,12 @@ impl Executor {
         let entity_terms = if completed.terms.is_none() {
             None
         } else {
-            let extents: Vec<mosaica_store::EntityTermsExtentPaths> = manifest
-                .only_shard()
+            let extents: Vec<mosaica_store::EntityTermsExtentPaths> = record
                 .entity_terms_extents
                 .iter()
                 .map(|e| entity_terms_extent_paths(&prefix_dir, e))
                 .collect();
-            match crate::filter::open_entity_terms_stack(
-                &prefix_dir,
-                ShardLayout::new(&completed.partition, ShardId::ZERO),
-                &extents,
-            ) {
+            match crate::filter::open_entity_terms_stack(&prefix_dir, layout, &extents) {
                 Ok(stack) => Some(Arc::new(stack)),
                 Err(e) => {
                     discard(&format!(
@@ -809,11 +835,10 @@ impl Executor {
         } else {
             // Both lists, one stack, as the open composes them: an artifact's content extents
             // hold the same format and the same reader, and the two never share an entity.
-            let extents: Vec<mosaica_filter::RecordExtentPaths> = manifest
-                .only_shard()
+            let extents: Vec<mosaica_filter::RecordExtentPaths> = record
                 .record_extents
                 .iter()
-                .chain(manifest.only_shard().artifact_record_extents.iter())
+                .chain(record.artifact_record_extents.iter())
                 .map(|e| record_extent_paths(&prefix_dir, e))
                 .collect();
             // The columns whose base no fold has written yet, which the schema owes no base
@@ -822,7 +847,7 @@ impl Executor {
             let unfolded = self.live.with_attributes(|a| a.entity_names());
             match crate::filter::open_record_stack(
                 &prefix_dir,
-                ShardLayout::new(&completed.partition, shard.id()),
+                layout,
                 &live.bundle.manifest.declared_scalars,
                 &live.bundle.manifest.vocabularies,
                 &unfolded,
@@ -920,11 +945,7 @@ impl Executor {
         {
             let held = match coalesced.filter(|(path, _)| path == rel) {
                 Some((_, tier)) => Some(Arc::clone(tier)),
-                None => held_tier(
-                    &shard.delta_postings,
-                    &partition_data.only_shard().record.deltas,
-                    rel,
-                ),
+                None => held_tier(&shard.delta_postings, &shard.data.record.deltas, rel),
             };
             let Some(tier) = held else {
                 // The manifest is already committed: a restart opens it.
@@ -953,14 +974,8 @@ impl Executor {
                 .partitions
                 .get(&completed.partition)
                 .expect("the partition this publication just rebased");
-            match mosaica_store::unique::UniqueIndexes::open(
-                &next_bundle.manifest,
-                &partition.manifest,
-                &partition.only_shard().record,
-                &self.prefix_dir(&live),
-                Some(&shard.unique),
-            ) {
-                Ok(unique) => Arc::new(unique),
+            match reopen_unique(&prefix_dir, &next_bundle, partition, shard) {
+                Ok(unique) => unique,
                 Err(e) => {
                     tracing::error!(
                         error = %e,
@@ -978,12 +993,8 @@ impl Executor {
                 .partitions
                 .get(&completed.partition)
                 .expect("the partition this publication just rebased");
-            match mosaica_store::edited::EditedIndex::open(
-                &partition.only_shard().record.edited_items,
-                &self.prefix_dir(&live),
-                Some(&shard.edited),
-            ) {
-                Ok(edited) => Arc::new(edited),
+            match reopen_edited(&prefix_dir, partition, shard) {
+                Ok(edited) => edited,
                 Err(e) => {
                     tracing::error!(
                         error = %e,
@@ -1093,7 +1104,7 @@ impl Executor {
         };
 
         let context = {
-            let Some(view_data) = partition_data.only_shard().views.get(&view) else {
+            let Some(view_data) = shard.data.views.get(&view) else {
                 return false;
             };
             // This view's frame: the flush quantises against the extent the view's own positions
@@ -1769,7 +1780,7 @@ impl Executor {
             });
         }
 
-        let extents_rel = ShardLayout::new(partition, ShardId::ZERO).record_extents_rel();
+        let extents_rel = ShardLayout::new(partition, ARTIFACT_SHARD).record_extents_rel();
         let dir = prefix_dir.join(&extents_rel);
         std::fs::create_dir_all(&dir).map_err(|source| mosaica_store::StoreError::Io {
             path: dir.clone(),
@@ -1850,7 +1861,7 @@ impl Executor {
         let ready = self.live.unpublished_memberships();
         pack_membership_extents(
             prefix_dir,
-            ShardLayout::new(partition, ShardId::ZERO),
+            ShardLayout::new(partition, ARTIFACT_SHARD),
             n,
             ready,
         )
@@ -1978,8 +1989,8 @@ impl Executor {
         // space, or a new incarnation's; its rows went with the drop, and the segment takes
         // neither, even where the new incarnation's empty row space would continue it.
         if let Some(segment) = &completed.segment {
-            let continues = partition_data
-                .only_shard()
+            let continues = shard
+                .data
                 .views
                 .get(&completed.view)
                 .filter(|view| view.incarnation == segment.descriptor.incarnation)
@@ -2033,7 +2044,7 @@ impl Executor {
                 .collect();
             match shard.filter_columns.with_scoped_columns(
                 &record_dir,
-                ShardLayout::new(&completed.partition, ShardId::ZERO),
+                ShardLayout::new(&completed.partition, completed.shard),
                 &opening,
                 &live.bundle.manifest.scoped_scalars(),
                 &live.bundle.manifest.vocabularies,
@@ -2087,6 +2098,28 @@ impl Executor {
                 return false;
             }
         };
+        // The group-scoped columns this flush gave a view its first of. Carried forward and
+        // appended to, never restated: the list is what a restart recovers
+        // `scoped_scalars[..].views` from, and a render-only family writes no extent for the
+        // derivation to find. `manifest` is the live side-manifest cloned, so the earlier pairs
+        // are already here.
+        for (column, view) in &completed.scoped_columns {
+            let entry = mosaica_store::manifest::ScopedColumn {
+                column: column.clone(),
+                view: view.clone(),
+                // The incarnation of the view the entry names. The list is carried forward
+                // indefinitely, so an entry outlives the drop that orphaned its column; the stamp
+                // is what keeps a key created again from publishing it as its own.
+                incarnation: completed.scoped_incarnation,
+            };
+            if !manifest.partition.scoped_columns.contains(&entry) {
+                manifest.partition.scoped_columns.push(entry);
+            }
+        }
+        manifest.partition.files.extend(completed.files);
+        if let Some(extent) = completed.dict_extent {
+            manifest.partition.dict_extents.push(extent);
+        }
         // The watermark advances at every flush publication and never regresses: a publication
         // coordinate, not an entity count.
         //
@@ -2114,31 +2147,8 @@ impl Executor {
                 .map(|s| s.high_water)
                 .unwrap_or(0),
         );
-        // And the group-scoped columns this flush gave a view its first of. Carried forward and
-        // appended to, never restated: the list is what a restart recovers
-        // `scoped_scalars[..].views` from, and a render-only family writes no extent for the
-        // derivation to find. `manifest` is the live side-manifest cloned, so the earlier pairs
-        // are already here.
-        for (column, view) in &completed.scoped_columns {
-            let entry = mosaica_store::manifest::ScopedColumn {
-                column: column.clone(),
-                view: view.clone(),
-                // The incarnation of the view the entry names. The list is carried forward
-                // indefinitely, so an entry outlives the drop that orphaned its column; the stamp
-                // is what keeps a key created again from publishing it as its own.
-                incarnation: completed.scoped_incarnation,
-            };
-            if !manifest.partition.scoped_columns.contains(&entry) {
-                manifest.partition.scoped_columns.push(entry);
-            }
-        }
-        // The segment's own manifest lists, taken together or not at all: a values-only
-        // publication wrote none of the files they name.
-        manifest.partition.files.extend(completed.files);
-        if let Some(extent) = completed.dict_extent {
-            manifest.partition.dict_extents.push(extent);
-        }
-        let record = manifest.only_shard_mut();
+        // The segment's own lists, taken together or not at all: a values-only publication wrote
+        // none of the files they name.
         if let Some(segment) = &completed.segment {
             record.segments.push(segment.descriptor.clone());
             record.deltas.push(segment.tier_path.clone());
@@ -2400,14 +2410,8 @@ impl Executor {
         // The runs this flush wrote join the index, and the live entries they hold leave.
         let unique = match next_bundle.partitions.get(&completed.partition) {
             Some(partition) if !completed.unique_runs.is_empty() => {
-                match mosaica_store::unique::UniqueIndexes::open(
-                    &next_bundle.manifest,
-                    &partition.manifest,
-                    &partition.only_shard().record,
-                    &self.prefix_dir(&live),
-                    Some(&shard.unique),
-                ) {
-                    Ok(unique) => Arc::new(unique),
+                match reopen_unique(&self.prefix_dir(&live), &next_bundle, partition, shard) {
+                    Ok(unique) => unique,
                     Err(e) => {
                         // The manifest is committed; a restart opens it.
                         self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
@@ -2430,15 +2434,11 @@ impl Executor {
             let Some(partition) = next_bundle.partitions.get(&completed.partition) else {
                 return false;
             };
-            match mosaica_store::edited::EditedIndex::open(
-                &partition.only_shard().record.edited_items,
-                &self.prefix_dir(&live),
-                Some(&shard.edited),
-            ) {
+            match reopen_edited(&self.prefix_dir(&live), partition, shard) {
                 Ok(index) => {
                     let mut edited_live = (*shard.edited_live).clone();
                     edited_live.remove(completed.edited_runs.entities.iter().copied());
-                    (Arc::new(index), Arc::new(edited_live))
+                    (index, Arc::new(edited_live))
                 }
                 Err(e) => {
                     self.health.flush_failures.fetch_add(1, Ordering::Relaxed);

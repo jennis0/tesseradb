@@ -212,8 +212,7 @@ fn mint_cells<'a>(
 
 /// The window could not be allocated: nothing was appended, nothing applied, and the high-water
 /// mark did not move. The one exit outside [`ClosingWindow`], since allocation is what failed.
-/// Admission measures every batch against the shard first, so a full shard reaching here is a
-/// backstop, answered as admission answers it.
+/// A full shard is refused at admission; this is the backstop.
 fn fail_allocation(
     health: &ExecutorHealth,
     error: AllocError,
@@ -427,25 +426,20 @@ impl Executor {
                     window = self.close_and_reopen(window);
                     admission = Admission::YieldedAfterClose;
                 }
-                // The ids the batch takes are counted against what the window leaves the shard.
-                // Where they do not fit, the window closes, and the batch is measured against the
-                // shard as the close leaves it and refused alone.
+                // A batch that does not fit beside the open window closes it, and is refused if it
+                // does not fit alone.
                 let (edits, items) =
                     mosaica_lifecycle::window::wanted(&submission.rows, submission.edits.len());
-                let with_window = |window: &CommitWindow<Reply<Ingested>>| {
+                let room = |shard: &ShardWrite, window: &CommitWindow<Reply<Ingested>>| {
                     let (held_edits, held_items) = window.wanted();
-                    (held_edits + edits, held_items + items)
+                    shard.room(held_edits + edits, held_items + items)
                 };
-                if !window.is_empty() && self.live.only_shard().room(with_window(&window)).is_err()
-                {
+                if !window.is_empty() && room(self.live.only_shard(), &window).is_err() {
                     window = self.close_and_reopen(window);
                     admission = Admission::YieldedAfterClose;
                 }
-                if let Err(full) = self.live.only_shard().room(with_window(&window)) {
+                if let Err(full) = room(self.live.only_shard(), &window) {
                     reply.fail(ExecError::ShardFull(full));
-                    if admission == Admission::Admitted {
-                        admission = Admission::Answered;
-                    }
                     return (window, admission);
                 }
                 if let Some(entry) = self.admit(submission, reply) {
@@ -497,12 +491,7 @@ impl Executor {
             || rows.iter().any(|row| match row.join {
                 Some(entity) => {
                     shard.overlay.is_deleted(entity)
-                        || shard
-                            .data
-                            .views
-                            .get(&row.view)
-                            .is_some_and(|data| data.row_space.row_of(entity).is_some())
-                        || shard.buffer.contains_in_view(entity, &row.view)
+                        || crate::edited::holds_in_view(shard, entity, &row.view)
                 }
                 None => false,
             });

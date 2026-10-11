@@ -35,6 +35,7 @@ pub(crate) struct FoldViewPlan {
 /// not a publication that consumed one of its files; the check at publication catches that.
 pub(crate) struct FoldPlan {
     pub(crate) partition: String,
+    pub(crate) shard: mosaica_types::ShardId,
     pub(crate) views: Vec<FoldViewPlan>,
     /// Prefix-relative, in the live manifest's order.
     pub(crate) tiers: Vec<String>,
@@ -53,6 +54,12 @@ pub(crate) struct FoldPlan {
     pub(crate) small_term_threshold: u32,
     /// A publication into a prefix other than this one is discarded.
     pub(crate) prefix: String,
+}
+
+impl FoldPlan {
+    pub(crate) fn layout(&self) -> mosaica_store::ShardLayout<'_> {
+        mosaica_store::ShardLayout::new(&self.partition, self.shard)
+    }
 }
 
 /// Why a tick planned no fold.
@@ -319,6 +326,7 @@ pub(crate) fn plan_fold(
 
     Ok(FoldPlan {
         partition: partition.clone(),
+        shard: record.id,
         views,
         tiers: record.deltas.clone(),
         attr_extents: record.attr_extents.clone(),
@@ -368,7 +376,11 @@ mod tests {
             0,
             "no terms, so no images"
         );
-        assert_eq!(memory_estimate(0, 1, 0, 0), 8 * 2, "no rows, so no images");
+        assert_eq!(
+            memory_estimate(0, 1, 0, 0),
+            8 * 2,
+            "no rows, so no images"
+        );
         let scratch = |bound: u64, rows: u64| {
             mosaica_store::permutation::project_scratch_bound(bound, rows).total()
         };

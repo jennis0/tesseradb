@@ -58,18 +58,17 @@ impl ShardWrite {
         lock_recover(&self.allocator).low_water()
     }
 
-    /// The size the high water may not pass.
     pub(crate) fn size(&self) -> u64 {
         lock_recover(&self.allocator).size()
     }
 
-    /// Whether a window of `wanted`, `(edits, new items)`, fits the shard. See
-    /// [`Allocator::room`].
+    /// [`Allocator::room`], under the lock.
     pub(in crate::write) fn room(
         &self,
-        wanted: (u64, u64),
+        edits: u64,
+        items: u64,
     ) -> Result<(), mosaica_types::ShardFull> {
-        lock_recover(&self.allocator).room(wanted.0, wanted.1)
+        lock_recover(&self.allocator).room(edits, items)
     }
 
     /// The allocator's freed ids and the sets it holds back, as a side-manifest records them.

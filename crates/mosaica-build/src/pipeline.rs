@@ -332,9 +332,7 @@ fn resolve_pairs_chunk(
         // Established by the dictionary pass over this same file; a miss means the file is not
         // the one that pass read.
         let Some(ordinal) = ordinal else {
-            return Err(input_changed(
-                "the pairs file names an item its first pass did not",
-            ));
+            return Err(input_changed("the pairs file names an item its first pass did not"));
         };
         resolved.push((source_term, ordinal as u64));
         Ok(())
@@ -954,10 +952,7 @@ fn build_bundle(
     timer.end(BuildStage::SourceIds, n);
 
     // ---- 2. the dictionary -----------------------------------------------------------
-    let dict_dir = args
-        .out
-        .join(PREFIX)
-        .join(mosaica_store::layout::DICTIONARY_DIR);
+    let dict_dir = args.out.join(PREFIX).join(mosaica_store::layout::DICTIONARY_DIR);
     std::fs::create_dir_all(&dict_dir).map_err(|e| BuildError::io(&dict_dir, e))?;
     // What every source term is called, established before any term id exists — a field-sourced
     // view's sorted vocabulary, or the relation's own integers (`crate::AccessPlan`).

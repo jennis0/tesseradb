@@ -185,7 +185,7 @@ pub(crate) struct CoalesceContext {
     /// The pass's id, which names its dictionary extent's directory. Never reused: two passes
     /// writing one path would truncate files the other has memory-mapped.
     pub(crate) id: String,
-    /// Where this pass writes everything else, prefix-relative: the shard's directory for `id`.
+    /// `<shard>/coalesced/<id>`: where the pass writes all but its dictionary extent.
     pub(crate) out_rel: String,
 }
 

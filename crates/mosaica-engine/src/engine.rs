@@ -580,10 +580,7 @@ fn reconstruct_writes(
         crate::write::ManifestSeed {
             shard: bundle.only_shard().record.id,
             high_water: bundle.only_shard().record.high_water,
-            low_water: mosaica_lifecycle::alloc::allocator_ceiling(
-                mosaica_types::layer::ROWLESS_CEILING,
-                &side_manifest_low_waters,
-            ),
+            low_water: mosaica_lifecycle::alloc::allocator_ceiling(&side_manifest_low_waters),
             size: shard_size_of(bundle),
             free,
             held,

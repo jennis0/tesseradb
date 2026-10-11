@@ -117,11 +117,7 @@ impl Executor {
         };
         let generation = self.generation.load_full();
         let manifest = &generation.bundle.manifest;
-        let Some(at) = manifest
-            .declared_scalars
-            .iter()
-            .position(|d| d.name == attribute)
-        else {
+        let Some(at) = manifest.declared_scalars.iter().position(|d| d.name == attribute) else {
             reply.fail(ExecError::AttributeRefused {
                 detail: format!("attribute '{attribute}' is not declared"),
             });
@@ -170,7 +166,8 @@ impl Executor {
             wanted,
             prior: pending.runs().map(|(run, _)| run.path.clone()).collect(),
             out_dir: prefix_dir.join(
-                ShardLayout::new(&partition, ShardId::ZERO).unique_index_rel(&pending.attribute),
+                ShardLayout::new(&partition, generation.only_shard().id())
+                    .unique_index_rel(&pending.attribute),
             ),
             prefix_dir,
             stem: format!("declared-{stamp}-{}", pending.rounds),
@@ -325,10 +322,7 @@ impl Executor {
             .map(|(entity, key)| (*key, *entity))
             .collect();
         for (entity, key, value) in arrived {
-            if held
-                .insert(*key, *entity)
-                .is_some_and(|other| other != *entity)
-            {
+            if held.insert(*key, *entity).is_some_and(|other| other != *entity) {
                 note(*key, value);
             }
         }
@@ -435,12 +429,7 @@ impl Executor {
             .zip(pending.runs())
             .map(|(run, (_, digest))| (run.path.clone(), digest.clone()))
             .collect();
-        self.publish_unique_change(
-            &generation,
-            &pending.attribute,
-            Some((index, files)),
-            started,
-        );
+        self.publish_unique_change(&generation, &pending.attribute, Some((index, files)), started);
         pending.reply.ack(true);
     }
 
@@ -463,11 +452,7 @@ impl Executor {
     }
 
     /// Publish the empty index of a unique column declared new at a running service.
-    pub(super) fn publish_new_unique_index(
-        &mut self,
-        attribute: &str,
-        started: std::time::Instant,
-    ) {
+    pub(super) fn publish_new_unique_index(&mut self, attribute: &str, started: std::time::Instant) {
         let generation = self.generation.load_full();
         let runs = UniqueIndexRuns {
             attribute: attribute.to_string(),
@@ -563,14 +548,13 @@ impl Executor {
         );
         let bundle = bundle.with_views(served);
         let shard = generation.only_shard();
-        let unique_indexes = match mosaica_store::unique::UniqueIndexes::open(
-            &bundle.manifest,
-            &bundle.partitions[partition].manifest,
-            &bundle.partitions[partition].only_shard().record,
+        let unique_indexes = match reopen_unique(
             &self.prefix_dir(generation),
-            Some(&shard.unique),
+            &bundle,
+            &bundle.partitions[partition],
+            shard,
         ) {
-            Ok(indexes) => Arc::new(indexes),
+            Ok(indexes) => indexes,
             Err(e) => {
                 tracing::error!(error = %e, "ALARM: a unique index was published and could not be opened; a restart opens it");
                 return;

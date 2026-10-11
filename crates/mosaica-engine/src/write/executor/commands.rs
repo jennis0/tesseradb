@@ -875,12 +875,6 @@ impl Executor {
     }
 
     /// `PUT /control/shards`: declare the point shard's size while the service runs.
-    ///
-    /// [`Self::commit_attribute_declare`]'s shape: checked against state only this thread
-    /// writes, appended, synced, applied, acknowledged. The size is the allocator's, so the next
-    /// batch admitted is measured against it, and it reaches `SEGMENTS-<n>.json` at the next
-    /// publication. A size the shard already has answers `true` with nothing appended. A failed
-    /// append leaves the size as it was.
     pub(super) fn commit_shards_declare(&mut self, size: u64, reply: Reply<bool>) {
         let (held, high_water) = {
             let shard = self.live.only_shard();
