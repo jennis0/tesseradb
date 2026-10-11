@@ -143,13 +143,7 @@ pub(crate) struct LiveState {
 impl LiveState {
     /// The one shard written to until several are.
     pub(crate) fn only_shard(&self) -> &ShardWrite {
-        match self.shards.as_slice() {
-            [shard] => shard,
-            shards => panic!(
-                "the write path writes one shard, and this one holds {}",
-                shards.len()
-            ),
-        }
+        mosaica_types::only(&self.shards)
     }
 
     /// Runs `f` with both the registry and the allocator held, in that lock order.

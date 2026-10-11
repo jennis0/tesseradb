@@ -34,7 +34,7 @@ use std::sync::Arc;
 use croaring::{Bitmap, Frozen};
 use memmap2::Mmap;
 use mosaica_roaring::OwnedView;
-use mosaica_types::{EntityId, Tenancy};
+use mosaica_types::{EntityId, IdentityKey, MosaicaId, ShardId, Tenancy};
 
 use crate::error::{io, Result, StoreError};
 use crate::{le_u32, le_u64};
@@ -243,6 +243,18 @@ impl TenancyIndex {
             return Tenancy::ZERO;
         };
         self.probe(|mapped| mapped.view.contains(number))
+    }
+
+    /// The number `id` names in `shard`, where `id` carries the tenancy the index holds for it;
+    /// `None` where `id` names no item, an item of another shard, or a number's earlier holder.
+    pub fn number_named(
+        &self,
+        key: &IdentityKey,
+        shard: ShardId,
+        id: MosaicaId,
+    ) -> Option<EntityId> {
+        let (high, number) = key.invert(id)?;
+        (high.shard == shard && self.of(number) == high.tenancy).then_some(number)
     }
 
     /// The tenancy whose bits are those the index holds and `holds` answers for.

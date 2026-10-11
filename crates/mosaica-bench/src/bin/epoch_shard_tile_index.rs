@@ -183,10 +183,9 @@ fn open_fixture(args: &Args) -> Fixture {
         segments.len()
     );
     let row_count = segments[0].row_count;
-    let view_dir = prefix_dir.join(
-        mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO).view_rel(&view),
-    );
-    let permutation_path = view_dir.join("permutation.bin");
+    let layout = mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO);
+    let view_dir = prefix_dir.join(layout.view_rel(&view));
+    let permutation_path = prefix_dir.join(layout.permutation_rel(&view));
     // Loaded for its bound only. The shard permutations below are written over the same bound,
     // and at N = 1 the written file is compared with this one byte for byte.
     let bound = Permutation::load(&permutation_path)
@@ -207,9 +206,8 @@ fn open_fixture(args: &Args) -> Fixture {
             .collect::<Vec<u32>>()
     };
     let morton = MortonSlice::load(
-        &view_dir
-            .join("segments")
-            .join(&segments[0].seg_id)
+        &prefix_dir
+            .join(layout.segment_rel(&view, &segments[0].seg_id))
             .join("morton.u32"),
     )
     .expect("morton.u32 loads");

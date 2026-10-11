@@ -1,9 +1,5 @@
-//! Where a prefix's files live: the term dictionary, each partition's side-manifests, and each
-//! point shard's per-entity and per-view structures.
-//!
-//! A path one side writes and another derives again comes from here, so the two cannot disagree.
-//! The `_rel` forms are prefix-relative with forward slashes, as the manifests' `files` maps key
-//! them; a file on disc is the prefix directory joined with one.
+//! Where a prefix's files live. A `_rel` path is prefix-relative with forward slashes, as a
+//! manifest's `files` map keys it.
 
 use std::path::{Path, PathBuf};
 
@@ -12,20 +8,21 @@ use mosaica_types::ShardId;
 
 use crate::edited::Direction;
 
-/// The separator between a group's name and a view's key in a view id. It is reserved out of plain
-/// view names and keys, so splitting on it is unambiguous.
 pub use mosaica_types::view::GROUP_SEPARATOR;
 
-/// The term dictionary's directory under a prefix, one for the whole bundle.
 pub const DICTIONARY_DIR: &str = "dictionary";
 
-/// The dictionary extent a flush or a coalesce writes, prefix-relative, where `id` is the flush's
+/// The directory of the dictionary extent a flush or a coalesce writes, where `id` is the flush's
 /// segment id or the coalesce's id.
-pub fn dictionary_extent_rel(id: &str) -> String {
-    format!("{DICTIONARY_DIR}/{id}/terms-0.dict")
+pub fn dictionary_extent_dir_rel(id: &str) -> String {
+    format!("{DICTIONARY_DIR}/{id}")
 }
 
-/// The directory every partition's directory is in, under `prefix_dir`.
+/// The extent's file in [`dictionary_extent_dir_rel`].
+pub fn dictionary_extent_rel(id: &str) -> String {
+    format!("{}/terms-0.dict", dictionary_extent_dir_rel(id))
+}
+
 pub fn partitions_dir(prefix_dir: &Path) -> PathBuf {
     prefix_dir.join("partitions")
 }
@@ -40,8 +37,7 @@ pub fn partition_dir(prefix_dir: &Path, partition: &str) -> PathBuf {
     prefix_dir.join(partition_rel(partition))
 }
 
-/// The path components a view id names, in order: one for a plain view, two for a group's view,
-/// which is nested rather than joined because `:` is not a path character everywhere.
+/// One component for a plain view, two for a group's: `:` is not a path character everywhere.
 pub fn view_path_components(view_id: &str) -> Vec<&str> {
     match view_id.split_once(GROUP_SEPARATOR) {
         Some((group, key)) => vec![group, key],
@@ -49,8 +45,7 @@ pub fn view_path_components(view_id: &str) -> Vec<&str> {
     }
 }
 
-/// One point shard of a partition: every per-entity and per-view structure of the shard is under
-/// its directory.
+/// Where one point shard's files live.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ShardLayout<'a> {
     pub partition: &'a str,
@@ -64,50 +59,64 @@ impl<'a> ShardLayout<'a> {
 
     /// The shard's directory, prefix-relative: `partitions/<partition>/shards/<shard>`.
     pub fn rel(self) -> String {
-        format!(
-            "{}/shards/{}",
-            partition_rel(self.partition),
-            self.shard.raw()
-        )
+        format!("{}/shards/{}", partition_rel(self.partition), self.shard)
     }
 
-    /// The shard's directory under `prefix_dir`.
     pub fn dir(self, prefix_dir: &Path) -> PathBuf {
         prefix_dir.join(self.rel())
     }
 
-    /// `views/<view>` or `views/<group>/<key>`: a view's permutation, row-to-entity table, field
-    /// tallies and segments.
+    /// `views/<view>` or `views/<group>/<key>`.
     pub fn view_rel(self, view_id: &str) -> String {
-        let mut rel = format!("{}/views", self.rel());
-        for component in view_path_components(view_id) {
-            rel.push('/');
-            rel.push_str(component);
-        }
-        rel
+        format!(
+            "{}/views/{}",
+            self.rel(),
+            view_path_components(view_id).join("/")
+        )
     }
 
-    /// One segment's directory in a view.
+    pub fn permutation_rel(self, view_id: &str) -> String {
+        format!("{}/permutation.bin", self.view_rel(view_id))
+    }
+
+    pub fn segments_rel(self, view_id: &str) -> String {
+        format!("{}/segments", self.view_rel(view_id))
+    }
+
     pub fn segment_rel(self, view_id: &str, seg_id: &str) -> String {
-        format!("{}/segments/{seg_id}", self.view_rel(view_id))
+        format!("{}/{seg_id}", self.segments_rel(view_id))
+    }
+
+    /// `attrs/<column>`: a column's base and extents, or a group-scoped family's views.
+    pub fn column_rel(self, column: &str) -> String {
+        format!("{}/attrs/{column}", self.rel())
+    }
+
+    /// The record blob's base. `record` is reserved out of column names, so no column shares it.
+    pub fn record_rel(self) -> String {
+        self.column_rel("record")
+    }
+
+    pub fn record_extents_rel(self) -> String {
+        format!("{}/extents", self.record_rel())
     }
 
     /// `attrs/<column>/<view components>`: one view's column of a group-scoped family.
     ///
-    /// Above [`DECLARED_INCARNATION`] the last component carries `@<incarnation>`, so a key created
-    /// again writes its base beside its predecessor's, which the live manifest may still name and a
-    /// live generation may still map. `@` is reserved out of a view key.
+    /// `@<incarnation>` marks the last component above [`DECLARED_INCARNATION`], so a recreated
+    /// key's base does not overwrite its predecessor's, which the live manifest may still name. `@`
+    /// is reserved out of view keys.
     pub fn scoped_column_rel(
         self,
         column: &str,
         view_id: &str,
         incarnation: ViewIncarnation,
     ) -> String {
-        let mut rel = format!("{}/attrs/{column}", self.rel());
-        for component in view_path_components(view_id) {
-            rel.push('/');
-            rel.push_str(component);
-        }
+        let mut rel = format!(
+            "{}/{}",
+            self.column_rel(column),
+            view_path_components(view_id).join("/")
+        );
         if incarnation != DECLARED_INCARNATION {
             rel.push('@');
             rel.push_str(&incarnation.to_string());
@@ -115,34 +124,45 @@ impl<'a> ShardLayout<'a> {
         rel
     }
 
-    /// `entities/unique/<attribute>`: one unique index's runs.
+    pub fn terms_rel(self) -> String {
+        format!("{}/terms", self.rel())
+    }
+
+    pub fn postings_rel(self) -> String {
+        format!("{}/postings.arrow", self.terms_rel())
+    }
+
+    pub fn pairs_rel(self) -> String {
+        format!("{}/pairs.parquet", self.terms_rel())
+    }
+
+    pub fn entities_rel(self) -> String {
+        format!("{}/entities", self.rel())
+    }
+
     pub fn unique_index_rel(self, attribute: &str) -> String {
-        format!("{}/entities/unique/{attribute}", self.rel())
+        format!("{}/unique/{attribute}", self.entities_rel())
     }
 
-    /// `entities/edited/<direction>`: the edited-item runs of one direction.
     pub fn edited_runs_rel(self, direction: Direction) -> String {
-        format!("{}/entities/edited/{}", self.rel(), direction.name())
+        format!("{}/edited/{}", self.entities_rel(), direction.name())
     }
 
-    /// `entities/terms`: the entity-to-term transpose's base, with its extents under `extents/`.
+    /// The entity-to-term transpose's base. Its extents are under `extents/`.
     pub fn entity_terms_rel(self) -> String {
-        format!("{}/entities/terms", self.rel())
+        format!("{}/terms", self.entities_rel())
     }
 
-    /// `tenancy`: the tenancy index's files.
     pub fn tenancy_rel(self) -> String {
         format!("{}/tenancy", self.rel())
     }
 
-    /// `members`: the membership extents.
     pub fn members_rel(self) -> String {
         format!("{}/members", self.rel())
     }
 
-    /// `coalesced`: each coalesce writes its own directory in this one.
-    pub fn coalesced_rel(self) -> String {
-        format!("{}/coalesced", self.rel())
+    pub fn coalesced_rel(self, id: &str) -> String {
+        format!("{}/coalesced/{id}", self.rel())
     }
 
     /// The directory one kind of derived structure is filed in: a `DerivedForm::dir`, or the term
@@ -153,57 +173,57 @@ impl<'a> ShardLayout<'a> {
 }
 
 #[cfg(test)]
+pub(crate) const TEST_SHARD: ShardLayout<'static> = ShardLayout::new("p", ShardId::ZERO);
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    const P0: ShardLayout<'static> = ShardLayout::new("p0", ShardId::ZERO);
-
-    /// A recreated key's scoped column does not land on its predecessor's path, and a
-    /// build-declared view's path does not move.
     #[test]
     fn a_scoped_columns_path_moves_with_the_incarnation_and_not_at_the_build() {
-        let declared = P0.scoped_column_rel("mood", "quarter:2026-Q3", DECLARED_INCARNATION);
-        assert_eq!(
-            declared,
-            "partitions/p0/shards/0/attrs/mood/quarter/2026-Q3"
-        );
-        let recreated = P0.scoped_column_rel("mood", "quarter:2026-Q3", 4);
+        let declared =
+            TEST_SHARD.scoped_column_rel("mood", "quarter:2026-Q3", DECLARED_INCARNATION);
+        assert_eq!(declared, "partitions/p/shards/0/attrs/mood/quarter/2026-Q3");
+        let recreated = TEST_SHARD.scoped_column_rel("mood", "quarter:2026-Q3", 4);
         assert_eq!(
             recreated,
-            "partitions/p0/shards/0/attrs/mood/quarter/2026-Q3@4"
+            "partitions/p/shards/0/attrs/mood/quarter/2026-Q3@4"
         );
         assert_ne!(
-            P0.scoped_column_rel("mood", "quarter:2026-Q3", 4),
-            P0.scoped_column_rel("mood", "quarter:2026-Q3", 5)
+            TEST_SHARD.scoped_column_rel("mood", "quarter:2026-Q3", 4),
+            TEST_SHARD.scoped_column_rel("mood", "quarter:2026-Q3", 5)
         );
         assert_eq!(
-            P0.scoped_column_rel("mood", "world", DECLARED_INCARNATION),
-            "partitions/p0/shards/0/attrs/mood/world"
+            TEST_SHARD.scoped_column_rel("mood", "world", DECLARED_INCARNATION),
+            "partitions/p/shards/0/attrs/mood/world"
         );
         assert_eq!(
-            P0.scoped_column_rel("mood", "world", 2),
-            "partitions/p0/shards/0/attrs/mood/world@2"
+            TEST_SHARD.scoped_column_rel("mood", "world", 2),
+            "partitions/p/shards/0/attrs/mood/world@2"
         );
     }
 
     #[test]
     fn a_plain_view_is_one_component_and_a_groups_view_is_two() {
         assert_eq!(
-            Path::new("/p").join(P0.view_rel("world")),
-            Path::new("/p/partitions/p0/shards/0/views/world")
+            Path::new("/p").join(TEST_SHARD.view_rel("world")),
+            Path::new("/p/partitions/p/shards/0/views/world")
         );
         assert_eq!(
             view_path_components("quarter:2026-Q2"),
             ["quarter", "2026-Q2"]
         );
-        assert_eq!(P0.view_rel("world"), "partitions/p0/shards/0/views/world");
         assert_eq!(
-            P0.view_rel("quarter:2026-Q2"),
-            "partitions/p0/shards/0/views/quarter/2026-Q2"
+            TEST_SHARD.view_rel("world"),
+            "partitions/p/shards/0/views/world"
         );
         assert_eq!(
-            P0.segment_rel("quarter:2026-Q2", "seg-1"),
-            "partitions/p0/shards/0/views/quarter/2026-Q2/segments/seg-1"
+            TEST_SHARD.view_rel("quarter:2026-Q2"),
+            "partitions/p/shards/0/views/quarter/2026-Q2"
+        );
+        assert_eq!(
+            TEST_SHARD.segment_rel("quarter:2026-Q2", "seg-1"),
+            "partitions/p/shards/0/views/quarter/2026-Q2/segments/seg-1"
         );
     }
 }

@@ -401,10 +401,9 @@ fn merge_side_declarations(bundle: &mut Bundle) -> SideDeclarations {
 /// its whole life, so paying the mmap setup once beats reading the whole file into memory.
 fn open_postings(prefix_dir: &Path, phash: &str) -> std::io::Result<Arc<PostingsReader>> {
     PostingsReader::open(
-        &mosaica_store::ShardLayout::new(phash, mosaica_types::ShardId::ZERO)
-            .dir(prefix_dir)
-            .join("terms")
-            .join("postings.arrow"),
+        &prefix_dir.join(
+            mosaica_store::ShardLayout::new(phash, mosaica_types::ShardId::ZERO).postings_rel(),
+        ),
         true,
     )
     .map(Arc::new)
@@ -490,8 +489,10 @@ impl PrefixReaders {
         let tenancy = mosaica_store::read::open_tenancy_index(
             &prefix_dir,
             &partition.only_shard().record,
-            &partition.manifest.files,
-            &bundle.manifest.files,
+            mosaica_store::read::Digests {
+                side: &partition.manifest.files,
+                bundle: &bundle.manifest.files,
+            },
         )
         .map_err(EngineError::Store)?;
 
@@ -577,7 +578,7 @@ fn reconstruct_writes(
     let (overlay, buffer, state) = WritePath::reconstruct(
         wal_path,
         crate::write::ManifestSeed {
-            shard: bundle.only_shard().id,
+            shard: bundle.only_shard().record.id,
             high_water: bundle.only_shard().record.high_water,
             low_water: mosaica_lifecycle::alloc::allocator_ceiling(
                 mosaica_types::layer::ROWLESS_CEILING,
@@ -636,10 +637,11 @@ fn reconstruct_writes(
     })
 }
 
-/// Apply the log's changes to `unique` onto every partition manifest's unique indexes. The last
-/// change to a column is the one in force, and the manifest is newer than a declaration it
-/// already carries an index for, so a declaration adopts its runs only where the manifest has no
-/// index for the column; each run adopted is checked against the digest the log recorded.
+/// Apply the log's changes to `unique` onto each partition's unique columns and its shard's
+/// indexes. The last change to a column is the one in force, and the manifest is newer than a
+/// declaration it already carries an index for, so a declaration adopts its runs only where the
+/// manifest has no index for the column; each run adopted is checked against the digest the log
+/// recorded.
 fn apply_unique_events(
     bundle: &mut Bundle,
     events: Vec<crate::write::UniqueEvent>,
@@ -657,16 +659,10 @@ fn apply_unique_events(
                 .record
                 .unique_indexes
                 .iter()
-                .position(|runs| runs.attribute == event.attribute);
-            match (event.unique, held) {
-                (false, Some(at)) => {
-                    partition.only_shard_mut().record.unique_indexes.remove(at);
-                    partition
-                        .manifest
-                        .unique_columns
-                        .retain(|column| column != &event.attribute);
-                }
-                (true, None) => {
+                .any(|runs| runs.attribute == event.attribute);
+            let runs = match (event.unique, held) {
+                (false, true) => None,
+                (true, false) => {
                     for run in event.base.iter().chain(&event.live) {
                         let digest = mosaica_store::digest_of(&prefix_dir.join(&run.path))
                             .map_err(EngineError::Store)?;
@@ -680,36 +676,36 @@ fn apply_unique_events(
                         }
                         partition.manifest.files.insert(run.path.clone(), digest);
                     }
-                    if !partition.manifest.unique_columns.contains(&event.attribute) {
-                        partition
-                            .manifest
-                            .unique_columns
-                            .push(event.attribute.clone());
-                    }
-                    partition.only_shard_mut().record.unique_indexes.push(
-                        mosaica_store::manifest::UniqueIndexRuns {
-                            attribute: event.attribute.clone(),
-                            base: event
-                                .base
-                                .iter()
-                                .map(|run| mosaica_store::manifest::BaseKeyRun {
-                                    path: run.path.clone(),
-                                    first_key: run.first_key.clone(),
-                                    last_key: run.last_key.clone(),
-                                })
-                                .collect(),
-                            live: event.live.iter().map(|run| run.path.clone()).collect(),
-                        },
-                    );
+                    Some(mosaica_store::manifest::UniqueIndexRuns {
+                        attribute: event.attribute.clone(),
+                        base: event
+                            .base
+                            .iter()
+                            .map(|run| mosaica_store::manifest::BaseKeyRun {
+                                path: run.path.clone(),
+                                first_key: run.first_key.clone(),
+                                last_key: run.last_key.clone(),
+                            })
+                            .collect(),
+                        live: event.live.iter().map(|run| run.path.clone()).collect(),
+                    })
                 }
                 // The manifest's index is the declaration's own, or, where the side-manifests of
                 // a removal and of this declaration were not written, the one from before the
                 // removal. That one indexes the same flushed values, since every flush writes a
                 // side-manifest and none came after it; the values buffered since are live
                 // entries again after the replay.
-                (true, Some(_)) => {}
-                (false, None) => {}
-            }
+                (true, true) => continue,
+                (false, false) => continue,
+            };
+            let record =
+                &mut std::sync::Arc::make_mut(mosaica_types::only(&mut partition.shards)).record;
+            mosaica_store::unique::set_unique_index(
+                &mut partition.manifest,
+                record,
+                &event.attribute,
+                runs,
+            );
         }
     }
     Ok(())
@@ -860,7 +856,7 @@ fn first_generation(
             vocabularies: Arc::new(vocabularies),
         },
         vec![(
-            bundle.only_shard().id,
+            bundle.only_shard().record.id,
             crate::ShardParts {
                 watermark: readers.watermark,
                 postings: Arc::clone(&readers.postings),
@@ -1326,8 +1322,10 @@ pub(crate) fn open_rotation(
         mosaica_store::read::open_tenancy_index(
             &prefix_dir,
             &partition.only_shard().record,
-            &partition.manifest.files,
-            &bundle.manifest.files,
+            mosaica_store::read::Digests {
+                side: &partition.manifest.files,
+                bundle: &bundle.manifest.files,
+            },
         )
         .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,
     );

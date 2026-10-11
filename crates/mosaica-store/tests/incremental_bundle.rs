@@ -11,10 +11,10 @@ use std::sync::Arc;
 use mosaica_store::permutation::SegmentExtent;
 use mosaica_store::read::PublishedManifest;
 use mosaica_store::{open_bundle, Bundle};
-use mosaica_types::{EntityId, RowId, ShardId};
+use mosaica_types::{EntityId, RowId};
 
 mod fixture;
-use fixture::{build_bundle, flush_segment, next_manifest, PARTITION, VIEW};
+use fixture::{build_bundle, flush_segment, next_manifest, PARTITION, SHARD, VIEW};
 
 /// The claim §1.4's drain-depth cost model rests on: consecutive generations share their base
 /// geometry — the mapped `permutation.bin` and every existing segment's mmaps — rather than being
@@ -28,8 +28,7 @@ fn an_incremental_bundle_shares_its_base_mappings() {
     let (seg, extent) = flush_segment(dir.path(), &base, 50, 3);
     let next = base
         .with_segment(
-            PARTITION,
-            ShardId::ZERO,
+            SHARD,
             VIEW,
             seg,
             extent,
@@ -64,8 +63,7 @@ fn a_flushed_entity_resolves_and_the_base_is_untouched() {
     let (seg, extent) = flush_segment(dir.path(), &base, 50, 3);
     let next = base
         .with_segment(
-            PARTITION,
-            ShardId::ZERO,
+            SHARD,
             VIEW,
             seg,
             extent,
@@ -122,8 +120,7 @@ fn a_merge_substitutes_the_consumed_segments() {
     let (s1, e1) = flush_segment(dir.path(), &base, 50, 2);
     let one = base
         .with_segment(
-            PARTITION,
-            ShardId::ZERO,
+            SHARD,
             VIEW,
             s1,
             e1,
@@ -136,8 +133,7 @@ fn a_merge_substitutes_the_consumed_segments() {
     let (s2, e2) = flush_segment(dir.path(), &one, 52, 2);
     let two = one
         .with_segment(
-            PARTITION,
-            ShardId::ZERO,
+            SHARD,
             VIEW,
             s2,
             e2,
@@ -161,8 +157,7 @@ fn a_merge_substitutes_the_consumed_segments() {
     let (merged_seg, merged_extent) = flush_segment(dir.path(), &base, 50, 4);
     let after = two
         .with_merged(
-            PARTITION,
-            ShardId::ZERO,
+            SHARD,
             VIEW,
             &consumed,
             merged_seg,
@@ -212,8 +207,7 @@ fn a_merge_whose_inputs_are_absent_is_refused() {
 
     let (seg, extent) = flush_segment(dir.path(), &base, 50, 3);
     let err = base.with_merged(
-        PARTITION,
-        ShardId::ZERO,
+        SHARD,
         VIEW,
         &["seg-that-never-existed".to_string()],
         seg,
@@ -240,8 +234,7 @@ fn an_unknown_view_is_refused() {
     let (seg, extent) = flush_segment(dir.path(), &base, 50, 3);
     assert!(base
         .with_segment(
-            PARTITION,
-            ShardId::ZERO,
+            SHARD,
             "no-such-view",
             seg,
             extent,
@@ -264,8 +257,7 @@ fn the_original_generation_is_unchanged_by_a_publication() {
     let (seg, extent) = flush_segment(dir.path(), &base, 50, 3);
     let _next = base
         .with_segment(
-            PARTITION,
-            ShardId::ZERO,
+            SHARD,
             VIEW,
             seg,
             extent,

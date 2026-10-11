@@ -33,8 +33,8 @@ use std::io;
 use std::ops::Range;
 use std::path::Path;
 
-use rayon::prelude::*;
 use mosaica_types::scalar::{Number, ScalarType};
+use rayon::prelude::*;
 
 pub use crate::exact_sum::{CompactSum, ExactSum, Trimmed};
 use crate::manifest::DeclaredScalar;
@@ -553,7 +553,7 @@ pub fn derive_view(
             .join(layout.segment_rel(view, seg_id))
             .join("columns.arrow"),
     )?;
-    let permutation = crate::Permutation::load(&view_dir.join("permutation.bin"))?;
+    let permutation = crate::Permutation::load(&prefix_dir.join(layout.permutation_rel(view)))?;
     let terms =
         crate::entity_terms::EntityTerms::open_dir(&prefix_dir.join(layout.entity_terms_rel()))?;
     let row_of = |entity: u32| {

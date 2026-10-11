@@ -39,7 +39,12 @@ fn files_under(base: &Path, dir: &Path, out: &mut Vec<String>) {
         if path.is_dir() {
             files_under(base, &path, out);
         } else {
-            out.push(path.strip_prefix(base).unwrap().to_string_lossy().into_owned());
+            out.push(
+                path.strip_prefix(base)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            );
         }
     }
 }
@@ -257,7 +262,7 @@ fn shards_of(root: &Path) -> (u64, Vec<(u32, u64)>) {
     let shards = partition
         .shards
         .iter()
-        .map(|shard| (shard.id.raw(), shard.record.high_water))
+        .map(|shard| (shard.record.id.raw(), shard.record.high_water))
         .collect();
     (partition.shard_size, shards)
 }
@@ -283,7 +288,11 @@ fn the_shard_record_and_the_shard_size_survive_a_flush_a_fold_and_a_restart() {
     send(&engine, "new-0", new_row(0));
     publish_buffered(&engine);
     let flushed = shards_of(&root);
-    assert_eq!(flushed.0, mosaica_types::SHARD_SIZE_DEFAULT, "after a flush");
+    assert_eq!(
+        flushed.0,
+        mosaica_types::SHARD_SIZE_DEFAULT,
+        "after a flush"
+    );
     assert_eq!(flushed.1, vec![(0, built[0].1 + 1)], "after a flush");
 
     fold(&engine);

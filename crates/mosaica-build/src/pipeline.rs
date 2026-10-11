@@ -332,7 +332,9 @@ fn resolve_pairs_chunk(
         // Established by the dictionary pass over this same file; a miss means the file is not
         // the one that pass read.
         let Some(ordinal) = ordinal else {
-            return Err(input_changed("the pairs file names an item its first pass did not"));
+            return Err(input_changed(
+                "the pairs file names an item its first pass did not",
+            ));
         };
         resolved.push((source_term, ordinal as u64));
         Ok(())
@@ -952,7 +954,10 @@ fn build_bundle(
     timer.end(BuildStage::SourceIds, n);
 
     // ---- 2. the dictionary -----------------------------------------------------------
-    let dict_dir = args.out.join(PREFIX).join(mosaica_store::layout::DICTIONARY_DIR);
+    let dict_dir = args
+        .out
+        .join(PREFIX)
+        .join(mosaica_store::layout::DICTIONARY_DIR);
     std::fs::create_dir_all(&dict_dir).map_err(|e| BuildError::io(&dict_dir, e))?;
     // What every source term is called, established before any term id exists — a field-sourced
     // view's sorted vocabulary, or the relation's own integers (`crate::AccessPlan`).
@@ -1514,9 +1519,8 @@ fn build_bundle(
 
     let prefix_dir = args.out.join(PREFIX);
     let shard = ShardLayout::new(PHASH, SHARD);
-    let shard_dir = shard.dir(&prefix_dir);
-    let terms_dir = shard_dir.join("terms");
-    let entities_dir = shard_dir.join("entities");
+    let terms_dir = prefix_dir.join(shard.terms_rel());
+    let entities_dir = prefix_dir.join(shard.entities_rel());
     for dir in [&terms_dir, &entities_dir] {
         std::fs::create_dir_all(dir).map_err(|e| BuildError::io(dir, e))?;
     }
@@ -1530,10 +1534,10 @@ fn build_bundle(
     // disk, fail-closed. The integrity chain replacing the old third pairs scan: bucket
     // receipts -> in-process emit -> band receipts (count + anchor, verified on read) ->
     // per-term exact counts -> the total against the deduplicated relation.
-    let postings_path = terms_dir.join("postings.arrow");
+    let postings_path = prefix_dir.join(shard.postings_rel());
     let pairs_path = args
         .emit_oracle_pairs
-        .then(|| terms_dir.join("pairs.parquet"));
+        .then(|| prefix_dir.join(shard.pairs_rel()));
     let mut pairs_writer = pairs_path
         .as_deref()
         .map(PairsParquetWriter::create)
@@ -1786,7 +1790,8 @@ fn build_bundle(
     )?;
     timer.end(BuildStage::UniqueIndexes, n);
     let (filter_paths, text_index) = write_filter_postings(
-        &shard_dir,
+        &prefix_dir,
+        shard,
         &args.schema,
         &attributes_by_entity,
         &open_extents,
@@ -1832,7 +1837,7 @@ fn build_bundle(
     // number for three jobs, which is why the 615 s this block cost at 7.4×10⁷ points could be
     // modelled and not read.
     let record_paths = write_record_blob(
-        &shard_dir,
+        &prefix_dir.join(shard.record_rel()),
         &args.schema,
         n,
         &plan.routes,
@@ -1920,7 +1925,7 @@ fn build_bundle(
                 entity_of_ordinal,
                 n,
                 identity_key: &args.identity_key,
-                shard_id: SHARD,
+                shard: SHARD,
                 rows_hint: geometry[index].rows,
             };
             crate::assembly::partition_rows(&source)?
@@ -1981,7 +1986,7 @@ fn build_bundle(
                 tmp: tmp.path(),
                 n,
                 identity_key: &args.identity_key,
-                shard_id: SHARD,
+                shard: SHARD,
                 render,
                 indexed,
             };
@@ -2071,7 +2076,7 @@ fn build_bundle(
             SEG_ID,
             rows_in_view,
             &crate::declared_scalars_of(&args.schema),
-            &|name| mosaica_filter::base_numbers(&shard_dir, name),
+            &|name| mosaica_filter::base_numbers(&prefix_dir.join(shard.column_rel(name))),
         )?);
 
         view_files.push(permutation_path);
@@ -3187,18 +3192,19 @@ fn read_scoped_column(
 /// kernel may reclaim, and the band budget bounds the only anonymous buffer left in the emit. This
 /// pass adds no second copy of the column to either.
 pub(crate) fn write_filter_postings(
-    shard_dir: &Path,
+    prefix_dir: &Path,
+    layout: ShardLayout<'_>,
     schema: &crate::config::Schema,
     by_entity: &[EntityColumn],
     spilled: &[crate::extents::OpenExtents],
     memory_budget: u64,
 ) -> Result<(Vec<PathBuf>, TextIndexCost)> {
     write_filter_postings_banded(
-        shard_dir,
+        prefix_dir,
+        layout,
         schema,
         by_entity,
         spilled,
-        POSTINGS_BAND_ROWS,
         TextIndexPlan::for_budget(memory_budget),
         KeywordDictPlan::for_budget(memory_budget),
     )
@@ -3222,11 +3228,11 @@ pub(crate) struct TextIndexCost {
 use mosaica_filter_write::POSTINGS_BAND_ROWS;
 
 fn write_filter_postings_banded(
-    shard_dir: &Path,
+    prefix_dir: &Path,
+    layout: ShardLayout<'_>,
     schema: &crate::config::Schema,
     by_entity: &[EntityColumn],
     spilled: &[crate::extents::OpenExtents],
-    band_rows: usize,
     text_plan: TextIndexPlan,
     keyword_plan: KeywordDictPlan,
 ) -> Result<(Vec<PathBuf>, TextIndexCost)> {
@@ -3236,7 +3242,7 @@ fn write_filter_postings_banded(
         if !postings_are_owed(schema, attribute) {
             continue;
         }
-        let column_dir = shard_dir.join("attrs").join(&attribute.name);
+        let column_dir = prefix_dir.join(layout.column_rel(&attribute.name));
         std::fs::create_dir_all(&column_dir).map_err(|e| BuildError::io(&column_dir, e))?;
 
         // **A text column owes no value column**, so it leaves before the one below is written.
@@ -3318,7 +3324,7 @@ fn write_filter_postings_banded(
         }
 
         let path = column_dir.join("postings.arrow");
-        write_category_postings(&path, &attribute.name, values, band_rows)?;
+        write_category_postings(&path, &attribute.name, values, POSTINGS_BAND_ROWS)?;
         fsync_file(&path)?;
         paths.push(path);
     }
@@ -3356,7 +3362,7 @@ fn write_filter_postings_banded(
 /// 1.02×10⁸ abstracts wrote 52 MB in thirteen minutes at 144 major faults a second
 /// (`probes/2026-09-03-text-arena-streaming/` §5).
 pub(crate) fn write_record_blob(
-    shard_dir: &Path,
+    record_dir: &Path,
     schema: &crate::config::Schema,
     n: u64,
     routes: &ColumnRoutes,
@@ -3382,10 +3388,7 @@ pub(crate) fn write_record_blob(
     if blob_columns.is_empty() {
         return Ok(Vec::new());
     }
-    // `record` is reserved as a column name at parse (records §7, review N10), so this directory
-    // cannot collide with a declared column's.
-    let record_dir = shard_dir.join("attrs").join("record");
-    std::fs::create_dir_all(&record_dir).map_err(|e| BuildError::io(&record_dir, e))?;
+    std::fs::create_dir_all(record_dir).map_err(|e| BuildError::io(record_dir, e))?;
     let blocks_path = record_dir.join(RECORD_BLOCKS_FILE);
     let hasrow_path = record_dir.join(RECORD_HASROW_FILE);
     let directory_path = record_dir.join(RECORD_DIRECTORY_FILE);
@@ -5993,11 +5996,8 @@ mod tests {
         )
         .expect("blob stage writes");
         assert!(!written.is_empty());
-        let blob = mosaica_filter::RecordBlob::open_dir(
-            &dir.path().join("attrs/record"),
-            mosaica_filter::Access::Mapped,
-        )
-        .expect("open");
+        let blob = mosaica_filter::RecordBlob::open_dir(dir.path(), mosaica_filter::Access::Mapped)
+            .expect("open");
         let fields = blob
             .fields_of(0)
             .expect("read")
@@ -6067,11 +6067,8 @@ mod tests {
             "a public category with neither flag has no entity-space home; without a blob row \
              its values are stored nowhere at all"
         );
-        let blob = mosaica_filter::RecordBlob::open_dir(
-            &dir.path().join("attrs/record"),
-            mosaica_filter::Access::Mapped,
-        )
-        .expect("open");
+        let blob = mosaica_filter::RecordBlob::open_dir(dir.path(), mosaica_filter::Access::Mapped)
+            .expect("open");
         assert_eq!(
             blob.fields_of(0)
                 .expect("read")
@@ -6278,11 +6275,8 @@ mod tests {
         // And the merged blob says what the corpus says.
         let dir = tempfile::tempdir().expect("tempdir");
         blob_of(dir.path(), 3);
-        let blob = mosaica_filter::RecordBlob::open_dir(
-            &dir.path().join("attrs/record"),
-            mosaica_filter::Access::Read,
-        )
-        .expect("open");
+        let blob = mosaica_filter::RecordBlob::open_dir(dir.path(), mosaica_filter::Access::Read)
+            .expect("open");
         // The last value written for an entity is the one the blob holds.
         let last_of = |source: &[(u32, String)]| {
             let mut held: std::collections::BTreeMap<u32, String> = Default::default();

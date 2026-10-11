@@ -32,11 +32,27 @@ impl ShardId {
     }
 }
 
+impl std::fmt::Display for ShardId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 impl TryFrom<u32> for ShardId {
     type Error = IdentityError;
 
     fn try_from(raw: u32) -> Result<ShardId, IdentityError> {
         ShardId::new(raw)
+    }
+}
+
+/// The one item of `items`, for a site that serves one shard of one partition. Panics on any other count.
+pub fn only<I: IntoIterator>(items: I) -> I::Item {
+    let mut items = items.into_iter();
+    match (items.next(), items.next()) {
+        (Some(item), None) => item,
+        (None, _) => panic!("expected exactly one, found none"),
+        (Some(_), Some(_)) => panic!("expected exactly one, found {}", 2 + items.count()),
     }
 }
 
@@ -48,7 +64,7 @@ pub const SHARD_SIZE_DEFAULT: u64 = (1 << 32) - (1 << 28);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ShardSizeError {
     Zero,
-    /// Below the shard's high water: the ids it has issued would need a second shard.
+    /// Below the shard's high water.
     BelowHighWater {
         size: u64,
         high_water: u64,
@@ -64,9 +80,8 @@ impl std::fmt::Display for ShardSizeError {
             ),
             ShardSizeError::BelowHighWater { size, high_water } => write!(
                 f,
-                "the shard's high water is {high_water}, and a size of {size} below it would need \
-                 a second shard, which this version does not open. Declare a size of \
-                 {high_water} or more"
+                "a size of {size} is below the shard's high water {high_water}. Declare a size \
+                 of {high_water} or more"
             ),
         }
     }
@@ -137,12 +152,11 @@ pub fn check_room(size: u64, end: u64, high_water: u64, needed: u64) -> Result<(
     if needed == 0 {
         return Ok(());
     }
-    let limit = if size <= end {
-        ShardLimit::Size(size)
+    let (limit, bound) = if size <= end {
+        (ShardLimit::Size(size), size)
     } else {
-        ShardLimit::End(end)
+        (ShardLimit::End(end), end)
     };
-    let bound = size.min(end);
     match high_water.checked_add(needed) {
         Some(reached) if reached <= bound => Ok(()),
         _ => Err(ShardFull {

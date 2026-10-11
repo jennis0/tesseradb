@@ -117,7 +117,11 @@ impl Executor {
         };
         let generation = self.generation.load_full();
         let manifest = &generation.bundle.manifest;
-        let Some(at) = manifest.declared_scalars.iter().position(|d| d.name == attribute) else {
+        let Some(at) = manifest
+            .declared_scalars
+            .iter()
+            .position(|d| d.name == attribute)
+        else {
             reply.fail(ExecError::AttributeRefused {
                 detail: format!("attribute '{attribute}' is not declared"),
             });
@@ -321,7 +325,10 @@ impl Executor {
             .map(|(entity, key)| (*key, *entity))
             .collect();
         for (entity, key, value) in arrived {
-            if held.insert(*key, *entity).is_some_and(|other| other != *entity) {
+            if held
+                .insert(*key, *entity)
+                .is_some_and(|other| other != *entity)
+            {
                 note(*key, value);
             }
         }
@@ -428,7 +435,12 @@ impl Executor {
             .zip(pending.runs())
             .map(|(run, (_, digest))| (run.path.clone(), digest.clone()))
             .collect();
-        self.publish_unique_change(&generation, &pending.attribute, Some((index, files)), started);
+        self.publish_unique_change(
+            &generation,
+            &pending.attribute,
+            Some((index, files)),
+            started,
+        );
         pending.reply.ack(true);
     }
 
@@ -451,7 +463,11 @@ impl Executor {
     }
 
     /// Publish the empty index of a unique column declared new at a running service.
-    pub(super) fn publish_new_unique_index(&mut self, attribute: &str, started: std::time::Instant) {
+    pub(super) fn publish_new_unique_index(
+        &mut self,
+        attribute: &str,
+        started: std::time::Instant,
+    ) {
         let generation = self.generation.load_full();
         let runs = UniqueIndexRuns {
             attribute: attribute.to_string(),
@@ -476,19 +492,12 @@ impl Executor {
         };
         let mut manifest = partition_data.side_manifest();
         let unique = index.is_some();
-        let columns = &mut manifest.partition.unique_columns;
-        columns.retain(|column| column != attribute);
-        if unique {
-            columns.push(attribute.to_string());
-        }
-        let indexes = &mut manifest.only_shard_mut().unique_indexes;
-        let removed = indexes
-            .iter()
-            .position(|held| held.attribute == attribute)
-            .map(|at| indexes.remove(at));
-        if let Some((runs, _)) = &index {
-            indexes.push(runs.clone());
-        }
+        let removed = mosaica_store::unique::set_unique_index(
+            &mut manifest.partition,
+            mosaica_types::only(&mut manifest.shards.records),
+            attribute,
+            index.as_ref().map(|(runs, _)| runs.clone()),
+        );
         for file in removed.iter().flat_map(UniqueIndexRuns::files) {
             manifest.partition.files.remove(file);
         }

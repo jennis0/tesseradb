@@ -1526,9 +1526,8 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
 
     let prefix_dir = args.out.join(PREFIX);
     let shard = ShardLayout::new(PHASH, SHARD);
-    let shard_dir = shard.dir(&prefix_dir);
-    let terms_dir = shard_dir.join("terms");
-    let entities_dir = shard_dir.join("entities");
+    let terms_dir = prefix_dir.join(shard.terms_rel());
+    let entities_dir = prefix_dir.join(shard.entities_rel());
     let view_dir = prefix_dir.join(shard.view_rel(&view.view_id));
     let segment_dir = prefix_dir.join(shard.segment_rel(&view.view_id, SEG_ID));
     for dir in [&terms_dir, &entities_dir, &view_dir, &segment_dir] {
@@ -1541,14 +1540,14 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         fsync_file(path)?;
     }
 
-    let postings_path = terms_dir.join("postings.arrow");
+    let postings_path = prefix_dir.join(shard.postings_rel());
     write_postings(&postings_path, &per_term, SMALL_TERM_THRESHOLD_DEFAULT)
         .map_err(|e| BuildError::io(&postings_path, e))?;
     fsync_file(&postings_path)?;
 
     let mut other_paths: Vec<PathBuf> = vec![postings_path.clone()];
     if args.emit_oracle_pairs {
-        let pairs_path = terms_dir.join("pairs.parquet");
+        let pairs_path = prefix_dir.join(shard.pairs_rel());
         write_pairs_parquet(&pairs_path, &per_term)?;
         other_paths.push(pairs_path);
     }
@@ -1828,7 +1827,8 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         // The text columns' timing is the streaming pipeline's stage split (`observer.rs`); this
         // path is the equivalence oracle and is not observed, so it drops it.
         let (mut paths, _text) = pipeline::write_filter_postings(
-            &shard_dir,
+            &prefix_dir,
+            shard,
             &args.schema,
             &by_entity,
             &open_extents,
@@ -1836,7 +1836,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 .unwrap_or_else(pipeline::detect_memory_budget),
         )?;
         paths.extend(pipeline::write_record_blob(
-            &shard_dir,
+            &prefix_dir.join(shard.record_rel()),
             &args.schema,
             tiler_items.len() as u64,
             &routes,
@@ -1923,7 +1923,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         fsync_file(&segment_dir.join(name))?;
     }
 
-    let permutation_path = view_dir.join("permutation.bin");
+    let permutation_path = prefix_dir.join(shard.permutation_rel(&view.view_id));
     let row_order: Vec<EntityId> = entity_ids;
     // `bound` is the partition view's max entity ID + 1. The bootstrap build allocates a dense
     // 0..n, so that is exactly the item count.
@@ -2079,7 +2079,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         SEG_ID,
         n as u32,
         &declared_scalars_of(&args.schema),
-        &|name| mosaica_filter::base_numbers(&shard_dir, name),
+        &|name| mosaica_filter::base_numbers(&prefix_dir.join(shard.column_rel(name))),
     )?);
 
     // ---- 9. manifests ------------------------------------------------------------------
@@ -2552,7 +2552,7 @@ pub struct VerifyReport {
 /// Verify a bundle at `root`: run the read protocol (which checks every manifest digest, every
 /// file's size and SHA-256, and each permutation's bijectivity onto its segment's rows), then
 /// re-confirm the row space covers exactly the rows the segments claim, and re-derive every
-/// row's `mosaica_id` from `(identity.key, identity.shard_id, entity_id)`, failing if a single
+/// row's `mosaica_id` from `(identity.key, the shard's id, entity_id)`, failing if a single
 /// row disagrees (contracts §2.6 r6: "`mosaica verify` checks the whole column against" the
 /// key).
 pub fn verify(root: &Path) -> Result<VerifyReport> {
@@ -2605,8 +2605,10 @@ fn verified_open(
         let tenancy = mosaica_store::read::open_tenancy_index(
             &prefix_dir,
             &shard.record,
-            &partition.manifest.files,
-            &bundle.manifest.files,
+            mosaica_store::read::Digests {
+                side: &partition.manifest.files,
+                bundle: &bundle.manifest.files,
+            },
         )?;
         for (view_id, view) in &shard.views {
             views += 1;
@@ -2628,7 +2630,7 @@ fn verified_open(
                 view,
                 Identity {
                     key: &identity_key,
-                    shard_id: shard.id,
+                    shard: shard.record.id,
                     edited: &edited,
                     tenancy: &tenancy,
                 },
@@ -2980,7 +2982,7 @@ fn claim_rows(
 #[derive(Clone, Copy)]
 struct Identity<'a> {
     key: &'a IdentityKey,
-    shard_id: ShardId,
+    shard: ShardId,
     edited: &'a mosaica_store::edited::EditedIndex,
     tenancy: &'a mosaica_store::tenancy::TenancyIndex,
 }
@@ -2996,7 +2998,7 @@ fn walk_window(
     identity: Identity<'_>,
 ) -> Result<()> {
     let identity_key = identity.key;
-    let item = |tenancy| ItemHigh::new(identity.shard_id, tenancy);
+    let item = |tenancy| ItemHigh::new(identity.shard, tenancy);
     // A row's entity is its number unless an edit moved it.
     let tenancies = identity
         .tenancy
@@ -3037,16 +3039,20 @@ fn walk_window(
             // A row an edit moved records its entity, and its `mosaica_id` is its number's, whose
             // entries in the edited items name the entity.
             let moved = recorded.is_some()
-                && identity_key
-                    .invert(mosaica_types::MosaicaId::new(id))
-                    .is_some_and(|(high, number)| {
-                        high.shard == identity.shard_id
-                            && identity.tenancy.of(number) == high.tenancy
-                            && u32::try_from(number.raw()).is_ok_and(|number| {
-                                identity.edited.entities_of(&[number]).is_ok_and(|held| {
-                                    held.iter().any(|(_, e)| u64::from(*e) == entity)
-                                })
-                            })
+                && identity
+                    .tenancy
+                    .number_named(
+                        identity_key,
+                        identity.shard,
+                        mosaica_types::MosaicaId::new(id),
+                    )
+                    .is_some_and(|number| {
+                        u32::try_from(number.raw()).is_ok_and(|number| {
+                            identity
+                                .edited
+                                .entities_of(&[number])
+                                .is_ok_and(|held| held.iter().any(|(_, e)| u64::from(*e) == entity))
+                        })
                     });
             if !moved {
                 return Err(BuildError::Invalid(format!(

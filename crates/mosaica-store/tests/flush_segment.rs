@@ -5,10 +5,10 @@ use std::path::Path;
 use mosaica_store::flush::{write_flush_segment, FlushInput, FlushOutput, FlushRow};
 use mosaica_store::manifest::Quantisation;
 use mosaica_store::MortonSlice;
-use mosaica_types::{EntityId, IdentityKey, ShardId};
+use mosaica_types::{EntityId, IdentityKey};
 
 mod fixture;
-use fixture::{build_bundle, PARTITION, SHARD, VIEW};
+use fixture::{build_bundle, SHARD, VIEW};
 
 const KEY_HEX: &str = "0123456789abcdef0123456789abcdef";
 
@@ -36,7 +36,7 @@ fn flush(prefix_dir: &Path, seg_id: &str, rows: Vec<FlushRow>, row_base: u32) ->
     let key = IdentityKey::from_hex(KEY_HEX).unwrap();
     write_flush_segment(
         prefix_dir,
-        PARTITION,
+        SHARD,
         VIEW,
         FlushInput {
             incarnation: 0,
@@ -44,7 +44,6 @@ fn flush(prefix_dir: &Path, seg_id: &str, rows: Vec<FlushRow>, row_base: u32) ->
             rows,
             quantisation: unit_quantisation(),
             identity_key: &key,
-            shard_id: ShardId::ZERO,
             scalar_schema: &[],
             indexed: &[],
             row_base,
@@ -163,7 +162,7 @@ fn unordered_rows_are_refused() {
     let key = IdentityKey::from_hex(KEY_HEX).unwrap();
     let result = write_flush_segment(
         &dir.path().join("v00000"),
-        PARTITION,
+        SHARD,
         VIEW,
         FlushInput {
             incarnation: 0,
@@ -171,7 +170,6 @@ fn unordered_rows_are_refused() {
             rows: vec![row(52, 0.1, 0.1), row(50, 0.2, 0.2)],
             quantisation: unit_quantisation(),
             identity_key: &key,
-            shard_id: ShardId::ZERO,
             scalar_schema: &[],
             indexed: &[],
             row_base: 50,

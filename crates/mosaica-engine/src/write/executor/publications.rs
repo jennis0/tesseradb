@@ -214,10 +214,8 @@ impl Executor {
         let ctx = crate::coalesce::CoalesceContext {
             prefix_dir: self.prefix_dir(generation),
             prefix: generation.prefix.clone(),
-            out_rel: format!(
-                "{}/{id}",
-                ShardLayout::new(partition, ShardId::ZERO).coalesced_rel()
-            ),
+            out_rel: ShardLayout::new(partition, partition_data.only_shard().record.id)
+                .coalesced_rel(&id),
             id,
         };
 
@@ -576,8 +574,7 @@ impl Executor {
             .collect();
         let merged_seg_id = completed.segment.seg_id.clone();
         let next_bundle = match live.bundle.with_merged(
-            &completed.plan.partition,
-            completed.plan.shard,
+            ShardLayout::new(&completed.plan.partition, completed.plan.shard),
             &completed.plan.view,
             &consumed,
             completed.segment,
@@ -810,7 +807,6 @@ impl Executor {
         let records = if completed.record.is_none() {
             None
         } else {
-            let shard_dir = ShardLayout::new(&completed.partition, ShardId::ZERO).dir(&prefix_dir);
             // Both lists, one stack, as the open composes them: an artifact's content extents
             // hold the same format and the same reader, and the two never share an entity.
             let extents: Vec<mosaica_filter::RecordExtentPaths> = manifest
@@ -825,7 +821,8 @@ impl Executor {
             // are the same stack.
             let unfolded = self.live.with_attributes(|a| a.entity_names());
             match crate::filter::open_record_stack(
-                &shard_dir,
+                &prefix_dir,
+                ShardLayout::new(&completed.partition, shard.id()),
                 &live.bundle.manifest.declared_scalars,
                 &live.bundle.manifest.vocabularies,
                 &unfolded,
@@ -1273,7 +1270,7 @@ impl Executor {
                 row_base,
                 entity_floor: view_data.row_space.entity_floor(),
                 identity_key: self.deps.identity_key,
-                shard_id: view_data.shard,
+                shard: view_data.shard,
                 quantisation,
                 // This view's schema, entity-scoped tail then scoped render lanes: the same list a
                 // merge and a fold of this view take (`view_scalar_schema_of`), so a segment
@@ -1772,10 +1769,7 @@ impl Executor {
             });
         }
 
-        let extents_rel = format!(
-            "{}/attrs/record/extents",
-            ShardLayout::new(partition, ShardId::ZERO).rel()
-        );
+        let extents_rel = ShardLayout::new(partition, ShardId::ZERO).record_extents_rel();
         let dir = prefix_dir.join(&extents_rel);
         std::fs::create_dir_all(&dir).map_err(|source| mosaica_store::StoreError::Io {
             path: dir.clone(),
@@ -2117,7 +2111,7 @@ impl Executor {
             completed
                 .segment
                 .as_ref()
-                .map(|s| s.entity_id_high_water)
+                .map(|s| s.high_water)
                 .unwrap_or(0),
         );
         // And the group-scoped columns this flush gave a view its first of. Carried forward and
@@ -2265,8 +2259,7 @@ impl Executor {
             Some(segment) => {
                 let seg_id = segment.segment.seg_id.clone();
                 let bundle = match live.bundle.with_segment(
-                    &completed.partition,
-                    completed.shard,
+                    ShardLayout::new(&completed.partition, completed.shard),
                     &completed.view,
                     segment.segment,
                     segment.extent,

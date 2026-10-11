@@ -85,16 +85,18 @@ use mosaica_types::EntityId;
 
 use rayon::prelude::*;
 
-use crate::config::{ArtifactSource, Fields, InlineArtifact, LayerSources, MemberTable, MemberValue};
-use crate::ids::{Numbering, Numbers, ReadKind, NO_SOURCE};
-use mosaica_store::unique::UniqueKey;
+use crate::config::{
+    ArtifactSource, Fields, InlineArtifact, LayerSources, MemberTable, MemberValue,
+};
 use crate::error::{BuildError, Result};
+use crate::ids::{Numbering, Numbers, ReadKind, NO_SOURCE};
 use crate::shapes::{
     inline_shape, shape_declared, space_at, space_column, ShapeColumns, ShapeContext,
     ShapeLayerReport, ShapeReader,
 };
 use crate::spill;
 use mosaica_store::derived::authored_shape_input;
+use mosaica_store::unique::UniqueKey;
 
 /// One artifact as the build inputs describe it, before any id has been resolved.
 #[derive(Debug, Default)]
@@ -654,7 +656,9 @@ pub(crate) fn read(
         memory_budget,
     };
     for (index, input) in inputs.iter().enumerate() {
-        let lists = numbering.of(ReadKind::Lists(index)).map(|rows| &rows.numbers);
+        let lists = numbering
+            .of(ReadKind::Lists(index))
+            .map(|rows| &rows.numbers);
         // An artifact source names artifacts *in a layer*, and a layer this build does not
         // register is a name the manifest cannot carry. The config produces these parallel to the
         // declarations; a caller assembling them by hand gets the refusal instead of a silently
@@ -954,7 +958,8 @@ fn read_artifacts(
         let parent = parent_column(path, &batch, fields)?;
         // A source without the declared column states no labels, and the publication refuses
         // its artifacts as it refuses a record without `access` at a running service.
-        let access = match access_field.and_then(|field| Some((field, batch.column_by_name(field)?)))
+        let access = match access_field
+            .and_then(|field| Some((field, batch.column_by_name(field)?)))
         {
             None => None,
             Some((field, column)) => {
@@ -1129,16 +1134,12 @@ fn plan_inline(
             view_key: None,
             membership: match (&row.members, &row.excluding) {
                 // Both is refused at parse, where the declaration can name the artifact.
-                (Some(members), _) => PlannedMembership::Included(listed_in(
-                    table_len(members),
-                    lists,
-                    &mut listed,
-                )),
-                (_, Some(excluding)) => PlannedMembership::Excluded(listed_in(
-                    table_len(excluding),
-                    lists,
-                    &mut listed,
-                )),
+                (Some(members), _) => {
+                    PlannedMembership::Included(listed_in(table_len(members), lists, &mut listed))
+                }
+                (_, Some(excluding)) => {
+                    PlannedMembership::Excluded(listed_in(table_len(excluding), lists, &mut listed))
+                }
                 (None, None) => PlannedMembership::default(),
             },
             contents: row
@@ -2505,7 +2506,8 @@ fn verify_hierarchies(
             )));
             }
             if !several {
-                if let Some(first) = claimed.insert((layer, *level, view.as_deref(), key), parent_key)
+                if let Some(first) =
+                    claimed.insert((layer, *level, view.as_deref(), key), parent_key)
                 {
                     return Err(BuildError::Invalid(format!(
                         "{layer} level {level} artifact {key} is claimed by both {first} and \
@@ -3247,7 +3249,7 @@ fn write_content_extent(
     // artifact belongs to no partition, and writing its content into each would give one record
     // stack two layers with overlapping has-row bitmaps — has no case to fire on. It becomes this
     // function's problem the day a build writes two, and the argument lives on the online copy.
-    let extents_rel = format!("{}/attrs/record/extents", shard.rel());
+    let extents_rel = shard.record_extents_rel();
     let dir = prefix_dir.join(&extents_rel);
     std::fs::create_dir_all(&dir).map_err(|e| BuildError::io(&dir, e))?;
     let extent = RecordExtent {
@@ -3564,7 +3566,12 @@ fn value_index(column: &UInt32Array, row: usize) -> Option<u32> {
 
 /// One artifact row's listed members, as the items the rule numbered them: the row's list is the
 /// next `len` members of the layer's lists, and a member the rule refused is left out.
-fn listed_at(column: &ListArray, row: usize, lists: Option<&Numbers>, listed: &mut u64) -> Vec<u64> {
+fn listed_at(
+    column: &ListArray,
+    row: usize,
+    lists: Option<&Numbers>,
+    listed: &mut u64,
+) -> Vec<u64> {
     let len = match column.is_null(row) {
         true => 0,
         false => column.value_length(row) as usize,
@@ -3659,7 +3666,10 @@ fn file_lists(
                     column.data_type()
                 ))
             };
-            let list = column.as_any().downcast_ref::<ListArray>().ok_or_else(refuse)?;
+            let list = column
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .ok_or_else(refuse)?;
             let members = list
                 .values()
                 .as_any()
@@ -3695,8 +3705,8 @@ fn file_lists(
                         let value = keys[at].get(member).copied().flatten().filter(|_| !null);
                         lists.keys[at].push(value);
                         let child = members.column_by_name(&field.column).expect("carried");
-                        if let Some(text) = crate::ids::scan::value_text(child.as_ref(), member)
-                            .filter(|_| !null)
+                        if let Some(text) =
+                            crate::ids::scan::value_text(child.as_ref(), member).filter(|_| !null)
                         {
                             parts.push(format!("{} = {text}", field.attribute));
                         }
@@ -3780,7 +3790,9 @@ fn inline_lists(
                     ));
                 }
             }
-            lists.texts.push(format!("artifact {key}: {}", parts.join(", ")));
+            lists
+                .texts
+                .push(format!("artifact {key}: {}", parts.join(", ")));
         }
     }
     Ok(Some(lists))
@@ -4475,8 +4487,10 @@ mod tests {
         let prefix = tempfile::tempdir().expect("a prefix directory");
         // The members the rule numbered, in the order the rows list them: each names the item of
         // its own number.
-        let numbering =
-            crate::ids::Numbering::with_lists(0, [1, 2, 3, 900, 4, 5].map(|item| item + 1).to_vec());
+        let numbering = crate::ids::Numbering::with_lists(
+            0,
+            [1, 2, 3, 900, 4, 5].map(|item| item + 1).to_vec(),
+        );
         let mut plan = read(
             std::slice::from_ref(&declaration),
             &sources,

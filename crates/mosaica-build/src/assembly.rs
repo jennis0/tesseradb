@@ -379,7 +379,7 @@ pub(crate) struct RowSource<'a> {
     /// Entity space's bound — the permutation's, not the view's population.
     pub(crate) n: u64,
     pub(crate) identity_key: &'a IdentityKey,
-    pub(crate) shard_id: ShardId,
+    pub(crate) shard: ShardId,
     /// What the view's points file said its row count is — the histogram is sized against it, and
     /// the walk's own count is checked against it by the caller.
     pub(crate) rows_hint: u64,
@@ -393,7 +393,7 @@ pub(crate) struct Assembly<'a> {
     pub(crate) tmp: &'a Path,
     pub(crate) n: u64,
     pub(crate) identity_key: &'a IdentityKey,
-    pub(crate) shard_id: ShardId,
+    pub(crate) shard: ShardId,
     pub(crate) render: Vec<RenderColumn<'a>>,
     /// The columns the identity bands copy beside the render ones, by entity.
     pub(crate) indexed: Vec<RenderColumn<'a>>,
@@ -483,7 +483,7 @@ pub(crate) fn partition_rows(
                 .map(|&code| (code, vec![0u64; 1 << 16]))
                 .collect();
             let key = job.identity_key;
-            let shard = job.shard_id;
+            let shard = job.shard;
             walk(job, |code, _, entity| {
                 if let Ok(at) = hot_codes.binary_search(&code) {
                     let priority = priority_of(key, shard, entity);
@@ -503,7 +503,7 @@ pub(crate) fn partition_rows(
         histogram.rows(),
     )?;
     let key = job.identity_key;
-    let shard = job.shard_id;
+    let shard = job.shard;
     let mut pushed: Result<()> = Ok(());
     walk(job, |code, residual, entity| {
         if pushed.is_err() {
@@ -627,7 +627,7 @@ pub(crate) fn write_segment(
                     morton: read(0),
                     entity,
                     residual: read(4),
-                    identity: identity_of(job.identity_key, job.shard_id, entity).raw(),
+                    identity: identity_of(job.identity_key, job.shard, entity).raw(),
                 }
             })
             .collect();

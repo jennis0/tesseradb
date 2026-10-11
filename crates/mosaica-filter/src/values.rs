@@ -669,15 +669,14 @@ pub struct ValueColumn {
 pub type NumbersOver =
     Box<dyn Fn(&Bitmap, &mut dyn FnMut(u32, mosaica_types::scalar::Number)) + Sync + Send>;
 
-/// Attribute `name`'s base column under a shard's directory, read as numbers over a set of
-/// entities, or `None` where no base column was written for it: what a build and a fold tally a
-/// field's values over a view's base rows from (`mosaica_store::field_tallies`).
-pub fn base_numbers(shard_dir: &Path, name: &str) -> io::Result<Option<NumbersOver>> {
-    let dir = shard_dir.join("attrs").join(name);
+/// The base column in `dir`, read as numbers over a set of entities, or `None` where no base
+/// column was written there: what a build and a fold tally a field's values over a view's base
+/// rows from (`mosaica_store::field_tallies`).
+pub fn base_numbers(dir: &Path) -> io::Result<Option<NumbersOver>> {
     if !dir.join(VALUES_FILE).exists() {
         return Ok(None);
     }
-    let column = ValueColumn::open_dir(&dir, Access::Mapped)?;
+    let column = ValueColumn::open_dir(dir, Access::Mapped)?;
     Ok(Some(Box::new(move |entities, f| {
         let _ = column.for_each_record_value_in(entities, |entity, value| {
             if let Some(number) = value.number() {
@@ -1950,21 +1949,59 @@ mod tests {
 
         let dense = ValueColumn::universal(Codes::U16(vec![10, 20, 30, 40].into()));
         // Entities 1, 5 and 9 carry values; everything else carries none.
-        let sparse = ValueColumn::partial(
-            Codes::U16(vec![10, 20, 30].into()),
-            candidate([1, 5, 9]),
-        )
-        .unwrap();
+        let sparse =
+            ValueColumn::partial(Codes::U16(vec![10, 20, 30].into()), candidate([1, 5, 9]))
+                .unwrap();
 
         let cases: [(&str, &ValueColumn, Bitmap, Vec<u32>); 8] = [
-            ("universal, every entity", &dense, candidate(0..4), vec![10, 20, 30, 40]),
-            ("universal, a scattered candidate", &dense, candidate([1, 3]), vec![20, 40]),
-            ("universal, an empty candidate", &dense, Bitmap::new(), vec![]),
-            ("universal, past the column", &dense, candidate([9, 40]), vec![]),
-            ("partial, every entity", &sparse, candidate(0..12), vec![10, 20, 30]),
-            ("partial, one present entity", &sparse, candidate([5]), vec![20]),
-            ("partial, outside the presence", &sparse, candidate([2, 3, 11]), vec![]),
-            ("partial, an empty candidate", &sparse, Bitmap::new(), vec![]),
+            (
+                "universal, every entity",
+                &dense,
+                candidate(0..4),
+                vec![10, 20, 30, 40],
+            ),
+            (
+                "universal, a scattered candidate",
+                &dense,
+                candidate([1, 3]),
+                vec![20, 40],
+            ),
+            (
+                "universal, an empty candidate",
+                &dense,
+                Bitmap::new(),
+                vec![],
+            ),
+            (
+                "universal, past the column",
+                &dense,
+                candidate([9, 40]),
+                vec![],
+            ),
+            (
+                "partial, every entity",
+                &sparse,
+                candidate(0..12),
+                vec![10, 20, 30],
+            ),
+            (
+                "partial, one present entity",
+                &sparse,
+                candidate([5]),
+                vec![20],
+            ),
+            (
+                "partial, outside the presence",
+                &sparse,
+                candidate([2, 3, 11]),
+                vec![],
+            ),
+            (
+                "partial, an empty candidate",
+                &sparse,
+                Bitmap::new(),
+                vec![],
+            ),
         ];
         for (label, column, cand, want) in cases {
             assert_eq!(codes_in(column, &cand), want, "{label}");
@@ -2013,8 +2050,16 @@ mod tests {
             ("i16", Codes::I16(vec![7, -8].into()), RecordValue::I16(-8)),
             ("i32", Codes::I32(vec![7, -8].into()), RecordValue::I32(-8)),
             ("i64", Codes::I64(vec![7, -8].into()), RecordValue::I64(-8)),
-            ("f32", Codes::F32(vec![7.0, -8.5].into()), RecordValue::F32(-8.5)),
-            ("f64", Codes::F64(vec![7.0, -8.5].into()), RecordValue::F64(-8.5)),
+            (
+                "f32",
+                Codes::F32(vec![7.0, -8.5].into()),
+                RecordValue::F32(-8.5),
+            ),
+            (
+                "f64",
+                Codes::F64(vec![7.0, -8.5].into()),
+                RecordValue::F64(-8.5),
+            ),
         ] {
             let dense = ValueColumn::universal(codes.clone());
             assert_eq!(dense.record_value_of(1), Some(want.clone()), "{label}");
@@ -2022,7 +2067,11 @@ mod tests {
 
             // The same two values, carried by entities 3 and 7 instead of 0 and 1.
             let sparse = ValueColumn::partial(codes, candidate([3, 7])).unwrap();
-            assert_eq!(sparse.record_value_of(7), Some(want.clone()), "{label}: by rank");
+            assert_eq!(
+                sparse.record_value_of(7),
+                Some(want.clone()),
+                "{label}: by rank"
+            );
             assert_eq!(sparse.record_value_of(4), None, "{label}: no value held");
             let mut walked = Vec::new();
             sparse
@@ -2031,7 +2080,11 @@ mod tests {
                     Ok::<(), ()>(())
                 })
                 .unwrap();
-            assert_eq!(walked, vec![(7, want)], "{label}: the walk reads what the rank does");
+            assert_eq!(
+                walked,
+                vec![(7, want)],
+                "{label}: the walk reads what the rank does"
+            );
         }
     }
 

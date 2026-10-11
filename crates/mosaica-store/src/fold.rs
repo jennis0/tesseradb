@@ -111,7 +111,7 @@ pub struct FoldRowSpaceSpec<'a> {
     /// `(morton, mosaica_id)` key.
     pub inputs: &'a [FoldSegmentInput],
     pub identity_key: &'a IdentityKey,
-    pub shard_id: ShardId,
+    pub shard: ShardId,
     pub scalar_schema: &'a [(String, ScalarType)],
     /// The indexed columns the bands copy ([`crate::bands::copied_beside`]), each banded row's
     /// value read from its input's copy.
@@ -134,8 +134,8 @@ pub struct FoldRowSpaceSpec<'a> {
     /// [`PermutationWriter::create`] writes `permutation_bound × 4` bytes of the `0xFF` row-absent
     /// sentinel before this pass appends a single row (4 GB at a 10⁹-entity bound) — a dirty
     /// shared mapping, and therefore real resident memory under compaction §3's pre-flight budget,
-    /// not the anonymous memory a `Vec` would cost. Callers size this against the live
-    /// `entity_id_high_water` at the snapshot, not against the row count this pass will emit,
+    /// not the anonymous memory a `Vec` would cost. Callers size this against the shard's live
+    /// `high_water` at the snapshot, not against the row count this pass will emit,
     /// which is smaller whenever any tombstone applies.
     pub permutation_bound: u64,
 }
@@ -264,7 +264,7 @@ pub fn fold_row_space(
         let cursor = &mut cursors[index];
         let row = cursor.row;
         let mosaica_id = MosaicaId::new(mosaica_raw);
-        let entity = cursor.entity(spec.identity_key, spec.shard_id)?;
+        let entity = cursor.entity(spec.identity_key, spec.shard)?;
 
         // Advance the cursor and refill the heap before the drop decision below, so an early
         // `continue` (the tombstoned case) can never skip it and stall this cursor.
@@ -362,6 +362,7 @@ mod tests {
     use mosaica_types::EntityId;
 
     use crate::flush::{write_flush_segment, FlushInput, FlushRow};
+    use crate::layout::TEST_SHARD;
     use crate::manifest::Quantisation;
     use crate::read::{ColumnsRef, ScalarSlice};
     use crate::render_presence::RENDER_PRESENCE_DIR;
@@ -392,7 +393,7 @@ mod tests {
             .collect();
         write_flush_segment(
             dir,
-            "p",
+            TEST_SHARD,
             "s",
             FlushInput {
                 incarnation: 0,
@@ -405,7 +406,6 @@ mod tests {
                     y_max: 1.0,
                 },
                 identity_key: &key(),
-                shard_id: ShardId::ZERO,
                 scalar_schema: &schema(),
                 indexed: &[],
                 row_base: 0,
@@ -415,7 +415,7 @@ mod tests {
         .expect("flush");
         FoldSegmentInput {
             seg_id: seg_id.to_string(),
-            dir: dir.join(crate::ShardLayout::new("p", ShardId::ZERO).segment_rel("s", seg_id)),
+            dir: dir.join(TEST_SHARD.segment_rel("s", seg_id)),
             entities: crate::edited::RowEntities::Numbers,
         }
     }
@@ -430,7 +430,7 @@ mod tests {
             FoldRowSpaceSpec {
                 inputs,
                 identity_key: &key(),
-                shard_id: ShardId::ZERO,
+                shard: ShardId::ZERO,
                 scalar_schema: &schema(),
                 indexed: &[],
                 absent_ok: &[],

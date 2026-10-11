@@ -326,7 +326,7 @@ pub(crate) fn check_manifest_publishable(
     next: &mosaica_store::manifest::SegmentsManifest,
 ) -> Result<(), ManifestRegression> {
     for shard in &live.shards {
-        let Some(record) = next.shards.records.iter().find(|r| r.id == shard.id) else {
+        let Some(record) = next.shards.records.iter().find(|r| r.id == shard.record.id) else {
             return Err(ManifestRegression {
                 field: "shards",
                 live: live.shards.len() as u64,
@@ -454,7 +454,6 @@ mod tests {
                 .into_iter()
                 .map(|record| {
                     std::sync::Arc::new(mosaica_store::read::ShardData {
-                        id: record.id,
                         record,
                         views: std::collections::HashMap::new(),
                     })

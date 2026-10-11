@@ -423,7 +423,7 @@ pub(crate) struct FlushContext {
     /// segment's extent.
     pub(crate) entity_floor: u64,
     pub(crate) identity_key: IdentityKey,
-    pub(crate) shard_id: ShardId,
+    pub(crate) shard: ShardId,
     pub(crate) quantisation: Quantisation,
     pub(crate) scalar_schema: Vec<(String, ScalarType)>,
     /// Where each of `scalar_schema`'s columns sits in a buffered row's scalar list.
@@ -467,7 +467,7 @@ pub(crate) struct FlushContext {
 
 impl FlushContext {
     fn layout(&self) -> ShardLayout<'_> {
-        ShardLayout::new(&self.partition, self.shard_id)
+        ShardLayout::new(&self.partition, self.shard)
     }
 }
 
@@ -538,7 +538,7 @@ pub(crate) struct SegmentFlush {
     /// Ingredients for the manifest: assembled at publication, with deny fields serialised fresh from the overlay.
     pub(crate) descriptor: mosaica_store::manifest::SegmentDescriptor,
     pub(crate) watermark: u64,
-    pub(crate) entity_id_high_water: u64,
+    pub(crate) high_water: u64,
     pub(crate) tier: Arc<DeltaTier>,
     /// The tier's prefix-relative path; carried rather than re-derived, since a coalesce moves it.
     pub(crate) tier_path: String,
@@ -623,7 +623,7 @@ fn execute_flush_stages(
         Some(
             write_flush_segment(
                 &ctx.prefix_dir,
-                &ctx.partition,
+                ctx.layout(),
                 &ctx.view,
                 FlushInput {
                     seg_id: &ctx.seg_id,
@@ -631,7 +631,6 @@ fn execute_flush_stages(
                     rows,
                     quantisation: ctx.quantisation,
                     identity_key: &ctx.identity_key,
-                    shard_id: ctx.shard_id,
                     scalar_schema: &ctx.scalar_schema,
                     indexed: &ctx.band_schema,
                     row_base: ctx.row_base,
@@ -833,7 +832,7 @@ fn execute_flush_stages(
             extent: out.extent,
             descriptor: out.segment,
             watermark: out.watermark,
-            entity_id_high_water: out.entity_id_high_water,
+            high_water: out.high_water,
             tier,
             tier_path,
             tier_tally,
@@ -843,7 +842,7 @@ fn execute_flush_stages(
     };
     let completed = CompletedFlush {
         partition: ctx.partition,
-        shard: ctx.shard_id,
+        shard: ctx.shard,
         view: ctx.view,
         consumed,
         segment,
@@ -997,11 +996,14 @@ fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, Maintenanc
         });
     }
 
-    let rel = mosaica_store::layout::dictionary_extent_rel(&ctx.seg_id);
-    let path = ctx.prefix_dir.join(&rel);
-    let dir = path.parent().expect("an extent's path names its directory");
-    std::fs::create_dir_all(dir).map_err(|e| MaintenanceFailed(format!("dict extent dir: {e}")))?;
-    let mut writer = DictStreamWriter::new(dir);
+    let dir = ctx
+        .prefix_dir
+        .join(mosaica_store::layout::dictionary_extent_dir_rel(
+            &ctx.seg_id,
+        ));
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| MaintenanceFailed(format!("dict extent dir: {e}")))?;
+    let mut writer = DictStreamWriter::new(&dir);
     for descriptor in &interned {
         writer
             .append(descriptor)
@@ -1016,7 +1018,7 @@ fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, Maintenanc
         // written.
         dict: Arc::new(ctx.dict.extended_with(&interned)),
         extent: Some(DictExtent {
-            path: rel,
+            path: mosaica_store::layout::dictionary_extent_rel(&ctx.seg_id),
             records: interned.len() as u64,
         }),
         postings,
@@ -1047,7 +1049,7 @@ fn write_filter_extents(
     let mut out = Vec::with_capacity(ctx.filter_schema.len());
     for spec in &ctx.filter_schema {
         let column = extent_values(spec, entity_scoped_rows(spec, plan)?)?;
-        let column_rel = format!("{}/attrs/{}", ctx.layout().rel(), spec.name);
+        let column_rel = ctx.layout().column_rel(&spec.name);
         let column_dir = ctx.prefix_dir.join(&column_rel);
         out.push(write_value_extent(
             ctx,
@@ -1547,7 +1549,7 @@ fn write_text_extents(
                 row.scalars.get(spec.index).unwrap_or(&WalScalar::Null),
             ));
         }
-        let rel_dir = format!("{}/attrs/{}/extents", ctx.layout().rel(), spec.name);
+        let rel_dir = format!("{}/extents", ctx.layout().column_rel(&spec.name));
         let sub = Some(TextLaps {
             laps: &mut *laps,
             mark: &mut mark,
@@ -1964,7 +1966,7 @@ fn write_record_extent(
     if ctx.record_schema.is_empty() {
         return Ok(None);
     }
-    let extents_rel = format!("{}/attrs/record/extents", ctx.layout().rel());
+    let extents_rel = ctx.layout().record_extents_rel();
     let extents_dir = ctx.prefix_dir.join(&extents_rel);
     std::fs::create_dir_all(&extents_dir)
         .map_err(|e| MaintenanceFailed(format!("record extent dir: {e}")))?;

@@ -225,7 +225,7 @@ fn flushed_bundle_at(root: &Path, tenancy: u16) {
     ];
     let flush = write_flush_segment(
         &prefix_dir,
-        "default",
+        mosaica_store::ShardLayout::new("default", ShardId::ZERO),
         "s0",
         FlushInput {
             incarnation: 0,
@@ -235,7 +235,6 @@ fn flushed_bundle_at(root: &Path, tenancy: u16) {
                 .quantisation_of("s0")
                 .expect("the built manifest declares view 's0'"),
             identity_key: &key,
-            shard_id: ShardId::ZERO,
             scalar_schema: &[],
             indexed: &[],
             row_base: n as u32,
@@ -289,7 +288,7 @@ fn flushed_bundle_at(root: &Path, tenancy: u16) {
     };
     *manifest_1.only_shard_mut() = ShardRecord {
         watermark: flush.watermark,
-        high_water: flush.entity_id_high_water,
+        high_water: flush.high_water,
         segments,
         deltas: vec![delta_rel],
         tombstones: EntitySet::of(&croaring::Bitmap::of(&[DELETED])),

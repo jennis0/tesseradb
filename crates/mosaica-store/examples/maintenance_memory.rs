@@ -32,7 +32,8 @@ use mosaica_store::manifest::Quantisation;
 use mosaica_store::merge::{execute_merge, MergeInput, MergeSpec};
 use mosaica_types::{EntityId, IdentityKey, ShardId};
 
-const PARTITION: &str = "p0";
+const SHARD: mosaica_store::ShardLayout<'static> =
+    mosaica_store::ShardLayout::new("p0", ShardId::ZERO);
 const VIEW: &str = "s0";
 const DEFAULT_ROWS: u64 = 2_000_000;
 const DEFAULT_SEGMENTS: u64 = 4;
@@ -78,7 +79,7 @@ fn dir_bytes(dir: &Path) -> u64 {
 }
 
 fn seg_dir(root: &Path, seg_id: &str) -> PathBuf {
-    root.join(mosaica_store::ShardLayout::new(PARTITION, ShardId::ZERO).segment_rel(VIEW, seg_id))
+    root.join(SHARD.segment_rel(VIEW, seg_id))
 }
 
 /// Write `segments` flush segments of `rows` rows each. Coordinates are a function of the entity
@@ -100,7 +101,7 @@ fn write_inputs(root: &Path, rows: u64, segments: u64) -> Vec<MergeInput> {
                 .collect();
             write_flush_segment(
                 root,
-                PARTITION,
+                SHARD,
                 VIEW,
                 FlushInput {
                     incarnation: 0,
@@ -108,7 +109,6 @@ fn write_inputs(root: &Path, rows: u64, segments: u64) -> Vec<MergeInput> {
                     rows: flush_rows,
                     quantisation: quantisation(),
                     identity_key: &key(),
-                    shard_id: ShardId::ZERO,
                     scalar_schema: &[],
                     indexed: &[],
                     row_base: (s * rows) as u32,
@@ -150,14 +150,13 @@ fn main() {
             let schema: Vec<(String, ScalarType)> = vec![];
             execute_merge(
                 &root,
-                PARTITION,
+                SHARD,
                 VIEW,
                 MergeSpec {
                     incarnation: 0,
                     seg_id: "merged",
                     inputs: &inputs,
                     identity_key: &key(),
-                    shard_id: ShardId::ZERO,
                     scalar_schema: &schema,
                     indexed: &[],
                     absent_ok: &[],

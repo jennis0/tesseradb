@@ -1,7 +1,7 @@
 //! Per-flush extents: the values one flush publishes for one column, and how they are named.
 //!
-//! A value column is written once by the batch build and covers `[0, entity_id_high_water)`; every
-//! flush since has published entities above it, and each appends its own values here
+//! A value column is written once by the batch build and covers `[0, high_water)` of its shard;
+//! every flush since has published entities above it, and each appends its own values here
 //! (`filter-index.md` §2.1, §2.5). The reader composes base and extents into one column, which is
 //! `mosaica-engine`'s `filter` module rather than this crate's: an extent is a [`ValueColumn`] like
 //! any other, and the layering is a property of a *bundle* rather than of a column.

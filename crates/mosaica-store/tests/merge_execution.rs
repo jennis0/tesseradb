@@ -4,7 +4,7 @@ mod fixture;
 
 use std::path::Path;
 
-use fixture::{build_bundle, PARTITION, SHARD, VIEW};
+use fixture::{build_bundle, SHARD, VIEW};
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_store::flush::{write_flush_segment, FlushInput, FlushRow};
 use mosaica_store::manifest::Quantisation;
@@ -54,7 +54,7 @@ fn segment(root: &Path, seg_id: &str, entity_lo: u64, count: u64, stride: u64) -
         .collect();
     write_flush_segment(
         &root.join("v00000"),
-        PARTITION,
+        SHARD,
         VIEW,
         FlushInput {
             incarnation: 0,
@@ -62,7 +62,6 @@ fn segment(root: &Path, seg_id: &str, entity_lo: u64, count: u64, stride: u64) -
             rows,
             quantisation: quantisation(),
             identity_key: &key(),
-            shard_id: ShardId::ZERO,
             scalar_schema: &[],
             indexed: &score(),
             row_base: 0,
@@ -82,14 +81,13 @@ fn merge(root: &Path, inputs: &[MergeInput]) -> mosaica_store::merge::MergeOutpu
     let schema: Vec<(String, ScalarType)> = vec![];
     execute_merge(
         &root.join("v00000"),
-        PARTITION,
+        SHARD,
         VIEW,
         MergeSpec {
             incarnation: 0,
             seg_id: "merged-1",
             inputs,
             identity_key: &key(),
-            shard_id: ShardId::ZERO,
             scalar_schema: &schema,
             indexed: &score(),
             absent_ok: &[],
@@ -286,14 +284,13 @@ fn out_of_order_inputs_are_refused() {
     let schema: Vec<(String, ScalarType)> = vec![];
     let err = execute_merge(
         &dir.path().join("v00000"),
-        PARTITION,
+        SHARD,
         VIEW,
         MergeSpec {
             incarnation: 0,
             seg_id: "merged-1",
             inputs: &[a, b],
             identity_key: &key(),
-            shard_id: ShardId::ZERO,
             scalar_schema: &schema,
             indexed: &[],
             absent_ok: &[],
@@ -324,14 +321,13 @@ fn a_missing_scalar_column_fails_the_merge_rather_than_shifting_the_rest() {
     let schema = vec![("citations".to_string(), ScalarType::U64)];
     let err = execute_merge(
         &dir.path().join("v00000"),
-        PARTITION,
+        SHARD,
         VIEW,
         MergeSpec {
             incarnation: 0,
             seg_id: "merged-1",
             inputs: &[a, b],
             identity_key: &key(),
-            shard_id: ShardId::ZERO,
             scalar_schema: &schema,
             indexed: &[],
             absent_ok: &[],
@@ -367,14 +363,13 @@ fn a_column_declared_since_the_inputs_is_absent_in_every_row_rather_than_shiftin
     let lawful = vec!["citations".to_string()];
     let out = execute_merge(
         &dir.path().join("v00000"),
-        PARTITION,
+        SHARD,
         VIEW,
         MergeSpec {
             incarnation: 0,
             seg_id: "merged-1",
             inputs: &[a, b],
             identity_key: &key(),
-            shard_id: ShardId::ZERO,
             scalar_schema: &schema,
             indexed: &[],
             absent_ok: &lawful,

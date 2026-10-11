@@ -192,8 +192,10 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
         let tenancy = mosaica_store::read::open_tenancy_index(
             &prefix_dir,
             &partition.only_shard().record,
-            &partition.manifest.files,
-            &bundle.manifest.files,
+            mosaica_store::read::Digests {
+                side: &partition.manifest.files,
+                bundle: &bundle.manifest.files,
+            },
         )?;
         check_edited_items(
             &prefix_dir,
@@ -359,7 +361,7 @@ fn check_edited_items(
 
     let key = IdentityKey::from_hex(&manifest.identity.key)
         .map_err(|e| BuildError::Invalid(format!("the manifest's identity key: {e}")))?;
-    let shard = partition.only_shard().id;
+    let shard = partition.only_shard().record.id;
     let mut views: Vec<_> = partition.only_shard().views.iter().collect();
     views.sort_by(|a, b| a.0.cmp(b.0));
     for (view, data) in views {
@@ -373,18 +375,12 @@ fn check_edited_items(
                         ids.len()
                     ))
                 })?;
-                let Some(number) = key
-                    .invert(MosaicaId::new(mosaica_id))
-                    .filter(|(high, number)| {
-                        high.shard == shard && tenancy.of(*number) == high.tenancy
-                    })
-                    .map(|(_, number)| number)
+                let Some(number) = tenancy.number_named(&key, shard, MosaicaId::new(mosaica_id))
                 else {
                     return Err(BuildError::Invalid(format!(
                         "view {view}, segment {}: moved row {row}'s mosaica_id names no item of \
-                         shard {} at its number's tenancy",
+                         shard {shard} at its number's tenancy",
                         segment.seg_id,
-                        shard.raw()
                     )));
                 };
                 if !u32::try_from(number.raw()).is_ok_and(|n| forward.contains(&(n, entity))) {
@@ -546,7 +542,7 @@ fn check_unique_indexes(
                 return Err(e);
             }
         } else {
-            let record_rel = format!("{}/attrs/record", ShardLayout::new(phash, shard.id).rel());
+            let record_rel = ShardLayout::new(phash, shard.record.id).record_rel();
             let record_dir = prefix_dir.join(&record_rel);
             let base_rel = format!("{record_rel}/{}", mosaica_filter::RECORD_BLOCKS_FILE);
             let base = manifest
@@ -639,10 +635,7 @@ fn value_layers(
     )>,
 > {
     let attribute = &declared.name;
-    let dir_rel = format!(
-        "{}/attrs/{attribute}",
-        ShardLayout::new(phash, shard.id).rel()
-    );
+    let dir_rel = ShardLayout::new(phash, shard.record.id).column_rel(attribute);
     let dir = prefix_dir.join(&dir_rel);
     let access = mosaica_filter::Access::MappedSequential;
     let mut layers = Vec::new();
@@ -885,7 +878,7 @@ fn check_bands(
                         row,
                         ids[row as usize],
                         &key,
-                        partition.only_shard().id,
+                        partition.only_shard().record.id,
                         &segment.seg_id,
                     )
                     .map_err(|e| BuildError::Invalid(e.to_string()))?;
@@ -1255,9 +1248,9 @@ fn check_postings_and_pairs(
         partition.manifest.files.contains_key(rel) || bundle_manifest.files.contains_key(rel)
     };
 
-    let shard_rel = ShardLayout::new(phash, shard.id).rel();
-    let postings_rel = format!("{shard_rel}/terms/postings.arrow");
-    let pairs_rel = format!("{shard_rel}/terms/pairs.parquet");
+    let layout = ShardLayout::new(phash, shard.record.id);
+    let postings_rel = layout.postings_rel();
+    let pairs_rel = layout.pairs_rel();
     if named(&postings_rel) {
         let path = join_rel(prefix_dir, &postings_rel)?;
         let reader = PostingsReader::open(&path, false).map_err(|e| BuildError::io(&path, e))?;
@@ -1462,7 +1455,7 @@ fn check_record_blobs(
     shard: &ShardData,
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
-    let record_rel = format!("{}/attrs/record", ShardLayout::new(phash, shard.id).rel());
+    let record_rel = ShardLayout::new(phash, shard.record.id).record_rel();
     let base_rel = format!("{record_rel}/{}", mosaica_filter::RECORD_BLOCKS_FILE);
     let mut layers: Vec<(String, PathBuf, PathBuf, PathBuf)> = Vec::new();
     if manifest.files.contains_key(&base_rel) {

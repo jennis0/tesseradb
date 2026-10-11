@@ -202,15 +202,6 @@ fn deny_versions(
     Arc::new(out)
 }
 
-/// The data `bundle` holds for shard `id`.
-fn shard_data(bundle: &Bundle, id: ShardId) -> &Arc<ShardData> {
-    bundle
-        .partitions
-        .values()
-        .find_map(|partition| partition.shard(id))
-        .unwrap_or_else(|| panic!("the bundle holds no shard {}", id.raw()))
-}
-
 impl std::ops::Deref for Generation {
     type Target = GenerationParts;
 
@@ -382,7 +373,7 @@ impl Shard {
     }
 
     pub fn id(&self) -> ShardId {
-        self.data.id
+        self.data.record.id
     }
 
     /// The row-space deny mask, per view.
@@ -424,7 +415,11 @@ impl Generation {
         let mut shards: Vec<Arc<Shard>> = shards
             .into_iter()
             .map(|(id, shard)| {
-                Arc::new(Shard::new(Arc::clone(shard_data(&parts.bundle, id)), shard))
+                let data = parts
+                    .bundle
+                    .shard(id)
+                    .unwrap_or_else(|| panic!("the bundle holds no shard {id}"));
+                Arc::new(Shard::new(Arc::clone(data), shard))
             })
             .collect();
         shards.sort_by_key(|shard| shard.id());
@@ -446,19 +441,13 @@ impl Generation {
 
     /// The one shard a generation holds until several are served.
     pub fn only_shard(&self) -> &Shard {
-        match self.shards.as_slice() {
-            [shard] => shard,
-            shards => panic!(
-                "a generation serves one shard, and this one holds {}",
-                shards.len()
-            ),
-        }
+        mosaica_types::only(&self.shards)
     }
 
     /// The parts of shard `id`, which a publication into it starts from.
     fn parts_of(&self, id: ShardId) -> ShardParts {
         self.shard(id)
-            .unwrap_or_else(|| panic!("a publication names shard {}, which is not held", id.raw()))
+            .unwrap_or_else(|| panic!("a publication names shard {id}, which is not held"))
             .parts
             .clone()
     }
@@ -476,7 +465,13 @@ impl Generation {
             .shards
             .iter()
             .map(|shard| {
-                let data = Arc::clone(shard_data(&parts.bundle, shard.id()));
+                let id = shard.id();
+                let data = Arc::clone(
+                    parts
+                        .bundle
+                        .shard(id)
+                        .unwrap_or_else(|| panic!("the bundle holds no shard {id}")),
+                );
                 if let Some(next) = changed(shard, same_prefix, Arc::clone(&data)) {
                     return Arc::new(next);
                 }
@@ -614,7 +609,6 @@ impl Generation {
                             segments_n: 0,
                             highest_candidate_n: 0,
                             shards: vec![Arc::new(ShardData {
-                                id: ShardId::ZERO,
                                 record: mosaica_store::manifest::ShardRecord::empty(ShardId::ZERO),
                                 views: std::collections::HashMap::new(),
                             })],

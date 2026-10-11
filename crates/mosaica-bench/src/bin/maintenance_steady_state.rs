@@ -47,7 +47,6 @@ use mosaica_lifecycle::UnallocatedRow;
 use mosaica_store::manifest::SegmentsManifest;
 use mosaica_types::layer::LayerScope;
 
-
 const VIEW: &str = "s0";
 const BASE_ITEMS: u64 = 10_000;
 const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
@@ -83,7 +82,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     build_fixture(tmp.path(), &root)?;
 
     let mut engine = open(tmp.path(), &root, args.hold_merge > 0)?;
-    for (name, ty, index) in [("note", "keyword", false), ("tag", "keyword", true), ("prose", "text", true)] {
+    for (name, ty, index) in [
+        ("note", "keyword", false),
+        ("tag", "keyword", true),
+        ("prose", "text", true),
+    ] {
         engine.declare_attribute(AttributeRequest {
             name: name.to_string(),
             title: None,
@@ -221,8 +224,16 @@ fn build_fixture(tmp: &Path, out: &Path) -> Result<(), Box<dyn std::error::Error
         schema.clone(),
         vec![
             Arc::new(UInt64Array::from(ids.clone())),
-            Arc::new(Float64Array::from(ids.iter().map(|e| ((e * 37) % 1000) as f64).collect::<Vec<_>>())),
-            Arc::new(Float64Array::from(ids.iter().map(|e| ((e * 53) % 1000) as f64).collect::<Vec<_>>())),
+            Arc::new(Float64Array::from(
+                ids.iter()
+                    .map(|e| ((e * 37) % 1000) as f64)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                ids.iter()
+                    .map(|e| ((e * 53) % 1000) as f64)
+                    .collect::<Vec<_>>(),
+            )),
         ],
     )?;
     let mut w = ArrowWriter::try_new(File::create(&points)?, schema, None)?;
@@ -333,7 +344,9 @@ impl Row {
     }
 
     fn header() {
-        let names: Vec<&str> = std::iter::once("tick").chain(Self::columns().iter().map(|c| c.0)).collect();
+        let names: Vec<&str> = std::iter::once("tick")
+            .chain(Self::columns().iter().map(|c| c.0))
+            .collect();
         println!("{}", names.join("\t"));
     }
 
@@ -376,7 +389,12 @@ impl Probe {
     fn sample(&mut self, tick: usize, engine: &Engine) -> Result<Row, Box<dyn std::error::Error>> {
         let generation = engine.generation();
         let prefix_dir = self.root.join(&generation.prefix);
-        let (partition, data) = generation.bundle.partitions.iter().next().expect("one partition");
+        let (partition, data) = generation
+            .bundle
+            .partitions
+            .iter()
+            .next()
+            .expect("one partition");
         let m = &data.manifest;
         let r = &data.only_shard().record;
         let stats = engine.write_executor_stats();
@@ -390,9 +408,10 @@ impl Probe {
 
         let (files, bytes) = walk(&prefix_dir, |_| true);
         let shard = mosaica_store::ShardLayout::new(partition, mosaica_types::ShardId::ZERO);
-        let segments_dir = prefix_dir.join(shard.view_rel(VIEW)).join("segments");
+        let segments_dir = prefix_dir.join(shard.segments_rel(VIEW));
         let merge_dirs = count_dirs(&segments_dir, "merge-");
-        let coalesce_dirs = count_dirs(&prefix_dir.join(shard.coalesced_rel()), "coalesce-");
+        // An empty id names the directory every coalesce's is in.
+        let coalesce_dirs = count_dirs(&prefix_dir.join(shard.coalesced_rel("")), "coalesce-");
 
         self.check_side_manifests(&prefix_dir, partition, &generation.prefix)?;
 
@@ -421,11 +440,19 @@ impl Probe {
         })
     }
 
-    fn check_side_manifests(&mut self, prefix_dir: &Path, partition: &str, prefix: &str) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_side_manifests(
+        &mut self,
+        prefix_dir: &Path,
+        partition: &str,
+        prefix: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let dir = mosaica_store::layout::partition_dir(prefix_dir, partition);
         for entry in std::fs::read_dir(&dir)? {
             let name = entry?.file_name().to_string_lossy().into_owned();
-            let Some(n) = name.strip_prefix("SEGMENTS-").and_then(|s| s.strip_suffix(".json")) else {
+            let Some(n) = name
+                .strip_prefix("SEGMENTS-")
+                .and_then(|s| s.strip_suffix(".json"))
+            else {
                 continue;
             };
             let n: u64 = n.parse()?;
@@ -447,14 +474,29 @@ impl Probe {
 
 fn ordering_breaches(m: &SegmentsManifest) -> Vec<String> {
     let mut out = Vec::new();
-    let views: BTreeSet<&str> = m.only_shard().segments.iter().map(|s| s.view.as_str()).collect();
+    let views: BTreeSet<&str> = m
+        .only_shard()
+        .segments
+        .iter()
+        .map(|s| s.view.as_str())
+        .collect();
     for view in views {
-        let segs: Vec<_> = m.only_shard().segments.iter().filter(|s| s.view == view).collect();
+        let segs: Vec<_> = m
+            .only_shard()
+            .segments
+            .iter()
+            .filter(|s| s.view == view)
+            .collect();
         for pair in segs.windows(2) {
             if pair[0].entity_hi >= pair[1].entity_lo {
                 out.push(format!(
                     "view {view}: segments {} ({}..={}) then {} ({}..={}) out of entity order",
-                    pair[0].seg_id, pair[0].entity_lo, pair[0].entity_hi, pair[1].seg_id, pair[1].entity_lo, pair[1].entity_hi
+                    pair[0].seg_id,
+                    pair[0].entity_lo,
+                    pair[0].entity_hi,
+                    pair[1].seg_id,
+                    pair[1].entity_lo,
+                    pair[1].entity_hi
                 ));
             }
         }
@@ -466,7 +508,14 @@ fn ordering_breaches(m: &SegmentsManifest) -> Vec<String> {
 fn settle(root: &Path, engine: &Engine) -> Result<(), Box<dyn std::error::Error>> {
     let state = || {
         let s = engine.write_executor_stats();
-        (walk(root, |_| true), s.merges, s.merge_failures, s.coalesces, s.coalesce_failures, s.coalesce_passes_failed)
+        (
+            walk(root, |_| true),
+            s.merges,
+            s.merge_failures,
+            s.coalesces,
+            s.coalesce_failures,
+            s.coalesce_passes_failed,
+        )
     };
     let deadline = Instant::now() + WAIT;
     let mut last = state();
@@ -491,7 +540,9 @@ fn walk(dir: &Path, keep: impl Fn(&str) -> bool) -> (u64, u64) {
     let mut bytes = 0;
     let mut stack = vec![dir.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let Ok(meta) = entry.metadata() else { continue };
             if meta.is_dir() {

@@ -195,7 +195,7 @@ pub fn flush_segment(
 
     let out = write_flush_segment(
         &root.join("v00000"),
-        PARTITION,
+        SHARD,
         VIEW,
         FlushInput {
             incarnation: 0,
@@ -217,7 +217,6 @@ pub fn flush_segment(
                 y_max: 1.0,
             },
             identity_key: &key,
-            shard_id: ShardId::ZERO,
             scalar_schema: &[],
             indexed: &[],
             row_base,

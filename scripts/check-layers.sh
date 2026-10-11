@@ -68,8 +68,7 @@ fi
 # reactor. rayon itself is fine and expected.
 deny mosaica-engine tokio
 deny mosaica-store tokio
-# Where a partition's and a shard's files live is decided in one module. A path built anywhere
-# else is one a change to the layout would not move.
+# Partition and shard paths are built only in mosaica-store's layout module.
 if grep -rnE --include=*.rs '"partitions/|partitions/\{|join\("partitions"\)' crates/*/src \
      | grep -v '^crates/mosaica-store/src/layout\.rs:'; then
   echo "FAIL: a partition path is built outside crates/mosaica-store/src/layout.rs (lines above)."

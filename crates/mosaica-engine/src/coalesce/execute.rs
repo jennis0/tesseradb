@@ -46,10 +46,10 @@ pub(super) fn coalesce_dicts(
     ctx: &CoalesceContext,
     files: &mut BTreeMap<String, FileDigest>,
 ) -> Result<DictExtent, MaintenanceFailed> {
+    let dir = mosaica_store::layout::dictionary_extent_dir_rel(&ctx.id);
+    std::fs::create_dir_all(ctx.prefix_dir.join(dir)).map_err(failed("dictionary extent dir"))?;
     let rel = mosaica_store::layout::dictionary_extent_rel(&ctx.id);
     let path = ctx.prefix_dir.join(&rel);
-    std::fs::create_dir_all(path.parent().expect("an extent's path names its directory"))
-        .map_err(failed("dictionary extent dir"))?;
     let inputs: Vec<PathBuf> = dicts.iter().map(|e| ctx.prefix_dir.join(&e.path)).collect();
     let records = coalesce_dict_extents(&inputs, &path).map_err(failed("dictionary extents"))?;
     // The counts differ only if an input repeated a descriptor, which would renumber every
@@ -462,7 +462,11 @@ pub(super) fn coalesce_unique_window(
     files: &mut BTreeMap<String, FileDigest>,
 ) -> Result<Vec<String>, MaintenanceFailed> {
     let attribute = &window.attribute;
-    let inputs: Vec<PathBuf> = window.runs.iter().map(|rel| ctx.prefix_dir.join(rel)).collect();
+    let inputs: Vec<PathBuf> = window
+        .runs
+        .iter()
+        .map(|rel| ctx.prefix_dir.join(rel))
+        .collect();
     let out_rel = format!("{}/unique/{attribute}", ctx.out_rel);
     let written = mosaica_store::unique::merge_unique_runs(
         &inputs,

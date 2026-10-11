@@ -37,7 +37,7 @@ use std::path::Path;
 use croaring::Bitmap;
 
 use mosaica_spatial::tiler::ScalarType;
-use mosaica_types::{IdentityKey, MosaicaId, ShardId};
+use mosaica_types::{IdentityKey, MosaicaId};
 
 use crate::error::{Result, StoreError};
 use crate::flush::{digest_of, write_render_presence};
@@ -161,7 +161,6 @@ pub struct MergeSpec<'a> {
     pub seg_id: &'a str,
     pub inputs: &'a [MergeInput],
     pub identity_key: &'a IdentityKey,
-    pub shard_id: ShardId,
     pub scalar_schema: &'a [(String, ScalarType)],
     /// The indexed columns the bands copy ([`crate::bands::copied_beside`]), each banded row's
     /// value read from its input's copy.
@@ -196,7 +195,7 @@ const OP: &str = "execute_merge";
 /// `max_merged_segment_bytes` bounds, and 8 bytes per row an input lists below its span.
 pub fn execute_merge(
     prefix_dir: &Path,
-    partition: &str,
+    layout: crate::ShardLayout<'_>,
     view: &str,
     spec: MergeSpec<'_>,
 ) -> Result<MergeOutput> {
@@ -217,7 +216,6 @@ pub fn execute_merge(
         });
     }
 
-    let layout = crate::ShardLayout::new(partition, spec.shard_id);
     let seg_path = |seg_id: &str| prefix_dir.join(layout.segment_rel(view, seg_id));
 
     let mut cursors: Vec<SegmentCursor> = spec
@@ -274,7 +272,7 @@ pub fn execute_merge(
         let cursor = &mut cursors[index];
         let row = cursor.row;
         let mosaica_id = MosaicaId::new(mosaica_raw);
-        let entity = cursor.entity(spec.identity_key, spec.shard_id)?;
+        let entity = cursor.entity(spec.identity_key, layout.shard)?;
         if spec
             .identity_key
             .invert(mosaica_id)
@@ -418,11 +416,11 @@ mod tests {
     use mosaica_types::EntityId;
 
     use crate::flush::{write_flush_segment, FlushInput, FlushRow};
+    use crate::layout::TEST_SHARD;
     use crate::manifest::Quantisation;
     use crate::read::{ColumnsRef, ScalarSlice};
 
     const KEY_HEX: &str = "0123456789abcdef0123456789abcdef";
-    const P: crate::ShardLayout<'static> = crate::ShardLayout::new("p", ShardId::ZERO);
 
     fn schema() -> [(String, ScalarType); 1] {
         [("score".to_string(), ScalarType::I32)]
@@ -445,7 +443,7 @@ mod tests {
             .collect();
         write_flush_segment(
             dir,
-            "p",
+            TEST_SHARD,
             "s",
             FlushInput {
                 incarnation: 0,
@@ -458,7 +456,6 @@ mod tests {
                     y_max: 1.0,
                 },
                 identity_key: &key,
-                shard_id: ShardId::ZERO,
                 scalar_schema: &schema(),
                 indexed: &[],
                 row_base: 0,
@@ -512,14 +509,13 @@ mod tests {
         let key = IdentityKey::from_hex(KEY_HEX).expect("test key");
         let out = execute_merge(
             dir.path(),
-            "p",
+            TEST_SHARD,
             "s",
             MergeSpec {
                 incarnation: 0,
                 seg_id: "seg-m",
                 inputs: &[a, b],
                 identity_key: &key,
-                shard_id: ShardId::ZERO,
                 scalar_schema: &schema(),
                 indexed: &[],
                 absent_ok: &[],
@@ -529,7 +525,7 @@ mod tests {
         .expect("merge");
         assert_eq!(out.segment.row_count, 8);
 
-        let merged = dir.path().join(P.segment_rel("s", "seg-m"));
+        let merged = dir.path().join(TEST_SHARD.segment_rel("s", "seg-m"));
         let columns = ColumnsRef::load(&merged.join("columns.arrow")).expect("columns");
         let ScalarSlice::I32(scores) = columns.scalar("score").expect("score column") else {
             panic!("score is declared i32");
@@ -554,7 +550,7 @@ mod tests {
         );
         assert!(out.files.contains_key(&format!(
             "{}/presence/score.roaring",
-            P.segment_rel("s", "seg-m")
+            TEST_SHARD.segment_rel("s", "seg-m")
         )));
     }
 
@@ -568,14 +564,13 @@ mod tests {
         let key = IdentityKey::from_hex(KEY_HEX).expect("test key");
         let out = execute_merge(
             dir.path(),
-            "p",
+            TEST_SHARD,
             "s",
             MergeSpec {
                 incarnation: 0,
                 seg_id: "seg-m",
                 inputs: &[a, b],
                 identity_key: &key,
-                shard_id: ShardId::ZERO,
                 scalar_schema: &schema(),
                 indexed: &[],
                 absent_ok: &[],
@@ -584,7 +579,7 @@ mod tests {
         )
         .expect("merge");
 
-        let merged = dir.path().join(P.segment_rel("s", "seg-m"));
+        let merged = dir.path().join(TEST_SHARD.segment_rel("s", "seg-m"));
         assert!(!merged.join(RENDER_PRESENCE_DIR).exists());
         assert!(!out
             .files

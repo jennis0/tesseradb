@@ -161,7 +161,8 @@ fn entity_text_layers(
 /// extents alone until a fold writes the base. Derived from the schema rather than probed for on
 /// disk, so a missing base is a refusal, never "those entities have no record".
 pub(crate) fn open_record_stack(
-    shard_dir: &Path,
+    prefix_dir: &Path,
+    layout: ShardLayout<'_>,
     declared: &[mosaica_store::manifest::DeclaredScalar],
     vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
     unfolded: &[String],
@@ -171,7 +172,7 @@ pub(crate) fn open_record_stack(
     let owes_base = declared
         .iter()
         .any(|d| !unfolded.iter().any(|name| name == &d.name) && blob_resident(d, vocabularies));
-    let record_dir = shard_dir.join("attrs").join("record");
+    let record_dir = prefix_dir.join(layout.record_rel());
     RecordStack::open(owes_base.then_some(record_dir.as_path()), extents, access)
 }
 
@@ -286,8 +287,7 @@ impl FilterColumns {
         let vocabularies = &manifest.vocabularies;
         let scoped = manifest.scoped_scalars();
         let view_incarnation = &|view: &str| manifest.incarnation_of(view);
-        let shard = ShardLayout::new(partition, mosaica_types::ShardId::ZERO);
-        let shard_dir = shard.dir(prefix_dir);
+        let layout = ShardLayout::new(partition, mosaica_types::ShardId::ZERO);
         let mut columns = BTreeMap::new();
         let mut placements = BTreeMap::new();
         for (declared_index, scalar) in declared.iter().enumerate() {
@@ -320,7 +320,7 @@ impl FilterColumns {
                 if !scalar.index {
                     continue;
                 }
-                let dir = shard_dir.join("attrs").join(&scalar.name);
+                let dir = prefix_dir.join(layout.column_rel(&scalar.name));
                 let mut text_layers = vec![TextLayer::open_base(
                     &scalar.name,
                     &dir,
@@ -343,7 +343,7 @@ impl FilterColumns {
             if !owes_value_column(scalar, vocabularies) {
                 continue;
             }
-            let dir = shard_dir.join("attrs").join(&scalar.name);
+            let dir = prefix_dir.join(layout.column_rel(&scalar.name));
             let (base, postings, route) = open_value_base(
                 &dir,
                 family,
@@ -376,7 +376,7 @@ impl FilterColumns {
                 };
                 let (name, placement, mut column) = open_scoped_column(
                     prefix_dir,
-                    shard,
+                    layout,
                     family,
                     view_id,
                     incarnation,
@@ -419,7 +419,8 @@ impl FilterColumns {
             })
             .collect();
         let records = open_record_stack(
-            &shard_dir,
+            prefix_dir,
+            layout,
             declared,
             vocabularies,
             unfolded,
@@ -429,7 +430,7 @@ impl FilterColumns {
         .map_err(record_open_error)?;
         let entity_terms = open_entity_terms_stack(
             prefix_dir,
-            shard,
+            layout,
             &extents
                 .entity_terms
                 .iter()

@@ -27,7 +27,7 @@ pub(crate) struct FoldContext {
     pub(crate) to_prefix: String,
     pub(crate) to_prefix_dir: PathBuf,
     pub(crate) identity_key: IdentityKey,
-    pub(crate) shard_id: ShardId,
+    pub(crate) shard: ShardId,
     /// Per view: the bundle-wide render tail plus that view's group-scoped render lanes.
     pub(crate) scalar_schema: BTreeMap<String, Vec<(String, ScalarType)>>,
     /// The columns the bands copy beside the render tail, in every view.
@@ -52,7 +52,7 @@ pub(crate) struct FoldContext {
 
 impl FoldContext {
     pub(super) fn layout<'a>(&self, plan: &'a FoldPlan) -> ShardLayout<'a> {
-        ShardLayout::new(&plan.partition, self.shard_id)
+        ShardLayout::new(&plan.partition, self.shard)
     }
 }
 
@@ -122,9 +122,9 @@ pub(crate) fn execute(
     plan: FoldPlan,
     ctx: FoldContext,
 ) -> Result<CompletedFold, MaintenanceFailed> {
-    let shard_dir = ctx.layout(&plan).dir(&ctx.to_prefix_dir);
-    let terms_dir = shard_dir.join("terms");
-    let entities_dir = shard_dir.join("entities");
+    let layout = ctx.layout(&plan);
+    let terms_dir = ctx.to_prefix_dir.join(layout.terms_rel());
+    let entities_dir = ctx.to_prefix_dir.join(layout.entities_rel());
     for dir in [&terms_dir, &entities_dir] {
         std::fs::create_dir_all(dir).map_err(failed("creating the new prefix"))?;
     }
@@ -199,12 +199,13 @@ fn fold_row_spaces(
                 view.view
             )));
         };
-        let view_rel = ctx.layout(plan).view_rel(&view.view);
+        let layout = ctx.layout(plan);
+        let view_rel = layout.view_rel(&view.view);
         let view_dir = ctx.to_prefix_dir.join(&view_rel);
         std::fs::create_dir_all(&view_dir).map_err(failed("creating the view"))?;
-        let segment_rel = format!("{view_rel}/segments/{}", ctx.seg_id);
+        let segment_rel = layout.segment_rel(&view.view, &ctx.seg_id);
         let segment_dir = ctx.to_prefix_dir.join(&segment_rel);
-        let permutation_rel = format!("{view_rel}/permutation.bin");
+        let permutation_rel = layout.permutation_rel(&view.view);
         let permutation_path = ctx.to_prefix_dir.join(&permutation_rel);
         let row_entity_rel = format!("{view_rel}/{}", mosaica_store::ROW_ENTITY_FILE);
         let row_entity_path = ctx.to_prefix_dir.join(&row_entity_rel);
@@ -238,7 +239,7 @@ fn fold_row_spaces(
             FoldRowSpaceSpec {
                 inputs: &inputs,
                 identity_key: &ctx.identity_key,
-                shard_id: ctx.shard_id,
+                shard: ctx.shard,
                 scalar_schema: view_schema,
                 indexed: &ctx.band_schema,
                 absent_ok: ctx.absent_ok.get(&view.view).map_or(&[][..], Vec::as_slice),
@@ -283,7 +284,6 @@ fn derive_field_tallies(
     out: &mut FoldOutput,
 ) -> Result<(), MaintenanceFailed> {
     let layout = ctx.layout(plan);
-    let shard_dir = layout.dir(&ctx.to_prefix_dir);
     for segment in segments {
         let path = mosaica_store::field_tallies::derive_view(
             &ctx.to_prefix_dir,
@@ -292,7 +292,7 @@ fn derive_field_tallies(
             &segment.seg_id,
             segment.row_count,
             &ctx.declared_scalars,
-            &|name| mosaica_filter::base_numbers(&shard_dir, name),
+            &|name| mosaica_filter::base_numbers(&ctx.to_prefix_dir.join(layout.column_rel(name))),
         )
         .map_err(failed("pass 4d (field tallies)"))?;
         out.push(
@@ -316,15 +316,14 @@ fn fold_postings(
     terms_dir: &Path,
     out: &mut FoldOutput,
 ) -> Result<PathBuf, MaintenanceFailed> {
-    let shard_rel = ctx.layout(plan).rel();
-    let postings_rel = format!("{shard_rel}/terms/postings.arrow");
-    let pairs_rel = format!("{shard_rel}/terms/pairs.parquet");
+    let layout = ctx.layout(plan);
+    let postings_rel = layout.postings_rel();
+    let pairs_rel = layout.pairs_rel();
     let postings_path = ctx.to_prefix_dir.join(&postings_rel);
     let pairs_path = ctx.to_prefix_dir.join(&pairs_rel);
     let spool_path = terms_dir.join("postings.spool");
     {
-        let mut spool =
-            PostingsSpool::create(&spool_path).map_err(failed("pass 2 (spool)"))?;
+        let mut spool = PostingsSpool::create(&spool_path).map_err(failed("pass 2 (spool)"))?;
         let mut pairs =
             PairsParquetWriter::create(&pairs_path).map_err(failed("pass 2 (pairs)"))?;
         let sweep = sweep_term_postings(
@@ -372,10 +371,9 @@ fn derive_term_images(
         if segment.row_count == 0 || dict_len == 0 {
             continue;
         }
-        let permutation_path = ctx.to_prefix_dir.join(format!(
-            "{}/permutation.bin",
-            ctx.layout(plan).view_rel(&segment.view)
-        ));
+        let permutation_path = ctx
+            .to_prefix_dir
+            .join(ctx.layout(plan).permutation_rel(&segment.view));
         // From pass 1's file, so the images match the permutation that is published.
         let permutation = mosaica_store::Permutation::load(&permutation_path)
             .map_err(failed("pass 2b (term images: the new permutation)"))?;
@@ -431,8 +429,7 @@ fn derive_term_images(
                 view: segment.view.clone(),
                 incarnation: segment.incarnation,
                 dict_len,
-                keep_rows_per_container: mosaica_store::term_images::KEEP_ROWS_PER_CONTAINER
-                    as u32,
+                keep_rows_per_container: mosaica_store::term_images::KEEP_ROWS_PER_CONTAINER as u32,
             },
             summary,
         });
@@ -462,12 +459,16 @@ fn fold_unique_indexes(
             &ctx.to_prefix_dir.join(&out_rel),
             "base",
         )
-        .map_err(failed(format!("pass 3b (unique index '{}')", index.attribute)))?;
+        .map_err(failed(format!(
+            "pass 3b (unique index '{}')",
+            index.attribute
+        )))?;
         let mut base = Vec::with_capacity(written.len());
         for run in written {
-            let listed = run
-                .as_base(&ctx.to_prefix_dir)
-                .map_err(failed(format!("pass 3b (unique index '{}')", index.attribute)))?;
+            let listed = run.as_base(&ctx.to_prefix_dir).map_err(failed(format!(
+                "pass 3b (unique index '{}')",
+                index.attribute
+            )))?;
             out.push(listed.path.clone(), run.path);
             base.push(listed);
         }
@@ -526,10 +527,7 @@ fn fold_edited_items(
 fn digest_and_sync(out: &FoldOutput) -> Result<BTreeMap<String, FileDigest>, MaintenanceFailed> {
     let mut files = BTreeMap::new();
     for (rel, path) in &out.written {
-        files.insert(
-            rel.clone(),
-            crate::flush::digest_of(path)?,
-        );
+        files.insert(rel.clone(), crate::flush::digest_of(path)?);
     }
     let paths: Vec<PathBuf> = out.written.iter().map(|(_, path)| path.clone()).collect();
     mosaica_store::fsync_written(&paths).map_err(failed("pass 5 (durability)"))?;

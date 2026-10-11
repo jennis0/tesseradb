@@ -224,7 +224,7 @@ pub(crate) fn plan_fold(
     let manifest = &partition_data.manifest;
     let shard = partition_data.only_shard();
     let record = &shard.record;
-    let layout = mosaica_store::ShardLayout::new(partition, shard.id);
+    let layout = mosaica_store::ShardLayout::new(partition, record.id);
 
     let mut views: Vec<FoldViewPlan> = Vec::new();
     // Sorted, so the plan does not depend on a `HashMap`'s iteration order.
@@ -368,11 +368,7 @@ mod tests {
             0,
             "no terms, so no images"
         );
-        assert_eq!(
-            memory_estimate(0, 1, 0, 0),
-            8 * 2,
-            "no rows, so no images"
-        );
+        assert_eq!(memory_estimate(0, 1, 0, 0), 8 * 2, "no rows, so no images");
         let scratch = |bound: u64, rows: u64| {
             mosaica_store::permutation::project_scratch_bound(bound, rows).total()
         };

@@ -333,10 +333,8 @@ impl std::fmt::Debug for IdentityDescriptor {
 }
 
 impl IdentityDescriptor {
-    /// Reject an unknown `construction` or a `rounds` other than [`IDENTITY_ROUNDS`]: a bundle
-    /// written by a different construction must not be silently read by this one (contracts
-    /// §2.6 r6 — "changing the construction, the round count or the round function is a
-    /// `bundle_format` bump").
+    /// Rejects an unknown `construction` or a `rounds` other than [`IDENTITY_ROUNDS`]: another
+    /// construction's bundle must not be read by this one.
     pub fn validate(&self) -> Result<()> {
         if self.construction != IDENTITY_CONSTRUCTION {
             return Err(StoreError::InvalidIdentity {
@@ -1951,8 +1949,7 @@ pub struct BaseKeyRun {
 /// that partition's worker only after every file it names is durable. `n` is in the filename and
 /// nowhere else.
 ///
-/// The partition's own fields are at the top level of the JSON; each point shard's are in its
-/// record under `shards`.
+/// A list field without `serde(default)` is required: a lost list must not read as an empty one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SegmentsManifest {
     #[serde(flatten)]
@@ -1969,8 +1966,7 @@ pub struct Shards {
     pub records: Vec<ShardRecord>,
 }
 
-/// The partition's fields of a [`SegmentsManifest`]: its registries and declarations, the
-/// dictionary's extents and every file's digest.
+/// The partition's fields of a [`SegmentsManifest`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PartitionManifest {
     /// The row-less region's mark: one past the lowest entity any layer registration has claimed,
@@ -1989,10 +1985,6 @@ pub struct PartitionManifest {
     pub entity_id_low_water: u64,
     /// The annotation layer registry as of this publication, complete current state rather than a
     /// diff — the posture contracts §2.3 already fixes for `deny` and `tombstones`.
-    ///
-    /// No `serde(default)`, per [`ShardRecord::attr_extents`]'s argument: a manifest that
-    /// omits it is malformed, not layer-free. The distinction matters because the two are
-    /// indistinguishable under a default and only one of them is safe to serve.
     pub layers: Vec<RegisteredLayer>,
     /// Every layer name that has ever been dropped. **Carried for ever and never pruned**:
     /// bookmarks, edges and suppressions all travel by name, so a name that once meant something
@@ -2014,7 +2006,7 @@ pub struct PartitionManifest {
     /// The views a *build* declared are in `MANIFEST.json` and are not restated here: this list
     /// is the additions, and the served roster is the two together plus the WAL's own overlay.
     ///
-    /// No `serde(default)`, on `layers`' argument: a manifest omitting it is malformed, not
+    /// No `serde(default)`: a manifest omitting it is malformed, not
     /// creation-free, and the two are indistinguishable under a default while only one is safe to
     /// serve — an absent list reads as *no view was ever created*, which is what a lost list looks
     /// like, and the roster then serves a group as though nothing had ever been added to it.
@@ -2035,7 +2027,7 @@ pub struct PartitionManifest {
     /// is on disc until a fold rewrites the prefix, and a fold writes the derived list into the
     /// new `MANIFEST.json` rather than leaving it here.
     ///
-    /// No `serde(default)`, on `layers`' argument: a manifest omitting it is malformed, not
+    /// No `serde(default)`: a manifest omitting it is malformed, not
     /// column-free, and the two are indistinguishable under a default while only one is safe to
     /// serve.
     pub scoped_columns: Vec<ScopedColumn>,
@@ -2055,7 +2047,7 @@ pub struct PartitionManifest {
     /// `MANIFEST.json` in the same publication, so a name here is one the opener must not demand
     /// a base for (`FilterColumns::open`) and the fold must not read one from.
     ///
-    /// No `serde(default)`, on `layers`' argument: a manifest omitting it is malformed, not
+    /// No `serde(default)`: a manifest omitting it is malformed, not
     /// declaration-free, and the two are indistinguishable under a default while only one is safe
     /// to serve.
     pub attributes: Vec<DeclaredScalar>,
@@ -2086,7 +2078,7 @@ pub struct PartitionManifest {
     /// `MANIFEST.views` at every open ([`Manifest::with_plain_views`]), so nothing downstream
     /// tells a plain view the build declared from one declared since.
     ///
-    /// No `serde(default)`, on `layers`' argument: a manifest omitting it is malformed, not
+    /// No `serde(default)`: a manifest omitting it is malformed, not
     /// view-free, and the two are indistinguishable under a default while only one is safe to
     /// serve.
     pub plain_views: Vec<ViewDescriptor>,
@@ -2103,8 +2095,7 @@ pub struct PartitionManifest {
     /// only in the log is lost at the first rotation, and a reclaim that forgot an incarnation
     /// would leave its files on disc for ever.
     pub dead_view_incarnations: Vec<DeadIncarnation>,
-    /// The columns declared unique, in declaration order: the served schema's `unique` flags. Every
-    /// shard's record holds an index for each of them and for no other column.
+    /// The columns declared unique, in declaration order. Each shard's record indexes exactly these.
     pub unique_columns: Vec<String>,
     #[serde(default)]
     pub dict_extents: Vec<DictExtent>,
@@ -2115,14 +2106,12 @@ pub struct PartitionManifest {
     pub files: BTreeMap<String, FileDigest>,
 }
 
-/// One point shard's state in a [`SegmentsManifest`]: its allocator, its overlay as of the
-/// publication, and every extent and run under its directory.
+/// One point shard's state in a [`SegmentsManifest`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShardRecord {
     pub id: ShardId,
-    /// One past the highest entity id the shard's allocator has issued. An item deleted before its
-    /// flush holds no row, so this, not the highest entity a segment holds, is what keeps its id
-    /// from being issued again.
+    /// One past the highest entity id the shard has issued, counting ids whose items were deleted
+    /// before a flush.
     pub high_water: u64,
     pub watermark: u64,
     pub segments: Vec<SegmentDescriptor>,
@@ -2138,7 +2127,7 @@ pub struct ShardRecord {
     /// of its manifest edit on this axis.
     #[serde(default)]
     pub deltas: Vec<String>,
-    /// Every filter-column extent this partition holds — see [`AttrExtent`]. Empty in a bundle
+    /// Every filter-column extent this shard holds — see [`AttrExtent`]. Empty in a bundle
     /// straight out of `mosaica build`, whose value columns cover every entity it knows about.
     ///
     /// **Not in [`HONOURED_STATE`], for the reason `dict_extents` is not:**
@@ -2147,21 +2136,15 @@ pub struct ShardRecord {
     /// over post-build entities, which is the failure the extent exists to remove — so there is no
     /// version of this reader for which ignoring it is a posture.
     pub attr_extents: Vec<AttrExtent>,
-    /// Every record-blob extent this partition holds — see [`RecordExtent`]. Empty in a bundle
+    /// Every record-blob extent this shard holds — see [`RecordExtent`]. Empty in a bundle
     /// straight out of `mosaica build`, whose base blob (`attrs/record/*`) covers every entity
     /// it knows about. Ordered oldest-first, like [`ShardRecord::attr_extents`]; the layers
     /// are disjoint in entity space (**I9**), so order only decides which layer answers first.
-    ///
-    /// No `serde(default)`, per [`ShardRecord::attr_extents`]'s argument: a manifest that
-    /// omits it is malformed, not extent-free.
     pub record_extents: Vec<RecordExtent>,
-    /// Every entity→term transpose extent this partition holds — see [`EntityTermsExtent`].
+    /// Every entity→term transpose extent this shard holds — see [`EntityTermsExtent`].
     /// Empty in a bundle straight out of `mosaica build`, whose base layer
     /// (`entities/terms/*`) covers every entity it knows about. Oldest first, and disjoint in
     /// entity space (**I9**), so order decides only which layer answers first.
-    ///
-    /// No `serde(default)`, per [`ShardRecord::attr_extents`]'s argument: a manifest that
-    /// omits it is malformed, not extent-free.
     pub entity_terms_extents: Vec<EntityTermsExtent>,
     /// One flush's text layer per entry, oldest first — the base build's index is not in this list
     /// and is opened from the column's own directory, exactly as `record_extents` treats the base
@@ -2171,16 +2154,8 @@ pub struct ShardRecord {
     /// order decides nothing. That disjointness is why this list needs no coverage check of the
     /// kind [`ShardRecord::attr_extents`] carries: an entity id is never reused, so no two
     /// text layers can hold the same entity's terms.
-    ///
-    /// No `serde(default)`, per [`ShardRecord::attr_extents`]'s argument: a manifest that
-    /// omits it is malformed, not extent-free.
     pub text_extents: Vec<TextExtent>,
-    /// One entry per unique column: the runs of its index ([`crate::unique`]). A column is unique
-    /// exactly where it has an entry, empty lists and all, so this list is also the served
-    /// schema's `unique` flags.
-    ///
-    /// No `serde(default)`: an absent list would read as no column being unique, and the ingest
-    /// refusal and the `eq` route would then stop without anything reporting it.
+    /// The runs of each column in [`PartitionManifest::unique_columns`] ([`crate::unique`]).
     pub unique_indexes: Vec<UniqueIndexRuns>,
     /// Which entity holds each item an edit moved to a new entity ([`crate::edited`]).
     ///
@@ -2213,56 +2188,28 @@ pub struct ShardRecord {
     /// union would make every deletion look retirable by an unsuppress.
     #[serde(default)]
     pub deny: EntitySet,
-    /// Every packed membership extent this partition holds — see [`MembershipExtent`]. Empty in a
+    /// Every packed membership extent this shard holds — see [`MembershipExtent`]. Empty in a
     /// bundle straight out of `mosaica build`, which registers no layers and publishes no artifacts.
-    ///
-    /// No `serde(default)`, per [`ShardRecord::attr_extents`]'s argument: a manifest omitting it
-    /// is malformed, not artifact-free. The two are indistinguishable under a default and only one of
-    /// them is safe to serve — an absent list reads as *no artifact was ever published*, which is
-    /// exactly what a lost list looks like, and the artifacts are then served as absent with nothing
-    /// anywhere reporting a fault.
     pub membership_extents: Vec<MembershipExtent>,
-    /// Every derived artifact file this partition holds. See [`DerivedExtent`]. No
-    /// `serde(default)`: a lost list must not read as an empty one.
+    /// Every derived artifact file this shard holds. See [`DerivedExtent`].
     pub derived_extents: Vec<DerivedExtent>,
-    /// Every view's term images this partition holds. See [`TermImageExtent`]. Empty in a bundle
+    /// Every view's term images this shard holds. See [`TermImageExtent`]. Empty in a bundle
     /// whose views hold no rows, in one whose dictionary carries no terms, and in one published
     /// before a build or a fold derived them.
     ///
-    /// No `serde(default)`, on `membership_extents`' argument: an absent list and a lost list are
-    /// indistinguishable under a default. The consequence here is that every session builds its
-    /// row projection by walking its permutation, which answers the same rows and takes the time
-    /// the images exist to remove, with nothing reporting a fault.
+    /// A lost list sends every session through a permutation walk, with no fault reported.
     pub term_image_extents: Vec<TermImageExtent>,
-    /// Every record-blob extent holding **artifact supplied content** — the same format, reader and
-    /// store as [`ShardRecord::record_extents`], listed separately.
-    ///
-    /// **Separate because ownership differs, not because the bytes do.** A point extent is written
-    /// by a flush and consumed by the coalesce and the fold; an artifact extent is written by an
-    /// artifact publication, which clones a *stale* manifest and so must restate its whole list
-    /// rather than extend one — the posture `membership_extents` takes above and for the same
-    /// reason. Keeping them on one list would put a held list and a maintained list in the same
-    /// field, where a coalesce consuming an entry and a publication restating it would each undo
-    /// the other.
-    ///
-    /// ⊘ **They are therefore not coalesced or folded**, and accumulate one file per publication
-    /// until the fold's artifact pass rewrites them (Stage 4, which also owns the fold refusal a
-    /// node with published artifacts already takes). A reader opens them alongside the point
-    /// extents; the two never share an entity, artifact ids descending from the ceiling and point
-    /// ids ascending from zero.
-    ///
-    /// No `serde(default)`, on `membership_extents`' argument: an absent list and an empty one are
-    /// indistinguishable under a default, and only one of them is safe to serve — an artifact whose
-    /// content extent went missing is withheld from every viewer with nothing reporting a fault.
+    /// Every record-blob extent holding artifact-supplied content, in [`Self::record_extents`]'
+    /// format. Kept apart because an artifact publication restates its whole list from a stale
+    /// manifest while a coalesce consumes point extents, so on one list each would undo the other.
+    /// Not coalesced or folded. Artifact ids descend from the ceiling and point ids ascend from
+    /// zero, so the two never share an entity.
     pub artifact_record_extents: Vec<RecordExtent>,
     /// Every `(layer, level)`'s artifact-write counter as of this publication — see
     /// [`LevelVersion`].
     ///
-    /// No `serde(default)`, on `membership_extents`' argument and with the same shape of
-    /// consequence: an absent list and a lost list are indistinguishable under a default, and a
-    /// lost one restarts every level at zero — which is a coordinate a derived structure written
-    /// under the *old* numbering could compare equal to. A manifest omitting it is malformed, not
-    /// version-free.
+    /// A lost list restarts every level at zero, which a structure derived under the old numbering
+    /// could match.
     pub level_versions: Vec<LevelVersion>,
 }
 
@@ -2430,38 +2377,30 @@ impl SegmentsManifest {
     }
 
     /// Refuses a manifest whose shards this reader cannot serve: anything but one shard numbered 0.
-    pub fn check_served_shards(&self) -> std::result::Result<(), String> {
+    pub(crate) fn check_served_shards(&self) -> std::result::Result<(), String> {
         match self.shards.records.as_slice() {
             [record] if record.id == ShardId::ZERO => Ok(()),
             [] => Err("the side-manifest names no shard; rebuild the bundle".to_string()),
             records => Err(format!(
-                "the side-manifest names shards {:?}, and a bundle of several shards, or of one \
-                 numbered other than 0, is not served yet; rebuild it as one shard",
-                records.iter().map(|r| r.id.raw()).collect::<Vec<_>>()
+                "the side-manifest names shards {}, and only one shard numbered 0 is served. \
+                 Rebuild the bundle.",
+                records
+                    .iter()
+                    .map(|record| record.id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )),
         }
     }
 
     /// The one shard's record. A manifest that passed [`Self::check_served_shards`] has one.
     pub fn only_shard(&self) -> &ShardRecord {
-        match self.shards.records.as_slice() {
-            [record] => record,
-            records => panic!(
-                "a partition serves one shard, and this manifest names {}",
-                records.len()
-            ),
-        }
+        mosaica_types::only(&self.shards.records)
     }
 
     /// [`Self::only_shard`], to edit.
     pub fn only_shard_mut(&mut self) -> &mut ShardRecord {
-        match self.shards.records.as_mut_slice() {
-            [record] => record,
-            records => panic!(
-                "a partition serves one shard, and this manifest names {}",
-                records.len()
-            ),
-        }
+        mosaica_types::only(&mut self.shards.records)
     }
 
     /// The state fields this manifest carries that [`HONOURED_STATE`] does not cover, by name.
@@ -2564,6 +2503,7 @@ impl SegmentsManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::TEST_SHARD;
 
     const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
@@ -2669,17 +2609,6 @@ mod tests {
     }
 
     #[test]
-    fn a_shard_id_that_does_not_fit_an_identifier_is_refused() {
-        let mut manifest = serde_json::to_value(SegmentsManifest::empty()).unwrap();
-        manifest["shards"]["records"][0]["id"] = (ShardId::LIMIT - 1).into();
-        assert!(serde_json::from_value::<SegmentsManifest>(manifest.clone()).is_ok());
-        manifest["shards"]["records"][0]["id"] = ShardId::LIMIT.into();
-        assert!(serde_json::from_value::<SegmentsManifest>(manifest).is_err());
-    }
-
-    /// A shard's record and the partition's fields share no key, so the record's state is under
-    /// `shards` and nowhere at the top level, and both survive a round trip.
-    #[test]
     fn a_shard_record_and_the_shard_size_round_trip_under_shards() {
         let mut manifest = SegmentsManifest::empty();
         manifest.only_shard_mut().high_water = 41;
@@ -2697,7 +2626,6 @@ mod tests {
         assert_eq!(parsed.partition.layer_registry_version, 3);
     }
 
-    /// A deny in any shard's record is deny-disposition state, whichever shard holds it.
     #[test]
     fn a_deny_in_any_shards_record_is_deny_disposition_state() {
         let mut manifest = SegmentsManifest::empty();
@@ -2721,8 +2649,7 @@ mod tests {
             .push(TermImageExtent {
                 path: format!(
                     "{}/term-images-000000-000.timg",
-                    crate::ShardLayout::new("default", mosaica_types::ShardId::ZERO)
-                        .derived_rel("term-images")
+                    TEST_SHARD.derived_rel(crate::derived::TERM_IMAGES_KIND)
                 ),
                 view: "s0".to_string(),
                 incarnation: DECLARED_INCARNATION,
@@ -2753,10 +2680,7 @@ mod tests {
         let mut manifest = SegmentsManifest::empty();
         manifest.only_shard_mut().tenancy_index.push(TenancyBit {
             bit: 3,
-            path: format!(
-                "{}/bit-03.tenancy",
-                crate::ShardLayout::new("default", mosaica_types::ShardId::ZERO).tenancy_rel()
-            ),
+            path: format!("{}/bit-03.tenancy", TEST_SHARD.tenancy_rel()),
         });
         manifest.only_shard_mut().retired_numbers = EntitySet::of(&croaring::Bitmap::of(&[7, 9]));
         let bytes = serde_json::to_vec(&manifest).expect("a manifest serialises");
@@ -2786,11 +2710,7 @@ mod tests {
     #[test]
     fn every_derived_form_round_trips_and_an_absent_list_is_refused() {
         let entry = |form: DerivedForm, view: Option<&str>| DerivedExtent {
-            path: format!(
-                "{}/x",
-                crate::ShardLayout::new("default", mosaica_types::ShardId::ZERO)
-                    .derived_rel(form.dir())
-            ),
+            path: format!("{}/x", TEST_SHARD.derived_rel(form.dir())),
             layer: "regions".to_string(),
             level: 0,
             level_version: 3,

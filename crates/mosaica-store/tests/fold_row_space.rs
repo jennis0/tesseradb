@@ -75,7 +75,7 @@ fn a_column_an_input_lacks_fails_the_fold_unless_declared_since_the_inputs() {
     let spec = |absent_ok: &'static [String]| FoldRowSpaceSpec {
         inputs: std::slice::from_ref(&input),
         identity_key: &identity_key,
-        shard_id: ShardId::ZERO,
+        shard: ShardId::ZERO,
         scalar_schema: &schema,
         indexed: &[],
         absent_ok,
@@ -127,7 +127,7 @@ fn fold(
         FoldRowSpaceSpec {
             inputs,
             identity_key: &key(),
-            shard_id: ShardId::ZERO,
+            shard: ShardId::ZERO,
             scalar_schema: &[],
             indexed: &[],
             absent_ok: &[],

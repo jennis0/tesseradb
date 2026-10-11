@@ -41,7 +41,7 @@ pub enum IdentityError {
     /// `forward`'s entity input exceeded `u32::MAX`. Plan Important I-1: a truncating
     /// cast would make "collision-free by construction" false. See memo §1.8.
     EntityOutOfRange { entity: u64 },
-    /// A shard id does not fit the 19 bits [`ShardId`] has.
+    /// A shard id of [`ShardId::LIMIT`] or more.
     ShardOutOfRange { shard: u32 },
     /// A tenancy does not fit the 12 bits [`ItemHigh`] gives it.
     TenancyOutOfRange { tenancy: u16 },
@@ -80,7 +80,8 @@ impl std::fmt::Display for IdentityError {
             IdentityError::ShardOutOfRange { shard } => {
                 write!(
                     f,
-                    "shard id {shard} does not fit in 19 bits; a shard id must be below {}",
+                    "shard id {shard} does not fit in {} bits; a shard id must be below {}",
+                    ShardId::BITS,
                     ShardId::LIMIT
                 )
             }
@@ -160,6 +161,8 @@ pub struct ItemHigh {
     pub tenancy: Tenancy,
 }
 
+const _: () = assert!(ShardId::BITS + Tenancy::BITS == 31);
+
 impl ItemHigh {
     #[inline]
     pub const fn new(shard: ShardId, tenancy: Tenancy) -> Self {
@@ -171,8 +174,7 @@ impl ItemHigh {
     }
 
     /// The item high half packed in `high`, or `None` when its kind bit is set and it names
-    /// something other than an item. The kind bit is the bit above the shard's, so a set one
-    /// reads as a shard [`ShardId::new`] refuses.
+    /// something other than an item. A set kind bit reads as a shard id [`ShardId::new`] refuses.
     pub fn unpack(high: u32) -> Option<ItemHigh> {
         Some(ItemHigh {
             shard: ShardId::new(high >> Tenancy::BITS).ok()?,

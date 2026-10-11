@@ -47,7 +47,7 @@ pub(crate) fn plan_merge(generation: &Generation, policy: MergePolicy) -> Option
         return None;
     }
     let shard = partition_data.only_shard();
-    let layout = ShardLayout::new(partition, shard.id);
+    let layout = ShardLayout::new(partition, shard.record.id);
     for (view, view_data) in &shard.views {
         // Use the view's live incarnation, or skip it. A mismatch between the bundle and its
         // manifest is a state the composition already refuses to serve.
@@ -89,7 +89,7 @@ pub(crate) fn plan_merge(generation: &Generation, policy: MergePolicy) -> Option
             .expect("select returns seg_ids from the list it was given");
         return Some(MergePlan {
             partition: partition.clone(),
-            shard: shard.id,
+            shard: shard.record.id,
             view: view.clone(),
             incarnation,
             inputs: descriptors
@@ -162,16 +162,16 @@ pub(crate) fn execute(
     plan: MergePlan,
     ctx: MergeContext,
 ) -> Result<CompletedMerge, MaintenanceFailed> {
+    let layout = ShardLayout::new(&plan.partition, plan.shard);
     let output = execute_merge(
         &ctx.prefix_dir,
-        &plan.partition,
+        layout,
         &plan.view,
         MergeSpec {
             incarnation: plan.incarnation,
             seg_id: &ctx.seg_id,
             inputs: &plan.inputs,
             identity_key: &ctx.identity_key,
-            shard_id: plan.shard,
             scalar_schema: &ctx.scalar_schema,
             indexed: &ctx.band_schema,
             absent_ok: &ctx.absent_ok,
@@ -182,7 +182,7 @@ pub(crate) fn execute(
 
     let seg_dir = ctx
         .prefix_dir
-        .join(ShardLayout::new(&plan.partition, plan.shard).segment_rel(&plan.view, &ctx.seg_id));
+        .join(layout.segment_rel(&plan.view, &ctx.seg_id));
     let entities = mosaica_store::edited::RowEntities::Listed(std::sync::Arc::new(
         mosaica_store::edited::EditedRows::open(
             &seg_dir,

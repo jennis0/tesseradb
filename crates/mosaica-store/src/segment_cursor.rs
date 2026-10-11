@@ -87,7 +87,8 @@ impl SegmentCursor {
         declared: ScalarType,
         op: &str,
     ) -> std::io::Result<ScalarValue> {
-        let malformed = |detail: String| std::io::Error::new(std::io::ErrorKind::InvalidData, detail);
+        let malformed =
+            |detail: String| std::io::Error::new(std::io::ErrorKind::InvalidData, detail);
         let Some(copy) = self.bands.copy(name) else {
             return Ok(ScalarValue::Null);
         };
@@ -119,13 +120,13 @@ impl SegmentCursor {
     pub(crate) fn entity(
         &self,
         key: &mosaica_types::IdentityKey,
-        shard_id: mosaica_types::ShardId,
+        shard: mosaica_types::ShardId,
     ) -> Result<mosaica_types::EntityId> {
         self.entities.entity_of(
             self.row as u32,
             self.columns.mosaica_id()[self.row],
             key,
-            shard_id,
+            shard,
             &self.seg_id,
         )
     }

@@ -873,7 +873,7 @@ impl Executor {
             to_prefix_dir: self.deps.bundle_root.join(&to_prefix),
             to_prefix: to_prefix.clone(),
             identity_key: self.deps.identity_key,
-            shard_id: partition_data.only_shard().id,
+            shard: partition_data.only_shard().record.id,
             scalar_schema,
             band_schema: band_schema_of(manifest),
             absent_ok,
@@ -1425,7 +1425,7 @@ impl Executor {
                     },
                     tenancy_index: next_tenancy.index(),
                     retired_numbers: mosaica_store::manifest::EntitySet::of(&retired_numbers),
-                    ..mosaica_store::manifest::ShardRecord::empty(live_shard.id)
+                    ..mosaica_store::manifest::ShardRecord::empty(live_shard.record.id)
                 }],
             },
         };
@@ -1927,7 +1927,7 @@ impl Executor {
         let shard = pass.shard;
         let n = pass.n;
         let pending = pass.pending;
-        let postings_path = shard.dir(prefix_dir).join("terms").join("postings.arrow");
+        let postings_path = prefix_dir.join(shard.postings_rel());
         let postings = match mosaica_authz::PostingsReader::open(&postings_path, true) {
             Ok(postings) => postings,
             Err(error) => {
@@ -2008,9 +2008,7 @@ impl Executor {
     ) -> Vec<(String, mosaica_store::RowSpace)> {
         let mut spaces: Vec<(String, mosaica_store::RowSpace)> = Vec::new();
         for (view, row_count) in views {
-            let path = prefix_dir
-                .join(shard.view_rel(view))
-                .join("permutation.bin");
+            let path = prefix_dir.join(shard.permutation_rel(view));
             match mosaica_store::Permutation::load(&path) {
                 Ok(permutation) => spaces.push((
                     view.clone(),

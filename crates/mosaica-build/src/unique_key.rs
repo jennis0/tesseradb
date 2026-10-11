@@ -127,13 +127,12 @@ pub fn keyword_cardinalities(
     let mut out = Vec::new();
     for (phash, segments) in partitions {
         let record = segments.only_shard();
-        let shard = mosaica_store::ShardLayout::new(phash, record.id);
-        let attrs_rel = format!("{}/attrs", shard.rel());
+        let layout = mosaica_store::ShardLayout::new(phash, record.id);
         for scalar in &manifest.declared_scalars {
             if scalar.arrow_type != ScalarType::Keyword || !scalar.index {
                 continue;
             }
-            let dir_rel = format!("{attrs_rel}/{}", scalar.name);
+            let dir_rel = layout.column_rel(&scalar.name);
             let (distinct, present) = read_column(&prefix_dir.join(&dir_rel))?;
             out.push(KeywordCardinality {
                 attribute: scalar.name.clone(),
@@ -150,7 +149,7 @@ pub fn keyword_cardinalities(
                     continue;
                 }
                 for view in &scalar.views {
-                    let dir_rel = shard.scoped_column_rel(
+                    let dir_rel = layout.scoped_column_rel(
                         &scalar.name,
                         view,
                         mosaica_types::view::DECLARED_INCARNATION,
@@ -358,10 +357,7 @@ mod tests {
 
     #[test]
     fn bytes_are_summed_for_the_column_directory_alone() {
-        let attrs = format!(
-            "{}/attrs",
-            mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO).rel()
-        );
+        let attrs = "s/attrs";
         let mut files = BTreeMap::new();
         for (path, size) in [
             ("uuid/dict.bin", 700u64),

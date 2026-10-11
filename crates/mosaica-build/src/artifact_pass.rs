@@ -188,9 +188,7 @@ pub fn run(
     // **The row space of the bundle this build just wrote**, opened from the file rather than kept
     // from the sort: the permutation is fsynced by now, and reading it back is what makes this pass
     // a function of the published prefix rather than of a structure that only existed in memory.
-    let permutation_path = prefix_dir
-        .join(shard.view_rel(view))
-        .join("permutation.bin");
+    let permutation_path = prefix_dir.join(shard.permutation_rel(view));
     let space = match mosaica_store::Permutation::load(&permutation_path) {
         Ok(permutation) => RowSpace::new(std::sync::Arc::new(permutation), row_count),
         Err(error) => {
@@ -673,7 +671,7 @@ pub fn containment(
     shard: ShardLayout<'_>,
     index: &mut DerivedIndex,
 ) -> Vec<mosaica_store::manifest::DerivedExtent> {
-    let postings_path = shard.dir(prefix_dir).join("terms").join("postings.arrow");
+    let postings_path = prefix_dir.join(shard.postings_rel());
     let postings = match PostingsReader::open(&postings_path, true) {
         Ok(postings) => postings,
         Err(error) => {

@@ -578,7 +578,11 @@ impl UniqueIndex {
     ) -> Result<UniqueIndex> {
         let held = |rel: &str| -> Arc<Slot> {
             reuse
-                .and_then(|index| index.slots().find(|slot| slot.rel == rel && slot.kind == kind))
+                .and_then(|index| {
+                    index
+                        .slots()
+                        .find(|slot| slot.rel == rel && slot.kind == kind)
+                })
                 .cloned()
                 .unwrap_or_else(|| Arc::new(Slot::new(rel, prefix_dir, kind)))
         };
@@ -661,6 +665,30 @@ impl UniqueIndex {
     }
 }
 
+/// Sets `attribute`'s index in `record` to `runs`, or removes it where `runs` is `None`, keeping
+/// `partition`'s unique columns the ones the record indexes, as [`UniqueIndexes::open`] requires.
+/// Returns the runs it replaced.
+pub fn set_unique_index(
+    partition: &mut PartitionManifest,
+    record: &mut ShardRecord,
+    attribute: &str,
+    runs: Option<UniqueIndexRuns>,
+) -> Option<UniqueIndexRuns> {
+    partition
+        .unique_columns
+        .retain(|column| column != attribute);
+    let replaced = record
+        .unique_indexes
+        .iter()
+        .position(|held| held.attribute == attribute)
+        .map(|at| record.unique_indexes.remove(at));
+    if let Some(runs) = runs {
+        partition.unique_columns.push(attribute.to_string());
+        record.unique_indexes.push(runs);
+    }
+    replaced
+}
+
 /// Every unique column's index in one shard, by attribute name.
 #[derive(Default)]
 pub struct UniqueIndexes {
@@ -669,9 +697,8 @@ pub struct UniqueIndexes {
 
 impl UniqueIndexes {
     /// The indexes `record` lists, typed by `manifest`'s declarations, sharing every run `reuse`
-    /// holds. Reads no file. An index for a column `partition` does not declare unique, or that
-    /// the manifest declares at a type that cannot be unique, is refused, as is a column declared
-    /// unique that the shard holds no index for.
+    /// holds. Reads no file. Refuses unless the shard indexes exactly `partition`'s unique
+    /// columns, each at a type that can be unique.
     pub fn open(
         manifest: &Manifest,
         partition: &PartitionManifest,
@@ -684,14 +711,17 @@ impl UniqueIndexes {
             .iter()
             .map(|runs| runs.attribute.as_str())
             .collect();
-        let declared: BTreeSet<&str> =
-            partition.unique_columns.iter().map(String::as_str).collect();
+        let declared: BTreeSet<&str> = partition
+            .unique_columns
+            .iter()
+            .map(String::as_str)
+            .collect();
         if indexed != declared {
             return Err(StoreError::MalformedBundle {
                 detail: format!(
                     "shard {} indexes columns {indexed:?} and the partition declares {declared:?} \
                      unique; restore the side-manifest that named both, or rebuild",
-                    record.id.raw()
+                    record.id
                 ),
             });
         }
@@ -784,7 +814,9 @@ pub fn duplicates_message(attribute: &str, count: u64, examples: &[String]) -> S
 }
 
 /// The declared columns that are unique, with their positions in the declaration.
-pub fn unique_columns(declared: &[DeclaredScalar]) -> impl Iterator<Item = (usize, &DeclaredScalar)> {
+pub fn unique_columns(
+    declared: &[DeclaredScalar],
+) -> impl Iterator<Item = (usize, &DeclaredScalar)> {
     declared.iter().enumerate().filter(|(_, d)| d.unique)
 }
 
@@ -798,10 +830,16 @@ mod tests {
             key_of(ScalarType::U8, &ScalarValue::U8(7)),
             key_of(ScalarType::U64, &ScalarValue::U64(7))
         );
-        assert_eq!(key_of_integer(ScalarType::U8, 7), Some(UniqueKey::unsigned(7)));
+        assert_eq!(
+            key_of_integer(ScalarType::U8, 7),
+            Some(UniqueKey::unsigned(7))
+        );
         assert_eq!(key_of_integer(ScalarType::U8, 256), None);
         assert_eq!(key_of_integer(ScalarType::U64, -1), None);
-        assert_eq!(key_of_integer(ScalarType::I64, -1), Some(UniqueKey::signed(-1)));
+        assert_eq!(
+            key_of_integer(ScalarType::I64, -1),
+            Some(UniqueKey::signed(-1))
+        );
         assert_eq!(
             key_of_integer(ScalarType::U64, u64::MAX as i128),
             Some(UniqueKey::unsigned(u64::MAX))

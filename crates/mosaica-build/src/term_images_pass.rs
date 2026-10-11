@@ -135,9 +135,7 @@ pub fn run(
     // pass loads the same file for the same reason. Its load is not shared with this one: that
     // pass returns before reaching it for a view with no drawn layer, and this one runs for every
     // view.
-    let permutation_path = prefix_dir
-        .join(shard.view_rel(view))
-        .join("permutation.bin");
+    let permutation_path = prefix_dir.join(shard.permutation_rel(view));
     let permutation = Permutation::load(&permutation_path)?;
     let space = RowSpace::new(Arc::new(permutation), rows_in_view);
 

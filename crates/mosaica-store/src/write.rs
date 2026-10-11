@@ -30,9 +30,9 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array,
-    Int64Array, Int8Array, StringArray, TimestampMicrosecondArray, UInt16Array, UInt32Array,
-    UInt64Array, UInt8Array,
+    ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
+    Int8Array, StringArray, TimestampMicrosecondArray, UInt16Array, UInt32Array, UInt64Array,
+    UInt8Array,
 };
 use arrow::buffer::{Buffer, OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{ArrowNativeType, DataType, Field, Schema, TimeUnit};
@@ -814,7 +814,7 @@ impl PagePlan {
     /// An empty plan over `[0, bound)`.
     ///
     /// **The bound ceiling is checked here, before any file exists.** A caller deriving a bound
-    /// from a corrupt `entity_id_high_water` gets a refusal from a `Vec` allocation, not from a
+    /// from a corrupt shard's `high_water` gets a refusal from a `Vec` allocation, not from a
     /// filled volume.
     pub fn new(bound: u64) -> io::Result<Self> {
         check_bound(bound)?;

@@ -28,7 +28,12 @@ struct ColumnJob {
 }
 
 impl ColumnJob {
-    fn holds(&self, column: &str, view: Option<&str>, incarnation: Option<ViewIncarnation>) -> bool {
+    fn holds(
+        &self,
+        column: &str,
+        view: Option<&str>,
+        incarnation: Option<ViewIncarnation>,
+    ) -> bool {
         column == self.name && view == self.view.as_deref() && incarnation == self.incarnation
     }
 }
@@ -46,7 +51,7 @@ fn column_jobs(
         .iter()
         .filter(|d| entity(d))
         .map(|d| ColumnJob {
-            rel: format!("{}/attrs/{}", ctx.layout(plan).rel(), d.name),
+            rel: ctx.layout(plan).column_rel(&d.name),
             name: d.name.clone(),
             view: None,
             incarnation: None,
@@ -432,7 +437,7 @@ pub(super) fn fold_record_blob(
         ));
     }
     if blob_resident {
-        let record_rel = format!("{}/attrs/record", ctx.layout(plan).rel());
+        let record_rel = ctx.layout(plan).record_rel();
         let from_dir = ctx.from_prefix_dir.join(&record_rel);
         let to_dir = ctx.to_prefix_dir.join(&record_rel);
         std::fs::create_dir_all(&to_dir).map_err(failed("pass 4a (record blob)"))?;

@@ -30,7 +30,7 @@ mod fixture;
 
 use std::path::Path;
 
-use fixture::{build_bundle, PARTITION, SHARD, VIEW};
+use fixture::{build_bundle, SHARD, VIEW};
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_store::flush::{write_flush_segment, FlushInput, FlushRow};
 use mosaica_store::manifest::Quantisation;
@@ -95,7 +95,7 @@ fn write_input(root: &Path, index: usize, entity_lo: u64, shape: &Shape) -> Merg
         .collect();
     write_flush_segment(
         &root.join("v00000"),
-        PARTITION,
+        SHARD,
         VIEW,
         FlushInput {
             incarnation: 0,
@@ -103,7 +103,6 @@ fn write_input(root: &Path, index: usize, entity_lo: u64, shape: &Shape) -> Merg
             rows,
             quantisation: quantisation(),
             identity_key: &key(),
-            shard_id: ShardId::ZERO,
             scalar_schema: &[],
             indexed: &[],
             row_base: 0,
@@ -170,14 +169,13 @@ proptest! {
         let schema: Vec<(String, ScalarType)> = vec![];
         let out = execute_merge(
             &dir.path().join("v00000"),
-            PARTITION,
+            SHARD,
             VIEW,
             MergeSpec {
                 incarnation: 0,
                 seg_id: "merged",
                 inputs: &inputs,
                 identity_key: &key(),
-                shard_id: ShardId::ZERO,
                 scalar_schema: &schema,
                 indexed: &[],
                 absent_ok: &[],

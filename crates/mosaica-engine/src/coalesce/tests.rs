@@ -124,11 +124,12 @@ impl Fixture {
     }
 
     fn execute(&self, plan: CoalescePlan) -> Result<CompletedCoalesce, MaintenanceFailed> {
+        let id = "coalesce-1-1";
         let ctx = CoalesceContext {
             prefix_dir: self.prefix_dir.clone(),
             prefix: "v00000".to_string(),
-            id: "coalesce-1-1".to_string(),
-            out_rel: format!("{}/coalesce-1-1", SHARD.coalesced_rel()),
+            id: id.to_string(),
+            out_rel: SHARD.coalesced_rel(id),
         };
         execute_coalesce(plan, ctx)
     }
@@ -158,13 +159,12 @@ impl Fixture {
                 y_max: 1.0,
             },
             identity_key: &key,
-            shard_id: ShardId::ZERO,
             scalar_schema: &[],
             indexed: &[],
             row_base,
             entity_floor: 0,
         };
-        mosaica_store::write_flush_segment(&self.prefix_dir, PARTITION, "s0", input).unwrap()
+        mosaica_store::write_flush_segment(&self.prefix_dir, SHARD, "s0", input).unwrap()
     }
 
     fn write_dict(&self, rel: String, descriptors: &[String]) -> String {
