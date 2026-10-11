@@ -79,12 +79,41 @@ The union is paid once per grant until the next write moves its fragment.
 347,583 admin artifacts that lost members to the deletions. Every version's report is kept, so the
 bundle grew by 71 MB a compaction. This holds without reuse.
 
+## Other orders of issuing pool ids, simulated
+
+[`policies.py`](policies.py) runs the churn on items carrying one access term each, with GeoNames'
+country sizes scaled to 1,000,000 items, numbered by signature as a build numbers them. It does
+this under five orders of issuing ids, with the halves deleted in turn as above (`alternate`) and
+with a fresh random half deleted each round (`random`). [`policies.csv`](policies.csv) holds every
+round. Postings are each term's run-optimised Roaring bitmap, serialised and summed.
+
+| order | postings, rounds 2 to 10, × as built: alternate | random | high water after round 10, random |
+|---|---|---|---|
+| high water only, no reuse | 1.6 | 181 to 207 | 6,000,000, rising every round |
+| lowest first (built) | 1.1 to 143 | 215 to 343 | 1,500,000 |
+| longest free runs first | 181 to 287 | 330 to 411 | 1,500,000 |
+| only free runs of at least 64 | 1.6 to 1.8 | 181 to 303 | 3,750,000 |
+| a term's own freed ids first | 76 to 144 | 209 to 251 | 1,500,000 |
+
+**Random deletion scatters the postings; the order of reuse only decides whether new items scatter
+too.**
+
+- With the halves in turn, no reuse looks clean only because each round deletes the whole of an
+  earlier round's inserts.
+- Under random deletion the surviving items are scattered whatever the allocator does. Every order
+  that keeps the high water flat lands within about a quarter of lowest first, and runs scatter
+  more.
+- Issuing high-water ids first saves about a quarter of the postings while the space lasts. Its
+  high water grows every round, and with it every view's `permutation.bin` (4 bytes an id) and a
+  compaction's up-front mapping.
+
+Ruled by Joe 2026-10-11: lowest first, to be measured again on larger corpora.
+
 ## Not measured
 
 - Tree of Life (§8.4's second corpus; its 40 GB bundle does not fit this host).
 - Several shards (stage 5).
-- Handing pool ids out in runs (§4.1).
-- The same churn without reuse.
+- The same churn without reuse, or under another order, on the engine rather than in simulation.
 - The union apart from the session plane and its round trip.
 
 ## Rounds

@@ -558,8 +558,23 @@ first, lowest id first, as §1.4 says. A window can straddle a change of target,
 landed in. A corpus whose live size is steady opens no shard, so the number of shards is about the
 live count over `shards.size`.
 
-Handing pool ids out in runs, so that a window's items stay together where contiguous space
-remains, is not part of this design. It is decided from the churn measurement (§8.4).
+Pool ids are issued lowest first. Deleting items at random leaves each term's surviving items
+scattered, whatever the allocator does next. Reusing their ids keeps the new items scattered too,
+where ids from the high water would have formed runs. Other orders were simulated against the churn
+on GeoNames' term sizes scaled to 1,000,000 items, with a fresh random half deleted each round
+(`probes/2026-10-10-churn-reuse/policies.py`):
+
+- Runs:
+  - Taking only runs of at least 64 free ids reuses few. After ten rounds the high water reaches
+    3.75 million, against 1.5 million lowest first and 6.0 million with no reuse.
+  - Taking the longest runs first gives postings 330 to 411 times the fresh build's, against 215
+    to 343 lowest first.
+- A term's own freed ids first: 209 to 251 times.
+- High-water ids first, reusing only when the space is full: 181 to 207 times. Meanwhile the high
+  water, and every view's `permutation.bin` and a compaction's memory with it, grows with every
+  round instead of following the live count.
+
+Ruled by Joe 2026-10-11: lowest first, to be measured again on larger corpora.
 
 ### 4.2 Resolving a batch
 
@@ -834,14 +849,15 @@ items. It gains a churn mode: ten rounds that each delete half the corpus, inser
 items and compact, on GeoNames and Tree of Life, at one shard and at several. Per round:
 the high water, which must stop rising once ids are reused; posting bytes and union cost against a
 fresh build of the same items; compaction time; and viewport latency. This is the gate for stage 1
-on one shard, and it decides whether pool ids need handing out in runs (§4.1).
+on one shard. On GeoNames it showed the cost of reuse to the term index and the union, which
+settled the order pool ids are issued in (§4.1) until larger corpora are measured.
 
 ### 8.5 What the measurements decide
 
 - `shards.size`: the default stays near the ceiling unless a smaller shard measures cheaper per
   request, per compaction or per restart. The read path favours fewer shards: every operation on
   the mask pays a fixed cost per part (§3.2).
-- `REUSE_MIN_FREE` and handing pool ids out in runs.
+- `REUSE_MIN_FREE`.
 - Compaction tiers and concurrent compactions.
 - The key filter's bits per value.
 
@@ -868,7 +884,8 @@ on one shard, and it decides whether pool ids need handing out in runs (§4.1).
 | a session's visible set grows more slowly than the corpus | assumed; to be confirmed before any figure above 2³² items is promised | n/a |
 | selection batched per shard, where a request's tiles abut: 0.57 to 0.97 of selection per part for a viewer of 0.1% or 1% at depths 8 to 10; at depth 11 and deeper the count of 300,000 parts, 5.7 to 11.4 ms at N = 100, sets what N costs | measured, synthetic, one thread, 4 cores | `probes/2026-10-10-batched-selection/` |
 | reused numbers, GeoNames at one shard, half the corpus deleted and inserted ten times: the high water stops rising after round 2; the term index's postings grow from 9 KB to 7 to 13 MB, and a grant's union from 3 to 13 ms to 10 to 22 ms; viewport latency unchanged | measured, one run, 4 cores | `probes/2026-10-10-churn-reuse/` |
-| the tile index on today's levels; every route at N on a built bundle; churn on Tree of Life and at several shards; pool ids handed out in runs; the key filter; compaction per shard | not measured | §8 |
+| other orders of issuing pool ids under the churn, on GeoNames' term sizes scaled to 1,000,000 items with a fresh random half deleted each round: postings 215 to 343 times the fresh build's lowest first, 209 to 251 a term's own ids first, 330 to 411 the longest free runs first, 181 to 207 high-water ids first, whose high water reaches six times the live count in ten rounds | simulated | `probes/2026-10-10-churn-reuse/policies.py` |
+| the tile index on today's levels; every route at N on a built bundle; churn on Tree of Life, on larger corpora and at several shards; the key filter; compaction per shard | not measured | §8 |
 
 ## 10. Stages
 
