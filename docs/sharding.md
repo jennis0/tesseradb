@@ -1,8 +1,9 @@
 # Sharding: several entity spaces in one process
 
-**Status:** design, 2026-10-09. Stages 0 and 1 are built: `count_ranges`, and reuse of a deleted
-item's number at the next tenancy; stage 1's churn on Tree of Life (§8.4) is still to run. Nothing
-else in this document is built. Each section says what the code does today and what changes.
+**Status:** design, 2026-10-09. Stages 0 to 2 are built: `count_ranges`; reuse of a deleted item's
+number at the next tenancy; and the shard as a parameter, with one shard under `shards/0/` and its
+declared size. Stage 1's churn on Tree of Life (§8.4) is still to run. Nothing else in this document
+is built. Each section says what the code does today and what changes.
 
 ## The limit
 
