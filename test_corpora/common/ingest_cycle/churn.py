@@ -298,16 +298,14 @@ class Churn(Cycle):
 
     def sample(self, token: str, zoom: int, box: list[float]) -> dict:
         """The battery's sample of `box` on the anchor view."""
-        return serve_battery.sample(
+        target = serve_battery.Target(
             self.served.viewer,
-            token,
             self.anchor,
             self.frames[self.anchor],
-            zoom,
-            box,
             self.k,
             max_tiles=self.max_tiles,
         )
+        return serve_battery.sample(target, token, zoom, box)
 
     def failures(self) -> list[str]:
         out = super().failures()

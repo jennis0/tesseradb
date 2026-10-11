@@ -41,6 +41,7 @@ import random
 import statistics
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
@@ -359,24 +360,27 @@ def budget_zoom(
     return depth
 
 
-def sample(
-    viewer_base: str,
-    token: str,
-    view_id: str,
-    quantisation: dict,
-    zoom: int,
-    box: Sequence[float],
-    k: int,
-    budget_depth: int = BUDGET_DEPTH,
-    max_tiles: int = DEFAULT_MAX_TILES,
-    **kw,
-) -> dict:
+@dataclass(frozen=True)
+class Target:
+    """Where a sample is sent and what every request asks for: the viewer, the view and its
+    frame, `k`, and the depth budget and tile ceiling [`budget_zoom`] holds a box to."""
+
+    viewer_base: str
+    view_id: str
+    quantisation: dict
+    k: int
+    budget_depth: int = BUDGET_DEPTH
+    max_tiles: int = DEFAULT_MAX_TILES
+
+
+def sample(target: Target, token: str, zoom: int, box: Sequence[float], **kw) -> dict:
     """One [`viewport`] at the depth [`budget_zoom`] gives `box` at `zoom`. A request that raised
     is a sample with a `failed` field, and a shed stream is one marked `shed`."""
-    depth = budget_zoom(quantisation, box, zoom, budget_depth, max_tiles)
+    t = target
+    depth = budget_zoom(t.quantisation, box, zoom, t.budget_depth, t.max_tiles)
     t0 = time.perf_counter()
     try:
-        return viewport(viewer_base, token, view_id, depth, box, k=k, **kw)
+        return viewport(t.viewer_base, token, t.view_id, depth, box, k=t.k, **kw)
     except Exception as e:  # noqa: BLE001 — the failure is the measurement
         return {
             "failed": f"{type(e).__name__}: {e}"[:300],
@@ -386,7 +390,7 @@ def sample(
             "bytes": None,
             "counts": None,
             "request_zoom": depth,
-            "k": k,
+            "k": t.k,
             "shed": False,
             "shed_error": None,
             "complete": False,
@@ -730,10 +734,11 @@ class Battery:
     def _sample(self, token, zoom, box, cold: bool, **kw) -> dict:
         """One [`sample`], with the cold proof around it when asked for."""
         before = self.evictor.majflt() if cold else None
-        s = sample(
-            self.args.viewer, token, self.view_id, self.quant, zoom, box, self.k,
-            self.args.budget_depth, self.max_tiles, point_rows=self.point_rows, **kw,
+        target = Target(
+            self.args.viewer, self.view_id, self.quant, self.k, self.args.budget_depth,
+            self.max_tiles,
         )
+        s = sample(target, token, zoom, box, point_rows=self.point_rows, **kw)
         if "failed" in s:
             self.failures += 1
             return s
