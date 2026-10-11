@@ -1058,9 +1058,9 @@ fn a_group_scoped_attribute_is_one_column_per_view_of_the_group() {
         .map(|s| s.name.as_str())
         .collect();
     assert_eq!(declared, ["id"], "a scoped family is no declared scalar");
-    let attrs = out
-        .join("v00000")
-        .join("partitions/default/attrs/sentiment/quarter_alt");
+    let attrs = mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO)
+        .dir(&out.join("v00000"))
+        .join("attrs/sentiment/quarter_alt");
     for (key, present) in [("2026-Q2", q2_present), ("2026-Q3", q3_present)] {
         let values = attrs.join(key).join("values.arrow");
         let presence = attrs.join(key).join("presence.roaring");

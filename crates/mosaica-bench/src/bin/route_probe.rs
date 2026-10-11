@@ -578,15 +578,12 @@ fn arm(
 
 /// What a cold arm evicts: the permutation the walk reads, the postings the residual reads and
 /// the images the split maps.
-fn evictable(partition_dir: &Path, view: &str, postings_path: &Path) -> Vec<PathBuf> {
+fn evictable(shard_dir: &Path, view: &str, postings_path: &Path) -> Vec<PathBuf> {
     let mut paths = vec![
-        partition_dir
-            .join("views")
-            .join(view)
-            .join("permutation.bin"),
+        shard_dir.join("views").join(view).join("permutation.bin"),
         postings_path.to_path_buf(),
     ];
-    if let Ok(entries) = std::fs::read_dir(partition_dir.join("term-images")) {
+    if let Ok(entries) = std::fs::read_dir(shard_dir.join("term-images")) {
         let mut found: Vec<PathBuf> = entries
             .flatten()
             .map(|e| e.path())
@@ -880,11 +877,12 @@ fn run(args: Args) -> Result<(), String> {
             String::from_utf8_lossy(bytes).into_owned()
         })
         .collect();
-    let partition_dir = prefix_dir.join("partitions").join(phash);
-    let postings_path = partition_dir.join("terms").join("postings.arrow");
+    let shard_dir =
+        mosaica_store::ShardLayout::new(phash, mosaica_types::ShardId::ZERO).dir(&prefix_dir);
+    let postings_path = shard_dir.join("terms").join("postings.arrow");
     let postings = PostingsReader::open(&postings_path, true)
         .map_err(|e| format!("opening {}: {e}", postings_path.display()))?;
-    let evictable = evictable(&partition_dir, &args.view, &postings_path);
+    let evictable = evictable(&shard_dir, &args.view, &postings_path);
 
     // ---- The principals, every term resolved before anything is measured.
     let mut principals: Vec<Principal> = args

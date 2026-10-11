@@ -27,11 +27,12 @@ use mosaica_build::error::BuildError;
 use mosaica_build::{build, verify, verify_deep, verify_with_window_rows, BuildArgs, VerifyOpts};
 use mosaica_spatial::Bounds;
 use mosaica_store::flush::{write_flush_segment, FlushInput, FlushRow};
+use mosaica_store::layout::partition_dir;
 use mosaica_store::manifest::{
     CurrentPointer, EntitySet, FileDigest, SegmentsManifest, TenancyBit,
 };
 use mosaica_store::tenancy::bits_of;
-use mosaica_store::{write_segments_manifest, StoreError};
+use mosaica_store::{write_segments_manifest, ShardLayout, StoreError};
 use mosaica_types::{EntityId, IdentityKey, ShardId, TermId, SMALL_TERM_THRESHOLD_DEFAULT};
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
@@ -39,7 +40,12 @@ const N_ITEMS: u64 = 48;
 /// The build entity the fixture deletes.
 const DELETED: u32 = 5;
 /// Where the fixture's tenancy index is written, prefix-relative.
-const TENANCY_REL: &str = "partitions/default/tenancy";
+const SHARD: ShardLayout<'static> = ShardLayout::new("default", ShardId::ZERO);
+
+/// `file` under the default shard, prefix-relative.
+fn shard_rel(file: &str) -> String {
+    format!("{}/{file}", SHARD.rel())
+}
 
 fn extent() -> Bounds {
     Bounds {
@@ -189,7 +195,8 @@ fn flushed_bundle_at(root: &Path, tenancy: u16) {
     )
     .expect("MANIFEST.json parses");
     let seg0: SegmentsManifest = serde_json::from_slice(
-        &fs::read(prefix_dir.join("partitions/default/SEGMENTS-0.json")).expect("SEGMENTS-0"),
+        &fs::read(partition_dir(&prefix_dir, "default").join("SEGMENTS-0.json"))
+            .expect("SEGMENTS-0"),
     )
     .expect("SEGMENTS-0 parses");
     let n = manifest.entity_id_high_water;
@@ -238,7 +245,7 @@ fn flushed_bundle_at(root: &Path, tenancy: u16) {
 
     // The flushed entities' postings live in a delta tier the base `pairs.parquet` has never
     // seen — the state the pairs check must not refuse.
-    let delta_rel = "partitions/default/views/s0/segments/flush-1/delta.arrow".to_string();
+    let delta_rel = shard_rel("views/s0/segments/flush-1/delta.arrow");
     let delta_path = prefix_dir.join(&delta_rel);
     mosaica_authz::write_delta_tier(
         &delta_path,
@@ -255,10 +262,11 @@ fn flushed_bundle_at(root: &Path, tenancy: u16) {
 
     let bits = bits_of(&[(n as u32 + 1, tenancy)]);
     let mut tenancy_index = Vec::new();
-    for (bit, path) in mosaica_store::tenancy::write(&prefix_dir.join(TENANCY_REL), &bits).unwrap()
+    let tenancy_rel = SHARD.tenancy_rel();
+    for (bit, path) in mosaica_store::tenancy::write(&prefix_dir.join(&tenancy_rel), &bits).unwrap()
     {
         let rel = format!(
-            "{TENANCY_REL}/{}",
+            "{tenancy_rel}/{}",
             path.file_name().unwrap().to_str().unwrap()
         );
         files.insert(rel.clone(), mosaica_store::digest_of(&path).unwrap());
@@ -309,7 +317,7 @@ fn refresh_digest(root: &Path, rel: &str) {
     let bytes = fs::read(prefix_dir.join(rel)).expect("the damaged file reads back");
     let digest = serde_json::json!({ "size": bytes.len(), "sha256": hex_sha256(&bytes) });
 
-    let segments_path = prefix_dir.join("partitions/default/SEGMENTS-1.json");
+    let segments_path = partition_dir(&prefix_dir, "default").join("SEGMENTS-1.json");
     let mut segments: serde_json::Value = fs::read(&segments_path)
         .map(|bytes| serde_json::from_slice(&bytes).unwrap())
         .unwrap_or_default();
@@ -405,7 +413,7 @@ fn the_partition_route_and_the_window_route_agree() {
     // claimed — surjectivity still holds — and what refuses is the derivation. The base is the
     // segment where the comparison is between two artefacts rather than a restatement of the
     // extent inversion the open performs.
-    let rel = "partitions/default/views/s0/segments/seg-0/columns.arrow";
+    let rel = &shard_rel("views/s0/segments/seg-0/columns.arrow");
     let path = root.join("v00000").join(rel);
     let reader = arrow::ipc::reader::FileReader::try_new(File::open(&path).unwrap(), None).unwrap();
     let schema = reader.schema();
@@ -442,7 +450,7 @@ fn the_partition_route_and_the_window_route_agree() {
 
 /// Rewrite the fixture's `SEGMENTS-1.json` through `change`.
 fn edit_side_manifest(root: &Path, change: impl FnOnce(&mut serde_json::Value)) {
-    let path = root.join("v00000/partitions/default/SEGMENTS-1.json");
+    let path = partition_dir(&root.join("v00000"), "default").join("SEGMENTS-1.json");
     let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     change(&mut value);
     fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
@@ -474,7 +482,7 @@ fn a_row_is_checked_at_its_numbers_tenancy_in_the_index() {
     let root = bundle_root(&temp);
     edit_side_manifest(&root, |m| {
         let files = m["files"].as_object_mut().unwrap();
-        files.retain(|rel, _| !rel.starts_with(TENANCY_REL));
+        files.retain(|rel, _| !rel.starts_with(&SHARD.tenancy_rel()));
     });
     assert!(matches!(
         verify(&root),
@@ -524,7 +532,7 @@ fn a_segment_whose_column_is_one_row_short_is_refused() {
     let temp = tempfile::TempDir::new().unwrap();
     flushed_bundle(temp.path());
     let root = bundle_root(&temp);
-    let rel = "partitions/default/views/s0/segments/flush-1/columns.arrow";
+    let rel = &shard_rel("views/s0/segments/flush-1/columns.arrow");
     let path = root.join("v00000").join(rel);
 
     let reader = arrow::ipc::reader::FileReader::try_new(File::open(&path).unwrap(), None).unwrap();
@@ -549,7 +557,7 @@ fn a_segment_whose_morton_column_is_out_of_order_is_refused() {
     let temp = tempfile::TempDir::new().unwrap();
     flushed_bundle(temp.path());
     let root = bundle_root(&temp);
-    let rel = "partitions/default/views/s0/segments/flush-1/morton.u32";
+    let rel = &shard_rel("views/s0/segments/flush-1/morton.u32");
     let path = root.join("v00000").join(rel);
 
     let mut bytes = fs::read(&path).unwrap();
@@ -573,7 +581,7 @@ fn a_posting_past_the_high_water_is_refused() {
     let temp = tempfile::TempDir::new().unwrap();
     flushed_bundle(temp.path());
     let root = bundle_root(&temp);
-    let rel = "partitions/default/terms/postings.arrow";
+    let rel = &shard_rel("terms/postings.arrow");
     let path = root.join("v00000").join(rel);
 
     let mut per_term = read_base_postings(&path);
@@ -594,7 +602,7 @@ fn a_posting_with_a_duplicate_entity_is_refused() {
     let temp = tempfile::TempDir::new().unwrap();
     flushed_bundle(temp.path());
     let root = bundle_root(&temp);
-    let rel = "partitions/default/terms/postings.arrow";
+    let rel = &shard_rel("terms/postings.arrow");
     let path = root.join("v00000").join(rel);
 
     let per_term = read_base_postings(&path);
@@ -654,11 +662,11 @@ fn a_pairs_file_missing_a_base_pair_is_refused() {
     let temp = tempfile::TempDir::new().unwrap();
     flushed_bundle(temp.path());
     let root = bundle_root(&temp);
-    let rel = "partitions/default/terms/pairs.parquet";
+    let rel = &shard_rel("terms/pairs.parquet");
     let path = root.join("v00000").join(rel);
 
     let mut per_term =
-        read_base_postings(&root.join("v00000/partitions/default/terms/postings.arrow"));
+        read_base_postings(&root.join("v00000").join(shard_rel("terms/postings.arrow")));
     let with_rows = per_term
         .iter()
         .position(|entities| !entities.is_empty())
@@ -697,7 +705,7 @@ fn a_permutation_leaving_a_row_unclaimed_is_refused() {
     let temp = tempfile::TempDir::new().unwrap();
     flushed_bundle(temp.path());
     let root = bundle_root(&temp);
-    let rel = "partitions/default/views/s0/permutation.bin";
+    let rel = &shard_rel("views/s0/permutation.bin");
     let path = root.join("v00000").join(rel);
 
     // `permutation.bin` is a 24-byte header, a `u32` per page of directory, zero padding to a
@@ -923,7 +931,7 @@ fn a_missing_scoped_render_lane_is_refused_and_an_intact_one_is_counted() {
 
     // The damage: the same rows, the same identities, the same row count — with the family's
     // column dropped out of one view's tail.
-    let rel = "partitions/default/views/quarter/2026-Q1/segments/seg-0/columns.arrow";
+    let rel = &shard_rel("views/quarter/2026-Q1/segments/seg-0/columns.arrow");
     let path = out.join("v00000").join(rel);
     let reader = arrow::ipc::reader::FileReader::try_new(File::open(&path).unwrap(), None).unwrap();
     let batches: Vec<RecordBatch> = reader.map(|b| b.unwrap()).collect();
@@ -989,7 +997,7 @@ fn a_cut_index_missing_a_cell_boundary_is_refused() {
     let temp = tempfile::TempDir::new().unwrap();
     flushed_bundle(temp.path());
     let root = bundle_root(&temp);
-    let rel = "partitions/default/views/s0/segments/seg-0/cuts.u32";
+    let rel = &shard_rel("views/s0/segments/seg-0/cuts.u32");
     let path = root.join("v00000").join(rel);
 
     let bytes = fs::read(&path).unwrap();
@@ -1003,7 +1011,7 @@ fn a_cut_index_missing_a_cell_boundary_is_refused() {
     refresh_digest(&root, rel);
     // The cell's code goes with it, so the two files still agree in length and the open passes
     // them to the check under test.
-    let codes_rel = "partitions/default/views/s0/segments/seg-0/cell-codes.u32";
+    let codes_rel = &shard_rel("views/s0/segments/seg-0/cell-codes.u32");
     let codes_path = root.join("v00000").join(codes_rel);
     let mut codes = fs::read(&codes_path).unwrap();
     codes.drain(4..8);
@@ -1029,7 +1037,7 @@ fn a_cell_code_that_is_not_its_cells_is_refused() {
     let temp = tempfile::TempDir::new().unwrap();
     flushed_bundle(temp.path());
     let root = bundle_root(&temp);
-    let rel = "partitions/default/views/s0/segments/seg-0/cell-codes.u32";
+    let rel = &shard_rel("views/s0/segments/seg-0/cell-codes.u32");
     let path = root.join("v00000").join(rel);
     let mut bytes = fs::read(&path).unwrap();
     bytes[0] ^= 1;
@@ -1041,13 +1049,13 @@ fn a_cell_code_that_is_not_its_cells_is_refused() {
 
 /// A bundle large enough for a band to hold a row, band 6 holding about one row in 64, with
 /// `score` rendered, and its base segment's `bands.bin`.
-fn banded_bundle(temp: &tempfile::TempDir) -> (PathBuf, &'static str, mosaica_store::bands::Bands) {
+fn banded_bundle(temp: &tempfile::TempDir) -> (PathBuf, String, mosaica_store::bands::Bands) {
     const ROWS: u64 = 1_000;
     built_bundle(temp.path(), ROWS, true);
     let root = bundle_root(temp);
-    let rel = "partitions/default/views/s0/segments/seg-0/bands.bin";
+    let rel = shard_rel("views/s0/segments/seg-0/bands.bin");
     let bands = mosaica_store::bands::Bands::open(
-        root.join("v00000").join(rel).parent().unwrap(),
+        root.join("v00000").join(&rel).parent().unwrap(),
         ROWS as u32,
     )
     .unwrap();
@@ -1061,6 +1069,7 @@ fn banded_bundle(temp: &tempfile::TempDir) -> (PathBuf, &'static str, mosaica_st
 fn a_band_entry_that_is_not_its_row_is_refused() {
     let temp = tempfile::TempDir::new().unwrap();
     let (root, rel, bands) = banded_bundle(&temp);
+    let rel = rel.as_str();
     drop(bands);
     let path = root.join("v00000").join(rel);
     let mut bytes = fs::read(&path).unwrap();
@@ -1076,6 +1085,7 @@ fn a_band_entry_that_is_not_its_row_is_refused() {
 fn a_render_copy_that_is_not_its_rows_value_is_refused() {
     let temp = tempfile::TempDir::new().unwrap();
     let (root, rel, bands) = banded_bundle(&temp);
+    let rel = rel.as_str();
     let at = bands.copy_range("score").expect("score is copied").start;
     drop(bands);
     let path = root.join("v00000").join(rel);
@@ -1095,7 +1105,7 @@ fn an_indexed_copy_that_is_not_its_items_value_is_refused() {
     built_bundle_with(temp.path(), ROWS, Some(Score::Indexed));
     let root = bundle_root(&temp);
     verify_deep(&root, &VerifyOpts::default()).expect("the built bundle verifies");
-    let rel = "partitions/default/views/s0/segments/seg-0/bands.bin";
+    let rel = &shard_rel("views/s0/segments/seg-0/bands.bin");
     let path = root.join("v00000").join(rel);
     let bands = mosaica_store::bands::Bands::open(path.parent().unwrap(), ROWS as u32).unwrap();
     assert_eq!(bands.indexed_names().collect::<Vec<_>>(), vec!["score"]);

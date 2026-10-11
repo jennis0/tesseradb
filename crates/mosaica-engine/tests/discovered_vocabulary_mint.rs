@@ -212,8 +212,7 @@ fn stored_code_of(root: &Path, column: &str, entity: EntityId) -> Option<u32> {
         for segment in &partition.manifest.segments {
             let dir = root
                 .join(prefix)
-                .join("partitions")
-                .join(phash)
+                .join(mosaica_store::ShardLayout::new(phash, mosaica_types::ShardId::ZERO).rel())
                 .join("views")
                 .join(&segment.view)
                 .join("segments")

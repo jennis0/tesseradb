@@ -42,9 +42,6 @@ use crate::{le_u32, le_u64};
 /// How many bits a tenancy has, and so how many bitmaps the index holds.
 pub const TENANCY_BITS: usize = Tenancy::BITS as usize;
 
-/// The directory a partition's index files sit in, beside its side-manifests.
-pub const TENANCY_DIR: &str = "tenancy";
-
 const MAGIC: &[u8; 4] = b"MSTN";
 const VERSION: u16 = 1;
 /// CRoaring's frozen reader needs its bytes 32-byte aligned, and a mapping is page-aligned.

@@ -126,6 +126,16 @@ pub const N_ITEMS: u64 = 10_000;
 pub const ALL_TERM: u64 = 0;
 pub const SUBSET_TERM: u64 = 1;
 
+/// The built bundle's partition, and its one shard.
+pub const PARTITION: &str = "default";
+pub const SHARD: mosaica_store::ShardLayout<'static> =
+    mosaica_store::ShardLayout::new(PARTITION, ShardId::ZERO);
+
+/// The built bundle's partition directory under `prefix_dir`: where its side-manifests are.
+pub fn partition_dir(prefix_dir: &Path) -> PathBuf {
+    mosaica_store::layout::partition_dir(prefix_dir, PARTITION)
+}
+
 /// A fixed, non-degenerate test key — the same canonical vector used across the identity
 /// construction's own tests (`mosaica_types::identity`'s `CANONICAL_KEY`) and
 /// `mosaica-build`'s fixture tests, so a mismatch between crates would show up as a vector
@@ -587,16 +597,18 @@ pub fn source_to_new_map(bundle_root: &Path, prefix: &str) -> BTreeMap<u64, u64>
 /// side-manifest as a publication names it.
 pub fn set_tenancy(bundle_root: &Path, number: EntityId, tenancy: u16) {
     use mosaica_store::manifest::{SegmentsManifest, TenancyBit};
-    use mosaica_store::tenancy::{bits_of, TENANCY_DIR};
+    use mosaica_store::tenancy::bits_of;
 
-    let partition = bundle_root.join("v00000/partitions/default");
+    let prefix_dir = bundle_root.join("v00000");
     let bits = bits_of(&[(number.raw() as u32, tenancy)]);
-    let path = partition.join("SEGMENTS-0.json");
+    let path = partition_dir(&prefix_dir).join("SEGMENTS-0.json");
     let mut manifest: SegmentsManifest =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    for (bit, file) in mosaica_store::tenancy::write(&partition.join(TENANCY_DIR), &bits).unwrap() {
+    let tenancy_rel = SHARD.tenancy_rel();
+    for (bit, file) in mosaica_store::tenancy::write(&prefix_dir.join(&tenancy_rel), &bits).unwrap()
+    {
         let name = file.file_name().unwrap().to_str().unwrap();
-        let rel = format!("partitions/default/{TENANCY_DIR}/{name}");
+        let rel = format!("{tenancy_rel}/{name}");
         manifest
             .files
             .insert(rel.clone(), mosaica_store::digest_of(&file).unwrap());

@@ -574,7 +574,7 @@ fn deep_verification_refuses_a_damaged_copy_and_a_missing_one() {
     std::fs::write(&copy, &good).unwrap();
 
     // The copy no longer named by the manifest the bundle serves.
-    let partition = prefix.join("partitions/default");
+    let partition = common::partition_dir(&prefix);
     let newest = std::fs::read_dir(&partition)
         .unwrap()
         .map(|e| e.unwrap().path())

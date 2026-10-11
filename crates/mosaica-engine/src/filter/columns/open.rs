@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use mosaica_filter::{ColumnPostings, RecordExtentPaths, RecordStack, SortedDict, ValueColumn};
 use mosaica_store::manifest::Visibility;
+use mosaica_store::ShardLayout;
 
 use super::{record_open_error, request_access, Column, FilterColumns, Layer, Route, TextLayer};
 use crate::filter::declared::{resolve_analyser, visibility_of};
@@ -21,7 +22,8 @@ use crate::filter::{
 /// [`FilterColumns::open`] at startup and, through [`FilterColumns::with_scoped_columns`], by a
 /// flush writing the first column of a family for a view created since the build.
 pub(super) fn open_scoped_column(
-    partition_dir: &Path,
+    prefix_dir: &Path,
+    shard: ShardLayout<'_>,
     family: &mosaica_store::manifest::ScopedScalar,
     view_id: &str,
     incarnation: mosaica_types::view::ViewIncarnation,
@@ -33,13 +35,7 @@ pub(super) fn open_scoped_column(
     // entity's value out of it, so it is held here with `filterable: false`, the same standing an
     // entity-scoped `derived` category with neither flag already has.
     let filterable = scoped_is_filterable(family);
-    // `attrs/<column>/<group>/<key>/`. Above the declared incarnation the key carries its own
-    // suffix: a recreated key opens its own base, leaving its predecessor's where the fold's
-    // reclaim expects to find it.
-    let mut dir = partition_dir.join("attrs").join(&family.name);
-    for component in mosaica_store::scoped_column_components(view_id, incarnation) {
-        dir.push(component);
-    }
+    let dir = prefix_dir.join(shard.scoped_column_rel(&family.name, view_id, incarnation));
     let name = scoped_column_name(&family.name, view_id);
     let placement = Placement {
         entity: true,
@@ -158,14 +154,14 @@ fn entity_text_layers(
     )
 }
 
-/// The record blob's stack for one partition: the base the schema owes, plus every extent named.
+/// The record blob's stack for one shard: the base the schema owes, plus every extent named.
 ///
 /// The base is owed exactly when the compiled schema has a blob-resident column with no other
 /// home ([`blob_resident`]); `unfolded` names the columns declared at a running service that have
 /// extents alone until a fold writes the base. Derived from the schema rather than probed for on
 /// disk, so a missing base is a refusal, never "those entities have no record".
 pub(crate) fn open_record_stack(
-    partition_dir: &Path,
+    shard_dir: &Path,
     declared: &[mosaica_store::manifest::DeclaredScalar],
     vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
     unfolded: &[String],
@@ -175,23 +171,21 @@ pub(crate) fn open_record_stack(
     let owes_base = declared
         .iter()
         .any(|d| !unfolded.iter().any(|name| name == &d.name) && blob_resident(d, vocabularies));
-    let record_dir = partition_dir.join("attrs").join("record");
+    let record_dir = shard_dir.join("attrs").join("record");
     RecordStack::open(owes_base.then_some(record_dir.as_path()), extents, access)
 }
 
-/// The entity→term transpose's stack for one partition: the base and every extent named.
+/// The entity→term transpose's stack for one shard: the base and every extent named.
 ///
 /// The base is unconditional, where the blob's is schema-dependent: every entity has a label set,
 /// so a build always writes one. A bundle that lacks it refuses the open rather than reading as
 /// "no entity carries a term", the fail-open direction on the write path.
 pub(crate) fn open_entity_terms_stack(
-    partition_dir: &Path,
+    prefix_dir: &Path,
+    shard: ShardLayout<'_>,
     extents: &[mosaica_store::EntityTermsExtentPaths],
 ) -> Result<mosaica_store::EntityTermsStack, mosaica_store::StoreError> {
-    mosaica_store::EntityTermsStack::open(
-        Some(&partition_dir.join(mosaica_store::ENTITY_TERMS_DIR)),
-        extents,
-    )
+    mosaica_store::EntityTermsStack::open(Some(&prefix_dir.join(shard.entity_terms_rel())), extents)
 }
 
 /// The stack a column declared at a running service opens with before any fold: no base, no
@@ -292,7 +286,8 @@ impl FilterColumns {
         let vocabularies = &manifest.vocabularies;
         let scoped = manifest.scoped_scalars();
         let view_incarnation = &|view: &str| manifest.incarnation_of(view);
-        let partition_dir = prefix_dir.join("partitions").join(partition);
+        let shard = ShardLayout::new(partition, mosaica_types::ShardId::ZERO);
+        let shard_dir = shard.dir(prefix_dir);
         let mut columns = BTreeMap::new();
         let mut placements = BTreeMap::new();
         for (declared_index, scalar) in declared.iter().enumerate() {
@@ -325,7 +320,7 @@ impl FilterColumns {
                 if !scalar.index {
                     continue;
                 }
-                let dir = partition_dir.join("attrs").join(&scalar.name);
+                let dir = shard_dir.join("attrs").join(&scalar.name);
                 let mut text_layers = vec![TextLayer::open_base(
                     &scalar.name,
                     &dir,
@@ -348,7 +343,7 @@ impl FilterColumns {
             if !owes_value_column(scalar, vocabularies) {
                 continue;
             }
-            let dir = partition_dir.join("attrs").join(&scalar.name);
+            let dir = shard_dir.join("attrs").join(&scalar.name);
             let (base, postings, route) = open_value_base(
                 &dir,
                 family,
@@ -380,7 +375,8 @@ impl FilterColumns {
                     continue;
                 };
                 let (name, placement, mut column) = open_scoped_column(
-                    &partition_dir,
+                    prefix_dir,
+                    shard,
                     family,
                     view_id,
                     incarnation,
@@ -423,7 +419,7 @@ impl FilterColumns {
             })
             .collect();
         let records = open_record_stack(
-            &partition_dir,
+            &shard_dir,
             declared,
             vocabularies,
             unfolded,
@@ -432,7 +428,8 @@ impl FilterColumns {
         )
         .map_err(record_open_error)?;
         let entity_terms = open_entity_terms_stack(
-            &partition_dir,
+            prefix_dir,
+            shard,
             &extents
                 .entity_terms
                 .iter()

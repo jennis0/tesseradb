@@ -157,10 +157,8 @@ fn item(root: &Path, attribute: &str, value: u64) -> u32 {
 
 /// Each item's record, as `(declared position, value)`.
 fn records(root: &Path) -> HashMap<u32, Vec<(u16, RecordValue)>> {
-    let dir = root
-        .join("v00000")
-        .join("partitions")
-        .join("default")
+    let dir = mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO)
+        .dir(&root.join("v00000"))
         .join("attrs")
         .join("record");
     let blob = RecordBlob::open_dir(&dir, Access::Read).expect("the blob opens");
@@ -793,8 +791,9 @@ fn creation_order_and_not_an_ids_value_numbers_items() {
     };
     let a = built(&dense, "dense");
     let b = built(&sparse, "sparse");
+    let shard = mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO);
     let view = |root: &Path, file: &str| {
-        std::fs::read(root.join("v00000/partitions/default/views/s0").join(file)).unwrap()
+        std::fs::read(root.join("v00000").join(shard.view_rel("s0")).join(file)).unwrap()
     };
     for file in ["permutation.bin", mosaica_store::ROW_ENTITY_FILE] {
         assert_eq!(view(&a, file), view(&b, file), "{file}");

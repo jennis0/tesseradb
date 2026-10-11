@@ -8,7 +8,7 @@ use mosaica_store::edited::{EditedRows, RowEntities};
 use mosaica_store::manifest::{DeclaredScalar, FileDigest, ManifestVocabulary, SegmentDescriptor};
 use mosaica_store::render_presence::RENDER_PRESENCE_DIR;
 use mosaica_store::{
-    fold_row_space, FoldRowSpaceSpec, FoldSegmentInput, PairsParquetWriter,
+    fold_row_space, FoldRowSpaceSpec, FoldSegmentInput, PairsParquetWriter, ShardLayout,
 };
 use mosaica_types::{IdentityKey, ShardId};
 
@@ -48,6 +48,12 @@ pub(crate) struct FoldContext {
     pub(crate) view_incarnations:
         std::collections::HashMap<String, mosaica_types::view::ViewIncarnation>,
     pub(crate) vocabularies: Vec<ManifestVocabulary>,
+}
+
+impl FoldContext {
+    pub(super) fn layout<'a>(&self, plan: &'a FoldPlan) -> ShardLayout<'a> {
+        ShardLayout::new(&plan.partition, self.shard_id)
+    }
 }
 
 /// The summary is carried to publication's log, since its timings and counts are not in the file.
@@ -116,9 +122,9 @@ pub(crate) fn execute(
     plan: FoldPlan,
     ctx: FoldContext,
 ) -> Result<CompletedFold, MaintenanceFailed> {
-    let partition_dir = ctx.to_prefix_dir.join("partitions").join(&plan.partition);
-    let terms_dir = partition_dir.join("terms");
-    let entities_dir = partition_dir.join("entities");
+    let shard_dir = ctx.layout(&plan).dir(&ctx.to_prefix_dir);
+    let terms_dir = shard_dir.join("terms");
+    let entities_dir = shard_dir.join("entities");
     for dir in [&terms_dir, &entities_dir] {
         std::fs::create_dir_all(dir).map_err(failed("creating the new prefix"))?;
     }
@@ -193,11 +199,7 @@ fn fold_row_spaces(
                 view.view
             )));
         };
-        let view_rel = format!(
-            "partitions/{}/{}",
-            plan.partition,
-            mosaica_store::view_rel(&view.view)
-        );
+        let view_rel = ctx.layout(plan).view_rel(&view.view);
         let view_dir = ctx.to_prefix_dir.join(&view_rel);
         std::fs::create_dir_all(&view_dir).map_err(failed("creating the view"))?;
         let segment_rel = format!("{view_rel}/segments/{}", ctx.seg_id);
@@ -280,22 +282,23 @@ fn derive_field_tallies(
     segments: &[SegmentDescriptor],
     out: &mut FoldOutput,
 ) -> Result<(), MaintenanceFailed> {
-    let partition_dir = ctx.to_prefix_dir.join("partitions").join(&plan.partition);
+    let layout = ctx.layout(plan);
+    let shard_dir = layout.dir(&ctx.to_prefix_dir);
     for segment in segments {
         let path = mosaica_store::field_tallies::derive_view(
-            &partition_dir,
+            &ctx.to_prefix_dir,
+            layout,
             &segment.view,
             &segment.seg_id,
             segment.row_count,
             &ctx.declared_scalars,
-            &|name| mosaica_filter::base_numbers(&partition_dir, name),
+            &|name| mosaica_filter::base_numbers(&shard_dir, name),
         )
         .map_err(failed("pass 4d (field tallies)"))?;
         out.push(
             format!(
-                "partitions/{}/{}/{}",
-                plan.partition,
-                mosaica_store::view_rel(&segment.view),
+                "{}/{}",
+                layout.view_rel(&segment.view),
                 mosaica_store::field_tallies::FIELD_TALLIES_FILE
             ),
             path,
@@ -313,8 +316,9 @@ fn fold_postings(
     terms_dir: &Path,
     out: &mut FoldOutput,
 ) -> Result<PathBuf, MaintenanceFailed> {
-    let postings_rel = format!("partitions/{}/terms/postings.arrow", plan.partition);
-    let pairs_rel = format!("partitions/{}/terms/pairs.parquet", plan.partition);
+    let shard_rel = ctx.layout(plan).rel();
+    let postings_rel = format!("{shard_rel}/terms/postings.arrow");
+    let pairs_rel = format!("{shard_rel}/terms/pairs.parquet");
     let postings_path = ctx.to_prefix_dir.join(&postings_rel);
     let pairs_path = ctx.to_prefix_dir.join(&pairs_rel);
     let spool_path = terms_dir.join("postings.spool");
@@ -369,9 +373,8 @@ fn derive_term_images(
             continue;
         }
         let permutation_path = ctx.to_prefix_dir.join(format!(
-            "partitions/{}/{}/permutation.bin",
-            plan.partition,
-            mosaica_store::view_rel(&segment.view)
+            "{}/permutation.bin",
+            ctx.layout(plan).view_rel(&segment.view)
         ));
         // From pass 1's file, so the images match the permutation that is published.
         let permutation = mosaica_store::Permutation::load(&permutation_path)
@@ -387,7 +390,7 @@ fn derive_term_images(
         };
         let file = mosaica_store::derived::term_image_file(
             &ctx.to_prefix_dir,
-            &plan.partition,
+            ctx.layout(plan),
             TERM_IMAGE_MANIFEST_N,
             &mut index,
         )
@@ -452,7 +455,7 @@ fn fold_unique_indexes(
             .files()
             .map(|rel| ctx.from_prefix_dir.join(rel))
             .collect();
-        let out_rel = mosaica_store::unique::index_dir_rel(&plan.partition, &index.attribute);
+        let out_rel = ctx.layout(plan).unique_index_rel(&index.attribute);
         let written = mosaica_store::unique::merge_unique_runs(
             &inputs,
             &plan.tombstones,
@@ -503,10 +506,8 @@ fn fold_edited_items(
             direction,
             &inputs,
             &plan.tombstones,
-            &ctx.to_prefix_dir.join(mosaica_store::edited::runs_dir_rel(
-                &plan.partition,
-                direction,
-            )),
+            &ctx.to_prefix_dir
+                .join(ctx.layout(plan).edited_runs_rel(direction)),
             "base",
         )
         .map_err(failed("pass 3c (edited items)"))?;

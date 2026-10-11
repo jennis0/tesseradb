@@ -721,8 +721,11 @@ async fn a_view_outside_the_group_is_byte_identical_to_a_build_without_the_famil
                 .unwrap()
                 .path()
         };
-        let phash = one(&root.join("v00000").join("partitions"));
-        one(&phash.join("views").join("world").join("segments"))
+        let prefix = root.join("v00000");
+        let phash = one(&mosaica_store::layout::partitions_dir(&prefix));
+        let phash = phash.file_name().unwrap().to_str().unwrap();
+        let shard = mosaica_store::ShardLayout::new(phash, mosaica_types::ShardId::ZERO);
+        one(&prefix.join(shard.view_rel("world")).join("segments"))
     };
     // **The listing as well as the bytes.** A presence bitmap is a file *beside* `columns.arrow`
     // (decision 0064), so a lane leaking into a view outside the scope could leave

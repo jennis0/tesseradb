@@ -60,7 +60,8 @@ use mosaica_store::manifest::{EntitySet, ManifestVocabulary, SegmentsManifest};
 use mosaica_store::merge::MergePolicy;
 use mosaica_store::render_presence::RENDER_PRESENCE_DIR;
 use mosaica_store::vocabulary::{MintError, Minted, Vocabularies};
-use mosaica_types::{EntityId, IdentityKey, TermId};
+use mosaica_store::ShardLayout;
+use mosaica_types::{EntityId, IdentityKey, ShardId, TermId};
 
 use crate::error::EngineError;
 use crate::{Generation, GenerationHandle};

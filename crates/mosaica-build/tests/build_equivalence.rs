@@ -870,11 +870,19 @@ fn batched_build_is_byte_identical_to_the_batched_reference() {
     // no-op): the batched bundle differs from the single-batch one.
     let single = temp.path().join("single");
     build(&args_for(&points, &pairs, single.clone())).unwrap();
-    let batched_perm =
-        std::fs::read(streaming_out.join("v00000/partitions/default/views/s0/permutation.bin"))
-            .unwrap();
-    let single_perm =
-        std::fs::read(single.join("v00000/partitions/default/views/s0/permutation.bin")).unwrap();
+    let permutation = |out: &std::path::Path| {
+        std::fs::read(
+            out.join("v00000")
+                .join(
+                    mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO)
+                        .view_rel("s0"),
+                )
+                .join("permutation.bin"),
+        )
+        .unwrap()
+    };
+    let batched_perm = permutation(&streaming_out);
+    let single_perm = permutation(&single);
     assert_ne!(
         batched_perm, single_perm,
         "two batches must produce a different (per-batch) assignment than one"
@@ -956,10 +964,8 @@ fn entity_ids_follow_signature_order() {
     let bundle = mosaica_store::read::open_bundle(&out).unwrap();
     let partition = bundle.partitions.values().next().unwrap();
     let n = partition.manifest.entity_id_high_water as usize;
-    let pairs_path = out
-        .join("v00000")
-        .join("partitions")
-        .join("default")
+    let pairs_path = mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO)
+        .dir(&out.join("v00000"))
         .join("terms")
         .join("pairs.parquet");
     let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(

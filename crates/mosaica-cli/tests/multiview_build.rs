@@ -390,7 +390,15 @@ fn the_whole_declaration_builds_and_verifies() {
     let bundle = at("bundle");
     for key in ["q1", "q2"] {
         for file in ["values.arrow", "presence.roaring"] {
-            let rel = format!("partitions/default/attrs/sentiment/quarter/{key}/{file}");
+            let rel = format!(
+                "{}/{file}",
+                mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO)
+                    .scoped_column_rel(
+                        "sentiment",
+                        &format!("quarter:{key}"),
+                        mosaica_types::view::DECLARED_INCARNATION,
+                    )
+            );
             assert!(bundle.join("v00000").join(&rel).is_file(), "{rel}");
         }
     }

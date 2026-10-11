@@ -273,7 +273,10 @@ fn build_bundle() -> tempfile::TempDir {
 }
 
 fn segment_dir(out: &Path) -> PathBuf {
-    out.join("v00000/partitions/default/views/s0/segments/seg-0")
+    out.join("v00000").join(
+        mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO)
+            .segment_rel("s0", "seg-0"),
+    )
 }
 
 /// Entity id → source id, through the unique `id` column.

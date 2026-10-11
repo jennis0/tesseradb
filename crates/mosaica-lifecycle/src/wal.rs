@@ -2856,7 +2856,7 @@ mod tests {
                 attribute: "doi".into(),
                 unique: true,
                 base: vec![DeclaredRun {
-                    path: "partitions/p/entities/unique/doi/declared-1-base-0.keys".into(),
+                    path: "entities/unique/doi/declared-1-base-0.keys".into(),
                     sha256: "03".repeat(32),
                     size: 8192,
                     first_key: "1f".into(),

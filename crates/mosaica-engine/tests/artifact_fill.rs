@@ -115,8 +115,7 @@ fn content_extents(fx: &Fixture, want: usize) {
     let dir = fx
         .root
         .join("v00000")
-        .join("partitions")
-        .join("default")
+        .join(common::SHARD.rel())
         .join("attrs")
         .join("record")
         .join("extents");

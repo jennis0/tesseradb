@@ -18,7 +18,10 @@ use mosaica_store::manifest::{
     Quantisation, SegmentDescriptor, SegmentsManifest, ViewDescriptor,
 };
 use mosaica_store::write::{write_permutation, write_segment};
+use mosaica_store::ShardLayout;
 use mosaica_types::{EntityId, MosaicaId, ShardId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+
+const SHARD: ShardLayout<'static> = ShardLayout::new("default", ShardId::ZERO);
 
 /// A synthetic `mosaica_id`-shaped value (splitmix64 over a seed) — same stand-in as
 /// `bundle_read.rs`; the identity construction itself is not under test here.
@@ -86,9 +89,8 @@ fn build_bundle(root: &Path) {
     let codes = sort_batch(&mut items, &mut entity_ids);
 
     let prefix_dir = root.join("v00000");
-    let partition_dir = prefix_dir.join("partitions").join("default");
-    let view_dir = partition_dir.join("views").join("main");
-    let seg_dir = view_dir.join("segments").join("seg0");
+    let view_dir = prefix_dir.join(SHARD.view_rel("main"));
+    let seg_dir = prefix_dir.join(SHARD.segment_rel("main", "seg0"));
     fs::create_dir_all(&seg_dir).expect("mkdir seg_dir");
 
     write_segment(&seg_dir, &items, &codes, &[], &[]).expect("write_segment");
@@ -96,10 +98,10 @@ fn build_bundle(root: &Path) {
         .expect("write_permutation");
 
     let mut segments_files = BTreeMap::new();
-    let rels = std::iter::once("partitions/default/views/main/permutation.bin".to_string()).chain(
+    let rels = std::iter::once(format!("{}/permutation.bin", SHARD.view_rel("main"))).chain(
         mosaica_store::SEGMENT_FILES
             .iter()
-            .map(|name| format!("partitions/default/views/main/segments/seg0/{name}")),
+            .map(|name| format!("{}/{name}", SHARD.segment_rel("main", "seg0"))),
     );
     for rel in rels {
         segments_files.insert(rel.clone(), file_digest(&prefix_dir.join(&rel)));
@@ -124,7 +126,11 @@ fn build_bundle(root: &Path) {
         ..SegmentsManifest::empty()
     };
     let segments_bytes = serde_json::to_vec_pretty(&segments_manifest).expect("serialise");
-    fs::write(partition_dir.join("SEGMENTS-0.json"), &segments_bytes).expect("write SEGMENTS-0");
+    fs::write(
+        mosaica_store::layout::partition_dir(&prefix_dir, "default").join("SEGMENTS-0.json"),
+        &segments_bytes,
+    )
+    .expect("write SEGMENTS-0");
 
     let manifest = Manifest {
         bundle_format: mosaica_types::BUNDLE_FORMAT,

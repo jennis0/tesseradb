@@ -251,7 +251,8 @@ fn base_postings_of(root: &Path, prefix: &str) -> PostingsReader {
     PostingsReader::open(
         &root
             .join(prefix)
-            .join("partitions/default/terms/postings.arrow"),
+            .join(common::SHARD.rel())
+            .join("terms/postings.arrow"),
         false,
     )
     .expect("the folded prefix's base postings open")
@@ -701,7 +702,7 @@ fn the_startup_sweep_reclaims_an_orphaned_prefix_and_leaves_everything_else() {
 
     // What a discarded fold leaves: a complete-looking tree under a name CURRENT never took.
     let orphan = root.join("v00007");
-    std::fs::create_dir_all(orphan.join("partitions/default/terms")).unwrap();
+    std::fs::create_dir_all(common::SHARD.dir(&orphan).join("terms")).unwrap();
     std::fs::write(orphan.join("MANIFEST.json"), b"{}").unwrap();
     // And something that is not a prefix at all, which the sweep must not guess about.
     let stray = root.join("stray");
@@ -2319,7 +2320,7 @@ fn the_dead_bytes_route_dispatches_a_fold_on_a_bundle_with_nothing_deleted() {
     let segments_n = generation.bundle.partitions["default"].segments_n;
     let manifests = [
         prefix.join("MANIFEST.json"),
-        prefix.join(format!("partitions/default/SEGMENTS-{segments_n}.json")),
+        common::partition_dir(&prefix).join(format!("SEGMENTS-{segments_n}.json")),
     ]
     .iter()
     .map(|path| {

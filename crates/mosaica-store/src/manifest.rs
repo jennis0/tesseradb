@@ -2604,7 +2604,11 @@ mod tests {
     fn a_term_image_list_round_trips_and_an_absent_one_is_refused() {
         let mut manifest = SegmentsManifest::empty();
         manifest.term_image_extents.push(TermImageExtent {
-            path: "partitions/default/term-images/term-images-000000-000.timg".to_string(),
+            path: format!(
+                "{}/term-images-000000-000.timg",
+                crate::ShardLayout::new("default", mosaica_types::ShardId::ZERO)
+                    .derived_rel("term-images")
+            ),
             view: "s0".to_string(),
             incarnation: DECLARED_INCARNATION,
             dict_len: 41,
@@ -2631,7 +2635,10 @@ mod tests {
         let mut manifest = SegmentsManifest::empty();
         manifest.tenancy_index.push(TenancyBit {
             bit: 3,
-            path: "partitions/default/tenancy/bit-03.tenancy".to_string(),
+            path: format!(
+                "{}/bit-03.tenancy",
+                crate::ShardLayout::new("default", mosaica_types::ShardId::ZERO).tenancy_rel()
+            ),
         });
         manifest.retired_numbers = EntitySet::of(&croaring::Bitmap::of(&[7, 9]));
         let bytes = serde_json::to_vec(&manifest).expect("a manifest serialises");
@@ -2655,7 +2662,11 @@ mod tests {
     #[test]
     fn every_derived_form_round_trips_and_an_absent_list_is_refused() {
         let entry = |form: DerivedForm, view: Option<&str>| DerivedExtent {
-            path: format!("partitions/default/{}/x", form.dir()),
+            path: format!(
+                "{}/x",
+                crate::ShardLayout::new("default", mosaica_types::ShardId::ZERO)
+                    .derived_rel(form.dir())
+            ),
             layer: "regions".to_string(),
             level: 0,
             level_version: 3,

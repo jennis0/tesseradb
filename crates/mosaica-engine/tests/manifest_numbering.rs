@@ -20,7 +20,7 @@ use mosaica_engine::{Engine, EngineConfig};
 use mosaica_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite};
 
 fn partition_dir(root: &Path, prefix: &str) -> PathBuf {
-    root.join(prefix).join("partitions").join("default")
+    common::partition_dir(&root.join(prefix))
 }
 
 /// Every `n` a `SEGMENTS-<n>.json` in `dir` is named with, ascending.
@@ -162,7 +162,7 @@ fn an_executor_seeds_above_a_side_manifest_no_manifest_names() {
         engine.generation().prefix.clone()
     };
     let dir = partition_dir(&root, &prefix);
-    let unnamed = root.join(&prefix).join("partitions").join("unnamed");
+    let unnamed = mosaica_store::layout::partition_dir(&root.join(&prefix), "unnamed");
     std::fs::create_dir_all(&unnamed).unwrap();
     std::fs::copy(dir.join("SEGMENTS-0.json"), unnamed.join("SEGMENTS-9.json")).unwrap();
 

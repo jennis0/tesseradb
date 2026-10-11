@@ -13,7 +13,8 @@ use super::*;
 use crate::flush::SMALL_TERM_THRESHOLD;
 
 const PARTITION: &str = "p0";
-const OUT_REL: &str = "partitions/p0/coalesced/coalesce-1-1";
+const SHARD: mosaica_store::ShardLayout<'static> =
+    mosaica_store::ShardLayout::new(PARTITION, ShardId::ZERO);
 const VIEWS: [&str; 2] = ["quarter:2026-Q1", "quarter:2026-Q3"];
 const KEYS: [&str; 5] = ["alpha", "beta", "gamma", "delta", "epsilon"];
 
@@ -122,7 +123,7 @@ impl Fixture {
         let ctx = CoalesceContext {
             prefix_dir: self.prefix_dir.clone(),
             prefix: "v00000".to_string(),
-            out_rel: OUT_REL.to_string(),
+            out_rel: format!("{}/coalesce-1-1", SHARD.coalesced_rel()),
         };
         execute_coalesce(plan, ctx)
     }
@@ -242,10 +243,8 @@ impl Fixture {
 
     fn column_rel(column: &str, view: Option<(&str, ViewIncarnation)>) -> String {
         match view {
-            None => format!("partitions/{PARTITION}/attrs/{column}"),
-            Some((view, incarnation)) => {
-                mosaica_store::scoped_column_rel(PARTITION, column, view, incarnation)
-            }
+            None => format!("{}/attrs/{column}", SHARD.rel()),
+            Some((view, incarnation)) => SHARD.scoped_column_rel(column, view, incarnation),
         }
     }
 
@@ -297,7 +296,7 @@ impl Fixture {
     }
 
     fn write_record(&mut self, seg: &str, entities: &[u32]) {
-        let dir = format!("partitions/{PARTITION}/attrs/record/extents");
+        let dir = format!("{}/attrs/record/extents", SHARD.rel());
         std::fs::create_dir_all(self.path(&dir)).unwrap();
         let extent = RecordExtent {
             blocks: format!("{dir}/{seg}.blocks.bin"),
@@ -386,7 +385,7 @@ impl Fixture {
     }
 
     fn write_entity_terms(&mut self, seg: &str, flush: u32, entities: &[u32]) {
-        let dir = format!("partitions/{PARTITION}/entities/terms/extents");
+        let dir = format!("{}/extents", SHARD.entity_terms_rel());
         std::fs::create_dir_all(self.path(&dir)).unwrap();
         let extent = EntityTermsExtent {
             hasrow: format!("{dir}/{seg}.hasrow.roaring"),

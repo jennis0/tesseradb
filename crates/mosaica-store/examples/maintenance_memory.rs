@@ -78,12 +78,7 @@ fn dir_bytes(dir: &Path) -> u64 {
 }
 
 fn seg_dir(root: &Path, seg_id: &str) -> PathBuf {
-    root.join("partitions")
-        .join(PARTITION)
-        .join("views")
-        .join(VIEW)
-        .join("segments")
-        .join(seg_id)
+    root.join(mosaica_store::ShardLayout::new(PARTITION, ShardId::ZERO).segment_rel(VIEW, seg_id))
 }
 
 /// Write `segments` flush segments of `rows` rows each. Coordinates are a function of the entity

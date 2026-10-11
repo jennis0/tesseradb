@@ -164,10 +164,11 @@ fn current_prefix(out: &Path) -> String {
     current["prefix"].as_str().unwrap().to_string()
 }
 
-fn partition_dir(out: &Path) -> PathBuf {
+fn shard_dir(out: &Path) -> PathBuf {
     let bundle = open_bundle(out).unwrap();
     let phash = bundle.partitions.keys().next().unwrap().clone();
-    out.join(current_prefix(out)).join("partitions").join(phash)
+    mosaica_store::ShardLayout::new(&phash, mosaica_types::ShardId::ZERO)
+        .dir(&out.join(current_prefix(out)))
 }
 
 /// **The index and the blob, both, from one build.**
@@ -175,7 +176,7 @@ fn partition_dir(out: &Path) -> PathBuf {
 fn an_indexed_text_column_writes_a_token_index_and_a_blob_row() {
     let dir = build_with(text_schema(true));
     let out = dir.path().join("bundle");
-    let column_dir = partition_dir(&out).join("attrs").join("abstract");
+    let column_dir = shard_dir(&out).join("attrs").join("abstract");
 
     // --- entity space: the dictionary holds the analyser's terms, deduplicated and sorted.
     let dict = SortedDict::open_dir(&column_dir, Access::Read).expect("the token dictionary opens");
@@ -229,11 +230,8 @@ fn an_indexed_text_column_writes_a_token_index_and_a_blob_row() {
     }
 
     // --- and the third home: the prose itself, which no posting could reconstruct.
-    let blob = RecordBlob::open_dir(
-        &partition_dir(&out).join("attrs").join("record"),
-        Access::Read,
-    )
-    .expect("an indexed text column still has a blob row");
+    let blob = RecordBlob::open_dir(&shard_dir(&out).join("attrs").join("record"), Access::Read)
+        .expect("an indexed text column still has a blob row");
     for source in [0u64, 1, 2, 3, 63] {
         let entity = source_of[&source];
         let fields = blob
@@ -263,7 +261,7 @@ fn an_indexed_text_column_writes_a_token_index_and_a_blob_row() {
 fn an_unindexed_text_column_has_the_blob_row_and_no_index() {
     let dir = build_with(text_schema(false));
     let out = dir.path().join("bundle");
-    let column_dir = partition_dir(&out).join("attrs").join("abstract");
+    let column_dir = shard_dir(&out).join("attrs").join("abstract");
     assert!(
         !column_dir.join(mosaica_filter::DICT_FILE).exists(),
         "an unindexed text column wrote a dictionary"
@@ -273,11 +271,8 @@ fn an_unindexed_text_column_has_the_blob_row_and_no_index() {
         "an unindexed text column wrote postings"
     );
 
-    let blob = RecordBlob::open_dir(
-        &partition_dir(&out).join("attrs").join("record"),
-        Access::Read,
-    )
-    .expect("the blob is where an unindexed text value lives");
+    let blob = RecordBlob::open_dir(&shard_dir(&out).join("attrs").join("record"), Access::Read)
+        .expect("the blob is where an unindexed text value lives");
     let source_of = common::entities_of(&out, "id", 0..N);
     assert_eq!(
         blob.fields_of(source_of[&5]).unwrap(),

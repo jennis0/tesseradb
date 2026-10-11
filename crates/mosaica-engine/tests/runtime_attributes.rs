@@ -327,8 +327,7 @@ fn partitions_with_base(root: &Path, column: &str) -> (usize, usize) {
         total += 1;
         if root
             .join(&current.prefix)
-            .join("partitions")
-            .join(phash)
+            .join(mosaica_store::ShardLayout::new(phash, mosaica_types::ShardId::ZERO).rel())
             .join("attrs")
             .join(column)
             .join(mosaica_filter::VALUES_FILE)

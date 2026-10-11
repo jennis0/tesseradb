@@ -18,8 +18,20 @@ use mosaica_store::manifest::{
     Quantisation, SegmentDescriptor, SegmentsManifest, ViewDescriptor,
 };
 use mosaica_store::write::{write_permutation, write_segment};
-use mosaica_store::{open_bundle, tile_ranges, StoreError};
+use mosaica_store::{open_bundle, tile_ranges, ShardLayout, StoreError};
 use mosaica_types::{EntityId, MosaicaId, ShardId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+
+const SHARD: ShardLayout<'static> = ShardLayout::new("default", ShardId::ZERO);
+
+/// `file` in `seg_id` of the "main" view, prefix-relative.
+fn seg_file(seg_id: &str, file: &str) -> String {
+    format!("{}/{file}", SHARD.segment_rel("main", seg_id))
+}
+
+/// The "default" partition's directory under `root`'s bundle prefix.
+fn partition_dir(root: &Path) -> std::path::PathBuf {
+    mosaica_store::layout::partition_dir(&root.join("v00000"), "default")
+}
 
 /// A synthetic `mosaica_id`-shaped value for test fixtures: full splitmix64 output over a
 /// seed, so its top 16 bits are a `priority` prefix like any real `mosaica_id` (contracts
@@ -77,9 +89,8 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
     let codes = sort_batch(&mut items, &mut entity_ids);
 
     let prefix_dir = root.join("v00000");
-    let partition_dir = prefix_dir.join("partitions").join("default");
-    let view_dir = partition_dir.join("views").join("main");
-    let seg_dir = view_dir.join("segments").join("seg0");
+    let view_dir = prefix_dir.join(SHARD.view_rel("main"));
+    let seg_dir = prefix_dir.join(SHARD.segment_rel("main", "seg0"));
     fs::create_dir_all(&seg_dir).expect("mkdir seg_dir");
 
     write_segment(&seg_dir, &items, &codes, &[], &[]).expect("write_segment");
@@ -97,14 +108,11 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
     // added since MANIFEST.
     let mut segments_files = BTreeMap::new();
     segments_files.insert(
-        "partitions/default/views/main/permutation.bin".to_string(),
+        format!("{}/permutation.bin", SHARD.view_rel("main")),
         file_digest(&view_dir.join("permutation.bin")),
     );
     for name in mosaica_store::SEGMENT_FILES {
-        segments_files.insert(
-            format!("partitions/default/views/main/segments/seg0/{name}"),
-            file_digest(&seg_dir.join(name)),
-        );
+        segments_files.insert(seg_file("seg0", name), file_digest(&seg_dir.join(name)));
     }
 
     let segments_manifest = SegmentsManifest {
@@ -126,7 +134,8 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
         ..SegmentsManifest::empty()
     };
     let segments_bytes = serde_json::to_vec_pretty(&segments_manifest).expect("serialise");
-    fs::write(partition_dir.join("SEGMENTS-0.json"), &segments_bytes).expect("write SEGMENTS-0");
+    fs::write(partition_dir(root).join("SEGMENTS-0.json"), &segments_bytes)
+        .expect("write SEGMENTS-0");
 
     let manifest = Manifest {
         bundle_format: mosaica_types::BUNDLE_FORMAT,
@@ -334,7 +343,7 @@ fn tile_ranges_covers_the_whole_segment_at_depth_zero() {
 /// manifests carry no digest of their own; only the `files` entries *inside* them are
 /// verified).
 fn edit_segments_manifest(root: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
-    let path = root.join("v00000/partitions/default/SEGMENTS-0.json");
+    let path = partition_dir(root).join("SEGMENTS-0.json");
     let mut value: serde_json::Value =
         serde_json::from_slice(&fs::read(&path).expect("read SEGMENTS-0.json"))
             .expect("parse SEGMENTS-0.json");
@@ -354,7 +363,7 @@ fn edit_segments_manifest(root: &Path, edit: impl FnOnce(&mut serde_json::Value)
 /// is why one test (`a_deny_carrying_manifest_whose_files_are_missing_is_still_refused`) breaks
 /// the pattern deliberately and has `edit` name a file that does not exist.
 fn add_segments_manifest(root: &Path, n: u64, edit: impl FnOnce(&mut serde_json::Value)) {
-    let dir = root.join("v00000/partitions/default");
+    let dir = partition_dir(root);
     let mut value: serde_json::Value =
         serde_json::from_slice(&fs::read(dir.join("SEGMENTS-0.json")).expect("read SEGMENTS-0"))
             .expect("parse SEGMENTS-0.json");
@@ -400,7 +409,7 @@ fn deny_set(ids: &[u32]) -> EntitySet {
 }
 
 fn name_a_missing_file(value: &mut serde_json::Value) {
-    value["files"]["partitions/default/views/main/segments/seg-unsynced/columns.arrow"] =
+    value["files"][seg_file("seg-unsynced", "columns.arrow")] =
         serde_json::json!({ "size": 4, "sha256": "00".repeat(32) });
 }
 
@@ -542,8 +551,10 @@ fn a_deny_alongside_deltas_is_not_stepped_past_either() {
 
     add_segments_manifest(dir.path(), 1, |value| {
         value["deny"] = serde_json::to_value(deny_set(&[17])).unwrap();
-        value["deltas"] =
-            serde_json::json!(["partitions/p/views/s0/segments/flush-1-1/delta.arrow"]);
+        value["deltas"] = serde_json::json!([format!(
+            "{}/delta.arrow",
+            ShardLayout::new("p", ShardId::ZERO).segment_rel("s0", "flush-1-1")
+        )]);
         name_a_missing_file(value);
     });
 
@@ -609,8 +620,10 @@ fn a_candidate_with_no_deny_state_steps_down_and_serves() {
     let dir = tempfile::tempdir().expect("tempdir");
     build_bundle(dir.path(), 50);
     add_segments_manifest(dir.path(), 1, |value| {
-        value["deltas"] =
-            serde_json::json!(["partitions/p/views/s0/segments/flush-1-1/delta.arrow"]);
+        value["deltas"] = serde_json::json!([format!(
+            "{}/delta.arrow",
+            ShardLayout::new("p", ShardId::ZERO).segment_rel("s0", "flush-1-1")
+        )]);
         name_a_missing_file(value);
     });
 
@@ -651,7 +664,7 @@ fn every_candidate_failing_verification_exhausts_the_candidate_list() {
     build_bundle(dir.path(), 50);
     edit_segments_manifest(dir.path(), name_a_missing_file);
     add_segments_manifest(dir.path(), 1, |value| {
-        value["files"]["partitions/default/views/main/segments/seg-newest/columns.arrow"] =
+        value["files"][seg_file("seg-newest", "columns.arrow")] =
             serde_json::json!({ "size": 4, "sha256": "00".repeat(32) });
     });
 
@@ -833,7 +846,8 @@ fn open_bundle_fails_closed_on_a_corrupted_columns_arrow_byte() {
 
     let columns_path = dir
         .path()
-        .join("v00000/partitions/default/views/main/segments/seg0/columns.arrow");
+        .join("v00000")
+        .join(seg_file("seg0", "columns.arrow"));
     let mut bytes = fs::read(&columns_path).expect("read columns.arrow");
     // Flip a byte roughly in the middle of the file — inside the record batch body, not the
     // footer/magic, so this is a content corruption a naive length-only check would miss.
@@ -882,7 +896,7 @@ fn open_bundle_rejects_a_segments_manifest_that_omits_columns_arrow_from_files()
         value["files"]
             .as_object_mut()
             .expect("files is an object")
-            .remove("partitions/default/views/main/segments/seg0/columns.arrow");
+            .remove(&seg_file("seg0", "columns.arrow"));
     });
 
     let err = open_bundle(dir.path())
@@ -907,7 +921,8 @@ fn a_segment_without_its_bands_does_not_open() {
     build_bundle(dir.path(), 40);
     let seg_dir = dir
         .path()
-        .join("v00000/partitions/default/views/main/segments/seg0");
+        .join("v00000")
+        .join(SHARD.segment_rel("main", "seg0"));
     fs::remove_file(seg_dir.join(mosaica_store::bands::BANDS_FILE)).unwrap();
     let refused = mosaica_store::read::SegmentData::load(
         &seg_dir,
@@ -930,7 +945,9 @@ fn open_bundle_rejects_a_permutation_slot_pointing_past_row_count() {
 
     let perm_path = dir
         .path()
-        .join("v00000/partitions/default/views/main/permutation.bin");
+        .join("v00000")
+        .join(SHARD.view_rel("main"))
+        .join("permutation.bin");
     let mut bytes = fs::read(&perm_path).expect("read permutation.bin");
 
     // The bound is 60, so the file holds one page and the payload starts at the first 4 KiB
@@ -947,7 +964,7 @@ fn open_bundle_rejects_a_permutation_slot_pointing_past_row_count() {
     // defences (one catches bit-flips, the other catches internally-consistent-but-wrong data).
     let corrected = file_digest(&perm_path);
     edit_segments_manifest(dir.path(), |value| {
-        let entry = &mut value["files"]["partitions/default/views/main/permutation.bin"];
+        let entry = &mut value["files"][format!("{}/permutation.bin", SHARD.view_rel("main"))];
         entry["size"] = serde_json::json!(corrected.size);
         entry["sha256"] = serde_json::json!(corrected.sha256);
     });
@@ -1164,7 +1181,8 @@ fn a_just_written_prefix_skips_the_digest_sweep_and_open_bundle_does_not() {
 
     let columns_path = dir
         .path()
-        .join("v00000/partitions/default/views/main/segments/seg0/columns.arrow");
+        .join("v00000")
+        .join(seg_file("seg0", "columns.arrow"));
     let mut bytes = fs::read(&columns_path).expect("read columns.arrow");
     // Mid-file, inside the record batch body rather than the footer, so the file still *parses*:
     // the only thing that separates it from the original is the digest, which is exactly the check
@@ -1225,7 +1243,7 @@ fn add_segments_manifest_named(
     version: u64,
     edit: impl FnOnce(&mut serde_json::Value),
 ) {
-    let dir = root.join("v00000/partitions/default");
+    let dir = partition_dir(root);
     let mut value: serde_json::Value =
         serde_json::from_slice(&fs::read(dir.join("SEGMENTS-0.json")).expect("read SEGMENTS-0"))
             .expect("parse SEGMENTS-0.json");
@@ -1344,7 +1362,7 @@ fn canonical_zero_and_multi_digit_names_still_open() {
 fn a_crashed_write_orphan_is_not_a_candidate() {
     let dir = tempfile::tempdir().expect("tempdir");
     build_bundle(dir.path(), 50);
-    let partition = dir.path().join("v00000/partitions/default");
+    let partition = partition_dir(dir.path());
     fs::write(partition.join("SEGMENTS-1.json.tmp"), b"{}").expect("write orphan");
     fs::write(partition.join("notes.txt"), b"hello").expect("write stray");
 

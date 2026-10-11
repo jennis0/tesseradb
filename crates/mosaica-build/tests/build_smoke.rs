@@ -19,6 +19,7 @@ use parquet::arrow::ArrowWriter;
 use mosaica_build::{build, signature_sort_key, BuildArgs};
 use mosaica_spatial::Bounds;
 use mosaica_store::read::open_bundle;
+use mosaica_store::ShardLayout;
 use mosaica_types::{IdentityKey, ShardId, TermId};
 
 mod common;
@@ -172,8 +173,10 @@ fn posting_entities(path: &Path, term: TermId) -> BTreeSet<u64> {
     out
 }
 
-fn partition_dir(root: &Path, prefix: &str) -> PathBuf {
-    root.join(prefix).join("partitions").join("default")
+const SHARD: ShardLayout<'static> = ShardLayout::new("default", ShardId::ZERO);
+
+fn shard_dir(root: &Path, prefix: &str) -> PathBuf {
+    SHARD.dir(&root.join(prefix))
 }
 
 #[test]
@@ -262,40 +265,44 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
          empty, got {:?}",
         part.manifest.files
     );
-    for rel in [
-        "dictionary/terms-0.dict",
-        "partitions/default/terms/postings.arrow",
-        "partitions/default/terms/pairs.parquet",
+    let shard_files = [
+        "terms/postings.arrow",
+        "terms/pairs.parquet",
         // The unique `id` column's index, and the record blob that holds its values.
-        "partitions/default/entities/unique/id/base-0.keys",
-        "partitions/default/attrs/record/blocks.bin",
-        "partitions/default/attrs/record/directory.arrow",
-        "partitions/default/attrs/record/hasrow.roaring",
+        "entities/unique/id/base-0.keys",
+        "attrs/record/blocks.bin",
+        "attrs/record/directory.arrow",
+        "attrs/record/hasrow.roaring",
         // The entity→term transpose (contracts §2.4), unconditional: every entity has a label
         // set, so a build always writes one, and a bundle without it refuses at open.
-        "partitions/default/entities/terms/hasrow.roaring",
-        "partitions/default/entities/terms/offsets.u32",
-        "partitions/default/entities/terms/terms.u32",
+        "entities/terms/hasrow.roaring",
+        "entities/terms/offsets.u32",
+        "entities/terms/terms.u32",
         // The offsets' block bases: one u64 per 65,536 has-row ranks, which is what takes the
         // layer's pair count off a u32 ceiling.
-        "partitions/default/entities/terms/bases.u64",
-        "partitions/default/views/s0/permutation.bin",
-        "partitions/default/views/s0/row-entity.u32",
-        "partitions/default/views/s0/segments/seg-0/columns.arrow",
-        "partitions/default/views/s0/segments/seg-0/morton.u32",
+        "entities/terms/bases.u64",
+        "views/s0/permutation.bin",
+        "views/s0/row-entity.u32",
+        "views/s0/segments/seg-0/columns.arrow",
+        "views/s0/segments/seg-0/morton.u32",
         // The Morton column's run-length index, which selection walks per cell
         // (`mosaica_store::read::CutIndex`).
-        "partitions/default/views/s0/segments/seg-0/cuts.u32",
+        "views/s0/segments/seg-0/cuts.u32",
         // Each cell's code, and the identity bands (`mosaica_store::bands`).
-        "partitions/default/views/s0/segments/seg-0/cell-codes.u32",
-        "partitions/default/views/s0/segments/seg-0/bands.bin",
+        "views/s0/segments/seg-0/cell-codes.u32",
+        "views/s0/segments/seg-0/bands.bin",
         // The view's term images (`mosaica_store::term_images`), one file per view with rows.
-        "partitions/default/term-images/term-images-000000-000.timg",
+        "term-images/term-images-000000-000.timg",
         // The view's field tallies (`mosaica_store::field_tallies`).
-        "partitions/default/views/s0/field-tallies.bin",
-    ] {
+        "views/s0/field-tallies.bin",
+    ];
+    for rel in std::iter::once("dictionary/terms-0.dict".to_string()).chain(
+        shard_files
+            .iter()
+            .map(|rel| format!("{}/{rel}", SHARD.rel())),
+    ) {
         assert!(
-            bundle.manifest.files.contains_key(rel),
+            bundle.manifest.files.contains_key(&rel),
             "MANIFEST.json must list {rel}, got {:?}",
             bundle.manifest.files.keys().collect::<Vec<_>>()
         );
@@ -307,7 +314,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     );
 
     let prefix = &report.prefix;
-    let pdir = partition_dir(&out, prefix);
+    let pdir = shard_dir(&out, prefix);
 
     // ---- source id -> new entity id, through the unique `id` column ----------------------
     let source_to_new: BTreeMap<u64, u64> = common::entities_of(&out, "id", 0..N_ITEMS)
@@ -669,7 +676,7 @@ fn morton_input_requires_the_identity_extent() {
     .unwrap();
     let bundle = open_bundle(&out).unwrap();
     let mut got: Vec<u64> =
-        std::fs::read(out.join("v00000/partitions/default/views/s0/segments/seg-0/morton.u32"))
+        std::fs::read(shard_dir(&out, "v00000").join("views/s0/segments/seg-0/morton.u32"))
             .unwrap()
             .as_chunks::<4>()
             .0
@@ -944,7 +951,7 @@ fn verify_rejects_a_columns_file_whose_mosaica_ids_do_not_match_the_key() {
     })
     .unwrap();
 
-    let columns_rel = "partitions/default/views/s0/segments/seg-0/columns.arrow".to_string();
+    let columns_rel = format!("{}/views/s0/segments/seg-0/columns.arrow", SHARD.rel());
     let columns_path = out.join(&report.prefix).join(&columns_rel);
 
     // ---- corrupt row 0's mosaica_id, keeping the schema and every other value intact --------

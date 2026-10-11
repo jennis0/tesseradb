@@ -1381,7 +1381,7 @@ fn live_prefix(served: &Served) -> (String, std::path::PathBuf) {
 
 /// The views the newest `SEGMENTS-<n>.json` of `prefix`'s only partition names a segment for.
 fn segment_views(prefix_dir: &Path) -> Vec<String> {
-    let partition = prefix_dir.join("partitions/default");
+    let partition = mosaica_store::layout::partition_dir(prefix_dir, "default");
     let mut manifests: Vec<std::path::PathBuf> = std::fs::read_dir(&partition)
         .expect("the partition directory")
         .flatten()

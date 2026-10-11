@@ -279,8 +279,7 @@ fn membership_files(fx: &Fixture, engine: &Engine) -> usize {
     let dir = fx
         .root
         .join(&engine.generation().prefix)
-        .join("partitions")
-        .join("default")
+        .join(common::SHARD.rel())
         .join("members");
     std::fs::read_dir(&dir)
         .into_iter()

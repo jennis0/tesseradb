@@ -45,8 +45,9 @@ use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchR
 
 use mosaica_authz::{DeltaTier, PostingRef, PostingsReader};
 use mosaica_store::manifest::{Manifest, SegmentsManifest};
+use mosaica_store::ShardLayout;
 
-use mosaica_types::{IdentityKey, MosaicaId};
+use mosaica_types::{IdentityKey, MosaicaId, ShardId};
 
 use crate::error::{BuildError, Result};
 use crate::VerifyReport;
@@ -551,15 +552,12 @@ fn check_unique_indexes(
                 return Err(e);
             }
         } else {
-            let record_dir = prefix_dir
-                .join("partitions")
-                .join(phash)
-                .join("attrs")
-                .join("record");
-            let base_rel = format!(
-                "partitions/{phash}/attrs/record/{}",
-                mosaica_filter::RECORD_BLOCKS_FILE
+            let record_rel = format!(
+                "{}/attrs/record",
+                ShardLayout::new(phash, ShardId::ZERO).rel()
             );
+            let record_dir = prefix_dir.join(&record_rel);
+            let base_rel = format!("{record_rel}/{}", mosaica_filter::RECORD_BLOCKS_FILE);
             let base = manifest
                 .files
                 .contains_key(&base_rel)
@@ -649,17 +647,14 @@ fn value_layers(
     )>,
 > {
     let attribute = &declared.name;
-    let dir = prefix_dir
-        .join("partitions")
-        .join(phash)
-        .join("attrs")
-        .join(attribute);
+    let dir_rel = format!(
+        "{}/attrs/{attribute}",
+        ShardLayout::new(phash, ShardId::ZERO).rel()
+    );
+    let dir = prefix_dir.join(&dir_rel);
     let access = mosaica_filter::Access::MappedSequential;
     let mut layers = Vec::new();
-    let base_rel = format!(
-        "partitions/{phash}/attrs/{attribute}/{}",
-        mosaica_filter::VALUES_FILE
-    );
+    let base_rel = format!("{dir_rel}/{}", mosaica_filter::VALUES_FILE);
     if manifest.files.contains_key(&base_rel) {
         let values = mosaica_filter::ValueColumn::open_dir(&dir, access)
             .map_err(|e| BuildError::io(&dir, e))?;
@@ -847,9 +842,8 @@ fn check_bands(
     views.sort_by(|a, b| a.0.cmp(b.0));
     for (view, data) in views {
         for segment in &data.segments {
-            let dir = mosaica_store::view_path(&prefix_dir.join("partitions").join(phash), view)
-                .join("segments")
-                .join(&segment.seg_id);
+            let dir = prefix_dir
+                .join(ShardLayout::new(phash, ShardId::ZERO).segment_rel(view, &segment.seg_id));
             let codes = segment.morton.u32();
             let expected: Vec<u32> = segment
                 .cuts
@@ -1199,9 +1193,8 @@ fn check_scoped_render_lanes(
             // The `files` map's own key: partition-qualified, forward slashes, exactly as the
             // build laid it down (contracts §2.2).
             let rel = format!(
-                "partitions/{phash}/{}/segments/{}/columns.arrow",
-                mosaica_store::view_rel(view_id),
-                segment.seg_id
+                "{}/columns.arrow",
+                ShardLayout::new(phash, ShardId::ZERO).segment_rel(view_id, &segment.seg_id)
             );
             if owner != group && !manifest.files.contains_key(&rel) {
                 continue;
@@ -1260,8 +1253,9 @@ fn check_postings_and_pairs(
         partition_manifest.files.contains_key(rel) || bundle_manifest.files.contains_key(rel)
     };
 
-    let postings_rel = format!("partitions/{phash}/terms/postings.arrow");
-    let pairs_rel = format!("partitions/{phash}/terms/pairs.parquet");
+    let shard_rel = ShardLayout::new(phash, ShardId::ZERO).rel();
+    let postings_rel = format!("{shard_rel}/terms/postings.arrow");
+    let pairs_rel = format!("{shard_rel}/terms/pairs.parquet");
     if named(&postings_rel) {
         let path = join_rel(prefix_dir, &postings_rel)?;
         let reader = PostingsReader::open(&path, false).map_err(|e| BuildError::io(&path, e))?;
@@ -1466,19 +1460,16 @@ fn check_record_blobs(
     partition_manifest: &SegmentsManifest,
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
-    let base_rel = format!(
-        "partitions/{phash}/attrs/record/{}",
-        mosaica_filter::RECORD_BLOCKS_FILE
+    let record_rel = format!(
+        "{}/attrs/record",
+        ShardLayout::new(phash, ShardId::ZERO).rel()
     );
+    let base_rel = format!("{record_rel}/{}", mosaica_filter::RECORD_BLOCKS_FILE);
     let mut layers: Vec<(String, PathBuf, PathBuf, PathBuf)> = Vec::new();
     if manifest.files.contains_key(&base_rel) {
-        let dir = prefix_dir
-            .join("partitions")
-            .join(phash)
-            .join("attrs")
-            .join("record");
+        let dir = prefix_dir.join(&record_rel);
         layers.push((
-            format!("partitions/{phash}/attrs/record"),
+            record_rel,
             dir.join(mosaica_filter::RECORD_BLOCKS_FILE),
             dir.join(mosaica_filter::RECORD_HASROW_FILE),
             dir.join(mosaica_filter::RECORD_DIRECTORY_FILE),

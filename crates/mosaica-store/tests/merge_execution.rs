@@ -4,7 +4,7 @@ mod fixture;
 
 use std::path::Path;
 
-use fixture::{build_bundle, PARTITION, VIEW};
+use fixture::{build_bundle, PARTITION, SHARD, VIEW};
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_store::flush::{write_flush_segment, FlushInput, FlushRow};
 use mosaica_store::manifest::Quantisation;
@@ -100,12 +100,7 @@ fn merge(root: &Path, inputs: &[MergeInput]) -> mosaica_store::merge::MergeOutpu
 }
 
 fn seg_dir(root: &Path, seg_id: &str) -> std::path::PathBuf {
-    root.join("v00000/partitions")
-        .join(PARTITION)
-        .join("views")
-        .join(VIEW)
-        .join("segments")
-        .join(seg_id)
+    root.join("v00000").join(SHARD.segment_rel(VIEW, seg_id))
 }
 
 /// **Dropping rows is a fold, and folds belong to compaction.** A merge that reclaimed a

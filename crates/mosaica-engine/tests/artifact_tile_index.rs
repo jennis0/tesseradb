@@ -710,8 +710,11 @@ fn a_hole_is_absent_and_an_empty_projection_is_a_live_artifact() {
 fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
     let fx = build_fixture(Shape::Runs);
     let tmp = TempDir::new().unwrap();
-    std::fs::create_dir_all(tmp.path().join("partitions/default/tile-index")).unwrap();
-    let rel = "partitions/default/tile-index/tile-index-000001-000.tsti";
+    std::fs::create_dir_all(tmp.path().join(common::SHARD.derived_rel("tile-index"))).unwrap();
+    let rel = &format!(
+        "{}/tile-index-000001-000.tsti",
+        common::SHARD.derived_rel("tile-index")
+    );
     let index = TileIndex::build(&fx.membership(), UNIVERSE);
     std::fs::write(tmp.path().join(rel), index.as_bytes()).unwrap();
 
@@ -815,7 +818,7 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
     // its own, which is what every request did before the fold wrote anything.
     let projections = ArtifactProjections::new(std::env::temp_dir());
     let mut missing = entry("s0", projected_at);
-    missing.path = "partitions/default/tile-index/gone.tsti".to_string();
+    missing.path = format!("{}/gone.tsti", common::SHARD.derived_rel("tile-index"));
     projections.adopt_indexes(tmp.path(), "v00000", &[missing], &store);
     let _ = projections.get_or_build(
         "v00000",
@@ -920,12 +923,18 @@ fn the_folds_projection_and_the_derived_index_are_the_same_column() {
 fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_one() {
     let fx = build_fixture(Shape::Partitioned);
     let tmp = TempDir::new().unwrap();
-    std::fs::create_dir_all(tmp.path().join("partitions/default/tile-index")).unwrap();
-    std::fs::create_dir_all(tmp.path().join("partitions/default/row-column")).unwrap();
-    let index_rel = "partitions/default/tile-index/tile-index-000001-000.tsti";
+    std::fs::create_dir_all(tmp.path().join(common::SHARD.derived_rel("tile-index"))).unwrap();
+    std::fs::create_dir_all(tmp.path().join(common::SHARD.derived_rel("row-column"))).unwrap();
+    let index_rel = &format!(
+        "{}/tile-index-000001-000.tsti",
+        common::SHARD.derived_rel("tile-index")
+    );
     let index = TileIndex::build(&fx.membership(), UNIVERSE);
     std::fs::write(tmp.path().join(index_rel), index.as_bytes()).unwrap();
-    let column_rel = "partitions/default/row-column/row-column-000001-000.tsrc";
+    let column_rel = &format!(
+        "{}/row-column-000001-000.tsrc",
+        common::SHARD.derived_rel("row-column")
+    );
     let column = RowColumn::compose(
         fx.rows().membership(),
         fx.row_space.base_rows(),
@@ -934,8 +943,11 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
     )
     .expect("a partitioned level composes a label column");
     std::fs::write(tmp.path().join(column_rel), column.as_bytes()).unwrap();
-    std::fs::create_dir_all(tmp.path().join("partitions/default/row-members")).unwrap();
-    let members_rel = "partitions/default/row-members/row-members-000001-000.tsrm";
+    std::fs::create_dir_all(tmp.path().join(common::SHARD.derived_rel("row-members"))).unwrap();
+    let members_rel = &format!(
+        "{}/row-members-000001-000.tsrm",
+        common::SHARD.derived_rel("row-members")
+    );
     let members = mosaica_store::derived::stage_row_members(
         &tmp.path().join(column_rel),
         ServingLayout::RowMajorLabel,

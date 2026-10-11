@@ -217,11 +217,8 @@ pub fn execute_merge(
         });
     }
 
-    let seg_path = |seg_id: &str| {
-        crate::view_path(&prefix_dir.join("partitions").join(partition), view)
-            .join("segments")
-            .join(seg_id)
-    };
+    let layout = crate::ShardLayout::new(partition, spec.shard_id);
+    let seg_path = |seg_id: &str| prefix_dir.join(layout.segment_rel(view, seg_id));
 
     let mut cursors: Vec<SegmentCursor> = spec
         .inputs
@@ -376,13 +373,8 @@ pub fn execute_merge(
     // The inputs' mappings go before the digests below, which read whole files.
     drop(cursors);
 
-    let rel = |name: &str| {
-        format!(
-            "partitions/{partition}/{}/segments/{}/{name}",
-            crate::view_rel(view),
-            spec.seg_id
-        )
-    };
+    let seg_rel = layout.segment_rel(view, spec.seg_id);
+    let rel = |name: &str| format!("{seg_rel}/{name}");
     let mut files = BTreeMap::new();
     for name in crate::SEGMENT_FILES {
         files.insert(rel(name), digest_of(&out_dir.join(name))?);
@@ -430,6 +422,7 @@ mod tests {
     use crate::read::{ColumnsRef, ScalarSlice};
 
     const KEY_HEX: &str = "0123456789abcdef0123456789abcdef";
+    const P: crate::ShardLayout<'static> = crate::ShardLayout::new("p", ShardId::ZERO);
 
     fn schema() -> [(String, ScalarType); 1] {
         [("score".to_string(), ScalarType::I32)]
@@ -536,7 +529,7 @@ mod tests {
         .expect("merge");
         assert_eq!(out.segment.row_count, 8);
 
-        let merged = dir.path().join("partitions/p/views/s/segments/seg-m");
+        let merged = dir.path().join(P.segment_rel("s", "seg-m"));
         let columns = ColumnsRef::load(&merged.join("columns.arrow")).expect("columns");
         let ScalarSlice::I32(scores) = columns.scalar("score").expect("score column") else {
             panic!("score is declared i32");
@@ -559,9 +552,10 @@ mod tests {
                 .all(|row| presence.contains(row)),
             "every other row carries a value, input B's included — and B has no bitmap of its own"
         );
-        assert!(out
-            .files
-            .contains_key("partitions/p/views/s/segments/seg-m/presence/score.roaring"));
+        assert!(out.files.contains_key(&format!(
+            "{}/presence/score.roaring",
+            P.segment_rel("s", "seg-m")
+        )));
     }
 
     /// A merge whose inputs have no absence between them writes no bitmap, exactly as a flush with
@@ -590,7 +584,7 @@ mod tests {
         )
         .expect("merge");
 
-        let merged = dir.path().join("partitions/p/views/s/segments/seg-m");
+        let merged = dir.path().join(P.segment_rel("s", "seg-m"));
         assert!(!merged.join(RENDER_PRESENCE_DIR).exists());
         assert!(!out
             .files

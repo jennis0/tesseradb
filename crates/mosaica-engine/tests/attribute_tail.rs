@@ -222,8 +222,7 @@ fn tail_by_identity(root: &Path) -> BTreeMap<u64, (u8, i64, f32)> {
         for segment in &partition.manifest.segments {
             let dir = root
                 .join(prefix)
-                .join("partitions")
-                .join(phash)
+                .join(mosaica_store::ShardLayout::new(phash, mosaica_types::ShardId::ZERO).rel())
                 .join("views")
                 .join(&segment.view)
                 .join("segments")
@@ -395,14 +394,16 @@ fn both_build_implementations_write_the_same_tail() {
     build(&args_for(&streamed)).expect("the streaming build succeeds");
     mosaica_build::build_in_memory(&args_for(&linear)).expect("the in-memory build succeeds");
 
-    let a = std::fs::read(
-        streamed.join("v00000/partitions/default/views/s0/segments/seg-0/columns.arrow"),
-    )
-    .unwrap();
-    let b = std::fs::read(
-        linear.join("v00000/partitions/default/views/s0/segments/seg-0/columns.arrow"),
-    )
-    .unwrap();
+    let columns = |root: &Path| {
+        std::fs::read(
+            root.join("v00000")
+                .join(common::SHARD.segment_rel("s0", "seg-0"))
+                .join("columns.arrow"),
+        )
+        .unwrap()
+    };
+    let a = columns(&streamed);
+    let b = columns(&linear);
     assert_eq!(
         a, b,
         "the two builds' columns.arrow must be byte-identical, tail included"
@@ -1153,8 +1154,7 @@ fn non_prefix_tail_by_identity(root: &Path) -> BTreeMap<u64, (u8, f32)> {
         for segment in &partition.manifest.segments {
             let dir = root
                 .join(prefix)
-                .join("partitions")
-                .join(phash)
+                .join(mosaica_store::ShardLayout::new(phash, mosaica_types::ShardId::ZERO).rel())
                 .join("views")
                 .join(&segment.view)
                 .join("segments")
@@ -1556,7 +1556,7 @@ fn side_manifest(root: &Path) -> mosaica_store::manifest::SegmentsManifest {
 fn record_stack(root: &Path) -> mosaica_filter::RecordStack {
     let prefix_dir = root.join(current_prefix(root));
     let manifest = side_manifest(root);
-    let base = prefix_dir.join("partitions/default/attrs/record");
+    let base = common::SHARD.dir(&prefix_dir).join("attrs/record");
     let extents: Vec<mosaica_filter::RecordExtentPaths> = manifest
         .record_extents
         .iter()
@@ -1808,9 +1808,9 @@ fn a_suppression_touches_no_blob_byte_and_only_the_fold_removes_a_deletion() {
     // The exhaustive walk over the folded base: every row is a surviving entity's, so the deleted
     // row's bytes are in no block (see this test's doc for why the walk is the byte argument).
     let base = mosaica_filter::RecordBlob::open_dir(
-        &root
-            .join(current_prefix(&root))
-            .join("partitions/default/attrs/record"),
+        &common::SHARD
+            .dir(&root.join(current_prefix(&root)))
+            .join("attrs/record"),
         mosaica_filter::Access::Read,
     )
     .expect("the folded base opens");

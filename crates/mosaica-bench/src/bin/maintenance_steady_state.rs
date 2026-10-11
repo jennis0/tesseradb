@@ -388,9 +388,10 @@ impl Probe {
         let coalesce_passes_failed = coalesce_passes_failed + stats.coalesce_passes_failed;
 
         let (files, bytes) = walk(&prefix_dir, |_| true);
-        let segments_dir = mosaica_store::view_path(&prefix_dir.join("partitions").join(partition), VIEW).join("segments");
+        let shard = mosaica_store::ShardLayout::new(partition, mosaica_types::ShardId::ZERO);
+        let segments_dir = prefix_dir.join(shard.view_rel(VIEW)).join("segments");
         let merge_dirs = count_dirs(&segments_dir, "merge-");
-        let coalesce_dirs = count_dirs(&prefix_dir.join("partitions").join(partition).join("coalesced"), "coalesce-");
+        let coalesce_dirs = count_dirs(&prefix_dir.join(shard.coalesced_rel()), "coalesce-");
 
         self.check_side_manifests(&prefix_dir, partition, &generation.prefix)?;
 
@@ -420,7 +421,7 @@ impl Probe {
     }
 
     fn check_side_manifests(&mut self, prefix_dir: &Path, partition: &str, prefix: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let dir = prefix_dir.join("partitions").join(partition);
+        let dir = mosaica_store::layout::partition_dir(prefix_dir, partition);
         for entry in std::fs::read_dir(&dir)? {
             let name = entry?.file_name().to_string_lossy().into_owned();
             let Some(n) = name.strip_prefix("SEGMENTS-").and_then(|s| s.strip_suffix(".json")) else {

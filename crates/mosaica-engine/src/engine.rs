@@ -387,9 +387,8 @@ fn merge_side_declarations(bundle: &mut Bundle) -> SideDeclarations {
 /// its whole life, so paying the mmap setup once beats reading the whole file into memory.
 fn open_postings(prefix_dir: &Path, phash: &str) -> std::io::Result<Arc<PostingsReader>> {
     PostingsReader::open(
-        &prefix_dir
-            .join("partitions")
-            .join(phash)
+        &mosaica_store::ShardLayout::new(phash, mosaica_types::ShardId::ZERO)
+            .dir(prefix_dir)
             .join("terms")
             .join("postings.arrow"),
         true,
@@ -765,7 +764,8 @@ fn first_generation(
         Arc::new(
             open_filter_columns(prefix_dir, bundle, &unfolded_attributes).map_err(|e| {
                 EngineError::Store(mosaica_store::StoreError::Io {
-                    path: prefix_dir.join("partitions").join(&partition),
+                    path: mosaica_store::ShardLayout::new(&partition, mosaica_types::ShardId::ZERO)
+                        .dir(prefix_dir),
                     source: e,
                 })
             })?,

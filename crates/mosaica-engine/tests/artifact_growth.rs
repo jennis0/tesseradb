@@ -95,8 +95,7 @@ impl Fixture {
     fn membership_files(&self, engine: &Engine) -> Vec<std::path::PathBuf> {
         let dir = self
             .live_prefix(engine)
-            .join("partitions")
-            .join("default")
+            .join(common::SHARD.rel())
             .join("members");
         std::fs::read_dir(&dir)
             .into_iter()

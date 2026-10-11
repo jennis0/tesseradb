@@ -23,12 +23,13 @@ use mosaica_store::manifest::{
 use mosaica_store::permutation::SegmentExtent;
 use mosaica_store::read::SegmentData;
 use mosaica_store::write::{write_permutation, write_segment};
-use mosaica_store::{write_flush_segment, Bundle, FlushInput, FlushRow};
+use mosaica_store::{write_flush_segment, Bundle, FlushInput, FlushRow, ShardLayout};
 use mosaica_types::{
     EntityId, IdentityKey, MosaicaId, ShardId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS,
 };
 
 pub const PARTITION: &str = "default";
+pub const SHARD: ShardLayout<'static> = ShardLayout::new(PARTITION, ShardId::ZERO);
 pub const VIEW: &str = "main";
 
 fn synthetic_mosaica_id(seed: u64) -> MosaicaId {
@@ -73,9 +74,9 @@ pub fn build_bundle(root: &Path, n: u64) {
     let codes = sort_batch(&mut items, &mut entity_ids);
 
     let prefix_dir = root.join("v00000");
-    let partition_dir = prefix_dir.join("partitions").join(PARTITION);
-    let view_dir = partition_dir.join("views").join(VIEW);
-    let seg_dir = view_dir.join("segments").join("seg0");
+    let partition_dir = mosaica_store::layout::partition_dir(&prefix_dir, PARTITION);
+    let view_dir = prefix_dir.join(SHARD.view_rel(VIEW));
+    let seg_dir = prefix_dir.join(SHARD.segment_rel(VIEW, "seg0"));
     fs::create_dir_all(&seg_dir).expect("mkdir");
 
     write_segment(&seg_dir, &items, &codes, &[], &[]).expect("write_segment");
@@ -83,12 +84,12 @@ pub fn build_bundle(root: &Path, n: u64) {
 
     let mut files = BTreeMap::new();
     files.insert(
-        format!("partitions/{PARTITION}/views/{VIEW}/permutation.bin"),
+        format!("{}/permutation.bin", SHARD.view_rel(VIEW)),
         file_digest(&view_dir.join("permutation.bin")),
     );
     for name in mosaica_store::SEGMENT_FILES {
         files.insert(
-            format!("partitions/{PARTITION}/views/{VIEW}/segments/seg0/{name}"),
+            format!("{}/{name}", SHARD.segment_rel(VIEW, "seg0")),
             file_digest(&seg_dir.join(name)),
         );
     }
@@ -219,13 +220,7 @@ pub fn flush_segment(
     )
     .expect("write_flush_segment");
 
-    let seg_dir = root
-        .join("v00000/partitions")
-        .join(PARTITION)
-        .join("views")
-        .join(VIEW)
-        .join("segments")
-        .join(&seg_id);
+    let seg_dir = root.join("v00000").join(SHARD.segment_rel(VIEW, &seg_id));
     let segment = SegmentData::load(
         &seg_dir,
         &seg_id,

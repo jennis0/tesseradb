@@ -57,7 +57,7 @@ use mosaica_store::derived;
 use mosaica_store::derived::{DerivedIndex, Filed, PostingSlice, SignatureIndex};
 use mosaica_store::manifest::DerivedForm;
 use mosaica_store::permutation::ProjectScratch;
-use mosaica_store::RowSpace;
+use mosaica_store::{RowSpace, ShardLayout};
 use mosaica_types::layer::{LevelShape, MembershipSource, RegisteredLayer, ServingLayout};
 
 use crate::layers::PublishedLayers;
@@ -128,7 +128,7 @@ pub fn run(
     published: &mut PublishedLayers,
     store: &ArtifactStore,
     prefix_dir: &Path,
-    partition: &str,
+    shard: ShardLayout<'_>,
     view: &str,
     row_count: u32,
     scratch_dir: &Path,
@@ -188,9 +188,9 @@ pub fn run(
     // **The row space of the bundle this build just wrote**, opened from the file rather than kept
     // from the sort: the permutation is fsynced by now, and reading it back is what makes this pass
     // a function of the published prefix rather than of a structure that only existed in memory.
-    let permutation_path =
-        mosaica_store::view_path(&prefix_dir.join("partitions").join(partition), view)
-            .join("permutation.bin");
+    let permutation_path = prefix_dir
+        .join(shard.view_rel(view))
+        .join("permutation.bin");
     let space = match mosaica_store::Permutation::load(&permutation_path) {
         Ok(permutation) => RowSpace::new(std::sync::Arc::new(permutation), row_count),
         Err(error) => {
@@ -220,7 +220,7 @@ pub fn run(
     // member table is. The serving engine resolves the same segment again at open from the same
     // shapes (`mosaica_engine::shapes`), so nothing here is persisted but the layout and the
     // column; what this pass buys is the pick and the report.
-    let segment = load_build_segment(prefix_dir, partition, view, row_count);
+    let segment = load_build_segment(prefix_dir, shard, view, row_count);
     let mut resolved: BTreeMap<(String, u32), Vec<Option<Bitmap>>> = BTreeMap::new();
     let mut decomposed: BTreeMap<(String, u32), Vec<Option<HeldShape>>> = BTreeMap::new();
     for (layer, level) in &levels {
@@ -404,7 +404,7 @@ pub fn run(
     }
     pass.derived_extents.extend(derived::file_derived(
         prefix_dir,
-        partition,
+        shard,
         MANIFEST_N,
         index,
         tile_indexes,
@@ -537,7 +537,7 @@ pub fn run(
             ),
         }
     }
-    let columns = derived::file_derived(prefix_dir, partition, MANIFEST_N, index, columns);
+    let columns = derived::file_derived(prefix_dir, shard, MANIFEST_N, index, columns);
 
     // ---- the shape row forms: every spatial level whose persisted form is not a column ---------
     //
@@ -578,7 +578,7 @@ pub fn run(
     }
     pass.derived_extents.extend(columns);
     pass.derived_extents.extend(derived::file_derived(
-        prefix_dir, partition, MANIFEST_N, index, shape_rows,
+        prefix_dir, shard, MANIFEST_N, index, shape_rows,
     ));
 
     // ---- the decompositions, per spatial level ------------------------------------------------
@@ -611,7 +611,7 @@ pub fn run(
         })
         .collect();
     pass.derived_extents.extend(derived::file_derived(
-        prefix_dir, partition, MANIFEST_N, index, held,
+        prefix_dir, shard, MANIFEST_N, index, held,
     ));
 
     for entry in &pass.derived_extents {
@@ -626,13 +626,11 @@ pub fn run(
 /// resolve at the engine's open and are recorded in their pinned or default layout.
 fn load_build_segment(
     prefix_dir: &Path,
-    partition: &str,
+    shard: ShardLayout<'_>,
     view: &str,
     row_count: u32,
 ) -> Option<SegmentData> {
-    let dir = mosaica_store::view_path(&prefix_dir.join("partitions").join(partition), view)
-        .join("segments")
-        .join(crate::BUILD_SEG_ID);
+    let dir = prefix_dir.join(shard.segment_rel(view, crate::BUILD_SEG_ID));
     match SegmentData::load(
         &dir,
         crate::BUILD_SEG_ID,
@@ -672,14 +670,10 @@ const MANIFEST_N: u64 = 0;
 pub fn containment(
     store: &ArtifactStore,
     prefix_dir: &Path,
-    partition: &str,
+    shard: ShardLayout<'_>,
     index: &mut DerivedIndex,
 ) -> Vec<mosaica_store::manifest::DerivedExtent> {
-    let postings_path = prefix_dir
-        .join("partitions")
-        .join(partition)
-        .join("terms")
-        .join("postings.arrow");
+    let postings_path = shard.dir(prefix_dir).join("terms").join("postings.arrow");
     let postings = match PostingsReader::open(&postings_path, true) {
         Ok(postings) => postings,
         Err(error) => {
@@ -745,7 +739,7 @@ pub fn containment(
             )),
         });
     }
-    derived::file_derived(prefix_dir, partition, MANIFEST_N, index, composed)
+    derived::file_derived(prefix_dir, shard, MANIFEST_N, index, composed)
 }
 
 /// The pass's own report, printed where `report_attribute_coverage` prints — so both entry points

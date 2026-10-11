@@ -2438,7 +2438,7 @@ fn a_poisoned_node_writes_no_side_manifest_for_its_denies() {
     let (engine, faults) = engine_with_faults(&tmp, 8);
     let root = tmp.path().join("bundle");
     let manifests = || {
-        let dir = root.join("v00000/partitions/default");
+        let dir = common::partition_dir(&root.join("v00000"));
         let mut names: Vec<String> = std::fs::read_dir(dir)
             .unwrap()
             .filter_map(|e| e.ok())

@@ -78,6 +78,7 @@ use mosaica_lifecycle::membership::{
 };
 use mosaica_lifecycle::LayerRegistry;
 use mosaica_store::manifest::{MembershipExtent, RecordExtent};
+use mosaica_store::ShardLayout;
 use mosaica_types::layer::RegisteredLayer;
 use mosaica_types::layer::{parent_edges, LayerDeclaration, ValueSet};
 use mosaica_types::EntityId;
@@ -1664,7 +1665,7 @@ pub fn publish(
     resolve: &(dyn Fn(u64) -> Option<u64> + Sync),
     high_water: u64,
     prefix_dir: &Path,
-    partition: &str,
+    shard: ShardLayout<'_>,
     views: &[String],
     derived: &BTreeMap<String, Vec<String>>,
     entries_per_batch: u64,
@@ -1809,10 +1810,7 @@ pub fn publish(
     // order in every batch; the entity of an ordinal is a function of the level's reservation
     // runs, and splitting the growth across batches appends the same runs in the same order
     // because nothing else allocates between two batches of one level.
-    let members_dir = prefix_dir
-        .join("partitions")
-        .join(partition)
-        .join("members");
+    let members_dir = prefix_dir.join(shard.members_rel());
     std::fs::create_dir_all(&members_dir).map_err(|e| BuildError::io(&members_dir, e))?;
     eprintln!(
         "layers: publishing in batches of at most {entries_per_batch} member entr(ies), \
@@ -2005,14 +2003,8 @@ pub fn publish(
             },
         )
         .collect();
-    write_membership_extents(
-        &mut store,
-        prefix_dir,
-        partition,
-        &mut published,
-        &mut streamed,
-    )?;
-    write_content_extent(&store, prefix_dir, partition, &mut published)?;
+    write_membership_extents(&mut store, prefix_dir, shard, &mut published, &mut streamed)?;
+    write_content_extent(&store, prefix_dir, shard, &mut published)?;
     published.store = store;
     Ok(published)
 }
@@ -3090,7 +3082,7 @@ fn publication_batches(
 fn write_membership_extents(
     store: &mut ArtifactStore,
     prefix_dir: &Path,
-    partition: &str,
+    shard: ShardLayout<'_>,
     published: &mut PublishedLayers,
     streamed: &mut BTreeMap<(String, u32), StreamedPack>,
 ) -> Result<()> {
@@ -3098,10 +3090,8 @@ fn write_membership_extents(
     if ready.is_empty() {
         return Ok(());
     }
-    let dir = prefix_dir
-        .join("partitions")
-        .join(partition)
-        .join("members");
+    let dir_rel = shard.members_rel();
+    let dir = prefix_dir.join(&dir_rel);
     std::fs::create_dir_all(&dir).map_err(|e| BuildError::io(&dir, e))?;
     let mut rehoused = 0u64;
     let mut kept = 0u64;
@@ -3164,7 +3154,7 @@ fn write_membership_extents(
         crate::trim_heap();
         published.paths.push(path);
         published.membership_extents.push(MembershipExtent {
-            path: format!("partitions/{partition}/members/{name}"),
+            path: format!("{dir_rel}/{name}"),
             layer,
             level,
             ordinal_lo,
@@ -3245,7 +3235,7 @@ fn map_level_memberships(
 fn write_content_extent(
     store: &ArtifactStore,
     prefix_dir: &Path,
-    partition: &str,
+    shard: ShardLayout<'_>,
     published: &mut PublishedLayers,
 ) -> Result<()> {
     let mut rows = store.unpublished_content();
@@ -3257,7 +3247,7 @@ fn write_content_extent(
     // artifact belongs to no partition, and writing its content into each would give one record
     // stack two layers with overlapping has-row bitmaps — has no case to fire on. It becomes this
     // function's problem the day a build writes two, and the argument lives on the online copy.
-    let extents_rel = format!("partitions/{partition}/attrs/record/extents");
+    let extents_rel = format!("{}/attrs/record/extents", shard.rel());
     let dir = prefix_dir.join(&extents_rel);
     std::fs::create_dir_all(&dir).map_err(|e| BuildError::io(&dir, e))?;
     let extent = RecordExtent {
@@ -4507,7 +4497,7 @@ mod tests {
             &|source| Some(source),
             1_000,
             prefix.path(),
-            "default",
+            ShardLayout::new("default", mosaica_types::ShardId::ZERO),
             &["world".to_string()],
             &BTreeMap::new(),
             PUBLICATION_BATCH_MAX_ENTRIES,

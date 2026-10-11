@@ -131,7 +131,9 @@ fn a_generator_corpus_with_every_artifact_arm_builds() {
     // partition-enumerated, treed) and the **attribute predicate**, whose artifacts are the
     // `partition` column's distinct values, minted from the column at the build. ⊘ The spatial
     // layer declares no `[layer.shape]`, so it holds nothing and writes none.
-    let members_dir = dir.path().join("bundle/v00000/partitions/default/members");
+    let members_dir = dir.path().join("bundle/v00000").join(
+        mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO).members_rel(),
+    );
     let published: Vec<_> = std::fs::read_dir(&members_dir)
         .unwrap_or_else(|e| panic!("{}: {e}", members_dir.display()))
         .map(|entry| entry.unwrap().path())

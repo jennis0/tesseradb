@@ -113,9 +113,15 @@ fn first_dictionary_descriptor(bundle_root: &Path) -> String {
     String::from_utf8(data[4..4 + len].to_vec()).unwrap()
 }
 
+fn postings_path(bundle_root: &Path) -> PathBuf {
+    mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO)
+        .dir(&bundle_root.join("v00000"))
+        .join("terms/postings.arrow")
+}
+
 fn bench_fragment_build(c: &mut Criterion) {
     let bundle_root = ensure_bundle();
-    let postings_path = bundle_root.join("v00000/partitions/default/terms/postings.arrow");
+    let postings_path = postings_path(&bundle_root);
     let postings = PostingsReader::open(&postings_path, true).expect("postings should open");
     let vocab = postings.term_count();
 
@@ -132,7 +138,7 @@ fn bench_fragment_build(c: &mut Criterion) {
 
 fn bench_compose(c: &mut Criterion) {
     let bundle_root = ensure_bundle();
-    let postings_path = bundle_root.join("v00000/partitions/default/terms/postings.arrow");
+    let postings_path = postings_path(&bundle_root);
     let postings = PostingsReader::open(&postings_path, true).expect("postings should open");
     let vocab = postings.term_count();
     let terms: Vec<TermId> = (0..vocab.min(1000)).map(TermId::new).collect();

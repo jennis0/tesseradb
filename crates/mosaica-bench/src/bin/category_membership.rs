@@ -119,8 +119,9 @@ fn main() {
         .map(|v| v.values.iter().map(|x| (x.code, x.key.clone())).collect())
         .unwrap_or_default();
 
-    let part_dir = prefix_dir.join("partitions/default");
-    let view_dir = part_dir.join("views/s0");
+    let shard = mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO);
+    let shard_dir = shard.dir(&prefix_dir);
+    let view_dir = prefix_dir.join(shard.view_rel("s0"));
     let permutation = Permutation::load(&view_dir.join("permutation.bin")).expect("permutation");
     let columns =
         ColumnsRef::load(&view_dir.join("segments/seg-0/columns.arrow")).expect("columns.arrow");
@@ -220,7 +221,7 @@ fn main() {
 
     // ---- legend latency --------------------------------------------------------------------
     let postings =
-        PostingsReader::open(&part_dir.join("terms/postings.arrow"), true).expect("postings");
+        PostingsReader::open(&shard_dir.join("terms/postings.arrow"), true).expect("postings");
     let mut widths: Vec<(TermId, u64)> = (0..postings.term_count())
         .map(|t| {
             let term = TermId::new(t);

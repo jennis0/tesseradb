@@ -690,7 +690,7 @@ fn copy_tree(from: &Path, to: &Path) {
 
 /// The newest side manifest of `root`'s partition, and its path.
 fn side_manifest(root: &Path) -> (std::path::PathBuf, serde_json::Value) {
-    let partition = root.join(current_prefix(root)).join("partitions/default");
+    let partition = common::partition_dir(&root.join(current_prefix(root)));
     let newest = std::fs::read_dir(&partition)
         .unwrap()
         .filter_map(|entry| {

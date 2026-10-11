@@ -282,8 +282,7 @@ fn postings_of(root: &Path, prefix: &str) -> PostingsReader {
     PostingsReader::open(
         &root
             .join(prefix)
-            .join("partitions")
-            .join("default")
+            .join(common::SHARD.rel())
             .join("terms")
             .join("postings.arrow"),
         true,

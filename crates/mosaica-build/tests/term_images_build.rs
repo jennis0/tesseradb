@@ -251,10 +251,8 @@ fn every_kept_image_is_the_projection_of_its_posting() {
     let (images, space, _) = images_of(&root);
 
     let postings = PostingsReader::open(
-        &root
-            .join("v00000")
-            .join("partitions")
-            .join("default")
+        &mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO)
+            .dir(&root.join("v00000"))
             .join("terms")
             .join("postings.arrow"),
         true,
@@ -505,10 +503,7 @@ fn rewrite_manifest(prefix: &Path, root: &Path, edit: impl FnOnce(&mut serde_jso
 /// Edit the partition's `SEGMENTS-0.json`. Nothing digests a side-manifest, so an edit to one
 /// needs no other file moved with it: the loader verifies the files it *names*.
 fn rewrite_side_manifest(prefix: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
-    let path = prefix
-        .join("partitions")
-        .join("default")
-        .join("SEGMENTS-0.json");
+    let path = mosaica_store::layout::partition_dir(prefix, "default").join("SEGMENTS-0.json");
     let mut manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     edit(&mut manifest);

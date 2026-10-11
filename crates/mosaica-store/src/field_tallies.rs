@@ -497,18 +497,19 @@ pub fn tallied_fields(declared: &[DeclaredScalar]) -> Vec<(String, bool, bool)> 
 }
 
 /// [`derive`] over one view's base as a build or a fold has just written it, into the view's own
-/// directory: its segment `seg_id`'s columns, its permutation and the partition's entity terms.
+/// directory: its segment `seg_id`'s columns, its permutation and the shard's entity terms.
 /// The fields are [`tallied_fields`] of `declared`, a held one read through `held` where it opens
 /// one.
 pub fn derive_view(
-    partition_dir: &Path,
+    prefix_dir: &Path,
+    layout: crate::ShardLayout<'_>,
     view: &str,
     seg_id: &str,
     base_rows: u32,
     declared: &[DeclaredScalar],
     held: &dyn Fn(&str) -> io::Result<Option<HeldValues>>,
 ) -> crate::error::Result<std::path::PathBuf> {
-    let view_dir = crate::view_path(partition_dir, view);
+    let view_dir = prefix_dir.join(layout.view_rel(view));
     let path = view_dir.join(FIELD_TALLIES_FILE);
     let io_error = |path: &Path| {
         let path = path.to_path_buf();
@@ -547,10 +548,14 @@ pub fn derive_view(
         .map_err(io_error(&path))?;
         return Ok(path);
     }
-    let columns = ColumnsRef::load(&view_dir.join("segments").join(seg_id).join("columns.arrow"))?;
+    let columns = ColumnsRef::load(
+        &prefix_dir
+            .join(layout.segment_rel(view, seg_id))
+            .join("columns.arrow"),
+    )?;
     let permutation = crate::Permutation::load(&view_dir.join("permutation.bin"))?;
     let terms =
-        crate::entity_terms::EntityTerms::open_dir(&partition_dir.join(crate::ENTITY_TERMS_DIR))?;
+        crate::entity_terms::EntityTerms::open_dir(&prefix_dir.join(layout.entity_terms_rel()))?;
     let row_of = |entity: u32| {
         permutation
             .row_of(mosaica_types::EntityId::new(u64::from(entity)))

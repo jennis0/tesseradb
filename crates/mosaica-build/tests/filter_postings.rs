@@ -234,9 +234,8 @@ fn codes_of(out: &Path, column: &str) -> HashMap<String, u32> {
 fn column_dir(out: &Path, column: &str) -> PathBuf {
     let bundle = open_bundle(out).unwrap();
     let phash = bundle.partitions.keys().next().unwrap().clone();
-    out.join(current_prefix(out))
-        .join("partitions")
-        .join(phash)
+    mosaica_store::ShardLayout::new(&phash, mosaica_types::ShardId::ZERO)
+        .dir(&out.join(current_prefix(out)))
         .join("attrs")
         .join(column)
 }
@@ -244,9 +243,8 @@ fn column_dir(out: &Path, column: &str) -> PathBuf {
 fn postings_path(out: &Path, column: &str) -> PathBuf {
     let bundle = open_bundle(out).unwrap();
     let phash = bundle.partitions.keys().next().unwrap().clone();
-    out.join(current_prefix(out))
-        .join("partitions")
-        .join(phash)
+    mosaica_store::ShardLayout::new(&phash, mosaica_types::ShardId::ZERO)
+        .dir(&out.join(current_prefix(out)))
         .join("attrs")
         .join(column)
         .join("postings.arrow")
@@ -380,7 +378,10 @@ fn the_postings_file_is_under_the_manifest_digest() {
     let out = dir.path().join("bundle");
     let bundle = open_bundle(&out).unwrap();
     let phash = bundle.partitions.keys().next().unwrap();
-    let key = format!("partitions/{phash}/attrs/department/postings.arrow");
+    let key = format!(
+        "{}/attrs/department/postings.arrow",
+        mosaica_store::ShardLayout::new(phash, mosaica_types::ShardId::ZERO).rel()
+    );
     assert!(
         bundle.manifest.files.contains_key(&key),
         "MANIFEST.files covers {key}; it holds {:?}",

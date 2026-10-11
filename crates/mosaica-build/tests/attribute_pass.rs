@@ -294,9 +294,8 @@ fn current_prefix(out: &Path) -> String {
 fn record_dir(out: &Path) -> PathBuf {
     let bundle = open_bundle(out).unwrap();
     let phash = bundle.partitions.keys().next().unwrap().clone();
-    out.join(current_prefix(out))
-        .join("partitions")
-        .join(phash)
+    mosaica_store::ShardLayout::new(&phash, mosaica_types::ShardId::ZERO)
+        .dir(&out.join(current_prefix(out)))
         .join("attrs")
         .join("record")
 }

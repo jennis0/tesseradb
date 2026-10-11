@@ -415,7 +415,7 @@ mod tests {
         .expect("flush");
         FoldSegmentInput {
             seg_id: seg_id.to_string(),
-            dir: dir.join(format!("partitions/p/views/s/segments/{seg_id}")),
+            dir: dir.join(crate::ShardLayout::new("p", ShardId::ZERO).segment_rel("s", seg_id)),
             entities: crate::edited::RowEntities::Numbers,
         }
     }

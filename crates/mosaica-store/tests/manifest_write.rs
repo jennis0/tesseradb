@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 
 use mosaica_spatial::tiler::{sort_batch, TilerItem};
 use mosaica_spatial::{fixed32, Bounds};
+use mosaica_store::layout::{partition_dir, partitions_dir};
 use mosaica_store::manifest::{
     EntitySet, IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation, SegmentDescriptor,
     SegmentsManifest, ViewDescriptor,
@@ -23,8 +24,10 @@ use mosaica_store::manifest::{
 use mosaica_store::manifest_write::{write_current, write_manifest_json};
 use mosaica_store::write::{write_permutation, write_segment};
 use mosaica_store::write_segments_manifest;
-use mosaica_store::{open_bundle, StoreError};
+use mosaica_store::{open_bundle, ShardLayout, StoreError};
 use mosaica_types::{EntityId, MosaicaId, ShardId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+
+const SHARD: ShardLayout<'static> = ShardLayout::new("default", ShardId::ZERO);
 
 /// A synthetic `mosaica_id`-shaped value for test fixtures — see `bundle_read.rs`'s copy of the
 /// same helper for why full splitmix64 output rather than a raw seed.
@@ -76,9 +79,8 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
     let codes = sort_batch(&mut items, &mut entity_ids);
 
     let prefix_dir = root.join("v00000");
-    let partition_dir = prefix_dir.join("partitions").join("default");
-    let view_dir = partition_dir.join("views").join("main");
-    let seg_dir = view_dir.join("segments").join("seg0");
+    let view_dir = prefix_dir.join(SHARD.view_rel("main"));
+    let seg_dir = prefix_dir.join(SHARD.segment_rel("main", "seg0"));
     fs::create_dir_all(&seg_dir).expect("mkdir seg_dir");
 
     write_segment(&seg_dir, &items, &codes, &[], &[]).expect("write_segment");
@@ -94,12 +96,12 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
     };
     let mut segments_files = BTreeMap::new();
     segments_files.insert(
-        "partitions/default/views/main/permutation.bin".to_string(),
+        format!("{}/permutation.bin", SHARD.view_rel("main")),
         file_digest(&view_dir.join("permutation.bin")),
     );
     for name in mosaica_store::SEGMENT_FILES {
         segments_files.insert(
-            format!("partitions/default/views/main/segments/seg0/{name}"),
+            format!("{}/{name}", SHARD.segment_rel("main", "seg0")),
             file_digest(&seg_dir.join(name)),
         );
     }
@@ -124,7 +126,7 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
         ..SegmentsManifest::empty()
     };
     fs::write(
-        partition_dir.join("SEGMENTS-0.json"),
+        partition_dir(&prefix_dir, "default").join("SEGMENTS-0.json"),
         serde_json::to_vec_pretty(&segments_manifest).expect("serialise SEGMENTS-0"),
     )
     .expect("write SEGMENTS-0.json");
@@ -316,7 +318,7 @@ fn manifest_fixture() -> SegmentsManifest {
 fn a_side_manifest_is_never_replaced() {
     let tmp = tempfile::TempDir::new().unwrap();
     let prefix_dir = tmp.path();
-    std::fs::create_dir_all(prefix_dir.join("partitions").join("default")).unwrap();
+    std::fs::create_dir_all(partition_dir(prefix_dir, "default")).unwrap();
 
     let mut first = manifest_fixture();
     first.watermark = 11;
@@ -339,13 +341,7 @@ fn a_side_manifest_is_never_replaced() {
     );
 
     let committed: SegmentsManifest = serde_json::from_slice(
-        &std::fs::read(
-            prefix_dir
-                .join("partitions")
-                .join("default")
-                .join("SEGMENTS-4.json"),
-        )
-        .unwrap(),
+        &std::fs::read(partition_dir(prefix_dir, "default").join("SEGMENTS-4.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(
@@ -353,9 +349,7 @@ fn a_side_manifest_is_never_replaced() {
         "the first writer's manifest is intact — the loser overwrote nothing"
     );
     assert!(
-        !prefix_dir
-            .join("partitions")
-            .join("default")
+        !partition_dir(prefix_dir, "default")
             .join("SEGMENTS-4.json.tmp")
             .exists(),
         "and the refused write left no temporary behind"
@@ -379,7 +373,7 @@ fn the_side_manifest_floor_is_every_file_present() {
         "an empty tree takes nothing"
     );
 
-    let live = root.join("v00000").join("partitions");
+    let live = partitions_dir(&root.join("v00000"));
     std::fs::create_dir_all(live.join("default")).unwrap();
     std::fs::write(live.join("default").join("SEGMENTS-3.json"), b"{}").unwrap();
     // Not a candidate at any n: the name does not end in `.json`, and a crashed write leaves one.
@@ -398,7 +392,7 @@ fn the_side_manifest_floor_is_every_file_present() {
     );
 
     // The prefix an in-flight compaction is building, which `CURRENT` does not name.
-    let pending = root.join("v00001").join("partitions").join("default");
+    let pending = partition_dir(&root.join("v00001"), "default");
     std::fs::create_dir_all(&pending).unwrap();
     std::fs::write(pending.join("SEGMENTS-11.json"), b"{}").unwrap();
     assert_eq!(
@@ -428,7 +422,7 @@ fn the_side_manifest_floor_follows_symlinked_directories() {
 
     // The real tree, outside the bundle root: `v00000` and one partition reach it only by link.
     let elsewhere = tmp.path().join("elsewhere");
-    let real_partition = elsewhere.join("v00000").join("partitions").join("default");
+    let real_partition = partition_dir(&elsewhere.join("v00000"), "default");
     std::fs::create_dir_all(&real_partition).unwrap();
     std::fs::write(real_partition.join("SEGMENTS-5.json"), b"{}").unwrap();
     let bundle = root.join("bundle");
@@ -445,12 +439,9 @@ fn the_side_manifest_floor_follows_symlinked_directories() {
     std::fs::create_dir_all(&real_second).unwrap();
     std::fs::write(real_second.join("SEGMENTS-8.json"), b"{}").unwrap();
     let live = root.join("live");
-    std::fs::create_dir_all(live.join("v00000").join("partitions")).unwrap();
-    std::os::unix::fs::symlink(
-        &real_second,
-        live.join("v00000").join("partitions").join("second"),
-    )
-    .unwrap();
+    std::fs::create_dir_all(partitions_dir(&live.join("v00000"))).unwrap();
+    std::os::unix::fs::symlink(&real_second, partition_dir(&live.join("v00000"), "second"))
+        .unwrap();
     assert_eq!(
         mosaica_store::highest_side_manifest_n(&live).unwrap(),
         Some(8),
@@ -472,7 +463,7 @@ fn the_side_manifest_floor_follows_symlinked_directories() {
 fn pruning_keeps_the_newest_manifests_and_never_the_lowest() {
     let tmp = tempfile::TempDir::new().unwrap();
     let prefix_dir = tmp.path().join("v00000");
-    let dir = prefix_dir.join("partitions").join("default");
+    let dir = partition_dir(&prefix_dir, "default");
     fs::create_dir_all(&dir).unwrap();
 
     let names = || {

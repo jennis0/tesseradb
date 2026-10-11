@@ -16,6 +16,7 @@ pub mod field_tallies;
 pub mod flush;
 pub mod fold;
 pub mod key_index;
+pub mod layout;
 pub mod manifest;
 pub mod manifest_write;
 pub mod member_key;
@@ -35,7 +36,6 @@ pub mod tenancy;
 pub mod term_images;
 pub mod unique;
 pub mod utf8;
-mod view_path;
 pub mod vocabulary;
 pub mod write;
 
@@ -61,12 +61,13 @@ pub(crate) fn le_u64(bytes: &[u8], at: usize) -> u64 {
 
 pub use entity_terms::{
     coalesce_entity_terms_extents, EntityTerms, EntityTermsExtentPaths, EntityTermsStack,
-    EntityTermsWriter, ENTITY_TERMS_BASES_FILE, ENTITY_TERMS_BLOCK_SHIFT, ENTITY_TERMS_DIR,
-    ENTITY_TERMS_HASROW_FILE, ENTITY_TERMS_OFFSETS_FILE, ENTITY_TERMS_TERMS_FILE,
+    EntityTermsWriter, ENTITY_TERMS_BASES_FILE, ENTITY_TERMS_BLOCK_SHIFT, ENTITY_TERMS_HASROW_FILE,
+    ENTITY_TERMS_OFFSETS_FILE, ENTITY_TERMS_TERMS_FILE,
 };
 pub use error::{Result, StoreError};
 pub use flush::{digest_of, write_flush_segment, FlushInput, FlushOutput, FlushRow};
 pub use fold::{fold_row_space, FoldRowSpaceOutput, FoldRowSpaceSpec, FoldSegmentInput};
+pub use layout::{view_path_components, ShardLayout, GROUP_SEPARATOR};
 pub use manifest_write::{
     fsync_dir, fsync_written, prune_superseded_segments_manifests, write_and_fsync, write_current,
     write_manifest_json, write_segments_manifest, SIDE_MANIFESTS_KEPT,
@@ -80,7 +81,3 @@ pub use read::{
 };
 pub use reclaim::{hard_link_forward, reclaim_prefix, reclaim_unpublished_prefix};
 pub use row_entity::{write_row_entity, RowToEntity, ROW_ENTITY_FILE};
-pub use view_path::{
-    scoped_column_components, scoped_column_rel, view_path, view_path_components, view_rel,
-    GROUP_SEPARATOR,
-};

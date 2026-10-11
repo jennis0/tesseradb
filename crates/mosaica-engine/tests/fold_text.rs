@@ -196,8 +196,8 @@ fn ingest_and_flush(engine: &Engine, root: &Path) -> Vec<EntityId> {
     }
 }
 
-fn partition_dir(root: &Path) -> PathBuf {
-    root.join(current_prefix(root)).join("partitions/default")
+fn shard_dir(root: &Path) -> PathBuf {
+    common::SHARD.dir(&root.join(current_prefix(root)))
 }
 
 fn text_extents(root: &Path) -> Vec<mosaica_store::manifest::TextExtent> {
@@ -213,7 +213,7 @@ fn text_extents(root: &Path) -> Vec<mosaica_store::manifest::TextExtent> {
 /// composed layers instead would let a fold that merged nothing and carried every extent forward
 /// answer these questions correctly.
 fn base_index(root: &Path) -> BTreeMap<String, croaring::Bitmap> {
-    let dir = partition_dir(root).join("attrs/prose");
+    let dir = shard_dir(root).join("attrs/prose");
     let dict = mosaica_filter::SortedDict::open_dir(&dir, mosaica_filter::Access::Read)
         .expect("the merged token dictionary opens");
     let postings = mosaica_filter::ColumnPostings::open(&dir.join("postings.arrow"), false)

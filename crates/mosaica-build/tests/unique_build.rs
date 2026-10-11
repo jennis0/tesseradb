@@ -248,7 +248,11 @@ fn build_reported(
 
 fn segments_manifest(root: &Path) -> SegmentsManifest {
     serde_json::from_slice(
-        &fs::read(root.join("v00000/partitions/default/SEGMENTS-0.json")).unwrap(),
+        &fs::read(
+            mosaica_store::layout::partition_dir(&root.join("v00000"), "default")
+                .join("SEGMENTS-0.json"),
+        )
+        .unwrap(),
     )
     .unwrap()
 }

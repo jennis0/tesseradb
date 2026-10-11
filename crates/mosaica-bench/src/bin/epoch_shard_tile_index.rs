@@ -135,7 +135,7 @@ fn open_fixture(args: &Args) -> Fixture {
             .expect("CURRENT parses");
     let prefix = current["prefix"].as_str().expect("CURRENT.prefix");
     let prefix_dir = args.fixture.join(prefix);
-    let partition_dir = prefix_dir.join("partitions").join("default");
+    let partition_dir = mosaica_store::layout::partition_dir(&prefix_dir, "default");
 
     // The highest SEGMENTS-<n>.json present. The store walks down from it verifying digests;
     // this bin reads the bundle only and takes the newest.
@@ -181,7 +181,9 @@ fn open_fixture(args: &Args) -> Fixture {
         segments.len()
     );
     let row_count = segments[0].row_count;
-    let view_dir = partition_dir.join("views").join(&view);
+    let view_dir = prefix_dir.join(
+        mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO).view_rel(&view),
+    );
     let permutation_path = view_dir.join("permutation.bin");
     // Loaded for its bound only. The shard permutations below are written over the same bound,
     // and at N = 1 the written file is compared with this one byte for byte.

@@ -671,8 +671,11 @@ fn a_level_composes_its_partition_once_for_every_view() {
 fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
     let fx = build_fixture();
     let tmp = TempDir::new().unwrap();
-    std::fs::create_dir_all(tmp.path().join("partitions/default/containment")).unwrap();
-    let rel = "partitions/default/containment/containment-000001-000.tscp";
+    std::fs::create_dir_all(tmp.path().join(common::SHARD.derived_rel("containment"))).unwrap();
+    let rel = &format!(
+        "{}/containment-000001-000.tscp",
+        common::SHARD.derived_rel("containment")
+    );
     std::fs::write(tmp.path().join(rel), fx.partition().as_bytes()).unwrap();
 
     // A coordinate that is a number rather than a zero, so *moved down* is expressible as well as
@@ -749,7 +752,7 @@ fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
     // level recomposes, which is what every request did before the fold wrote anything.
     let projections = ArtifactProjections::new(std::env::temp_dir());
     let mut missing = entry(composed_at);
-    missing.path = "partitions/default/containment/gone.tscp".to_string();
+    missing.path = format!("{}/gone.tscp", common::SHARD.derived_rel("containment"));
     projections.adopt_all(tmp.path(), "v00000", &[missing], &store);
     assert_eq!(projections.adopted(), 0);
 }
@@ -761,8 +764,8 @@ fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
 fn an_adopted_partition_does_not_answer_under_another_prefix() {
     let fx = build_fixture();
     let tmp = TempDir::new().unwrap();
-    std::fs::create_dir_all(tmp.path().join("partitions/default/containment")).unwrap();
-    let rel = "partitions/default/containment/p.tscp";
+    std::fs::create_dir_all(tmp.path().join(common::SHARD.derived_rel("containment"))).unwrap();
+    let rel = &format!("{}/p.tscp", common::SHARD.derived_rel("containment"));
     std::fs::write(tmp.path().join(rel), fx.partition().as_bytes()).unwrap();
 
     let projections = ArtifactProjections::new(std::env::temp_dir());

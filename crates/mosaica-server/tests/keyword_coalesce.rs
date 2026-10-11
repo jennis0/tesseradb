@@ -139,9 +139,10 @@ async fn answers(server: &TestServer, token: &str) -> Vec<(String, BTreeSet<u64>
 fn tag_extents(root: &Path) -> Vec<Value> {
     let current: Value =
         serde_json::from_slice(&std::fs::read(root.join("CURRENT")).unwrap()).unwrap();
-    let partition = root
-        .join(current["prefix"].as_str().expect("CURRENT names a prefix"))
-        .join("partitions/default");
+    let partition = mosaica_store::layout::partition_dir(
+        &root.join(current["prefix"].as_str().expect("CURRENT names a prefix")),
+        "default",
+    );
     let newest = std::fs::read_dir(&partition)
         .expect("the partition directory")
         .flatten()

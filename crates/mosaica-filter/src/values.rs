@@ -669,11 +669,11 @@ pub struct ValueColumn {
 pub type NumbersOver =
     Box<dyn Fn(&Bitmap, &mut dyn FnMut(u32, mosaica_types::scalar::Number)) + Sync + Send>;
 
-/// Attribute `name`'s base column under a partition's directory, read as numbers over a set of
+/// Attribute `name`'s base column under a shard's directory, read as numbers over a set of
 /// entities, or `None` where no base column was written for it: what a build and a fold tally a
 /// field's values over a view's base rows from (`mosaica_store::field_tallies`).
-pub fn base_numbers(partition_dir: &Path, name: &str) -> io::Result<Option<NumbersOver>> {
-    let dir = partition_dir.join("attrs").join(name);
+pub fn base_numbers(shard_dir: &Path, name: &str) -> io::Result<Option<NumbersOver>> {
+    let dir = shard_dir.join("attrs").join(name);
     if !dir.join(VALUES_FILE).exists() {
         return Ok(None);
     }

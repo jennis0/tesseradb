@@ -928,12 +928,15 @@ async fn a_stepped_down_partition_is_not_ready() {
 
     // Copy SEGMENTS-0 to a newer SEGMENTS-1 naming a file that does not exist, so the walk steps
     // down to SEGMENTS-0 and serves.
-    let partition_dir = bundle_root.join("v00000/partitions/default");
+    let partition_dir =
+        mosaica_store::layout::partition_dir(&bundle_root.join("v00000"), "default");
     let mut value: serde_json::Value =
         serde_json::from_slice(&std::fs::read(partition_dir.join("SEGMENTS-0.json")).unwrap())
             .unwrap();
     value["segments_version"] = serde_json::json!(1);
-    value["files"]["partitions/default/views/s0/segments/seg-unsynced/columns.arrow"] =
+    let unsynced = mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO)
+        .segment_rel("s0", "seg-unsynced");
+    value["files"][format!("{unsynced}/columns.arrow")] =
         serde_json::json!({ "size": 4, "sha256": "00".repeat(32) });
     std::fs::write(
         partition_dir.join("SEGMENTS-1.json"),

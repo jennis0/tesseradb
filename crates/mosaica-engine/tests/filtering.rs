@@ -2334,8 +2334,7 @@ fn a_range_composes_with_a_category_and_a_string() {
 fn postings_path(fx: &Fixture, column: &str) -> std::path::PathBuf {
     fx.bundle
         .join(&fx.prefix)
-        .join("partitions")
-        .join(&fx.phash)
+        .join(mosaica_store::ShardLayout::new(&fx.phash, mosaica_types::ShardId::ZERO).rel())
         .join("attrs")
         .join(column)
         .join("postings.arrow")
@@ -3008,8 +3007,7 @@ fn folded_column(fx: &Fixture, prefix: &str, column: &str) -> mosaica_filter::Va
 fn attr_dir(fx: &Fixture, prefix: &str, column: &str) -> PathBuf {
     fx.bundle
         .join(prefix)
-        .join("partitions")
-        .join(&fx.phash)
+        .join(mosaica_store::ShardLayout::new(&fx.phash, mosaica_types::ShardId::ZERO).rel())
         .join("attrs")
         .join(column)
 }
@@ -3130,8 +3128,7 @@ fn a_deleted_entitys_value_leaves_the_column_and_every_predicate() {
     let postings = mosaica_filter::ColumnPostings::open_keyed(
         &fx.bundle
             .join("v00001")
-            .join("partitions")
-            .join(&fx.phash)
+            .join(mosaica_store::ShardLayout::new(&fx.phash, mosaica_types::ShardId::ZERO).rel())
             .join("attrs/archive/postings.arrow"),
     )
     .expect("the rebuilt postings open");
@@ -3308,8 +3305,7 @@ fn a_suppression_changes_no_attribute_artefact_across_the_fold() {
     let postings = mosaica_filter::ColumnPostings::open_keyed(
         &fx.bundle
             .join("v00001")
-            .join("partitions")
-            .join(&fx.phash)
+            .join(mosaica_store::ShardLayout::new(&fx.phash, mosaica_types::ShardId::ZERO).rel())
             .join("attrs/archive/postings.arrow"),
     )
     .expect("the rebuilt postings open");
@@ -3474,8 +3470,7 @@ fn the_flip_maps_the_new_prefixs_columns_and_not_the_superseded_ones() {
     let folded_attrs = fx
         .bundle
         .join("v00001")
-        .join("partitions")
-        .join(&fx.phash)
+        .join(mosaica_store::ShardLayout::new(&fx.phash, mosaica_types::ShardId::ZERO).rel())
         .join("attrs")
         .display()
         .to_string();

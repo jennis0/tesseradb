@@ -218,8 +218,11 @@ fn build_bundle() -> tempfile::TempDir {
     dir
 }
 
+const SHARD: mosaica_store::ShardLayout<'static> =
+    mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO);
+
 fn segment_dir(out: &Path) -> PathBuf {
-    out.join("v00000/partitions/default/views/s0/segments/seg-0")
+    out.join("v00000").join(SHARD.segment_rel("s0", "seg-0"))
 }
 
 /// The bitmap says exactly which rows carry a score, and the column still holds the type's zero at
@@ -289,7 +292,10 @@ fn no_file_is_written_for_a_full_column_or_for_a_category() {
 fn the_bitmap_is_digested_and_a_missing_one_refuses_at_open() {
     let dir = build_bundle();
     let out = dir.path().join("bundle");
-    let rel = "partitions/default/views/s0/segments/seg-0/presence/score.roaring";
+    let rel = &format!(
+        "{}/presence/score.roaring",
+        SHARD.segment_rel("s0", "seg-0")
+    );
 
     let bundle = open_bundle(&out).expect("the bundle opens");
     let manifest = &bundle.manifest;

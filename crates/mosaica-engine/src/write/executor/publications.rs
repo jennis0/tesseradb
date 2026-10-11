@@ -34,17 +34,15 @@ pub(super) fn view_row_space<'a>(
 /// fsynced too, so a crash cannot leave a manifest naming a file that was never written.
 pub(super) fn pack_membership_extents(
     prefix_dir: &std::path::Path,
-    partition: &str,
+    shard: ShardLayout<'_>,
     n: u64,
     ready: Vec<mosaica_lifecycle::membership::PendingExtent>,
 ) -> mosaica_store::Result<Vec<mosaica_store::manifest::MembershipExtent>> {
     if ready.is_empty() {
         return Ok(Vec::new());
     }
-    let dir = prefix_dir
-        .join("partitions")
-        .join(partition)
-        .join("members");
+    let dir_rel = shard.members_rel();
+    let dir = prefix_dir.join(&dir_rel);
     std::fs::create_dir_all(&dir).map_err(|source| mosaica_store::StoreError::Io {
         path: dir.clone(),
         source,
@@ -56,7 +54,7 @@ pub(super) fn pack_membership_extents(
         let bytes = mosaica_store::membership::pack(ordinal_lo, &blobs);
         mosaica_store::write_and_fsync(&dir.join(&name), &bytes)?;
         entries.push(mosaica_store::manifest::MembershipExtent {
-            path: format!("partitions/{partition}/members/{name}"),
+            path: format!("{dir_rel}/{name}"),
             layer,
             level,
             ordinal_lo,
@@ -212,8 +210,10 @@ impl Executor {
             // one `n` would otherwise write one path, and the second `File::create` truncates
             // files the first has memory-mapped.
             out_rel: format!(
-                "partitions/{partition}/coalesced/coalesce-{}-{}",
-                partition_data.segments_n, attempt
+                "{}/coalesce-{}-{}",
+                ShardLayout::new(partition, ShardId::ZERO).coalesced_rel(),
+                partition_data.segments_n,
+                attempt
             ),
         };
 
@@ -774,13 +774,16 @@ impl Executor {
         let entity_terms = if completed.terms.is_none() {
             None
         } else {
-            let partition_dir = prefix_dir.join("partitions").join(&completed.partition);
             let extents: Vec<mosaica_store::EntityTermsExtentPaths> = manifest
                 .entity_terms_extents
                 .iter()
                 .map(|e| entity_terms_extent_paths(&prefix_dir, e))
                 .collect();
-            match crate::filter::open_entity_terms_stack(&partition_dir, &extents) {
+            match crate::filter::open_entity_terms_stack(
+                &prefix_dir,
+                ShardLayout::new(&completed.partition, ShardId::ZERO),
+                &extents,
+            ) {
                 Ok(stack) => Some(Arc::new(stack)),
                 Err(e) => {
                     discard(&format!(
@@ -800,7 +803,7 @@ impl Executor {
         let records = if completed.record.is_none() {
             None
         } else {
-            let partition_dir = prefix_dir.join("partitions").join(&completed.partition);
+            let shard_dir = ShardLayout::new(&completed.partition, ShardId::ZERO).dir(&prefix_dir);
             // Both lists, one stack, as the open composes them: an artifact's content extents
             // hold the same format and the same reader, and the two never share an entity.
             let extents: Vec<mosaica_filter::RecordExtentPaths> = manifest
@@ -814,7 +817,7 @@ impl Executor {
             // are the same stack.
             let unfolded = self.live.with_attributes(|a| a.entity_names());
             match crate::filter::open_record_stack(
-                &partition_dir,
+                &shard_dir,
                 &live.bundle.manifest.declared_scalars,
                 &live.bundle.manifest.vocabularies,
                 &unfolded,
@@ -1753,7 +1756,10 @@ impl Executor {
             });
         }
 
-        let extents_rel = format!("partitions/{partition}/attrs/record/extents");
+        let extents_rel = format!(
+            "{}/attrs/record/extents",
+            ShardLayout::new(partition, ShardId::ZERO).rel()
+        );
         let dir = prefix_dir.join(&extents_rel);
         std::fs::create_dir_all(&dir).map_err(|source| mosaica_store::StoreError::Io {
             path: dir.clone(),
@@ -1832,7 +1838,12 @@ impl Executor {
         n: u64,
     ) -> mosaica_store::Result<Vec<mosaica_store::manifest::MembershipExtent>> {
         let ready = self.live.unpublished_memberships();
-        pack_membership_extents(prefix_dir, partition, n, ready)
+        pack_membership_extents(
+            prefix_dir,
+            ShardLayout::new(partition, ShardId::ZERO),
+            n,
+            ready,
+        )
     }
 
     /// Publication by rebase: apply a completed flush to the then-current generation rather than
@@ -2001,7 +2012,6 @@ impl Executor {
         let live_columns = if completed.scoped_columns.is_empty() {
             Arc::clone(&live.filter_columns)
         } else {
-            let partition_dir = record_dir.join("partitions").join(&completed.partition);
             // Stamped with the incarnation of the view the pair names, which is what places the
             // base the flush just wrote.
             let opening: Vec<(String, String, mosaica_types::view::ViewIncarnation)> = completed
@@ -2010,7 +2020,8 @@ impl Executor {
                 .map(|(column, view)| (column.clone(), view.clone(), completed.scoped_incarnation))
                 .collect();
             match live.filter_columns.with_scoped_columns(
-                &partition_dir,
+                &record_dir,
+                ShardLayout::new(&completed.partition, ShardId::ZERO),
                 &opening,
                 &live.bundle.manifest.scoped_scalars(),
                 &live.bundle.manifest.vocabularies,

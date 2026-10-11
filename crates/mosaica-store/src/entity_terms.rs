@@ -138,9 +138,6 @@ pub const ENTITY_TERMS_BASES_FILE: &str = "bases.u64";
 /// the format and takes a `BUNDLE_FORMAT` bump with it.
 pub const ENTITY_TERMS_BLOCK_SHIFT: u32 = 16;
 
-/// The base layer's directory, relative to a partition directory.
-pub const ENTITY_TERMS_DIR: &str = "entities/terms";
-
 /// One extent's four files, as a manifest's `entity_terms_extents` entry names them.
 #[derive(Debug, Clone)]
 pub struct EntityTermsExtentPaths {

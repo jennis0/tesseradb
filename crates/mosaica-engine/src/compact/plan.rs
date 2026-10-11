@@ -225,6 +225,7 @@ pub(crate) fn plan_fold(
         .next()
         .ok_or(NoFold::NothingToFold)?;
     let manifest = &partition_data.manifest;
+    let layout = mosaica_store::ShardLayout::new(partition, mosaica_types::ShardId::ZERO);
 
     let mut views: Vec<FoldViewPlan> = Vec::new();
     // Sorted, so the plan does not depend on a `HashMap`'s iteration order.
@@ -244,19 +245,15 @@ pub(crate) fn plan_fold(
                 .segments
                 .iter()
                 .map(|segment| {
-                    let dir = format!(
-                        "partitions/{partition}/{}/segments/{}",
-                        mosaica_store::view_rel(view),
-                        segment.seg_id
-                    );
+                    let dir = layout.segment_rel(view, &segment.seg_id);
                     let base = !row_space
                         .extents()
                         .iter()
                         .any(|e| e.seg_id == segment.seg_id);
                     let entities = match (base, row_space.row_entity()) {
                         (true, Some(_)) => PlannedEntities::Table(format!(
-                            "partitions/{partition}/{}/{}",
-                            mosaica_store::view_rel(view),
+                            "{}/{}",
+                            layout.view_rel(view),
                             mosaica_store::ROW_ENTITY_FILE
                         )),
                         (true, None) => PlannedEntities::Numbers,

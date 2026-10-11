@@ -126,7 +126,8 @@ pub fn keyword_cardinalities(
 ) -> Result<Vec<KeywordCardinality>> {
     let mut out = Vec::new();
     for (phash, segments) in partitions {
-        let attrs_rel = format!("partitions/{phash}/attrs");
+        let shard = mosaica_store::ShardLayout::new(phash, mosaica_types::ShardId::ZERO);
+        let attrs_rel = format!("{}/attrs", shard.rel());
         for scalar in &manifest.declared_scalars {
             if scalar.arrow_type != ScalarType::Keyword || !scalar.index {
                 continue;
@@ -148,11 +149,11 @@ pub fn keyword_cardinalities(
                     continue;
                 }
                 for view in &scalar.views {
-                    let mut dir_rel = format!("{attrs_rel}/{}", scalar.name);
-                    for component in mosaica_store::view_path_components(view) {
-                        dir_rel.push('/');
-                        dir_rel.push_str(component);
-                    }
+                    let dir_rel = shard.scoped_column_rel(
+                        &scalar.name,
+                        view,
+                        mosaica_types::view::DECLARED_INCARNATION,
+                    );
                     let (distinct, present) = read_column(&prefix_dir.join(&dir_rel))?;
                     let rows = segments
                         .segments
@@ -353,26 +354,30 @@ mod tests {
 
     #[test]
     fn bytes_are_summed_for_the_column_directory_alone() {
+        let attrs = format!(
+            "{}/attrs",
+            mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO).rel()
+        );
         let mut files = BTreeMap::new();
         for (path, size) in [
-            ("partitions/default/attrs/uuid/dict.bin", 700u64),
-            ("partitions/default/attrs/uuid/values.arrow", 200),
-            ("partitions/default/attrs/uuid/presence.roaring", 30),
-            ("partitions/default/attrs/uuid/q/2026/dict.bin", 5000),
-            ("partitions/default/attrs/uuid2/dict.bin", 9000),
-            ("partitions/default/attrs/name/dict.bin", 11),
+            ("uuid/dict.bin", 700u64),
+            ("uuid/values.arrow", 200),
+            ("uuid/presence.roaring", 30),
+            ("uuid/q/2026/dict.bin", 5000),
+            ("uuid2/dict.bin", 9000),
+            ("name/dict.bin", 11),
         ] {
             files.insert(
-                path.to_string(),
+                format!("{attrs}/{path}"),
                 FileDigest {
                     size,
                     sha256: String::new(),
                 },
             );
         }
-        assert_eq!(bytes_under("partitions/default/attrs/uuid", &[&files]), 930);
+        assert_eq!(bytes_under(&format!("{attrs}/uuid"), &[&files]), 930);
         assert_eq!(
-            bytes_under("partitions/default/attrs/uuid/q/2026", &[&files]),
+            bytes_under(&format!("{attrs}/uuid/q/2026"), &[&files]),
             5000
         );
     }

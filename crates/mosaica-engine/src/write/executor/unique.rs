@@ -170,10 +170,9 @@ impl Executor {
             at: pending.at,
             wanted,
             prior: pending.runs().map(|(run, _)| run.path.clone()).collect(),
-            out_dir: prefix_dir.join(mosaica_store::unique::index_dir_rel(
-                &partition,
-                &pending.attribute,
-            )),
+            out_dir: prefix_dir.join(
+                ShardLayout::new(&partition, ShardId::ZERO).unique_index_rel(&pending.attribute),
+            ),
             prefix_dir,
             stem: format!("declared-{stamp}-{}", pending.rounds),
             memory_budget: ROUND_MEMORY,

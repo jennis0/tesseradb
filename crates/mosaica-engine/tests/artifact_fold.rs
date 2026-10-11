@@ -85,8 +85,7 @@ impl Fixture {
     fn containment_files(&self, engine: &Engine) -> Vec<std::path::PathBuf> {
         let dir = self
             .live_prefix(engine)
-            .join("partitions")
-            .join("default")
+            .join(common::SHARD.rel())
             .join("containment");
         std::fs::read_dir(&dir)
             .into_iter()
@@ -102,8 +101,7 @@ impl Fixture {
     fn tile_index_files(&self, engine: &Engine) -> Vec<std::path::PathBuf> {
         let dir = self
             .live_prefix(engine)
-            .join("partitions")
-            .join("default")
+            .join(common::SHARD.rel())
             .join("tile-index");
         std::fs::read_dir(&dir)
             .into_iter()
@@ -117,8 +115,7 @@ impl Fixture {
     fn membership_files(&self, engine: &Engine) -> Vec<std::path::PathBuf> {
         let dir = self
             .live_prefix(engine)
-            .join("partitions")
-            .join("default")
+            .join(common::SHARD.rel())
             .join("members");
         std::fs::read_dir(&dir)
             .into_iter()
@@ -132,7 +129,7 @@ impl Fixture {
     /// The `level_versions` the newest side manifest of the live prefix states, as
     /// `(layer, level, version)`.
     fn stated_level_versions(&self, engine: &Engine) -> Vec<(String, u32, u64)> {
-        let dir = self.live_prefix(engine).join("partitions").join("default");
+        let dir = common::partition_dir(&self.live_prefix(engine));
         let newest = std::fs::read_dir(&dir)
             .expect("the partition directory exists")
             .flatten()

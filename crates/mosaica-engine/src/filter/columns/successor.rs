@@ -181,7 +181,8 @@ impl FilterColumns {
     /// already held is a no-op, a re-publication reaching the same state.
     pub fn with_scoped_columns(
         &self,
-        partition_dir: &Path,
+        prefix_dir: &Path,
+        shard: mosaica_store::ShardLayout<'_>,
         columns: &[(String, String, mosaica_types::view::ViewIncarnation)],
         scoped: &[mosaica_store::manifest::ScopedScalar],
         vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
@@ -202,7 +203,8 @@ impl FilterColumns {
                 continue;
             }
             let (name, placement, layers) = open_scoped_column(
-                partition_dir,
+                prefix_dir,
+                shard,
                 family,
                 view,
                 *incarnation,

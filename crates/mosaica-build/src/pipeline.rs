@@ -153,6 +153,7 @@ use mosaica_filter::{
 };
 use mosaica_spatial::split32;
 use mosaica_spatial::tiler::{ScalarType, ScalarValue};
+use mosaica_store::ShardLayout;
 use mosaica_types::SMALL_TERM_THRESHOLD_DEFAULT;
 
 use crate::column::EntityColumn;
@@ -951,7 +952,7 @@ fn build_bundle(
     timer.end(BuildStage::SourceIds, n);
 
     // ---- 2. the dictionary -----------------------------------------------------------
-    let dict_dir = args.out.join(PREFIX).join("dictionary");
+    let dict_dir = args.out.join(PREFIX).join(mosaica_store::layout::DICTIONARY_DIR);
     std::fs::create_dir_all(&dict_dir).map_err(|e| BuildError::io(&dict_dir, e))?;
     // What every source term is called, established before any term id exists — a field-sourced
     // view's sorted vocabulary, or the relation's own integers (`crate::AccessPlan`).
@@ -1306,9 +1307,7 @@ fn build_bundle(
     let entity_terms_dir = args
         .out
         .join(PREFIX)
-        .join("partitions")
-        .join(PHASH)
-        .join(mosaica_store::ENTITY_TERMS_DIR);
+        .join(ShardLayout::new(PHASH, args.shard_id).entity_terms_rel());
     let mut entity_terms = mosaica_store::EntityTermsWriter::create(&entity_terms_dir)
         .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?;
     let mut sig_terms: Vec<u32> = Vec::new();
@@ -1513,9 +1512,11 @@ fn build_bundle(
         fsync_file(path)?;
     }
 
-    let partition_dir = args.out.join(PREFIX).join("partitions").join(PHASH);
-    let terms_dir = partition_dir.join("terms");
-    let entities_dir = partition_dir.join("entities");
+    let prefix_dir = args.out.join(PREFIX);
+    let shard = ShardLayout::new(PHASH, args.shard_id);
+    let shard_dir = shard.dir(&prefix_dir);
+    let terms_dir = shard_dir.join("terms");
+    let entities_dir = shard_dir.join("entities");
     for dir in [&terms_dir, &entities_dir] {
         std::fs::create_dir_all(dir).map_err(|e| BuildError::io(dir, e))?;
     }
@@ -1675,7 +1676,8 @@ fn build_bundle(
     // the group, in entity space; nothing per row space.
     let (scoped_paths, scoped_render) = write_scoped_columns(
         args,
-        &partition_dir,
+        &prefix_dir,
+        shard,
         n,
         &numbering,
         entity_of_ordinal,
@@ -1734,13 +1736,12 @@ fn build_bundle(
         )?;
         // The member rows are read, so every file's numbers have served their last reader.
         drop(numbering);
-        let prefix_dir = args.out.join(crate::PREFIX);
         crate::layers::publish(
             &mut plan,
             &|number| (number < n).then(|| u64::from(entity_of_ordinal[number as usize])),
             n,
             &prefix_dir,
-            crate::PHASH,
+            shard,
             &view_ids,
             &derived,
             publication_batch,
@@ -1773,8 +1774,8 @@ fn build_bundle(
     // join spilled, and before the passes that release them. A value held twice refuses the
     // build before any row space is written.
     let unique = crate::unique_index::write_unique_indexes(
-        &args.out.join(PREFIX),
-        PHASH,
+        &prefix_dir,
+        shard,
         &args.schema,
         |column| match open_extents.iter().find(|extents| extents.column == column) {
             Some(extents) => crate::unique_index::UniqueSource::Extents(extents),
@@ -1785,7 +1786,7 @@ fn build_bundle(
     )?;
     timer.end(BuildStage::UniqueIndexes, n);
     let (filter_paths, text_index) = write_filter_postings(
-        &partition_dir,
+        &shard_dir,
         &args.schema,
         &attributes_by_entity,
         &open_extents,
@@ -1831,7 +1832,7 @@ fn build_bundle(
     // number for three jobs, which is why the 615 s this block cost at 7.4×10⁷ points could be
     // modelled and not read.
     let record_paths = write_record_blob(
-        &partition_dir,
+        &shard_dir,
         &args.schema,
         n,
         &plan.routes,
@@ -1897,8 +1898,8 @@ fn build_bundle(
     let mut term_images: Vec<Option<crate::term_images_pass::ViewTermImages>> =
         Vec::with_capacity(args.views.len());
     for (index, view) in args.views.iter().enumerate() {
-        let view_dir = mosaica_store::view_path(&partition_dir, &view.view_id);
-        let segment_dir = view_dir.join("segments").join(SEG_ID);
+        let view_dir = prefix_dir.join(shard.view_rel(&view.view_id));
+        let segment_dir = prefix_dir.join(shard.segment_rel(&view.view_id, SEG_ID));
         std::fs::create_dir_all(&segment_dir).map_err(|e| BuildError::io(&segment_dir, e))?;
 
         // ---- the assembly: the view's rows, Morton-partitioned, straight from ordinal order ----
@@ -2018,8 +2019,8 @@ fn build_bundle(
         let artifact_pass = crate::artifact_pass::run(
             &mut published_layers,
             &artifact_store,
-            &args.out.join(crate::PREFIX),
-            crate::PHASH,
+            &prefix_dir,
+            shard,
             &view.view_id,
             rows_in_view,
             tmp.path(),
@@ -2047,8 +2048,8 @@ fn build_bundle(
         // exist until that permutation was written.
         let images = crate::term_images_pass::run(
             &postings,
-            &args.out.join(crate::PREFIX),
-            crate::PHASH,
+            &prefix_dir,
+            shard,
             &view.view_id,
             rows_in_view,
             &mut derived_index,
@@ -2063,14 +2064,14 @@ fn build_bundle(
         //
         // After every file they read: the segment, the row-to-entity table, the entity terms and
         // the value columns. The in-memory build calls the same function at the same point.
-        let partition_dir = args.out.join(crate::PREFIX).join("partitions").join(crate::PHASH);
         view_files.push(mosaica_store::field_tallies::derive_view(
-            &partition_dir,
+            &prefix_dir,
+            shard,
             &view.view_id,
             SEG_ID,
             rows_in_view,
             &crate::declared_scalars_of(&args.schema),
-            &|name| mosaica_filter::base_numbers(&partition_dir, name),
+            &|name| mosaica_filter::base_numbers(&shard_dir, name),
         )?);
 
         view_files.push(permutation_path);
@@ -2099,8 +2100,8 @@ fn build_bundle(
         let artifact_store = std::mem::take(&mut published_layers.store);
         let containment = crate::artifact_pass::containment(
             &artifact_store,
-            &args.out.join(crate::PREFIX),
-            crate::PHASH,
+            &prefix_dir,
+            shard,
             &mut derived_index,
         );
         published_layers.store = artifact_store;
@@ -2757,7 +2758,8 @@ fn read_one_attribute_scan(
 #[allow(clippy::too_many_arguments)]
 fn write_scoped_columns(
     args: &BuildArgs,
-    partition_dir: &Path,
+    prefix_dir: &Path,
+    shard: ShardLayout<'_>,
     n: u64,
     numbering: &crate::ids::Numbering,
     entity_of_ordinal: &[u32],
@@ -2817,12 +2819,11 @@ fn write_scoped_columns(
                 minters,
                 scratch,
             )?;
-            // `attrs/<column>/<group>/<key>/` — the view id's own path components, through the
-            // one place a view id becomes a path (`mosaica_store::view_path`).
-            let mut column_dir = partition_dir.join("attrs").join(&attribute.name);
-            for component in mosaica_store::view_path_components(&view.view_id) {
-                column_dir.push(component);
-            }
+            let column_dir = prefix_dir.join(shard.scoped_column_rel(
+                &attribute.name,
+                &view.view_id,
+                mosaica_types::view::DECLARED_INCARNATION,
+            ));
             std::fs::create_dir_all(&column_dir).map_err(|e| BuildError::io(&column_dir, e))?;
             // **A text column has no value column**, per view exactly as bundle-wide: its
             // entity-space artefacts are the token dictionary and the postings over it, and there
@@ -3186,14 +3187,14 @@ fn read_scoped_column(
 /// kernel may reclaim, and the band budget bounds the only anonymous buffer left in the emit. This
 /// pass adds no second copy of the column to either.
 pub(crate) fn write_filter_postings(
-    partition_dir: &Path,
+    shard_dir: &Path,
     schema: &crate::config::Schema,
     by_entity: &[EntityColumn],
     spilled: &[crate::extents::OpenExtents],
     memory_budget: u64,
 ) -> Result<(Vec<PathBuf>, TextIndexCost)> {
     write_filter_postings_banded(
-        partition_dir,
+        shard_dir,
         schema,
         by_entity,
         spilled,
@@ -3221,7 +3222,7 @@ pub(crate) struct TextIndexCost {
 use mosaica_filter_write::POSTINGS_BAND_ROWS;
 
 fn write_filter_postings_banded(
-    partition_dir: &Path,
+    shard_dir: &Path,
     schema: &crate::config::Schema,
     by_entity: &[EntityColumn],
     spilled: &[crate::extents::OpenExtents],
@@ -3235,7 +3236,7 @@ fn write_filter_postings_banded(
         if !postings_are_owed(schema, attribute) {
             continue;
         }
-        let column_dir = partition_dir.join("attrs").join(&attribute.name);
+        let column_dir = shard_dir.join("attrs").join(&attribute.name);
         std::fs::create_dir_all(&column_dir).map_err(|e| BuildError::io(&column_dir, e))?;
 
         // **A text column owes no value column**, so it leaves before the one below is written.
@@ -3355,7 +3356,7 @@ fn write_filter_postings_banded(
 /// 1.02×10⁸ abstracts wrote 52 MB in thirteen minutes at 144 major faults a second
 /// (`probes/2026-09-03-text-arena-streaming/` §5).
 pub(crate) fn write_record_blob(
-    partition_dir: &Path,
+    shard_dir: &Path,
     schema: &crate::config::Schema,
     n: u64,
     routes: &ColumnRoutes,
@@ -3383,7 +3384,7 @@ pub(crate) fn write_record_blob(
     }
     // `record` is reserved as a column name at parse (records §7, review N10), so this directory
     // cannot collide with a declared column's.
-    let record_dir = partition_dir.join("attrs").join("record");
+    let record_dir = shard_dir.join("attrs").join("record");
     std::fs::create_dir_all(&record_dir).map_err(|e| BuildError::io(&record_dir, e))?;
     let blocks_path = record_dir.join(RECORD_BLOCKS_FILE);
     let hasrow_path = record_dir.join(RECORD_HASROW_FILE);

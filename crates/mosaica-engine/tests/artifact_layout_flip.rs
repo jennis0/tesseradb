@@ -89,8 +89,7 @@ fn answers(engine: &Engine, credential: &[u8]) -> Vec<(Option<String>, u64)> {
 fn files(root: &std::path::Path, engine: &Engine, dir: &str) -> Vec<std::path::PathBuf> {
     let dir = root
         .join(&engine.generation().prefix)
-        .join("partitions")
-        .join("default")
+        .join(common::SHARD.rel())
         .join(dir);
     std::fs::read_dir(&dir)
         .into_iter()

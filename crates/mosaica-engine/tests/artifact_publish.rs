@@ -254,8 +254,7 @@ fn published_extents(fx: &Fixture) -> Vec<std::path::PathBuf> {
     let dir = fx
         .root
         .join("v00000")
-        .join("partitions")
-        .join("default")
+        .join(common::SHARD.rel())
         .join("members");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {

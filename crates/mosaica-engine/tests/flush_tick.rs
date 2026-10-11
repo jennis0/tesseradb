@@ -428,16 +428,9 @@ fn a_retry_that_finds_nothing_to_flush_still_reaches_the_promised_number() {
 fn segments_dir(root: &std::path::Path, view: &str) -> std::path::PathBuf {
     let current: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(root.join("CURRENT")).unwrap()).unwrap();
-    let partitions = root
-        .join(current["prefix"].as_str().unwrap())
-        .join("partitions");
-    let partition = std::fs::read_dir(&partitions)
-        .unwrap()
-        .next()
-        .expect("the bundle has a partition")
-        .unwrap()
-        .path();
-    mosaica_store::view_path(&partition, view).join("segments")
+    root.join(current["prefix"].as_str().unwrap())
+        .join(common::SHARD.view_rel(view))
+        .join("segments")
 }
 
 /// Whether a full-coverage viewer is served `entity`, ingested at (0.5, 0.5), in `view`.

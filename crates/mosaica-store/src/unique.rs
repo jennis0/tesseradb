@@ -38,11 +38,6 @@ pub const RUN_MAX_ENTRIES: NonZeroU64 = match NonZeroU64::new(1 << 26) {
     None => unreachable!(),
 };
 
-/// Where a partition's unique indexes live, prefix-relative: one directory per column.
-pub fn index_dir_rel(partition: &str, attribute: &str) -> String {
-    format!("partitions/{partition}/entities/unique/{attribute}")
-}
-
 /// Whether a column of this type may be declared unique: keyword, every integer width, and
 /// timestamps. A float has no exact equality to index, a boolean two values, a category codes
 /// minted by the server, and text no single value.

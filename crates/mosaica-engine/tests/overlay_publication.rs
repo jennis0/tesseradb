@@ -310,7 +310,7 @@ fn a_run_of_denies_leaves_a_bounded_directory_and_a_reopen_hides_every_one() {
         });
         (suppressed, deleted, before, engine.generation().prefix.clone())
     };
-    let partition_dir = root.join(&prefix).join("partitions").join("default");
+    let partition_dir = common::partition_dir(&root.join(&prefix));
     let present: Vec<String> = std::fs::read_dir(&partition_dir)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())

@@ -159,8 +159,7 @@ impl Fixture {
         let dir = self
             .root
             .join(&engine.generation().prefix)
-            .join("partitions")
-            .join("default")
+            .join(common::SHARD.rel())
             .join("row-column");
         std::fs::read_dir(&dir)
             .into_iter()
@@ -174,8 +173,7 @@ impl Fixture {
         let dir = self
             .root
             .join(&engine.generation().prefix)
-            .join("partitions")
-            .join("default")
+            .join(common::SHARD.rel())
             .join("tile-index");
         std::fs::read_dir(&dir)
             .into_iter()
@@ -289,8 +287,7 @@ fn wait_for_publication(fx: &Fixture, engine: &Engine, files: usize) {
     let dir = fx
         .root
         .join(&engine.generation().prefix)
-        .join("partitions")
-        .join("default")
+        .join(common::SHARD.rel())
         .join("members");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {

@@ -138,20 +138,10 @@ pub fn write_flush_segment(
         input.rows.iter().map(|r| r.entity_id.raw()),
     );
 
-    // **`view_rel`, never the joined id** (`views.md` §3.2): a group's view lays its files down
-    // at `views/<group>/<key>/` and a `files` key spelled `views/<group>:<key>/` names a path no
-    // reader will look at — every file under the view unverifiable, which the loader reads as a
-    // corrupt bundle. The path below and the key here must come from one derivation.
-    let rel = |name: &str| {
-        format!(
-            "partitions/{partition}/{}/segments/{}/{name}",
-            crate::view_rel(view),
-            input.seg_id
-        )
-    };
-    let seg_dir = crate::view_path(&prefix_dir.join("partitions").join(partition), view)
-        .join("segments")
-        .join(input.seg_id);
+    let seg_rel =
+        crate::ShardLayout::new(partition, input.shard_id).segment_rel(view, input.seg_id);
+    let rel = |name: &str| format!("{seg_rel}/{name}");
+    let seg_dir = prefix_dir.join(&seg_rel);
     fs::create_dir_all(&seg_dir).map_err(|source| StoreError::Io {
         path: seg_dir.clone(),
         source,
@@ -449,7 +439,8 @@ mod tests {
             },
         )
         .expect("flush");
-        (out, dir.join("partitions/p/views/s/segments/seg-1"))
+        let seg_rel = crate::ShardLayout::new("p", ShardId::ZERO).segment_rel("s", "seg-1");
+        (out, dir.join(seg_rel))
     }
 
     /// **The bitmap is in row space, and the fixture is arranged so entity space would be wrong.**
@@ -468,9 +459,10 @@ mod tests {
             ],
         );
 
+        let seg_rel = crate::ShardLayout::new("p", ShardId::ZERO).segment_rel("s", "seg-1");
         assert!(
             out.files
-                .contains_key("partitions/p/views/s/segments/seg-1/presence/score.roaring"),
+                .contains_key(&format!("{seg_rel}/presence/score.roaring")),
             "the manifest must name the bitmap, or a missing one reads as 'every row present' \
              instead of refusing"
         );

@@ -20,7 +20,7 @@ use mosaica_types::EntityId;
 /// digest of its own — only the `files` entries *inside* it are verified — so this needs no
 /// resealing.
 fn edit_segments_manifest(root: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
-    let path = root.join("v00000/partitions/default/SEGMENTS-0.json");
+    let path = common::partition_dir(&root.join("v00000")).join("SEGMENTS-0.json");
     let mut value: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     edit(&mut value);

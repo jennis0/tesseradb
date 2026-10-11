@@ -52,14 +52,6 @@ impl Direction {
     }
 }
 
-/// Where a partition's edited-item runs of one direction live, prefix-relative.
-pub fn runs_dir_rel(partition: &str, direction: Direction) -> String {
-    format!(
-        "partitions/{partition}/entities/edited/{}",
-        direction.name()
-    )
-}
-
 /// The runs one writer finished for both directions.
 #[derive(Debug, Default)]
 pub struct WrittenEdited {
@@ -81,7 +73,7 @@ impl WrittenEdited {
 /// `prefix_dir`. Writes no file for no pairs. The caller fsyncs.
 pub fn write_edited_runs(
     prefix_dir: &Path,
-    partition: &str,
+    layout: crate::ShardLayout<'_>,
     stem: &str,
     pairs: &[(u32, u32)],
 ) -> Result<WrittenEdited> {
@@ -91,14 +83,14 @@ pub fn write_edited_runs(
     let mut by_entity: Vec<(u32, u32)> = by_number.iter().map(|&(n, e)| (e, n)).collect();
     by_entity.sort_unstable();
     Ok(WrittenEdited {
-        by_number: write_direction(prefix_dir, partition, Direction::ByNumber, stem, &by_number)?,
-        by_entity: write_direction(prefix_dir, partition, Direction::ByEntity, stem, &by_entity)?,
+        by_number: write_direction(prefix_dir, layout, Direction::ByNumber, stem, &by_number)?,
+        by_entity: write_direction(prefix_dir, layout, Direction::ByEntity, stem, &by_entity)?,
     })
 }
 
 fn write_direction(
     prefix_dir: &Path,
-    partition: &str,
+    layout: crate::ShardLayout<'_>,
     direction: Direction,
     stem: &str,
     sorted: &[(u32, u32)],
@@ -106,7 +98,7 @@ fn write_direction(
     if sorted.is_empty() {
         return Ok(Vec::new());
     }
-    let dir = prefix_dir.join(runs_dir_rel(partition, direction));
+    let dir = prefix_dir.join(layout.edited_runs_rel(direction));
     std::fs::create_dir_all(&dir).map_err(|source| StoreError::Io {
         path: dir.clone(),
         source,
@@ -577,7 +569,9 @@ mod tests {
     fn both_directions_answer_and_a_merge_drops_retired_entities() {
         let tmp = tempfile::tempdir().unwrap();
         let prefix = tmp.path();
-        let written = write_edited_runs(prefix, "p", "live", &[(3, 40), (3, 41), (7, 42)]).unwrap();
+        let layout = crate::ShardLayout::new("p", mosaica_types::ShardId::ZERO);
+        let written =
+            write_edited_runs(prefix, layout, "live", &[(3, 40), (3, 41), (7, 42)]).unwrap();
         let listed = |runs: &[WrittenRun<u32>]| KeyRuns {
             base: Vec::new(),
             live: runs
@@ -599,7 +593,7 @@ mod tests {
         let retired = croaring::Bitmap::of(&[40]);
         let paths =
             |runs: &[WrittenRun<u32>]| runs.iter().map(|r| r.path.clone()).collect::<Vec<_>>();
-        let dir = |direction| prefix.join(runs_dir_rel("p", direction));
+        let dir = |direction| prefix.join(layout.edited_runs_rel(direction));
         let by_number = merge_edited_runs(
             Direction::ByNumber,
             &paths(&written.by_number),

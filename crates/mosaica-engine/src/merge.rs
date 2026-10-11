@@ -14,6 +14,7 @@ use mosaica_store::manifest::SegmentDescriptor;
 use mosaica_store::merge::{execute_merge, MergeInput, MergeOutput, MergePolicy, MergeSpec};
 use mosaica_store::read::SegmentData;
 use mosaica_store::render_presence::RENDER_PRESENCE_DIR;
+use mosaica_store::ShardLayout;
 use mosaica_types::{IdentityKey, ShardId};
 
 use crate::flush::MaintenanceFailed;
@@ -44,6 +45,7 @@ pub(crate) fn plan_merge(generation: &Generation, policy: MergePolicy) -> Option
     if partition_data.stepped_down() {
         return None;
     }
+    let layout = ShardLayout::new(partition, ShardId::ZERO);
     for (view, view_data) in &partition_data.views {
         // Use the view's live incarnation, or skip it. A mismatch between the bundle and its
         // manifest is a state the composition already refuses to serve.
@@ -74,7 +76,7 @@ pub(crate) fn plan_merge(generation: &Generation, policy: MergePolicy) -> Option
             .collect();
         let sizes: Vec<u64> = descriptors
             .iter()
-            .map(|d| segment_bytes(&partition_data.manifest, partition, view, &d.seg_id))
+            .map(|d| segment_bytes(&partition_data.manifest, layout, view, &d.seg_id))
             .collect();
         let Some(chosen) = policy.select(&descriptors, &sizes) else {
             continue;
@@ -96,9 +98,8 @@ pub(crate) fn plan_merge(generation: &Generation, policy: MergePolicy) -> Option
                     entity_hi: d.entity_hi,
                     edited_rows: {
                         let rel = format!(
-                            "partitions/{partition}/{}/segments/{}/{}",
-                            mosaica_store::view_rel(view),
-                            d.seg_id,
+                            "{}/{}",
+                            layout.segment_rel(view, &d.seg_id),
                             mosaica_store::edited::EDITED_ROWS_FILE
                         );
                         // A segment a fold carried is listed in the bundle's manifest.
@@ -116,14 +117,11 @@ pub(crate) fn plan_merge(generation: &Generation, policy: MergePolicy) -> Option
 /// One segment's bytes, from the manifest's own digests: every file its directory holds.
 fn segment_bytes(
     manifest: &mosaica_store::manifest::SegmentsManifest,
-    partition: &str,
+    layout: ShardLayout<'_>,
     view: &str,
     seg_id: &str,
 ) -> u64 {
-    let dir = format!(
-        "partitions/{partition}/{}/segments/{seg_id}/",
-        mosaica_store::view_rel(view)
-    );
+    let dir = format!("{}/", layout.segment_rel(view, seg_id));
     manifest
         .files
         .iter()
@@ -180,12 +178,9 @@ pub(crate) fn execute(
     )
     .map_err(|e| MaintenanceFailed(format!("merge: {e}")))?;
 
-    let seg_dir = mosaica_store::view_path(
-        &ctx.prefix_dir.join("partitions").join(&plan.partition),
-        &plan.view,
-    )
-    .join("segments")
-    .join(&ctx.seg_id);
+    let seg_dir = ctx
+        .prefix_dir
+        .join(ShardLayout::new(&plan.partition, ctx.shard_id).segment_rel(&plan.view, &ctx.seg_id));
     let entities = mosaica_store::edited::RowEntities::Listed(std::sync::Arc::new(
         mosaica_store::edited::EditedRows::open(
             &seg_dir,
@@ -238,11 +233,8 @@ pub(crate) fn rebase_into(
     // Presence bitmaps are removed by prefix because a column with no absence in a given segment
     // has no bitmap file there; the merged segment carries its own, permuted.
     for seg_id in &consumed {
-        let seg_rel = format!(
-            "partitions/{}/{}/segments/{seg_id}",
-            plan.partition,
-            mosaica_store::view_rel(&plan.view)
-        );
+        let seg_rel =
+            ShardLayout::new(&plan.partition, ShardId::ZERO).segment_rel(&plan.view, seg_id);
         for name in mosaica_store::SEGMENT_FILES {
             manifest.files.remove(&format!("{seg_rel}/{name}"));
         }

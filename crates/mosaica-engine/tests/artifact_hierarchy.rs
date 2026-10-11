@@ -1688,8 +1688,7 @@ fn parents_in_bundle(
     let dir = fx
         .root
         .join(&engine.generation().prefix)
-        .join("partitions")
-        .join("default")
+        .join(common::SHARD.rel())
         .join("members");
     let mut found = None;
     for entry in std::fs::read_dir(&dir)

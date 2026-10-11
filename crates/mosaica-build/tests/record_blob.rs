@@ -239,9 +239,8 @@ fn current_prefix(out: &Path) -> String {
 fn record_dir(out: &Path) -> PathBuf {
     let bundle = open_bundle(out).unwrap();
     let phash = bundle.partitions.keys().next().unwrap().clone();
-    out.join(current_prefix(out))
-        .join("partitions")
-        .join(phash)
+    mosaica_store::ShardLayout::new(&phash, mosaica_types::ShardId::ZERO)
+        .dir(&out.join(current_prefix(out)))
         .join("attrs")
         .join("record")
 }
@@ -292,7 +291,10 @@ fn the_blob_files_are_under_the_manifest_digest() {
     let bundle = open_bundle(&out).unwrap();
     let phash = bundle.partitions.keys().next().unwrap();
     for file in ["blocks.bin", "hasrow.roaring", "directory.arrow"] {
-        let key = format!("partitions/{phash}/attrs/record/{file}");
+        let key = format!(
+            "{}/attrs/record/{file}",
+            mosaica_store::ShardLayout::new(phash, mosaica_types::ShardId::ZERO).rel()
+        );
         assert!(
             bundle.manifest.files.contains_key(&key),
             "MANIFEST.files covers {key}; it holds {:?}",
@@ -407,15 +409,16 @@ fn verify_deep_refuses_a_blob_whose_bitmap_renames_a_rank() {
 
     let dir = build_with(blob_schema(), &note_of);
     let out = dir.path().join("bundle");
+    let phash = open_bundle(&out)
+        .unwrap()
+        .partitions
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
     let rel = format!(
-        "partitions/{}/attrs/record/{}",
-        open_bundle(&out)
-            .unwrap()
-            .partitions
-            .keys()
-            .next()
-            .unwrap()
-            .clone(),
+        "{}/attrs/record/{}",
+        mosaica_store::ShardLayout::new(&phash, mosaica_types::ShardId::ZERO).rel(),
         mosaica_filter::RECORD_HASROW_FILE
     );
     let hasrow_path = record_dir(&out).join(mosaica_filter::RECORD_HASROW_FILE);

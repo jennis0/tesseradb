@@ -20,7 +20,7 @@ use mosaica_spatial::tiler::ScalarType;
 use mosaica_store::manifest::{DictExtent, FileDigest, Quantisation, RecordExtent};
 use mosaica_store::permutation::SegmentExtent;
 use mosaica_store::read::SegmentData;
-use mosaica_store::{write_flush_segment, FlushInput, FlushRow};
+use mosaica_store::{write_flush_segment, FlushInput, FlushRow, ShardLayout};
 use mosaica_types::{EntityId, IdentityKey, ShardId, TermId};
 use rustc_hash::FxHashMap;
 
@@ -464,6 +464,12 @@ pub(crate) struct FlushContext {
     pub(crate) tenancy: Arc<mosaica_store::tenancy::TenancyIndex>,
 }
 
+impl FlushContext {
+    fn layout(&self) -> ShardLayout<'_> {
+        ShardLayout::new(&self.partition, self.shard_id)
+    }
+}
+
 /// A flush whose files are durable, awaiting manifest assembly and the swap on the executor. The side-manifest is
 /// the commit point, written at publication, not here: a crash while one of these is in flight leaves orphan files
 /// nothing references, and the next tick re-plans.
@@ -641,10 +647,8 @@ fn execute_flush_stages(
             plan.items.len() as u64,
         );
         let tier_rel = format!(
-            "partitions/{}/{}/segments/{}/delta.arrow",
-            ctx.partition,
-            mosaica_store::view_rel(&ctx.view),
-            ctx.seg_id
+            "{}/delta.arrow",
+            ctx.layout().segment_rel(&ctx.view, &ctx.seg_id)
         );
         let tier_path = ctx.prefix_dir.join(&tier_rel);
         write_delta_tier(&tier_path, &promotion.postings, SMALL_TERM_THRESHOLD)
@@ -725,8 +729,9 @@ fn execute_flush_stages(
     // A base a view acquired at this flush is digested too: the build never wrote it.
     for (column, view) in &scoped_columns {
         // The writer's own derivation, so the base is digested at the exact path it was written to.
-        let rel =
-            mosaica_store::scoped_column_rel(&ctx.partition, column, view, ctx.scoped_incarnation);
+        let rel = ctx
+            .layout()
+            .scoped_column_rel(column, view, ctx.scoped_incarnation);
         let prose = |name: &str| format!("{}/{name}", mosaica_store::manifest::SCOPED_PROSE_DIR);
         for name in [
             mosaica_filter::VALUES_FILE.to_string(),
@@ -1007,10 +1012,8 @@ fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, Maintenanc
         dict: Arc::new(ctx.dict.extended_with(&interned)),
         extent: Some(DictExtent {
             path: format!(
-                "partitions/{}/{}/segments/{}/terms-0.dict",
-                ctx.partition,
-                mosaica_store::view_rel(&ctx.view),
-                ctx.seg_id
+                "{}/terms-0.dict",
+                ctx.layout().segment_rel(&ctx.view, &ctx.seg_id)
             ),
             records: interned.len() as u64,
         }),
@@ -1042,7 +1045,7 @@ fn write_filter_extents(
     let mut out = Vec::with_capacity(ctx.filter_schema.len());
     for spec in &ctx.filter_schema {
         let column = extent_values(spec, entity_scoped_rows(spec, plan)?)?;
-        let column_rel = format!("partitions/{}/attrs/{}", ctx.partition, spec.name);
+        let column_rel = format!("{}/attrs/{}", ctx.layout().rel(), spec.name);
         let column_dir = ctx.prefix_dir.join(&column_rel);
         out.push(write_value_extent(
             ctx,
@@ -1114,7 +1117,7 @@ fn write_edited_runs(
     }
     let written = mosaica_store::edited::write_edited_runs(
         &ctx.prefix_dir,
-        &ctx.partition,
+        ctx.layout(),
         &ctx.seg_id,
         &pairs,
     )
@@ -1157,7 +1160,7 @@ fn write_unique_runs(
         }
         entries.sort_unstable();
         entries.dedup();
-        let dir_rel = mosaica_store::unique::index_dir_rel(&ctx.partition, attribute);
+        let dir_rel = ctx.layout().unique_index_rel(attribute);
         let written = mosaica_store::unique::write_sorted_runs(
             kind,
             &ctx.prefix_dir.join(&dir_rel),
@@ -1542,7 +1545,7 @@ fn write_text_extents(
                 row.scalars.get(spec.index).unwrap_or(&WalScalar::Null),
             ));
         }
-        let rel_dir = format!("partitions/{}/attrs/{}/extents", ctx.partition, spec.name);
+        let rel_dir = format!("{}/attrs/{}/extents", ctx.layout().rel(), spec.name);
         let sub = Some(TextLaps {
             laps: &mut *laps,
             mark: &mut mark,
@@ -1694,17 +1697,11 @@ fn write_text_layer(
     }))
 }
 
-/// Where one view's column of a group-scoped family lives, prefix-relative:
-/// `partitions/<p>/attrs/<column>/<group>/<key>/`, through the one place a view id and its
-/// incarnation become a path, so a recreated key's base never lands on its predecessor's path.
+/// Where one view's column of a group-scoped family lives, prefix-relative. Addressed by
+/// `scoped_view` and its own incarnation, not `view`'s.
 fn scoped_column_rel(ctx: &FlushContext, column: &str) -> String {
-    // `scoped_view` and its own incarnation, not `view`'s.
-    mosaica_store::scoped_column_rel(
-        &ctx.partition,
-        column,
-        &ctx.scoped_view,
-        ctx.scoped_incarnation,
-    )
+    ctx.layout()
+        .scoped_column_rel(column, &ctx.scoped_view, ctx.scoped_incarnation)
 }
 
 /// Write this flush's extent for every group-scoped family of its view's group, and the empty
@@ -1889,7 +1886,7 @@ fn write_entity_terms_extent(
     per_entity: &[(u32, Vec<u32>)],
     ctx: &FlushContext,
 ) -> Result<mosaica_store::manifest::EntityTermsExtent, MaintenanceFailed> {
-    let extents_rel = format!("partitions/{}/entities/terms/extents", ctx.partition);
+    let extents_rel = format!("{}/extents", ctx.layout().entity_terms_rel());
     let extents_dir = ctx.prefix_dir.join(&extents_rel);
     std::fs::create_dir_all(&extents_dir)
         .map_err(|e| MaintenanceFailed(format!("entity-terms extent dir: {e}")))?;
@@ -1965,7 +1962,7 @@ fn write_record_extent(
     if ctx.record_schema.is_empty() {
         return Ok(None);
     }
-    let extents_rel = format!("partitions/{}/attrs/record/extents", ctx.partition);
+    let extents_rel = format!("{}/attrs/record/extents", ctx.layout().rel());
     let extents_dir = ctx.prefix_dir.join(&extents_rel);
     std::fs::create_dir_all(&extents_dir)
         .map_err(|e| MaintenanceFailed(format!("record extent dir: {e}")))?;
@@ -2082,12 +2079,8 @@ fn narrow_entity(entity: EntityId) -> Result<u32, MaintenanceFailed> {
 /// This flush's segment directory. Both the segment writer and promotion address it; naming it
 /// once keeps them from drifting apart.
 fn segment_dir(ctx: &FlushContext) -> PathBuf {
-    mosaica_store::view_path(
-        &ctx.prefix_dir.join("partitions").join(&ctx.partition),
-        &ctx.view,
-    )
-    .join("segments")
-    .join(&ctx.seg_id)
+    ctx.prefix_dir
+        .join(ctx.layout().segment_rel(&ctx.view, &ctx.seg_id))
 }
 
 /// One file's size and hex SHA-256, by reading it back: `mosaica_store::digest_of` with this

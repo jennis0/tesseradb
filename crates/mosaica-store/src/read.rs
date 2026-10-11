@@ -671,8 +671,9 @@ fn open_prefix(
     let mut partitions = HashMap::with_capacity(manifest.partitions.len());
     for partition_desc in &manifest.partitions {
         sanitize_component("partition phash", &partition_desc.phash)?;
-        let partition_dir = prefix_dir.join("partitions").join(&partition_desc.phash);
+        let partition_dir = crate::layout::partition_dir(&prefix_dir, &partition_desc.phash);
         let selected = load_verifying_segments_manifest(&prefix_dir, &partition_dir, verification)?;
+        let layout = crate::ShardLayout::new(&partition_desc.phash, mosaica_types::ShardId::ZERO);
         let segments_manifest = selected.manifest;
 
         // **One incarnation per view, and it is the newest** (decision 0115). A drop leaves its
@@ -708,14 +709,11 @@ fn open_prefix(
             }
             sanitize_component("segment id", &seg_desc.seg_id)?;
 
-            let view_dir = crate::view_path(&partition_dir, &seg_desc.view);
+            let view_rel = layout.view_rel(&seg_desc.view);
+            let view_dir = prefix_dir.join(&view_rel);
             let is_new_view = !views.contains_key(&seg_desc.view);
             let perm_path = view_dir.join("permutation.bin");
-            let perm_rel = format!(
-                "partitions/{}/{}/permutation.bin",
-                partition_desc.phash,
-                crate::view_rel(&seg_desc.view)
-            );
+            let perm_rel = format!("{view_rel}/permutation.bin");
             // **A view need not have a base at all** (`views.md` §3.2). Every view a build or a
             // fold wrote has one, and its first segment is the build segment `permutation.bin`
             // addresses; a view *created while the service runs* owns no row space until its
@@ -749,12 +747,8 @@ fn open_prefix(
                     // *is* named, it is verified like any other file — an unverifiable table is a
                     // refusal, because a wrong row→entity mapping would put another entity's
                     // filter verdict on a row.
-                    let row_entity_rel = format!(
-                        "partitions/{}/{}/{}",
-                        partition_desc.phash,
-                        crate::view_rel(&seg_desc.view),
-                        crate::row_entity::ROW_ENTITY_FILE
-                    );
+                    let row_entity_rel =
+                        format!("{view_rel}/{}", crate::row_entity::ROW_ENTITY_FILE);
                     let row_entity = if has_base
                         && (segments_manifest.files.contains_key(&row_entity_rel)
                             || manifest.files.contains_key(&row_entity_rel))
@@ -777,12 +771,8 @@ fn open_prefix(
                     // (`crate::field_tallies`). **Optional, as `row-entity.u32` is**: a view
                     // without one has its base rows walked for a field's figures, and arrives at
                     // the same answer. Where it is named, it is verified like any other file.
-                    let tallies_rel = format!(
-                        "partitions/{}/{}/{}",
-                        partition_desc.phash,
-                        crate::view_rel(&seg_desc.view),
-                        crate::field_tallies::FIELD_TALLIES_FILE
-                    );
+                    let tallies_rel =
+                        format!("{view_rel}/{}", crate::field_tallies::FIELD_TALLIES_FILE);
                     let field_tallies = if has_base
                         && (segments_manifest.files.contains_key(&tallies_rel)
                             || manifest.files.contains_key(&tallies_rel))
@@ -823,14 +813,10 @@ fn open_prefix(
                 }
             };
 
-            let seg_dir = view_dir.join("segments").join(&seg_desc.seg_id);
+            let seg_rel = layout.segment_rel(&seg_desc.view, &seg_desc.seg_id);
+            let seg_dir = prefix_dir.join(&seg_rel);
             for name in crate::SEGMENT_FILES {
-                let rel = format!(
-                    "partitions/{}/{}/segments/{}/{name}",
-                    partition_desc.phash,
-                    crate::view_rel(&seg_desc.view),
-                    seg_desc.seg_id
-                );
+                let rel = format!("{seg_rel}/{name}");
                 ensure_verified(
                     &rel,
                     &segments_manifest,
@@ -856,10 +842,7 @@ fn open_prefix(
                         source,
                     })?;
                     let rel = format!(
-                        "partitions/{}/{}/segments/{}/{RENDER_PRESENCE_DIR}/{}",
-                        partition_desc.phash,
-                        crate::view_rel(&seg_desc.view),
-                        seg_desc.seg_id,
+                        "{seg_rel}/{RENDER_PRESENCE_DIR}/{}",
                         entry.file_name().to_string_lossy()
                     );
                     ensure_verified(&rel, &segments_manifest, &manifest.files, &entry.path())?;
@@ -875,13 +858,7 @@ fn open_prefix(
                     None => crate::edited::RowEntities::Numbers,
                 }
             } else {
-                let rel = format!(
-                    "partitions/{}/{}/segments/{}/{}",
-                    partition_desc.phash,
-                    crate::view_rel(&seg_desc.view),
-                    seg_desc.seg_id,
-                    crate::edited::EDITED_ROWS_FILE
-                );
+                let rel = format!("{seg_rel}/{}", crate::edited::EDITED_ROWS_FILE);
                 let listed =
                     segments_manifest.files.contains_key(&rel) || manifest.files.contains_key(&rel);
                 if listed {
@@ -1264,9 +1241,9 @@ fn load_verifying_segments_manifest(
     // Built before the listing because the listing can itself refuse (a non-canonical name).
     let partition_label = match (prefix_dir.file_name(), partition_dir.file_name()) {
         (Some(prefix), Some(phash)) => format!(
-            "{}/partitions/{}",
+            "{}/{}",
             prefix.to_string_lossy(),
-            phash.to_string_lossy()
+            crate::layout::partition_rel(&phash.to_string_lossy())
         ),
         _ => partition_dir.display().to_string(),
     };
@@ -1468,7 +1445,7 @@ pub(crate) fn list_segments_manifests(
 pub fn highest_side_manifest_n(bundle_root: &Path) -> Result<Option<u64>> {
     let mut highest: Option<u64> = None;
     for prefix in sub_directories(bundle_root)? {
-        for partition in sub_directories(&prefix.join("partitions"))? {
+        for partition in sub_directories(&crate::layout::partitions_dir(&prefix))? {
             for entry in read_dir_if_present(&partition)? {
                 let entry = entry.map_err(|source| StoreError::Io {
                     path: partition.clone(),
