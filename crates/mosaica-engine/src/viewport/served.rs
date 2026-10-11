@@ -4,10 +4,8 @@ use super::*;
 
 /// One request's view, resolved once and passed whole.
 ///
-/// Every field is fixed for the request from the moment the view resolves: the session asking, the
-/// generation loaded at request start, the shard the view's rows are in, the view's name and data,
-/// its segments with their row bases, its deny mask rows, and what this request's composed mask is. A callee that would otherwise take
-/// four or more of them takes this instead.
+/// Every field is fixed for the request from the moment the view resolves; a callee that would
+/// otherwise take four or more of them takes this instead.
 ///
 /// A struct of borrows: it owns only the segment list, which is the one `segments_with_row_bases`
 /// already built for the request; nothing here is cloned or reference-counted a second time.

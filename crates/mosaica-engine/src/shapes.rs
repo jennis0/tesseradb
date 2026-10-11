@@ -548,11 +548,7 @@ impl ShapeStore {
                 continue;
             }
             for view in &declaration.views {
-                let Some(view_data) = bundle
-                    .partitions
-                    .values()
-                    .find_map(|partition| partition.only_shard().views.get(view))
-                else {
+                let Some(view_data) = bundle.only_shard().views.get(view) else {
                     continue;
                 };
                 for level in 0..registered.runs.len() as u32 {

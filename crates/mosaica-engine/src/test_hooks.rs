@@ -441,21 +441,9 @@ impl Engine {
     ) -> Result<croaring::Bitmap> {
         let generation = self.generation.load_full();
         let shard = generation.only_shard();
-        let view_data = shard
-            .data
-            .views
-            .get(view)
-            .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
         let mut probe = crate::timing::Probe::new();
-        let (geometry, _) = self.session_geometry(
-            session,
-            &generation,
-            shard,
-            view,
-            view_data,
-            &None,
-            &mut probe,
-        )?;
+        let (geometry, _) =
+            self.session_geometry(session, &generation, shard, view, &None, &mut probe)?;
         Ok(geometry.projection.bitmap().clone())
     }
 

@@ -53,7 +53,6 @@ use mosaica_types::layer::{HierarchyKind, RegisteredLayer};
 use mosaica_types::{EntityId, MosaicaId};
 
 use crate::artifacts::{ArtifactVerdict, ArtifactView};
-use crate::compose::compose;
 use crate::compose::EffectiveMask;
 use crate::error::Result;
 use crate::filter::FilterExpr;
@@ -306,30 +305,12 @@ impl crate::Engine {
         // is given one and its laps are dropped. Named `_probe` rather than silenced afterwards,
         // so that a stage field arriving here is a change to this line and not to a discard.
         let mut _probe = crate::timing::Probe::new();
-        let (geometry, key) = self.session_geometry(
-            session,
-            &generation,
-            shard,
-            view,
-            view_data,
-            &None,
-            &mut _probe,
-        )?;
-        let denied = shard
-            .denied()
-            .get(view)
-            .ok_or_else(|| EngineError::DenyMaskMissing {
-                view: view.to_string(),
-            })?;
-        let mask = compose(
-            session.satisfied(),
-            &shard.overlay,
-            &shard.buffer,
-            Arc::clone(&geometry.projection),
-            &view_data.row_space,
-            denied,
-            shard.buffered_rows(view),
-        );
+        let (geometry, key) =
+            self.session_geometry(session, &generation, shard, view, &None, &mut _probe)?;
+        let denied = shard.denied_in(view)?;
+        let projection = Arc::clone(&geometry.projection);
+        let mask =
+            shard.compose(session.satisfied(), projection, view, &view_data.row_space, denied);
         let served_view = crate::viewport::ServedView {
             session,
             generation: &generation,

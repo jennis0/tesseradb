@@ -425,39 +425,37 @@ pub(crate) fn flushed_row_scalar(
     let d = manifest.declared_scalars.get(declared_index)?;
     let render_scalars: Vec<_> = manifest.render_scalars().cloned().collect();
 
-    for partition in generation.bundle.partitions.values() {
-        for (view, view_data) in &partition.only_shard().views {
-            let resolved_row = match segment_row_of(view, view_data, entity) {
-                Ok(resolved) => resolved,
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        view = %view,
-                        "a view's segment set could not be resolved, so the join rule's attribute \
-                         arm cannot read a render-only column from this view (views §4). The scan \
-                         continues; if no view answers, the batch's joins are accepted unchecked. \
-                         The artefact is a build or flush defect; a fold rewrites it."
-                    );
-                    continue;
-                }
-            };
-            let Some((segment, local)) = resolved_row else {
-                continue;
-            };
-            let Ok(local_row) = u32::try_from(local) else {
-                continue;
-            };
-            if !RowPresence::of(segment, &d.name, d.vocabulary.is_some()).contains(local_row) {
+    for (view, view_data) in &generation.only_shard().data.views {
+        let resolved_row = match segment_row_of(view, view_data, entity) {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    view = %view,
+                    "a view's segment set could not be resolved, so the join rule's attribute \
+                     arm cannot read a render-only column from this view (views §4). The scan \
+                     continues; if no view answers, the batch's joins are accepted unchecked. \
+                     The artefact is a build or flush defect; a fold rewrites it."
+                );
                 continue;
             }
-            let resolved = resolve_scalars(segment, &render_scalars);
-            let Some(Some(view_slice)) = resolved.get(slot) else {
-                continue;
-            };
-            let read = slice_value(view_slice, local);
-            if read.is_some() {
-                return read;
-            }
+        };
+        let Some((segment, local)) = resolved_row else {
+            continue;
+        };
+        let Ok(local_row) = u32::try_from(local) else {
+            continue;
+        };
+        if !RowPresence::of(segment, &d.name, d.vocabulary.is_some()).contains(local_row) {
+            continue;
+        }
+        let resolved = resolve_scalars(segment, &render_scalars);
+        let Some(Some(view_slice)) = resolved.get(slot) else {
+            continue;
+        };
+        let read = slice_value(view_slice, local);
+        if read.is_some() {
+            return read;
         }
     }
     None

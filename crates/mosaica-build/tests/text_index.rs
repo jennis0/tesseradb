@@ -446,7 +446,7 @@ fn open_columns(out: &Path) -> mosaica_engine::filter::FilterColumns {
     let phash = bundle.partitions.keys().next().unwrap().clone();
     mosaica_engine::filter::FilterColumns::open(
         &out.join(current_prefix(out)),
-        &phash,
+        mosaica_store::ShardLayout::new(&phash, bundle.only_shard().record.id),
         &bundle.manifest,
         // A built bundle has flushed nothing, so every column is its base layer alone.
         Default::default(),

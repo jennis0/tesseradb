@@ -580,12 +580,12 @@ pub fn denied_rows_of(overlay: &Overlay, row_space: &RowSpace) -> Bitmap {
     rows
 }
 
-/// Derive, per view of one shard, the buffered entities [`compose`]'s walk has anything to say about: those
-/// holding an own row in the buffer that already have a row in that view. An entity gains one only
-/// when a publication gives it one, so this is re-derived by every publication and may otherwise be
-/// carried; the result is the only legal value of [`crate::Shard::buffered_rows`]. The overlay is not
-/// consulted, so a deny or its lift changes nothing here and `compose` asks [`Overlay::touches`]
-/// for itself.
+/// Derive, per view of one shard, the buffered entities [`compose`]'s walk has anything to say
+/// about: those holding an own row in the buffer that already have a row in that view. An entity
+/// gains one only when a publication gives it one, so this is re-derived by every publication and
+/// may otherwise be carried; the result is the only legal value of
+/// [`crate::Shard::buffered_rows`]. The overlay is not consulted, so a deny or its lift changes
+/// nothing here and `compose` asks [`Overlay::touches`] for itself.
 pub(crate) fn derive_buffered_rows(
     buffer: &IngestBuffer,
     shard: &ShardData,

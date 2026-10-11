@@ -327,16 +327,9 @@ impl Engine {
         // Must be a function of the exact `auth_data` that produced `satisfied`.
         let auth_data_hash: [u8; 32] = Sha256::digest(auth_data).into();
 
-        let shard = generation.only_shard();
-        let fragment = shard
-            .fragments
-            .get_or_build_grant_waiting(
-                &grant,
-                &shard.postings,
-                &shard.delta_postings,
-                shard.watermark,
-                &mosaica_cache::NeverCancelled,
-            )
+        let fragment = generation
+            .only_shard()
+            .fragment(&grant)
             .map_err(fragment_error)?;
 
         let mut token_bytes = [0u8; 32];
@@ -430,16 +423,7 @@ impl Engine {
         {
             return Ok(Arc::clone(&session.fragment));
         }
-        shard
-            .fragments
-            .get_or_build_grant_waiting(
-                &session.grant,
-                &shard.postings,
-                &shard.delta_postings,
-                shard.watermark,
-                &mosaica_cache::NeverCancelled,
-            )
-            .map_err(fragment_error)
+        shard.fragment(&session.grant).map_err(fragment_error)
     }
 
     /// Which layers this principal may know exist. A layer's label is evaluated against the

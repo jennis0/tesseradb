@@ -100,7 +100,7 @@ impl<'a> PageCx<'a> {
     /// The entity `segment`'s row `local` belongs to.
     fn entity_of(&self, segment: &SegmentData, local: u32) -> u32 {
         let entity = segment
-            .entity_of(local, &self.engine.identity_key, self.open.served.data.shard)
+            .entity_of(local, &self.engine.identity_key, self.open.served.shard.id())
             .expect("an opened segment's rows invert to its own shard");
         u32::try_from(entity.raw()).expect("entity ids are capped at u32::MAX by I9")
     }

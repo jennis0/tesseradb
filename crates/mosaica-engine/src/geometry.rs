@@ -316,11 +316,9 @@ impl std::fmt::Display for ManifestRegression {
 /// (caught by the endurance tier, 2026-08-15), and what contained it was an accident: the boot
 /// rebuilds the buffer by `has_row`, not by the watermark, so the under-report never miscounted.
 ///
-/// **What is compared: every ordered scalar the manifest carries** — each shard's `watermark` and
-/// `high_water`, and the partition's `layer_registry_version`; everything else is a list or map
-/// with per-field replacement rules no total order describes. A new ordered scalar joins this
-/// comparison when it is added, or it inherits the silent version of the defect above. A shard
-/// the partition serves must keep its record, or its high water would be lost with it.
+/// **Compared: every ordered scalar** — each shard's `watermark` and `high_water`, and the
+/// partition's `layer_registry_version`; the rest are lists and maps no total order describes. A
+/// new ordered scalar joins this comparison, and a served shard's record may not be dropped.
 pub(crate) fn check_manifest_publishable(
     live: &mosaica_store::read::PartitionData,
     next: &mosaica_store::manifest::SegmentsManifest,
@@ -430,8 +428,7 @@ mod tests {
         assert!(text.contains("row-projection cache"), "{text}");
     }
 
-    /// A side-manifest with only its shard's two ordered scalars set — [`check_manifest_publishable`]
-    /// reads nothing else off it but the registry version.
+    /// A side-manifest whose one shard has these two ordered scalars.
     fn manifest_at(watermark: u64, high_water: u64) -> mosaica_store::manifest::SegmentsManifest {
         let mut manifest = mosaica_store::manifest::SegmentsManifest::empty();
         let record = manifest.only_shard_mut();
@@ -440,26 +437,9 @@ mod tests {
         manifest
     }
 
-    /// The partition `manifest` was published as.
+    /// The partition [`manifest_at`] describes, as served.
     fn partition_at(watermark: u64, high_water: u64) -> mosaica_store::read::PartitionData {
-        let manifest = manifest_at(watermark, high_water);
-        mosaica_store::read::PartitionData {
-            manifest: manifest.partition,
-            shard_size: manifest.shards.size,
-            segments_n: 0,
-            highest_candidate_n: 0,
-            shards: manifest
-                .shards
-                .records
-                .into_iter()
-                .map(|record| {
-                    std::sync::Arc::new(mosaica_store::read::ShardData {
-                        record,
-                        views: std::collections::HashMap::new(),
-                    })
-                })
-                .collect(),
-        }
+        crate::generation::partition_of(manifest_at(watermark, high_water))
     }
 
     /// **A side-manifest may raise a durable scalar or leave it, never lower it.**

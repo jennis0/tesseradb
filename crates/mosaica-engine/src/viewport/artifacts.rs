@@ -202,8 +202,7 @@ impl Engine {
     /// Builds only structures shared by every viewer of a `(view, layer, level)` — never the
     /// masked counts, the gate or the verdicts, which need a session.
     ///
-    /// A view a partition does not carry, a view two partitions carry, or a layer suppressed at
-    /// open are each skipped: the level is then built on first use, as before this existed.
+    /// A layer suppressed at open is skipped: its levels are then built on first use.
     pub(crate) fn warm_artifact_projections(&self) -> WarmedProjections {
         let started = std::time::Instant::now();
         let mut warmed = WarmedProjections::default();
@@ -214,20 +213,7 @@ impl Engine {
         }
         let shard = generation.only_shard();
         let source = shard.partition_source();
-        // Views this bundle carries, each with the partition that carries it. A view two
-        // partitions carry errors on the request path, so it is left unwarmed here.
-        let mut views: std::collections::BTreeMap<&str, Option<&mosaica_store::read::ViewData>> =
-            std::collections::BTreeMap::new();
-        for partition in generation.bundle.partitions.values() {
-            for (name, data) in &partition.only_shard().views {
-                views
-                    .entry(name.as_str())
-                    .and_modify(|held| *held = None)
-                    .or_insert(Some(data));
-            }
-        }
-        for (view, view_data) in views {
-            let Some(view_data) = view_data else { continue };
+        for (view, view_data) in &shard.data.views {
             let Ok(segments) = segments_with_row_bases(view, view_data) else {
                 continue;
             };
@@ -493,30 +479,12 @@ impl Engine {
             .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
 
         let mut probe = Probe::new();
-        let (geometry, key) = self.session_geometry(
-            session,
-            &generation,
-            shard,
-            view,
-            view_data,
-            &None,
-            &mut probe,
-        )?;
-        let denied = shard
-            .denied()
-            .get(view)
-            .ok_or_else(|| EngineError::DenyMaskMissing {
-                view: view.to_string(),
-            })?;
-        let mask = compose(
-            session.satisfied(),
-            &shard.overlay,
-            &shard.buffer,
-            Arc::clone(&geometry.projection),
-            &view_data.row_space,
-            denied,
-            shard.buffered_rows(view),
-        );
+        let (geometry, key) =
+            self.session_geometry(session, &generation, shard, view, &None, &mut probe)?;
+        let denied = shard.denied_in(view)?;
+        let projection = Arc::clone(&geometry.projection);
+        let mask =
+            shard.compose(session.satisfied(), projection, view, &view_data.row_space, denied);
         let mask_identity =
             self.mask_identity(session, &generation, shard, &geometry, key.segments_version);
         let served = ServedView {

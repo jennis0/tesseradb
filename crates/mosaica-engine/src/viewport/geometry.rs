@@ -67,7 +67,7 @@ impl Engine {
         // `tile_sweep` call. Nothing reachable from a rayon worker may touch this cache: a worker
         // blocking on a build only the calling thread can drive would deadlock the pool.
         let (geometry, key) =
-            self.session_geometry(session, generation, shard, view, view_data, cancel, probe)?;
+            self.session_geometry(session, generation, shard, view, cancel, probe)?;
         let coordinates = self.view_coordinates(shard, &geometry, view);
         // Names the fragment this request composes against, which under stale-serve is the
         // entry's and not the newest one.
@@ -98,16 +98,7 @@ impl Engine {
         // observed here never interrupts it — only the work this request would go on to do.
         check_cancelled(cancel)?;
 
-        // Fail-closed on a missing entry: every view the bundle carries has one, empty when
-        // nothing is denied, so an absent key means the mask and the bundle disagree about what
-        // this generation holds. Treating that as "nothing is denied" would serve suppressed and
-        // deleted rows with no error.
-        let denied = shard
-            .denied()
-            .get(view)
-            .ok_or_else(|| EngineError::DenyMaskMissing {
-                view: view.to_string(),
-            })?;
+        let denied = shard.denied_in(view)?;
 
         // Everything this request's view fixes, named once. The composed mask is not part of it:
         // the filter phase below holds the pre-filter mask and the narrowed one at the same time.
@@ -124,15 +115,7 @@ impl Engine {
             turn: Default::default(),
         };
 
-        let mask = compose(
-            session.satisfied(),
-            &shard.overlay,
-            &shard.buffer,
-            base,
-            &view_data.row_space,
-            denied,
-            shard.buffered_rows(view),
-        );
+        let mask = shard.compose(session.satisfied(), base, view, &view_data.row_space, denied);
         probe.lap(|t| &mut t.compose_ns);
 
         Ok(OpenView {
@@ -206,17 +189,20 @@ impl Engine {
     ///
     /// Returns the key the geometry is stored under, which names the previous generation when the
     /// second rung served it.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn session_geometry(
         &self,
         session: &Session,
         generation: &Generation,
         shard: &crate::Shard,
         view: &str,
-        view_data: &mosaica_store::read::ViewData,
         cancel: &Option<CancelToken>,
         probe: &mut Probe,
     ) -> Result<(Arc<SessionGeometry>, RowProjectionKey)> {
+        let view_data = shard
+            .data
+            .views
+            .get(view)
+            .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
         let key = RowProjectionKey {
             token_id: session.token_id(),
             view: view.to_string(),
@@ -423,30 +409,12 @@ impl Engine {
             .get(view)
             .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
         let mut probe = Probe::new();
-        let (geometry, key) = self.session_geometry(
-            session,
-            &generation,
-            shard,
-            view,
-            view_data,
-            &None,
-            &mut probe,
-        )?;
-        let denied = shard
-            .denied()
-            .get(view)
-            .ok_or_else(|| EngineError::DenyMaskMissing {
-                view: view.to_string(),
-            })?;
-        let mask = compose(
-            session.satisfied(),
-            &shard.overlay,
-            &shard.buffer,
-            Arc::clone(&geometry.projection),
-            &view_data.row_space,
-            denied,
-            shard.buffered_rows(view),
-        );
+        let (geometry, key) =
+            self.session_geometry(session, &generation, shard, view, &None, &mut probe)?;
+        let denied = shard.denied_in(view)?;
+        let projection = Arc::clone(&geometry.projection);
+        let mask =
+            shard.compose(session.satisfied(), projection, view, &view_data.row_space, denied);
         let segments = segments_with_row_bases(view, view_data)?;
         let mask_identity =
             self.mask_identity(session, &generation, shard, &geometry, key.segments_version);
@@ -473,30 +441,11 @@ impl Engine {
                 .views
                 .get(view)
                 .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
-            let (geometry, _) = self.session_geometry(
-                session,
-                &generation,
-                shard,
-                view,
-                view_data,
-                &None,
-                &mut probe,
-            )?;
-            let denied = shard
-                .denied()
-                .get(view)
-                .ok_or_else(|| EngineError::DenyMaskMissing {
-                    view: view.to_string(),
-                })?;
-            compose(
-                session.satisfied(),
-                &shard.overlay,
-                &shard.buffer,
-                Arc::clone(&geometry.projection),
-                &view_data.row_space,
-                denied,
-                shard.buffered_rows(view),
-            )
+            let (geometry, _) =
+                self.session_geometry(session, &generation, shard, view, &None, &mut probe)?;
+            let projection = Arc::clone(&geometry.projection);
+            let denied = shard.denied_in(view)?;
+            shard.compose(session.satisfied(), projection, view, &view_data.row_space, denied)
         };
         Ok((generation, mask))
     }

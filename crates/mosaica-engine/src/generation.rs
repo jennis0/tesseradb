@@ -1,10 +1,10 @@
-//! A generation: one immutable snapshot of engine state. What the bundle holds once is on the
-//! generation; what a point shard holds is on that shard's [`Shard`], with the deny mask and the
-//! buffered-row lists derived from it.
+//! A generation: one immutable snapshot of engine state, held once for the bundle and per shard.
 
 use std::sync::Arc;
 
-use mosaica_authz::{DeltaTier, Dict, FragmentCache, PostingsReader};
+use mosaica_authz::{
+    DeltaTier, Dict, FragmentCache, FragmentCacheError, FrozenFragment, Grant, PostingsReader,
+};
 use mosaica_lifecycle::{IngestBuffer, Overlay};
 use mosaica_store::read::{Bundle, ShardData};
 use mosaica_store::vocabulary::Vocabularies;
@@ -12,8 +12,7 @@ use mosaica_types::{EntityId, ShardId};
 
 use crate::DenyMask;
 
-/// What a generation holds once for the bundle. [`Generation`] derefs to this, so
-/// `generation.bundle` reads as it always did.
+/// What a generation holds once for the bundle. [`Generation`] derefs to this.
 #[derive(Clone)]
 pub struct GenerationParts {
     /// The bundle's `CURRENT` prefix (e.g. `"v00000"`) this generation was loaded from.
@@ -22,15 +21,9 @@ pub struct GenerationParts {
     /// bundle build is loaded, never by an overlay/buffer update.
     pub segments_version: u64,
     pub bundle: Arc<Bundle>,
-    /// The dictionary this generation's postings and buffered items resolve against.
-    ///
-    /// **Generation-scoped rather than process-scoped, because a flush promotes.** A novel
-    /// descriptor buffers an item under an unsatisfiable extension id and becomes a durable
-    /// ordinal only when the flush that carries it publishes a `dict_extents` entry, so the
-    /// dictionary grows with geometry and has to be republished alongside it. Ordinals are
-    /// preserved across a promotion ([`mosaica_authz::Dict::load_extending`]), so a session
-    /// authorised against an older generation keeps evaluating the terms it was granted; what it
-    /// does *not* get is the newly promoted one, which is fail-closed.
+    /// The dictionary every shard's postings and buffered items resolve against. A flush that
+    /// promotes a descriptor republishes it; ordinals are preserved, so a session authorised
+    /// earlier keeps its terms and is not granted the promoted one.
     pub dict: Arc<Dict>,
     /// How many commit windows have committed an edit, how many folds have retired entities, and
     /// how many folds have freed ids the allocator issues again, since the process started: what a
@@ -41,62 +34,32 @@ pub struct GenerationParts {
     /// How many publications of deletions, suppressions and unsuppressions since the process
     /// started. An ingest does not move it.
     pub(crate) deny_epoch: u64,
-    /// The live category bindings: key → code per vocabulary, plus the assigned-code set that makes
-    /// never-reuse hold.
-    ///
-    /// **On the generation, because a mint publishes.** A novel key acquires its code at a commit
-    /// window's close and becomes durable in the same fsync as the rows that use it, so the
-    /// bindings grow exactly when the buffer does and have to be republished alongside it — the
-    /// same reason `dict` lives here. A request that loads one generation pointer gets the buffer,
-    /// the geometry and the bindings that agree.
-    ///
-    /// **Read-only here; the executor owns the authoritative copy.** Minting is serial by
-    /// construction and this is a published snapshot of it, exactly as a shard's `overlay` is of
-    /// the live overlay. A handler resolving a key through this may find it bound or not; it must
-    /// never mint, because two handlers racing one novel key would draw two codes for it and split
-    /// its rows between them.
+    /// The live category bindings: key → code per vocabulary, and every code ever assigned. A mint
+    /// publishes them with the buffer that uses them. A snapshot of the executor's copy: a handler
+    /// may find a key bound or not and must never mint, or two racing handlers would split its
+    /// rows across two codes.
     pub vocabularies: Arc<Vocabularies>,
-    /// Every category vocabulary's suggestion index.
-    ///
-    /// **Carried across publications rather than rebuilt with them.** A flush changes which
-    /// entities carry a value and changes nothing this index holds — it is over the value set, and
-    /// the mask never enters it — so a per-generation rebuild would pay a sort measured in tens of
-    /// seconds at 10⁷ values for a change it cannot see. It is on the generation all the same,
-    /// because a *mint* publishes: a novel key acquires its code at a commit window's close and
-    /// must be suggestible on the next keystroke, so the side map grows exactly when
-    /// [`GenerationParts::vocabularies`] does and travels with it.
+    /// Every category vocabulary's suggestion index. Carried across publications, since a flush
+    /// changes nothing it holds and a rebuild sorts for tens of seconds at 10⁷ values; a mint grows
+    /// it with `vocabularies`.
     pub suggest: Arc<crate::suggest::SuggestIndexes>,
 }
 
-/// What a point shard holds in a generation but what is derived from it. [`Shard`] derefs to this.
+/// A point shard's state in a generation, less what is derived from it. [`Shard`] derefs to this.
 #[derive(Clone)]
 pub struct ShardParts {
-    /// The highest entity id folded into the shard's row geometry. Entities at or past this value
-    /// live only in `buffer`, never in the shard's permutations.
+    /// Entities at or past this live only in `buffer`, never in the shard's permutations.
     pub watermark: u64,
     /// The base postings — the build's `terms/postings.arrow`, unchanged by any flush.
     pub postings: Arc<PostingsReader>,
-    /// The mask-fragment cache, and through it the MANIFEST digest of the prefix `postings` was
-    /// read from.
-    ///
-    /// A fold rewrites the term index and publishes a new prefix, so every fragment built from the
-    /// old one names entities the new postings no longer contain, and it advances no watermark.
-    /// Held beside `postings`, a request loads one pointer and gets postings, identity and fragment
-    /// cache that agree.
-    ///
-    /// Two holders sit outside it — a `Session`'s own `Arc<FrozenFragment>`, and
-    /// `SessionGeometry`'s — and a replaced container reaches neither. The comparison is therefore
-    /// made at composition, against [`mosaica_authz::FrozenFragment::identity`]:
-    /// `Engine::fragment_for` for the first, `RowProjectionCache::freshest_fragment`'s prefix
-    /// scoping for the second.
+    /// The mask-fragment cache, keyed by the MANIFEST digest of the prefix `postings` was read
+    /// from, so a fold's new prefix is never answered from the old one's fragments.
     pub(crate) fragments: Arc<FragmentCache>,
-    /// Every unique column's index runs, as the shard's record lists them. Replaced by every
-    /// publication that changes the list, sharing the runs it already opened.
+    /// Every unique column's index runs, as the shard's record lists them.
     pub(crate) unique: Arc<mosaica_store::unique::UniqueIndexes>,
     /// The unique index entries of the rows the buffer holds, published with the buffer.
     pub(crate) unique_live: Arc<crate::unique::UniqueLive>,
-    /// The edited-items map's runs, as the shard's record lists them. Replaced by every
-    /// publication that changes the list, sharing the runs it already opened.
+    /// The edited-items map's runs, as the shard's record lists them.
     pub(crate) edited: Arc<mosaica_store::edited::EditedIndex>,
     /// The edited-items pairs no run holds yet, published with the buffer.
     pub(crate) edited_live: Arc<crate::edited::EditedLive>,
@@ -104,48 +67,25 @@ pub struct ShardParts {
     /// `mosaica_id` is formed and resolved at ([`crate::edited`]). Replaced only by a publication
     /// into a new prefix.
     pub(crate) tenancy: Arc<mosaica_store::tenancy::TenancyIndex>,
-    /// One sparse delta postings tier per flush segment, in publication order.
-    ///
-    /// A fragment build unions the base with every live tier over the session's satisfied terms.
-    /// A flush publishes one and the entity-space coalesce merges several into one, so the set
-    /// changes with each publication. Empty in a bundle straight out of `mosaica build`.
+    /// One sparse delta postings tier per flush segment, in publication order; empty after a
+    /// build.
     pub delta_postings: Vec<Arc<DeltaTier>>,
-    /// Monotone counter bumped on every overlay/buffer swap (independent of `segments_version` —
-    /// an overlay change never touches the bundle).
+    /// Bumped on every overlay or buffer swap; independent of `segments_version`.
     pub overlay_version: u64,
     pub overlay: Arc<Overlay>,
     pub buffer: Arc<IngestBuffer>,
-    /// The shard's filter columns, opened once per generation. A new prefix brings new columns,
-    /// and a session reading the old generation keeps reading the old ones. Empty when the schema
-    /// declares nothing filterable.
+    /// The shard's filter columns; empty when the schema declares nothing filterable.
     pub filter_columns: Arc<crate::filter::FilterColumns>,
 }
 
-/// One point shard of a generation: the bundle's data for it, what the engine holds for it, and
-/// what is derived from the two.
-///
-/// The derived values are functions of the parts and the data, so only this module sets them: a
-/// shard is built with [`Generation::new`] or carried into a successor by one of
-/// [`Generation`]'s publications, and each derives them.
+/// One point shard of a generation. Its derived fields are functions of `data` and its parts, so
+/// only this module sets them.
 pub struct Shard {
-    /// The shard's data in the generation's bundle.
     pub data: Arc<ShardData>,
     parts: ShardParts,
-    /// **The deny mask**: per view, the row-space image of `deleted ∪ suppressed`, subtracted from
-    /// every composed mask.
-    ///
-    /// **Derived, never persisted, never a second source of truth.** The three entity-space stores
-    /// on [`Overlay`] remain authoritative, and `compose::verdict` remains the single answer for
-    /// every entity-space verb. Folded in as a bitmap, the deny half of composition costs one
-    /// `andnot` rather than a walk over every deny ever accepted.
-    ///
-    /// Row ids mean something only within one `segments_version`, so the mask is rebuilt by every
-    /// geometry publication and travels with the row space it addresses. The derivation rule is in
-    /// [`crate::compose::derive_denied`]; an unsuppress may not subtract a row.
-    ///
-    /// Keyed by view. A view the shard carries always has an entry, empty when nothing is denied;
-    /// a missing entry means the mask and the data disagree, and the read path treats that as
-    /// fail-closed rather than as "nothing denied".
+    /// **Derived**: per view, the row-space image of `deleted ∪ suppressed`, subtracted from every
+    /// composed mask, by [`crate::compose::derive_denied`]. Never persisted; the overlay stays
+    /// authoritative.
     denied: Arc<DenyMask>,
     /// **Derived**: per view, a version of [`Self::denied`]'s rows below the view's base, which
     /// moves exactly when those rows change: at a deny, a lift or a compaction that touches them,
@@ -153,11 +93,8 @@ pub struct Shard {
     /// under ([`crate::figures`]). Drawn from one counter for the process, so a version is never
     /// reused for another set.
     deny_versions: Arc<DenyVersions>,
-    /// **Derived**: per view, the buffered entities [`crate::compose`]'s walk has anything to say
-    /// about, so a request pays for those rather than for the whole buffer. Entity ids, never row
-    /// ids, because a merge, coalesce or fold rewrites rows. The rule is
-    /// [`crate::compose::derive_buffered_rows`]; a view with no entry sends the walk back over the
-    /// buffer, which is slow and never wrong.
+    /// **Derived** by [`crate::compose::derive_buffered_rows`]: per view, the buffered entities
+    /// that have a row there. Entity ids, because a merge, coalesce or fold rewrites rows.
     buffered_rows: Arc<crate::BufferedRows>,
 }
 
@@ -219,7 +156,6 @@ impl std::ops::Deref for Shard {
 }
 
 impl Shard {
-    /// A shard over `data` holding `parts`, with everything derived from them.
     fn new(data: Arc<ShardData>, parts: ShardParts) -> Shard {
         let denied = Arc::new(crate::compose::derive_denied(&parts.overlay, &data));
         let buffered_rows = Arc::new(crate::compose::derive_buffered_rows(&parts.buffer, &data));
@@ -233,34 +169,20 @@ impl Shard {
         }
     }
 
-    /// The deny versions of a successor whose mask is `denied` over `data`. A fold publishes a new
-    /// prefix and renumbers the base, so nothing is carried across one.
-    fn next_deny_versions(
+    /// The successor over `data` holding these, with its deny versions; none is carried across a
+    /// new prefix, since a fold renumbers the base.
+    fn successor(
         &self,
         same_prefix: bool,
-        denied: &Arc<DenyMask>,
-        data: &ShardData,
-    ) -> Arc<DenyVersions> {
-        if Arc::ptr_eq(denied, &self.denied) && same_prefix {
-            return Arc::clone(&self.deny_versions);
-        }
-        deny_versions(same_prefix.then_some(self), denied, data)
-    }
-
-    /// The successor over `data` holding `parts`. The mask is derived again if the data or the
-    /// overlay changed, and the buffered-row lists if the data or the buffer did; both are carried
-    /// otherwise.
-    fn next(&self, same_prefix: bool, data: Arc<ShardData>, parts: ShardParts) -> Shard {
-        let same_data = Arc::ptr_eq(&data, &self.data);
-        let denied = match same_data && Arc::ptr_eq(&parts.overlay, &self.overlay) {
-            true => Arc::clone(&self.denied),
-            false => Arc::new(crate::compose::derive_denied(&parts.overlay, &data)),
+        data: Arc<ShardData>,
+        parts: ShardParts,
+        denied: Arc<DenyMask>,
+        buffered_rows: Arc<crate::BufferedRows>,
+    ) -> Shard {
+        let deny_versions = match Arc::ptr_eq(&denied, &self.denied) && same_prefix {
+            true => Arc::clone(&self.deny_versions),
+            false => deny_versions(same_prefix.then_some(self), &denied, &data),
         };
-        let buffered_rows = match same_data && Arc::ptr_eq(&parts.buffer, &self.buffer) {
-            true => Arc::clone(&self.buffered_rows),
-            false => Arc::new(crate::compose::derive_buffered_rows(&parts.buffer, &data)),
-        };
-        let deny_versions = self.next_deny_versions(same_prefix, &denied, &data);
         Shard {
             data,
             parts,
@@ -270,9 +192,24 @@ impl Shard {
         }
     }
 
-    /// The successor over `data` holding `parts`, whose buffer is this one's with `inserted` added
-    /// and anything else only removed. The mask is carried if the data and the overlay are this
-    /// one's.
+    /// This shard's mask where `data` and `overlay` are its own, else one derived over them.
+    fn carried_denied(&self, data: &Arc<ShardData>, overlay: &Arc<Overlay>) -> Arc<DenyMask> {
+        match Arc::ptr_eq(data, &self.data) && Arc::ptr_eq(overlay, &self.overlay) {
+            true => Arc::clone(&self.denied),
+            false => Arc::new(crate::compose::derive_denied(overlay, data)),
+        }
+    }
+
+    fn next(&self, same_prefix: bool, data: Arc<ShardData>, parts: ShardParts) -> Shard {
+        let denied = self.carried_denied(&data, &parts.overlay);
+        let buffered_rows =
+            match Arc::ptr_eq(&data, &self.data) && Arc::ptr_eq(&parts.buffer, &self.buffer) {
+                true => Arc::clone(&self.buffered_rows),
+                false => Arc::new(crate::compose::derive_buffered_rows(&parts.buffer, &data)),
+            };
+        self.successor(same_prefix, data, parts, denied, buffered_rows)
+    }
+
     fn next_buffer(
         &self,
         same_prefix: bool,
@@ -280,25 +217,11 @@ impl Shard {
         parts: ShardParts,
         inserted: &[EntityId],
     ) -> Shard {
-        let denied =
-            match Arc::ptr_eq(&data, &self.data) && Arc::ptr_eq(&parts.overlay, &self.overlay) {
-                true => Arc::clone(&self.denied),
-                false => Arc::new(crate::compose::derive_denied(&parts.overlay, &data)),
-            };
+        let denied = self.carried_denied(&data, &parts.overlay);
         let buffered_rows = self.next_buffered_rows(&data, &parts.buffer, inserted);
-        let deny_versions = self.next_deny_versions(same_prefix, &denied, &data);
-        Shard {
-            data,
-            parts,
-            denied,
-            deny_versions,
-            buffered_rows,
-        }
+        self.successor(same_prefix, data, parts, denied, buffered_rows)
     }
 
-    /// [`Self::next_buffer`] where the overlay differs from this one's only by deletions and
-    /// suppressions of `newly_denied`, so their rows are added to the mask without walking the
-    /// whole overlay.
     fn next_denies(
         &self,
         same_prefix: bool,
@@ -324,27 +247,15 @@ impl Shard {
             "the incremental deny mask does not equal a fresh derivation"
         );
         let buffered_rows = self.next_buffered_rows(&data, &parts.buffer, inserted);
-        let denied = Arc::new(denied);
-        let deny_versions = self.next_deny_versions(same_prefix, &denied, &data);
-        Shard {
-            data,
-            parts,
-            denied,
-            deny_versions,
-            buffered_rows,
-        }
+        self.successor(same_prefix, data, parts, Arc::new(denied), buffered_rows)
     }
 
-    /// The buffered-row lists over `data` for `buffer`, which is this shard's with `inserted` added
-    /// and anything else only removed.
     fn next_buffered_rows(
         &self,
         data: &Arc<ShardData>,
         buffer: &IngestBuffer,
         inserted: &[EntityId],
     ) -> Arc<crate::BufferedRows> {
-        // The held lists are against this shard's row spaces; against any other they are derived
-        // afresh, in a release build too.
         if !Arc::ptr_eq(data, &self.data) {
             return Arc::new(crate::compose::derive_buffered_rows(buffer, data));
         }
@@ -372,13 +283,57 @@ impl Shard {
         Arc::new(next)
     }
 
-    pub fn id(&self) -> ShardId {
+    pub(crate) fn id(&self) -> ShardId {
         self.data.record.id
     }
 
     /// The row-space deny mask, per view.
     pub fn denied(&self) -> &DenyMask {
         &self.denied
+    }
+
+    /// `view`'s deny mask, refused with [`crate::EngineError::DenyMaskMissing`] where it has none.
+    pub(crate) fn denied_in(&self, view: &str) -> crate::error::Result<&croaring::Bitmap> {
+        self.denied
+            .get(view)
+            .ok_or_else(|| crate::EngineError::DenyMaskMissing {
+                view: view.to_string(),
+            })
+    }
+
+    /// [`crate::compose::compose`] in `view`, over this shard's overlay, buffer and buffered-row
+    /// list.
+    pub(crate) fn compose(
+        &self,
+        satisfied: &dyn crate::session::SatisfiedKeys,
+        projection: Arc<crate::projection::RowProjection>,
+        view: &str,
+        row_space: &mosaica_store::RowSpace,
+        denied: &croaring::Bitmap,
+    ) -> crate::EffectiveMask {
+        crate::compose::compose(
+            satisfied,
+            &self.overlay,
+            &self.buffer,
+            projection,
+            row_space,
+            denied,
+            self.buffered_rows(view),
+        )
+    }
+
+    /// The fragment for `grant` at this shard's watermark, waiting on a build already running.
+    pub(crate) fn fragment(
+        &self,
+        grant: &Grant,
+    ) -> Result<Arc<FrozenFragment>, FragmentCacheError> {
+        self.fragments.get_or_build_grant_waiting(
+            grant,
+            &self.postings,
+            &self.delta_postings,
+            self.watermark,
+            &mosaica_cache::NeverCancelled,
+        )
     }
 
     /// See [`Self::deny_versions`]'s field. Zero for a view this shard does not carry.
@@ -393,9 +348,7 @@ impl Shard {
         self.buffered_rows.get(view).map(Vec::as_slice)
     }
 
-    /// The MANIFEST digest of the prefix this shard's postings and term index were read from — see
-    /// [`ShardParts::fragments`], which is where it is held so that it and the cache it keys cannot
-    /// disagree.
+    /// The MANIFEST digest of the prefix this shard's postings were read from.
     pub(crate) fn bundle_identity(&self) -> [u8; 32] {
         self.fragments.bundle_identity()
     }
@@ -409,8 +362,6 @@ impl Shard {
 }
 
 impl Generation {
-    /// A generation holding `parts` and, for each `(id, parts)` of `shards`, a shard over the
-    /// bundle's shard `id`.
     pub(crate) fn new(parts: GenerationParts, shards: Vec<(ShardId, ShardParts)>) -> Generation {
         let mut shards: Vec<Arc<Shard>> = shards
             .into_iter()
@@ -426,35 +377,20 @@ impl Generation {
         Generation { parts, shards }
     }
 
-    /// The shard numbered `id`.
-    pub fn shard(&self, id: ShardId) -> Option<&Shard> {
+    pub(crate) fn shard(&self, id: ShardId) -> Option<&Shard> {
         self.shards
             .iter()
             .find(|shard| shard.id() == id)
             .map(Arc::as_ref)
     }
 
-    /// Every shard, ascending by id.
-    pub fn shards(&self) -> impl Iterator<Item = &Shard> {
-        self.shards.iter().map(Arc::as_ref)
-    }
-
-    /// The one shard a generation holds until several are served.
+    /// The generation's one shard; panics if it holds any other number.
     pub fn only_shard(&self) -> &Shard {
         mosaica_types::only(&self.shards)
     }
 
-    /// The parts of shard `id`, which a publication into it starts from.
-    fn parts_of(&self, id: ShardId) -> ShardParts {
-        self.shard(id)
-            .unwrap_or_else(|| panic!("a publication names shard {id}, which is not held"))
-            .parts
-            .clone()
-    }
-
-    /// The successor holding `parts`, each shard over the data `parts`' bundle holds for it: the
-    /// one `changed` answers for, and every other carried with its derived values derived again
-    /// where its data changed.
+    /// The successor holding `parts`: the shard `changed` answers for is replaced, and every other
+    /// is carried, re-derived where its data changed.
     fn succeeded_by(
         &self,
         parts: GenerationParts,
@@ -484,6 +420,28 @@ impl Generation {
         Generation { parts, shards }
     }
 
+    /// The successor with `change` applied to what is held once and to shard `id`'s parts, and
+    /// that shard replaced by what `next` makes of them.
+    fn publish(
+        &self,
+        id: ShardId,
+        change: impl FnOnce(&mut GenerationParts, &mut ShardParts),
+        next: impl FnOnce(&Shard, bool, Arc<ShardData>, ShardParts) -> Shard,
+    ) -> Generation {
+        let mut parts = self.parts.clone();
+        let mut shard = self
+            .shard(id)
+            .unwrap_or_else(|| panic!("a publication names shard {id}, which is not held"))
+            .parts
+            .clone();
+        change(&mut parts, &mut shard);
+        let mut pending = Some((shard, next));
+        self.succeeded_by(parts, |held, same_prefix, data| {
+            let (parts, next) = pending.take_if(|_| held.id() == id)?;
+            Some(next(held, same_prefix, data, parts))
+        })
+    }
+
     /// A copy with `change` applied to what is held once.
     pub(crate) fn with(&self, change: impl FnOnce(&mut GenerationParts)) -> Generation {
         let mut parts = self.parts.clone();
@@ -492,29 +450,18 @@ impl Generation {
     }
 
     /// A copy with `change` applied to what is held once and to shard `id`. A buffer-only change
-    /// has [`Generation::with_buffer`], which derives less, so a call site that forgets it is slow
-    /// rather than wrong.
+    /// should use [`Self::with_buffer`], which derives less.
     pub(crate) fn with_shard(
         &self,
         id: ShardId,
         change: impl FnOnce(&mut GenerationParts, &mut ShardParts),
     ) -> Generation {
-        let (mut parts, mut shard) = (self.parts.clone(), self.parts_of(id));
-        change(&mut parts, &mut shard);
-        let mut shard = Some(shard);
-        self.succeeded_by(parts, |held, same_prefix, data| {
-            if held.id() != id {
-                return None;
-            }
-            shard
-                .take()
-                .map(|parts| held.next(same_prefix, data, parts))
-        })
+        self.publish(id, change, Shard::next)
     }
 
-    /// A copy whose shard `id` has buffer `buffer`, with `change` applied. The buffered-row lists
-    /// are the shard's minus the entities whose own row has left the buffer, plus those of
-    /// `inserted` that hold one and have a row. Cost is the lists and `inserted`, not the buffer.
+    /// [`Self::with_shard`] that also sets shard `id`'s buffer to `buffer`, which must be its
+    /// present one with `inserted` added and anything else only removed; the buffered-row lists
+    /// are then updated at the cost of those lists and `inserted`, not the buffer.
     pub(crate) fn with_buffer(
         &self,
         id: ShardId,
@@ -522,25 +469,20 @@ impl Generation {
         inserted: &[EntityId],
         change: impl FnOnce(&mut GenerationParts, &mut ShardParts),
     ) -> Generation {
-        let (mut parts, mut shard) = (self.parts.clone(), self.parts_of(id));
-        change(&mut parts, &mut shard);
-        shard.buffer = buffer;
-        let mut shard = Some(shard);
-        self.succeeded_by(parts, |held, same_prefix, data| {
-            if held.id() != id {
-                return None;
-            }
-            shard
-                .take()
-                .map(|parts| held.next_buffer(same_prefix, data, parts, inserted))
-        })
+        self.publish(
+            id,
+            |parts, shard| {
+                change(parts, shard);
+                shard.buffer = buffer;
+            },
+            |held, same_prefix, data, parts| held.next_buffer(same_prefix, data, parts, inserted),
+        )
     }
 
-    /// A copy whose shard `id`'s overlay differs from its present one only by deletions and
-    /// suppressions of `newly_denied`, so their rows are added to the mask without walking the
-    /// whole overlay. An unsuppress may not take this route: the entity may still be deleted.
-    /// `buffer` is the shard's with the deleted entities' rows removed and the rows of `inserted`
-    /// added, so the buffered-row lists lose the one and gain the other.
+    /// [`Self::with_buffer`] that also sets the overlay to `overlay`, which must differ from the
+    /// shard's only by deletions and suppressions of `newly_denied`; their rows are added to the
+    /// mask without walking the overlay. An unsuppress may not take this route: the entity may
+    /// still be deleted.
     pub(crate) fn with_denies(
         &self,
         id: ShardId,
@@ -550,19 +492,17 @@ impl Generation {
         inserted: &[EntityId],
         change: impl FnOnce(&mut GenerationParts, &mut ShardParts),
     ) -> Generation {
-        let (mut parts, mut shard) = (self.parts.clone(), self.parts_of(id));
-        change(&mut parts, &mut shard);
-        shard.overlay = overlay;
-        shard.buffer = buffer;
-        let mut shard = Some(shard);
-        self.succeeded_by(parts, |held, same_prefix, data| {
-            if held.id() != id {
-                return None;
-            }
-            shard
-                .take()
-                .map(|parts| held.next_denies(same_prefix, data, parts, newly_denied, inserted))
-        })
+        self.publish(
+            id,
+            |parts, shard| {
+                change(parts, shard);
+                shard.overlay = overlay;
+                shard.buffer = buffer;
+            },
+            |held, same_prefix, data, parts| {
+                held.next_denies(same_prefix, data, parts, newly_denied, inserted)
+            },
+        )
     }
 
     /// A generation over an empty bundle of one shard, for in-crate tests that read a few scalars
@@ -595,26 +535,19 @@ impl Generation {
         let dir = tempfile::TempDir::new().expect("a temp dir");
         let postings_path = dir.path().join("postings.arrow");
         mosaica_authz::write_postings(&postings_path, &[], 32).expect("an empty postings file");
+        let bundle = Arc::new(Bundle {
+            manifest,
+            partitions: std::collections::HashMap::from([(
+                "default".to_string(),
+                partition_of(mosaica_store::manifest::SegmentsManifest::empty()),
+            )]),
+        });
+        let shard = bundle.only_shard().record.id;
         Generation::new(
             GenerationParts {
                 prefix: prefix.to_string(),
                 segments_version,
-                bundle: Arc::new(Bundle {
-                    manifest,
-                    partitions: std::collections::HashMap::from([(
-                        "default".to_string(),
-                        mosaica_store::read::PartitionData {
-                            manifest: mosaica_store::manifest::PartitionManifest::empty(),
-                            shard_size: mosaica_types::SHARD_SIZE_DEFAULT,
-                            segments_n: 0,
-                            highest_candidate_n: 0,
-                            shards: vec![Arc::new(ShardData {
-                                record: mosaica_store::manifest::ShardRecord::empty(ShardId::ZERO),
-                                views: std::collections::HashMap::new(),
-                            })],
-                        },
-                    )]),
-                }),
+                bundle,
                 dict: Arc::new(Dict::load(&[]).expect("an empty dict needs no file")),
                 edit_epoch: 0,
                 fold_epoch: 0,
@@ -624,7 +557,7 @@ impl Generation {
                 suggest: Arc::new(crate::suggest::SuggestIndexes::default()),
             },
             vec![(
-                ShardId::ZERO,
+                shard,
                 ShardParts {
                     watermark,
                     postings: Arc::new(
@@ -648,5 +581,29 @@ impl Generation {
                 },
             )],
         )
+    }
+}
+
+/// `manifest` as a served partition, its shards carrying no view.
+#[cfg(test)]
+pub(crate) fn partition_of(
+    manifest: mosaica_store::manifest::SegmentsManifest,
+) -> mosaica_store::read::PartitionData {
+    mosaica_store::read::PartitionData {
+        manifest: manifest.partition,
+        shard_size: manifest.shards.size,
+        segments_n: 0,
+        highest_candidate_n: 0,
+        shards: manifest
+            .shards
+            .records
+            .into_iter()
+            .map(|record| {
+                Arc::new(ShardData {
+                    record,
+                    views: std::collections::HashMap::new(),
+                })
+            })
+            .collect(),
     }
 }

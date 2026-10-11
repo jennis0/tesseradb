@@ -300,12 +300,10 @@ fn fixture() -> Fixture {
     let phash = opened.partitions.keys().next().unwrap().clone();
     let columns = FilterColumns::open(
         &bundle.join(&prefix),
-        &phash,
+        mosaica_store::ShardLayout::new(&phash, opened.only_shard().record.id),
         &opened.manifest,
         // A freshly built bundle has flushed nothing, so its columns are the base layer alone.
-        mosaica_engine::filter::PartitionExtents::of(Some(
-            &opened.partitions[&phash].only_shard().record,
-        )),
+        mosaica_engine::filter::ShardExtents::of(&opened.only_shard().record),
         &[],
         // Mapped, which is what the engine does at session open — so the round-trip these tests
         // assert is the one a served request actually takes.
@@ -1109,9 +1107,9 @@ fn an_extent_file_the_manifest_names_but_that_is_absent_refuses_to_open() {
     let open = |extents: &[mosaica_store::manifest::AttrExtent]| {
         FilterColumns::open(
             &prefix,
-            &phash,
+            mosaica_store::ShardLayout::new(&phash, opened.only_shard().record.id),
             &opened.manifest,
-            mosaica_engine::filter::PartitionExtents {
+            mosaica_engine::filter::ShardExtents {
                 attrs: extents,
                 ..Default::default()
             },
@@ -2364,11 +2362,11 @@ fn postings_path(fx: &Fixture, column: &str) -> std::path::PathBuf {
 fn reopen(fx: &Fixture) -> Result<FilterColumns, mosaica_engine::filter::ComposeError> {
     FilterColumns::open(
         &fx.bundle.join(&fx.prefix),
-        &fx.phash,
+        mosaica_store::ShardLayout::new(&fx.phash, mosaica_types::ShardId::ZERO),
         // The manifest as it stood at the build: this fixture declares no view group
         // (`views.md` §5), so no incarnation is ever asked for.
         &fx.manifest,
-        mosaica_engine::filter::PartitionExtents {
+        mosaica_engine::filter::ShardExtents {
             attrs: &fx.extents,
             ..Default::default()
         },

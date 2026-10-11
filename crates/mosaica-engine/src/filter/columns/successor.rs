@@ -182,7 +182,7 @@ impl FilterColumns {
     pub fn with_scoped_columns(
         &self,
         prefix_dir: &Path,
-        shard: mosaica_store::ShardLayout<'_>,
+        layout: mosaica_store::ShardLayout<'_>,
         columns: &[(String, String, mosaica_types::view::ViewIncarnation)],
         scoped: &[mosaica_store::manifest::ScopedScalar],
         vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
@@ -204,7 +204,7 @@ impl FilterColumns {
             }
             let (name, placement, layers) = open_scoped_column(
                 prefix_dir,
-                shard,
+                layout,
                 family,
                 view,
                 *incarnation,

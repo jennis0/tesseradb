@@ -221,13 +221,7 @@ impl Engine {
                 // fragment-resident — so a value carried only by entities a flush has published
                 // since would be derived as invisible from the stale one, and a viewer would be
                 // told a value they can see does not exist.
-                let fragment = self.fragment_for(session, shard)?;
-                Some(crate::filter::candidate(
-                    &fragment,
-                    session.satisfied(),
-                    &shard.overlay,
-                    &shard.buffer,
-                ))
+                Some(self.filter_candidate(session, shard)?)
             }
         };
         let membership = match &candidate {
@@ -548,11 +542,7 @@ impl Engine {
             });
         };
         if let Some(view) = view {
-            let known = generation
-                .bundle
-                .partitions
-                .values()
-                .any(|partition| partition.only_shard().views.contains_key(view));
+            let known = shard.data.views.contains_key(view);
             if !known || !session.visible_views().contains_view(view) {
                 return Err(EngineError::UnknownView(view.to_string()));
             }
@@ -578,13 +568,7 @@ impl Engine {
         // values served, which the visibility alone still decides.
         let derived = vocabulary.visibility() == Visibility::Derived;
         let candidate = if derived || counts {
-            let fragment = self.fragment_for(session, shard)?;
-            Some(crate::filter::candidate(
-                &fragment,
-                session.satisfied(),
-                &shard.overlay,
-                &shard.buffer,
-            ))
+            Some(self.filter_candidate(session, shard)?)
         } else {
             None
         };

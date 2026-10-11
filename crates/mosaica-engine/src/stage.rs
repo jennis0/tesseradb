@@ -80,7 +80,6 @@ use rustc_hash::FxHashMap;
 
 use crate::cache::SessionGeometry;
 use crate::cancel::CancelToken;
-use crate::compose::compose;
 use crate::occupancy::{OccupancyKey, OccupiedTiles};
 use crate::Generation;
 
@@ -214,7 +213,7 @@ fn run(
     let Some(view_data) = shard.data.views.get(&task.view) else {
         return;
     };
-    let Some(denied) = shard.denied().get(&task.view) else {
+    let Ok(denied) = shard.denied_in(&task.view) else {
         return;
     };
     let Ok(segments) = crate::viewport::segments_with_row_bases(&task.view, view_data) else {
@@ -224,14 +223,12 @@ fn run(
     // and this runs after the request has returned. It is the same composition over the same
     // inputs — the request's own generation and geometry travel with the task — so the rungs are
     // exactly what that session's next zoom would have computed for itself.
-    let mask = compose(
+    let mask = shard.compose(
         &task.satisfied,
-        &shard.overlay,
-        &shard.buffer,
         Arc::clone(&task.geometry.projection),
+        &task.view,
         &view_data.row_space,
         denied,
-        shard.buffered_rows(&task.view),
     );
     if cancel.is_cancelled() {
         return;

@@ -49,7 +49,7 @@ use mosaica_types::{EntityId, GenerationStamp, RowId, TermId, MosaicaId, API_VER
 
 use crate::cache::{CacheWaitEnded, Peek, RowProjectionKey, SessionGeometry};
 use crate::cancel::CancelToken;
-use crate::compose::{compose, visible_to, EffectiveMask, FilterRows};
+use crate::compose::{visible_to, EffectiveMask, FilterRows};
 use crate::filter::{Endpoint, Family, FilterOperand, Scalar};
 use crate::membership_column::{ServedLayer, ServedLevel};
 use crate::select::{SelectParams, Selection, SelectionPart, SelectionParts, Threshold};

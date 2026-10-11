@@ -23,7 +23,7 @@ use crate::filter::{
 /// flush writing the first column of a family for a view created since the build.
 pub(super) fn open_scoped_column(
     prefix_dir: &Path,
-    shard: ShardLayout<'_>,
+    layout: ShardLayout<'_>,
     family: &mosaica_store::manifest::ScopedScalar,
     view_id: &str,
     incarnation: mosaica_types::view::ViewIncarnation,
@@ -35,7 +35,7 @@ pub(super) fn open_scoped_column(
     // entity's value out of it, so it is held here with `filterable: false`, the same standing an
     // entity-scoped `derived` category with neither flag already has.
     let filterable = scoped_is_filterable(family);
-    let dir = prefix_dir.join(shard.scoped_column_rel(&family.name, view_id, incarnation));
+    let dir = prefix_dir.join(layout.scoped_column_rel(&family.name, view_id, incarnation));
     let name = scoped_column_name(&family.name, view_id);
     let placement = Placement {
         entity: true,
@@ -183,10 +183,13 @@ pub(crate) fn open_record_stack(
 /// "no entity carries a term", the fail-open direction on the write path.
 pub(crate) fn open_entity_terms_stack(
     prefix_dir: &Path,
-    shard: ShardLayout<'_>,
+    layout: ShardLayout<'_>,
     extents: &[mosaica_store::EntityTermsExtentPaths],
 ) -> Result<mosaica_store::EntityTermsStack, mosaica_store::StoreError> {
-    mosaica_store::EntityTermsStack::open(Some(&prefix_dir.join(shard.entity_terms_rel())), extents)
+    mosaica_store::EntityTermsStack::open(
+        Some(&prefix_dir.join(layout.entity_terms_rel())),
+        extents,
+    )
 }
 
 /// The stack a column declared at a running service opens with before any fold: no base, no
@@ -224,10 +227,9 @@ pub(super) fn runtime_layers(
     )))
 }
 
-/// Every extent list one partition's side-manifest names, as [`FilterColumns::open`] reads them:
-/// the base each artefact class owes plus whatever has been published since.
+/// Every extent list one shard's record names, as [`FilterColumns::open`] reads them.
 #[derive(Default, Clone, Copy)]
-pub struct PartitionExtents<'a> {
+pub struct ShardExtents<'a> {
     pub attrs: &'a [mosaica_store::manifest::AttrExtent],
     pub records: &'a [mosaica_store::manifest::RecordExtent],
     /// An artifact's content extents, listed apart from a point's because their ownership differs
@@ -237,14 +239,9 @@ pub struct PartitionExtents<'a> {
     pub texts: &'a [mosaica_store::manifest::TextExtent],
 }
 
-impl<'a> PartitionExtents<'a> {
-    /// The lists one shard's record names. `None` is a bundle carrying no partition, which names
-    /// none.
-    pub fn of(record: Option<&'a mosaica_store::manifest::ShardRecord>) -> Self {
-        let Some(record) = record else {
-            return PartitionExtents::default();
-        };
-        PartitionExtents {
+impl<'a> ShardExtents<'a> {
+    pub fn of(record: &'a mosaica_store::manifest::ShardRecord) -> Self {
+        ShardExtents {
             attrs: &record.attr_extents,
             records: &record.record_extents,
             artifact_records: &record.artifact_record_extents,
@@ -255,8 +252,7 @@ impl<'a> PartitionExtents<'a> {
 }
 
 impl FilterColumns {
-    /// Open every filter column the manifest declares, with every extent the partition's
-    /// side-manifest names.
+    /// Open every filter column the manifest declares, with every extent the shard's record names.
     ///
     /// A declared column whose files are missing is an error, not an absence: the manifest
     /// digests them, so a missing one means the bundle is not what its manifest says it is. The
@@ -274,9 +270,9 @@ impl FilterColumns {
     /// request path's mappings, which a `bool` cannot express.
     pub fn open(
         prefix_dir: &Path,
-        partition: &str,
+        layout: ShardLayout<'_>,
         manifest: &mosaica_store::manifest::Manifest,
-        extents: PartitionExtents<'_>,
+        extents: ShardExtents<'_>,
         // The entity-scoped columns declared at a running service that no fold has written a
         // base for. Each opens as an empty stack the extents compose onto; every other declared
         // column's base is demanded.
@@ -287,7 +283,6 @@ impl FilterColumns {
         let vocabularies = &manifest.vocabularies;
         let scoped = manifest.scoped_scalars();
         let view_incarnation = &|view: &str| manifest.incarnation_of(view);
-        let layout = ShardLayout::new(partition, mosaica_types::ShardId::ZERO);
         let mut columns = BTreeMap::new();
         let mut placements = BTreeMap::new();
         for (declared_index, scalar) in declared.iter().enumerate() {

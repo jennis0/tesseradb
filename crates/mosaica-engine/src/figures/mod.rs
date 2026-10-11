@@ -154,11 +154,7 @@ type WithPlaces = Arc<dyn Fn(&mut dyn FnMut(&[Placement<'_>])) + Send + Sync>;
 /// [`WithPlaces`] over one view of `bundle`.
 fn places_of_view(bundle: Arc<mosaica_store::read::Bundle>, view: String) -> WithPlaces {
     Arc::new(move |read: &mut dyn FnMut(&[Placement<'_>])| {
-        let Some(view_data) = bundle
-            .partitions
-            .values()
-            .find_map(|partition| partition.only_shard().views.get(&view))
-        else {
+        let Some(view_data) = bundle.only_shard().views.get(&view) else {
             return;
         };
         if let Ok(segments) = crate::viewport::segments_with_row_bases(&view, view_data) {
