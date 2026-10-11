@@ -63,7 +63,7 @@ impl Executor {
                 self.execute(command);
                 return true;
             };
-            if !self.follow_since(stamp, |generation| {
+            if !stamp.follow_since(&self.generation.load_full(), |generation| {
                 crate::edited::follow_changes(generation, &mut changes)
             }) {
                 reply.fail(ExecError::Stale);
@@ -82,23 +82,6 @@ impl Executor {
         self.cascade_dependents(&mut entries);
         self.commit_denies(entries);
         true
-    }
-
-    /// Whether a command resolved at `stamp` names its entities where their items are now,
-    /// `follow` having moved each that an edit committed since moved. `false` where a fold has
-    /// also retired entities since, which can drop the entry saying where an item went, or the
-    /// edited items cannot be read: the caller resolves the command's names again.
-    pub(super) fn follow_since(
-        &self,
-        stamp: crate::edited::Stamp,
-        follow: impl FnOnce(&crate::Generation) -> Result<(), mosaica_store::StoreError>,
-    ) -> bool {
-        let generation = self.generation.load();
-        match stamp.since(&generation) {
-            crate::edited::Since::Still => true,
-            crate::edited::Since::Edited => follow(&generation).is_ok(),
-            crate::edited::Since::Folded => false,
-        }
     }
 
     /// Add one entry deleting every artifact that depends on one this window deletes. Only

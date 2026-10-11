@@ -91,6 +91,7 @@ impl UnallocatedRow {
             // alone.** The entity exists; a second allocation for it would be a second identity
             // for one document, which is the whole of what the join rule prevents.
             entity_id: self.join,
+            edit: false,
         }
     }
 
@@ -501,8 +502,8 @@ pub enum ExecError {
     /// id.
     UniqueTaken { detail: String },
     /// What the handler resolved a batch against has changed since: an item a row names was
-    /// deleted or joined to the row's view, or a value a row carries has a new holder, or an edit
-    /// moved an item a command names while a fold retired entities. Nothing took effect, and the
+    /// deleted or joined to the row's view, or a value a row carries has a new holder, or a
+    /// command's names are stale by `mosaica_engine::Stamp`'s rule. Nothing took effect, and the
     /// names are resolved again.
     Stale,
 }
@@ -606,5 +607,4 @@ mod tests {
             "and the resolved terms come back too"
         );
     }
-
 }

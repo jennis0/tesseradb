@@ -15,11 +15,11 @@
 mod lifecycle;
 mod wait;
 
+pub use ingest_rows::IngestRows;
 #[allow(unused_imports)]
 pub use lifecycle::*;
 #[allow(unused_imports)]
 pub use wait::*;
-pub use ingest_rows::IngestRows;
 
 mod ingest_rows {
     use mosaica_engine::{AcceptError, Engine, IngestRequest};
@@ -88,7 +88,14 @@ mod ingest_rows {
                 mosaica_id_column: false,
             })?;
             let entities = self
-                .resolve_mosaica_ids(&receipt.mosaica_ids.iter().flatten().copied().collect::<Vec<_>>())
+                .resolve_mosaica_ids(
+                    &receipt
+                        .mosaica_ids
+                        .iter()
+                        .flatten()
+                        .copied()
+                        .collect::<Vec<_>>(),
+                )
                 .unwrap()
                 .into_iter()
                 .map(|entity| entity.expect("an accepted row names an item"))
@@ -113,7 +120,7 @@ use mosaica_engine::{default_compute_threads, ArtifactOut, Engine, EngineConfig}
 use mosaica_lifecycle::UnallocatedRow;
 use mosaica_spatial::Bounds;
 use mosaica_store::read::open_bundle;
-use mosaica_types::{EntityId, IdentityKey, MosaicaId};
+use mosaica_types::{EntityId, IdentityKey, ItemHigh, MosaicaId, Tenancy};
 
 pub const N_ITEMS: u64 = 10_000;
 pub const ALL_TERM: u64 = 0;
@@ -127,6 +134,22 @@ pub const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
 pub fn test_key() -> IdentityKey {
     IdentityKey::from_hex(TEST_KEY_HEX).unwrap()
+}
+
+/// The `mosaica_id` of the item of shard 0 holding `entity` as its number at `tenancy`.
+pub fn mosaica_id_at(entity: EntityId, tenancy: u16) -> MosaicaId {
+    let high = ItemHigh::new(0, Tenancy::new(tenancy).expect("a tenancy below 4,096"));
+    test_key().forward(high, entity).unwrap()
+}
+
+/// The tenancy `id` carries.
+pub fn tenancy_of(id: MosaicaId) -> u16 {
+    test_key()
+        .invert(id)
+        .expect("an item's mosaica_id inverts")
+        .0
+        .tenancy
+        .raw()
 }
 
 pub fn extent() -> Bounds {
@@ -536,7 +559,11 @@ pub fn source_to_new_map(bundle_root: &Path, prefix: &str) -> BTreeMap<u64, u64>
         .find(|runs| runs.attribute == "id")
         .expect("the fixture declares a unique `id`");
     let mut map = BTreeMap::new();
-    let paths = runs.base.iter().map(|run| run.path.as_str()).chain(runs.live.iter().map(String::as_str));
+    let paths = runs
+        .base
+        .iter()
+        .map(|run| run.path.as_str())
+        .chain(runs.live.iter().map(String::as_str));
     for rel in paths {
         mosaica_store::unique::for_each_entry(
             mosaica_store::unique::KeyKind::Unsigned,
@@ -551,6 +578,28 @@ pub fn source_to_new_map(bundle_root: &Path, prefix: &str) -> BTreeMap<u64, u64>
         .unwrap();
     }
     map
+}
+
+/// Put `number` at `tenancy` in the built bundle's tenancy index, named and digested in its
+/// side-manifest as a publication names it.
+pub fn set_tenancy(bundle_root: &Path, number: EntityId, tenancy: u16) {
+    use mosaica_store::manifest::{SegmentsManifest, TenancyBit};
+    use mosaica_store::tenancy::{bits_of, TENANCY_DIR};
+
+    let partition = bundle_root.join("v00000/partitions/default");
+    let bits = bits_of(&[(number.raw() as u32, tenancy)]);
+    let path = partition.join("SEGMENTS-0.json");
+    let mut manifest: SegmentsManifest =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    for (bit, file) in mosaica_store::tenancy::write(&partition.join(TENANCY_DIR), &bits).unwrap() {
+        let name = file.file_name().unwrap().to_str().unwrap();
+        let rel = format!("partitions/default/{TENANCY_DIR}/{name}");
+        manifest
+            .files
+            .insert(rel.clone(), mosaica_store::digest_of(&file).unwrap());
+        manifest.tenancy_index.push(TenancyBit { bit, path: rel });
+    }
+    std::fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
 }
 
 /// The item the unique `id` value `source` names, deleted items left out.
@@ -625,23 +674,13 @@ pub fn open_engine_publishing_with_tick_period(
 }
 
 pub fn open_engine(bundle_root: &Path, cache_dir: &Path, wal_path: &Path) -> Engine {
-    Engine::open(
-        bundle_root,
-        cache_dir,
-        wal_path,
-        config(),
-    )
-    .expect("engine should open against a freshly built bundle")
+    Engine::open(bundle_root, cache_dir, wal_path, config())
+        .expect("engine should open against a freshly built bundle")
 }
 
 pub fn open_engine_uncapped(bundle_root: &Path, cache_dir: &Path, wal_path: &Path) -> Engine {
-    Engine::open(
-        bundle_root,
-        cache_dir,
-        wal_path,
-        config_uncapped(),
-    )
-    .expect("engine should open against a freshly built bundle")
+    Engine::open(bundle_root, cache_dir, wal_path, config_uncapped())
+        .expect("engine should open against a freshly built bundle")
 }
 
 /// The fixture's whole extent, as a viewport request carries it.
@@ -664,7 +703,10 @@ pub fn artifacts_of(engine: &Engine, credential: &[u8]) -> Vec<ArtifactOut> {
 pub fn over_every_tile(out: &mosaica_engine::ViewportArtifactsOut) -> Vec<ArtifactOut> {
     let mut merged: Vec<ArtifactOut> = Vec::new();
     for artifact in out.frames.iter().flat_map(|frame| &frame.artifacts) {
-        match merged.iter_mut().find(|held| held.mosaica_id == artifact.mosaica_id) {
+        match merged
+            .iter_mut()
+            .find(|held| held.mosaica_id == artifact.mosaica_id)
+        {
             Some(held) => {
                 held.matched = held.matched.zip(artifact.matched).map(|(a, b)| a || b);
                 held.highlighted = held

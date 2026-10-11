@@ -40,6 +40,9 @@ pub(crate) struct TestSwitches {
     pub(crate) aggregate_min_chunk_rows: AtomicU64,
     /// The rows past which an aggregate's run of cells is sent as a page of its own.
     pub(crate) aggregate_alone_rows: AtomicU64,
+    /// A group's cells are counted by range when its items number at least this many times the
+    /// cells that could hold them: [`crate::aggregate::RANGE_FACTOR`].
+    pub(crate) aggregate_range_factor: AtomicU64,
     /// The most terms a flush may carry the dictionary to: [`mosaica_authz::MAX_DISTINCT_TERMS`].
     pub(crate) max_distinct_terms: AtomicU64,
     /// How many visible items cluster centres are taken from: [`crate::slots::SAMPLE`].
@@ -95,8 +98,14 @@ impl TestSwitches {
     pub(crate) fn hold_projection_build_if_wanted(&self) {
         // The ordering is spelled on each line: `check-layers.sh` tells an atomic from a generation
         // publication by the `Ordering::` beside the call.
-        if self.projection_build_hold_wanted.swap(false, std::sync::atomic::Ordering::SeqCst) {
-            while self.projection_build_held.load(std::sync::atomic::Ordering::SeqCst) {
+        if self
+            .projection_build_hold_wanted
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            while self
+                .projection_build_held
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
         }
@@ -105,8 +114,14 @@ impl TestSwitches {
     /// Called inside a masked-count build. Waits if a test asked for the next build to be held.
     #[cfg(feature = "fault-injection")]
     pub(crate) fn hold_masked_count_build_if_wanted(&self) {
-        if self.masked_count_build_hold_wanted.swap(false, std::sync::atomic::Ordering::SeqCst) {
-            while self.masked_count_build_held.load(std::sync::atomic::Ordering::SeqCst) {
+        if self
+            .masked_count_build_hold_wanted
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            while self
+                .masked_count_build_held
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
         }
@@ -168,7 +183,10 @@ impl TestSwitches {
     /// Called by the executor before it drains its work queue. Waits while a test holds it.
     #[cfg(feature = "fault-injection")]
     pub(crate) fn hold_work_pass_if_paused(&self) {
-        while self.work_pass_paused.load(std::sync::atomic::Ordering::SeqCst) {
+        while self
+            .work_pass_paused
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }
@@ -192,6 +210,7 @@ impl Default for TestSwitches {
             tags_from_labels: AtomicBool::new(true),
             aggregate_min_chunk_rows: AtomicU64::new(crate::aggregate::MIN_CHUNK_ROWS),
             aggregate_alone_rows: AtomicU64::new(crate::aggregate::ALONE_ROWS),
+            aggregate_range_factor: AtomicU64::new(crate::aggregate::RANGE_FACTOR),
             max_distinct_terms: AtomicU64::new(mosaica_authz::MAX_DISTINCT_TERMS),
             slot_sample: AtomicU64::new(crate::slots::SAMPLE),
             #[cfg(feature = "fault-injection")]

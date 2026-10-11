@@ -44,7 +44,7 @@ fn item_lookup_resolves_a_row_far_from_the_segments_start() {
     let source_to_new = source_to_new_map(&bundle_root, "v00000");
     let last_source = N_ITEMS - 1;
     let entity = EntityId::new(source_to_new[&last_source]);
-    let id = test_key().forward(0, entity).unwrap();
+    let id = mosaica_id_at(entity, 0);
 
     let out = engine.item(&session, id).unwrap();
     assert!(
@@ -52,7 +52,10 @@ fn item_lookup_resolves_a_row_far_from_the_segments_start() {
         "an item far from segment start must still resolve through the permutation"
     );
     let fields = out.unwrap().fields;
-    let held = fields.iter().find(|f| f.name == "id").map(|f| f.value.clone());
+    let held = fields
+        .iter()
+        .find(|f| f.name == "id")
+        .map(|f| f.value.clone());
     assert_eq!(held, Some(mosaica_engine::ScalarOut::U64(last_source)));
 }
 
@@ -76,16 +79,47 @@ fn an_unknown_id_and_an_invisible_one_are_indistinguishable() {
     let session = engine.authorise(&zero_credential()).unwrap();
 
     // Unknown: an entity id far beyond anything this bundle ever allocated.
-    let unknown_id = test_key()
-        .forward(0, EntityId::new(N_ITEMS + 1_000_000))
-        .unwrap();
+    let unknown_id = mosaica_id_at(EntityId::new(N_ITEMS + 1_000_000), 0);
     assert_eq!(engine.item(&session, unknown_id).unwrap(), None);
 
     // Known but invisible: a zero-term session sees nothing, so any real item is invisible.
     let source_to_new = source_to_new_map(&bundle_root, "v00000");
     let entity = EntityId::new(source_to_new[&0]);
-    let invisible_id = test_key().forward(0, entity).unwrap();
+    let invisible_id = mosaica_id_at(entity, 0);
     assert_eq!(engine.item(&session, invisible_id).unwrap(), None);
+}
+
+/// An identifier at a tenancy its number is not at names nothing, at the item card and at the
+/// resolver, and costs the card no row projection; one at the tenancy the bundle's index holds
+/// names the item. The index here puts a built item's number at tenancy 3.
+#[test]
+fn an_identifier_at_a_tenancy_its_number_is_not_at_names_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let entity = EntityId::new(source_to_new_map(&bundle_root, "v00000")[&0]);
+    set_tenancy(&bundle_root, entity, 3);
+
+    let engine = open_engine(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let at = |tenancy: u16| mosaica_id_at(entity, tenancy);
+
+    assert_eq!(
+        engine.resolve_mosaica_ids(&[at(3), at(0), at(2)]).unwrap(),
+        vec![Some(entity), None, None]
+    );
+    assert_eq!(engine.item(&session, at(0)).unwrap(), None);
+    assert_eq!(engine.item(&session, at(2)).unwrap(), None);
+    assert_eq!(engine.row_projection_cache_len(), 0);
+    assert!(engine.item(&session, at(3)).unwrap().is_some());
 }
 
 /// The timing channel is closed rather than narrowed: the entity-space visibility test never
@@ -114,7 +148,7 @@ fn the_item_path_never_constructs_a_row_projection() {
         "no viewport drawn yet"
     );
 
-    let unknown_id = test_key().forward(0, EntityId::new(N_ITEMS + 1)).unwrap();
+    let unknown_id = mosaica_id_at(EntityId::new(N_ITEMS + 1), 0);
     engine.item(&session, unknown_id).unwrap();
     assert_eq!(
         engine.row_projection_cache_len(),
@@ -124,7 +158,7 @@ fn the_item_path_never_constructs_a_row_projection() {
 
     let source_to_new = source_to_new_map(&bundle_root, "v00000");
     let entity = EntityId::new(source_to_new[&0]);
-    let visible_id = test_key().forward(0, entity).unwrap();
+    let visible_id = mosaica_id_at(entity, 0);
     engine.item(&session, visible_id).unwrap();
     assert_eq!(
         engine.row_projection_cache_len(),
@@ -155,7 +189,7 @@ fn drill_down_works_on_a_session_that_has_never_drawn_a_viewport() {
 
     let source_to_new = source_to_new_map(&bundle_root, "v00000");
     let entity = EntityId::new(source_to_new[&0]);
-    let id = test_key().forward(0, entity).unwrap();
+    let id = mosaica_id_at(entity, 0);
 
     let out = engine.item(&session, id).unwrap();
     assert!(

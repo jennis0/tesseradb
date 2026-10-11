@@ -422,6 +422,7 @@ fn g_count_range_matches_brute_force_rows_in_range() {
     assert!(mask.check_structural_invariants());
 
     let mut rng = StdRng::seed_from_u64(42);
+    let mut ranges = Vec::new();
     for _ in 0..200 {
         let a = rng.gen_range(0..BOUND as u32);
         let b = rng.gen_range(0..BOUND as u32);
@@ -429,7 +430,24 @@ fn g_count_range_matches_brute_force_rows_in_range() {
 
         let expected = mask.rows_in_range(r.clone()).iter().count() as u64;
         assert_eq!(mask.count_range(r.clone()), expected, "range {r:?}");
+        ranges.push(r);
     }
+
+    // The batched count is the same arithmetic over every range at once: over these ranges in
+    // any order, and over adjacent ranges in order, the way a segment's cells are counted.
+    assert!(
+        !mask.diffs_are_empty(),
+        "the overlay must reach the batched count"
+    );
+    let one_by_one = |ranges: &[Range<u32>]| -> Vec<u64> {
+        ranges.iter().map(|r| mask.count_range(r.clone())).collect()
+    };
+    assert_eq!(mask.count_ranges(&ranges), one_by_one(&ranges));
+    let mut cuts: Vec<u32> = (0..60).map(|_| rng.gen_range(0..BOUND as u32)).collect();
+    cuts.extend([0, BOUND as u32]);
+    cuts.sort_unstable();
+    let adjacent: Vec<Range<u32>> = cuts.windows(2).map(|w| w[0]..w[1]).collect();
+    assert_eq!(mask.count_ranges(&adjacent), one_by_one(&adjacent));
 }
 
 /// The run decode (`for_each_visible_run`) flattens to exactly `rows_in_range`, on **both**

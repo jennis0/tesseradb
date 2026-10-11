@@ -46,6 +46,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Mapping, Sequence
 
+from .tenancy import HolderCount
+
 NAMES_TWO_ITEMS = "names_two_items"
 UNKNOWN_MOSAICA_ID = "unknown_mosaica_id"
 NAMES_NO_ITEM = "names_no_item"
@@ -102,12 +104,23 @@ class Holdings:
 
     `unique` maps each field declared unique to `KEYWORD` or `INTEGER`. `items` maps each live or
     suppressed item's `mosaica_id` to the values it holds, unique or not, keyed by column; a column
-    the item holds no value in is absent. A deleted item is not in `items`.
+    the item holds no value in is absent. A deleted item is not in `items`. `issued` holds every
+    `mosaica_id` the model has seen given to an item, deleted or not. `numbers`, where given,
+    counts each number's holders, and every identifier issued or answered is checked against it
+    (`oracle.tenancy`).
     """
 
     unique: dict[str, str]
     items: dict[int, dict[str, object]] = field(default_factory=dict)
     suppressed: set[int] = field(default_factory=set)
+    issued: set[int] = field(default_factory=set)
+    numbers: HolderCount | None = None
+
+    def __post_init__(self) -> None:
+        self.issued |= set(self.items)
+        if self.numbers is not None:
+            for item in self.items:
+                self.numbers.named(item)
 
     def key(self, column: str, value: object) -> object | None:
         """The value a unique column's cell names by, or `None` for a null. An integer is the same
@@ -275,9 +288,9 @@ def apply_ingest(
     """Apply an accepted batch to `holdings`, and count what it did.
 
     `created` maps each creating row's position to the `mosaica_id` the server issued it, which
-    this model cannot know. A row naming an item edits it when a column it carries holds a different
-    value there, a null clearing a held value, and is unchanged otherwise. Refused rows write
-    nothing.
+    this model cannot know. One the model has seen issued before is refused. A row naming an item
+    edits it when a column it carries holds a different value there, a null clearing a held value,
+    and is unchanged otherwise. Refused rows write nothing.
     """
     counts = {"created": 0, "edited": 0, "unchanged": 0}
     for i, (row, verdict) in enumerate(zip(rows, verdicts, strict=True)):
@@ -287,9 +300,20 @@ def apply_ingest(
             if column != MOSAICA_ID
         }
         if isinstance(verdict, Creates):
-            holdings.items[created[i]] = {c: v for c, v in cells.items() if v is not None}
+            item = created[i]
+            if item in holdings.issued:
+                raise AssertionError(
+                    f"row {i} created an item with mosaica_id {item}, which was issued to an "
+                    "item before"
+                )
+            if holdings.numbers is not None:
+                holdings.numbers.created(item)
+            holdings.issued.add(item)
+            holdings.items[item] = {c: v for c, v in cells.items() if v is not None}
             counts["created"] += 1
         elif isinstance(verdict, Names):
+            if holdings.numbers is not None:
+                holdings.numbers.named(verdict.item)
             values = holdings.items[verdict.item]
             changed = False
             for column, value in cells.items():
@@ -319,6 +343,8 @@ def apply_changes(
         if change["op"] == "delete":
             del holdings.items[item]
             holdings.suppressed.discard(item)
+            if holdings.numbers is not None:
+                holdings.numbers.delete(item)
         elif change["op"] == "suppress":
             holdings.suppressed.add(item)
         elif change["op"] == "unsuppress":

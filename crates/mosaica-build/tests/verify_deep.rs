@@ -27,7 +27,10 @@ use mosaica_build::error::BuildError;
 use mosaica_build::{build, verify, verify_deep, verify_with_window_rows, BuildArgs, VerifyOpts};
 use mosaica_spatial::Bounds;
 use mosaica_store::flush::{write_flush_segment, FlushInput, FlushRow};
-use mosaica_store::manifest::{CurrentPointer, EntitySet, FileDigest, SegmentsManifest};
+use mosaica_store::manifest::{
+    CurrentPointer, EntitySet, FileDigest, SegmentsManifest, TenancyBit,
+};
+use mosaica_store::tenancy::bits_of;
 use mosaica_store::{write_segments_manifest, StoreError};
 use mosaica_types::{EntityId, IdentityKey, TermId, SMALL_TERM_THRESHOLD_DEFAULT};
 
@@ -35,6 +38,8 @@ const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 const N_ITEMS: u64 = 48;
 /// The build entity the fixture deletes.
 const DELETED: u32 = 5;
+/// Where the fixture's tenancy index is written, prefix-relative.
+const TENANCY_REL: &str = "partitions/default/tenancy";
 
 fn extent() -> Bounds {
     Bounds {
@@ -169,6 +174,12 @@ fn built_bundle_with(root: &Path, n: u64, score: Option<Score>) {
 /// delta tier carrying their postings, a deleted build entity's tombstone, and a
 /// complete-current-state `SEGMENTS-1.json`.
 fn flushed_bundle(root: &Path) {
+    flushed_bundle_at(root, 0);
+}
+
+/// [`flushed_bundle`] with the second flushed item at `tenancy`, which the side-manifest's tenancy
+/// index holds for its number.
+fn flushed_bundle_at(root: &Path, tenancy: u16) {
     built_bundle(root, N_ITEMS, false);
     let out = root.join("bundle");
 
@@ -190,6 +201,7 @@ fn flushed_bundle(root: &Path) {
         FlushRow {
             entity_id: EntityId::new(n),
             number: EntityId::new(n),
+            tenancy: mosaica_types::Tenancy::ZERO,
             x: 10.0,
             y: 10.0,
             scalars: Vec::new(),
@@ -197,6 +209,7 @@ fn flushed_bundle(root: &Path) {
         FlushRow {
             entity_id: EntityId::new(n + 1),
             number: EntityId::new(n + 1),
+            tenancy: mosaica_types::Tenancy::new(tenancy).unwrap(),
             x: 990.0,
             y: 990.0,
             scalars: Vec::new(),
@@ -240,6 +253,18 @@ fn flushed_bundle(root: &Path) {
         mosaica_store::digest_of(&delta_path).expect("the tier digests"),
     );
 
+    let bits = bits_of(&[(n as u32 + 1, tenancy)]);
+    let mut tenancy_index = Vec::new();
+    for (bit, path) in mosaica_store::tenancy::write(&prefix_dir.join(TENANCY_REL), &bits).unwrap()
+    {
+        let rel = format!(
+            "{TENANCY_REL}/{}",
+            path.file_name().unwrap().to_str().unwrap()
+        );
+        files.insert(rel.clone(), mosaica_store::digest_of(&path).unwrap());
+        tenancy_index.push(TenancyBit { bit, path: rel });
+    }
+
     let mut segments = seg0.segments.clone();
     segments.push(flush.segment.clone());
 
@@ -254,6 +279,7 @@ fn flushed_bundle(root: &Path) {
         deltas: vec![delta_rel],
         dict_extents: seg0.dict_extents.clone(),
         tombstones: EntitySet::of(&croaring::Bitmap::of(&[DELETED])),
+        tenancy_index,
         files,
         ..SegmentsManifest::empty()
     };
@@ -414,6 +440,66 @@ fn the_partition_route_and_the_window_route_agree() {
     assert_eq!(window.to_string(), partition.to_string());
 }
 
+/// Rewrite the fixture's `SEGMENTS-1.json` through `change`.
+fn edit_side_manifest(root: &Path, change: impl FnOnce(&mut serde_json::Value)) {
+    let path = root.join("v00000/partitions/default/SEGMENTS-1.json");
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    change(&mut value);
+    fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+}
+
+/// An item flushed at a raised tenancy verifies against the index that holds it, and its number
+/// is counted. Without the index its row is at a tenancy its number is not, and the derivation
+/// refuses it; an index file no `files` map digests is refused before it is read.
+#[test]
+fn a_row_is_checked_at_its_numbers_tenancy_in_the_index() {
+    let temp = tempfile::TempDir::new().unwrap();
+    flushed_bundle_at(temp.path(), 5);
+    let root = bundle_root(&temp);
+
+    verify(&root).expect("the row is at the tenancy the index holds for its number");
+    verify_with_window_rows(&root, 0).expect("on the partition route too");
+    let deep = verify_deep(&root, &VerifyOpts::default()).expect("and verifies deep");
+    assert_eq!((deep.raised_numbers, deep.retired_numbers), (1, 0));
+
+    edit_side_manifest(&root, |m| m["tenancy_index"] = serde_json::json!([]));
+    let refused = verify(&root);
+    assert!(
+        matches!(refused, Err(BuildError::Invalid(_))),
+        "without the index the row's tenancy is not its number's: {refused:?}"
+    );
+
+    let temp = tempfile::TempDir::new().unwrap();
+    flushed_bundle_at(temp.path(), 5);
+    let root = bundle_root(&temp);
+    edit_side_manifest(&root, |m| {
+        let files = m["files"].as_object_mut().unwrap();
+        files.retain(|rel, _| !rel.starts_with(TENANCY_REL));
+    });
+    assert!(matches!(
+        verify(&root),
+        Err(BuildError::Store(StoreError::UnverifiedFile { .. }))
+    ));
+}
+
+/// A retired number is at the highest tenancy and holds nothing; one the index puts lower is
+/// refused.
+#[test]
+fn a_retired_number_below_the_highest_tenancy_is_refused() {
+    let temp = tempfile::TempDir::new().unwrap();
+    flushed_bundle(temp.path());
+    let root = bundle_root(&temp);
+    let retired = EntitySet::of(&croaring::Bitmap::of(&[DELETED]));
+    edit_side_manifest(&root, |m| {
+        m["retired_numbers"] = serde_json::to_value(&retired).unwrap()
+    });
+    let refused = verify_deep(&root, &VerifyOpts::default());
+    assert!(
+        matches!(refused, Err(BuildError::Invalid(_))),
+        "a retired number at tenancy 0: {refused:?}"
+    );
+}
+
 // ---- deliberate damage (§18 obligation 9) --------------------------------------------------
 //
 // Each test damages exactly one artefact of the valid fixture, repairs its manifest digest so
@@ -553,18 +639,10 @@ fn a_dict_extent_with_a_miscounted_declaration_is_refused() {
     let temp = tempfile::TempDir::new().unwrap();
     flushed_bundle(temp.path());
     let root = bundle_root(&temp);
-    let prefix_dir = root.join("v00000");
-
-    let segments_path = prefix_dir.join("partitions/default/SEGMENTS-1.json");
-    let mut segments: serde_json::Value =
-        serde_json::from_slice(&fs::read(&segments_path).unwrap()).unwrap();
-    let declared = segments["dict_extents"][0]["records"].as_u64().unwrap();
-    segments["dict_extents"][0]["records"] = serde_json::json!(declared + 1);
-    fs::write(
-        &segments_path,
-        serde_json::to_vec_pretty(&segments).unwrap(),
-    )
-    .unwrap();
+    edit_side_manifest(&root, |segments| {
+        let declared = segments["dict_extents"][0]["records"].as_u64().unwrap();
+        segments["dict_extents"][0]["records"] = serde_json::json!(declared + 1);
+    });
 
     expect_refusal(&root, "positional");
 }
@@ -695,20 +773,14 @@ fn append_dict_extent_repeating_first_descriptor(root: &Path, k: usize) {
     let rel = format!("dictionary/terms-{k}.dict");
     fs::write(prefix_dir.join(&rel), record).unwrap();
 
-    let segments_path = prefix_dir.join("partitions/default/SEGMENTS-1.json");
-    let mut segments: serde_json::Value =
-        serde_json::from_slice(&fs::read(&segments_path).unwrap()).unwrap();
-    segments["dict_extents"]
-        .as_array_mut()
-        .unwrap()
-        .push(serde_json::json!({ "path": rel, "records": 1 }));
-    segments["files"][&rel] =
-        serde_json::json!({ "size": record.len(), "sha256": hex_sha256(record) });
-    fs::write(
-        &segments_path,
-        serde_json::to_vec_pretty(&segments).unwrap(),
-    )
-    .unwrap();
+    edit_side_manifest(root, |segments| {
+        segments["dict_extents"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({ "path": rel, "records": 1 }));
+        segments["files"][&rel] =
+            serde_json::json!({ "size": record.len(), "sha256": hex_sha256(record) });
+    });
 }
 
 /// **A rendered group-scoped family's lane is verified per (build segment, view)** (`views.md`

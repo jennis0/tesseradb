@@ -31,13 +31,13 @@ mod fixture;
 use std::path::Path;
 
 use fixture::{build_bundle, PARTITION, VIEW};
-use proptest::prelude::*;
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_store::flush::{write_flush_segment, FlushInput, FlushRow};
 use mosaica_store::manifest::Quantisation;
 use mosaica_store::merge::{execute_merge, MergeInput, MergeSpec};
 use mosaica_store::read::{ColumnsRef, MortonSlice};
 use mosaica_types::{EntityId, IdentityKey, MosaicaId, ROW_ABSENT};
+use proptest::prelude::*;
 
 fn key() -> IdentityKey {
     IdentityKey::from_hex("0123456789abcdef0123456789abcdef").expect("test key")
@@ -87,6 +87,7 @@ fn write_input(root: &Path, index: usize, entity_lo: u64, shape: &Shape) -> Merg
         .map(|e| FlushRow {
             entity_id: EntityId::new(e),
             number: EntityId::new(e),
+            tenancy: mosaica_types::Tenancy::ZERO,
             x: (((e * shape.stride + shape.phase) % 97) as f64) / 97.0,
             y: (((e * 53 + shape.phase) % 89) as f64) / 89.0,
             scalars: vec![],
@@ -209,8 +210,10 @@ proptest! {
             for entity in input.entity_lo..=input.entity_hi {
                 let row = out.extent.rows[(entity - base) as usize];
                 prop_assert_ne!(row, ROW_ABSENT, "entity {} has no row", entity);
-                let (shard, back) = key().invert(MosaicaId::new(cols.mosaica_id()[row as usize]));
-                prop_assert_eq!(shard, 0);
+                let (high, back) = key()
+                    .invert(MosaicaId::new(cols.mosaica_id()[row as usize]))
+                    .unwrap();
+                prop_assert_eq!(high.shard, 0);
                 prop_assert_eq!(
                     back.raw(), entity,
                     "the extent's row for {} carries another entity's identity", entity

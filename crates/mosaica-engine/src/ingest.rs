@@ -26,7 +26,6 @@
 
 use std::collections::BTreeMap;
 
-use rustc_hash::{FxHashMap, FxHashSet};
 use mosaica_lifecycle::resolve::{self, Identifier, Key, Reason, Refusal, RowIdentity};
 use mosaica_lifecycle::{
     BatchArtifacts, ExecError, IngestRow, RowOutcome, RowReceipt, Slot, UnallocatedEdit,
@@ -34,7 +33,8 @@ use mosaica_lifecycle::{
 };
 use mosaica_store::manifest::DeclaredScalar;
 use mosaica_store::unique::{key_of, value_text, KeyKind, UniqueKey};
-use mosaica_types::{EntityId, TermId, MosaicaId};
+use mosaica_types::{EntityId, MosaicaId, TermId};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::engine::Engine;
 use crate::write::joined::{self, BlobRow};
@@ -396,21 +396,15 @@ impl Engine {
         }
         // Each named item's number, which its `mosaica_id` is taken from and an edit keeps.
         let entities: Vec<EntityId> = order.iter().map(|(entity, _)| *entity).collect();
-        let numbers: FxHashMap<EntityId, EntityId> = entities
+        let unreadable = |e: mosaica_store::StoreError| AcceptError::Unreadable(e.to_string());
+        let numbers = crate::edited::numbers_of(generation, &entities).map_err(unreadable)?;
+        let ids = crate::edited::ids_of_numbers(&self.identity_key, generation, &numbers)
+            .map_err(unreadable)?;
+        let held: FxHashMap<EntityId, (EntityId, u64)> = entities
             .iter()
             .copied()
-            .zip(
-                crate::edited::numbers_of(generation, &entities)
-                    .map_err(|e| AcceptError::Unreadable(e.to_string()))?,
-            )
+            .zip(numbers.into_iter().zip(ids.into_iter().map(|id| id.raw())))
             .collect();
-        let shard = manifest.identity.shard_id;
-        let tid_of = |entity: &EntityId| -> Result<u64, AcceptError> {
-            self.identity_key
-                .forward(shard, numbers[entity])
-                .map(|id| id.raw())
-                .map_err(|e| AcceptError::Unreadable(e.to_string()))
-        };
 
         for (at, (row, item)) in request.rows.iter().zip(&named).enumerate() {
             if let Some(reason) = refused[at] {
@@ -442,50 +436,46 @@ impl Engine {
                         terms: Vec::new(),
                     });
                 }
-                Some(entity) => match decided.remove(&at).expect("every named row was decided") {
-                    Decided::Unchanged => slots.push(Slot::Unchanged {
-                        entity: *entity,
-                        mosaica_id: tid_of(entity)?,
-                    }),
-                    Decided::Joined => {
-                        slots.push(Slot::Joined {
+                Some(entity) => {
+                    let (number, mosaica_id) = held[entity];
+                    match decided.remove(&at).expect("every named row was decided") {
+                        Decided::Unchanged => slots.push(Slot::Unchanged {
                             entity: *entity,
-                            mosaica_id: tid_of(entity)?,
-                        });
-                        joined_from.push(at);
+                            mosaica_id,
+                        }),
+                        Decided::Joined => {
+                            slots.push(Slot::Joined {
+                                entity: *entity,
+                                mosaica_id,
+                            });
+                            joined_from.push(at);
+                        }
+                        Decided::Added(join) => {
+                            slots.push(Slot::Written {
+                                row: rows.len() as u32,
+                                mosaica_id: Some(mosaica_id),
+                            });
+                            written_from.push(at);
+                            rows.push(*join);
+                        }
+                        Decided::Edited => {
+                            let blob = match &stored.blobs {
+                                Some(blobs) => BlobRow::of(blobs.get(entity).cloned()),
+                                None => BlobRow::default(),
+                            };
+                            let edit = self.carry(
+                                generation, &meta, request, at, *entity, number, view, blob,
+                            )?;
+                            keys.extend(identities[at].unique.iter().copied());
+                            slots.push(Slot::Edited {
+                                edit: edits.len() as u32,
+                                mosaica_id,
+                            });
+                            edited_from.push(at);
+                            edits.push(edit);
+                        }
                     }
-                    Decided::Added(join) => {
-                        slots.push(Slot::Written {
-                            row: rows.len() as u32,
-                            mosaica_id: Some(tid_of(entity)?),
-                        });
-                        written_from.push(at);
-                        rows.push(*join);
-                    }
-                    Decided::Edited => {
-                        let blob = match &stored.blobs {
-                            Some(blobs) => BlobRow::of(blobs.get(entity).cloned()),
-                            None => BlobRow::default(),
-                        };
-                        let edit = self.carry(
-                            generation,
-                            &meta,
-                            request,
-                            at,
-                            *entity,
-                            numbers[entity],
-                            view,
-                            blob,
-                        )?;
-                        keys.extend(identities[at].unique.iter().copied());
-                        slots.push(Slot::Edited {
-                            edit: edits.len() as u32,
-                            mosaica_id: tid_of(entity)?,
-                        });
-                        edited_from.push(at);
-                        edits.push(edit);
-                    }
-                },
+                }
             }
         }
 

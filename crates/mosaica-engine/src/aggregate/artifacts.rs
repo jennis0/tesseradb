@@ -11,9 +11,9 @@
 //! overlap, so a table's rows can add to more than the set's size.
 
 use croaring::Bitmap;
-use rustc_hash::{FxHashMap, FxHashSet};
 use mosaica_types::layer::{HierarchyKind, RegisteredLayer, ServingLayout};
 use mosaica_types::{EntityId, MosaicaId};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::set::Cx;
 use super::table::{Groups, Key};
@@ -230,11 +230,8 @@ impl Layer {
             registered.as_ref()?.runs[self.level as usize].entity_of(u64::from(ordinal))
         };
         let mosaica_id = |ordinal: u32| -> Option<u64> {
-            engine
-                .identity_key
-                .forward(shard, EntityId::new(entity_at(ordinal)?))
-                .ok()
-                .map(|id| id.raw())
+            let entity = EntityId::new(entity_at(ordinal)?);
+            engine.artifact_id(shard, entity).map(|id| id.raw())
         };
         let attached = registered
             .as_ref()
@@ -324,10 +321,11 @@ impl Layer {
                 Pick::Named(ids) => {
                     let mut listed: Vec<u32> = Vec::with_capacity(ids.len());
                     for &id in ids {
-                        let (id_shard, entity) = engine.identity_key.invert(id);
-                        if id_shard != shard {
+                        let Some(entity) =
+                            crate::edited::artifact_named(&engine.identity_key, shard, id)
+                        else {
                             continue;
-                        }
+                        };
                         let Some((name, level, ordinal)) =
                             engine.write.live().locate_artifact(entity)
                         else {
@@ -453,7 +451,7 @@ impl Layer {
         let keys = chosen
             .iter()
             .map(|&entity| {
-                let id = engine.identity_key.forward(shard, EntityId::new(entity));
+                let id = engine.artifact_id(shard, EntityId::new(entity));
                 Key::Id(id.map_or(0, |id| id.raw()))
             })
             .collect();

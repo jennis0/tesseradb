@@ -84,17 +84,44 @@ pub(super) struct FoldDerived<'a> {
     pub(super) freed: &'a mosaica_store::manifest::HeldEntities,
 }
 
-/// The entities of `executed` the allocator may issue again: each one whose number, the entity
-/// its item was first given, is another. An item's number is never freed, so a `mosaica_id` a
-/// client holds never comes to name another item.
-fn freed_by(
+/// What a fold frees and retires, by the rule [`freeing`] states.
+struct Freeing {
+    /// The ids the allocator may issue again, each at the tenancy it is issued at.
+    ids: mosaica_lifecycle::ByTenancy,
+    /// The numbers among them, each one tenancy higher in the index the fold publishes.
+    raised: croaring::Bitmap,
+    /// The numbers whose last entity the fold removes at the highest tenancy, never issued again.
+    retired: croaring::Bitmap,
+}
+
+/// What the fold that removes `executed` from `live` frees.
+///
+/// An executed entity an edit gave an item is no item's number, and is freed at tenancy 0. Its
+/// number, or the entity itself where it is a number, is freed when the fold removes the number's
+/// last entity: the number and every entity the edited-items map pairs with it is executed here
+/// or already gone, holding no row, buffered or flushed, and no deny record. Until then the number
+/// resolves through the map, so its next holder would resolve to an entity of its last. An entity
+/// at or above `high_water`, the allocator's, is row-less (an artifact or a layer) and is never
+/// freed.
+///
+/// Read before the swap, while the map still holds the pairs of the entities this fold removes,
+/// and on the executor thread, so no window commits between this read and the swap.
+///
+/// A restart before the log rotates past this fold has the next fold free its numbers again one
+/// tenancy higher, skipping a tenancy no item was given, since the ids are held until that rotation.
+fn freeing(
     live: &Generation,
     executed: &croaring::Bitmap,
-) -> Result<croaring::Bitmap, mosaica_store::StoreError> {
+    high_water: u64,
+) -> Result<Freeing, mosaica_store::StoreError> {
     const CHUNK: usize = 1 << 16;
-    let mut freed = croaring::Bitmap::new();
+    let mut left = croaring::Bitmap::new();
+    let mut candidates = croaring::Bitmap::new();
     let mut entities: Vec<EntityId> = Vec::with_capacity(CHUNK);
-    let mut iter = executed.iter().peekable();
+    let mut iter = executed
+        .iter()
+        .take_while(|&entity| u64::from(entity) < high_water)
+        .peekable();
     while iter.peek().is_some() {
         entities.clear();
         entities.extend(
@@ -105,11 +132,106 @@ fn freed_by(
         let numbers = crate::edited::numbers_of(live, &entities)?;
         for (entity, number) in entities.iter().zip(numbers) {
             if number != *entity {
-                freed.add(entity.raw() as u32);
+                left.add(entity.raw() as u32);
+            }
+            candidates.add(number.raw() as u32);
+        }
+    }
+
+    let gone = |entity: EntityId| {
+        executed.contains(entity.raw() as u32)
+            || (!live.overlay.touches(entity) && !crate::edited::holds(live, entity))
+    };
+    let mut numbers = croaring::Bitmap::new();
+    let mut chunk: Vec<u32> = Vec::with_capacity(CHUNK);
+    let mut iter = candidates.iter().peekable();
+    while iter.peek().is_some() {
+        chunk.clear();
+        chunk.extend(iter.by_ref().take(CHUNK));
+        let entries = crate::edited::entries_of(live, &chunk)?;
+        for (number, entries) in chunk.iter().zip(entries) {
+            if gone(EntityId::new(u64::from(*number))) && entries.into_iter().all(gone) {
+                numbers.add(*number);
             }
         }
     }
+
+    let mut freed = Freeing {
+        ids: mosaica_lifecycle::ByTenancy::new(),
+        raised: croaring::Bitmap::new(),
+        retired: croaring::Bitmap::new(),
+    };
+    if !left.is_empty() {
+        freed.ids.insert(mosaica_types::Tenancy::ZERO, left);
+    }
+    for (tenancy, at) in live.tenancy.split(&numbers) {
+        match tenancy.next() {
+            Some(next) => {
+                freed.raised.or_inplace(&at);
+                freed.ids.entry(next).or_default().or_inplace(&at);
+            }
+            None => freed.retired.or_inplace(&at),
+        }
+    }
     Ok(freed)
+}
+
+/// The tenancy index a fold publishes.
+struct NextTenancy {
+    /// The live index's files for the bits the fold leaves as they are, which it links.
+    shared: Vec<mosaica_store::manifest::TenancyBit>,
+    /// The files it wrote for the bits it changes, with their paths, which it digests.
+    written: Vec<(mosaica_store::manifest::TenancyBit, PathBuf)>,
+}
+
+impl NextTenancy {
+    /// Every bit's entry, as the side-manifest names them.
+    fn index(&self) -> Vec<mosaica_store::manifest::TenancyBit> {
+        let mut index: Vec<mosaica_store::manifest::TenancyBit> = self
+            .shared
+            .iter()
+            .cloned()
+            .chain(self.written.iter().map(|(entry, _)| entry.clone()))
+            .collect();
+        index.sort_by_key(|entry| entry.bit);
+        index
+    }
+}
+
+/// Write the tenancy index a fold publishes into `prefix_dir`: each bit `raised` changes as a new
+/// file, fsynced, and each it leaves shared with `live`.
+fn write_next_tenancy_index(
+    prefix_dir: &Path,
+    partition: &str,
+    live: &[mosaica_store::manifest::TenancyBit],
+    raised: &[Option<croaring::Bitmap>; mosaica_store::tenancy::TENANCY_BITS],
+) -> Result<NextTenancy, mosaica_store::StoreError> {
+    use mosaica_store::tenancy::{file_name, write_bit, TENANCY_DIR};
+    let dir_rel = format!("partitions/{partition}/{TENANCY_DIR}");
+    let mut next = NextTenancy {
+        shared: live
+            .iter()
+            .filter(|entry| matches!(raised.get(entry.bit as usize), Some(None)))
+            .cloned()
+            .collect(),
+        written: Vec::new(),
+    };
+    for (bit, numbers) in raised.iter().enumerate() {
+        let Some(numbers) = numbers else { continue };
+        let bit = bit as u32;
+        if let Some(path) = write_bit(&prefix_dir.join(&dir_rel), bit, numbers)? {
+            let path_rel = format!("{dir_rel}/{}", file_name(bit));
+            let entry = mosaica_store::manifest::TenancyBit {
+                bit,
+                path: path_rel,
+            };
+            next.written.push((entry, path));
+        }
+    }
+    if !next.written.is_empty() {
+        mosaica_store::fsync_dir(&prefix_dir.join(&dir_rel))?;
+    }
+    Ok(next)
 }
 
 /// The fold-written files whose stamped version is the level's now, after the fold's retirement
@@ -190,7 +312,10 @@ pub(in crate::write) fn sweep_orphan_prefixes(bundle_root: &Path, live: &str) {
 ///
 /// `named` sums both the bundle-level `MANIFEST.json` and the partition's `SEGMENTS-<n>.json`;
 /// the build's own artefacts are in the first and would be missed by reading only the second.
-pub(super) fn dead_bytes_of(prefix_dir: &Path, generation: &Generation) -> Option<crate::compact::DeadBytes> {
+pub(super) fn dead_bytes_of(
+    prefix_dir: &Path,
+    generation: &Generation,
+) -> Option<crate::compact::DeadBytes> {
     pub(super) fn walk(dir: &Path, total: &mut u64) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
@@ -461,7 +586,11 @@ pub(super) fn carried_forward<'a>(
             .unique_indexes
             .iter()
             .map(|index| {
-                match plan.unique.iter().find(|folded| folded.attribute == index.attribute) {
+                match plan
+                    .unique
+                    .iter()
+                    .find(|folded| folded.attribute == index.attribute)
+                {
                     None => index.clone(),
                     Some(folded) => {
                         let consumed: FxHashSet<&str> = folded.files().collect();
@@ -508,6 +637,7 @@ pub(super) fn carried_files(
     live_manifest: &SegmentsManifest,
     bundle_files: &std::collections::BTreeMap<String, mosaica_store::manifest::FileDigest>,
     forward: &CarriedExtents,
+    shared_tenancy: &[mosaica_store::manifest::TenancyBit],
 ) -> std::collections::BTreeSet<String> {
     // A segment an earlier fold carried has its files listed in the bundle's manifest.
     let listed =
@@ -558,6 +688,7 @@ pub(super) fn carried_files(
     }
     rels.extend(forward.edited.files().map(String::from));
     rels.extend(live_manifest.dict_extents.iter().map(|e| e.path.clone()));
+    rels.extend(shared_tenancy.iter().map(|bit| bit.path.clone()));
     rels
 }
 
@@ -574,7 +705,10 @@ impl Executor {
     /// The dead-bytes gauge is a directory walk and is passed as a closure: `due` calls it only
     /// after every cheaper gauge has declined. It walks the live prefix, not the bundle root; an
     /// orphaned prefix is the startup sweep's to reclaim, not a fold's.
-    pub(super) fn scheduled_fold(&self, generation: &Arc<Generation>) -> Option<crate::compact::FoldTrigger> {
+    pub(super) fn scheduled_fold(
+        &self,
+        generation: &Arc<Generation>,
+    ) -> Option<crate::compact::FoldTrigger> {
         let now = unix_now()?;
         let live_rows: u64 = generation
             .bundle
@@ -833,7 +967,12 @@ impl Executor {
     /// Apply every completed fold waiting from its thread, and report whether any did.
     pub(super) fn publish_completed_folds(&mut self) -> bool {
         // Test hook; always false in a shipped build. See `MaintenanceDeps::switches`.
-        if self.deps.switches.fold_publication_paused.load(Ordering::SeqCst) {
+        if self
+            .deps
+            .switches
+            .fold_publication_paused
+            .load(Ordering::SeqCst)
+        {
             return false;
         }
         let mut any = false;
@@ -907,9 +1046,11 @@ impl Executor {
         // poison after `plan_fold` checked it, and this manifest would then publish deny state no
         // durable record backs. The divergence half is already asked by `may_publish` above.
         if self.log.wal.is_poisoned() {
-            return Err("the WAL poisoned during its flight, so its manifest would publish deny state \
+            return Err(
+                "the WAL poisoned during its flight, so its manifest would publish deny state \
                      no durable record backs"
-                .to_string());
+                    .to_string(),
+            );
         }
 
         if live.prefix != plan.prefix {
@@ -934,7 +1075,9 @@ impl Executor {
             })
             .collect();
         if !fold_rebases(plan, live_manifest, &consumed_segments) {
-            return Err("an artefact it consumed is no longer listed in the live manifest".to_string());
+            return Err(
+                "an artefact it consumed is no longer listed in the live manifest".to_string(),
+            );
         }
 
         // ---- the carry-forward set ----------------------------------------------------------------
@@ -956,9 +1099,11 @@ impl Executor {
             .iter()
             .any(|view| live_incarnations.get(view.view.as_str()) != Some(&view.incarnation))
         {
-            return Err("a view it folded was dropped during its flight; the next fold plans over \
+            return Err(
+                "a view it folded was dropped during its flight; the next fold plans over \
                      the views as they now stand"
-                .to_string());
+                    .to_string(),
+            );
         }
         let forward = carried_forward(plan, live_manifest, &live_incarnations, &consumed_segments);
 
@@ -969,29 +1114,30 @@ impl Executor {
             let Some(view) = plan.views.iter().find(|s| s.view == descriptor.view) else {
                 // A view created and flushed since the plan was taken has no base here; that is
                 // transient, and the next fold plans over a bundle that holds it.
-                return Err("a carried-forward segment names a view created since the plan was taken, so \
+                return Err(
+                    "a carried-forward segment names a view created since the plan was taken, so \
                      the fold has no base for it; the next fold plans over a bundle that has it"
-                    .to_string());
+                        .to_string(),
+                );
             };
             if descriptor.entity_lo < view.permutation_bound {
-                return Err("a carried-forward segment begins below the fold's own base permutation".to_string());
+                return Err(
+                    "a carried-forward segment begins below the fold's own base permutation"
+                        .to_string(),
+                );
             }
         }
         // ---- retirement, evaluated here and nowhere earlier ---------------------------------------
         let mut carried = crate::compact::CarriedForward::new();
         for descriptor in &forward.segments {
-            let Some(extent) = partition_data
-                .views
-                .get(&descriptor.view)
-                .and_then(|view| {
-                    view.row_space
-                        .extents()
-                        .iter()
-                        .find(|extent| extent.seg_id == descriptor.seg_id)
-                })
-            else {
+            let Some(extent) = partition_data.views.get(&descriptor.view).and_then(|view| {
+                view.row_space
+                    .extents()
+                    .iter()
+                    .find(|extent| extent.seg_id == descriptor.seg_id)
+            }) else {
                 return Err(
-                    "a carried-forward segment has no extent in the live row space".to_string()
+                    "a carried-forward segment has no extent in the live row space".to_string(),
                 );
             };
             carried.add_segment(extent);
@@ -1103,12 +1249,7 @@ impl Executor {
                 .with_artifacts(|store| store.levels_moved_by(&executed)),
             retired: executed.clone(),
         };
-        let derived = self.write_fold_derived(
-            &to_prefix_dir,
-            &completed,
-            manifest_n,
-            &pending,
-        );
+        let derived = self.write_fold_derived(&to_prefix_dir, &completed, manifest_n, &pending);
         stairs.record("8 derived");
 
         // ---- the report, before anything retires ---------------------------------------------------
@@ -1136,10 +1277,8 @@ impl Executor {
                     .map(|d| (*d).clone()),
             );
         }
-        // Read before the swap, while the edited-items map still holds the retired entities'
-        // pairs.
-        let freed = match freed_by(&live, &executed) {
-            Ok(freed) => freed,
+        let freeing = match freeing(&live, &executed, self.live.allocator_high_water()) {
+            Ok(freeing) => freeing,
             Err(e) => {
                 discard(&format!(
                     "the entities it retires could not be told apart from items' numbers ({e})"
@@ -1147,6 +1286,24 @@ impl Executor {
                 return;
             }
         };
+        let next_tenancy = match write_next_tenancy_index(
+            &to_prefix_dir,
+            &plan.partition,
+            &live_manifest.tenancy_index,
+            &live.tenancy.raised(&freeing.raised),
+        ) {
+            Ok(next) => next,
+            Err(e) => {
+                discard(&format!("its tenancy index would not be written ({e})"));
+                return;
+            }
+        };
+        let mut retired_numbers = live_manifest
+            .retired_numbers
+            .entities()
+            .cloned()
+            .unwrap_or_default();
+        retired_numbers.or_inplace(&freeing.retired);
         // The suppressions leaving with their entities are logged before the manifest omits
         // them, so a replay of the suppressions the log still holds ends without them. Each entity
         // is deleted until this fold's swap, so the record hides nothing less even if the fold is
@@ -1171,10 +1328,13 @@ impl Executor {
         // carrying what the swap is about to retire would re-seed the overlay at the next restart.
         let mut published_overlay = (*live.overlay).clone();
         published_overlay.retire(&executed);
+        let frees = !freeing.ids.is_empty();
         // At the log position no later record can name the freed ids at.
         let freed = mosaica_store::manifest::HeldEntities {
             position: self.log.wal.position(),
-            entities: mosaica_store::manifest::EntitySet::of(&freed),
+            entities: mosaica_store::manifest::EntitySet::of(&mosaica_lifecycle::union_of(
+                &freeing.ids,
+            )),
         };
 
         let (runtime_attributes, runtime_scoped_attributes) =
@@ -1251,6 +1411,8 @@ impl Executor {
                     live: forward.edited.by_entity.live.clone(),
                 },
             },
+            tenancy_index: next_tenancy.index(),
+            retired_numbers: mosaica_store::manifest::EntitySet::of(&retired_numbers),
             ..SegmentsManifest::empty()
         };
         write_deny_state(&mut segments_manifest, &published_overlay);
@@ -1258,11 +1420,23 @@ impl Executor {
         // ---- the new `MANIFEST.json` ----------------------------------------------------------
         let mut bundle_manifest = self.fold_bundle_manifest(&live, &completed, plan);
 
+        for (entry, path) in &next_tenancy.written {
+            match mosaica_store::digest_of(path) {
+                Ok(digest) => {
+                    bundle_manifest.files.insert(entry.path.clone(), digest);
+                }
+                Err(e) => {
+                    discard(&format!("its tenancy index would not digest ({e})"));
+                    return;
+                }
+            }
+        }
         let carried_rels = carried_files(
             &plan.partition,
             live_manifest,
             &live.bundle.manifest.files,
             &forward,
+            &next_tenancy.shared,
         );
         for rel in &carried_rels {
             let Some(digest) = live_manifest
@@ -1343,9 +1517,11 @@ impl Executor {
         stairs.record("10 manifest");
 
         self.pause_point(PauseSiteArg::BeforeCurrentFlip);
-        if let Err(e) =
-            mosaica_store::write_current(&self.deps.bundle_root, &completed.prefix, &manifest_digest)
-        {
+        if let Err(e) = mosaica_store::write_current(
+            &self.deps.bundle_root,
+            &completed.prefix,
+            &manifest_digest,
+        ) {
             discard(&format!("CURRENT would not flip ({e})"));
             return;
         }
@@ -1396,15 +1572,15 @@ impl Executor {
             &live_manifest.deltas,
             &segments_manifest.deltas,
             executed,
+            frees,
         ) {
             self.diverge_from_current(&completed.prefix, &reason);
             return;
         }
         // Taken here, while every generation in it is over the prefix this fold supersedes: one
         // published after the swap is over the new prefix, and the next fold waits for it.
-        let mut generations = std::mem::take(
-            &mut *self.superseded.lock().unwrap_or_else(|e| e.into_inner()),
-        );
+        let mut generations =
+            std::mem::take(&mut *self.superseded.lock().unwrap_or_else(|e| e.into_inner()));
         generations.push(Arc::downgrade(&live));
         stairs.record("13 open");
 
@@ -1430,11 +1606,14 @@ impl Executor {
         // Immediately: the manifest seed no longer carries the executed entries, but the WAL still
         // holds the original delete records until a rotation reclaims them. The freed ids are
         // issued once it has.
-        if let Some(ids) = freed.entities.entities() {
-            let ids = ids.clone();
-            self.live
-                .with_allocator(|alloc| alloc.release_after(freed.position, ids));
-        }
+        let freed_ids = freed
+            .entities
+            .entities()
+            .map_or(0, croaring::Bitmap::cardinality);
+        let freed_numbers = freeing.raised.cardinality();
+        let exhausted_numbers = freeing.retired.cardinality();
+        self.live
+            .with_allocator(|alloc| alloc.release_after(freed.position, freeing.ids));
         self.rotate_wal();
         stairs.record("16 wal");
         self.live.with_attributes(|attributes| {
@@ -1490,6 +1669,9 @@ impl Executor {
             prefix = %completed.prefix,
             segments_version,
             retired = retired_count,
+            freed_ids,
+            freed_numbers,
+            exhausted_numbers,
             carried_entities,
             elapsed_ms = started.elapsed().as_millis() as u64,
             passes = %passes,
@@ -1584,7 +1766,8 @@ impl Executor {
         );
     }
 
-    /// Opens the prefix `CURRENT` now names and swaps onto it.
+    /// Opens the prefix `CURRENT` now names and swaps onto it, retiring `retired` and, where
+    /// `frees`, moving the epoch that makes every write resolved before it stale.
     fn swap_onto_folded_prefix(
         &mut self,
         prefix: &str,
@@ -1592,10 +1775,12 @@ impl Executor {
         live_tiers: &[String],
         folded_tiers: &[String],
         retired: croaring::Bitmap,
+        frees: bool,
     ) -> Result<(), String> {
-        let (bundle, rotation) =
+        let (bundle, mut rotation) =
             crate::engine::open_rotation(&self.deps.bundle_root, prefix, &live.fragments, retired)
                 .map_err(|e| format!("the folded prefix would not open ({e})"))?;
+        rotation.frees = frees;
         let delta_postings = folded_tiers
             .iter()
             .map(|rel| {
@@ -1631,7 +1816,11 @@ impl Executor {
         }
         let mut still_read = Vec::new();
         for pending in std::mem::take(&mut self.pending_reclaim) {
-            if pending.generations.iter().any(|held| held.strong_count() > 0) {
+            if pending
+                .generations
+                .iter()
+                .any(|held| held.strong_count() > 0)
+            {
                 still_read.push(pending);
                 continue;
             }
@@ -2562,7 +2751,6 @@ impl Executor {
             "the fold's artifact pass rebuilt every level's row form"
         );
     }
-
 }
 /// The segments a fold wrote, opened from the prefix it wrote them into: what its artifact pass
 /// resolves every spatial level against. A segment that will not open is skipped and logged; the

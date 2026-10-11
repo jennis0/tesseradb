@@ -131,8 +131,8 @@ fn b_subset_session_sees_exactly_its_terms_items() {
     let new_to_source: BTreeMap<u64, u64> = source_to_new.iter().map(|(&s, &n)| (n, s)).collect();
     let key = test_key();
     for (mosaica_id, _) in out.points.iter() {
-        let (shard, entity) = key.invert(mosaica_id);
-        assert_eq!(shard, 0, "fixture uses shard 0 only");
+        let (high, entity) = key.invert(mosaica_id).expect("a served point is an item");
+        assert_eq!(high.shard, 0, "fixture uses shard 0 only");
         let source = new_to_source[&entity.raw()];
         assert_eq!(
             source % 3,
@@ -637,13 +637,20 @@ fn config_with_underlay(max_cells: usize) -> EngineConfig {
 }
 
 fn open_engine_with(bundle_root: &Path, tmp: &Path, cfg: EngineConfig) -> Engine {
-    Engine::open(
-        bundle_root,
-        &tmp.join("cache"),
-        &tmp.join("wal.log"),
-        cfg,
-    )
-    .unwrap()
+    Engine::open(bundle_root, &tmp.join("cache"), &tmp.join("wal.log"), cfg).unwrap()
+}
+
+/// Each tile's sub-cells, `offset` levels below it, sum to the tile's masked `visible` count.
+fn assert_sub_cells_sum_to_tiles(out: &ViewportOut, offset: u8, what: &str) {
+    for tile in &out.tiles {
+        let summed: u64 = out
+            .sub_cells
+            .iter()
+            .filter(|c| c.cell >> (2 * u32::from(offset)) == tile.tile)
+            .map(|c| c.count)
+            .sum();
+        assert_eq!(summed, tile.visible, "{what}, tile {}", tile.tile);
+    }
 }
 
 /// **I2.** Sub-cell counts are exact *masked* cardinalities, so a tile's sub-cells must sum to that
@@ -674,25 +681,47 @@ fn underlay_sub_cells_sum_to_the_tile_s_masked_visible_count() {
                 )
                 .unwrap();
             assert!(!out.sub_cells.is_empty(), "zoom {zoom}: underlay was empty");
-
-            for tile in &out.tiles {
-                let summed: u64 = out
-                    .sub_cells
-                    .iter()
-                    .filter(|c| (c.cell >> (2 * offset as u32)) == tile.tile)
-                    .map(|c| c.count)
-                    .sum();
-                assert_eq!(
-                    summed, tile.visible,
-                    "zoom {zoom} offset {offset}, tile {}: sub-cells summed to {summed} but the \
-                     masked visible count is {} — an unmasked underlay would over-count here (I2)",
-                    tile.tile, tile.visible
-                );
-            }
+            assert_sub_cells_sum_to_tiles(&out, offset, &format!("zoom {zoom} offset {offset}"));
             assert!(
                 out.sub_cells.iter().all(|c| c.count > 0),
                 "empty sub-cells must be omitted, exactly as empty tiles are"
             );
+        }
+    }
+}
+
+/// Over more rows than one 65,536-row container holds, a tile or a sub-cell that spans several
+/// containers, from row 0 or from later, counts every visible item in it: the tiles sum to the
+/// visible total, and each tile's sub-cells to its count.
+#[test]
+fn counts_spanning_several_containers_sum_to_the_visible_total() {
+    const ITEMS: u64 = 300_000;
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture_n(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        ITEMS,
+    );
+    let engine = open_engine_with(&bundle_root, tmp.path(), config());
+
+    for (credential, items) in [
+        (full_coverage_credential(), ITEMS),
+        (subset_credential(), ITEMS.div_ceil(3)),
+    ] {
+        let session = engine.authorise(&credential).unwrap();
+        for zoom in [0u8, 1] {
+            let out = engine
+                .viewport(
+                    &session,
+                    ViewportRequest::new("s0", zoom, [0.0, 0.0, 1000.0, 1000.0], 30)
+                        .underlay_offset(Some(1)),
+                )
+                .unwrap();
+            let visible: u64 = out.tiles.iter().map(|t| t.visible).sum();
+            assert_eq!(visible, items, "zoom {zoom}: the tiles' counts");
+            assert_sub_cells_sum_to_tiles(&out, 1, &format!("zoom {zoom}"));
         }
     }
 }
@@ -1006,13 +1035,17 @@ fn n_occ_falls_when_a_suppression_empties_a_tile() {
         &tmp.path().join("wal_a.log"),
     );
     let session_a = baseline.authorise(&full_coverage_credential()).unwrap();
-    let before = baseline.occupied_tiles_for_test(&session_a, "s0", 16).unwrap();
+    let before = baseline
+        .occupied_tiles_for_test(&session_a, "s0", 16)
+        .unwrap();
     assert_eq!(
         before, 1_000,
         "the fixture's ten thousand items sit on a thousand lattice positions"
     );
     assert_eq!(
-        baseline.occupied_tiles_for_test(&session_a, "s0", 0).unwrap(),
+        baseline
+            .occupied_tiles_for_test(&session_a, "s0", 0)
+            .unwrap(),
         1,
         "depth 0 is one tile whatever the data does"
     );
@@ -1133,7 +1166,9 @@ fn the_background_fill_takes_the_ladder_to_twelve_in_one_walk_off_the_request() 
 
     for depth in [0u8, 3, 6, 9, 12] {
         assert_eq!(
-            filled.occupied_tiles_for_test(&session, "s0", depth).unwrap(),
+            filled
+                .occupied_tiles_for_test(&session, "s0", depth)
+                .unwrap(),
             unfilled
                 .occupied_tiles_for_test(&plain_session, "s0", depth)
                 .unwrap(),
@@ -1414,7 +1449,10 @@ fn a_first_viewport_finishes_while_another_sessions_build_is_held() {
         finished.is_ok(),
         "a second session's first viewport waited for the first session's build"
     );
-    assert_eq!(builds_while_held, 2, "each session builds its own projection");
+    assert_eq!(
+        builds_while_held, 2,
+        "each session builds its own projection"
+    );
 }
 
 /// Byte-format/wire behaviour is unchanged by the D-G refactor: a warm cache must serve output
@@ -1618,7 +1656,10 @@ fn f1_selection_reads_fewer_than_the_visible_set_on_a_dense_tile() {
         .unwrap();
     let t = out.timings;
 
-    assert!(t.enabled, "built with bench-timing, so timings must be real");
+    assert!(
+        t.enabled,
+        "built with bench-timing, so timings must be real"
+    );
     assert_eq!(t.tiles_nonempty, 1, "zoom 0 is one tile");
     assert_eq!(
         decode_tier(t.sigma_visible, t.rows_in_ranges),

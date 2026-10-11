@@ -318,6 +318,14 @@ impl std::error::Error for StoreError {
     }
 }
 
+/// The error mapper for an I/O failure at `path`.
+pub(crate) fn io(path: &std::path::Path) -> impl Fn(io::Error) -> StoreError + '_ {
+    move |source| StoreError::Io {
+        path: path.to_path_buf(),
+        source,
+    }
+}
+
 /// Read `path` fully into a `Vec<u8>`, wrapping any I/O error with the path (fail-closed
 /// bundle reads need to say *which* file was unreadable, not just "some I/O error").
 pub(crate) fn read_to_vec(path: &std::path::Path) -> Result<Vec<u8>> {

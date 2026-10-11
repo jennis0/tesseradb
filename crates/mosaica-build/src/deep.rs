@@ -118,6 +118,11 @@ pub struct VerifyDeepReport {
     pub edited_pairs: u64,
     /// Segment rows whose entity is not their number, each confirmed to be a pair of the map.
     pub edited_rows: u64,
+    /// Numbers the tenancy index holds above tenancy 0, each confirmed to have been issued
+    /// ([`check_tenancy`]); 0 where no number has been freed.
+    pub raised_numbers: u64,
+    /// Retired numbers, each confirmed to be at the highest tenancy and to hold nothing.
+    pub retired_numbers: u64,
 }
 
 /// Deep-verify the bundle at `root`: the shallow [`crate::verify`] pass, then §11's structural
@@ -152,6 +157,8 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
         unique_entries: 0,
         edited_pairs: 0,
         edited_rows: 0,
+        raised_numbers: 0,
+        retired_numbers: 0,
     };
 
     // Sorted so two runs over the same defective bundle refuse with the same message.
@@ -186,10 +193,89 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
             partition,
             &mut report,
         )?;
-        check_edited_items(&prefix_dir, phash, &bundle.manifest, partition, &mut report)?;
+        let tenancy = mosaica_store::read::open_tenancy_index(
+            &prefix_dir,
+            &partition.manifest,
+            &bundle.manifest.files,
+        )?;
+        check_edited_items(
+            &prefix_dir,
+            phash,
+            &bundle.manifest,
+            partition,
+            &tenancy,
+            &mut report,
+        )?;
+        check_tenancy(phash, partition, &tenancy, &mut report)?;
     }
 
     Ok(report)
+}
+
+/// **The tenancy index and the retired numbers agree with the allocator.** Every number the index
+/// holds is below the high water, so was issued. Every retired number decodes, is at the highest
+/// tenancy, holds no row, and is neither free nor held back. A row's own tenancy is checked by the
+/// shallow pass, and a moved row's by [`check_edited_items`].
+fn check_tenancy(
+    phash: &str,
+    partition: &mosaica_store::read::PartitionData,
+    tenancy: &mosaica_store::tenancy::TenancyIndex,
+    report: &mut VerifyDeepReport,
+) -> Result<()> {
+    let manifest = &partition.manifest;
+    let bits: Vec<&croaring::Bitmap> = (0..mosaica_store::tenancy::TENANCY_BITS)
+        .filter_map(|bit| tenancy.bit(bit))
+        .collect();
+    let raised = croaring::Bitmap::fast_or(&bits);
+    if let Some(number) = raised.maximum() {
+        if u64::from(number) >= manifest.entity_id_high_water {
+            return Err(BuildError::Invalid(format!(
+                "partition {phash}: the tenancy index holds number {number}, at or above the high \
+                 water {}, which no item has been given",
+                manifest.entity_id_high_water
+            )));
+        }
+    }
+    report.raised_numbers += raised.cardinality();
+
+    let Some(retired) = manifest.retired_numbers.entities() else {
+        return Err(BuildError::Invalid(format!(
+            "partition {phash}: the retired numbers do not decode"
+        )));
+    };
+    let issuable: Vec<&croaring::Bitmap> = manifest
+        .held_entities
+        .iter()
+        .filter_map(|held| held.entities.entities())
+        .chain(manifest.free_entities.entities())
+        .collect();
+    let issuable = croaring::Bitmap::fast_or(&issuable);
+    for number in retired.iter() {
+        let entity = mosaica_types::EntityId::new(u64::from(number));
+        let at = tenancy.of(entity);
+        if at != mosaica_types::Tenancy::MAX {
+            return Err(BuildError::Invalid(format!(
+                "partition {phash}: number {number} is retired at tenancy {}, below the highest",
+                at.raw()
+            )));
+        }
+        if issuable.contains(number) {
+            return Err(BuildError::Invalid(format!(
+                "partition {phash}: number {number} is retired and still free to be issued"
+            )));
+        }
+        if partition
+            .views
+            .values()
+            .any(|data| data.row_space.row_of(entity).is_some())
+        {
+            return Err(BuildError::Invalid(format!(
+                "partition {phash}: number {number} is retired and still holds a row"
+            )));
+        }
+    }
+    report.retired_numbers += retired.cardinality();
+    Ok(())
 }
 
 /// **The edited-items map agrees with itself and with the rows.** Its two directions hold the same
@@ -200,6 +286,7 @@ fn check_edited_items(
     phash: &str,
     manifest: &mosaica_store::manifest::Manifest,
     partition: &mosaica_store::read::PartitionData,
+    tenancy: &mosaica_store::tenancy::TenancyIndex,
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
     use std::collections::{BTreeMap, BTreeSet};
@@ -273,6 +360,7 @@ fn check_edited_items(
 
     let key = IdentityKey::from_hex(&manifest.identity.key)
         .map_err(|e| BuildError::Invalid(format!("the manifest's identity key: {e}")))?;
+    let shard = manifest.identity.shard_id;
     let mut views: Vec<_> = partition.views.iter().collect();
     views.sort_by(|a, b| a.0.cmp(b.0));
     for (view, data) in views {
@@ -286,7 +374,15 @@ fn check_edited_items(
                         ids.len()
                     ))
                 })?;
-                let (_, number) = key.invert(MosaicaId::new(mosaica_id));
+                let Some((number, true)) =
+                    tenancy.number_named(&key, shard, MosaicaId::new(mosaica_id))
+                else {
+                    return Err(BuildError::Invalid(format!(
+                        "view {view}, segment {}: moved row {row}'s mosaica_id names no item of \
+                         shard {shard} at its number's tenancy",
+                        segment.seg_id
+                    )));
+                };
                 if !u32::try_from(number.raw()).is_ok_and(|n| forward.contains(&(n, entity))) {
                     return Err(BuildError::Invalid(format!(
                         "view {view}, segment {}: row {row} holds entity {entity}, which the \
@@ -334,8 +430,12 @@ fn check_unique_indexes(
         .ok_or_else(|| {
             BuildError::Invalid(format!("partition {phash}: the tombstones do not decode"))
         })?;
-    let bound = u32::try_from(partition_manifest.entity_id_high_water.max(manifest.entity_id_high_water))
-        .unwrap_or(u32::MAX);
+    let bound = u32::try_from(
+        partition_manifest
+            .entity_id_high_water
+            .max(manifest.entity_id_high_water),
+    )
+    .unwrap_or(u32::MAX);
     for index in &partition_manifest.unique_indexes {
         let attribute = &index.attribute;
         let Some((at, declared)) = served
@@ -450,9 +550,19 @@ fn check_unique_indexes(
                 return Err(e);
             }
         } else {
-            let record_dir = prefix_dir.join("partitions").join(phash).join("attrs").join("record");
-            let base_rel = format!("partitions/{phash}/attrs/record/{}", mosaica_filter::RECORD_BLOCKS_FILE);
-            let base = manifest.files.contains_key(&base_rel).then_some(record_dir.as_path());
+            let record_dir = prefix_dir
+                .join("partitions")
+                .join(phash)
+                .join("attrs")
+                .join("record");
+            let base_rel = format!(
+                "partitions/{phash}/attrs/record/{}",
+                mosaica_filter::RECORD_BLOCKS_FILE
+            );
+            let base = manifest
+                .files
+                .contains_key(&base_rel)
+                .then_some(record_dir.as_path());
             let extents: Vec<mosaica_filter::RecordExtentPaths> = partition_manifest
                 .record_extents
                 .iter()
@@ -531,12 +641,24 @@ fn value_layers(
     manifest: &Manifest,
     partition_manifest: &SegmentsManifest,
     declared: &mosaica_store::manifest::DeclaredScalar,
-) -> Result<Vec<(mosaica_filter::ValueColumn, Option<mosaica_filter::SortedDict>)>> {
+) -> Result<
+    Vec<(
+        mosaica_filter::ValueColumn,
+        Option<mosaica_filter::SortedDict>,
+    )>,
+> {
     let attribute = &declared.name;
-    let dir = prefix_dir.join("partitions").join(phash).join("attrs").join(attribute);
+    let dir = prefix_dir
+        .join("partitions")
+        .join(phash)
+        .join("attrs")
+        .join(attribute);
     let access = mosaica_filter::Access::MappedSequential;
     let mut layers = Vec::new();
-    let base_rel = format!("partitions/{phash}/attrs/{attribute}/{}", mosaica_filter::VALUES_FILE);
+    let base_rel = format!(
+        "partitions/{phash}/attrs/{attribute}/{}",
+        mosaica_filter::VALUES_FILE
+    );
     if manifest.files.contains_key(&base_rel) {
         let values = mosaica_filter::ValueColumn::open_dir(&dir, access)
             .map_err(|e| BuildError::io(&dir, e))?;
@@ -624,7 +746,10 @@ fn check_cut_index(
             let starts = segment.cuts.starts();
             let ids = segment.columns.mosaica_id();
             let where_at = |row: usize| {
-                format!("partition {phash}, view '{view}', segment '{}', row {row}", segment.seg_id)
+                format!(
+                    "partition {phash}, view '{view}', segment '{}', row {row}",
+                    segment.seg_id
+                )
             };
             let mut cell = 0usize;
             for row in 0..codes.len() {
@@ -789,19 +914,20 @@ fn check_bands(
                 let mut values: std::collections::HashMap<u32, mosaica_spatial::ScalarValue> =
                     Default::default();
                 for (layer, _) in layers {
-                    layer.for_each_record_value_in(&wanted, |entity, value| {
-                        // A value column stores a timestamp as its `i64`.
-                        let value = match (declared.arrow_type, record_as_scalar(value)) {
-                            (
-                                mosaica_spatial::ScalarType::TimestampUs,
-                                mosaica_spatial::ScalarValue::I64(t),
-                            ) => mosaica_spatial::ScalarValue::TimestampUs(t),
-                            (_, value) => value,
-                        };
-                        values.insert(entity, value);
-                        Ok::<(), ()>(())
-                    })
-                    .expect("the closure does not fail");
+                    layer
+                        .for_each_record_value_in(&wanted, |entity, value| {
+                            // A value column stores a timestamp as its `i64`.
+                            let value = match (declared.arrow_type, record_as_scalar(value)) {
+                                (
+                                    mosaica_spatial::ScalarType::TimestampUs,
+                                    mosaica_spatial::ScalarValue::I64(t),
+                                ) => mosaica_spatial::ScalarValue::TimestampUs(t),
+                                (_, value) => value,
+                            };
+                            values.insert(entity, value);
+                            Ok::<(), ()>(())
+                        })
+                        .expect("the closure does not fail");
                 }
                 segment
                     .bands
@@ -1137,8 +1263,7 @@ fn check_postings_and_pairs(
     let pairs_rel = format!("partitions/{phash}/terms/pairs.parquet");
     if named(&postings_rel) {
         let path = join_rel(prefix_dir, &postings_rel)?;
-        let reader =
-            PostingsReader::open(&path, false).map_err(|e| BuildError::io(&path, e))?;
+        let reader = PostingsReader::open(&path, false).map_err(|e| BuildError::io(&path, e))?;
 
         let mut pairs = if named(&pairs_rel) {
             Some(PairsCursor::open(&join_rel(prefix_dir, &pairs_rel)?)?)
@@ -1441,8 +1566,8 @@ fn check_dict_extents(
             if bytes.len() - offset < 4 {
                 return Err(truncated("cuts off inside its length field"));
             }
-            let len = u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4 bytes"))
-                as usize;
+            let len =
+                u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4 bytes")) as usize;
             offset += 4;
             if bytes.len() - offset < len {
                 return Err(truncated("overruns the end of the file"));

@@ -1,7 +1,7 @@
 //! The tile sweep and the gather: one tile's count and selection, and the columns it emits.
 
-use super::*;
 use super::out::flat_families;
+use super::*;
 use mosaica_store::bands::{element, page_size, will_need, CopyType, CopyValue};
 
 /// The emit pass's hard per-frame accumulation cap, applied under any `flush_bytes` — including
@@ -36,7 +36,11 @@ pub const SERIAL_FALLBACK_MAX_ROWS: u64 = 500_000_000;
 /// Two terms, either of which fires the fan-out: the row term above, and the tile term
 /// ([`TILE_PAR_MIN_TILES`]).
 #[inline]
-pub(super) fn should_fold_serially(total_rows_in_ranges: u64, threshold: u64, tiles: usize) -> bool {
+pub(super) fn should_fold_serially(
+    total_rows_in_ranges: u64,
+    threshold: u64,
+    tiles: usize,
+) -> bool {
     total_rows_in_ranges < threshold && tiles < TILE_PAR_MIN_TILES
 }
 
@@ -304,10 +308,14 @@ pub(super) fn tile_ranges(
 ///
 /// `bands` says whether the request is answered from the identity bands ([`crate::bands`]) where
 /// they can answer a tile; the rest are read as the shipped scan reads them.
+///
+/// `visible_by_part` is each of `tile_parts`' composed count, in the same order, which the sweep
+/// takes for every tile at once.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn tile_sweep<'a>(
     tile: &Tile,
     tile_parts: &'a [(usize, Range<u32>)],
+    visible_by_part: &[u64],
     mask: &EffectiveMask,
     segments: &[(&'a SegmentData, u32)],
     params: &SelectParams,
@@ -330,18 +338,20 @@ pub(super) fn tile_sweep<'a>(
     // union, not just one segment's share.
     let part_list: Vec<SelectionPart<'_>> = tile_parts
         .iter()
-        .map(|(s, range)| {
+        .zip(visible_by_part)
+        .map(|((s, range), &visible)| {
             let (segment, row_base) = segments[*s];
             // The count selection draws from, `M_sel`'s: a fully-visible range takes the
             // `FullRange` decode tier, which extends every row without consulting the mask, so an
             // unfiltered count here would serve every row under a filter that had narrowed the
             // counts correctly. `TileCount::visible` below stays unfiltered.
-            let visible = mask.count_matched_range(row_base + range.start..row_base + range.end);
+            let matched =
+                mask.count_matched_range(row_base + range.start..row_base + range.end, visible);
             SelectionPart {
                 segment,
                 range: range.clone(),
                 row_base,
-                visible,
+                visible: matched,
             }
         })
         .collect();
@@ -349,13 +359,7 @@ pub(super) fn tile_sweep<'a>(
     let matched: u64 = part_list.iter().map(|p| p.visible).sum();
     // The composed count: how many of this tile's items the principal may see, unaffected by a
     // filter, summed over the same segment ranges as `matched`.
-    let visible: u64 = tile_parts
-        .iter()
-        .map(|(s, range)| {
-            let (_, row_base) = segments[*s];
-            mask.count_range(row_base + range.start..row_base + range.end)
-        })
-        .sum();
+    let visible: u64 = visible_by_part.iter().sum();
     stats.lap(|t| &mut t.count_ns);
 
     if visible == 0 {
@@ -410,12 +414,9 @@ pub(super) fn tile_sweep<'a>(
         served: rows.len() as u64,
         // Of `matched`, how many also satisfy the highlight — one `and_cardinality` per segment
         // range, the operation `matched` already is. Equal to `matched` with no highlight.
-        highlighted: tile_parts
+        highlighted: part_list
             .iter()
-            .map(|(s, range)| {
-                let (_, row_base) = segments[*s];
-                mask.count_highlighted_range(row_base + range.start..row_base + range.end)
-            })
+            .map(|p| mask.count_highlighted_range(p.view_range(), p.visible))
             .sum(),
     };
 
@@ -426,13 +427,13 @@ pub(super) fn tile_sweep<'a>(
     if let Some(offset) = underlay_offset {
         let first = tile.prefix << (2 * offset as u32);
         let counted = crate::cells::count_by_ranges(
+            crate::cells::CellSet::Mask(mask),
             parts
                 .as_slice()
                 .iter()
                 .map(|part| (part.segment, part.row_base, part.range.clone())),
             zoom + offset,
             first..first + (1u64 << (2 * offset as u32)),
-            &|rows| mask.count_range(rows),
         );
         sub_cells = counted
             .cells
@@ -496,6 +497,30 @@ impl Engine {
         // `count_range` performs per row-range, so the two combine into one predictor.
         let total_rows_in_ranges = tiling.rows_in_ranges + tiling.underlay_cells_demanded;
 
+        // Every tile's parts counted together, each of the mask's bitmaps walked once: tiles next
+        // to each other share containers, which a count per part popcounts again for each.
+        probe.skip();
+        let part_ranges: Vec<Range<u32>> = tiling
+            .ranges
+            .iter()
+            .flatten()
+            .map(|(s, range)| {
+                let (_, row_base) = served.segments[*s];
+                row_base + range.start..row_base + range.end
+            })
+            .collect();
+        let visible_by_part = mask.count_ranges(&part_ranges);
+        let mut at = 0;
+        let visible_by_tile: Vec<&[u64]> = tiling
+            .ranges
+            .iter()
+            .map(|parts| {
+                at += parts.len();
+                &visible_by_part[at - parts.len()..at]
+            })
+            .collect();
+        probe.lap(|t| &mut t.count_ns);
+
         // Below `SERIAL_FALLBACK_MAX_ROWS`, fold `tile_sweep` in place, since the fan-out's own
         // entry/scheduling cost exceeds the per-tile work it would parallelise below that line. At
         // or above it, the fan-out runs on the one shared pool this engine built at `Engine::open`.
@@ -506,10 +531,11 @@ impl Engine {
         // fan-out has at most `compute_threads` tiles, since every tile already past the
         // checkpoint runs to completion.
         let bands = req.zoom < self.switches.bands_below_zoom.load(Ordering::Relaxed);
-        let run = |tile: &Tile, tile_parts: &'a [(usize, Range<u32>)]| {
+        let run = |tile: &Tile, tile_parts: &'a [(usize, Range<u32>)], visible_by_part: &[u64]| {
             tile_sweep(
                 tile,
                 tile_parts,
+                visible_by_part,
                 mask,
                 &served.segments,
                 params,
@@ -523,8 +549,10 @@ impl Engine {
         // Read from `self`, not the constant, so a test can override it per-`Engine` via
         // `Engine::set_serial_fallback_max_rows_for_test`; a shipped binary always reads
         // `SERIAL_FALLBACK_MAX_ROWS` here.
-        let serial_fallback_max_rows =
-            self.switches.serial_fallback_max_rows.load(Ordering::Relaxed);
+        let serial_fallback_max_rows = self
+            .switches
+            .serial_fallback_max_rows
+            .load(Ordering::Relaxed);
         let tile_outcomes: Vec<Result<Option<TileSweepOut>>> = if should_fold_serially(
             total_rows_in_ranges,
             serial_fallback_max_rows,
@@ -534,7 +562,8 @@ impl Engine {
                 .tiles
                 .iter()
                 .zip(&tiling.ranges)
-                .map(|(tile, tile_parts)| run(tile, tile_parts))
+                .zip(&visible_by_tile)
+                .map(|((tile, tile_parts), visible)| run(tile, tile_parts, visible))
                 .collect::<Vec<Result<Option<TileSweepOut>>>>()
         } else {
             self.pool.install(|| {
@@ -542,8 +571,9 @@ impl Engine {
                     .tiles
                     .par_iter()
                     .zip(tiling.ranges.par_iter())
+                    .zip(visible_by_tile.par_iter())
                     .with_min_len(TILE_PAR_MIN_LEN)
-                    .map(|(tile, tile_parts)| run(tile, tile_parts))
+                    .map(|((tile, tile_parts), visible)| run(tile, tile_parts, visible))
                     .collect::<Vec<Result<Option<TileSweepOut>>>>()
             })
         };
@@ -763,7 +793,12 @@ pub(crate) enum RowPresence<'a> {
 
 impl<'a> RowPresence<'a> {
     pub(crate) fn of(segment: &'a SegmentData, name: &str, category: bool) -> Self {
-        Self::read(segment, name, category, segment.columns.scalar(name).is_some())
+        Self::read(
+            segment,
+            name,
+            category,
+            segment.columns.scalar(name).is_some(),
+        )
     }
 
     /// [`Self::of`] where the caller has already looked up whether the segment holds the column.
@@ -950,7 +985,11 @@ fn is_scattered(ts: &TileSweepOut<'_>) -> bool {
     if ts.entries.is_some() {
         return true;
     }
-    let spanned: u64 = ts.tile_parts.iter().map(|(_, r)| (r.end - r.start) as u64).sum();
+    let spanned: u64 = ts
+        .tile_parts
+        .iter()
+        .map(|(_, r)| (r.end - r.start) as u64)
+        .sum();
     spanned >= ts.rows.len() as u64 * SPARSE_ROWS_PER_POINT
 }
 
@@ -998,12 +1037,9 @@ impl<'a> Gather<'a> {
                 .iter()
                 .zip(&resolved)
                 .map(|(segment, r)| match (segment, r) {
-                    (Some(segment), Some(r)) => RowPresence::read(
-                        segment,
-                        &d.name,
-                        d.vocabulary.is_some(),
-                        r[ci].is_some(),
-                    ),
+                    (Some(segment), Some(r)) => {
+                        RowPresence::read(segment, &d.name, d.vocabulary.is_some(), r[ci].is_some())
+                    }
                     _ => RowPresence::NoRow,
                 })
                 .collect();

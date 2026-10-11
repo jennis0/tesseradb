@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use mosaica_engine::{AddressTable, AddressValue};
+use mosaica_engine::{AddressTable, AddressValue, Stamp};
 use mosaica_lifecycle::resolve::{Reason, Verdict};
 use mosaica_types::{EntityId, MosaicaId};
 
@@ -138,6 +138,14 @@ pub(crate) enum Named {
     Refused(Reason),
 }
 
+/// What a request's rows named: one answer per row, table by table; the columns ignored; and the
+/// generation the rows were resolved against, which the write naming them carries.
+pub(crate) struct Names {
+    pub(crate) tables: Vec<Vec<Named>>,
+    pub(crate) ignored: Vec<String>,
+    pub(crate) at: Stamp,
+}
+
 /// Every table of one request as the one table the engine resolves, and each table's rows.
 pub(crate) struct Merged {
     table: AddressTable,
@@ -183,11 +191,8 @@ impl Merged {
         Ok(Merged { table, widths })
     }
 
-    /// Resolve every row: one answer per row, table by table, and the columns ignored.
-    pub(crate) fn name(
-        &self,
-        state: &AppState,
-    ) -> Result<(Vec<Vec<Named>>, Vec<String>), ApiError> {
+    /// Resolve every row.
+    pub(crate) fn name(&self, state: &AppState) -> Result<Names, ApiError> {
         let named = state
             .engine
             .name_items(&self.table)
@@ -202,7 +207,11 @@ impl Merged {
             .iter()
             .map(|rows| verdicts.by_ref().take(*rows).collect())
             .collect();
-        Ok((per_table, named.ignored))
+        Ok(Names {
+            tables: per_table,
+            ignored: named.ignored,
+            at: named.at,
+        })
     }
 }
 

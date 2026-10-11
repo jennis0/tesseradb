@@ -6,8 +6,8 @@ except ModuleNotFoundError:  # 3.10 on this box
     import tomli as tomllib
 import subprocess
 from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 import numpy as np
 import pyarrow as pa

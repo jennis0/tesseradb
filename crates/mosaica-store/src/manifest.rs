@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_spatial::Projection;
 use mosaica_types::layer::{RegisteredLayer, ServingLayout};
-use mosaica_types::{IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+use mosaica_types::{ItemHigh, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
 use crate::error::{Result, StoreError};
 
@@ -338,7 +338,7 @@ impl IdentityDescriptor {
     /// Reject an unknown `construction` or a `rounds` other than [`IDENTITY_ROUNDS`]: a bundle
     /// written by a different construction must not be silently read by this one (contracts
     /// §2.6 r6 — "changing the construction, the round count or the round function is a
-    /// `bundle_format` bump").
+    /// `bundle_format` bump"). Reject a `shard_id` that does not fit an item's identifier.
     pub fn validate(&self) -> Result<()> {
         if self.construction != IDENTITY_CONSTRUCTION {
             return Err(StoreError::InvalidIdentity {
@@ -356,7 +356,9 @@ impl IdentityDescriptor {
                 ),
             });
         }
-        Ok(())
+        ItemHigh::check_shard(self.shard_id).map_err(|e| StoreError::InvalidIdentity {
+            detail: e.to_string(),
+        })
     }
 }
 
@@ -1215,7 +1217,10 @@ impl Manifest {
             let group = &mut manifest.groups[g];
             if position.as_ref().is_none_or(|(held, _)| *held != g) {
                 let ids = group.views.iter().enumerate().map(|(i, v)| {
-                    (format!("{}{}{}", group.name, crate::GROUP_SEPARATOR, v.key), i)
+                    (
+                        format!("{}{}{}", group.name, crate::GROUP_SEPARATOR, v.key),
+                        i,
+                    )
                 });
                 position = Some((g, ids.collect()));
             }
@@ -1270,7 +1275,8 @@ impl Manifest {
     /// numbers and timestamps that are not drawn ([`crate::bands::copied_beside`]), in declared
     /// order.
     pub fn band_scalars(&self) -> impl Iterator<Item = &DeclaredScalar> {
-        self.band_indices().map(|index| &self.declared_scalars[index])
+        self.band_indices()
+            .map(|index| &self.declared_scalars[index])
     }
 
     /// Where each of [`Self::band_scalars`] sits in the full declaration, which a buffered row's
@@ -1400,6 +1406,16 @@ impl<'de> Deserialize<'de> for EntitySet {
         let entities = EntitySet::decode(&encoded);
         Ok(EntitySet { encoded, entities })
     }
+}
+
+/// One file of the tenancy index in [`SegmentsManifest::tenancy_index`]: the numbers whose tenancy
+/// has bit `bit` set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TenancyBit {
+    pub bit: u32,
+    /// Prefix-relative.
+    pub path: String,
 }
 
 /// One entry of `vocabulary_extensions`: the bindings one named vocabulary has acquired since the
@@ -2201,12 +2217,23 @@ pub struct SegmentsManifest {
     /// fold has removed.
     pub edited_items: EditedItemsRuns,
     /// The entity ids a fold freed that the allocator issues before its high-water, as of this
-    /// publication (`mosaica_lifecycle::alloc`). Ids that do not decode are read as none, which
-    /// issues nothing twice.
+    /// publication (`mosaica_lifecycle::alloc`), each at the tenancy [`Self::tenancy_index`] holds
+    /// for it. Ids that do not decode are read as none, which issues nothing twice.
     pub free_entities: EntitySet,
     /// Freed entity ids the allocator holds back until the log keeps no record older than the
     /// position beside them.
     pub held_entities: Vec<HeldEntities>,
+    /// The tenancy index's files ([`crate::tenancy`]), one for each bit some number's tenancy
+    /// sets, so none in a shard where no number has been freed.
+    ///
+    /// No `serde(default)`: an absent list would read every number as tenancy 0, and an
+    /// identifier given to a number's earlier holder would name the item holding it now.
+    pub tenancy_index: Vec<TenancyBit>,
+    /// The numbers whose last entity a compaction removed at [`mosaica_types::Tenancy::MAX`],
+    /// which are never issued again.
+    ///
+    /// No `serde(default)`: a manifest omitting it is malformed, not retirement-free.
+    pub retired_numbers: EntitySet,
     /// The entities already deleted whose rows a fold has not yet removed — see [`EntitySet`].
     #[serde(default)]
     pub tombstones: EntitySet,
@@ -2353,6 +2380,8 @@ impl SegmentsManifest {
             edited_items: EditedItemsRuns::default(),
             free_entities: EntitySet::default(),
             held_entities: Vec::new(),
+            tenancy_index: Vec::new(),
+            retired_numbers: EntitySet::default(),
             tombstones: EntitySet::default(),
             deny: EntitySet::default(),
             vocabulary_extensions: Vec::new(),
@@ -2405,28 +2434,30 @@ impl SegmentsManifest {
         .filter(|(_, undecodable)| *undecodable)
         .map(|(name, _)| name)
         .collect();
-        fields.extend([
-            ("deltas", !self.deltas.is_empty()),
-            (
-                "vocabulary_extensions",
-                !self.vocabulary_extensions.is_empty(),
-            ),
-            ("layers", !self.layers.is_empty()),
-            ("layer_tombstones", !self.layer_tombstones.is_empty()),
-            ("views", !self.views.is_empty()),
-            (
-                "dead_view_incarnations",
-                !self.dead_view_incarnations.is_empty(),
-            ),
-            ("attributes", !self.attributes.is_empty()),
-            ("scoped_attributes", !self.scoped_attributes.is_empty()),
-            ("vocabularies", !self.vocabularies.is_empty()),
-            ("groups", !self.groups.is_empty()),
-            ("plain_views", !self.plain_views.is_empty()),
-        ]
-        .into_iter()
-        .filter(|(name, carried)| *carried && !HONOURED_STATE.contains(name))
-        .map(|(name, _)| name));
+        fields.extend(
+            [
+                ("deltas", !self.deltas.is_empty()),
+                (
+                    "vocabulary_extensions",
+                    !self.vocabulary_extensions.is_empty(),
+                ),
+                ("layers", !self.layers.is_empty()),
+                ("layer_tombstones", !self.layer_tombstones.is_empty()),
+                ("views", !self.views.is_empty()),
+                (
+                    "dead_view_incarnations",
+                    !self.dead_view_incarnations.is_empty(),
+                ),
+                ("attributes", !self.attributes.is_empty()),
+                ("scoped_attributes", !self.scoped_attributes.is_empty()),
+                ("vocabularies", !self.vocabularies.is_empty()),
+                ("groups", !self.groups.is_empty()),
+                ("plain_views", !self.plain_views.is_empty()),
+            ]
+            .into_iter()
+            .filter(|(name, carried)| *carried && !HONOURED_STATE.contains(name))
+            .map(|(name, _)| name),
+        );
         fields
     }
 
@@ -2557,6 +2588,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_shard_id_that_does_not_fit_an_identifier_is_refused() {
+        let mut identity = descriptor();
+        identity.shard_id = ItemHigh::SHARD_LIMIT - 1;
+        assert!(identity.validate().is_ok());
+        identity.shard_id = ItemHigh::SHARD_LIMIT;
+        assert!(matches!(
+            identity.validate(),
+            Err(StoreError::InvalidIdentity { .. })
+        ));
+    }
+
     /// The term-image list survives a round trip, and a manifest that omits it is refused.
     ///
     /// The refusal is the half worth testing. There is no `serde(default)` on the field, so a
@@ -2586,6 +2629,32 @@ mod tests {
             serde_json::from_slice::<SegmentsManifest>(&without).is_err(),
             "a manifest with no term-image list must not parse"
         );
+    }
+
+    #[test]
+    fn the_tenancy_index_and_retired_numbers_round_trip_and_an_absent_one_is_refused() {
+        let mut manifest = SegmentsManifest::empty();
+        manifest.tenancy_index.push(TenancyBit {
+            bit: 3,
+            path: "partitions/default/tenancy/bit-03.tenancy".to_string(),
+        });
+        manifest.retired_numbers = EntitySet::of(&croaring::Bitmap::of(&[7, 9]));
+        let bytes = serde_json::to_vec(&manifest).expect("a manifest serialises");
+        let parsed: SegmentsManifest = serde_json::from_slice(&bytes).expect("and parses back");
+        assert_eq!(parsed.tenancy_index, manifest.tenancy_index);
+        assert_eq!(
+            parsed.retired_numbers.entities(),
+            Some(&croaring::Bitmap::of(&[7, 9]))
+        );
+        for field in ["tenancy_index", "retired_numbers"] {
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            value.as_object_mut().unwrap().remove(field);
+            let without = serde_json::to_vec(&value).unwrap();
+            assert!(
+                serde_json::from_slice::<SegmentsManifest>(&without).is_err(),
+                "a manifest with no {field} must not parse"
+            );
+        }
     }
 
     #[test]
@@ -2960,7 +3029,8 @@ mod tests {
                 .iter()
                 .any(|f| f.views.contains(&view_id))
         };
-        let rostered = |manifest: &Manifest| manifest.groups[0].views.iter().any(|v| v.key == "2026-Q1");
+        let rostered =
+            |manifest: &Manifest| manifest.groups[0].views.iter().any(|v| v.key == "2026-Q1");
 
         // Recreated: the predecessor's death leaves it alone.
         let recreated = folded.with_roster(&[created(1)], &[stone(0)]);

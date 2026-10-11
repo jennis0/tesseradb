@@ -15,7 +15,7 @@ use mosaica_spatial::tiler::{sort_batch, TilerItem};
 use mosaica_store::read::{ColumnsRef, MortonSlice};
 use mosaica_store::write::write_segment;
 use mosaica_store::{fold_row_space, FoldRowSpaceSpec, FoldSegmentInput, Permutation, RowToEntity};
-use mosaica_types::{EntityId, IdentityKey, RowId};
+use mosaica_types::{EntityId, IdentityKey, ItemHigh, RowId, Tenancy};
 
 fn key() -> IdentityKey {
     IdentityKey::from_hex("0123456789abcdef0123456789abcdef").expect("test key")
@@ -32,7 +32,9 @@ fn write_input(dir: &Path, seg_id: &str, entities: &[u64], stride: u64) -> FoldS
     let mut items: Vec<TilerItem> = entities
         .iter()
         .map(|&e| TilerItem {
-            mosaica_id: k.forward(0, EntityId::new(e)).expect("entity fits u32"),
+            mosaica_id: k
+                .forward(ItemHigh::new(0, Tenancy::ZERO), EntityId::new(e))
+                .expect("entity fits u32"),
             qx: fixed32(((e * stride) % 97) as f64 / 97.0, 0.0, 1.0),
             qy: fixed32(((e * 53) % 89) as f64 / 89.0, 0.0, 1.0),
             scalars: vec![],
@@ -144,7 +146,7 @@ fn read_input_rows(input: &FoldSegmentInput) -> Vec<(u64, u64, u32, u32)> {
     (0..codes.u32().len())
         .map(|row| {
             let mosaica_id = cols.mosaica_id()[row];
-            let (_, entity) = k.invert(mosaica_types::MosaicaId::new(mosaica_id));
+            let (_, entity) = k.invert(mosaica_types::MosaicaId::new(mosaica_id)).unwrap();
             (
                 entity.raw(),
                 mosaica_id,
@@ -199,7 +201,12 @@ fn fold_drops_tombstoned_rows_and_keeps_the_rest_in_morton_order() {
     let k = key();
     let surviving_entities: Vec<u64> = rows
         .iter()
-        .map(|&(tid, _, _)| k.invert(mosaica_types::MosaicaId::new(tid)).1.raw())
+        .map(|&(tid, _, _)| {
+            k.invert(mosaica_types::MosaicaId::new(tid))
+                .unwrap()
+                .1
+                .raw()
+        })
         .collect();
     for e in (100..110).chain(200..208) {
         let dropped = [103u64, 105, 202].contains(&e);
@@ -280,7 +287,9 @@ fn permutation_maps_survivors_and_marks_dropped_and_unknown_entities_absent() {
         if [101u64, 103, 205].contains(&e) {
             continue;
         }
-        let mosaica_id = k.forward(0, EntityId::new(e)).unwrap();
+        let mosaica_id = k
+            .forward(ItemHigh::new(0, Tenancy::ZERO), EntityId::new(e))
+            .unwrap();
         let expected_row = rows
             .iter()
             .position(|&(tid, _, _)| tid == mosaica_id.raw())

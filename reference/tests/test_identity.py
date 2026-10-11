@@ -170,6 +170,55 @@ def test_secondary_key_disagrees_with_canonical_key(vectors, canonical_key):
     assert ident.forward(canonical_key, 0, 0) != ident.forward(key2, 0, 0)
 
 
+# --- packed: the high half as kind, shard and tenancy, asserted in BOTH directions --------
+
+
+def _assert_packed_entry(key, case):
+    kind, shard, tenancy = case["kind"], case["shard"], case["tenancy"]
+    number, high = case["number"], case["high"]
+    mosaica_id = _u(case["mosaica_id"])
+
+    assert ident.pack_high(kind, shard, tenancy) == high
+    assert ident.unpack_high(high) == (kind, shard, tenancy)
+    assert ident.forward(key, high, number) == mosaica_id
+    assert ident.invert(key, mosaica_id) == (high, number)
+    assert ident.invert_item(key, mosaica_id) == (kind, shard, tenancy, number)
+    if kind == ident.KIND_ITEM:
+        assert ident.pack_item_high(shard, tenancy) == high
+        assert ident.forward_item(key, shard, tenancy, number) == mosaica_id
+
+
+def test_packed_vectors_both_directions(vectors, canonical_key):
+    cases = vectors["packed"]["vectors"]
+    assert len(cases) == 8
+    assert {case["kind"] for case in cases} == {ident.KIND_ITEM, ident.KIND_ARTIFACT}
+    for case in cases:
+        _assert_packed_entry(canonical_key, case)
+
+
+def test_packed_secondary_key_both_directions(vectors):
+    key = ident.IdentityKey.from_hex(vectors["secondary_key"]["key"])
+    cases = vectors["packed"]["secondary_key_vectors"]
+    assert len(cases) == 2
+    for case in cases:
+        _assert_packed_entry(key, case)
+
+
+def test_rejected_packings(vectors):
+    cases = vectors["packed"]["rejected_packings"]
+    assert len(cases) == 2
+    for case in cases:
+        with pytest.raises(ident.IdentityError):
+            ident.pack_item_high(case["shard"], case["tenancy"])
+
+
+def test_an_item_at_shard_zero_and_tenancy_zero_has_the_raw_identifier(vectors, canonical_key):
+    for case in vectors["vectors"]:
+        if case["shard_id"] == 0:
+            expected = _u(case["mosaica_id"])
+            assert ident.forward_item(canonical_key, 0, 0, case["entity_id"]) == expected
+
+
 # --- rejected_keys: 6 malformed/degenerate cases -----------------------------------------
 
 

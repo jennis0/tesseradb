@@ -97,6 +97,7 @@ pub use config::{
     MIN_SELECTION_WIDTH,
 };
 pub use control::{AddressTable, AddressValue, GrownMembership, NamedItems, PublishedArtifacts};
+pub use edited::Stamp;
 pub use engine::Engine;
 pub use ingest::{IngestReceipt, IngestRequest};
 pub use error::EngineError;

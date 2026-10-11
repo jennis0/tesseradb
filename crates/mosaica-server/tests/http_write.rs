@@ -460,8 +460,10 @@ async fn ingest_without_an_id_returns_a_genuinely_resolvable_mosaica_id() {
     assert_eq!(mosaica_ids.len(), 1);
     let mosaica_id = mosaica_ids[0];
 
-    let (shard, entity) = test_key().invert(mosaica_types::MosaicaId::new(mosaica_id));
-    assert_eq!(shard, 0, "the fixture bundle is shard 0");
+    let (high, entity) = test_key()
+        .invert(mosaica_types::MosaicaId::new(mosaica_id))
+        .expect("a receipt names an item");
+    assert_eq!(high.shard, 0, "the fixture bundle is shard 0");
     assert!(
         entity.raw() >= N_ITEMS,
         "an ingested item gets an entity id past the bundle's own"
@@ -1664,7 +1666,11 @@ async fn an_ingest_body_carries_its_coordinates_at_either_float_width() {
         (200, serde_json::json!(1))
     );
     assert_eq!(
-        post("narrow", vec![(9_100_002, f64::from(outside as f32), 33.25, "0")]).await,
+        post(
+            "narrow",
+            vec![(9_100_002, f64::from(outside as f32), 33.25, "0")]
+        )
+        .await,
         (200, serde_json::json!(0))
     );
 }
@@ -1962,10 +1968,14 @@ async fn status_reports_a_held_refresh_and_a_held_merge_as_in_flight() {
             .await
             .unwrap();
         assert_eq!(resp.status().as_u16(), 202);
-        wait_until(&format!("round {round}'s flush publishing"), WAIT, async || {
-            control_status(&server).await["write_executor"]["flush"]["flushes"].as_u64()
-                == Some(round)
-        })
+        wait_until(
+            &format!("round {round}'s flush publishing"),
+            WAIT,
+            async || {
+                control_status(&server).await["write_executor"]["flush"]["flushes"].as_u64()
+                    == Some(round)
+            },
+        )
         .await;
     };
 
@@ -1973,7 +1983,10 @@ async fn status_reports_a_held_refresh_and_a_held_merge_as_in_flight() {
     engine.set_refresh_paused_for_test(true);
     flush_round(1).await;
     let held = control_status(&server).await;
-    assert_eq!(held["write_executor"]["flush"]["refresh_in_flight"], true, "{held}");
+    assert_eq!(
+        held["write_executor"]["flush"]["refresh_in_flight"], true,
+        "{held}"
+    );
     engine.set_refresh_paused_for_test(false);
     wait_until("the released refresh ending", WAIT, async || {
         control_status(&server).await["write_executor"]["flush"]["refresh_in_flight"] == false
@@ -1985,7 +1998,10 @@ async fn status_reports_a_held_refresh_and_a_held_merge_as_in_flight() {
     let mut round = 1;
     while !engine.merge_publication_is_held_for_test() {
         round += 1;
-        assert!(round <= 16, "sixteen flush rounds never produced a merge to hold");
+        assert!(
+            round <= 16,
+            "sixteen flush rounds never produced a merge to hold"
+        );
         flush_round(round).await;
         // A merge the tick dispatched may still be running.
         wait_until("a dispatched merge finishing", WAIT, async || {
@@ -2064,7 +2080,10 @@ async fn the_pin_names_the_generation_a_response_was_served_from_during_a_refres
     })
     .await;
     let status = control_status(&server).await;
-    assert_eq!(status["write_executor"]["flush"]["refresh_in_flight"], true, "{status}");
+    assert_eq!(
+        status["write_executor"]["flush"]["refresh_in_flight"], true,
+        "{status}"
+    );
     let version_after = live_version().await;
     assert!(version_after > version_before);
 
@@ -3042,7 +3061,10 @@ async fn every_path_on_the_control_listener_needs_the_credential() {
             );
             let body: serde_json::Value = resp.json().await.unwrap();
             assert_eq!(body["error"], "bad-credential", "{method} {path}: {body}");
-            assert!(body.get("retry_after_s").is_none(), "{method} {path}: {body}");
+            assert!(
+                body.get("retry_after_s").is_none(),
+                "{method} {path}: {body}"
+            );
         }
     }
 }
@@ -3061,7 +3083,11 @@ async fn a_body_or_query_of_the_wrong_shape_is_a_contract_refusal_on_every_contr
         ("PUT", "/control/layers", wrong_shape.clone()),
         ("PUT", "/control/attributes", wrong_shape.clone()),
         ("PUT", "/control/vocabularies/genre", wrong_shape.clone()),
-        ("PATCH", "/control/vocabularies/genre/values", wrong_shape.clone()),
+        (
+            "PATCH",
+            "/control/vocabularies/genre/values",
+            wrong_shape.clone(),
+        ),
         ("PUT", "/control/view_groups/quarter", wrong_shape.clone()),
         ("PUT", "/control/views/plain", wrong_shape.clone()),
         ("PUT", "/control/views/quarter/2026-Q3", wrong_shape.clone()),
@@ -3090,7 +3116,11 @@ async fn a_body_or_query_of_the_wrong_shape_is_a_contract_refusal_on_every_contr
             .send()
             .await
             .unwrap();
-        assert_eq!(refused(resp, 422).await, "contract", "{method} {path} {body}");
+        assert_eq!(
+            refused(resp, 422).await,
+            "contract",
+            "{method} {path} {body}"
+        );
     }
     // Every control route that reads a query, sent a parameter it does not define and no body, so
     // only the query can be refused.
@@ -3109,7 +3139,10 @@ async fn a_body_or_query_of_the_wrong_shape_is_a_contract_refusal_on_every_contr
         ("DELETE", "/control/views/quarter/2026-Q3?wiat=visible"),
         ("PUT", "/control/layers/clusters/artifacts?wiat=visible"),
         ("PATCH", "/control/layers/clusters/artifacts?wiat=visible"),
-        ("GET", "/control/faults/arrivals?site=after_fsync&wiat=visible"),
+        (
+            "GET",
+            "/control/faults/arrivals?site=after_fsync&wiat=visible",
+        ),
     ];
     for (method, path) in queries {
         let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap();
@@ -3144,7 +3177,10 @@ async fn a_body_or_query_of_the_wrong_shape_is_a_contract_refusal_on_every_contr
         .json()
         .await
         .unwrap();
-    assert_eq!(arrivals["arrivals"], 0, "after_fsync is unarmed: {arrivals}");
+    assert_eq!(
+        arrivals["arrivals"], 0,
+        "after_fsync is unarmed: {arrivals}"
+    );
 }
 
 /// **No request body is buffered on behalf of an unauthenticated caller** — the first and largest of
@@ -3232,9 +3268,7 @@ async fn a_change_batch_of_n_costs_one_fsync() {
     let server = serve(&tmp).await;
 
     let before = control_status(&server).await;
-    let items: Vec<serde_json::Value> = (0..N)
-        .map(|i| change(i, "suppress"))
-        .collect();
+    let items: Vec<serde_json::Value> = (0..N).map(|i| change(i, "suppress")).collect();
 
     let resp = server
         .client
@@ -3252,7 +3286,11 @@ async fn a_change_batch_of_n_costs_one_fsync() {
     let appends = after["write_executor"]["wal_appends"].as_u64().unwrap()
         - before["write_executor"]["wal_appends"].as_u64().unwrap();
 
-    assert_eq!((appends, fsyncs), (1, 1), "{N} denies in one request are one record");
+    assert_eq!(
+        (appends, fsyncs),
+        (1, 1),
+        "{N} denies in one request are one record"
+    );
 }
 
 /// **A deny batch whose append fails applies the `Delete`/`Suppress` items and nothing else.**
@@ -3391,10 +3429,22 @@ const STATUS_SHAPE: &[(&str, &str)] = &[
     ("/compaction/fold_failures", "integer"),
     ("/compaction/fold_refusals", "integer"),
     ("/compaction/fold_refusals_by_gate", "object"),
-    ("/compaction/fold_refusals_by_gate/insufficient_disc", "integer"),
-    ("/compaction/fold_refusals_by_gate/insufficient_memory", "integer"),
-    ("/compaction/fold_refusals_by_gate/nothing_to_fold", "integer"),
-    ("/compaction/fold_refusals_by_gate/overlay_diverged", "integer"),
+    (
+        "/compaction/fold_refusals_by_gate/insufficient_disc",
+        "integer",
+    ),
+    (
+        "/compaction/fold_refusals_by_gate/insufficient_memory",
+        "integer",
+    ),
+    (
+        "/compaction/fold_refusals_by_gate/nothing_to_fold",
+        "integer",
+    ),
+    (
+        "/compaction/fold_refusals_by_gate/overlay_diverged",
+        "integer",
+    ),
     ("/compaction/fold_refusals_by_gate/stepped_down", "integer"),
     ("/compaction/fold_refusals_by_gate/wal_poisoned", "integer"),
     ("/compaction/fold_requested", "bool"),
@@ -3601,46 +3651,139 @@ const STATUS_SHAPE: &[(&str, &str)] = &[
     ("/write_executor/flush_stages/bench_timing", "bool"),
     ("/write_executor/flush_stages/executions", "integer"),
     ("/write_executor/flush_stages/executor_nanos", "object"),
-    ("/write_executor/flush_stages/executor_nanos/  .deny_state", "integer"),
-    ("/write_executor/flush_stages/executor_nanos/  .manifest_clone", "integer"),
-    ("/write_executor/flush_stages/executor_nanos/  .vocab_extensions", "integer"),
-    ("/write_executor/flush_stages/executor_nanos/artifacts", "integer"),
-    ("/write_executor/flush_stages/executor_nanos/buffer_rebase", "integer"),
-    ("/write_executor/flush_stages/executor_nanos/compose", "integer"),
-    ("/write_executor/flush_stages/executor_nanos/denied", "integer"),
-    ("/write_executor/flush_stages/executor_nanos/discarded", "integer"),
-    ("/write_executor/flush_stages/executor_nanos/dispatch", "integer"),
-    ("/write_executor/flush_stages/executor_nanos/drop_superseded", "integer"),
-    ("/write_executor/flush_stages/executor_nanos/manifest", "integer"),
-    ("/write_executor/flush_stages/executor_nanos/manifest_commit", "integer"),
-    ("/write_executor/flush_stages/executor_nanos/plan", "integer"),
-    ("/write_executor/flush_stages/executor_nanos/publish_wall", "integer"),
-    ("/write_executor/flush_stages/executor_nanos/rotate", "integer"),
-    ("/write_executor/flush_stages/executor_nanos/shapes_install", "integer"),
-    ("/write_executor/flush_stages/executor_nanos/swap", "integer"),
-    ("/write_executor/flush_stages/executor_nanos/with_segment", "integer"),
+    (
+        "/write_executor/flush_stages/executor_nanos/  .deny_state",
+        "integer",
+    ),
+    (
+        "/write_executor/flush_stages/executor_nanos/  .manifest_clone",
+        "integer",
+    ),
+    (
+        "/write_executor/flush_stages/executor_nanos/  .vocab_extensions",
+        "integer",
+    ),
+    (
+        "/write_executor/flush_stages/executor_nanos/artifacts",
+        "integer",
+    ),
+    (
+        "/write_executor/flush_stages/executor_nanos/buffer_rebase",
+        "integer",
+    ),
+    (
+        "/write_executor/flush_stages/executor_nanos/compose",
+        "integer",
+    ),
+    (
+        "/write_executor/flush_stages/executor_nanos/denied",
+        "integer",
+    ),
+    (
+        "/write_executor/flush_stages/executor_nanos/discarded",
+        "integer",
+    ),
+    (
+        "/write_executor/flush_stages/executor_nanos/dispatch",
+        "integer",
+    ),
+    (
+        "/write_executor/flush_stages/executor_nanos/drop_superseded",
+        "integer",
+    ),
+    (
+        "/write_executor/flush_stages/executor_nanos/manifest",
+        "integer",
+    ),
+    (
+        "/write_executor/flush_stages/executor_nanos/manifest_commit",
+        "integer",
+    ),
+    (
+        "/write_executor/flush_stages/executor_nanos/plan",
+        "integer",
+    ),
+    (
+        "/write_executor/flush_stages/executor_nanos/publish_wall",
+        "integer",
+    ),
+    (
+        "/write_executor/flush_stages/executor_nanos/rotate",
+        "integer",
+    ),
+    (
+        "/write_executor/flush_stages/executor_nanos/shapes_install",
+        "integer",
+    ),
+    (
+        "/write_executor/flush_stages/executor_nanos/swap",
+        "integer",
+    ),
+    (
+        "/write_executor/flush_stages/executor_nanos/with_segment",
+        "integer",
+    ),
     ("/write_executor/flush_stages/flushes", "integer"),
     ("/write_executor/flush_stages/pool_nanos", "object"),
-    ("/write_executor/flush_stages/pool_nanos/delta_tier", "integer"),
+    (
+        "/write_executor/flush_stages/pool_nanos/delta_tier",
+        "integer",
+    ),
     ("/write_executor/flush_stages/pool_nanos/digests", "integer"),
-    ("/write_executor/flush_stages/pool_nanos/drop_plan", "integer"),
-    ("/write_executor/flush_stages/pool_nanos/entity_terms", "integer"),
+    (
+        "/write_executor/flush_stages/pool_nanos/drop_plan",
+        "integer",
+    ),
+    (
+        "/write_executor/flush_stages/pool_nanos/entity_terms",
+        "integer",
+    ),
     ("/write_executor/flush_stages/pool_nanos/failed", "integer"),
-    ("/write_executor/flush_stages/pool_nanos/filter_extents", "integer"),
-    ("/write_executor/flush_stages/pool_nanos/pool_wall", "integer"),
+    (
+        "/write_executor/flush_stages/pool_nanos/filter_extents",
+        "integer",
+    ),
+    (
+        "/write_executor/flush_stages/pool_nanos/pool_wall",
+        "integer",
+    ),
     ("/write_executor/flush_stages/pool_nanos/promote", "integer"),
-    ("/write_executor/flush_stages/pool_nanos/record_extent", "integer"),
+    (
+        "/write_executor/flush_stages/pool_nanos/record_extent",
+        "integer",
+    ),
     ("/write_executor/flush_stages/pool_nanos/reopen", "integer"),
     ("/write_executor/flush_stages/pool_nanos/rows", "integer"),
-    ("/write_executor/flush_stages/pool_nanos/scoped_extents", "integer"),
+    (
+        "/write_executor/flush_stages/pool_nanos/scoped_extents",
+        "integer",
+    ),
     ("/write_executor/flush_stages/pool_nanos/segment", "integer"),
     ("/write_executor/flush_stages/pool_nanos/shapes", "integer"),
-    ("/write_executor/flush_stages/pool_nanos/text_dict", "integer"),
-    ("/write_executor/flush_stages/pool_nanos/text_extents", "integer"),
-    ("/write_executor/flush_stages/pool_nanos/text_postings", "integer"),
-    ("/write_executor/flush_stages/pool_nanos/text_presence", "integer"),
-    ("/write_executor/flush_stages/pool_nanos/text_rows", "integer"),
-    ("/write_executor/flush_stages/pool_nanos/text_tokenise_terms", "integer"),
+    (
+        "/write_executor/flush_stages/pool_nanos/text_dict",
+        "integer",
+    ),
+    (
+        "/write_executor/flush_stages/pool_nanos/text_extents",
+        "integer",
+    ),
+    (
+        "/write_executor/flush_stages/pool_nanos/text_postings",
+        "integer",
+    ),
+    (
+        "/write_executor/flush_stages/pool_nanos/text_presence",
+        "integer",
+    ),
+    (
+        "/write_executor/flush_stages/pool_nanos/text_rows",
+        "integer",
+    ),
+    (
+        "/write_executor/flush_stages/pool_nanos/text_tokenise_terms",
+        "integer",
+    ),
     ("/write_executor/flush_stages/rows_executed", "integer"),
     ("/write_executor/flush_stages/rows_published", "integer"),
     ("/write_executor/foreign_side_manifests", "integer"),
@@ -3750,7 +3893,12 @@ async fn control_status_serves_its_pinned_shape() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status().as_u16(), 201, "{}", resp.text().await.unwrap());
+    assert_eq!(
+        resp.status().as_u16(),
+        201,
+        "{}",
+        resp.text().await.unwrap()
+    );
     tick(&server).await;
     let resp = server
         .client
@@ -3858,7 +4006,9 @@ async fn control_status_serves_its_pinned_shape() {
     for (read, shape) in served.iter().enumerate() {
         for (path, kinds) in shape {
             assert!(
-                pinned.get(path.as_str()).is_some_and(|pin| kinds.is_subset(pin)),
+                pinned
+                    .get(path.as_str())
+                    .is_some_and(|pin| kinds.is_subset(pin)),
                 "read {read} serves {path} as {kinds:?}, pinned as {:?}; every read:\n{listing}",
                 pinned.get(path.as_str())
             );
@@ -4288,7 +4438,10 @@ async fn a_deleted_holder_names_nothing_and_a_suppressed_one_is_named() {
     // Deleted: forgotten, so the same row creates a new item.
     assert_eq!(apply("delete", fresh).await.status(), 200);
     let reborn: serde_json::Value = ingest("rebind-3", vec![fresh]).await.json().await.unwrap();
-    assert_eq!(reborn["created"], 1, "a deleted holder names nothing: {reborn}");
+    assert_eq!(
+        reborn["created"], 1,
+        "a deleted holder names nothing: {reborn}"
+    );
     assert_ne!(reborn["mosaica_ids"], first["mosaica_ids"], "{reborn}");
 
     // And the `id` names the new item: a suppress addresses it, answered 200.
@@ -4435,7 +4588,12 @@ fn build_scalar_tail_fixture(out: &std::path::Path, tmp: &std::path::Path) {
         .collect();
     write_points(&points, &ids, scatter, extra);
     write_pairs_n(&pairs, SCALAR_TAIL_N);
-    build_declared(out, &points, &pairs, &format!("{}{ID_ATTRIBUTE}", scalar_tail_schema_toml()));
+    build_declared(
+        out,
+        &points,
+        &pairs,
+        &format!("{}{ID_ATTRIBUTE}", scalar_tail_schema_toml()),
+    );
 }
 
 /// One ingest batch of one item, carrying [`scalar_tail_planted`]'s value in every declared column

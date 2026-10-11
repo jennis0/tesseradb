@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import itertools
 import json
 import shutil
 import time
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 import numpy as np
 import pyarrow as pa
@@ -157,7 +158,7 @@ def grouped_by_key(ranges: Sequence[tuple[str, str]]) -> bool:
     """Whether consecutive row groups' key ranges never overlap, so every key's rows are
     contiguous, allowing one shared key at a boundary.
     """
-    return all(a_max <= b_min for (_, a_max), (b_min, _) in zip(ranges, ranges[1:]))
+    return all(a_max <= b_min for (_, a_max), (b_min, _) in itertools.pairwise(ranges))
 
 
 def member_columns(table: pa.Table, value_set: pa.Array, path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

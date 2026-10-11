@@ -195,6 +195,7 @@ pub fn flush_segment(
                 .map(|e| FlushRow {
                     entity_id: EntityId::new(e),
                     number: EntityId::new(e),
+                    tenancy: mosaica_types::Tenancy::ZERO,
                     x: ((e * 37) % 100) as f64 / 100.0,
                     y: ((e * 61) % 100) as f64 / 100.0,
                     scalars: vec![],

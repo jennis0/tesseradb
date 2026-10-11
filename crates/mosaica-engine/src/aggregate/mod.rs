@@ -42,7 +42,7 @@ use crate::viewport::{filter_refusal, SinkClosed, SinkResult};
 
 use cursor::{AggregateCursor, Position};
 use table::Plan;
-pub(crate) use table::{ALONE_ROWS, MIN_CHUNK_ROWS};
+pub(crate) use table::{ALONE_ROWS, MIN_CHUNK_ROWS, RANGE_FACTOR};
 
 /// One `POST /v1/aggregate` response, as the engine sees it.
 #[derive(Debug, Clone)]
@@ -450,7 +450,15 @@ impl Engine {
             .iter()
             .enumerate()
             .map(|(index, grouping)| {
-                Plan::of(self, session, &generation, req.view, index, grouping, req.caps.cells)
+                Plan::of(
+                    self,
+                    session,
+                    &generation,
+                    req.view,
+                    index,
+                    grouping,
+                    req.caps.cells,
+                )
             })
             .collect::<Result<Vec<_>>>()?;
         let layers: Vec<Option<u64>> = plans.iter().map(Plan::layer_entity).collect();

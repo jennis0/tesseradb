@@ -140,10 +140,7 @@ impl Fixture {
 
     /// The wire identity of a source id's point — `shard 0`, as the fixture builds.
     fn point_id(&self, source: u64) -> u64 {
-        test_key()
-            .forward(0, EntityId::new(self.map[&source]))
-            .unwrap()
-            .raw()
+        mosaica_id_at(EntityId::new(self.map[&source]), 0).raw()
     }
 
     /// Wait for a publication's membership extents to land, which is when a pinned row-major
@@ -799,8 +796,7 @@ fn measure_the_column_cost() {
             let served = engine
                 .viewport_artifacts(
                     &session,
-                    ViewportArtifactsRequest::new("s0", 2, WHOLE_MAP, usize::MAX)
-                        .budget(budget),
+                    ViewportArtifactsRequest::new("s0", 2, WHOLE_MAP, usize::MAX).budget(budget),
                 )
                 .unwrap()
                 .artifacts()

@@ -447,7 +447,7 @@ impl<'a> SelectionPart<'a> {
     }
 
     /// This part's range in view row space — what every mask operation takes.
-    fn view_range(&self) -> Range<u32> {
+    pub(crate) fn view_range(&self) -> Range<u32> {
         self.row_base + self.range.start..self.row_base + self.range.end
     }
 
@@ -1114,10 +1114,7 @@ mod tests {
                             // is the arithmetic answer and no tile is emitted to be thinned by it.
                             // Anywhere else a zero is the wrap this test exists for.
                             if n_occ > 0 {
-                                assert_ne!(
-                                    p, 0,
-                                    "{v_total}/{m_target}/{n_occ}: wrapped to Cut(0)"
-                                );
+                                assert_ne!(p, 0, "{v_total}/{m_target}/{n_occ}: wrapped to Cut(0)");
                             }
                         }
                     }

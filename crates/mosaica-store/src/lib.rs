@@ -8,13 +8,13 @@ pub mod columns;
 pub mod coordinates;
 pub mod declaration;
 pub mod derived;
+pub mod edited;
 pub mod entity_terms;
 pub mod error;
 pub mod exact_sum;
 pub mod field_tallies;
 pub mod flush;
 pub mod fold;
-pub mod edited;
 pub mod key_index;
 pub mod manifest;
 pub mod manifest_write;
@@ -31,6 +31,7 @@ pub mod row_entity;
 pub mod row_members;
 pub mod scalar_column;
 mod segment_cursor;
+pub mod tenancy;
 pub mod term_images;
 pub mod unique;
 pub mod utf8;
@@ -48,15 +49,23 @@ pub const SEGMENT_FILES: [&str; 5] = [
     bands::BANDS_FILE,
 ];
 
+/// The little-endian `u32` at byte `at` of `bytes`.
+pub(crate) fn le_u32(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
+}
+
+/// The little-endian `u64` at byte `at` of `bytes`.
+pub(crate) fn le_u64(bytes: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(bytes[at..at + 8].try_into().expect("eight bytes"))
+}
+
 pub use entity_terms::{
     coalesce_entity_terms_extents, EntityTerms, EntityTermsExtentPaths, EntityTermsStack,
     EntityTermsWriter, ENTITY_TERMS_BASES_FILE, ENTITY_TERMS_BLOCK_SHIFT, ENTITY_TERMS_DIR,
     ENTITY_TERMS_HASROW_FILE, ENTITY_TERMS_OFFSETS_FILE, ENTITY_TERMS_TERMS_FILE,
 };
 pub use error::{Result, StoreError};
-pub use flush::{
-    digest_of, write_flush_segment, FlushInput, FlushOutput, FlushRow,
-};
+pub use flush::{digest_of, write_flush_segment, FlushInput, FlushOutput, FlushRow};
 pub use fold::{fold_row_space, FoldRowSpaceOutput, FoldRowSpaceSpec, FoldSegmentInput};
 pub use manifest_write::{
     fsync_dir, fsync_written, prune_superseded_segments_manifests, write_and_fsync, write_current,
@@ -65,9 +74,9 @@ pub use manifest_write::{
 pub use pairs::PairsParquetWriter;
 pub use permutation::{EntityBuckets, Permutation, RowEntities, RowSpace, SegmentExtent};
 pub use read::{
-    highest_side_manifest_n, open_bundle, open_written_prefix, tile_ranges, tile_ranges_all,
-    tile_ranges_within, first_code_at_or_past, Bundle,
-    ColumnsRef, CutIndex, MortonSlice, PartitionData, ScalarSlice, SegmentData, ViewData,
+    first_code_at_or_past, highest_side_manifest_n, open_bundle, open_written_prefix, tile_ranges,
+    tile_ranges_all, tile_ranges_within, Bundle, ColumnsRef, CutIndex, MortonSlice, PartitionData,
+    ScalarSlice, SegmentData, ViewData,
 };
 pub use reclaim::{hard_link_forward, reclaim_prefix, reclaim_unpublished_prefix};
 pub use row_entity::{write_row_entity, RowToEntity, ROW_ENTITY_FILE};

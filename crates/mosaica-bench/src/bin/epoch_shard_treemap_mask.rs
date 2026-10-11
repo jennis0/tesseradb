@@ -18,6 +18,32 @@
 //! A fourth column, **rows_in_range**, is `EffectiveMask::rows_in_range`'s materialised
 //! `leaf ∩ range`, which is what the decode pays instead when the overlay diffs are non-empty.
 //!
+//! **select_tiles** is the selection with the tiles that hold no visible row left out, as
+//! `tile_sweep` leaves them out. **select_parts** also leaves out the parts that hold none.
+//! **select_batched** walks each leaf once with one cursor over the request's parts in row order,
+//! seeking only where a part does not begin where the last one ended, with every visible row fed
+//! into its tile's threshold count and bounded heap, which carry over from one leaf to the next.
+//! Tiles and parts with no visible row are left out, as `select_parts` leaves them out. It serves
+//! what `Selection::of` serves, checked on every tile.
+//!
+//! Two more columns price the count another way. croaring's range count takes two ranks, each a
+//! popcount from the start of the range's container, so a short range costs what a long one does.
+//!
+//! - **count_ranges** is `mosaica_roaring::count_ranges` per leaf over the request's parts: one
+//!   `roaring_bitmap_rank_many` call over their endpoints in ascending order, which walks the
+//!   leaf's containers once with a running rank.
+//! - **count_local** is `leaf ∩ range` counted without materialising it, against a one-run bitmap
+//!   built per part, which popcounts only the words inside the range.
+//!
+//! `--layout viewport` places a request's tiles as a screen asks for them, a contiguous block of
+//! the map, in place of distinct tiles anywhere. Batching gains only where ranges share containers,
+//! which a contiguous block makes likely and a scattered one does not.
+//!
+//! `--figures-artifacts` adds a level's figures walk: each visible row's label read from a column
+//! and counted against its artifact, one count vector per leaf, then the vectors summed. The walk
+//! and the sum are timed apart, since the engine keeps each shard's counts and pays the sum per
+//! request.
+//!
 //! Synthetic and in memory: a universe of 2³⁰ rows, one bitmap over it at N = 1 or N leaves over
 //! 2³⁰/N each at the same density, rows chosen independently at random (realistic masks measure
 //! as essentially scattered under Morton order, run ratio 1.03–1.15 — `probes/results.md` §5),
@@ -39,6 +65,7 @@
 //!     --scratch /tmp/epoch-shard --out result.json
 //! ```
 
+use std::collections::BinaryHeap;
 use std::hint::black_box;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -55,9 +82,11 @@ use serde::Serialize;
 use mosaica_engine::compose::{compose, EffectiveMask};
 use mosaica_engine::projection::RowProjection;
 use mosaica_engine::select::{
-    decode_tier, DecodeTier, SelectParams, Selection, SelectionPart, SelectionParts, Threshold,
+    decode_tier, served_count, DecodeTier, SelectParams, Selection, SelectionPart, SelectionParts,
+    Threshold,
 };
 use mosaica_lifecycle::{IngestBuffer, Overlay};
+use mosaica_spatial::morton::interleave_bits;
 use mosaica_store::read::SegmentData;
 use mosaica_store::write::{write_permutation, SegmentRow, SegmentWriter};
 use mosaica_store::{Permutation, RowSpace};
@@ -97,6 +126,9 @@ struct Args {
     /// Untimed requests before the samples.
     #[arg(long, default_value_t = 1)]
     warmup: usize,
+    /// Shallowest tile depth.
+    #[arg(long, default_value_t = 0)]
+    min_depth: u8,
     /// Deepest tile depth. A depth whose per-leaf range is under one row is skipped.
     #[arg(long, default_value_t = 14)]
     max_depth: u8,
@@ -109,6 +141,21 @@ struct Args {
     /// log₂ of the synthetic identity column's length. 26 is 512 MB.
     #[arg(long, default_value_t = 26)]
     id_rows_log2: u32,
+    /// Where a request's tiles are: `random`, distinct tiles anywhere, or `viewport`, a contiguous
+    /// block.
+    #[arg(long, value_enum, default_value_t = Layout::Random)]
+    layout: Layout,
+    /// Tiles next to each other in Morton order share the boundary between them, jittered once,
+    /// as a request's tiles do in a segment. Without it each part is jittered on its own, so
+    /// neighbouring parts neither meet nor stay apart.
+    #[arg(long)]
+    abutting: bool,
+    /// Operations to measure, from the list printed in the tables; empty measures every one.
+    #[arg(long, value_delimiter = ',')]
+    ops: Vec<String>,
+    /// Artifacts in the level the figures walk counts into; 0 skips the walk.
+    #[arg(long, default_value_t = 0)]
+    figures_artifacts: u32,
     #[arg(long, default_value_t = 0x5EED)]
     seed: u64,
     /// Where the synthetic segment's files go; removed at exit.
@@ -117,6 +164,13 @@ struct Args {
     /// JSON record of every cell.
     #[arg(long)]
     out: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Layout {
+    Random,
+    Viewport,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -158,6 +212,11 @@ impl Treemap {
     /// own `reset_at_or_after` / `next_many` walk.
     fn decode_source(&self, shard: u32) -> &Bitmap {
         self.leaf(shard)
+    }
+
+    /// `leaf ∩ r`, counted against a one-run bitmap.
+    fn count_local(&self, shard: u32, r: Range<u32>) -> u64 {
+        self.leaf(shard).and_cardinality(&Bitmap::from_range(r))
     }
 
     fn cardinality(&self) -> u64 {
@@ -424,6 +483,21 @@ struct LeafStats {
     run_containers: u32,
 }
 
+/// One figures walk: every leaf's visible rows counted against their artifacts, then the leaves'
+/// counts summed.
+#[derive(Serialize)]
+struct FiguresCell {
+    variant: String,
+    coverage_pct: f64,
+    shards: u32,
+    artifacts: u32,
+    visible: u64,
+    walk_us: Vec<f64>,
+    walk_us_median: f64,
+    sum_us: Vec<f64>,
+    sum_us_median: f64,
+}
+
 #[derive(Serialize)]
 struct Report {
     cpu: String,
@@ -438,11 +512,24 @@ struct Report {
     k_min: usize,
     m_target: u64,
     seed: u64,
+    layout: Layout,
+    abutting: bool,
     leaves: Vec<LeafStats>,
     cells: Vec<Cell>,
+    figures: Vec<FiguresCell>,
 }
 
-const OPS: [&str; 4] = ["count", "decode", "rows_in_range", "select"];
+const OPS: [&str; 9] = [
+    "count",
+    "count_ranges",
+    "count_local",
+    "decode",
+    "rows_in_range",
+    "select",
+    "select_tiles",
+    "select_parts",
+    "select_batched",
+];
 
 fn median(xs: &[f64]) -> f64 {
     let mut v = xs.to_vec();
@@ -464,17 +551,35 @@ fn measure(warmup: usize, samples: usize, mut f: impl FnMut()) -> Vec<f64> {
 }
 
 /// The tile positions of one depth: every tile where there are at most `tiles` of them,
-/// otherwise `tiles` distinct positions at random. The same positions serve every N.
-fn positions(depth: u8, tiles: usize, seed: u64) -> Vec<u64> {
+/// otherwise `tiles` distinct positions, at random or as a contiguous block in Morton order. The
+/// same positions serve every N.
+fn positions(depth: u8, tiles: usize, seed: u64, layout: Layout) -> Vec<u64> {
     let count = 1usize << (2 * u32::from(depth));
     if count <= tiles {
         return (0..count as u64).collect();
     }
     let mut rng = StdRng::seed_from_u64(seed ^ (u64::from(depth) << 48));
-    rand::seq::index::sample(&mut rng, count, tiles)
-        .into_iter()
-        .map(|p| p as u64)
-        .collect()
+    let mut picked: Vec<u64> = match layout {
+        Layout::Random => rand::seq::index::sample(&mut rng, count, tiles)
+            .into_iter()
+            .map(|p| p as u64)
+            .collect(),
+        Layout::Viewport => {
+            let side = 1u64 << depth;
+            let w = (tiles as f64).sqrt().ceil() as u64;
+            let h = (tiles as u64).div_ceil(w);
+            let x0 = rng.gen_range(0..=side - w);
+            let y0 = rng.gen_range(0..=side - h);
+            (0..h)
+                .flat_map(|dy| {
+                    (0..w).map(move |dx| interleave_bits((x0 + dx) as u32, (y0 + dy) as u32, depth))
+                })
+                .take(tiles)
+                .collect()
+        }
+    };
+    picked.sort_unstable();
+    picked
 }
 
 struct Case<'a> {
@@ -496,7 +601,7 @@ fn run_depth(args: &Args, case: &Case<'_>, depth: u8, cells: &mut Vec<Cell>) {
         eprintln!("  depth {depth}: per-leaf range under one row at N={shards}, skipped");
         return;
     }
-    let positions = positions(depth, args.tiles, args.seed);
+    let positions = positions(depth, args.tiles, args.seed, args.layout);
     let tiles = positions.len();
 
     // The request's parts: for each tile, `(shard, local range)` per leaf. Each part's start is
@@ -505,12 +610,25 @@ fn run_depth(args: &Args, case: &Case<'_>, depth: u8, cells: &mut Vec<Cell>) {
     // an arbitrary row, whereas `2³⁰/4ᵈ` is a multiple of the container width up to depth 7, and
     // a range that starts and ends on container boundaries is counted from the header alone —
     // an unrealistic advantage that a split into N parts would then appear to lose.
-    let mut jitter = StdRng::seed_from_u64(args.seed ^ (u64::from(depth) << 40) ^ (u64::from(shards) << 8));
+    let mut jitter =
+        StdRng::seed_from_u64(args.seed ^ (u64::from(depth) << 40) ^ (u64::from(shards) << 8));
+    // `--abutting` jitters each boundary once instead, by less than a part, so a tile ends where
+    // the tile after it in Morton order begins, and the last boundary of a leaf stays at its end.
+    let boundary = |s: u32, q: u64| -> u64 {
+        if q * part_rows >= shard_rows {
+            return shard_rows;
+        }
+        let key = args.seed ^ (u64::from(depth) << 56) ^ (u64::from(s) << 36) ^ q;
+        q * part_rows + SplitMix(key).next() % part_rows.min(65_536)
+    };
     let parts: Vec<Vec<(u32, Range<u32>)>> = positions
         .iter()
         .map(|&p| {
             (0..shards)
                 .map(|s| {
+                    if args.abutting {
+                        return (s, boundary(s, p) as u32..boundary(s, p + 1) as u32);
+                    }
                     let room = shard_rows - (p + 1) * part_rows;
                     let delta = jitter.gen_range(0..=room.min(65_535));
                     let start = p * part_rows + delta;
@@ -530,7 +648,9 @@ fn run_depth(args: &Args, case: &Case<'_>, depth: u8, cells: &mut Vec<Cell>) {
                 .collect()
         })
         .collect();
-    let total_visible: u64 = visible.iter().flatten().sum();
+    let tile_visible: Vec<u64> = visible.iter().map(|tile| tile.iter().sum()).collect();
+    let total_visible: u64 = tile_visible.iter().sum();
+    let view_start = |s: u32, r: &Range<u32>| (u64::from(s) * shard_rows) as u32 + r.start;
 
     let mut record = |op: &'static str, us: Vec<f64>| {
         let us_median = median(&us);
@@ -549,42 +669,100 @@ fn run_depth(args: &Args, case: &Case<'_>, depth: u8, cells: &mut Vec<Cell>) {
     };
 
     let map = case.map;
-    let us = measure(args.warmup, args.samples, || {
-        let mut sum = 0u64;
-        for tile in &parts {
-            for (s, r) in tile {
-                sum += map.range_cardinality(*s, r.clone());
+    let wants = |op: &str| args.ops.is_empty() || args.ops.iter().any(|o| o == op);
+    if wants("count") {
+        let us = measure(args.warmup, args.samples, || {
+            let mut sum = 0u64;
+            for tile in &parts {
+                for (s, r) in tile {
+                    sum += map.range_cardinality(*s, r.clone());
+                }
+            }
+            black_box(sum);
+        });
+        record("count", us);
+    }
+
+    if wants("count_ranges") || wants("count_local") {
+        // Each leaf's ranges in tile order, outside the timer.
+        let by_leaf: Vec<Vec<Range<u32>>> = (0..shards as usize)
+            .map(|s| parts.iter().map(|tile| tile[s].1.clone()).collect())
+            .collect();
+        for (s, ranges) in by_leaf.iter().enumerate() {
+            let counts = mosaica_roaring::count_ranges(map.leaf(s as u32), ranges);
+            for (t, c) in counts.iter().enumerate() {
+                assert_eq!(
+                    *c, visible[t][s],
+                    "count_ranges disagrees at leaf {s}, tile {t}"
+                );
+                let local = map.count_local(s as u32, ranges[t].clone());
+                assert_eq!(
+                    local, visible[t][s],
+                    "count_local disagrees at leaf {s}, tile {t}"
+                );
             }
         }
-        black_box(sum);
-    });
-    record("count", us);
-
-    let us = measure(args.warmup, args.samples, || {
-        let mut visited = 0u64;
-        let mut acc = 0u32;
-        for (tile, vis) in parts.iter().zip(&visible) {
-            for ((s, r), v) in tile.iter().zip(vis) {
-                let (n, a) = decode_part(map, *s, r.clone(), *v);
-                visited += n;
-                acc ^= a;
-            }
+        if wants("count_ranges") {
+            let us = measure(args.warmup, args.samples, || {
+                let mut sum = 0u64;
+                for (s, ranges) in by_leaf.iter().enumerate() {
+                    let counts = mosaica_roaring::count_ranges(map.leaf(s as u32), ranges);
+                    sum += counts.iter().sum::<u64>();
+                }
+                black_box(sum);
+            });
+            record("count_ranges", us);
         }
-        black_box((visited, acc));
-    });
-    record("decode", us);
+    }
 
-    let us = measure(args.warmup, args.samples, || {
-        let mut card = 0u64;
-        for tile in &parts {
-            for (s, r) in tile {
-                card += map.rows_in_range(*s, r.clone()).cardinality();
+    if wants("count_local") {
+        let us = measure(args.warmup, args.samples, || {
+            let mut sum = 0u64;
+            for tile in &parts {
+                for (s, r) in tile {
+                    sum += map.count_local(*s, r.clone());
+                }
             }
-        }
-        black_box(card);
-    });
-    record("rows_in_range", us);
+            black_box(sum);
+        });
+        record("count_local", us);
+    }
 
+    if wants("decode") {
+        let us = measure(args.warmup, args.samples, || {
+            let mut visited = 0u64;
+            let mut acc = 0u32;
+            for (tile, vis) in parts.iter().zip(&visible) {
+                for ((s, r), v) in tile.iter().zip(vis) {
+                    let (n, a) = decode_part(map, *s, r.clone(), *v);
+                    visited += n;
+                    acc ^= a;
+                }
+            }
+            black_box((visited, acc));
+        });
+        record("decode", us);
+    }
+
+    if wants("rows_in_range") {
+        let us = measure(args.warmup, args.samples, || {
+            let mut card = 0u64;
+            for tile in &parts {
+                for (s, r) in tile {
+                    card += map.rows_in_range(*s, r.clone()).cardinality();
+                }
+            }
+            black_box(card);
+        });
+        record("rows_in_range", us);
+    }
+
+    if !["select", "select_tiles", "select_parts", "select_batched"]
+        .iter()
+        .any(|op| wants(op))
+    {
+        return;
+    }
     if tile_rows > case.id_rows {
         eprintln!(
             "  depth {depth}: tile of {tile_rows} rows exceeds the {} -row id column, select skipped",
@@ -594,16 +772,17 @@ fn run_depth(args: &Args, case: &Case<'_>, depth: u8, cells: &mut Vec<Cell>) {
     }
 
     // Each part reads the identity column at its own offset, chosen once here: `off ≤ view_start`
-    // keeps `row_base = view_start − off` non-negative, and `off + part_rows ≤ id_rows` keeps
-    // the slice inside the column.
+    // keeps `row_base = view_start − off` non-negative, and `off + len ≤ id_rows` keeps the slice
+    // inside the column.
     let mut rng = StdRng::seed_from_u64(args.seed ^ (u64::from(depth) << 48) ^ u64::from(shards));
     let offsets: Vec<Vec<u32>> = parts
         .iter()
         .map(|tile| {
             tile.iter()
                 .map(|(s, r)| {
-                    let view_start = u64::from(*s) * shard_rows + u64::from(r.start);
-                    let max_off = view_start.min(case.id_rows - part_rows);
+                    let len = u64::from(r.end - r.start);
+                    assert!(len <= case.id_rows, "a part longer than the id column");
+                    let max_off = u64::from(view_start(*s, r)).min(case.id_rows - len);
                     rng.gen_range(0..=max_off) as u32
                 })
                 .collect()
@@ -613,7 +792,7 @@ fn run_depth(args: &Args, case: &Case<'_>, depth: u8, cells: &mut Vec<Cell>) {
     // The view-space mask must agree with the leaves about every part, or the select column
     // would be measuring a different mask. Checked on the first tile, outside the timers.
     for ((s, r), v) in parts[0].iter().zip(&visible[0]) {
-        let start = (u64::from(*s) * shard_rows + u64::from(r.start)) as u32;
+        let start = view_start(*s, r);
         let end = start + (r.end - r.start);
         assert_eq!(
             case.mask.count_range(start..end),
@@ -638,30 +817,256 @@ fn run_depth(args: &Args, case: &Case<'_>, depth: u8, cells: &mut Vec<Cell>) {
     };
     let segment = case.segment;
     let mask = case.mask;
-    let us = measure(args.warmup, args.samples, || {
-        let mut served = 0usize;
-        for ((tile, vis), offs) in parts.iter().zip(&visible).zip(&offsets) {
-            let sel_parts: Vec<SelectionPart<'_>> = tile
+    // One tile's selection parts; with `skip_empty`, only the parts holding a visible row.
+    let tile_parts = |t: usize, skip_empty: bool| -> Vec<SelectionPart<'_>> {
+        parts[t]
+            .iter()
+            .zip(&visible[t])
+            .zip(&offsets[t])
+            .filter(|((_, v), _)| !skip_empty || **v > 0)
+            .map(|(((s, r), v), off)| SelectionPart {
+                segment,
+                range: *off..*off + (r.end - r.start),
+                row_base: view_start(*s, r) - *off,
+                visible: *v,
+            })
+            .collect()
+    };
+    let select = |t: usize, sel_parts: &[SelectionPart<'_>]| {
+        Selection::of(
+            mask,
+            &SelectionParts::new(sel_parts),
+            &params,
+            tile_visible[t],
+        )
+        .rows
+    };
+
+    // A part with no visible row adds no row to a tile's selection, so leaving it out serves the
+    // same rows. Selection does not order what it returns, and the response sorts a tile's points
+    // by identifier, so the rows are compared as sets. Checked on every tile, outside the timers.
+    if wants("select_parts") {
+        for t in 0..tiles {
+            let mut all = select(t, &tile_parts(t, false));
+            let mut held = select(t, &tile_parts(t, true));
+            all.sort_unstable();
+            held.sort_unstable();
+            assert_eq!(
+                all, held,
+                "skipping empty parts changed tile {t}'s selection"
+            );
+        }
+    }
+
+    // Each op with whether it leaves out the tiles, and the parts, that hold no visible row.
+    for (op, skip_tiles, skip_parts) in [
+        ("select", false, false),
+        ("select_tiles", true, false),
+        ("select_parts", true, true),
+    ] {
+        if !wants(op) {
+            continue;
+        }
+        let us = measure(args.warmup, args.samples, || {
+            let mut served = 0usize;
+            for (t, &v) in tile_visible.iter().enumerate() {
+                if !skip_tiles || v > 0 {
+                    served += select(t, &tile_parts(t, skip_parts)).len();
+                }
+            }
+            black_box(served);
+        });
+        record(op, us);
+    }
+
+    if wants("select_batched") {
+        // Each leaf's non-empty parts of non-empty tiles, in row order, with where each begins and
+        // ends in view space. A request's ranges come out of the sweep in row order, so this is
+        // sorted outside the timer.
+        let mut walks: Vec<Vec<(usize, usize, u32, u32)>> = vec![Vec::new(); shards as usize];
+        for (t, tile) in parts.iter().enumerate() {
+            if tile_visible[t] == 0 {
+                continue;
+            }
+            for (p, (s, r)) in tile.iter().enumerate() {
+                if visible[t][p] > 0 {
+                    let start = view_start(*s, r);
+                    walks[*s as usize].push((t, p, start, start + (r.end - r.start)));
+                }
+            }
+        }
+        for walk in &mut walks {
+            walk.sort_unstable_by_key(|&(_, _, start, _)| start);
+        }
+        assert!(
+            mask.diffs_are_empty(),
+            "the walk reads the projection itself"
+        );
+        let source = mask.decode_source(0..u32::MAX);
+        let ids = segment.columns.mosaica_id();
+        let batched = || -> Vec<Vec<u32>> {
+            let mut heaps: Vec<BinaryHeap<(u64, u32)>> = tile_visible
                 .iter()
-                .zip(vis)
-                .zip(offs)
-                .map(|(((s, r), v), off)| {
-                    let view_start = u64::from(*s) * shard_rows + u64::from(r.start);
-                    SelectionPart {
-                        segment,
-                        range: *off..*off + (r.end - r.start),
-                        row_base: (view_start - u64::from(*off)) as u32,
-                        visible: *v,
-                    }
+                .map(|&v| match v {
+                    // A tile with nothing visible is never walked, so it allocates nothing.
+                    0 => BinaryHeap::new(),
+                    v => BinaryHeap::with_capacity(params.cap.min(v as usize) + 1),
                 })
                 .collect();
-            let tile_visible: u64 = vis.iter().sum();
-            let selected = Selection::of(mask, &SelectionParts::new(&sel_parts), &params, tile_visible);
-            served += selected.rows.len();
+            let mut c_theta = vec![0u64; tiles];
+            let mut buf = [0u32; VALUE_BUF_LEN];
+            for walk in &walks {
+                let mut iter = source.bitmap().iter();
+                let mut at = None;
+                for &(t, p, start, end) in walk {
+                    if at != Some(start) {
+                        iter.reset_at_or_after(start);
+                    }
+                    at = Some(end);
+                    let base = start - offsets[t][p];
+                    let heap = &mut heaps[t];
+                    let mut remaining = visible[t][p];
+                    while remaining > 0 {
+                        let want = remaining.min(VALUE_BUF_LEN as u64) as usize;
+                        let n = iter.next_many(&mut buf[..want]);
+                        if n == 0 {
+                            break;
+                        }
+                        for &row in &buf[..n] {
+                            let id = ids[(row - base) as usize];
+                            if params.threshold.admits(id) {
+                                c_theta[t] += 1;
+                            }
+                            if heap.len() == params.cap {
+                                if id >= heap.peek().expect("non-empty at len == cap").0 {
+                                    continue;
+                                }
+                                heap.pop();
+                            }
+                            heap.push((id, row));
+                        }
+                        remaining -= n as u64;
+                    }
+                }
+            }
+            heaps
+                .into_iter()
+                .enumerate()
+                .map(|(t, heap)| {
+                    let m = served_count(c_theta[t], &params, tile_visible[t]);
+                    let mut kept = heap.into_vec();
+                    kept.sort_unstable();
+                    kept.truncate(m);
+                    kept.into_iter().map(|(_, row)| row).collect()
+                })
+                .collect()
+        };
+        // The same rows as `Selection::of` over the tile's non-empty parts, compared as sets.
+        for (t, mut rows) in batched().into_iter().enumerate() {
+            if tile_visible[t] == 0 {
+                continue;
+            }
+            let mut want = select(t, &tile_parts(t, true));
+            rows.sort_unstable();
+            want.sort_unstable();
+            assert_eq!(rows, want, "the batched walk changed tile {t}'s selection");
         }
-        black_box(served);
+        let us = measure(args.warmup, args.samples, || {
+            let served: usize = batched().iter().map(Vec::len).sum();
+            black_box(served);
+        });
+        record("select_batched", us);
+    }
+}
+
+/// A label per row of the universe, each an artifact drawn at random: the level's column.
+fn label_column(artifacts: u32, seed: u64) -> Vec<u32> {
+    let mut rng = SplitMix(seed);
+    (0..UNIVERSE)
+        .map(|_| (((rng.next() >> 32) * u64::from(artifacts)) >> 32) as u32)
+        .collect()
+}
+
+/// The figures walk over every leaf, each into a count vector of its own, and the sum of those
+/// vectors, timed apart. Leaf s reads the column from row s·(2³⁰/N).
+fn figures(
+    args: &Args,
+    variant: &str,
+    coverage_pct: f64,
+    map: &Treemap,
+    labels: &[u32],
+) -> FiguresCell {
+    let shards = map.leaves.len();
+    let shard_rows = (UNIVERSE / shards as u64) as usize;
+    let artifacts = args.figures_artifacts as usize;
+    let mut per: Vec<Vec<u32>> = vec![vec![0u32; artifacts]; shards];
+    let mut total = vec![0u64; artifacts];
+
+    let walk_us = measure(args.warmup, args.samples, || {
+        for ((s, leaf), counts) in map.leaves.iter().zip(per.iter_mut()) {
+            counts.fill(0);
+            let column = &labels[*s as usize * shard_rows..][..shard_rows];
+            let mut iter = leaf.iter();
+            let mut buf = [0u32; VALUE_BUF_LEN];
+            loop {
+                let n = iter.next_many(&mut buf);
+                if n == 0 {
+                    break;
+                }
+                for &row in &buf[..n] {
+                    counts[column[row as usize] as usize] += 1;
+                }
+            }
+        }
+        black_box(&per);
     });
-    record("select", us);
+    let sum_us = measure(args.warmup, args.samples, || {
+        total.fill(0);
+        for counts in &per {
+            for (t, c) in total.iter_mut().zip(counts) {
+                *t += u64::from(*c);
+            }
+        }
+        black_box(&total);
+    });
+    assert_eq!(total.iter().sum::<u64>(), map.cardinality());
+    FiguresCell {
+        variant: variant.to_string(),
+        coverage_pct,
+        shards: shards as u32,
+        artifacts: args.figures_artifacts,
+        visible: map.cardinality(),
+        walk_us_median: median(&walk_us),
+        walk_us,
+        sum_us_median: median(&sum_us),
+        sum_us,
+    }
+}
+
+fn print_figures(figures: &[FiguresCell]) {
+    if figures.is_empty() {
+        return;
+    }
+    println!("\n### figures walk (ms per walk, median of samples)\n");
+    println!("| variant | N | visible | walk | sum | walk + sum | ÷ N=1 |");
+    println!("|---|---|---|---|---|---|---|");
+    for f in figures {
+        let base = figures
+            .iter()
+            .find(|b| b.variant == f.variant && b.shards == 1)
+            .map(|b| b.walk_us_median + b.sum_us_median);
+        let both = f.walk_us_median + f.sum_us_median;
+        println!(
+            "| {} | {} | {} | {:.1} | {:.2} | {:.1} | {} |",
+            f.variant,
+            f.shards,
+            f.visible,
+            f.walk_us_median / 1e3,
+            f.sum_us_median / 1e3,
+            both / 1e3,
+            base.map_or("—".to_string(), |b| format!("{:.2}", both / b)),
+        );
+    }
 }
 
 fn fmt_us(us: f64) -> String {
@@ -674,7 +1079,13 @@ fn fmt_us(us: f64) -> String {
     }
 }
 
-fn find<'a>(cells: &'a [Cell], variant: &str, op: &str, shards: u32, depth: u8) -> Option<&'a Cell> {
+fn find<'a>(
+    cells: &'a [Cell],
+    variant: &str,
+    op: &str,
+    shards: u32,
+    depth: u8,
+) -> Option<&'a Cell> {
     cells
         .iter()
         .find(|c| c.variant == variant && c.op == op && c.shards == shards && c.depth == depth)
@@ -790,8 +1201,17 @@ fn main() {
     let segment = synthetic_segment(id_rows, args.seed ^ 0x1D, &scratch);
     eprintln!("  written and mapped in {:.1} s", t.elapsed().as_secs_f64());
 
+    let labels = (args.figures_artifacts > 0).then(|| {
+        eprintln!(
+            "label column: {UNIVERSE} rows over {} artifacts",
+            args.figures_artifacts
+        );
+        label_column(args.figures_artifacts, args.seed ^ 0x1AB)
+    });
+
     let mut cells: Vec<Cell> = Vec::new();
     let mut leaves: Vec<LeafStats> = Vec::new();
+    let mut figures_cells: Vec<FiguresCell> = Vec::new();
     for (variant, coverage_pct, run_heavy) in &variants {
         for &shards in &args.shards {
             eprintln!("{variant}, N={shards}: building");
@@ -833,7 +1253,12 @@ fn main() {
                 segment: &segment,
                 id_rows: id_rows as u64,
             };
-            for depth in 0..=args.max_depth {
+            if let Some(labels) = &labels {
+                let t = Instant::now();
+                figures_cells.push(figures(&args, variant, *coverage_pct, &map, labels));
+                eprintln!("  figures done in {:.1} s", t.elapsed().as_secs_f64());
+            }
+            for depth in args.min_depth..=args.max_depth {
                 let t = Instant::now();
                 run_depth(&args, &case, depth, &mut cells);
                 eprintln!("  depth {depth} done in {:.1} s", t.elapsed().as_secs_f64());
@@ -842,6 +1267,7 @@ fn main() {
     }
 
     print_tables(&cells, &args.shards, args.max_depth);
+    print_figures(&figures_cells);
 
     if let Some(out) = &args.out {
         let report = Report {
@@ -857,11 +1283,17 @@ fn main() {
             k_min: args.k_min,
             m_target: M_TARGET,
             seed: args.seed,
+            layout: args.layout,
+            abutting: args.abutting,
             leaves,
             cells,
+            figures: figures_cells,
         };
-        std::fs::write(out, serde_json::to_string_pretty(&report).expect("serialise"))
-            .expect("write result json");
+        std::fs::write(
+            out,
+            serde_json::to_string_pretty(&report).expect("serialise"),
+        )
+        .expect("write result json");
         eprintln!("wrote {}", out.display());
     }
 

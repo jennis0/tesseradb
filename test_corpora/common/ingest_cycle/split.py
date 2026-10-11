@@ -8,8 +8,8 @@ import json
 import shutil
 import subprocess
 import time
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 import numpy as np
 import pyarrow as pa
@@ -91,7 +91,7 @@ def split_entities(ids: np.ndarray, fraction: float, seed: int) -> tuple[np.ndar
     """
     rng = np.random.default_rng(seed)
     order = rng.permutation(len(ids))
-    cut = int(round(fraction * len(ids)))
+    cut = round(fraction * len(ids))
     held = np.sort(ids[order[:cut]])
     base = np.sort(ids[order[cut:]])
     return base, held

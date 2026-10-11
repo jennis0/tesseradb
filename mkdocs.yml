@@ -34,6 +34,7 @@ exclude_docs: |
   /roadmap.md
   /users-and-access.md
   /ingest-campaign.md
+  /sharding.md
   /guides/views.md
   /pytest.ini
   /tests/

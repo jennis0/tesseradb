@@ -204,8 +204,8 @@ pub fn fold_row_space(
     // filtered viewport can walk a tile without a Feistel per row.
     let mut row_entity: Vec<u32> = Vec::new();
 
-    let mut writer = SegmentWriter::create(output_dir, spec.scalar_schema, spec.indexed)
-        .map_err(columns_io)?;
+    let mut writer =
+        SegmentWriter::create(output_dir, spec.scalar_schema, spec.indexed).map_err(columns_io)?;
     let mut permutation =
         PermutationWriter::create(permutation_path, spec.permutation_bound).map_err(perm_io)?;
 
@@ -384,6 +384,7 @@ mod tests {
             .map(|(entity, x, score)| FlushRow {
                 entity_id: EntityId::new(*entity),
                 number: EntityId::new(*entity),
+                tenancy: mosaica_types::Tenancy::ZERO,
                 x: *x,
                 y: 0.0,
                 scalars: vec![score.clone()],

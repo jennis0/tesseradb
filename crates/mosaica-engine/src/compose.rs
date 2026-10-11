@@ -261,12 +261,12 @@ impl EffectiveMask {
         self.highlight.is_some()
     }
 
-    /// The rows in `r` visible, matching the filter and satisfying the highlight —
-    /// `TileCount::highlighted`. Equal to [`Self::count_matched_range`] with no highlight, so
-    /// the column is always present on the wire. `highlighted ≤ matched ≤ visible` always holds.
-    pub fn count_highlighted_range(&self, r: Range<u32>) -> u64 {
+    /// The rows in `r` that are visible, match the filter and satisfy the highlight:
+    /// `TileCount::highlighted`. `matched` is `r`'s [`Self::count_matched_range`], returned as is
+    /// without a highlight. `highlighted ≤ matched ≤ visible` always holds.
+    pub fn count_highlighted_range(&self, r: Range<u32>, matched: u64) -> u64 {
         match &self.highlight {
-            None => self.count_matched_range(r),
+            None => matched,
             Some(highlight) => {
                 debug_assert!(
                     highlight.covers(&r),
@@ -304,6 +304,22 @@ impl EffectiveMask {
         base_count - minus_count + plus_count
     }
 
+    /// [`Self::count_range`] over each of `ranges`, each bitmap walked once
+    /// ([`mosaica_roaring::RangeEnds`]).
+    pub fn count_ranges(&self, ranges: &[Range<u32>]) -> Vec<u64> {
+        let ends = mosaica_roaring::RangeEnds::of(ranges);
+        let mut counts = ends.counts(self.base.bitmap());
+        if !self.minus.is_empty() {
+            let minus = ends.counts(&self.minus);
+            counts.iter_mut().zip(minus).for_each(|(c, m)| *c -= m);
+        }
+        if !self.plus.is_empty() {
+            let plus = ends.counts(&self.plus);
+            counts.iter_mut().zip(plus).for_each(|(c, p)| *c += p);
+        }
+        counts
+    }
+
     /// The total number of visible rows in this mask, over the whole row space — the quantity
     /// θ's anchor is derived from ([`crate::select::Threshold::at_depth`]; [`crate::occupancy`]
     /// takes the same rule for `N_occ(d)`). The composed figure, not the projection's: `base` is
@@ -318,13 +334,11 @@ impl EffectiveMask {
         self.base.cardinality() - self.minus.cardinality() + self.plus.cardinality()
     }
 
-    /// The rows in `r` that are visible and match the request's filter — `TileCount::matched`,
-    /// distinct from [`Self::count_range`]'s composed visible count: `visible` is how many
-    /// items in this tile the principal may see, `matched` how many the filter admits. Without a
-    /// filter the two agree, and this returns `count_range` rather than materialising a bitmap.
-    pub fn count_matched_range(&self, r: Range<u32>) -> u64 {
+    /// The rows in `r` that are visible and match the filter: `TileCount::matched`. `visible` is
+    /// `r`'s [`Self::count_range`], returned as is without a filter.
+    pub fn count_matched_range(&self, r: Range<u32>, visible: u64) -> u64 {
         match &self.filter {
-            None => self.count_range(r),
+            None => visible,
             // With a filter present the term-by-term arithmetic does not hold — a row can be in
             // `base` and out of the filter — so this materialises the intersection instead.
             // O(containers in the range), not O(rows).
@@ -720,14 +734,14 @@ mod walk_tests {
 
     use super::*;
 
-    use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
-    use rustc_hash::FxHashSet;
-    use mosaica_types::TermId;
     use mosaica_lifecycle::wal::WalRow;
     use mosaica_lifecycle::ChangeOp;
     use mosaica_store::write::write_permutation;
     use mosaica_store::Permutation;
+    use mosaica_types::TermId;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+    use rustc_hash::FxHashSet;
 
     const BOUND: u64 = 2_000;
 

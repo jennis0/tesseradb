@@ -35,9 +35,10 @@ pub(super) fn dangling_entities(generation: &Generation, views: &[String]) -> Ve
         .map(|raw| EntityId::new(u64::from(raw)))
         .filter(|entity| {
             let in_another_view = generation.bundle.partitions.values().any(|partition| {
-                partition.views.iter().any(|(id, data)| {
-                    !in_views(id) && data.row_space.row_of(*entity).is_some()
-                })
+                partition
+                    .views
+                    .iter()
+                    .any(|(id, data)| !in_views(id) && data.row_space.row_of(*entity).is_some())
             });
             let buffered_elsewhere = generation
                 .buffer
@@ -66,12 +67,12 @@ pub(super) fn view_entities(generation: &Generation, views: &[String]) -> croari
                 continue;
             };
             let row_space = &view_data.row_space;
-            let _ = row_space
-                .base()
-                .try_for_each_slot(|entity, _| -> Result<(), std::convert::Infallible> {
+            let _ = row_space.base().try_for_each_slot(
+                |entity, _| -> Result<(), std::convert::Infallible> {
                     entities.add(entity as u32);
                     Ok(())
-                });
+                },
+            );
             for extent in row_space.extents() {
                 entities.extend(extent.pairs().map(|(entity, _)| entity as u32));
             }
@@ -193,6 +194,68 @@ pub(crate) struct PublishedBatch {
     pub(crate) joined: u64,
 }
 
+/// The refusal of a publication naming a deleted member or content source, where it names one.
+/// A suppressed one is accepted, being a live member temporarily outside every mask. The detail is
+/// the caller's 422 body, so it gives a count and an artifact's position, never an entity id.
+fn deleted_in_publication(
+    generation: &Generation,
+    artifacts: &[IncomingArtifact],
+) -> Option<ExecError> {
+    let deleted = generation.overlay.deleted_set();
+    let (count, first_artifact) =
+        first_deleted(artifacts.iter().enumerate().map(|(index, artifact)| {
+            let in_contents: u64 = artifact
+                .contents
+                .iter()
+                .map(|content| content.generated_from.and_cardinality(deleted))
+                .sum();
+            (
+                index,
+                artifact.members.and_cardinality(deleted) + in_contents,
+            )
+        }))?;
+    Some(ExecError::LayerRefused {
+        detail: format!(
+            "{count} member(s) or content source(s) of this batch are deleted, the first in \
+             artifact {first_artifact}; remove the deleted members and send the batch again"
+        ),
+    })
+}
+
+/// The refusal of a growth whose joining members include a deleted one, on
+/// [`deleted_in_publication`]'s terms: a count and the key of the first join naming one.
+fn deleted_in_growth(
+    generation: &Generation,
+    joins: &[mosaica_lifecycle::IncomingGrowth],
+) -> Option<ExecError> {
+    let deleted = generation.overlay.deleted_set();
+    let (count, first_key) = first_deleted(
+        joins
+            .iter()
+            .map(|join| (join.key.as_str(), join.joining.and_cardinality(deleted))),
+    )?;
+    Some(ExecError::LayerRefused {
+        detail: format!(
+            "{count} joining member(s) are deleted, the first joining '{first_key}'; remove the \
+             deleted members and send the batch again"
+        ),
+    })
+}
+
+/// The sum of the deleted counts, and the first entry whose count is not zero; `None` where every
+/// count is zero.
+fn first_deleted<K>(counts: impl IntoIterator<Item = (K, u64)>) -> Option<(u64, K)> {
+    let mut total = 0u64;
+    let mut first = None;
+    for (key, count) in counts {
+        if count > 0 {
+            total += count;
+            first.get_or_insert(key);
+        }
+    }
+    Some((total, first?))
+}
+
 impl Executor {
     pub(super) fn execute(&mut self, command: Command) {
         match command {
@@ -203,11 +266,7 @@ impl Executor {
             // `BatchState::Held` is unconstructible here and the answers are exactly `admit`'s.
             Command::Ingest { submission, reply } => {
                 let window = CommitWindow::new(self.next_window_seq());
-                let (window, _) = self.admit_ingest(
-                    window,
-                    submission,
-                    reply,
-                );
+                let (window, _) = self.admit_ingest(window, submission, reply);
                 if !window.is_empty() {
                     self.close_window(window);
                 }
@@ -219,7 +278,7 @@ impl Executor {
                 stamp,
                 reply,
             } => {
-                if !self.follow_since(stamp, |generation| {
+                if !stamp.follow_since(&self.generation.load_full(), |generation| {
                     crate::edited::follow_changes(generation, &mut changes)
                 }) {
                     reply.fail(ExecError::Stale);
@@ -277,10 +336,15 @@ impl Executor {
                 stamp,
                 reply,
             } => {
-                if !self.follow_since(stamp, |generation| {
+                let generation = self.generation.load_full();
+                if !stamp.follow_since(&generation, |generation| {
                     crate::edited::follow_artifacts(generation, &mut artifacts)
                 }) {
                     reply.fail(ExecError::Stale);
+                    return;
+                }
+                if let Some(refusal) = deleted_in_publication(&generation, &artifacts) {
+                    reply.fail(refusal);
                     return;
                 }
                 self.commit_artifacts(layer, level, artifacts, reply)
@@ -292,10 +356,15 @@ impl Executor {
                 stamp,
                 reply,
             } => {
-                if !self.follow_since(stamp, |generation| {
+                let generation = self.generation.load_full();
+                if !stamp.follow_since(&generation, |generation| {
                     crate::edited::follow_growth(generation, &mut joins)
                 }) {
                     reply.fail(ExecError::Stale);
+                    return;
+                }
+                if let Some(refusal) = deleted_in_growth(&generation, &joins) {
+                    reply.fail(refusal);
                     return;
                 }
                 self.commit_growth(layer, level, joins, reply)
@@ -1279,5 +1348,4 @@ impl Executor {
         });
         self.publish(next, started);
     }
-
 }

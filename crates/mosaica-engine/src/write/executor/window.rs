@@ -81,7 +81,11 @@ impl ClosingWindow {
         for (i, entry) in self.closed.into_iter().enumerate() {
             for (k, waiter) in entry.waiters.into_iter().enumerate() {
                 // A joined retry was never appended separately, so it has nothing else to be told.
-                let e = if k == 0 { blame.at(i) } else { WalError::Poisoned };
+                let e = if k == 0 {
+                    blame.at(i)
+                } else {
+                    WalError::Poisoned
+                };
                 waiter.fail(ExecError::Wal(e));
             }
         }
@@ -342,7 +346,10 @@ impl Executor {
 
     /// Close `window` and return its replacement, stamped after the close: stamped first, the
     /// replacement would charge its predecessor's whole service to itself.
-    pub(super) fn close_and_reopen(&mut self, window: CommitWindow<Reply<Ingested>>) -> CommitWindow<Reply<Ingested>> {
+    pub(super) fn close_and_reopen(
+        &mut self,
+        window: CommitWindow<Reply<Ingested>>,
+    ) -> CommitWindow<Reply<Ingested>> {
         self.close_window(window);
         CommitWindow::new(self.next_window_seq())
     }
@@ -477,20 +484,27 @@ impl Executor {
                 None => false,
             });
         // An entity the handler resolved can since have been retired by a fold, freed, and issued
-        // to another item: each must still hold the item the handler resolved it to.
+        // to another item: each must still hold the item the handler resolved it to, and its
+        // number must still be at the tenancy the identifier carries.
         let stale = stale || {
             let key = &self.deps.identity_key;
-            let number_of =
-                |mosaica_id: u64| key.invert(mosaica_types::MosaicaId::new(mosaica_id)).1;
-            let mut named: Vec<(EntityId, EntityId)> = edits
-                .iter()
-                .map(|submitted| (submitted.edit.old, submitted.edit.number))
-                .collect();
+            let number_of = |mosaica_id: u64| {
+                crate::edited::number_named(
+                    key,
+                    &generation,
+                    mosaica_types::MosaicaId::new(mosaica_id),
+                )
+            };
+            let mut named: Vec<(EntityId, Option<EntityId>)> = Vec::new();
             for slot in &slots {
                 match slot {
                     mosaica_lifecycle::Slot::Unchanged { entity, mosaica_id }
                     | mosaica_lifecycle::Slot::Joined { entity, mosaica_id } => {
                         named.push((*entity, number_of(*mosaica_id)));
+                    }
+                    mosaica_lifecycle::Slot::Edited { edit, mosaica_id } => {
+                        let old = edits.get(*edit as usize).map(|e| e.edit.old);
+                        named.extend(old.map(|old| (old, number_of(*mosaica_id))));
                     }
                     mosaica_lifecycle::Slot::Written {
                         row,
@@ -508,7 +522,7 @@ impl Executor {
                 Ok(numbers) => named
                     .iter()
                     .zip(numbers)
-                    .any(|((_, resolved), now)| now != *resolved),
+                    .any(|((_, resolved), now)| Some(now) != *resolved),
                 Err(_) => true,
             }
         };
@@ -595,13 +609,18 @@ impl Executor {
         let started = window.opened_at();
         let mut mark = StageMark::now();
 
-        let (identity, shard) = (
-            self.deps.identity_key,
-            self.generation.load().bundle.manifest.identity.shard_id,
-        );
+        // The allocator's freed ids are at this index's tenancies: a fold swaps its index in before
+        // it releases the ids it freed, and both run on this thread.
+        let (identity, shard, tenancy) = {
+            let generation = self.generation.load();
+            (
+                self.deps.identity_key,
+                generation.bundle.manifest.identity.shard_id,
+                Arc::clone(&generation.tenancy),
+            )
+        };
         let mosaica_id_of = |entity: EntityId| {
-            identity
-                .forward(shard, entity)
+            crate::edited::id_at(&identity, shard, tenancy.of(entity), entity)
                 .map(|id| id.raw())
                 .expect("the allocator issues entities inside the identity space")
         };
@@ -765,7 +784,11 @@ impl Executor {
             .chain(growth.iter().map(|(record, _)| record))
             .chain(carried.iter())
             .collect();
-        self.apply_artifact_records(&artifact_records, &positions[artifacts_at..], Publish::AtTick);
+        self.apply_artifact_records(
+            &artifact_records,
+            &positions[artifacts_at..],
+            Publish::AtTick,
+        );
 
         self.record_accepted_batches(closing.entries(), &positions[entries_at..artifacts_at]);
         log_minted_artifacts(&minted_per_entry, &mint_records);

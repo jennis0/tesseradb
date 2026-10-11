@@ -31,7 +31,8 @@ use std::any::Any;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use croaring::{Bitmap, BitmapView, Portable};
+use croaring::{Bitmap, Portable};
+use mosaica_roaring::OwnedView;
 use mosaica_types::EntityId;
 
 /// Withdraw every content of one record whose generating set names a member this fold retired
@@ -657,27 +658,19 @@ pub struct Degradation {
 /// allocation `owner` keeps alive — the mapped extent file, at a build and at a serving open alike
 /// — so the view is valid for exactly as long as this value is. Nothing outside
 /// [`Members::mapped`] can construct one.
+#[derive(Clone)]
 pub struct Members(MembersInner);
 
+#[derive(Clone)]
 enum MembersInner {
     Owned(Bitmap),
-    /// Declared in drop order: the view's header is freed before the bytes it addresses can go.
     Mapped {
-        view: BitmapView<'static>,
-        bytes: &'static [u8],
-        owner: Arc<dyn Any + Send + Sync>,
+        view: OwnedView,
         /// The members joined since the bytes were written, disjoint from the view. `None` where
         /// nothing has joined.
         joined: Option<Box<Bitmap>>,
     },
 }
-
-/// `Bitmap` carries croaring's own `Send`/`Sync`, and a view over bytes nothing else may write is
-/// no weaker: every read is a read of a `roaring_bitmap_t` and of the immutable slice behind it,
-/// and every write ([`Members::to_mut`], [`Members::join`]) needs `&mut self`. The owner is
-/// `Send + Sync` by its own bound.
-unsafe impl Send for Members {}
-unsafe impl Sync for Members {}
 
 impl Members {
     /// The membership on the heap — what a publication, a WAL replay, a growth and every test
@@ -696,25 +689,12 @@ impl Members {
     ///
     /// # Safety
     ///
-    /// `bytes` must remain valid and unwritten for as long as `owner` is held, and dropping
-    /// `owner` must not free them earlier. Both hold for a slice of a read-only file mapping the
-    /// `owner` itself keeps open.
+    /// `bytes` must lie inside an allocation `owner` keeps alive, unwritten and unmoved, for as
+    /// long as `owner` lives. A slice of a read-only file mapping `owner` keeps open holds that.
     pub unsafe fn mapped(bytes: &[u8], owner: Arc<dyn Any + Send + Sync>) -> Option<Self> {
-        // The checked deserialiser first: `BitmapView::deserialize` is unchecked, and bytes that
-        // are not a bitmap would be read as containers at whatever the header claimed. This costs
-        // one decode of the header region and is the same validation the WAL replay applies.
-        let checked = deserialise_members(bytes)?;
-        drop(checked);
-        // SAFETY: the caller's contract above pins the bytes for `owner`'s life, and `owner` is
-        // moved into the value that holds the view, so the two cannot be separated.
-        let bytes: &'static [u8] = unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) };
-        let view = unsafe { BitmapView::deserialize::<Portable>(bytes) };
-        Some(Members(MembersInner::Mapped {
-            view,
-            bytes,
-            owner,
-            joined: None,
-        }))
+        // SAFETY: the caller's contract above is `OwnedView::portable`'s.
+        let view = unsafe { OwnedView::portable(bytes, owner) }?;
+        Some(Members(MembersInner::Mapped { view, joined: None }))
     }
 
     /// The whole membership as something that can be written to, materialising it on the heap
@@ -734,7 +714,7 @@ impl Members {
     pub fn join(&mut self, joining: &Bitmap) {
         match &mut self.0 {
             MembersInner::Owned(bitmap) => bitmap.or_inplace(joining),
-            MembersInner::Mapped { view, joined, .. } => {
+            MembersInner::Mapped { view, joined } => {
                 let new = joining.andnot(view);
                 if new.is_empty() {
                     return;
@@ -858,28 +838,6 @@ impl From<Bitmap> for Members {
 impl Default for Members {
     fn default() -> Self {
         Members::owned(Bitmap::new())
-    }
-}
-
-impl Clone for Members {
-    /// A clone of a view is a view: the owner is an `Arc` and the bytes outlive both.
-    fn clone(&self) -> Self {
-        match &self.0 {
-            MembersInner::Owned(bitmap) => Members::owned(bitmap.clone()),
-            MembersInner::Mapped {
-                bytes,
-                owner,
-                joined,
-                ..
-            } => Members(MembersInner::Mapped {
-                // SAFETY: `bytes` is the slice this value's own view already addresses, and
-                // `owner` — cloned beside it — is what keeps it alive.
-                view: unsafe { BitmapView::deserialize::<Portable>(bytes) },
-                bytes,
-                owner: Arc::clone(owner),
-                joined: joined.clone(),
-            }),
-        }
     }
 }
 
@@ -2414,8 +2372,9 @@ impl ArtifactStore {
         self.pending_ranges()
             .into_iter()
             .map(|(layer, level, ordinal_lo, count)| {
-                let blobs: Vec<Vec<u8>> =
-                    self.encode_pending(&layer, level, ordinal_lo, count).collect();
+                let blobs: Vec<Vec<u8>> = self
+                    .encode_pending(&layer, level, ordinal_lo, count)
+                    .collect();
                 (layer, level, ordinal_lo, blobs)
             })
             .collect()
@@ -3740,16 +3699,30 @@ mod tests {
             vec![("clusters/q".to_string(), 0), ("labels/t".to_string(), 0)]
         );
         assert!(store.level_version("clusters/q", 0) > before);
-        let held: Vec<u32> = store.level("clusters/q", 0).map(|(ordinal, _)| ordinal).collect();
+        let held: Vec<u32> = store
+            .level("clusters/q", 0)
+            .map(|(ordinal, _)| ordinal)
+            .collect();
         assert_eq!(held, vec![2]);
-        assert_eq!(store.ordinal_of_key("clusters/q", 0, Some("q2"), "c1"), Some(2));
-        assert_eq!(store.ordinal_of_key("clusters/q", 0, Some("q2"), "c2"), None);
+        assert_eq!(
+            store.ordinal_of_key("clusters/q", 0, Some("q2"), "c1"),
+            Some(2)
+        );
+        assert_eq!(
+            store.ordinal_of_key("clusters/q", 0, Some("q2"), "c2"),
+            None
+        );
         assert_eq!(store.next_ordinal("clusters/q", 0), 3);
         assert_eq!(store.level("clusters/p", 0).count(), 1);
-        let labels: Vec<u32> = store.level("labels/t", 0).map(|(ordinal, _)| ordinal).collect();
+        let labels: Vec<u32> = store
+            .level("labels/t", 0)
+            .map(|(ordinal, _)| ordinal)
+            .collect();
         assert_eq!(labels, vec![1]);
         assert!(store.cascade_from(&[EntityId::new(101)]).is_empty());
-        assert!(store.retire_dead_views(|_, _, incarnation| incarnation == 2).is_empty());
+        assert!(store
+            .retire_dead_views(|_, _, incarnation| incarnation == 2)
+            .is_empty());
     }
 
     #[test]
@@ -4319,7 +4292,12 @@ mod tests {
             FillOutcome::Identical
         );
         assert_eq!(
-            store.fill("clusters/a", 0, 0, &ArtifactPart::Access(vec![b"team-b".to_vec()])),
+            store.fill(
+                "clusters/a",
+                0,
+                0,
+                &ArtifactPart::Access(vec![b"team-b".to_vec()])
+            ),
             FillOutcome::Differs
         );
         assert_eq!(store.get("clusters/a", 0, 0).unwrap().access, a);
@@ -4510,7 +4488,10 @@ mod tests {
     #[test]
     fn members_added_counts_created_artifacts_whole_and_held_ones_by_their_new_members() {
         let mut store = ArtifactStore::new();
-        assert_eq!(store.apply(&publication("clusters/a", 0, 100, &[1, 2, 3]), 0), 0);
+        assert_eq!(
+            store.apply(&publication("clusters/a", 0, 100, &[1, 2, 3]), 0),
+            0
+        );
 
         let minted = publication("clusters/a", 1, 101, &[4, 5, 6, 7]);
         assert_eq!(members_added(&minted, &store), 4);
@@ -4528,7 +4509,11 @@ mod tests {
                 cardinality: 2,
             };
         }
-        assert_eq!(members_added(&generating, &store), 0, "a generating set is no membership");
+        assert_eq!(
+            members_added(&generating, &store),
+            0,
+            "a generating set is no membership"
+        );
     }
 
     /// **`levels_moved_by` reports exactly the levels `retire` moves, and `retire` moves each by

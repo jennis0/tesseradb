@@ -27,6 +27,8 @@ What it measures, in order:
 
 A hold-out is not a random sample: entity ids are assigned differently at ingest than at a build,
 so equivalence compares masked counts, not ids.
+
+With `--churn-rounds` none of this runs, and the churn in `churn.py` runs instead.
 """
 
 from __future__ import annotations
@@ -34,10 +36,11 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 from .census import artifact_frame_census, census, compare_census
+from .churn import Churn
 from .control import Control, wait_for
 from .cycle import Cycle, driver_rss, executor_laps, safe
 from .holdout import HoldOut, MemberStream, encode_batch, wire_columns
@@ -75,7 +78,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--work", required=True)
     ap.add_argument("--binary", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--fraction", type=float, required=True)
+    ap.add_argument(
+        "--fraction",
+        type=float,
+        default=None,
+        help="the entities held back and ingested. Required unless --churn-rounds is given",
+    )
     ap.add_argument("--concurrency", type=int, default=8)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--port0", type=int, default=8161)
@@ -94,6 +102,36 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="last, send the whole hold-out again as it was ingested and then with one entity in "
         "a hundred moved, as a nightly re-ingest of a changed source does",
+    )
+    ap.add_argument(
+        "--churn-rounds",
+        type=int,
+        default=None,
+        help="run this many rounds of the churn in place of the cycle "
+        "(test_corpora/common/README.md, The churn)",
+    )
+    ap.add_argument(
+        "--churn-fraction",
+        type=float,
+        default=0.5,
+        help="the fraction of the items each churn round deletes and ingests again",
+    )
+    ap.add_argument(
+        "--churn-zooms",
+        default="0,3,6,9,12",
+        help="the zooms the churn's latency boxes are drawn at, one per density decile at each",
+    )
+    ap.add_argument(
+        "--churn-candidates",
+        type=int,
+        default=100,
+        help="candidate boxes ranked per churn zoom",
+    )
+    ap.add_argument(
+        "--churn-samples",
+        type=int,
+        default=3,
+        help="viewport requests per latency box, per principal, per churn round",
     )
     ap.add_argument("--reuse-base", action="store_true")
     ap.add_argument(
@@ -152,8 +190,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--flush-timeout", type=float, default=900.0)
     ap.add_argument("--fold-timeout", type=float, default=7200.0)
     args = ap.parse_args(argv)
+    if (args.fraction is None) == (args.churn_rounds is None):
+        ap.error(
+            "give exactly one of --fraction, which runs the ingest cycle, and --churn-rounds, "
+            "which runs the churn"
+        )
+    if not 0.0 < args.churn_fraction <= 1.0:
+        ap.error(
+            f"--churn-fraction is {args.churn_fraction}; give a fraction above 0 and at most 1"
+        )
     started = time.time()
-    result = Cycle(args).run()
+    result = (Cycle if args.churn_rounds is None else Churn)(args).run()
     result["ran_s"] = round(time.time() - started, 1)
     # `VmHWM` of the driver itself, whichever phase set it, beside the server's own fold peak.
     result["driver_peak_rss"] = driver_rss()["peak"]

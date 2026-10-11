@@ -4,8 +4,8 @@ try:  # 3.11+
     import tomllib
 except ModuleNotFoundError:  # 3.10 on this box
     import tomli as tomllib
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 import numpy as np
 import pyarrow as pa

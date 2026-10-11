@@ -10,16 +10,8 @@
 //! `mosaica-server`, made explicit here as a standing assertion over the types themselves rather
 //! than an incidental consequence of how one call site happens to use them.
 //!
-//! **No `unsafe impl` backs any of this.** `Engine`, `Session`, `FrozenFragment` and `SegmentData`
-//! are all Send + Sync automatically (the compiler's auto-trait derivation), because every field
-//! they and their transitive dependencies hold is itself `Send + Sync`: `Arc<T: Send + Sync>`,
-//! `std::sync::Mutex<T: Send>`, `arc_swap::ArcSwap<T: Send + Sync>`, `memmap2::Mmap` (which is
-//! `Send + Sync` by the crate's own design), and `arrow::buffer::Buffer` (whose custom
-//! `mmap`-backed allocation in `mosaica-store::read::ColumnsRef::load` is built from a `NonNull`
-//! wrapped inside `Buffer::from_custom_allocation`, itself `Send + Sync`, not a bare pointer
-//! field on `ColumnsRef`/`SegmentData` that would need its own unsafe impl). Grepping the
-//! workspace for `unsafe impl` at the time this test was added returns no results — see this
-//! task's report.
+//! The compiler derives both traits for these types from their fields, and the workspace's only
+//! `unsafe impl` of either beneath them is the pair on `mosaica_roaring::OwnedView`.
 
 use mosaica_authz::FrozenFragment;
 use mosaica_engine::{Engine, Session};

@@ -42,7 +42,8 @@ use std::path::{Path, PathBuf};
 use croaring::{Bitmap, BitmapView, Frozen};
 use memmap2::Mmap;
 
-use crate::error::{Result, StoreError};
+use crate::error::{io, Result, StoreError};
+use crate::{le_u32, le_u64};
 
 const MAGIC: &[u8; 4] = b"MSRM";
 const VERSION: u16 = 2;
@@ -57,23 +58,8 @@ fn malformed(path: &Path, detail: impl std::fmt::Display) -> StoreError {
     }
 }
 
-fn io(path: &Path) -> impl Fn(std::io::Error) -> StoreError + '_ {
-    move |source| StoreError::Io {
-        path: path.to_path_buf(),
-        source,
-    }
-}
-
 fn align_up(at: u64) -> u64 {
     at.div_ceil(ALIGN) * ALIGN
-}
-
-fn le_u32(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
-}
-
-fn le_u64(bytes: &[u8], at: usize) -> u64 {
-    u64::from_le_bytes(bytes[at..at + 8].try_into().expect("eight bytes"))
 }
 
 /// Where the table and `cover_at` end, which is where the payload may begin.
