@@ -324,9 +324,7 @@ impl Engine {
                         false,
                         table.as_deref(),
                     )?;
-                    crate::edited::artifact_id(&self.identity_key, shard, entity)
-                        .ok()
-                        .map(|id| id.raw())
+                    self.artifact_id(shard, entity).map(|id| id.raw())
                 })
             };
             let mut lowest = |labels: &[u32]| -> Option<u64> {

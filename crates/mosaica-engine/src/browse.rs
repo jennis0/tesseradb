@@ -380,8 +380,7 @@ impl crate::Engine {
                 else {
                     continue;
                 };
-                let Ok(mosaica_id) = crate::edited::artifact_id(&self.identity_key, shard, entity)
-                else {
+                let Some(mosaica_id) = self.artifact_id(shard, entity) else {
                     continue;
                 };
                 // Content decides servability as well as text: a viewer containing no content's

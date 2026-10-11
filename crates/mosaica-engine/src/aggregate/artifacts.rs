@@ -231,9 +231,7 @@ impl Layer {
         };
         let mosaica_id = |ordinal: u32| -> Option<u64> {
             let entity = EntityId::new(entity_at(ordinal)?);
-            crate::edited::artifact_id(&engine.identity_key, shard, entity)
-                .ok()
-                .map(|id| id.raw())
+            engine.artifact_id(shard, entity).map(|id| id.raw())
         };
         let attached = registered
             .as_ref()
@@ -453,8 +451,7 @@ impl Layer {
         let keys = chosen
             .iter()
             .map(|&entity| {
-                let id =
-                    crate::edited::artifact_id(&engine.identity_key, shard, EntityId::new(entity));
+                let id = engine.artifact_id(shard, EntityId::new(entity));
                 Key::Id(id.map_or(0, |id| id.raw()))
             })
             .collect();

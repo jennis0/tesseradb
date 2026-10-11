@@ -17,7 +17,8 @@
 //! [`BlockRanks`] answers a member's rank in constant time, where croaring's own rank sums every
 //! container below the value.
 //!
-//! [`count_ranges`] counts a bitmap over many ranges in one walk of its containers.
+//! [`count_ranges`] counts a bitmap over many ranges in one walk of its containers, and
+//! [`RangeEnds`] holds the ranges' ends for counting several bitmaps over them.
 //!
 //! The crate sits below `mosaica-filter` and `mosaica-store` because both use it and neither may
 //! depend on the other.
@@ -26,7 +27,7 @@ mod counts;
 mod ranks;
 mod runs;
 
-pub use counts::count_ranges;
+pub use counts::{count_ranges, RangeEnds};
 pub use ranks::BlockRanks;
 pub use runs::{for_each_run_in, split_by_cardinality, RankedRuns, Runs};
 

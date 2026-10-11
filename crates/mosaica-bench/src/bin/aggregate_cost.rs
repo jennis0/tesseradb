@@ -77,8 +77,8 @@ struct Args {
     /// given.
     #[arg(long, value_delimiter = ',')]
     terms: Vec<String>,
-    /// The depths of the density cases; 6, 16 and 32 where none is given.
-    #[arg(long)]
+    /// The depths of the density cases.
+    #[arg(long, default_values_t = [6u8, 16, 32])]
     density_depth: Vec<u8>,
     /// Count a group's cells by range where its items number at least this many times the cells
     /// that could hold them, in place of the engine's own factor: 0 for every group at depth 16
@@ -355,11 +355,7 @@ fn main() -> Result<(), BoxError> {
             ));
         }
     }
-    let depths = match args.density_depth.is_empty() {
-        true => vec![6u8, 16, 32],
-        false => args.density_depth.clone(),
-    };
-    for depth in depths {
+    for &depth in &args.density_depth {
         cases.push((format!("density d{depth}"), density(depth), depth == 16));
     }
     cases.push((

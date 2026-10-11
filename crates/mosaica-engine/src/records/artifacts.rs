@@ -289,8 +289,8 @@ impl Scope<'_> {
     }
 
     fn mosaica_id(&self, entity: EntityId) -> Option<u64> {
-        crate::edited::artifact_id(&self.engine.identity_key, self.shard, entity)
-            .ok()
+        self.engine
+            .artifact_id(self.shard, entity)
             .map(|id| id.raw())
     }
 

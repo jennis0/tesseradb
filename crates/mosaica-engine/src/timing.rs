@@ -124,7 +124,7 @@ pub struct StageTimings {
     /// `compute_threads` — not to be confused with the genuinely per-tile fields below.
     pub tile_ranges_ns: u64,
     /// The tiles' counts: one `EffectiveMask::count_ranges` over every tile's parts, before the
-    /// fan-out, and each tile's filtered and highlighted counts, summed over tiles.
+    /// fan-out, and each tile's filtered counts, summed over tiles.
     ///
     /// **The per-tile share is a cross-worker sum under `compute_threads > 1`, not a wall-clock
     /// partition** — see this struct's doc.

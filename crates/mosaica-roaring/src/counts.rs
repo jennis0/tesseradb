@@ -23,61 +23,67 @@ use croaring::Bitmap;
 const _: () =
     assert!(std::mem::size_of::<Bitmap>() == std::mem::size_of::<croaring_sys::roaring_bitmap_t>());
 
-/// The number of members of `bitmap` in each of `ranges`, in order.
+/// The number of members of `bitmap` in each of `ranges`, in order: [`RangeEnds::counts`] over
+/// [`RangeEnds::of`] `ranges`.
+pub fn count_ranges(bitmap: &Bitmap, ranges: &[Range<u32>]) -> Vec<u64> {
+    RangeEnds::of(ranges).counts(bitmap)
+}
+
+/// The ends of many ranges, sorted once and counted against as many bitmaps as need them.
 ///
 /// Ranges in ascending order that do not overlap, which is how a request's tiles and a tile's
 /// cells come out of a segment, are counted in one walk. Any other order is sorted first. An empty
 /// range counts 0.
-pub fn count_ranges(bitmap: &Bitmap, ranges: &[Range<u32>]) -> Vec<u64> {
-    // Each range's `start − 1` (none where it starts at 0) and `end − 1`, with where each lands.
-    let mut ends: Vec<u32> = Vec::with_capacity(2 * ranges.len());
-    let mut at: Vec<(Option<usize>, usize)> = Vec::with_capacity(ranges.len());
-    // A range from 0 counts by its end's rank alone, which must then count from the first
-    // container.
-    let mut from_zero = false;
-    for r in ranges {
-        if r.start >= r.end {
-            at.push((None, usize::MAX));
-            continue;
-        }
-        from_zero |= r.start == 0;
-        let lo = (r.start > 0).then(|| {
-            ends.push(r.start - 1);
-            ends.len() - 1
-        });
-        ends.push(r.end - 1);
-        at.push((lo, ends.len() - 1));
-    }
-    if !ends.is_sorted() {
-        let mut order: Vec<usize> = (0..ends.len()).collect();
-        order.sort_unstable_by_key(|&i| ends[i]);
-        let mut moved = vec![0usize; ends.len()];
-        for (to, &from) in order.iter().enumerate() {
-            moved[from] = to;
-        }
-        ends = order.iter().map(|&i| ends[i]).collect();
-        for (lo, hi) in &mut at {
-            if *hi != usize::MAX {
-                *lo = lo.map(|l| moved[l]);
-                *hi = moved[*hi];
+#[derive(Debug, Clone)]
+pub struct RangeEnds {
+    /// Each non-empty range's `start − 1`, where it does not start at 0, and its `end − 1`,
+    /// ascending.
+    ends: Vec<u32>,
+    /// Where each range's two ends are in `ends`: none for an empty range, and no start for a range
+    /// from 0.
+    places: Vec<[Option<usize>; 2]>,
+    /// Where the ranks count from ([`rank_many`]): 0 where a range starts at 0, which counts by its
+    /// end's rank alone, and otherwise the lowest end.
+    from: u32,
+}
+
+impl RangeEnds {
+    pub fn of(ranges: &[Range<u32>]) -> RangeEnds {
+        // Each end with its slot: twice its range's index, plus one for the range's end.
+        let mut keyed: Vec<(u32, usize)> = Vec::with_capacity(2 * ranges.len());
+        let mut from_zero = false;
+        for (i, r) in ranges.iter().enumerate().filter(|(_, r)| r.start < r.end) {
+            from_zero |= r.start == 0;
+            if r.start > 0 {
+                keyed.push((r.start - 1, 2 * i));
             }
+            keyed.push((r.end - 1, 2 * i + 1));
         }
+        keyed.sort_unstable();
+        let mut ends = Vec::with_capacity(keyed.len());
+        let mut places = vec![[None; 2]; ranges.len()];
+        for (place, (end, slot)) in keyed.into_iter().enumerate() {
+            ends.push(end);
+            places[slot / 2][slot % 2] = Some(place);
+        }
+        let from = match ends.first() {
+            Some(&lowest) if !from_zero => lowest,
+            _ => 0,
+        };
+        RangeEnds { ends, places, from }
     }
-    let from = if from_zero {
-        0
-    } else {
-        ends.first().copied().unwrap_or(0)
-    };
-    let ranks = rank_many(bitmap, &ends, from);
-    at.iter()
-        .map(|&(lo, hi)| {
-            if hi == usize::MAX {
-                0
-            } else {
-                ranks[hi] - lo.map_or(0, |l| ranks[l])
-            }
-        })
-        .collect()
+
+    /// The number of members of `bitmap` in each range, in the order the ranges were given.
+    pub fn counts(&self, bitmap: &Bitmap) -> Vec<u64> {
+        let ranks = rank_many(bitmap, &self.ends, self.from);
+        self.places
+            .iter()
+            .map(|place| match *place {
+                [start, Some(end)] => ranks[end] - start.map_or(0, |start| ranks[start]),
+                _ => 0,
+            })
+            .collect()
+    }
 }
 
 /// For each of `values`, ascending, how many members of `bitmap` are at or below it and in or

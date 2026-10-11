@@ -353,16 +353,8 @@ pub(crate) fn id_at(
     key.forward(ItemHigh::new(shard, tenancy), number)
 }
 
-/// The `mosaica_id` of the artifact or layer `entity` in `shard`.
-pub(crate) fn artifact_id(
-    key: &IdentityKey,
-    shard: u32,
-    entity: EntityId,
-) -> Result<MosaicaId, IdentityError> {
-    id_at(key, shard, Tenancy::ZERO, entity)
-}
-
-/// The entity `id` names in `shard` as [`artifact_id`] forms it, or `None` where it names none.
+/// The entity `id` names in `shard` as [`crate::Engine::artifact_id`] forms it, or `None` where it
+/// names none.
 /// Whether that entity is an artifact is the caller's question.
 pub(crate) fn artifact_named(key: &IdentityKey, shard: u32, id: MosaicaId) -> Option<EntityId> {
     let (high, entity) = key.invert(id)?;
@@ -370,6 +362,12 @@ pub(crate) fn artifact_named(key: &IdentityKey, shard: u32, id: MosaicaId) -> Op
 }
 
 impl crate::Engine {
+    /// The `mosaica_id` of the artifact or layer `entity` in `shard`, or `None` where `entity`
+    /// lies outside the identity space.
+    pub(crate) fn artifact_id(&self, shard: u32, entity: EntityId) -> Option<MosaicaId> {
+        id_at(&self.identity_key, shard, Tenancy::ZERO, entity).ok()
+    }
+
     /// The `mosaica_id` of each of `entities`, against `generation`: its number's permutation.
     pub(crate) fn mosaica_ids_of_in(
         &self,

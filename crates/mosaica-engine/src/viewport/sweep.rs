@@ -416,10 +416,7 @@ pub(super) fn tile_sweep<'a>(
         // range, the operation `matched` already is. Equal to `matched` with no highlight.
         highlighted: part_list
             .iter()
-            .map(|p| {
-                let r = p.row_base + p.range.start..p.row_base + p.range.end;
-                mask.count_highlighted_range(r, p.visible)
-            })
+            .map(|p| mask.count_highlighted_range(p.view_range(), p.visible))
             .sum(),
     };
 
@@ -430,13 +427,13 @@ pub(super) fn tile_sweep<'a>(
     if let Some(offset) = underlay_offset {
         let first = tile.prefix << (2 * offset as u32);
         let counted = crate::cells::count_by_ranges(
+            crate::cells::CellSet::Mask(mask),
             parts
                 .as_slice()
                 .iter()
                 .map(|part| (part.segment, part.row_base, part.range.clone())),
             zoom + offset,
             first..first + (1u64 << (2 * offset as u32)),
-            &|rows| mask.count_ranges(rows),
         );
         sub_cells = counted
             .cells
@@ -500,15 +497,6 @@ impl Engine {
         // `count_range` performs per row-range, so the two combine into one predictor.
         let total_rows_in_ranges = tiling.rows_in_ranges + tiling.underlay_cells_demanded;
 
-        // Below `SERIAL_FALLBACK_MAX_ROWS`, fold `tile_sweep` in place, since the fan-out's own
-        // entry/scheduling cost exceeds the per-tile work it would parallelise below that line. At
-        // or above it, the fan-out runs on the one shared pool this engine built at `Engine::open`.
-        // Both branches produce `Vec<Result<Option<TileSweepOut>>>` in `tiles`' order, so the fold
-        // below is identical either way, which keeps the two paths byte-identical. A `Cancelled`
-        // observed inside `tile_sweep` propagates to the fold regardless of path; the serial fold
-        // has at most one tile of wasted work in flight at cancellation, where the parallel
-        // fan-out has at most `compute_threads` tiles, since every tile already past the
-        // checkpoint runs to completion.
         // Every tile's parts counted together, each of the mask's bitmaps walked once: tiles next
         // to each other share containers, which a count per part popcounts again for each.
         probe.skip();
@@ -521,24 +509,33 @@ impl Engine {
                 row_base + range.start..row_base + range.end
             })
             .collect();
-        let part_counts = mask.count_ranges(&part_ranges);
+        let visible_by_part = mask.count_ranges(&part_ranges);
         let mut at = 0;
-        let counts_by_tile: Vec<&[u64]> = tiling
+        let visible_by_tile: Vec<&[u64]> = tiling
             .ranges
             .iter()
             .map(|parts| {
                 at += parts.len();
-                &part_counts[at - parts.len()..at]
+                &visible_by_part[at - parts.len()..at]
             })
             .collect();
         probe.lap(|t| &mut t.count_ns);
 
+        // Below `SERIAL_FALLBACK_MAX_ROWS`, fold `tile_sweep` in place, since the fan-out's own
+        // entry/scheduling cost exceeds the per-tile work it would parallelise below that line. At
+        // or above it, the fan-out runs on the one shared pool this engine built at `Engine::open`.
+        // Both branches produce `Vec<Result<Option<TileSweepOut>>>` in `tiles`' order, so the fold
+        // below is identical either way, which keeps the two paths byte-identical. A `Cancelled`
+        // observed inside `tile_sweep` propagates to the fold regardless of path; the serial fold
+        // has at most one tile of wasted work in flight at cancellation, where the parallel
+        // fan-out has at most `compute_threads` tiles, since every tile already past the
+        // checkpoint runs to completion.
         let bands = req.zoom < self.switches.bands_below_zoom.load(Ordering::Relaxed);
-        let run = |tile: &Tile, tile_parts: &'a [(usize, Range<u32>)], counts: &[u64]| {
+        let run = |tile: &Tile, tile_parts: &'a [(usize, Range<u32>)], visible_by_part: &[u64]| {
             tile_sweep(
                 tile,
                 tile_parts,
-                counts,
+                visible_by_part,
                 mask,
                 &served.segments,
                 params,
@@ -565,8 +562,8 @@ impl Engine {
                 .tiles
                 .iter()
                 .zip(&tiling.ranges)
-                .zip(&counts_by_tile)
-                .map(|((tile, tile_parts), counts)| run(tile, tile_parts, counts))
+                .zip(&visible_by_tile)
+                .map(|((tile, tile_parts), visible)| run(tile, tile_parts, visible))
                 .collect::<Vec<Result<Option<TileSweepOut>>>>()
         } else {
             self.pool.install(|| {
@@ -574,9 +571,9 @@ impl Engine {
                     .tiles
                     .par_iter()
                     .zip(tiling.ranges.par_iter())
-                    .zip(counts_by_tile.par_iter())
+                    .zip(visible_by_tile.par_iter())
                     .with_min_len(TILE_PAR_MIN_LEN)
-                    .map(|((tile, tile_parts), counts)| run(tile, tile_parts, counts))
+                    .map(|((tile, tile_parts), visible)| run(tile, tile_parts, visible))
                     .collect::<Vec<Result<Option<TileSweepOut>>>>()
             })
         };

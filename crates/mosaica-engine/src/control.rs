@@ -434,7 +434,7 @@ impl Engine {
         shard: u32,
         entity: EntityId,
     ) -> std::result::Result<MosaicaId, crate::write::AcceptError> {
-        crate::edited::artifact_id(&self.identity_key, shard, entity).map_err(|_| {
+        self.artifact_id(shard, entity).ok_or_else(|| {
             crate::write::AcceptError::Exec(mosaica_lifecycle::ExecError::LayerRefused {
                 detail: "an allocated entity id lies outside the identity space".to_string(),
             })

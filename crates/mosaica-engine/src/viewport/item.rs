@@ -191,8 +191,7 @@ impl Engine {
             None => self.fragment_for(session, &generation)?,
         };
 
-        // ONE BIT, in entity space, O(1), before anything is looked up in row space. Run too for
-        // an identifier at a tenancy its number is not at, which names nothing.
+        // ONE BIT, in entity space, O(1), before anything is looked up in row space.
         if !self.visible_to(&fragment, session, &generation, entity) || !current {
             return Ok(None);
         }

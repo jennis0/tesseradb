@@ -40,8 +40,8 @@ pub(crate) struct TestSwitches {
     pub(crate) aggregate_min_chunk_rows: AtomicU64,
     /// The rows past which an aggregate's run of cells is sent as a page of its own.
     pub(crate) aggregate_alone_rows: AtomicU64,
-    /// How many times the cells that could hold a group's items it must number for the aggregate
-    /// to count its cells by range: [`crate::aggregate::RANGE_FACTOR`].
+    /// A group's cells are counted by range when its items number at least this many times the
+    /// cells that could hold them: [`crate::aggregate::RANGE_FACTOR`].
     pub(crate) aggregate_range_factor: AtomicU64,
     /// The most terms a flush may carry the dictionary to: [`mosaica_authz::MAX_DISTINCT_TERMS`].
     pub(crate) max_distinct_terms: AtomicU64,

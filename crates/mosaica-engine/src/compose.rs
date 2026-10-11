@@ -261,10 +261,9 @@ impl EffectiveMask {
         self.highlight.is_some()
     }
 
-    /// The rows in `r` visible, matching the filter and satisfying the highlight —
-    /// `TileCount::highlighted` — where `matched` is `r`'s [`Self::count_matched_range`]. Equal
-    /// to `matched` with no highlight, so the column is always present on the wire.
-    /// `highlighted ≤ matched ≤ visible` always holds.
+    /// The rows in `r` that are visible, match the filter and satisfy the highlight:
+    /// `TileCount::highlighted`. `matched` is `r`'s [`Self::count_matched_range`], returned as is
+    /// without a highlight. `highlighted ≤ matched ≤ visible` always holds.
     pub fn count_highlighted_range(&self, r: Range<u32>, matched: u64) -> u64 {
         match &self.highlight {
             None => matched,
@@ -306,15 +305,16 @@ impl EffectiveMask {
     }
 
     /// [`Self::count_range`] over each of `ranges`, each bitmap walked once
-    /// ([`mosaica_roaring::count_ranges`]).
+    /// ([`mosaica_roaring::RangeEnds`]).
     pub fn count_ranges(&self, ranges: &[Range<u32>]) -> Vec<u64> {
-        let mut counts = mosaica_roaring::count_ranges(self.base.bitmap(), ranges);
+        let ends = mosaica_roaring::RangeEnds::of(ranges);
+        let mut counts = ends.counts(self.base.bitmap());
         if !self.minus.is_empty() {
-            let minus = mosaica_roaring::count_ranges(&self.minus, ranges);
+            let minus = ends.counts(&self.minus);
             counts.iter_mut().zip(minus).for_each(|(c, m)| *c -= m);
         }
         if !self.plus.is_empty() {
-            let plus = mosaica_roaring::count_ranges(&self.plus, ranges);
+            let plus = ends.counts(&self.plus);
             counts.iter_mut().zip(plus).for_each(|(c, p)| *c += p);
         }
         counts
@@ -334,10 +334,8 @@ impl EffectiveMask {
         self.base.cardinality() - self.minus.cardinality() + self.plus.cardinality()
     }
 
-    /// The rows in `r` that are visible and match the request's filter — `TileCount::matched` —
-    /// where `visible` is `r`'s [`Self::count_range`]: `visible` is how many items in this tile
-    /// the principal may see, `matched` how many the filter admits. Without a filter the two
-    /// agree, and this returns `visible` rather than materialising a bitmap.
+    /// The rows in `r` that are visible and match the filter: `TileCount::matched`. `visible` is
+    /// `r`'s [`Self::count_range`], returned as is without a filter.
     pub fn count_matched_range(&self, r: Range<u32>, visible: u64) -> u64 {
         match &self.filter {
             None => visible,

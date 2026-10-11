@@ -79,16 +79,16 @@ pub struct RangeCounts {
     pub visited: u64,
 }
 
-/// Count every depth-`depth` cell in `cells` over the segment-local row ranges `parts`, each given
-/// with its segment and the segment's first row in view row space. `count` takes one segment's
-/// occupied cells as view row ranges, ascending and adjacent, and returns each one's count, so a
-/// batched count walks the set once per segment. Moves from one occupied cell to the next by
-/// binary search, so an empty cell costs nothing.
+/// Count `set` in every depth-`depth` cell in `cells` over the segment-local row ranges `parts`,
+/// each given with its segment and the segment's first row in view row space. One segment's
+/// occupied cells are counted together ([`CellSet::count_ranges`]), so the set is walked once per
+/// segment. Moves from one occupied cell to the next by binary search, so an empty cell costs
+/// nothing.
 pub fn count_by_ranges<'a>(
+    set: CellSet<'_>,
     parts: impl IntoIterator<Item = (&'a SegmentData, u32, Range<u32>)>,
     depth: u8,
     cells: Range<u64>,
-    count: &dyn Fn(&[Range<u32>]) -> Vec<u64>,
 ) -> RangeCounts {
     assert!(depth <= 16, "a cell deeper than 16 is not a row range");
     let shift = 32 - 2 * u32::from(depth);
@@ -116,7 +116,7 @@ pub fn count_by_ranges<'a>(
         if rows.is_empty() {
             continue;
         }
-        for (cell, n) in occupied.iter().zip(count(&rows)) {
+        for (cell, n) in occupied.iter().zip(set.count_ranges(&rows)) {
             if n > 0 {
                 found.push((*cell, n));
             }
@@ -634,12 +634,12 @@ pub(crate) fn count_chunk_by_ranges(
     prefixes: Range<u64>,
 ) -> RangeCounts {
     count_by_ranges(
+        set,
         segments
             .iter()
             .map(|&(segment, row_base)| (segment, row_base, 0..segment.row_count)),
         depth,
         prefixes,
-        &|rows| set.count_ranges(rows),
     )
 }
 

@@ -1496,8 +1496,7 @@ impl Engine {
         check_cancelled(&ask.cancel)?;
         // The blinding is total over the allocator's space; a failure means the manifest and
         // allocator disagree, and dropping the artifact is the fail-closed reading of that.
-        let Ok(mosaica_id) = crate::edited::artifact_id(&self.identity_key, pass.shard, entity)
-        else {
+        let Some(mosaica_id) = self.artifact_id(pass.shard, entity) else {
             return Ok(());
         };
         // From the composed mask, and only from it: every property below is a function of the

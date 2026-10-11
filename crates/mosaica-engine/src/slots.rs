@@ -760,7 +760,7 @@ impl Engine {
                 {
                     continue;
                 }
-                let Ok(id) = crate::edited::artifact_id(&self.identity_key, shard, entity) else {
+                let Some(id) = self.artifact_id(shard, entity) else {
                     continue;
                 };
                 at[ordinal as usize] = clusters.len() as u32;
