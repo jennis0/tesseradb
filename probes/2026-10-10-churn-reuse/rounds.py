@@ -42,8 +42,8 @@ def main() -> None:
     rows = [flat(json.loads(line)) for line in open(args[0])]
     if "--table" in sys.argv:
         print("| round | high water | rise | free | held | postings | × fresh | compaction s "
-              "| union ms, 1% / all | p50 ms, 1% / all |")
-        print("|---|---|---|---|---|---|---|---|---|---|")
+              "| union ms, 1% / all | p50 ms, 1% / all | p95 ms, 1% / all |")
+        print("|---|---|---|---|---|---|---|---|---|---|---|")
         for r in rows:
             print(
                 f"| {r['round']} | {r['entity_id_high_water']:,} | "
@@ -51,7 +51,8 @@ def main() -> None:
                 f"{r['free_ids']:,} | {r['held_ids']:,} | {r['postings_bytes']:,} | "
                 f"{r['postings_vs_fresh']:,.0f} | {r['fold_s'] or ''} | "
                 f"{r['narrow_union_ms']} / {r['broad_union_ms']} | "
-                f"{r['narrow_p50_ms']} / {r['broad_p50_ms']} |"
+                f"{r['narrow_p50_ms']} / {r['broad_p50_ms']} | "
+                f"{r['narrow_p95_ms']} / {r['broad_p95_ms']} |"
             )
         return
     out = csv.DictWriter(sys.stdout, FIELDS)

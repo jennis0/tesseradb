@@ -1,7 +1,8 @@
 # Sharding: several entity spaces in one process
 
-**Status:** design, 2026-10-09. Nothing in this document is built but stage 0's `count_ranges`. Each section says what the code
-does today and what changes.
+**Status:** design, 2026-10-09. Stages 0 and 1 are built: `count_ranges`, and reuse of a deleted
+item's number at the next tenancy; stage 1's churn on Tree of Life (§8.4) is still to run. Nothing
+else in this document is built. Each section says what the code does today and what changes.
 
 ## The limit
 
@@ -142,9 +143,12 @@ Modelled: an id whose holder turns over every 100 days, 1% daily churn, reaches 
 Ids issued from the pool land among other signatures' runs in the term index rather than in a run of
 their own, as edit-freed ids do today. Measured for edits on GeoNames (13.5 million items, rounds of
 6,748 moved items): the compacted base term index was 82,866 bytes after the two rounds on new ids
-and 82,674 to 82,930 bytes after the rounds on freed ones
-([write path](system/write-path.md#freed-entity-ids)). The cost of deletions and inserts at a
-higher churn is measured at the first stage's gate (§8.4).
+and 82,674 to 82,930 bytes after the rounds on freed ones ([write
+path](system/write-path.md#freed-entity-ids)). The cost of deletions and inserts at a higher churn
+was measured at the first stage's gate (§8.4) on GeoNames at one shard, deleting and inserting half
+the corpus ten times. The high water stopped rising after the second round. The term index's
+postings grew from 9 KB as built to 7 to 13 MB, and a grant's union from 3 to 13 ms to 10 to 22 ms.
+Viewport latency did not change (`probes/2026-10-10-churn-reuse/`).
 
 ### 1.5 What a client sees
 
@@ -863,7 +867,8 @@ on one shard, and it decides whether pool ids need handing out in runs (§4.1).
 | capacity: 2¹⁹ shards of about 2³² ids, about 2 × 10¹⁵ items | modelled | §2.1, §2.5 |
 | a session's visible set grows more slowly than the corpus | assumed; to be confirmed before any figure above 2³² items is promised | n/a |
 | selection batched per shard, where a request's tiles abut: 0.57 to 0.97 of selection per part for a viewer of 0.1% or 1% at depths 8 to 10; at depth 11 and deeper the count of 300,000 parts, 5.7 to 11.4 ms at N = 100, sets what N costs | measured, synthetic, one thread, 4 cores | `probes/2026-10-10-batched-selection/` |
-| the tile index on today's levels; every route at N on a built bundle; churn locality; the key filter; compaction per shard | not measured | §8 |
+| reused numbers, GeoNames at one shard, half the corpus deleted and inserted ten times: the high water stops rising after round 2; the term index's postings grow from 9 KB to 7 to 13 MB, and a grant's union from 3 to 13 ms to 10 to 22 ms; viewport latency unchanged | measured, one run, 4 cores | `probes/2026-10-10-churn-reuse/` |
+| the tile index on today's levels; every route at N on a built bundle; churn on Tree of Life and at several shards; pool ids handed out in runs; the key filter; compaction per shard | not measured | §8 |
 
 ## 10. Stages
 

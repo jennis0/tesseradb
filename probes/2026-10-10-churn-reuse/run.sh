@@ -21,3 +21,13 @@ cd "$REPO"
 python3 -m test_corpora.common.ingest_cycle --rung-dir "$LADDER/geonames" --work "$OUT/work" \
   --binary "$REPO/target/release/mosaica" --all-in-bundle "$LADDER/geonames/bundle" \
   --churn-rounds 10 --out "$OUT/churn-geonames.json"
+
+# The fresh and the churned bundle served back to back with no rounds, twice, so that the rounds'
+# latency can be read apart from the host's and the long-running server's:
+#
+#   for run in fresh churned fresh2 churned2; do ... --all-in-bundle <bundle> --churn-rounds 0 \
+#     --out "$OUT/ab-$run.json"; done
+#   python3 ab.py "$OUT"/ab-{fresh,churned,fresh2,churned2}.jsonl > ab.csv
+#
+# The churned bundle is the round-10 copy under "$OUT/work/churn/bundle", moved out before the
+# next run clears the work directory.
