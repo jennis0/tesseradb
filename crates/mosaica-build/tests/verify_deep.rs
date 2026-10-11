@@ -29,7 +29,8 @@ use mosaica_spatial::Bounds;
 use mosaica_store::flush::{write_flush_segment, FlushInput, FlushRow};
 use mosaica_store::layout::partition_dir;
 use mosaica_store::manifest::{
-    CurrentPointer, EntitySet, FileDigest, SegmentsManifest, TenancyBit,
+    CurrentPointer, EntitySet, FileDigest, PartitionManifest, SegmentsManifest, ShardRecord,
+    TenancyBit,
 };
 use mosaica_store::tenancy::bits_of;
 use mosaica_store::{write_segments_manifest, ShardLayout, StoreError};
@@ -163,7 +164,6 @@ fn built_bundle_with(root: &Path, n: u64, score: Option<Score>) {
         limit: None,
         strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -199,7 +199,7 @@ fn flushed_bundle_at(root: &Path, tenancy: u16) {
             .expect("SEGMENTS-0"),
     )
     .expect("SEGMENTS-0 parses");
-    let n = manifest.entity_id_high_water;
+    let n = seg0.only_shard().high_water;
     assert_eq!(n, N_ITEMS);
 
     // Two flushed entities.
@@ -273,23 +273,27 @@ fn flushed_bundle_at(root: &Path, tenancy: u16) {
         tenancy_index.push(TenancyBit { bit, path: rel });
     }
 
-    let mut segments = seg0.segments.clone();
+    let mut segments = seg0.only_shard().segments.clone();
     segments.push(flush.segment.clone());
 
-    let manifest_1 = SegmentsManifest {
+    let mut manifest_1 = SegmentsManifest::empty();
+    manifest_1.partition = PartitionManifest {
+        entity_id_low_water: seg0.partition.entity_id_low_water,
+        layers: seg0.partition.layers.clone(),
+        layer_tombstones: seg0.partition.layer_tombstones.clone(),
+        layer_registry_version: seg0.partition.layer_registry_version,
+        dict_extents: seg0.partition.dict_extents.clone(),
+        files,
+        ..PartitionManifest::empty()
+    };
+    *manifest_1.only_shard_mut() = ShardRecord {
         watermark: flush.watermark,
-        entity_id_high_water: flush.entity_id_high_water,
-        entity_id_low_water: seg0.entity_id_low_water,
-        layers: seg0.layers.clone(),
-        layer_tombstones: seg0.layer_tombstones.clone(),
-        layer_registry_version: seg0.layer_registry_version,
+        high_water: flush.entity_id_high_water,
         segments,
         deltas: vec![delta_rel],
-        dict_extents: seg0.dict_extents.clone(),
         tombstones: EntitySet::of(&croaring::Bitmap::of(&[DELETED])),
         tenancy_index,
-        files,
-        ..SegmentsManifest::empty()
+        ..ShardRecord::empty(ShardId::ZERO)
     };
     write_segments_manifest(&prefix_dir, "default", 1, &manifest_1)
         .expect("SEGMENTS-1.json commits");
@@ -470,7 +474,9 @@ fn a_row_is_checked_at_its_numbers_tenancy_in_the_index() {
     let deep = verify_deep(&root, &VerifyOpts::default()).expect("and verifies deep");
     assert_eq!((deep.raised_numbers, deep.retired_numbers), (1, 0));
 
-    edit_side_manifest(&root, |m| m["tenancy_index"] = serde_json::json!([]));
+    edit_side_manifest(&root, |m| {
+        m["shards"]["records"][0]["tenancy_index"] = serde_json::json!([])
+    });
     let refused = verify(&root);
     assert!(
         matches!(refused, Err(BuildError::Invalid(_))),
@@ -499,7 +505,7 @@ fn a_retired_number_below_the_highest_tenancy_is_refused() {
     let root = bundle_root(&temp);
     let retired = EntitySet::of(&croaring::Bitmap::of(&[DELETED]));
     edit_side_manifest(&root, |m| {
-        m["retired_numbers"] = serde_json::to_value(&retired).unwrap()
+        m["shards"]["records"][0]["retired_numbers"] = serde_json::to_value(&retired).unwrap()
     });
     let refused = verify_deep(&root, &VerifyOpts::default());
     assert!(
@@ -911,7 +917,6 @@ fn a_missing_scoped_render_lane_is_refused_and_an_intact_one_is_counted() {
         limit: None,
         strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

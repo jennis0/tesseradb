@@ -441,7 +441,7 @@ pub(crate) fn for_each_flushed_value(
         // Rendered alone: every view's rows carry the value, so each entity is read from the
         // first view that holds it.
         for partition in generation.bundle.partitions.values() {
-            for view in partition.views.values() {
+            for view in partition.only_shard().views.values() {
                 let mut read = croaring::Bitmap::new();
                 view.for_each_rendered(&declared.name, &wanted, &mut |entity, value| {
                     read.add(entity);

@@ -316,7 +316,6 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -414,7 +413,6 @@ pub fn build_corpus_fixture(
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -471,7 +469,6 @@ pub fn build_corpus_fixture_with_layers(
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: config.layers,
         layer_inputs: config.layer_sources,
         scoped_layers: Default::default(),
@@ -520,7 +517,6 @@ pub fn build_with_layers(
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: config.layers,
         layer_inputs: config.layer_sources,
         scoped_layers: Default::default(),
@@ -566,7 +562,8 @@ pub fn source_to_new_map(bundle_root: &Path, prefix: &str) -> BTreeMap<u64, u64>
     let bundle = open_bundle(bundle_root).unwrap();
     let part = &bundle.partitions["default"];
     let runs = part
-        .manifest
+        .only_shard()
+        .record
         .unique_indexes
         .iter()
         .find(|runs| runs.attribute == "id")
@@ -610,9 +607,13 @@ pub fn set_tenancy(bundle_root: &Path, number: EntityId, tenancy: u16) {
         let name = file.file_name().unwrap().to_str().unwrap();
         let rel = format!("{tenancy_rel}/{name}");
         manifest
+            .partition
             .files
             .insert(rel.clone(), mosaica_store::digest_of(&file).unwrap());
-        manifest.tenancy_index.push(TenancyBit { bit, path: rel });
+        manifest
+            .only_shard_mut()
+            .tenancy_index
+            .push(TenancyBit { bit, path: rel });
     }
     std::fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
 }

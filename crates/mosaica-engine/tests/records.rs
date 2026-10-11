@@ -48,7 +48,7 @@ use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
-use mosaica_types::{AttrLocalId, EntityId, IdentityKey, MosaicaId, ShardId};
+use mosaica_types::{AttrLocalId, EntityId, IdentityKey, MosaicaId};
 
 const N: u64 = 2000;
 const GEO: &str = "geo";
@@ -481,7 +481,6 @@ fn build_bundle_of(dir: &Path, key: IdentityKey, n: u64) -> PathBuf {
         limit: None,
         strict: false,
         identity_key: key,
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -998,7 +997,9 @@ fn a_view_of_several_segments_is_read_whole_in_both_orders() {
     publish_buffered(&fx.engine);
     fx.ingest("b2", &(N + 60..N + 150).collect::<Vec<_>>());
     publish_buffered(&fx.engine);
-    let segments = fx.engine.generation().bundle.partitions["default"].views["s0"]
+    let segments = fx.engine.generation().bundle.partitions["default"]
+        .only_shard()
+        .views["s0"]
         .segments
         .len();
     assert!(segments >= 3, "the view holds {segments} segments");
@@ -1935,7 +1936,7 @@ fn a_joined_item_whose_own_record_is_unflushed_has_null_record_fields() {
     faults.await_arrivals(PauseSite::BeforeManifestPublish, 2, Duration::from_secs(30));
 
     let generation = engine.generation();
-    let views = &generation.bundle.partitions["default"].views;
+    let views = &generation.bundle.partitions["default"].only_shard().views;
     assert!(
         views[GEO].row_space.row_of(joiner).is_some(),
         "the join row published"
@@ -2437,7 +2438,9 @@ fn a_merge_and_a_flush_between_two_pages_of_one_filtered_response_keep_it_exact(
 fn every_row_is_read_once_across_stretch_boundaries() {
     let n = 30_000u64;
     let (_tmp, engine) = thirty_thousand(3);
-    let segments = engine.generation().bundle.partitions["default"].views["s0"]
+    let segments = engine.generation().bundle.partitions["default"]
+        .only_shard()
+        .views["s0"]
         .segments
         .len();
     assert!(segments >= 3, "the view holds {segments} segments");
@@ -3635,7 +3638,9 @@ fn a_rendered_filter_is_exact_across_segments_and_chunks() {
         );
         publish_buffered(&fx.engine);
     }
-    let segments = fx.engine.generation().bundle.partitions["default"].views["s0"]
+    let segments = fx.engine.generation().bundle.partitions["default"]
+        .only_shard()
+        .views["s0"]
         .segments
         .len();
     assert!(segments >= 4, "the view holds {segments} segments");

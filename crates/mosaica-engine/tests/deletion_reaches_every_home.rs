@@ -43,7 +43,7 @@ use mosaica_build::{build, BuildArgs};
 use mosaica_engine::{Engine, EngineConfig, ViewportRequest};
 use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_store::read::{open_bundle, ColumnsRef, ScalarSlice};
-use mosaica_types::{AttrLocalId, EntityId, ShardId, TermId};
+use mosaica_types::{AttrLocalId, EntityId, TermId};
 
 use homes::Home;
 
@@ -271,7 +271,6 @@ fn build_fixture_with_every_home(out: &Path, tmp: &Path, n: u64) {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -319,7 +318,7 @@ fn segment_dirs(root: &Path) -> Vec<PathBuf> {
     let bundle = open_bundle(root).expect("the bundle opens");
     let prefix = root.join(current_prefix(root));
     bundle.partitions["default"]
-        .manifest
+        .only_shard().record
         .segments
         .iter()
         .map(|segment| prefix.join(common::SHARD.segment_rel(&segment.view, &segment.seg_id)))
@@ -432,7 +431,7 @@ fn every_home_byte(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 /// `Home::Row`: the row this entity resolves to, through the only legal entity → row path (I4).
 fn row_of(root: &Path, entity: EntityId) -> Option<u32> {
     let bundle = open_bundle(root).expect("the bundle opens");
-    bundle.partitions["default"].views["s0"]
+    bundle.partitions["default"].only_shard().views["s0"]
         .row_space
         .row_of(entity)
         .map(|row| row.raw())

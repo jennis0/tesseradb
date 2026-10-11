@@ -95,23 +95,31 @@ pub fn build_bundle(root: &Path, n: u64) {
     }
 
     let segments_manifest = SegmentsManifest {
-        watermark: n,
-        entity_id_high_water: n,
-        segments: vec![SegmentDescriptor {
-            incarnation: 0,
-            view: VIEW.to_string(),
-            seg_id: "seg0".to_string(),
-            row_count: n as u32,
-            entity_lo: 0,
-            entity_hi: n.saturating_sub(1),
-        }],
-        deltas: vec![],
-        dict_extents: vec![],
-        tombstones: EntitySet::default(),
-        deny: EntitySet::default(),
-        vocabulary_extensions: vec![],
-        files,
-        ..SegmentsManifest::empty()
+        partition: mosaica_store::manifest::PartitionManifest {
+            dict_extents: vec![],
+            vocabulary_extensions: vec![],
+            files,
+            ..mosaica_store::manifest::PartitionManifest::empty()
+        },
+        shards: mosaica_store::manifest::Shards {
+            size: mosaica_types::SHARD_SIZE_DEFAULT,
+            records: vec![mosaica_store::manifest::ShardRecord {
+                watermark: n,
+                high_water: n,
+                segments: vec![SegmentDescriptor {
+                    incarnation: 0,
+                    view: VIEW.to_string(),
+                    seg_id: "seg0".to_string(),
+                    row_count: n as u32,
+                    entity_lo: 0,
+                    entity_hi: n.saturating_sub(1),
+                }],
+                deltas: vec![],
+                tombstones: EntitySet::default(),
+                deny: EntitySet::default(),
+                ..mosaica_store::manifest::ShardRecord::empty(mosaica_types::ShardId::ZERO)
+            }],
+        },
     };
     fs::write(
         partition_dir.join("SEGMENTS-0.json"),
@@ -125,12 +133,10 @@ pub fn build_bundle(root: &Path, n: u64) {
         declared_scalars: vec![],
         vocabularies: vec![],
         small_term_threshold: 32,
-        entity_id_high_water: n,
         identity: IdentityDescriptor {
             construction: IDENTITY_CONSTRUCTION.to_string(),
             rounds: IDENTITY_ROUNDS,
             key: "0123456789abcdef0123456789abcdef".to_string(),
-            shard_id: ShardId::ZERO,
         },
         groups: Vec::new(),
         views: vec![ViewDescriptor {
@@ -181,7 +187,7 @@ pub fn flush_segment(
     entity_lo: u64,
     count: u64,
 ) -> (SegmentData, SegmentExtent) {
-    let row_base = bundle.partitions[PARTITION].views[VIEW]
+    let row_base = bundle.partitions[PARTITION].only_shard().views[VIEW]
         .row_space
         .total_rows() as u32;
     let seg_id = format!("seg-{entity_lo}-{count}");
@@ -235,8 +241,9 @@ pub fn flush_segment(
 /// `added` entities the caller is publishing. The `files` map is carried forward unchanged: these
 /// tests exercise generation construction, not verification, which happened at `open_bundle`.
 pub fn next_manifest(bundle: &Bundle, added: u64) -> SegmentsManifest {
-    let mut manifest = bundle.partitions[PARTITION].manifest.clone();
-    manifest.watermark += added;
-    manifest.entity_id_high_water += added;
+    let mut manifest = bundle.partitions[PARTITION].side_manifest();
+    let record = manifest.only_shard_mut();
+    record.watermark += added;
+    record.high_water += added;
     manifest
 }

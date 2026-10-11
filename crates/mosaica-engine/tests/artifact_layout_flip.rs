@@ -182,7 +182,7 @@ fn the_fold_flips_a_scattered_level_and_the_answers_do_not_move() {
         .bundle
         .partitions
         .values()
-        .flat_map(|p| p.manifest.derived_extents.iter().cloned())
+        .flat_map(|p| p.only_shard().record.derived_extents.iter().cloned())
         .filter(|e| matches!(e.form, mosaica_store::manifest::DerivedForm::RowColumn { .. }))
         .collect();
     assert_eq!(
@@ -208,7 +208,8 @@ fn the_fold_flips_a_scattered_level_and_the_answers_do_not_move() {
         .partitions
         .values()
         .map(|p| {
-            p.manifest
+            p.only_shard()
+                .record
                 .derived_extents
                 .iter()
                 .filter(|e| e.form == mosaica_store::manifest::DerivedForm::TileIndex)

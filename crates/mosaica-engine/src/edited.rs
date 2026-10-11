@@ -164,6 +164,7 @@ pub(crate) fn holds(generation: &Generation, entity: EntityId) -> bool {
     generation.buffer.contains(entity)
         || generation.bundle.partitions.values().any(|partition| {
             partition
+                .only_shard()
                 .views
                 .values()
                 .any(|data| data.row_space.row_of(entity).is_some())
@@ -318,7 +319,7 @@ pub(crate) fn number_named(
     generation: &Generation,
     id: MosaicaId,
 ) -> Option<EntityId> {
-    let shard = generation.bundle.manifest.identity.shard_id;
+    let shard = generation.bundle.only_shard().id;
     let (number, current) = generation.tenancy.number_named(key, shard, id)?;
     current.then_some(number)
 }
@@ -330,7 +331,7 @@ pub(crate) fn ids_of_numbers(
     generation: &Generation,
     numbers: &[EntityId],
 ) -> Result<Vec<MosaicaId>, StoreError> {
-    let shard = generation.bundle.manifest.identity.shard_id;
+    let shard = generation.bundle.only_shard().id;
     let tenancies = generation.tenancy.of_each(numbers.iter().copied());
     numbers
         .iter()
@@ -353,19 +354,21 @@ pub(crate) fn id_at(
     key.forward(ItemHigh::new(shard, tenancy), number)
 }
 
-/// The entity `id` names in `shard` as [`crate::Engine::artifact_id`] forms it, or `None` where it
-/// names none.
+/// The shard an artifact's or a layer's `mosaica_id` is formed in.
+pub(crate) const ARTIFACT_SHARD: ShardId = ShardId::ZERO;
+
+/// The entity `id` names as [`crate::Engine::artifact_id`] forms it, or `None` where it names none.
 /// Whether that entity is an artifact is the caller's question.
-pub(crate) fn artifact_named(key: &IdentityKey, shard: ShardId, id: MosaicaId) -> Option<EntityId> {
+pub(crate) fn artifact_named(key: &IdentityKey, id: MosaicaId) -> Option<EntityId> {
     let (high, entity) = key.invert(id)?;
-    (high == ItemHigh::new(shard, Tenancy::ZERO)).then_some(entity)
+    (high == ItemHigh::new(ARTIFACT_SHARD, Tenancy::ZERO)).then_some(entity)
 }
 
 impl crate::Engine {
-    /// The `mosaica_id` of the artifact or layer `entity` in `shard`, or `None` where `entity`
-    /// lies outside the identity space.
-    pub(crate) fn artifact_id(&self, shard: ShardId, entity: EntityId) -> Option<MosaicaId> {
-        id_at(&self.identity_key, shard, Tenancy::ZERO, entity).ok()
+    /// The `mosaica_id` of the artifact or layer `entity`, or `None` where `entity` lies outside
+    /// the identity space.
+    pub(crate) fn artifact_id(&self, entity: EntityId) -> Option<MosaicaId> {
+        id_at(&self.identity_key, ARTIFACT_SHARD, Tenancy::ZERO, entity).ok()
     }
 
     /// The `mosaica_id` of each of `entities`, against `generation`: its number's permutation.

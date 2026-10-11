@@ -336,6 +336,11 @@ class BundleView:
     segment_bytes: dict[str, int]
 
 
+def _shard_records(view: BundleView) -> list[dict]:
+    """Every shard's record in the latest side-manifest of every partition."""
+    return [record for m in view.latest.values() for record in m["shards"]["records"]]
+
+
 def read_bundle(bundle_root: Path) -> BundleView:
     live = json.loads((bundle_root / "CURRENT").read_text())["prefix"]
     prefixes = tuple(
@@ -389,15 +394,16 @@ def read_bundle(bundle_root: Path) -> BundleView:
 
     segment_bytes: dict[str, int] = {}
     for partition, manifest in latest.items():
-        for seg in manifest["segments"]:
-            seg_dir = (
-                shard_dir(prefix_dir, partition)
-                / "views"
-                / Path(*seg["view"].split(":", 1))
-                / "segments"
-                / seg["seg_id"]
-            )
-            segment_bytes[seg["seg_id"]] = _du(seg_dir) if seg_dir.exists() else 0
+        for record in manifest["shards"]["records"]:
+            for seg in record["segments"]:
+                seg_dir = (
+                    shard_dir(prefix_dir, partition, record["id"])
+                    / "views"
+                    / Path(*seg["view"].split(":", 1))
+                    / "segments"
+                    / seg["seg_id"]
+                )
+                segment_bytes[seg["seg_id"]] = _du(seg_dir) if seg_dir.exists() else 0
 
     return BundleView(
         prefixes=prefixes,
@@ -526,19 +532,7 @@ def observe(
         )
 
     # -- the coalesce-bounded axes and the merge ladder -----------------------------------------
-    seg_count = 0
-    for partition, manifest in view.latest.items():
-        axes = {
-            "deltas": len(manifest["deltas"]),
-            "record_extents": len(manifest["record_extents"]),
-            "text_extents": len(manifest["text_extents"]),
-        }
-        for name, count in axes.items():
-            assert count <= AXIS_CEILING, (
-                f"{label}: `{name}` reached {count} entries (ceiling {AXIS_CEILING}) — this axis "
-                f"grows one per flush and only the entity-space coalesce bounds it; a working "
-                f"pass stays under ~8·log8(flushes)"
-            )
+    for manifest in view.latest.values():
         # The dictionary axis is bounded like the other five. It ratcheted 6 -> 58 across 24 fold
         # cycles when this tier first ran, and the cause was not the tiering the first reading
         # blamed: a fold digest-names every file it carries into the new prefix's MANIFEST, and
@@ -550,11 +544,24 @@ def observe(
             f"{label}: `dict_extents` reached {dicts} entries (ceiling {AXIS_CEILING}) — the "
             f"coalesce has stopped bounding this axis, or a publication has frozen it again"
         )
+    seg_count = 0
+    for record in _shard_records(view):
+        axes = {
+            "deltas": len(record["deltas"]),
+            "record_extents": len(record["record_extents"]),
+            "text_extents": len(record["text_extents"]),
+        }
+        for name, count in axes.items():
+            assert count <= AXIS_CEILING, (
+                f"{label}: `{name}` reached {count} entries (ceiling {AXIS_CEILING}) — this axis "
+                f"grows one per flush and only the entity-space coalesce bounds it; a working "
+                f"pass stays under ~8·log8(flushes)"
+            )
         # The attribute axis is one list over every indexed column, bounded per column
         # (`AXIS_CEILING`'s note): the coalesce holds each column, keyword columns included,
         # under the flat ceiling. An extent naming a column the corpus never declared is a
         # foreign writer.
-        per_column = collections.Counter(e["column"] for e in manifest["attr_extents"])
+        per_column = collections.Counter(e["column"] for e in record["attr_extents"])
         undeclared = set(per_column) - declared_columns
         assert not undeclared, (
             f"{label}: `attr_extents` names column(s) {sorted(undeclared)} the corpus does not "
@@ -566,14 +573,14 @@ def observe(
                 f"{AXIS_CEILING}) — this column grows one extent per flush and only the "
                 f"entity-space coalesce bounds it; a working pass stays under ~8·log8(flushes)"
             )
-        segments = manifest["segments"]
+        segments = record["segments"]
         seg_count += len(segments)
         key_runs = {
             f"unique index `{index['attribute']}`": index["live"]
-            for index in manifest["unique_indexes"]
+            for index in record["unique_indexes"]
         }
         for direction in ("by_number", "by_entity"):
-            key_runs[f"edited items {direction}"] = manifest["edited_items"][direction]["live"]
+            key_runs[f"edited items {direction}"] = record["edited_items"][direction]["live"]
         for axis, live in key_runs.items():
             assert len(live) <= AXIS_CEILING, (
                 f"{label}: the {axis} reached {len(live)} live runs (ceiling {AXIS_CEILING}) — "
@@ -615,7 +622,7 @@ def observe(
     # The durable record may never trail the served one: every publication commits its manifest
     # *before* it swaps, so at any instant disc >= wire — a shortfall here is a manifest written
     # from plan-time state rather than live state.
-    disc_watermark = min(m["watermark"] for m in view.latest.values())
+    disc_watermark = min(r["watermark"] for r in _shard_records(view))
     assert disc_watermark >= watermark, (
         f"{label}: the side-manifest watermark {disc_watermark} trails the live {watermark} — "
         f"the durable record under-reports, and a reboot serves it"
@@ -671,13 +678,13 @@ def observe(
         "segments": seg_count,
         "non_base": len(non_base),
         "non_base_kb": non_base_bytes // 1024,
-        "deltas": sum(len(m["deltas"]) for m in view.latest.values()),
+        "deltas": sum(len(r["deltas"]) for r in _shard_records(view)),
         "dicts": sum(len(m["dict_extents"]) for m in view.latest.values()),
-        "attrs": sum(len(m["attr_extents"]) for m in view.latest.values()),
-        "records": sum(len(m["record_extents"]) for m in view.latest.values()),
-        "texts": sum(len(m["text_extents"]) for m in view.latest.values()),
+        "attrs": sum(len(r["attr_extents"]) for r in _shard_records(view)),
+        "records": sum(len(r["record_extents"]) for r in _shard_records(view)),
+        "texts": sum(len(r["text_extents"]) for r in _shard_records(view)),
         "runs": sum(
-            len(index["live"]) for m in view.latest.values() for index in m["unique_indexes"]
+            len(index["live"]) for r in _shard_records(view) for index in r["unique_indexes"]
         ),
         "side_n": max((n for (_pfx, _p, n) in t.side_seen if _pfx == view.live_prefix), default=0),
         "overlay": f"{overlay['depth']}/{overlay['retirable']}",

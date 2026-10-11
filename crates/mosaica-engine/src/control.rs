@@ -7,7 +7,7 @@ use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_store::manifest::DeclaredScalar;
 use mosaica_store::unique::{KeyKind, UniqueKey};
 use mosaica_store::StoreError;
-use mosaica_types::{EntityId, MosaicaId, ShardId, TermId};
+use mosaica_types::{EntityId, MosaicaId, TermId};
 
 use crate::edited::Stamp;
 use crate::engine::Engine;
@@ -297,6 +297,7 @@ impl Engine {
         let generation = self.generation();
         generation.bundle.partitions.values().any(|partition| {
             partition
+                .only_shard()
                 .views
                 .get(view)
                 .is_some_and(|data| data.row_space.row_of(entity).is_some())
@@ -424,17 +425,15 @@ impl Engine {
         let entity = self.write.register_layer(declaration)?;
         // The blinding is total over the space the allocator will issue, so a row-less entity is
         // always inside it and this conversion cannot fail in practice.
-        let generation = self.generation();
-        self.issued_id(generation.bundle.manifest.identity.shard_id, entity)
+        self.issued_id(entity)
     }
 
     /// The `mosaica_id` of an entity a layer write just allocated, or the write's refusal.
     fn issued_id(
         &self,
-        shard: ShardId,
         entity: EntityId,
     ) -> std::result::Result<MosaicaId, crate::write::AcceptError> {
-        self.artifact_id(shard, entity).ok_or_else(|| {
+        self.artifact_id(entity).ok_or_else(|| {
             crate::write::AcceptError::Exec(mosaica_lifecycle::ExecError::LayerRefused {
                 detail: "an allocated entity id lies outside the identity space".to_string(),
             })
@@ -601,11 +600,10 @@ impl Engine {
         // the executor, so this passes over the empty set the record carries.
         self.refuse_rowless(artifacts.iter().map(|a| &a.members))?;
         let batch = self.write.publish_artifacts(layer, level, artifacts, at)?;
-        let shard = self.generation().bundle.manifest.identity.shard_id;
         let mosaica_ids = batch
             .entities
             .into_iter()
-            .map(|entity| self.issued_id(shard, entity))
+            .map(|entity| self.issued_id(entity))
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(PublishedArtifacts {
             mosaica_ids,
@@ -656,12 +654,11 @@ impl Engine {
     ) -> std::result::Result<Vec<GrownMembership>, crate::write::AcceptError> {
         self.refuse_rowless(joins.iter().map(|j| &j.joining))?;
         let grown = self.write.grow_memberships(layer, level, joins, at)?;
-        let shard = self.generation().bundle.manifest.identity.shard_id;
         grown
             .into_iter()
             .map(|receipt| {
                 Ok(GrownMembership {
-                    mosaica_id: self.issued_id(shard, receipt.entity)?,
+                    mosaica_id: self.issued_id(receipt.entity)?,
                     joined: receipt.joined,
                     filled: receipt.filled,
                     left: receipt.left,
@@ -744,6 +741,7 @@ pub(crate) fn holds_item(generation: &Generation, entity: EntityId) -> bool {
     generation.buffer.contains(entity)
         || generation.bundle.partitions.values().any(|partition| {
             partition
+                .only_shard()
                 .views
                 .values()
                 .any(|view| view.row_space.row_of(entity).is_some())

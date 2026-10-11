@@ -17,7 +17,7 @@
 //! manifest, so a lookup touches only the runs its keys fall in, and a page is checked the first
 //! time it is read.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -29,7 +29,9 @@ use crate::key_index::{
     keyword_key, merge_runs, signed_key, unsigned_key, DuplicateKey, KeyRun, KeyRunWriter,
     KeySpill, WrittenRun,
 };
-use crate::manifest::{BaseKeyRun, DeclaredScalar, Manifest, SegmentsManifest, UniqueIndexRuns};
+use crate::manifest::{
+    BaseKeyRun, DeclaredScalar, Manifest, PartitionManifest, ShardRecord, UniqueIndexRuns,
+};
 
 /// The most entries one run file holds before a writer starts the next, past the entities of its
 /// last key. At most about 12 bytes an entry, an integer run is at most about 770 MiB.
@@ -659,24 +661,42 @@ impl UniqueIndex {
     }
 }
 
-/// Every unique column's index in one partition, by attribute name.
+/// Every unique column's index in one shard, by attribute name.
 #[derive(Default)]
 pub struct UniqueIndexes {
     by_attribute: BTreeMap<String, UniqueIndex>,
 }
 
 impl UniqueIndexes {
-    /// The indexes `segments` lists, typed by `manifest`'s declarations, sharing every run
-    /// `reuse` holds. Reads no file. An index for a column the manifest does not declare, or
-    /// declares at a type that cannot be unique, is refused.
+    /// The indexes `record` lists, typed by `manifest`'s declarations, sharing every run `reuse`
+    /// holds. Reads no file. An index for a column `partition` does not declare unique, or that
+    /// the manifest declares at a type that cannot be unique, is refused, as is a column declared
+    /// unique that the shard holds no index for.
     pub fn open(
         manifest: &Manifest,
-        segments: &SegmentsManifest,
+        partition: &PartitionManifest,
+        record: &ShardRecord,
         prefix_dir: &Path,
         reuse: Option<&UniqueIndexes>,
     ) -> Result<UniqueIndexes> {
+        let indexed: BTreeSet<&str> = record
+            .unique_indexes
+            .iter()
+            .map(|runs| runs.attribute.as_str())
+            .collect();
+        let declared: BTreeSet<&str> =
+            partition.unique_columns.iter().map(String::as_str).collect();
+        if indexed != declared {
+            return Err(StoreError::MalformedBundle {
+                detail: format!(
+                    "shard {} indexes columns {indexed:?} and the partition declares {declared:?} \
+                     unique; restore the side-manifest that named both, or rebuild",
+                    record.id.raw()
+                ),
+            });
+        }
         let mut by_attribute = BTreeMap::new();
-        for runs in &segments.unique_indexes {
+        for runs in &record.unique_indexes {
             let kind = manifest
                 .declared_scalars
                 .iter()
@@ -707,16 +727,13 @@ impl UniqueIndexes {
     }
 }
 
-/// The served schema's unique flags, set from the indexes the partition manifest lists: a column
-/// is unique exactly where an index exists for it. The side manifest is newer than
-/// `MANIFEST.json`, so a declaration made or removed at a running service shows here first.
-pub fn with_unique_flags(manifest: &Manifest, segments: &SegmentsManifest) -> Manifest {
+/// The served schema's unique flags, set from the columns the side-manifest declares unique. The
+/// side-manifest is newer than `MANIFEST.json`, so a declaration made or removed at a running
+/// service shows here first.
+pub fn with_unique_flags(manifest: &Manifest, partition: &PartitionManifest) -> Manifest {
     let mut manifest = manifest.clone();
     for declared in &mut manifest.declared_scalars {
-        declared.unique = segments
-            .unique_indexes
-            .iter()
-            .any(|runs| runs.attribute == declared.name);
+        declared.unique = partition.unique_columns.contains(&declared.name);
     }
     manifest
 }

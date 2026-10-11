@@ -159,6 +159,7 @@ fn open_fixture(args: &Args) -> Fixture {
             .expect("segments manifest parses");
 
     let layer = manifest
+        .partition
         .layers
         .iter()
         .find(|l| l.declaration.name == args.layer)
@@ -170,6 +171,7 @@ fn open_fixture(args: &Args) -> Fixture {
         .expect("the layer names a view")
         .clone();
     let segments: Vec<_> = manifest
+        .only_shard()
         .segments
         .iter()
         .filter(|s| s.view == view)
@@ -214,6 +216,7 @@ fn open_fixture(args: &Args) -> Fixture {
     assert_eq!(morton.len(), row_count as usize);
 
     let extents: Vec<_> = manifest
+        .only_shard()
         .membership_extents
         .iter()
         .filter(|e| e.layer == args.layer && e.level == args.level)
@@ -951,16 +954,23 @@ fn check_whole(args: &Args, fixture: &Fixture, shard: &ShardBuild, index: &TileI
 
     let level_version = fixture
         .manifest
+        .only_shard()
         .level_versions
         .iter()
         .find(|v| v.layer == args.layer && v.level == args.level)
         .map(|v| v.version);
-    if let Some(extent) = fixture.manifest.derived_extents.iter().find(|e| {
-        e.form == mosaica_store::manifest::DerivedForm::TileIndex
-            && e.layer == args.layer
-            && e.level == args.level
-            && e.view.as_deref() == Some(fixture.view.as_str())
-    }) {
+    if let Some(extent) = fixture
+        .manifest
+        .only_shard()
+        .derived_extents
+        .iter()
+        .find(|e| {
+            e.form == mosaica_store::manifest::DerivedForm::TileIndex
+                && e.layer == args.layer
+                && e.level == args.level
+                && e.view.as_deref() == Some(fixture.view.as_str())
+        })
+    {
         let written = TileIndex::open(&fixture.prefix_dir.join(&extent.path))
             .expect("fold-written index opens");
         let bytes_identical = written.as_bytes() == index.as_bytes();

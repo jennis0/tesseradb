@@ -218,7 +218,7 @@ impl Engine {
         let mut views: std::collections::BTreeMap<&str, Option<&mosaica_store::read::ViewData>> =
             std::collections::BTreeMap::new();
         for partition in generation.bundle.partitions.values() {
-            for (name, data) in &partition.views {
+            for (name, data) in &partition.only_shard().views {
                 views
                     .entry(name.as_str())
                     .and_modify(|held| *held = None)
@@ -344,8 +344,7 @@ impl Engine {
         let (session, generation) = (served.session, served.generation);
         let (view, view_data) = (served.name, served.data);
         let (segments, denied) = (&served.segments[..], served.denied);
-        let shard = generation.bundle.manifest.identity.shard_id;
-        let Some(entity) = crate::edited::artifact_named(&self.identity_key, shard, id) else {
+        let Some(entity) = crate::edited::artifact_named(&self.identity_key, id) else {
             return Ok(None);
         };
 
@@ -480,7 +479,7 @@ impl Engine {
             .bundle
             .partitions
             .values()
-            .filter(|partition| partition.views.contains_key(view))
+            .filter(|partition| partition.only_shard().views.contains_key(view))
             .count();
         if carriers > 1 {
             return Err(EngineError::MultiPartitionView(view.to_string()));
@@ -489,7 +488,7 @@ impl Engine {
             .bundle
             .partitions
             .values()
-            .find_map(|partition| partition.views.get(view))
+            .find_map(|partition| partition.only_shard().views.get(view))
             .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
 
         let mut probe = Probe::new();
@@ -1496,7 +1495,7 @@ impl Engine {
         check_cancelled(&ask.cancel)?;
         // The blinding is total over the allocator's space; a failure means the manifest and
         // allocator disagree, and dropping the artifact is the fail-closed reading of that.
-        let Some(mosaica_id) = self.artifact_id(pass.shard, entity) else {
+        let Some(mosaica_id) = self.artifact_id(entity) else {
             return Ok(());
         };
         // From the composed mask, and only from it: every property below is a function of the
@@ -1618,7 +1617,6 @@ pub(super) struct ArtifactPass<'a> {
     pub(super) locator: crate::derived::RowLocator<'a>,
     /// The postings, which are the generation's, not any layer's.
     pub(super) source: crate::containment::PartitionSource<'a>,
-    pub(super) shard: mosaica_types::ShardId,
 }
 
 impl<'a> ArtifactPass<'a> {
@@ -1635,7 +1633,6 @@ impl<'a> ArtifactPass<'a> {
             dependency_served,
             locator: crate::derived::RowLocator::new(served.segments.clone()),
             source: served.generation.partition_source(),
-            shard: served.generation.bundle.manifest.identity.shard_id,
         }
     }
 }

@@ -39,7 +39,7 @@ pub fn run(ctx: &Context, zooms: &[u8], coverages: &[f64], seed: u64) -> Result<
         let Some(partition) = bundle.partitions.values().next() else {
             continue;
         };
-        let Some(view) = partition.views.values().next() else {
+        let Some(view) = partition.only_shard().views.values().next() else {
             continue;
         };
         let Some(segment) = view.segments.first() else {

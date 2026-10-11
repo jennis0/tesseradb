@@ -77,7 +77,7 @@ fn live_rows_of(generation: &Generation) -> u64 {
         .bundle
         .partitions
         .values()
-        .flat_map(|partition| partition.manifest.segments.iter())
+        .flat_map(|partition| partition.only_shard().record.segments.iter())
         .map(|descriptor| u64::from(descriptor.row_count))
         .sum()
 }
@@ -91,7 +91,7 @@ fn segment_counts_of(generation: &Generation) -> Vec<ViewSegments> {
         .partitions
         .iter()
         .flat_map(|(partition, data)| {
-            data.views
+            data.only_shard().views
                 .iter()
                 .map(move |(view, view_data)| ViewSegments {
                     partition: partition.clone(),

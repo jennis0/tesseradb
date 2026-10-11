@@ -398,12 +398,11 @@ class Bundle:
                 raise ValueError(f"view '{view_id}' declares no quantisation extent")
 
         # `identity` (contracts r6, docs/evidence/memos/2026-07-30-tessera-id-construction.md
-        # §2): the bundle's key and the §13.3 shard prefix `mosaica_id` is built
-        # under. A bundle that *does* carry `identity` is read strictly, per the memo's
-        # fail-closed rule: bad construction/rounds/key/shard_id all refuse, none
-        # default. An absent object takes the PRE_R6_IDENTITY_FALLBACK_REMOVE_AT scaffold
-        # path above instead of raising -- see its docstring for why that is still
-        # tolerated and when it must go.
+        # §2): the bundle's key `mosaica_id` is built under. A bundle that *does* carry
+        # `identity` is read strictly, per the memo's fail-closed rule: bad
+        # construction/rounds/key all refuse, none default. An absent object takes the
+        # PRE_R6_IDENTITY_FALLBACK_REMOVE_AT scaffold path above instead of raising -- see its
+        # docstring for why that is still tolerated and when it must go.
         identity_obj = self.manifest.get("identity")
         if identity_obj is not None:
             if identity_obj.get("construction") != "feistel-splitmix64-v1":
@@ -412,19 +411,30 @@ class Bundle:
                 )
             if identity_obj.get("rounds") != identity_mod.ROUNDS:
                 raise ValueError(f"unsupported identity round count {identity_obj.get('rounds')!r}")
+            if "shard_id" in identity_obj:
+                raise ValueError(
+                    "MANIFEST identity names a shard, which a bundle names in its side-manifest's "
+                    "shard records; rebuild the bundle"
+                )
             self.identity_key: identity_mod.IdentityKey | None = identity_mod.IdentityKey.from_hex(
                 identity_obj["key"]
             )
-            self.identity_shard_id: int | None = identity_obj["shard_id"]
         else:
             self.identity_key = None
-            self.identity_shard_id = None
 
-        # Phase 1: exactly one partition, "default".
+        # Phase 1: exactly one partition, "default", holding exactly one shard, numbered 0.
         partition_dir = self.prefix_dir / "partitions" / "default"
         segments_path = partition_dir / "SEGMENTS-0.json"
-        self.segments_manifest = json.loads(segments_path.read_bytes())
-        self._verify_files(self.segments_manifest.get("files", {}))
+        self._side_manifest = json.loads(segments_path.read_bytes())
+        records = self._side_manifest.get("shards", {}).get("records")
+        if records is None or [record.get("id") for record in records] != [0]:
+            raise ValueError(
+                f"{segments_path}: names shards "
+                f"{None if records is None else [r.get('id') for r in records]}, and a bundle of "
+                "several shards, or of one numbered other than 0, is not served yet; rebuild it "
+                "as one shard"
+            )
+        self._verify_files(self._side_manifest.get("files", {}))
 
         self._shard_dir = shard_dir(self.prefix_dir)
         self._segment_cache: dict[str, Segment] = {}
@@ -437,7 +447,7 @@ class Bundle:
 
         # Dictionary: term_id (ordinal) -> descriptor bytes.
         self.dictionary: list[bytes] = []
-        for extent_entry in self.segments_manifest.get("dict_extents", []):
+        for extent_entry in self.partition_manifest().get("dict_extents", []):
             dict_path = self.prefix_dir / extent_entry["path"]
             self.dictionary.extend(_read_dictionary(dict_path))
         self.descriptor_to_term_id = {d: i for i, d in enumerate(self.dictionary)}
@@ -456,6 +466,17 @@ class Bundle:
         self._view_geometry: dict[str, SourceGeometry] = {}
         self._position_cache: dict[str, list[int]] = {}
         self._unique_cache: dict[str, dict[int, int]] = {}
+
+    def partition_manifest(self) -> dict:
+        """`SEGMENTS-0.json`'s partition fields: registries, declarations, dictionary extents and
+        `files`. A shard's own state is in `shard_record`."""
+        return self._side_manifest
+
+    def shard_record(self, shard: int = 0) -> dict:
+        """Shard `shard`'s record in `SEGMENTS-0.json`: its id, high water, watermark, segments,
+        deltas, extents, runs and deny state."""
+        (record,) = [r for r in self._side_manifest["shards"]["records"] if r["id"] == shard]
+        return record
 
     def _verify_files(self, files: dict) -> None:
         for rel, info in files.items():
@@ -514,7 +535,7 @@ class Bundle:
         return path
 
     def segment_dir(self, view_id: str) -> Path:
-        for seg in self.segments_manifest["segments"]:
+        for seg in self.shard_record()["segments"]:
             if seg["view"] == view_id:
                 return self.view_dir(view_id) / "segments" / seg["seg_id"]
         raise KeyError(f"no segment for view '{view_id}'")
@@ -640,7 +661,7 @@ class Bundle:
         for row in rows:
             entity_id = int(seg.entity_id[row])
             expected = int(seg.mosaica_id[row])
-            got = identity_mod.forward(self.identity_key, self.identity_shard_id, entity_id)
+            got = identity_mod.forward(self.identity_key, self.shard_record()["id"], entity_id)
             if got != expected:
                 raise ValueError(
                     f"identity cross-check failed at row {row}: entity {entity_id} forwards to "
@@ -649,19 +670,18 @@ class Bundle:
 
     def mosaica_id_of(self, entity_id: int) -> int:
         """Pure function, no file read (memo §6): the identifier of the item the build gave
-        `entity_id` as its number, in the manifest's shard at tenancy 0. Requires a post-r6 bundle
+        `entity_id` as its number, in the bundle's shard at tenancy 0. Requires a post-r6 bundle
         (`identity` present in MANIFEST)."""
         if self.identity_key is None:
             raise ValueError("bundle has no `identity` object in MANIFEST (pre-r6 bundle)")
-        return identity_mod.forward_item(self.identity_key, self.identity_shard_id, 0, entity_id)
+        return identity_mod.forward_item(self.identity_key, self.shard_record()["id"], 0, entity_id)
 
     def derive_row_order(self, view_id: str) -> np.ndarray:
-        """Re-derive row order from `(source-recomputed morton, forward(identity.key,
-        identity.shard_id, entity_id))` ascending, with no further tiebreak (the
-        priority-as-identity-prefix fold; `mosaica_id` is already unique so nothing else is
-        needed to break ties). Row order is therefore key-dependent, where it previously
-        was not -- this reads `identity.key` and `identity.shard_id` from MANIFEST, which
-        `Bundle.__init__` already parses.
+        """Re-derive row order from `(source-recomputed morton, forward(identity.key, shard,
+        entity_id))` ascending, with no further tiebreak (the priority-as-identity-prefix fold;
+        `mosaica_id` is already unique so nothing else is needed to break ties). Row order is
+        therefore key-dependent -- this reads `identity.key` from MANIFEST and the shard from its
+        record, which `Bundle.__init__` already parses.
 
         Delegates to `row_order_from_geometry`, the module-level, key-dependent
         re-derivation -- computed from the *source* geometry and the permutation-derived
@@ -680,7 +700,7 @@ class Bundle:
         seg = self.segment(view_id)
         return row_order_from_geometry(
             self.identity_key,
-            self.identity_shard_id,
+            self.shard_record()["id"],
             seg.entity_id,
             self.row_morton_codes(view_id),
         )
@@ -718,7 +738,7 @@ class Bundle:
                     "integer attribute's values can be read back from its index"
                 )
             (index,) = [
-                i for i in self.segments_manifest["unique_indexes"] if i["attribute"] == attribute
+                i for i in self.shard_record()["unique_indexes"] if i["attribute"] == attribute
             ]
             runs = [run["path"] for run in index["base"]] + list(index["live"])
             entities: dict[int, int] = {}

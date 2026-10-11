@@ -855,11 +855,15 @@ fn run(args: Args) -> Result<(), String> {
         .iter()
         .next()
         .ok_or_else(|| "the bundle has no partition".to_string())?;
-    let view_data = partition.views.get(&args.view).ok_or_else(|| {
-        let mut names: Vec<&String> = partition.views.keys().collect();
-        names.sort();
-        format!("no view '{}' in the bundle; it has {:?}", args.view, names)
-    })?;
+    let view_data = partition
+        .only_shard()
+        .views
+        .get(&args.view)
+        .ok_or_else(|| {
+            let mut names: Vec<&String> = partition.only_shard().views.keys().collect();
+            names.sort();
+            format!("no view '{}' in the bundle; it has {:?}", args.view, names)
+        })?;
     let row_space = &view_data.row_space;
     let images = view_data.term_images.as_deref();
 

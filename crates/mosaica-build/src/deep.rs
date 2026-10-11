@@ -44,10 +44,11 @@ use arrow::array::{Array, UInt32Array, UInt64Array};
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 
 use mosaica_authz::{DeltaTier, PostingRef, PostingsReader};
-use mosaica_store::manifest::{Manifest, SegmentsManifest};
+use mosaica_store::manifest::{Manifest, PartitionManifest};
+use mosaica_store::read::ShardData;
 use mosaica_store::ShardLayout;
 
-use mosaica_types::{IdentityKey, MosaicaId, ShardId};
+use mosaica_types::{IdentityKey, MosaicaId};
 
 use crate::error::{BuildError, Result};
 use crate::VerifyReport;
@@ -166,19 +167,13 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
     let mut partitions: Vec<_> = bundle.partitions.iter().collect();
     partitions.sort_by(|a, b| a.0.cmp(b.0));
     for (phash, partition) in partitions {
-        check_postings_and_pairs(
-            &prefix_dir,
-            phash,
-            &bundle.manifest,
-            &partition.manifest,
-            &mut report,
-        )?;
+        check_postings_and_pairs(&prefix_dir, phash, &bundle.manifest, partition, &mut report)?;
         check_dict_extents(&prefix_dir, &partition.manifest, &mut report)?;
         check_record_blobs(
             &prefix_dir,
             phash,
             &bundle.manifest,
-            &partition.manifest,
+            partition.only_shard(),
             &mut report,
         )?;
         check_scoped_render_lanes(&bundle.manifest, phash, partition, &mut report)?;
@@ -196,7 +191,8 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
         )?;
         let tenancy = mosaica_store::read::open_tenancy_index(
             &prefix_dir,
-            &partition.manifest,
+            &partition.only_shard().record,
+            &partition.manifest.files,
             &bundle.manifest.files,
         )?;
         check_edited_items(
@@ -223,17 +219,18 @@ fn check_tenancy(
     tenancy: &mosaica_store::tenancy::TenancyIndex,
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
-    let manifest = &partition.manifest;
+    let shard = partition.only_shard();
+    let manifest = &shard.record;
     let bits: Vec<&croaring::Bitmap> = (0..mosaica_store::tenancy::TENANCY_BITS)
         .filter_map(|bit| tenancy.bit(bit))
         .collect();
     let raised = croaring::Bitmap::fast_or(&bits);
     if let Some(number) = raised.maximum() {
-        if u64::from(number) >= manifest.entity_id_high_water {
+        if u64::from(number) >= manifest.high_water {
             return Err(BuildError::Invalid(format!(
                 "partition {phash}: the tenancy index holds number {number}, at or above the high \
                  water {}, which no item has been given",
-                manifest.entity_id_high_water
+                manifest.high_water
             )));
         }
     }
@@ -265,7 +262,7 @@ fn check_tenancy(
                 "partition {phash}: number {number} is retired and still free to be issued"
             )));
         }
-        if partition
+        if shard
             .views
             .values()
             .any(|data| data.row_space.row_of(entity).is_some())
@@ -291,7 +288,7 @@ fn check_edited_items(
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
     use std::collections::{BTreeMap, BTreeSet};
-    let runs = &partition.manifest.edited_items;
+    let runs = &partition.only_shard().record.edited_items;
     let unreadable = |e: mosaica_store::StoreError| {
         BuildError::Invalid(format!("partition {phash}: the edited items' runs: {e}"))
     };
@@ -328,14 +325,15 @@ fn check_edited_items(
     // A number's live entity is one no deletion names that has a row: an edit deletes the entity
     // it moves an item away from.
     let deleted = partition
-        .manifest
+        .only_shard()
+        .record
         .tombstones
         .entities()
         .cloned()
         .unwrap_or_default();
     let live = |entity: u32| {
         !deleted.contains(entity)
-            && partition.views.values().any(|data| {
+            && partition.only_shard().views.values().any(|data| {
                 data.row_space
                     .row_of(mosaica_types::EntityId::new(u64::from(entity)))
                     .is_some()
@@ -361,8 +359,8 @@ fn check_edited_items(
 
     let key = IdentityKey::from_hex(&manifest.identity.key)
         .map_err(|e| BuildError::Invalid(format!("the manifest's identity key: {e}")))?;
-    let shard = manifest.identity.shard_id;
-    let mut views: Vec<_> = partition.views.iter().collect();
+    let shard = partition.only_shard().id;
+    let mut views: Vec<_> = partition.only_shard().views.iter().collect();
     views.sort_by(|a, b| a.0.cmp(b.0));
     for (view, data) in views {
         for segment in &data.segments {
@@ -419,26 +417,18 @@ fn check_unique_indexes(
 ) -> Result<()> {
     use mosaica_store::unique::{key_of, KeyKind, UniqueSpill};
     let partition_manifest = &partition.manifest;
-    if partition_manifest.unique_indexes.is_empty() {
+    let shard = partition.only_shard();
+    if shard.record.unique_indexes.is_empty() {
         return Ok(());
     }
     let store = |e: mosaica_store::StoreError| BuildError::Invalid(e.to_string());
     // The schema as served: the build's columns and those declared at a running service.
     let served = manifest.with_attributes(&partition_manifest.attributes, &[]);
-    let tombstones = partition_manifest
-        .tombstones
-        .entities()
-        .cloned()
-        .ok_or_else(|| {
-            BuildError::Invalid(format!("partition {phash}: the tombstones do not decode"))
-        })?;
-    let bound = u32::try_from(
-        partition_manifest
-            .entity_id_high_water
-            .max(manifest.entity_id_high_water),
-    )
-    .unwrap_or(u32::MAX);
-    for index in &partition_manifest.unique_indexes {
+    let tombstones = shard.record.tombstones.entities().cloned().ok_or_else(|| {
+        BuildError::Invalid(format!("partition {phash}: the tombstones do not decode"))
+    })?;
+    let bound = u32::try_from(shard.record.high_water).unwrap_or(u32::MAX);
+    for index in &shard.record.unique_indexes {
         let attribute = &index.attribute;
         let Some((at, declared)) = served
             .declared_scalars
@@ -501,7 +491,7 @@ fn check_unique_indexes(
             Ok(())
         };
         if homes_value {
-            let layers = value_layers(prefix_dir, phash, manifest, partition_manifest, declared)?;
+            let layers = value_layers(prefix_dir, phash, manifest, shard, declared)?;
             let mut scratch_bytes = Vec::new();
             let mut keyed = |dict: &mosaica_filter::SortedDict, ordinal: u32| {
                 dict.key_of(ordinal, &mut scratch_bytes)
@@ -532,7 +522,7 @@ fn check_unique_indexes(
             // first view that holds it.
             let mut wanted = croaring::Bitmap::new();
             wanted.add_range(0..bound);
-            let mut views: Vec<_> = partition.views.iter().collect();
+            let mut views: Vec<_> = shard.views.iter().collect();
             views.sort_by(|a, b| a.0.cmp(b.0));
             let mut failed: Option<BuildError> = None;
             for (view, data) in views {
@@ -552,17 +542,15 @@ fn check_unique_indexes(
                 return Err(e);
             }
         } else {
-            let record_rel = format!(
-                "{}/attrs/record",
-                ShardLayout::new(phash, ShardId::ZERO).rel()
-            );
+            let record_rel = format!("{}/attrs/record", ShardLayout::new(phash, shard.id).rel());
             let record_dir = prefix_dir.join(&record_rel);
             let base_rel = format!("{record_rel}/{}", mosaica_filter::RECORD_BLOCKS_FILE);
             let base = manifest
                 .files
                 .contains_key(&base_rel)
                 .then_some(record_dir.as_path());
-            let extents: Vec<mosaica_filter::RecordExtentPaths> = partition_manifest
+            let extents: Vec<mosaica_filter::RecordExtentPaths> = shard
+                .record
                 .record_extents
                 .iter()
                 .map(|e| {
@@ -638,7 +626,7 @@ fn value_layers(
     prefix_dir: &Path,
     phash: &str,
     manifest: &Manifest,
-    partition_manifest: &SegmentsManifest,
+    shard: &ShardData,
     declared: &mosaica_store::manifest::DeclaredScalar,
 ) -> Result<
     Vec<(
@@ -649,7 +637,7 @@ fn value_layers(
     let attribute = &declared.name;
     let dir_rel = format!(
         "{}/attrs/{attribute}",
-        ShardLayout::new(phash, ShardId::ZERO).rel()
+        ShardLayout::new(phash, shard.id).rel()
     );
     let dir = prefix_dir.join(&dir_rel);
     let access = mosaica_filter::Access::MappedSequential;
@@ -664,7 +652,8 @@ fn value_layers(
             .map_err(|e| BuildError::Invalid(format!("{attribute}: {e}")))?;
         layers.push((values, dict));
     }
-    for extent in partition_manifest
+    for extent in shard
+        .record
         .attr_extents
         .iter()
         .filter(|e| &e.column == attribute && e.view.is_none())
@@ -734,7 +723,7 @@ fn check_cut_index(
     partition: &mosaica_store::read::PartitionData,
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
-    let mut views: Vec<_> = partition.views.iter().collect();
+    let mut views: Vec<_> = partition.only_shard().views.iter().collect();
     views.sort_by(|a, b| a.0.cmp(b.0));
     for (view, data) in views {
         for segment in &data.segments {
@@ -824,26 +813,33 @@ fn check_bands(
     let copied = served
         .band_scalars()
         .map(|declared| {
-            value_layers(prefix_dir, phash, manifest, &partition.manifest, declared)
-                .map(|layers| (declared, layers))
+            value_layers(
+                prefix_dir,
+                phash,
+                manifest,
+                partition.only_shard(),
+                declared,
+            )
+            .map(|layers| (declared, layers))
         })
         .collect::<Result<Vec<_>>>()?;
     let key = IdentityKey::from_hex(&manifest.identity.key)
         .map_err(|e| BuildError::Invalid(format!("the manifest's identity key: {e}")))?;
     let deleted = partition
-        .manifest
+        .only_shard()
+        .record
         .tombstones
         .entities()
         .cloned()
         .ok_or_else(|| {
             BuildError::Invalid(format!("partition {phash}: the tombstones do not decode"))
         })?;
-    let mut views: Vec<_> = partition.views.iter().collect();
+    let mut views: Vec<_> = partition.only_shard().views.iter().collect();
     views.sort_by(|a, b| a.0.cmp(b.0));
     for (view, data) in views {
         for segment in &data.segments {
             let dir = prefix_dir
-                .join(ShardLayout::new(phash, ShardId::ZERO).segment_rel(view, &segment.seg_id));
+                .join(ShardLayout::new(phash, data.shard).segment_rel(view, &segment.seg_id));
             let codes = segment.morton.u32();
             let expected: Vec<u32> = segment
                 .cuts
@@ -885,7 +881,7 @@ fn check_bands(
                         row,
                         ids[row as usize],
                         &key,
-                        manifest.identity.shard_id,
+                        partition.only_shard().id,
                         &segment.seg_id,
                     )
                     .map_err(|e| BuildError::Invalid(e.to_string()))?;
@@ -955,10 +951,11 @@ fn check_band_labels(
 ) -> Result<()> {
     use mosaica_store::manifest::{DerivedExtent, DerivedForm};
     use mosaica_types::layer::ServingLayout;
-    let extents = &partition.manifest.derived_extents;
+    let extents = &partition.only_shard().record.derived_extents;
     let current = |e: &DerivedExtent| {
         partition
-            .manifest
+            .only_shard()
+            .record
             .level_versions
             .iter()
             .any(|v| v.layer == e.layer && v.level == e.level && v.version == e.level_version)
@@ -1004,7 +1001,7 @@ fn check_band_labels(
         let segment = copy
             .view
             .as_ref()
-            .and_then(|view| partition.views.get(view))
+            .and_then(|view| partition.only_shard().views.get(view))
             .and_then(|data| data.segments.iter().find(|s| &s.seg_id == seg_id))
             .ok_or_else(|| {
                 disagrees(
@@ -1046,7 +1043,7 @@ fn check_row_members(
 ) -> Result<()> {
     use mosaica_store::manifest::DerivedForm;
     use mosaica_store::row_members::RowMembersPack;
-    let extents = &partition.manifest.derived_extents;
+    let extents = &partition.only_shard().record.derived_extents;
     for members in extents.iter().filter(|e| e.form == DerivedForm::RowMembers) {
         if !extents
             .iter()
@@ -1156,7 +1153,7 @@ fn check_scoped_render_lanes(
     if families.is_empty() {
         return Ok(());
     }
-    for (view_id, view) in &partition.views {
+    for (view_id, view) in &partition.only_shard().views {
         // Which families this view renders — its own group's, or those of the group it declares
         // `members` of, the keys being the owner's (§3.3). Stated here off the manifest's roster,
         // as the engine states it off the same roster at the request and the build off its
@@ -1194,7 +1191,7 @@ fn check_scoped_render_lanes(
             // build laid it down (contracts §2.2).
             let rel = format!(
                 "{}/columns.arrow",
-                ShardLayout::new(phash, ShardId::ZERO).segment_rel(view_id, &segment.seg_id)
+                ShardLayout::new(phash, view.shard).segment_rel(view_id, &segment.seg_id)
             );
             if owner != group && !manifest.files.contains_key(&rel) {
                 continue;
@@ -1245,15 +1242,16 @@ fn check_postings_and_pairs(
     prefix_dir: &Path,
     phash: &str,
     bundle_manifest: &Manifest,
-    partition_manifest: &SegmentsManifest,
+    partition: &mosaica_store::read::PartitionData,
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
-    let high_water = partition_manifest.entity_id_high_water;
+    let shard = partition.only_shard();
+    let high_water = shard.record.high_water;
     let named = |rel: &str| {
-        partition_manifest.files.contains_key(rel) || bundle_manifest.files.contains_key(rel)
+        partition.manifest.files.contains_key(rel) || bundle_manifest.files.contains_key(rel)
     };
 
-    let shard_rel = ShardLayout::new(phash, ShardId::ZERO).rel();
+    let shard_rel = ShardLayout::new(phash, shard.id).rel();
     let postings_rel = format!("{shard_rel}/terms/postings.arrow");
     let pairs_rel = format!("{shard_rel}/terms/pairs.parquet");
     if named(&postings_rel) {
@@ -1308,7 +1306,7 @@ fn check_postings_and_pairs(
         )));
     }
 
-    for delta_rel in &partition_manifest.deltas {
+    for delta_rel in &shard.record.deltas {
         let path = join_rel(prefix_dir, delta_rel)?;
         let tier = DeltaTier::open(&path).map_err(|e| BuildError::io(&path, e))?;
         for ordinal in tier.ordinals() {
@@ -1457,13 +1455,10 @@ fn check_record_blobs(
     prefix_dir: &Path,
     phash: &str,
     manifest: &Manifest,
-    partition_manifest: &SegmentsManifest,
+    shard: &ShardData,
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
-    let record_rel = format!(
-        "{}/attrs/record",
-        ShardLayout::new(phash, ShardId::ZERO).rel()
-    );
+    let record_rel = format!("{}/attrs/record", ShardLayout::new(phash, shard.id).rel());
     let base_rel = format!("{record_rel}/{}", mosaica_filter::RECORD_BLOCKS_FILE);
     let mut layers: Vec<(String, PathBuf, PathBuf, PathBuf)> = Vec::new();
     if manifest.files.contains_key(&base_rel) {
@@ -1475,10 +1470,11 @@ fn check_record_blobs(
             dir.join(mosaica_filter::RECORD_DIRECTORY_FILE),
         ));
     }
-    for extent in partition_manifest
+    for extent in shard
+        .record
         .record_extents
         .iter()
-        .chain(partition_manifest.artifact_record_extents.iter())
+        .chain(shard.record.artifact_record_extents.iter())
     {
         layers.push((
             extent.blocks.clone(),
@@ -1538,7 +1534,7 @@ fn check_record_blobs(
 /// sorted rather than hashed, which is a partition pass like the identity check's.
 fn check_dict_extents(
     prefix_dir: &Path,
-    partition_manifest: &SegmentsManifest,
+    partition_manifest: &PartitionManifest,
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
     let mut seen: HashSet<Vec<u8>> = HashSet::new();

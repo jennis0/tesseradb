@@ -237,18 +237,18 @@ pub struct PartitionExtents<'a> {
 }
 
 impl<'a> PartitionExtents<'a> {
-    /// The lists one partition's side-manifest names. `None` is a bundle carrying no partition,
-    /// which names none.
-    pub fn of(manifest: Option<&'a mosaica_store::manifest::SegmentsManifest>) -> Self {
-        let Some(manifest) = manifest else {
+    /// The lists one shard's record names. `None` is a bundle carrying no partition, which names
+    /// none.
+    pub fn of(record: Option<&'a mosaica_store::manifest::ShardRecord>) -> Self {
+        let Some(record) = record else {
             return PartitionExtents::default();
         };
         PartitionExtents {
-            attrs: &manifest.attr_extents,
-            records: &manifest.record_extents,
-            artifact_records: &manifest.artifact_record_extents,
-            entity_terms: &manifest.entity_terms_extents,
-            texts: &manifest.text_extents,
+            attrs: &record.attr_extents,
+            records: &record.record_extents,
+            artifact_records: &record.artifact_record_extents,
+            entity_terms: &record.entity_terms_extents,
+            texts: &record.text_extents,
         }
     }
 }

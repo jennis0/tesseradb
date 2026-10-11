@@ -38,7 +38,7 @@ use mosaica_engine::Engine;
 use mosaica_lifecycle::wal::WalScalar;
 use mosaica_lifecycle::UnallocatedRow;
 use mosaica_store::read::open_bundle;
-use mosaica_types::{AttrLocalId, ShardId};
+use mosaica_types::AttrLocalId;
 
 /// Built items — small, because the built layer is not what this module is about.
 const N: u64 = 16;
@@ -135,7 +135,6 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -150,7 +149,7 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
 
 fn text_extents(root: &Path) -> Vec<mosaica_store::manifest::TextExtent> {
     open_bundle(root).expect("the bundle opens").partitions["default"]
-        .manifest
+        .only_shard().record
         .text_extents
         .clone()
 }
@@ -202,7 +201,7 @@ fn flush_a_window(engine: &Engine, root: &Path, from: usize) -> Vec<u32> {
         .collect();
     tick_until(engine, "the text layers to coalesce", std::time::Duration::from_secs(60), || {
         let generation = engine.generation();
-        let live = &generation.bundle.partitions["default"].manifest.text_extents;
+        let live = &generation.bundle.partitions["default"].only_shard().record.text_extents;
         live.iter().filter(|e| e.column == "prose").count() < COALESCE_WIDTH
     });
     entities

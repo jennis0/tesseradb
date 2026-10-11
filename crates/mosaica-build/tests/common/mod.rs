@@ -19,8 +19,14 @@ pub fn entities_of(
     let current: serde_json::Value =
         serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT")).unwrap();
     let prefix = root.join(current["prefix"].as_str().expect("CURRENT names a prefix"));
-    let indexes = UniqueIndexes::open(&bundle.manifest, &partition.manifest, &prefix, None)
-        .unwrap_or_else(|e| panic!("partition {phash}'s unique indexes open: {e}"));
+    let indexes = UniqueIndexes::open(
+        &bundle.manifest,
+        &partition.manifest,
+        &partition.only_shard().record,
+        &prefix,
+        None,
+    )
+    .unwrap_or_else(|e| panic!("partition {phash}'s unique indexes open: {e}"));
     let index = indexes
         .get(attribute)
         .unwrap_or_else(|| panic!("'{attribute}' is a unique column"));

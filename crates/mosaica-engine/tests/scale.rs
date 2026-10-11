@@ -505,7 +505,7 @@ fn probe_codes(
 /// Assert identity resolves in both directions and the entity has a row — for every sample.
 fn assert_identity(engine: &Engine, samples: &[Planted]) {
     let generation = engine.generation();
-    let row_space = &generation.bundle.partitions["default"].views["s0"].row_space;
+    let row_space = &generation.bundle.partitions["default"].only_shard().views["s0"].row_space;
     for planted in samples {
         assert_eq!(
             item_of_key(engine, &planted.key),
@@ -599,11 +599,11 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
             timings.ack,
             timings.publish,
             timings.refresh,
-            engine.generation().bundle.partitions["default"].views["s0"]
+            engine.generation().bundle.partitions["default"].only_shard().views["s0"]
                 .segments
                 .len(),
             engine.generation().bundle.partitions["default"]
-                .manifest
+                .only_shard().record
                 .deltas
                 .len(),
             stats.merges,
@@ -613,7 +613,7 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
         // per live segment, so the request cost is the product — and the product is what stays
         // flat if the cost model holds. A raw per-request figure grows for two reasons at once
         // (more occupied tiles, more segments) and cannot tell which moved.
-        let segments = engine.generation().bundle.partitions["default"].views["s0"]
+        let segments = engine.generation().bundle.partitions["default"].only_shard().views["s0"]
             .segments
             .len();
         // **The write-path stage split, at scale.** Zero without `bench-timing`. A microbenchmark
@@ -678,9 +678,15 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
     eprintln!(
         "  settled: segments={}, deltas={}, key runs={}, dict extents={} \
          (merges={}, coalesces={}, refreshes={}, full builds={})",
-        partition.views["s0"].segments.len(),
-        manifest.deltas.len(),
-        manifest.unique_indexes.iter().map(|i| i.live.len()).sum::<usize>(),
+        partition.only_shard().views["s0"].segments.len(),
+        partition.only_shard().record.deltas.len(),
+        partition
+            .only_shard()
+            .record
+            .unique_indexes
+            .iter()
+            .map(|i| i.live.len())
+            .sum::<usize>(),
         manifest.dict_extents.len(),
         stats.merges,
         stats.coalesces,
@@ -716,9 +722,9 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
         "maintenance must not be failing its way to a low segment count: {stats:?}"
     );
     assert!(
-        partition.views["s0"].segments.len() < rounds + 1,
+        partition.only_shard().views["s0"].segments.len() < rounds + 1,
         "the segment axis is unbounded at scale: {} segments after {rounds} flushes",
-        partition.views["s0"].segments.len()
+        partition.only_shard().views["s0"].segments.len()
     );
 
     // ---- properties 1-4, against everything that has happened --------------------------------
@@ -1277,7 +1283,7 @@ fn a_streaming_read_of_the_whole_bundle_against_a_live_viewport() {
     // latency under IO contention; a session's update path is P2's subject, not this one's.
     let full = engine.authorise(&full_coverage_credential()).unwrap();
     let on_disc = bundle_bytes(&root);
-    let segments = engine.generation().bundle.partitions["default"].views["s0"]
+    let segments = engine.generation().bundle.partitions["default"].only_shard().views["s0"]
         .segments
         .len();
     // **The regime, stated before the figures, because the figures mean nothing without it.**
@@ -1794,7 +1800,7 @@ fn p1_one_scale(base: u64) {
     }
     eprintln!("  {} deletions accepted", doomed.len());
 
-    let segments_before = engine.generation().bundle.partitions["default"].views["s0"]
+    let segments_before = engine.generation().bundle.partitions["default"].only_shard().views["s0"]
         .segments
         .len();
     let on_disc_before = bundle_bytes(&root);
@@ -1862,7 +1868,7 @@ fn p1_one_scale(base: u64) {
     let passes_delta = passes_peak.saturating_sub(baseline_rss);
     let publish_delta = publish_peak.saturating_sub(publish_baseline);
 
-    let segments_after = engine.generation().bundle.partitions["default"].views["s0"]
+    let segments_after = engine.generation().bundle.partitions["default"].only_shard().views["s0"]
         .segments
         .len();
     let live_after = live_bytes(&engine);

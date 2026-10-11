@@ -218,7 +218,6 @@ fn fixture() -> Fixture {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: mosaica_types::ShardId::ZERO,
         layers: config.layers,
         layer_inputs: config.layer_sources,
         scoped_layers: Default::default(),
@@ -246,8 +245,7 @@ fn manifest(fx: &Fixture) -> mosaica_store::manifest::SegmentsManifest {
         .values()
         .next()
         .expect("one partition")
-        .manifest
-        .clone()
+        .side_manifest()
 }
 
 /// **Finding 1's fix.** The build's own pass chooses each level's layout and records it, with no
@@ -311,7 +309,7 @@ fn the_manifest_names_a_column_for_each_flat_level_and_an_index_for_the_treed_on
     let is_column = |e: &&mosaica_store::manifest::DerivedExtent| matches!(e.form, mosaica_store::manifest::DerivedForm::RowColumn { .. });
     let is_index = |e: &&mosaica_store::manifest::DerivedExtent| e.form == mosaica_store::manifest::DerivedForm::TileIndex;
     let columns: Vec<_> = manifest
-        .derived_extents
+        .only_shard().derived_extents
         .iter()
         .filter(is_column)
         .filter(|e| e.layer == SPREAD || e.layer == CLUMPED)
@@ -326,7 +324,7 @@ fn the_manifest_names_a_column_for_each_flat_level_and_an_index_for_the_treed_on
     );
     assert!(
         manifest
-            .derived_extents
+            .only_shard().derived_extents
             .iter()
             .filter(is_column)
             .all(|e| e.layer != TREED),
@@ -334,7 +332,7 @@ fn the_manifest_names_a_column_for_each_flat_level_and_an_index_for_the_treed_on
     );
 
     let indexes: Vec<_> = manifest
-        .derived_extents
+        .only_shard().derived_extents
         .iter()
         .filter(is_index)
         .filter(|e| e.layer == TREED)
@@ -342,7 +340,7 @@ fn the_manifest_names_a_column_for_each_flat_level_and_an_index_for_the_treed_on
     assert_eq!(indexes.len(), 1, "one index per (view, layer, level)");
     assert!(
         manifest
-            .derived_extents
+            .only_shard().derived_extents
             .iter()
             .filter(is_index)
             .all(|e| e.layer != SPREAD && e.layer != CLUMPED),
@@ -355,7 +353,7 @@ fn the_manifest_names_a_column_for_each_flat_level_and_an_index_for_the_treed_on
     let generation = engine.generation();
     let prefix_dir = fx.root.join(generation.prefix.as_str());
     let digests = &generation.bundle.manifest.files;
-    for path in manifest.derived_extents.iter().map(|e| &e.path) {
+    for path in manifest.only_shard().derived_extents.iter().map(|e| &e.path) {
         assert!(
             prefix_dir.join(path).exists(),
             "{path} is named by the manifest and is not in the prefix"

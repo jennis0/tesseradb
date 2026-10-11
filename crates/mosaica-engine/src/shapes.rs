@@ -551,7 +551,7 @@ impl ShapeStore {
                 let Some(view_data) = bundle
                     .partitions
                     .values()
-                    .find_map(|partition| partition.views.get(view))
+                    .find_map(|partition| partition.only_shard().views.get(view))
                 else {
                     continue;
                 };

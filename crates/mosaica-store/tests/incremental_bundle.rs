@@ -11,7 +11,7 @@ use std::sync::Arc;
 use mosaica_store::permutation::SegmentExtent;
 use mosaica_store::read::PublishedManifest;
 use mosaica_store::{open_bundle, Bundle};
-use mosaica_types::{EntityId, RowId};
+use mosaica_types::{EntityId, RowId, ShardId};
 
 mod fixture;
 use fixture::{build_bundle, flush_segment, next_manifest, PARTITION, VIEW};
@@ -29,6 +29,7 @@ fn an_incremental_bundle_shares_its_base_mappings() {
     let next = base
         .with_segment(
             PARTITION,
+            ShardId::ZERO,
             VIEW,
             seg,
             extent,
@@ -39,8 +40,8 @@ fn an_incremental_bundle_shares_its_base_mappings() {
         )
         .unwrap();
 
-    let a = &base.partitions[PARTITION].views[VIEW];
-    let b = &next.partitions[PARTITION].views[VIEW];
+    let a = &base.partitions[PARTITION].only_shard().views[VIEW];
+    let b = &next.partitions[PARTITION].only_shard().views[VIEW];
     assert!(
         Arc::ptr_eq(a.row_space.base(), b.row_space.base()),
         "the base permutation was re-opened, not shared"
@@ -64,6 +65,7 @@ fn a_flushed_entity_resolves_and_the_base_is_untouched() {
     let next = base
         .with_segment(
             PARTITION,
+            ShardId::ZERO,
             VIEW,
             seg,
             extent,
@@ -74,8 +76,8 @@ fn a_flushed_entity_resolves_and_the_base_is_untouched() {
         )
         .unwrap();
 
-    let before = &base.partitions[PARTITION].views[VIEW].row_space;
-    let after = &next.partitions[PARTITION].views[VIEW].row_space;
+    let before = &base.partitions[PARTITION].only_shard().views[VIEW].row_space;
+    let after = &next.partitions[PARTITION].only_shard().views[VIEW].row_space;
 
     for e in 0..50u64 {
         assert_eq!(
@@ -121,6 +123,7 @@ fn a_merge_substitutes_the_consumed_segments() {
     let one = base
         .with_segment(
             PARTITION,
+            ShardId::ZERO,
             VIEW,
             s1,
             e1,
@@ -134,6 +137,7 @@ fn a_merge_substitutes_the_consumed_segments() {
     let two = one
         .with_segment(
             PARTITION,
+            ShardId::ZERO,
             VIEW,
             s2,
             e2,
@@ -143,9 +147,14 @@ fn a_merge_substitutes_the_consumed_segments() {
             },
         )
         .unwrap();
-    assert_eq!(two.partitions[PARTITION].views[VIEW].segments.len(), 3);
+    assert_eq!(
+        two.partitions[PARTITION].only_shard().views[VIEW]
+            .segments
+            .len(),
+        3
+    );
 
-    let consumed: Vec<String> = two.partitions[PARTITION].views[VIEW].segments[1..]
+    let consumed: Vec<String> = two.partitions[PARTITION].only_shard().views[VIEW].segments[1..]
         .iter()
         .map(|s| s.seg_id.clone())
         .collect();
@@ -153,6 +162,7 @@ fn a_merge_substitutes_the_consumed_segments() {
     let after = two
         .with_merged(
             PARTITION,
+            ShardId::ZERO,
             VIEW,
             &consumed,
             merged_seg,
@@ -171,7 +181,7 @@ fn a_merge_substitutes_the_consumed_segments() {
         )
         .unwrap();
 
-    let view = &after.partitions[PARTITION].views[VIEW];
+    let view = &after.partitions[PARTITION].only_shard().views[VIEW];
     assert_eq!(view.segments.len(), 2, "two segments collapsed into one");
     assert_eq!(view.row_space.extent_count(), 1);
     for e in 50..=53u64 {
@@ -183,7 +193,7 @@ fn a_merge_substitutes_the_consumed_segments() {
     }
     assert!(
         Arc::ptr_eq(
-            &two.partitions[PARTITION].views[VIEW].segments[0],
+            &two.partitions[PARTITION].only_shard().views[VIEW].segments[0],
             &view.segments[0]
         ),
         "the untouched build segment is still shared"
@@ -203,6 +213,7 @@ fn a_merge_whose_inputs_are_absent_is_refused() {
     let (seg, extent) = flush_segment(dir.path(), &base, 50, 3);
     let err = base.with_merged(
         PARTITION,
+        ShardId::ZERO,
         VIEW,
         &["seg-that-never-existed".to_string()],
         seg,
@@ -230,6 +241,7 @@ fn an_unknown_view_is_refused() {
     assert!(base
         .with_segment(
             PARTITION,
+            ShardId::ZERO,
             "no-such-view",
             seg,
             extent,
@@ -253,6 +265,7 @@ fn the_original_generation_is_unchanged_by_a_publication() {
     let _next = base
         .with_segment(
             PARTITION,
+            ShardId::ZERO,
             VIEW,
             seg,
             extent,
@@ -263,7 +276,7 @@ fn the_original_generation_is_unchanged_by_a_publication() {
         )
         .unwrap();
 
-    let view = &base.partitions[PARTITION].views[VIEW];
+    let view = &base.partitions[PARTITION].only_shard().views[VIEW];
     assert_eq!(view.segments.len(), 1);
     assert_eq!(view.row_space.extent_count(), 0);
     assert_eq!(view.row_space.total_rows(), 50);

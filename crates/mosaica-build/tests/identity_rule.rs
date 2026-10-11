@@ -23,7 +23,7 @@ use mosaica_build::{build, build_in_memory, BuildArgs, BuildReport, RefusedRows}
 use mosaica_filter::{Access, RecordBlob, RecordValue};
 use mosaica_spatial::Bounds;
 use mosaica_store::unique::{UniqueIndexes, UniqueKey};
-use mosaica_types::{IdentityKey, ShardId};
+use mosaica_types::IdentityKey;
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
@@ -117,7 +117,6 @@ fn args(dir: &Path, declaration: &str, out: &Path) -> BuildArgs {
         limit: None,
         strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        shard_id: ShardId::ZERO,
         layers,
         layer_inputs: acquired.layers,
         scoped_layers: Default::default(),
@@ -136,6 +135,7 @@ fn holders(root: &Path, attribute: &str, keys: &[UniqueKey]) -> Vec<Vec<u32>> {
     let indexes = UniqueIndexes::open(
         &bundle.manifest,
         &partition.manifest,
+        &partition.only_shard().record,
         &root.join("v00000"),
         None,
     )
@@ -163,7 +163,7 @@ fn records(root: &Path) -> HashMap<u32, Vec<(u16, RecordValue)>> {
         .join("record");
     let blob = RecordBlob::open_dir(&dir, Access::Read).expect("the blob opens");
     let bundle = mosaica_store::read::open_bundle(root).expect("the bundle opens");
-    (0..bundle.manifest.entity_id_high_water as u32)
+    (0..bundle.only_shard().record.high_water as u32)
         .map(|entity| {
             let fields = blob
                 .fields_of(entity)

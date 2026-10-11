@@ -218,7 +218,7 @@ fn every_file_is_global_or_its_partitions_or_in_its_shard() {
 fn assert_bases(root: &Path, after: &str) {
     let bundle = mosaica_store::open_bundle(root).expect("the bundle opens");
     for view in VIEWS {
-        let data = &bundle.partitions[PARTITION].views[view];
+        let data = &bundle.partitions[PARTITION].only_shard().views[view];
         assert!(
             data.row_space.base_rows() > 0,
             "{view} has no base after {after}"
@@ -248,4 +248,56 @@ fn a_built_or_folded_view_opens_with_its_base_row_entities_and_field_tallies() {
     fold(&engine);
     drop(engine);
     assert_bases(&root, "a fold");
+}
+
+/// The bundle's shard size, and each shard's number and high water, as an open reads them.
+fn shards_of(root: &Path) -> (u64, Vec<(u32, u64)>) {
+    let bundle = mosaica_store::open_bundle(root).expect("the bundle opens");
+    let partition = &bundle.partitions[PARTITION];
+    let shards = partition
+        .shards
+        .iter()
+        .map(|shard| (shard.id.raw(), shard.record.high_water))
+        .collect();
+    (partition.shard_size, shards)
+}
+
+/// **The shard's record and the shard size survive a flush, a fold and a restart.** Every
+/// publication restates the size, and the shard's high water only rises.
+#[test]
+fn the_shard_record_and_the_shard_size_survive_a_flush_a_fold_and_a_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = build_homes(tmp.path());
+    let (size, built) = shards_of(&root);
+    assert_eq!(size, mosaica_types::SHARD_SIZE_DEFAULT);
+    assert_eq!(built.len(), 1);
+    assert_eq!(built[0].0, 0);
+    let new_row = |i: u32| {
+        let mut row = bare(None);
+        row.labels = Some(vec![b"0".to_vec()]);
+        row.position = Some((10.0 + f64::from(i), 20.0));
+        row
+    };
+
+    let engine = engine_at(tmp.path(), &root);
+    send(&engine, "new-0", new_row(0));
+    publish_buffered(&engine);
+    let flushed = shards_of(&root);
+    assert_eq!(flushed.0, mosaica_types::SHARD_SIZE_DEFAULT, "after a flush");
+    assert_eq!(flushed.1, vec![(0, built[0].1 + 1)], "after a flush");
+
+    fold(&engine);
+    assert_eq!(shards_of(&root), flushed, "after a fold");
+    drop(engine);
+
+    let engine = engine_at(tmp.path(), &root);
+    assert_eq!(shards_of(&root), flushed, "after a restart");
+    send(&engine, "new-1", new_row(1));
+    publish_buffered(&engine);
+    assert_eq!(
+        shards_of(&root),
+        (mosaica_types::SHARD_SIZE_DEFAULT, vec![(0, built[0].1 + 2)]),
+        "after a flush that follows the restart"
+    );
+    drop(engine);
 }

@@ -96,7 +96,10 @@ fn a_row_acked_during_a_flush_survives_rotation_and_a_restart() {
     let reopened = engine_at(tmp.path(), &root, 3600);
     let bundle = mosaica_store::open_bundle(&root).expect("the bundle opens");
     let partition = bundle.partitions.values().next().unwrap();
-    let has_geometry = partition.views["s0"].row_space.row_of(second).is_some();
+    let has_geometry = partition.only_shard().views["s0"]
+        .row_space
+        .row_of(second)
+        .is_some();
     assert!(
         reopened.generation().buffer.contains(second) || has_geometry,
         "an acked ingest was silently lost: entity {} is in neither the buffer nor a segment after \
@@ -189,7 +192,10 @@ fn a_row_deleted_before_its_first_flush_stops_pinning_the_log() {
     let bundle = mosaica_store::open_bundle(&root).expect("the bundle opens");
     let partition = bundle.partitions.values().next().unwrap();
     assert!(
-        partition.views["s0"].row_space.row_of(deleted).is_none(),
+        partition.only_shard().views["s0"]
+            .row_space
+            .row_of(deleted)
+            .is_none(),
         "and it acquired no geometry on the way out"
     );
     assert!(

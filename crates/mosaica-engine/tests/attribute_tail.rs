@@ -190,7 +190,6 @@ fn build_placed_fixture(out: &Path, tmp: &Path, n: u64, at: impl Fn(u64) -> (f64
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: mosaica_types::ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -219,7 +218,7 @@ fn tail_by_identity(root: &Path) -> BTreeMap<u64, (u8, i64, f32)> {
     let prefix = &current.prefix;
     let mut out = BTreeMap::new();
     for (phash, partition) in &bundle.partitions {
-        for segment in &partition.manifest.segments {
+        for segment in &partition.only_shard().record.segments {
             let dir = root
                 .join(prefix)
                 .join(mosaica_store::ShardLayout::new(phash, mosaica_types::ShardId::ZERO).rel())
@@ -378,7 +377,6 @@ fn both_build_implementations_write_the_same_tail() {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: mosaica_types::ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -846,7 +844,7 @@ fn every_point_reads_the_segment_that_holds_it_across_tiles_of_several_segments(
     let view_data = bundle
         .partitions
         .values()
-        .find_map(|p| p.views.get("s0"))
+        .find_map(|p| p.only_shard().views.get("s0"))
         .expect("the bundle holds view s0");
     let segments = mosaica_engine::viewport::segments_with_row_bases("s0", view_data).unwrap();
     assert_eq!(segments.len(), 3, "the build and two flushes, unmerged");
@@ -1109,7 +1107,6 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: mosaica_types::ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -1151,7 +1148,7 @@ fn non_prefix_tail_by_identity(root: &Path) -> BTreeMap<u64, (u8, f32)> {
     let prefix = &current.prefix;
     let mut out = BTreeMap::new();
     for (phash, partition) in &bundle.partitions {
-        for segment in &partition.manifest.segments {
+        for segment in &partition.only_shard().record.segments {
             let dir = root
                 .join(prefix)
                 .join(mosaica_store::ShardLayout::new(phash, mosaica_types::ShardId::ZERO).rel())
@@ -1532,7 +1529,6 @@ fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: mosaica_types::ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -1548,7 +1544,7 @@ fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
 /// The partition's side-manifest, as the serving path holds it.
 fn side_manifest(root: &Path) -> mosaica_store::manifest::SegmentsManifest {
     let bundle = open_bundle(root).expect("the bundle opens");
-    bundle.partitions["default"].manifest.clone()
+    bundle.partitions["default"].side_manifest()
 }
 
 /// The record stack exactly as drill-down will open it: the base blob under `attrs/record` plus
@@ -1558,6 +1554,7 @@ fn record_stack(root: &Path) -> mosaica_filter::RecordStack {
     let manifest = side_manifest(root);
     let base = common::SHARD.dir(&prefix_dir).join("attrs/record");
     let extents: Vec<mosaica_filter::RecordExtentPaths> = manifest
+        .only_shard()
         .record_extents
         .iter()
         .map(|e| mosaica_filter::RecordExtentPaths {
@@ -1652,11 +1649,15 @@ fn a_flushed_record_extent_round_trips_through_the_stack() {
     drop(engine);
 
     let manifest = side_manifest(&root);
-    assert_eq!(manifest.record_extents.len(), 1, "one extent per flush");
-    let extent = &manifest.record_extents[0];
+    assert_eq!(
+        manifest.only_shard().record_extents.len(),
+        1,
+        "one extent per flush"
+    );
+    let extent = &manifest.only_shard().record_extents[0];
     for rel in [&extent.blocks, &extent.hasrow, &extent.directory] {
         assert!(
-            manifest.files.contains_key(rel),
+            manifest.partition.files.contains_key(rel),
             "an extent file the manifest names but does not digest: {rel}"
         );
     }
@@ -1723,9 +1724,9 @@ fn a_suppression_touches_no_blob_byte_and_only_the_fold_removes_a_deletion() {
     publish_buffered(&engine);
 
     let manifest = side_manifest(&root);
-    assert_eq!(manifest.record_extents.len(), 1);
+    assert_eq!(manifest.only_shard().record_extents.len(), 1);
     let prefix_dir = root.join(current_prefix(&root));
-    let extent = manifest.record_extents[0].clone();
+    let extent = manifest.only_shard().record_extents[0].clone();
     let extent_files = || -> Vec<Vec<u8>> {
         [&extent.blocks, &extent.hasrow, &extent.directory]
             .iter()
@@ -1770,9 +1771,9 @@ fn a_suppression_touches_no_blob_byte_and_only_the_fold_removes_a_deletion() {
 
     let manifest = side_manifest(&root);
     assert!(
-        manifest.record_extents.is_empty(),
+        manifest.only_shard().record_extents.is_empty(),
         "the fold consumed every record extent into the new base: {:?}",
-        manifest.record_extents
+        manifest.only_shard().record_extents
     );
     let stack = record_stack(&root);
     let suppressed = u32::try_from(entities[0].raw()).unwrap();
@@ -1882,7 +1883,7 @@ fn a_coalesce_collapses_record_extents_and_every_row_still_answers() {
         }
     }
     assert_eq!(
-        side_manifest(&root).record_extents.len(),
+        side_manifest(&root).only_shard().record_extents.len(),
         8,
         "one record extent per flush before the coalesce"
     );
@@ -1933,10 +1934,10 @@ fn a_coalesce_collapses_record_extents_and_every_row_still_answers() {
 
     let manifest = side_manifest(&root);
     assert_eq!(
-        manifest.record_extents.len(),
+        manifest.only_shard().record_extents.len(),
         1,
         "eight extents became one: {:?}",
-        manifest.record_extents
+        manifest.only_shard().record_extents
     );
     let stack = record_stack(&root);
     for (entity, note, revision) in &ingested {

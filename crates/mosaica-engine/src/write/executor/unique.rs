@@ -128,12 +128,7 @@ impl Executor {
             return self.advance_unique_declarations();
         }
         // Every entity a flush or a build can have given a value: the point region.
-        let high_water = generation
-            .bundle
-            .partitions
-            .values()
-            .map(|p| p.manifest.entity_id_high_water)
-            .fold(manifest.entity_id_high_water, u64::max);
+        let high_water = generation.bundle.only_shard().record.high_water;
         let mut wanted = croaring::Bitmap::new();
         wanted.add_range(0..high_water.min(u64::from(u32::MAX)) as u32);
         let attempt = self.unique_declarations.rounds.next_attempt();
@@ -477,26 +472,26 @@ impl Executor {
         let Some((partition, partition_data)) = generation.bundle.partitions.iter().next() else {
             return;
         };
-        let mut manifest = partition_data.manifest.clone();
+        let mut manifest = partition_data.side_manifest();
         let unique = index.is_some();
-        match index {
-            Some((runs, files)) => {
-                manifest.unique_indexes.retain(|held| held.attribute != attribute);
-                manifest.unique_indexes.push(runs);
-                manifest.files.extend(files);
-            }
-            None => {
-                if let Some(at) = manifest
-                    .unique_indexes
-                    .iter()
-                    .position(|held| held.attribute == attribute)
-                {
-                    let removed = manifest.unique_indexes.remove(at);
-                    for file in removed.files() {
-                        manifest.files.remove(file);
-                    }
-                }
-            }
+        let columns = &mut manifest.partition.unique_columns;
+        columns.retain(|column| column != attribute);
+        if unique {
+            columns.push(attribute.to_string());
+        }
+        let indexes = &mut manifest.only_shard_mut().unique_indexes;
+        let removed = indexes
+            .iter()
+            .position(|held| held.attribute == attribute)
+            .map(|at| indexes.remove(at));
+        if let Some((runs, _)) = &index {
+            indexes.push(runs.clone());
+        }
+        for file in removed.iter().flat_map(UniqueIndexRuns::files) {
+            manifest.partition.files.remove(file);
+        }
+        if let Some((_, files)) = index {
+            manifest.partition.files.extend(files);
         }
         write_deny_state(&mut manifest, &generation.overlay);
         write_vocabulary_extensions(
@@ -559,6 +554,7 @@ impl Executor {
         let unique_indexes = match mosaica_store::unique::UniqueIndexes::open(
             &bundle.manifest,
             &bundle.partitions[partition].manifest,
+            &bundle.partitions[partition].only_shard().record,
             &self.prefix_dir(generation),
             Some(&generation.unique),
         ) {

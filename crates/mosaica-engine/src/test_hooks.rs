@@ -444,7 +444,7 @@ impl Engine {
             .bundle
             .partitions
             .values()
-            .find_map(|partition| partition.views.get(view))
+            .find_map(|partition| partition.only_shard().views.get(view))
             .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
         let mut probe = crate::timing::Probe::new();
         let (geometry, _) =
@@ -468,7 +468,7 @@ impl Engine {
             .bundle
             .partitions
             .values()
-            .find_map(|partition| partition.views.get(view))
+            .find_map(|partition| partition.only_shard().views.get(view))
             .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
         let fragment = self.fragment_for(session, &generation)?;
         let mut rows = view_data.row_space.project(&fragment.view());

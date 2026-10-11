@@ -709,7 +709,6 @@ impl Engine {
     ) -> Result<LevelSlots> {
         let started = std::time::Instant::now();
         let generation = served.generation;
-        let shard = generation.bundle.manifest.identity.shard_id;
         let kind = layer.declaration.hierarchy.kind;
         let treed = matches!(kind, HierarchyKind::Nested | HierarchyKind::Dag);
         let stop = || gone(&served.cancel);
@@ -760,7 +759,7 @@ impl Engine {
                 {
                     continue;
                 }
-                let Some(id) = self.artifact_id(shard, entity) else {
+                let Some(id) = self.artifact_id(entity) else {
                     continue;
                 };
                 at[ordinal as usize] = clusters.len() as u32;

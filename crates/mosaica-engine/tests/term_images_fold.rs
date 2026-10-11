@@ -29,7 +29,7 @@ use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_store::read::open_bundle;
 use mosaica_store::term_images::{TermImages, HEADER_BYTES, KEEP_ROWS_PER_CONTAINER};
 use mosaica_store::RowSpace;
-use mosaica_types::{EntityId, ShardId, TermId};
+use mosaica_types::{EntityId, TermId};
 
 /// Rows enough for a second Roaring container, which is what puts a term whose image is spread
 /// over both on the wrong side of the keep rule: thirty rows a container is a cut a scattered term
@@ -190,7 +190,6 @@ fn build_fixture(tmp: &Path, root: &Path) {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -250,7 +249,7 @@ fn images_of(root: &Path, prefix: &str, view: &str) -> (Arc<TermImages>, RowSpac
     let bundle = open_bundle(root).expect("the bundle opens");
     let partition = bundle.partitions.get("default").expect("one partition");
     let named: Vec<_> = partition
-        .manifest
+        .only_shard().record
         .term_image_extents
         .iter()
         .filter(|entry| entry.view == view)
@@ -261,7 +260,7 @@ fn images_of(root: &Path, prefix: &str, view: &str) -> (Arc<TermImages>, RowSpac
         "the side-manifest names one term-image file for view '{view}'"
     );
     let path = root.join(prefix).join(&named[0].path);
-    let view = partition.views.get(view).expect("the view");
+    let view = partition.only_shard().views.get(view).expect("the view");
     let images = view
         .term_images
         .clone()
@@ -273,7 +272,7 @@ fn images_of(root: &Path, prefix: &str, view: &str) -> (Arc<TermImages>, RowSpac
 /// Every view's entry in the side-manifest of the bundle `CURRENT` names.
 fn extents_of(root: &Path) -> Vec<mosaica_store::manifest::TermImageExtent> {
     open_bundle(root).expect("the bundle opens").partitions["default"]
-        .manifest
+        .only_shard().record
         .term_image_extents
         .clone()
 }
@@ -403,7 +402,7 @@ fn a_folds_images_are_the_projections_of_the_folds_own_postings() {
     let live = engine.generation();
     for view in VIEWS {
         assert!(
-            live.bundle.partitions["default"].views[view]
+            live.bundle.partitions["default"].only_shard().views[view]
                 .term_images
                 .is_some(),
             "the prefix the fold just wrote maps view '{view}'s images"

@@ -196,7 +196,7 @@ fn deny_versions(
     let previous = previous.filter(|previous| previous.parts.prefix == parts.prefix);
     let mut out = DenyVersions::default();
     for partition in parts.bundle.partitions.values() {
-        for (view, view_data) in &partition.views {
+        for (view, view_data) in &partition.only_shard().views {
             let base_rows = view_data.row_space.base_rows();
             let now = denied.get(view).map(|rows| below(rows, base_rows));
             let carried = previous.and_then(|previous| {
@@ -322,7 +322,7 @@ impl Generation {
         parts.buffer = buffer;
         let mut denied = (*self.denied).clone();
         for partition in parts.bundle.partitions.values() {
-            for (view, view_data) in &partition.views {
+            for (view, view_data) in &partition.only_shard().views {
                 let Some(rows) = denied.get_mut(view) else {
                     continue;
                 };
@@ -366,7 +366,7 @@ impl Generation {
         }
         let mut next = crate::BufferedRows::default();
         for partition in parts.bundle.partitions.values() {
-            for (view, view_data) in &partition.views {
+            for (view, view_data) in &partition.only_shard().views {
                 let mut entities: Vec<EntityId> = match self.buffered_rows.get(view) {
                     Some(held) => held
                         .iter()
@@ -437,12 +437,10 @@ impl Generation {
             declared_scalars: vec![],
             vocabularies: vec![],
             small_term_threshold: 32,
-            entity_id_high_water: 0,
             identity: mosaica_store::manifest::IdentityDescriptor {
                 construction: "siphash-2-4".to_string(),
                 rounds: 1,
                 key: "0123456789abcdef0123456789abcdef".to_string(),
-                shard_id: mosaica_types::ShardId::ZERO,
             },
             groups: Vec::new(),
             views: vec![],
@@ -459,7 +457,22 @@ impl Generation {
             watermark,
             bundle: Arc::new(Bundle {
                 manifest,
-                partitions: std::collections::HashMap::new(),
+                partitions: std::collections::HashMap::from([(
+                    "default".to_string(),
+                    mosaica_store::read::PartitionData {
+                        manifest: mosaica_store::manifest::PartitionManifest::empty(),
+                        shard_size: mosaica_types::SHARD_SIZE_DEFAULT,
+                        segments_n: 0,
+                        highest_candidate_n: 0,
+                        shards: vec![Arc::new(mosaica_store::read::ShardData {
+                            id: mosaica_types::ShardId::ZERO,
+                            record: mosaica_store::manifest::ShardRecord::empty(
+                                mosaica_types::ShardId::ZERO,
+                            ),
+                            views: std::collections::HashMap::new(),
+                        })],
+                    },
+                )]),
             }),
             dict: Arc::new(Dict::load(&[]).expect("an empty dict needs no file")),
             postings: Arc::new(PostingsReader::open(&postings_path, false).expect("it opens")),

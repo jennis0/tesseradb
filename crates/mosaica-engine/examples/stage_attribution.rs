@@ -28,7 +28,7 @@ use mosaica_build::{build, BuildArgs};
 use mosaica_engine::viewport::ViewportRequest;
 use mosaica_engine::{Engine, EngineConfig};
 use mosaica_spatial::Bounds;
-use mosaica_types::{IdentityKey, ShardId};
+use mosaica_types::IdentityKey;
 
 const ITEM_LIMIT: u64 = 2_422_486;
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
@@ -85,7 +85,6 @@ fn ensure_bundle() -> PathBuf {
             limit: Some(ITEM_LIMIT),
             strict: false,
             identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-            shard_id: ShardId::ZERO,
             layers: Vec::new(),
             layer_inputs: Vec::new(),
             scoped_layers: Default::default(),

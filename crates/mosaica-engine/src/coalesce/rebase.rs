@@ -4,42 +4,42 @@ use mosaica_store::manifest::{
 
 use super::{ColumnExtent, CompletedCoalesce};
 
-/// `manifest` with `completed` applied, or `None` if a consumed window has moved and the pass is
+/// `next` with `completed` applied, or `None` if a consumed window has moved and the pass is
 /// discarded. Each replacement takes its window's position, never the end, which keeps every
 /// dictionary ordinal, and manifest bytes, independent of timing.
 pub(crate) fn rebased(
-    manifest: &SegmentsManifest,
+    mut next: SegmentsManifest,
     completed: &CompletedCoalesce,
 ) -> Option<SegmentsManifest> {
-    let mut next = manifest.clone();
-    if let Some(m) = &completed.tier {
-        let tier = m.output.0.clone();
-        replace_window(&mut next.deltas, &m.consumed, tier, |rel| rel, all)?;
-    }
     if let Some(m) = &completed.dict {
         let dict = m.output.clone();
-        replace_window(&mut next.dict_extents, &m.consumed, dict, |e| &e.path, all)?;
+        replace_window(&mut next.partition.dict_extents, &m.consumed, dict, |e| &e.path, all)?;
+    }
+    let shard = next.only_shard_mut();
+    if let Some(m) = &completed.tier {
+        let tier = m.output.0.clone();
+        replace_window(&mut shard.deltas, &m.consumed, tier, |rel| rel, all)?;
     }
     for m in &completed.attrs {
         let (window, attr) = (&m.consumed, m.output.extent.clone());
         let same_column = |e: &AttrExtent| e.key() == window.key();
-        replace_window(&mut next.attr_extents, &window.extents, attr, |e| &e.values, same_column)?;
+        replace_window(&mut shard.attr_extents, &window.extents, attr, |e| &e.values, same_column)?;
     }
     if let Some(m) = &completed.record {
         let record = m.output.clone();
-        replace_window(&mut next.record_extents, &m.consumed, record, |e| &e.blocks, all)?;
+        replace_window(&mut shard.record_extents, &m.consumed, record, |e| &e.blocks, all)?;
     }
     for m in &completed.texts {
         let (window, text) = (&m.consumed, m.output.clone());
         let same_column = |e: &TextExtent| e.key() == window.key();
-        replace_window(&mut next.text_extents, &window.extents, text, |e| &e.dict, same_column)?;
+        replace_window(&mut shard.text_extents, &window.extents, text, |e| &e.dict, same_column)?;
     }
     if let Some(m) = &completed.terms {
         let terms = m.output.clone();
-        replace_window(&mut next.entity_terms_extents, &m.consumed, terms, |e| &e.terms, all)?;
+        replace_window(&mut shard.entity_terms_extents, &m.consumed, terms, |e| &e.terms, all)?;
     }
     for m in &completed.unique {
-        let index = next
+        let index = shard
             .unique_indexes
             .iter_mut()
             .find(|index| index.attribute == m.consumed.attribute)?;
@@ -48,17 +48,17 @@ pub(crate) fn rebased(
     }
     for m in &completed.edited {
         let runs = match m.consumed.direction {
-            mosaica_store::edited::Direction::ByNumber => &mut next.edited_items.by_number,
-            mosaica_store::edited::Direction::ByEntity => &mut next.edited_items.by_entity,
+            mosaica_store::edited::Direction::ByNumber => &mut shard.edited_items.by_number,
+            mosaica_store::edited::Direction::ByEntity => &mut shard.edited_items.by_entity,
         };
         let at = contiguous(&runs.live, &m.consumed.runs, |rel| rel)?;
         runs.live.splice(at, m.output.iter().cloned());
     }
 
     for rel in completed.consumed_files() {
-        next.files.remove(rel);
+        next.partition.files.remove(rel);
     }
-    next.files.extend(completed.files.clone());
+    next.partition.files.extend(completed.files.clone());
     Some(next)
 }
 

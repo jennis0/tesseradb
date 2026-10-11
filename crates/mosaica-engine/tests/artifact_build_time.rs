@@ -19,7 +19,7 @@ use parquet::arrow::ArrowWriter;
 use mosaica_build::BuildArgs;
 use mosaica_engine::{ArtifactOut, Engine};
 use mosaica_lifecycle::wal::ChangeOp;
-use mosaica_types::{EntityId, ShardId};
+use mosaica_types::EntityId;
 
 const CLUSTERS: &str = "clusters/a";
 const LABELS: &str = "topics/x";
@@ -225,7 +225,6 @@ fn try_fixture(topics: fn(&Path)) -> Result<Fixture, mosaica_build::BuildError> 
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: config.layers,
         layer_inputs: config.layer_sources,
         scoped_layers: Default::default(),
@@ -443,7 +442,8 @@ fn a_built_bundle_carries_its_containment_partitions_and_the_first_request_claim
         .values()
         .next()
         .expect("one partition")
-        .manifest;
+        .only_shard()
+        .record;
     assert!(
         manifest
             .derived_extents

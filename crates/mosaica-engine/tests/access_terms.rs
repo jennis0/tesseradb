@@ -35,7 +35,7 @@ use mosaica_engine::{
     Session, SinkResult,
 };
 use mosaica_lifecycle::{ChangeOp, IngestRow};
-use mosaica_types::{MosaicaId, ShardId};
+use mosaica_types::MosaicaId;
 use mosaica_build::config::{AccessInput, AccessSource};
 use mosaica_build::{build, BuildArgs};
 
@@ -128,7 +128,6 @@ fn args(points: &Path, out: &Path, default: Option<&str>) -> BuildArgs {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

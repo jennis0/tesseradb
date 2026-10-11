@@ -210,7 +210,6 @@ impl Engine {
         let name = &declaration.name;
         let vocabulary = predicate_vocabulary(generation, declaration);
         let source = generation.partition_source();
-        let shard = generation.bundle.manifest.identity.shard_id;
         let base = served.segments.first().map(|&(segment, _)| segment);
 
         let mut tags: Vec<Option<u64>> = vec![None; points.len()];
@@ -324,7 +323,7 @@ impl Engine {
                         false,
                         table.as_deref(),
                     )?;
-                    self.artifact_id(shard, entity).map(|id| id.raw())
+                    self.artifact_id(entity).map(|id| id.raw())
                 })
             };
             let mut lowest = |labels: &[u32]| -> Option<u64> {

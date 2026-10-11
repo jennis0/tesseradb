@@ -378,7 +378,7 @@ pub(super) fn live_segments_of(generation: &Generation) -> usize {
         .bundle
         .partitions
         .values()
-        .flat_map(|partition| partition.views.values())
+        .flat_map(|partition| partition.only_shard().views.values())
         .map(|view| view.segments.len())
         .max()
         .unwrap_or(0)
@@ -387,36 +387,36 @@ pub(super) fn live_segments_of(generation: &Generation) -> usize {
 /// Whether every artefact a completed fold consumed is still listed in the live manifest.
 pub(super) fn fold_rebases(
     plan: &crate::compact::FoldPlan,
-    live_manifest: &SegmentsManifest,
+    live: &mosaica_store::manifest::ShardRecord,
     consumed_segments: &FxHashSet<(&str, &str)>,
 ) -> bool {
-    let listed_segments: FxHashSet<(&str, &str)> = live_manifest
+    let listed_segments: FxHashSet<(&str, &str)> = live
         .segments
         .iter()
         .map(|d| (d.view.as_str(), d.seg_id.as_str()))
         .collect();
     consumed_segments.is_subset(&listed_segments)
-        && plan.tiers.iter().all(|t| live_manifest.deltas.contains(t))
+        && plan.tiers.iter().all(|t| live.deltas.contains(t))
         && plan.attr_extents.iter().all(|consumed| {
-            live_manifest
+            live
                 .attr_extents
                 .iter()
                 .any(|extent| extent.values == consumed.values)
         })
         && plan.record_extents.iter().all(|consumed| {
-            live_manifest
+            live
                 .record_extents
                 .iter()
                 .any(|extent| extent.blocks == consumed.blocks)
         })
         && plan.text_extents.iter().all(|consumed| {
-            live_manifest
+            live
                 .text_extents
                 .iter()
                 .any(|extent| extent.dict == consumed.dict)
         })
         && plan.entity_terms_extents.iter().all(|consumed| {
-            live_manifest
+            live
                 .entity_terms_extents
                 .iter()
                 .any(|extent| extent.terms == consumed.terms)
@@ -424,11 +424,11 @@ pub(super) fn fold_rebases(
         // An index removed during the flight takes nothing; one still held must still list every
         // run the fold consumed.
         && {
-            let listed: FxHashSet<&str> = live_manifest.edited_items.files().collect();
+            let listed: FxHashSet<&str> = live.edited_items.files().collect();
             plan.edited.files().all(|rel| listed.contains(rel))
         }
         && plan.unique.iter().all(|consumed| {
-            live_manifest
+            live
                 .unique_indexes
                 .iter()
                 .find(|index| index.attribute == consumed.attribute)
@@ -501,13 +501,13 @@ pub(super) fn not_consumed<T: Clone>(
 
 pub(super) fn carried_forward<'a>(
     plan: &crate::compact::FoldPlan,
-    live_manifest: &'a SegmentsManifest,
+    live: &'a mosaica_store::manifest::ShardRecord,
     live_incarnations: &FxHashMap<&str, mosaica_types::view::ViewIncarnation>,
     consumed_segments: &FxHashSet<(&str, &str)>,
 ) -> CarriedExtents<'a> {
     let mut omitted_views: Vec<String> = Vec::new();
     let mut omitted_segments = 0usize;
-    let segments: Vec<&mosaica_store::manifest::SegmentDescriptor> = live_manifest
+    let segments: Vec<&mosaica_store::manifest::SegmentDescriptor> = live
         .segments
         .iter()
         .filter(|d| !consumed_segments.contains(&(d.view.as_str(), d.seg_id.as_str())))
@@ -523,7 +523,7 @@ pub(super) fn carried_forward<'a>(
         })
         .collect();
     let mut attrs = not_consumed(
-        &live_manifest.attr_extents,
+        &live.attr_extents,
         &plan
             .attr_extents
             .iter()
@@ -539,7 +539,7 @@ pub(super) fn carried_forward<'a>(
         )
     });
     let mut texts = not_consumed(
-        &live_manifest.text_extents,
+        &live.text_extents,
         &plan
             .text_extents
             .iter()
@@ -556,7 +556,7 @@ pub(super) fn carried_forward<'a>(
     });
     CarriedExtents {
         segments,
-        tiers: live_manifest
+        tiers: live
             .deltas
             .iter()
             .filter(|t| !plan.tiers.contains(t))
@@ -564,7 +564,7 @@ pub(super) fn carried_forward<'a>(
             .collect(),
         attrs,
         records: not_consumed(
-            &live_manifest.record_extents,
+            &live.record_extents,
             &plan
                 .record_extents
                 .iter()
@@ -574,7 +574,7 @@ pub(super) fn carried_forward<'a>(
         ),
         texts,
         entity_terms: not_consumed(
-            &live_manifest.entity_terms_extents,
+            &live.entity_terms_extents,
             &plan
                 .entity_terms_extents
                 .iter()
@@ -582,7 +582,7 @@ pub(super) fn carried_forward<'a>(
                 .collect(),
             |extent| extent.terms.as_str(),
         ),
-        unique: live_manifest
+        unique: live
             .unique_indexes
             .iter()
             .map(|index| {
@@ -621,8 +621,8 @@ pub(super) fn carried_forward<'a>(
                         .collect(),
                 };
             mosaica_store::manifest::EditedItemsRuns {
-                by_number: unconsumed(&live_manifest.edited_items.by_number),
-                by_entity: unconsumed(&live_manifest.edited_items.by_entity),
+                by_number: unconsumed(&live.edited_items.by_number),
+                by_entity: unconsumed(&live.edited_items.by_entity),
             }
         },
         omitted_views,
@@ -634,7 +634,7 @@ pub(super) fn carried_forward<'a>(
 /// path twice is what `hard_link_forward` refuses.
 pub(super) fn carried_files(
     shard: ShardLayout<'_>,
-    live_manifest: &SegmentsManifest,
+    live_manifest: &mosaica_store::manifest::PartitionManifest,
     bundle_files: &std::collections::BTreeMap<String, mosaica_store::manifest::FileDigest>,
     forward: &CarriedExtents,
     shared_tenancy: &[mosaica_store::manifest::TenancyBit],
@@ -709,7 +709,7 @@ impl Executor {
             .bundle
             .partitions
             .values()
-            .flat_map(|partition| partition.manifest.segments.iter())
+            .flat_map(|partition| partition.only_shard().record.segments.iter())
             .map(|descriptor| u64::from(descriptor.row_count))
             .sum();
         crate::compact::due(
@@ -873,7 +873,7 @@ impl Executor {
             to_prefix_dir: self.deps.bundle_root.join(&to_prefix),
             to_prefix: to_prefix.clone(),
             identity_key: self.deps.identity_key,
-            shard_id: manifest.identity.shard_id,
+            shard_id: partition_data.only_shard().id,
             scalar_schema,
             band_schema: band_schema_of(manifest),
             absent_ok,
@@ -1055,7 +1055,7 @@ impl Executor {
         let Some(partition_data) = live.bundle.partitions.get(&plan.partition) else {
             return Err("the live bundle no longer carries the partition it folded".to_string());
         };
-        let live_manifest = &partition_data.manifest;
+        let live_record = &partition_data.only_shard().record;
 
         // ---- rebase or discard ------------------------------------------------------------------
         //
@@ -1070,7 +1070,7 @@ impl Executor {
                     .map(move |segment| (view.view.as_str(), segment.seg_id.as_str()))
             })
             .collect();
-        if !fold_rebases(plan, live_manifest, &consumed_segments) {
+        if !fold_rebases(plan, live_record, &consumed_segments) {
             return Err(
                 "an artefact it consumed is no longer listed in the live manifest".to_string(),
             );
@@ -1101,7 +1101,7 @@ impl Executor {
                     .to_string(),
             );
         }
-        let forward = carried_forward(plan, live_manifest, &live_incarnations, &consumed_segments);
+        let forward = carried_forward(plan, live_record, &live_incarnations, &consumed_segments);
 
         // Every carried-forward segment must begin at or above its view's base, or the prefix will
         // not open. Checked before anything is written, since that would surface only after
@@ -1126,12 +1126,17 @@ impl Executor {
         // ---- retirement, evaluated here and nowhere earlier ---------------------------------------
         let mut carried = crate::compact::CarriedForward::new();
         for descriptor in &forward.segments {
-            let Some(extent) = partition_data.views.get(&descriptor.view).and_then(|view| {
-                view.row_space
-                    .extents()
-                    .iter()
-                    .find(|extent| extent.seg_id == descriptor.seg_id)
-            }) else {
+            let Some(extent) = partition_data
+                .only_shard()
+                .views
+                .get(&descriptor.view)
+                .and_then(|view| {
+                    view.row_space
+                        .extents()
+                        .iter()
+                        .find(|extent| extent.seg_id == descriptor.seg_id)
+                })
+            else {
                 return Err(
                     "a carried-forward segment has no extent in the live row space".to_string(),
                 );
@@ -1197,6 +1202,7 @@ impl Executor {
         };
         let partition_data = &live.bundle.partitions[&plan.partition];
         let live_manifest = &partition_data.manifest;
+        let live_shard = partition_data.only_shard();
         let retired_count = executed.cardinality();
         let manifest_n = match self
             .side_manifests
@@ -1285,7 +1291,7 @@ impl Executor {
         let next_tenancy = match write_next_tenancy_index(
             &to_prefix_dir,
             ShardLayout::new(&plan.partition, ShardId::ZERO),
-            &live_manifest.tenancy_index,
+            &live_shard.record.tenancy_index,
             &live.tenancy.raised(&freeing.raised),
         ) {
             Ok(next) => next,
@@ -1294,7 +1300,8 @@ impl Executor {
                 return;
             }
         };
-        let mut retired_numbers = live_manifest
+        let mut retired_numbers = live_shard
+            .record
             .retired_numbers
             .entities()
             .cloned()
@@ -1343,78 +1350,88 @@ impl Executor {
             .with_view_declarations(|declarations| declarations.names());
 
         let mut segments_manifest = SegmentsManifest {
-            text_extents: forward.texts.clone(),
-            // Live and untouched: an entity at or above the watermark is buffered rather than
-            // rowed, so deriving this from the fold's inputs would move it backwards past every
-            // post-snapshot entity and make the gap invisible.
-            watermark: live_manifest.watermark,
-            entity_id_high_water: live_manifest.entity_id_high_water,
-            // Live: the fold does not renumber the row-less region, so deriving this from the
-            // fold's inputs would hand the next registration ids a live layer already holds. The
-            // commit lowers it to the allocator's mark and restates the registry and the roster.
-            entity_id_low_water: live_manifest.entity_id_low_water,
-            // Only the declarations made since the fold planned: the fold's own `MANIFEST.json`
-            // already states the rest, with a base written for each.
-            attributes: runtime_attributes
-                .iter()
-                .filter(|d| !completed.runtime_attributes.contains(&d.name))
-                .cloned()
-                .collect(),
-            scoped_attributes: runtime_scoped_attributes
-                .iter()
-                .filter(|f| !completed.runtime_scoped_attributes.contains(&f.name))
-                .cloned()
-                .collect(),
-            // The artifact pass's own output: paths are prefix-relative, so this is the only list
-            // naming files the new prefix contains.
-            membership_extents: repacked.clone(),
-            term_image_extents: completed
-                .term_images
-                .iter()
-                .map(|images| images.extent.clone())
-                .collect(),
-            artifact_record_extents: self.side_manifests.artifact_record_extents.clone(),
-            segments,
-            deltas: forward.tiers.clone(),
-            // The live list, not the plan's: a flush that promoted during the flight appended an
-            // extent whose ordinals the live dictionary already holds.
-            dict_extents: live_manifest.dict_extents.clone(),
-            attr_extents: forward.attrs.clone(),
-            record_extents: forward.records.clone(),
-            entity_terms_extents: forward.entity_terms.clone(),
-            unique_indexes: forward
-                .unique
-                .iter()
-                .map(|carried| {
-                    let mut index = carried.clone();
-                    if let Some((_, base)) = completed
+            partition: mosaica_store::manifest::PartitionManifest {
+                // Live: the fold does not renumber the row-less region, so deriving this from the
+                // fold's inputs would hand the next registration ids a live layer already holds.
+                // The commit lowers it to the allocator's mark and restates the registry and the
+                // roster.
+                entity_id_low_water: live_manifest.entity_id_low_water,
+                // Only the declarations made since the fold planned: the fold's own
+                // `MANIFEST.json` already states the rest, with a base written for each.
+                attributes: runtime_attributes
+                    .iter()
+                    .filter(|d| !completed.runtime_attributes.contains(&d.name))
+                    .cloned()
+                    .collect(),
+                scoped_attributes: runtime_scoped_attributes
+                    .iter()
+                    .filter(|f| !completed.runtime_scoped_attributes.contains(&f.name))
+                    .cloned()
+                    .collect(),
+                unique_columns: live_manifest.unique_columns.clone(),
+                // The live list, not the plan's: a flush that promoted during the flight appended
+                // an extent whose ordinals the live dictionary already holds.
+                dict_extents: live_manifest.dict_extents.clone(),
+                ..mosaica_store::manifest::PartitionManifest::empty()
+            },
+            shards: mosaica_store::manifest::Shards {
+                size: partition_data.shard_size,
+                records: vec![mosaica_store::manifest::ShardRecord {
+                    // Live and untouched: an entity at or above the watermark is buffered rather
+                    // than rowed, so deriving this from the fold's inputs would move it backwards
+                    // past every post-snapshot entity and make the gap invisible.
+                    watermark: live_shard.record.watermark,
+                    high_water: live_shard.record.high_water,
+                    text_extents: forward.texts.clone(),
+                    // The artifact pass's own output: paths are prefix-relative, so this is the
+                    // only list naming files the new prefix contains.
+                    membership_extents: repacked.clone(),
+                    term_image_extents: completed
+                        .term_images
+                        .iter()
+                        .map(|images| images.extent.clone())
+                        .collect(),
+                    artifact_record_extents: self.side_manifests.artifact_record_extents.clone(),
+                    segments,
+                    deltas: forward.tiers.clone(),
+                    attr_extents: forward.attrs.clone(),
+                    record_extents: forward.records.clone(),
+                    entity_terms_extents: forward.entity_terms.clone(),
+                    unique_indexes: forward
                         .unique
                         .iter()
-                        .find(|(attribute, _)| *attribute == carried.attribute)
-                    {
-                        index.base = base.clone();
-                    }
-                    index
-                })
-                .collect(),
-            edited_items: mosaica_store::manifest::EditedItemsRuns {
-                by_number: mosaica_store::manifest::KeyRuns {
-                    base: completed.edited.by_number.base.clone(),
-                    live: forward.edited.by_number.live.clone(),
-                },
-                by_entity: mosaica_store::manifest::KeyRuns {
-                    base: completed.edited.by_entity.base.clone(),
-                    live: forward.edited.by_entity.live.clone(),
-                },
+                        .map(|carried| {
+                            let mut index = carried.clone();
+                            if let Some((_, base)) = completed
+                                .unique
+                                .iter()
+                                .find(|(attribute, _)| *attribute == carried.attribute)
+                            {
+                                index.base = base.clone();
+                            }
+                            index
+                        })
+                        .collect(),
+                    edited_items: mosaica_store::manifest::EditedItemsRuns {
+                        by_number: mosaica_store::manifest::KeyRuns {
+                            base: completed.edited.by_number.base.clone(),
+                            live: forward.edited.by_number.live.clone(),
+                        },
+                        by_entity: mosaica_store::manifest::KeyRuns {
+                            base: completed.edited.by_entity.base.clone(),
+                            live: forward.edited.by_entity.live.clone(),
+                        },
+                    },
+                    tenancy_index: next_tenancy.index(),
+                    retired_numbers: mosaica_store::manifest::EntitySet::of(&retired_numbers),
+                    ..mosaica_store::manifest::ShardRecord::empty(live_shard.id)
+                }],
             },
-            tenancy_index: next_tenancy.index(),
-            retired_numbers: mosaica_store::manifest::EntitySet::of(&retired_numbers),
-            ..SegmentsManifest::empty()
         };
         write_deny_state(&mut segments_manifest, &published_overlay);
 
         // ---- the new `MANIFEST.json` ----------------------------------------------------------
-        let mut bundle_manifest = self.fold_bundle_manifest(&live, &completed, plan);
+        let mut bundle_manifest = self.fold_bundle_manifest(&live, &completed);
 
         for (entry, path) in &next_tenancy.written {
             match mosaica_store::digest_of(path) {
@@ -1556,7 +1573,7 @@ impl Executor {
             );
         }
         self.side_manifests.derived_extents = self.live.with_artifacts(|store| {
-            held_at_current_version(store, &segments_manifest.derived_extents)
+            held_at_current_version(store, &segments_manifest.only_shard().derived_extents)
         });
         *lock_recover(&self.health.last_fold_report) = degraded;
         stairs.record("12 retire");
@@ -1565,8 +1582,8 @@ impl Executor {
         if let Err(reason) = self.swap_onto_folded_prefix(
             &completed.prefix,
             &live,
-            &live_manifest.deltas,
-            &segments_manifest.deltas,
+            &live_shard.record.deltas,
+            &segments_manifest.only_shard().deltas,
             executed,
             frees,
         ) {
@@ -1689,10 +1706,6 @@ impl Executor {
     /// The `MANIFEST.json` a fold's new prefix carries: the live one, with the schema wound back to
     /// what it was at the plan, every live vocabulary binding folded in, and the fold's own files.
     ///
-    /// `entity_id_high_water` here is the snapshot's: `Engine::open` seeds the allocator's floor
-    /// from the max of this and the side-manifest's live value, so the lower value is safe for the
-    /// allocator.
-    ///
     /// The vocabulary bindings fold in verbatim, never re-derived, re-sorted or re-numbered: keys
     /// and codes are byte-identical everywhere, and `columns.arrow` stores the code alone, so
     /// renumbering here would recolour the corpus with no error and no digest mismatch.
@@ -1700,7 +1713,6 @@ impl Executor {
         &self,
         live: &Generation,
         completed: &crate::compact::CompletedFold,
-        plan: &crate::compact::FoldPlan,
     ) -> mosaica_store::manifest::Manifest {
         let mut bundle_manifest = live.bundle.manifest.clone();
         let (runtime_attributes, runtime_scoped_attributes) =
@@ -1729,7 +1741,6 @@ impl Executor {
                 .retain(|f| !scoped_since_plan.contains(&f.name.as_str()));
         }
         crate::vocabularies::merge_live_values(&mut bundle_manifest, &live.vocabularies);
-        bundle_manifest.entity_id_high_water = plan.high_water;
         bundle_manifest.files = completed.files.clone();
         let carried_bindings: Vec<_> = live
             .bundle
@@ -2645,7 +2656,7 @@ impl Executor {
         let before_projections = self.deps.artifact_projections.builds();
         let before_lineages = self.deps.lineages.builds();
         for partition in generation.bundle.partitions.values() {
-            for (view, view_data) in &partition.views {
+            for (view, view_data) in &partition.only_shard().views {
                 for (layer, level) in &levels {
                     // The layout the fold has just recorded, so the warm builds the form the next
                     // request will ask for rather than one it would immediately replace.

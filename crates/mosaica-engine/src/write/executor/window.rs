@@ -475,6 +475,7 @@ impl Executor {
                     generation.overlay.is_deleted(entity)
                         || generation.bundle.partitions.values().any(|partition| {
                             partition
+                                .only_shard()
                                 .views
                                 .get(&row.view)
                                 .is_some_and(|data| data.row_space.row_of(entity).is_some())
@@ -615,7 +616,7 @@ impl Executor {
             let generation = self.generation.load();
             (
                 self.deps.identity_key,
-                generation.bundle.manifest.identity.shard_id,
+                generation.bundle.only_shard().id,
                 Arc::clone(&generation.tenancy),
             )
         };

@@ -270,7 +270,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|s| s.name.clone())
         .collect();
     let partition = bundle.partitions.values().next().ok_or("no partition")?;
-    let view = partition.views.values().next().ok_or("no view")?;
+    let view = partition.only_shard().views.values().next().ok_or("no view")?;
     let segment = view.segments.first().ok_or("no segment")?;
     let total = segment.columns.row_count() as usize;
     let n = want_rows.min(total);

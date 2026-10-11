@@ -35,7 +35,7 @@ use mosaica_lifecycle::command::UnallocatedRow;
 use mosaica_lifecycle::WalScalar;
 use mosaica_spatial::fixed32;
 use mosaica_spatial::shape::Space;
-use mosaica_types::{AttrLocalId, ShardId};
+use mosaica_types::AttrLocalId;
 
 const N: u64 = 60;
 
@@ -291,7 +291,6 @@ fn build_args(points: &Path, pairs: &Path, out: &Path, schema: Schema) -> BuildA
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

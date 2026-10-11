@@ -86,7 +86,7 @@ fn inspect(root: &Path) -> Result<Fixture, Box<dyn std::error::Error>> {
         .partitions
         .values()
         .next()
-        .and_then(|p| p.views.keys().next().cloned())
+        .and_then(|p| p.only_shard().views.keys().next().cloned())
         .unwrap_or_else(|| "s0".to_string());
     let mut categories = Vec::new();
     for scalar in &bundle.manifest.declared_scalars {
@@ -110,7 +110,7 @@ fn inspect(root: &Path) -> Result<Fixture, Box<dyn std::error::Error>> {
             }
         }
     }
-    let items = bundle.manifest.entity_id_high_water;
+    let items = bundle.only_shard().record.high_water;
     Ok(Fixture {
         view,
         extent: [q.x_min, q.y_min, q.x_max, q.y_max],

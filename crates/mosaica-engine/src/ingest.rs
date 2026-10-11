@@ -1005,7 +1005,7 @@ impl Engine {
             return Ok(Some(fixed(view.quantisation, item.x, item.y)));
         }
         for partition in generation.bundle.partitions.values() {
-            let Some(view_data) = partition.views.get(&view.id) else {
+            let Some(view_data) = partition.only_shard().views.get(&view.id) else {
                 continue;
             };
             let found = crate::viewport::segment_row_of(&view.id, view_data, entity)

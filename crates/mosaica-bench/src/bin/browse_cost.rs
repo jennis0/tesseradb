@@ -372,7 +372,6 @@ fn build_scan_fixture(dir: &Path, rows: u64) -> PathBuf {
             "07070707070707070707070707070707",
         )
         .expect("a well-formed key"),
-        shard_id: mosaica_types::ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

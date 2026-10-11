@@ -25,7 +25,7 @@ use mosaica_engine::{Engine, EngineConfig};
 use mosaica_lifecycle::command::UnallocatedRow;
 use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_store::read::open_bundle;
-use mosaica_types::{EntityId, MosaicaId, ShardId, TermId};
+use mosaica_types::{EntityId, MosaicaId, TermId};
 use parquet::arrow::ArrowWriter;
 
 /// A fixture bundle and an engine over it, with the executor running and the background refresh
@@ -128,7 +128,6 @@ fn build_fixture_with_sparse_term(out: &Path, points_path: &Path, pairs_path: &P
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -350,7 +349,7 @@ fn all_three_halves_of_one_deletion() {
     );
 
     let bundle = open_bundle(&root).expect("the folded bundle opens on its own");
-    let row_space = &bundle.partitions["default"].views["s0"].row_space;
+    let row_space = &bundle.partitions["default"].only_shard().views["s0"].row_space;
     assert!(
         row_space.row_of(deleted).is_none(),
         "the folded entity has no row in the new base"
@@ -411,7 +410,7 @@ fn every_surviving_row_keeps_its_own_identity_and_row_space_is_dense() {
     fold(&engine);
 
     let bundle = open_bundle(&root).expect("the folded bundle opens");
-    let view = &bundle.partitions["default"].views["s0"];
+    let view = &bundle.partitions["default"].only_shard().views["s0"];
     let row_space = &view.row_space;
     assert_eq!(
         row_space.total_rows(),
@@ -982,7 +981,10 @@ fn a_merge_cap_above_the_base_segment_is_obeyed() {
         .unwrap();
     fold(&engine);
     assert_eq!(engine.generation().prefix, "v00001");
-    let base = engine.generation().bundle.partitions["default"].views["s0"].segments[0]
+    let base = engine.generation().bundle.partitions["default"]
+        .only_shard()
+        .views["s0"]
+        .segments[0]
         .seg_id
         .clone();
 
@@ -1003,7 +1005,9 @@ fn a_merge_cap_above_the_base_segment_is_obeyed() {
         engine.write_executor_stats().merges > merges
     });
     let segment_ids = |engine: &Engine| -> Vec<String> {
-        engine.generation().bundle.partitions["default"].views["s0"]
+        engine.generation().bundle.partitions["default"]
+            .only_shard()
+            .views["s0"]
             .segments
             .iter()
             .map(|segment| segment.seg_id.clone())
@@ -1046,7 +1050,7 @@ fn a_merge_cap_above_the_base_segment_is_obeyed() {
     assert_eq!(visible(&restarted, &session), expected);
     for entity in &flushed[1..] {
         assert!(
-            generation.bundle.partitions["default"].views["s0"]
+            generation.bundle.partitions["default"].only_shard().views["s0"]
                 .row_space
                 .row_of(*entity)
                 .is_some(),
@@ -1058,7 +1062,7 @@ fn a_merge_cap_above_the_base_segment_is_obeyed() {
     // checks. The files beside them are the manifests themselves and the four segments the merge
     // consumed, which stay until the next fold reclaims the prefix.
     open_bundle(&root).expect("the published prefix opens and verifies");
-    let live: Vec<&str> = generation.bundle.partitions["default"].views["s0"]
+    let live: Vec<&str> = generation.bundle.partitions["default"].only_shard().views["s0"]
         .segments
         .iter()
         .map(|segment| segment.seg_id.as_str())
@@ -1086,7 +1090,9 @@ fn a_merge_cap_above_the_base_segment_is_obeyed() {
         !root.join("v00001").exists(),
         "the next fold reclaims the merge's inputs"
     );
-    let live: Vec<String> = restarted.generation().bundle.partitions["default"].views["s0"]
+    let live: Vec<String> = restarted.generation().bundle.partitions["default"]
+        .only_shard()
+        .views["s0"]
         .segments
         .iter()
         .map(|segment| segment.seg_id.clone())
@@ -1187,8 +1193,9 @@ fn fold_with_a_flush_in_flight(engine: &Engine) -> (EntityId, u64, u64) {
     let mid_flight = engine.generation();
     let mid_flight_watermark = mid_flight.watermark;
     let mid_flight_high_water = mid_flight.bundle.partitions["default"]
-        .manifest
-        .entity_id_high_water;
+        .only_shard()
+        .record
+        .high_water;
 
     engine.set_fold_paused_for_test(false);
     wait_for_fold_publication(engine, &before);
@@ -1230,12 +1237,15 @@ fn a_flush_inside_the_folds_flight_is_carried_forward() {
     let bundle = open_bundle(&root).expect("the folded bundle opens");
     let partition = &bundle.partitions["default"];
     assert_eq!(
-        partition.views["s0"].row_space.extent_count(),
+        partition.only_shard().views["s0"].row_space.extent_count(),
         1,
         "one carried-forward extent above the folded base"
     );
     assert!(
-        partition.views["s0"].row_space.row_of(entity).is_some(),
+        partition.only_shard().views["s0"]
+            .row_space
+            .row_of(entity)
+            .is_some(),
         "whose rows the base permutation does not claim"
     );
 }
@@ -1299,21 +1309,27 @@ fn a_delete_accepted_after_the_snapshot_survives_the_fold() {
     let bundle = open_bundle(&root).expect("the folded bundle opens");
     let partition = &bundle.partitions["default"];
     assert!(
-        partition.views["s0"].row_space.row_of(mid_flight).is_some(),
+        partition.only_shard().views["s0"]
+            .row_space
+            .row_of(mid_flight)
+            .is_some(),
         "the post-snapshot deletion keeps its row: the fold's passes ran over `D₀`, which did not \
          name it"
     );
     assert!(
-        partition.views["s0"].row_space.row_of(folded).is_none(),
+        partition.only_shard().views["s0"]
+            .row_space
+            .row_of(folded)
+            .is_none(),
         "and the pre-snapshot one lost its row, so the fold did fold something"
     );
     assert!(
-        tombstoned(&partition.manifest, mid_flight),
+        tombstoned(&partition.only_shard().record, mid_flight),
         "its id is in the new manifest's tombstones — the seed a restart reads, and the only thing \
          still hiding it: tombstones is `live deleted − executed`, never the plan's set"
     );
     assert!(
-        !tombstoned(&partition.manifest, folded),
+        !tombstoned(&partition.only_shard().record, folded),
         "while the executed one is gone from the seed"
     );
     assert_eq!(
@@ -1454,8 +1470,9 @@ fn the_watermark_and_high_water_published_are_the_live_ones_not_the_snapshot() {
 
     let baseline_watermark = engine.generation().watermark;
     let baseline_high_water = engine.generation().bundle.partitions["default"]
-        .manifest
-        .entity_id_high_water;
+        .only_shard()
+        .record
+        .high_water;
 
     let (_, mid_flight_watermark, mid_flight_high_water) = fold_with_a_flush_in_flight(&engine);
 
@@ -1473,16 +1490,15 @@ fn the_watermark_and_high_water_published_are_the_live_ones_not_the_snapshot() {
 
     assert_eq!(engine.generation().prefix, "v00001");
     let bundle = open_bundle(&root).expect("the folded bundle opens");
-    let published = &bundle.partitions["default"].manifest;
+    let published = &bundle.partitions["default"].only_shard().record;
     assert_eq!(
         published.watermark, mid_flight_watermark,
         "the published SEGMENTS-<n>.json watermark is the live one at the flip, not a value \
          frozen at the fold's own snapshot"
     );
     assert_eq!(
-        published.entity_id_high_water, mid_flight_high_water,
-        "and likewise for entity_id_high_water — the SEGMENTS-<n>.json half is the live \
-         allocator floor, where MANIFEST.json's is deliberately the snapshot bound"
+        published.high_water, mid_flight_high_water,
+        "and likewise for the shard's high water, the live allocator floor"
     );
 }
 
@@ -1776,8 +1792,8 @@ fn a_session_from_before_a_fold_is_never_served_the_entity_the_fold_retired() {
 }
 
 /// Whether the manifest's tombstones name `entity`.
-fn tombstoned(manifest: &mosaica_store::manifest::SegmentsManifest, entity: EntityId) -> bool {
-    manifest
+fn tombstoned(record: &mosaica_store::manifest::ShardRecord, entity: EntityId) -> bool {
+    record
         .tombstones
         .entities()
         .expect("a written manifest's tombstones decode")
@@ -2405,7 +2421,9 @@ fn the_segment_ceiling_dispatches_a_fold_outside_the_window() {
     assert_eq!(engine.generation().prefix, "v00001");
     let bundle = open_bundle(&root).expect("the folded bundle opens");
     assert_eq!(
-        bundle.partitions["default"].views["s0"].segments.len(),
+        bundle.partitions["default"].only_shard().views["s0"]
+            .segments
+            .len(),
         1,
         "and the fold did what the gauge asked for: one segment per partition-view"
     );
@@ -2631,7 +2649,7 @@ fn a_fold_lands_while_the_feed_runs(join: bool) {
 
         wait_for("the feed to publish into every view", || {
             let generation = engine.generation();
-            let views = &generation.bundle.partitions["default"].views;
+            let views = &generation.bundle.partitions["default"].only_shard().views;
             ["s1", "s2"]
                 .iter()
                 .all(|v| views.get(*v).is_some_and(|d| !d.segments.is_empty()))

@@ -1155,8 +1155,7 @@ fn newest_side_manifest(root: &std::path::Path) -> mosaica_store::manifest::Segm
         .values()
         .next()
         .expect("the fixture has one partition")
-        .manifest
-        .clone()
+        .side_manifest()
 }
 
 /// Register the open layer and wait out the side-manifest the registration publishes, so what a
@@ -1236,7 +1235,7 @@ fn a_tick_puts_them_in_the_prefix_and_a_restore_needs_no_log() {
             !fx.membership_files(&engine).is_empty()
         });
         assert!(
-            !newest_side_manifest(&fx.root).membership_extents.is_empty(),
+            !newest_side_manifest(&fx.root).only_shard().membership_extents.is_empty(),
             "the newest manifest names the extent the tick wrote"
         );
     }
@@ -1310,14 +1309,14 @@ fn a_suppression_still_publishes_at_once_and_takes_the_memberships_with_it() {
     let manifest = newest_side_manifest(&fx.root);
     assert!(
         manifest
-            .deny
+            .only_shard().deny
             .entities()
             .expect("the field a writer produced decodes")
             .contains(suppressed.raw() as u32),
         "the suppression reached the manifest without waiting for a tick"
     );
     assert!(
-        !manifest.membership_extents.is_empty(),
+        !manifest.only_shard().membership_extents.is_empty(),
         "and the batch's memberships went with it"
     );
     assert_eq!(engine.write_executor_stats().flushes, 0, "no tick was needed");

@@ -77,7 +77,7 @@ pub use permutation::{EntityBuckets, Permutation, RowEntities, RowSpace, Segment
 pub use read::{
     first_code_at_or_past, highest_side_manifest_n, open_bundle, open_written_prefix, tile_ranges,
     tile_ranges_all, tile_ranges_within, Bundle, ColumnsRef, CutIndex, MortonSlice, PartitionData,
-    ScalarSlice, SegmentData, ViewData,
+    ScalarSlice, SegmentData, ShardData, ViewData,
 };
 pub use reclaim::{hard_link_forward, reclaim_prefix, reclaim_unpublished_prefix};
 pub use row_entity::{write_row_entity, RowToEntity, ROW_ENTITY_FILE};

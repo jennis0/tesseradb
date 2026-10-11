@@ -299,6 +299,19 @@ items_of() {
     *) echo 0 ;;
   esac
 }
+# A built bundle's items: the high water of every shard in its newest side-manifest.
+high_water_of() {
+  python3 -c "
+import json, pathlib, sys
+bundle = pathlib.Path(sys.argv[1])
+prefix = json.loads((bundle / 'CURRENT').read_text())['prefix']
+side = max(
+    (bundle / prefix / 'partitions' / 'default').glob('SEGMENTS-*.json'),
+    key=lambda path: int(path.stem.split('-', 1)[1]),
+)
+print(sum(record['high_water'] for record in json.loads(side.read_text())['shards']['records']))
+" "$1"
+}
 prose_of()   { case "$1" in 2m4|notebook*) echo '"title","abstract"' ;; 25m) echo '"title"' ;; *) echo '' ;; esac; }
 # The column the viewer titles a record by: `title` wherever the scale declares it, else none.
 title_of()   { case "$1" in 2m4|25m|notebook*) echo 'title' ;; *) echo '' ;; esac; }
@@ -316,12 +329,7 @@ schema_of()  { case "$1" in notebook*) echo "$(notebook_dir_of "$1")/schema.toml
 if [[ -n "$bundle_override" ]]; then
   [[ -d "$bundle_override" ]] || { echo "no such bundle: $bundle_override" >&2; exit 1; }
   scales=(custom)
-  items_of()   { python3 -c "
-import json,sys,pathlib
-b = pathlib.Path('$bundle_override')
-m = sorted(b.glob('v*/MANIFEST.json'))
-print(json.load(open(m[-1]))['entity_id_high_water'] if m else 0)
-" 2>/dev/null || echo 0; }
+  items_of()   { high_water_of "$bundle_override"; }
   prose_of()   { if [[ -n "$prose_override" ]]; then printf '"%s"' "${prose_override//,/\",\"}"; fi; }
   title_of()   { echo ''; }
   schema_of()  { echo ''; }
@@ -408,12 +416,7 @@ if [[ -n "$deployment_override" ]]; then
   done
 
   scales=(custom)
-  items_of()   { python3 -c "
-import json,sys,pathlib
-b = pathlib.Path('$bundle_override')
-m = sorted(b.glob('v*/MANIFEST.json'))
-print(json.load(open(m[-1]))['entity_id_high_water'] if m else 0)
-" 2>/dev/null || echo 0; }
+  items_of()   { high_water_of "$bundle_override"; }
   prose_of()   { if [[ -n "$prose_override" ]]; then printf '"%s"' "${prose_override//,/\",\"}"; fi; }
   title_of()   { echo ''; }
   schema_of()  { echo ''; }

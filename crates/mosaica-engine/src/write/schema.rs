@@ -264,12 +264,10 @@ mod segment_schema_tests {
             created_at: String::new(),
             vocabularies: vec![],
             small_term_threshold: 32,
-            entity_id_high_water: 0,
             identity: mosaica_store::manifest::IdentityDescriptor {
                 construction: "siphash-2-4".to_string(),
                 rounds: 1,
                 key: "0123456789abcdef0123456789abcdef".to_string(),
-                shard_id: mosaica_types::ShardId::ZERO,
             },
             groups: Vec::new(),
             views: vec![],

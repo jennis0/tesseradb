@@ -28,7 +28,7 @@ use mosaica_store::membership::{LabelColumnPack, ROW_COLUMN_HOLE};
 use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource, ServingLayout,
 };
-use mosaica_types::{EntityId, ShardId};
+use mosaica_types::EntityId;
 
 /// Enough rows for band 6, which holds about one row in 64, to hold a few dozen.
 const ROWS: u64 = 3_000;
@@ -104,7 +104,6 @@ fn build_scored(root: &Path) {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -123,7 +122,7 @@ fn check_segments(engine: &Engine) -> BTreeMap<String, Vec<u64>> {
     let generation = engine.generation();
     let mut seen = BTreeMap::new();
     for partition in generation.bundle.partitions.values() {
-        for data in partition.views.values() {
+        for data in partition.only_shard().views.values() {
             for segment in &data.segments {
                 segment
                     .bands
@@ -280,7 +279,7 @@ fn extents_of(engine: &Engine, layer: &str) -> Vec<DerivedExtent> {
         .bundle
         .partitions
         .values()
-        .flat_map(|p| p.manifest.derived_extents.iter().cloned())
+        .flat_map(|p| p.only_shard().record.derived_extents.iter().cloned())
         .filter(|e| e.layer == layer)
         .collect()
 }
@@ -311,7 +310,14 @@ fn labels_of(root: &Path, engine: &Engine, layer: &str) -> LabelColumnPack {
     let DerivedForm::BandLabels { seg_id } = &copy.form else {
         unreachable!()
     };
-    let view = &generation.bundle.partitions.values().next().unwrap().views["s0"];
+    let view = &generation
+        .bundle
+        .partitions
+        .values()
+        .next()
+        .unwrap()
+        .only_shard()
+        .views["s0"];
     let base = &view.segments[0];
     assert_eq!(
         seg_id, &base.seg_id,
@@ -334,7 +340,15 @@ fn labels_of(root: &Path, engine: &Engine, layer: &str) -> LabelColumnPack {
 /// is a hole.
 fn assert_partition(engine: &Engine, labels: &LabelColumnPack, members: &[Vec<EntityId>]) {
     let generation = engine.generation();
-    let space = &generation.bundle.partitions.values().next().unwrap().views["s0"].row_space;
+    let space = &generation
+        .bundle
+        .partitions
+        .values()
+        .next()
+        .unwrap()
+        .only_shard()
+        .views["s0"]
+        .row_space;
     let mut claimed = vec![false; labels.rows() as usize];
     let mut seen = std::collections::BTreeSet::new();
     for artifact in members {
@@ -592,7 +606,7 @@ fn deep_verification_refuses_a_damaged_copy_and_a_missing_one() {
         .unwrap();
     let mut manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&newest).unwrap()).unwrap();
-    manifest["derived_extents"]
+    manifest["shards"]["records"][0]["derived_extents"]
         .as_array_mut()
         .unwrap()
         .retain(|e| !e["path"].as_str().unwrap().contains("/band-labels/"));

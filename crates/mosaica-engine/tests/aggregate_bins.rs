@@ -358,7 +358,6 @@ fn build_gated_views(dir: &Path, items: &[Item], views: &[GatedView<'_>]) -> Pat
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: mosaica_types::ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

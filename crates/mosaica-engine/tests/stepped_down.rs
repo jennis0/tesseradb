@@ -32,7 +32,7 @@ fn fabricate_stepped_down(root: &std::path::Path) {
     let mut manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("SEGMENTS-0.json")).unwrap())
             .unwrap();
-    manifest["deltas"] = serde_json::json!([1]);
+    manifest["shards"]["records"][0]["deltas"] = serde_json::json!([1]);
     manifest["files"] = serde_json::json!({
         format!("{}/never-written.arrow", common::SHARD.rel()): {
             "size": 1,

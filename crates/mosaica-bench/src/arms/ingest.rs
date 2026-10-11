@@ -124,7 +124,7 @@ use mosaica_engine::{Engine, EngineConfig};
 use mosaica_lifecycle::UnallocatedRow;
 use mosaica_spatial::Bounds;
 use mosaica_store::read::open_bundle;
-use mosaica_types::{IdentityKey, ShardId, TermId};
+use mosaica_types::{IdentityKey, TermId};
 
 use crate::arms::{Context, Result};
 use crate::corpus::{
@@ -245,7 +245,6 @@ pub fn run_build(
                 limit: Some(scale),
                 strict: false,
                 identity_key: IdentityKey::from_hex(TEST_KEY_HEX)?,
-                shard_id: ShardId::ZERO,
                 layers: Vec::new(),
                 layer_inputs: Vec::new(),
                 scoped_layers: Default::default(),
@@ -611,7 +610,7 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
             .partitions
             .values()
             .next()
-            .and_then(|p| p.views.keys().next().cloned())
+            .and_then(|p| p.only_shard().views.keys().next().cloned())
             .unwrap_or_else(|| "s0".to_string());
         drop(bundle);
 

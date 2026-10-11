@@ -23,7 +23,7 @@ use parquet::arrow::ArrowWriter;
 use mosaica_build::{build, BuildArgs, ViewArgs};
 use mosaica_spatial::Bounds;
 use mosaica_store::read::open_bundle;
-use mosaica_types::{IdentityKey, ShardId};
+use mosaica_types::IdentityKey;
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
@@ -218,7 +218,6 @@ fn two_views_derived_files_do_not_collide() {
         limit: None,
         strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        shard_id: ShardId::ZERO,
         layers: config.layers,
         layer_inputs: config.layer_sources,
         scoped_layers: Default::default(),
@@ -235,7 +234,8 @@ fn two_views_derived_files_do_not_collide() {
         .partitions
         .get("default")
         .expect("one partition")
-        .manifest;
+        .only_shard()
+        .record;
 
     // **Every derived path is named once.** Two entries naming one file is the defect itself: one
     // of them describes bytes that are not there any more.

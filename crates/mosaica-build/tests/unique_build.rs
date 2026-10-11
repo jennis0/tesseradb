@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 use mosaica_build::{build, verify_deep, BuildArgs, BuildReport, VerifyOpts};
 use mosaica_spatial::Bounds;
 use mosaica_store::manifest::{CurrentPointer, SegmentsManifest};
-use mosaica_types::{IdentityKey, ShardId};
+use mosaica_types::IdentityKey;
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 const N: u64 = 700;
@@ -229,7 +229,6 @@ fn build_reported(
         limit: None,
         strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -263,7 +262,7 @@ fn segments_manifest(root: &Path) -> SegmentsManifest {
 fn every_unique_type_builds_an_index_the_deep_verifier_accepts() {
     let temp = tempfile::tempdir().unwrap();
     let root = build_in(temp.path(), false, true).expect("a build with distinct values");
-    let indexes = segments_manifest(&root).unique_indexes;
+    let indexes = segments_manifest(&root).only_shard().unique_indexes.clone();
     let names: Vec<&str> = indexes.iter().map(|i| i.attribute.as_str()).collect();
     assert_eq!(names, ["doi", "small", "wide", "signed", "big", "at", "id"]);
     assert!(indexes
@@ -284,7 +283,10 @@ fn the_linear_build_writes_the_same_index() {
     let linear = tempfile::tempdir().unwrap();
     let a = build_in(streaming.path(), false, true).unwrap();
     let b = build_in(linear.path(), false, false).unwrap();
-    let (ia, ib) = (segments_manifest(&a).unique_indexes, segments_manifest(&b).unique_indexes);
+    let (ia, ib) = (
+        segments_manifest(&a).only_shard().unique_indexes.clone(),
+        segments_manifest(&b).only_shard().unique_indexes.clone(),
+    );
     assert_eq!(ia, ib);
     for index in &ia {
         for rel in index.files() {
@@ -376,9 +378,11 @@ fn refresh_digest(root: &Path, rel: &str) {
 
 /// The path of `attribute`'s first base run, prefix-relative, and on disc.
 fn first_run(root: &Path, attribute: &str) -> (String, PathBuf) {
-    let index = segments_manifest(root)
+    let manifest = segments_manifest(root);
+    let index = manifest
+        .only_shard()
         .unique_indexes
-        .into_iter()
+        .iter()
         .find(|i| i.attribute == attribute)
         .unwrap();
     let rel = index.base[0].path.clone();

@@ -46,7 +46,7 @@ use parquet::arrow::ArrowWriter;
 
 use mosaica_build::{build, build_in_memory, BuildArgs};
 use mosaica_spatial::Bounds;
-use mosaica_types::{IdentityKey, ShardId};
+use mosaica_types::IdentityKey;
 
 const N_ITEMS: u64 = 4_000;
 const N_TERMS: u64 = 61;
@@ -386,7 +386,6 @@ fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -963,7 +962,7 @@ fn entity_ids_follow_signature_order() {
     // Recover each entity's signature from pairs.parquet, which is the (term, entity) relation.
     let bundle = mosaica_store::read::open_bundle(&out).unwrap();
     let partition = bundle.partitions.values().next().unwrap();
-    let n = partition.manifest.entity_id_high_water as usize;
+    let n = partition.only_shard().record.high_water as usize;
     let pairs_path = mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO)
         .dir(&out.join("v00000"))
         .join("terms")
@@ -1050,7 +1049,6 @@ fn reference_build_at_scale() {
         limit: Some(limit),
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

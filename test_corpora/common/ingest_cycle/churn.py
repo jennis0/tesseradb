@@ -394,17 +394,15 @@ def served_state(bundle: Path) -> dict:
     frees: list[str] = []
     held: list[str] = []
     for partition in sorted(path for path in (root / "partitions").iterdir() if path.is_dir()):
-        side = newest_side_manifest(partition)
-        out["postings_bytes"] += (shard_dir(partition) / "terms" / "postings.arrow").stat().st_size
-        out["postings_bytes"] += sum(
-            (root / path).stat().st_size for path in side.get("deltas") or []
-        )
-        out["term_images_bytes"] += sum(
-            (root / extent["path"]).stat().st_size
-            for extent in side.get("term_image_extents") or []
-        )
-        frees.append(side["free_entities"])
-        held += [entry["entities"] for entry in side["held_entities"]]
+        for record in newest_side_manifest(partition)["shards"]["records"]:
+            postings = shard_dir(partition, record["id"]) / "terms" / "postings.arrow"
+            out["postings_bytes"] += postings.stat().st_size
+            out["postings_bytes"] += sum((root / path).stat().st_size for path in record["deltas"])
+            out["term_images_bytes"] += sum(
+                (root / extent["path"]).stat().st_size for extent in record["term_image_extents"]
+            )
+            frees.append(record["free_entities"])
+            held += [entry["entities"] for entry in record["held_entities"]]
     out["free_ids"] = sum(map(roaring_cardinality, frees))
     out["held_ids"] = sum(map(roaring_cardinality, held))
     return out

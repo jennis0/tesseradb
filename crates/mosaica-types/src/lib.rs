@@ -4,7 +4,7 @@ pub use identity::{
     IDENTITY_ROUNDS,
 };
 mod shard;
-pub use shard::{ShardId, ShardRow};
+pub use shard::{ShardId, ShardRow, SHARD_SIZE_DEFAULT};
 
 /// The process's own memory — the allocator's retention and the kernel's resident figures.
 ///
@@ -232,8 +232,10 @@ pub struct GenerationStamp {
 // 36: a side-manifest carries `tenancy_index`, the files of each number's tenancy, and
 // `retired_numbers`. A 35 manifest lacks the fields and is refused as malformed.
 // 37: every per-entity and per-view structure is under `partitions/<p>/shards/<s>/`, and every
-// dictionary extent under `dictionary/`. A 36 bundle keeps them in the partition's directory and
-// a segment's, where a 37 reader does not look, and is refused.
+// dictionary extent under `dictionary/`. A side-manifest holds each shard's state in
+// `shards.records` beside `shards.size`, and `MANIFEST.json` carries no shard id or high water. A
+// 36 bundle keeps its files where a 37 reader does not look and its manifests lack `shards`, and is
+// refused.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility.
 pub const BUNDLE_FORMAT: u32 = 37;

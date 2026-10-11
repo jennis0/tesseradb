@@ -1395,7 +1395,7 @@ fn segment_views(prefix_dir: &Path) -> Vec<String> {
     manifests.sort();
     let newest = manifests.last().expect("a side-manifest per partition");
     let document: Value = serde_json::from_slice(&std::fs::read(newest).unwrap()).unwrap();
-    let mut views: Vec<String> = document["segments"]
+    let mut views: Vec<String> = document["shards"]["records"][0]["segments"]
         .as_array()
         .expect("the segment list")
         .iter()

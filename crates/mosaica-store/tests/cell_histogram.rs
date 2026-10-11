@@ -108,22 +108,30 @@ fn build_bundle(root: &Path) {
     }
 
     let segments_manifest = SegmentsManifest {
-        watermark: n,
-        entity_id_high_water: n,
-        segments: vec![SegmentDescriptor {
-            incarnation: 0,
-            view: "main".to_string(),
-            seg_id: "seg0".to_string(),
-            row_count: items.len() as u32,
-            entity_lo: 0,
-            entity_hi: n - 1,
-        }],
-        deltas: vec![],
-        dict_extents: vec![],
-        tombstones: EntitySet::default(),
-        deny: EntitySet::default(),
-        files: segments_files,
-        ..SegmentsManifest::empty()
+        partition: mosaica_store::manifest::PartitionManifest {
+            dict_extents: vec![],
+            files: segments_files,
+            ..mosaica_store::manifest::PartitionManifest::empty()
+        },
+        shards: mosaica_store::manifest::Shards {
+            size: mosaica_types::SHARD_SIZE_DEFAULT,
+            records: vec![mosaica_store::manifest::ShardRecord {
+                watermark: n,
+                high_water: n,
+                segments: vec![SegmentDescriptor {
+                    incarnation: 0,
+                    view: "main".to_string(),
+                    seg_id: "seg0".to_string(),
+                    row_count: items.len() as u32,
+                    entity_lo: 0,
+                    entity_hi: n - 1,
+                }],
+                deltas: vec![],
+                tombstones: EntitySet::default(),
+                deny: EntitySet::default(),
+                ..mosaica_store::manifest::ShardRecord::empty(mosaica_types::ShardId::ZERO)
+            }],
+        },
     };
     let segments_bytes = serde_json::to_vec_pretty(&segments_manifest).expect("serialise");
     fs::write(
@@ -138,12 +146,10 @@ fn build_bundle(root: &Path) {
         declared_scalars: vec![],
         vocabularies: vec![],
         small_term_threshold: 32,
-        entity_id_high_water: n,
         identity: IdentityDescriptor {
             construction: IDENTITY_CONSTRUCTION.to_string(),
             rounds: IDENTITY_ROUNDS,
             key: "0123456789abcdef0123456789abcdef".to_string(),
-            shard_id: ShardId::ZERO,
         },
         groups: Vec::new(),
         views: vec![ViewDescriptor {

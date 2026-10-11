@@ -163,7 +163,7 @@ use crate::observer::{BuildObserver, BuildStage, StageTimer};
 use crate::spill;
 use crate::{
     fsync_file, validate_args, write_manifests, BuildArgs, BuildReport, BundleFiles,
-    PairsParquetWriter, PHASH, PREFIX, SEG_ID,
+    PairsParquetWriter, PHASH, PREFIX, SEG_ID, SHARD,
 };
 
 /// One item's position in the signature sort. 16 bytes, four-byte aligned — every field is a
@@ -1307,7 +1307,7 @@ fn build_bundle(
     let entity_terms_dir = args
         .out
         .join(PREFIX)
-        .join(ShardLayout::new(PHASH, args.shard_id).entity_terms_rel());
+        .join(ShardLayout::new(PHASH, SHARD).entity_terms_rel());
     let mut entity_terms = mosaica_store::EntityTermsWriter::create(&entity_terms_dir)
         .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?;
     let mut sig_terms: Vec<u32> = Vec::new();
@@ -1513,7 +1513,7 @@ fn build_bundle(
     }
 
     let prefix_dir = args.out.join(PREFIX);
-    let shard = ShardLayout::new(PHASH, args.shard_id);
+    let shard = ShardLayout::new(PHASH, SHARD);
     let shard_dir = shard.dir(&prefix_dir);
     let terms_dir = shard_dir.join("terms");
     let entities_dir = shard_dir.join("entities");
@@ -1920,7 +1920,7 @@ fn build_bundle(
                 entity_of_ordinal,
                 n,
                 identity_key: &args.identity_key,
-                shard_id: args.shard_id,
+                shard_id: SHARD,
                 rows_hint: geometry[index].rows,
             };
             crate::assembly::partition_rows(&source)?
@@ -1981,7 +1981,7 @@ fn build_bundle(
                 tmp: tmp.path(),
                 n,
                 identity_key: &args.identity_key,
-                shard_id: args.shard_id,
+                shard_id: SHARD,
                 render,
                 indexed,
             };

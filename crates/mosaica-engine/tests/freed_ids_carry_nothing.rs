@@ -108,7 +108,8 @@ fn pool(root: &Path) -> (croaring::Bitmap, croaring::Bitmap) {
         .values()
         .next()
         .expect("the fixture has one partition")
-        .manifest;
+        .only_shard()
+        .record;
     let freed = manifest
         .held_entities
         .iter()

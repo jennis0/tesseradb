@@ -19,7 +19,7 @@ use mosaica_build::config::{Config, Schema};
 use mosaica_build::{build, build_in_memory, BuildArgs};
 use mosaica_spatial::Bounds;
 use mosaica_store::{open_bundle, ScalarSlice};
-use mosaica_types::{EntityId, IdentityKey, ShardId};
+use mosaica_types::{EntityId, IdentityKey};
 
 mod common;
 
@@ -143,7 +143,6 @@ fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs 
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -173,7 +172,7 @@ fn department_key_of(
 ) -> Option<String> {
     let bundle = open_bundle(out).unwrap();
     let part = bundle.partitions.values().next().unwrap();
-    let view = &part.views["s0"];
+    let view = &part.only_shard().views["s0"];
     let entity = entity_of_source[&source_id];
     let row = view
         .row_space

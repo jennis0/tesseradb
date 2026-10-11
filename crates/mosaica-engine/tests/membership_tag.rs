@@ -211,7 +211,7 @@ fn has_labels(engine: &Engine, layer: &str, level: u32) -> bool {
         .bundle
         .partitions
         .values()
-        .flat_map(|p| p.manifest.derived_extents.iter())
+        .flat_map(|p| p.only_shard().record.derived_extents.iter())
         .any(|e| {
             e.layer == layer && e.level == level && matches!(e.form, DerivedForm::BandLabels { .. })
         })
@@ -592,7 +592,7 @@ fn a_built_bundle_tags_alike_before_and_after_an_ingest() {
         .bundle
         .partitions
         .values()
-        .flat_map(|p| p.manifest.derived_extents.iter().map(|e| e.layer.clone()))
+        .flat_map(|p| p.only_shard().record.derived_extents.iter().map(|e| e.layer.clone()))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();

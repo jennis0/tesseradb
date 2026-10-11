@@ -29,7 +29,7 @@ use mosaica_engine::{AcceptError, Engine, EngineConfig};
 use mosaica_lifecycle::command::UnallocatedRow;
 use mosaica_lifecycle::{Wal, WalRecord, WalScalar};
 use mosaica_store::read::{open_bundle, ColumnsRef, ScalarSlice};
-use mosaica_types::{EntityId, ShardId};
+use mosaica_types::EntityId;
 
 /// A discovered `department` vocabulary, wide enough that ordinary tests never see exhaustion.
 const DISCOVERED_WIDE: &str = r#"
@@ -150,7 +150,6 @@ fn build_args(points: &Path, pairs: &Path, out: &Path, schema: Schema) -> BuildA
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -209,7 +208,7 @@ fn stored_code_of(root: &Path, column: &str, entity: EntityId) -> Option<u32> {
     let prefix = &current.prefix;
     let mosaica_id = mosaica_id_at(entity, 0).raw();
     for (phash, partition) in &bundle.partitions {
-        for segment in &partition.manifest.segments {
+        for segment in &partition.only_shard().record.segments {
             let dir = root
                 .join(prefix)
                 .join(mosaica_store::ShardLayout::new(phash, mosaica_types::ShardId::ZERO).rel())

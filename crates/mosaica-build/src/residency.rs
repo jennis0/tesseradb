@@ -3728,7 +3728,6 @@ require_member_visibility = "none"
             strict: false,
             identity_key: mosaica_types::IdentityKey::from_hex("000102030405060708090a0b0c0d0e0f")
                 .unwrap(),
-            shard_id: mosaica_types::ShardId::ZERO,
             layers: parsed.layers.clone(),
             layer_inputs: parsed.layer_sources.clone(),
             scoped_layers: Default::default(),

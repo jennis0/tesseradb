@@ -1546,7 +1546,7 @@ async fn every_scoped_family_survives_ingest_flush_layering_fold_and_restart() {
     }
     let manifest = side_manifest(&served);
     let layers = |column: &str, view: &str| {
-        manifest["attr_extents"]
+        manifest["shards"]["records"][0]["attr_extents"]
             .as_array()
             .expect("attr_extents")
             .iter()
@@ -1556,7 +1556,7 @@ async fn every_scoped_family_survives_ingest_flush_layering_fold_and_restart() {
     assert!(
         layers("mood", "quarter:2026-Q1") >= 3,
         "the fillers stacked layers on `2026-Q1`'s column: {}",
-        manifest["attr_extents"]
+        manifest["shards"]["records"][0]["attr_extents"]
     );
     assert_eq!(
         layers("mood", &format!("quarter:{MINTED_KEY}")),

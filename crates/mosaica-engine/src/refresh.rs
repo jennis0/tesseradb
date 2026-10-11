@@ -132,7 +132,7 @@ pub(crate) fn refresh_resident(
             .bundle
             .partitions
             .values()
-            .find_map(|partition| partition.views.get(&key.view))
+            .find_map(|partition| partition.only_shard().views.get(&key.view))
         else {
             continue;
         };

@@ -160,7 +160,7 @@ fn tag_extents(root: &Path) -> Vec<Value> {
         })
         .expect("a side-manifest");
     let manifest: Value = serde_json::from_slice(&std::fs::read(newest).unwrap()).unwrap();
-    manifest["attr_extents"]
+    manifest["shards"]["records"][0]["attr_extents"]
         .as_array()
         .expect("attr_extents")
         .iter()

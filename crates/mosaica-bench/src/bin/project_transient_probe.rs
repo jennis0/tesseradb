@@ -310,7 +310,12 @@ fn main() {
         serde_json::from_slice(&std::fs::read(args.bundle.join("CURRENT")).unwrap()).unwrap();
     let prefix_dir = args.bundle.join(&current.prefix);
     let (phash, partition) = bundle.partitions.iter().next().expect("a partition");
-    let row_space = &partition.views.get(&args.view).expect("the view").row_space;
+    let row_space = &partition
+        .only_shard()
+        .views
+        .get(&args.view)
+        .expect("the view")
+        .row_space;
     assert_eq!(row_space.extent_count(), 0, "a bundle with extents");
     let bound = row_space.base().bound();
     let total_rows = row_space.total_rows();

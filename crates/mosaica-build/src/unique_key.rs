@@ -126,7 +126,8 @@ pub fn keyword_cardinalities(
 ) -> Result<Vec<KeywordCardinality>> {
     let mut out = Vec::new();
     for (phash, segments) in partitions {
-        let shard = mosaica_store::ShardLayout::new(phash, mosaica_types::ShardId::ZERO);
+        let record = segments.only_shard();
+        let shard = mosaica_store::ShardLayout::new(phash, record.id);
         let attrs_rel = format!("{}/attrs", shard.rel());
         for scalar in &manifest.declared_scalars {
             if scalar.arrow_type != ScalarType::Keyword || !scalar.index {
@@ -139,8 +140,8 @@ pub fn keyword_cardinalities(
                 view: None,
                 distinct,
                 present,
-                rows: manifest.entity_id_high_water,
-                index_bytes: bytes_under(&dir_rel, &[&manifest.files, &segments.files]),
+                rows: record.high_water,
+                index_bytes: bytes_under(&dir_rel, &[&manifest.files, &segments.partition.files]),
             });
         }
         for group in &manifest.groups {
@@ -155,7 +156,7 @@ pub fn keyword_cardinalities(
                         mosaica_types::view::DECLARED_INCARNATION,
                     );
                     let (distinct, present) = read_column(&prefix_dir.join(&dir_rel))?;
-                    let rows = segments
+                    let rows = record
                         .segments
                         .iter()
                         .filter(|segment| &segment.view == view)
@@ -167,7 +168,10 @@ pub fn keyword_cardinalities(
                         distinct,
                         present,
                         rows,
-                        index_bytes: bytes_under(&dir_rel, &[&manifest.files, &segments.files]),
+                        index_bytes: bytes_under(
+                            &dir_rel,
+                            &[&manifest.files, &segments.partition.files],
+                        ),
                     });
                 }
             }

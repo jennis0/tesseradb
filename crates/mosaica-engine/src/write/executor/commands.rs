@@ -36,6 +36,7 @@ pub(super) fn dangling_entities(generation: &Generation, views: &[String]) -> Ve
         .filter(|entity| {
             let in_another_view = generation.bundle.partitions.values().any(|partition| {
                 partition
+                    .only_shard()
                     .views
                     .iter()
                     .any(|(id, data)| !in_views(id) && data.row_space.row_of(*entity).is_some())
@@ -63,7 +64,7 @@ pub(super) fn view_entities(generation: &Generation, views: &[String]) -> croari
     let mut entities = croaring::Bitmap::new();
     for view in views {
         for partition in generation.bundle.partitions.values() {
-            let Some(view_data) = partition.views.get(view) else {
+            let Some(view_data) = partition.only_shard().views.get(view) else {
                 continue;
             };
             let row_space = &view_data.row_space;

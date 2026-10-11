@@ -149,7 +149,7 @@ fn row_of(engine: &Engine, entity: EntityId) -> u32 {
         .bundle
         .partitions
         .values()
-        .find_map(|p| p.views["s0"].row_space.row_of(entity))
+        .find_map(|p| p.only_shard().views["s0"].row_space.row_of(entity))
         .expect("the entity has a row")
         .raw()
 }
@@ -415,7 +415,7 @@ fn a_join_published_before_the_entitys_own_row_is_drawn_from_the_buffer() {
             .bundle
             .partitions
             .values()
-            .find_map(|p| p.views.get(view))
+            .find_map(|p| p.only_shard().views.get(view))
             .expect("the view is in the generation")
     };
     assert!(
@@ -505,7 +505,7 @@ fn an_entrys_whole_life_serves_the_same_answer_at_every_step() {
             .bundle
             .partitions
             .values()
-            .find_map(|p| p.views.get(view))
+            .find_map(|p| p.only_shard().views.get(view))
             .expect("the view is in the generation")
             .row_space
             .row_of(entity)

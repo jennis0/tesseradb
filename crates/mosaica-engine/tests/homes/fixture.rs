@@ -27,7 +27,7 @@ use mosaica_engine::filter::{FilterExpr, FilterOperand};
 use mosaica_engine::{Engine, EngineConfig, Session, ViewportRequest};
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_spatial::Projection;
-use mosaica_types::{EntityId, ShardId};
+use mosaica_types::EntityId;
 
 pub const N: u64 = 24;
 /// The item edited.
@@ -315,7 +315,6 @@ pub fn build_homes(dir: &Path) -> std::path::PathBuf {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

@@ -1150,7 +1150,7 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
     assert str(identity_key.k0) not in items_text_str and str(identity_key.k1) not in items_text_str
 
     # --- POST /v1/artifacts: a layer published over the catalogue, read whole, every frame swept -
-    shard = oracle_bundle.manifest["identity"].get("shard_id", 0)
+    shard = oracle_bundle.shard_record()["id"]
     # Each group holds admitted and denied items alike, so every count is a partial one.
     seen, unseen = sorted(admitted_high), sorted(denied_high)
     groups = [seen[i : i + 200] + unseen[i : i + 200] for i in range(0, 4_000, 200)]

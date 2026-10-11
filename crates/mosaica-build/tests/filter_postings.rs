@@ -21,7 +21,7 @@ use mosaica_build::{build, BuildArgs};
 use mosaica_filter::{ColumnPostings, ValueColumn};
 use mosaica_spatial::Bounds;
 use mosaica_store::open_bundle;
-use mosaica_types::{AttrLocalId, IdentityKey, ShardId};
+use mosaica_types::{AttrLocalId, IdentityKey};
 
 mod common;
 
@@ -196,7 +196,6 @@ fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs 
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -653,7 +652,13 @@ fn the_manifest_records_the_placement_the_tail_was_built_from() {
     assert_eq!(declared, vec!["department", "title", "id"]);
     // Only one is in the tail, and it is exactly what the segment carries.
     assert_eq!(tail, vec!["department"]);
-    let view = &bundle.partitions.values().next().unwrap().views["s0"];
+    let view = &bundle
+        .partitions
+        .values()
+        .next()
+        .unwrap()
+        .only_shard()
+        .views["s0"];
     let columns = &view.segments[0].columns;
     assert!(columns.scalar("department").is_some());
     assert!(columns.scalar("title").is_none());
@@ -681,7 +686,13 @@ fn a_filter_only_column_is_absent_from_the_hot_column() {
     .unwrap();
 
     let bundle = open_bundle(&out).unwrap();
-    let view = &bundle.partitions.values().next().unwrap().views["s0"];
+    let view = &bundle
+        .partitions
+        .values()
+        .next()
+        .unwrap()
+        .only_shard()
+        .views["s0"];
     let columns = &view.segments[0].columns;
     assert!(
         columns.scalar("department").is_some(),

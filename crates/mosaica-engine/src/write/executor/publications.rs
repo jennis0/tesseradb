@@ -5,7 +5,7 @@ pub(super) fn views_of(generation: &Generation) -> Vec<String> {
         .bundle
         .partitions
         .values()
-        .flat_map(|p| p.views.keys().cloned())
+        .flat_map(|p| p.only_shard().views.keys().cloned())
         .collect();
     views.sort_unstable();
     views.dedup();
@@ -21,7 +21,7 @@ pub(super) fn view_row_space<'a>(
     bundle
         .partitions
         .get(partition)
-        .and_then(|p| p.views.get(view))
+        .and_then(|p| p.only_shard().views.get(view))
         .map(|v| &v.row_space)
 }
 
@@ -188,6 +188,7 @@ impl Executor {
         let Some(plan) = crate::coalesce::plan_coalesce(
             partition,
             &partition_data.manifest,
+            &partition_data.only_shard().record,
             &generation.bundle.manifest.files,
             self.deps.coalesce_policy,
             // The roster as this generation has it: a scoped column of an incarnation that is no
@@ -302,7 +303,6 @@ impl Executor {
             // truncates files the first has memory-mapped.
             seg_id: format!("merge-{}-{attempt}", partition_data.segments_n),
             identity_key: self.deps.identity_key,
-            shard_id: manifest.identity.shard_id,
             scalar_schema,
             band_schema: band_schema_of(manifest),
             absent_ok,
@@ -528,7 +528,7 @@ impl Executor {
             return;
         };
 
-        let mut manifest = partition_data.manifest.clone();
+        let mut manifest = partition_data.side_manifest();
         if !crate::merge::rebase_into(&mut manifest, &completed) {
             // A consumed segment is no longer listed. The files are orphans nothing references.
             tracing::warn!("discarding a completed merge that no longer rebases");
@@ -577,6 +577,7 @@ impl Executor {
         let merged_seg_id = completed.segment.seg_id.clone();
         let next_bundle = match live.bundle.with_merged(
             &completed.plan.partition,
+            completed.plan.shard,
             &completed.plan.view,
             &consumed,
             completed.segment,
@@ -618,7 +619,7 @@ impl Executor {
             let merged_segment = next_bundle
                 .partitions
                 .get(&completed.plan.partition)
-                .and_then(|p| p.views.get(&completed.plan.view))
+                .and_then(|p| p.only_shard().views.get(&completed.plan.view))
                 .and_then(|v| v.segments.iter().find(|s| s.seg_id == merged_seg_id))
                 .map(|s| s.as_ref());
             self.live.with_artifacts(|store| {
@@ -725,7 +726,8 @@ impl Executor {
             return;
         };
 
-        let Some(mut manifest) = crate::coalesce::rebased(&partition_data.manifest, &completed)
+        let Some(mut manifest) =
+            crate::coalesce::rebased(partition_data.side_manifest(), &completed)
         else {
             // A consumed entry is no longer listed. The files are orphans nothing references.
             tracing::warn!("discarding a completed coalesce that no longer rebases");
@@ -778,6 +780,7 @@ impl Executor {
             None
         } else {
             let extents: Vec<mosaica_store::EntityTermsExtentPaths> = manifest
+                .only_shard()
                 .entity_terms_extents
                 .iter()
                 .map(|e| entity_terms_extent_paths(&prefix_dir, e))
@@ -810,9 +813,10 @@ impl Executor {
             // Both lists, one stack, as the open composes them: an artifact's content extents
             // hold the same format and the same reader, and the two never share an entity.
             let extents: Vec<mosaica_filter::RecordExtentPaths> = manifest
+                .only_shard()
                 .record_extents
                 .iter()
-                .chain(manifest.artifact_record_extents.iter())
+                .chain(manifest.only_shard().artifact_record_extents.iter())
                 .map(|e| record_extent_paths(&prefix_dir, e))
                 .collect();
             // The columns whose base no fold has written yet, which the schema owes no base
@@ -911,12 +915,17 @@ impl Executor {
             .partitions
             .get(&completed.partition)
             .expect("the partition this publication just rebased")
-            .manifest
+            .only_shard()
+            .record
             .deltas
         {
             let held = match coalesced.filter(|(path, _)| path == rel) {
                 Some((_, tier)) => Some(Arc::clone(tier)),
-                None => held_tier(&live.delta_postings, &partition_data.manifest.deltas, rel),
+                None => held_tier(
+                    &live.delta_postings,
+                    &partition_data.only_shard().record.deltas,
+                    rel,
+                ),
             };
             let Some(tier) = held else {
                 // The manifest is already committed: a restart opens it.
@@ -948,6 +957,7 @@ impl Executor {
             match mosaica_store::unique::UniqueIndexes::open(
                 &next_bundle.manifest,
                 &partition.manifest,
+                &partition.only_shard().record,
                 &self.prefix_dir(&live),
                 Some(&live.unique),
             ) {
@@ -970,7 +980,7 @@ impl Executor {
                 .get(&completed.partition)
                 .expect("the partition this publication just rebased");
             match mosaica_store::edited::EditedIndex::open(
-                &partition.manifest.edited_items,
+                &partition.only_shard().record.edited_items,
                 &self.prefix_dir(&live),
                 Some(&live.edited),
             ) {
@@ -1083,7 +1093,7 @@ impl Executor {
         };
 
         let context = {
-            let Some(view_data) = partition_data.views.get(&view) else {
+            let Some(view_data) = partition_data.only_shard().views.get(&view) else {
                 return false;
             };
             // This view's frame: the flush quantises against the extent the view's own positions
@@ -1260,7 +1270,7 @@ impl Executor {
                 row_base,
                 entity_floor: view_data.row_space.entity_floor(),
                 identity_key: self.deps.identity_key,
-                shard_id: manifest.identity.shard_id,
+                shard_id: view_data.shard,
                 quantisation,
                 // This view's schema, entity-scoped tail then scoped render lanes: the same list a
                 // merge and a fold of this view take (`view_scalar_schema_of`), so a segment
@@ -1409,7 +1419,7 @@ impl Executor {
         let mut views: std::collections::BTreeMap<&str, Option<&mosaica_store::read::ViewData>> =
             std::collections::BTreeMap::new();
         for partition in generation.bundle.partitions.values() {
-            for (name, data) in &partition.views {
+            for (name, data) in &partition.only_shard().views {
                 views
                     .entry(name.as_str())
                     .and_modify(|held| *held = None)
@@ -1605,7 +1615,7 @@ impl Executor {
             Vec<mosaica_store::manifest::MembershipExtent>,
         )> = Vec::new();
         for (partition, partition_data) in &live.bundle.partitions {
-            let mut manifest = partition_data.manifest.clone();
+            let mut manifest = partition_data.side_manifest();
             write_deny_state(&mut manifest, &live.overlay);
             // Membership extents are written before the manifest that names them, which is the
             // whole of their durability contract: a manifest naming a missing extent refuses at
@@ -1971,6 +1981,7 @@ impl Executor {
         // neither, even where the new incarnation's empty row space would continue it.
         if let Some(segment) = &completed.segment {
             let continues = partition_data
+                .only_shard()
                 .views
                 .get(&completed.view)
                 .filter(|view| view.incarnation == segment.descriptor.incarnation)
@@ -2062,7 +2073,7 @@ impl Executor {
         // The four parts of this stage, lapped apart on their own mark; the outer `Manifest` lap
         // still covers the whole of it.
         let mut n = StageMark::now();
-        let mut manifest = partition_data.manifest.clone();
+        let mut manifest = partition_data.side_manifest();
         n = self
             .health
             .flush_lap(crate::flush::FlushStage::ManifestClone, n);
@@ -2091,13 +2102,14 @@ impl Executor {
         // A values-only publication has no segment and so no entity high-water of its own; it
         // still advances the watermark, since it publishes extents a resident fragment must be
         // rebuilt past.
-        manifest.watermark = completed
+        let record = manifest.only_shard_mut();
+        record.watermark = completed
             .segment
             .as_ref()
             .map(|s| s.watermark)
             .unwrap_or(0)
-            .max(manifest.watermark + 1);
-        manifest.entity_id_high_water = manifest.entity_id_high_water.max(
+            .max(record.watermark + 1);
+        record.high_water = record.high_water.max(
             completed
                 .segment
                 .as_ref()
@@ -2118,30 +2130,34 @@ impl Executor {
                 // is what keeps a key created again from publishing it as its own.
                 incarnation: completed.scoped_incarnation,
             };
-            if !manifest.scoped_columns.contains(&entry) {
-                manifest.scoped_columns.push(entry);
+            if !manifest.partition.scoped_columns.contains(&entry) {
+                manifest.partition.scoped_columns.push(entry);
             }
         }
         // The segment's own manifest lists, taken together or not at all: a values-only
         // publication wrote none of the files they name.
-        if let Some(segment) = &completed.segment {
-            manifest.segments.push(segment.descriptor.clone());
-            manifest.deltas.push(segment.tier_path.clone());
+        manifest.partition.files.extend(completed.files);
+        if let Some(extent) = completed.dict_extent {
+            manifest.partition.dict_extents.push(extent);
         }
-        manifest.files.extend(completed.files);
+        let record = manifest.only_shard_mut();
+        if let Some(segment) = &completed.segment {
+            record.segments.push(segment.descriptor.clone());
+            record.deltas.push(segment.tier_path.clone());
+        }
         let edited = &completed.edited_runs;
-        manifest
+        record
             .edited_items
             .by_number
             .live
             .extend(edited.by_number.iter().map(|run| run.path.clone()));
-        manifest
+        record
             .edited_items
             .by_entity
             .live
             .extend(edited.by_entity.iter().map(|run| run.path.clone()));
         for flushed in &completed.unique_runs {
-            if let Some(index) = manifest
+            if let Some(index) = record
                 .unique_indexes
                 .iter_mut()
                 .find(|runs| runs.attribute == flushed.attribute)
@@ -2149,33 +2165,30 @@ impl Executor {
                 index.live.extend(flushed.runs.iter().cloned());
             }
         }
-        if let Some(extent) = completed.dict_extent {
-            manifest.dict_extents.push(extent);
-        }
         // Named in the manifest as well as digested in `files`: the reader composes exactly what
         // this list names, so an extent on disk that no manifest names is not read and one named
         // but absent is a refusal to open (`FilterColumns::open`).
-        manifest
+        record
             .attr_extents
             .extend(completed.filter_extents.iter().map(|e| e.extent.clone()));
         // The record-blob extent, under the same two-obligation rule: the three files are already
         // in `files`, and this entry is what makes them reachable. A record stack opens exactly
         // what `record_extents` names, so bytes this list omits answer no drill-down, and bytes
         // it names but that are absent refuse the open.
-        manifest.record_extents.extend(completed.record_extent);
+        record.record_extents.extend(completed.record_extent);
         // The entity→term transpose's extent, under the same two-obligation rule and for the
         // sharper of the two reasons: a list this manifest omits leaves the flushed entities'
         // labels unknown, which serves a drill-down without them (harmless) *and* leaves the join
         // rule's label arm with nothing to compare against (a re-label accepted through a second
         // view's row). The live generation composes it below.
-        manifest
+        record
             .entity_terms_extents
             .push(completed.entity_terms_extent.clone());
         // The text layers, under the same two-obligation rule: the files are already digested in
         // `files`, and this entry is what makes them reachable to a reopen. The live generation
         // composes them below: a published layer no live reader holds answers no `match` until
         // the next fold, so the record blob's own composition must do the same.
-        manifest
+        record
             .text_extents
             .extend(completed.text_extents.iter().cloned());
         write_deny_state(&mut manifest, &live.overlay);
@@ -2249,6 +2262,7 @@ impl Executor {
                 let seg_id = segment.segment.seg_id.clone();
                 let bundle = match live.bundle.with_segment(
                     &completed.partition,
+                    completed.shard,
                     &completed.view,
                     segment.segment,
                     segment.extent,
@@ -2328,7 +2342,7 @@ impl Executor {
         let watermark = next_bundle
             .partitions
             .get(&completed.partition)
-            .map(|p| p.manifest.watermark)
+            .map(|p| p.only_shard().record.watermark)
             .unwrap_or(live.watermark);
         let segments_version = live.segments_version + 1;
         let mut delta_postings = live.delta_postings.clone();
@@ -2356,7 +2370,7 @@ impl Executor {
                 next_bundle
                     .partitions
                     .get(&completed.partition)
-                    .and_then(|p| p.views.get(&completed.view))
+                    .and_then(|p| p.only_shard().views.get(&completed.view))
                     .and_then(|v| v.segments.iter().find(|s| &s.seg_id == seg_id))
                     .map(|s| s.as_ref())
             });
@@ -2392,6 +2406,7 @@ impl Executor {
                 match mosaica_store::unique::UniqueIndexes::open(
                     &next_bundle.manifest,
                     &partition.manifest,
+                    &partition.only_shard().record,
                     &self.prefix_dir(&live),
                     Some(&live.unique),
                 ) {
@@ -2419,7 +2434,7 @@ impl Executor {
                 return false;
             };
             match mosaica_store::edited::EditedIndex::open(
-                &partition.manifest.edited_items,
+                &partition.only_shard().record.edited_items,
                 &self.prefix_dir(&live),
                 Some(&live.edited),
             ) {

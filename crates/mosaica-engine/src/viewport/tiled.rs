@@ -724,7 +724,7 @@ impl Engine {
                 true,
                 contents,
             )?;
-            let mosaica_id = self.artifact_id(pass.shard, entity)?.raw();
+            let mosaica_id = self.artifact_id(entity)?.raw();
             Some(Arc::new(Admitted {
                 mosaica_id,
                 passing: (ordinal, entity, masked_count, rank),

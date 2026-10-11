@@ -316,33 +316,42 @@ impl std::fmt::Display for ManifestRegression {
 /// (caught by the endurance tier, 2026-08-15), and what contained it was an accident: the boot
 /// rebuilds the buffer by `has_row`, not by the watermark, so the under-report never miscounted.
 ///
-/// **What is compared: every ordered scalar the manifest carries** — `watermark`,
-/// `entity_id_high_water` and `layer_registry_version`; everything else in a `SegmentsManifest` is a list or map with
-/// per-field replacement rules no total order describes. A new ordered scalar joins this
-/// comparison when it is added, or it inherits the silent version of the defect above.
+/// **What is compared: every ordered scalar the manifest carries** — each shard's `watermark` and
+/// `high_water`, and the partition's `layer_registry_version`; everything else is a list or map
+/// with per-field replacement rules no total order describes. A new ordered scalar joins this
+/// comparison when it is added, or it inherits the silent version of the defect above. A shard
+/// the partition serves must keep its record, or its high water would be lost with it.
 pub(crate) fn check_manifest_publishable(
-    live: &mosaica_store::manifest::SegmentsManifest,
+    live: &mosaica_store::read::PartitionData,
     next: &mosaica_store::manifest::SegmentsManifest,
 ) -> Result<(), ManifestRegression> {
-    if next.watermark < live.watermark {
-        return Err(ManifestRegression {
-            field: "watermark",
-            live: live.watermark,
-            offered: next.watermark,
-        });
+    for shard in &live.shards {
+        let Some(record) = next.shards.records.iter().find(|r| r.id == shard.id) else {
+            return Err(ManifestRegression {
+                field: "shards",
+                live: live.shards.len() as u64,
+                offered: next.shards.records.len() as u64,
+            });
+        };
+        let live_record = &shard.record;
+        for (field, live, offered) in [
+            ("watermark", live_record.watermark, record.watermark),
+            ("high_water", live_record.high_water, record.high_water),
+        ] {
+            if offered < live {
+                return Err(ManifestRegression {
+                    field,
+                    live,
+                    offered,
+                });
+            }
+        }
     }
-    if next.entity_id_high_water < live.entity_id_high_water {
-        return Err(ManifestRegression {
-            field: "entity_id_high_water",
-            live: live.entity_id_high_water,
-            offered: next.entity_id_high_water,
-        });
-    }
-    if next.layer_registry_version < live.layer_registry_version {
+    if next.partition.layer_registry_version < live.manifest.layer_registry_version {
         return Err(ManifestRegression {
             field: "layer_registry_version",
-            live: live.layer_registry_version,
-            offered: next.layer_registry_version,
+            live: live.manifest.layer_registry_version,
+            offered: next.partition.layer_registry_version,
         });
     }
     Ok(())
@@ -421,16 +430,36 @@ mod tests {
         assert!(text.contains("row-projection cache"), "{text}");
     }
 
-    /// A side-manifest with only its two ordered scalars set — [`check_manifest_publishable`]
-    /// reads nothing else off it.
-    fn manifest_at(
-        watermark: u64,
-        entity_id_high_water: u64,
-    ) -> mosaica_store::manifest::SegmentsManifest {
-        mosaica_store::manifest::SegmentsManifest {
-            watermark,
-            entity_id_high_water,
-            ..mosaica_store::manifest::SegmentsManifest::empty()
+    /// A side-manifest with only its shard's two ordered scalars set — [`check_manifest_publishable`]
+    /// reads nothing else off it but the registry version.
+    fn manifest_at(watermark: u64, high_water: u64) -> mosaica_store::manifest::SegmentsManifest {
+        let mut manifest = mosaica_store::manifest::SegmentsManifest::empty();
+        let record = manifest.only_shard_mut();
+        record.watermark = watermark;
+        record.high_water = high_water;
+        manifest
+    }
+
+    /// The partition `manifest` was published as.
+    fn partition_at(watermark: u64, high_water: u64) -> mosaica_store::read::PartitionData {
+        let manifest = manifest_at(watermark, high_water);
+        mosaica_store::read::PartitionData {
+            manifest: manifest.partition,
+            shard_size: manifest.shards.size,
+            segments_n: 0,
+            highest_candidate_n: 0,
+            shards: manifest
+                .shards
+                .records
+                .into_iter()
+                .map(|record| {
+                    std::sync::Arc::new(mosaica_store::read::ShardData {
+                        id: record.id,
+                        record,
+                        views: std::collections::HashMap::new(),
+                    })
+                })
+                .collect(),
         }
     }
 
@@ -444,7 +473,7 @@ mod tests {
     /// publication commits the live values unchanged, so `>` would refuse them all).
     #[test]
     fn a_side_manifest_may_not_regress_a_durable_scalar() {
-        let live = manifest_at(100, 200);
+        let live = partition_at(100, 200);
 
         assert!(check_manifest_publishable(&live, &manifest_at(100, 200)).is_ok());
         assert!(check_manifest_publishable(&live, &manifest_at(101, 201)).is_ok());
@@ -456,6 +485,11 @@ mod tests {
 
         let refused = check_manifest_publishable(&live, &manifest_at(100, 199))
             .expect_err("a regressed high-water is refused");
-        assert_eq!(refused.field, "entity_id_high_water");
+        assert_eq!(refused.field, "high_water");
+
+        let mut without = manifest_at(100, 200);
+        without.shards.records.clear();
+        check_manifest_publishable(&live, &without)
+            .expect_err("a manifest that drops a served shard's record is refused");
     }
 }

@@ -208,7 +208,6 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -224,7 +223,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     // ---- (a) manifests present, digests verify (open_bundle is the read protocol) ----------
     let bundle = open_bundle(&out).expect("open_bundle must verify the freshly built bundle");
     assert_eq!(bundle.manifest.bundle_format, mosaica_types::BUNDLE_FORMAT);
-    assert_eq!(bundle.manifest.entity_id_high_water, N_ITEMS);
+    assert_eq!(bundle.only_shard().record.high_water, N_ITEMS);
     assert_eq!(bundle.manifest.small_term_threshold, 32);
     assert_eq!(bundle.manifest.partitions.len(), 1);
     assert_eq!(bundle.manifest.partitions[0].phash, "default");
@@ -239,16 +238,19 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
 
     let part = &bundle.partitions["default"];
     assert_eq!(part.segments_n, 0);
-    assert_eq!(part.manifest.watermark, N_ITEMS);
-    assert_eq!(part.manifest.entity_id_high_water, N_ITEMS);
-    assert_eq!(part.manifest.segments.len(), 1);
-    assert_eq!(part.manifest.segments[0].view, "s0");
-    assert_eq!(part.manifest.segments[0].row_count, N_ITEMS as u32);
-    assert_eq!(part.manifest.segments[0].entity_lo, 0);
-    assert_eq!(part.manifest.segments[0].entity_hi, N_ITEMS - 1);
-    assert!(part.manifest.deltas.is_empty());
-    assert!(!part.manifest.tombstones.carries());
-    assert!(!part.manifest.deny.carries());
+    assert_eq!(part.only_shard().record.watermark, N_ITEMS);
+    assert_eq!(part.only_shard().record.high_water, N_ITEMS);
+    assert_eq!(part.only_shard().record.segments.len(), 1);
+    assert_eq!(part.only_shard().record.segments[0].view, "s0");
+    assert_eq!(
+        part.only_shard().record.segments[0].row_count,
+        N_ITEMS as u32
+    );
+    assert_eq!(part.only_shard().record.segments[0].entity_lo, 0);
+    assert_eq!(part.only_shard().record.segments[0].entity_hi, N_ITEMS - 1);
+    assert!(part.only_shard().record.deltas.is_empty());
+    assert!(!part.only_shard().record.tombstones.carries());
+    assert!(!part.only_shard().record.deny.carries());
     assert_eq!(part.manifest.dict_extents.len(), 1);
     assert_eq!(
         part.manifest.dict_extents[0].path,
@@ -466,7 +468,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
         .is_some());
 
     // ---- permutation is a bijection over the segment's rows ------------------------------
-    let view = &part.views["s0"];
+    let view = &part.only_shard().views["s0"];
     assert_eq!(view.row_space.base().bound(), N_ITEMS);
     let mut rows: BTreeSet<u32> = BTreeSet::new();
     for e in 0..N_ITEMS {
@@ -507,7 +509,6 @@ fn build_refuses_to_clobber_an_existing_bundle() {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -557,7 +558,6 @@ fn an_empty_selection_builds_an_empty_bundle() {
         limit: Some(0),
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -570,9 +570,9 @@ fn an_empty_selection_builds_an_empty_bundle() {
     .expect("a build that selects no rows writes a bundle with no items");
 
     let bundle = open_bundle(&out).expect("the empty bundle opens and its digests verify");
-    assert_eq!(bundle.manifest.entity_id_high_water, 0);
+    assert_eq!(bundle.only_shard().record.high_water, 0);
     let partition = bundle.partitions.values().next().expect("one partition");
-    assert_eq!(partition.manifest.segments[0].row_count, 0);
+    assert_eq!(partition.only_shard().record.segments[0].row_count, 0);
 }
 
 /// A points file storing Morton codes is exact only against the grid's own extent. Any other
@@ -609,7 +609,6 @@ fn morton_input_requires_the_identity_extent() {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -663,7 +662,6 @@ fn morton_input_requires_the_identity_extent() {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -720,7 +718,6 @@ fn build_rejects_an_unsafe_view_id() {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -774,7 +771,6 @@ fn limit_filters_the_source_entity_id_prefix() {
         limit: Some(100),
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -787,7 +783,7 @@ fn limit_filters_the_source_entity_id_prefix() {
     .unwrap();
     assert_eq!(report.items, 100);
     let bundle = open_bundle(&out).unwrap();
-    assert_eq!(bundle.manifest.entity_id_high_water, 100);
+    assert_eq!(bundle.only_shard().record.high_water, 100);
 }
 
 /// **A row group whose signed ids run from negative to small positive keeps every row `--limit`
@@ -842,7 +838,6 @@ fn limit_keeps_a_row_group_whose_signed_ids_start_below_zero() {
         limit: Some(100),
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -888,7 +883,6 @@ fn verify_accepts_a_freshly_built_bundle() {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -939,7 +933,6 @@ fn verify_rejects_a_columns_file_whose_mosaica_ids_do_not_match_the_key() {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -1251,7 +1244,6 @@ fn entity_ids_break_signature_ties_on_the_morton_code() {
             limit: None,
             strict: false,
             identity_key: test_key(),
-            shard_id: ShardId::ZERO,
             layers: Vec::new(),
             layer_inputs: Vec::new(),
             scoped_layers: Default::default(),

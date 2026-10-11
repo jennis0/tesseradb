@@ -180,7 +180,7 @@ fn a_limited_build_frames_the_rows_it_keeps() {
         [("layer 'groups' members".to_string(), "outside_limit".to_string(), 1)]
     );
     let bundle = mosaica_store::read::open_bundle(&tmp.path().join("bundle")).unwrap();
-    assert_eq!(bundle.manifest.entity_id_high_water, 2);
+    assert_eq!(bundle.only_shard().record.high_water, 2);
     // The kept rows sit at (0, 0) and (1, 1), and the rows left out at (2, 2) and (3, 3).
     let frame = bundle.manifest.views[0].quantisation;
     assert!(frame.x_min <= 0.0 && frame.x_max >= 1.0 && frame.x_max < 2.0, "{frame:?}");

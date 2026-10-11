@@ -36,7 +36,7 @@ use mosaica_engine::{Engine, EngineConfig};
 use mosaica_lifecycle::{IngestBuffer, Overlay};
 use mosaica_spatial::Bounds;
 use mosaica_store::read::open_bundle;
-use mosaica_types::{IdentityKey, ShardId, TermId};
+use mosaica_types::{IdentityKey, TermId};
 
 const ITEM_LIMIT: u64 = 2_422_486;
 
@@ -91,7 +91,6 @@ fn ensure_bundle() -> PathBuf {
             limit: Some(ITEM_LIMIT),
             strict: false,
             identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-            shard_id: ShardId::ZERO,
             layers: Vec::new(),
             layer_inputs: Vec::new(),
             scoped_layers: Default::default(),
@@ -150,7 +149,7 @@ fn bench_compose(c: &mut Criterion) {
         .expect("fragment build should succeed");
 
     let bundle = open_bundle(&bundle_root).expect("bundle should open");
-    let view = &bundle.partitions["default"].views["s0"];
+    let view = &bundle.partitions["default"].only_shard().views["s0"];
     let base = Arc::new(RowProjection::walk(&fragment, &view.row_space));
 
     let satisfied: rustc_hash::FxHashSet<TermId> = terms.iter().copied().collect();

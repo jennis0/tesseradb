@@ -268,7 +268,6 @@ fn build_fixture(tmp: &Path, out: &Path) -> Result<(), Box<dyn std::error::Error
         limit: None,
         strict: false,
         identity_key: mosaica_types::IdentityKey::from_hex(KEY_HEX).expect("key"),
-        shard_id: mosaica_types::ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -378,6 +377,7 @@ impl Probe {
         let prefix_dir = self.root.join(&generation.prefix);
         let (partition, data) = generation.bundle.partitions.iter().next().expect("one partition");
         let m = &data.manifest;
+        let r = &data.only_shard().record;
         let stats = engine.write_executor_stats();
         let [merges, merge_failures, coalesces, coalesce_failures, coalesce_passes_failed] =
             self.carried;
@@ -397,13 +397,13 @@ impl Probe {
 
         Ok(Row {
             tick: tick as u64,
-            segments: m.segments.iter().filter(|s| s.view == VIEW).count() as u64,
-            deltas: m.deltas.len() as u64,
+            segments: r.segments.iter().filter(|s| s.view == VIEW).count() as u64,
+            deltas: r.deltas.len() as u64,
             dicts: m.dict_extents.len() as u64,
-            attrs: m.attr_extents.len() as u64,
-            records: m.record_extents.len() as u64,
-            texts: m.text_extents.len() as u64,
-            terms: m.entity_terms_extents.len() as u64,
+            attrs: r.attr_extents.len() as u64,
+            records: r.record_extents.len() as u64,
+            texts: r.text_extents.len() as u64,
+            terms: r.entity_terms_extents.len() as u64,
             files,
             mib: bytes >> 20,
             geometry_mib: walk(&segments_dir, |_| true).1 >> 20,
@@ -446,9 +446,9 @@ impl Probe {
 
 fn ordering_breaches(m: &SegmentsManifest) -> Vec<String> {
     let mut out = Vec::new();
-    let views: BTreeSet<&str> = m.segments.iter().map(|s| s.view.as_str()).collect();
+    let views: BTreeSet<&str> = m.only_shard().segments.iter().map(|s| s.view.as_str()).collect();
     for view in views {
-        let segs: Vec<_> = m.segments.iter().filter(|s| s.view == view).collect();
+        let segs: Vec<_> = m.only_shard().segments.iter().filter(|s| s.view == view).collect();
         for pair in segs.windows(2) {
             if pair[0].entity_hi >= pair[1].entity_lo {
                 out.push(format!(

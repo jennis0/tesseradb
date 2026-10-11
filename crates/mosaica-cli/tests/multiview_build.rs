@@ -410,11 +410,11 @@ fn the_whole_declaration_builds_and_verifies() {
     let partition = opened.partitions.get("default").expect("one partition");
     for key in ["q1", "q2"] {
         let owner = partition
-            .views
+            .only_shard().views
             .get(&format!("quarter:{key}"))
             .expect("the owning group's view");
         let sharing = partition
-            .views
+            .only_shard().views
             .get(&format!("quarter_alt:{key}"))
             .expect("the sharing group's view");
         let held = |view: &mosaica_store::read::ViewData| -> Vec<u64> {

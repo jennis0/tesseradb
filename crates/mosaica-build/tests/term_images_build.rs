@@ -31,7 +31,7 @@ use mosaica_store::term_images::{
     TermImageRefusal, TermImageStamp, TermImages, KEEP_ROWS_PER_CONTAINER,
 };
 use mosaica_store::RowSpace;
-use mosaica_types::{IdentityKey, ShardId, TermId};
+use mosaica_types::{IdentityKey, TermId};
 
 /// Rows enough for a second Roaring container, which is what puts a term whose image is spread
 /// over both on the wrong side of the keep rule: thirty rows a container is a cut a scattered
@@ -181,7 +181,6 @@ fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -230,13 +229,14 @@ fn images_of(root: &Path) -> (Arc<TermImages>, RowSpace, PathBuf) {
     let bundle = open_bundle(root).expect("the bundle opens");
     let partition = bundle.partitions.get("default").expect("one partition");
     let entry = partition
-        .manifest
+        .only_shard()
+        .record
         .term_image_extents
         .iter()
         .find(|entry| entry.view == "s0")
         .expect("the side-manifest names the view's term images");
     let path = root.join("v00000").join(&entry.path);
-    let view = partition.views.get("s0").expect("the view");
+    let view = partition.only_shard().views.get("s0").expect("the view");
     let images = view
         .term_images
         .clone()
@@ -389,7 +389,7 @@ fn a_stamp_the_bundle_disagrees_with_leaves_the_view_walking() {
 
     let bundle = open_bundle(&root).expect("the bundle still opens");
     assert!(
-        bundle.partitions["default"].views["s0"]
+        bundle.partitions["default"].only_shard().views["s0"]
             .term_images
             .is_none(),
         "a refused file leaves the view with no images"
@@ -403,7 +403,7 @@ fn two_term_image_extents_for_one_view_refuse_the_bundle() {
     let temp = tempfile::TempDir::new().unwrap();
     let root = built(temp.path(), "streaming", build);
     rewrite_side_manifest(&root.join("v00000"), |manifest| {
-        let list = manifest["term_image_extents"]
+        let list = manifest["shards"]["records"][0]["term_image_extents"]
             .as_array_mut()
             .expect("the list the build wrote");
         let first = list[0].clone();
@@ -424,13 +424,13 @@ fn a_file_derived_under_another_keep_rule_leaves_the_view_walking() {
     let temp = tempfile::TempDir::new().unwrap();
     let root = built(temp.path(), "streaming", build);
     rewrite_side_manifest(&root.join("v00000"), |manifest| {
-        manifest["term_image_extents"][0]["keep_rows_per_container"] =
+        manifest["shards"]["records"][0]["term_image_extents"][0]["keep_rows_per_container"] =
             serde_json::Value::from(KEEP_ROWS_PER_CONTAINER - 1);
     });
 
     let bundle = open_bundle(&root).expect("the bundle still opens");
     assert!(
-        bundle.partitions["default"].views["s0"]
+        bundle.partitions["default"].only_shard().views["s0"]
             .term_images
             .is_none(),
         "a file under another keep rule leaves the view with no images"

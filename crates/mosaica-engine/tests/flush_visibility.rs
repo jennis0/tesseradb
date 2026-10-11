@@ -126,18 +126,22 @@ fn a_published_flush_is_a_bundle_a_restart_opens() {
         "the reader settled on the flush-published side-manifest"
     );
     assert_eq!(
-        partition.manifest.segments.len(),
+        partition.only_shard().record.segments.len(),
         2,
         "the build segment and the flush segment"
     );
     assert_eq!(
-        partition.manifest.watermark,
+        partition.only_shard().record.watermark,
         id.raw() + 1,
         "one past the highest flushed entity, or it would be in neither fragment nor buffer"
     );
-    assert_eq!(partition.manifest.deltas.len(), 1, "one delta tier");
+    assert_eq!(
+        partition.only_shard().record.deltas.len(),
+        1,
+        "one delta tier"
+    );
 
-    let view = &partition.views["s0"];
+    let view = &partition.only_shard().views["s0"];
     assert_eq!(view.segments.len(), 2, "both segments mapped");
 
     // **The extent survives the restart, and nothing on disk carries it.** It is rebuilt from the
@@ -207,16 +211,17 @@ fn a_reopened_engine_does_not_re_buffer_rows_that_already_have_geometry() {
     // loss.
     let bundle = mosaica_store::open_bundle(&root).expect("the published bundle opens");
     let partition = bundle.partitions.values().next().unwrap();
-    assert!(partition.views["s0"].row_space.row_of(id).is_some());
+    assert!(partition.only_shard().views["s0"]
+        .row_space
+        .row_of(id)
+        .is_some());
 }
 
 /// **The allocator floor survives on the side-manifest alone** (I9).
 ///
-/// `MANIFEST.json`'s `entity_id_high_water` is frozen at build; every flush raises the
-/// *side*-manifest's past the ids it consumed. Seeding from the build value works today only
-/// because the WAL still carries the `Lease` and `IngestBatch` records `high_water_from` derives
-/// the rest from — and rotation deletes exactly those. An id reissued after that grants the new
-/// item every access the old one had.
+/// Every flush raises the shard record's high water past the ids it consumed. The WAL's `Lease`
+/// and `IngestBatch` records, which `high_water_from` derives the floor from, are what rotation
+/// deletes. An id reissued after that grants the new item every access the old one had.
 ///
 /// Asserted by reopening against a WAL that carries nothing: the side-manifest is then the only
 /// surviving statement of how far allocation has gone.
@@ -237,12 +242,8 @@ fn the_allocator_floor_comes_from_the_side_manifest() {
     let bundle = mosaica_store::open_bundle(&root).expect("the published bundle opens");
     let partition = bundle.partitions.values().next().unwrap();
     assert!(
-        partition.manifest.entity_id_high_water > flushed.raw(),
+        partition.only_shard().record.high_water > flushed.raw(),
         "the flush must raise the side-manifest's floor past the ids it consumed"
-    );
-    assert!(
-        bundle.manifest.entity_id_high_water <= flushed.raw(),
-        "and the build manifest's must be the stale one, or this test proves nothing"
     );
 
     // A *fresh* WAL: nothing survives to re-derive the floor from, so only the side-manifest can

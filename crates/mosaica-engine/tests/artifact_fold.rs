@@ -143,7 +143,7 @@ impl Fixture {
             .expect("the live prefix carries a side manifest");
         let json: serde_json::Value =
             serde_json::from_slice(&std::fs::read(newest).unwrap()).unwrap();
-        json["level_versions"]
+        json["shards"]["records"][0]["level_versions"]
             .as_array()
             .expect("level_versions is a list")
             .iter()

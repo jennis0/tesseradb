@@ -156,7 +156,7 @@ impl Engine {
     pub fn item(&self, session: &Session, id: MosaicaId) -> Result<Option<ItemOut>> {
         let generation = self.generation.load_full();
 
-        let shard = generation.bundle.manifest.identity.shard_id;
+        let shard = generation.bundle.only_shard().id;
         let Some((number, current)) =
             generation
                 .tenancy
@@ -232,7 +232,7 @@ impl Engine {
 fn rows_of(generation: &Generation, entity: EntityId) -> Result<Vec<(&str, &SegmentData, usize)>> {
     let mut rows: Vec<(&str, &SegmentData, usize)> = Vec::new();
     for partition in generation.bundle.partitions.values() {
-        for (view, view_data) in &partition.views {
+        for (view, view_data) in &partition.only_shard().views {
             let Some((segment, local)) = segment_row_of(view, view_data, entity)? else {
                 continue;
             };
@@ -424,7 +424,7 @@ pub(crate) fn flushed_row_scalar(
     let render_scalars: Vec<_> = manifest.render_scalars().cloned().collect();
 
     for partition in generation.bundle.partitions.values() {
-        for (view, view_data) in &partition.views {
+        for (view, view_data) in &partition.only_shard().views {
             let resolved_row = match segment_row_of(view, view_data, entity) {
                 Ok(resolved) => resolved,
                 Err(e) => {

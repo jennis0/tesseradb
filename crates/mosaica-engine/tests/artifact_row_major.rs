@@ -722,7 +722,7 @@ fn a_fold_over_a_row_major_level_writes_its_column_and_changes_no_answer() {
         .bundle
         .partitions
         .values()
-        .flat_map(|p| p.manifest.derived_extents.iter().cloned())
+        .flat_map(|p| p.only_shard().record.derived_extents.iter().cloned())
         .filter(|e| matches!(e.form, mosaica_store::manifest::DerivedForm::RowColumn { .. }))
         .collect();
     assert_eq!(extents.len(), fx.row_column_files(&engine).len());
@@ -980,7 +980,7 @@ fn flat_artifact_entity(engine: &Engine, key: &str) -> EntityId {
 /// The row of each of `sources` in the served row space, for a column check.
 fn rows_of(fx: &Fixture, engine: &Engine, sources: std::ops::Range<u64>) -> Vec<u32> {
     let generation = engine.generation();
-    let space = &generation.bundle.partitions["default"].views["s0"].row_space;
+    let space = &generation.bundle.partitions["default"].only_shard().views["s0"].row_space;
     fx.members(sources)
         .into_iter()
         .map(|entity| space.row_of(entity).expect("every member has a row").raw())

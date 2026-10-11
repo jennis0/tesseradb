@@ -34,7 +34,7 @@ use mosaica_types::layer::{
     LayerDeclaration, LevelDeclaration, MembershipSource, ShapeDeclaration, ShapeKind,
     SuppliedContent, SuppliedRequirement,
 };
-use mosaica_types::{EntityId, MosaicaId, ShardId};
+use mosaica_types::{EntityId, MosaicaId};
 
 const N: u64 = 900;
 const TREE: &str = "clusters/tree";
@@ -1669,7 +1669,6 @@ fn authored() -> Authored {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

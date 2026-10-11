@@ -144,7 +144,6 @@ impl Layer {
         let served_view = &cx.open.served;
         let mask = &cx.open.mask;
         let generation = cx.generation;
-        let shard = generation.bundle.manifest.identity.shard_id;
         let registered = engine
             .readable_layer(
                 served_view.session,
@@ -231,7 +230,7 @@ impl Layer {
         };
         let mosaica_id = |ordinal: u32| -> Option<u64> {
             let entity = EntityId::new(entity_at(ordinal)?);
-            engine.artifact_id(shard, entity).map(|id| id.raw())
+            engine.artifact_id(entity).map(|id| id.raw())
         };
         let attached = registered
             .as_ref()
@@ -321,8 +320,7 @@ impl Layer {
                 Pick::Named(ids) => {
                     let mut listed: Vec<u32> = Vec::with_capacity(ids.len());
                     for &id in ids {
-                        let Some(entity) =
-                            crate::edited::artifact_named(&engine.identity_key, shard, id)
+                        let Some(entity) = crate::edited::artifact_named(&engine.identity_key, id)
                         else {
                             continue;
                         };
@@ -451,7 +449,7 @@ impl Layer {
         let keys = chosen
             .iter()
             .map(|&entity| {
-                let id = engine.artifact_id(shard, EntityId::new(entity));
+                let id = engine.artifact_id(EntityId::new(entity));
                 Key::Id(id.map_or(0, |id| id.raw()))
             })
             .collect();

@@ -66,7 +66,7 @@ fn a_manifest_suppression_hides_its_entity_from_the_first_request() {
 
     let suppressed = entity_of_source(&root, 7);
     edit_segments_manifest(&root, |value| {
-        value["deny"] = deny_set(&[suppressed]);
+        value["shards"]["records"][0]["deny"] = deny_set(&[suppressed]);
     });
 
     let after = visible(&open_engine(
@@ -101,7 +101,7 @@ fn a_manifest_tombstone_hides_its_entity_from_the_first_request() {
 
     let deleted = entity_of_source(&root, 11);
     edit_segments_manifest(&root, |value| {
-        value["tombstones"] = deny_set(&[deleted]);
+        value["shards"]["records"][0]["tombstones"] = deny_set(&[deleted]);
     });
 
     let after = visible(&open_engine(
@@ -130,8 +130,8 @@ fn an_empty_deny_state_hides_nothing() {
         &tmp.path().join("wal-0.log"),
     ));
     edit_segments_manifest(&root, |value| {
-        value["deny"] = deny_set(&[]);
-        value["tombstones"] = deny_set(&[]);
+        value["shards"]["records"][0]["deny"] = deny_set(&[]);
+        value["shards"]["records"][0]["tombstones"] = deny_set(&[]);
     });
     assert_eq!(
         visible(&open_engine(
@@ -191,7 +191,7 @@ fn a_wal_unsuppress_beats_a_manifest_suppression_that_predates_it() {
     // The manifest published between the two: it carries the suppression and knows nothing of the
     // unsuppress that followed.
     edit_segments_manifest(&root, |value| {
-        value["deny"] = deny_set(&[entity]);
+        value["shards"]["records"][0]["deny"] = deny_set(&[entity]);
     });
 
     // Reopened on the **same** WAL — which is the whole point: the records that retire the

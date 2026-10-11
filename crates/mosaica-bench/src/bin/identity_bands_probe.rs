@@ -1316,7 +1316,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .partitions
             .values()
             .next()
-            .and_then(|p| p.views.iter().next())
+            .and_then(|p| p.only_shard().views.iter().next())
             .map(|(id, data)| (id.clone(), data))
             .ok_or("the bundle carries no view")?;
         (view_id, quantisation, view_data.segments.len())
@@ -1404,7 +1404,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .bundle
             .partitions
             .values()
-            .find_map(|partition| partition.views.get(&view_id))
+            .find_map(|partition| partition.only_shard().views.get(&view_id))
             .ok_or("the view vanished between open and compose")?;
         let segments = segments_with_row_bases(&view_id, view_data)?;
         let before = Counters::now();
@@ -1444,7 +1444,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .bundle
         .partitions
         .values()
-        .find_map(|partition| partition.views.get(&view_id))
+        .find_map(|partition| partition.only_shard().views.get(&view_id))
         .ok_or("the view vanished")?;
     let segments = segments_with_row_bases(&view_id, view_data)?;
     let (segment, row_base) = segments[0];

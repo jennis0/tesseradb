@@ -4189,7 +4189,7 @@ async fn control_status_publishes_the_live_segment_count_per_view() {
 
     // The gauge is the generation's own set, not a counter that happens to agree with it today.
     let generation = server.state.engine.generation();
-    let live: usize = generation.bundle.partitions["default"].views["s0"]
+    let live: usize = generation.bundle.partitions["default"].only_shard().views["s0"]
         .segments
         .len();
     assert_eq!(

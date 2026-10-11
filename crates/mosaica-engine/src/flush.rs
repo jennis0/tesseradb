@@ -475,6 +475,8 @@ impl FlushContext {
 /// nothing references, and the next tick re-plans.
 pub(crate) struct CompletedFlush {
     pub(crate) partition: String,
+    /// The shard the flush wrote into.
+    pub(crate) shard: mosaica_types::ShardId,
     pub(crate) view: String,
     /// The entity ids removed from the buffer at publication: exactly what was consumed, not a range.
     pub(crate) consumed: Vec<EntityId>,
@@ -840,6 +842,7 @@ fn execute_flush_stages(
     };
     let completed = CompletedFlush {
         partition: ctx.partition,
+        shard: ctx.shard_id,
         view: ctx.view,
         consumed,
         segment,

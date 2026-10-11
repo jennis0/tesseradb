@@ -107,23 +107,31 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
     }
 
     let segments_manifest = SegmentsManifest {
-        watermark: n,
-        entity_id_high_water: n,
-        segments: vec![SegmentDescriptor {
-            incarnation: 0,
-            view: "main".to_string(),
-            seg_id: "seg0".to_string(),
-            row_count: items.len() as u32,
-            entity_lo: 0,
-            entity_hi: n.saturating_sub(1),
-        }],
-        deltas: vec![],
-        dict_extents: vec![],
-        tombstones: EntitySet::default(),
-        deny: EntitySet::default(),
-        vocabulary_extensions: vec![],
-        files: segments_files,
-        ..SegmentsManifest::empty()
+        partition: mosaica_store::manifest::PartitionManifest {
+            dict_extents: vec![],
+            vocabulary_extensions: vec![],
+            files: segments_files,
+            ..mosaica_store::manifest::PartitionManifest::empty()
+        },
+        shards: mosaica_store::manifest::Shards {
+            size: mosaica_types::SHARD_SIZE_DEFAULT,
+            records: vec![mosaica_store::manifest::ShardRecord {
+                watermark: n,
+                high_water: n,
+                segments: vec![SegmentDescriptor {
+                    incarnation: 0,
+                    view: "main".to_string(),
+                    seg_id: "seg0".to_string(),
+                    row_count: items.len() as u32,
+                    entity_lo: 0,
+                    entity_hi: n.saturating_sub(1),
+                }],
+                deltas: vec![],
+                tombstones: EntitySet::default(),
+                deny: EntitySet::default(),
+                ..mosaica_store::manifest::ShardRecord::empty(mosaica_types::ShardId::ZERO)
+            }],
+        },
     };
     fs::write(
         partition_dir(&prefix_dir, "default").join("SEGMENTS-0.json"),
@@ -137,12 +145,10 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
         declared_scalars: vec![],
         vocabularies: vec![],
         small_term_threshold: 32,
-        entity_id_high_water: n,
         identity: IdentityDescriptor {
             construction: IDENTITY_CONSTRUCTION.to_string(),
             rounds: IDENTITY_ROUNDS,
             key: "0123456789abcdef0123456789abcdef".to_string(),
-            shard_id: ShardId::ZERO,
         },
         groups: Vec::new(),
         views: vec![ViewDescriptor {
@@ -187,10 +193,10 @@ fn write_manifest_json_then_write_current_round_trips_through_open_bundle() {
 
     let bundle = open_bundle(dir.path()).expect("open_bundle over a bundle these writers built");
     assert_eq!(bundle.manifest.bundle_format, mosaica_types::BUNDLE_FORMAT);
-    assert_eq!(bundle.manifest.entity_id_high_water, 64);
+    assert_eq!(bundle.only_shard().record.high_water, 64);
 
     let partition = bundle.partitions.get("default").expect("default partition");
-    let view = partition.views.get("main").expect("main view");
+    let view = partition.only_shard().views.get("main").expect("main view");
     assert_eq!(view.segments.len(), 1);
     assert_eq!(view.segments[0].row_count, 64);
 }
@@ -242,7 +248,7 @@ fn write_current_is_exactly_what_open_bundle_expects() {
     write_current(dir.path(), "v00000", &digest).expect("write_current");
 
     let bundle = open_bundle(dir.path()).expect("open_bundle must accept write_current's CURRENT");
-    assert_eq!(bundle.manifest.entity_id_high_water, 16);
+    assert_eq!(bundle.only_shard().record.high_water, 16);
 }
 
 /// A wrong `manifest_digest` in `CURRENT` must be refused, not silently accepted — the property
@@ -295,10 +301,7 @@ fn write_manifest_json_digest_changes_when_the_manifest_changes() {
 /// An empty side-manifest. `watermark` is the field the refuse-to-replace test varies, so the
 /// two writers' manifests are distinguishable in the committed bytes.
 fn manifest_fixture() -> SegmentsManifest {
-    SegmentsManifest {
-        vocabulary_extensions: vec![],
-        ..SegmentsManifest::empty()
-    }
+    SegmentsManifest::empty()
 }
 
 /// **Obligation 11: a side-manifest is never replaced.**
@@ -321,11 +324,11 @@ fn a_side_manifest_is_never_replaced() {
     std::fs::create_dir_all(partition_dir(prefix_dir, "default")).unwrap();
 
     let mut first = manifest_fixture();
-    first.watermark = 11;
+    first.only_shard_mut().watermark = 11;
     write_segments_manifest(prefix_dir, "default", 4, &first).expect("the first write commits");
 
     let mut second = manifest_fixture();
-    second.watermark = 22;
+    second.only_shard_mut().watermark = 22;
     let refused = write_segments_manifest(prefix_dir, "default", 4, &second)
         .expect_err("the second write at the same n must be refused");
     assert!(
@@ -345,7 +348,8 @@ fn a_side_manifest_is_never_replaced() {
     )
     .unwrap();
     assert_eq!(
-        committed.watermark, 11,
+        committed.only_shard().watermark,
+        11,
         "the first writer's manifest is intact — the loser overwrote nothing"
     );
     assert!(

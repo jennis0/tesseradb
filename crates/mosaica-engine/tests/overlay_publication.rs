@@ -51,11 +51,11 @@ fn engine_at(tmp: &Path, root: &Path, tick_secs: u64) -> Engine {
 fn newest_manifest(root: &Path) -> (u64, SegmentsManifest) {
     let bundle = mosaica_store::open_bundle(root).expect("the bundle opens");
     let partition = bundle.partitions.values().next().unwrap();
-    (partition.segments_n, partition.manifest.clone())
+    (partition.segments_n, partition.side_manifest())
 }
 
 fn suppressed_in(manifest: &SegmentsManifest) -> Vec<u64> {
-    ids_of(&manifest.deny)
+    ids_of(&manifest.only_shard().deny)
 }
 
 /// The ids one of a manifest's deny fields carries, ascending.
@@ -103,7 +103,7 @@ fn a_flush_manifest_carries_the_deny_state_at_publication() {
     );
     assert!(n >= 1, "the flush published a manifest above the build's");
     assert_eq!(
-        manifest.segments.len(),
+        manifest.only_shard().segments.len(),
         2,
         "and it is the flush's own manifest — the build segment plus the flushed one"
     );
@@ -169,7 +169,7 @@ fn a_delete_reaches_tombstones_and_a_suppress_reaches_deny() {
 
     let (_, manifest) = newest_manifest(&root);
     assert_eq!(suppressed_in(&manifest), vec![suppressed.raw()]);
-    assert_eq!(ids_of(&manifest.tombstones), vec![deleted.raw()]);
+    assert_eq!(ids_of(&manifest.only_shard().tombstones), vec![deleted.raw()]);
 }
 
 /// **The restore path this exists for**: a node opened from the bundle alone — no WAL — honours

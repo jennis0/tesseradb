@@ -40,6 +40,10 @@ impl TryFrom<u32> for ShardId {
     }
 }
 
+/// The high water at which a point shard seals unless a declaration says otherwise: 2³² − 2²⁸, which
+/// leaves a sealed shard 2²⁸ ids for edits of its own items.
+pub const SHARD_SIZE_DEFAULT: u64 = (1 << 32) - (1 << 28);
+
 /// A row in a named shard, ordered shard-major.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct ShardRow(u64);

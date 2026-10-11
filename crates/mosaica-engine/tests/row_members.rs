@@ -27,7 +27,7 @@ use mosaica_store::manifest::{DerivedForm, SegmentsManifest};
 use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource, ServingLayout,
 };
-use mosaica_types::{EntityId, ShardId};
+use mosaica_types::EntityId;
 
 const N: u64 = 3_000;
 /// Sources at or past this are in no artifact of the built layers, so a growth can take them
@@ -201,7 +201,6 @@ fn fixture_with(extra: &[(String, u64)]) -> Fixture {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: config.layers,
         layer_inputs: config.layer_sources,
         scoped_layers: Default::default(),
@@ -295,7 +294,7 @@ fn held_forms(column: &RowColumn, what: &str) -> Forms {
 fn manifest_at(root: &Path) -> (PathBuf, SegmentsManifest) {
     let bundle = mosaica_store::read::open_bundle(root).expect("the bundle opens");
     let prefix = root.join(current_prefix(root));
-    let manifest = bundle.partitions["default"].manifest.clone();
+    let manifest = bundle.partitions["default"].side_manifest();
     (prefix, manifest)
 }
 
@@ -303,12 +302,12 @@ fn manifest_at(root: &Path) -> (PathBuf, SegmentsManifest) {
 fn stored_forms(root: &Path) -> BTreeMap<(String, u32), Forms> {
     let (prefix, manifest) = manifest_at(root);
     let mut out = BTreeMap::new();
-    for column in &manifest.derived_extents {
+    for column in &manifest.only_shard().derived_extents {
         let DerivedForm::RowColumn { layout } = column.form else {
             continue;
         };
         let beside: Vec<_> = manifest
-            .derived_extents
+            .only_shard().derived_extents
             .iter()
             .filter(|e| e.form == DerivedForm::RowMembers && e.same_level(column))
             .collect();

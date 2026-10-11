@@ -561,7 +561,7 @@ pub(crate) fn admits(
 pub(crate) fn derive_denied(overlay: &Overlay, bundle: &Bundle) -> DenyMask {
     let mut out = DenyMask::default();
     for partition in bundle.partitions.values() {
-        for (view, view_data) in &partition.views {
+        for (view, view_data) in &partition.only_shard().views {
             // Every view gets an entry, empty or not: a missing one must mean "the mask and the
             // bundle disagree", never "nothing is denied here".
             out.insert(view.clone(), denied_rows_of(overlay, &view_data.row_space));
@@ -590,7 +590,7 @@ pub fn denied_rows_of(overlay: &Overlay, row_space: &RowSpace) -> Bitmap {
 pub(crate) fn derive_buffered_rows(buffer: &IngestBuffer, bundle: &Bundle) -> crate::BufferedRows {
     let mut out = crate::BufferedRows::default();
     for partition in bundle.partitions.values() {
-        for (view, view_data) in &partition.views {
+        for (view, view_data) in &partition.only_shard().views {
             // Every view gets an entry, empty or not, on [`derive_denied`]'s rule.
             out.insert(view.clone(), buffered_rows_of(buffer, &view_data.row_space));
         }

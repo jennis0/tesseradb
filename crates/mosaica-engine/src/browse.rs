@@ -247,7 +247,7 @@ impl crate::Engine {
             .bundle
             .partitions
             .values()
-            .filter(|partition| partition.views.contains_key(view))
+            .filter(|partition| partition.only_shard().views.contains_key(view))
             .count();
         if carriers > 1 {
             return Err(EngineError::MultiPartitionView(view.to_string()));
@@ -256,7 +256,7 @@ impl crate::Engine {
             .bundle
             .partitions
             .values()
-            .find_map(|partition| partition.views.get(view))
+            .find_map(|partition| partition.only_shard().views.get(view))
             .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
 
         // **The layer, resolved through the principal's own reachable set** — one probe for a
@@ -362,7 +362,6 @@ impl crate::Engine {
         let mut names: HashMap<(u32, u32), Option<String>> = HashMap::new();
         let mut keys: HashMap<(u32, u32), Option<String>> = HashMap::new();
         let mut filtered: HashMap<(u32, u32), u64> = HashMap::new();
-        let shard = generation.bundle.manifest.identity.shard_id;
         for (walked, runs) in layer.runs.iter().enumerate() {
             let walked = walked as u32;
             let mut level_read = self.read_level(&served_view, &mask, &layer, walked, false)?;
@@ -380,7 +379,7 @@ impl crate::Engine {
                 else {
                     continue;
                 };
-                let Some(mosaica_id) = self.artifact_id(shard, entity) else {
+                let Some(mosaica_id) = self.artifact_id(entity) else {
                     continue;
                 };
                 // Content decides servability as well as text: a viewer containing no content's

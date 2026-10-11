@@ -43,7 +43,7 @@ impl Engine {
             .bundle
             .partitions
             .values()
-            .filter(|partition| partition.views.contains_key(view))
+            .filter(|partition| partition.only_shard().views.contains_key(view))
             .count();
         if carriers > 1 {
             return Err(EngineError::MultiPartitionView(view.to_string()));
@@ -52,7 +52,7 @@ impl Engine {
             .bundle
             .partitions
             .values()
-            .find_map(|partition| partition.views.get(view))
+            .find_map(|partition| partition.only_shard().views.get(view))
             .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
 
         // Every segment of the view, each with where its rows begin in the view's row space.
@@ -415,7 +415,7 @@ impl Engine {
             .bundle
             .partitions
             .values()
-            .find_map(|partition| partition.views.get(view))
+            .find_map(|partition| partition.only_shard().views.get(view))
             .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
         let mut probe = Probe::new();
         let (geometry, key) =
@@ -459,7 +459,7 @@ impl Engine {
                 .bundle
                 .partitions
                 .values()
-                .find_map(|partition| partition.views.get(view))
+                .find_map(|partition| partition.only_shard().views.get(view))
                 .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
             let (geometry, _) =
                 self.session_geometry(session, &generation, view, view_data, &None, &mut probe)?;

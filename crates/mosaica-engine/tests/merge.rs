@@ -165,14 +165,14 @@ fn served_ids(
 }
 
 fn segment_count(engine: &Engine) -> usize {
-    engine.generation().bundle.partitions["default"].views["s0"]
+    engine.generation().bundle.partitions["default"].only_shard().views["s0"]
         .segments
         .len()
 }
 
 fn rows_of(engine: &Engine, entities: &[EntityId]) -> Vec<Option<u32>> {
     let generation = engine.generation();
-    let row_space = &generation.bundle.partitions["default"].views["s0"].row_space;
+    let row_space = &generation.bundle.partitions["default"].only_shard().views["s0"].row_space;
     entities
         .iter()
         .map(|e| row_space.row_of(*e).map(|r| r.raw()))
@@ -473,7 +473,7 @@ fn a_delete_before_a_merge_stays_deleted_across_it_and_a_restart() {
 
     assert!(
         engine.generation().bundle.partitions["default"]
-            .manifest
+            .only_shard().record
             .tombstones
             .entities()
             .expect("a written manifest's tombstones decode")
@@ -725,7 +725,7 @@ fn a_merged_manifest_reopens_with_every_item_and_every_tier() {
     let reopened = engine_at(tmp.path(), &root);
     let generation = reopened.generation();
     assert_eq!(
-        generation.bundle.partitions["default"].views["s0"]
+        generation.bundle.partitions["default"].only_shard().views["s0"]
             .segments
             .len(),
         2,
@@ -747,7 +747,7 @@ fn a_merged_manifest_reopens_with_every_item_and_every_tier() {
     );
     for (entity, key) in &items {
         assert!(
-            generation.bundle.partitions["default"].views["s0"]
+            generation.bundle.partitions["default"].only_shard().views["s0"]
                 .row_space
                 .row_of(*entity)
                 .is_some(),
@@ -833,7 +833,7 @@ fn a_reboot_after_a_merge_reads_back_the_watermark_the_process_served() {
             "a merge moves the watermark for no one, in memory included"
         );
         assert_eq!(
-            generation.bundle.partitions["default"].manifest.watermark, watermark_served,
+            generation.bundle.partitions["default"].only_shard().record.watermark, watermark_served,
             "the manifest the merge published must carry the live watermark, not its plan-time \
              snapshot — the manifest is what a restart believes, and every later publication \
              clones it forward"
@@ -999,7 +999,7 @@ fn flush_one_segment(engine: &Engine, tag: usize, rows: usize) -> Vec<EntityId> 
 
 /// The live extent list as `(seg_id, entity_lo, entity_hi)`, in listed (entity) order.
 fn extents_of(engine: &Engine) -> Vec<(String, u64, u64)> {
-    engine.generation().bundle.partitions["default"].views["s0"]
+    engine.generation().bundle.partitions["default"].only_shard().views["s0"]
         .row_space
         .extents()
         .iter()
@@ -1313,7 +1313,7 @@ fn a_flush_handed_back_while_the_executor_is_parked_is_published_once() {
 
     // And the bundle on disc is one a restart opens, holding each late item at one row.
     let bundle = mosaica_store::open_bundle(&root).expect("the bundle on disc opens");
-    let row_space = &bundle.partitions["default"].views["s0"].row_space;
+    let row_space = &bundle.partitions["default"].only_shard().views["s0"].row_space;
     let mut rows: Vec<u32> = late
         .iter()
         .map(|e| row_space.row_of(*e).expect("a late item has a row").raw())

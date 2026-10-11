@@ -53,7 +53,7 @@ use mosaica_lifecycle::wal::WalScalar;
 use mosaica_lifecycle::{ChangeOp, IngestRow};
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_types::layer::LayerScope;
-use mosaica_types::{EntityId, MosaicaId, ShardId};
+use mosaica_types::{EntityId, MosaicaId};
 
 const VIEWS: [&str; 2] = ["s0", "s1"];
 /// The one key of the group `quarter`, whose view every built item is in beside [`VIEWS`].
@@ -393,7 +393,6 @@ fn fixture() -> Fixture {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

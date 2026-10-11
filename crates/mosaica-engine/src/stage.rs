@@ -214,7 +214,7 @@ fn run(
         .bundle
         .partitions
         .values()
-        .find_map(|partition| partition.views.get(&task.view))
+        .find_map(|partition| partition.only_shard().views.get(&task.view))
     else {
         return;
     };

@@ -49,9 +49,6 @@ pub(crate) struct FoldPlan {
     pub(crate) tombstones: Bitmap,
     /// One past the highest entity with a row in this partition at the snapshot.
     pub(crate) entity_bound: u64,
-    /// The high-water the new bundle manifest records: the larger of [`Self::entity_bound`] and
-    /// the bundle's own, which a dropped view's rows can hold.
-    pub(crate) high_water: u64,
     pub(crate) dict_len: u32,
     pub(crate) small_term_threshold: u32,
     /// A publication into a prefix other than this one is discarded.
@@ -225,14 +222,16 @@ pub(crate) fn plan_fold(
         .next()
         .ok_or(NoFold::NothingToFold)?;
     let manifest = &partition_data.manifest;
-    let layout = mosaica_store::ShardLayout::new(partition, mosaica_types::ShardId::ZERO);
+    let shard = partition_data.only_shard();
+    let record = &shard.record;
+    let layout = mosaica_store::ShardLayout::new(partition, shard.id);
 
     let mut views: Vec<FoldViewPlan> = Vec::new();
     // Sorted, so the plan does not depend on a `HashMap`'s iteration order.
-    let mut view_ids: Vec<&String> = partition_data.views.keys().collect();
+    let mut view_ids: Vec<&String> = shard.views.keys().collect();
     view_ids.sort_unstable();
     for view in view_ids {
-        let view_data = &partition_data.views[view];
+        let view_data = &shard.views[view];
         if view_data.segments.is_empty() {
             continue;
         }
@@ -317,21 +316,19 @@ pub(crate) fn plan_fold(
     }
 
     let tombstones = generation.overlay.deleted_set().clone();
-    let high_water = entity_bound.max(generation.bundle.manifest.entity_id_high_water);
 
     Ok(FoldPlan {
         partition: partition.clone(),
         views,
-        tiers: manifest.deltas.clone(),
-        attr_extents: manifest.attr_extents.clone(),
-        record_extents: manifest.record_extents.clone(),
-        entity_terms_extents: manifest.entity_terms_extents.clone(),
-        text_extents: manifest.text_extents.clone(),
-        unique: manifest.unique_indexes.clone(),
-        edited: manifest.edited_items.clone(),
+        tiers: record.deltas.clone(),
+        attr_extents: record.attr_extents.clone(),
+        record_extents: record.record_extents.clone(),
+        entity_terms_extents: record.entity_terms_extents.clone(),
+        text_extents: record.text_extents.clone(),
+        unique: record.unique_indexes.clone(),
+        edited: record.edited_items.clone(),
         tombstones,
         entity_bound,
-        high_water,
         dict_len,
         small_term_threshold: generation.bundle.manifest.small_term_threshold,
         prefix: generation.prefix.clone(),

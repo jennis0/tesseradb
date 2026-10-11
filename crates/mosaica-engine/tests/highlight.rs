@@ -34,7 +34,7 @@ use common::*;
 use mosaica_build::config::Config;
 use mosaica_build::{build, BuildArgs};
 use mosaica_engine::filter::{Endpoint, FilterExpr, FilterOperand, Scalar};
-use mosaica_types::{AttrLocalId, ShardId};
+use mosaica_types::AttrLocalId;
 use mosaica_engine::{Engine, PointRows, ViewportOut, ViewportRequest};
 
 /// Enough items that a depth-2 request splits into several non-empty tiles and the cap clause has
@@ -160,7 +160,6 @@ fn fixture() -> Fixture {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

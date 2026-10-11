@@ -741,7 +741,7 @@ fn verify_refuses_edited_items_that_disagree() {
     let one_way = tmp.path().join("one-way");
     copy_tree(&root, &one_way);
     let (path, mut manifest) = side_manifest(&one_way);
-    manifest["edited_items"]["by_entity"]["live"] = serde_json::json!([]);
+    manifest["shards"]["records"][0]["edited_items"]["by_entity"]["live"] = serde_json::json!([]);
     std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
     assert!(verify(&one_way).is_err(), "a map held one way is refused");
 

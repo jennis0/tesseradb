@@ -112,7 +112,6 @@ fn build_bundle(dir: &Path) -> std::path::PathBuf {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: mosaica_types::ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -227,7 +226,7 @@ fn every_table_of_the_pass_is_the_one_counted_row_by_row() {
     let (generation, mask) = engine
         .composed_mask(&session, "s0")
         .expect("the mask composes");
-    let view_data = &generation.bundle.partitions["default"].views["s0"];
+    let view_data = &generation.bundle.partitions["default"].only_shard().views["s0"];
     let segments = segments_with_row_bases("s0", view_data).expect("the segments resolve");
     assert_eq!(segments.len(), 2, "the flush wrote a segment of its own");
     let flushed = segments[1].1..segments[1].1 + segments[1].0.row_count;

@@ -161,7 +161,7 @@ pub fn run(ctx: &Context, ops: &[String], checkpoints: &[u64], seed: u64) -> Res
             .partitions
             .values()
             .next()
-            .and_then(|p| p.views.keys().next().cloned())
+            .and_then(|p| p.only_shard().views.keys().next().cloned())
             .unwrap_or_else(|| "s0".to_string());
         drop(bundle);
 

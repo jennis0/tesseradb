@@ -32,7 +32,7 @@ use mosaica_types::layer::{
     ArtifactVisibility, ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
-use mosaica_types::{MosaicaId, ShardId};
+use mosaica_types::MosaicaId;
 
 const SIDE: u64 = 64;
 const CELL: f64 = 1000.0 / SIDE as f64;
@@ -115,7 +115,6 @@ fn build(dir: &Path, cells: &[(u64, u64)]) -> PathBuf {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

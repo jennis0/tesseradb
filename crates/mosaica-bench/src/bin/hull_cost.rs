@@ -103,14 +103,14 @@ fn main() -> ExitCode {
             let Some(view_name) = layer.declaration.views.first() else {
                 continue;
             };
-            let Some(view) = partition.views.get(view_name) else {
+            let Some(view) = partition.only_shard().views.get(view_name) else {
                 eprintln!("{name}: view '{view_name}' is not in partition '{partition_name}'");
                 continue;
             };
             let locator = locator_over(view);
 
             let mut clouds: Vec<Cloud> = Vec::new();
-            for extent in &partition.manifest.membership_extents {
+            for extent in &partition.only_shard().record.membership_extents {
                 if &extent.layer != name {
                     continue;
                 }

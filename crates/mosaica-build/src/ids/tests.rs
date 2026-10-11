@@ -14,7 +14,7 @@ use arrow::datatypes::{Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use mosaica_spatial::Bounds;
-use mosaica_types::{IdentityKey, ShardId};
+use mosaica_types::IdentityKey;
 
 use super::{reads, ReadInput};
 use crate::config::Config;
@@ -255,7 +255,6 @@ fn args(dir: &Path, budget: Option<u64>) -> crate::BuildArgs {
         limit: None,
         strict: false,
         identity_key: IdentityKey::from_hex("000102030405060708090a0b0c0d0e0f").unwrap(),
-        shard_id: ShardId::ZERO,
         layers,
         layer_inputs: acquired.layers,
         scoped_layers: Default::default(),
@@ -440,6 +439,7 @@ fn a_group_scoped_file_sets_the_unique_values_it_carries() {
     let indexes = mosaica_store::unique::UniqueIndexes::open(
         &bundle.manifest,
         &partition.manifest,
+        &partition.only_shard().record,
         &root.join("v00000"),
         None,
     )

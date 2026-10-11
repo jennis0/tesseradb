@@ -310,7 +310,7 @@ pub(crate) fn views_holding(generation: &Generation, entity: EntityId) -> Vec<St
         .map(|item| item.view.clone())
         .collect();
     for partition in generation.bundle.partitions.values() {
-        for (view, data) in &partition.views {
+        for (view, data) in &partition.only_shard().views {
             if data.row_space.row_of(entity).is_some() {
                 views.push(view.clone());
             }

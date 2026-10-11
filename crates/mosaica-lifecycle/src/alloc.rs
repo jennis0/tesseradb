@@ -57,8 +57,7 @@
 //!
 //! **The downward mark is durable on the same terms as the upward one** and must be, or a rotation
 //! and restart can re-issue a row-less id to a point: two entities, one `mosaica_id`. See
-//! [`low_water_from`], which is [`high_water_from`]'s mirror, and `allocator_floor`'s companion
-//! [`allocator_ceiling`].
+//! [`low_water_from`], which is [`high_water_from`]'s mirror, and [`allocator_ceiling`].
 //!
 //! `mosaica_lifecycle::buffer` already allocates term-extension ids downward from `u32::MAX` on the
 //! same argument in a different space; this is that pattern applied to a second population.
@@ -404,9 +403,8 @@ pub fn high_water_from<'r>(records: impl IntoIterator<Item = &'r WalRecord>) -> 
             // An overlay snapshot names entities that were certainly allocated, so it raises the
             // floor — but only for entities something has *denied*, which is a weak bound and not
             // the mechanism. Rotation deletes the `IngestBatch` records this function really
-            // derives from; what replaces them is the side-manifest's own `entity_id_high_water`,
-            // refreshed at every flush publication — never the build `MANIFEST.json`, which would
-            // reallocate every flushed entity id and violate I9.
+            // derives from; what replaces them is the shard record's `high_water` in the
+            // side-manifest, refreshed at every publication.
             WalRecord::OverlaySnapshot { entries } => {
                 for entry in entries {
                     let candidate = entry.entity_id.raw() + 1;
@@ -547,37 +545,13 @@ pub fn low_water_from<'r>(records: impl IntoIterator<Item = &'r WalRecord>) -> u
 /// The ceiling a restart seeds its row-less mark from: the lowest of everything durable that could
 /// name an allocated row-less id.
 ///
-/// [`allocator_floor`]'s mirror, and it takes the **minimum** where that one takes the maximum —
-/// the two regions grow towards each other, so "furthest along" is downward here. The same three
-/// homes apply: the bundle manifest, every side manifest, and the WAL term that rotation reclaims
+/// The homes are the bundle manifest, every side manifest, and the WAL term that rotation reclaims
 /// ([`low_water_from`]), and only the combination is correct.
 pub fn allocator_ceiling(bundle_low_water: u64, side_manifest_low_waters: &[u64]) -> u64 {
     side_manifest_low_waters
         .iter()
         .copied()
         .fold(bundle_low_water, u64::min)
-}
-
-/// The floor a restart seeds its allocator from: the highest of everything durable that could
-/// name an allocated id.
-///
-/// **This exists as a function because the fold makes the two manifest values disagree on
-/// purpose, and the safety of that is a property of this expression rather than of either
-/// writer.** `publish_fold` lowers `MANIFEST.json`'s `entity_id_high_water` to the *snapshot's*
-/// entity bound — it has a second reader, the base locator's declared length, for which a live
-/// value would claim every post-snapshot entity — and writes the live value into
-/// `SEGMENTS-<n>.json` instead. Either field read alone therefore reissues ids: the bundle's
-/// because the fold lowered it, the side-manifest's because a build writes none. Only the `max`
-/// is correct, and a change on either side has to re-check it here (compaction §12's obligation
-/// 10, and `write.rs`'s note at the fold's manifest assembly).
-///
-/// The WAL term is the third home and the one rotation reclaims, which is why it cannot stand
-/// alone either: see [`high_water_from`].
-pub fn allocator_floor(bundle_high_water: u64, side_manifest_high_waters: &[u64]) -> u64 {
-    side_manifest_high_waters
-        .iter()
-        .copied()
-        .fold(bundle_high_water, u64::max)
 }
 
 /// One item awaiting entity-ID assignment at serve time (append ingest).
@@ -959,10 +933,8 @@ mod tests {
     }
 
     #[test]
-    fn allocator_ceiling_takes_the_minimum_where_the_floor_takes_the_maximum() {
-        // The two regions grow towards each other, so "furthest along" is downward here. Reading
-        // either mark from one home alone reissues ids, which is why both functions exist.
-        assert_eq!(allocator_floor(10, &[7, 42, 3]), 42);
+    fn allocator_ceiling_takes_the_minimum() {
+        // The row-less region grows downward, so "furthest along" is the lowest mark.
         assert_eq!(allocator_ceiling(ROWLESS_CEILING, &[]), ROWLESS_CEILING);
         assert_eq!(
             allocator_ceiling(ROWLESS_CEILING, &[ROWLESS_CEILING - 8, ROWLESS_CEILING - 2]),

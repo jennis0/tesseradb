@@ -157,7 +157,7 @@ fn places_of_view(bundle: Arc<mosaica_store::read::Bundle>, view: String) -> Wit
         let Some(view_data) = bundle
             .partitions
             .values()
-            .find_map(|partition| partition.views.get(&view))
+            .find_map(|partition| partition.only_shard().views.get(&view))
         else {
             return;
         };

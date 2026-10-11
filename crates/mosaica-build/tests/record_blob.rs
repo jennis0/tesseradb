@@ -25,7 +25,7 @@ use mosaica_filter::{Access, RecordBlob, RecordValue};
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_spatial::Bounds;
 use mosaica_store::open_bundle;
-use mosaica_types::{IdentityKey, ShardId};
+use mosaica_types::IdentityKey;
 
 mod common;
 
@@ -207,7 +207,6 @@ fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs 
         limit: None,
         strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

@@ -37,7 +37,7 @@ use mosaica_engine::ViewportRequest;
 use mosaica_lifecycle::command::UnallocatedRow;
 use mosaica_lifecycle::wal::WalScalar;
 use mosaica_store::read::open_bundle;
-use mosaica_types::{AttrLocalId, ShardId};
+use mosaica_types::AttrLocalId;
 
 const N: u64 = 60;
 /// The whole declared extent, so a depth-0 request covers every item.
@@ -279,7 +279,6 @@ fn fixture() -> Fixture {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -303,7 +302,9 @@ fn fixture() -> Fixture {
         &phash,
         &opened.manifest,
         // A freshly built bundle has flushed nothing, so its columns are the base layer alone.
-        mosaica_engine::filter::PartitionExtents::of(Some(&opened.partitions[&phash].manifest)),
+        mosaica_engine::filter::PartitionExtents::of(Some(
+            &opened.partitions[&phash].only_shard().record,
+        )),
         &[],
         // Mapped, which is what the engine does at session open — so the round-trip these tests
         // assert is the one a served request actually takes.
@@ -335,7 +336,7 @@ fn fixture() -> Fixture {
         prefix,
         phash: phash.clone(),
         manifest: opened.manifest.clone(),
-        extents: opened.partitions[&phash].manifest.attr_extents.clone(),
+        extents: opened.partitions[&phash].only_shard().record.attr_extents.clone(),
     }
 }
 
@@ -1094,7 +1095,7 @@ fn an_extent_file_the_manifest_names_but_that_is_absent_refuses_to_open() {
     let prefix = fx.bundle.join(current["prefix"].as_str().unwrap());
     let opened = open_bundle(&fx.bundle).unwrap();
     let phash = opened.partitions.keys().next().unwrap().clone();
-    let extents = opened.partitions[&phash].manifest.attr_extents.clone();
+    let extents = opened.partitions[&phash].only_shard().record.attr_extents.clone();
     assert!(
         !extents.is_empty(),
         "the flush recorded its extents in the side-manifest"
@@ -2950,7 +2951,7 @@ fn a_folded_bundle_answers_every_filter_it_answered_before() {
             .values()
             .next()
             .expect("one partition")
-            .manifest
+            .only_shard().record
             .attr_extents
             .len(),
         0,
@@ -3397,7 +3398,7 @@ fn an_extent_published_during_the_folds_flight_is_carried_forward_and_composed()
         .values()
         .next()
         .expect("one partition");
-    let extents = &partition.manifest.attr_extents;
+    let extents = &partition.only_shard().record.attr_extents;
     assert!(
         !extents.is_empty(),
         "the flight's extents are named in the folded manifest — the list is half of publishing \
@@ -3540,7 +3541,7 @@ fn attrs_coalesced(engine: &mosaica_engine::Engine) {
         let generation = engine.generation();
         let (_, partition) = generation.bundle.partitions.iter().next().unwrap();
         let mut per_column: BTreeMap<&str, usize> = BTreeMap::new();
-        for extent in &partition.manifest.attr_extents {
+        for extent in &partition.only_shard().record.attr_extents {
             *per_column.entry(extent.column.as_str()).or_default() += 1;
         }
         per_column.values().all(|&n| n < COALESCE_WIDTH)
@@ -3552,7 +3553,7 @@ fn extents_per_column(fx: &Fixture) -> BTreeMap<String, usize> {
     let opened = open_bundle(&fx.bundle).unwrap();
     let phash = opened.partitions.keys().next().unwrap().clone();
     let mut counts = BTreeMap::new();
-    for extent in &opened.partitions[&phash].manifest.attr_extents {
+    for extent in &opened.partitions[&phash].only_shard().record.attr_extents {
         *counts.entry(extent.column.clone()).or_insert(0) += 1;
     }
     counts
@@ -4147,7 +4148,7 @@ fn a_coalesce_carries_a_deleted_but_unfolded_entitys_value_through() {
         serde_json::from_slice(&std::fs::read(fx.bundle.join("CURRENT")).unwrap()).unwrap();
     let prefix = fx.bundle.join(current["prefix"].as_str().unwrap());
     let mut held = None;
-    for extent in &opened.partitions[&phash].manifest.attr_extents {
+    for extent in &opened.partitions[&phash].only_shard().record.attr_extents {
         if extent.column != "title" {
             continue;
         }

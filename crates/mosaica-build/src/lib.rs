@@ -104,6 +104,8 @@ pub use unique_key::{
 const PREFIX: &str = "v00000";
 /// This build writes exactly one partition: there are no compartments.
 const PHASH: &str = "default";
+/// The one shard a build writes.
+const SHARD: ShardId = ShardId::ZERO;
 /// One segment per (partition, view) at build (contracts §2.1).
 const SEG_ID: &str = "seg-0";
 /// The same, for the artifact pass, which reopens the segment the build wrote.
@@ -297,8 +299,6 @@ pub struct BuildArgs {
     /// for every bundle it creates; a caller that needs two builds to agree byte for byte passes
     /// the same key to both.
     pub identity_key: IdentityKey,
-    /// The §13.3 row-range shard this build produces. Always 0: there is no sharding.
-    pub shard_id: ShardId,
     /// The config's `[[layer]]` blocks, compiled, in declaration order — which is registration
     /// order, a layer having to follow every layer it names in `depends_on`. Empty for a bundle
     /// with no layers, which is what every build wrote before this input existed.
@@ -371,7 +371,6 @@ impl std::fmt::Debug for BuildArgs {
             .field("limit", &self.limit)
             .field("strict", &self.strict)
             .field("identity_key", &self.identity_key)
-            .field("shard_id", &self.shard_id)
             .field("emit_oracle_pairs", &self.emit_oracle_pairs)
             .field("batch_items", &self.batch_items)
             .field("memory_budget", &self.memory_budget)
@@ -1514,7 +1513,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     }
 
     let prefix_dir = args.out.join(PREFIX);
-    let shard = ShardLayout::new(PHASH, args.shard_id);
+    let shard = ShardLayout::new(PHASH, SHARD);
     let shard_dir = shard.dir(&prefix_dir);
     let terms_dir = shard_dir.join("terms");
     let entities_dir = shard_dir.join("entities");
@@ -1577,7 +1576,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     let mut entity_ids: Vec<EntityId> = (0..n).map(EntityId::new).collect();
     let mut tiler_items: Vec<TilerItem> = Vec::with_capacity(n as usize);
     for (position, item) in staged.iter().enumerate() {
-        let mosaica_id = assembly::identity_of(&args.identity_key, args.shard_id, position as u32);
+        let mosaica_id = assembly::identity_of(&args.identity_key, SHARD, position as u32);
         tiler_items.push(TilerItem {
             mosaica_id,
             qx: item.qx,
@@ -2284,45 +2283,58 @@ fn write_manifests(
 
     let bundle_bytes: u64 = manifest_files.values().map(|f| f.size).sum();
 
+    let unique_columns = unique_indexes
+        .iter()
+        .map(|index| index.attribute.clone())
+        .collect();
     let segments = SegmentsManifest {
-        watermark: n,
-        entity_id_high_water: n,
-        // The row-less region's mark, and it must be the manifest's: the WAL carries the same one
-        // in its registration records and rotation reclaims those, so a mark that lived only there
-        // is lost at the first rotation and the next registration is handed ids a live layer
-        // already holds (decision 0074). `ROWLESS_CEILING` when the declaration carried no layer, which is
-        // the untouched region rather than a default standing in for a lost value.
-        entity_id_low_water: published_layers.low_water,
-        layers: published_layers.layers.clone(),
-        layer_registry_version: published_layers.registry_version,
-        membership_extents: published_layers.membership_extents.clone(),
-        level_versions: published_layers.level_versions.clone(),
-        // **The post-bundle artifact pass's output** (`crate::artifact_pass`). Empty only where
-        // the build published no artifacts, or where a derived structure would not compose — each
-        // of which leaves the level composing it on first use, exactly as before the pass existed.
-        derived_extents: published_layers.derived_extents.clone(),
-        // One entry per view that has images, in the order the views were built
-        // (`crate::term_images_pass`). A view with no rows, and a build over a dictionary with no
-        // terms, have none.
-        term_image_extents: term_images
-            .iter()
-            .flatten()
-            .map(|images| images.extent.clone())
-            .collect(),
-        artifact_record_extents: published_layers.artifact_record_extents.clone(),
-        // One per view the build materialised (`views.md` §7), in registry order. `entity_hi`
-        // is inclusive, and an empty build has no entity range at all — hence the saturating
-        // subtraction pass two hands over.
-        segments: segments_written
-            .iter()
-            .map(|descriptor| SegmentDescriptor {
-                entity_hi: descriptor.entity_hi.saturating_sub(1),
-                ..descriptor.clone()
-            })
-            .collect(),
-        dict_extents,
-        unique_indexes,
-        ..SegmentsManifest::empty()
+        partition: mosaica_store::manifest::PartitionManifest {
+            // The row-less region's mark, and it must be the manifest's: the WAL carries the same
+            // one in its registration records and rotation reclaims those, so a mark that lived
+            // only there is lost at the first rotation and the next registration is handed ids a
+            // live layer already holds. `ROWLESS_CEILING` when the declaration carried no layer,
+            // which is the untouched region rather than a default standing in for a lost value.
+            entity_id_low_water: published_layers.low_water,
+            layers: published_layers.layers.clone(),
+            layer_registry_version: published_layers.registry_version,
+            dict_extents,
+            unique_columns,
+            ..mosaica_store::manifest::PartitionManifest::empty()
+        },
+        shards: mosaica_store::manifest::Shards {
+            size: mosaica_types::SHARD_SIZE_DEFAULT,
+            records: vec![mosaica_store::manifest::ShardRecord {
+                watermark: n,
+                high_water: n,
+                membership_extents: published_layers.membership_extents.clone(),
+                level_versions: published_layers.level_versions.clone(),
+                // **The post-bundle artifact pass's output** (`crate::artifact_pass`). Empty only
+                // where the build published no artifacts, or where a derived structure would not
+                // compose — each of which leaves the level composing it on first use.
+                derived_extents: published_layers.derived_extents.clone(),
+                // One entry per view that has images, in the order the views were built
+                // (`crate::term_images_pass`). A view with no rows, and a build over a dictionary
+                // with no terms, have none.
+                term_image_extents: term_images
+                    .iter()
+                    .flatten()
+                    .map(|images| images.extent.clone())
+                    .collect(),
+                artifact_record_extents: published_layers.artifact_record_extents.clone(),
+                // One per view the build materialised (`views.md` §7), in registry order.
+                // `entity_hi` is inclusive, and an empty build has no entity range at all — hence
+                // the saturating subtraction pass two hands over.
+                segments: segments_written
+                    .iter()
+                    .map(|descriptor| SegmentDescriptor {
+                        entity_hi: descriptor.entity_hi.saturating_sub(1),
+                        ..descriptor.clone()
+                    })
+                    .collect(),
+                unique_indexes,
+                ..mosaica_store::manifest::ShardRecord::empty(SHARD)
+            }],
+        },
     };
     let segments_path = partition_dir.join("SEGMENTS-0.json");
     write_json(&segments_path, &segments)?;
@@ -2376,12 +2388,10 @@ fn write_manifests(
             compiled
         },
         small_term_threshold: SMALL_TERM_THRESHOLD_DEFAULT,
-        entity_id_high_water: n,
         identity: IdentityDescriptor {
             construction: IDENTITY_CONSTRUCTION.to_string(),
             rounds: IDENTITY_ROUNDS,
             key: args.identity_key.to_hex(),
-            shard_id: args.shard_id,
         },
         // **One entry per view, each carrying its own frame** (decision 0040): two views of one
         // bundle may quantise differently, and an embedding and a map cannot share a frame
@@ -2560,7 +2570,6 @@ fn verified_open(
     // and the build do.
     let identity_key = IdentityKey::from_hex(&bundle.manifest.identity.key)
         .map_err(|e| BuildError::Invalid(format!("MANIFEST identity.key: {e}")))?;
-    let shard_id = bundle.manifest.identity.shard_id;
 
     // Created on the first view that needs it, and by nothing else: a bundle small enough for the
     // direct route verifies on a read-only root exactly as it did.
@@ -2575,17 +2584,19 @@ fn verified_open(
     };
     for partition in bundle.partitions.values() {
         let prefix_dir = root.join(&current.prefix);
+        let shard = partition.only_shard();
         let edited = mosaica_store::edited::EditedIndex::open(
-            &partition.manifest.edited_items,
+            &shard.record.edited_items,
             &prefix_dir,
             None,
         )?;
         let tenancy = mosaica_store::read::open_tenancy_index(
             &prefix_dir,
-            &partition.manifest,
+            &shard.record,
+            &partition.manifest.files,
             &bundle.manifest.files,
         )?;
-        for (view_id, view) in &partition.views {
+        for (view_id, view) in &shard.views {
             views += 1;
             segments += view.segments.len();
             let total_rows = view.row_space.total_rows();
@@ -2605,7 +2616,7 @@ fn verified_open(
                 view,
                 Identity {
                     key: &identity_key,
-                    shard_id,
+                    shard_id: shard.id,
                     edited: &edited,
                     tenancy: &tenancy,
                 },
@@ -2613,12 +2624,16 @@ fn verified_open(
         }
     }
     // Sorted so two runs over one bundle report the columns in one order.
-    let mut partitions: Vec<(&str, &mosaica_store::manifest::SegmentsManifest)> = bundle
+    let mut side_manifests: Vec<(&str, SegmentsManifest)> = bundle
         .partitions
         .iter()
-        .map(|(phash, data)| (phash.as_str(), &data.manifest))
+        .map(|(phash, data)| (phash.as_str(), data.side_manifest()))
         .collect();
-    partitions.sort_by(|a, b| a.0.cmp(b.0));
+    side_manifests.sort_by(|a, b| a.0.cmp(b.0));
+    let partitions: Vec<(&str, &SegmentsManifest)> = side_manifests
+        .iter()
+        .map(|(phash, manifest)| (*phash, manifest))
+        .collect();
     let bundle_bytes = bundle
         .manifest
         .files
@@ -2626,7 +2641,7 @@ fn verified_open(
         .chain(
             partitions
                 .iter()
-                .flat_map(|(_, segments)| segments.files.values()),
+                .flat_map(|(_, segments)| segments.partition.files.values()),
         )
         .map(|file| file.size)
         .sum();
@@ -2635,13 +2650,18 @@ fn verified_open(
         &bundle.manifest,
         &partitions,
     )?;
+    let entity_id_high_water = partitions
+        .iter()
+        .map(|(_, segments)| segments.only_shard().high_water)
+        .max()
+        .unwrap_or(0);
     let report = VerifyReport {
         prefix: current.prefix,
         partitions: bundle.partitions.len(),
         views,
         segments,
         rows,
-        entity_id_high_water: bundle.manifest.entity_id_high_water,
+        entity_id_high_water,
         bundle_bytes,
         keyword_cardinalities,
     };

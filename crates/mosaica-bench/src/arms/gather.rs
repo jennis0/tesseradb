@@ -226,7 +226,7 @@ pub fn run(
         let Some(partition) = bundle.partitions.values().next() else {
             continue;
         };
-        let Some(view) = partition.views.values().next() else {
+        let Some(view) = partition.only_shard().views.values().next() else {
             continue;
         };
         let Some(segment) = view.segments.first() else {

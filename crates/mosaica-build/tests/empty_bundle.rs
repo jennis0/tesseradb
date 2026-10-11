@@ -32,7 +32,7 @@ use parquet::arrow::ArrowWriter;
 use mosaica_build::{build, build_in_memory, BuildArgs};
 use mosaica_spatial::Bounds;
 use mosaica_store::read::open_bundle;
-use mosaica_types::{IdentityKey, ShardId};
+use mosaica_types::IdentityKey;
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
@@ -219,7 +219,6 @@ fn args(inputs: &Inputs, out: &Path) -> BuildArgs {
         limit: None,
         strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -256,11 +255,12 @@ fn a_build_with_no_points_writes_a_bundle() {
     let bundle = open_bundle(&out).expect("a zero-item bundle opens and verifies");
     let partition = bundle.partitions.values().next().expect("one partition");
     let manifest = &partition.manifest;
+    let record = &partition.only_shard().record;
 
-    assert_eq!(manifest.entity_id_high_water, 0);
-    assert_eq!(manifest.watermark, 0);
-    assert_eq!(manifest.segments.len(), 1);
-    assert_eq!(manifest.segments[0].row_count, 0);
+    assert_eq!(record.high_water, 0);
+    assert_eq!(record.watermark, 0);
+    assert_eq!(record.segments.len(), 1);
+    assert_eq!(record.segments[0].row_count, 0);
 
     // Every declared column is present and empty — the schema is the bundle's, not the corpus's,
     // so a column exists because it was declared and not because a row carried a value.

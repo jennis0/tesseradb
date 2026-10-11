@@ -549,7 +549,7 @@ impl Engine {
                 .bundle
                 .partitions
                 .values()
-                .any(|partition| partition.views.contains_key(view));
+                .any(|partition| partition.only_shard().views.contains_key(view));
             if !known || !session.visible_views().contains_view(view) {
                 return Err(EngineError::UnknownView(view.to_string()));
             }

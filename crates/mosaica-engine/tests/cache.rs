@@ -63,7 +63,8 @@ fn watermark_of(bundle: &Bundle) -> u64 {
         .values()
         .next()
         .expect("the fixture bundle has one partition")
-        .manifest
+        .only_shard()
+        .record
         .watermark
 }
 

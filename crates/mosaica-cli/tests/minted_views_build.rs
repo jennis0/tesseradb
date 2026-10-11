@@ -211,7 +211,7 @@ fn a_group_with_no_roster_builds_its_minted_views() {
     let partition = opened.partitions.get("default").expect("one partition");
     for (key, range) in POPULATION {
         let view = partition
-            .views
+            .only_shard().views
             .get(&format!("quarter:{key}"))
             .expect("a minted view is in the bundle");
         let rows = (0..ENTITIES)

@@ -30,10 +30,13 @@ use memmap2::Mmap;
 use sha2::{Digest, Sha256};
 
 use mosaica_spatial::Tile;
-use mosaica_types::{IdentityKey, BUNDLE_FORMAT};
+use mosaica_types::{IdentityKey, ShardId, BUNDLE_FORMAT};
 
 use crate::error::{read_to_vec, Result, StoreError};
-use crate::manifest::{CurrentPointer, FileDigest, Honourability, Manifest, SegmentsManifest};
+use crate::manifest::{
+    CurrentPointer, FileDigest, Honourability, Manifest, PartitionManifest, SegmentsManifest,
+    ShardRecord, Shards,
+};
 use crate::permutation::{Permutation, RowSpace, SegmentExtent};
 use crate::render_presence::{render_presence_path, RenderPresence, RENDER_PRESENCE_DIR};
 
@@ -53,6 +56,8 @@ use crate::render_presence::{render_presence_path, RenderPresence, RENDER_PRESEN
 /// would re-pay `Permutation::load`'s O(bound) `validate_rows` per flush.
 #[derive(Debug, Clone)]
 pub struct ViewData {
+    /// The shard whose rows these are.
+    pub shard: ShardId,
     pub row_space: RowSpace,
     pub segments: Vec<Arc<SegmentData>>,
     /// **Which incarnation of the key these files belong to** (decision 0115). Read off the
@@ -74,6 +79,22 @@ pub struct ViewData {
 }
 
 impl ViewData {
+    /// A view with no rows in `shard`: one created while the service runs owns no row space until
+    /// its first flush there.
+    pub fn empty(shard: ShardId, incarnation: mosaica_types::view::ViewIncarnation) -> ViewData {
+        ViewData {
+            shard,
+            row_space: RowSpace::new(
+                Arc::new(Permutation::empty().expect("an anonymous mapping of one page")),
+                0,
+            ),
+            segments: Vec::new(),
+            incarnation,
+            term_images: None,
+            field_tallies: None,
+        }
+    }
+
     /// The segments paired with their `row_base` in the view's row space, ascending, or `Err`
     /// naming a segment the row space holds no base for. Keyed on `seg_id`, never zipped by
     /// position: a merge pushes its segment to the end of `segments` while the row space puts its
@@ -218,19 +239,17 @@ impl std::fmt::Display for SegmentLoadError {
     }
 }
 
-/// One loaded partition: its verified side-manifest, the `n` that manifest was found at, the
-/// highest `n` present in the partition directory, and every view it names.
+/// One loaded partition: its verified side-manifest's partition fields, the `n` that manifest was
+/// found at, the highest `n` present in the partition directory, and its shards.
 ///
 /// `Clone` for [`Bundle::with_segment`]'s sake — see [`ViewData`]. Cloning one copies a manifest
-/// and two small maps of `Arc`s; it opens no file.
+/// and the shards' `Arc`s; it opens no file.
 #[derive(Debug, Clone)]
 pub struct PartitionData {
-    pub manifest: SegmentsManifest,
-    /// The `n` of the `SEGMENTS-<n>.json` actually served — taken from the **filename**, which is
-    /// the only place it is written. The manifest carried a `segments_version` field defined as
-    /// `= n`; it is gone, because the name collided with the *geometry* version, a different
-    /// counter that must not move when a manifest is written for deny state alone (see
-    /// `SegmentsManifest`'s doc).
+    pub manifest: PartitionManifest,
+    /// The side-manifest's `shards.size`.
+    pub shard_size: u64,
+    /// The `n` of the `SEGMENTS-<n>.json` actually served, taken from the filename.
     pub segments_n: u64,
     /// The highest `SEGMENTS-<n>.json` present for this partition at open, whether or not it
     /// was the one served.
@@ -248,6 +267,16 @@ pub struct PartitionData {
     /// built, its time bound is not, so a stepped-down partition serves its older manifest
     /// indefinitely. Contracts §2.3 is marked the same way.
     pub highest_candidate_n: u64,
+    /// Ascending by id.
+    pub shards: Vec<Arc<ShardData>>,
+}
+
+/// One point shard of a partition: its record in the served side-manifest, and every view's rows
+/// in it.
+#[derive(Debug, Clone)]
+pub struct ShardData {
+    pub id: ShardId,
+    pub record: ShardRecord,
     pub views: HashMap<String, ViewData>,
 }
 
@@ -260,6 +289,102 @@ impl PartitionData {
     /// step-down safe.
     pub fn stepped_down(&self) -> bool {
         self.highest_candidate_n > self.segments_n
+    }
+
+    /// The shard numbered `id`.
+    pub fn shard(&self, id: ShardId) -> Option<&ShardData> {
+        self.shards
+            .iter()
+            .find(|shard| shard.id == id)
+            .map(Arc::as_ref)
+    }
+
+    /// The one shard a partition holds until several are served; the open refuses any other
+    /// number.
+    pub fn only_shard(&self) -> &ShardData {
+        match self.shards.as_slice() {
+            [shard] => shard,
+            shards => panic!(
+                "a partition serves one shard, and this one holds {}",
+                shards.len()
+            ),
+        }
+    }
+
+    /// [`Self::only_shard`], to edit.
+    pub fn only_shard_mut(&mut self) -> &mut ShardData {
+        match self.shards.as_mut_slice() {
+            [shard] => Arc::make_mut(shard),
+            shards => panic!(
+                "a partition serves one shard, and this one holds {}",
+                shards.len()
+            ),
+        }
+    }
+
+    /// The side-manifest this partition was published with, to edit into the next one.
+    pub fn side_manifest(&self) -> SegmentsManifest {
+        SegmentsManifest {
+            partition: self.manifest.clone(),
+            shards: Shards {
+                size: self.shard_size,
+                records: self
+                    .shards
+                    .iter()
+                    .map(|shard| shard.record.clone())
+                    .collect(),
+            },
+        }
+    }
+
+    /// This partition as `published` leaves it, with `views` replacing one view of one shard. Every
+    /// shard keeps its views otherwise; `published` must hold a record for each shard and no
+    /// other.
+    fn publishing(
+        &self,
+        published: PublishedManifest,
+        mut views: Option<(ShardId, &str, ViewData)>,
+    ) -> Result<PartitionData> {
+        let SegmentsManifest {
+            partition: manifest,
+            shards: published_shards,
+        } = published.manifest;
+        if !published_shards
+            .records
+            .iter()
+            .map(|record| record.id)
+            .eq(self.shards.iter().map(|shard| shard.id))
+        {
+            return Err(StoreError::MalformedBundle {
+                detail: "a publication's shard records do not name the shards being served"
+                    .to_string(),
+            });
+        }
+        let shards = published_shards
+            .records
+            .into_iter()
+            .zip(&self.shards)
+            .map(|(record, shard)| {
+                let mut shard_views = shard.views.clone();
+                if let Some((_, view, data)) = views.take_if(|(id, _, _)| *id == shard.id) {
+                    shard_views.insert(view.to_string(), data);
+                }
+                Arc::new(ShardData {
+                    id: shard.id,
+                    record,
+                    views: shard_views,
+                })
+            })
+            .collect();
+        // The served `n` and the highest candidate move together: this generation *is* the newest
+        // manifest, so it is not stepped down, whatever the one it was built from was.
+        Ok(PartitionData {
+            manifest,
+            shard_size: published_shards.size,
+            segments_n: published.n,
+            highest_candidate_n: published.n,
+            shards,
+        })
     }
 }
 
@@ -282,6 +407,18 @@ pub struct PublishedManifest {
 }
 
 impl Bundle {
+    /// The one shard of the one partition a bundle serves until several are.
+    pub fn only_shard(&self) -> &ShardData {
+        let mut partitions = self.partitions.values();
+        match (partitions.next(), partitions.next()) {
+            (Some(partition), None) => partition.only_shard(),
+            _ => panic!(
+                "a bundle serves one partition, and this one holds {}",
+                self.partitions.len()
+            ),
+        }
+    }
+
     /// This bundle plus one segment in `(partition, view)`: a **new** `Bundle` sharing every
     /// mapped file with this one.
     ///
@@ -303,12 +440,13 @@ impl Bundle {
     pub fn with_segment(
         &self,
         partition: &str,
+        shard: ShardId,
         view: &str,
         segment: SegmentData,
         extent: SegmentExtent,
         published: PublishedManifest,
     ) -> Result<Arc<Bundle>> {
-        self.substituting(partition, view, published, |view_data| {
+        self.substituting(partition, shard, view, published, |view_data| {
             let row_space = view_data.row_space.with_extent(extent).ok_or_else(|| {
                 StoreError::MalformedBundle {
                     detail: format!(
@@ -320,6 +458,7 @@ impl Bundle {
             let mut segments = view_data.segments.clone();
             segments.push(Arc::new(segment));
             Ok(ViewData {
+                shard: view_data.shard,
                 row_space,
                 segments,
                 // **The view's own, unchanged**: a flush and a merge write into the incarnation
@@ -342,16 +481,18 @@ impl Bundle {
     /// `seg_id`s are never reused, across merges or prefixes (contracts §2.1), so an absent one is
     /// proof the inputs are gone — never a pointer comparison. An `Err`, not a panic: a discarded
     /// merge is an expected outcome of the rebase, not a bug.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_merged(
         &self,
         partition: &str,
+        shard: ShardId,
         view: &str,
         consumed: &[String],
         segment: SegmentData,
         extent: SegmentExtent,
         published: PublishedManifest,
     ) -> Result<Arc<Bundle>> {
-        self.substituting(partition, view, published, |view_data| {
+        self.substituting(partition, shard, view, published, |view_data| {
             let row_space = view_data
                 .row_space
                 .collapsing(consumed, extent)
@@ -369,6 +510,7 @@ impl Bundle {
                 .collect();
             segments.push(Arc::new(segment));
             Ok(ViewData {
+                shard: view_data.shard,
                 row_space,
                 segments,
                 // **The view's own, unchanged**: a flush and a merge write into the incarnation
@@ -396,22 +538,14 @@ impl Bundle {
         partition: &str,
         published: PublishedManifest,
     ) -> Result<Arc<Bundle>> {
-        let view = self
+        let next = self
             .partitions
             .get(partition)
-            .and_then(|p| p.views.keys().next().cloned())
             .ok_or_else(|| StoreError::MalformedBundle {
-                detail: format!("no partition '{partition}' with a view in this bundle"),
-            })?;
-        self.substituting(partition, &view, published, |view_data| {
-            Ok(ViewData {
-                row_space: view_data.row_space.clone(),
-                segments: view_data.segments.clone(),
-                incarnation: view_data.incarnation,
-                term_images: view_data.term_images.clone(),
-                field_tallies: view_data.field_tallies.clone(),
-            })
-        })
+                detail: format!("no partition '{partition}' in this bundle"),
+            })?
+            .publishing(published, None)?;
+        Ok(self.with_partition(partition, next))
     }
 
     /// This bundle carrying a different **top-level manifest**, with the per-view map brought
@@ -430,34 +564,23 @@ impl Bundle {
     pub fn with_views(&self, manifest: Manifest) -> Arc<Bundle> {
         let mut partitions = self.partitions.clone();
         for partition in partitions.values_mut() {
-            // **Declared *and* at the live incarnation** (decision 0115). A dropped key may be
-            // created again, and the recreated view carries the same id — so declaration alone
-            // stopped being the question the moment the burn was withdrawn. A view whose data was
-            // built over a dead incarnation is dropped here exactly as an undeclared one is, and
-            // the seeding below puts an **empty** view back in its place: the predecessor's files
-            // stay on disc, reachable by nothing, until the fold reclaims them.
-            partition
-                .views
-                .retain(|id, data| manifest.is_live_incarnation(id, data.incarnation));
-            for view in &manifest.views {
-                partition
+            for shard in &mut partition.shards {
+                let shard = Arc::make_mut(shard);
+                // **Declared *and* at the live incarnation** (decision 0115). A dropped key may be
+                // created again, and the recreated view carries the same id. A view whose data was
+                // built over a dead incarnation is dropped here exactly as an undeclared one is,
+                // and the seeding below puts an **empty** view back in its place: the
+                // predecessor's files stay on disc, reachable by nothing, until the fold reclaims
+                // them.
+                shard
                     .views
-                    .entry(view.id.clone())
-                    .or_insert_with(|| ViewData {
-                        row_space: RowSpace::new(
-                            Arc::new(
-                                crate::permutation::Permutation::empty()
-                                    .expect("an anonymous mapping of one page"),
-                            ),
-                            0,
-                        ),
-                        segments: Vec::new(),
-                        incarnation: view.incarnation,
-                        // A view created while the service runs owns no row space until its first
-                        // flush, so there is nothing to have projected.
-                        term_images: None,
-                        field_tallies: None,
-                    });
+                    .retain(|id, data| manifest.is_live_incarnation(id, data.incarnation));
+                for view in &manifest.views {
+                    shard
+                        .views
+                        .entry(view.id.clone())
+                        .or_insert_with(|| ViewData::empty(shard.id, view.incarnation));
+                }
             }
         }
         Arc::new(Bundle {
@@ -466,12 +589,12 @@ impl Bundle {
         })
     }
 
-    /// The shared half of [`Self::with_segment`], [`Self::with_merged`] and
-    /// [`Self::with_manifest`]: clone the partition and view maps — `Arc`s and a manifest, no
-    /// file IO — and replace the one view.
+    /// The shared half of [`Self::with_segment`] and [`Self::with_merged`]: the partition as
+    /// `published` leaves it, with one view of one shard replaced. No file IO.
     fn substituting(
         &self,
         partition: &str,
+        shard: ShardId,
         view: &str,
         published: PublishedManifest,
         replace: impl FnOnce(&ViewData) -> Result<ViewData>,
@@ -483,32 +606,27 @@ impl Bundle {
                     detail: format!("no partition '{partition}' in this bundle"),
                 })?;
         let view_data = existing
-            .views
-            .get(view)
+            .shard(shard)
+            .and_then(|data| data.views.get(view))
             .ok_or_else(|| StoreError::MalformedBundle {
-                detail: format!("no view '{view}' in partition '{partition}'"),
+                detail: format!(
+                    "no view '{view}' in shard {} of partition '{partition}'",
+                    shard.raw()
+                ),
             })?;
         let next_view = replace(view_data)?;
+        let next = existing.publishing(published, Some((shard, view, next_view)))?;
+        Ok(self.with_partition(partition, next))
+    }
 
+    /// This bundle with `partition`'s data replaced by `next`.
+    fn with_partition(&self, partition: &str, next: PartitionData) -> Arc<Bundle> {
         let mut partitions = self.partitions.clone();
-        let entry = partitions
-            .get_mut(partition)
-            .expect("looked up immediately above");
-        entry.views.insert(view.to_string(), next_view);
-        // The served `n` and the highest candidate move together: this generation *is* the newest
-        // manifest, so it is not stepped down, whatever the one it was built from was.
-        //
-        // **Passed in, not read off the manifest.** `n` lives in the filename (see
-        // `SegmentsManifest`'s doc for why the field that duplicated it is gone), so the only
-        // honest source for it here is the writer that allocated it.
-        entry.segments_n = published.n;
-        entry.highest_candidate_n = published.n;
-        entry.manifest = published.manifest;
-
-        Ok(Arc::new(Bundle {
+        partitions.insert(partition.to_string(), next);
+        Arc::new(Bundle {
             manifest: self.manifest.clone(),
             partitions,
-        }))
+        })
     }
 }
 
@@ -673,342 +791,336 @@ fn open_prefix(
         sanitize_component("partition phash", &partition_desc.phash)?;
         let partition_dir = crate::layout::partition_dir(&prefix_dir, &partition_desc.phash);
         let selected = load_verifying_segments_manifest(&prefix_dir, &partition_dir, verification)?;
-        let layout = crate::ShardLayout::new(&partition_desc.phash, mosaica_types::ShardId::ZERO);
-        let segments_manifest = selected.manifest;
+        let SegmentsManifest {
+            partition: partition_manifest,
+            shards,
+        } = selected.manifest;
+        let side_files = &partition_manifest.files;
+        let mut shard_data = Vec::with_capacity(shards.records.len());
+        for record in shards.records {
+            let layout = crate::ShardLayout::new(&partition_desc.phash, record.id);
 
-        // **One incarnation per view, and it is the newest** (decision 0115). A drop leaves its
-        // segments in the live side-manifest until a fold reclaims them, so after a key has been
-        // created again this list can name two incarnations of one view id. Their row spaces are
-        // unrelated — each is dense from its own base — so composing them would be nonsense
-        // before it was a disclosure. Incarnations are minted monotonically, so the newest is the
-        // live one; the rest are the fold's to reclaim and are not opened. `with_views` then
-        // checks even that one against the roster and blanks the view if it disagrees, which is
-        // where the *fail-closed* half lives: this pass has the manifest and not yet the log.
-        let mut newest: HashMap<&str, mosaica_types::view::ViewIncarnation> = HashMap::new();
-        // The incarnation of each view's first listed segment, which is the one the view's
-        // `permutation.bin` addresses. A key created again after a drop keeps its predecessor's
-        // base listed first until a fold, and that base is not the new incarnation's.
-        let mut based: HashMap<&str, mosaica_types::view::ViewIncarnation> = HashMap::new();
-        for seg_desc in &segments_manifest.segments {
-            let seen = newest.entry(seg_desc.view.as_str()).or_default();
-            *seen = (*seen).max(seg_desc.incarnation);
-            based
-                .entry(seg_desc.view.as_str())
-                .or_insert(seg_desc.incarnation);
-        }
-        let mut views: HashMap<String, ViewData> = HashMap::new();
-        for seg_desc in &segments_manifest.segments {
-            if newest.get(seg_desc.view.as_str()) != Some(&seg_desc.incarnation) {
-                continue;
+            // **One incarnation per view, and it is the newest** (decision 0115). A drop leaves its
+            // segments in the live side-manifest until a fold reclaims them, so after a key has been
+            // created again this list can name two incarnations of one view id. Their row spaces are
+            // unrelated — each is dense from its own base — so composing them would be nonsense
+            // before it was a disclosure. Incarnations are minted monotonically, so the newest is the
+            // live one; the rest are the fold's to reclaim and are not opened. `with_views` then
+            // checks even that one against the roster and blanks the view if it disagrees, which is
+            // where the *fail-closed* half lives: this pass has the manifest and not yet the log.
+            let mut newest: HashMap<&str, mosaica_types::view::ViewIncarnation> = HashMap::new();
+            // The incarnation of each view's first listed segment, which is the one the view's
+            // `permutation.bin` addresses. A key created again after a drop keeps its predecessor's
+            // base listed first until a fold, and that base is not the new incarnation's.
+            let mut based: HashMap<&str, mosaica_types::view::ViewIncarnation> = HashMap::new();
+            for seg_desc in &record.segments {
+                let seen = newest.entry(seg_desc.view.as_str()).or_default();
+                *seen = (*seen).max(seg_desc.incarnation);
+                based
+                    .entry(seg_desc.view.as_str())
+                    .or_insert(seg_desc.incarnation);
             }
-            // **Per component the path derivation will lay down**, not on the joined id: a
-            // group's view is `group:key` and `:` is exactly the character the two-component path
-            // exists for (`views.md` §3.2).
-            for component in crate::view_path_components(&seg_desc.view) {
-                sanitize_component("view id", component)?;
-            }
-            sanitize_component("segment id", &seg_desc.seg_id)?;
+            let mut views: HashMap<String, ViewData> = HashMap::new();
+            for seg_desc in &record.segments {
+                if newest.get(seg_desc.view.as_str()) != Some(&seg_desc.incarnation) {
+                    continue;
+                }
+                // **Per component the path derivation will lay down**, not on the joined id: a
+                // group's view is `group:key` and `:` is exactly the character the two-component path
+                // exists for (`views.md` §3.2).
+                for component in crate::view_path_components(&seg_desc.view) {
+                    sanitize_component("view id", component)?;
+                }
+                sanitize_component("segment id", &seg_desc.seg_id)?;
 
-            let view_rel = layout.view_rel(&seg_desc.view);
-            let view_dir = prefix_dir.join(&view_rel);
-            let is_new_view = !views.contains_key(&seg_desc.view);
-            let perm_path = view_dir.join("permutation.bin");
-            let perm_rel = format!("{view_rel}/permutation.bin");
-            // **A view need not have a base at all** (`views.md` §3.2). Every view a build or a
-            // fold wrote has one, and its first segment is the build segment `permutation.bin`
-            // addresses; a view *created while the service runs* owns no row space until its
-            // first flush, and every segment it ever takes is an extent over an empty base. The
-            // manifest is what says which — a view whose permutation no manifest names has none,
-            // and reading that as a missing file would refuse the bundle for a view that is
-            // simply new.
-            let has_base = based.get(seg_desc.view.as_str()) == Some(&seg_desc.incarnation)
-                && (segments_manifest.files.contains_key(&perm_rel)
-                    || manifest.files.contains_key(&perm_rel));
-            let is_base_segment = is_new_view && has_base;
-            let view_entry = match views.get_mut(&seg_desc.view) {
-                Some(entry) => entry,
-                None => {
-                    let permutation = if has_base {
-                        ensure_verified(
-                            &perm_rel,
-                            &segments_manifest,
-                            &manifest.files,
-                            &perm_path,
-                        )?;
-                        Permutation::load(&perm_path)?
-                    } else {
-                        Permutation::empty()?
-                    };
+                let view_rel = layout.view_rel(&seg_desc.view);
+                let view_dir = prefix_dir.join(&view_rel);
+                let is_new_view = !views.contains_key(&seg_desc.view);
+                let perm_path = view_dir.join("permutation.bin");
+                let perm_rel = format!("{view_rel}/permutation.bin");
+                // **A view need not have a base at all** (`views.md` §3.2). Every view a build or a
+                // fold wrote has one, and its first segment is the build segment `permutation.bin`
+                // addresses; a view *created while the service runs* owns no row space until its
+                // first flush, and every segment it ever takes is an extent over an empty base. The
+                // manifest is what says which — a view whose permutation no manifest names has none,
+                // and reading that as a missing file would refuse the bundle for a view that is
+                // simply new.
+                let has_base = based.get(seg_desc.view.as_str()) == Some(&seg_desc.incarnation)
+                    && (side_files.contains_key(&perm_rel)
+                        || manifest.files.contains_key(&perm_rel));
+                let is_base_segment = is_new_view && has_base;
+                let view_entry = match views.get_mut(&seg_desc.view) {
+                    Some(entry) => entry,
+                    None => {
+                        let permutation = if has_base {
+                            ensure_verified(&perm_rel, side_files, &manifest.files, &perm_path)?;
+                            Permutation::load(&perm_path)?
+                        } else {
+                            Permutation::empty()?
+                        };
 
-                    // `row-entity.u32` beside it, the other direction
-                    // (`crate::row_entity`). **Optional, and its absence is not a refusal**: it is
-                    // an optimisation for the filtered viewport's per-tile route, and a view
-                    // without one still answers every query through the projecting route. Where it
-                    // *is* named, it is verified like any other file — an unverifiable table is a
-                    // refusal, because a wrong row→entity mapping would put another entity's
-                    // filter verdict on a row.
-                    let row_entity_rel =
-                        format!("{view_rel}/{}", crate::row_entity::ROW_ENTITY_FILE);
-                    let row_entity = if has_base
-                        && (segments_manifest.files.contains_key(&row_entity_rel)
-                            || manifest.files.contains_key(&row_entity_rel))
-                    {
-                        let path = view_dir.join(crate::row_entity::ROW_ENTITY_FILE);
-                        ensure_verified(
-                            &row_entity_rel,
-                            &segments_manifest,
-                            &manifest.files,
-                            &path,
-                        )?;
-                        Some(std::sync::Arc::new(crate::row_entity::RowToEntity::load(
-                            &path,
-                        )?))
-                    } else {
-                        None
-                    };
+                        // `row-entity.u32` beside it, the other direction
+                        // (`crate::row_entity`). **Optional, and its absence is not a refusal**: it is
+                        // an optimisation for the filtered viewport's per-tile route, and a view
+                        // without one still answers every query through the projecting route. Where it
+                        // *is* named, it is verified like any other file — an unverifiable table is a
+                        // refusal, because a wrong row→entity mapping would put another entity's
+                        // filter verdict on a row.
+                        let row_entity_rel =
+                            format!("{view_rel}/{}", crate::row_entity::ROW_ENTITY_FILE);
+                        let row_entity = if has_base
+                            && (side_files.contains_key(&row_entity_rel)
+                                || manifest.files.contains_key(&row_entity_rel))
+                        {
+                            let path = view_dir.join(crate::row_entity::ROW_ENTITY_FILE);
+                            ensure_verified(&row_entity_rel, side_files, &manifest.files, &path)?;
+                            Some(std::sync::Arc::new(crate::row_entity::RowToEntity::load(
+                                &path,
+                            )?))
+                        } else {
+                            None
+                        };
 
-                    // `field-tallies.bin` beside it, which a build and a fold write for every base
-                    // (`crate::field_tallies`). **Optional, as `row-entity.u32` is**: a view
-                    // without one has its base rows walked for a field's figures, and arrives at
-                    // the same answer. Where it is named, it is verified like any other file.
-                    let tallies_rel =
-                        format!("{view_rel}/{}", crate::field_tallies::FIELD_TALLIES_FILE);
-                    let field_tallies = if has_base
-                        && (segments_manifest.files.contains_key(&tallies_rel)
-                            || manifest.files.contains_key(&tallies_rel))
-                    {
-                        let path = view_dir.join(crate::field_tallies::FIELD_TALLIES_FILE);
-                        crate::field_tallies::read(&path)?.map(Arc::new)
-                    } else {
-                        None
-                    };
+                        // `field-tallies.bin` beside it, which a build and a fold write for every base
+                        // (`crate::field_tallies`). **Optional, as `row-entity.u32` is**: a view
+                        // without one has its base rows walked for a field's figures, and arrives at
+                        // the same answer. Where it is named, it is verified like any other file.
+                        let tallies_rel =
+                            format!("{view_rel}/{}", crate::field_tallies::FIELD_TALLIES_FILE);
+                        let field_tallies = if has_base
+                            && (side_files.contains_key(&tallies_rel)
+                                || manifest.files.contains_key(&tallies_rel))
+                        {
+                            let path = view_dir.join(crate::field_tallies::FIELD_TALLIES_FILE);
+                            crate::field_tallies::read(&path)?.map(Arc::new)
+                        } else {
+                            None
+                        };
 
-                    // The first segment named for a view is its build segment: `permutation.bin`
-                    // addresses that one's row space, and every later segment arrives as an
-                    // extent above it.
-                    // A base-less view's rows all belong to extents, so its base owns none:
-                    // `base_rows` is this segment's count only where the permutation is what
-                    // addresses it.
-                    let mut row_space = RowSpace::new(
-                        std::sync::Arc::new(permutation),
-                        if has_base { seg_desc.row_count } else { 0 },
-                    );
-                    if let Some(table) = row_entity {
-                        row_space = row_space.with_row_entity(table);
+                        // The first segment named for a view is its build segment: `permutation.bin`
+                        // addresses that one's row space, and every later segment arrives as an
+                        // extent above it.
+                        // A base-less view's rows all belong to extents, so its base owns none:
+                        // `base_rows` is this segment's count only where the permutation is what
+                        // addresses it.
+                        let mut row_space = RowSpace::new(
+                            std::sync::Arc::new(permutation),
+                            if has_base { seg_desc.row_count } else { 0 },
+                        );
+                        if let Some(table) = row_entity {
+                            row_space = row_space.with_row_entity(table);
+                        }
+                        views.insert(
+                            seg_desc.view.clone(),
+                            ViewData {
+                                shard: record.id,
+                                row_space,
+                                segments: Vec::new(),
+                                incarnation: seg_desc.incarnation,
+                                // Attached below, once the base segment's row count and the
+                                // permutation's bound have been checked: both are stamped into the
+                                // file and the open compares them.
+                                term_images: None,
+                                field_tallies,
+                            },
+                        );
+                        views.get_mut(&seg_desc.view).expect("just inserted")
                     }
-                    views.insert(
-                        seg_desc.view.clone(),
-                        ViewData {
-                            row_space,
-                            segments: Vec::new(),
-                            incarnation: seg_desc.incarnation,
-                            // Attached below, once the base segment's row count and the
-                            // permutation's bound have been checked: both are stamped into the
-                            // file and the open compares them.
-                            term_images: None,
-                            field_tallies,
-                        },
-                    );
-                    views.get_mut(&seg_desc.view).expect("just inserted")
-                }
-            };
+                };
 
-            let seg_rel = layout.segment_rel(&seg_desc.view, &seg_desc.seg_id);
-            let seg_dir = prefix_dir.join(&seg_rel);
-            for name in crate::SEGMENT_FILES {
-                let rel = format!("{seg_rel}/{name}");
-                ensure_verified(
-                    &rel,
-                    &segments_manifest,
-                    &manifest.files,
-                    &seg_dir.join(name),
-                )?;
-            }
-            // `ColumnsRef::load` reads every presence bitmap beside the column, so each one has to
-            // pass the same membership rule the two files above do. Driven off the directory rather
-            // than off the manifest because it is what the loader will *read* that must have been
-            // verified — a bitmap dropped in beside a segment, naming rows no digest covers, is
-            // exactly what this half of the check exists to refuse.
-            let presence_dir = seg_dir.join(RENDER_PRESENCE_DIR);
-            if presence_dir.is_dir() {
-                let entries =
-                    std::fs::read_dir(&presence_dir).map_err(|source| StoreError::Io {
-                        path: presence_dir.clone(),
-                        source,
-                    })?;
-                for entry in entries {
-                    let entry = entry.map_err(|source| StoreError::Io {
-                        path: presence_dir.clone(),
-                        source,
-                    })?;
-                    let rel = format!(
-                        "{seg_rel}/{RENDER_PRESENCE_DIR}/{}",
-                        entry.file_name().to_string_lossy()
-                    );
-                    ensure_verified(&rel, &segments_manifest, &manifest.files, &entry.path())?;
+                let seg_rel = layout.segment_rel(&seg_desc.view, &seg_desc.seg_id);
+                let seg_dir = prefix_dir.join(&seg_rel);
+                for name in crate::SEGMENT_FILES {
+                    let rel = format!("{seg_rel}/{name}");
+                    ensure_verified(&rel, side_files, &manifest.files, &seg_dir.join(name))?;
                 }
-            }
+                // `ColumnsRef::load` reads every presence bitmap beside the column, so each one has to
+                // pass the same membership rule the two files above do. Driven off the directory rather
+                // than off the manifest because it is what the loader will *read* that must have been
+                // verified — a bitmap dropped in beside a segment, naming rows no digest covers, is
+                // exactly what this half of the check exists to refuse.
+                let presence_dir = seg_dir.join(RENDER_PRESENCE_DIR);
+                if presence_dir.is_dir() {
+                    let entries =
+                        std::fs::read_dir(&presence_dir).map_err(|source| StoreError::Io {
+                            path: presence_dir.clone(),
+                            source,
+                        })?;
+                    for entry in entries {
+                        let entry = entry.map_err(|source| StoreError::Io {
+                            path: presence_dir.clone(),
+                            source,
+                        })?;
+                        let rel = format!(
+                            "{seg_rel}/{RENDER_PRESENCE_DIR}/{}",
+                            entry.file_name().to_string_lossy()
+                        );
+                        ensure_verified(&rel, side_files, &manifest.files, &entry.path())?;
+                    }
+                }
 
-            // A base segment's rows name their entities in the view's row-to-entity file. A flush
-            // or merge segment lists the rows an edit moved, a file that must be there and verify
-            // where the manifest names it.
-            let entities = if is_base_segment {
-                match view_entry.row_space.row_entity() {
-                    Some(table) => crate::edited::RowEntities::Table(std::sync::Arc::clone(table)),
-                    None => crate::edited::RowEntities::Numbers,
+                // A base segment's rows name their entities in the view's row-to-entity file. A flush
+                // or merge segment lists the rows an edit moved, a file that must be there and verify
+                // where the manifest names it.
+                let entities = if is_base_segment {
+                    match view_entry.row_space.row_entity() {
+                        Some(table) => {
+                            crate::edited::RowEntities::Table(std::sync::Arc::clone(table))
+                        }
+                        None => crate::edited::RowEntities::Numbers,
+                    }
+                } else {
+                    let rel = format!("{seg_rel}/{}", crate::edited::EDITED_ROWS_FILE);
+                    let listed = side_files.contains_key(&rel) || manifest.files.contains_key(&rel);
+                    if listed {
+                        ensure_verified(
+                            &rel,
+                            side_files,
+                            &manifest.files,
+                            &seg_dir.join(crate::edited::EDITED_ROWS_FILE),
+                        )?;
+                    }
+                    crate::edited::RowEntities::Listed(std::sync::Arc::new(
+                        crate::edited::EditedRows::open(&seg_dir, listed)?,
+                    ))
+                };
+                let segment =
+                    SegmentData::load(&seg_dir, &seg_desc.seg_id, seg_desc.row_count, entities)
+                        .map_err(|e| e.source)?;
+                let (morton, columns) = (&segment.morton, &segment.columns);
+
+                if morton.len() as u32 != seg_desc.row_count
+                    || columns.row_count() != seg_desc.row_count
+                {
+                    return Err(StoreError::MalformedBundle {
+                        detail: format!(
+                            "segment '{}' (view '{}'): manifest row_count {} doesn't match \
+                             morton.u32 ({} codes) or columns.arrow ({} rows)",
+                            seg_desc.seg_id,
+                            seg_desc.view,
+                            seg_desc.row_count,
+                            morton.len(),
+                            columns.row_count()
+                        ),
+                    });
                 }
-            } else {
-                let rel = format!("{seg_rel}/{}", crate::edited::EDITED_ROWS_FILE);
-                let listed =
-                    segments_manifest.files.contains_key(&rel) || manifest.files.contains_key(&rel);
-                if listed {
-                    ensure_verified(
-                        &rel,
-                        &segments_manifest,
+
+                // `permutation.bin` addresses this view's single build segment (R4); validate its
+                // row bound against that segment's `row_count` the first time we see it (I11/I4 —
+                // a corrupt permutation must never hand out a `RowId` that indexes `columns.arrow`
+                // out of range). Only meaningful once, against the one segment a Phase-1 view has.
+                if is_base_segment {
+                    match verification {
+                        Verification::Digests => view_entry
+                            .row_space
+                            .base()
+                            .validate_rows(seg_desc.row_count)?,
+                        // The scan is skipped here and its *result* is taken from the writer — see
+                        // [`open_written_prefix`]'s "what is skipped" section for why that rests on
+                        // the same premise rather than a weaker one. Without it a compaction's
+                        // in-process open would leave every session on the new prefix walking
+                        // `permutation.bin` for a whole-domain grant until the process restarted.
+                        //
+                        // The complement route rests on this same count: it subtracts the rows of the
+                        // entities outside a grant from `[0, row_count)`, which is the whole row space
+                        // only if the count is right. A wrong declaration would make both routes wrong
+                        // together, which is why the premise is that these are the bytes this process
+                        // wrote and nothing weaker.
+                        Verification::JustWritten => view_entry
+                            .row_space
+                            .base()
+                            .declare_dense_rows(seg_desc.row_count),
+                    }
+
+                    // **The view's term images, here and not earlier**: the file's stamp names the
+                    // base segment's row count and the permutation's bound, and the bound is only
+                    // established once the permutation above has been validated or declared.
+                    //
+                    // A digest failure is not this path. The sweep covers this file as it covers
+                    // every other file the manifest lists and refuses the whole bundle before the
+                    // first view is opened; under [`Verification::JustWritten`] the bytes are the
+                    // writer's own.
+                    view_entry.term_images = open_term_images(
+                        &prefix_dir,
+                        prefix,
+                        &record,
+                        side_files,
                         &manifest.files,
-                        &seg_dir.join(crate::edited::EDITED_ROWS_FILE),
+                        seg_desc,
+                        view_entry.row_space.base().bound(),
                     )?;
                 }
-                crate::edited::RowEntities::Listed(std::sync::Arc::new(
-                    crate::edited::EditedRows::open(&seg_dir, listed)?,
-                ))
-            };
-            let segment =
-                SegmentData::load(&seg_dir, &seg_desc.seg_id, seg_desc.row_count, entities)
-                    .map_err(|e| e.source)?;
-            let (morton, columns) = (&segment.morton, &segment.columns);
 
-            if morton.len() as u32 != seg_desc.row_count
-                || columns.row_count() != seg_desc.row_count
-            {
-                return Err(StoreError::MalformedBundle {
-                    detail: format!(
-                        "segment '{}' (view '{}'): manifest row_count {} doesn't match \
-                         morton.u32 ({} codes) or columns.arrow ({} rows)",
-                        seg_desc.seg_id,
-                        seg_desc.view,
-                        seg_desc.row_count,
-                        morton.len(),
-                        columns.row_count()
-                    ),
-                });
-            }
-
-            // `permutation.bin` addresses this view's single build segment (R4); validate its
-            // row bound against that segment's `row_count` the first time we see it (I11/I4 —
-            // a corrupt permutation must never hand out a `RowId` that indexes `columns.arrow`
-            // out of range). Only meaningful once, against the one segment a Phase-1 view has.
-            if is_base_segment {
-                match verification {
-                    Verification::Digests => view_entry
-                        .row_space
-                        .base()
-                        .validate_rows(seg_desc.row_count)?,
-                    // The scan is skipped here and its *result* is taken from the writer — see
-                    // [`open_written_prefix`]'s "what is skipped" section for why that rests on
-                    // the same premise rather than a weaker one. Without it a compaction's
-                    // in-process open would leave every session on the new prefix walking
-                    // `permutation.bin` for a whole-domain grant until the process restarted.
-                    //
-                    // The complement route rests on this same count: it subtracts the rows of the
-                    // entities outside a grant from `[0, row_count)`, which is the whole row space
-                    // only if the count is right. A wrong declaration would make both routes wrong
-                    // together, which is why the premise is that these are the bytes this process
-                    // wrote and nothing weaker.
-                    Verification::JustWritten => view_entry
-                        .row_space
-                        .base()
-                        .declare_dense_rows(seg_desc.row_count),
+                // Every segment after the first is one a flush appended or a merge collapsed, and it
+                // owns row space above the base. Its entity→row mapping is rebuilt here from its own
+                // `mosaica_id` column and the rows an edit moved; see
+                // [`SegmentExtent::rebuild`]. `with_extent` then re-checks contiguity and
+                // well-formedness, so a manifest listing segments out of entity order, or one whose
+                // `row_count` disagrees with what the extent actually owns, fails closed here rather
+                // than serving rows under the wrong entity.
+                if !is_base_segment {
+                    let row_base =
+                        u32::try_from(view_entry.row_space.total_rows()).map_err(|_| {
+                            StoreError::MalformedBundle {
+                                detail: format!(
+                                "view '{}' already holds {} rows, so segment '{}' cannot begin \
+                                 inside a u32 row space",
+                                seg_desc.view,
+                                view_entry.row_space.total_rows(),
+                                seg_desc.seg_id
+                            ),
+                            }
+                        })?;
+                    let extent = SegmentExtent::rebuild(
+                        &segment,
+                        seg_desc.entity_lo,
+                        seg_desc.entity_hi,
+                        row_base,
+                        &identity_key,
+                        record.id,
+                    )?;
+                    view_entry.row_space =
+                        view_entry.row_space.with_extent(extent).ok_or_else(|| {
+                            StoreError::MalformedBundle {
+                                detail: format!(
+                                    "segment '{}' does not continue view '{}'s row space",
+                                    seg_desc.seg_id, seg_desc.view
+                                ),
+                            }
+                        })?;
                 }
 
-                // **The view's term images, here and not earlier**: the file's stamp names the
-                // base segment's row count and the permutation's bound, and the bound is only
-                // established once the permutation above has been validated or declared.
-                //
-                // A digest failure is not this path. The sweep covers this file as it covers
-                // every other file the manifest lists and refuses the whole bundle before the
-                // first view is opened; under [`Verification::JustWritten`] the bytes are the
-                // writer's own.
-                view_entry.term_images = open_term_images(
-                    &prefix_dir,
-                    prefix,
-                    &segments_manifest,
-                    &manifest.files,
-                    seg_desc,
-                    view_entry.row_space.base().bound(),
-                )?;
+                view_entry.segments.push(Arc::new(segment));
             }
 
-            // Every segment after the first is one a flush appended or a merge collapsed, and it
-            // owns row space above the base. Its entity→row mapping is rebuilt here from its own
-            // `mosaica_id` column and the rows an edit moved; see
-            // [`SegmentExtent::rebuild`]. `with_extent` then re-checks contiguity and
-            // well-formedness, so a manifest listing segments out of entity order, or one whose
-            // `row_count` disagrees with what the extent actually owns, fails closed here rather
-            // than serving rows under the wrong entity.
-            if !is_base_segment {
-                let row_base = u32::try_from(view_entry.row_space.total_rows()).map_err(|_| {
-                    StoreError::MalformedBundle {
-                        detail: format!(
-                            "view '{}' already holds {} rows, so segment '{}' cannot begin \
-                             inside a u32 row space",
-                            seg_desc.view,
-                            view_entry.row_space.total_rows(),
-                            seg_desc.seg_id
-                        ),
-                    }
-                })?;
-                let extent = SegmentExtent::rebuild(
-                    &segment,
-                    seg_desc.entity_lo,
-                    seg_desc.entity_hi,
-                    row_base,
-                    &identity_key,
-                    manifest.identity.shard_id,
-                )?;
-                view_entry.row_space =
-                    view_entry.row_space.with_extent(extent).ok_or_else(|| {
-                        StoreError::MalformedBundle {
-                            detail: format!(
-                                "segment '{}' does not continue view '{}'s row space",
-                                seg_desc.seg_id, seg_desc.view
-                            ),
-                        }
-                    })?;
+            // **Every declared view is a view, with or without rows** (`views.md` §3.2). The map
+            // above is built from the segments, because that is where a row space comes from; a view
+            // that has taken no flush yet has no segment and would otherwise be absent from it — and
+            // absent is read as *unknown view* by the viewport (404) and as *the deny mask and the
+            // bundle disagree* by the mask derivation (500). A view created while the service runs is
+            // in exactly that state between its create and its first flush, and it must answer
+            // **empty** in both places, so it is seeded here.
+            for view in &manifest.views {
+                views
+                    .entry(view.id.clone())
+                    .or_insert_with(|| ViewData::empty(record.id, view.incarnation));
             }
 
-            view_entry.segments.push(Arc::new(segment));
-        }
-
-        // **Every declared view is a view, with or without rows** (`views.md` §3.2). The map
-        // above is built from the segments, because that is where a row space comes from; a view
-        // that has taken no flush yet has no segment and would otherwise be absent from it — and
-        // absent is read as *unknown view* by the viewport (404) and as *the deny mask and the
-        // bundle disagree* by the mask derivation (500). A view created while the service runs is
-        // in exactly that state between its create and its first flush, and it must answer
-        // **empty** in both places, so it is seeded here.
-        for view in &manifest.views {
-            views.entry(view.id.clone()).or_insert_with(|| ViewData {
-                row_space: RowSpace::new(
-                    std::sync::Arc::new(
-                        Permutation::empty().expect("an anonymous mapping of one page"),
-                    ),
-                    0,
-                ),
-                segments: Vec::new(),
-                incarnation: view.incarnation,
-                term_images: None,
-                field_tallies: None,
-            });
+            shard_data.push(Arc::new(ShardData {
+                id: record.id,
+                record,
+                views,
+            }));
         }
 
         partitions.insert(
             partition_desc.phash.clone(),
             PartitionData {
-                manifest: segments_manifest,
+                manifest: partition_manifest,
+                shard_size: shards.size,
                 segments_n: selected.n,
                 highest_candidate_n: selected.highest_candidate_n,
-                views,
+                shards: shard_data,
             },
         );
     }
@@ -1049,11 +1161,11 @@ fn sanitize_component(what: &str, value: &str) -> Result<()> {
 /// *read* must have appeared in the set that was actually verified.
 fn ensure_verified(
     rel: &str,
-    segments_manifest: &SegmentsManifest,
+    side_files: &BTreeMap<String, FileDigest>,
     manifest_files: &BTreeMap<String, FileDigest>,
     full_path: &Path,
 ) -> Result<()> {
-    if segments_manifest.files.contains_key(rel) || manifest_files.contains_key(rel) {
+    if side_files.contains_key(rel) || manifest_files.contains_key(rel) {
         Ok(())
     } else {
         Err(StoreError::UnverifiedFile {
@@ -1062,17 +1174,18 @@ fn ensure_verified(
     }
 }
 
-/// The tenancy index `segments_manifest` names, mapped, and empty where it names no file. Each file
-/// must be one a `files` map digests, as every file the loader reads must be.
+/// The tenancy index `record` names, mapped, and empty where it names no file. Each file must be one
+/// a `files` map digests, as every file the loader reads must be.
 pub fn open_tenancy_index(
     prefix_dir: &Path,
-    segments_manifest: &SegmentsManifest,
+    record: &ShardRecord,
+    side_files: &BTreeMap<String, FileDigest>,
     manifest_files: &BTreeMap<String, FileDigest>,
 ) -> Result<crate::tenancy::TenancyIndex> {
-    let mut files = Vec::with_capacity(segments_manifest.tenancy_index.len());
-    for entry in &segments_manifest.tenancy_index {
+    let mut files = Vec::with_capacity(record.tenancy_index.len());
+    for entry in &record.tenancy_index {
         let path = safe_join(prefix_dir, &entry.path)?;
-        ensure_verified(&entry.path, segments_manifest, manifest_files, &path)?;
+        ensure_verified(&entry.path, side_files, manifest_files, &path)?;
         files.push((entry.bit, path));
     }
     crate::tenancy::TenancyIndex::open(&files)
@@ -1092,12 +1205,13 @@ pub fn open_tenancy_index(
 fn open_term_images(
     prefix_dir: &Path,
     prefix: &str,
-    segments_manifest: &SegmentsManifest,
+    record: &ShardRecord,
+    side_files: &BTreeMap<String, FileDigest>,
     manifest_files: &BTreeMap<String, FileDigest>,
     seg_desc: &crate::manifest::SegmentDescriptor,
     bound: u64,
 ) -> Result<Option<Arc<crate::term_images::TermImages>>> {
-    let mut named = segments_manifest
+    let mut named = record
         .term_image_extents
         .iter()
         .filter(|entry| entry.view == seg_desc.view && entry.incarnation == seg_desc.incarnation);
@@ -1114,7 +1228,7 @@ fn open_term_images(
     }
 
     let path = safe_join(prefix_dir, &entry.path)?;
-    ensure_verified(&entry.path, segments_manifest, manifest_files, &path)?;
+    ensure_verified(&entry.path, side_files, manifest_files, &path)?;
 
     if u64::from(entry.keep_rows_per_container) != crate::term_images::KEEP_ROWS_PER_CONTAINER {
         tracing::warn!(
@@ -1275,6 +1389,13 @@ fn load_verifying_segments_manifest(
                 continue;
             }
         };
+        // Refused rather than stepped past: an older manifest would serve without the shards
+        // this one names, and without their denies.
+        if let Err(detail) = segments_manifest.check_served_shards() {
+            return Err(StoreError::MalformedBundle {
+                detail: format!("{}: {detail}", path.display()),
+            });
+        }
         // One classification, made where the fields are defined (`SegmentsManifest`), never
         // re-derived here — see this function's doc and [`Honourability`].
         //
@@ -1308,7 +1429,7 @@ fn load_verifying_segments_manifest(
         }
 
         let verified = match verification {
-            Verification::Digests => verify_files(prefix_dir, &segments_manifest.files),
+            Verification::Digests => verify_files(prefix_dir, &segments_manifest.partition.files),
             // The step-down walk still runs: a just-written prefix carries exactly the one
             // manifest its publication wrote, so there is nothing to step past, and leaving the
             // walk in place keeps one code path rather than two.

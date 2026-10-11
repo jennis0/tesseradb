@@ -38,7 +38,7 @@ use common::*;
 use mosaica_build::{build, BuildArgs};
 use mosaica_engine::{Engine, EngineConfig, ViewportRequest};
 use mosaica_lifecycle::UnallocatedRow;
-use mosaica_types::{MosaicaId, ShardId};
+use mosaica_types::MosaicaId;
 
 const WAIT: Duration = Duration::from_secs(180);
 
@@ -214,7 +214,6 @@ fn build_bundle(dir: &Path, name: &str, entities: u64) -> std::path::PathBuf {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -355,7 +354,7 @@ fn kept_descriptors(engine: &Engine, where_: &str) -> BTreeSet<String> {
         .bundle
         .partitions
         .values()
-        .find_map(|partition| partition.views.get(VIEW))
+        .find_map(|partition| partition.only_shard().views.get(VIEW))
         .expect("the generation carries the view");
     let images = view
         .term_images
@@ -404,7 +403,7 @@ fn a_built_corpus_and_the_same_corpus_ingested_and_folded_agree() {
             .bundle
             .partitions
             .values()
-            .find_map(|partition| partition.views.get(VIEW))
+            .find_map(|partition| partition.only_shard().views.get(VIEW))
             .expect("the ingested generation carries the view");
         assert!(
             view.term_images.is_none(),
