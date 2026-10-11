@@ -1013,7 +1013,10 @@ mod tests {
                 let _ = task.await;
             }
             let state = self.state;
-            wait_until("the state to be released", || Arc::strong_count(&state) == 1).await;
+            wait_until("the state to be released", || {
+                Arc::strong_count(&state) == 1
+            })
+            .await;
         }
     }
 
@@ -1038,7 +1041,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let toml = deployment(tmp.path());
         let log = tmp.path().join("requests.jsonl");
-        let viewport = json!({"view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200});
+        let viewport =
+            json!({"view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200});
         // Term 0 sees every point and term 1 none, so the two principals' viewports differ.
         for term in ["0", "1"] {
             let server = start(&toml).await;
@@ -1093,10 +1097,15 @@ mod tests {
             .iter()
             .find(|l| l["route"] == "POST /session/authorise" && l["run"] == recorded[2]["run"])
             .unwrap();
-        let downtime_us =
-            recorded[2]["start_us"].as_u64().unwrap() - recorded[1]["start_us"].as_u64().unwrap();
-        assert!(
-            second["offset_us"].as_u64().unwrap() + 2_000_000 <= downtime_us,
+        let at = |line: &Value, field: &str| line[field].as_u64().unwrap();
+        let first_run_end_us = recorded[..2]
+            .iter()
+            .map(|l| at(l, "start_us") + at(l, "end_us"))
+            .max()
+            .unwrap();
+        assert_eq!(
+            at(second, "offset_us"),
+            first_run_end_us - at(&recorded[0], "start_us"),
             "the second run starts where the first stopped, not after the downtime: {second}"
         );
         server.stop().await;
