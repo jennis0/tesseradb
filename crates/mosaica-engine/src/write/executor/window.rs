@@ -212,6 +212,8 @@ fn mint_cells<'a>(
 
 /// The window could not be allocated: nothing was appended, nothing applied, and the high-water
 /// mark did not move. The one exit outside [`ClosingWindow`], since allocation is what failed.
+/// Admission measures every batch against the shard first, so a full shard reaching here is a
+/// backstop, answered as admission answers it.
 fn fail_allocation(
     health: &ExecutorHealth,
     error: AllocError,
@@ -219,9 +221,7 @@ fn fail_allocation(
     entries: u64,
     started: std::time::Instant,
 ) {
-    refuse_waiters(health, waiters, entries, started, || {
-        ExecError::Alloc(error)
-    });
+    refuse_waiters(health, waiters, entries, started, || ExecError::from(error));
 }
 
 /// Answer every waiter of a window that will not commit, and time the window.
@@ -307,13 +307,15 @@ impl Executor {
                 }
             };
             let Command::Ingest { submission, reply } = command else {
-                // A declaration reads the unique values the window has not applied, and a change
-                // to the view roster changes the views the window's rows are going into, so the
+                // A declaration reads the unique values the window has not applied, a shard size
+                // is checked against the high water the window has yet to take, and a change to
+                // the view roster changes the views the window's rows are going into, so the
                 // window closes first. Every other command is tolerable while a window is open: an
                 // edit's close carries the memberships and generating sets it finds then.
                 if matches!(
                     command,
                     Command::DeclareAttribute { .. }
+                        | Command::DeclareShards { .. }
                         | Command::CreateView { .. }
                         | Command::DropView { .. }
                         | Command::CreateViewGroup { .. }
@@ -424,6 +426,27 @@ impl Executor {
                 if window.conflicts(&claims) {
                     window = self.close_and_reopen(window);
                     admission = Admission::YieldedAfterClose;
+                }
+                // The ids the batch takes are counted against what the window leaves the shard.
+                // Where they do not fit, the window closes, and the batch is measured against the
+                // shard as the close leaves it and refused alone.
+                let (edits, items) =
+                    mosaica_lifecycle::window::wanted(&submission.rows, submission.edits.len());
+                let with_window = |window: &CommitWindow<Reply<Ingested>>| {
+                    let (held_edits, held_items) = window.wanted();
+                    (held_edits + edits, held_items + items)
+                };
+                if !window.is_empty() && self.live.only_shard().room(with_window(&window)).is_err()
+                {
+                    window = self.close_and_reopen(window);
+                    admission = Admission::YieldedAfterClose;
+                }
+                if let Err(full) = self.live.only_shard().room(with_window(&window)) {
+                    reply.fail(ExecError::ShardFull(full));
+                    if admission == Admission::Admitted {
+                        admission = Admission::Answered;
+                    }
+                    return (window, admission);
                 }
                 if let Some(entry) = self.admit(submission, reply) {
                     if window.is_empty() {

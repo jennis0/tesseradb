@@ -10,6 +10,7 @@ Every table refuses a key it does not know. Where a key is refused beside anothe
 | --- | --- | --- | --- |
 | `sources` | table of strings | not set | The files the declaration reads, as `name = "path"`, each path relative to the directory the declaration is in. Every `source` key elsewhere names one of these. An empty name, an empty path and an absolute path are refused; `--file NAME=PATH` replaces a path from the command line. |
 | `defaults` | table | not set | The source a block takes when it names none, and the view that orders internal ids. |
+| `shards` | table | not set | The shard the items are stored in. |
 | `view` | array of tables | `[]` | Coordinate systems, each giving the items it holds a position on a map. |
 | `view_group` | array of tables | `[]` | Sets of views that share every setting and differ by a key. |
 | `vocabulary` | array of tables | `[]` | Named value sets, which `category` attributes draw on. |
@@ -24,6 +25,14 @@ What a block takes when it names no source of its own. `source` reaches a `[[vie
 | --- | --- | --- | --- |
 | `source` | string | not set | A name in `[sources]`, read by a `[[view]]` and an entity-scoped `[[attribute]]` that name no `source`. A name `[sources]` does not have is refused. |
 | `allocation_view` | string | not set | The view whose map positions order the entity ids a build assigns to items with the same access labels. A build of more than one view, counting each view of a group, is refused without it. A view of a group is named `<group>:<key>`, and a name that is not one of the build's views is refused. |
+
+## `[shards]`
+
+The shard the items are stored in. Each new item, and each edit of an item, takes an id from it, an id a deletion freed first and otherwise one past the shard's high water. Without this table the size is 4,026,531,840. `PUT /control/shards` declares the same table at a running service.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `size` | integer | required | The high water the shard may not pass. A positive integer. A build whose files create more items than this is refused, and so is an insert that would take the shard's high water past it. |
 
 ## `[[view]]`
 

@@ -269,6 +269,7 @@ fn build_fixture_with_every_home(out: &Path, tmp: &Path, n: u64) {
         attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
         layers: Vec::new(),

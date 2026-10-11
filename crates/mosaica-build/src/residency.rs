@@ -3725,6 +3725,7 @@ require_member_visibility = "none"
             attribute_sources: parsed.attribute_sources.clone(),
             out: dir.join("bundle"),
             limit: None,
+            shard_size: None,
             strict: false,
             identity_key: mosaica_types::IdentityKey::from_hex("000102030405060708090a0b0c0d0e0f")
                 .unwrap(),

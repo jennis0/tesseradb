@@ -20,7 +20,7 @@
 //! executor, and this type is what a handler submits: everything a `WalRow` needs *except* the ID,
 //! plus the resolved term set that is the item's sort signature.
 
-use mosaica_types::{EntityId, TermId};
+use mosaica_types::{EntityId, ShardFull, ShardSizeError, TermId};
 
 use crate::alloc::{AllocError, PendingItem};
 use crate::wal::{WalError, WalRow, WalScalar};
@@ -424,9 +424,17 @@ pub enum ExecError {
     /// So the 500 means "at least one item is in force but not durable, and every deny in the
     /// request was attempted", never "the batch was refused".
     Wal(WalError),
-    /// Entity-ID assignment refused (I9's `u32` ceiling) → HTTP 500, fail closed. The batch has
-    /// no effect: `Allocator::allocate` leaves the high-water mark unchanged on this path.
+    /// Row-less entity-ID assignment refused (I9's `u32` ceiling) → HTTP 500, fail closed. The
+    /// command has no effect: `Allocator::allocate_rowless` leaves both marks unchanged on this
+    /// path.
     Alloc(AllocError),
+    /// A batch needs more ids from the shard's high water than its size or the end of its ids
+    /// leaves → HTTP **409**, no effect. Refused for that batch alone: the other batches of its
+    /// commit window go on.
+    ShardFull(ShardFull),
+    /// A shard size `mosaica_types::check_shard_size` refuses → HTTP **422** for a size of zero,
+    /// **409** for one below the high water. No effect.
+    ShardSize(ShardSizeError),
     /// This `batch_id` was already accepted, or is held in an open window, with **different**
     /// body bytes → HTTP 409 (contracts §3.4). The retry has no effect, and **a held original is
     /// not disturbed by it**; the argument for that reading, and what would change under the
@@ -513,6 +521,8 @@ impl std::fmt::Display for ExecError {
         match self {
             ExecError::Wal(e) => write!(f, "write-ahead log failure: {e}"),
             ExecError::Alloc(e) => write!(f, "entity-id assignment refused: {e}"),
+            ExecError::ShardFull(full) => full.fmt(f),
+            ExecError::ShardSize(e) => e.fmt(f),
             ExecError::BatchConflict { batch_id } => write!(
                 f,
                 "batch id '{batch_id}' was already submitted with a different body"
@@ -546,7 +556,10 @@ impl From<WalError> for ExecError {
 
 impl From<AllocError> for ExecError {
     fn from(e: AllocError) -> Self {
-        ExecError::Alloc(e)
+        match e {
+            AllocError::Full(full) => ExecError::ShardFull(full),
+            e => ExecError::Alloc(e),
+        }
     }
 }
 

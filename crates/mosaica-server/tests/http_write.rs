@@ -245,6 +245,71 @@ async fn a_second_row_for_an_ingested_id_edits_its_item() {
     );
 }
 
+/// **A batch past the shard's size is `409`**, naming the size, the high water and the ids it
+/// needed, and writes nothing; `/control/status` reports the size `PUT /control/shards` declared,
+/// and the batch goes in once the size is raised. An edit takes an id as a new item does.
+#[tokio::test]
+async fn a_batch_past_the_shard_size_is_refused_and_writes_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let declare = |size: u64| {
+        server
+            .client
+            .put(server.control_url("/control/shards"))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .json(&serde_json::json!({ "size": size }))
+            .send()
+    };
+    let high_water = control_status(&server).await["entity_id_high_water"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(declare(high_water + 1).await.unwrap().status(), 201);
+    assert_eq!(
+        control_status(&server).await["shards"]["size"].as_u64(),
+        Some(high_water + 1)
+    );
+
+    let two = build_ingest_batch(&[(N_ITEMS + 1, 1.0, 1.0, "0"), (N_ITEMS + 2, 2.0, 2.0, "0")]);
+    let (status, refusal) = post_body(&server, "past-the-size", two.clone()).await;
+    assert_eq!(
+        (status, refusal["error"].as_str()),
+        (409, Some("conflict")),
+        "{refusal}"
+    );
+    assert_eq!(
+        control_status(&server).await["entity_id_high_water"].as_u64(),
+        Some(high_water),
+        "the refused batch took no id"
+    );
+
+    let (status, answer) = post_body(
+        &server,
+        "an-edit",
+        build_ingest_batch(&[(0, 5.0, 5.0, "0")]),
+    )
+    .await;
+    assert_eq!(status, 200, "the edit fits: {answer}");
+    let (status, answer) = post_body(
+        &server,
+        "a-second-edit",
+        build_ingest_batch(&[(0, 6.0, 6.0, "0")]),
+    )
+    .await;
+    assert_eq!(
+        status, 409,
+        "the shard is full and an edit takes an id: {answer}"
+    );
+
+    assert_eq!(declare(high_water + 3).await.unwrap().status(), 201);
+    let (status, answer) = post_body(&server, "past-the-size", two).await;
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(
+        answer["created"].as_u64(),
+        Some(2),
+        "a new batch, not a replay: {answer}"
+    );
+}
+
 /// A row carrying the `id` of an item the build stored edits that item, as one ingested at the
 /// service does.
 #[tokio::test]
@@ -3089,6 +3154,7 @@ async fn a_body_or_query_of_the_wrong_shape_is_a_contract_refusal_on_every_contr
     let routes = [
         ("PUT", "/control/layers", wrong_shape.clone()),
         ("PUT", "/control/attributes", wrong_shape.clone()),
+        ("PUT", "/control/shards", wrong_shape.clone()),
         ("PUT", "/control/vocabularies/genre", wrong_shape.clone()),
         (
             "PATCH",
@@ -3138,6 +3204,7 @@ async fn a_body_or_query_of_the_wrong_shape_is_a_contract_refusal_on_every_contr
         ("PUT", "/control/layers?wiat=visible"),
         ("DELETE", "/control/layers/clusters?wiat=visible"),
         ("PUT", "/control/attributes?wiat=visible"),
+        ("PUT", "/control/shards?wiat=visible"),
         ("PUT", "/control/vocabularies/genre?wiat=visible"),
         ("PATCH", "/control/vocabularies/genre/values?wiat=visible"),
         ("PUT", "/control/view_groups/quarter?wiat=visible"),
@@ -3625,6 +3692,8 @@ const STATUS_SHAPE: &[(&str, &str)] = &[
     ("/sessions/sweep_at", "integer"),
     ("/sessions/sweeps", "integer"),
     ("/sessions/swept_total", "integer"),
+    ("/shards", "object"),
+    ("/shards/size", "integer"),
     ("/suggest_sets", "object"),
     ("/suggest_sets/builds", "integer"),
     ("/suggest_sets/bytes", "integer"),

@@ -253,6 +253,7 @@ fn args(dir: &Path, budget: Option<u64>) -> crate::BuildArgs {
         attribute_sources: acquired.attribute_sources,
         out: dir.join("out"),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: IdentityKey::from_hex("000102030405060708090a0b0c0d0e0f").unwrap(),
         layers,
@@ -803,9 +804,12 @@ fn scratch_within_forecast(dir: &Path) {
     assert!(most <= forecast, "{most} bytes of scratch against a forecast of {forecast}");
 }
 
-/// **A build numbering past the most items a bundle holds is refused**, at the item past it.
+/// **A build numbering past the most items a shard holds is refused**, at the item past the
+/// lower of its size and the end of its ids.
 #[test]
 fn numbering_past_the_item_cap_is_refused() {
-    assert!(super::check_cap(super::ITEMS_MAX).is_ok());
-    assert!(super::check_cap(super::ITEMS_MAX + 1).is_err());
+    assert!(super::check_cap(super::ITEMS_MAX, u64::MAX).is_ok());
+    assert!(super::check_cap(super::ITEMS_MAX + 1, u64::MAX).is_err());
+    assert!(super::check_cap(40, 40).is_ok());
+    assert!(super::check_cap(41, 40).is_err());
 }

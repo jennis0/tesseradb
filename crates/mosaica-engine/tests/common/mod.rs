@@ -291,6 +291,17 @@ pub fn write_pairs_n(path: &Path, n: u64) {
 /// Build the fixture bundle at `out` through `mosaica_build::build`, over an
 /// `n`-item synthetic corpus. See [`write_points_n`]'s doc for why this is parameterised.
 pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64) {
+    build_fixture_sized(out, points_path, pairs_path, n, None)
+}
+
+/// [`build_fixture_n`], declaring `[shards] size` where `shard_size` is given.
+pub fn build_fixture_sized(
+    out: &Path,
+    points_path: &Path,
+    pairs_path: &Path,
+    n: u64,
+    shard_size: Option<u64>,
+) {
     write_points_n(points_path, n);
     write_pairs_n(pairs_path, n);
     let schema = id_schema();
@@ -314,6 +325,7 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
         ),
         out: out.to_path_buf(),
         limit: None,
+        shard_size,
         strict: false,
         identity_key: test_key(),
         layers: Vec::new(),
@@ -411,6 +423,7 @@ pub fn build_corpus_fixture(
         ),
         out: out.to_path_buf(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
         layers: Vec::new(),
@@ -467,6 +480,7 @@ pub fn build_corpus_fixture_with_layers(
         ),
         out: out.to_path_buf(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
         layers: config.layers,
@@ -515,6 +529,7 @@ pub fn build_with_layers(
         ),
         out: out.to_path_buf(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
         layers: config.layers,

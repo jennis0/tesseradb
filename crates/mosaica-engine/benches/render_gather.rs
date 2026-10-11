@@ -129,6 +129,7 @@ fn bundle(dir: &Path, absent_every: Option<u64>) -> Engine {
         attribute_sources: AttributeSource::over(points, &schema),
         out: out.clone(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: IdentityKey::from_hex(KEY_HEX).unwrap(),
         layers: Vec::new(),

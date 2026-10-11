@@ -133,6 +133,7 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
         attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &schema),
         out: out.to_path_buf(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
         layers: Vec::new(),

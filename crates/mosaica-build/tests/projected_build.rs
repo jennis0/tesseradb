@@ -418,6 +418,7 @@ fn build_bundle(
         attribute_sources,
         out: out.clone(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: IdentityKey::from_hex(KEY_HEX).unwrap(),
         layers: Vec::new(),

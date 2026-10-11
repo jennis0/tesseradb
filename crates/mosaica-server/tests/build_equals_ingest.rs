@@ -581,6 +581,7 @@ fn args(dir: &Path, declaration: &str, out: &Path) -> BuildArgs {
         attribute_sources: acquired.attribute_sources,
         out: out.to_path_buf(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
         layers,

@@ -227,6 +227,7 @@ fn build_reported(
         attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
         out: out.clone(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         layers: Vec::new(),

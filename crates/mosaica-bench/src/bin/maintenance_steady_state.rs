@@ -266,6 +266,7 @@ fn build_fixture(tmp: &Path, out: &Path) -> Result<(), Box<dyn std::error::Error
         attribute_sources: Vec::new(),
         out: out.to_path_buf(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: mosaica_types::IdentityKey::from_hex(KEY_HEX).expect("key"),
         layers: Vec::new(),

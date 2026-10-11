@@ -277,6 +277,7 @@ fn fixture() -> Fixture {
         attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: bundle.clone(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
         layers: Vec::new(),

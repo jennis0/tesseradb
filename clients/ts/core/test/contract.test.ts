@@ -125,6 +125,7 @@ const CONTROL_CALLS: Record<string, (c: Control) => Promise<unknown>> = {
   flush: (c) => c.flush(),
   compact: (c) => c.compact(),
   declareAttribute: (c) => c.declareAttribute({}),
+  declareShards: (c) => c.declareShards({}),
   declareVocabulary: (c) => c.declareVocabulary('genre', {}),
   vocabularyValues: (c) => c.vocabularyValues('genre', {}),
   declareViewGroup: (c) => c.declareViewGroup('quarter', {}),

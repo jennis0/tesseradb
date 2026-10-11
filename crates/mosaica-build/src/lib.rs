@@ -292,6 +292,9 @@ pub struct BuildArgs {
     /// Keep the items whose value of the declaration's one unique integer attribute is below this,
     /// and the rows of every file that name them ([`ids::Limit`]).
     pub limit: Option<u64>,
+    /// `[shards] size`: the most items the build may create, written into `SEGMENTS-0.json`.
+    /// `None` builds at [`mosaica_types::SHARD_SIZE_DEFAULT`] ([`BuildArgs::shard_size`]).
+    pub shard_size: Option<u64>,
     /// Refuse the build at the first file with a row the identity rule refuses, rather than
     /// refusing those rows and reporting them ([`ids`]).
     pub strict: bool,
@@ -359,6 +362,14 @@ pub struct BuildArgs {
     pub schema: crate::config::Schema,
 }
 
+impl BuildArgs {
+    /// The size the build checks its items against and writes: the declared one, or
+    /// [`mosaica_types::SHARD_SIZE_DEFAULT`] where the declaration has no `[shards]`.
+    pub fn shard_size(&self) -> u64 {
+        self.shard_size.unwrap_or(mosaica_types::SHARD_SIZE_DEFAULT)
+    }
+}
+
 impl std::fmt::Debug for BuildArgs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BuildArgs")
@@ -369,6 +380,7 @@ impl std::fmt::Debug for BuildArgs {
             .field("attribute_sources", &self.attribute_sources)
             .field("out", &self.out)
             .field("limit", &self.limit)
+            .field("shard_size", &self.shard_size)
             .field("strict", &self.strict)
             .field("identity_key", &self.identity_key)
             .field("emit_oracle_pairs", &self.emit_oracle_pairs)
@@ -2302,7 +2314,7 @@ fn write_manifests(
             ..mosaica_store::manifest::PartitionManifest::empty()
         },
         shards: mosaica_store::manifest::Shards {
-            size: mosaica_types::SHARD_SIZE_DEFAULT,
+            size: args.shard_size(),
             records: vec![mosaica_store::manifest::ShardRecord {
                 watermark: n,
                 high_water: n,

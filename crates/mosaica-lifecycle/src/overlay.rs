@@ -436,7 +436,8 @@ impl<'a> Replay<'a> {
             | WalRecord::UniqueDeclare { .. }
             | WalRecord::VocabularyDeclare { .. }
             | WalRecord::ViewGroupCreate { .. }
-            | WalRecord::PlainViewCreate { .. } => {}
+            | WalRecord::PlainViewCreate { .. }
+            | WalRecord::ShardsDeclare { .. } => {}
         }
     }
 

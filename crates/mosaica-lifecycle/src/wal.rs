@@ -477,6 +477,10 @@ pub enum WalRecord {
         /// Written by later rounds over values flushed while the first ran.
         live: Vec<DeclaredRun>,
     },
+    /// The point shard's size declared while the service runs (`PUT /control/shards`). The
+    /// side-manifest's `shards.size` is its durable home; replay starts from the served manifest's
+    /// size, and the last of these records after it wins.
+    ShardsDeclare { size: u64 },
 }
 
 /// One index run a [`WalRecord::UniqueDeclare`] adopts.
@@ -546,7 +550,8 @@ pub fn unbuilt_track(record: &WalRecord) -> Option<(&'static str, &'static str)>
         | WalRecord::ArtifactPublish { .. }
         | WalRecord::ArtifactGrow { .. }
         | WalRecord::ArtifactFill { .. }
-        | WalRecord::UniqueDeclare { .. } => None,
+        | WalRecord::UniqueDeclare { .. }
+        | WalRecord::ShardsDeclare { .. } => None,
     }
 }
 
@@ -644,7 +649,8 @@ pub fn batch_identity(record: &WalRecord) -> Option<BatchIdentity<'_>> {
         | WalRecord::VocabularyDeclare { .. }
         | WalRecord::ArtifactPublish { .. }
         | WalRecord::ArtifactGrow { .. }
-        | WalRecord::ArtifactFill { .. } => None,
+        | WalRecord::ArtifactFill { .. }
+        | WalRecord::ShardsDeclare { .. } => None,
     }
 }
 
@@ -1068,7 +1074,9 @@ const WAL_MAGIC: [u8; 4] = *b"MWAL";
 // **33**: a row's descriptors are the operands of its labels read as one disjunction: a term,
 // `public`, or a conjunction under its own key. A log at 32 is refused.
 // **34**: the magic is `MWAL`. A log at 33 is refused.
-const WAL_VERSION: u16 = 34;
+// **35**: the variant table gained `ShardsDeclare`, a shard size declared while the service runs.
+// A log at 34 is refused.
+const WAL_VERSION: u16 = 35;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -2915,13 +2923,17 @@ mod tests {
                     point_default: None,
                 }),
             },
+            WalRecord::ShardsDeclare {
+                size: 4_026_531_841,
+            },
         ];
         // The growth's rank and leaving set are applied by `ArtifactStore::grow_set`, the four
         // fills by `ArtifactStore::fill`, the attribute declaration by
         // `Executor::declare_attribute`, the vocabulary declaration by
-        // `Executor::commit_vocabulary_declare` and the two view declarations by
-        // `Executor::commit_view_group_create` and `commit_plain_view_create`. **Every record of
-        // the ingest design is applied now**, so no arm names a track.
+        // `Executor::commit_vocabulary_declare`, the two view declarations by
+        // `Executor::commit_view_group_create` and `commit_plain_view_create`, and the shard size
+        // by `Executor::commit_shards_declare`. **Every record of the ingest design is applied
+        // now**, so no arm names a track.
         let tracks: Vec<Option<&str>> = records
             .iter()
             .map(|record| unbuilt_track(record).map(|(_, track)| track))
@@ -2929,6 +2941,7 @@ mod tests {
         assert_eq!(
             tracks,
             [
+                None,
                 None,
                 None,
                 None,

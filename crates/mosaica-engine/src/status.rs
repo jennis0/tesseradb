@@ -169,6 +169,11 @@ impl Engine {
         self.write.live().only_shard().high_water()
     }
 
+    /// The point shard's size: the high water an insert may not take it past.
+    pub fn shard_size(&self) -> u64 {
+        self.write.live().only_shard().size()
+    }
+
     /// The figures' gauges ([`crate::figures`]). Operator plane only: a count of structures,
     /// naming no artifact and no principal.
     pub fn figures_stats(&self) -> crate::figures::FiguresStats {

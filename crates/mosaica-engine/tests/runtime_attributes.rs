@@ -152,6 +152,7 @@ fn build_fixture_with_schema(root: &Path, tmp: &Path) {
         attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
         out: root.to_path_buf(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
         layers: Vec::new(),

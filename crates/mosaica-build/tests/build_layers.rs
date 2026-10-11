@@ -359,6 +359,7 @@ fn args(inputs: &Inputs, out: &Path) -> BuildArgs {
         ),
         out: out.to_path_buf(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         layers: Vec::new(),

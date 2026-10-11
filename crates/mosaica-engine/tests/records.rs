@@ -479,6 +479,7 @@ fn build_bundle_of(dir: &Path, key: IdentityKey, n: u64) -> PathBuf {
         ),
         out: out.clone(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: key,
         layers: Vec::new(),

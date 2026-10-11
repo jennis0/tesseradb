@@ -215,6 +215,12 @@ class Planner:
             for column in columns
             if column.get("category")
         }
+        #: The shard size the database reports, asked only where the declaration has one.
+        self.served_shard_size = (
+            (control.status().get("shards") or {}).get("size")
+            if database.blocks.shards is not None
+            else None
+        )
 
     @property
     def inserts(self) -> list:
@@ -275,6 +281,17 @@ class Planner:
         the values pages that fill the columns it declared.
         """
         payloads = self.db._payloads() if self._pending(document) else {}
+        # First, so the rows this commit sends are measured against the size it declares.
+        shards = payloads.get("shards")
+        if shards is not None and shards.get("size") != self.served_shard_size:
+            self.pages.append(
+                Page(
+                    kind="shards",
+                    name="shards",
+                    line=f"declare shard size {shards['size']}",
+                    body=shards,
+                )
+            )
         for entry in _placed(
             payloads.get("view_groups", []),
             lambda entry: entry["name"],
@@ -450,6 +467,9 @@ class Planner:
 
     def _pending(self, document: dict) -> bool:
         """Whether this declaration carries a block the database does not."""
+        shards = document.get("shards")
+        if shards is not None and shards.get("size") != self.served_shard_size:
+            return True
         for group in document.get("view_group", []):
             if group["name"] not in self.held_views:
                 return True
@@ -1299,6 +1319,8 @@ def _send(control: Control, page: Page, strict: bool = False) -> Answer:
         return control.declare_view(page.name, page.body)
     if page.kind == "attribute":
         return control.declare_attribute(page.body)
+    if page.kind == "shards":
+        return control.declare_shards(page.body)
     if page.kind == "vocabulary":
         return control.declare_vocabulary(page.name, page.body)
     if page.kind == "vocabulary_values":

@@ -110,6 +110,7 @@ fn build_bundle(dir: &Path) -> std::path::PathBuf {
         attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
         out: out.clone(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
         layers: Vec::new(),

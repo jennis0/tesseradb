@@ -365,6 +365,17 @@ pub fn map_accept_error(e: mosaica_engine::AcceptError) -> ApiError {
                     .to_string(),
             )
         }
+        // The detail names the shard's size, its high water and the ids the batch needed. Refused
+        // for the batch alone, before any id was taken.
+        AcceptError::Exec(e @ ExecError::ShardFull(_)) => ApiError::Conflict(e.to_string()),
+        // A size of zero is corrected and resent; one below the high water would need a second
+        // shard. Neither took effect.
+        AcceptError::Exec(ExecError::ShardSize(e @ mosaica_types::ShardSizeError::Zero)) => {
+            ApiError::Contract(e.to_string())
+        }
+        AcceptError::Exec(ExecError::ShardSize(
+            e @ mosaica_types::ShardSizeError::BelowHighWater { .. },
+        )) => ApiError::Conflict(e.to_string()),
         // Forwarded: the detail names a vocabulary and its declared width. Widening the code space
         // instead would recolour every coded row.
         AcceptError::Exec(ExecError::VocabularyRefused { detail }) => ApiError::Contract(detail),

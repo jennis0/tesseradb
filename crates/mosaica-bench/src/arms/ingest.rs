@@ -243,6 +243,7 @@ pub fn run_build(
                 attribute_sources: Vec::new(),
                 out: out.clone(),
                 limit: Some(scale),
+                shard_size: None,
                 strict: false,
                 identity_key: IdentityKey::from_hex(TEST_KEY_HEX)?,
                 layers: Vec::new(),

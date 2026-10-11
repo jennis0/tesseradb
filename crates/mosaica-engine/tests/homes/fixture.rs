@@ -313,6 +313,7 @@ pub fn build_homes(dir: &Path) -> std::path::PathBuf {
         attribute_sources: mosaica_build::config::AttributeSource::over(world, &schema),
         out: out.clone(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
         layers: Vec::new(),

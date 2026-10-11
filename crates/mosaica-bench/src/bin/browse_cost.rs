@@ -367,6 +367,7 @@ fn build_scan_fixture(dir: &Path, rows: u64) -> PathBuf {
         attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
         out: bundle.clone(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: mosaica_types::IdentityKey::from_hex(
             "07070707070707070707070707070707",

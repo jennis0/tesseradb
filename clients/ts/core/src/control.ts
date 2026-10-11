@@ -887,6 +887,17 @@ export class Control {
   }
 
   /**
+   * `PUT /control/shards`: declares the size of the shard items are stored in, as `{size}`: the
+   * high water an insert may not take the shard past. Each new item and each edited item takes an
+   * id, one a deletion freed or else one past the high water, and an ingest batch that would take
+   * the high water past the size is refused with `409`. `201` when the size changed, `200` when the
+   * shard already had it, `409` for a size below the shard's high water, `422` for a size of zero.
+   */
+  declareShards(body: object, options: WriteOptions = {}): Promise<Answer> {
+    return this.sendJson('PUT', withQuery('/control/shards', waiting(options)), body, options);
+  }
+
+  /**
    * `PUT /control/vocabularies/{name}`: declares a vocabulary, the value set of a category column,
    * with a closed set's values in the body. `201` when new, `200` when the name already has this
    * declaration and its values are added as a page, `409` when it has another.

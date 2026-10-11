@@ -736,6 +736,12 @@ impl WritePath {
         })
     }
 
+    /// Declare the point shard's size. Answers whether the shard already had this size, in which
+    /// case nothing was appended.
+    pub(crate) fn declare_shards(&self, size: u64) -> Result<bool, AcceptError> {
+        self.submit(|reply| Command::DeclareShards { size, reply })
+    }
+
     /// Declare a vocabulary. Answers `(existing, added, titles)`: whether a vocabulary of that
     /// name already carried this identity, how many of the request's values were novel, and how
     /// many held values it gave a new title.

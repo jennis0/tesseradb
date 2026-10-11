@@ -10,6 +10,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from mosaica._database import create
+from mosaica._database import open as reopen
 from mosaica._refusal import Refusal
 from mosaica._toml import Inline, dumps
 
@@ -295,3 +296,20 @@ def test_a_file_carrying_a_unique_attribute_under_another_name_says_so_in_fields
     )
     assert checked(db).ok
     assert 'fields = { id = "paper" }' in db.declaration
+
+
+def test_a_shard_size_is_the_shards_table_and_is_kept_with_the_declaration(db, checked):
+    """`declare_shards` writes `[shards]`, which a declaration without it does not carry, and the
+    database's own copy of the declaration reopens with it."""
+    db.declare_view("s0")
+    assert "[shards]" not in db.declaration
+    assert db.declare_shards(4096) == {"size": 4096}
+    assert checked(db).ok
+    assert "[shards]\nsize = 4096" in db.declaration
+    assert "[shards]\nsize = 4096" in reopen(db.path).declaration
+
+
+def test_a_shard_size_of_zero_is_refused_by_the_check(db, checked):
+    db.declare_view("s0")
+    db.declare_shards(0)
+    assert not checked(db).ok

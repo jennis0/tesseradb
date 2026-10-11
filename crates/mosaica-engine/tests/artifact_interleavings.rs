@@ -1188,6 +1188,7 @@ fn built_fixture() -> Fixture {
         attribute_sources: mosaica_build::config::AttributeSource::over(points, &id_schema()),
         out: root.clone(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
         layers: config.layers,

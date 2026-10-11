@@ -279,6 +279,9 @@ zones         = "zones.parquet"
 [defaults]
 source = "points"
 
+[shards]
+size = 4096
+
 [[view]]
 name = "map"
 extent.auto = true
@@ -377,6 +380,7 @@ fn place(path: &str) -> (&'static str, &'static str) {
     const ZONES: &str = "[[layer]]\nname = \"zones\"\n";
     match path {
         "defaults" => ("[defaults]\n", ""),
+        "shards" => ("[shards]\n", ""),
         "view" => ("[[view]]\n", ""),
         "view.extent" => ("[[view]]\n", "extent."),
         "view.point_visibility" => ("[[view]]\n", "point_visibility."),

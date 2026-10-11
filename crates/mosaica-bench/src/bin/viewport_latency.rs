@@ -117,6 +117,7 @@ fn ensure_bundle(bundle_root: &Path) -> Result<(), String> {
         attribute_sources: Vec::new(),
         out: bundle_root.to_path_buf(),
         limit: Some(ITEM_LIMIT),
+        shard_size: None,
         strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         layers: Vec::new(),

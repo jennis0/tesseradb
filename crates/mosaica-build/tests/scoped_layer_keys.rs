@@ -353,6 +353,7 @@ fn build_with_labels(
         ),
         out: dir.join("bundle"),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         layers,

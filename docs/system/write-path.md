@@ -110,7 +110,7 @@ A request against `/control/ingest` is checked before the server commits any wor
 credential and its `write`, the body size, the row count and the columns are checked first, and a
 request that fails any of them takes no effect. Every column may be left out of a row: a value
 left out keeps what the item stores, and a null clears it. A row carries both coordinates or
-neither. Beyond those, three checks apply:
+neither. Beyond those, four checks apply:
 
 1. An admission limit bounds how many ingest requests run at once, and a buffer limit bounds how
    many rows may wait for a flush. Past either, the request is refused with a retry interval
@@ -119,6 +119,16 @@ neither. Beyond those, three checks apply:
    replay the recorded answer, and different bytes under the same id are refused.
 3. Each row is resolved to the item it names, and compared with what that item stores
    ([resolving a batch](#resolving-a-batch)).
+4. Each row that creates an item, and each edit, takes an id at the window's close: one a
+   compaction freed, or else one past the shard's high water. The ids a batch would take from the
+   high water may not carry it past the shard's size, declared by `[shards] size` at a build or by
+   `PUT /control/shards` at a running service, nor past the lowest id an annotation layer holds.
+   The executor counts each batch as it joins the [commit window](#the-commit-window), against
+   what the batches already in the window leave. Freed ids the window does not take are counted
+   first, and ids still held for the log to rotate are not counted. A batch that does not fit
+   closes the window, and is counted again against the shard the close leaves. One that still does
+   not fit is refused with `409`, naming the size, the high water and the ids it needed, and takes
+   no effect, while every other batch of the window goes in.
 
 A row that carries access labels has each read as an access expression by the parser a build
 reads its access column with, and the item is indexed under the keys its labels give it: the
@@ -288,7 +298,7 @@ that is decided as a new batch.
 | Outcome | Meaning | Retry |
 |---|---|---|
 | 200 | Every row is resolved. Created, added and edited rows are durable in the WAL, with their identity allocated, and not yet visible; unchanged and refused rows wrote nothing, and `refused` lists the refused ones | Not needed; a refused row after fixing it |
-| 409 | With `strict=true`, a row is refused; or the same batch id with different bytes, or what the batch names moved twice while it was checked. Nothing in the batch took effect | After fixing the request; the last as it was |
+| 409 | With `strict=true`, a row is refused; or the same batch id with different bytes, or what the batch names moved twice while it was checked, or its new and edited items would take the shard past its size. Nothing in the batch took effect | After fixing the request; the last as it was, or after declaring a larger size |
 | 422 | Validation failed: an undeclared column, a wrong type, too many rows, a new item with no label, or a coordinate that is not a place. Nothing took effect | After fixing the request |
 | 429 | The server is declining the request for load, with a retry interval attached | After that interval |
 | 500 | The WAL append or the fsync failed. Nothing was applied | With identical bytes |
@@ -661,10 +671,13 @@ records the allocator's own high point, not only the highest entity a segment ho
 deleted before its flush holds no row, and once the log records naming it are reclaimed, the
 manifest is what keeps its entity id, and so its `mosaica_id`, from being issued to a new item.
 Freed ids are restored from the newest manifest less every id the replay names
-([freed entity ids](#freed-entity-ids)). The buffer of rows
-awaiting flush is rebuilt as exactly the replayed rows whose entity has no row in any segment,
-rather than compared against a watermark. This predicate stays correct regardless of how flush and
-allocation order have diverged from each other.
+([freed entity ids](#freed-entity-ids)). The shard's size is the newest manifest's, replaced by
+each size declaration the replayed log carries, so the last declaration made is the one in force.
+Every publication restates it, so it survives the log's rotation and a compaction. A size below
+the high water the replay reaches refuses the open, since no declaration could have left one. The
+buffer of rows awaiting flush is rebuilt as exactly the replayed rows whose entity has no row in
+any segment, rather than compared against a watermark. This predicate stays correct regardless of
+how flush and allocation order have diverged from each other.
 
 | Crash point | Recovery | At risk |
 |---|---|---|

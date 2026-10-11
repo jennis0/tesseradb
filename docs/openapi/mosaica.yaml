@@ -102,6 +102,8 @@ tags:
     description: Asking for a compaction fold. Control plane.
   - name: "control: attributes"
     description: Declaring attribute columns. Control plane.
+  - name: "control: shards"
+    description: Declaring the size of the shard items are stored in. Control plane.
   - name: "control: vocabularies"
     description: Declaring vocabularies and adding values to them. Control plane.
   - name: "control: views"
@@ -1733,6 +1735,12 @@ paths:
         is written. A deleted item names nothing, so its values may be given to a new item. A null
         is no value.
 
+        **The shard's size.** Each row that creates an item, and each that edits one, takes an
+        id: one a deletion freed, or else one past the shard's high water. A batch whose ids would
+        take the high water past the size `PUT /control/shards` declares is `409`, naming the
+        size, the high water and how many ids the batch needed, and writes nothing. Each batch sent
+        beside it is taken or refused on its own.
+
         **Retries.** `x-mosaica-batch-id` names the batch. The same bytes sent again under the same
         id answer `200` with `replayed: true`, the first acceptance's `mosaica_ids` and `refused`,
         and change nothing, whatever `strict` says; different bytes under a used id are `409`.
@@ -1793,6 +1801,7 @@ paths:
             - With `strict=true`, a row is refused: its values name more than one item, as when a row gives an item a unique value another item holds; its `mosaica_id` names no live or suppressed item; it names no item and carries no coordinates; or it names an item, or sets a unique value, an earlier row does
             - An item a row edits changed while the batch was checked; sending it again answers
             - The items the batch names changed while it was checked twice; sending it again answers
+            - The ids the batch's new and edited items take would carry the shard's high water past its size, or past the end of its ids; the detail names the size, the high water and how many ids the batch needed
           content:
             application/json:
               schema:
@@ -2073,6 +2082,75 @@ paths:
             - `vocabulary` on another type
             - `analyser` on a type other than `text`, or an unknown analyser
             - A group scope naming no view group, or a group that takes its views from another
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/WriteFailed"
+        "503":
+          $ref: "#/components/responses/ExecutorNotReady"
+
+  /control/shards:
+    put:
+      tags: ["control: shards"]
+      operationId: declareShards
+      summary: Declare the size of the shard items are stored in.
+      description: |
+        The body is a corpus declaration's `[shards]` table in JSON. The size is the high water
+        the shard may not pass: each item created and each item edited takes an id, one a deletion
+        freed or else one past the high water, and a batch of `POST /control/ingest` that would
+        take the high water past the size is `409`. Without a declaration the size is
+        4,026,531,840. `GET /control/status` reports it under `shards`.
+
+        Declaring the size the shard has answers `200` and changes nothing. A size below the
+        shard's high water is `409`: the ids the shard has issued would need a second shard, which
+        this version does not open.
+      security:
+        - controlCredential: []
+      parameters:
+        - $ref: "#/components/parameters/Wait"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ShardsDeclaration"
+      responses:
+        "200":
+          description: The shard already has this size.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ShardsDeclared"
+        "201":
+          description: The size is declared.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ShardsDeclared"
+        "400":
+          $ref: "#/components/responses/NotJson"
+        "401":
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: The size is below the shard's high water. The detail names the high water.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "413":
+          $ref: "#/components/responses/DeclarationTooLarge"
+        "415":
+          $ref: "#/components/responses/NotJsonContentType"
+        "422":
+          description: |
+            - An unknown field
+            - A size of zero, or one that is not a positive integer
           content:
             application/json:
               schema:
@@ -6199,6 +6277,36 @@ components:
           type: boolean
           description: "`PublicationAck.visible`."
 
+    ShardsDeclaration:
+      type: object
+      additionalProperties: false
+      required: [size]
+      description: A corpus declaration's `[shards]` table.
+      properties:
+        size:
+          type: integer
+          minimum: 1
+          description: The high water the shard may not pass.
+
+    ShardsDeclared:
+      type: object
+      additionalProperties: false
+      required: [size, existing, publication]
+      properties:
+        size:
+          type: integer
+          minimum: 1
+        existing:
+          type: boolean
+          description: "`true` where the shard already had this size and nothing was written."
+        publication:
+          type: integer
+          minimum: 0
+          description: "`PublicationAck.publication`."
+        visible:
+          type: boolean
+          description: "`PublicationAck.visible`."
+
     VocabularyDeclaration:
       type: object
       additionalProperties: false
@@ -7076,12 +7184,21 @@ components:
       type: object
       additionalProperties: false
       description: The `GET /control/status` document. Counters count from the process's start; gauges are read when the request is answered. Byte figures are bytes and times are in the unit their name gives.
-      required: [entity_id_high_water, publication, partitions, compute, bulk, artifacts, write_executor, ingest, limits, segments, overlay, compaction, fragmentation, row_projection_cache, projection_builds_by_route, fragment_cache, sessions, masked_count_cache, region_cache, derived_cache, suggest_sets, occupancy, heap]
+      required: [entity_id_high_water, shards, publication, partitions, compute, bulk, artifacts, write_executor, ingest, limits, segments, overlay, compaction, fragmentation, row_projection_cache, projection_builds_by_route, fragment_cache, sessions, masked_count_cache, region_cache, derived_cache, suggest_sets, occupancy, heap]
       properties:
         entity_id_high_water:
           type: integer
           minimum: 0
           description: The next entity id the allocator will issue to an item, a corpus-wide figure.
+        shards:
+          type: object
+          additionalProperties: false
+          required: [size]
+          properties:
+            size:
+              type: integer
+              minimum: 1
+              description: The high water an insert may not take the shard past, as `PUT /control/shards` or the build's `[shards]` declared it.
         publication:
           type: integer
           minimum: 0

@@ -210,6 +210,11 @@ struct ConfigFile {
     /// Default: not set.
     #[serde(default)]
     defaults: Option<DefaultsBlock>,
+    /// The shard the items are stored in.
+    ///
+    /// Default: not set.
+    #[serde(default)]
+    shards: Option<ShardsBlock>,
     /// Coordinate systems, each giving the items it holds a position on a map.
     #[serde(default)]
     view: Vec<ViewBlock>,
@@ -247,6 +252,19 @@ struct DefaultsBlock {
     /// Default: not set.
     #[serde(default)]
     allocation_view: Option<String>,
+}
+
+/// The shard the items are stored in. Each new item, and each edit of an item, takes an id from
+/// it, an id a deletion freed first and otherwise one past the shard's high water. Without this
+/// table the size is 4,026,531,840. `PUT /control/shards` declares the same table at a running
+/// service.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShardsBlock {
+    /// The high water the shard may not pass. A positive integer. A build whose files create more
+    /// items than this is refused, and so is an insert that would take the shard's high water
+    /// past it.
+    size: u64,
 }
 
 /// One coordinate system: a position for each item it holds, the frame those positions are stored
@@ -1221,6 +1239,9 @@ pub struct Config {
     /// reviewer diffing two builds' disclosure decisions still needs to know that a layer they did
     /// not write appeared because a `[layer.labels]` block asked for it.
     pub label_layers: BTreeMap<String, String>,
+    /// `[shards] size` as written, or `None` where the declaration has no `[shards]`, which builds
+    /// at [`mosaica_types::SHARD_SIZE_DEFAULT`].
+    pub shard_size: Option<u64>,
     /// `[defaults].allocation_view` as written, or `None` where the declaration named none.
     ///
     /// **The anchor is a view id, resolved against the registry [`Config::build_views`] builds**
@@ -2637,6 +2658,17 @@ impl Config {
         let base = path.parent().unwrap_or(Path::new("")).to_path_buf();
         let sources = Sources::compile(&base, file.sources.as_ref(), overrides)?;
         let defaults = Defaults::compile(file.defaults.as_ref(), &file.attribute, &sources)?;
+        // A build is an ingest into an empty database: the size is checked against a high water
+        // of 0 here, and against the items the files create as they are numbered.
+        let shard_size = file
+            .shards
+            .as_ref()
+            .map(|shards| {
+                mosaica_types::check_shard_size(shards.size, 0)
+                    .map(|()| shards.size)
+                    .map_err(|e| declaration_error(format!("[shards] size: {e}")))
+            })
+            .transpose()?;
         let views = compile_views(&file.view, &sources, &defaults)?;
         let vocabularies = compile_vocabularies(&file.vocabulary, &sources)?;
         // Groups after the vocabularies a category's metadata draws on, and after the views whose
@@ -2689,6 +2721,7 @@ impl Config {
                 .collect(),
             layer_sources,
             label_layers,
+            shard_size,
             allocation_view: defaults.allocation_view.clone(),
         })
     }
@@ -6442,13 +6475,18 @@ impl Config {
 /// closed set with no values refuses every ingest, so its keys have to be paged before it can be
 /// declared, and `values_source` says where they are.
 pub fn control_payloads(config: &Config) -> serde_json::Value {
-    serde_json::json!({
+    let mut payloads = serde_json::json!({
         "layers": config.layers,
         "attributes": attribute_payloads(config),
         "vocabularies": vocabulary_payloads(config),
         "views": view_payloads(config),
         "view_groups": view_group_payloads(config),
-    })
+    });
+    // The body of `PUT /control/shards`, only where the declaration writes `[shards]`.
+    if let Some(size) = config.shard_size {
+        payloads["shards"] = serde_json::json!({ "size": size });
+    }
+    payloads
 }
 
 /// Drop the key where the value is absent: every optional on a declaration route is
@@ -6784,6 +6822,9 @@ clusters = "clusters.parquet"
 source          = "points"
 allocation_view = "world"
 
+[shards]
+size = 5000
+
 [[view]]
 name             = "world"
 title            = "Whole corpus"
@@ -6911,6 +6952,37 @@ fields = { id = "entity" }
                 );
             }
         }
+    }
+
+    /// **Shards**: `[shards]` is the `PUT /control/shards` body, and a declaration without it
+    /// emits no key, so nothing declares a size its author did not write.
+    #[test]
+    fn the_shard_payload_is_written_only_where_the_declaration_writes_it() {
+        let (_dir, payloads) = every_key();
+        assert_eq!(payloads["shards"], serde_json::json!({ "size": 5000 }));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[[view]]\nname = \"s0\"\nextent = { x = [0.0, 1.0], y = [0.0, 1.0] }\n\
+             point_visibility = { default = \"public\" }\n",
+        )
+        .unwrap();
+        let config = Config::parse(&path, &HashMap::new()).expect("the declaration compiles");
+        assert_eq!(config.shard_size, None);
+        assert!(control_payloads(&config).get("shards").is_none());
+    }
+
+    /// A size of zero is refused at the declaration, by the rule a running service applies.
+    #[test]
+    fn a_shard_size_of_zero_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[shards]\nsize = 0\n").unwrap();
+        assert!(Config::parse(&path, &HashMap::new()).is_err());
+        std::fs::write(&path, "[shards]\nsize = 1\n").unwrap();
+        let config = Config::parse(&path, &HashMap::new()).expect("a size of one compiles");
+        assert_eq!(config.shard_size, Some(1));
     }
 
     /// **Layers**: the array key and the bodies are exactly what they were — a `[[layer]]` block

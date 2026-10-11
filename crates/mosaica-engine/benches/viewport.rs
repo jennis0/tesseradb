@@ -89,6 +89,7 @@ fn ensure_bundle() -> PathBuf {
             attribute_sources: Vec::new(),
             out: bundle_root.clone(),
             limit: Some(ITEM_LIMIT),
+            shard_size: None,
             strict: false,
             identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
             layers: Vec::new(),

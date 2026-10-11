@@ -309,6 +309,7 @@ impl Executor {
             Command::DeclareAttribute { request, reply } => {
                 self.commit_attribute_declare(*request, reply)
             }
+            Command::DeclareShards { size, reply } => self.commit_shards_declare(size, reply),
             Command::DeclareVocabulary { request, reply } => {
                 self.commit_vocabulary_declare(*request, reply)
             }
@@ -870,6 +871,39 @@ impl Executor {
                 self.publish_new_unique_index(&d.name, started);
             }
         }
+        reply.ack(false);
+    }
+
+    /// `PUT /control/shards`: declare the point shard's size while the service runs.
+    ///
+    /// [`Self::commit_attribute_declare`]'s shape: checked against state only this thread
+    /// writes, appended, synced, applied, acknowledged. The size is the allocator's, so the next
+    /// batch admitted is measured against it, and it reaches `SEGMENTS-<n>.json` at the next
+    /// publication. A size the shard already has answers `true` with nothing appended. A failed
+    /// append leaves the size as it was.
+    pub(super) fn commit_shards_declare(&mut self, size: u64, reply: Reply<bool>) {
+        let (held, high_water) = {
+            let shard = self.live.only_shard();
+            (shard.size(), shard.high_water())
+        };
+        if let Err(e) = mosaica_types::check_shard_size(size, high_water) {
+            reply.fail(ExecError::ShardSize(e));
+            return;
+        }
+        if size == held {
+            reply.ack(true);
+            return;
+        }
+        let record = WalRecord::ShardsDeclare { size };
+        if let Err(e) = self.make_durable(&[&record], "a shard size declaration") {
+            reply.fail(e);
+            return;
+        }
+        self.live
+            .only_shard()
+            .with_allocator(|alloc| alloc.set_size(size));
+        // Durable in the log and not yet in a manifest: the next publication restates it.
+        self.side_manifests.behind_live = true;
         reply.ack(false);
     }
 

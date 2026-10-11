@@ -223,6 +223,7 @@ fn try_fixture(topics: fn(&Path)) -> Result<Fixture, mosaica_build::BuildError> 
         attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &config.schema),
         out: root.clone(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
         layers: config.layers,

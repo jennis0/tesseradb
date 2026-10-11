@@ -112,6 +112,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/control/layers", axum::routing::put(register_layer))
         .route("/control/layers/{name}", axum::routing::delete(drop_layer))
         .route("/control/attributes", axum::routing::put(declare_attribute))
+        .route("/control/shards", axum::routing::put(declare_shards))
         .route(
             "/control/vocabularies/{name}",
             axum::routing::put(declare_vocabulary),
@@ -1101,6 +1102,29 @@ async fn declare_attribute(
         .write(move |state| state.engine.declare_attribute(request))
         .await?;
     let body = serde_json::json!({ "name": name, "existing": existing });
+    acknowledge(&state, &wait, declared(existing), body).await
+}
+
+/// `PUT /control/shards`' body: the `[shards]` table.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShardsBody {
+    size: u64,
+}
+
+/// `PUT /control/shards`: declares the point shard's size, the high water an insert may not take
+/// it past. 201 when the size changed, 200 when the shard already had it, 422 for a size of zero,
+/// 409 for one below the shard's high water.
+async fn declare_shards(
+    State(state): State<Arc<AppState>>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
+    body: ApiJson<ShardsBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let size = body.0.size;
+    let existing = state
+        .write(move |state| state.engine.declare_shards(size))
+        .await?;
+    let body = serde_json::json!({ "size": size, "existing": existing });
     acknowledge(&state, &wait, declared(existing), body).await
 }
 
@@ -2899,6 +2923,8 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
     let segments: Vec<mosaica_engine::ViewSegments> = live.segments;
     Ok(Json(serde_json::json!({
         "entity_id_high_water": state.engine.allocator_high_water(),
+        // The high water an insert may not take the shard past.
+        "shards": { "size": state.engine.shard_size() },
         // Cycles completed since the executor started, one per cycle whatever it published: the
         // number a write acknowledgement's `publication` is compared against.
         "publication": state.engine.publication(),

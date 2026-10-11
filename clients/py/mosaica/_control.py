@@ -230,6 +230,14 @@ class Control:
         """
         return self._send("PUT", "/control/attributes", _json(body), {"content-type": JSON})
 
+    def declare_shards(self, body: dict) -> Answer:
+        """`PUT /control/shards`: declare the size of the shard items are stored in, as `{"size": n}`.
+
+        A batch whose new and edited items would take the shard's high water past the size is
+        refused with `409`. A size below the high water is `409` too.
+        """
+        return self._send("PUT", "/control/shards", _json(body), {"content-type": JSON})
+
     def declare_vocabulary(self, name: str, body: dict) -> Answer:
         """`PUT /control/vocabularies/{name}`: the value set, with a closed set's values on it."""
         return self._send("PUT", f"/control/vocabularies/{_segment(name)}", _json(body),

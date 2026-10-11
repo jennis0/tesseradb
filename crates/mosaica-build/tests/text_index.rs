@@ -142,6 +142,7 @@ fn build_with(schema: Schema) -> tempfile::TempDir {
         attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &schema),
         out,
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         layers: Vec::new(),

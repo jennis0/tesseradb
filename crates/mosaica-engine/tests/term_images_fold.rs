@@ -188,6 +188,7 @@ fn build_fixture(tmp: &Path, root: &Path) {
         out: root.to_path_buf(),
         schema: id_schema(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
         layers: Vec::new(),

@@ -293,6 +293,17 @@ fn across_partitions<'a, T, I: IntoIterator<Item = T>>(
     bundle.partitions.values().flat_map(of).collect()
 }
 
+/// The shard size the newest served side-manifest records. Every publication restates it, so the
+/// newest is the one in force.
+fn shard_size_of(bundle: &Bundle) -> u64 {
+    bundle
+        .partitions
+        .values()
+        .max_by_key(|p| p.segments_n)
+        .expect("a bundle serves a partition, as `Bundle::only_shard` asks")
+        .shard_size
+}
+
 /// The freed entity ids the newest served side-manifest records, and the sets it holds back, each
 /// split by `tenancy`. "Newest" is the partition whose served manifest has the highest number,
 /// which is meaningful while a bundle has one partition, as every bundle has.
@@ -572,6 +583,7 @@ fn reconstruct_writes(
                 mosaica_types::layer::ROWLESS_CEILING,
                 &side_manifest_low_waters,
             ),
+            size: shard_size_of(bundle),
             free,
             held,
             layers: &manifest_layers,

@@ -67,7 +67,7 @@ use std::ops::Range;
 
 use croaring::Bitmap;
 use mosaica_types::layer::RESERVED_BLOCK;
-use mosaica_types::{EntityId, Tenancy, TermId};
+use mosaica_types::{check_room, EntityId, ShardFull, Tenancy, TermId};
 
 use crate::wal::WalRecord;
 
@@ -88,9 +88,12 @@ pub use mosaica_types::layer::ROWLESS_CEILING;
 /// nor [`Allocator::allocate_rowless`] moves its mark on the error path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllocError {
-    /// Issuing the requested range would carry the point region's mark into the row-less region's,
-    /// or past [`ENTITY_ID_CEILING`] when nothing row-less has been allocated. Both marks are
-    /// reported because "how much is left" is the gap between them and neither alone says it.
+    /// The point ids a window needs from the high water would pass the shard's size, or reach the
+    /// row-less mark: [`check_room`]'s refusal.
+    Full(ShardFull),
+    /// Issuing the requested row-less run would carry the row-less mark into the point region.
+    /// Both marks are reported because "how much is left" is the gap between them and neither
+    /// alone says it.
     Exhausted { high_water: u64, low_water: u64 },
     /// The seeds already meet or cross — caught at open rather than at the first allocation, so a
     /// corrupt or hand-edited manifest mark fails closed immediately instead of silently colliding.
@@ -100,6 +103,7 @@ pub enum AllocError {
 impl std::fmt::Display for AllocError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            AllocError::Full(full) => full.fmt(f),
             AllocError::Exhausted {
                 high_water,
                 low_water,
@@ -184,6 +188,8 @@ pub struct Allocation {
 pub struct Allocator {
     high_water: u64,
     low_water: u64,
+    /// The shard's size, which `high_water` may not pass.
+    size: u64,
     /// Freed point ids, issued before any id from `high_water` (module doc).
     free: ByTenancy,
     /// Freed point ids held back until the log keeps no record older than the position beside
@@ -202,14 +208,44 @@ impl Allocator {
 
     /// [`Allocator::new`] with both marks supplied, for a restart that has recovered a row-less
     /// allocation. `low_water` is the lowest row-less id ever issued, or [`ROWLESS_CEILING`] if
-    /// none has been.
+    /// none has been. No size bounds it until [`Allocator::set_size`] gives one.
     pub fn with_marks(high_water: u64, low_water: u64) -> Self {
         Allocator {
             high_water,
             low_water,
+            size: u64::MAX,
             free: ByTenancy::new(),
             held: Vec::new(),
         }
+    }
+
+    /// The shard's size: the high water may not pass it.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// Set the shard's size. The caller checks it against [`Allocator::high_water`] with
+    /// [`mosaica_types::check_shard_size`].
+    pub fn set_size(&mut self, size: u64) {
+        self.size = size;
+    }
+
+    /// How many of a window's `edits` and `items` take a freed id, in [`Allocator::allocate`]'s
+    /// order: an edit takes one at tenancy 0, and a new item one at any tenancy that is left.
+    fn reused(&self, edits: u64, items: u64) -> (u64, u64) {
+        let at_zero = self.free.get(&Tenancy::ZERO).map_or(0, Bitmap::cardinality);
+        let edits_reused = edits.min(at_zero);
+        let items_reused = items.min(cardinality_of(&self.free) - edits_reused);
+        (edits_reused, items_reused)
+    }
+
+    /// Whether a window of `edits` edits and `items` new items fits: the ids it takes from the
+    /// high water, after the freed ids, may pass neither the size nor the row-less mark. Held ids
+    /// are not counted.
+    pub fn room(&self, edits: u64, items: u64) -> Result<(), ShardFull> {
+        let (edits_reused, items_reused) = self.reused(edits, items);
+        let needed = (edits - edits_reused) + (items - items_reused);
+        check_room(self.size, self.low_water, self.high_water, needed)
     }
 
     /// [`Allocator::new`], refusing a seed that already meets the row-less mark — the check that
@@ -232,22 +268,15 @@ impl Allocator {
 
     /// Allocates **point** entity IDs for a commit window's `edits` new entities and its `items`
     /// new items, in the order the module doc gives. The high-water advances past every id it
-    /// gives. Refuses, leaving the allocator unchanged, if the ids from the high-water would reach
-    /// the row-less region: an allocation that overran it would put two entities on one
-    /// `mosaica_id`.
+    /// gives. Refuses, leaving the allocator unchanged, where [`Allocator::room`] does: the ids
+    /// from the high-water would pass the size, or reach the row-less region, where an allocation
+    /// that overran it would put two entities on one `mosaica_id`.
     pub fn allocate(&mut self, edits: u64, items: u64) -> Result<Allocation, AllocError> {
-        let at_zero = self.free.get(&Tenancy::ZERO).map_or(0, Bitmap::cardinality);
-        let edits_reused = edits.min(at_zero);
-        let items_reused = items.min(cardinality_of(&self.free) - edits_reused);
+        self.room(edits, items).map_err(AllocError::Full)?;
+        let (edits_reused, items_reused) = self.reused(edits, items);
         let lo = self.high_water;
         let mid = lo + (edits - edits_reused);
         let hi = mid + (items - items_reused);
-        if hi > self.low_water {
-            return Err(AllocError::Exhausted {
-                high_water: lo,
-                low_water: self.low_water,
-            });
-        }
         let mut allocation = Allocation {
             edits: take_lowest(&mut self.free, Tenancy::ZERO, edits_reused),
             items: Vec::with_capacity(items as usize),
@@ -435,6 +464,8 @@ pub fn high_water_from<'r>(records: impl IntoIterator<Item = &'r WalRecord>) -> 
             | WalRecord::VocabularyDeclare { .. }
             | WalRecord::ViewGroupCreate { .. }
             | WalRecord::PlainViewCreate { .. } => {}
+            // A size bounds the mark and moves it nowhere.
+            WalRecord::ShardsDeclare { .. } => {}
         }
     }
     hw
@@ -588,9 +619,9 @@ fn signature_sort_key(terms: &[TermId]) -> Vec<u32> {
 /// identical signatures take adjacent ids from the high-water, which is what makes their postings
 /// compress as runs; freed ids come first and scatter among other signatures' runs.
 ///
-/// Fallible: propagates [`AllocError::Exhausted`] from the underlying
-/// `Allocator::allocate` rather than swallowing it — a batch that would exhaust the entity-ID
-/// space has no effect, exactly as `allocate` leaves the allocator unchanged on that error.
+/// Fallible: propagates [`AllocError::Full`] from the underlying
+/// `Allocator::allocate` rather than swallowing it — a batch that does not fit has no effect,
+/// exactly as `allocate` leaves the allocator unchanged on that error.
 pub fn assign_sorted(items: &mut [PendingItem], alloc: &mut Allocator) -> Result<(), AllocError> {
     // Compute each item's signature sort key once, up front, rather than inside
     // the comparator — `sort_by`'s comparator can be called O(n log n) times, and
@@ -709,10 +740,7 @@ mod tests {
         alloc.release_after(0, at(0, &[5]));
         alloc.release_after(0, at(4, &[3]));
         alloc.promote(0);
-        assert!(matches!(
-            alloc.allocate(1, 3),
-            Err(AllocError::Exhausted { .. })
-        ));
+        assert!(matches!(alloc.allocate(1, 3), Err(AllocError::Full(_))));
         assert_eq!(listed(alloc.free()), vec![(0, vec![5]), (4, vec![3])]);
         assert_eq!(alloc.high_water(), ROWLESS_CEILING - 1);
         let given = alloc.allocate(1, 2).unwrap();
@@ -720,6 +748,52 @@ mod tests {
             (given.edits, given.items),
             (vec![5], vec![3, ROWLESS_CEILING - 1])
         );
+    }
+
+    #[test]
+    fn freed_ids_come_before_the_size_and_held_ids_do_not() {
+        let mut alloc = Allocator::new(8);
+        alloc.set_size(10);
+        alloc.release_after(1, at(0, &[2]));
+        alloc.release_after(1, at(1, &[3]));
+        alloc.release_after(5, at(0, &[4]));
+        alloc.promote(1);
+        let full = |needed| {
+            Err(ShardFull {
+                limit: mosaica_types::ShardLimit::Size(10),
+                high_water: 8,
+                needed,
+            })
+        };
+        assert_eq!(
+            alloc.room(1, 3),
+            Ok(()),
+            "the edit takes 2, two items take 3 and 8, and one 9"
+        );
+        assert_eq!(alloc.room(1, 4), full(3), "the held 4 is not counted");
+        assert_eq!(alloc.room(3, 0), Ok(()));
+        assert_eq!(
+            alloc.room(4, 0),
+            full(3),
+            "an edit takes no id above tenancy 0"
+        );
+        assert_eq!(
+            alloc.allocate(1, 4),
+            Err(AllocError::Full(full(3).unwrap_err()))
+        );
+        assert_eq!(alloc.high_water(), 8, "a refused window takes nothing");
+        assert_eq!(listed(alloc.free()), vec![(0, vec![2]), (1, vec![3])]);
+        let given = alloc.allocate(1, 3).unwrap();
+        assert_eq!((given.edits, given.items), (vec![2], vec![3, 8, 9]));
+        assert_eq!(
+            alloc.room(0, 1),
+            full(1).map_err(|f| ShardFull {
+                high_water: 10,
+                ..f
+            })
+        );
+        alloc.set_size(11);
+        assert_eq!(alloc.allocate(0, 1).unwrap().items, vec![10]);
     }
 
     #[test]
@@ -761,10 +835,7 @@ mod tests {
         // would share a mosaica_id and `invert` would return the WRONG one.
         let mut a = Allocator::new(ROWLESS_CEILING - 2);
         assert!(a.allocate(0, 1).is_ok());
-        assert!(matches!(
-            a.allocate(5, 5),
-            Err(AllocError::Exhausted { .. })
-        ));
+        assert!(matches!(a.allocate(5, 5), Err(AllocError::Full(_))));
         // The failed call must not have moved the high-water mark (the batch has no effect).
         assert_eq!(a.high_water(), ROWLESS_CEILING - 1);
 
@@ -819,19 +890,17 @@ mod tests {
             Err(AllocError::Exhausted { .. })
         ));
 
-        // Upward: the same wall, met from the other side, and the refusal reports both marks so
-        // "how much is left" is answerable from the error alone.
+        // Upward: the same wall, met from the other side, and the refusal names the high water
+        // and the mark it met.
         assert!(a.allocate(0, RESERVED_BLOCK).is_ok());
-        match a.allocate(0, 1) {
-            Err(AllocError::Exhausted {
-                high_water,
-                low_water,
-            }) => {
-                assert_eq!(high_water, ROWLESS_CEILING);
-                assert_eq!(low_water, ROWLESS_CEILING);
-            }
-            other => panic!("expected exhaustion, got {other:?}"),
-        }
+        assert_eq!(
+            a.allocate(0, 1),
+            Err(AllocError::Full(ShardFull {
+                limit: mosaica_types::ShardLimit::End(ROWLESS_CEILING),
+                high_water: ROWLESS_CEILING,
+                needed: 1,
+            }))
+        );
 
         // And a request whose *width* overflows a u64 is refused rather than wrapping into a run
         // that looks valid.

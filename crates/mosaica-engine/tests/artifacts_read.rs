@@ -1667,6 +1667,7 @@ fn authored() -> Authored {
         attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &id_schema()),
         out: root.clone(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
         layers: Vec::new(),

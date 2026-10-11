@@ -199,6 +199,7 @@ fn fixture_with(extra: &[(String, u64)]) -> Fixture {
         attribute_sources: mosaica_build::config::AttributeSource::over(points, &config.schema),
         out: root.clone(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
         layers: config.layers,

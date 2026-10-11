@@ -216,6 +216,7 @@ fn two_views_derived_files_do_not_collide() {
         ),
         out: out.clone(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         layers: config.layers,

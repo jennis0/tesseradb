@@ -115,6 +115,7 @@ fn args(dir: &Path, declaration: &str, out: &Path) -> BuildArgs {
         attribute_sources: acquired.attribute_sources,
         out: out.to_path_buf(),
         limit: None,
+        shard_size: config.shard_size,
         strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         layers,
@@ -215,6 +216,28 @@ unique = true
 "#;
 
 // -------------------------------------------------------------------------------------------
+
+/// **A build whose files create more items than `[shards] size` is refused**, by both numberings,
+/// and one creating exactly as many builds and records the size it was declared with.
+#[test]
+fn a_build_over_its_shard_size_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    points(
+        &dir.join("points.parquet"),
+        &[Some(1), Some(2), Some(3), Some(2)],
+        Vec::new(),
+    );
+    let sized = |size: u64| format!("[shards]\nsize = {size}\n{ONE_VIEW}");
+    assert!(build(&args(dir, &sized(2), &dir.join("over-streamed"))).is_err());
+    assert!(build_in_memory(&args(dir, &sized(2), &dir.join("over-linear"))).is_err());
+
+    let (out, report) = both_ways(dir, &sized(3));
+    assert_eq!(report.items, 3, "a row naming an item takes no id");
+    let bundle = mosaica_store::read::open_bundle(&out).expect("the bundle opens");
+    let sizes: Vec<u64> = bundle.partitions.values().map(|p| p.shard_size).collect();
+    assert_eq!(sizes, [3]);
+}
 
 /// **(a) One unique field across two views, an attribute file and a members file.** A value in
 /// both views' points is one item in both, and the other files name items by it.

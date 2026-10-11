@@ -481,6 +481,16 @@ impl Engine {
         self.write.declare_attribute(request)
     }
 
+    /// Declare the point shard's size while the service runs. `true` where the shard already had
+    /// this size and nothing was appended.
+    /// Blocking — a tokio handler must call this inside `spawn_blocking`.
+    pub fn declare_shards(
+        &self,
+        size: u64,
+    ) -> std::result::Result<bool, crate::write::AcceptError> {
+        self.write.declare_shards(size)
+    }
+
     /// Declare a vocabulary while the service runs. Answers `(existing, added, titles)`.
     /// Blocking — a tokio handler must call this inside `spawn_blocking`.
     pub fn declare_vocabulary(

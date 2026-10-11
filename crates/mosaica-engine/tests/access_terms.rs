@@ -126,6 +126,7 @@ fn args(points: &Path, out: &Path, default: Option<&str>) -> BuildArgs {
         attribute_sources: Vec::new(),
         out: out.to_path_buf(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
         layers: Vec::new(),

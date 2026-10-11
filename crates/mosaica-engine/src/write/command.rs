@@ -241,6 +241,9 @@ pub(crate) enum Command {
         request: Box<AttributeRequest>,
         reply: Reply<bool>,
     },
+    /// Declare the point shard's size. The answer is whether the shard already had this size, in
+    /// which case nothing was appended.
+    DeclareShards { size: u64, reply: Reply<bool> },
     /// Declare a vocabulary.
     DeclareVocabulary {
         request: Box<VocabularyRequest>,

@@ -169,7 +169,9 @@ enum Command {
         /// vocabulary, view or view group entry is `{ "name", "body" }`, because its name goes
         /// in the route's path. A vocabulary entry also has `values`, the body for `PATCH
         /// /control/vocabularies/{name}/values`, or `values_source`, the `[sources]` name its
-        /// values are read from. Values read from a source are not printed.
+        /// values are read from. Values read from a source are not printed. Where the
+        /// declaration writes `[shards]`, the object also has `shards`, the body for `PUT
+        /// /control/shards`.
         #[arg(long)]
         payloads: bool,
     },
@@ -1431,6 +1433,7 @@ fn main() -> ExitCode {
                 layers: config.layers,
                 layer_inputs: acquired.layers,
                 scoped_layers,
+                shard_size: config.shard_size,
             };
             let observer = StageTimings {
                 print: stage_timings,

@@ -202,7 +202,7 @@ impl Executor {
         next: &mut mosaica_store::manifest::SegmentsManifest,
         fold: Option<FoldDerived<'_>>,
     ) -> Result<(), ManifestCommitRefused> {
-        self.write_live_state(next, partition_data.shard_size, fold.is_some());
+        self.write_live_state(next, fold.is_some());
         if let Some(fold) = &fold {
             next.only_shard_mut().held_entities.push(fold.freed.clone());
         }
@@ -267,13 +267,13 @@ impl Executor {
     /// The high-water mark is the allocator's, not the highest entity a segment holds: an item
     /// deleted before its flush holds no row, and once the log records naming it are reclaimed,
     /// only this keeps its entity id, and so its `mosaica_id`, from being issued again.
-    fn write_live_state(&self, manifest: &mut SegmentsManifest, shard_size: u64, fold: bool) {
+    fn write_live_state(&self, manifest: &mut SegmentsManifest, fold: bool) {
         let registry = self.live.registry_for_publication();
         let shard = self.live.only_shard();
         let record = manifest.only_shard_mut();
         record.high_water = record.high_water.max(shard.high_water());
         (record.free_entities, record.held_entities) = shard.freed();
-        manifest.shards.size = shard_size;
+        manifest.shards.size = shard.size();
         let partition = &mut manifest.partition;
         partition.entity_id_low_water = partition.entity_id_low_water.min(registry.low_water);
         partition.layers = registry.layers;

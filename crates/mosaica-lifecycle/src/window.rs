@@ -548,6 +548,14 @@ fn tally(pending: &[PendingItem]) -> FragmentationTally {
     t
 }
 
+/// The ids an entry's `rows` and its `edits` edits take at the window's close, as `(edits, new
+/// items)`: one for each edit, and one for each row that creates an item. A row joining an item
+/// takes none.
+pub fn wanted(rows: &[UnallocatedRow], edits: usize) -> (u64, u64) {
+    let items = rows.iter().filter(|row| row.join.is_none()).count();
+    (edits as u64, items as u64)
+}
+
 /// The open commit window.
 pub struct CommitWindow<W> {
     entries: Vec<WindowEntry<W>>,
@@ -560,6 +568,8 @@ pub struct CommitWindow<W> {
     entities: FxHashSet<EntityId>,
     keys: FxHashSet<(u16, u128)>,
     rows: usize,
+    /// The edits and the new items the entries take ids for ([`wanted`]).
+    wanted: (u64, u64),
     /// When this window opened. Read by the executor to time the window's service, and by nothing
     /// else: **there is no age bound and no timer**. A window closes on its row bound or on the work
     /// queue being observed empty; the age bound the specification mentions is the safety cap on a
@@ -579,6 +589,7 @@ impl<W> CommitWindow<W> {
             entities: FxHashSet::default(),
             keys: FxHashSet::default(),
             rows: 0,
+            wanted: (0, 0),
             opened_at: Instant::now(),
             seq,
         }
@@ -613,6 +624,12 @@ impl<W> CommitWindow<W> {
 
     pub fn seq(&self) -> u64 {
         self.seq
+    }
+
+    /// The edits and the new items this window's entries take ids for at its close, which
+    /// [`Allocator::room`] is asked about before another entry joins.
+    pub fn wanted(&self) -> (u64, u64) {
+        self.wanted
     }
 
     pub fn opened_at(&self) -> Instant {
@@ -666,6 +683,8 @@ impl<W> CommitWindow<W> {
         self.entities.extend(claims.entities);
         self.keys.extend(claims.keys);
         self.rows += entry.rows.len() + entry.edits.iter().map(|e| e.rows.len()).sum::<usize>();
+        let (edits, items) = wanted(&entry.rows, entry.edits.len());
+        self.wanted = (self.wanted.0 + edits, self.wanted.1 + items);
         self.entries.push(entry);
     }
 
@@ -979,6 +998,34 @@ mod tests {
         assert!(!w.conflicts(&WindowClaims::of(&[row(&[1])], [], vec![(2, 98), (3, 99)])));
     }
 
+    /// A window counts the ids its entries take: one per edit and per row creating an item, and
+    /// none for a row joining one.
+    #[test]
+    fn a_window_counts_the_ids_its_entries_take() {
+        let mut w: CommitWindow<&'static str> = CommitWindow::new(0);
+        assert_eq!(w.wanted(), (0, 0));
+        let joining = UnallocatedRow {
+            join: Some(EntityId::new(7)),
+            ..row(&[1])
+        };
+        push(&mut w, entry("a", vec![row(&[1]), joining, row(&[2])]));
+        let mut edited = entry("b", vec![row(&[3])]);
+        edited.edits.push(UnallocatedEdit {
+            old: EntityId::new(5),
+            number: EntityId::new(5),
+            rows: vec![row(&[4]), row(&[4])],
+        });
+        push(&mut w, edited);
+        assert_eq!(w.wanted(), (1, 3));
+        let mut alloc = Allocator::new(0);
+        w.allocate(&mut alloc, |e| e.raw()).unwrap();
+        assert_eq!(
+            alloc.high_water(),
+            4,
+            "what the window counted is what it took"
+        );
+    }
+
     /// The `Held` lookup: the batch id, the window's own sequence number, and **the hash the
     /// entry was admitted under** — which is what decides join versus 409.
     #[test]
@@ -1180,7 +1227,7 @@ mod tests {
         push(&mut w, entry("a", vec![row(&[1]), row(&[1])]));
         let mut alloc = Allocator::new(u32::MAX as u64 - 1);
         let err = w.allocate(&mut alloc, |e| e.raw());
-        let Err((AllocError::Exhausted { .. }, waiters)) = err else {
+        let Err((AllocError::Full(_), waiters)) = err else {
             panic!("a window past the u32 ceiling must be refused");
         };
         assert_eq!(alloc.high_water(), u32::MAX as u64 - 1);

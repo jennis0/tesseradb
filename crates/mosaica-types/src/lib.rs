@@ -4,7 +4,10 @@ pub use identity::{
     IDENTITY_ROUNDS,
 };
 mod shard;
-pub use shard::{ShardId, ShardRow, SHARD_SIZE_DEFAULT};
+pub use shard::{
+    check_room, check_shard_size, ShardFull, ShardId, ShardLimit, ShardRow, ShardSizeError,
+    SHARD_SIZE_DEFAULT,
+};
 
 /// The process's own memory — the allocator's retention and the kernel's resident figures.
 ///

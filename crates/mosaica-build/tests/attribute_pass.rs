@@ -265,6 +265,7 @@ fn args(dir: &Path, out: PathBuf) -> BuildArgs {
         attribute_sources: mosaica_build::config::AttributeSource::over(attributes, &schema),
         out,
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         layers: Vec::new(),
