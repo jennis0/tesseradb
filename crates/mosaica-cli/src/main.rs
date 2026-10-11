@@ -1600,7 +1600,7 @@ fn main() -> ExitCode {
                             report.unique_entries,
                             report.edited_pairs,
                             report.edited_rows,
-                            report.reissued_numbers,
+                            report.raised_numbers,
                             report.retired_numbers
                         );
                         ExitCode::SUCCESS

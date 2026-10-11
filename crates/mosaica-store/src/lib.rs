@@ -49,6 +49,16 @@ pub const SEGMENT_FILES: [&str; 5] = [
     bands::BANDS_FILE,
 ];
 
+/// The little-endian `u32` at byte `at` of `bytes`.
+pub(crate) fn le_u32(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
+}
+
+/// The little-endian `u64` at byte `at` of `bytes`.
+pub(crate) fn le_u64(bytes: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(bytes[at..at + 8].try_into().expect("eight bytes"))
+}
+
 pub use entity_terms::{
     coalesce_entity_terms_extents, EntityTerms, EntityTermsExtentPaths, EntityTermsStack,
     EntityTermsWriter, ENTITY_TERMS_BASES_FILE, ENTITY_TERMS_BLOCK_SHIFT, ENTITY_TERMS_DIR,

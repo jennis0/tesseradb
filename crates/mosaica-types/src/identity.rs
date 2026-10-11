@@ -14,9 +14,7 @@
 //! required here). Do not change the round count, the round function, the packing or the
 //! key schedule: see the memo §1.
 //!
-//! An item's high half is [`ItemHigh`]: from the most significant bit, a kind bit of 0, the
-//! shard in 19 bits and the item's [`Tenancy`] in 12. The low half is the item's number, the
-//! entity id it holds. An identifier whose kind bit is 1 names no item.
+//! An item's high half is an [`ItemHigh`]; an identifier whose kind bit is 1 names no item.
 
 use crate::EntityId;
 
@@ -27,7 +25,7 @@ pub const IDENTITY_ROUNDS: u32 = 8;
 /// Identifies the construction, as recorded in MANIFEST's `identity.construction` field.
 pub const IDENTITY_CONSTRUCTION: &str = "feistel-splitmix64-v1";
 
-/// Errors from key parsing and from the checked `high ‖ entity_id -> mosaica_id` conversion.
+/// Errors from key parsing and from the checked `high ‖ number -> mosaica_id` conversion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityError {
     /// The hex string was not exactly 32 lowercase hexadecimal characters.
@@ -175,10 +173,16 @@ impl ItemHigh {
     }
 
     pub fn pack(self) -> Result<u32, IdentityError> {
-        if self.shard >= Self::SHARD_LIMIT {
-            return Err(IdentityError::ShardOutOfRange { shard: self.shard });
-        }
+        Self::check_shard(self.shard)?;
         Ok((self.shard << Tenancy::BITS) | self.tenancy.0 as u32)
+    }
+
+    /// Refuses a shard id of [`ItemHigh::SHARD_LIMIT`] or more.
+    pub fn check_shard(shard: u32) -> Result<(), IdentityError> {
+        if shard >= Self::SHARD_LIMIT {
+            return Err(IdentityError::ShardOutOfRange { shard });
+        }
+        Ok(())
     }
 
     /// The item high half packed in `high`, or `None` when its kind bit is set and it names
@@ -294,16 +298,14 @@ impl IdentityKey {
     }
 
     /// The `mosaica_id` of the item at `high` holding `entity` as its number. Refuses a shard
-    /// [`ItemHigh::pack`] refuses, and an entity above `u32::MAX` (plan Important I-1, memo
-    /// §1.8): a truncating cast would let two entities differing only above bit 32 share a
-    /// `mosaica_id` and make `invert` return the wrong entity.
+    /// [`ItemHigh::pack`] refuses, and an entity above `u32::MAX`, which a truncating cast
+    /// would let collide.
     pub fn forward(&self, high: ItemHigh, entity: EntityId) -> Result<MosaicaId, IdentityError> {
         self.forward_raw(high.pack()?, entity)
     }
 
     /// The item high half and number `id` was formed from, or `None` when `id` names no item.
-    /// Every `u64` inverts (memo §1.7); the caller compares the shard and the tenancy with the
-    /// ones it holds.
+    /// The caller compares the shard and the tenancy with its own.
     pub fn invert(&self, id: MosaicaId) -> Option<(ItemHigh, EntityId)> {
         let (high, entity) = self.invert_raw(id);
         Some((ItemHigh::unpack(high)?, entity))
@@ -552,8 +554,7 @@ mod tests {
 
     #[test]
     fn the_shard_and_the_tenancy_separate_identity_spaces() {
-        // Every caller in this build passes shard 0, and every number is at tenancy 0, so
-        // this keeps both fields from being tidied out of the input encoding.
+        // This keeps the shard and the tenancy from being tidied out of the input encoding.
         let key = IdentityKey::from_hex(CANONICAL_KEY).unwrap();
         let shard_one = ItemHigh::new(1, Tenancy::ZERO);
         let tenancy_one = ItemHigh::new(0, Tenancy::ZERO.next().unwrap());

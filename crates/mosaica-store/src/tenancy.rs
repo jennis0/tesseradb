@@ -32,9 +32,10 @@ use std::path::{Path, PathBuf};
 
 use croaring::{Bitmap, BitmapView, Frozen};
 use memmap2::Mmap;
-use mosaica_types::{EntityId, Tenancy};
+use mosaica_types::{EntityId, IdentityKey, MosaicaId, Tenancy};
 
-use crate::error::{Result, StoreError};
+use crate::error::{io, Result, StoreError};
+use crate::{le_u32, le_u64};
 
 /// How many bits a tenancy has, and so how many bitmaps the index holds.
 pub const TENANCY_BITS: usize = Tenancy::BITS as usize;
@@ -58,19 +59,21 @@ fn malformed(path: &Path, detail: impl std::fmt::Display) -> StoreError {
     }
 }
 
-fn io(path: &Path) -> impl Fn(std::io::Error) -> StoreError + '_ {
-    move |source| StoreError::Io {
-        path: path.to_path_buf(),
-        source,
+fn at(raw: u16) -> Tenancy {
+    Tenancy::new(raw).expect("twelve bits hold at most the highest tenancy")
+}
+
+/// The bits that put each `(number, tenancy)` at its tenancy.
+pub fn bits_of(tenancies: &[(u32, u16)]) -> [Bitmap; TENANCY_BITS] {
+    let mut bits: [Bitmap; TENANCY_BITS] = Default::default();
+    for &(number, tenancy) in tenancies {
+        for (bit, numbers) in bits.iter_mut().enumerate() {
+            if tenancy & (1 << bit) != 0 {
+                numbers.add(number);
+            }
+        }
     }
-}
-
-fn le_u32(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
-}
-
-fn le_u64(bytes: &[u8], at: usize) -> u64 {
-    u64::from_le_bytes(bytes[at..at + 8].try_into().expect("eight bytes"))
+    bits
 }
 
 /// Write each of `bits` that holds a number to its own file in `dir`, fsynced, and return the bits
@@ -168,8 +171,7 @@ impl MappedBit {
         }
         // SAFETY: the mapping is page-aligned and the payload starts 32 bytes in, so the pointer
         // is 32-byte aligned, and its length is the one the writer recorded. That the bytes are a
-        // frozen bitmap rests on the digest sweep (module doc). The view's lifetime is the
-        // mapping's: both are moved into the value returned, which drops the view first.
+        // frozen bitmap rests on the digest sweep (module doc).
         let bytes: &'static [u8] =
             unsafe { std::mem::transmute::<&[u8], &'static [u8]>(&map[HEADER_LEN..]) };
         let view = unsafe { BitmapView::deserialize::<Frozen>(bytes) };
@@ -236,11 +238,6 @@ impl TenancyIndex {
         Ok(index)
     }
 
-    /// Whether every number is at tenancy 0.
-    pub fn is_empty(&self) -> bool {
-        self.maximum.is_none()
-    }
-
     /// The numbers whose tenancy has bit `bit` set, or `None` where none has.
     pub fn bit(&self, bit: usize) -> Option<&Bitmap> {
         self.bits.get(bit)?.as_ref().map(|mapped| &*mapped.view)
@@ -251,13 +248,31 @@ impl TenancyIndex {
         let Ok(number) = u32::try_from(number.raw()) else {
             return Tenancy::ZERO;
         };
+        self.probe(|mapped| mapped.view.contains(number))
+    }
+
+    /// The tenancy whose bits are those the index holds and `holds` answers for.
+    fn probe(&self, holds: impl Fn(&MappedBit) -> bool) -> Tenancy {
         let mut raw = 0u16;
         for (bit, mapped) in self.bits.iter().enumerate() {
-            if mapped.as_ref().is_some_and(|m| m.view.contains(number)) {
+            if mapped.as_ref().is_some_and(&holds) {
                 raw |= 1 << bit;
             }
         }
-        Tenancy::new(raw).expect("twelve bits hold at most the highest tenancy")
+        at(raw)
+    }
+
+    /// The number `id` names in `shard`, and whether `id` carries the tenancy the index holds for
+    /// that number; `None` where `id` names no item or an item of another shard. The index is read
+    /// for every identifier of `shard`.
+    pub fn number_named(
+        &self,
+        key: &IdentityKey,
+        shard: u32,
+        id: MosaicaId,
+    ) -> Option<(EntityId, bool)> {
+        let (high, number) = key.invert(id)?;
+        (high.shard == shard).then(|| (number, self.of(number) == high.tenancy))
     }
 
     /// The tenancy of each of `numbers`, in their order. A number above every number the index
@@ -273,18 +288,10 @@ impl TenancyIndex {
         };
         numbers
             .map(|number| match u32::try_from(number.raw()) {
-                Ok(number) if number <= maximum => {
-                    let mut raw = 0u16;
-                    for (bit, mapped) in self.bits.iter().enumerate() {
-                        let Some(mapped) = mapped else { continue };
-                        if (mapped.minimum..=mapped.maximum).contains(&number)
-                            && mapped.view.contains(number)
-                        {
-                            raw |= 1 << bit;
-                        }
-                    }
-                    Tenancy::new(raw).expect("twelve bits hold at most the highest tenancy")
-                }
+                Ok(number) if number <= maximum => self.probe(|mapped| {
+                    (mapped.minimum..=mapped.maximum).contains(&number)
+                        && mapped.view.contains(number)
+                }),
                 _ => Tenancy::ZERO,
             })
             .collect()
@@ -293,8 +300,10 @@ impl TenancyIndex {
     /// `numbers` split by the tenancy each is at, with no entry for a tenancy holding none of
     /// them. Bitmap arithmetic, one pass over the bits the index holds.
     pub fn split(&self, numbers: &Bitmap) -> BTreeMap<Tenancy, Bitmap> {
+        if numbers.is_empty() {
+            return BTreeMap::new();
+        }
         let mut groups: Vec<(u16, Bitmap)> = vec![(0, numbers.clone())];
-        groups.retain(|(_, ids)| !ids.is_empty());
         for (bit, mapped) in self.bits.iter().enumerate() {
             let Some(mapped) = mapped else { continue };
             groups = groups
@@ -309,11 +318,7 @@ impl TenancyIndex {
         }
         groups
             .into_iter()
-            .map(|(raw, ids)| {
-                let tenancy =
-                    Tenancy::new(raw).expect("twelve bits hold at most the highest tenancy");
-                (tenancy, ids)
-            })
+            .map(|(raw, ids)| (at(raw), ids))
             .collect()
     }
 
@@ -350,23 +355,6 @@ impl TenancyIndex {
 mod tests {
     use super::*;
 
-    fn at(raw: u16) -> Tenancy {
-        Tenancy::new(raw).unwrap()
-    }
-
-    /// The bits that put each `(number, tenancy)` at its tenancy.
-    fn bits_of(tenancies: &[(u32, u16)]) -> [Bitmap; TENANCY_BITS] {
-        let mut bits: [Bitmap; TENANCY_BITS] = Default::default();
-        for &(number, tenancy) in tenancies {
-            for (bit, numbers) in bits.iter_mut().enumerate() {
-                if tenancy & (1 << bit) != 0 {
-                    numbers.add(number);
-                }
-            }
-        }
-        bits
-    }
-
     fn written(dir: &Path, bits: &[Bitmap; TENANCY_BITS]) -> TenancyIndex {
         TenancyIndex::open(&write(dir, bits).unwrap()).unwrap()
     }
@@ -378,7 +366,6 @@ mod tests {
         let files = write(dir.path(), &bits_of(&held)).unwrap();
         assert_eq!(files.len(), TENANCY_BITS, "every bit holds a number here");
         let index = TenancyIndex::open(&files).unwrap();
-        assert!(!index.is_empty());
         for (number, tenancy) in held {
             assert_eq!(index.of(EntityId::new(u64::from(number))), at(tenancy));
         }
@@ -396,7 +383,8 @@ mod tests {
             vec![(2, dir.path().join(file_name(2)))],
             "only bit 2 is written"
         );
-        assert!(TenancyIndex::open(&[]).unwrap().is_empty());
+        let opened = TenancyIndex::open(&[]).unwrap();
+        assert!((0..TENANCY_BITS).all(|bit| opened.bit(bit).is_none()));
         let none = tempfile::tempdir().unwrap();
         assert!(write(none.path(), &Default::default()).unwrap().is_empty());
         assert_eq!(TenancyIndex::default().of(EntityId::new(5)), Tenancy::ZERO);

@@ -156,8 +156,11 @@ impl Engine {
     pub fn item(&self, session: &Session, id: MosaicaId) -> Result<Option<ItemOut>> {
         let generation = self.generation.load_full();
 
+        let shard = generation.bundle.manifest.identity.shard_id;
         let Some((number, current)) =
-            crate::edited::number_and_tenancy_named(&self.identity_key, &generation, id)
+            generation
+                .tenancy
+                .number_named(&self.identity_key, shard, id)
         else {
             return Ok(None);
         };

@@ -120,7 +120,7 @@ pub struct VerifyDeepReport {
     pub edited_rows: u64,
     /// Numbers the tenancy index holds above tenancy 0, each confirmed to have been issued
     /// ([`check_tenancy`]); 0 where no number has been freed.
-    pub reissued_numbers: u64,
+    pub raised_numbers: u64,
     /// Retired numbers, each confirmed to be at the highest tenancy and to hold nothing.
     pub retired_numbers: u64,
 }
@@ -157,7 +157,7 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
         unique_entries: 0,
         edited_pairs: 0,
         edited_rows: 0,
-        reissued_numbers: 0,
+        raised_numbers: 0,
         retired_numbers: 0,
     };
 
@@ -223,13 +223,11 @@ fn check_tenancy(
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
     let manifest = &partition.manifest;
-    let mut held = croaring::Bitmap::new();
-    for bit in 0..mosaica_store::tenancy::TENANCY_BITS {
-        if let Some(numbers) = tenancy.bit(bit) {
-            held.or_inplace(numbers);
-        }
-    }
-    if let Some(number) = held.maximum() {
+    let bits: Vec<&croaring::Bitmap> = (0..mosaica_store::tenancy::TENANCY_BITS)
+        .filter_map(|bit| tenancy.bit(bit))
+        .collect();
+    let raised = croaring::Bitmap::fast_or(&bits);
+    if let Some(number) = raised.maximum() {
         if u64::from(number) >= manifest.entity_id_high_water {
             return Err(BuildError::Invalid(format!(
                 "partition {phash}: the tenancy index holds number {number}, at or above the high \
@@ -238,19 +236,20 @@ fn check_tenancy(
             )));
         }
     }
-    report.reissued_numbers += held.cardinality();
+    report.raised_numbers += raised.cardinality();
 
     let Some(retired) = manifest.retired_numbers.entities() else {
         return Err(BuildError::Invalid(format!(
             "partition {phash}: the retired numbers do not decode"
         )));
     };
-    let issuable = manifest
+    let issuable: Vec<&croaring::Bitmap> = manifest
         .held_entities
         .iter()
         .filter_map(|held| held.entities.entities())
         .chain(manifest.free_entities.entities())
-        .fold(croaring::Bitmap::new(), |all, ids| all.or(ids));
+        .collect();
+    let issuable = croaring::Bitmap::fast_or(&issuable);
     for number in retired.iter() {
         let entity = mosaica_types::EntityId::new(u64::from(number));
         let at = tenancy.of(entity);
@@ -361,6 +360,7 @@ fn check_edited_items(
 
     let key = IdentityKey::from_hex(&manifest.identity.key)
         .map_err(|e| BuildError::Invalid(format!("the manifest's identity key: {e}")))?;
+    let shard = manifest.identity.shard_id;
     let mut views: Vec<_> = partition.views.iter().collect();
     views.sort_by(|a, b| a.0.cmp(b.0));
     for (view, data) in views {
@@ -374,12 +374,8 @@ fn check_edited_items(
                         ids.len()
                     ))
                 })?;
-                let shard = manifest.identity.shard_id;
-                let Some((_, number)) =
-                    key.invert(MosaicaId::new(mosaica_id))
-                        .filter(|(high, number)| {
-                            high.shard == shard && high.tenancy == tenancy.of(*number)
-                        })
+                let Some((number, true)) =
+                    tenancy.number_named(&key, shard, MosaicaId::new(mosaica_id))
                 else {
                     return Err(BuildError::Invalid(format!(
                         "view {view}, segment {}: moved row {row}'s mosaica_id names no item of \

@@ -78,8 +78,8 @@ use mosaica_store::manifest::{
 use mosaica_store::write::{write_permutation, write_segment};
 use mosaica_store::{write_current, write_manifest_json, PairsParquetWriter};
 use mosaica_types::{
-    EntityId, IdentityKey, ItemHigh, Tenancy, TermId, BUNDLE_FORMAT, IDENTITY_CONSTRUCTION,
-    IDENTITY_ROUNDS, SMALL_TERM_THRESHOLD_DEFAULT,
+    EntityId, IdentityKey, ItemHigh, TermId, BUNDLE_FORMAT, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS,
+    SMALL_TERM_THRESHOLD_DEFAULT,
 };
 
 pub use deep::{verify_deep, VerifyDeepReport, VerifyOpts};
@@ -1123,9 +1123,7 @@ pub fn describe_refused(refused: &[RefusedRows]) -> Vec<String> {
 
 /// Argument and destination checks shared by both build implementations.
 fn validate_args(args: &BuildArgs) -> Result<()> {
-    ItemHigh::new(args.shard_id, Tenancy::ZERO)
-        .pack()
-        .map_err(BuildError::Identity)?;
+    ItemHigh::check_shard(args.shard_id).map_err(BuildError::Identity)?;
     if args.views.is_empty() {
         return Err(BuildError::Invalid(
             "this build materialises no view, so it has no coordinate system to write a row \
@@ -1574,10 +1572,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     let mut entity_ids: Vec<EntityId> = (0..n).map(EntityId::new).collect();
     let mut tiler_items: Vec<TilerItem> = Vec::with_capacity(n as usize);
     for (position, item) in staged.iter().enumerate() {
-        let entity_id = EntityId::new(position as u64);
-        let mosaica_id = args
-            .identity_key
-            .forward(ItemHigh::new(args.shard_id, Tenancy::ZERO), entity_id)?;
+        let mosaica_id = assembly::identity_of(&args.identity_key, args.shard_id, position as u32);
         tiler_items.push(TilerItem {
             mosaica_id,
             qx: item.qx,
@@ -3008,10 +3003,15 @@ fn walk_window(
             // A row an edit moved records its entity, and its `mosaica_id` is its number's, whose
             // entries in the edited items name the entity.
             let moved = recorded.is_some()
-                && identity_key
-                    .invert(mosaica_types::MosaicaId::new(id))
-                    .is_some_and(|(high, number)| {
-                        high == item(identity.tenancy.of(number))
+                && identity
+                    .tenancy
+                    .number_named(
+                        identity_key,
+                        identity.shard_id,
+                        mosaica_types::MosaicaId::new(id),
+                    )
+                    .is_some_and(|(number, current)| {
+                        current
                             && u32::try_from(number.raw()).is_ok_and(|number| {
                                 identity.edited.entities_of(&[number]).is_ok_and(|held| {
                                     held.iter().any(|(_, e)| u64::from(*e) == entity)

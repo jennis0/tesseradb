@@ -50,7 +50,7 @@ use mosaica_spatial::split32;
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_store::columns::{ColumnsFile, ColumnsPlan};
 use mosaica_store::write::{CutWriter, PagePlan, PermutationWriter};
-use mosaica_types::{EntityId, IdentityKey, ItemHigh, Tenancy};
+use mosaica_types::{EntityId, IdentityKey, ItemHigh, MosaicaId, Tenancy};
 use rayon::slice::ParallelSliceMut;
 
 use crate::column::EntityColumn;
@@ -116,18 +116,14 @@ impl RowRec {
     }
 }
 
-/// The `mosaica_id` of one entity, at tenancy 0 since a build holds every number once.
-/// **Unreachable as an error in practice** — `validate_args` refuses a shard that does not fit,
-/// and the allocator caps entity ids below `u32::MAX` (I-1), which is what makes `forward`
-/// infallible for any entity a build assigns — but `expect` rather than a fallback, because a
-/// silently wrong identity here is a silently wrong row order.
-fn identity_of(key: &IdentityKey, shard: u32, entity: u32) -> u64 {
+/// The `mosaica_id` of one entity at tenancy 0: a build gives each number to one item.
+/// `validate_args` has checked the shard, and the allocator caps entities below `u32::MAX`.
+pub(crate) fn identity_of(key: &IdentityKey, shard: u32, entity: u32) -> MosaicaId {
     key.forward(
         ItemHigh::new(shard, Tenancy::ZERO),
         EntityId::new(entity as u64),
     )
     .expect("the shard is checked and entity ids are capped below u32::MAX (I-1)")
-    .raw()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -552,12 +548,7 @@ impl PartitionedRows {
 }
 
 fn priority_of(key: &IdentityKey, shard: u32, entity: u32) -> u16 {
-    key.forward(
-        ItemHigh::new(shard, Tenancy::ZERO),
-        EntityId::new(entity as u64),
-    )
-    .expect("the shard is checked and entity ids are capped below u32::MAX (I-1)")
-    .priority()
+    identity_of(key, shard, entity).priority()
 }
 
 /// Steps 3 to 6: the buckets in Morton order, the permutation, the render tail and the framing
@@ -637,7 +628,7 @@ pub(crate) fn write_segment(
                     morton: read(0),
                     entity,
                     residual: read(4),
-                    identity: identity_of(job.identity_key, job.shard_id, entity),
+                    identity: identity_of(job.identity_key, job.shard_id, entity).raw(),
                 }
             })
             .collect();

@@ -302,21 +302,9 @@ pub(crate) fn number_named(
     generation: &Generation,
     id: MosaicaId,
 ) -> Option<EntityId> {
-    let (number, current) = number_and_tenancy_named(key, generation, id)?;
-    current.then_some(number)
-}
-
-/// The number `id` names in `generation`'s shard, and whether `id` carries the tenancy the index
-/// holds for that number; `None` where `id` names no item or an item of another shard. The index
-/// is read for every identifier that reaches it.
-pub(crate) fn number_and_tenancy_named(
-    key: &IdentityKey,
-    generation: &Generation,
-    id: MosaicaId,
-) -> Option<(EntityId, bool)> {
-    let (high, number) = key.invert(id)?;
     let shard = generation.bundle.manifest.identity.shard_id;
-    (high.shard == shard).then(|| (number, generation.tenancy.of(number) == high.tenancy))
+    let (number, current) = generation.tenancy.number_named(key, shard, id)?;
+    current.then_some(number)
 }
 
 /// The `mosaica_id` of the item holding each of `numbers` as its number, at the tenancy the index
@@ -434,7 +422,7 @@ mod tests {
         );
         assert_eq!(named(id(&key, 1, 3, 7)), None, "another shard's");
         assert_eq!(
-            number_and_tenancy_named(&key, &generation, id(&key, 0, 2, 7)),
+            generation.tenancy.number_named(&key, 0, id(&key, 0, 2, 7)),
             Some((EntityId::new(7), false))
         );
     }

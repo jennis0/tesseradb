@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_spatial::Projection;
 use mosaica_types::layer::{RegisteredLayer, ServingLayout};
-use mosaica_types::{ItemHigh, Tenancy, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+use mosaica_types::{ItemHigh, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
 use crate::error::{Result, StoreError};
 
@@ -356,12 +356,9 @@ impl IdentityDescriptor {
                 ),
             });
         }
-        ItemHigh::new(self.shard_id, Tenancy::ZERO)
-            .pack()
-            .map_err(|e| StoreError::InvalidIdentity {
-                detail: e.to_string(),
-            })?;
-        Ok(())
+        ItemHigh::check_shard(self.shard_id).map_err(|e| StoreError::InvalidIdentity {
+            detail: e.to_string(),
+        })
     }
 }
 
@@ -1386,16 +1383,6 @@ pub struct HeldEntities {
     pub entities: EntitySet,
 }
 
-/// One file of the tenancy index in [`SegmentsManifest::tenancy_index`]: the numbers whose tenancy
-/// has bit `bit` set.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TenancyBit {
-    pub bit: u32,
-    /// Prefix-relative.
-    pub path: String,
-}
-
 impl Default for EntitySet {
     fn default() -> Self {
         EntitySet::of(&croaring::Bitmap::new())
@@ -1419,6 +1406,16 @@ impl<'de> Deserialize<'de> for EntitySet {
         let entities = EntitySet::decode(&encoded);
         Ok(EntitySet { encoded, entities })
     }
+}
+
+/// One file of the tenancy index in [`SegmentsManifest::tenancy_index`]: the numbers whose tenancy
+/// has bit `bit` set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TenancyBit {
+    pub bit: u32,
+    /// Prefix-relative.
+    pub path: String,
 }
 
 /// One entry of `vocabulary_extensions`: the bindings one named vocabulary has acquired since the

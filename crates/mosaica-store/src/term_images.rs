@@ -81,6 +81,7 @@ use mosaica_types::TermId;
 
 use crate::derived::{PostingSlice, PostingWalk};
 use crate::permutation::{ProjectScratch, RowSpace};
+use crate::{le_u32, le_u64};
 
 /// The cut an image is kept above: **more than thirty rows per Roaring container** (owner ruling,
 /// 2026-09-16, from the thresholds compared in the evidence memo §2).
@@ -241,14 +242,6 @@ impl TermImageEntry {
             + 4 * u64::from(self.runs)
             + 2 * u64::from(self.arrays)
     }
-}
-
-fn le_u32(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
-}
-
-fn le_u64(bytes: &[u8], at: usize) -> u64 {
-    u64::from_le_bytes(bytes[at..at + 8].try_into().expect("eight bytes"))
 }
 
 fn align_up(at: u64) -> u64 {
@@ -1194,8 +1187,8 @@ pub fn chooser_inputs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use mosaica_types::EntityId;
+    use std::sync::Arc;
 
     use crate::permutation::Permutation;
 

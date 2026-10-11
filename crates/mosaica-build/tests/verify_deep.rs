@@ -465,7 +465,7 @@ fn a_row_is_checked_at_its_numbers_tenancy_in_the_index() {
     verify(&root).expect("the row is at the tenancy the index holds for its number");
     verify_with_window_rows(&root, 0).expect("on the partition route too");
     let deep = verify_deep(&root, &VerifyOpts::default()).expect("and verifies deep");
-    assert_eq!((deep.reissued_numbers, deep.retired_numbers), (1, 0));
+    assert_eq!((deep.raised_numbers, deep.retired_numbers), (1, 0));
 
     edit_side_manifest(&root, |m| m["tenancy_index"] = serde_json::json!([]));
     let err = verify(&root).expect_err("without the index the row's tenancy is not its number's");
