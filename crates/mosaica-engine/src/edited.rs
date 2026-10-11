@@ -19,7 +19,7 @@
 //! not read for it.
 
 use mosaica_store::StoreError;
-use mosaica_types::{EntityId, IdentityError, IdentityKey, ItemHigh, MosaicaId, Tenancy};
+use mosaica_types::{EntityId, IdentityError, IdentityKey, ItemHigh, MosaicaId, ShardId, Tenancy};
 use rustc_hash::FxHashMap;
 
 use crate::Generation;
@@ -346,7 +346,7 @@ pub(crate) fn ids_of_numbers(
 /// The `mosaica_id` of the item holding `number` at `tenancy` in `shard`.
 pub(crate) fn id_at(
     key: &IdentityKey,
-    shard: u32,
+    shard: ShardId,
     tenancy: Tenancy,
     number: EntityId,
 ) -> Result<MosaicaId, IdentityError> {
@@ -356,7 +356,7 @@ pub(crate) fn id_at(
 /// The entity `id` names in `shard` as [`crate::Engine::artifact_id`] forms it, or `None` where it
 /// names none.
 /// Whether that entity is an artifact is the caller's question.
-pub(crate) fn artifact_named(key: &IdentityKey, shard: u32, id: MosaicaId) -> Option<EntityId> {
+pub(crate) fn artifact_named(key: &IdentityKey, shard: ShardId, id: MosaicaId) -> Option<EntityId> {
     let (high, entity) = key.invert(id)?;
     (high == ItemHigh::new(shard, Tenancy::ZERO)).then_some(entity)
 }
@@ -364,7 +364,7 @@ pub(crate) fn artifact_named(key: &IdentityKey, shard: u32, id: MosaicaId) -> Op
 impl crate::Engine {
     /// The `mosaica_id` of the artifact or layer `entity` in `shard`, or `None` where `entity`
     /// lies outside the identity space.
-    pub(crate) fn artifact_id(&self, shard: u32, entity: EntityId) -> Option<MosaicaId> {
+    pub(crate) fn artifact_id(&self, shard: ShardId, entity: EntityId) -> Option<MosaicaId> {
         id_at(&self.identity_key, shard, Tenancy::ZERO, entity).ok()
     }
 
@@ -411,7 +411,7 @@ mod tests {
     }
 
     fn id(key: &IdentityKey, shard: u32, tenancy: u16, number: u64) -> MosaicaId {
-        let high = ItemHigh::new(shard, Tenancy::new(tenancy).unwrap());
+        let high = ItemHigh::new(ShardId::new(shard).unwrap(), Tenancy::new(tenancy).unwrap());
         key.forward(high, EntityId::new(number)).unwrap()
     }
 
@@ -437,7 +437,9 @@ mod tests {
         );
         assert_eq!(named(id(&key, 1, 3, 7)), None, "another shard's");
         assert_eq!(
-            generation.tenancy.number_named(&key, 0, id(&key, 0, 2, 7)),
+            generation
+                .tenancy
+                .number_named(&key, ShardId::ZERO, id(&key, 0, 2, 7)),
             Some((EntityId::new(7), false))
         );
     }

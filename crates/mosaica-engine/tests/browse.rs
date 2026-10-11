@@ -46,7 +46,7 @@ use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource, SuppliedContent, SuppliedRequirement,
 };
-use mosaica_types::{EntityId, MosaicaId};
+use mosaica_types::{EntityId, MosaicaId, ShardId};
 
 const N: u64 = 900;
 const LAYER: &str = "clusters/tree";
@@ -208,7 +208,7 @@ fn fixture(criterion: Option<ExistenceCriterion>) -> Fixture {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

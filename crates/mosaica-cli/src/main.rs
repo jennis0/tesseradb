@@ -8,7 +8,7 @@ mod records;
 
 use clap::{Parser, Subcommand};
 use mosaica_spatial::Bounds;
-use mosaica_types::IdentityKey;
+use mosaica_types::{IdentityKey, ShardId};
 
 #[cfg(test)]
 mod reference;
@@ -1423,7 +1423,7 @@ fn main() -> ExitCode {
                 limit,
                 strict,
                 identity_key: IdentityKey::generate(),
-                shard_id: 0,
+                shard_id: ShardId::ZERO,
                 emit_oracle_pairs: !no_oracle_pairs,
                 batch_items,
                 memory_budget,

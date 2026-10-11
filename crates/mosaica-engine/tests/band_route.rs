@@ -27,7 +27,7 @@ use mosaica_engine::{Engine, EngineConfig};
 use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
 use mosaica_lifecycle::UnallocatedRow;
 use mosaica_spatial::tiler::ScalarType;
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, ShardId};
 
 /// Enough rows that the bands answer tiles down to zoom 3 under [`config`]'s threshold.
 const ROWS: u64 = 60_000;
@@ -169,7 +169,7 @@ fn build_fixture(root: &Path) {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

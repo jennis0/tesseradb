@@ -583,7 +583,7 @@ fn args(dir: &Path, declaration: &str, out: &Path) -> BuildArgs {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
+        shard_id: mosaica_types::ShardId::ZERO,
         layers,
         layer_inputs: acquired.layers,
         scoped_layers: Default::default(),

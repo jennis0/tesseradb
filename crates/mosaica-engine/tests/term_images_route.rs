@@ -49,7 +49,7 @@ use common::*;
 use mosaica_build::{build, BuildArgs};
 use mosaica_engine::{Engine, EngineConfig, ProjectionRoute, ViewportRequest};
 use mosaica_lifecycle::{ChangeOp, UnallocatedRow};
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, ShardId};
 
 const WAIT: Duration = Duration::from_secs(60);
 
@@ -259,7 +259,7 @@ fn build_fixture(out: &Path, points: &Path, pairs: &Path) {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

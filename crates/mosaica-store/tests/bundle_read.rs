@@ -19,7 +19,7 @@ use mosaica_store::manifest::{
 };
 use mosaica_store::write::{write_permutation, write_segment};
 use mosaica_store::{open_bundle, tile_ranges, StoreError};
-use mosaica_types::{EntityId, MosaicaId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+use mosaica_types::{EntityId, MosaicaId, ShardId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
 /// A synthetic `mosaica_id`-shaped value for test fixtures: full splitmix64 output over a
 /// seed, so its top 16 bits are a `priority` prefix like any real `mosaica_id` (contracts
@@ -139,7 +139,7 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
             construction: IDENTITY_CONSTRUCTION.to_string(),
             rounds: IDENTITY_ROUNDS,
             key: "0123456789abcdef0123456789abcdef".to_string(),
-            shard_id: 0,
+            shard_id: ShardId::ZERO,
         },
         groups: Vec::new(),
         views: vec![ViewDescriptor {

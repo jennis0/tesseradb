@@ -34,7 +34,7 @@ use sha2::{Digest, Sha256};
 
 use mosaica_spatial::fixed32;
 use mosaica_spatial::tiler::{sort_batch, ScalarType, ScalarValue, TilerItem};
-use mosaica_types::{EntityId, IdentityKey, ItemHigh, MosaicaId, Tenancy};
+use mosaica_types::{EntityId, IdentityKey, ItemHigh, MosaicaId, ShardId, Tenancy};
 
 use crate::error::{Result, StoreError};
 use crate::manifest::{FileDigest, Quantisation, SegmentDescriptor};
@@ -82,7 +82,7 @@ pub struct FlushInput<'a> {
     pub rows: Vec<FlushRow>,
     pub quantisation: Quantisation,
     pub identity_key: &'a IdentityKey,
-    pub shard_id: u32,
+    pub shard_id: ShardId,
     pub scalar_schema: &'a [(String, ScalarType)],
     /// The indexed columns the bands copy ([`crate::bands::copied_beside`]).
     pub indexed: &'a [(String, ScalarType)],
@@ -441,7 +441,7 @@ mod tests {
                 rows,
                 quantisation: quantisation(),
                 identity_key: &key,
-                shard_id: 0,
+                shard_id: ShardId::ZERO,
                 scalar_schema: &schema,
                 indexed: &[],
                 row_base: 0,
@@ -526,7 +526,7 @@ mod tests {
         let key = IdentityKey::from_hex(KEY_HEX).unwrap();
         let named = |tenancy: u16, number: u64| {
             key.forward(
-                ItemHigh::new(0, Tenancy::new(tenancy).unwrap()),
+                ItemHigh::new(ShardId::ZERO, Tenancy::new(tenancy).unwrap()),
                 EntityId::new(number),
             )
             .unwrap()

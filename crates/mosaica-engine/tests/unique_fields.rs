@@ -31,7 +31,7 @@ use mosaica_lifecycle::command::UnallocatedRow;
 use mosaica_lifecycle::wal::WalScalar;
 use mosaica_lifecycle::{ChangeOp, ExecError};
 use mosaica_types::layer::LayerScope;
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, ShardId};
 
 const N: u64 = 90;
 const VIEWPORT: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
@@ -172,7 +172,7 @@ fn fixture_of(unique: bool, views: &[&str]) -> Fixture {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

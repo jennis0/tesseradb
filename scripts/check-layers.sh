@@ -69,7 +69,7 @@ fi
 deny mosaica-engine tokio
 deny mosaica-store tokio
 # I4: no ID conversions in types
-if grep -rn "impl From" crates/mosaica-types/src/ | grep -E "EntityId|RowId|TermId|AttrLocalId|MosaicaId"; then
+if grep -rn "impl From" crates/mosaica-types/src/ | grep -E "EntityId|RowId|TermId|AttrLocalId|MosaicaId|ShardId|ShardRow"; then
   echo "FORBIDDEN: ID conversion in mosaica-types"; fail=1
 fi
 

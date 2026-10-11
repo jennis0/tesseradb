@@ -37,7 +37,7 @@ use mosaica_engine::ViewportRequest;
 use mosaica_lifecycle::command::UnallocatedRow;
 use mosaica_lifecycle::wal::WalScalar;
 use mosaica_store::read::open_bundle;
-use mosaica_types::AttrLocalId;
+use mosaica_types::{AttrLocalId, ShardId};
 
 const N: u64 = 60;
 /// The whole declared extent, so a depth-0 request covers every item.
@@ -279,7 +279,7 @@ fn fixture() -> Fixture {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

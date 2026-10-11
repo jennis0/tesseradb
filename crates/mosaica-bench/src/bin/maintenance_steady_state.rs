@@ -268,7 +268,7 @@ fn build_fixture(tmp: &Path, out: &Path) -> Result<(), Box<dyn std::error::Error
         limit: None,
         strict: false,
         identity_key: mosaica_types::IdentityKey::from_hex(KEY_HEX).expect("key"),
-        shard_id: 0,
+        shard_id: mosaica_types::ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

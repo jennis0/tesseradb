@@ -78,8 +78,8 @@ use mosaica_store::manifest::{
 use mosaica_store::write::{write_permutation, write_segment};
 use mosaica_store::{write_current, write_manifest_json, PairsParquetWriter};
 use mosaica_types::{
-    EntityId, IdentityKey, ItemHigh, TermId, BUNDLE_FORMAT, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS,
-    SMALL_TERM_THRESHOLD_DEFAULT,
+    EntityId, IdentityKey, ItemHigh, ShardId, TermId, BUNDLE_FORMAT, IDENTITY_CONSTRUCTION,
+    IDENTITY_ROUNDS, SMALL_TERM_THRESHOLD_DEFAULT,
 };
 
 pub use deep::{verify_deep, VerifyDeepReport, VerifyOpts};
@@ -297,7 +297,7 @@ pub struct BuildArgs {
     /// the same key to both.
     pub identity_key: IdentityKey,
     /// The §13.3 row-range shard this build produces. Always 0: there is no sharding.
-    pub shard_id: u32,
+    pub shard_id: ShardId,
     /// The config's `[[layer]]` blocks, compiled, in declaration order — which is registration
     /// order, a layer having to follow every layer it names in `depends_on`. Empty for a bundle
     /// with no layers, which is what every build wrote before this input existed.
@@ -1123,7 +1123,6 @@ pub fn describe_refused(refused: &[RefusedRows]) -> Vec<String> {
 
 /// Argument and destination checks shared by both build implementations.
 fn validate_args(args: &BuildArgs) -> Result<()> {
-    ItemHigh::check_shard(args.shard_id).map_err(BuildError::Identity)?;
     if args.views.is_empty() {
         return Err(BuildError::Invalid(
             "this build materialises no view, so it has no coordinate system to write a row \
@@ -2946,7 +2945,7 @@ fn claim_rows(
 #[derive(Clone, Copy)]
 struct Identity<'a> {
     key: &'a IdentityKey,
-    shard_id: u32,
+    shard_id: ShardId,
     edited: &'a mosaica_store::edited::EditedIndex,
     tenancy: &'a mosaica_store::tenancy::TenancyIndex,
 }

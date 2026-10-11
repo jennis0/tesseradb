@@ -33,7 +33,7 @@ use mosaica_build::{build, BuildArgs, ViewArgs};
 use mosaica_engine::viewport::ViewportRequest;
 use mosaica_engine::{Engine, EngineConfig};
 use mosaica_spatial::{Bounds, Projection};
-use mosaica_types::IdentityKey;
+use mosaica_types::{IdentityKey, ShardId};
 
 const N: u64 = 1_000_000;
 const COLUMNS: [&str; 4] = ["a", "b", "c", "d"];
@@ -131,7 +131,7 @@ fn bundle(dir: &Path, absent_every: Option<u64>) -> Engine {
         limit: None,
         strict: false,
         identity_key: IdentityKey::from_hex(KEY_HEX).unwrap(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

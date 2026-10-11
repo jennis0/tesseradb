@@ -24,7 +24,7 @@ use mosaica_store::manifest_write::{write_current, write_manifest_json};
 use mosaica_store::write::{write_permutation, write_segment};
 use mosaica_store::write_segments_manifest;
 use mosaica_store::{open_bundle, StoreError};
-use mosaica_types::{EntityId, MosaicaId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+use mosaica_types::{EntityId, MosaicaId, ShardId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
 /// A synthetic `mosaica_id`-shaped value for test fixtures — see `bundle_read.rs`'s copy of the
 /// same helper for why full splitmix64 output rather than a raw seed.
@@ -140,7 +140,7 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
             construction: IDENTITY_CONSTRUCTION.to_string(),
             rounds: IDENTITY_ROUNDS,
             key: "0123456789abcdef0123456789abcdef".to_string(),
-            shard_id: 0,
+            shard_id: ShardId::ZERO,
         },
         groups: Vec::new(),
         views: vec![ViewDescriptor {

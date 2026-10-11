@@ -25,7 +25,7 @@ use mosaica_build::input::{read_points, PointSurvey};
 use mosaica_build::{build, BuildArgs};
 use mosaica_spatial::{fixed32, AlignedSquare, Bounds, Projection};
 use mosaica_store::read::open_bundle;
-use mosaica_types::IdentityKey;
+use mosaica_types::{IdentityKey, ShardId};
 
 
 /// That fixture's points file, as a reader of it needs it.
@@ -420,7 +420,7 @@ fn build_bundle(
         limit: None,
         strict: false,
         identity_key: IdentityKey::from_hex(KEY_HEX).unwrap(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

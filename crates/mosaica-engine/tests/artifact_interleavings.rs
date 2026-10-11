@@ -46,7 +46,7 @@ use mosaica_lifecycle::{
 use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource, ValueSet,
 };
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, ShardId};
 
 const LAYER: &str = "clusters/a";
 /// Generous on purpose: every wait here is on a counter the executor moves, so a timeout is a hang
@@ -1191,7 +1191,7 @@ fn built_fixture() -> Fixture {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: config.layers,
         layer_inputs: config.layer_sources,
         scoped_layers: Default::default(),

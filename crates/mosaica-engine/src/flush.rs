@@ -21,7 +21,7 @@ use mosaica_store::manifest::{DictExtent, FileDigest, Quantisation, RecordExtent
 use mosaica_store::permutation::SegmentExtent;
 use mosaica_store::read::SegmentData;
 use mosaica_store::{write_flush_segment, FlushInput, FlushRow};
-use mosaica_types::{EntityId, IdentityKey, TermId};
+use mosaica_types::{EntityId, IdentityKey, ShardId, TermId};
 use rustc_hash::FxHashMap;
 
 use crate::write::StageMark;
@@ -422,7 +422,7 @@ pub(crate) struct FlushContext {
     /// segment's extent.
     pub(crate) entity_floor: u64,
     pub(crate) identity_key: IdentityKey,
-    pub(crate) shard_id: u32,
+    pub(crate) shard_id: ShardId,
     pub(crate) quantisation: Quantisation,
     pub(crate) scalar_schema: Vec<(String, ScalarType)>,
     /// Where each of `scalar_schema`'s columns sits in a buffered row's scalar list.

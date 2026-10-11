@@ -30,7 +30,7 @@ use sha2::Digest as _;
 use mosaica_catalogue::{Catalogue, Grantee, Permission, PrincipalKind};
 use mosaica_server::state::{AppState, ComputeGate, IngestAdmission, ServeLimits, SessionRegistry};
 use mosaica_spatial::Bounds;
-use mosaica_types::IdentityKey;
+use mosaica_types::{IdentityKey, ShardId};
 
 pub const N_ITEMS: u64 = 1_000;
 
@@ -380,7 +380,7 @@ pub fn build_args(out: &Path, views: Vec<ViewArgs>) -> BuildArgs {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

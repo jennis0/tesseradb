@@ -132,7 +132,11 @@ fn b_subset_session_sees_exactly_its_terms_items() {
     let key = test_key();
     for (mosaica_id, _) in out.points.iter() {
         let (high, entity) = key.invert(mosaica_id).expect("a served point is an item");
-        assert_eq!(high.shard, 0, "fixture uses shard 0 only");
+        assert_eq!(
+            high.shard,
+            mosaica_types::ShardId::ZERO,
+            "fixture uses shard 0 only"
+        );
         let source = new_to_source[&entity.raw()];
         assert_eq!(
             source % 3,

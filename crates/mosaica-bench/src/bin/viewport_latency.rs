@@ -24,7 +24,7 @@ use mosaica_build::{build, BuildArgs};
 use mosaica_engine::viewport::ViewportRequest;
 use mosaica_engine::{Engine, EngineConfig};
 use mosaica_spatial::Bounds;
-use mosaica_types::IdentityKey;
+use mosaica_types::{IdentityKey, ShardId};
 
 /// The prefix the shared-context fixtures are cut at.
 const ITEM_LIMIT: u64 = 2_422_486;
@@ -119,7 +119,7 @@ fn ensure_bundle(bundle_root: &Path) -> Result<(), String> {
         limit: Some(ITEM_LIMIT),
         strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

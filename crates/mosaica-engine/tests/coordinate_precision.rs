@@ -31,7 +31,7 @@ use mosaica_build::{build, BuildArgs};
 use mosaica_engine::{Engine, EngineConfig, ViewportRequest};
 use mosaica_lifecycle::UnallocatedRow;
 use mosaica_spatial::Bounds;
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, ShardId};
 
 /// A frame 16 units wide out of a 65,536-unit coordinate range — 1/4096 of it — placed where the
 /// coordinates are largest and an `f32`'s step is therefore coarsest. One cell is 2.44 × 10⁻⁴
@@ -127,7 +127,7 @@ fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path, points: &[(f
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

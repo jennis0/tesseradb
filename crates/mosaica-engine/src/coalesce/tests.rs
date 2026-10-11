@@ -7,7 +7,7 @@ use mosaica_store::manifest::UniqueIndexRuns;
 use mosaica_store::manifest::{Quantisation, SegmentsManifest, DECLARED_INCARNATION};
 use mosaica_store::FlushOutput;
 use mosaica_types::view::ViewIncarnation;
-use mosaica_types::{AttrLocalId, EntityId, TermId};
+use mosaica_types::{AttrLocalId, EntityId, ShardId, TermId};
 
 use super::*;
 use crate::flush::SMALL_TERM_THRESHOLD;
@@ -152,7 +152,7 @@ impl Fixture {
                 y_max: 1.0,
             },
             identity_key: &key,
-            shard_id: 0,
+            shard_id: ShardId::ZERO,
             scalar_schema: &[],
             indexed: &[],
             row_base,

@@ -120,7 +120,7 @@ use mosaica_engine::{default_compute_threads, ArtifactOut, Engine, EngineConfig}
 use mosaica_lifecycle::UnallocatedRow;
 use mosaica_spatial::Bounds;
 use mosaica_store::read::open_bundle;
-use mosaica_types::{EntityId, IdentityKey, ItemHigh, MosaicaId, Tenancy};
+use mosaica_types::{EntityId, IdentityKey, ItemHigh, MosaicaId, ShardId, Tenancy};
 
 pub const N_ITEMS: u64 = 10_000;
 pub const ALL_TERM: u64 = 0;
@@ -138,7 +138,10 @@ pub fn test_key() -> IdentityKey {
 
 /// The `mosaica_id` of the item of shard 0 holding `entity` as its number at `tenancy`.
 pub fn mosaica_id_at(entity: EntityId, tenancy: u16) -> MosaicaId {
-    let high = ItemHigh::new(0, Tenancy::new(tenancy).expect("a tenancy below 4,096"));
+    let high = ItemHigh::new(
+        ShardId::ZERO,
+        Tenancy::new(tenancy).expect("a tenancy below 4,096"),
+    );
     test_key().forward(high, entity).unwrap()
 }
 
@@ -303,7 +306,7 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -401,7 +404,7 @@ pub fn build_corpus_fixture(
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -458,7 +461,7 @@ pub fn build_corpus_fixture_with_layers(
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: config.layers,
         layer_inputs: config.layer_sources,
         scoped_layers: Default::default(),
@@ -507,7 +510,7 @@ pub fn build_with_layers(
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: config.layers,
         layer_inputs: config.layer_sources,
         scoped_layers: Default::default(),

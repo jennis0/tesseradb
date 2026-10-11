@@ -48,7 +48,7 @@ use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
-use mosaica_types::{AttrLocalId, EntityId, IdentityKey, MosaicaId};
+use mosaica_types::{AttrLocalId, EntityId, IdentityKey, MosaicaId, ShardId};
 
 const N: u64 = 2000;
 const GEO: &str = "geo";
@@ -481,7 +481,7 @@ fn build_bundle_of(dir: &Path, key: IdentityKey, n: u64) -> PathBuf {
         limit: None,
         strict: false,
         identity_key: key,
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

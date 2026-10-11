@@ -29,7 +29,7 @@ use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_store::read::open_bundle;
 use mosaica_store::term_images::{TermImages, HEADER_BYTES, KEEP_ROWS_PER_CONTAINER};
 use mosaica_store::RowSpace;
-use mosaica_types::{EntityId, TermId};
+use mosaica_types::{EntityId, ShardId, TermId};
 
 /// Rows enough for a second Roaring container, which is what puts a term whose image is spread
 /// over both on the wrong side of the keep rule: thirty rows a container is a cut a scattered term
@@ -190,7 +190,7 @@ fn build_fixture(tmp: &Path, root: &Path) {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

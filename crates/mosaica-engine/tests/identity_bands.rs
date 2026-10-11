@@ -28,7 +28,7 @@ use mosaica_store::membership::{LabelColumnPack, ROW_COLUMN_HOLE};
 use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource, ServingLayout,
 };
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, ShardId};
 
 /// Enough rows for band 6, which holds about one row in 64, to hold a few dozen.
 const ROWS: u64 = 3_000;
@@ -104,7 +104,7 @@ fn build_scored(root: &Path) {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

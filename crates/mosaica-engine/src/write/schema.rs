@@ -269,7 +269,7 @@ mod segment_schema_tests {
                 construction: "siphash-2-4".to_string(),
                 rounds: 1,
                 key: "0123456789abcdef0123456789abcdef".to_string(),
-                shard_id: 0,
+                shard_id: mosaica_types::ShardId::ZERO,
             },
             groups: Vec::new(),
             views: vec![],

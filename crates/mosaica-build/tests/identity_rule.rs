@@ -23,7 +23,7 @@ use mosaica_build::{build, build_in_memory, BuildArgs, BuildReport, RefusedRows}
 use mosaica_filter::{Access, RecordBlob, RecordValue};
 use mosaica_spatial::Bounds;
 use mosaica_store::unique::{UniqueIndexes, UniqueKey};
-use mosaica_types::IdentityKey;
+use mosaica_types::{IdentityKey, ShardId};
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
@@ -117,7 +117,7 @@ fn args(dir: &Path, declaration: &str, out: &Path) -> BuildArgs {
         limit: None,
         strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers,
         layer_inputs: acquired.layers,
         scoped_layers: Default::default(),

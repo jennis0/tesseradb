@@ -463,7 +463,11 @@ async fn ingest_without_an_id_returns_a_genuinely_resolvable_mosaica_id() {
     let (high, entity) = test_key()
         .invert(mosaica_types::MosaicaId::new(mosaica_id))
         .expect("a receipt names an item");
-    assert_eq!(high.shard, 0, "the fixture bundle is shard 0");
+    assert_eq!(
+        high.shard,
+        mosaica_types::ShardId::ZERO,
+        "the fixture bundle is shard 0"
+    );
     assert!(
         entity.raw() >= N_ITEMS,
         "an ingested item gets an entity id past the bundle's own"

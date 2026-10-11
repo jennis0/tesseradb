@@ -31,7 +31,7 @@ use mosaica_store::term_images::{
     TermImageRefusal, TermImageStamp, TermImages, KEEP_ROWS_PER_CONTAINER,
 };
 use mosaica_store::RowSpace;
-use mosaica_types::{IdentityKey, TermId};
+use mosaica_types::{IdentityKey, ShardId, TermId};
 
 /// Rows enough for a second Roaring container, which is what puts a term whose image is spread
 /// over both on the wrong side of the keep rule: thirty rows a container is a cut a scattered
@@ -181,7 +181,7 @@ fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

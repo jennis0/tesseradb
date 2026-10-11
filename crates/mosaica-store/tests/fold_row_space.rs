@@ -15,7 +15,7 @@ use mosaica_spatial::tiler::{sort_batch, TilerItem};
 use mosaica_store::read::{ColumnsRef, MortonSlice};
 use mosaica_store::write::write_segment;
 use mosaica_store::{fold_row_space, FoldRowSpaceSpec, FoldSegmentInput, Permutation, RowToEntity};
-use mosaica_types::{EntityId, IdentityKey, ItemHigh, RowId, Tenancy};
+use mosaica_types::{EntityId, IdentityKey, ItemHigh, RowId, ShardId, Tenancy};
 
 fn key() -> IdentityKey {
     IdentityKey::from_hex("0123456789abcdef0123456789abcdef").expect("test key")
@@ -33,7 +33,10 @@ fn write_input(dir: &Path, seg_id: &str, entities: &[u64], stride: u64) -> FoldS
         .iter()
         .map(|&e| TilerItem {
             mosaica_id: k
-                .forward(ItemHigh::new(0, Tenancy::ZERO), EntityId::new(e))
+                .forward(
+                    ItemHigh::new(ShardId::ZERO, Tenancy::ZERO),
+                    EntityId::new(e),
+                )
                 .expect("entity fits u32"),
             qx: fixed32(((e * stride) % 97) as f64 / 97.0, 0.0, 1.0),
             qy: fixed32(((e * 53) % 89) as f64 / 89.0, 0.0, 1.0),
@@ -72,7 +75,7 @@ fn a_column_an_input_lacks_fails_the_fold_unless_declared_since_the_inputs() {
     let spec = |absent_ok: &'static [String]| FoldRowSpaceSpec {
         inputs: std::slice::from_ref(&input),
         identity_key: &identity_key,
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         scalar_schema: &schema,
         indexed: &[],
         absent_ok,
@@ -124,7 +127,7 @@ fn fold(
         FoldRowSpaceSpec {
             inputs,
             identity_key: &key(),
-            shard_id: 0,
+            shard_id: ShardId::ZERO,
             scalar_schema: &[],
             indexed: &[],
             absent_ok: &[],
@@ -288,7 +291,10 @@ fn permutation_maps_survivors_and_marks_dropped_and_unknown_entities_absent() {
             continue;
         }
         let mosaica_id = k
-            .forward(ItemHigh::new(0, Tenancy::ZERO), EntityId::new(e))
+            .forward(
+                ItemHigh::new(ShardId::ZERO, Tenancy::ZERO),
+                EntityId::new(e),
+            )
             .unwrap();
         let expected_row = rows
             .iter()

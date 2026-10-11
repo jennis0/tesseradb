@@ -1,0 +1,27 @@
+error[E0277]: the trait bound `ShardRow: From<EntityId>` is not satisfied
+ --> tests/ui/shard_row_from_entity_id.rs:8:40
+  |
+8 |     let _: ShardRow = EntityId::new(7).into();
+  |                                        ^^^^ the trait `From<EntityId>` is not implemented for `ShardRow`
+  |
+  = note: required for `EntityId` to implement `Into<ShardRow>`
+
+error[E0061]: this function takes 2 arguments but 1 argument was supplied
+ --> tests/ui/shard_row_from_entity_id.rs:9:13
+  |
+9 |     let _ = ShardRow::new(EntityId::new(7).raw());
+  |             ^^^^^^^^^^^^^------------------------
+  |                          ||
+  |                          |expected `ShardId`, found `u64`
+  |                          argument #2 of type `RowId` is missing
+  |
+note: associated function defined here
+ --> src/shard.rs
+  |
+  |     pub const fn new(shard: ShardId, row: RowId) -> ShardRow {
+  |                  ^^^
+help: provide the argument
+  |
+9 -     let _ = ShardRow::new(EntityId::new(7).raw());
+9 +     let _ = ShardRow::new(/* ShardId */, /* RowId */);
+  |

@@ -38,7 +38,7 @@ use common::*;
 use mosaica_build::{build, BuildArgs};
 use mosaica_engine::{Engine, EngineConfig, ViewportRequest};
 use mosaica_lifecycle::UnallocatedRow;
-use mosaica_types::MosaicaId;
+use mosaica_types::{MosaicaId, ShardId};
 
 const WAIT: Duration = Duration::from_secs(180);
 
@@ -214,7 +214,7 @@ fn build_bundle(dir: &Path, name: &str, entities: u64) -> std::path::PathBuf {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

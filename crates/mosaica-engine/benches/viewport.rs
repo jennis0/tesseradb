@@ -36,7 +36,7 @@ use mosaica_engine::{Engine, EngineConfig};
 use mosaica_lifecycle::{IngestBuffer, Overlay};
 use mosaica_spatial::Bounds;
 use mosaica_store::read::open_bundle;
-use mosaica_types::{IdentityKey, TermId};
+use mosaica_types::{IdentityKey, ShardId, TermId};
 
 const ITEM_LIMIT: u64 = 2_422_486;
 
@@ -91,7 +91,7 @@ fn ensure_bundle() -> PathBuf {
             limit: Some(ITEM_LIMIT),
             strict: false,
             identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-            shard_id: 0,
+            shard_id: ShardId::ZERO,
             layers: Vec::new(),
             layer_inputs: Vec::new(),
             scoped_layers: Default::default(),

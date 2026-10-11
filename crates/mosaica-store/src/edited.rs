@@ -533,7 +533,7 @@ impl RowEntities {
         row: u32,
         mosaica_id: u64,
         key: &mosaica_types::IdentityKey,
-        shard_id: u32,
+        shard_id: mosaica_types::ShardId,
         seg_id: &str,
     ) -> Result<mosaica_types::EntityId> {
         let (high, number) = key
@@ -545,8 +545,9 @@ impl RowEntities {
             return Err(StoreError::MalformedBundle {
                 detail: format!(
                     "segment '{seg_id}': row {row}'s mosaica_id inverts to shard {}, but the \
-                     manifest declares shard {shard_id}",
-                    high.shard
+                     manifest declares shard {}",
+                    high.shard.raw(),
+                    shard_id.raw()
                 ),
             });
         }
@@ -646,6 +647,7 @@ mod tests {
         assert_eq!(rows.iter().collect::<Vec<_>>(), vec![(1, 90), (4, 91)]);
         let key = mosaica_types::IdentityKey::from_hex("0123456789abcdef0123456789abcdef").unwrap();
         let id_at = |shard: u32, tenancy: u16, n: u64| {
+            let shard = mosaica_types::ShardId::new(shard).unwrap();
             let tenancy = mosaica_types::Tenancy::new(tenancy).unwrap();
             let high = mosaica_types::ItemHigh::new(shard, tenancy);
             key.forward(high, mosaica_types::EntityId::new(n))
@@ -655,20 +657,24 @@ mod tests {
         let tid = |n: u64| id_at(0, 0, n);
         let rows = RowEntities::Listed(Arc::new(rows));
         assert_eq!(
-            rows.entity_of(4, tid(5), &key, 0, "s").unwrap(),
+            rows.entity_of(4, tid(5), &key, mosaica_types::ShardId::ZERO, "s")
+                .unwrap(),
             mosaica_types::EntityId::new(91)
         );
         assert_eq!(
-            rows.entity_of(2, tid(5), &key, 0, "s").unwrap(),
+            rows.entity_of(2, tid(5), &key, mosaica_types::ShardId::ZERO, "s")
+                .unwrap(),
             mosaica_types::EntityId::new(5)
         );
         assert_eq!(
-            rows.entity_of(2, id_at(0, 3, 5), &key, 0, "s").unwrap(),
+            rows.entity_of(2, id_at(0, 3, 5), &key, mosaica_types::ShardId::ZERO, "s")
+                .unwrap(),
             mosaica_types::EntityId::new(5),
             "a row whose number was held before resolves to it"
         );
         assert!(
-            rows.entity_of(2, id_at(1, 0, 5), &key, 0, "s").is_err(),
+            rows.entity_of(2, id_at(1, 0, 5), &key, mosaica_types::ShardId::ZERO, "s")
+                .is_err(),
             "a row naming another shard's item is refused"
         );
     }

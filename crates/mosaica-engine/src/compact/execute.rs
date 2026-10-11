@@ -10,7 +10,7 @@ use mosaica_store::render_presence::RENDER_PRESENCE_DIR;
 use mosaica_store::{
     fold_row_space, FoldRowSpaceSpec, FoldSegmentInput, PairsParquetWriter,
 };
-use mosaica_types::IdentityKey;
+use mosaica_types::{IdentityKey, ShardId};
 
 use crate::flush::{failed, remove_spool_on_error, MaintenanceFailed};
 
@@ -27,7 +27,7 @@ pub(crate) struct FoldContext {
     pub(crate) to_prefix: String,
     pub(crate) to_prefix_dir: PathBuf,
     pub(crate) identity_key: IdentityKey,
-    pub(crate) shard_id: u32,
+    pub(crate) shard_id: ShardId,
     /// Per view: the bundle-wide render tail plus that view's group-scoped render lanes.
     pub(crate) scalar_schema: BTreeMap<String, Vec<(String, ScalarType)>>,
     /// The columns the bands copy beside the render tail, in every view.

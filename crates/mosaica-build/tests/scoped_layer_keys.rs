@@ -22,7 +22,7 @@ use mosaica_build::{build, BuildArgs, ScopedLayer, ViewArgs};
 use mosaica_engine::browse::{BrowseForm, BrowseRequest};
 use mosaica_spatial::Bounds;
 use mosaica_store::read::open_bundle;
-use mosaica_types::IdentityKey;
+use mosaica_types::{IdentityKey, ShardId};
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
@@ -355,7 +355,7 @@ fn build_with_labels(
         limit: None,
         strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers,
         layer_inputs: config.layer_sources.clone(),
         scoped_layers: scoped_layers.into_iter().collect(),

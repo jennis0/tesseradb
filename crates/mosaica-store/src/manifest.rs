@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_spatial::Projection;
 use mosaica_types::layer::{RegisteredLayer, ServingLayout};
-use mosaica_types::{ItemHigh, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+use mosaica_types::{ShardId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
 use crate::error::{Result, StoreError};
 
@@ -318,7 +318,7 @@ pub struct IdentityDescriptor {
     /// Exactly 32 lowercase hex characters (readers reject any other case rather than
     /// case-folding — contracts §2.6).
     pub key: String,
-    pub shard_id: u32,
+    pub shard_id: ShardId,
 }
 
 /// Hand-written because `key` is the key in plaintext hex, and `Manifest` and `Bundle` reach this
@@ -338,7 +338,7 @@ impl IdentityDescriptor {
     /// Reject an unknown `construction` or a `rounds` other than [`IDENTITY_ROUNDS`]: a bundle
     /// written by a different construction must not be silently read by this one (contracts
     /// §2.6 r6 — "changing the construction, the round count or the round function is a
-    /// `bundle_format` bump"). Reject a `shard_id` that does not fit an item's identifier.
+    /// `bundle_format` bump").
     pub fn validate(&self) -> Result<()> {
         if self.construction != IDENTITY_CONSTRUCTION {
             return Err(StoreError::InvalidIdentity {
@@ -356,9 +356,7 @@ impl IdentityDescriptor {
                 ),
             });
         }
-        ItemHigh::check_shard(self.shard_id).map_err(|e| StoreError::InvalidIdentity {
-            detail: e.to_string(),
-        })
+        Ok(())
     }
 }
 
@@ -2491,7 +2489,7 @@ mod tests {
             construction: IDENTITY_CONSTRUCTION.to_string(),
             rounds: IDENTITY_ROUNDS,
             key: KEY_HEX.to_string(),
-            shard_id: 0,
+            shard_id: ShardId::ZERO,
         }
     }
 
@@ -2590,14 +2588,11 @@ mod tests {
 
     #[test]
     fn a_shard_id_that_does_not_fit_an_identifier_is_refused() {
-        let mut identity = descriptor();
-        identity.shard_id = ItemHigh::SHARD_LIMIT - 1;
-        assert!(identity.validate().is_ok());
-        identity.shard_id = ItemHigh::SHARD_LIMIT;
-        assert!(matches!(
-            identity.validate(),
-            Err(StoreError::InvalidIdentity { .. })
-        ));
+        let mut identity = serde_json::to_value(descriptor()).unwrap();
+        identity["shard_id"] = (ShardId::LIMIT - 1).into();
+        assert!(serde_json::from_value::<IdentityDescriptor>(identity.clone()).is_ok());
+        identity["shard_id"] = ShardId::LIMIT.into();
+        assert!(serde_json::from_value::<IdentityDescriptor>(identity).is_err());
     }
 
     /// The term-image list survives a round trip, and a manifest that omits it is refused.

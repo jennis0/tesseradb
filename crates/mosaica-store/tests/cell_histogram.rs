@@ -18,7 +18,7 @@ use mosaica_store::manifest::{
     Quantisation, SegmentDescriptor, SegmentsManifest, ViewDescriptor,
 };
 use mosaica_store::write::{write_permutation, write_segment};
-use mosaica_types::{EntityId, MosaicaId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+use mosaica_types::{EntityId, MosaicaId, ShardId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
 /// A synthetic `mosaica_id`-shaped value (splitmix64 over a seed) — same stand-in as
 /// `bundle_read.rs`; the identity construction itself is not under test here.
@@ -137,7 +137,7 @@ fn build_bundle(root: &Path) {
             construction: IDENTITY_CONSTRUCTION.to_string(),
             rounds: IDENTITY_ROUNDS,
             key: "0123456789abcdef0123456789abcdef".to_string(),
-            shard_id: 0,
+            shard_id: ShardId::ZERO,
         },
         groups: Vec::new(),
         views: vec![ViewDescriptor {

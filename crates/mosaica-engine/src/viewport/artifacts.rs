@@ -1618,7 +1618,7 @@ pub(super) struct ArtifactPass<'a> {
     pub(super) locator: crate::derived::RowLocator<'a>,
     /// The postings, which are the generation's, not any layer's.
     pub(super) source: crate::containment::PartitionSource<'a>,
-    pub(super) shard: u32,
+    pub(super) shard: mosaica_types::ShardId,
 }
 
 impl<'a> ArtifactPass<'a> {

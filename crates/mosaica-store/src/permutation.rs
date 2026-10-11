@@ -1491,7 +1491,7 @@ impl SegmentExtent {
         entity_hi: u64,
         row_base: u32,
         key: &mosaica_types::IdentityKey,
-        shard_id: u32,
+        shard_id: mosaica_types::ShardId,
     ) -> Result<Self> {
         let (seg_id, mosaica_ids) = (segment.seg_id.as_str(), segment.columns.mosaica_id());
         let mut entities = Vec::with_capacity(mosaica_ids.len());

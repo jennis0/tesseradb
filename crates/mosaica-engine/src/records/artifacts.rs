@@ -25,7 +25,7 @@ use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
 use croaring::Bitmap;
 use mosaica_types::layer::RegisteredLayer;
-use mosaica_types::{EntityId, MosaicaId};
+use mosaica_types::{EntityId, MosaicaId, ShardId};
 
 use super::columns::ViewFrame;
 use super::cursor::{ArtifactsCursor, Binding, LayerBinding, Route};
@@ -244,7 +244,7 @@ struct Scope<'a> {
     /// Under `parent`: the parent's position where this viewer is served it, and `None` where no
     /// artifact is its child.
     parent: Option<Option<(u32, u32)>>,
-    shard: u32,
+    shard: ShardId,
     /// This viewer's slots over each level the page reads, where `slot` is named under a palette
     /// size.
     slots: Vec<Option<Arc<crate::slots::LevelSlots>>>,

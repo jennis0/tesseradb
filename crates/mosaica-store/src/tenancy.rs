@@ -34,7 +34,7 @@ use std::sync::Arc;
 use croaring::{Bitmap, Frozen};
 use memmap2::Mmap;
 use mosaica_roaring::OwnedView;
-use mosaica_types::{EntityId, IdentityKey, MosaicaId, Tenancy};
+use mosaica_types::{EntityId, IdentityKey, MosaicaId, ShardId, Tenancy};
 
 use crate::error::{io, Result, StoreError};
 use crate::{le_u32, le_u64};
@@ -265,7 +265,7 @@ impl TenancyIndex {
     pub fn number_named(
         &self,
         key: &IdentityKey,
-        shard: u32,
+        shard: ShardId,
         id: MosaicaId,
     ) -> Option<(EntityId, bool)> {
         let (high, number) = key.invert(id)?;

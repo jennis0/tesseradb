@@ -14,7 +14,7 @@ use arrow::datatypes::{Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use mosaica_spatial::Bounds;
-use mosaica_types::IdentityKey;
+use mosaica_types::{IdentityKey, ShardId};
 
 use super::{reads, ReadInput};
 use crate::config::Config;
@@ -255,7 +255,7 @@ fn args(dir: &Path, budget: Option<u64>) -> crate::BuildArgs {
         limit: None,
         strict: false,
         identity_key: IdentityKey::from_hex("000102030405060708090a0b0c0d0e0f").unwrap(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers,
         layer_inputs: acquired.layers,
         scoped_layers: Default::default(),

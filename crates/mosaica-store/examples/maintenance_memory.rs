@@ -30,7 +30,7 @@ use mosaica_spatial::tiler::ScalarType;
 use mosaica_store::flush::{write_flush_segment, FlushInput, FlushRow};
 use mosaica_store::manifest::Quantisation;
 use mosaica_store::merge::{execute_merge, MergeInput, MergeSpec};
-use mosaica_types::{EntityId, IdentityKey};
+use mosaica_types::{EntityId, IdentityKey, ShardId};
 
 const PARTITION: &str = "p0";
 const VIEW: &str = "s0";
@@ -113,7 +113,7 @@ fn write_inputs(root: &Path, rows: u64, segments: u64) -> Vec<MergeInput> {
                     rows: flush_rows,
                     quantisation: quantisation(),
                     identity_key: &key(),
-                    shard_id: 0,
+                    shard_id: ShardId::ZERO,
                     scalar_schema: &[],
                     indexed: &[],
                     row_base: (s * rows) as u32,
@@ -162,7 +162,7 @@ fn main() {
                     seg_id: "merged",
                     inputs: &inputs,
                     identity_key: &key(),
-                    shard_id: 0,
+                    shard_id: ShardId::ZERO,
                     scalar_schema: &schema,
                     indexed: &[],
                     absent_ok: &[],

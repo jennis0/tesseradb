@@ -10,7 +10,7 @@ use mosaica_store::flush::{write_flush_segment, FlushInput, FlushRow};
 use mosaica_store::manifest::Quantisation;
 use mosaica_store::merge::{execute_merge, MergeInput, MergeSpec};
 use mosaica_store::read::{ColumnsRef, MortonSlice};
-use mosaica_types::{EntityId, IdentityKey};
+use mosaica_types::{EntityId, IdentityKey, ShardId};
 
 fn key() -> IdentityKey {
     IdentityKey::from_hex("0123456789abcdef0123456789abcdef").expect("test key")
@@ -62,7 +62,7 @@ fn segment(root: &Path, seg_id: &str, entity_lo: u64, count: u64, stride: u64) -
             rows,
             quantisation: quantisation(),
             identity_key: &key(),
-            shard_id: 0,
+            shard_id: ShardId::ZERO,
             scalar_schema: &[],
             indexed: &score(),
             row_base: 0,
@@ -89,7 +89,7 @@ fn merge(root: &Path, inputs: &[MergeInput]) -> mosaica_store::merge::MergeOutpu
             seg_id: "merged-1",
             inputs,
             identity_key: &key(),
-            shard_id: 0,
+            shard_id: ShardId::ZERO,
             scalar_schema: &schema,
             indexed: &score(),
             absent_ok: &[],
@@ -264,7 +264,7 @@ fn the_extent_maps_every_entity_to_its_merged_row() {
                 cols.mosaica_id()[row as usize],
             ))
             .unwrap();
-        assert_eq!(high.shard, 0);
+        assert_eq!(high.shard, ShardId::ZERO);
         assert_eq!(
             back.raw(),
             entity,
@@ -298,7 +298,7 @@ fn out_of_order_inputs_are_refused() {
             seg_id: "merged-1",
             inputs: &[a, b],
             identity_key: &key(),
-            shard_id: 0,
+            shard_id: ShardId::ZERO,
             scalar_schema: &schema,
             indexed: &[],
             absent_ok: &[],
@@ -336,7 +336,7 @@ fn a_missing_scalar_column_fails_the_merge_rather_than_shifting_the_rest() {
             seg_id: "merged-1",
             inputs: &[a, b],
             identity_key: &key(),
-            shard_id: 0,
+            shard_id: ShardId::ZERO,
             scalar_schema: &schema,
             indexed: &[],
             absent_ok: &[],
@@ -379,7 +379,7 @@ fn a_column_declared_since_the_inputs_is_absent_in_every_row_rather_than_shiftin
             seg_id: "merged-1",
             inputs: &[a, b],
             identity_key: &key(),
-            shard_id: 0,
+            shard_id: ShardId::ZERO,
             scalar_schema: &schema,
             indexed: &[],
             absent_ok: &lawful,

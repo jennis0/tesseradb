@@ -31,7 +31,7 @@ use mosaica_engine::Engine;
 use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
 use mosaica_lifecycle::UnallocatedRow;
 use mosaica_store::read::open_bundle;
-use mosaica_types::{AttrLocalId, EntityId};
+use mosaica_types::{AttrLocalId, EntityId, ShardId};
 
 /// Built items. Small: every assertion here is exhaustive over the corpus and the fold is the
 /// expensive step.
@@ -134,7 +134,7 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

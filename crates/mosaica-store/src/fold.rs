@@ -80,7 +80,7 @@ use std::path::{Path, PathBuf};
 use croaring::Bitmap;
 
 use mosaica_spatial::tiler::ScalarType;
-use mosaica_types::{IdentityKey, MosaicaId};
+use mosaica_types::{IdentityKey, MosaicaId, ShardId};
 
 use crate::error::{Result, StoreError};
 use crate::segment_cursor::{gather_scalars, SegmentCursor};
@@ -111,7 +111,7 @@ pub struct FoldRowSpaceSpec<'a> {
     /// `(morton, mosaica_id)` key.
     pub inputs: &'a [FoldSegmentInput],
     pub identity_key: &'a IdentityKey,
-    pub shard_id: u32,
+    pub shard_id: ShardId,
     pub scalar_schema: &'a [(String, ScalarType)],
     /// The indexed columns the bands copy ([`crate::bands::copied_beside`]), each banded row's
     /// value read from its input's copy.
@@ -405,7 +405,7 @@ mod tests {
                     y_max: 1.0,
                 },
                 identity_key: &key(),
-                shard_id: 0,
+                shard_id: ShardId::ZERO,
                 scalar_schema: &schema(),
                 indexed: &[],
                 row_base: 0,
@@ -430,7 +430,7 @@ mod tests {
             FoldRowSpaceSpec {
                 inputs,
                 identity_key: &key(),
-                shard_id: 0,
+                shard_id: ShardId::ZERO,
                 scalar_schema: &schema(),
                 indexed: &[],
                 absent_ok: &[],

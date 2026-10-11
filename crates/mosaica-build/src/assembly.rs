@@ -50,7 +50,7 @@ use mosaica_spatial::split32;
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_store::columns::{ColumnsFile, ColumnsPlan};
 use mosaica_store::write::{CutWriter, PagePlan, PermutationWriter};
-use mosaica_types::{EntityId, IdentityKey, ItemHigh, MosaicaId, Tenancy};
+use mosaica_types::{EntityId, IdentityKey, ItemHigh, MosaicaId, ShardId, Tenancy};
 use rayon::slice::ParallelSliceMut;
 
 use crate::column::EntityColumn;
@@ -117,13 +117,12 @@ impl RowRec {
 }
 
 /// The `mosaica_id` of one entity at tenancy 0: a build gives each number to one item.
-/// `validate_args` has checked the shard, and the allocator caps entities below `u32::MAX`.
-pub(crate) fn identity_of(key: &IdentityKey, shard: u32, entity: u32) -> MosaicaId {
+pub(crate) fn identity_of(key: &IdentityKey, shard: ShardId, entity: u32) -> MosaicaId {
     key.forward(
         ItemHigh::new(shard, Tenancy::ZERO),
         EntityId::new(entity as u64),
     )
-    .expect("the shard is checked and entity ids are capped below u32::MAX (I-1)")
+    .expect("an entity id is a u32")
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -380,7 +379,7 @@ pub(crate) struct RowSource<'a> {
     /// Entity space's bound — the permutation's, not the view's population.
     pub(crate) n: u64,
     pub(crate) identity_key: &'a IdentityKey,
-    pub(crate) shard_id: u32,
+    pub(crate) shard_id: ShardId,
     /// What the view's points file said its row count is — the histogram is sized against it, and
     /// the walk's own count is checked against it by the caller.
     pub(crate) rows_hint: u64,
@@ -394,7 +393,7 @@ pub(crate) struct Assembly<'a> {
     pub(crate) tmp: &'a Path,
     pub(crate) n: u64,
     pub(crate) identity_key: &'a IdentityKey,
-    pub(crate) shard_id: u32,
+    pub(crate) shard_id: ShardId,
     pub(crate) render: Vec<RenderColumn<'a>>,
     /// The columns the identity bands copy beside the render ones, by entity.
     pub(crate) indexed: Vec<RenderColumn<'a>>,
@@ -547,7 +546,7 @@ impl PartitionedRows {
     }
 }
 
-fn priority_of(key: &IdentityKey, shard: u32, entity: u32) -> u16 {
+fn priority_of(key: &IdentityKey, shard: ShardId, entity: u32) -> u16 {
     identity_of(key, shard, entity).priority()
 }
 
@@ -1051,7 +1050,7 @@ mod tests {
     #[test]
     fn row_rec_comparator_agrees_with_a_full_mosaica_id_sort_over_engineered_ties() {
         let key = IdentityKey::from_hex("000102030405060708090a0b0c0d0e0f").unwrap();
-        let shard = ItemHigh::new(0, Tenancy::ZERO);
+        let shard = ItemHigh::new(ShardId::ZERO, Tenancy::ZERO);
         let morton = 42u32;
 
         let rows: Vec<RowRec> = (0..4000u32)

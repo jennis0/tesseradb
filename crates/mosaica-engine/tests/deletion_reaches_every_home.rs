@@ -43,7 +43,7 @@ use mosaica_build::{build, BuildArgs};
 use mosaica_engine::{Engine, EngineConfig, ViewportRequest};
 use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_store::read::{open_bundle, ColumnsRef, ScalarSlice};
-use mosaica_types::{AttrLocalId, EntityId, TermId};
+use mosaica_types::{AttrLocalId, EntityId, ShardId, TermId};
 
 use homes::Home;
 
@@ -271,7 +271,7 @@ fn build_fixture_with_every_home(out: &Path, tmp: &Path, n: u64) {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

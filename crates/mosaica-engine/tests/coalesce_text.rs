@@ -38,7 +38,7 @@ use mosaica_engine::Engine;
 use mosaica_lifecycle::wal::WalScalar;
 use mosaica_lifecycle::UnallocatedRow;
 use mosaica_store::read::open_bundle;
-use mosaica_types::AttrLocalId;
+use mosaica_types::{AttrLocalId, ShardId};
 
 /// Built items — small, because the built layer is not what this module is about.
 const N: u64 = 16;
@@ -135,7 +135,7 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

@@ -27,7 +27,7 @@ use mosaica_store::manifest::{DerivedForm, SegmentsManifest};
 use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource, ServingLayout,
 };
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, ShardId};
 
 const N: u64 = 3_000;
 /// Sources at or past this are in no artifact of the built layers, so a growth can take them
@@ -201,7 +201,7 @@ fn fixture_with(extra: &[(String, u64)]) -> Fixture {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: config.layers,
         layer_inputs: config.layer_sources,
         scoped_layers: Default::default(),

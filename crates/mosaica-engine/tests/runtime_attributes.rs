@@ -35,7 +35,7 @@ use mosaica_lifecycle::wal::WalScalar;
 use mosaica_lifecycle::ExecError;
 use mosaica_store::read::open_bundle;
 use mosaica_types::layer::LayerScope;
-use mosaica_types::{AttrLocalId, EntityId};
+use mosaica_types::{AttrLocalId, EntityId, ShardId};
 
 const N_ITEMS: u64 = 120;
 const VIEWPORT: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
@@ -154,7 +154,7 @@ fn build_fixture_with_schema(root: &Path, tmp: &Path) {
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

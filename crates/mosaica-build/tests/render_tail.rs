@@ -37,7 +37,7 @@ use mosaica_build::{build, BuildArgs};
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_spatial::Bounds;
 use mosaica_store::read::{ColumnsRef, ScalarSlice};
-use mosaica_types::IdentityKey;
+use mosaica_types::{IdentityKey, ShardId};
 
 mod common;
 
@@ -250,7 +250,7 @@ fn args(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
         limit: None,
         strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

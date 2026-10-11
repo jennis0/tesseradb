@@ -379,8 +379,9 @@ fn check_edited_items(
                 else {
                     return Err(BuildError::Invalid(format!(
                         "view {view}, segment {}: moved row {row}'s mosaica_id names no item of \
-                         shard {shard} at its number's tenancy",
-                        segment.seg_id
+                         shard {} at its number's tenancy",
+                        segment.seg_id,
+                        shard.raw()
                     )));
                 };
                 if !u32::try_from(number.raw()).is_ok_and(|n| forward.contains(&(n, entity))) {

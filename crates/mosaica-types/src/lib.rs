@@ -3,6 +3,8 @@ pub use identity::{
     IdentityError, IdentityKey, ItemHigh, MosaicaId, Tenancy, IDENTITY_CONSTRUCTION,
     IDENTITY_ROUNDS,
 };
+mod shard;
+pub use shard::{ShardId, ShardRow};
 
 /// The process's own memory — the allocator's retention and the kernel's resident figures.
 ///

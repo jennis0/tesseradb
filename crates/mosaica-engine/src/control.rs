@@ -7,7 +7,7 @@ use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_store::manifest::DeclaredScalar;
 use mosaica_store::unique::{KeyKind, UniqueKey};
 use mosaica_store::StoreError;
-use mosaica_types::{EntityId, MosaicaId, TermId};
+use mosaica_types::{EntityId, MosaicaId, ShardId, TermId};
 
 use crate::edited::Stamp;
 use crate::engine::Engine;
@@ -431,7 +431,7 @@ impl Engine {
     /// The `mosaica_id` of an entity a layer write just allocated, or the write's refusal.
     fn issued_id(
         &self,
-        shard: u32,
+        shard: ShardId,
         entity: EntityId,
     ) -> std::result::Result<MosaicaId, crate::write::AcceptError> {
         self.artifact_id(shard, entity).ok_or_else(|| {

@@ -19,7 +19,7 @@ use parquet::arrow::ArrowWriter;
 use mosaica_build::BuildArgs;
 use mosaica_engine::{ArtifactOut, Engine};
 use mosaica_lifecycle::wal::ChangeOp;
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, ShardId};
 
 const CLUSTERS: &str = "clusters/a";
 const LABELS: &str = "topics/x";
@@ -225,7 +225,7 @@ fn try_fixture(topics: fn(&Path)) -> Result<Fixture, mosaica_build::BuildError> 
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: config.layers,
         layer_inputs: config.layer_sources,
         scoped_layers: Default::default(),

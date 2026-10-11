@@ -5,7 +5,7 @@ use std::path::Path;
 use mosaica_store::flush::{write_flush_segment, FlushInput, FlushOutput, FlushRow};
 use mosaica_store::manifest::Quantisation;
 use mosaica_store::MortonSlice;
-use mosaica_types::{EntityId, IdentityKey};
+use mosaica_types::{EntityId, IdentityKey, ShardId};
 
 mod fixture;
 use fixture::{build_bundle, PARTITION, VIEW};
@@ -44,7 +44,7 @@ fn flush(prefix_dir: &Path, seg_id: &str, rows: Vec<FlushRow>, row_base: u32) ->
             rows,
             quantisation: unit_quantisation(),
             identity_key: &key,
-            shard_id: 0,
+            shard_id: ShardId::ZERO,
             scalar_schema: &[],
             indexed: &[],
             row_base,
@@ -171,7 +171,7 @@ fn unordered_rows_are_refused() {
             rows: vec![row(52, 0.1, 0.1), row(50, 0.2, 0.2)],
             quantisation: unit_quantisation(),
             identity_key: &key,
-            shard_id: 0,
+            shard_id: ShardId::ZERO,
             scalar_schema: &[],
             indexed: &[],
             row_base: 50,

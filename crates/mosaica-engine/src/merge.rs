@@ -14,7 +14,7 @@ use mosaica_store::manifest::SegmentDescriptor;
 use mosaica_store::merge::{execute_merge, MergeInput, MergeOutput, MergePolicy, MergeSpec};
 use mosaica_store::read::SegmentData;
 use mosaica_store::render_presence::RENDER_PRESENCE_DIR;
-use mosaica_types::IdentityKey;
+use mosaica_types::{IdentityKey, ShardId};
 
 use crate::flush::MaintenanceFailed;
 use crate::Generation;
@@ -139,7 +139,7 @@ pub(crate) struct MergeContext {
     pub(crate) prefix: String,
     pub(crate) seg_id: String,
     pub(crate) identity_key: IdentityKey,
-    pub(crate) shard_id: u32,
+    pub(crate) shard_id: ShardId,
     pub(crate) scalar_schema: Vec<(String, mosaica_spatial::tiler::ScalarType)>,
     /// The columns the bands copy beside the render tail.
     pub(crate) band_schema: Vec<(String, mosaica_spatial::tiler::ScalarType)>,

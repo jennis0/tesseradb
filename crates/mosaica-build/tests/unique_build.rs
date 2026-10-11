@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 use mosaica_build::{build, verify_deep, BuildArgs, BuildReport, VerifyOpts};
 use mosaica_spatial::Bounds;
 use mosaica_store::manifest::{CurrentPointer, SegmentsManifest};
-use mosaica_types::IdentityKey;
+use mosaica_types::{IdentityKey, ShardId};
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 const N: u64 = 700;
@@ -229,7 +229,7 @@ fn build_reported(
         limit: None,
         strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

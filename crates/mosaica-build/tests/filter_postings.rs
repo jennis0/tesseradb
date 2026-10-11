@@ -21,7 +21,7 @@ use mosaica_build::{build, BuildArgs};
 use mosaica_filter::{ColumnPostings, ValueColumn};
 use mosaica_spatial::Bounds;
 use mosaica_store::open_bundle;
-use mosaica_types::{AttrLocalId, IdentityKey};
+use mosaica_types::{AttrLocalId, IdentityKey, ShardId};
 
 mod common;
 
@@ -196,7 +196,7 @@ fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs 
         limit: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

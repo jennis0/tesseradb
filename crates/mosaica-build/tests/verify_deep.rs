@@ -32,7 +32,7 @@ use mosaica_store::manifest::{
 };
 use mosaica_store::tenancy::bits_of;
 use mosaica_store::{write_segments_manifest, StoreError};
-use mosaica_types::{EntityId, IdentityKey, TermId, SMALL_TERM_THRESHOLD_DEFAULT};
+use mosaica_types::{EntityId, IdentityKey, ShardId, TermId, SMALL_TERM_THRESHOLD_DEFAULT};
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 const N_ITEMS: u64 = 48;
@@ -157,7 +157,7 @@ fn built_bundle_with(root: &Path, n: u64, score: Option<Score>) {
         limit: None,
         strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -227,7 +227,7 @@ fn flushed_bundle_at(root: &Path, tenancy: u16) {
                 .quantisation_of("s0")
                 .expect("the built manifest declares view 's0'"),
             identity_key: &key,
-            shard_id: 0,
+            shard_id: ShardId::ZERO,
             scalar_schema: &[],
             indexed: &[],
             row_base: n as u32,
@@ -903,7 +903,7 @@ fn a_missing_scoped_render_lane_is_refused_and_an_intact_one_is_counted() {
         limit: None,
         strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        shard_id: 0,
+        shard_id: ShardId::ZERO,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

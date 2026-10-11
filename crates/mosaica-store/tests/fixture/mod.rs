@@ -24,7 +24,9 @@ use mosaica_store::permutation::SegmentExtent;
 use mosaica_store::read::SegmentData;
 use mosaica_store::write::{write_permutation, write_segment};
 use mosaica_store::{write_flush_segment, Bundle, FlushInput, FlushRow};
-use mosaica_types::{EntityId, IdentityKey, MosaicaId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+use mosaica_types::{
+    EntityId, IdentityKey, MosaicaId, ShardId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS,
+};
 
 pub const PARTITION: &str = "default";
 pub const VIEW: &str = "main";
@@ -127,7 +129,7 @@ pub fn build_bundle(root: &Path, n: u64) {
             construction: IDENTITY_CONSTRUCTION.to_string(),
             rounds: IDENTITY_ROUNDS,
             key: "0123456789abcdef0123456789abcdef".to_string(),
-            shard_id: 0,
+            shard_id: ShardId::ZERO,
         },
         groups: Vec::new(),
         views: vec![ViewDescriptor {
@@ -208,7 +210,7 @@ pub fn flush_segment(
                 y_max: 1.0,
             },
             identity_key: &key,
-            shard_id: 0,
+            shard_id: ShardId::ZERO,
             scalar_schema: &[],
             indexed: &[],
             row_base,

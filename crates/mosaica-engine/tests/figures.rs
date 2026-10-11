@@ -35,7 +35,7 @@ use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource, ServingLayout,
 };
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, ShardId};
 
 const N: u64 = 1_200;
 /// A partition: item `e` is in artifact `e % 24`, served from a label column.
@@ -287,7 +287,7 @@ impl Fixture {
             limit: None,
             strict: false,
             identity_key: test_key(),
-            shard_id: 0,
+            shard_id: ShardId::ZERO,
             layers: Vec::new(),
             layer_inputs: Vec::new(),
             scoped_layers: Default::default(),
