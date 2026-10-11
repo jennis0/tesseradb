@@ -6,8 +6,10 @@ license.workspace = true
 
 [dependencies]
 croaring.workspace = true
-# `count_ranges` calls `roaring_bitmap_rank_many`, which croaring does not wrap. The version is the
-# one croaring depends on, so both name the same `roaring_bitmap_t`.
+# `count_ranges` calls `roaring_bitmap_rank_many`, and `OwnedView` `roaring_bitmap_frozen_view`,
+# which croaring does not wrap. The version is the one croaring depends on, so both name the same
+# `roaring_bitmap_t`: a croaring upgrade moves this version in step, or the cast in counts.rs reads
+# one crate's struct as the other's.
 croaring-sys = "5.2.2"
 
 [dev-dependencies]

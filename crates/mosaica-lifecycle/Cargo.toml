@@ -21,6 +21,7 @@ fault-injection = []
 
 [dependencies]
 croaring = { workspace = true }
+mosaica-roaring = { path = "../mosaica-roaring" }
 mosaica-types = { path = "../mosaica-types", features = ["serde"] }
 mosaica-authz = { path = "../mosaica-authz" }
 postcard = { workspace = true }

@@ -20,16 +20,20 @@
 //! [`count_ranges`] counts a bitmap over many ranges in one walk of its containers, and
 //! [`RangeEnds`] holds the ranges' ends for counting several bitmaps over them.
 //!
+//! [`OwnedView`] reads a bitmap in place from bytes another value keeps alive.
+//!
 //! The crate sits below `mosaica-filter` and `mosaica-store` because both use it and neither may
 //! depend on the other.
 
 mod counts;
 mod ranks;
 mod runs;
+mod view;
 
 pub use counts::{count_ranges, RangeEnds};
 pub use ranks::BlockRanks;
 pub use runs::{for_each_run_in, split_by_cardinality, RankedRuns, Runs};
+pub use view::OwnedView;
 
 use croaring::{Bitmap, Portable};
 

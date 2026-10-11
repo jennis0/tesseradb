@@ -22,6 +22,9 @@ use croaring::Bitmap;
 // `rank_many` sound. A croaring release that changed that would fail here before it misread one.
 const _: () =
     assert!(std::mem::size_of::<Bitmap>() == std::mem::size_of::<croaring_sys::roaring_bitmap_t>());
+const _: () = assert!(
+    std::mem::align_of::<Bitmap>() == std::mem::align_of::<croaring_sys::roaring_bitmap_t>()
+);
 
 /// The number of members of `bitmap` in each of `ranges`, in order: [`RangeEnds::counts`] over
 /// [`RangeEnds::of`] `ranges`.

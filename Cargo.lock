@@ -2237,6 +2237,7 @@ dependencies = [
  "croaring",
  "mosaica-authz",
  "mosaica-lifecycle",
+ "mosaica-roaring",
  "mosaica-types",
  "postcard",
  "proptest",

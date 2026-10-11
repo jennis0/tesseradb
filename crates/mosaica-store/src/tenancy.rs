@@ -20,18 +20,20 @@
 //!
 //! # What the open checks
 //!
-//! The header against the file and against the bit the side-manifest names the file for, and the
-//! mapped bitmap's cardinality, minimum and maximum against the header's. A frozen view over bytes
-//! that are not a frozen bitmap is undefined, so that the payload is what the writer produced rests
-//! on the bundle's digest sweep, as it does for [`crate::term_images`].
+//! The header against the file and against the bit the side-manifest names the file for, the
+//! payload's frozen layout ([`mosaica_roaring::OwnedView::frozen`]), and the mapped bitmap's
+//! cardinality, minimum and maximum against the header's. That the containers hold what the writer
+//! wrote rests on the bundle's digest sweep, as it does for [`crate::term_images`].
 
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use croaring::{Bitmap, BitmapView, Frozen};
+use croaring::{Bitmap, Frozen};
 use memmap2::Mmap;
+use mosaica_roaring::OwnedView;
 use mosaica_types::{EntityId, IdentityKey, MosaicaId, Tenancy};
 
 use crate::error::{io, Result, StoreError};
@@ -120,9 +122,7 @@ pub fn write_bit(dir: &Path, bit: u32, numbers: &Bitmap) -> Result<Option<PathBu
 
 /// One bit's numbers: a frozen view over the mapped file that holds them.
 struct MappedBit {
-    /// Declared before `_map`, so it is dropped before the bytes it reads.
-    view: BitmapView<'static>,
-    _map: Mmap,
+    view: OwnedView,
     minimum: u32,
     maximum: u32,
 }
@@ -169,12 +169,10 @@ impl MappedBit {
                 ),
             ));
         }
-        // SAFETY: the mapping is page-aligned and the payload starts 32 bytes in, so the pointer
-        // is 32-byte aligned, and its length is the one the writer recorded. That the bytes are a
-        // frozen bitmap rests on the digest sweep (module doc).
-        let bytes: &'static [u8] =
-            unsafe { std::mem::transmute::<&[u8], &'static [u8]>(&map[HEADER_LEN..]) };
-        let view = unsafe { BitmapView::deserialize::<Frozen>(bytes) };
+        let map = Arc::new(map);
+        // SAFETY: the payload lies inside the read-only mapping the view is given to keep.
+        let view = unsafe { OwnedView::frozen(&map[HEADER_LEN..], map.clone()) }
+            .ok_or_else(|| malformed(path, "the payload is not a frozen bitmap"))?;
         let bounds = (view.minimum(), view.maximum());
         if view.cardinality() != cardinality
             || (cardinality > 0 && bounds != (Some(minimum), Some(maximum)))
@@ -186,7 +184,6 @@ impl MappedBit {
         }
         Ok(MappedBit {
             view,
-            _map: map,
             minimum,
             maximum,
         })
