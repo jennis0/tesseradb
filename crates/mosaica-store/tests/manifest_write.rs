@@ -274,7 +274,7 @@ fn write_current_with_a_wrong_digest_is_caught_by_open_bundle_not_silently_serve
 }
 
 /// The property the fold's identity rotation depends on (compaction §4's `bundle_identity`,
-/// carried on `Generation::fragments`): two manifests that differ in even one field must
+/// carried on `Shard::fragments`): two manifests that differ in even one field must
 /// digest differently, or a fold that changed the corpus would leave every session's fragment
 /// cache believing nothing had rotated.
 #[test]

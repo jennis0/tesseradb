@@ -375,8 +375,8 @@ fn candidate_for(fx: &Fixture, credential: &[u8]) -> (mosaica_engine::Engine, Bi
     let cand = candidate(
         session.fragment_at_authorise_for_test(),
         session.satisfied_for_test(),
-        &generation.overlay,
-        &generation.buffer,
+        &generation.only_shard().overlay,
+        &generation.only_shard().buffer,
     );
     (engine, cand)
 }
@@ -671,8 +671,8 @@ fn live_candidate(engine: &mosaica_engine::Engine) -> (Arc<mosaica_engine::Gener
     let cand = candidate(
         session.fragment_at_authorise_for_test(),
         session.satisfied_for_test(),
-        &generation.overlay,
-        &generation.buffer,
+        &generation.only_shard().overlay,
+        &generation.only_shard().buffer,
     );
     (generation, cand)
 }
@@ -701,7 +701,7 @@ fn an_entity_ingested_after_the_build_answers_a_filter_on_its_own_value() {
 
     let (generation, cand) = live_candidate(&engine);
     assert!(cand.contains(new), "the ingested entity is visible");
-    let columns = &generation.filter_columns;
+    let columns = &generation.only_shard().filter_columns;
     let matched = |operand: FilterOperand, column: &str| -> Bitmap {
         columns
             .resolve(column, &operand, &cand)
@@ -806,6 +806,7 @@ fn a_flush_does_not_disturb_what_the_build_already_answered() {
     let below = cand_after.and(&Bitmap::from_range(0..N as u32));
     for ((column, operand), before) in operands.iter().zip(&built) {
         let after = generation
+            .only_shard()
             .filter_columns
             .resolve(column, operand, &below)
             .unwrap();
@@ -835,7 +836,7 @@ fn an_ingested_entity_with_no_value_is_absent_from_every_predicate_on_that_colum
     let new = ingest_and_flush(&engine, "no-dept", WalScalar::U8(0), "paper-98", 7) as u32;
 
     let (generation, cand) = live_candidate(&engine);
-    let columns = &generation.filter_columns;
+    let columns = &generation.only_shard().filter_columns;
     let every_code: Vec<AttrLocalId> = fx.codes.values().map(|c| AttrLocalId::new(*c)).collect();
     for operand in [
         FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
@@ -914,6 +915,7 @@ fn a_flushed_item_with_no_number_matches_no_range_either() {
     };
 
     let straddling_zero = generation
+        .only_shard()
         .filter_columns
         .resolve("bonus", &range(-100, 100), &cand)
         .unwrap();
@@ -930,6 +932,7 @@ fn a_flushed_item_with_no_number_matches_no_range_either() {
     // absence from the corpus.
     assert!(
         generation
+            .only_shard()
             .filter_columns
             .resolve(
                 "title",
@@ -977,7 +980,7 @@ fn several_flushes_compose_and_each_entity_keeps_its_own_value() {
     ) as u32;
 
     let (generation, cand) = live_candidate(&engine);
-    let columns = &generation.filter_columns;
+    let columns = &generation.only_shard().filter_columns;
     for (entity, key, title, score) in [
         (first, "eng", "alpha", 1i128),
         (second, "sales", "beta", 2),
@@ -1046,11 +1049,13 @@ fn a_restart_composes_the_extents_the_manifest_names() {
     assert!(cand.contains(new), "the flushed entity is visible again");
     let legal = AttrLocalId::new(fx.codes["legal"]);
     assert!(generation
+        .only_shard()
         .filter_columns
         .resolve("department", &FilterOperand::Equals(legal), &cand)
         .unwrap()
         .contains(new));
     assert!(generation
+        .only_shard()
         .filter_columns
         .resolve(
             "title",
@@ -1839,7 +1844,11 @@ fn an_entity_whose_value_is_not_yet_reachable_matches_no_negation() {
         )]),
         FilterExpr::NoneOf(vec![leaf("title", FilterOperand::TextPrefix("zzz".into()))]),
     ] {
-        let got = generation.filter_columns.evaluate(&expr, &cand).unwrap();
+        let got = generation
+            .only_shard()
+            .filter_columns
+            .evaluate(&expr, &cand)
+            .unwrap();
         assert!(
             !got.contains(buffered),
             "an entity with no reachable value matched a negation — the failure arithmetic has \
@@ -1868,6 +1877,7 @@ fn none_of_every_offered_value_proves_no_unoffered_value_exists() {
     // The vocabulary this principal is actually offered, derived the way `/v1/categories` derives
     // it — membership against its own composed candidate.
     let membership = generation
+        .only_shard()
         .filter_columns
         .category_membership("department", &cand)
         .expect("a `derived` category carries membership postings");
@@ -1896,7 +1906,11 @@ fn none_of_every_offered_value_proves_no_unoffered_value_exists() {
     );
 
     let expr = FilterExpr::NoneOf(vec![leaf("department", FilterOperand::In(offered.clone()))]);
-    let got = generation.filter_columns.evaluate(&expr, &cand).unwrap();
+    let got = generation
+        .only_shard()
+        .filter_columns
+        .evaluate(&expr, &cand)
+        .unwrap();
 
     assert!(
         got.is_empty(),
@@ -1919,11 +1933,13 @@ fn a_values_count_is_what_a_filter_on_that_value_returns() {
     let (engine, cand) = candidate_for(&fx, &subset_credential());
     let generation = engine.generation();
     let membership = generation
+        .only_shard()
         .filter_columns
         .category_membership("department", &cand)
         .expect("a `derived` category carries membership postings");
     let codes: Vec<u32> = fx.codes.values().copied().collect();
     let counts = generation
+        .only_shard()
         .filter_columns
         .category_counts(
             "department",
@@ -1935,6 +1951,7 @@ fn a_values_count_is_what_a_filter_on_that_value_returns() {
 
     for (key, code) in &fx.codes {
         let resolved = generation
+            .only_shard()
             .filter_columns
             .resolve(
                 "department",
@@ -2514,7 +2531,7 @@ fn a_routed_public_category_unions_the_postings_with_every_extent() {
     ) as u32;
 
     let (generation, cand) = live_candidate(&engine);
-    let columns = &generation.filter_columns;
+    let columns = &generation.only_shard().filter_columns;
     let code = |key: &str| AttrLocalId::new(fx.archive_codes[key]);
     let hits = |operand: FilterOperand| columns.resolve("archive", &operand, &cand).unwrap();
 
@@ -2913,7 +2930,7 @@ fn a_folded_bundle_answers_every_filter_it_answered_before() {
     ) as u32;
 
     let (generation, cand) = live_candidate(&engine);
-    let before = probe_every_operand(&fx, &generation.filter_columns, &cand);
+    let before = probe_every_operand(&fx, &generation.only_shard().filter_columns, &cand);
     // The reference is the corpus, not the index: the build's own answer for one operand is
     // checked against the fixture's inputs, so a pass that folded a self-consistent lie fails here
     // and not only against itself.
@@ -2939,7 +2956,7 @@ fn a_folded_bundle_answers_every_filter_it_answered_before() {
         as_vec(&cand),
         "the fold retires nothing here, so the candidate is the same entity set"
     );
-    let after = probe_every_operand(&fx, &folded.filter_columns, &cand_after);
+    let after = probe_every_operand(&fx, &folded.only_shard().filter_columns, &cand_after);
     assert_eq!(
         after, before,
         "every operand answers what it answered before"
@@ -2982,7 +2999,7 @@ fn a_node_restarts_onto_a_folded_bundle_and_answers_from_it() {
     );
     fold(&engine);
     let (generation, cand) = live_candidate(&engine);
-    let before = probe_every_operand(&fx, &generation.filter_columns, &cand);
+    let before = probe_every_operand(&fx, &generation.only_shard().filter_columns, &cand);
     drop(generation);
     drop(engine);
 
@@ -2990,7 +3007,7 @@ fn a_node_restarts_onto_a_folded_bundle_and_answers_from_it() {
     assert_eq!(restarted.generation().prefix, "v00001");
     let (generation, cand) = live_candidate(&restarted);
     assert_eq!(
-        probe_every_operand(&fx, &generation.filter_columns, &cand),
+        probe_every_operand(&fx, &generation.only_shard().filter_columns, &cand),
         before,
         "a restart onto the folded prefix composes exactly what the process that folded it served"
     );
@@ -3076,7 +3093,7 @@ fn a_deleted_entitys_value_leaves_the_column_and_every_predicate() {
     );
 
     let (generation, cand) = live_candidate(&engine);
-    let columns = &generation.filter_columns;
+    let columns = &generation.only_shard().filter_columns;
     for (column, operand) in [
         ("department", FilterOperand::Equals(dept)),
         ("archive", FilterOperand::Equals(arch)),
@@ -3328,6 +3345,7 @@ fn a_suppression_changes_no_attribute_artefact_across_the_fold() {
         .expect("an unsuppress is accepted");
     let (generation, cand) = live_candidate(&engine);
     assert!(generation
+        .only_shard()
         .filter_columns
         .resolve("title", &FilterOperand::TextEquals(title_of(2)), &cand)
         .expect("answers")
@@ -3413,6 +3431,7 @@ fn an_extent_published_during_the_folds_flight_is_carried_forward_and_composed()
         }
     }
     assert!(generation
+        .only_shard()
         .filter_columns
         .resolve(
             "title",
@@ -3422,6 +3441,7 @@ fn an_extent_published_during_the_folds_flight_is_carried_forward_and_composed()
         .expect("answers")
         .contains(mid_flight));
     assert!(generation
+        .only_shard()
         .filter_columns
         .resolve(
             "archive",
@@ -3437,6 +3457,7 @@ fn an_extent_published_during_the_folds_flight_is_carried_forward_and_composed()
     let restarted = open_engine_publishing(&fx.bundle, &cache, &wal);
     let (generation, cand) = live_candidate(&restarted);
     assert!(generation
+        .only_shard()
         .filter_columns
         .resolve(
             "department",
@@ -3577,6 +3598,7 @@ fn every_answer(engine: &mosaica_engine::Engine, fx: &Fixture) -> Vec<(String, V
                 }
             };
             let answer = generation
+                .only_shard()
                 .filter_columns
                 .resolve(
                     column,
@@ -3593,12 +3615,14 @@ fn every_answer(engine: &mosaica_engine::Engine, fx: &Fixture) -> Vec<(String, V
         FilterOperand::TextContains("title-0".into()),
     ] {
         let answer = generation
+            .only_shard()
             .filter_columns
             .resolve("title", &operand, &cand)
             .expect("answers");
         out.push((format!("title {operand:?}"), answer.iter().collect()));
     }
     let answer = generation
+        .only_shard()
         .filter_columns
         .resolve(
             "score",
@@ -3653,7 +3677,11 @@ fn a_window_of_extents_becomes_one_file_per_column_and_answers_identically() {
         // **And the live generation serves from the coalesced layer**, base plus one — or the
         // bound is a manifest edit the running process keeps ignoring until its next restart.
         assert_eq!(
-            engine.generation().filter_columns.layer_count(&column),
+            engine
+                .generation()
+                .only_shard()
+                .filter_columns
+                .layer_count(&column),
             Some(2),
             "column '{column}' is still served from the layers the coalesce replaced"
         );
@@ -3662,6 +3690,7 @@ fn a_window_of_extents_becomes_one_file_per_column_and_answers_identically() {
     let eng = AttrLocalId::new(fx.codes["eng"]);
     let (generation, cand) = live_candidate(&engine);
     let matched = generation
+        .only_shard()
         .filter_columns
         .resolve("department", &FilterOperand::Equals(eng), &cand)
         .expect("answers");
@@ -3685,6 +3714,7 @@ fn a_window_of_extents_becomes_one_file_per_column_and_answers_identically() {
     }
     let (generation, cand) = live_candidate(&engine);
     let matched = generation
+        .only_shard()
         .filter_columns
         .resolve("department", &FilterOperand::Equals(eng), &cand)
         .expect("answers");
@@ -3727,7 +3757,11 @@ fn a_coalesced_column_reopens_and_answers_over_every_post_build_entity() {
         "the keyword column reopens from its one coalesced extent"
     );
     assert_eq!(
-        reopened.generation().filter_columns.layer_count("title"),
+        reopened
+            .generation()
+            .only_shard()
+            .filter_columns
+            .layer_count("title"),
         Some(2),
         "base plus the coalesced layer, its dictionary opened from the manifest entry"
     );
@@ -3735,6 +3769,7 @@ fn a_coalesced_column_reopens_and_answers_over_every_post_build_entity() {
     for (i, entity) in entities.iter().enumerate() {
         let key = ["eng", "sales", "legal"][i % 3];
         let answer = generation
+            .only_shard()
             .filter_columns
             .resolve(
                 "department",
@@ -3747,6 +3782,7 @@ fn a_coalesced_column_reopens_and_answers_over_every_post_build_entity() {
             "entity {entity} lost its value to the restart"
         );
         let title = generation
+            .only_shard()
             .filter_columns
             .resolve(
                 "title",
@@ -3766,7 +3802,7 @@ fn composition_reading(
     fx: &Fixture,
 ) -> BTreeMap<String, String> {
     let (generation, cand) = live_candidate(engine);
-    let columns = &generation.filter_columns;
+    let columns = &generation.only_shard().filter_columns;
     let mut out = BTreeMap::new();
     out.insert("candidate".to_string(), cand.cardinality().to_string());
     out.insert(
@@ -3938,6 +3974,7 @@ fn keyword_answers(
     operands.push(FilterOperand::TextEquals(format!("{tag}-zeta")));
     for operand in &operands {
         let answer = generation
+            .only_shard()
             .filter_columns
             .resolve("title", operand, &cand)
             .expect("answers");
@@ -3953,6 +3990,7 @@ fn keyword_answers(
             ),
         ]);
         let answer = generation
+            .only_shard()
             .filter_columns
             .evaluate(&expr, &cand)
             .expect("answers");
@@ -4019,7 +4057,11 @@ fn a_keyword_windows_extents_become_one_and_every_entity_keeps_its_key() {
         "the keyword window collapsed to one extent"
     );
     assert_eq!(
-        engine.generation().filter_columns.layer_count("title"),
+        engine
+            .generation()
+            .only_shard()
+            .filter_columns
+            .layer_count("title"),
         Some(2),
         "the live generation serves the base and the one coalesced layer"
     );
@@ -4031,6 +4073,7 @@ fn a_keyword_windows_extents_become_one_and_every_entity_keeps_its_key() {
     for (i, entity) in entities.iter().enumerate() {
         for key in ["alpha", "beta", "delta", "epsilon", "gamma"] {
             let answer = generation
+                .only_shard()
                 .filter_columns
                 .resolve(
                     "title",
@@ -4085,7 +4128,11 @@ fn a_coalesced_keyword_extent_survives_a_restart_and_a_fold() {
             "the fold consumed the coalesced extent"
         );
         assert_eq!(
-            engine.generation().filter_columns.layer_count("title"),
+            engine
+                .generation()
+                .only_shard()
+                .filter_columns
+                .layer_count("title"),
             Some(1),
             "one base again"
         );

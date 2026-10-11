@@ -252,11 +252,11 @@ impl crate::Engine {
         if carriers > 1 {
             return Err(EngineError::MultiPartitionView(view.to_string()));
         }
-        let view_data = generation
-            .bundle
-            .partitions
-            .values()
-            .find_map(|partition| partition.only_shard().views.get(view))
+        let shard = generation.only_shard();
+        let view_data = shard
+            .data
+            .views
+            .get(view)
             .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
 
         // **The layer, resolved through the principal's own reachable set** — one probe for a
@@ -284,7 +284,7 @@ impl crate::Engine {
             })
         };
         let layer = self
-            .readable_layer(session, &generation, req.layer, view)
+            .readable_layer(session, shard, req.layer, view)
             .map_err(refused)?;
         if !layer.declaration.depends_on.is_empty() {
             return Err(EngineError::BrowseRefused(BrowseRefused::AttachedLayer(
@@ -306,9 +306,16 @@ impl crate::Engine {
         // is given one and its laps are dropped. Named `_probe` rather than silenced afterwards,
         // so that a stage field arriving here is a change to this line and not to a discard.
         let mut _probe = crate::timing::Probe::new();
-        let (geometry, key) =
-            self.session_geometry(session, &generation, view, view_data, &None, &mut _probe)?;
-        let denied = generation
+        let (geometry, key) = self.session_geometry(
+            session,
+            &generation,
+            shard,
+            view,
+            view_data,
+            &None,
+            &mut _probe,
+        )?;
+        let denied = shard
             .denied()
             .get(view)
             .ok_or_else(|| EngineError::DenyMaskMissing {
@@ -316,16 +323,17 @@ impl crate::Engine {
             })?;
         let mask = compose(
             session.satisfied(),
-            &generation.overlay,
-            &generation.buffer,
+            &shard.overlay,
+            &shard.buffer,
             Arc::clone(&geometry.projection),
             &view_data.row_space,
             denied,
-            generation.buffered_rows(view),
+            shard.buffered_rows(view),
         );
         let served_view = crate::viewport::ServedView {
             session,
             generation: &generation,
+            shard,
             name: view,
             data: view_data,
             segments: segments_with_row_bases(view, view_data)?,
@@ -333,6 +341,7 @@ impl crate::Engine {
             mask_identity: self.mask_identity(
                 session,
                 &generation,
+                shard,
                 &geometry,
                 key.segments_version,
             ),
@@ -386,8 +395,7 @@ impl crate::Engine {
                 // generating set receives no artifact at all rather than one with its description
                 // missing (decision 0076), which is why this runs inside the gate and not beside
                 // the row build.
-                let Some(content) =
-                    level_read.content(self, &generation, &layer, ordinal, entity, rank)
+                let Some(content) = level_read.content(self, shard, &layer, ordinal, entity, rank)
                 else {
                     continue;
                 };
@@ -725,7 +733,7 @@ impl<'a, 'c> Namer<'a, 'c> {
 
     fn attached_name(&self, level: u32, ordinal: u32) -> Option<String> {
         let (engine, served, mask) = (self.engine, self.served, self.mask);
-        let generation = served.generation;
+        let shard = served.shard;
         let target_layer = self.layer.declaration.name.as_str();
         let target = self.layer.runs[level as usize]
             .entity_of(u64::from(ordinal))
@@ -735,7 +743,7 @@ impl<'a, 'c> Namer<'a, 'c> {
                 .names()
                 .filter_map(|name| {
                     engine
-                        .readable_layer(served.session, generation, name, served.name)
+                        .readable_layer(served.session, shard, name, served.name)
                         .ok()
                 })
                 .filter(|label| {
@@ -808,8 +816,7 @@ impl<'a, 'c> Namer<'a, 'c> {
                         let ArtifactVerdict::Serve { rank, .. } = view.verdict(entity, at) else {
                             return None;
                         };
-                        read.content(engine, generation, label, at, entity, rank)?
-                            .name()
+                        read.content(engine, shard, label, at, entity, rank)?.name()
                     })
                 })
             })

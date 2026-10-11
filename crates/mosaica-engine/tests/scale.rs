@@ -813,6 +813,7 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
     assert!(
         reopened
             .generation()
+            .only_shard()
             .overlay
             .is_suppressed(suppressed.entity),
         "the suppression survives the restart"
@@ -1809,7 +1810,7 @@ fn p1_one_scale(base: u64) {
     // entity id the bundle's row geometry covers, which is what `permutation.bin` is sized by. Row
     // count is the axis it explicitly does *not* scale on, and reporting both is how a reader tells
     // the two apart when a corpus has one row per entity.
-    let entities = engine.generation().watermark;
+    let entities = engine.generation().only_shard().watermark;
 
     // **The input the coefficient is against is the bytes the fold reads**, which is what the live
     // manifests name — not everything on disc. A merge's consumed segments are still in the

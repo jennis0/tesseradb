@@ -217,6 +217,7 @@ fn answers(engine: &Engine, terms: &[String]) -> BTreeMap<String, Vec<u32>> {
         .iter()
         .map(|term| {
             let answer = generation
+                .only_shard()
                 .filter_columns
                 .resolve(
                     "prose",
@@ -327,7 +328,11 @@ fn a_window_of_text_layers_becomes_one_and_answers_identically() {
     );
     // **The live generation, not only the manifest.** The base plus the coalesced layer is two.
     assert_eq!(
-        engine.generation().filter_columns.text_layer_count("prose"),
+        engine
+            .generation()
+            .only_shard()
+            .filter_columns
+            .text_layer_count("prose"),
         Some(2),
         "the process is still serving from the layers the coalesce replaced"
     );
@@ -416,7 +421,8 @@ fn a_coalesced_text_layer_that_does_not_cover_its_window_is_refused() {
         .into_iter()
         .find(|e| e.column == "prose")
         .expect("the coalesced extent");
-    let columns = &engine.generation().filter_columns;
+    let generation = engine.generation();
+    let columns = &generation.only_shard().filter_columns;
     let paths = |presence: &Path| mosaica_engine::filter::TextExtentPaths {
         column: "prose".to_string(),
         dict_rel: extent.dict.clone(),

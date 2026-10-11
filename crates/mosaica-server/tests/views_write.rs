@@ -2699,7 +2699,14 @@ async fn an_edit_in_a_view_dropped_before_the_tick_is_still_written() {
         "the item is served in the view it kept, holding the edit's value"
     );
     assert_eq!(
-        served.server.state.engine.generation().buffer.oldest_wal_pos(),
+        served
+            .server
+            .state
+            .engine
+            .generation()
+            .only_shard()
+            .buffer
+            .oldest_wal_pos(),
         None,
         "nothing buffered holds the log"
     );

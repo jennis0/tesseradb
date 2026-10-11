@@ -6,6 +6,8 @@ use super::*;
 /// A struct rather than four arguments: the fields travel together and are all read from the same
 /// manifests, and a fifth stays a compile error here rather than a defaulted argument.
 pub(crate) struct ManifestSeed<'a> {
+    /// The shard the marks and freed ids below are of.
+    pub shard: ShardId,
     /// `max(build MANIFEST, side manifests)`: the point region's floor.
     pub high_water: u64,
     /// `min(ceiling, side manifests)`: the row-less region's ceiling. A build sets this whenever
@@ -498,7 +500,7 @@ impl WritePath {
             buffer,
             WritePathState {
                 wal,
-                allocator,
+                shards: vec![ShardWrite::new(seed.shard, allocator)],
                 resolver_state,
                 accepted_batches,
                 registry,

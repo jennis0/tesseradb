@@ -151,8 +151,8 @@ impl Engine {
                 };
                 let declaration = &registered.declaration;
                 if !declaration.views.iter().any(|v| v == served.name)
-                    || served.generation.overlay.is_deleted(registered.entity)
-                    || served.generation.overlay.is_suppressed(registered.entity)
+                    || served.shard.overlay.is_deleted(registered.entity)
+                    || served.shard.overlay.is_suppressed(registered.entity)
                 {
                     return Tagging::None;
                 }
@@ -209,7 +209,7 @@ impl Engine {
         let declaration = &registered.declaration;
         let name = &declaration.name;
         let vocabulary = predicate_vocabulary(generation, declaration);
-        let source = generation.partition_source();
+        let source = served.shard.partition_source();
         let base = served.segments.first().map(|&(segment, _)| segment);
 
         let mut tags: Vec<Option<u64>> = vec![None; points.len()];
@@ -275,7 +275,7 @@ impl Engine {
             };
             let view = ArtifactView {
                 declaration,
-                overlay: &generation.overlay,
+                overlay: &served.shard.overlay,
                 labels: self.label_gate(served.session, declaration),
                 layer_reachable: true,
                 rows,
@@ -305,7 +305,7 @@ impl Engine {
                                         generation.segments_version,
                                         || {
                                             crate::artifact_content::LevelContent::build(
-                                                generation.filter_columns.records(),
+                                                served.shard.filter_columns.records(),
                                                 runs,
                                             )
                                         },
@@ -314,7 +314,7 @@ impl Engine {
                                 .clone()
                         });
                     self.supplied_content(
-                        generation,
+                        served.shard,
                         declaration,
                         level,
                         ordinal,

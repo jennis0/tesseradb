@@ -312,16 +312,16 @@ impl UniqueLive {
     }
 }
 
-/// The entities of `generation` holding each of `keys` in unique column `attribute`, from its
-/// runs and its live entries, deleted entities dropped, as `(position in keys, entity)` ascending
+/// The entities of `shard` holding each of `keys` in unique column `attribute`, from its runs and
+/// its live entries, deleted entities dropped, as `(position in keys, entity)` ascending
 /// by position. A suppressed entity holds its value. Nothing here asks who may see a holder: a
 /// caller answering a viewer intersects with the viewer's visible set.
 pub(crate) fn holders(
-    generation: &Generation,
+    shard: &crate::Shard,
     attribute: &str,
     keys: &[UniqueKey],
 ) -> Result<Vec<(usize, EntityId)>, mosaica_store::StoreError> {
-    let mut out: Vec<(usize, EntityId)> = match generation.unique.get(attribute) {
+    let mut out: Vec<(usize, EntityId)> = match shard.unique.get(attribute) {
         Some(index) => index
             .lookup(keys)?
             .into_iter()
@@ -329,8 +329,8 @@ pub(crate) fn holders(
             .collect(),
         None => Vec::new(),
     };
-    out.extend(generation.unique_live.lookup(attribute, keys));
-    out.retain(|(_, entity)| !generation.overlay.is_deleted(*entity));
+    out.extend(shard.unique_live.lookup(attribute, keys));
+    out.retain(|(_, entity)| !shard.overlay.is_deleted(*entity));
     out.sort_unstable();
     out.dedup();
     Ok(out)
@@ -339,11 +339,11 @@ pub(crate) fn holders(
 /// An item's `mosaica_id` as a refusal names it.
 pub(crate) fn mosaica_id_text(
     engine: &crate::Engine,
-    generation: &Generation,
+    shard: &crate::Shard,
     entity: EntityId,
 ) -> String {
     engine
-        .mosaica_id_in(generation, entity)
+        .mosaica_id_in(shard, entity)
         .map(|id| id.raw().to_string())
         .unwrap_or_else(|_| "unknown".to_string())
 }
@@ -360,7 +360,8 @@ pub(crate) fn moved_since(
     creates: bool,
 ) -> bool {
     use mosaica_store::unique::KeyKind;
-    let live = &generation.unique_live;
+    let shard = generation.only_shard();
+    let live = &shard.unique_live;
     if creates && live.columns_changed_since(seq) {
         return true;
     }
@@ -380,7 +381,7 @@ pub(crate) fn moved_since(
         };
         live.added_since(&d.name, &[UniqueKey::of_widened(kind, *key)], seq)
             .into_iter()
-            .any(|(_, holder)| !generation.overlay.is_deleted(holder))
+            .any(|(_, holder)| !shard.overlay.is_deleted(holder))
     })
 }
 
@@ -395,9 +396,10 @@ pub(crate) fn for_each_flushed_value(
     visit: &mut dyn FnMut(u32, WalScalar) -> Result<(), String>,
 ) -> Result<(), String> {
     let manifest = &generation.bundle.manifest;
+    let shard = generation.only_shard();
     let declared = &manifest.declared_scalars[at];
     let mut wanted = wanted.clone();
-    wanted.andnot_inplace(generation.overlay.deleted_set());
+    wanted.andnot_inplace(shard.overlay.deleted_set());
     let mut failed: Option<String> = None;
     let mut send = |entity: u32, value: WalScalar| {
         if failed.is_none() {
@@ -407,7 +409,7 @@ pub(crate) fn for_each_flushed_value(
         }
     };
     if crate::filter::owes_value_column(declared, &manifest.vocabularies) {
-        let columns = &generation.filter_columns;
+        let columns = &shard.filter_columns;
         let mut present = croaring::Bitmap::new();
         if let Some(layers) = columns.value_layers(&declared.name) {
             for layer in layers.base().into_iter().chain(layers.extents()) {
@@ -423,7 +425,7 @@ pub(crate) fn for_each_flushed_value(
             }
         }
     } else if crate::filter::blob_resident(declared, &manifest.vocabularies) {
-        generation
+        shard
             .filter_columns
             .records()
             .for_each_row_in(&wanted, &mut |entity, fields| {
@@ -440,15 +442,13 @@ pub(crate) fn for_each_flushed_value(
     } else {
         // Rendered alone: every view's rows carry the value, so each entity is read from the
         // first view that holds it.
-        for partition in generation.bundle.partitions.values() {
-            for view in partition.only_shard().views.values() {
-                let mut read = croaring::Bitmap::new();
-                view.for_each_rendered(&declared.name, &wanted, &mut |entity, value| {
-                    read.add(entity);
-                    send(entity, value);
-                })?;
-                wanted.andnot_inplace(&read);
-            }
+        for view in shard.data.views.values() {
+            let mut read = croaring::Bitmap::new();
+            view.for_each_rendered(&declared.name, &wanted, &mut |entity, value| {
+                read.add(entity);
+                send(entity, value);
+            })?;
+            wanted.andnot_inplace(&read);
         }
     }
     failed.map_or(Ok(()), Err)
@@ -487,7 +487,8 @@ pub(crate) fn build_round(input: RoundInput) -> Result<RoundOutput, String> {
     let declared = &generation.bundle.manifest.declared_scalars[input.at];
     let ty = declared.arrow_type;
     let kind = KeyKind::of(ty).ok_or_else(|| format!("'{}' cannot be unique", declared.name))?;
-    let deleted = |entity: EntityId| generation.overlay.is_deleted(entity);
+    let shard = generation.only_shard();
+    let deleted = |entity: EntityId| shard.overlay.is_deleted(entity);
 
     std::fs::create_dir_all(&input.out_dir).map_err(|e| e.to_string())?;
     let mut spill = UniqueSpill::create(kind, &input.out_dir, input.memory_budget)
@@ -573,7 +574,7 @@ pub(crate) fn build_round(input: RoundInput) -> Result<RoundOutput, String> {
     let mut checked: FxHashMap<EntityId, UniqueKey> = FxHashMap::default();
     let mut by_key: FxHashMap<UniqueKey, EntityId> = FxHashMap::default();
     let mut texts: FxHashMap<UniqueKey, String> = FxHashMap::default();
-    for (entity, scalars) in buffered_scalars(&generation.buffer) {
+    for (entity, scalars) in buffered_scalars(&shard.buffer) {
         if deleted(entity) {
             continue;
         }

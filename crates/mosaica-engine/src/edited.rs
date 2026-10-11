@@ -12,7 +12,7 @@
 //! entries that the generation holds and has not deleted, or, where the number has no entries,
 //! the number itself.
 //!
-//! A number's `mosaica_id` carries the number's tenancy, which the generation's tenancy index holds
+//! A number's `mosaica_id` carries the number's tenancy, which its shard's tenancy index holds
 //! ([`mosaica_store::tenancy`]). An identifier is formed at the tenancy the index holds for its
 //! number, and names the number only while the index still holds that tenancy for it. An artifact
 //! or a layer is an entity that is never freed, so its identifier is at tenancy 0 and the index is
@@ -22,7 +22,7 @@ use mosaica_store::StoreError;
 use mosaica_types::{EntityId, IdentityError, IdentityKey, ItemHigh, MosaicaId, ShardId, Tenancy};
 use rustc_hash::FxHashMap;
 
-use crate::Generation;
+use crate::{Generation, Shard};
 
 /// The edited items whose pair no run holds yet: number to entities, and entity to number.
 #[derive(Debug, Clone, Default)]
@@ -89,16 +89,16 @@ fn narrow(entity: EntityId) -> u32 {
     u32::try_from(entity.raw()).expect("entity ids are capped at u32::MAX by I9")
 }
 
-/// Each entity's number: the one its pair names, or the entity itself.
+/// Each entity's number in `shard`: the one its pair names, or the entity itself.
 pub(crate) fn numbers_of(
-    generation: &Generation,
+    shard: &Shard,
     entities: &[EntityId],
 ) -> Result<Vec<EntityId>, StoreError> {
     let raw: Vec<u32> = entities.iter().map(|e| narrow(*e)).collect();
     let mut out: Vec<EntityId> = entities.to_vec();
     let mut unresolved: Vec<usize> = Vec::new();
     for (at, entity) in raw.iter().enumerate() {
-        match generation.edited_live.number_of(*entity) {
+        match shard.edited_live.number_of(*entity) {
             Some(number) => out[at] = EntityId::new(u64::from(number)),
             None => unresolved.push(at),
         }
@@ -107,24 +107,21 @@ pub(crate) fn numbers_of(
         return Ok(out);
     }
     let asked: Vec<u32> = unresolved.iter().map(|&at| raw[at]).collect();
-    for (at, number) in generation.edited.numbers_of(&asked)? {
+    for (at, number) in shard.edited.numbers_of(&asked)? {
         out[unresolved[at]] = EntityId::new(u64::from(number));
     }
     Ok(out)
 }
 
 /// For each number, every entity its pairs name, in the runs and here, in ascending order.
-pub(crate) fn entries_of(
-    generation: &Generation,
-    numbers: &[u32],
-) -> Result<Vec<Vec<EntityId>>, StoreError> {
+pub(crate) fn entries_of(shard: &Shard, numbers: &[u32]) -> Result<Vec<Vec<EntityId>>, StoreError> {
     let mut out: Vec<Vec<EntityId>> = vec![Vec::new(); numbers.len()];
     for (at, number) in numbers.iter().enumerate() {
-        if let Some(held) = generation.edited_live.by_number.get(number) {
+        if let Some(held) = shard.edited_live.by_number.get(number) {
             out[at].extend(held.iter().map(|e| EntityId::new(u64::from(*e))));
         }
     }
-    for (at, entity) in generation.edited.entities_of(numbers)? {
+    for (at, entity) in shard.edited.entities_of(numbers)? {
         out[at].push(EntityId::new(u64::from(entity)));
     }
     for entities in &mut out {
@@ -138,12 +135,12 @@ pub(crate) fn entries_of(
 /// for and the overlay has not deleted; where the number has no entries, the number itself where
 /// `holds` answers for it. `None` for a number naming nothing.
 pub(crate) fn entities_of_numbers(
-    generation: &Generation,
+    shard: &Shard,
     numbers: &[EntityId],
     holds: impl Fn(EntityId) -> bool,
 ) -> Result<Vec<Option<EntityId>>, StoreError> {
     let raw: Vec<u32> = numbers.iter().map(|n| narrow(*n)).collect();
-    let entries = entries_of(generation, &raw)?;
+    let entries = entries_of(shard, &raw)?;
     Ok(numbers
         .iter()
         .zip(entries)
@@ -154,43 +151,35 @@ pub(crate) fn entities_of_numbers(
             entries
                 .into_iter()
                 .rev()
-                .find(|e| !generation.overlay.is_deleted(*e) && holds(*e))
+                .find(|e| !shard.overlay.is_deleted(*e) && holds(*e))
         })
         .collect())
 }
 
-/// Whether `generation` holds a row of `entity`, flushed or buffered.
-pub(crate) fn holds(generation: &Generation, entity: EntityId) -> bool {
-    generation.buffer.contains(entity)
-        || generation.bundle.partitions.values().any(|partition| {
-            partition
-                .only_shard()
-                .views
-                .values()
-                .any(|data| data.row_space.row_of(entity).is_some())
-        })
+/// Whether `shard` holds a row of `entity`, flushed or buffered.
+pub(crate) fn holds(shard: &Shard, entity: EntityId) -> bool {
+    shard.buffer.contains(entity)
+        || shard
+            .data
+            .views
+            .values()
+            .any(|data| data.row_space.row_of(entity).is_some())
 }
 
 /// The entity holding the item `entity` held, where an edit has moved the item since; `None`
 /// where it has not moved or its item is gone.
-pub(crate) fn moved_to(
-    generation: &Generation,
-    entity: EntityId,
-) -> Result<Option<EntityId>, StoreError> {
-    let number = numbers_of(generation, &[entity])?[0];
-    let now = entities_of_numbers(generation, &[number], |e| holds(generation, e))?[0];
+pub(crate) fn moved_to(shard: &Shard, entity: EntityId) -> Result<Option<EntityId>, StoreError> {
+    let number = numbers_of(shard, &[entity])?[0];
+    let now = entities_of_numbers(shard, &[number], |e| holds(shard, e))?[0];
     Ok(now.filter(|now| *now != entity))
 }
 
 /// Each member of `set` an edit has moved, replaced by the entity its item holds now. Only a
 /// member the overlay deletes can have moved: an edit deletes the entity it moves away from.
-pub(crate) fn follow_moves(
-    generation: &Generation,
-    set: &mut croaring::Bitmap,
-) -> Result<(), StoreError> {
-    let deleted = set.and(generation.overlay.deleted_set());
+pub(crate) fn follow_moves(shard: &Shard, set: &mut croaring::Bitmap) -> Result<(), StoreError> {
+    let deleted = set.and(shard.overlay.deleted_set());
     for old in deleted.iter() {
-        if let Some(now) = moved_to(generation, EntityId::new(u64::from(old)))? {
+        if let Some(now) = moved_to(shard, EntityId::new(u64::from(old)))? {
             set.remove(old);
             set.add(narrow(now));
         }
@@ -201,15 +190,15 @@ pub(crate) fn follow_moves(
 /// `changes` with each change naming an entity an edit has moved an item away from also applied
 /// to the entity the item holds now. The change to the old entity stays, so the log names both.
 pub(crate) fn follow_changes(
-    generation: &Generation,
+    shard: &Shard,
     changes: &mut Vec<(EntityId, mosaica_lifecycle::ChangeOp)>,
 ) -> Result<(), StoreError> {
     let mut followed = Vec::new();
     for &(entity, op) in changes.iter() {
-        if !generation.overlay.is_deleted(entity) && holds(generation, entity) {
+        if !shard.overlay.is_deleted(entity) && holds(shard, entity) {
             continue;
         }
-        if let Some(now) = moved_to(generation, entity)? {
+        if let Some(now) = moved_to(shard, entity)? {
             followed.push((now, op));
         }
     }
@@ -219,16 +208,16 @@ pub(crate) fn follow_changes(
 
 /// Every entity set of `artifacts`, members and generating sets, following moves.
 pub(crate) fn follow_artifacts(
-    generation: &Generation,
+    shard: &Shard,
     artifacts: &mut [mosaica_lifecycle::IncomingArtifact],
 ) -> Result<(), StoreError> {
     for artifact in artifacts {
-        follow_moves(generation, &mut artifact.members)?;
+        follow_moves(shard, &mut artifact.members)?;
         if let Some(excluding) = artifact.excluding.as_mut() {
-            follow_moves(generation, excluding)?;
+            follow_moves(shard, excluding)?;
         }
         for content in &mut artifact.contents {
-            follow_moves(generation, &mut content.generated_from)?;
+            follow_moves(shard, &mut content.generated_from)?;
         }
     }
     Ok(())
@@ -236,12 +225,12 @@ pub(crate) fn follow_artifacts(
 
 /// Every entity set of `joins`, following moves.
 pub(crate) fn follow_growth(
-    generation: &Generation,
+    shard: &Shard,
     joins: &mut [mosaica_lifecycle::IncomingGrowth],
 ) -> Result<(), StoreError> {
     for join in joins {
-        follow_moves(generation, &mut join.joining)?;
-        follow_moves(generation, &mut join.leaving)?;
+        follow_moves(shard, &mut join.joining)?;
+        follow_moves(shard, &mut join.leaving)?;
     }
     Ok(())
 }
@@ -312,32 +301,44 @@ impl Stamp {
     }
 }
 
-/// The number `id` names in `generation`'s shard, or `None` where `id` names no item, an item of
-/// another shard, or its number at a tenancy the number is not held at.
+/// The shard of `generation` whose item `id` names, the number it names there, and whether `id`
+/// carries the tenancy that shard's index holds for the number. `None` where `id` names no item or
+/// an item of a shard `generation` does not hold. The index is read for every identifier of a shard
+/// it holds.
+pub(crate) fn named<'g>(
+    key: &IdentityKey,
+    generation: &'g Generation,
+    id: MosaicaId,
+) -> Option<(&'g Shard, EntityId, bool)> {
+    let (high, number) = key.invert(id)?;
+    let shard = generation.shard(high.shard)?;
+    Some((shard, number, shard.tenancy.of(number) == high.tenancy))
+}
+
+/// The number `id` names, or `None` where `id` names no item, an item of a shard `generation` does
+/// not hold, or its number at a tenancy the number is not held at.
 pub(crate) fn number_named(
     key: &IdentityKey,
     generation: &Generation,
     id: MosaicaId,
 ) -> Option<EntityId> {
-    let shard = generation.bundle.only_shard().id;
-    let (number, current) = generation.tenancy.number_named(key, shard, id)?;
+    let (_, number, current) = named(key, generation, id)?;
     current.then_some(number)
 }
 
-/// The `mosaica_id` of the item holding each of `numbers` as its number, at the tenancy the index
-/// holds for it.
+/// The `mosaica_id` of the item holding each of `numbers` as its number in `shard`, at the tenancy
+/// the shard's index holds for it.
 pub(crate) fn ids_of_numbers(
     key: &IdentityKey,
-    generation: &Generation,
+    shard: &Shard,
     numbers: &[EntityId],
 ) -> Result<Vec<MosaicaId>, StoreError> {
-    let shard = generation.bundle.only_shard().id;
-    let tenancies = generation.tenancy.of_each(numbers.iter().copied());
+    let tenancies = shard.tenancy.of_each(numbers.iter().copied());
     numbers
         .iter()
         .zip(tenancies)
         .map(|(number, tenancy)| {
-            id_at(key, shard, tenancy, *number).map_err(|e| StoreError::MalformedBundle {
+            id_at(key, shard.id(), tenancy, *number).map_err(|e| StoreError::MalformedBundle {
                 detail: format!("an issued entity lies outside the identity space: {e}"),
             })
         })
@@ -371,26 +372,22 @@ impl crate::Engine {
         id_at(&self.identity_key, ARTIFACT_SHARD, Tenancy::ZERO, entity).ok()
     }
 
-    /// The `mosaica_id` of each of `entities`, against `generation`: its number's permutation.
+    /// The `mosaica_id` of each of `entities` of `shard`: its number's permutation.
     pub(crate) fn mosaica_ids_of_in(
         &self,
-        generation: &Generation,
+        shard: &Shard,
         entities: &[EntityId],
     ) -> Result<Vec<MosaicaId>, StoreError> {
-        ids_of_numbers(
-            &self.identity_key,
-            generation,
-            &numbers_of(generation, entities)?,
-        )
+        ids_of_numbers(&self.identity_key, shard, &numbers_of(shard, entities)?)
     }
 
     /// [`Self::mosaica_ids_of_in`] for one entity.
     pub(crate) fn mosaica_id_in(
         &self,
-        generation: &Generation,
+        shard: &Shard,
         entity: EntityId,
     ) -> Result<MosaicaId, StoreError> {
-        Ok(self.mosaica_ids_of_in(generation, &[entity])?[0])
+        Ok(self.mosaica_ids_of_in(shard, &[entity])?[0])
     }
 }
 
@@ -410,7 +407,7 @@ mod tests {
         let files = mosaica_store::tenancy::write(dir, &bits_of(held)).unwrap();
         let index = Arc::new(TenancyIndex::open(&files).unwrap());
         Generation::synthetic("v00000", 1, 0, Overlay::new(), IngestBuffer::new())
-            .with(|g| g.tenancy = index)
+            .with_shard(ShardId::ZERO, |_, shard| shard.tenancy = index)
     }
 
     fn id(key: &IdentityKey, shard: u32, tenancy: u16, number: u64) -> MosaicaId {
@@ -439,12 +436,10 @@ mod tests {
             "never freed"
         );
         assert_eq!(named(id(&key, 1, 3, 7)), None, "another shard's");
-        assert_eq!(
-            generation
-                .tenancy
-                .number_named(&key, ShardId::ZERO, id(&key, 0, 2, 7)),
-            Some((EntityId::new(7), false))
-        );
+        assert!(matches!(
+            super::named(&key, &generation, id(&key, 0, 2, 7)),
+            Some((shard, number, false)) if shard.id() == ShardId::ZERO && number == EntityId::new(7)
+        ));
     }
 
     /// A write resolved at a stamp follows its entities after an edit alone, and is resolved
@@ -491,8 +486,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let generation = generation_with(dir.path(), &[(7, 3)]);
         let key = IdentityKey::from_hex(KEY).unwrap();
-        let numbers = numbers_of(&generation, &[EntityId::new(7), EntityId::new(8)]).unwrap();
-        let ids = ids_of_numbers(&key, &generation, &numbers).unwrap();
+        let shard = generation.only_shard();
+        let numbers = numbers_of(shard, &[EntityId::new(7), EntityId::new(8)]).unwrap();
+        let ids = ids_of_numbers(&key, shard, &numbers).unwrap();
         assert_eq!(ids, [id(&key, 0, 3, 7), id(&key, 0, 0, 8)]);
         assert!(ids
             .iter()

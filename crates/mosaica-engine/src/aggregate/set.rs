@@ -189,13 +189,12 @@ pub(super) fn crossing(engine: &Engine, open: &OpenView<'_>, rows: &Bitmap) -> R
 pub(super) fn compose(
     engine: &Engine,
     open: &OpenView<'_>,
-    generation: &Arc<Generation>,
     req: &AggregateRequest<'_>,
     prefer_row: bool,
 ) -> Result<Sets> {
     check_cancelled(&req.cancel)?;
     let served = &open.served;
-    let candidate = engine.filter_candidate(served.session, generation)?;
+    let candidate = engine.filter_candidate(served.session, served.shard)?;
     let resolved = ResolvedLeaves::default();
     let whole = || Set::whole(open);
     let (set, reference) = engine.route_filters_under(

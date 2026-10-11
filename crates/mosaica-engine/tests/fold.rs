@@ -874,7 +874,11 @@ fn a_restart_before_the_rotation_resurrects_the_retirement_harmlessly_and_perman
         "the retired entry is back: replay runs over the manifest seed, and the seed's omission \
          cannot subtract a record the WAL still holds"
     );
-    assert!(restarted.generation().overlay.is_deleted(deleted));
+    assert!(restarted
+        .generation()
+        .only_shard()
+        .overlay
+        .is_deleted(deleted));
     let session = restarted.authorise(&full_coverage_credential()).unwrap();
     assert_eq!(
         visible(&restarted, &session),
@@ -1044,7 +1048,7 @@ fn a_merge_cap_above_the_base_segment_is_obeyed() {
         segments,
         "the base is still unmerged after a restart"
     );
-    assert!(generation.overlay.is_deleted(flushed[0]));
+    assert!(generation.only_shard().overlay.is_deleted(flushed[0]));
 
     let session = restarted.authorise(&full_coverage_credential()).unwrap();
     assert_eq!(visible(&restarted, &session), expected);
@@ -1191,7 +1195,7 @@ fn fold_with_a_flush_in_flight(engine: &Engine) -> (EntityId, u64, u64) {
     // this straightforward — after the flip it is what the new generation carries, which is
     // exactly the claim under test.
     let mid_flight = engine.generation();
-    let mid_flight_watermark = mid_flight.watermark;
+    let mid_flight_watermark = mid_flight.only_shard().watermark;
     let mid_flight_high_water = mid_flight.bundle.partitions["default"]
         .only_shard()
         .record
@@ -1425,25 +1429,29 @@ fn a_deletion_a_carried_forward_segment_still_names_does_not_retire() {
          carried-forward artefact names e }}`"
     );
     assert!(
-        engine.generation().overlay.is_deleted(doomed),
+        engine.generation().only_shard().overlay.is_deleted(doomed),
         "the entity a carried-forward segment's declared range names keeps its tombstone for \
          another round — fail-closed, and the next fold takes it"
     );
     assert!(
-        engine.generation().overlay.is_deleted(zero_term),
+        engine
+            .generation()
+            .only_shard()
+            .overlay
+            .is_deleted(zero_term),
         "and so does the zero-term one, which no tier could have named: the rule is stated over \
          the carry-forward set, not over the postings"
     );
     assert!(
-        !engine.generation().overlay.is_deleted(folded),
+        !engine.generation().only_shard().overlay.is_deleted(folded),
         "and the one the fold demonstrably removed does not"
     );
 
     // The mid-flight flush's own items are unharmed by any of it.
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     assert_eq!(visible(&engine, &session), N_ITEMS + 1);
-    assert!(!engine.generation().overlay.is_deleted(a));
-    assert!(!engine.generation().overlay.is_deleted(c));
+    assert!(!engine.generation().only_shard().overlay.is_deleted(a));
+    assert!(!engine.generation().only_shard().overlay.is_deleted(c));
 }
 
 /// **Obligation 10: the watermark and `entity_id_high_water` published in `SEGMENTS-<n>.json` are
@@ -1468,7 +1476,7 @@ fn the_watermark_and_high_water_published_are_the_live_ones_not_the_snapshot() {
     let root = tmp.path().join("bundle");
     let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
 
-    let baseline_watermark = engine.generation().watermark;
+    let baseline_watermark = engine.generation().only_shard().watermark;
     let baseline_high_water = engine.generation().bundle.partitions["default"]
         .only_shard()
         .record
@@ -2750,7 +2758,7 @@ fn a_fold_publishes_when_a_dropped_view_held_the_highest_bound_entity() {
         .expect("the item is accepted")[0];
     wait_ticking(&engine, "the item to flush", || {
         engine.request_flush();
-        engine.generation().buffer.is_empty()
+        engine.generation().only_shard().buffer.is_empty()
     });
     let dropped = engine
         .drop_view("quarter".into(), "q2".into())
@@ -2762,7 +2770,7 @@ fn a_fold_publishes_when_a_dropped_view_held_the_highest_bound_entity() {
 
     fold(&engine);
     assert!(
-        !engine.generation().overlay.is_deleted(entity) && engine.overlay_depth() == 0,
+        !engine.generation().only_shard().overlay.is_deleted(entity) && engine.overlay_depth() == 0,
         "the fold removed the dropped item's row, so its deletion retired"
     );
 }

@@ -165,7 +165,7 @@ fn an_accepted_deny_moves_no_geometry() {
 
     let after = engine.generation();
     assert!(
-        after.overlay_version > before.overlay_version,
+        after.only_shard().overlay_version > before.only_shard().overlay_version,
         "the deny is in force"
     );
     assert_eq!(
@@ -240,6 +240,7 @@ fn a_deny_only_node_rotates_at_the_tick_and_the_suppression_survives_restart() {
     assert!(
         reopened
             .generation()
+            .only_shard()
             .overlay
             .is_suppressed(EntityId::new(entity)),
         "the suppression must survive the rotation it was reclaimed under"

@@ -1889,7 +1889,11 @@ fn a_coalesce_collapses_record_extents_and_every_row_still_answers() {
     );
     // The base plus one layer per extent, in the stack the *running* process reads from.
     assert_eq!(
-        engine.generation().filter_columns.record_layers(),
+        engine
+            .generation()
+            .only_shard()
+            .filter_columns
+            .record_layers(),
         9,
         "the live stack composes each flush's extent as it publishes"
     );
@@ -1898,7 +1902,14 @@ fn a_coalesce_collapses_record_extents_and_every_row_still_answers() {
         &engine,
         "the record extents to coalesce",
         std::time::Duration::from_secs(60),
-        || engine.generation().filter_columns.record_layers() < 9,
+        || {
+            engine
+                .generation()
+                .only_shard()
+                .filter_columns
+                .record_layers()
+                < 9
+        },
     );
 
     // **The live stack shrank with the manifest, before any restart.** The blob's layers ride on
@@ -1908,7 +1919,11 @@ fn a_coalesce_collapses_record_extents_and_every_row_still_answers() {
     // (I9). The count is the assertion because the count is the cost: a miss walks every layer,
     // and the whole point of the pass is that there are fewer of them.
     assert_eq!(
-        engine.generation().filter_columns.record_layers(),
+        engine
+            .generation()
+            .only_shard()
+            .filter_columns
+            .record_layers(),
         2,
         "the base plus the one coalesced extent, re-derived from the rebased manifest"
     );
@@ -1918,6 +1933,7 @@ fn a_coalesce_collapses_record_extents_and_every_row_still_answers() {
         let entity = u32::try_from(entity.raw()).unwrap();
         let fields = engine
             .generation()
+            .only_shard()
             .filter_columns
             .records()
             .fields_of(entity)

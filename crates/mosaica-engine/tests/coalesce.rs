@@ -44,7 +44,7 @@ fn settle_coalesce(engine: &Engine) {
     tick_until(engine, "the coalesce to settle", WAIT, || {
         let generation = engine.generation();
         let record = &generation.bundle.partitions["default"].only_shard().record;
-        generation.delta_postings.len() == 1 && live_runs(record).len() < RUN_WIDTH
+        generation.only_shard().delta_postings.len() == 1 && live_runs(record).len() < RUN_WIDTH
     });
 }
 
@@ -192,7 +192,7 @@ fn a_coalesce_bounds_the_three_entity_space_axes_without_moving_geometry() {
         "an entity-space coalesce must not bump segments_version"
     );
     assert_eq!(
-        engine.generation().delta_postings.len(),
+        engine.generation().only_shard().delta_postings.len(),
         1,
         "the live tier list is swapped too, or the bound is only realised at the next restart"
     );
@@ -287,7 +287,7 @@ fn a_coalesced_manifest_reopens_with_every_item_and_binding_intact() {
     let reopened = engine_at(tmp.path(), &root);
     let generation = reopened.generation();
     assert_eq!(
-        generation.delta_postings.len(),
+        generation.only_shard().delta_postings.len(),
         1,
         "the reopened bundle holds exactly the tiers its manifest names"
     );
@@ -417,7 +417,12 @@ fn a_coalesce_merges_the_entity_term_extents_and_every_entity_answers_the_same()
     );
     // The build's base plus one layer per flush — what the reader probes before the pass.
     assert_eq!(
-        engine.generation().filter_columns.entity_terms().layers(),
+        engine
+            .generation()
+            .only_shard()
+            .filter_columns
+            .entity_terms()
+            .layers(),
         WIDTH + 1
     );
     let labels_before: Vec<Option<Vec<_>>> = ingested
@@ -471,7 +476,12 @@ fn a_coalesce_merges_the_entity_term_extents_and_every_entity_answers_the_same()
         after.only_shard().entity_terms_extents
     );
     assert_eq!(
-        engine.generation().filter_columns.entity_terms().layers(),
+        engine
+            .generation()
+            .only_shard()
+            .filter_columns
+            .entity_terms()
+            .layers(),
         2,
         "the live stack is the base plus the coalesced layer, or the bound is only realised at \
          the next restart"
@@ -493,7 +503,12 @@ fn a_coalesce_merges_the_entity_term_extents_and_every_entity_answers_the_same()
     drop(engine);
     let reopened = engine_at(tmp.path(), &root);
     assert_eq!(
-        reopened.generation().filter_columns.entity_terms().layers(),
+        reopened
+            .generation()
+            .only_shard()
+            .filter_columns
+            .entity_terms()
+            .layers(),
         2
     );
     for (entity, before) in ingested.iter().zip(&labels_before) {

@@ -534,7 +534,7 @@ impl Executor {
             tracing::warn!("discarding a completed merge that no longer rebases");
             return;
         }
-        write_deny_state(&mut manifest, &live.overlay);
+        write_deny_state(&mut manifest, &live.only_shard().overlay);
         write_vocabulary_extensions(
             &mut manifest,
             &live.vocabularies,
@@ -714,6 +714,7 @@ impl Executor {
             }
         };
         let live = self.generation.load_full();
+        let shard = live.only_shard();
         if live.prefix != completed.prefix {
             tracing::warn!(
                 planned = %completed.prefix,
@@ -829,7 +830,7 @@ impl Executor {
                 &live.bundle.manifest.vocabularies,
                 &unfolded,
                 &extents,
-                live.filter_columns.access(),
+                shard.filter_columns.access(),
             ) {
                 Ok(stack) => Some(Arc::new(stack)),
                 Err(e) => {
@@ -841,23 +842,24 @@ impl Executor {
                 }
             }
         };
-        let filter_columns =
-            match live
-                .filter_columns
-                .with_coalesced(&windows, &text_windows, entity_terms, records)
-            {
-                Ok(columns) => Arc::new(columns),
-                Err(e) => {
-                    discard(&format!(
-                        "its attribute extents would not replace the layers they consumed ({e}), \
+        let filter_columns = match shard.filter_columns.with_coalesced(
+            &windows,
+            &text_windows,
+            entity_terms,
+            records,
+        ) {
+            Ok(columns) => Arc::new(columns),
+            Err(e) => {
+                discard(&format!(
+                    "its attribute extents would not replace the layers they consumed ({e}), \
                          and a manifest must not name a column this process cannot serve"
-                    ));
-                    return;
-                }
-            };
+                ));
+                return;
+            }
+        };
         // Complete current state, serialised fresh from the overlay this publication carries, the
         // same rule every other manifest write follows.
-        write_deny_state(&mut manifest, &live.overlay);
+        write_deny_state(&mut manifest, &shard.overlay);
         write_vocabulary_extensions(
             &mut manifest,
             &live.vocabularies,
@@ -922,7 +924,7 @@ impl Executor {
             let held = match coalesced.filter(|(path, _)| path == rel) {
                 Some((_, tier)) => Some(Arc::clone(tier)),
                 None => held_tier(
-                    &live.delta_postings,
+                    &shard.delta_postings,
                     &partition_data.only_shard().record.deltas,
                     rel,
                 ),
@@ -948,7 +950,7 @@ impl Executor {
 
         // The merged unique runs hold the same entries as the runs they replace.
         let unique = if completed.unique.is_empty() {
-            Arc::clone(&live.unique)
+            Arc::clone(&shard.unique)
         } else {
             let partition = next_bundle
                 .partitions
@@ -959,7 +961,7 @@ impl Executor {
                 &partition.manifest,
                 &partition.only_shard().record,
                 &self.prefix_dir(&live),
-                Some(&live.unique),
+                Some(&shard.unique),
             ) {
                 Ok(unique) => Arc::new(unique),
                 Err(e) => {
@@ -973,7 +975,7 @@ impl Executor {
             }
         };
         let edited = if completed.edited.is_empty() {
-            Arc::clone(&live.edited)
+            Arc::clone(&shard.edited)
         } else {
             let partition = next_bundle
                 .partitions
@@ -982,7 +984,7 @@ impl Executor {
             match mosaica_store::edited::EditedIndex::open(
                 &partition.only_shard().record.edited_items,
                 &self.prefix_dir(&live),
-                Some(&live.edited),
+                Some(&shard.edited),
             ) {
                 Ok(edited) => Arc::new(edited),
                 Err(e) => {
@@ -995,15 +997,15 @@ impl Executor {
                 }
             }
         };
-        let next = live.with(|g| {
+        let next = live.with_shard(shard.id(), |g, s| {
             // The live columns with each consumed window replaced by the layer that carries its
             // values, the same set of `(entity, value)` pairs in fewer files, so a request holding
             // the old and one holding the new agree on every answer.
-            g.filter_columns = filter_columns;
-            g.unique = unique;
-            g.edited = edited;
+            s.filter_columns = filter_columns;
+            s.unique = unique;
+            s.edited = edited;
             g.bundle = next_bundle;
-            g.delta_postings = delta_postings;
+            s.delta_postings = delta_postings;
         });
         self.publish(next, started);
         self.health.coalesces.fetch_add(1, Ordering::Relaxed);
@@ -1047,6 +1049,7 @@ impl Executor {
             return false;
         };
         let manifest = &generation.bundle.manifest;
+        let shard = generation.only_shard();
         let scalar_schema = scalar_schema_of(manifest);
         let filter_schema = filter_schema_of(manifest);
         let record_schema = record_schema_of(manifest);
@@ -1310,9 +1313,9 @@ impl Executor {
                     .filter(|(_, d)| d.unique)
                     .map(|(at, d)| (d.name.clone(), at, d.arrow_type))
                     .collect(),
-                edited: Arc::clone(&generation.edited),
-                edited_live: Arc::clone(&generation.edited_live),
-                tenancy: Arc::clone(&generation.tenancy),
+                edited: Arc::clone(&shard.edited),
+                edited_live: Arc::clone(&shard.edited_live),
+                tenancy: Arc::clone(&shard.tenancy),
             }
         };
         self.health
@@ -1616,7 +1619,7 @@ impl Executor {
         )> = Vec::new();
         for (partition, partition_data) in &live.bundle.partitions {
             let mut manifest = partition_data.side_manifest();
-            write_deny_state(&mut manifest, &live.overlay);
+            write_deny_state(&mut manifest, &live.only_shard().overlay);
             // Membership extents are written before the manifest that names them, which is the
             // whole of their durability contract: a manifest naming a missing extent refuses at
             // open, so the file has to be durable first. A failure here abandons the publication
@@ -1913,6 +1916,7 @@ impl Executor {
             }
         };
         let live = self.generation.load_full();
+        let shard = live.only_shard();
         if live.prefix != completed.prefix {
             // A compaction moved the prefix under this flush. Nothing to apply it to.
             tracing::warn!(
@@ -2024,7 +2028,7 @@ impl Executor {
         // find it. Empty in every steady-state flush, where the base has been on disc since the
         // build.
         let live_columns = if completed.scoped_columns.is_empty() {
-            Arc::clone(&live.filter_columns)
+            Arc::clone(&shard.filter_columns)
         } else {
             // Stamped with the incarnation of the view the pair names, which is what places the
             // base the flush just wrote.
@@ -2033,7 +2037,7 @@ impl Executor {
                 .iter()
                 .map(|(column, view)| (column.clone(), view.clone(), completed.scoped_incarnation))
                 .collect();
-            match live.filter_columns.with_scoped_columns(
+            match shard.filter_columns.with_scoped_columns(
                 &record_dir,
                 ShardLayout::new(&completed.partition, ShardId::ZERO),
                 &opening,
@@ -2191,7 +2195,7 @@ impl Executor {
         record
             .text_extents
             .extend(completed.text_extents.iter().cloned());
-        write_deny_state(&mut manifest, &live.overlay);
+        write_deny_state(&mut manifest, &shard.overlay);
         n = self
             .health
             .flush_lap(crate::flush::FlushStage::ManifestDenyState, n);
@@ -2321,7 +2325,7 @@ impl Executor {
         // Exactly what was consumed, from the then-current buffer. This is O(buffered) work on
         // this thread, so one such stall lands ahead of the deny lane per tick: a cost this
         // design adds rather than one it avoids.
-        let mut buffer = (*live.buffer).clone();
+        let mut buffer = (*shard.buffer).clone();
         for entity in &completed.consumed {
             // By (entity, view), never by entity. A flush consumes one view's rows; an entity
             // that also holds a row awaiting flush in another view keeps it, and removing the
@@ -2343,9 +2347,9 @@ impl Executor {
             .partitions
             .get(&completed.partition)
             .map(|p| p.only_shard().record.watermark)
-            .unwrap_or(live.watermark);
+            .unwrap_or(shard.watermark);
         let segments_version = live.segments_version + 1;
-        let mut delta_postings = live.delta_postings.clone();
+        let mut delta_postings = shard.delta_postings.clone();
         delta_postings.extend(tier);
 
         *mark = self
@@ -2408,7 +2412,7 @@ impl Executor {
                     &partition.manifest,
                     &partition.only_shard().record,
                     &self.prefix_dir(&live),
-                    Some(&live.unique),
+                    Some(&shard.unique),
                 ) {
                     Ok(unique) => Arc::new(unique),
                     Err(e) => {
@@ -2424,11 +2428,11 @@ impl Executor {
                     }
                 }
             }
-            _ => Arc::clone(&live.unique),
+            _ => Arc::clone(&shard.unique),
         };
         // And the edited items' runs, whose pairs leave the live map.
         let (edited, edited_live) = if completed.edited_runs.entities.is_empty() {
-            (Arc::clone(&live.edited), Arc::clone(&live.edited_live))
+            (Arc::clone(&shard.edited), Arc::clone(&shard.edited_live))
         } else {
             let Some(partition) = next_bundle.partitions.get(&completed.partition) else {
                 return false;
@@ -2436,10 +2440,10 @@ impl Executor {
             match mosaica_store::edited::EditedIndex::open(
                 &partition.only_shard().record.edited_items,
                 &self.prefix_dir(&live),
-                Some(&live.edited),
+                Some(&shard.edited),
             ) {
                 Ok(index) => {
-                    let mut edited_live = (*live.edited_live).clone();
+                    let mut edited_live = (*shard.edited_live).clone();
                     edited_live.remove(completed.edited_runs.entities.iter().copied());
                     (Arc::new(index), Arc::new(edited_live))
                 }
@@ -2455,9 +2459,9 @@ impl Executor {
             }
         };
         let unique_live = if completed.unique_runs.is_empty() {
-            Arc::clone(&live.unique_live)
+            Arc::clone(&shard.unique_live)
         } else {
-            let mut unique_live = (*live.unique_live).clone();
+            let mut unique_live = (*shard.unique_live).clone();
             unique_live.flushed(
                 completed
                     .unique_runs
@@ -2467,20 +2471,20 @@ impl Executor {
             Arc::new(unique_live)
         };
         self.unique_declarations.flushed(&completed.consumed);
-        let next = Arc::new(live.with(|g| {
+        let next = Arc::new(live.with_shard(shard.id(), |g, s| {
             // The live columns with this flush's extents composed on: the whole of what makes an
             // entity ingested since the build answer a filter on its own value.
-            g.filter_columns = filter_columns;
+            s.filter_columns = filter_columns;
             g.segments_version = segments_version;
-            g.watermark = watermark;
+            s.watermark = watermark;
             g.bundle = next_bundle;
             g.dict = completed.dict;
-            g.delta_postings = delta_postings;
-            g.buffer = Arc::new(buffer);
-            g.unique = unique;
-            g.unique_live = unique_live;
-            g.edited = edited;
-            g.edited_live = edited_live;
+            s.delta_postings = delta_postings;
+            s.buffer = Arc::new(buffer);
+            s.unique = unique;
+            s.unique_live = unique_live;
+            s.edited = edited;
+            s.edited_live = edited_live;
         }));
         // Armed before the swap, and that ordering is the mechanism. A request landing between
         // the swap and the pool task's first insert must find the flag set, or it takes the cost

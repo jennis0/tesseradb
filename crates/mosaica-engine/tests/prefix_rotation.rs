@@ -191,7 +191,7 @@ fn a_rotation_moves_the_prefix_the_postings_the_identity_and_the_unique_indexes_
         .publish_rotated_prefix_for_test(
             "v00001",
             before.segments_version + 1,
-            before.watermark,
+            before.only_shard().watermark,
             std::sync::Arc::clone(&before.dict),
             Vec::new(),
             &[],
@@ -250,7 +250,7 @@ fn a_session_fragment_is_rebuilt_across_a_rotation_not_reused() {
         .publish_rotated_prefix_for_test(
             "v00001",
             before.segments_version + 1,
-            before.watermark,
+            before.only_shard().watermark,
             std::sync::Arc::clone(&before.dict),
             Vec::new(),
             &[],
@@ -314,7 +314,7 @@ fn a_pre_rotation_fragment_is_unreachable_by_key_on_disc_and_across_a_restart() 
         .publish_rotated_prefix_for_test(
             "v00001",
             before.segments_version + 1,
-            before.watermark,
+            before.only_shard().watermark,
             std::sync::Arc::clone(&before.dict),
             Vec::new(),
             &[],
@@ -387,7 +387,7 @@ fn a_deny_published_after_a_flip_writes_into_the_new_prefix() {
         .publish_rotated_prefix_for_test(
             "v00001",
             before.segments_version + 1,
-            before.watermark,
+            before.only_shard().watermark,
             std::sync::Arc::clone(&before.dict),
             Vec::new(),
             &[],
@@ -454,7 +454,7 @@ fn a_drill_down_after_a_rotation_does_not_reuse_the_superseded_prefixs_fragment(
         .publish_rotated_prefix_for_test(
             "v00001",
             before.segments_version + 1,
-            before.watermark,
+            before.only_shard().watermark,
             std::sync::Arc::clone(&before.dict),
             Vec::new(),
             &[],
@@ -521,7 +521,7 @@ fn a_rotation_retires_the_deletions_it_is_given_and_leaves_suppressions_alone() 
         .publish_rotated_prefix_for_test(
             "v00001",
             before.segments_version + 1,
-            before.watermark,
+            before.only_shard().watermark,
             std::sync::Arc::clone(&before.dict),
             Vec::new(),
             &[deleted],
@@ -565,7 +565,7 @@ fn a_rotation_with_an_empty_retirement_set_retires_nothing() {
         .publish_rotated_prefix_for_test(
             "v00001",
             before.segments_version + 1,
-            before.watermark,
+            before.only_shard().watermark,
             std::sync::Arc::clone(&before.dict),
             Vec::new(),
             &[],
@@ -598,7 +598,7 @@ fn publishing_a_prefix_current_does_not_name_is_refused() {
         .publish_rotated_prefix_for_test(
             "v00001",
             before.segments_version + 1,
-            before.watermark,
+            before.only_shard().watermark,
             std::sync::Arc::clone(&before.dict),
             Vec::new(),
             &[],

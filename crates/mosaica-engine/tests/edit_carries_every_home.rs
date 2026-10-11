@@ -548,7 +548,7 @@ fn a_view_dropped_behind_an_edit_in_one_window_keeps_the_item() {
             "s0 serves the item after {pass}"
         );
         assert_eq!(
-            engine.generation().buffer.oldest_wal_pos(),
+            engine.generation().only_shard().buffer.oldest_wal_pos(),
             None,
             "nothing buffered holds the log after {pass}"
         );

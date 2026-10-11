@@ -115,7 +115,7 @@ fn a_published_flush_is_a_bundle_a_restart_opens() {
     });
 
     // In the publishing process: the item left the buffer, exactly once, and geometry moved.
-    assert!(!engine.generation().buffer.contains(id));
+    assert!(!engine.generation().only_shard().buffer.contains(id));
     assert_eq!(engine.generation().segments_version, 1);
 
     // And on disk, read back through the ordinary protocol.
@@ -190,20 +190,20 @@ fn a_reopened_engine_does_not_re_buffer_rows_that_already_have_geometry() {
         wait_until("the flush to publish", WAIT, || {
             engine.write_executor_stats().flushes >= 1
         });
-        assert!(!engine.generation().buffer.contains(id));
+        assert!(!engine.generation().only_shard().buffer.contains(id));
         id
     };
 
     // The record is still in the WAL — nothing has rotated — so replay will meet it again.
     let reopened = engine_at(tmp.path(), &root, 3600);
     assert!(
-        !reopened.generation().buffer.contains(id),
+        !reopened.generation().only_shard().buffer.contains(id),
         "the row has geometry, so it must not come back into the buffer: the next flush would \
          write it a second time, and `verdict` would answer from the buffer for an entity the \
          fragment already covers"
     );
     assert!(
-        reopened.generation().buffer.is_empty(),
+        reopened.generation().only_shard().buffer.is_empty(),
         "and nothing else came back either"
     );
 

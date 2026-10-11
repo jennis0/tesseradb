@@ -385,10 +385,11 @@ pub(crate) fn plan_flush(
         return Err(NoFlush::SteppedDown);
     }
 
-    let mut items: Vec<(EntityId, BufferedItem)> = generation
+    let shard = generation.only_shard();
+    let mut items: Vec<(EntityId, BufferedItem)> = shard
         .buffer
         .rows()
-        .filter(|(entity, item)| item.view == view && !is_deleted(&generation.overlay, **entity))
+        .filter(|(entity, item)| item.view == view && !is_deleted(&shard.overlay, **entity))
         .map(|(entity, item)| (*entity, item.clone()))
         .collect();
     if items.is_empty() {

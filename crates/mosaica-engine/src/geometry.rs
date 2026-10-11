@@ -271,7 +271,7 @@ pub(crate) fn check_publishable(
             GeometryRefusedReason::SegmentsVersionNotIncreasing,
         ));
     }
-    if watermark < live.watermark {
+    if watermark < live.only_shard().watermark {
         return Err(GeometryRefused::new(
             live,
             prefix,

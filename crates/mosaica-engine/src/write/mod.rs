@@ -64,7 +64,7 @@ use mosaica_store::ShardLayout;
 use mosaica_types::{EntityId, IdentityKey, ShardId, TermId};
 
 use crate::error::EngineError;
-use crate::{Generation, GenerationHandle};
+use crate::{Generation, GenerationHandle, Shard};
 
 /// Take a lock, recovering rather than panicking if a previous holder panicked.
 ///
@@ -301,7 +301,7 @@ pub(crate) fn retire_dead_view_artifacts(
 /// Everything [`WritePath::reconstruct`] rebuilds from durable state.
 pub(crate) struct WritePathState {
     wal: Wal,
-    allocator: Allocator,
+    shards: Vec<ShardWrite>,
     resolver_state: ResolverState,
     accepted_batches: AcceptedBatches,
     pub(crate) registry: LayerRegistry,
@@ -344,7 +344,7 @@ impl WritePath {
     pub(crate) fn new(state: WritePathState) -> Self {
         WritePath {
             live: Arc::new(LiveState {
-                allocator: Mutex::new(state.allocator),
+                shards: state.shards,
                 resolver_state: Mutex::new(state.resolver_state),
                 accepted_batches: Mutex::new(state.accepted_batches),
                 registry: Mutex::new(state.registry),

@@ -566,6 +566,7 @@ fn reconstruct_writes(
     let (overlay, buffer, state) = WritePath::reconstruct(
         wal_path,
         crate::write::ManifestSeed {
+            shard: bundle.only_shard().id,
             high_water: bundle.only_shard().record.high_water,
             low_water: mosaica_lifecycle::alloc::allocator_ceiling(
                 mosaica_types::layer::ROWLESS_CEILING,
@@ -838,27 +839,32 @@ fn first_generation(
             prefix: readers.prefix.clone(),
             suggest,
             segments_version: readers.segments_version,
-            watermark: readers.watermark,
             bundle: Arc::clone(bundle),
             dict: Arc::clone(&readers.dict),
-            postings: Arc::clone(&readers.postings),
-            fragments,
-            unique: Arc::new(unique),
-            unique_live: Arc::new(crate::unique::UniqueLive::derive(&bundle.manifest, &buffer)),
-            edited: Arc::new(edited),
-            edited_live: Arc::new(state.edited_live.clone()),
-            tenancy: Arc::clone(&readers.tenancy),
             edit_epoch: 0,
             deny_epoch: 0,
             fold_epoch: 0,
             free_epoch: 0,
-            delta_postings: readers.delta_postings.clone(),
-            overlay_version: 0,
-            overlay: Arc::new(overlay),
-            buffer: Arc::new(buffer),
             vocabularies: Arc::new(vocabularies),
-            filter_columns,
         },
+        vec![(
+            bundle.only_shard().id,
+            crate::ShardParts {
+                watermark: readers.watermark,
+                postings: Arc::clone(&readers.postings),
+                fragments,
+                unique: Arc::new(unique),
+                unique_live: Arc::new(crate::unique::UniqueLive::derive(&bundle.manifest, &buffer)),
+                edited: Arc::new(edited),
+                edited_live: Arc::new(state.edited_live.clone()),
+                tenancy: Arc::clone(&readers.tenancy),
+                delta_postings: readers.delta_postings.clone(),
+                overlay_version: 0,
+                overlay: Arc::new(overlay),
+                buffer: Arc::new(buffer),
+                filter_columns,
+            },
+        )],
     )))))
 }
 
@@ -1076,7 +1082,7 @@ impl Engine {
         // Only the bundle being served can ever read its figures back.
         engine
             .figures
-            .sweep(engine.generation.load().bundle_identity());
+            .sweep(engine.generation.load().only_shard().bundle_identity());
 
         // Every level's row form, built before this engine serves a request: left lazy, the cost
         // lands on whichever request of a fresh process arrives first.
@@ -1094,7 +1100,7 @@ impl Engine {
         engine.shapes.clear_staged();
         // The rows the log held and no flush wrote, which the occupancy bound and the row trigger
         // count from the first request, not from the first write.
-        let buffered = engine.generation().buffer.len();
+        let buffered = engine.generation().only_shard().buffer.len();
         engine
             .write
             .health()

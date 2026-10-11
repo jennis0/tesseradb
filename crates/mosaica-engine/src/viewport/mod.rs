@@ -133,7 +133,7 @@ impl Engine {
     /// restoration moves counts a client must not keep presenting as current.
     fn view_coordinates(
         &self,
-        generation: &Generation,
+        shard: &crate::Shard,
         geometry: &SessionGeometry,
         view: &str,
     ) -> ViewCoordinates {
@@ -151,7 +151,7 @@ impl Engine {
         hasher.update(b"mosaica-content-key-v1");
         hasher.update(identity_key);
         hasher.update(geometry.fragment.watermark.to_le_bytes());
-        hasher.update(generation.overlay_version.to_le_bytes());
+        hasher.update(shard.overlay_version.to_le_bytes());
         hasher.update(self.boot_nonce.to_le_bytes());
         let content_digest: [u8; 32] = hasher.finalize().into();
         let mut content_key = [0u8; 16];

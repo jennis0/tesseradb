@@ -428,7 +428,11 @@ fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_b
     let old = EntityId::new(0);
 
     // The drill-down: absent for the older entity, from the schema, with no blob read.
-    let reads_before = engine.generation().filter_columns.record_reads();
+    let reads_before = engine
+        .generation()
+        .only_shard()
+        .filter_columns
+        .record_reads();
     let old_fields = fields_of(&engine, &session, old);
     assert_eq!(
         old_fields.keys().cloned().collect::<Vec<_>>(),
@@ -436,7 +440,11 @@ fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_b
         "an entity that predates the declaration carries none of the new columns"
     );
     assert_eq!(
-        engine.generation().filter_columns.record_reads(),
+        engine
+            .generation()
+            .only_shard()
+            .filter_columns
+            .record_reads(),
         reads_before,
         "absence is answered from the segment schema, never by opening a blob"
     );
@@ -450,7 +458,12 @@ fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_b
     assert_eq!(new_fields["tag"], ScalarOut::Utf8("eng".to_string()));
     assert_eq!(new_fields["memo"], ScalarOut::U16(7));
     assert!(
-        engine.generation().filter_columns.record_reads() > reads_before,
+        engine
+            .generation()
+            .only_shard()
+            .filter_columns
+            .record_reads()
+            > reads_before,
         "the entity whose row the flush wrote is read from the blob"
     );
 
@@ -1136,7 +1149,11 @@ fn a_record_coalesce_publishes_over_a_blob_declared_at_a_running_service() {
     // tick's.
     engine.set_coalesce_for_test(false);
 
-    let after = engine.generation().filter_columns.record_layers();
+    let after = engine
+        .generation()
+        .only_shard()
+        .filter_columns
+        .record_layers();
     assert!(
         after < flushes as usize,
         "the live record stack still holds a layer per flush ({after}), so the bound arrives only \
@@ -1153,7 +1170,11 @@ fn a_record_coalesce_publishes_over_a_blob_declared_at_a_running_service() {
     assert_eq!(served(&engine), expected, "a coalesced blob row reads back");
 
     let engine = restart(&fx, engine);
-    let reopened = engine.generation().filter_columns.record_layers();
+    let reopened = engine
+        .generation()
+        .only_shard()
+        .filter_columns
+        .record_layers();
     assert!(
         reopened <= after && reopened < flushes as usize,
         "the reopened bundle holds {reopened} layers where the live stack held {after}"

@@ -80,7 +80,7 @@ fn a_row_acked_during_a_flush_survives_rotation_and_a_restart() {
 
         // Acked after that flush consumed the first row, so it is buffered when the rotation runs.
         let second = ingest(&engine, "ext-2");
-        assert!(engine.generation().buffer.contains(second));
+        assert!(engine.generation().only_shard().buffer.contains(second));
         // The first flush's rotation opened member 2 before this ingest was acked; the member
         // the next rotation opens is the one that follows the second row's flush.
         wait_until("a rotation", WAIT, || {
@@ -101,7 +101,7 @@ fn a_row_acked_during_a_flush_survives_rotation_and_a_restart() {
         .row_of(second)
         .is_some();
     assert!(
-        reopened.generation().buffer.contains(second) || has_geometry,
+        reopened.generation().only_shard().buffer.contains(second) || has_geometry,
         "an acked ingest was silently lost: entity {} is in neither the buffer nor a segment after \
          a rotation and a restart",
         second.raw()
@@ -136,7 +136,11 @@ fn a_suppression_accepted_before_a_rotation_is_still_in_force_after_a_restart() 
 
     let reopened = engine_at(tmp.path(), &root, 3600);
     assert!(
-        reopened.generation().overlay.is_suppressed(suppressed),
+        reopened
+            .generation()
+            .only_shard()
+            .overlay
+            .is_suppressed(suppressed),
         "the record that carried this suppression was reclaimed; only the rotation's snapshot \
          stands between that and a re-exposed item"
     );
@@ -161,12 +165,12 @@ fn a_row_deleted_before_its_first_flush_stops_pinning_the_log() {
     let deleted = {
         let engine = engine_at(tmp.path(), &root, 1);
         let id = ingest(&engine, "ext-1");
-        assert!(engine.generation().buffer.contains(id));
+        assert!(engine.generation().only_shard().buffer.contains(id));
         engine
             .accept_change(id, ChangeOp::Delete)
             .expect("the delete is accepted");
         assert!(
-            !engine.generation().buffer.contains(id),
+            !engine.generation().only_shard().buffer.contains(id),
             "the delete must drop the row from the buffer; nothing else ever will"
         );
 
@@ -181,12 +185,12 @@ fn a_row_deleted_before_its_first_flush_stops_pinning_the_log() {
     let reopened = engine_at(tmp.path(), &root, 3600);
     let generation = reopened.generation();
     assert!(
-        generation.overlay.is_deleted(deleted),
+        generation.only_shard().overlay.is_deleted(deleted),
         "the record that carried this deletion was reclaimed; the rotation's snapshot is what \
          keeps it in force"
     );
     assert!(
-        !generation.buffer.contains(deleted),
+        !generation.only_shard().buffer.contains(deleted),
         "a reclaimed row must reconstruct nothing — the entity is forgotten (decision 0047)"
     );
     let bundle = mosaica_store::open_bundle(&root).expect("the bundle opens");
@@ -278,12 +282,12 @@ fn a_deleted_entitys_join_row_is_not_rebuilt_at_a_restart() {
 
         // A row in the second view, unflushed, and then the delete that takes both.
         assert_eq!(ingest_into(&engine, "b2", Some(id), "s1"), id);
-        assert!(engine.generation().buffer.contains(id));
+        assert!(engine.generation().only_shard().buffer.contains(id));
         engine
             .accept_change(id, ChangeOp::Delete)
             .expect("the delete is accepted");
         assert!(
-            !engine.generation().buffer.contains(id),
+            !engine.generation().only_shard().buffer.contains(id),
             "the live path takes the join row with the rest"
         );
         (id, members(tmp.path()))
@@ -291,11 +295,11 @@ fn a_deleted_entitys_join_row_is_not_rebuilt_at_a_restart() {
 
     let reopened = engine_at(tmp.path(), &root, 1);
     assert!(
-        !reopened.generation().buffer.contains(deleted),
+        !reopened.generation().only_shard().buffer.contains(deleted),
         "replay must take the join row too: nothing will ever flush it"
     );
     assert_eq!(
-        reopened.generation().buffer.len(),
+        reopened.generation().only_shard().buffer.len(),
         0,
         "and nothing else of the deleted entity is buffered either"
     );
@@ -315,7 +319,7 @@ fn a_deleted_edits_rows_are_not_rebuilt_at_a_restart() {
         let engine = engine_at(tmp.path(), &root, 3600);
         let first = ingest_into(&engine, "b1", None, "s0");
         publish_buffered(&engine);
-        assert!(!engine.generation().buffer.contains(first));
+        assert!(!engine.generation().only_shard().buffer.contains(first));
 
         let mut hash = [2u8; 32];
         hash[0] = b'e';
@@ -333,12 +337,12 @@ fn a_deleted_edits_rows_are_not_rebuilt_at_a_restart() {
             .ingest_rows(vec![row], "b2".to_string(), hash)
             .expect("the edit is accepted")[0];
         assert_ne!(edited, first, "an edit moves the item to a new entity");
-        assert!(engine.generation().buffer.contains(edited));
+        assert!(engine.generation().only_shard().buffer.contains(edited));
         engine
             .accept_change(edited, ChangeOp::Delete)
             .expect("the delete is accepted");
         assert_eq!(
-            engine.generation().buffer.len(),
+            engine.generation().only_shard().buffer.len(),
             0,
             "the live path takes the edit's rows"
         );
@@ -347,10 +351,10 @@ fn a_deleted_edits_rows_are_not_rebuilt_at_a_restart() {
 
     let reopened = engine_at(tmp.path(), &root, 1);
     assert_eq!(
-        reopened.generation().buffer.len(),
+        reopened.generation().only_shard().buffer.len(),
         0,
         "replay must take the deleted edit's rows too"
     );
-    assert!(!reopened.generation().buffer.contains(edited));
+    assert!(!reopened.generation().only_shard().buffer.contains(edited));
     inherited_members_reclaimed(&reopened, tmp.path(), &inherited);
 }

@@ -89,7 +89,7 @@ fn publish_second_geometry(engine: &Engine, tmp: &TempDir, prefix: &str, n: u64)
     // regression: composition treats every entity at or above the watermark as buffered rather
     // than rowed, so lowering it would hide the gap from every principal. What these cases need
     // is a new row space under a new `segments_version`, which is exactly what they still get.
-    let live_watermark = engine.generation().watermark;
+    let live_watermark = engine.generation().only_shard().watermark;
     assert!(
         watermark_of(&second) <= live_watermark,
         "the fixture's premise: a smaller second corpus is not a successor"

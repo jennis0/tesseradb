@@ -94,7 +94,7 @@ struct Freeing {
     retired: croaring::Bitmap,
 }
 
-/// What the fold that removes `executed` from `live` frees.
+/// What the fold that removes `executed` from `shard` frees.
 ///
 /// An executed entity an edit gave an item is no item's number, and is freed at tenancy 0. Its
 /// number, or the entity itself where it is a number, is freed when the fold removes the number's
@@ -110,7 +110,7 @@ struct Freeing {
 /// A restart before the log rotates past this fold has the next fold free its numbers again one
 /// tenancy higher, skipping a tenancy no item was given, since the ids are held until that rotation.
 fn freeing(
-    live: &Generation,
+    shard: &Shard,
     executed: &croaring::Bitmap,
     high_water: u64,
 ) -> Result<Freeing, mosaica_store::StoreError> {
@@ -129,7 +129,7 @@ fn freeing(
                 .take(CHUNK)
                 .map(|entity| EntityId::new(u64::from(entity))),
         );
-        let numbers = crate::edited::numbers_of(live, &entities)?;
+        let numbers = crate::edited::numbers_of(shard, &entities)?;
         for (entity, number) in entities.iter().zip(numbers) {
             if number != *entity {
                 left.add(entity.raw() as u32);
@@ -140,7 +140,7 @@ fn freeing(
 
     let gone = |entity: EntityId| {
         executed.contains(entity.raw() as u32)
-            || (!live.overlay.touches(entity) && !crate::edited::holds(live, entity))
+            || (!shard.overlay.touches(entity) && !crate::edited::holds(shard, entity))
     };
     let mut numbers = croaring::Bitmap::new();
     let mut chunk: Vec<u32> = Vec::with_capacity(CHUNK);
@@ -148,7 +148,7 @@ fn freeing(
     while iter.peek().is_some() {
         chunk.clear();
         chunk.extend(iter.by_ref().take(CHUNK));
-        let entries = crate::edited::entries_of(live, &chunk)?;
+        let entries = crate::edited::entries_of(shard, &chunk)?;
         for (number, entries) in chunk.iter().zip(entries) {
             if gone(EntityId::new(u64::from(*number))) && entries.into_iter().all(gone) {
                 numbers.add(*number);
@@ -164,7 +164,7 @@ fn freeing(
     if !left.is_empty() {
         freed.ids.insert(mosaica_types::Tenancy::ZERO, left);
     }
-    for (tenancy, at) in live.tenancy.split(&numbers) {
+    for (tenancy, at) in shard.tenancy.split(&numbers) {
         match tenancy.next() {
             Some(next) => {
                 freed.raised.or_inplace(&at);
@@ -718,7 +718,7 @@ impl Executor {
             self.fold_floor_from(),
             crate::compact::Gauges {
                 live_segments: live_segments_of(generation),
-                retirable_deletions: generation.overlay.deleted_len(),
+                retirable_deletions: generation.only_shard().overlay.deleted_len(),
                 live_rows,
             },
             || dead_bytes_of(&self.prefix_dir(generation), generation),
@@ -882,8 +882,8 @@ impl Executor {
             // A `seg_id` must never be reused across the bundle's life, or a rebase's ABA check
             // would be meaningless.
             seg_id: format!("fold-{}-{attempt}", partition_data.segments_n),
-            base_postings: Arc::clone(&generation.postings),
-            tiers: generation.delta_postings.clone(),
+            base_postings: Arc::clone(&generation.only_shard().postings),
+            tiers: generation.only_shard().delta_postings.clone(),
             declared_scalars: manifest.declared_scalars.clone(),
             scoped_scalars: manifest.scoped_scalars(),
             view_incarnations: manifest
@@ -903,7 +903,7 @@ impl Executor {
             tracing::info!(
                 trigger = ?trigger,
                 live_segments = live_segments_of(generation),
-                retirable_deletions = generation.overlay.deleted_len(),
+                retirable_deletions = generation.only_shard().overlay.deleted_len(),
                 on_disc_bytes = dead.map(|d| d.on_disc),
                 named_bytes = dead.map(|d| d.named),
                 "dispatching a scheduled compaction fold"
@@ -1202,7 +1202,8 @@ impl Executor {
         };
         let partition_data = &live.bundle.partitions[&plan.partition];
         let live_manifest = &partition_data.manifest;
-        let live_shard = partition_data.only_shard();
+        let shard = live.only_shard();
+        let live_shard = &shard.data;
         let retired_count = executed.cardinality();
         let manifest_n = match self
             .side_manifests
@@ -1279,7 +1280,7 @@ impl Executor {
                     .map(|d| (*d).clone()),
             );
         }
-        let freeing = match freeing(&live, &executed, self.live.allocator_high_water()) {
+        let freeing = match freeing(shard, &executed, self.live.only_shard().high_water()) {
             Ok(freeing) => freeing,
             Err(e) => {
                 discard(&format!(
@@ -1292,7 +1293,7 @@ impl Executor {
             &to_prefix_dir,
             ShardLayout::new(&plan.partition, ShardId::ZERO),
             &live_shard.record.tenancy_index,
-            &live.tenancy.raised(&freeing.raised),
+            &shard.tenancy.raised(&freeing.raised),
         ) {
             Ok(next) => next,
             Err(e) => {
@@ -1311,7 +1312,7 @@ impl Executor {
         // them, so a replay of the suppressions the log still holds ends without them. Each entity
         // is deleted until this fold's swap, so the record hides nothing less even if the fold is
         // then discarded.
-        let unsuppressed = live.overlay.suppressions_retired_by(&executed);
+        let unsuppressed = shard.overlay.suppressions_retired_by(&executed);
         if !unsuppressed.is_empty() {
             let record = WalRecord::ChangeBatch {
                 changes: unsuppressed
@@ -1329,7 +1330,7 @@ impl Executor {
         }
         // `tombstones` must leave the overlay in the same commit as the manifest, or a manifest
         // carrying what the swap is about to retire would re-seed the overlay at the next restart.
-        let mut published_overlay = (*live.overlay).clone();
+        let mut published_overlay = (*shard.overlay).clone();
         published_overlay.retire(&executed);
         let frees = !freeing.ids.is_empty();
         // At the log position no later record can name the freed ids at.
@@ -1626,6 +1627,7 @@ impl Executor {
         let freed_numbers = freeing.raised.cardinality();
         let exhausted_numbers = freeing.retired.cardinality();
         self.live
+            .only_shard()
             .with_allocator(|alloc| alloc.release_after(freed.position, freeing.ids));
         self.rotate_wal();
         stairs.record("16 wal");
@@ -1784,14 +1786,15 @@ impl Executor {
         retired: croaring::Bitmap,
         frees: bool,
     ) -> Result<(), String> {
+        let shard = live.only_shard();
         let (bundle, mut rotation) =
-            crate::engine::open_rotation(&self.deps.bundle_root, prefix, &live.fragments, retired)
+            crate::engine::open_rotation(&self.deps.bundle_root, prefix, &shard.fragments, retired)
                 .map_err(|e| format!("the folded prefix would not open ({e})"))?;
         rotation.frees = frees;
         let delta_postings = folded_tiers
             .iter()
             .map(|rel| {
-                held_tier(&live.delta_postings, live_tiers, rel).ok_or_else(|| {
+                held_tier(&shard.delta_postings, live_tiers, rel).ok_or_else(|| {
                     format!("the folded manifest names delta tier {rel}, which is not held open")
                 })
             })
@@ -1800,7 +1803,7 @@ impl Executor {
             GeometryPublication::within_prefix(
                 prefix.to_string(),
                 live.segments_version + 1,
-                live.watermark,
+                shard.watermark,
                 bundle,
                 Arc::clone(&live.dict),
                 delta_postings,
@@ -2717,7 +2720,7 @@ impl Executor {
                             *level,
                             store,
                             &view_data.row_space,
-                            Some(&generation.partition_source()),
+                            Some(&generation.only_shard().partition_source()),
                             layout,
                             predicate.as_ref(),
                             generation.segments_version,

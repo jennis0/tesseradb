@@ -327,7 +327,7 @@ fn promotion_past_the_term_ceiling_refuses_the_flush() {
         "nothing published: a refused promotion is a failed flush, not a partial one"
     );
     assert!(
-        engine.generation().buffer.contains(id),
+        engine.generation().only_shard().buffer.contains(id),
         "and the row is retained, so ingest backpressure is what sheds, not the item"
     );
     assert_eq!(

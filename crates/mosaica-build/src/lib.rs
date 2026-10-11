@@ -3025,15 +3025,11 @@ fn walk_window(
             // A row an edit moved records its entity, and its `mosaica_id` is its number's, whose
             // entries in the edited items name the entity.
             let moved = recorded.is_some()
-                && identity
-                    .tenancy
-                    .number_named(
-                        identity_key,
-                        identity.shard_id,
-                        mosaica_types::MosaicaId::new(id),
-                    )
-                    .is_some_and(|(number, current)| {
-                        current
+                && identity_key
+                    .invert(mosaica_types::MosaicaId::new(id))
+                    .is_some_and(|(high, number)| {
+                        high.shard == identity.shard_id
+                            && identity.tenancy.of(number) == high.tenancy
                             && u32::try_from(number.raw()).is_ok_and(|number| {
                                 identity.edited.entities_of(&[number]).is_ok_and(|held| {
                                     held.iter().any(|(_, e)| u64::from(*e) == entity)

@@ -315,7 +315,7 @@ pub(crate) fn plan_fold(
         }
     }
 
-    let tombstones = generation.overlay.deleted_set().clone();
+    let tombstones = generation.only_shard().overlay.deleted_set().clone();
 
     Ok(FoldPlan {
         partition: partition.clone(),

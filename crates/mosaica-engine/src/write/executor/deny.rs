@@ -64,7 +64,7 @@ impl Executor {
                 return true;
             };
             if !stamp.follow_since(&self.generation.load_full(), |generation| {
-                crate::edited::follow_changes(generation, &mut changes)
+                crate::edited::follow_changes(generation.only_shard(), &mut changes)
             }) {
                 reply.fail(ExecError::Stale);
                 continue;
@@ -205,7 +205,8 @@ impl Executor {
     pub(super) fn apply_changes(&self, changes: Vec<(EntityId, ChangeOp)>) {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
-        let mut overlay: Overlay = (*generation.overlay).clone();
+        let shard = generation.only_shard();
+        let mut overlay: Overlay = (*shard.overlay).clone();
         let mut newly_denied: Vec<EntityId> = Vec::new();
         let mut deleted: Vec<EntityId> = Vec::new();
         let mut unsuppressed = false;
@@ -237,13 +238,10 @@ impl Executor {
 
         // A deleted entity's rows leave the buffer here, or they would pin the WAL: `plan_flush`
         // never consumes a deleted row.
-        let (buffer, unique_live) = if !generation.buffer.holds_any(&deleted) {
-            (
-                Arc::clone(&generation.buffer),
-                Arc::clone(&generation.unique_live),
-            )
+        let (buffer, unique_live) = if !shard.buffer.holds_any(&deleted) {
+            (Arc::clone(&shard.buffer), Arc::clone(&shard.unique_live))
         } else {
-            let mut buffer = (*generation.buffer).clone();
+            let mut buffer = (*shard.buffer).clone();
             for entity in &deleted {
                 buffer.remove(*entity);
             }
@@ -253,7 +251,7 @@ impl Executor {
             // A deleted entity names nothing, so its live unique entries go with its rows. Its
             // edited-item pair stays until the fold that removes it, which reads the pair to tell
             // an entity an edit made from an item's number.
-            let mut unique_live = (*generation.unique_live).clone();
+            let mut unique_live = (*shard.unique_live).clone();
             unique_live.remove_entities(
                 &deleted
                     .iter()
@@ -265,19 +263,20 @@ impl Executor {
 
         // A window of deletes and suppressions only grows the mask; an unsuppress re-derives it,
         // since subtracting a row would re-expose a still-deleted entity.
-        let overlay_version = generation.overlay_version + 1;
+        let overlay_version = shard.overlay_version + 1;
         let next = if unsuppressed {
-            generation.with_buffer(buffer, &[], |g| {
-                g.overlay_version = overlay_version;
+            generation.with_buffer(shard.id(), buffer, &[], |g, s| {
+                s.overlay_version = overlay_version;
                 g.deny_epoch = generation.deny_epoch + 1;
-                g.overlay = Arc::new(overlay);
-                g.unique_live = unique_live;
+                s.overlay = Arc::new(overlay);
+                s.unique_live = unique_live;
             })
         } else {
-            generation.with_denies(Arc::new(overlay), &newly_denied, buffer, &[], |g| {
-                g.overlay_version = overlay_version;
+            let overlay = Arc::new(overlay);
+            generation.with_denies(shard.id(), overlay, &newly_denied, buffer, &[], |g, s| {
+                s.overlay_version = overlay_version;
                 g.deny_epoch = generation.deny_epoch + 1;
-                g.unique_live = unique_live;
+                s.unique_live = unique_live;
             })
         };
         self.publish(next, started)

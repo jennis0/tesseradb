@@ -337,7 +337,11 @@ fn a_suppression_survives_a_merge_and_still_hides_the_same_item() {
     );
     for entity in [inside, outside] {
         assert!(
-            engine.generation().overlay.is_suppressed(entity),
+            engine
+                .generation()
+                .only_shard()
+                .overlay
+                .is_suppressed(entity),
             "entity {} lost its suppression to the merge",
             entity.raw()
         );
@@ -434,7 +438,11 @@ fn an_unsuppress_after_a_merge_restores_the_item_that_was_suppressed() {
         "the unsuppress must restore the entity that was suppressed, at its own identity — a set \
          of the right size naming a different item is a mask resolved against a stale row space"
     );
-    assert!(!engine.generation().overlay.is_suppressed(entity));
+    assert!(!engine
+        .generation()
+        .only_shard()
+        .overlay
+        .is_suppressed(entity));
 }
 
 /// **A delete before a merge stays deleted across it and across a restart**, and the merge carries
@@ -490,7 +498,11 @@ fn a_delete_before_a_merge_stays_deleted_across_it_and_a_restart() {
         after_delete,
         "and it is still deleted once the merged manifest is what the node opens"
     );
-    assert!(reopened.generation().overlay.is_deleted(deleted));
+    assert!(reopened
+        .generation()
+        .only_shard()
+        .overlay
+        .is_deleted(deleted));
 }
 
 /// **A suppression accepted while the merge is in flight is in force once it lands.**
@@ -530,7 +542,11 @@ fn a_suppression_racing_a_merge_is_in_force_once_both_have_landed() {
         "the suppression is in force whichever side of the swap it landed"
     );
     assert!(served.is_subset(&baseline));
-    assert!(engine.generation().overlay.is_suppressed(entity));
+    assert!(engine
+        .generation()
+        .only_shard()
+        .overlay
+        .is_suppressed(entity));
 }
 
 /// **A suppression accepted *inside* a merge's flight survives its publication** — the ordering
@@ -589,7 +605,11 @@ fn a_suppression_accepted_inside_a_merges_flight_survives_its_publication() {
         baseline.len() - 1,
         "the deny is in force before the merge publishes, which is what makes the ordering chosen          rather than raced"
     );
-    assert!(engine.generation().overlay.is_suppressed(entity));
+    assert!(engine
+        .generation()
+        .only_shard()
+        .overlay
+        .is_suppressed(entity));
 
     engine.set_merge_publication_paused_for_test(false);
     wait_until("the merge to publish", WAIT, || {
@@ -606,7 +626,11 @@ fn a_suppression_accepted_inside_a_merges_flight_survives_its_publication() {
         inside,
         "the publication re-derived the deny mask over the new row space from the live overlay:          the suppressed entity is still absent and no other entity took its place"
     );
-    assert!(engine.generation().overlay.is_suppressed(entity));
+    assert!(engine
+        .generation()
+        .only_shard()
+        .overlay
+        .is_suppressed(entity));
 }
 
 /// **The segment count comes down and nothing is lost doing it.**
@@ -732,7 +756,7 @@ fn a_merged_manifest_reopens_with_every_item_and_every_tier() {
         "the reopened bundle holds the build segment and the merged one"
     );
     assert_eq!(
-        generation.delta_postings.len(),
+        generation.only_shard().delta_postings.len(),
         TIER_WIDTH,
         "every consumed segment's tier is still listed — its entities have rows in the merged \
          segment, and dropping one would make them invisible"
@@ -796,43 +820,44 @@ fn a_reboot_after_a_merge_reads_back_the_watermark_the_process_served() {
         // over the same four extents.
         engine.set_merge_for_test(false);
 
-        // The flush that advances the watermark past the merge's plan.
-        let batch: Vec<UnallocatedRow> = (0..ROWS_EACH)
-            .map(|t| {
-                let descriptors = vec![b"0".to_vec()];
-                UnallocatedRow {
-                    view: "s0".to_string(),
-                    join: None,
-                    x: ((t * TIER_WIDTH) * 20) as f64,
-                    y: 45.0,
-                    scalars: Vec::new(),
-                    terms: engine.resolve_terms(&descriptors),
-                    descriptors,
-                    scoped: Vec::new(),
-                }
-            })
-            .collect();
-        engine
-            .ingest_rows(batch, "batch-late".to_string(), [9u8; 32])
-            .expect("ingest is accepted");
-        let flushes = engine.write_executor_stats().flushes;
-        engine.request_flush();
-        wait_until("the late flush to publish", WAIT, || {
-            engine.write_executor_stats().flushes > flushes
-        });
-        let watermark_served = engine.generation().watermark;
+            // The flush that advances the watermark past the merge's plan.
+            let batch: Vec<UnallocatedRow> = (0..ROWS_EACH)
+                .map(|t| {
+                    let descriptors = vec![b"0".to_vec()];
+                    UnallocatedRow {
+                        view: "s0".to_string(),
+                        join: None,
+                        x: ((t * TIER_WIDTH) * 20) as f64,
+                        y: 45.0,
+                        scalars: Vec::new(),
+                        terms: engine.resolve_terms(&descriptors),
+                        descriptors,
+                        scoped: Vec::new(),
+                    }
+                })
+                .collect();
+            engine
+                .ingest_rows(batch, "batch-late".to_string(), [9u8; 32])
+                .expect("ingest is accepted");
+            let flushes = engine.write_executor_stats().flushes;
+            engine.request_flush();
+            wait_until("the late flush to publish", WAIT, || {
+                engine.write_executor_stats().flushes > flushes
+            });
+            let watermark_served = engine.generation().only_shard().watermark;
 
         engine.set_merge_publication_paused_for_test(false);
         wait_until("the merge to publish", WAIT, || {
             engine.write_executor_stats().merges >= 1
         });
 
-        let generation = engine.generation();
-        assert_eq!(
-            generation.watermark, watermark_served,
-            "a merge moves the watermark for no one, in memory included"
-        );
-        assert_eq!(
+            let generation = engine.generation();
+            assert_eq!(
+                generation.only_shard().watermark,
+                watermark_served,
+                "a merge moves the watermark for no one, in memory included"
+            );
+            assert_eq!(
             generation.bundle.partitions["default"].only_shard().record.watermark, watermark_served,
             "the manifest the merge published must carry the live watermark, not its plan-time \
              snapshot — the manifest is what a restart believes, and every later publication \
@@ -842,7 +867,7 @@ fn a_reboot_after_a_merge_reads_back_the_watermark_the_process_served() {
     };
 
     let reopened = open_engine_at(tmp.path(), &root);
-    let read_back = reopened.generation().watermark;
+    let read_back = reopened.generation().only_shard().watermark;
     assert!(
         read_back >= watermark_served,
         "the reboot read back watermark {read_back} where the running process served \

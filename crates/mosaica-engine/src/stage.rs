@@ -193,12 +193,13 @@ fn run(
     cancel: &CancelToken,
 ) {
     let generation = &task.generation;
+    let shard = generation.only_shard();
     let mut key = OccupancyKey {
         token_id: task.token_id,
         view: task.view.clone(),
         depth: BACKGROUND_DEPTH,
         segments_version: generation.segments_version,
-        overlay_version: generation.overlay_version,
+        overlay_version: shard.overlay_version,
         fragment_identity: task.geometry.fragment.identity,
         fragment_watermark: task.geometry.fragment.watermark,
     };
@@ -210,15 +211,10 @@ fn run(
         return;
     }
 
-    let Some(view_data) = generation
-        .bundle
-        .partitions
-        .values()
-        .find_map(|partition| partition.only_shard().views.get(&task.view))
-    else {
+    let Some(view_data) = shard.data.views.get(&task.view) else {
         return;
     };
-    let Some(denied) = generation.denied().get(&task.view) else {
+    let Some(denied) = shard.denied().get(&task.view) else {
         return;
     };
     let Ok(segments) = crate::viewport::segments_with_row_bases(&task.view, view_data) else {
@@ -230,12 +226,12 @@ fn run(
     // exactly what that session's next zoom would have computed for itself.
     let mask = compose(
         &task.satisfied,
-        &generation.overlay,
-        &generation.buffer,
+        &shard.overlay,
+        &shard.buffer,
         Arc::clone(&task.geometry.projection),
         &view_data.row_space,
         denied,
-        generation.buffered_rows(&task.view),
+        shard.buffered_rows(&task.view),
     );
     if cancel.is_cancelled() {
         return;

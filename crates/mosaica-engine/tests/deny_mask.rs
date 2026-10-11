@@ -3,7 +3,7 @@
 //! Composition used to answer the row-space question — *is this row denied* — by walking the deny
 //! sets and resolving `row_of` per denied entity, on every request. That made per-request work grow
 //! with denies **ever accepted**, which is a cost curve nothing retires: deletions wait on a
-//! compaction fold that does not exist. `Generation::denied` is the same fact as
+//! compaction fold that does not exist. `Shard::denied` is the same fact as
 //! a row-space bitmap, folded into `compose`'s existing diffs with one `andnot`.
 //!
 //! **Two representations of one truth, so the differential test is the licence for holding them.**
@@ -107,6 +107,7 @@ fn visible_count(engine: &Engine, session: &mosaica_engine::Session) -> u64 {
 fn denied_rows(engine: &Engine) -> croaring::Bitmap {
     engine
         .generation()
+        .only_shard()
         .denied()
         .get("s0")
         .expect("every view the bundle carries has an entry")

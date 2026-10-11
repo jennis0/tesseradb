@@ -1719,7 +1719,7 @@ fn a_geometry_publication_leaves_the_work_counts_alone() {
         .publish_geometry(mosaica_engine::GeometryPublication::within_prefix(
             live.prefix.clone(),
             live.segments_version + 1,
-            live.watermark,
+            live.only_shard().watermark,
             Arc::clone(&live.bundle),
             Arc::clone(&live.dict),
             Vec::new(),

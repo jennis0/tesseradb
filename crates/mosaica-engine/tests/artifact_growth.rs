@@ -524,11 +524,11 @@ fn a_log_the_growth_holds_replays_to_what_was_served() {
     assert_eq!(count(&engine), 310, "the join replays");
     assert_eq!(visible(&engine), served, "the restart serves what was served");
     assert!(
-        engine.generation().buffer.contains(buffered),
+        engine.generation().only_shard().buffer.contains(buffered),
         "the row no flush reached is buffered again"
     );
     assert_eq!(
-        engine.generation().buffer.len(),
+        engine.generation().only_shard().buffer.len(),
         1,
         "and it is the only one: a flushed row is not buffered again"
     );

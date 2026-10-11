@@ -259,6 +259,7 @@ fn every_table_of_the_pass_is_the_one_counted_row_by_row() {
         .row_entities()
         .expect("the view has row-entity.u32");
     let codes = generation
+        .only_shard()
         .filter_columns
         .entity_codes("kind")
         .expect("kind is indexed");

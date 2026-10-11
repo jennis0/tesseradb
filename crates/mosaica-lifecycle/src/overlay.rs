@@ -83,7 +83,7 @@ impl Overlay {
 
     /// `deleted ∪ suppressed` — every entity denied outright, in entity space.
     ///
-    /// **The one input to the row-space deny mask** (`Generation::denied`), and the reason it is a
+    /// **The one input to the row-space deny mask** (`Shard::denied`), and the reason it is a
     /// union rather than two accessors: the mask's derivation rule turns on the union, so an
     /// unsuppress may not subtract a row while `deleted` still holds the entity. Handing callers
     /// the union makes the rule the only expressible thing.

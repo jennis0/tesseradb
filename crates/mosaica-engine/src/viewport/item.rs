@@ -69,7 +69,7 @@ pub struct ItemField {
 }
 
 impl Engine {
-    /// Is `entity` visible to `session` under `generation` — the one bit `/v1/items` needs. An
+    /// Is `entity` visible to `session` in `shard` — the one bit `/v1/items` needs. An
     /// entity-space question: three constant-time probes, no `RowProjection` constructed or
     /// consulted, so this costs the same whether `entity` exists and is visible, exists and is
     /// not, or does not exist at all. Takes the fragment as an argument: a session's own fragment
@@ -79,14 +79,14 @@ impl Engine {
         &self,
         fragment: &FrozenFragment,
         session: &Session,
-        generation: &Generation,
+        shard: &crate::Shard,
         entity: EntityId,
     ) -> bool {
         visible_to(
             fragment,
             session.satisfied(),
-            &generation.overlay,
-            &generation.buffer,
+            &shard.overlay,
+            &shard.buffer,
             entity,
         )
     }
@@ -103,11 +103,12 @@ impl Engine {
     pub(crate) fn labels_for(
         &self,
         generation: &Generation,
+        shard: &crate::Shard,
         session: &Session,
         entity: u32,
         parsed: &mut FxHashMap<TermId, Option<Label>>,
     ) -> Result<Vec<String>> {
-        let Some(keys) = generation
+        let Some(keys) = shard
             .filter_columns
             .entity_terms()
             .terms_of(entity)
@@ -156,18 +157,15 @@ impl Engine {
     pub fn item(&self, session: &Session, id: MosaicaId) -> Result<Option<ItemOut>> {
         let generation = self.generation.load_full();
 
-        let shard = generation.bundle.only_shard().id;
-        let Some((number, current)) =
-            generation
-                .tenancy
-                .number_named(&self.identity_key, shard, id)
+        let Some((shard, number, current)) =
+            crate::edited::named(&self.identity_key, &generation, id)
         else {
             return Ok(None);
         };
         // The item's current entity, the edited-items map probed whether or not it holds the
         // number, so an edited item's card costs what any other's does. An entity the overlay has
         // deleted is not an answer; visibility below decides the rest.
-        let Some(entity) = crate::edited::entities_of_numbers(&generation, &[number], |_| true)
+        let Some(entity) = crate::edited::entities_of_numbers(shard, &[number], |_| true)
             .map_err(EngineError::Store)?[0]
         else {
             return Ok(None);
@@ -188,11 +186,11 @@ impl Engine {
                 .saturating_sub(crate::cache::KEEP_SUPERSEDED_GENERATIONS),
         ) {
             Some(fragment) => fragment,
-            None => self.fragment_for(session, &generation)?,
+            None => self.fragment_for(session, shard)?,
         };
 
         // ONE BIT, in entity space, O(1), before anything is looked up in row space.
-        if !self.visible_to(&fragment, session, &generation, entity) || !current {
+        if !self.visible_to(&fragment, session, shard, entity) || !current {
             return Ok(None);
         }
 
@@ -203,7 +201,7 @@ impl Engine {
         // from a 32-bit half; checked rather than cast so a violated invariant fails loudly.
         let entity_raw =
             u32::try_from(entity.raw()).expect("entity ids are capped at u32::MAX by I9");
-        let rows = rows_of(&generation, entity)?;
+        let rows = rows_of(shard, entity)?;
         let views = item_views(&rows, session.visible_views());
         let Some(&(_view, segment, local)) = row_to_read(&rows, session.visible_views()) else {
             // Visible in entity space but with no row anywhere: a buffered item awaiting flush.
@@ -213,11 +211,17 @@ impl Engine {
 
         // The scoped values, gate-filtered by the same set and keyed by the group's key. See
         // [`scoped_values_of`].
-        let scoped = scoped_values_of(&generation, session.visible_views(), entity_raw);
-        let fields = record_fields(&generation, segment, local, entity_raw)?;
+        let scoped = scoped_values_of(&generation, shard, session.visible_views(), entity_raw);
+        let fields = record_fields(&generation, shard, segment, local, entity_raw)?;
         Ok(Some(ItemOut {
             fields,
-            labels: self.labels_for(&generation, session, entity_raw, &mut FxHashMap::default())?,
+            labels: self.labels_for(
+                &generation,
+                shard,
+                session,
+                entity_raw,
+                &mut FxHashMap::default(),
+            )?,
             views,
             scoped,
         }))
@@ -227,17 +231,14 @@ impl Engine {
 /// Every view this item holds a row in, resolved in one pass, sorted by view id. The `views`
 /// array is the gate-filtered part of this list, so a second walk would be a second chance to
 /// disagree about which rows exist. An O(1) bounds-checked slot read per view rather than a scan,
-/// so the whole array costs O(views). Sorted, because the maps walked here are hash maps, and
-/// each view id appears once: an entity lives in exactly one partition.
-fn rows_of(generation: &Generation, entity: EntityId) -> Result<Vec<(&str, &SegmentData, usize)>> {
+/// so the whole array costs O(views). Sorted, because the map walked here is a hash map.
+fn rows_of(shard: &crate::Shard, entity: EntityId) -> Result<Vec<(&str, &SegmentData, usize)>> {
     let mut rows: Vec<(&str, &SegmentData, usize)> = Vec::new();
-    for partition in generation.bundle.partitions.values() {
-        for (view, view_data) in &partition.only_shard().views {
-            let Some((segment, local)) = segment_row_of(view, view_data, entity)? else {
-                continue;
-            };
-            rows.push((view.as_str(), segment, local));
-        }
+    for (view, view_data) in &shard.data.views {
+        let Some((segment, local)) = segment_row_of(view, view_data, entity)? else {
+            continue;
+        };
+        rows.push((view.as_str(), segment, local));
     }
     rows.sort_unstable_by(|a, b| a.0.cmp(b.0));
     Ok(rows)
@@ -287,6 +288,7 @@ fn row_to_read<'a>(
 /// [`Engine::item`]'s visibility verdict, like every other read there.
 fn record_fields(
     generation: &Generation,
+    shard: &crate::Shard,
     segment: &SegmentData,
     local: usize,
     entity: u32,
@@ -317,7 +319,7 @@ fn record_fields(
         if d.render || values[declared_index].is_some() {
             continue;
         }
-        if let Some(stored) = generation.filter_columns.stored_value(&d.name, entity) {
+        if let Some(stored) = shard.filter_columns.stored_value(&d.name, entity) {
             values[declared_index] = stored_field_out(
                 stored,
                 d.arrow_type,
@@ -329,7 +331,7 @@ fn record_fields(
 
     // Home 3: the record blob, one block read. Fail-closed: a malformed row, a bad tag or an
     // addressing defect refuses the request rather than serving a neighbour's field.
-    if let Some(blob_fields) = generation
+    if let Some(blob_fields) = shard
         .filter_columns
         .records()
         .fields_of(entity)
@@ -549,6 +551,7 @@ pub(crate) fn stored_field_out(
 /// nothing since; every other family is served live.
 fn scoped_values_of(
     generation: &Generation,
+    shard: &crate::Shard,
     visible: &crate::gate::VisibleViews,
     entity: u32,
 ) -> Vec<ItemScoped> {
@@ -598,7 +601,7 @@ fn scoped_values_of(
                 continue;
             }
             let column = crate::filter::scoped_column_name(&family.name, &id);
-            let Some(stored) = generation.filter_columns.stored_value(&column, entity) else {
+            let Some(stored) = shard.filter_columns.stored_value(&column, entity) else {
                 continue;
             };
             if let Some(value) = stored_field_out(

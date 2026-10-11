@@ -5,8 +5,8 @@ use super::*;
 /// One request's view, resolved once and passed whole.
 ///
 /// Every field is fixed for the request from the moment the view resolves: the session asking, the
-/// generation loaded at request start, the view's name and data, its segments with their row bases,
-/// its deny mask rows, and what this request's composed mask is. A callee that would otherwise take
+/// generation loaded at request start, the shard the view's rows are in, the view's name and data,
+/// its segments with their row bases, its deny mask rows, and what this request's composed mask is. A callee that would otherwise take
 /// four or more of them takes this instead.
 ///
 /// A struct of borrows: it owns only the segment list, which is the one `segments_with_row_bases`
@@ -18,6 +18,7 @@ use super::*;
 pub(crate) struct ServedView<'a> {
     pub(crate) session: &'a Session,
     pub(crate) generation: &'a Generation,
+    pub(crate) shard: &'a crate::Shard,
     pub(crate) name: &'a str,
     pub(crate) data: &'a mosaica_store::read::ViewData,
     /// Every segment of the view, each with where its rows begin in the view's row space, ascending.

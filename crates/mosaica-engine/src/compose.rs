@@ -23,7 +23,8 @@ use croaring::Bitmap;
 use mosaica_authz::FrozenFragment;
 use mosaica_lifecycle::{BufferedItem, IngestBuffer, Overlay};
 use mosaica_roaring::for_each_run_in;
-use mosaica_store::{Bundle, RowSpace};
+use mosaica_store::read::ShardData;
+use mosaica_store::RowSpace;
 use mosaica_types::{EntityId, TermId};
 
 use crate::projection::RowProjection;
@@ -547,10 +548,10 @@ pub(crate) fn admits(
     keys.into_iter().any(|key| satisfied.holds_key(key))
 }
 
-/// Derive the row-space deny mask from the authoritative entity-space stores:
+/// Derive one shard's row-space deny mask from the authoritative entity-space stores:
 /// `{row_of(e) : e ∈ deleted ∪ suppressed}`, per view, taken from [`Overlay::denied`] so the
 /// union is expressed once; this function's result is the only legal value of
-/// [`Generation::denied`]. Additions may be applied incrementally, since a window of deletes and
+/// [`crate::Shard::denied`]. Additions may be applied incrementally, since a window of deletes and
 /// suppressions only grows the union; any removal must re-derive from scratch, because
 /// subtracting a row on unsuppress is wrong — after delete → suppress → unsuppress the row must
 /// stay masked, `deleted` still holding the entity, and re-deriving is what stops that case
@@ -558,14 +559,12 @@ pub(crate) fn admits(
 /// meaningful only within one `segments_version`. An entity with no row — still buffered, or
 /// belonging to another view — contributes nothing: the mask governs row-space questions,
 /// `verdict` the entity-space ones.
-pub(crate) fn derive_denied(overlay: &Overlay, bundle: &Bundle) -> DenyMask {
+pub(crate) fn derive_denied(overlay: &Overlay, shard: &ShardData) -> DenyMask {
     let mut out = DenyMask::default();
-    for partition in bundle.partitions.values() {
-        for (view, view_data) in &partition.only_shard().views {
-            // Every view gets an entry, empty or not: a missing one must mean "the mask and the
-            // bundle disagree", never "nothing is denied here".
-            out.insert(view.clone(), denied_rows_of(overlay, &view_data.row_space));
-        }
+    for (view, view_data) in &shard.views {
+        // Every view gets an entry, empty or not: a missing one must mean "the mask and the shard
+        // disagree", never "nothing is denied here".
+        out.insert(view.clone(), denied_rows_of(overlay, &view_data.row_space));
     }
     out
 }
@@ -581,19 +580,20 @@ pub fn denied_rows_of(overlay: &Overlay, row_space: &RowSpace) -> Bitmap {
     rows
 }
 
-/// Derive, per view, the buffered entities [`compose`]'s walk has anything to say about: those
+/// Derive, per view of one shard, the buffered entities [`compose`]'s walk has anything to say about: those
 /// holding an own row in the buffer that already have a row in that view. An entity gains one only
 /// when a publication gives it one, so this is re-derived by every publication and may otherwise be
-/// carried; the result is the only legal value of [`Generation::buffered_rows`]. The overlay is not
+/// carried; the result is the only legal value of [`crate::Shard::buffered_rows`]. The overlay is not
 /// consulted, so a deny or its lift changes nothing here and `compose` asks [`Overlay::touches`]
 /// for itself.
-pub(crate) fn derive_buffered_rows(buffer: &IngestBuffer, bundle: &Bundle) -> crate::BufferedRows {
+pub(crate) fn derive_buffered_rows(
+    buffer: &IngestBuffer,
+    shard: &ShardData,
+) -> crate::BufferedRows {
     let mut out = crate::BufferedRows::default();
-    for partition in bundle.partitions.values() {
-        for (view, view_data) in &partition.only_shard().views {
-            // Every view gets an entry, empty or not, on [`derive_denied`]'s rule.
-            out.insert(view.clone(), buffered_rows_of(buffer, &view_data.row_space));
-        }
+    for (view, view_data) in &shard.views {
+        // Every view gets an entry, empty or not, on [`derive_denied`]'s rule.
+        out.insert(view.clone(), buffered_rows_of(buffer, &view_data.row_space));
     }
     out
 }

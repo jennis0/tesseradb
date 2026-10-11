@@ -2456,7 +2456,14 @@ async fn an_edit_in_a_dropped_view_holds_nothing_in_the_log() {
         .unwrap();
     assert_eq!(resp.status(), 200, "the drop is accepted");
     assert_eq!(
-        served.server.state.engine.generation().buffer.oldest_wal_pos(),
+        served
+            .server
+            .state
+            .engine
+            .generation()
+            .only_shard()
+            .buffer
+            .oldest_wal_pos(),
         None,
         "nothing buffered holds the log"
     );
@@ -2464,7 +2471,13 @@ async fn an_edit_in_a_dropped_view_holds_nothing_in_the_log() {
     let Served { server, tmp, .. } = served;
     let server = restart(server, &tmp).await;
     assert_eq!(
-        server.state.engine.generation().buffer.oldest_wal_pos(),
+        server
+            .state
+            .engine
+            .generation()
+            .only_shard()
+            .buffer
+            .oldest_wal_pos(),
         None,
         "and a restart does not buffer the edit again"
     );

@@ -1648,7 +1648,7 @@ fn an_item_joining_another_view_is_sampled_with_its_indexed_values() {
         assert_eq!(receipt.created, 0, "{batch}");
         wait_until("the flush", Duration::from_secs(60), || {
             fx.engine.request_flush();
-            fx.engine.generation().buffer.is_empty()
+            fx.engine.generation().only_shard().buffer.is_empty()
         });
     };
     // Every declared column, `id` alone given.
@@ -1761,7 +1761,7 @@ fn a_sample_read_partly_from_the_band_and_partly_by_scanning_is_the_oracles() {
         .expect("the ingest is accepted");
     wait_until("the flush", Duration::from_secs(60), || {
         fx.engine.request_flush();
-        fx.engine.generation().buffer.is_empty()
+        fx.engine.generation().only_shard().buffer.is_empty()
     });
     fx.items.extend(added);
     for item in fx.items.iter_mut() {
@@ -2280,7 +2280,8 @@ fn the_figures_are_the_oracles_through_every_change() {
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();
         wait_until("the flush", Duration::from_secs(60), || {
-            engine.write_executor_stats().flushes > flushes && engine.generation().buffer.is_empty()
+            engine.write_executor_stats().flushes > flushes
+                && engine.generation().only_shard().buffer.is_empty()
         });
     };
     let change = |engine: &Engine, sources: &[u64], op: ChangeOp| {

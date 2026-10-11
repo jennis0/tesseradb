@@ -188,7 +188,7 @@ impl Executor {
         self.health.mark_tick(self.last_tick);
         self.health.ticks.fetch_add(1, Ordering::Relaxed);
         // No deletion filter needed: the buffer never holds rows of a deleted entity.
-        let flushable = generation.buffer.len();
+        let flushable = generation.only_shard().buffer.len();
         self.health
             .flushable_items
             .store(flushable, Ordering::SeqCst);
@@ -322,60 +322,61 @@ impl Executor {
         let started = std::time::Instant::now();
         let previous = self.generation.load_full();
         check_publishable(&previous, &prefix, segments_version, watermark)?;
+        let shard = previous.only_shard();
 
         // Cloned and retired against here, never mutated on the shared `Arc` the read path holds.
         // Cache keys read `overlay_version` as the security state, so a geometry-only swap must
         // not move it.
         let (overlay, overlay_version) = match rotation.as_ref().map(|r| &r.retired) {
             Some(retired) if !retired.is_empty() => {
-                let mut overlay = (*previous.overlay).clone();
+                let mut overlay = (*shard.overlay).clone();
                 let count = overlay.retire(retired);
                 tracing::info!(
                     retired = count,
                     prefix = %prefix,
                     "Rule F: executed deletions retired in the fold's own publication"
                 );
-                (Arc::new(overlay), previous.overlay_version + 1)
+                (Arc::new(overlay), shard.overlay_version + 1)
             }
-            _ => (Arc::clone(&previous.overlay), previous.overlay_version),
+            _ => (Arc::clone(&shard.overlay), shard.overlay_version),
         };
 
-        let next = previous.with(|g| {
+        let next = previous.with_shard(shard.id(), |g, s| {
             g.prefix = prefix;
             g.segments_version = segments_version;
-            g.watermark = watermark;
+            s.watermark = watermark;
             g.bundle = bundle;
             g.dict = dict;
             // A rotation carries the new prefix's own columns, or `with` would serve stale entries.
             if let Some(r) = &rotation {
-                g.filter_columns = Arc::clone(&r.filter_columns);
-                g.postings = Arc::clone(&r.postings);
-                g.fragments = Arc::clone(&r.fragments);
-                g.unique = Arc::clone(&r.unique);
-                g.edited = Arc::clone(&r.edited);
-                g.tenancy = Arc::clone(&r.tenancy);
+                s.filter_columns = Arc::clone(&r.filter_columns);
+                s.postings = Arc::clone(&r.postings);
+                s.fragments = Arc::clone(&r.fragments);
+                s.unique = Arc::clone(&r.unique);
+                s.edited = Arc::clone(&r.edited);
+                s.tenancy = Arc::clone(&r.tenancy);
                 // The retired entities' pairs leave the live map with their runs' entries, or an id
                 // freed here and issued again would answer its previous holder's number.
                 if !r.retired.is_empty() {
-                    let mut edited_live = (*previous.edited_live).clone();
+                    let mut edited_live = (*shard.edited_live).clone();
                     edited_live.remove(r.retired.iter());
-                    g.edited_live = Arc::new(edited_live);
+                    s.edited_live = Arc::new(edited_live);
                 }
             }
-            g.delta_postings = delta_postings;
+            s.delta_postings = delta_postings;
             if rotation.as_ref().is_some_and(|r| !r.retired.is_empty()) {
                 g.fold_epoch = previous.fold_epoch + 1;
             }
             if rotation.as_ref().is_some_and(|r| r.frees) {
                 g.free_epoch = previous.free_epoch + 1;
             }
-            g.overlay_version = overlay_version;
-            g.overlay = overlay;
+            s.overlay_version = overlay_version;
+            s.overlay = overlay;
         });
         // Listed before the swap and deleted after it, so nothing is lost if the swap never lands.
         let superseded = rotation
             .as_ref()
-            .map(|_| previous.fragments.superseded_entries())
+            .map(|_| shard.fragments.superseded_entries())
             .unwrap_or_default();
 
         let next = Arc::new(next);
@@ -388,7 +389,7 @@ impl Executor {
 
         // After the swap, so a missing projection after a fold is an ordinary cache miss.
         if rotation.is_some() {
-            self.deps.figures.sweep(next.bundle_identity());
+            self.deps.figures.sweep(next.only_shard().bundle_identity());
             self.deps.refresh.spawn(next);
         }
 

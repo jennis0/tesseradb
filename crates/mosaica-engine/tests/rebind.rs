@@ -100,7 +100,7 @@ fn delete_then_reingest_gives_the_value_to_the_new_item_across_flush_rotation_an
         "the lookup names the live holder: the deleted first life is forgotten"
     );
     assert!(
-        reopened.generation().overlay.is_deleted(first),
+        reopened.generation().only_shard().overlay.is_deleted(first),
         "the first life's deny survives rotation and restart"
     );
 
@@ -109,11 +109,19 @@ fn delete_then_reingest_gives_the_value_to_the_new_item_across_flush_rotation_an
         .accept_change(resolved, ChangeOp::Suppress)
         .expect("suppress accepted");
     assert!(
-        reopened.generation().overlay.is_suppressed(second),
+        reopened
+            .generation()
+            .only_shard()
+            .overlay
+            .is_suppressed(second),
         "the suppression addressed the re-ingested entity, not the forgotten one"
     );
     assert!(
-        !reopened.generation().overlay.is_suppressed(first),
+        !reopened
+            .generation()
+            .only_shard()
+            .overlay
+            .is_suppressed(first),
         "the forgotten holder accumulates no new state"
     );
 }

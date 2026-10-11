@@ -292,11 +292,8 @@ impl PartitionData {
     }
 
     /// The shard numbered `id`.
-    pub fn shard(&self, id: ShardId) -> Option<&ShardData> {
-        self.shards
-            .iter()
-            .find(|shard| shard.id == id)
-            .map(Arc::as_ref)
+    pub fn shard(&self, id: ShardId) -> Option<&Arc<ShardData>> {
+        self.shards.iter().find(|shard| shard.id == id)
     }
 
     /// The one shard a partition holds until several are served; the open refuses any other

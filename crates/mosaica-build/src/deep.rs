@@ -373,8 +373,12 @@ fn check_edited_items(
                         ids.len()
                     ))
                 })?;
-                let Some((number, true)) =
-                    tenancy.number_named(&key, shard, MosaicaId::new(mosaica_id))
+                let Some(number) = key
+                    .invert(MosaicaId::new(mosaica_id))
+                    .filter(|(high, number)| {
+                        high.shard == shard && tenancy.of(*number) == high.tenancy
+                    })
+                    .map(|(_, number)| number)
                 else {
                     return Err(BuildError::Invalid(format!(
                         "view {view}, segment {}: moved row {row}'s mosaica_id names no item of \

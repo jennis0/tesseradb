@@ -209,7 +209,11 @@ fn a_node_restored_from_the_bundle_alone_honours_the_published_deny() {
          baseline, recovered from the manifest alone"
     );
     assert!(
-        restored.generation().overlay.is_suppressed(suppressed),
+        restored
+            .generation()
+            .only_shard()
+            .overlay
+            .is_suppressed(suppressed),
         "and the suppression is in force, not merely parsed"
     );
 }
@@ -332,7 +336,15 @@ fn a_run_of_denies_leaves_a_bounded_directory_and_a_reopen_hides_every_one() {
         "every suppression and the deletion survived the pruning"
     );
     for entity in suppressed {
-        assert!(restored.generation().overlay.is_suppressed(entity));
+        assert!(restored
+            .generation()
+            .only_shard()
+            .overlay
+            .is_suppressed(entity));
     }
-    assert!(restored.generation().overlay.is_deleted(deleted));
+    assert!(restored
+        .generation()
+        .only_shard()
+        .overlay
+        .is_deleted(deleted));
 }

@@ -269,9 +269,10 @@ impl Executor {
     /// only this keeps its entity id, and so its `mosaica_id`, from being issued again.
     fn write_live_state(&self, manifest: &mut SegmentsManifest, shard_size: u64, fold: bool) {
         let registry = self.live.registry_for_publication();
+        let shard = self.live.only_shard();
         let record = manifest.only_shard_mut();
-        record.high_water = record.high_water.max(self.live.allocator_high_water());
-        (record.free_entities, record.held_entities) = self.live.allocator_freed();
+        record.high_water = record.high_water.max(shard.high_water());
+        (record.free_entities, record.held_entities) = shard.freed();
         manifest.shards.size = shard_size;
         let partition = &mut manifest.partition;
         partition.entity_id_low_water = partition.entity_id_low_water.min(registry.low_water);

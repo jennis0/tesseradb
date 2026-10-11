@@ -390,11 +390,19 @@ fn an_artifacts_entity_takes_a_suppression_like_any_other() {
     engine
         .accept_change(entity, ChangeOp::Suppress)
         .expect("an artifact suppression is an ordinary change");
-    assert!(engine.generation().overlay.is_suppressed(entity));
+    assert!(engine
+        .generation()
+        .only_shard()
+        .overlay
+        .is_suppressed(entity));
 
     // And it comes back — a suppression is the reversible one of the two removal rules.
     engine.accept_change(entity, ChangeOp::Unsuppress).unwrap();
-    assert!(!engine.generation().overlay.is_suppressed(entity));
+    assert!(!engine
+        .generation()
+        .only_shard()
+        .overlay
+        .is_suppressed(entity));
 }
 
 /// **A membership that came back from an extent is read through that extent**, and it is the set
