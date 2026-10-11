@@ -83,15 +83,14 @@ impl LiveState {
         lock_recover(&self.allocator).low_water()
     }
 
-    /// The allocator's freed ids and the sets it holds back, as a side-manifest records them: each
-    /// set as one set of ids, which a restart splits by the tenancy index published beside it.
+    /// The allocator's freed ids and the sets it holds back, as a side-manifest records them.
     pub(crate) fn allocator_freed(
         &self,
     ) -> (
         mosaica_store::manifest::EntitySet,
         Vec<mosaica_store::manifest::HeldEntities>,
     ) {
-        use mosaica_lifecycle::alloc::union_of;
+        use mosaica_lifecycle::union_of;
         let alloc = lock_recover(&self.allocator);
         let held = alloc
             .held()

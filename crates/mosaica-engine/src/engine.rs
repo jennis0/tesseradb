@@ -294,9 +294,8 @@ fn across_partitions<'a, T, I: IntoIterator<Item = T>>(
 }
 
 /// The freed entity ids the newest served side-manifest records, and the sets it holds back, each
-/// split by `tenancy`, the index the served prefix names. "Newest" is the partition whose served
-/// manifest has the highest number, which is meaningful while a bundle has one partition, as every
-/// bundle has.
+/// split by `tenancy`. "Newest" is the partition whose served manifest has the highest number,
+/// which is meaningful while a bundle has one partition, as every bundle has.
 ///
 /// Every publication records the allocator's sets, which shrink as ids are issued and grow only at
 /// a fold, so an older manifest can list an id issued since. A stepped-down partition serves a

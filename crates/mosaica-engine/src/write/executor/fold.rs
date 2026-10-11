@@ -100,31 +100,28 @@ struct Freeing {
 /// number, or the entity itself where it is a number, is freed when the fold removes the number's
 /// last entity: the number and every entity the edited-items map pairs with it is executed here
 /// or already gone, holding no row, buffered or flushed, and no deny record. Until then the number
-/// resolves through the map, so its next holder would resolve to an entity of its last. A freed
-/// number is issued one tenancy above the one the index holds for it, and one at the highest
-/// tenancy is retired instead. An entity at or above `high_water`, the allocator's, is row-less (an
-/// artifact or a layer) and is never freed.
+/// resolves through the map, so its next holder would resolve to an entity of its last. An entity
+/// at or above `high_water`, the allocator's, is row-less (an artifact or a layer) and is never
+/// freed.
 ///
 /// Read before the swap, while the map still holds the pairs of the entities this fold removes,
 /// and on the executor thread, so no window commits between this read and the swap.
 ///
-/// A restart after the fold's publication and before the log rotates past it replays the
-/// deletions of what the fold removed, and the next fold frees those numbers again, one tenancy
-/// higher. The tenancy skipped was never issued, since the ids are held until that rotation.
+/// A restart before the log rotates past this fold has the next fold free its numbers again one
+/// tenancy higher, skipping a tenancy no item was given, since the ids are held until that rotation.
 fn freeing(
     live: &Generation,
     executed: &croaring::Bitmap,
     high_water: u64,
 ) -> Result<Freeing, mosaica_store::StoreError> {
     const CHUNK: usize = 1 << 16;
-    let mut points = executed.clone();
-    if let Ok(high_water) = u32::try_from(high_water) {
-        points.remove_range(high_water..);
-    }
     let mut left = croaring::Bitmap::new();
     let mut candidates = croaring::Bitmap::new();
     let mut entities: Vec<EntityId> = Vec::with_capacity(CHUNK);
-    let mut iter = points.iter().peekable();
+    let mut iter = executed
+        .iter()
+        .take_while(|&entity| u64::from(entity) < high_water)
+        .peekable();
     while iter.peek().is_some() {
         entities.clear();
         entities.extend(
@@ -231,8 +228,9 @@ fn write_next_tenancy_index(
             next.written.push((entry, path));
         }
     }
-    let paths: Vec<PathBuf> = next.written.iter().map(|(_, path)| path.clone()).collect();
-    mosaica_store::fsync_written(&paths)?;
+    if !next.written.is_empty() {
+        mosaica_store::fsync_dir(&prefix_dir.join(&dir_rel))?;
+    }
     Ok(next)
 }
 
@@ -1334,7 +1332,7 @@ impl Executor {
         // At the log position no later record can name the freed ids at.
         let freed = mosaica_store::manifest::HeldEntities {
             position: self.log.wal.position(),
-            entities: mosaica_store::manifest::EntitySet::of(&mosaica_lifecycle::alloc::union_of(
+            entities: mosaica_store::manifest::EntitySet::of(&mosaica_lifecycle::union_of(
                 &freeing.ids,
             )),
         };
@@ -1608,14 +1606,12 @@ impl Executor {
         // Immediately: the manifest seed no longer carries the executed entries, but the WAL still
         // holds the original delete records until a rotation reclaims them. The freed ids are
         // issued once it has.
-        let (freed_ids, freed_numbers, retired_now) = (
-            freed
-                .entities
-                .entities()
-                .map_or(0, croaring::Bitmap::cardinality),
-            freeing.raised.cardinality(),
-            freeing.retired.cardinality(),
-        );
+        let freed_ids = freed
+            .entities
+            .entities()
+            .map_or(0, croaring::Bitmap::cardinality);
+        let freed_numbers = freeing.raised.cardinality();
+        let exhausted_numbers = freeing.retired.cardinality();
         self.live
             .with_allocator(|alloc| alloc.release_after(freed.position, freeing.ids));
         self.rotate_wal();
@@ -1675,7 +1671,7 @@ impl Executor {
             retired = retired_count,
             freed_ids,
             freed_numbers,
-            retired_numbers = retired_now,
+            exhausted_numbers,
             carried_entities,
             elapsed_ms = started.elapsed().as_millis() as u64,
             passes = %passes,

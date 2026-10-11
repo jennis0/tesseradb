@@ -620,9 +620,7 @@ impl Executor {
             )
         };
         let mosaica_id_of = |entity: EntityId| {
-            let high = mosaica_types::ItemHigh::new(shard, tenancy.of(entity));
-            identity
-                .forward(high, entity)
+            crate::edited::id_at(&identity, shard, tenancy.of(entity), entity)
                 .map(|id| id.raw())
                 .expect("the allocator issues entities inside the identity space")
         };

@@ -264,20 +264,28 @@ const CHANGES_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 const CHANGES_MAX_ITEMS: usize = 10_000;
 
 /// How many times a write naming items resolves its names and is submitted. The executor refuses
-/// one whose names a fold has made stale since they were resolved, and the names are resolved
+/// one whose names are stale by [`mosaica_engine::Stamp`]'s rule, and the names are resolved
 /// again; the last refusal is the caller's 409.
 const NAMING_ATTEMPTS: usize = 3;
 
-/// Whether the executor refused attempt `attempts`, counted from 1, of a write naming items as
-/// stale, and the write may resolve its names and be submitted again.
-fn stale_again<T>(answered: &Result<T, mosaica_engine::AcceptError>, attempts: usize) -> bool {
-    attempts < NAMING_ATTEMPTS
-        && matches!(
+/// The answer of `attempt`, which resolves a write's names and submits it, run again while the
+/// executor refuses it as stale, at most [`NAMING_ATTEMPTS`] times. An `Err` is a refusal made
+/// before the write was submitted.
+fn with_fresh_names<T>(
+    mut attempt: impl FnMut() -> Result<Result<T, mosaica_engine::AcceptError>, ApiError>,
+) -> Result<Result<T, mosaica_engine::AcceptError>, ApiError> {
+    for _ in 1..NAMING_ATTEMPTS {
+        let answered = attempt()?;
+        if !matches!(
             answered,
             Err(mosaica_engine::AcceptError::Exec(
                 mosaica_lifecycle::ExecError::Stale
             ))
-        )
+        ) {
+            return Ok(answered);
+        }
+    }
+    attempt()
 }
 
 /// A declaration's body cap: axum's `Json` default, which declaration routes inherit, named so
@@ -712,9 +720,8 @@ fn run_changes(
     }
     let merged = crate::address::Merged::of(tables)?;
 
-    let mut attempts = 0;
-    loop {
-        attempts += 1;
+    let mut applied: Vec<ChangeOp> = Vec::new();
+    let answered = with_fresh_names(|| {
         let crate::address::Names {
             tables: named,
             ignored,
@@ -737,17 +744,12 @@ fn run_changes(
             ignored,
         };
         if changes.is_empty() {
-            return Ok(done);
+            return Ok(Ok(done));
         }
-        let applied: Vec<ChangeOp> = changes.iter().map(|(_, op)| *op).collect();
-        let answered = state.engine.accept_changes_at(changes, at);
-        if stale_again(&answered, attempts) {
-            continue;
-        }
-        return answered
-            .map(|()| done)
-            .map_err(|e| map_change_batch_error(&applied, e));
-    }
+        applied = changes.iter().map(|(_, op)| *op).collect();
+        Ok(state.engine.accept_changes_at(changes, at).map(|()| done))
+    })?;
+    answered.map_err(|e| map_change_batch_error(&applied, e))
 }
 
 /// `POST /control/changes`: deletions, suppressions and unsuppressions. Never answers 429, and has
@@ -2451,9 +2453,7 @@ async fn publish_artifacts(
 
             let keys: Vec<Option<String>> = artifacts.iter().map(|a| a.key.clone()).collect();
             let merged = merge_member_lists(&mut lists)?;
-            let mut attempts = 0;
-            loop {
-                attempts += 1;
+            let answered = with_fresh_names(|| {
                 let ResolvedLists {
                     entities: resolved,
                     refused,
@@ -2529,15 +2529,13 @@ async fn publish_artifacts(
                     })
                     .collect();
 
-                let answered = state
+                Ok(state
                     .engine
-                    .put_artifacts_at(name.clone(), level, incoming, at);
-                if stale_again(&answered, attempts) {
-                    continue;
-                }
-                let batch = answered.map_err(crate::error::map_accept_error)?;
-                return Ok((batch, keys, shape_reports, refused, ignored));
-            }
+                    .put_artifacts_at(name.clone(), level, incoming, at)
+                    .map(|batch| (batch, refused, ignored)))
+            })?;
+            let (batch, refused, ignored) = answered.map_err(crate::error::map_accept_error)?;
+            Ok((batch, keys, shape_reports, refused, ignored))
         })
         .await?;
 
@@ -2727,9 +2725,7 @@ async fn grow_memberships(
 
             let keys: Vec<String> = artifacts.iter().map(|a| a.key.clone()).collect();
             let merged = merge_member_lists(&mut lists)?;
-            let mut attempts = 0;
-            loop {
-                attempts += 1;
+            let answered = with_fresh_names(|| {
                 // Joining and leaving members are resolved in one pass, joins first in each row,
                 // so an entity named in both resolves to one entity.
                 let ResolvedLists {
@@ -2777,15 +2773,13 @@ async fn grow_memberships(
                     })
                     .collect();
 
-                let answered = state
+                Ok(state
                     .engine
-                    .grow_memberships_at(name.clone(), level, joins, at);
-                if stale_again(&answered, attempts) {
-                    continue;
-                }
-                let grown = answered.map_err(crate::error::map_accept_error)?;
-                return Ok((grown, keys, shape_reports, refused, ignored));
-            }
+                    .grow_memberships_at(name.clone(), level, joins, at)
+                    .map(|grown| (grown, refused, ignored)))
+            })?;
+            let (grown, refused, ignored) = answered.map_err(crate::error::map_accept_error)?;
+            Ok((grown, keys, shape_reports, refused, ignored))
         })
         .await?;
 

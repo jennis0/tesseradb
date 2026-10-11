@@ -37,25 +37,6 @@ impl DenyEntry {
     }
 }
 
-/// Whether a command whose entities were resolved at `stamp` names them where their items are in
-/// `generation`, `follow` having moved each that an edit committed since moved. A command's
-/// entities are followed here and nowhere else, so each is followed once, from the generation it
-/// was resolved against. `false` where a fold has since freed ids, which may have issued one the
-/// command names to another item, or retired entities after an edit, which can drop the entry
-/// saying where an item went, or where the edited items cannot be read: the caller resolves the
-/// command's names again.
-pub(super) fn follow_since(
-    generation: &crate::Generation,
-    stamp: crate::edited::Stamp,
-    follow: impl FnOnce(&crate::Generation) -> Result<(), mosaica_store::StoreError>,
-) -> bool {
-    match stamp.since(generation) {
-        crate::edited::Since::Still => true,
-        crate::edited::Since::Edited => follow(generation).is_ok(),
-        crate::edited::Since::Folded => false,
-    }
-}
-
 impl Executor {
     /// Gather the queued deny requests into one committable unit and commit it, closing at an
     /// empty queue or once [`DENY_WINDOW_MAX_ENTRIES`] changes are held. Returns whether anything
@@ -82,7 +63,7 @@ impl Executor {
                 self.execute(command);
                 return true;
             };
-            if !follow_since(&self.generation.load(), stamp, |generation| {
+            if !stamp.follow_since(&self.generation.load_full(), |generation| {
                 crate::edited::follow_changes(generation, &mut changes)
             }) {
                 reply.fail(ExecError::Stale);

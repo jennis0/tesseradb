@@ -130,7 +130,11 @@ pub type ByTenancy = BTreeMap<Tenancy, Bitmap>;
 
 /// Every id of `sets`, whatever its tenancy.
 pub fn union_of(sets: &ByTenancy) -> Bitmap {
-    sets.values().fold(Bitmap::new(), |all, ids| all.or(ids))
+    let mut all = Bitmap::new();
+    for ids in sets.values() {
+        all.or_inplace(ids);
+    }
+    all
 }
 
 fn cardinality_of(sets: &ByTenancy) -> u64 {
@@ -228,11 +232,10 @@ impl Allocator {
     }
 
     /// Allocates **point** entity IDs for a commit window's `edits` new entities and its `items`
-    /// new items, in the order the module doc gives: the edits first, from the freed ids at
-    /// tenancy 0 and then the high-water, and the items after, from the freed ids of the lowest
-    /// tenancy and then the high-water, which advances past every id it gives. Refuses, leaving
-    /// the allocator unchanged, if the ids from the high-water would reach the row-less region: an
-    /// allocation that overran it would put two entities on one `mosaica_id`.
+    /// new items, in the order the module doc gives. The high-water advances past every id it
+    /// gives. Refuses, leaving the allocator unchanged, if the ids from the high-water would reach
+    /// the row-less region: an allocation that overran it would put two entities on one
+    /// `mosaica_id`.
     pub fn allocate(&mut self, edits: u64, items: u64) -> Result<Allocation, AllocError> {
         let at_zero = self.free.get(&Tenancy::ZERO).map_or(0, Bitmap::cardinality);
         let edits_reused = edits.min(at_zero);
@@ -267,11 +270,10 @@ impl Allocator {
 
     /// Hold `ids` back until the log keeps no record older than `position`: a fold's freed ids,
     /// at the position its publication reached, each at the tenancy it is issued at.
-    pub fn release_after(&mut self, position: u64, ids: ByTenancy) {
-        let mut held = ByTenancy::new();
-        absorb(&mut held, ids);
-        if !held.is_empty() {
-            self.held.push((position, held));
+    pub fn release_after(&mut self, position: u64, mut ids: ByTenancy) {
+        ids.retain(|_, held| !held.is_empty());
+        if !ids.is_empty() {
+            self.held.push((position, ids));
         }
     }
 
@@ -279,18 +281,14 @@ impl Allocator {
     /// reached. Returns how many ids were freed.
     pub fn promote(&mut self, retained_from: u64) -> u64 {
         let mut freed = 0;
-        let mut promoted = Vec::new();
         self.held.retain_mut(|(position, ids)| {
             if *position > retained_from {
                 return true;
             }
             freed += cardinality_of(ids);
-            promoted.push(std::mem::take(ids));
+            absorb(&mut self.free, std::mem::take(ids));
             false
         });
-        for ids in promoted {
-            absorb(&mut self.free, ids);
-        }
         freed
     }
 
@@ -307,8 +305,8 @@ impl Allocator {
         retained_from: u64,
         named: &Bitmap,
     ) {
-        self.free = ByTenancy::new();
-        absorb(&mut self.free, free);
+        self.free = free;
+        self.free.retain(|_, ids| !ids.is_empty());
         self.held = Vec::new();
         for (position, ids) in held {
             self.release_after(position, ids);
@@ -592,7 +590,7 @@ pub struct PendingItem {
     pub terms: Vec<TermId>,
     /// Filled in by [`assign_sorted`]; `None` beforehand.
     pub entity_id: Option<EntityId>,
-    /// Whether the id is an edit's new entity, which takes a freed id only at tenancy 0.
+    /// Whether the id is an edit's new entity.
     pub edit: bool,
 }
 
@@ -611,11 +609,10 @@ fn signature_sort_key(terms: &[TermId]) -> Vec<u32> {
     key
 }
 
-/// Assigns entity IDs to `items` in ascending order of `signature_sort_key`, ties in batch order:
-/// the edits' new entities in their own order and the new items in theirs, from one
-/// [`Allocator::allocate`]. Items with identical signatures take adjacent ids from the
-/// high-water, which is what makes their postings compress as runs; freed ids come first and
-/// scatter among other signatures' runs.
+/// Assigns entity IDs to `items` from one [`Allocator::allocate`], the edits' new entities and the
+/// new items each in ascending order of `signature_sort_key`, ties in batch order. Items with
+/// identical signatures take adjacent ids from the high-water, which is what makes their postings
+/// compress as runs; freed ids come first and scatter among other signatures' runs.
 ///
 /// Fallible: propagates [`AllocError::Exhausted`] from the underlying
 /// `Allocator::allocate` rather than swallowing it — a batch that would exhaust the entity-ID
@@ -630,28 +627,19 @@ pub fn assign_sorted(items: &mut [PendingItem], alloc: &mut Allocator) -> Result
     // second view, whose identity was decided when it was first ingested. It takes no id and no
     // rank — allocating one would mint a second entity for one document, and the join rule exists
     // precisely so that cannot happen — so the allocation is sized by the rows that need one.
-    let mut edits: Vec<(usize, Vec<u32>)> = Vec::new();
-    let mut created: Vec<(usize, Vec<u32>)> = Vec::new();
-    for (i, item) in items.iter().enumerate() {
-        if item.entity_id.is_none() {
-            let keyed = (i, signature_sort_key(&item.terms));
-            if item.edit {
-                edits.push(keyed);
-            } else {
-                created.push(keyed);
-            }
-        }
-    }
+    let mut keyed: Vec<(bool, Vec<u32>, usize)> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.entity_id.is_none())
+        .map(|(i, item)| (!item.edit, signature_sort_key(&item.terms), i))
+        .collect();
     // Stable, so items with one signature keep their order in the batch.
-    edits.sort_by(|(_, ka), (_, kb)| ka.cmp(kb));
-    created.sort_by(|(_, ka), (_, kb)| ka.cmp(kb));
+    keyed.sort_by(|(ca, ka, _), (cb, kb, _)| (ca, ka).cmp(&(cb, kb)));
+    let edits = keyed.iter().take_while(|(created, ..)| !created).count();
 
-    let ids = alloc.allocate(edits.len() as u64, created.len() as u64)?;
-    let assigned = edits
-        .into_iter()
-        .zip(ids.edits)
-        .chain(created.into_iter().zip(ids.items));
-    for ((idx, _), id) in assigned {
+    let ids = alloc.allocate(edits as u64, (keyed.len() - edits) as u64)?;
+    let ids = ids.edits.into_iter().chain(ids.items);
+    for ((_, _, idx), id) in keyed.into_iter().zip(ids) {
         items[idx].entity_id = Some(EntityId::new(id));
     }
     Ok(())

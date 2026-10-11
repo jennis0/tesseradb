@@ -397,14 +397,13 @@ impl Engine {
         // Each named item's number, which its `mosaica_id` is taken from and an edit keeps.
         let entities: Vec<EntityId> = order.iter().map(|(entity, _)| *entity).collect();
         let unreadable = |e: mosaica_store::StoreError| AcceptError::Unreadable(e.to_string());
-        let held = crate::edited::numbers_of(generation, &entities).map_err(unreadable)?;
-        let ids = crate::edited::ids_of_numbers(&self.identity_key, generation, &held)
+        let numbers = crate::edited::numbers_of(generation, &entities).map_err(unreadable)?;
+        let ids = crate::edited::ids_of_numbers(&self.identity_key, generation, &numbers)
             .map_err(unreadable)?;
-        let numbers: FxHashMap<EntityId, EntityId> = entities.iter().copied().zip(held).collect();
-        let ids: FxHashMap<EntityId, u64> = entities
+        let held: FxHashMap<EntityId, (EntityId, u64)> = entities
             .iter()
             .copied()
-            .zip(ids.into_iter().map(|id| id.raw()))
+            .zip(numbers.into_iter().zip(ids.into_iter().map(|id| id.raw())))
             .collect();
 
         for (at, (row, item)) in request.rows.iter().zip(&named).enumerate() {
@@ -437,50 +436,46 @@ impl Engine {
                         terms: Vec::new(),
                     });
                 }
-                Some(entity) => match decided.remove(&at).expect("every named row was decided") {
-                    Decided::Unchanged => slots.push(Slot::Unchanged {
-                        entity: *entity,
-                        mosaica_id: ids[entity],
-                    }),
-                    Decided::Joined => {
-                        slots.push(Slot::Joined {
+                Some(entity) => {
+                    let (number, mosaica_id) = held[entity];
+                    match decided.remove(&at).expect("every named row was decided") {
+                        Decided::Unchanged => slots.push(Slot::Unchanged {
                             entity: *entity,
-                            mosaica_id: ids[entity],
-                        });
-                        joined_from.push(at);
+                            mosaica_id,
+                        }),
+                        Decided::Joined => {
+                            slots.push(Slot::Joined {
+                                entity: *entity,
+                                mosaica_id,
+                            });
+                            joined_from.push(at);
+                        }
+                        Decided::Added(join) => {
+                            slots.push(Slot::Written {
+                                row: rows.len() as u32,
+                                mosaica_id: Some(mosaica_id),
+                            });
+                            written_from.push(at);
+                            rows.push(*join);
+                        }
+                        Decided::Edited => {
+                            let blob = match &stored.blobs {
+                                Some(blobs) => BlobRow::of(blobs.get(entity).cloned()),
+                                None => BlobRow::default(),
+                            };
+                            let edit = self.carry(
+                                generation, &meta, request, at, *entity, number, view, blob,
+                            )?;
+                            keys.extend(identities[at].unique.iter().copied());
+                            slots.push(Slot::Edited {
+                                edit: edits.len() as u32,
+                                mosaica_id,
+                            });
+                            edited_from.push(at);
+                            edits.push(edit);
+                        }
                     }
-                    Decided::Added(join) => {
-                        slots.push(Slot::Written {
-                            row: rows.len() as u32,
-                            mosaica_id: Some(ids[entity]),
-                        });
-                        written_from.push(at);
-                        rows.push(*join);
-                    }
-                    Decided::Edited => {
-                        let blob = match &stored.blobs {
-                            Some(blobs) => BlobRow::of(blobs.get(entity).cloned()),
-                            None => BlobRow::default(),
-                        };
-                        let edit = self.carry(
-                            generation,
-                            &meta,
-                            request,
-                            at,
-                            *entity,
-                            numbers[entity],
-                            view,
-                            blob,
-                        )?;
-                        keys.extend(identities[at].unique.iter().copied());
-                        slots.push(Slot::Edited {
-                            edit: edits.len() as u32,
-                            mosaica_id: ids[entity],
-                        });
-                        edited_from.push(at);
-                        edits.push(edit);
-                    }
-                },
+                }
             }
         }
 

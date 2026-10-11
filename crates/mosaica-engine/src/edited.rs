@@ -246,10 +246,8 @@ pub(crate) fn follow_growth(
 }
 
 /// The generation a write's entities were resolved against, which [`crate::Engine::name_items`]
-/// answers with its names and the write carries to the executor. A later generation that
-/// committed an edit may have moved one of the entities; one that also retired entities in a fold
-/// may have dropped the map entry that says where to; and one whose fold freed ids may have issued
-/// one of them to another item.
+/// answers with its names and the write carries to the executor. [`Since`] is what a later
+/// generation can have done to those entities, and whether the write's names still hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(test, derive(Default))]
 pub struct Stamp {
@@ -260,14 +258,15 @@ pub struct Stamp {
 
 /// What has happened to a write's entities since its [`Stamp`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Since {
+enum Since {
     /// No edit committed and no fold freed an id: every entity is where it was.
     Still,
-    /// An edit committed and no fold retired an entity: [`follow_moves`] finds where each moved
-    /// entity's item is now.
+    /// An edit committed and no fold retired an entity. An edit moves its item to a new entity,
+    /// and [`follow_moves`] finds where each moved entity's item is now.
     Edited,
-    /// A fold freed ids, or an edit committed and a fold retired entities: the names are resolved
-    /// again.
+    /// A fold freed ids, and may have issued one the write names to another item. Or an edit
+    /// committed and a fold retired entities, which can drop the map entry saying where an item
+    /// went. The names are resolved again.
     Folded,
 }
 
@@ -280,7 +279,7 @@ impl Stamp {
         }
     }
 
-    pub(crate) fn since(self, generation: &Generation) -> Since {
+    fn since(self, generation: &Generation) -> Since {
         if generation.free_epoch != self.frees {
             return Since::Folded;
         }
@@ -291,6 +290,23 @@ impl Stamp {
             (true, _) => Since::Still,
             (false, true) => Since::Edited,
             (false, false) => Since::Folded,
+        }
+    }
+
+    /// Whether a write resolved at this stamp names its entities where their items are in
+    /// `generation`, `follow` having moved each that an edit has moved since. A write's entities
+    /// are followed here and nowhere else, so each is followed once, from the generation it was
+    /// resolved against. `false` where the names are stale by [`Since`]'s rule or `follow` cannot
+    /// read the edited items: the caller resolves the write's names again.
+    pub(crate) fn follow_since(
+        self,
+        generation: &Generation,
+        follow: impl FnOnce(&Generation) -> Result<(), StoreError>,
+    ) -> bool {
+        match self.since(generation) {
+            Since::Still => true,
+            Since::Edited => follow(generation).is_ok(),
+            Since::Folded => false,
         }
     }
 }
@@ -320,12 +336,21 @@ pub(crate) fn ids_of_numbers(
         .iter()
         .zip(tenancies)
         .map(|(number, tenancy)| {
-            key.forward(ItemHigh::new(shard, tenancy), *number)
-                .map_err(|e| StoreError::MalformedBundle {
-                    detail: format!("an issued entity lies outside the identity space: {e}"),
-                })
+            id_at(key, shard, tenancy, *number).map_err(|e| StoreError::MalformedBundle {
+                detail: format!("an issued entity lies outside the identity space: {e}"),
+            })
         })
         .collect()
+}
+
+/// The `mosaica_id` of the item holding `number` at `tenancy` in `shard`.
+pub(crate) fn id_at(
+    key: &IdentityKey,
+    shard: u32,
+    tenancy: Tenancy,
+    number: EntityId,
+) -> Result<MosaicaId, IdentityError> {
+    key.forward(ItemHigh::new(shard, tenancy), number)
 }
 
 /// The `mosaica_id` of the artifact or layer `entity` in `shard`.
@@ -334,7 +359,7 @@ pub(crate) fn artifact_id(
     shard: u32,
     entity: EntityId,
 ) -> Result<MosaicaId, IdentityError> {
-    key.forward(ItemHigh::new(shard, Tenancy::ZERO), entity)
+    id_at(key, shard, Tenancy::ZERO, entity)
 }
 
 /// The entity `id` names in `shard` as [`artifact_id`] forms it, or `None` where it names none.

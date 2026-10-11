@@ -65,8 +65,7 @@ pub enum AddressValue {
 }
 
 /// What [`Engine::name_items`] decided: one verdict per row, the columns it ignored, and the
-/// generation it resolved them against, which a write naming the items carries
-/// ([`Engine::submit_changes_at`], [`Engine::put_artifacts_at`], [`Engine::grow_memberships_at`]).
+/// generation it resolved them against, which a write naming the items carries.
 #[derive(Debug, Clone)]
 pub struct NamedItems {
     pub verdicts: Vec<Verdict>,
@@ -399,9 +398,9 @@ impl Engine {
     /// Enqueue one `/control/changes` request whose entities were resolved at `at`, without
     /// waiting, so requests from several callers reach the deny lane together and share one
     /// fsync. A change naming an entity an edit has moved an item away from since `at` also
-    /// reaches the item where it is now; a request a fold has made stale since `at` is answered
-    /// with `ExecError::Stale`, and its names are resolved again. Read `PendingChange::wait`
-    /// before treating either half's `Err` as "nothing happened".
+    /// reaches the item where it is now; a request stale by [`Stamp`]'s rule is answered with
+    /// `ExecError::Stale`. Read `PendingChange::wait` before treating either half's `Err` as
+    /// "nothing happened".
     pub fn submit_changes_at(
         &self,
         changes: Vec<(EntityId, ChangeOp)>,
