@@ -47,7 +47,13 @@ fn slack(wall: u64) -> u64 {
     (wall / 20).max(1_000_000)
 }
 
-fn assert_partition(name: &str, nanos: &[u64], stages: &[FlushStage], wall: FlushStage) {
+/// Flushes the test publishes. A span charged to no stage recurs in every one, where the
+/// scheduler taking the thread between the last lap and the wall's lands in one; so a partition is
+/// judged on its smallest gap across them.
+const FLUSHES: usize = 5;
+
+/// One flush's `(unattributed, wall)` under `wall`, from its laps alone.
+fn gap(name: &str, nanos: &[u64], stages: &[FlushStage], wall: FlushStage) -> (u64, u64) {
     let wall_ns = nanos[wall as usize];
     let sum: u64 = stages.iter().map(|s| nanos[*s as usize]).sum();
     assert!(wall_ns > 0, "{name}: the wall clock was measured");
@@ -56,11 +62,17 @@ fn assert_partition(name: &str, nanos: &[u64], stages: &[FlushStage], wall: Flus
         "{name}: the stages sum to {sum} ns, more than their wall {wall_ns} ns; a stage is \
          counted twice or lapped outside the span"
     );
+    (wall_ns - sum, wall_ns)
+}
+
+fn assert_partition(name: &str, gaps: &[(u64, u64)]) {
+    let (unattributed, wall) = *gaps.iter().min().expect("a flush was measured");
     assert!(
-        wall_ns - sum <= slack(wall_ns),
-        "{name}: {} ns of the {wall_ns} ns wall is unattributed, more than the slack; a span \
-         between two laps is charged to no stage",
-        wall_ns - sum
+        unattributed <= slack(wall),
+        "{name}: at least {unattributed} ns of a {wall} ns wall is unattributed in every one of \
+         {} flushes (unattributed, wall: {gaps:?}), more than the slack; a span between two laps \
+         is charged to no stage",
+        gaps.len()
     );
 }
 
@@ -78,7 +90,7 @@ fn the_flush_stages_partition_both_walls_and_accumulate_across_flushes() {
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
         EngineConfig {
-            // Only the request below publishes, so every lap read here is one flush's.
+            // Only the requests below publish, so every lap read here is one flush's.
             flush_max_age_secs: 3600,
             ..config()
         },
@@ -91,83 +103,69 @@ fn the_flush_stages_partition_both_walls_and_accumulate_across_flushes() {
     for batch in ["a", "b", "c"] {
         ingest_rows(&engine, batch, 50);
     }
-    engine.request_flush();
-    // `PublishWall` is lapped after `publish_flush` returns, so it moving is what says every
-    // publication stage has been charged; `flushes` moves before the last two.
-    wait_until(
-        "the first flush publishes and its wall is lapped",
-        WAIT,
-        || engine.write_executor_stats().flush_stage_nanos[FlushStage::PublishWall as usize] > 0,
-    );
-
-    let stats = engine.write_executor_stats();
-    assert_eq!(stats.flushes, 1);
-    assert_eq!(
-        stats.flush_executions, 1,
-        "one execute_flush returned on the pool"
-    );
-    assert_eq!(stats.flush_rows_executed, 150);
-    assert_eq!(stats.flush_rows_published, 150);
-    let nanos = stats.flush_stage_nanos;
-    assert_partition(
-        "execute_flush",
-        &nanos,
-        &FlushStage::EXECUTE,
-        FlushStage::PoolWall,
-    );
-    assert_partition(
-        "publish_flush",
-        &nanos,
-        &FlushStage::PUBLISH,
-        FlushStage::PublishWall,
-    );
-    for stage in [
-        FlushStage::Plan,
-        FlushStage::Dispatch,
-        FlushStage::Segment,
-        FlushStage::Digests,
-        FlushStage::Commit,
-        FlushStage::BufferRebase,
-        FlushStage::Swap,
-        FlushStage::Rotate,
-    ] {
-        assert!(
-            nanos[stage as usize] > 0,
-            "{} does work on every flush and must be lapped",
-            stage.name()
+    let mut before = [0u64; FlushStage::COUNT];
+    let mut execute_gaps = Vec::new();
+    let mut publish_gaps = Vec::new();
+    for flush in 1..=FLUSHES {
+        if flush > 1 {
+            ingest_rows(&engine, &format!("batch-{flush}"), 20);
+        }
+        engine.request_flush();
+        // `PublishWall` is lapped after `publish_flush` returns, so it moving is what says every
+        // publication stage has been charged; `flushes` moves before the last two.
+        wait_until("the flush publishes and its wall is lapped", WAIT, || {
+            let stats = engine.write_executor_stats();
+            stats.flushes >= flush as u64
+                && stats.flush_stage_nanos[FlushStage::PublishWall as usize]
+                    > before[FlushStage::PublishWall as usize]
+        });
+        let stats = engine.write_executor_stats();
+        assert_eq!(stats.flushes, flush as u64);
+        assert_eq!(
+            stats.flush_executions, flush as u64,
+            "one execute_flush returned on the pool per flush"
         );
+        assert_eq!(stats.flush_rows_executed, 150 + 20 * (flush as u64 - 1));
+        assert_eq!(stats.flush_rows_published, stats.flush_rows_executed);
+        let after = stats.flush_stage_nanos;
+        for stage in FlushStage::EXECUTOR.iter().chain(FlushStage::POOL.iter()) {
+            assert!(
+                after[*stage as usize] >= before[*stage as usize],
+                "{} is a running total and cannot fall",
+                stage.name()
+            );
+        }
+        let laps: Vec<u64> = after.iter().zip(&before).map(|(a, b)| a - b).collect();
+        for stage in [
+            FlushStage::Plan,
+            FlushStage::Dispatch,
+            FlushStage::Segment,
+            FlushStage::Digests,
+            FlushStage::Commit,
+            FlushStage::BufferRebase,
+            FlushStage::Swap,
+            FlushStage::Rotate,
+        ] {
+            assert!(
+                laps[stage as usize] > 0,
+                "{} does work on every flush and must be lapped",
+                stage.name()
+            );
+        }
+        execute_gaps.push(gap(
+            "execute_flush",
+            &laps,
+            &FlushStage::EXECUTE,
+            FlushStage::PoolWall,
+        ));
+        publish_gaps.push(gap(
+            "publish_flush",
+            &laps,
+            &FlushStage::PUBLISH,
+            FlushStage::PublishWall,
+        ));
+        before = after;
     }
-
-    // A second flush adds to the totals rather than replacing them, and both partitions hold
-    // over the accumulated figures too.
-    ingest_rows(&engine, "d", 20);
-    engine.request_flush();
-    wait_until("the second flush publishes", WAIT, || {
-        engine.write_executor_stats().flushes >= 2
-            && engine.write_executor_stats().flush_stage_nanos[FlushStage::PublishWall as usize]
-                > nanos[FlushStage::PublishWall as usize]
-    });
-    let after = engine.write_executor_stats();
-    assert_eq!(after.flush_executions, 2);
-    assert_eq!(after.flush_rows_executed, 170);
-    assert_eq!(after.flush_rows_published, 170);
-    for stage in FlushStage::EXECUTOR.iter().chain(FlushStage::POOL.iter()) {
-        assert!(
-            after.flush_stage_nanos[*stage as usize] >= nanos[*stage as usize],
-            "{} is a running total and cannot fall",
-            stage.name()
-        );
-    }
-    assert_partition(
-        "execute_flush, two flushes",
-        &after.flush_stage_nanos,
-        &FlushStage::EXECUTE,
-        FlushStage::PoolWall,
-    );
-    assert_partition(
-        "publish_flush, two flushes",
-        &after.flush_stage_nanos,
-        &FlushStage::PUBLISH,
-        FlushStage::PublishWall,
-    );
+    assert_partition("execute_flush", &execute_gaps);
+    assert_partition("publish_flush", &publish_gaps);
 }

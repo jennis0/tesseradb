@@ -2593,8 +2593,11 @@ impl Executor {
         // `live` is its last reference once the swap has happened (a request in flight holds its
         // own, and then the free lands on that thread instead), and its buffer holds every row
         // that was buffered before the swap: an O(buffered) free on this thread, beside the
-        // O(buffered) clone `BufferRebase` measures.
+        // O(buffered) clone `BufferRebase` measures. `live_columns` is the other: a clone of its
+        // filter columns, or the scoped columns composed over them, which would otherwise free
+        // its column map at the return, outside every stage.
         drop(live);
+        drop(live_columns);
         drop(completed.consumed);
         self.health
             .flush_lap(crate::flush::FlushStage::DropSuperseded, *mark);
