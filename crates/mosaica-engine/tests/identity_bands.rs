@@ -102,9 +102,9 @@ fn build_scored(root: &Path) {
         attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
         out: root.to_path_buf(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -122,29 +122,27 @@ fn build_scored(root: &Path) {
 fn check_segments(engine: &Engine) -> BTreeMap<String, Vec<u64>> {
     let generation = engine.generation();
     let mut seen = BTreeMap::new();
-    for partition in generation.bundle.partitions.values() {
-        for data in partition.views.values() {
-            for segment in &data.segments {
-                segment
-                    .bands
-                    .check_against(segment.morton.u32(), &segment.columns)
-                    .unwrap_or_else(|e| panic!("segment {}: {e}", segment.seg_id));
-                let codes = segment.morton.u32();
-                let expected: Vec<u32> = segment
-                    .cuts
-                    .starts()
-                    .iter()
-                    .map(|&s| codes[s as usize])
-                    .collect();
-                assert_eq!(segment.cell_codes.codes(), expected.as_slice());
-                assert_eq!(
-                    segment.bands.copy_names().collect::<Vec<_>>(),
-                    vec!["score"],
-                    "segment {} copies its render column",
-                    segment.seg_id
-                );
-                seen.insert(segment.seg_id.clone(), segment.bands.ids().to_vec());
-            }
+    for data in generation.bundle.only_shard().views.values() {
+        for segment in &data.segments {
+            segment
+                .bands
+                .check_against(segment.morton.u32(), &segment.columns)
+                .unwrap_or_else(|e| panic!("segment {}: {e}", segment.seg_id));
+            let codes = segment.morton.u32();
+            let expected: Vec<u32> = segment
+                .cuts
+                .starts()
+                .iter()
+                .map(|&s| codes[s as usize])
+                .collect();
+            assert_eq!(segment.cell_codes.codes(), expected.as_slice());
+            assert_eq!(
+                segment.bands.copy_names().collect::<Vec<_>>(),
+                vec!["score"],
+                "segment {} copies its render column",
+                segment.seg_id
+            );
+            seen.insert(segment.seg_id.clone(), segment.bands.ids().to_vec());
         }
     }
     seen
@@ -278,10 +276,12 @@ fn extents_of(engine: &Engine, layer: &str) -> Vec<DerivedExtent> {
     engine
         .generation()
         .bundle
-        .partitions
-        .values()
-        .flat_map(|p| p.manifest.derived_extents.iter().cloned())
+        .only_shard()
+        .record
+        .derived_extents
+        .iter()
         .filter(|e| e.layer == layer)
+        .cloned()
         .collect()
 }
 
@@ -311,7 +311,7 @@ fn labels_of(root: &Path, engine: &Engine, layer: &str) -> LabelColumnPack {
     let DerivedForm::BandLabels { seg_id } = &copy.form else {
         unreachable!()
     };
-    let view = &generation.bundle.partitions.values().next().unwrap().views["s0"];
+    let view = &generation.bundle.only_shard().views["s0"];
     let base = &view.segments[0];
     assert_eq!(
         seg_id, &base.seg_id,
@@ -334,7 +334,7 @@ fn labels_of(root: &Path, engine: &Engine, layer: &str) -> LabelColumnPack {
 /// is a hole.
 fn assert_partition(engine: &Engine, labels: &LabelColumnPack, members: &[Vec<EntityId>]) {
     let generation = engine.generation();
-    let space = &generation.bundle.partitions.values().next().unwrap().views["s0"].row_space;
+    let space = &generation.bundle.only_shard().views["s0"].row_space;
     let mut claimed = vec![false; labels.rows() as usize];
     let mut seen = std::collections::BTreeSet::new();
     for artifact in members {
@@ -574,28 +574,11 @@ fn deep_verification_refuses_a_damaged_copy_and_a_missing_one() {
     std::fs::write(&copy, &good).unwrap();
 
     // The copy no longer named by the manifest the bundle serves.
-    let partition = prefix.join("partitions/default");
-    let newest = std::fs::read_dir(&partition)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("SEGMENTS-") && n.ends_with(".json"))
-        })
-        .max_by_key(|p| {
-            let name = p.file_name().unwrap().to_str().unwrap();
-            name["SEGMENTS-".len()..name.len() - ".json".len()]
-                .parse::<u64>()
-                .unwrap()
-        })
-        .unwrap();
-    let mut manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&newest).unwrap()).unwrap();
-    manifest["derived_extents"]
-        .as_array_mut()
-        .unwrap()
-        .retain(|e| !e["path"].as_str().unwrap().contains("/band-labels/"));
-    std::fs::write(&newest, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    edit_side_manifest(&root, |manifest| {
+        manifest
+            .only_shard_mut()
+            .derived_extents
+            .retain(|e| !e.path.contains("/band-labels/"));
+    });
     refused_on(&column);
 }

@@ -30,13 +30,13 @@ mod fixture;
 
 use std::path::Path;
 
-use fixture::{build_bundle, PARTITION, VIEW};
+use fixture::{build_bundle, SHARD, VIEW};
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_store::flush::{write_flush_segment, FlushInput, FlushRow};
 use mosaica_store::manifest::Quantisation;
 use mosaica_store::merge::{execute_merge, MergeInput, MergeSpec};
 use mosaica_store::read::{ColumnsRef, MortonSlice};
-use mosaica_types::{EntityId, IdentityKey, MosaicaId, ROW_ABSENT};
+use mosaica_types::{EntityId, IdentityKey, MosaicaId, ShardId, ROW_ABSENT};
 use proptest::prelude::*;
 
 fn key() -> IdentityKey {
@@ -95,7 +95,7 @@ fn write_input(root: &Path, index: usize, entity_lo: u64, shape: &Shape) -> Merg
         .collect();
     write_flush_segment(
         &root.join("v00000"),
-        PARTITION,
+        SHARD,
         VIEW,
         FlushInput {
             incarnation: 0,
@@ -103,7 +103,6 @@ fn write_input(root: &Path, index: usize, entity_lo: u64, shape: &Shape) -> Merg
             rows,
             quantisation: quantisation(),
             identity_key: &key(),
-            shard_id: 0,
             scalar_schema: &[],
             indexed: &[],
             row_base: 0,
@@ -120,12 +119,7 @@ fn write_input(root: &Path, index: usize, entity_lo: u64, shape: &Shape) -> Merg
 }
 
 fn seg_dir(root: &Path, seg_id: &str) -> std::path::PathBuf {
-    root.join("v00000/partitions")
-        .join(PARTITION)
-        .join("views")
-        .join(VIEW)
-        .join("segments")
-        .join(seg_id)
+    root.join("v00000").join(SHARD.segment_rel(VIEW, seg_id))
 }
 
 /// `(mosaica_id, code, residual)` for every row of a segment, sorted — the multiset property 2 is
@@ -175,14 +169,13 @@ proptest! {
         let schema: Vec<(String, ScalarType)> = vec![];
         let out = execute_merge(
             &dir.path().join("v00000"),
-            PARTITION,
+            SHARD,
             VIEW,
             MergeSpec {
                 incarnation: 0,
                 seg_id: "merged",
                 inputs: &inputs,
                 identity_key: &key(),
-                shard_id: 0,
                 scalar_schema: &schema,
                 indexed: &[],
                 absent_ok: &[],
@@ -213,7 +206,7 @@ proptest! {
                 let (high, back) = key()
                     .invert(MosaicaId::new(cols.mosaica_id()[row as usize]))
                     .unwrap();
-                prop_assert_eq!(high.shard, 0);
+                prop_assert_eq!(high.shard, ShardId::ZERO);
                 prop_assert_eq!(
                     back.raw(), entity,
                     "the extent's row for {} carries another entity's identity", entity

@@ -12,6 +12,10 @@ use std::time::{Duration, Instant};
 
 pub const OPERATOR_CREDENTIAL: &str = "operator-credential";
 
+/// A built bundle's one shard, in the one partition a build writes.
+pub const SHARD: mosaica_store::ShardLayout<'static> =
+    mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO);
+
 pub fn mosaica() -> Command {
     Command::new(env!("CARGO_BIN_EXE_mosaica"))
 }

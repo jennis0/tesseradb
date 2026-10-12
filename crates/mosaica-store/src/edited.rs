@@ -52,14 +52,6 @@ impl Direction {
     }
 }
 
-/// Where a partition's edited-item runs of one direction live, prefix-relative.
-pub fn runs_dir_rel(partition: &str, direction: Direction) -> String {
-    format!(
-        "partitions/{partition}/entities/edited/{}",
-        direction.name()
-    )
-}
-
 /// The runs one writer finished for both directions.
 #[derive(Debug, Default)]
 pub struct WrittenEdited {
@@ -81,7 +73,7 @@ impl WrittenEdited {
 /// `prefix_dir`. Writes no file for no pairs. The caller fsyncs.
 pub fn write_edited_runs(
     prefix_dir: &Path,
-    partition: &str,
+    layout: crate::ShardLayout<'_>,
     stem: &str,
     pairs: &[(u32, u32)],
 ) -> Result<WrittenEdited> {
@@ -91,14 +83,14 @@ pub fn write_edited_runs(
     let mut by_entity: Vec<(u32, u32)> = by_number.iter().map(|&(n, e)| (e, n)).collect();
     by_entity.sort_unstable();
     Ok(WrittenEdited {
-        by_number: write_direction(prefix_dir, partition, Direction::ByNumber, stem, &by_number)?,
-        by_entity: write_direction(prefix_dir, partition, Direction::ByEntity, stem, &by_entity)?,
+        by_number: write_direction(prefix_dir, layout, Direction::ByNumber, stem, &by_number)?,
+        by_entity: write_direction(prefix_dir, layout, Direction::ByEntity, stem, &by_entity)?,
     })
 }
 
 fn write_direction(
     prefix_dir: &Path,
-    partition: &str,
+    layout: crate::ShardLayout<'_>,
     direction: Direction,
     stem: &str,
     sorted: &[(u32, u32)],
@@ -106,7 +98,7 @@ fn write_direction(
     if sorted.is_empty() {
         return Ok(Vec::new());
     }
-    let dir = prefix_dir.join(runs_dir_rel(partition, direction));
+    let dir = prefix_dir.join(layout.edited_runs_rel(direction));
     std::fs::create_dir_all(&dir).map_err(|source| StoreError::Io {
         path: dir.clone(),
         source,
@@ -533,7 +525,7 @@ impl RowEntities {
         row: u32,
         mosaica_id: u64,
         key: &mosaica_types::IdentityKey,
-        shard_id: u32,
+        shard: mosaica_types::ShardId,
         seg_id: &str,
     ) -> Result<mosaica_types::EntityId> {
         let (high, number) = key
@@ -541,11 +533,11 @@ impl RowEntities {
             .ok_or_else(|| StoreError::MalformedBundle {
                 detail: format!("segment '{seg_id}': row {row}'s mosaica_id names no item"),
             })?;
-        if high.shard != shard_id {
+        if high.shard != shard {
             return Err(StoreError::MalformedBundle {
                 detail: format!(
                     "segment '{seg_id}': row {row}'s mosaica_id inverts to shard {}, but the \
-                     manifest declares shard {shard_id}",
+                     manifest declares shard {shard}",
                     high.shard
                 ),
             });
@@ -569,6 +561,8 @@ impl RowEntities {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::TEST_SHARD;
+    use mosaica_types::ShardId;
 
     /// Both directions answer from the runs one write produced, and a merge drops the entries of
     /// the entities it retires in each direction.
@@ -576,7 +570,8 @@ mod tests {
     fn both_directions_answer_and_a_merge_drops_retired_entities() {
         let tmp = tempfile::tempdir().unwrap();
         let prefix = tmp.path();
-        let written = write_edited_runs(prefix, "p", "live", &[(3, 40), (3, 41), (7, 42)]).unwrap();
+        let written =
+            write_edited_runs(prefix, TEST_SHARD, "live", &[(3, 40), (3, 41), (7, 42)]).unwrap();
         let listed = |runs: &[WrittenRun<u32>]| KeyRuns {
             base: Vec::new(),
             live: runs
@@ -598,7 +593,7 @@ mod tests {
         let retired = croaring::Bitmap::of(&[40]);
         let paths =
             |runs: &[WrittenRun<u32>]| runs.iter().map(|r| r.path.clone()).collect::<Vec<_>>();
-        let dir = |direction| prefix.join(runs_dir_rel("p", direction));
+        let dir = |direction| prefix.join(TEST_SHARD.edited_runs_rel(direction));
         let by_number = merge_edited_runs(
             Direction::ByNumber,
             &paths(&written.by_number),
@@ -646,6 +641,7 @@ mod tests {
         assert_eq!(rows.iter().collect::<Vec<_>>(), vec![(1, 90), (4, 91)]);
         let key = mosaica_types::IdentityKey::from_hex("0123456789abcdef0123456789abcdef").unwrap();
         let id_at = |shard: u32, tenancy: u16, n: u64| {
+            let shard = ShardId::new(shard).unwrap();
             let tenancy = mosaica_types::Tenancy::new(tenancy).unwrap();
             let high = mosaica_types::ItemHigh::new(shard, tenancy);
             key.forward(high, mosaica_types::EntityId::new(n))
@@ -655,20 +651,22 @@ mod tests {
         let tid = |n: u64| id_at(0, 0, n);
         let rows = RowEntities::Listed(Arc::new(rows));
         assert_eq!(
-            rows.entity_of(4, tid(5), &key, 0, "s").unwrap(),
+            rows.entity_of(4, tid(5), &key, ShardId::ZERO, "s").unwrap(),
             mosaica_types::EntityId::new(91)
         );
         assert_eq!(
-            rows.entity_of(2, tid(5), &key, 0, "s").unwrap(),
+            rows.entity_of(2, tid(5), &key, ShardId::ZERO, "s").unwrap(),
             mosaica_types::EntityId::new(5)
         );
         assert_eq!(
-            rows.entity_of(2, id_at(0, 3, 5), &key, 0, "s").unwrap(),
+            rows.entity_of(2, id_at(0, 3, 5), &key, ShardId::ZERO, "s")
+                .unwrap(),
             mosaica_types::EntityId::new(5),
             "a row whose number was held before resolves to it"
         );
         assert!(
-            rows.entity_of(2, id_at(1, 0, 5), &key, 0, "s").is_err(),
+            rows.entity_of(2, id_at(1, 0, 5), &key, ShardId::ZERO, "s")
+                .is_err(),
             "a row naming another shard's item is refused"
         );
     }

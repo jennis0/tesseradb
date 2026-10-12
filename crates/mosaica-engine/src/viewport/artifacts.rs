@@ -202,8 +202,7 @@ impl Engine {
     /// Builds only structures shared by every viewer of a `(view, layer, level)` — never the
     /// masked counts, the gate or the verdicts, which need a session.
     ///
-    /// A view a partition does not carry, a view two partitions carry, or a layer suppressed at
-    /// open are each skipped: the level is then built on first use, as before this existed.
+    /// A layer suppressed at open is skipped: its levels are then built on first use.
     pub(crate) fn warm_artifact_projections(&self) -> WarmedProjections {
         let started = std::time::Instant::now();
         let mut warmed = WarmedProjections::default();
@@ -212,21 +211,9 @@ impl Engine {
         if layers.is_empty() {
             return warmed;
         }
-        let source = generation.partition_source();
-        // Views this bundle carries, each with the partition that carries it. A view two
-        // partitions carry errors on the request path, so it is left unwarmed here.
-        let mut views: std::collections::BTreeMap<&str, Option<&mosaica_store::read::ViewData>> =
-            std::collections::BTreeMap::new();
-        for partition in generation.bundle.partitions.values() {
-            for (name, data) in &partition.views {
-                views
-                    .entry(name.as_str())
-                    .and_modify(|held| *held = None)
-                    .or_insert(Some(data));
-            }
-        }
-        for (view, view_data) in views {
-            let Some(view_data) = view_data else { continue };
+        let shard = generation.only_shard();
+        let source = shard.partition_source();
+        for (view, view_data) in &shard.data.views {
             let Ok(segments) = segments_with_row_bases(view, view_data) else {
                 continue;
             };
@@ -236,8 +223,8 @@ impl Engine {
                 }
                 // Same order as `serve_artifacts`: a suppressed or deleted layer is served to
                 // nobody, so its form is not worth building.
-                if generation.overlay.is_deleted(layer.entity)
-                    || generation.overlay.is_suppressed(layer.entity)
+                if shard.overlay.is_deleted(layer.entity)
+                    || shard.overlay.is_suppressed(layer.entity)
                 {
                     continue;
                 }
@@ -255,7 +242,7 @@ impl Engine {
                         self.write.live().with_artifacts(|store| {
                             let predicate = predicate_source(
                                 &layer.declaration,
-                                &generation,
+                                shard,
                                 view,
                                 view_data,
                                 &segments,
@@ -315,7 +302,7 @@ impl Engine {
                                 generation.segments_version,
                                 || {
                                     crate::artifact_content::LevelContent::build(
-                                        generation.filter_columns.records(),
+                                        shard.filter_columns.records(),
                                         runs,
                                     )
                                 },
@@ -341,11 +328,10 @@ impl Engine {
         mask: &EffectiveMask,
         id: MosaicaId,
     ) -> Result<Option<GatedArtifact>> {
-        let (session, generation) = (served.session, served.generation);
+        let (session, generation, shard) = (served.session, served.generation, served.shard);
         let (view, view_data) = (served.name, served.data);
         let (segments, denied) = (&served.segments[..], served.denied);
-        let shard = generation.bundle.manifest.identity.shard_id;
-        let Some(entity) = crate::edited::artifact_named(&self.identity_key, shard, id) else {
+        let Some(entity) = crate::edited::artifact_named(&self.identity_key, id) else {
             return Ok(None);
         };
 
@@ -367,13 +353,13 @@ impl Engine {
         // Reachability, then live suppression — same order as `serve_artifacts`.
         let reachable = self.reachable_layers(served.session);
         if !reachable.contains(&name)
-            || generation.overlay.is_deleted(layer.entity)
-            || generation.overlay.is_suppressed(layer.entity)
+            || shard.overlay.is_deleted(layer.entity)
+            || shard.overlay.is_suppressed(layer.entity)
         {
             return Ok(None);
         }
 
-        let source = generation.partition_source();
+        let source = shard.partition_source();
         let recorded = layer.layout_of(level);
         // Resolved from the same generation the viewport uses: same membership, either route.
         let vocabulary = predicate_vocabulary(generation, &layer.declaration);
@@ -384,7 +370,7 @@ impl Engine {
         let (rows, level_version) = self.write.live().with_artifacts(|store| {
             let predicate = predicate_source(
                 &layer.declaration,
-                generation,
+                shard,
                 view,
                 view_data,
                 segments,
@@ -427,7 +413,7 @@ impl Engine {
         let dependency_served = self.dependency_gate(&ctx);
         let artifact_view = crate::artifacts::ArtifactView {
             declaration: &layer.declaration,
-            overlay: &generation.overlay,
+            overlay: &shard.overlay,
             labels: self.label_gate(session, &layer.declaration),
             layer_reachable: true,
             rows: &rows,
@@ -480,41 +466,31 @@ impl Engine {
             .bundle
             .partitions
             .values()
-            .filter(|partition| partition.views.contains_key(view))
+            .filter(|partition| partition.only_shard().views.contains_key(view))
             .count();
         if carriers > 1 {
             return Err(EngineError::MultiPartitionView(view.to_string()));
         }
-        let view_data = generation
-            .bundle
-            .partitions
-            .values()
-            .find_map(|partition| partition.views.get(view))
+        let shard = generation.only_shard();
+        let view_data = shard
+            .data
+            .views
+            .get(view)
             .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
 
         let mut probe = Probe::new();
         let (geometry, key) =
-            self.session_geometry(session, &generation, view, view_data, &None, &mut probe)?;
-        let denied = generation
-            .denied()
-            .get(view)
-            .ok_or_else(|| EngineError::DenyMaskMissing {
-                view: view.to_string(),
-            })?;
-        let mask = compose(
-            session.satisfied(),
-            &generation.overlay,
-            &generation.buffer,
-            Arc::clone(&geometry.projection),
-            &view_data.row_space,
-            denied,
-            generation.buffered_rows(view),
-        );
+            self.session_geometry(session, &generation, shard, view, &None, &mut probe)?;
+        let denied = shard.denied_in(view)?;
+        let projection = Arc::clone(&geometry.projection);
+        let mask =
+            shard.compose(session.satisfied(), projection, view, &view_data.row_space, denied);
         let mask_identity =
-            self.mask_identity(session, &generation, &geometry, key.segments_version);
+            self.mask_identity(session, &generation, shard, &geometry, key.segments_version);
         let served = ServedView {
             session,
             generation: &generation,
+            shard,
             name: view,
             data: view_data,
             segments: segments_with_row_bases(view, view_data)?,
@@ -539,7 +515,7 @@ impl Engine {
         } = gated;
         // Same call as the viewport's, so the two routes cannot serve different content.
         let Some(supplied) = self.supplied_content(
-            &generation,
+            shard,
             &layer.declaration,
             level,
             ordinal,
@@ -695,7 +671,7 @@ impl Engine {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn supplied_content(
         &self,
-        generation: &crate::Generation,
+        shard: &crate::Shard,
         declaration: &mosaica_types::layer::LayerDeclaration,
         level: u32,
         ordinal: u32,
@@ -705,7 +681,7 @@ impl Engine {
         table: Option<&crate::artifact_content::LevelContent>,
     ) -> Option<Supplied> {
         let mut values = self.supplied_values(
-            generation,
+            shard,
             &declaration.name,
             level,
             ordinal,
@@ -727,7 +703,7 @@ impl Engine {
     #[allow(clippy::too_many_arguments)]
     fn supplied_values(
         &self,
-        generation: &crate::Generation,
+        shard: &crate::Shard,
         layer: &str,
         level: u32,
         ordinal: u32,
@@ -789,11 +765,7 @@ impl Engine {
                 })
             }
             None => {
-                let fields = generation
-                    .filter_columns
-                    .records()
-                    .fields_of(entity)
-                    .ok()??;
+                let fields = shard.filter_columns.records().fields_of(entity).ok()??;
                 values_for(base, kinds, materialise, |tag| {
                     fields
                         .iter()
@@ -833,8 +805,8 @@ impl Engine {
         let Some(layer) = self.write.live().registered_layer(&attachment.layer) else {
             return false;
         };
-        if ctx.served.generation.overlay.is_deleted(layer.entity)
-            || ctx.served.generation.overlay.is_suppressed(layer.entity)
+        if ctx.served.shard.overlay.is_deleted(layer.entity)
+            || ctx.served.shard.overlay.is_suppressed(layer.entity)
         {
             return false;
         }
@@ -862,7 +834,7 @@ impl Engine {
         let (rows, level_version) = self.write.live().with_artifacts(|store| {
             let predicate = predicate_source(
                 &layer.declaration,
-                ctx.served.generation,
+                ctx.served.shard,
                 ctx.served.name,
                 ctx.served.data,
                 &ctx.served.segments,
@@ -878,7 +850,7 @@ impl Engine {
                 attachment.level,
                 store,
                 &ctx.served.data.row_space,
-                Some(&ctx.served.generation.partition_source()),
+                Some(&ctx.served.shard.partition_source()),
                 recorded,
                 predicate.as_ref(),
                 ctx.served.generation.segments_version,
@@ -916,7 +888,7 @@ impl Engine {
             .or_insert_with(|| self.label_gate(ctx.served.session, &layer.declaration));
         crate::artifacts::ArtifactView {
             declaration: &layer.declaration,
-            overlay: &ctx.served.generation.overlay,
+            overlay: &ctx.served.shard.overlay,
             labels,
             layer_reachable: true,
             rows: &rows,
@@ -1070,8 +1042,8 @@ impl Engine {
             return Ok(None);
         }
         // Asked per request: reachability may be cached but a suppression verdict may not.
-        if generation.overlay.is_deleted(registered.entity)
-            || generation.overlay.is_suppressed(registered.entity)
+        if pass.served.shard.overlay.is_deleted(registered.entity)
+            || pass.served.shard.overlay.is_suppressed(registered.entity)
         {
             return Ok(None);
         }
@@ -1118,7 +1090,7 @@ impl Engine {
         self.write.live().with_artifacts(|store| {
             let predicate = predicate_source(
                 &registered.declaration,
-                generation,
+                served.shard,
                 served.name,
                 served.data,
                 &served.segments,
@@ -1209,7 +1181,7 @@ impl Engine {
         let rows: &crate::artifacts::ArtifactRows = &level.rows;
         crate::artifacts::ArtifactView {
             declaration: &layer.registered.declaration,
-            overlay: &served.generation.overlay,
+            overlay: &served.shard.overlay,
             labels: self.label_gate(served.session, &layer.registered.declaration),
             layer_reachable: true,
             rows,
@@ -1404,7 +1376,7 @@ impl Engine {
         });
         for (key, at) in keyed {
             let content = match self.supplied_content(
-                level.layer.pass.served.generation,
+                level.layer.pass.served.shard,
                 &level.layer.registered.declaration,
                 level.level,
                 at.0,
@@ -1434,7 +1406,7 @@ impl Engine {
         wanted: bool,
     ) -> Option<Arc<crate::artifact_content::LevelContent>> {
         let layer = level.layer;
-        let generation = layer.pass.served.generation;
+        let served = layer.pass.served;
         if layer.registered.declaration.content.supplied.is_empty() || !wanted {
             return None;
         }
@@ -1442,10 +1414,10 @@ impl Engine {
             &layer.name,
             level.level,
             level.level_version,
-            generation.segments_version,
+            served.generation.segments_version,
             || {
                 crate::artifact_content::LevelContent::build(
-                    generation.filter_columns.records(),
+                    served.shard.filter_columns.records(),
                     level.runs,
                 )
             },
@@ -1496,7 +1468,7 @@ impl Engine {
         check_cancelled(&ask.cancel)?;
         // The blinding is total over the allocator's space; a failure means the manifest and
         // allocator disagree, and dropping the artifact is the fail-closed reading of that.
-        let Some(mosaica_id) = self.artifact_id(pass.shard, entity) else {
+        let Some(mosaica_id) = self.artifact_id(entity) else {
             return Ok(());
         };
         // From the composed mask, and only from it: every property below is a function of the
@@ -1618,7 +1590,6 @@ pub(super) struct ArtifactPass<'a> {
     pub(super) locator: crate::derived::RowLocator<'a>,
     /// The postings, which are the generation's, not any layer's.
     pub(super) source: crate::containment::PartitionSource<'a>,
-    pub(super) shard: u32,
 }
 
 impl<'a> ArtifactPass<'a> {
@@ -1634,8 +1605,7 @@ impl<'a> ArtifactPass<'a> {
             mask,
             dependency_served,
             locator: crate::derived::RowLocator::new(served.segments.clone()),
-            source: served.generation.partition_source(),
-            shard: served.generation.bundle.manifest.identity.shard_id,
+            source: served.shard.partition_source(),
         }
     }
 }

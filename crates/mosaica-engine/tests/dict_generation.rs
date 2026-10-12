@@ -73,7 +73,7 @@ fn the_write_path_resolves_against_the_generations_dict() {
         .publish_geometry(GeometryPublication::within_prefix(
             live.prefix.clone(),
             live.segments_version + 1,
-            live.watermark,
+            live.only_shard().watermark,
             Arc::clone(&live.bundle),
             extended,
             Vec::new(),
@@ -127,7 +127,7 @@ fn authorise_resolves_against_the_generations_dict() {
         .publish_geometry(GeometryPublication::within_prefix(
             live.prefix.clone(),
             live.segments_version + 1,
-            live.watermark,
+            live.only_shard().watermark,
             Arc::clone(&live.bundle),
             extended,
             Vec::new(),

@@ -573,6 +573,29 @@ class Layers(Case):
         return d
 
 
+def _shards_toml(size: int) -> str:
+    return f"[shards]\nsize = {size}\n"
+
+
+class ShardSize(Case):
+    """`[shards] size` at a build, and declared live before the rest is ingested. The corpus fills
+    the size exactly."""
+
+    name = "shard-size"
+    plan = Plan(items=ITEMS)
+
+    def built(self, work) -> Deployment:
+        blocks = [_shards_toml(fx.N_ITEMS), fx.plain_view_toml(), fx.fx_column().toml()]
+        return Deployment(work, Corpus(blocks, _world(ALL)))
+
+    def live(self, work) -> Deployment:
+        d = Deployment(work, Corpus([fx.plain_view_toml(), fx.fx_column().toml()], _world(BUILT)))
+        d.control("PUT", "/control/shards", json={"size": fx.N_ITEMS}, expect=(201,))
+        d.rows("/control/ingest", fx.point_rows(INGESTED, [fx.fx_column()]), "shard-ingest")
+        d.publish()
+        return d
+
+
 CASES: dict[str, Case] = {
     case.name: case
     for case in (
@@ -599,6 +622,7 @@ CASES: dict[str, Case] = {
         GroupScoped("group-scoped"),
         GroupScoped("group-view-recreated", recreate=True),
         Layers(),
+        ShardSize(),
     )
 }
 
@@ -675,6 +699,8 @@ class Walk:
         built = case.built(work / "built")
         try:
             observed = fx.observe(built.server, case.plan)
+            #: The shard size the operator reads, which a live declaration has to match too.
+            self.shards = built.server.status()["shards"]
         finally:
             built.stop()
         self.expected = observed.answers
@@ -695,6 +721,10 @@ class Walk:
             live = self.at(stage)
             observed = fx.observe(live.server, self.case.plan)
             self.found[stage] = fx.differences(self.expected, observed.answers)
+            shards = live.server.status()["shards"]
+            if shards != self.shards:
+                place = ("size", self.shards.get("size"), shards.get("size"))
+                self.found[stage].append(fx.Difference("operator", "status shards", [place]))
             self.moved_codes[stage] = _moved_codes(stage, observed.codes, self._first_codes)
         return self.found[stage]
 
@@ -803,3 +833,45 @@ def test_a_live_declaration_serves_what_a_build_serves(walks, case, stage, known
         _, matching = fx.split(found, k.places)
         shown = "\n".join(map(str, matching[:6]))
         assert not matching, f"{k.reason}\n{shown}"
+
+
+# ---------------------------------------------------------------------------------------------
+# An insert past the shard's size, on both paths
+# ---------------------------------------------------------------------------------------------
+
+#: A shard the corpus fills: one more item does not fit.
+TINY = 16
+
+
+@pytest.mark.parametrize("path", ["built", "live"])
+def test_an_insert_past_the_shard_size_is_refused_until_the_size_is_raised(tmp_path, path):
+    """Built at a size its corpus fills, or declared live at its high water."""
+    Deployment.stop_all()
+    held = list(range(TINY))
+    blocks = [fx.plain_view_toml(), fx.fx_column().toml()]
+    if path == "built":
+        blocks.insert(0, _shards_toml(TINY))
+    d = Deployment(tmp_path / path, Corpus(blocks, _world(held)))
+    try:
+        if path == "live":
+            d.control("PUT", "/control/shards", json={"size": TINY}, expect=(201,))
+        status = d.server.status()
+        assert (status["shards"], status["entity_id_high_water"]) == ({"size": TINY}, TINY)
+
+        past = fx.point_rows([TINY, TINY + 1], [fx.fx_column()])
+        with pytest.raises(fx.Refused) as refused:
+            d.rows("/control/ingest", past, "past")
+        assert refused.value.status == 409
+        assert d.server.status()["entity_id_high_water"] == TINY
+        d.control("PUT", "/control/shards", json={"size": TINY - 1}, expect=(409,))
+
+        d.control("PUT", "/control/shards", json={"size": TINY + 2}, expect=(201,))
+        assert d.rows("/control/ingest", past, "past")["created"] == 2
+        d.restart()
+        status = d.server.status()
+        assert (status["shards"], status["entity_id_high_water"]) == (
+            {"size": TINY + 2},
+            TINY + 2,
+        )
+    finally:
+        d.stop()

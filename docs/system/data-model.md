@@ -121,6 +121,13 @@ once the item is deleted and a compaction has removed its last entity, and the i
 next has a different `mosaica_id` ([freed entity ids](write-path.md#freed-entity-ids) has the
 rules).
 
+The entity ids come from one shard, the space the items are numbered in. Its size bounds its high
+water, the id past the highest it has issued. The size is `[shards] size` in the declaration a
+build reads, or what `PUT /control/shards` declares at a running service, and 4,026,531,840 where
+neither declares one. A size below the high water is refused, and so is a build whose files create
+more items than the size. [Admission](write-path.md#admission) says how an ingest batch is counted
+against it.
+
 The `mosaica_id` is what a client receives and holds instead of the entity id. The key of the
 permutation is drawn at random by `mosaica build` each time it creates a bundle and is stored in
 the bundle's manifest. Nobody configures it, and no response carries it. A `mosaica_id` is stable

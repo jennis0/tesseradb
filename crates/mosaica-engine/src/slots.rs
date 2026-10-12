@@ -655,7 +655,7 @@ impl Engine {
             &mut crate::timing::Probe::new(),
         )?;
         open.served.cancel = cancel.clone();
-        let Ok(registered) = self.readable_layer(session, &generation, layer, view) else {
+        let Ok(registered) = self.readable_layer(session, open.served.shard, layer, view) else {
             return Ok(T::default());
         };
         let reachable = self.reachable_layers(session);
@@ -709,7 +709,6 @@ impl Engine {
     ) -> Result<LevelSlots> {
         let started = std::time::Instant::now();
         let generation = served.generation;
-        let shard = generation.bundle.manifest.identity.shard_id;
         let kind = layer.declaration.hierarchy.kind;
         let treed = matches!(kind, HierarchyKind::Nested | HierarchyKind::Dag);
         let stop = || gone(&served.cancel);
@@ -755,12 +754,12 @@ impl Engine {
                     continue;
                 }
                 if read
-                    .content(self, generation, layer, ordinal, entity, rank)
+                    .content(self, served.shard, layer, ordinal, entity, rank)
                     .is_none()
                 {
                     continue;
                 }
-                let Some(id) = self.artifact_id(shard, entity) else {
+                let Some(id) = self.artifact_id(entity) else {
                     continue;
                 };
                 at[ordinal as usize] = clusters.len() as u32;

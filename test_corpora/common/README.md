@@ -117,9 +117,9 @@ and the run's parameters under `churn`, and a table of the rows is printed.
 | `fold` | — | the cycle's fold: `fold_s` is the server's `compaction.last_secs`, `observed_s` the driver's wait, and `fold_refusals` with `last_refusal` a fold refused for want of memory or disc |
 | `live`, `live_by_view` | count | zoom-0 `visible` under every term after the compaction, on the anchor view and, where there are several, on each |
 | `entity_id_high_water`, `high_water_rise` | count | `/control/status`, and the rise since the row before |
-| `free_ids`, `held_ids` | count | the newest side-manifest's `free_entities`, the freed ids the allocator issues before its high water, and `held_entities`, those held back until the log rotates |
+| `free_ids`, `held_ids` | count | the newest side-manifest's shard records' `free_entities`, the freed ids the allocator issues before its high water, and `held_entities`, those held back until the log rotates |
 | `prefix` | — | the bundle version `CURRENT` names |
-| `postings_bytes`, `fresh_postings_bytes`, `postings_vs_fresh` | bytes | the term index on disc, `partitions/<p>/terms/postings.arrow` and every delta tier the newest side-manifest lists, on the served copy and on the all-in bundle, and their ratio |
+| `postings_bytes`, `fresh_postings_bytes`, `postings_vs_fresh` | bytes | the term index on disc, `partitions/<p>/shards/<s>/terms/postings.arrow` and every delta tier the newest side-manifest lists, on the served copy and on the all-in bundle, and their ratio |
 | `term_images_bytes`, `fresh_term_images_bytes` | bytes | the side-manifest's `term_image_extents`, on each |
 | `bundle_bytes` | bytes | every file under the served copy, a version not yet removed included |
 | `principals[]` | — | the narrowest and the broadest principal of `--targets`' ladder |

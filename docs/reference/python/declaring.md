@@ -1,6 +1,6 @@
 # Declaring
 
-Declaring says what a database holds: its views, columns, vocabularies and annotation layers. A declaration takes no data; [`insert`](inserting.md) hands a table to something declared. Each `declare_*` method adds to the declaration file, `schema.toml`, which the next `check()` or `commit()` checks.
+Declaring says what a database holds: its views, columns, vocabularies and annotation layers, and the size of the shard its items are stored in. A declaration takes no data; [`insert`](inserting.md) hands a table to something declared. Each `declare_*` method adds to the declaration file, `schema.toml`, which the next `check()` or `commit()` checks.
 
 ## Database
 
@@ -21,6 +21,10 @@ Declaring says what a database holds: its views, columns, vocabularies and annot
       heading_level: 3
 
 ::: mosaica._database.Database.declare_vocabulary
+    options:
+      heading_level: 3
+
+::: mosaica._database.Database.declare_shards
     options:
       heading_level: 3
 

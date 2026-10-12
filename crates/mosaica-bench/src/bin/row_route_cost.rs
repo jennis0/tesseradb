@@ -76,18 +76,13 @@ fn inspect(root: &Path) -> Result<Fixture, Box<dyn std::error::Error>> {
     let bundle = open_bundle(root)?;
     // The frame is the view's (decision 0040); a built bundle declares one, and this harness
     // measures against it.
-    let q = bundle
+    let view = bundle
         .manifest
         .views
         .first()
-        .expect("a built bundle declares a view")
-        .quantisation;
-    let view = bundle
-        .partitions
-        .values()
-        .next()
-        .and_then(|p| p.views.keys().next().cloned())
-        .unwrap_or_else(|| "s0".to_string());
+        .expect("a built bundle declares a view");
+    let q = view.quantisation;
+    let view = view.id.clone();
     let mut categories = Vec::new();
     for scalar in &bundle.manifest.declared_scalars {
         let Some(vocab_name) = &scalar.vocabulary else {
@@ -110,7 +105,7 @@ fn inspect(root: &Path) -> Result<Fixture, Box<dyn std::error::Error>> {
             }
         }
     }
-    let items = bundle.manifest.entity_id_high_water;
+    let items = bundle.only_shard().record.high_water;
     Ok(Fixture {
         view,
         extent: [q.x_min, q.y_min, q.x_max, q.y_max],

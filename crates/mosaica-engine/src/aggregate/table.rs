@@ -443,7 +443,7 @@ impl Plan {
                     Outer::Field(field) => {
                         let listed: Vec<u32> = groups.chosen.iter().map(|&c| c as u32).collect();
                         table = GroupTable::new(&listed);
-                        codes = field.entity_codes(cx.generation)?;
+                        codes = field.entity_codes(cx.open.served.shard)?;
                         Source::Grouped(field.row_groups(cx, &table, &codes)?)
                     }
                     Outer::Bins(_) => unreachable!("a grouping by bins with cells is refused"),

@@ -69,9 +69,11 @@ class _StubBundle:
     """Just enough `Bundle` for the journal: a key, a build of 100 items and a term dictionary."""
 
     identity_key = KEY
-    identity_shard_id = 0
-    manifest = {"entity_id_high_water": 100}
     dictionary = {0: b"term-zero", 1: b"term-one"}
+
+    @staticmethod
+    def shard_record() -> dict:
+        return {"id": 0, "high_water": 100}
 
     @staticmethod
     def mosaica_id_of(entity_id: int) -> int:

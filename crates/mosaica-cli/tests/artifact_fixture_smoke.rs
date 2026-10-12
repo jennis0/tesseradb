@@ -10,17 +10,17 @@
 //! what the generator says it wrote, and that nothing was minted or left unclustered — every
 //! roster is closed and complete, so both of those counts are zero by construction.
 
-use std::process::{Command, Output};
+use std::process::Output;
 
 use mosaica_corpus::Corpus;
 use mosaica_spatial::Bounds;
+
+mod common;
+use common::mosaica;
+
 /// ~10⁵ items — large enough that the fixture's counts are not a handful of coincidental small
 /// numbers, small enough that the whole smoke runs in the ordinary test pass.
 const N: u64 = 100_000;
-
-fn mosaica() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_mosaica"))
-}
 
 fn grid() -> Bounds {
     Bounds {
@@ -131,7 +131,7 @@ fn a_generator_corpus_with_every_artifact_arm_builds() {
     // partition-enumerated, treed) and the **attribute predicate**, whose artifacts are the
     // `partition` column's distinct values, minted from the column at the build. ⊘ The spatial
     // layer declares no `[layer.shape]`, so it holds nothing and writes none.
-    let members_dir = dir.path().join("bundle/v00000/partitions/default/members");
+    let members_dir = dir.path().join("bundle/v00000").join(common::SHARD.members_rel());
     let published: Vec<_> = std::fs::read_dir(&members_dir)
         .unwrap_or_else(|e| panic!("{}: {e}", members_dir.display()))
         .map(|entry| entry.unwrap().path())

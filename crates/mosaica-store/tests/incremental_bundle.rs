@@ -14,7 +14,7 @@ use mosaica_store::{open_bundle, Bundle};
 use mosaica_types::{EntityId, RowId};
 
 mod fixture;
-use fixture::{build_bundle, flush_segment, next_manifest, PARTITION, VIEW};
+use fixture::{build_bundle, flush_segment, next_manifest, PARTITION, SHARD, VIEW};
 
 /// The claim §1.4's drain-depth cost model rests on: consecutive generations share their base
 /// geometry — the mapped `permutation.bin` and every existing segment's mmaps — rather than being
@@ -28,7 +28,7 @@ fn an_incremental_bundle_shares_its_base_mappings() {
     let (seg, extent) = flush_segment(dir.path(), &base, 50, 3);
     let next = base
         .with_segment(
-            PARTITION,
+            SHARD,
             VIEW,
             seg,
             extent,
@@ -39,8 +39,8 @@ fn an_incremental_bundle_shares_its_base_mappings() {
         )
         .unwrap();
 
-    let a = &base.partitions[PARTITION].views[VIEW];
-    let b = &next.partitions[PARTITION].views[VIEW];
+    let a = &base.only_shard().views[VIEW];
+    let b = &next.only_shard().views[VIEW];
     assert!(
         Arc::ptr_eq(a.row_space.base(), b.row_space.base()),
         "the base permutation was re-opened, not shared"
@@ -63,7 +63,7 @@ fn a_flushed_entity_resolves_and_the_base_is_untouched() {
     let (seg, extent) = flush_segment(dir.path(), &base, 50, 3);
     let next = base
         .with_segment(
-            PARTITION,
+            SHARD,
             VIEW,
             seg,
             extent,
@@ -74,8 +74,8 @@ fn a_flushed_entity_resolves_and_the_base_is_untouched() {
         )
         .unwrap();
 
-    let before = &base.partitions[PARTITION].views[VIEW].row_space;
-    let after = &next.partitions[PARTITION].views[VIEW].row_space;
+    let before = &base.only_shard().views[VIEW].row_space;
+    let after = &next.only_shard().views[VIEW].row_space;
 
     for e in 0..50u64 {
         assert_eq!(
@@ -120,7 +120,7 @@ fn a_merge_substitutes_the_consumed_segments() {
     let (s1, e1) = flush_segment(dir.path(), &base, 50, 2);
     let one = base
         .with_segment(
-            PARTITION,
+            SHARD,
             VIEW,
             s1,
             e1,
@@ -133,7 +133,7 @@ fn a_merge_substitutes_the_consumed_segments() {
     let (s2, e2) = flush_segment(dir.path(), &one, 52, 2);
     let two = one
         .with_segment(
-            PARTITION,
+            SHARD,
             VIEW,
             s2,
             e2,
@@ -143,16 +143,16 @@ fn a_merge_substitutes_the_consumed_segments() {
             },
         )
         .unwrap();
-    assert_eq!(two.partitions[PARTITION].views[VIEW].segments.len(), 3);
+    assert_eq!(two.only_shard().views[VIEW].segments.len(), 3);
 
-    let consumed: Vec<String> = two.partitions[PARTITION].views[VIEW].segments[1..]
+    let consumed: Vec<String> = two.only_shard().views[VIEW].segments[1..]
         .iter()
         .map(|s| s.seg_id.clone())
         .collect();
     let (merged_seg, merged_extent) = flush_segment(dir.path(), &base, 50, 4);
     let after = two
         .with_merged(
-            PARTITION,
+            SHARD,
             VIEW,
             &consumed,
             merged_seg,
@@ -171,7 +171,7 @@ fn a_merge_substitutes_the_consumed_segments() {
         )
         .unwrap();
 
-    let view = &after.partitions[PARTITION].views[VIEW];
+    let view = &after.only_shard().views[VIEW];
     assert_eq!(view.segments.len(), 2, "two segments collapsed into one");
     assert_eq!(view.row_space.extent_count(), 1);
     for e in 50..=53u64 {
@@ -182,10 +182,7 @@ fn a_merge_substitutes_the_consumed_segments() {
         );
     }
     assert!(
-        Arc::ptr_eq(
-            &two.partitions[PARTITION].views[VIEW].segments[0],
-            &view.segments[0]
-        ),
+        Arc::ptr_eq(&two.only_shard().views[VIEW].segments[0], &view.segments[0]),
         "the untouched build segment is still shared"
     );
 }
@@ -202,7 +199,7 @@ fn a_merge_whose_inputs_are_absent_is_refused() {
 
     let (seg, extent) = flush_segment(dir.path(), &base, 50, 3);
     let err = base.with_merged(
-        PARTITION,
+        SHARD,
         VIEW,
         &["seg-that-never-existed".to_string()],
         seg,
@@ -229,7 +226,7 @@ fn an_unknown_view_is_refused() {
     let (seg, extent) = flush_segment(dir.path(), &base, 50, 3);
     assert!(base
         .with_segment(
-            PARTITION,
+            SHARD,
             "no-such-view",
             seg,
             extent,
@@ -252,7 +249,7 @@ fn the_original_generation_is_unchanged_by_a_publication() {
     let (seg, extent) = flush_segment(dir.path(), &base, 50, 3);
     let _next = base
         .with_segment(
-            PARTITION,
+            SHARD,
             VIEW,
             seg,
             extent,
@@ -263,7 +260,7 @@ fn the_original_generation_is_unchanged_by_a_publication() {
         )
         .unwrap();
 
-    let view = &base.partitions[PARTITION].views[VIEW];
+    let view = &base.only_shard().views[VIEW];
     assert_eq!(view.segments.len(), 1);
     assert_eq!(view.row_space.extent_count(), 0);
     assert_eq!(view.row_space.total_rows(), 50);

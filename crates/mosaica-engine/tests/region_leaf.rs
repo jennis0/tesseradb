@@ -564,14 +564,14 @@ fn flush_filler_segment(engine: &Engine, n: usize) {
 }
 
 fn segment_count(engine: &Engine) -> usize {
-    engine.generation().bundle.partitions["default"].views["s0"]
+    engine.generation().bundle.only_shard().views["s0"]
         .segments
         .len()
 }
 
 fn rows_of(engine: &Engine, entities: &[EntityId]) -> Vec<Option<u32>> {
     let generation = engine.generation();
-    let row_space = &generation.bundle.partitions["default"].views["s0"].row_space;
+    let row_space = &generation.bundle.only_shard().views["s0"].row_space;
     entities
         .iter()
         .map(|e| row_space.row_of(*e).map(|r| r.raw()))

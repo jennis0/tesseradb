@@ -54,7 +54,7 @@ fn an_engine_without_a_write_executor_cannot_publish() {
         .publish_geometry(GeometryPublication::within_prefix(
             live.prefix.clone(),
             live.segments_version + 1,
-            live.watermark,
+            live.only_shard().watermark,
             std::sync::Arc::clone(&live.bundle),
             std::sync::Arc::clone(&live.dict),
             Vec::new(),

@@ -110,7 +110,7 @@ A request against `/control/ingest` is checked before the server commits any wor
 credential and its `write`, the body size, the row count and the columns are checked first, and a
 request that fails any of them takes no effect. Every column may be left out of a row: a value
 left out keeps what the item stores, and a null clears it. A row carries both coordinates or
-neither. Beyond those, three checks apply:
+neither. Beyond those, four checks apply:
 
 1. An admission limit bounds how many ingest requests run at once, and a buffer limit bounds how
    many rows may wait for a flush. Past either, the request is refused with a retry interval
@@ -119,6 +119,16 @@ neither. Beyond those, three checks apply:
    replay the recorded answer, and different bytes under the same id are refused.
 3. Each row is resolved to the item it names, and compared with what that item stores
    ([resolving a batch](#resolving-a-batch)).
+4. Each row that creates an item, and each edit, takes an id at the window's close: one a
+   compaction freed, or else one past the shard's high water. The ids a batch would take from the
+   high water may not carry it past the shard's size, declared by `[shards] size` at a build or by
+   `PUT /control/shards` at a running service, nor past the lowest id an annotation layer holds.
+   The executor counts each batch as it joins the [commit window](#the-commit-window), against
+   what the batches already in the window leave. Freed ids the window does not take are counted
+   first, and ids still held for the log to rotate are not counted. A batch that does not fit
+   closes the window, and is counted again against the shard the close leaves. One that still does
+   not fit is refused with `409`, naming the size, the high water and the ids it needed, and takes
+   no effect, while every other batch of the window goes in.
 
 A row that carries access labels has each read as an access expression by the parser a build
 reads its access column with, and the item is indexed under the keys its labels give it: the
@@ -288,7 +298,7 @@ that is decided as a new batch.
 | Outcome | Meaning | Retry |
 |---|---|---|
 | 200 | Every row is resolved. Created, added and edited rows are durable in the WAL, with their identity allocated, and not yet visible; unchanged and refused rows wrote nothing, and `refused` lists the refused ones | Not needed; a refused row after fixing it |
-| 409 | With `strict=true`, a row is refused; or the same batch id with different bytes, or what the batch names moved twice while it was checked. Nothing in the batch took effect | After fixing the request; the last as it was |
+| 409 | With `strict=true`, a row is refused; or the same batch id with different bytes, or what the batch names moved twice while it was checked, or its new and edited items would take the shard past its size. Nothing in the batch took effect | After fixing the request; the last as it was, or after declaring a larger size |
 | 422 | Validation failed: an undeclared column, a wrong type, too many rows, a new item with no label, or a coordinate that is not a place. Nothing took effect | After fixing the request |
 | 429 | The server is declining the request for load, with a retry interval attached | After that interval |
 | 500 | The WAL append or the fsync failed. Nothing was applied | With identical bytes |
@@ -561,7 +571,7 @@ without being freed. An entity a suppression stood against is freed like any oth
 compaction drops its suppression with it, and the item that takes the id is not suppressed. An item
 edited again and again therefore holds its number and at most two other ids: the entity it is in,
 and the one its last edit left, until a compaction frees it. Under repeated edits of the same items
-the high point of the id space stops rising after the second compaction.
+the shard's high water stops rising after the second compaction.
 
 A deleted item's number is freed by the compaction that removes its last entity: the number itself
 and every entity the edited-items map pairs with it. Until then the number resolves through the
@@ -576,22 +586,22 @@ artifacts and layers, are never freed.
 A freed id is held back until the WAL has rotated past the compaction's publication. Until then a
 restart would replay records naming the id's previous holder, its rows, its deletion and its
 memberships, onto whatever took the id. Once the log keeps no such record, the id is free. The
-allocator issues free ids before any id from its high point. A commit window's edits draw first,
+allocator issues free ids before any id from its high water. A commit window's edits draw first,
 each from tenancy 0, lowest id first, since an edit's new entity carries its item's `mosaica_id` and
 never becomes a number. Its new items then take the lowest tenancy, lowest id first. A restart
 between a compaction and the rotation after it replays the deletions the compaction executed, so
 the next compaction frees those numbers again, one tenancy higher. The tenancy skipped was never
 issued.
 
-Every side-manifest records the free ids and the held-back ones, each set with the WAL position it
-waits for, beside the tenancy index. A restart takes both from the newest manifest it serves,
-splits them by that index, frees the sets whose position the log has passed, and removes every id
-a replayed record or the overlay names from the free and the held sets alike. In a free set such
-an id was issued after the manifest was written; in a set still held it is named by a record of
-its previous holder, which the replay has applied, so that set never frees it. The ids an artifact
-publication or growth names count, as do the rows, deletions and snapshots. A partition serving an
-older manifest after a step-down issues no freed id, since the manifest it serves can list an id
-issued since.
+Every side-manifest records, in each shard's record, the free ids and the held-back ones, each set
+with the WAL position it waits for, beside the tenancy index. A restart takes both from the newest
+manifest it serves, splits them by that index, frees the sets whose position the log has passed,
+and removes every id a replayed record or the overlay names from the free and the held sets alike.
+In a free set such an id was issued after the manifest was written; in a set still held it is named
+by a record of its previous holder, which the replay has applied, so that set never frees it. The
+ids an artifact publication or growth names count, as do the rows, deletions and snapshots. A
+partition serving an older manifest after a step-down issues no freed id, since the manifest it
+serves can list an id issued since.
 
 A freed id is lower than the entities a view already has rows for, and so is an older item added to
 a view in place, so a flush cannot place such a row by extending the segment's range of entities
@@ -602,7 +612,7 @@ compaction folds them into the base like any other.
 
 Measured on the GeoNames corpus (13.5 million items), over five rounds that each send a
 673,193-row hold-out again with the same 6,748 items moved, then flush and compact: the first two
-rounds took 6,748 new ids each and every later round none, so the high point stayed at 13,477,353.
+rounds took 6,748 new ids each and every later round none, so the high water stayed at 13,477,353.
 Freed ids land among other terms' runs in the term index rather than in a run of their own, and
 the compacted base term index measured 82,866 bytes after each of the two rounds on new ids and
 82,674 to 82,930 bytes after the rounds on freed ones; they were 52,018 bytes before the first
@@ -655,16 +665,19 @@ everything the deleted ones carried. Reading back through them is a step down to
 a server that runs out of manifests to step to refuses to serve that partition rather than
 reaching for one old enough to have forgotten a deny.
 
-The entity id allocator resumes from whichever is larger, the manifest's recorded high point or
-the value replay reaches, so an id above the high point is never issued twice. Every side-manifest
-records the allocator's own high point, not only the highest entity a segment holds: an item
+The entity id allocator resumes from whichever is larger, the shard record's high water or the
+value replay reaches, so an id above the high water is never issued twice. Every side-manifest
+records each shard allocator's own high water, not only the highest entity a segment holds: an item
 deleted before its flush holds no row, and once the log records naming it are reclaimed, the
 manifest is what keeps its entity id, and so its `mosaica_id`, from being issued to a new item.
 Freed ids are restored from the newest manifest less every id the replay names
-([freed entity ids](#freed-entity-ids)). The buffer of rows
-awaiting flush is rebuilt as exactly the replayed rows whose entity has no row in any segment,
-rather than compared against a watermark. This predicate stays correct regardless of how flush and
-allocation order have diverged from each other.
+([freed entity ids](#freed-entity-ids)). The shard's size is the newest manifest's, replaced by
+each size declaration the replayed log carries, so the last declaration made is the one in force.
+Every publication restates it, so it survives the log's rotation and a compaction. A size below
+the high water the replay reaches refuses the open, since no declaration could have left one. The
+buffer of rows awaiting flush is rebuilt as exactly the replayed rows whose entity has no row in
+any segment, rather than compared against a watermark. This predicate stays correct regardless of
+how flush and allocation order have diverged from each other.
 
 | Crash point | Recovery | At risk |
 |---|---|---|

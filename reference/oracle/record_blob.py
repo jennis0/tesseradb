@@ -50,6 +50,8 @@ import pyarrow as pa
 import pyarrow.ipc as ipc
 from pyroaring import BitMap
 
+from .layout import shard_dir
+
 # The blob's three base files, under `attrs/record/` (records §7).
 BLOCKS_FILE = "blocks.bin"
 HASROW_FILE = "hasrow.roaring"
@@ -107,9 +109,9 @@ _KIND_LIST = 13
 
 
 def record_dir_of(bundle_root: Path) -> Path:
-    """`attrs/record/` under the bundle's current prefix (Phase 1: one partition, `default`)."""
+    """`attrs/record/` of the bundle's one shard, under its current prefix."""
     current = json.loads((bundle_root / "CURRENT").read_text())
-    return bundle_root / current["prefix"] / "partitions" / "default" / "attrs" / "record"
+    return shard_dir(bundle_root / current["prefix"]) / "attrs" / "record"
 
 
 def _frame_value(payload: bytes, pos: int, kind: int, where: str, failures: list[str]) -> int:

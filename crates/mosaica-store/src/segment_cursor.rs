@@ -119,13 +119,13 @@ impl SegmentCursor {
     pub(crate) fn entity(
         &self,
         key: &mosaica_types::IdentityKey,
-        shard_id: u32,
+        shard: mosaica_types::ShardId,
     ) -> Result<mosaica_types::EntityId> {
         self.entities.entity_of(
             self.row as u32,
             self.columns.mosaica_id()[self.row],
             key,
-            shard_id,
+            shard,
             &self.seg_id,
         )
     }

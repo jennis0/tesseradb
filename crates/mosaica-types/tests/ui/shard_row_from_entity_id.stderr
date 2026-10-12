@@ -1,0 +1,7 @@
+error[E0277]: the trait bound `ShardRow: From<EntityId>` is not satisfied
+ --> tests/ui/shard_row_from_entity_id.rs:6:40
+  |
+6 |     let _: ShardRow = EntityId::new(7).into();
+  |                                        ^^^^ the trait `From<EntityId>` is not implemented for `ShardRow`
+  |
+  = note: required for `EntityId` to implement `Into<ShardRow>`

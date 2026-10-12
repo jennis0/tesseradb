@@ -150,19 +150,14 @@ pub fn run(ctx: &Context, ops: &[String], checkpoints: &[u64], seed: u64) -> Res
         let bundle = open_bundle(&fixture.root)?;
         // The frame is the view's (decision 0040); a built bundle declares one, and this harness
         // measures against it.
-        let q = bundle
+        let view = bundle
             .manifest
             .views
             .first()
-            .expect("a built bundle declares a view")
-            .quantisation;
+            .expect("a built bundle declares a view");
+        let q = view.quantisation;
         let full_bbox = [q.x_min, q.y_min, q.x_max, q.y_max];
-        let view_id = bundle
-            .partitions
-            .values()
-            .next()
-            .and_then(|p| p.views.keys().next().cloned())
-            .unwrap_or_else(|| "s0".to_string());
+        let view_id = view.id.clone();
         drop(bundle);
 
         // The entities to act on: drawn from the principal's own visible set, so a suppression

@@ -213,13 +213,12 @@ pub use mosaica_lifecycle::IngestRow;
 pub use mosaica_lifecycle::wal::{DeclaredFrame, PlainViewDeclaration, ViewGroupDeclaration};
 pub use mosaica_lifecycle::{DeclaredValue, VocabularyRequest};
 
-pub use generation::{Generation, GenerationParts};
+pub use generation::{Generation, GenerationParts, Shard, ShardParts};
 
-/// Per-view row-space deny masks — see [`Generation::denied`].
+/// Per-view row-space deny masks — see [`Shard::denied`].
 pub type DenyMask = rustc_hash::FxHashMap<String, croaring::Bitmap>;
 
-/// Per view, the buffered entities that already have a row there — see
-/// [`Generation::buffered_rows`].
+/// Per view, the buffered entities that already have a row there — see [`Shard::buffered_rows`].
 pub type BufferedRows = rustc_hash::FxHashMap<String, Vec<mosaica_types::EntityId>>;
 
 /// The process-wide handle to the current generation. A request must load this pointer exactly

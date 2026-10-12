@@ -34,16 +34,13 @@ use std::sync::Arc;
 use croaring::{Bitmap, Frozen};
 use memmap2::Mmap;
 use mosaica_roaring::OwnedView;
-use mosaica_types::{EntityId, IdentityKey, MosaicaId, Tenancy};
+use mosaica_types::{EntityId, IdentityKey, MosaicaId, ShardId, Tenancy};
 
 use crate::error::{io, Result, StoreError};
 use crate::{le_u32, le_u64};
 
 /// How many bits a tenancy has, and so how many bitmaps the index holds.
 pub const TENANCY_BITS: usize = Tenancy::BITS as usize;
-
-/// The directory a partition's index files sit in, beside its side-manifests.
-pub const TENANCY_DIR: &str = "tenancy";
 
 const MAGIC: &[u8; 4] = b"MSTN";
 const VERSION: u16 = 1;
@@ -248,6 +245,18 @@ impl TenancyIndex {
         self.probe(|mapped| mapped.view.contains(number))
     }
 
+    /// The number `id` names in `shard`, where `id` carries the tenancy the index holds for it;
+    /// `None` where `id` names no item, an item of another shard, or a number's earlier holder.
+    pub fn number_named(
+        &self,
+        key: &IdentityKey,
+        shard: ShardId,
+        id: MosaicaId,
+    ) -> Option<EntityId> {
+        let (high, number) = key.invert(id)?;
+        (high.shard == shard && self.of(number) == high.tenancy).then_some(number)
+    }
+
     /// The tenancy whose bits are those the index holds and `holds` answers for.
     fn probe(&self, holds: impl Fn(&MappedBit) -> bool) -> Tenancy {
         let mut raw = 0u16;
@@ -257,19 +266,6 @@ impl TenancyIndex {
             }
         }
         at(raw)
-    }
-
-    /// The number `id` names in `shard`, and whether `id` carries the tenancy the index holds for
-    /// that number; `None` where `id` names no item or an item of another shard. The index is read
-    /// for every identifier of `shard`.
-    pub fn number_named(
-        &self,
-        key: &IdentityKey,
-        shard: u32,
-        id: MosaicaId,
-    ) -> Option<(EntityId, bool)> {
-        let (high, number) = key.invert(id)?;
-        (high.shard == shard).then(|| (number, self.of(number) == high.tenancy))
     }
 
     /// The tenancy of each of `numbers`, in their order. A number above every number the index

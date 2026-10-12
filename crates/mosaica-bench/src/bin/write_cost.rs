@@ -131,7 +131,7 @@ fn inspect(source: &Path, root: &Path, prefix: &str) -> Result<Fixture, Box<dyn 
             .take(TERM_DENSITY)
             .map(String::into_bytes)
             .collect(),
-        high_water: bundle.manifest.entity_id_high_water,
+        high_water: bundle.only_shard().record.high_water,
         category: category.map(|(index, key, _)| (index, key)),
         declared,
     })

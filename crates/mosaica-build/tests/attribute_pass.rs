@@ -40,12 +40,8 @@ use mosaica_build::{build, build_in_memory, AttributeCoverage, BuildArgs};
 use mosaica_filter::{Access, RecordBlob, RecordValue};
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_spatial::Bounds;
-use mosaica_store::open_bundle;
-use mosaica_types::IdentityKey;
 
 mod common;
-
-const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
 /// **Not a multiple of 64**, which is what presence is stored in words of.
 const N: u64 = 5_001;
@@ -259,23 +255,9 @@ fn args(dir: &Path, out: PathBuf) -> BuildArgs {
             select: None,
             access: mosaica_build::config::AccessInput::relation(dir.join("pairs.parquet")),
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources: mosaica_build::config::AttributeSource::over(attributes, &schema),
-        out,
-        limit: None,
-        strict: false,
-        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&out)
     }
 }
 
@@ -285,26 +267,11 @@ fn fixture(dir: &Path) {
     write_empty_pairs(&dir.join("pairs.parquet"));
 }
 
-fn current_prefix(out: &Path) -> String {
-    let current: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(out.join("CURRENT")).unwrap()).unwrap();
-    current["prefix"].as_str().unwrap().to_string()
-}
-
-fn record_dir(out: &Path) -> PathBuf {
-    let bundle = open_bundle(out).unwrap();
-    let phash = bundle.partitions.keys().next().unwrap().clone();
-    out.join(current_prefix(out))
-        .join("partitions")
-        .join(phash)
-        .join("attrs")
-        .join("record")
-}
-
 /// Every entity's blob row, keyed by **source** id: tag → value, absent tags and `id` omitted.
 fn rows_by_source(out: &Path) -> BTreeMap<u64, BTreeMap<u16, RecordValue>> {
     let entity_of = common::entities_of(out, "id", 0..N);
-    let blob = RecordBlob::open_dir(&record_dir(out), Access::Read).expect("the blob opens");
+    let record_dir = common::prefix_dir(out).join(common::SHARD.record_rel());
+    let blob = RecordBlob::open_dir(&record_dir, Access::Read).expect("the blob opens");
     blob.self_check().expect("the artefact is self-consistent");
     let mut rows = BTreeMap::new();
     for (source, entity) in entity_of {

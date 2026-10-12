@@ -5,7 +5,7 @@ pub(super) fn views_of(generation: &Generation) -> Vec<String> {
         .bundle
         .partitions
         .values()
-        .flat_map(|p| p.views.keys().cloned())
+        .flat_map(|p| p.only_shard().views.keys().cloned())
         .collect();
     views.sort_unstable();
     views.dedup();
@@ -21,7 +21,7 @@ pub(super) fn view_row_space<'a>(
     bundle
         .partitions
         .get(partition)
-        .and_then(|p| p.views.get(view))
+        .and_then(|p| p.only_shard().views.get(view))
         .map(|v| &v.row_space)
 }
 
@@ -34,17 +34,15 @@ pub(super) fn view_row_space<'a>(
 /// fsynced too, so a crash cannot leave a manifest naming a file that was never written.
 pub(super) fn pack_membership_extents(
     prefix_dir: &std::path::Path,
-    partition: &str,
+    layout: ShardLayout<'_>,
     n: u64,
     ready: Vec<mosaica_lifecycle::membership::PendingExtent>,
 ) -> mosaica_store::Result<Vec<mosaica_store::manifest::MembershipExtent>> {
     if ready.is_empty() {
         return Ok(Vec::new());
     }
-    let dir = prefix_dir
-        .join("partitions")
-        .join(partition)
-        .join("members");
+    let dir_rel = layout.members_rel();
+    let dir = prefix_dir.join(&dir_rel);
     std::fs::create_dir_all(&dir).map_err(|source| mosaica_store::StoreError::Io {
         path: dir.clone(),
         source,
@@ -56,7 +54,7 @@ pub(super) fn pack_membership_extents(
         let bytes = mosaica_store::membership::pack(ordinal_lo, &blobs);
         mosaica_store::write_and_fsync(&dir.join(&name), &bytes)?;
         entries.push(mosaica_store::manifest::MembershipExtent {
-            path: format!("partitions/{partition}/members/{name}"),
+            path: format!("{dir_rel}/{name}"),
             layer,
             level,
             ordinal_lo,
@@ -107,6 +105,38 @@ pub(super) fn held_tier(
         .zip(rels)
         .find(|(_, live_rel)| live_rel.as_str() == rel)
         .map(|(tier, _)| Arc::clone(tier))
+}
+
+/// `shard`'s unique indexes as `partition` of `bundle` lists them, sharing every run `shard` has
+/// open.
+pub(super) fn reopen_unique(
+    prefix_dir: &std::path::Path,
+    bundle: &mosaica_store::read::Bundle,
+    partition: &mosaica_store::read::PartitionData,
+    shard: &Shard,
+) -> mosaica_store::Result<Arc<mosaica_store::unique::UniqueIndexes>> {
+    mosaica_store::unique::UniqueIndexes::open(
+        &bundle.manifest,
+        &partition.manifest,
+        &partition.only_shard().record,
+        prefix_dir,
+        Some(&shard.unique),
+    )
+    .map(Arc::new)
+}
+
+/// `shard`'s edited-items index as `partition` lists it, sharing every run `shard` has open.
+pub(super) fn reopen_edited(
+    prefix_dir: &std::path::Path,
+    partition: &mosaica_store::read::PartitionData,
+    shard: &Shard,
+) -> mosaica_store::Result<Arc<mosaica_store::edited::EditedIndex>> {
+    mosaica_store::edited::EditedIndex::open(
+        &partition.only_shard().record.edited_items,
+        prefix_dir,
+        Some(&shard.edited),
+    )
+    .map(Arc::new)
 }
 
 /// Whether this layer's memberships are a **stored** set, the kind a record's delta describes.
@@ -187,9 +217,11 @@ impl Executor {
         if partition_data.stepped_down() {
             return;
         }
+        let record = &partition_data.only_shard().record;
         let Some(plan) = crate::coalesce::plan_coalesce(
             partition,
             &partition_data.manifest,
+            record,
             &generation.bundle.manifest.files,
             self.deps.coalesce_policy,
             // The roster as this generation has it: a scoped column of an incarnation that is no
@@ -204,17 +236,16 @@ impl Executor {
             return;
         };
 
-        let attempt = self.coalesce.next_attempt();
+        let id = format!(
+            "coalesce-{}-{}",
+            partition_data.segments_n,
+            self.coalesce.next_attempt()
+        );
         let ctx = crate::coalesce::CoalesceContext {
             prefix_dir: self.prefix_dir(generation),
             prefix: generation.prefix.clone(),
-            // The same never-reused shape a `seg_id` has, and for the same reason: two passes at
-            // one `n` would otherwise write one path, and the second `File::create` truncates
-            // files the first has memory-mapped.
-            out_rel: format!(
-                "partitions/{partition}/coalesced/coalesce-{}-{}",
-                partition_data.segments_n, attempt
-            ),
+            out_rel: ShardLayout::new(partition, record.id).coalesced_rel(&id),
+            id,
         };
 
         let unit = self.coalesce.start();
@@ -299,7 +330,6 @@ impl Executor {
             // truncates files the first has memory-mapped.
             seg_id: format!("merge-{}-{attempt}", partition_data.segments_n),
             identity_key: self.deps.identity_key,
-            shard_id: manifest.identity.shard_id,
             scalar_schema,
             band_schema: band_schema_of(manifest),
             absent_ok,
@@ -525,13 +555,13 @@ impl Executor {
             return;
         };
 
-        let mut manifest = partition_data.manifest.clone();
+        let mut manifest = partition_data.side_manifest();
         if !crate::merge::rebase_into(&mut manifest, &completed) {
             // A consumed segment is no longer listed. The files are orphans nothing references.
             tracing::warn!("discarding a completed merge that no longer rebases");
             return;
         }
-        write_deny_state(&mut manifest, &live.overlay);
+        write_deny_state(&mut manifest, &live.only_shard().overlay);
         write_vocabulary_extensions(
             &mut manifest,
             &live.vocabularies,
@@ -573,7 +603,7 @@ impl Executor {
             .collect();
         let merged_seg_id = completed.segment.seg_id.clone();
         let next_bundle = match live.bundle.with_merged(
-            &completed.plan.partition,
+            completed.plan.layout(),
             &completed.plan.view,
             &consumed,
             completed.segment,
@@ -615,7 +645,7 @@ impl Executor {
             let merged_segment = next_bundle
                 .partitions
                 .get(&completed.plan.partition)
-                .and_then(|p| p.views.get(&completed.plan.view))
+                .and_then(|p| p.only_shard().views.get(&completed.plan.view))
                 .and_then(|v| v.segments.iter().find(|s| s.seg_id == merged_seg_id))
                 .map(|s| s.as_ref());
             self.live.with_artifacts(|store| {
@@ -710,6 +740,7 @@ impl Executor {
             }
         };
         let live = self.generation.load_full();
+        let shard = live.only_shard();
         if live.prefix != completed.prefix {
             tracing::warn!(
                 planned = %completed.prefix,
@@ -722,7 +753,8 @@ impl Executor {
             return;
         };
 
-        let Some(mut manifest) = crate::coalesce::rebased(&partition_data.manifest, &completed)
+        let Some(mut manifest) =
+            crate::coalesce::rebased(partition_data.side_manifest(), &completed)
         else {
             // A consumed entry is no longer listed. The files are orphans nothing references.
             tracing::warn!("discarding a completed coalesce that no longer rebases");
@@ -752,6 +784,8 @@ impl Executor {
         // is the flush's arrangement for a text extent, and for its reason: a text layer is three
         // files that must be installed together.
         let prefix_dir = self.prefix_dir(&live);
+        let layout = ShardLayout::new(&completed.partition, shard.id());
+        let record = manifest.only_shard();
         let text_windows: Vec<crate::filter::CoalescedTextWindow> = completed
             .texts
             .iter()
@@ -774,13 +808,12 @@ impl Executor {
         let entity_terms = if completed.terms.is_none() {
             None
         } else {
-            let partition_dir = prefix_dir.join("partitions").join(&completed.partition);
-            let extents: Vec<mosaica_store::EntityTermsExtentPaths> = manifest
+            let extents: Vec<mosaica_store::EntityTermsExtentPaths> = record
                 .entity_terms_extents
                 .iter()
                 .map(|e| entity_terms_extent_paths(&prefix_dir, e))
                 .collect();
-            match crate::filter::open_entity_terms_stack(&partition_dir, &extents) {
+            match crate::filter::open_entity_terms_stack(&prefix_dir, layout, &extents) {
                 Ok(stack) => Some(Arc::new(stack)),
                 Err(e) => {
                     discard(&format!(
@@ -800,13 +833,12 @@ impl Executor {
         let records = if completed.record.is_none() {
             None
         } else {
-            let partition_dir = prefix_dir.join("partitions").join(&completed.partition);
             // Both lists, one stack, as the open composes them: an artifact's content extents
             // hold the same format and the same reader, and the two never share an entity.
-            let extents: Vec<mosaica_filter::RecordExtentPaths> = manifest
+            let extents: Vec<mosaica_filter::RecordExtentPaths> = record
                 .record_extents
                 .iter()
-                .chain(manifest.artifact_record_extents.iter())
+                .chain(record.artifact_record_extents.iter())
                 .map(|e| record_extent_paths(&prefix_dir, e))
                 .collect();
             // The columns whose base no fold has written yet, which the schema owes no base
@@ -814,12 +846,13 @@ impl Executor {
             // are the same stack.
             let unfolded = self.live.with_attributes(|a| a.entity_names());
             match crate::filter::open_record_stack(
-                &partition_dir,
+                &prefix_dir,
+                layout,
                 &live.bundle.manifest.declared_scalars,
                 &live.bundle.manifest.vocabularies,
                 &unfolded,
                 &extents,
-                live.filter_columns.access(),
+                shard.filter_columns.access(),
             ) {
                 Ok(stack) => Some(Arc::new(stack)),
                 Err(e) => {
@@ -831,23 +864,24 @@ impl Executor {
                 }
             }
         };
-        let filter_columns =
-            match live
-                .filter_columns
-                .with_coalesced(&windows, &text_windows, entity_terms, records)
-            {
-                Ok(columns) => Arc::new(columns),
-                Err(e) => {
-                    discard(&format!(
-                        "its attribute extents would not replace the layers they consumed ({e}), \
+        let filter_columns = match shard.filter_columns.with_coalesced(
+            &windows,
+            &text_windows,
+            entity_terms,
+            records,
+        ) {
+            Ok(columns) => Arc::new(columns),
+            Err(e) => {
+                discard(&format!(
+                    "its attribute extents would not replace the layers they consumed ({e}), \
                          and a manifest must not name a column this process cannot serve"
-                    ));
-                    return;
-                }
-            };
+                ));
+                return;
+            }
+        };
         // Complete current state, serialised fresh from the overlay this publication carries, the
         // same rule every other manifest write follows.
-        write_deny_state(&mut manifest, &live.overlay);
+        write_deny_state(&mut manifest, &shard.overlay);
         write_vocabulary_extensions(
             &mut manifest,
             &live.vocabularies,
@@ -905,12 +939,13 @@ impl Executor {
             .partitions
             .get(&completed.partition)
             .expect("the partition this publication just rebased")
-            .manifest
+            .only_shard()
+            .record
             .deltas
         {
             let held = match coalesced.filter(|(path, _)| path == rel) {
                 Some((_, tier)) => Some(Arc::clone(tier)),
-                None => held_tier(&live.delta_postings, &partition_data.manifest.deltas, rel),
+                None => held_tier(&shard.delta_postings, &shard.data.record.deltas, rel),
             };
             let Some(tier) = held else {
                 // The manifest is already committed: a restart opens it.
@@ -933,19 +968,14 @@ impl Executor {
 
         // The merged unique runs hold the same entries as the runs they replace.
         let unique = if completed.unique.is_empty() {
-            Arc::clone(&live.unique)
+            Arc::clone(&shard.unique)
         } else {
             let partition = next_bundle
                 .partitions
                 .get(&completed.partition)
                 .expect("the partition this publication just rebased");
-            match mosaica_store::unique::UniqueIndexes::open(
-                &next_bundle.manifest,
-                &partition.manifest,
-                &self.prefix_dir(&live),
-                Some(&live.unique),
-            ) {
-                Ok(unique) => Arc::new(unique),
+            match reopen_unique(&prefix_dir, &next_bundle, partition, shard) {
+                Ok(unique) => unique,
                 Err(e) => {
                     tracing::error!(
                         error = %e,
@@ -957,18 +987,14 @@ impl Executor {
             }
         };
         let edited = if completed.edited.is_empty() {
-            Arc::clone(&live.edited)
+            Arc::clone(&shard.edited)
         } else {
             let partition = next_bundle
                 .partitions
                 .get(&completed.partition)
                 .expect("the partition this publication just rebased");
-            match mosaica_store::edited::EditedIndex::open(
-                &partition.manifest.edited_items,
-                &self.prefix_dir(&live),
-                Some(&live.edited),
-            ) {
-                Ok(edited) => Arc::new(edited),
+            match reopen_edited(&prefix_dir, partition, shard) {
+                Ok(edited) => edited,
                 Err(e) => {
                     tracing::error!(
                         error = %e,
@@ -979,15 +1005,15 @@ impl Executor {
                 }
             }
         };
-        let next = live.with(|g| {
+        let next = live.with_shard(shard.id(), |g, s| {
             // The live columns with each consumed window replaced by the layer that carries its
             // values, the same set of `(entity, value)` pairs in fewer files, so a request holding
             // the old and one holding the new agree on every answer.
-            g.filter_columns = filter_columns;
-            g.unique = unique;
-            g.edited = edited;
+            s.filter_columns = filter_columns;
+            s.unique = unique;
+            s.edited = edited;
             g.bundle = next_bundle;
-            g.delta_postings = delta_postings;
+            s.delta_postings = delta_postings;
         });
         self.publish(next, started);
         self.health.coalesces.fetch_add(1, Ordering::Relaxed);
@@ -1031,6 +1057,7 @@ impl Executor {
             return false;
         };
         let manifest = &generation.bundle.manifest;
+        let shard = generation.only_shard();
         let scalar_schema = scalar_schema_of(manifest);
         let filter_schema = filter_schema_of(manifest);
         let record_schema = record_schema_of(manifest);
@@ -1077,7 +1104,7 @@ impl Executor {
         };
 
         let context = {
-            let Some(view_data) = partition_data.views.get(&view) else {
+            let Some(view_data) = shard.data.views.get(&view) else {
                 return false;
             };
             // This view's frame: the flush quantises against the extent the view's own positions
@@ -1254,7 +1281,7 @@ impl Executor {
                 row_base,
                 entity_floor: view_data.row_space.entity_floor(),
                 identity_key: self.deps.identity_key,
-                shard_id: manifest.identity.shard_id,
+                shard: view_data.shard,
                 quantisation,
                 // This view's schema, entity-scoped tail then scoped render lanes: the same list a
                 // merge and a fold of this view take (`view_scalar_schema_of`), so a segment
@@ -1294,9 +1321,9 @@ impl Executor {
                     .filter(|(_, d)| d.unique)
                     .map(|(at, d)| (d.name.clone(), at, d.arrow_type))
                     .collect(),
-                edited: Arc::clone(&generation.edited),
-                edited_live: Arc::clone(&generation.edited_live),
-                tenancy: Arc::clone(&generation.tenancy),
+                edited: Arc::clone(&shard.edited),
+                edited_live: Arc::clone(&shard.edited_live),
+                tenancy: Arc::clone(&shard.tenancy),
             }
         };
         self.health
@@ -1403,7 +1430,7 @@ impl Executor {
         let mut views: std::collections::BTreeMap<&str, Option<&mosaica_store::read::ViewData>> =
             std::collections::BTreeMap::new();
         for partition in generation.bundle.partitions.values() {
-            for (name, data) in &partition.views {
+            for (name, data) in &partition.only_shard().views {
                 views
                     .entry(name.as_str())
                     .and_modify(|held| *held = None)
@@ -1599,8 +1626,8 @@ impl Executor {
             Vec<mosaica_store::manifest::MembershipExtent>,
         )> = Vec::new();
         for (partition, partition_data) in &live.bundle.partitions {
-            let mut manifest = partition_data.manifest.clone();
-            write_deny_state(&mut manifest, &live.overlay);
+            let mut manifest = partition_data.side_manifest();
+            write_deny_state(&mut manifest, &live.only_shard().overlay);
             // Membership extents are written before the manifest that names them, which is the
             // whole of their durability contract: a manifest naming a missing extent refuses at
             // open, so the file has to be durable first. A failure here abandons the publication
@@ -1753,7 +1780,7 @@ impl Executor {
             });
         }
 
-        let extents_rel = format!("partitions/{partition}/attrs/record/extents");
+        let extents_rel = ShardLayout::new(partition, ARTIFACT_SHARD).record_extents_rel();
         let dir = prefix_dir.join(&extents_rel);
         std::fs::create_dir_all(&dir).map_err(|source| mosaica_store::StoreError::Io {
             path: dir.clone(),
@@ -1832,7 +1859,12 @@ impl Executor {
         n: u64,
     ) -> mosaica_store::Result<Vec<mosaica_store::manifest::MembershipExtent>> {
         let ready = self.live.unpublished_memberships();
-        pack_membership_extents(prefix_dir, partition, n, ready)
+        pack_membership_extents(
+            prefix_dir,
+            ShardLayout::new(partition, ARTIFACT_SHARD),
+            n,
+            ready,
+        )
     }
 
     /// Publication by rebase: apply a completed flush to the then-current generation rather than
@@ -1889,6 +1921,7 @@ impl Executor {
             }
         };
         let live = self.generation.load_full();
+        let shard = live.only_shard();
         if live.prefix != completed.prefix {
             // A compaction moved the prefix under this flush. Nothing to apply it to.
             tracing::warn!(
@@ -1956,7 +1989,8 @@ impl Executor {
         // space, or a new incarnation's; its rows went with the drop, and the segment takes
         // neither, even where the new incarnation's empty row space would continue it.
         if let Some(segment) = &completed.segment {
-            let continues = partition_data
+            let continues = shard
+                .data
                 .views
                 .get(&completed.view)
                 .filter(|view| view.incarnation == segment.descriptor.incarnation)
@@ -1999,9 +2033,8 @@ impl Executor {
         // find it. Empty in every steady-state flush, where the base has been on disc since the
         // build.
         let live_columns = if completed.scoped_columns.is_empty() {
-            Arc::clone(&live.filter_columns)
+            Arc::clone(&shard.filter_columns)
         } else {
-            let partition_dir = record_dir.join("partitions").join(&completed.partition);
             // Stamped with the incarnation of the view the pair names, which is what places the
             // base the flush just wrote.
             let opening: Vec<(String, String, mosaica_types::view::ViewIncarnation)> = completed
@@ -2009,8 +2042,9 @@ impl Executor {
                 .iter()
                 .map(|(column, view)| (column.clone(), view.clone(), completed.scoped_incarnation))
                 .collect();
-            match live.filter_columns.with_scoped_columns(
-                &partition_dir,
+            match shard.filter_columns.with_scoped_columns(
+                &record_dir,
+                ShardLayout::new(&completed.partition, completed.shard),
                 &opening,
                 &live.bundle.manifest.scoped_scalars(),
                 &live.bundle.manifest.vocabularies,
@@ -2048,7 +2082,7 @@ impl Executor {
         // The four parts of this stage, lapped apart on their own mark; the outer `Manifest` lap
         // still covers the whole of it.
         let mut n = StageMark::now();
-        let mut manifest = partition_data.manifest.clone();
+        let mut manifest = partition_data.side_manifest();
         n = self
             .health
             .flush_lap(crate::flush::FlushStage::ManifestClone, n);
@@ -2064,33 +2098,7 @@ impl Executor {
                 return false;
             }
         };
-        // The watermark advances at every flush publication and never regresses: a publication
-        // coordinate, not an entity count.
-        //
-        // `entity_hi + 1` of this view's flush is neither monotone nor sufficient once a bundle
-        // has several views. Not monotone: views flush one per tick, so a view holding older
-        // entities can publish after one holding newer ones and offer a lower number, which
-        // `check_manifest_publishable` refuses. Not sufficient: fragment freshness is
-        // `fragment.watermark >= generation.watermark` (`Engine::fragment_for`), so a publication
-        // that did not move it would leave a session's fragment stale with nothing to say so.
-        //
-        // A values-only publication has no segment and so no entity high-water of its own; it
-        // still advances the watermark, since it publishes extents a resident fragment must be
-        // rebuilt past.
-        manifest.watermark = completed
-            .segment
-            .as_ref()
-            .map(|s| s.watermark)
-            .unwrap_or(0)
-            .max(manifest.watermark + 1);
-        manifest.entity_id_high_water = manifest.entity_id_high_water.max(
-            completed
-                .segment
-                .as_ref()
-                .map(|s| s.entity_id_high_water)
-                .unwrap_or(0),
-        );
-        // And the group-scoped columns this flush gave a view its first of. Carried forward and
+        // The group-scoped columns this flush gave a view its first of. Carried forward and
         // appended to, never restated: the list is what a restart recovers
         // `scoped_scalars[..].views` from, and a render-only family writes no extent for the
         // derivation to find. `manifest` is the live side-manifest cloned, so the earlier pairs
@@ -2104,30 +2112,60 @@ impl Executor {
                 // is what keeps a key created again from publishing it as its own.
                 incarnation: completed.scoped_incarnation,
             };
-            if !manifest.scoped_columns.contains(&entry) {
-                manifest.scoped_columns.push(entry);
+            if !manifest.partition.scoped_columns.contains(&entry) {
+                manifest.partition.scoped_columns.push(entry);
             }
         }
-        // The segment's own manifest lists, taken together or not at all: a values-only
-        // publication wrote none of the files they name.
-        if let Some(segment) = &completed.segment {
-            manifest.segments.push(segment.descriptor.clone());
-            manifest.deltas.push(segment.tier_path.clone());
+        manifest.partition.files.extend(completed.files);
+        if let Some(extent) = completed.dict_extent {
+            manifest.partition.dict_extents.push(extent);
         }
-        manifest.files.extend(completed.files);
+        // The watermark advances at every flush publication and never regresses: a publication
+        // coordinate, not an entity count.
+        //
+        // `entity_hi + 1` of this view's flush is neither monotone nor sufficient once a bundle
+        // has several views. Not monotone: views flush one per tick, so a view holding older
+        // entities can publish after one holding newer ones and offer a lower number, which
+        // `check_manifest_publishable` refuses. Not sufficient: fragment freshness is
+        // `fragment.watermark >= generation.watermark` (`Engine::fragment_for`), so a publication
+        // that did not move it would leave a session's fragment stale with nothing to say so.
+        //
+        // A values-only publication has no segment and so no entity high-water of its own; it
+        // still advances the watermark, since it publishes extents a resident fragment must be
+        // rebuilt past.
+        let record = manifest.only_shard_mut();
+        record.watermark = completed
+            .segment
+            .as_ref()
+            .map(|s| s.watermark)
+            .unwrap_or(0)
+            .max(record.watermark + 1);
+        record.high_water = record.high_water.max(
+            completed
+                .segment
+                .as_ref()
+                .map(|s| s.high_water)
+                .unwrap_or(0),
+        );
+        // The segment's own lists, taken together or not at all: a values-only publication wrote
+        // none of the files they name.
+        if let Some(segment) = &completed.segment {
+            record.segments.push(segment.descriptor.clone());
+            record.deltas.push(segment.tier_path.clone());
+        }
         let edited = &completed.edited_runs;
-        manifest
+        record
             .edited_items
             .by_number
             .live
             .extend(edited.by_number.iter().map(|run| run.path.clone()));
-        manifest
+        record
             .edited_items
             .by_entity
             .live
             .extend(edited.by_entity.iter().map(|run| run.path.clone()));
         for flushed in &completed.unique_runs {
-            if let Some(index) = manifest
+            if let Some(index) = record
                 .unique_indexes
                 .iter_mut()
                 .find(|runs| runs.attribute == flushed.attribute)
@@ -2135,36 +2173,33 @@ impl Executor {
                 index.live.extend(flushed.runs.iter().cloned());
             }
         }
-        if let Some(extent) = completed.dict_extent {
-            manifest.dict_extents.push(extent);
-        }
         // Named in the manifest as well as digested in `files`: the reader composes exactly what
         // this list names, so an extent on disk that no manifest names is not read and one named
         // but absent is a refusal to open (`FilterColumns::open`).
-        manifest
+        record
             .attr_extents
             .extend(completed.filter_extents.iter().map(|e| e.extent.clone()));
         // The record-blob extent, under the same two-obligation rule: the three files are already
         // in `files`, and this entry is what makes them reachable. A record stack opens exactly
         // what `record_extents` names, so bytes this list omits answer no drill-down, and bytes
         // it names but that are absent refuse the open.
-        manifest.record_extents.extend(completed.record_extent);
+        record.record_extents.extend(completed.record_extent);
         // The entity→term transpose's extent, under the same two-obligation rule and for the
         // sharper of the two reasons: a list this manifest omits leaves the flushed entities'
         // labels unknown, which serves a drill-down without them (harmless) *and* leaves the join
         // rule's label arm with nothing to compare against (a re-label accepted through a second
         // view's row). The live generation composes it below.
-        manifest
+        record
             .entity_terms_extents
             .push(completed.entity_terms_extent.clone());
         // The text layers, under the same two-obligation rule: the files are already digested in
         // `files`, and this entry is what makes them reachable to a reopen. The live generation
         // composes them below: a published layer no live reader holds answers no `match` until
         // the next fold, so the record blob's own composition must do the same.
-        manifest
+        record
             .text_extents
             .extend(completed.text_extents.iter().cloned());
-        write_deny_state(&mut manifest, &live.overlay);
+        write_deny_state(&mut manifest, &shard.overlay);
         n = self
             .health
             .flush_lap(crate::flush::FlushStage::ManifestDenyState, n);
@@ -2234,7 +2269,7 @@ impl Executor {
             Some(segment) => {
                 let seg_id = segment.segment.seg_id.clone();
                 let bundle = match live.bundle.with_segment(
-                    &completed.partition,
+                    ShardLayout::new(&completed.partition, completed.shard),
                     &completed.view,
                     segment.segment,
                     segment.extent,
@@ -2293,7 +2328,7 @@ impl Executor {
         // Exactly what was consumed, from the then-current buffer. This is O(buffered) work on
         // this thread, so one such stall lands ahead of the deny lane per tick: a cost this
         // design adds rather than one it avoids.
-        let mut buffer = (*live.buffer).clone();
+        let mut buffer = (*shard.buffer).clone();
         for entity in &completed.consumed {
             // By (entity, view), never by entity. A flush consumes one view's rows; an entity
             // that also holds a row awaiting flush in another view keeps it, and removing the
@@ -2314,10 +2349,10 @@ impl Executor {
         let watermark = next_bundle
             .partitions
             .get(&completed.partition)
-            .map(|p| p.manifest.watermark)
-            .unwrap_or(live.watermark);
+            .map(|p| p.only_shard().record.watermark)
+            .unwrap_or(shard.watermark);
         let segments_version = live.segments_version + 1;
-        let mut delta_postings = live.delta_postings.clone();
+        let mut delta_postings = shard.delta_postings.clone();
         delta_postings.extend(tier);
 
         *mark = self
@@ -2342,7 +2377,7 @@ impl Executor {
                 next_bundle
                     .partitions
                     .get(&completed.partition)
-                    .and_then(|p| p.views.get(&completed.view))
+                    .and_then(|p| p.only_shard().views.get(&completed.view))
                     .and_then(|v| v.segments.iter().find(|s| &s.seg_id == seg_id))
                     .map(|s| s.as_ref())
             });
@@ -2375,13 +2410,8 @@ impl Executor {
         // The runs this flush wrote join the index, and the live entries they hold leave.
         let unique = match next_bundle.partitions.get(&completed.partition) {
             Some(partition) if !completed.unique_runs.is_empty() => {
-                match mosaica_store::unique::UniqueIndexes::open(
-                    &next_bundle.manifest,
-                    &partition.manifest,
-                    &self.prefix_dir(&live),
-                    Some(&live.unique),
-                ) {
-                    Ok(unique) => Arc::new(unique),
+                match reopen_unique(&self.prefix_dir(&live), &next_bundle, partition, shard) {
+                    Ok(unique) => unique,
                     Err(e) => {
                         // The manifest is committed; a restart opens it.
                         self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
@@ -2395,24 +2425,20 @@ impl Executor {
                     }
                 }
             }
-            _ => Arc::clone(&live.unique),
+            _ => Arc::clone(&shard.unique),
         };
         // And the edited items' runs, whose pairs leave the live map.
         let (edited, edited_live) = if completed.edited_runs.entities.is_empty() {
-            (Arc::clone(&live.edited), Arc::clone(&live.edited_live))
+            (Arc::clone(&shard.edited), Arc::clone(&shard.edited_live))
         } else {
             let Some(partition) = next_bundle.partitions.get(&completed.partition) else {
                 return false;
             };
-            match mosaica_store::edited::EditedIndex::open(
-                &partition.manifest.edited_items,
-                &self.prefix_dir(&live),
-                Some(&live.edited),
-            ) {
+            match reopen_edited(&self.prefix_dir(&live), partition, shard) {
                 Ok(index) => {
-                    let mut edited_live = (*live.edited_live).clone();
+                    let mut edited_live = (*shard.edited_live).clone();
                     edited_live.remove(completed.edited_runs.entities.iter().copied());
-                    (Arc::new(index), Arc::new(edited_live))
+                    (index, Arc::new(edited_live))
                 }
                 Err(e) => {
                     self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
@@ -2426,9 +2452,9 @@ impl Executor {
             }
         };
         let unique_live = if completed.unique_runs.is_empty() {
-            Arc::clone(&live.unique_live)
+            Arc::clone(&shard.unique_live)
         } else {
-            let mut unique_live = (*live.unique_live).clone();
+            let mut unique_live = (*shard.unique_live).clone();
             unique_live.flushed(
                 completed
                     .unique_runs
@@ -2438,20 +2464,20 @@ impl Executor {
             Arc::new(unique_live)
         };
         self.unique_declarations.flushed(&completed.consumed);
-        let next = Arc::new(live.with(|g| {
+        let next = Arc::new(live.with_shard(shard.id(), |g, s| {
             // The live columns with this flush's extents composed on: the whole of what makes an
             // entity ingested since the build answer a filter on its own value.
-            g.filter_columns = filter_columns;
+            s.filter_columns = filter_columns;
             g.segments_version = segments_version;
-            g.watermark = watermark;
+            s.watermark = watermark;
             g.bundle = next_bundle;
             g.dict = completed.dict;
-            g.delta_postings = delta_postings;
-            g.buffer = Arc::new(buffer);
-            g.unique = unique;
-            g.unique_live = unique_live;
-            g.edited = edited;
-            g.edited_live = edited_live;
+            s.delta_postings = delta_postings;
+            s.buffer = Arc::new(buffer);
+            s.unique = unique;
+            s.unique_live = unique_live;
+            s.edited = edited;
+            s.edited_live = edited_live;
         }));
         // Armed before the swap, and that ordering is the mechanism. A request landing between
         // the swap and the pool task's first insert must find the flag set, or it takes the cost

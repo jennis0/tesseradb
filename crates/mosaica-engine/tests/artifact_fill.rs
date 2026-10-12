@@ -115,11 +115,7 @@ fn content_extents(fx: &Fixture, want: usize) {
     let dir = fx
         .root
         .join("v00000")
-        .join("partitions")
-        .join("default")
-        .join("attrs")
-        .join("record")
-        .join("extents");
+        .join(common::SHARD.record_extents_rel());
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let found = std::fs::read_dir(&dir)

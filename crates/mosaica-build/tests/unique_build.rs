@@ -18,10 +18,10 @@ use sha2::{Digest, Sha256};
 
 use mosaica_build::{build, verify_deep, BuildArgs, BuildReport, VerifyOpts};
 use mosaica_spatial::Bounds;
-use mosaica_store::manifest::{CurrentPointer, SegmentsManifest};
-use mosaica_types::IdentityKey;
+use mosaica_store::manifest::{CurrentPointer, SegmentsManifest, UniqueIndexRuns};
 
-const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
+mod common;
+
 const N: u64 = 700;
 
 fn extent() -> Bounds {
@@ -221,23 +221,9 @@ fn build_reported(
             select: None,
             access: mosaica_build::config::AccessInput::relation(pairs),
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
-        out: out.clone(),
-        limit: None,
-        strict: false,
-        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&out)
     };
     let built = match streaming {
         true => build(&args),
@@ -246,11 +232,11 @@ fn build_reported(
     built.map(|report| (out, report)).map_err(|e| e.to_string())
 }
 
-fn segments_manifest(root: &Path) -> SegmentsManifest {
-    serde_json::from_slice(
-        &fs::read(root.join("v00000/partitions/default/SEGMENTS-0.json")).unwrap(),
-    )
-    .unwrap()
+fn unique_indexes(root: &Path) -> Vec<UniqueIndexRuns> {
+    let path = mosaica_store::layout::partition_dir(&root.join("v00000"), "default")
+        .join("SEGMENTS-0.json");
+    let manifest: SegmentsManifest = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    manifest.only_shard().unique_indexes.clone()
 }
 
 /// **Every type `unique` applies to builds its index, and the deep verifier agrees it with the
@@ -259,7 +245,7 @@ fn segments_manifest(root: &Path) -> SegmentsManifest {
 fn every_unique_type_builds_an_index_the_deep_verifier_accepts() {
     let temp = tempfile::tempdir().unwrap();
     let root = build_in(temp.path(), false, true).expect("a build with distinct values");
-    let indexes = segments_manifest(&root).unique_indexes;
+    let indexes = unique_indexes(&root);
     let names: Vec<&str> = indexes.iter().map(|i| i.attribute.as_str()).collect();
     assert_eq!(names, ["doi", "small", "wide", "signed", "big", "at", "id"]);
     assert!(indexes
@@ -280,7 +266,7 @@ fn the_linear_build_writes_the_same_index() {
     let linear = tempfile::tempdir().unwrap();
     let a = build_in(streaming.path(), false, true).unwrap();
     let b = build_in(linear.path(), false, false).unwrap();
-    let (ia, ib) = (segments_manifest(&a).unique_indexes, segments_manifest(&b).unique_indexes);
+    let (ia, ib) = (unique_indexes(&a), unique_indexes(&b));
     assert_eq!(ia, ib);
     for index in &ia {
         for rel in index.files() {
@@ -372,8 +358,7 @@ fn refresh_digest(root: &Path, rel: &str) {
 
 /// The path of `attribute`'s first base run, prefix-relative, and on disc.
 fn first_run(root: &Path, attribute: &str) -> (String, PathBuf) {
-    let index = segments_manifest(root)
-        .unique_indexes
+    let index = unique_indexes(root)
         .into_iter()
         .find(|i| i.attribute == attribute)
         .unwrap();

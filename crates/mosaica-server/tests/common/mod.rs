@@ -324,6 +324,37 @@ pub fn copy_dir(from: &Path, to: &Path) {
     }
 }
 
+/// A built bundle's one shard, in the one partition a build writes.
+pub const SHARD: mosaica_store::ShardLayout<'static> =
+    mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO);
+
+/// The prefix `CURRENT` names in the bundle at `root`, and its directory.
+pub fn live_prefix(root: &Path) -> (String, std::path::PathBuf) {
+    let current: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).unwrap()).unwrap();
+    let prefix = current["prefix"].as_str().expect("CURRENT names a prefix").to_string();
+    let dir = root.join(&prefix);
+    (prefix, dir)
+}
+
+/// The shard record of the newest `SEGMENTS-<n>.json` in the live prefix of the bundle at `root`.
+pub fn newest_shard_record(root: &Path) -> serde_json::Value {
+    let partition = mosaica_store::layout::partition_dir(&live_prefix(root).1, "default");
+    let (_, newest) = std::fs::read_dir(&partition)
+        .expect("the partition directory")
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let n: u64 = name.strip_prefix("SEGMENTS-")?.strip_suffix(".json")?.parse().ok()?;
+            Some((n, entry.path()))
+        })
+        .max_by_key(|(n, _)| *n)
+        .expect("a side-manifest");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(newest).unwrap()).unwrap();
+    manifest["shards"]["records"][0].take()
+}
+
 static STANDARD: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();
 
 /// [`build_fixture`] of [`N_ITEMS`] into `dir`, built once per test binary and copied.
@@ -367,8 +398,8 @@ pub async fn serve_with_faults_and_config(
     (server, faults)
 }
 
-/// A build of `views` into `out` under the test identity key, writing no oracle pairs, with every other input empty. A test sets what it varies with struct update
-/// syntax.
+/// A build of `views` into `out` under the test identity key, writing no oracle pairs, with every
+/// other input empty. A test sets what it varies with struct update syntax.
 pub fn build_args(out: &Path, views: Vec<ViewArgs>) -> BuildArgs {
     BuildArgs {
         views,
@@ -378,9 +409,9 @@ pub fn build_args(out: &Path, views: Vec<ViewArgs>) -> BuildArgs {
         attribute_sources: Vec::new(),
         out: out.to_path_buf(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),

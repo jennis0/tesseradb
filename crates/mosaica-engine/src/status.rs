@@ -72,12 +72,12 @@ pub struct GenerationStatus {
     pub fragment_cache_rebuilds: u64,
 }
 
-fn live_rows_of(generation: &Generation) -> u64 {
+pub(crate) fn live_rows_of(generation: &Generation) -> u64 {
     generation
         .bundle
         .partitions
         .values()
-        .flat_map(|partition| partition.manifest.segments.iter())
+        .flat_map(|partition| partition.only_shard().record.segments.iter())
         .map(|descriptor| u64::from(descriptor.row_count))
         .sum()
 }
@@ -91,7 +91,7 @@ fn segment_counts_of(generation: &Generation) -> Vec<ViewSegments> {
         .partitions
         .iter()
         .flat_map(|(partition, data)| {
-            data.views
+            data.only_shard().views
                 .iter()
                 .map(move |(view, view_data)| ViewSegments {
                     partition: partition.clone(),
@@ -113,7 +113,7 @@ fn partition_status_of(generation: &Generation) -> Vec<PartitionStatus> {
         .map(|partition| PartitionStatus {
             partition: partition.clone(),
             segments_version: generation.segments_version,
-            watermark: generation.watermark,
+            watermark: generation.only_shard().watermark,
         })
         .collect();
     rows.sort_by(|a, b| a.partition.cmp(&b.partition));
@@ -165,9 +165,13 @@ impl Engine {
         self.counters.driven_stretches.load(Ordering::Relaxed)
     }
 
-    /// Delegates to `WritePath::allocator_high_water`, which owns the allocator.
     pub fn allocator_high_water(&self) -> u64 {
-        self.write.live().allocator_high_water()
+        self.write.live().only_shard().high_water()
+    }
+
+    /// The point shard's size: the high water an insert may not take it past.
+    pub fn shard_size(&self) -> u64 {
+        self.write.live().only_shard().size()
     }
 
     /// The figures' gauges ([`crate::figures`]). Operator plane only: a count of structures,
@@ -225,6 +229,7 @@ impl Engine {
             .set_bound_bytes(row_projection_bytes);
         self.generation
             .load()
+            .only_shard()
             .fragments
             .set_memory_bound(fragment_bytes);
     }
@@ -281,6 +286,7 @@ impl Engine {
         self.row_projection_cache.set_wait_budget_ms(wait_budget_ms);
         self.generation
             .load()
+            .only_shard()
             .fragments
             .set_wait_budget_ms(wait_budget_ms);
     }
@@ -318,20 +324,21 @@ impl Engine {
     /// in one response describe one publication.
     pub fn generation_status(&self) -> GenerationStatus {
         let generation = self.generation.load();
+        let shard = generation.only_shard();
         GenerationStatus {
             partitions: partition_status_of(&generation),
             segments: segment_counts_of(&generation),
             live_rows: live_rows_of(&generation),
-            overlay_depth: generation.overlay.len(),
-            retirable_deletions: generation.overlay.deleted_len(),
-            fragment_cache: generation.fragments.stats(),
-            fragment_cache_rebuilds: generation.fragments.rebuild_count(),
+            overlay_depth: shard.overlay.len(),
+            retirable_deletions: shard.overlay.deleted_len(),
+            fragment_cache: shard.fragments.stats(),
+            fragment_cache_rebuilds: shard.fragments.rebuild_count(),
         }
     }
 
     /// The live overlay's entry count, read off the current generation.
     pub fn overlay_depth(&self) -> usize {
-        self.generation.load().overlay.len()
+        self.generation.load().only_shard().overlay.len()
     }
 
     /// Rows the bundle's segments hold, tombstoned ones included: the only figure on
@@ -344,7 +351,7 @@ impl Engine {
     /// [`Engine::overlay_depth`]: this is what a fold can reduce, since a fold retires a
     /// suppression only of an entity it removes, which is deleted too.
     pub fn retirable_deletions(&self) -> u64 {
-        self.generation.load().overlay.deleted_len()
+        self.generation.load().only_shard().overlay.deleted_len()
     }
 
     /// The row-projection cache's operator gauges, published as `projection_cache`. The fragment
@@ -359,14 +366,18 @@ impl Engine {
     /// `canonical_key_for` and `rebuild_count`, not the whole cache: `FragmentCache::set_memory_bound`
     /// would silently undo the bound [`Self::set_cache_bounds`]'s validated caller sets.
     pub fn fragment_cache_stats(&self) -> mosaica_authz::fragment::CacheStats {
-        self.generation.load().fragments.stats()
+        self.generation.load().only_shard().fragments.stats()
     }
 
     /// Times the fragment cache has actually re-unioned postings, rather than reopening a
     /// digest-verified `.frag` sidecar or hitting the in-memory tier. Read off the live
     /// generation's cache, so this and [`Self::fragment_cache_stats`] both reset at a compaction.
     pub fn fragment_cache_rebuilds(&self) -> u64 {
-        self.generation.load().fragments.rebuild_count()
+        self.generation
+            .load()
+            .only_shard()
+            .fragments
+            .rebuild_count()
     }
 
     /// The canonical cache key for `satisfied`, at the live generation's watermark — the only way
@@ -374,16 +385,17 @@ impl Engine {
     /// reveals nothing the caller did not supply.
     pub fn fragment_canonical_key(&self, satisfied: &[TermId]) -> [u8; 32] {
         let generation = self.generation.load();
-        generation
+        let shard = generation.only_shard();
+        shard
             .fragments
-            .canonical_key_for(satisfied, generation.watermark)
+            .canonical_key_for(satisfied, shard.watermark)
     }
 
     /// Drop one entry from the fragment cache's in-memory tier; returns whether it was there. The
     /// digest-verified `.frag`/`.meta` pair stays on disk, and a live `Session` holding the fragment
     /// keeps its mapping alive regardless.
     pub fn evict_fragment(&self, key: &[u8; 32]) -> bool {
-        self.generation.load().fragments.evict(key)
+        self.generation.load().only_shard().fragments.evict(key)
     }
 
     /// Cached row-space projection slots currently held (`Building` and `Ready` both counted).
@@ -490,7 +502,7 @@ impl Engine {
     /// One past the lowest row-less entity ever allocated. Read beside the high-water mark:
     /// together they say how much of the entity space is left.
     pub fn allocator_low_water(&self) -> u64 {
-        self.write.live().allocator_low_water()
+        self.write.live().only_shard().low_water()
     }
 
     /// How many artifacts this node holds, across every layer. No per-layer form: that would be a

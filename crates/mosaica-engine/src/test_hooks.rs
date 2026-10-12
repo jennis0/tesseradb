@@ -398,7 +398,7 @@ impl Engine {
         let (bundle, rotation) = open_rotation(
             &self.bundle_root,
             prefix,
-            &self.generation.load().fragments,
+            &self.generation.load().only_shard().fragments,
             retired_bitmap,
         )?;
 
@@ -440,15 +440,10 @@ impl Engine {
         view: &str,
     ) -> Result<croaring::Bitmap> {
         let generation = self.generation.load_full();
-        let view_data = generation
-            .bundle
-            .partitions
-            .values()
-            .find_map(|partition| partition.views.get(view))
-            .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
+        let shard = generation.only_shard();
         let mut probe = crate::timing::Probe::new();
         let (geometry, _) =
-            self.session_geometry(session, &generation, view, view_data, &None, &mut probe)?;
+            self.session_geometry(session, &generation, shard, view, &None, &mut probe)?;
         Ok(geometry.projection.bitmap().clone())
     }
 
@@ -464,13 +459,13 @@ impl Engine {
         view: &str,
     ) -> Result<croaring::Bitmap> {
         let generation = self.generation.load_full();
-        let view_data = generation
-            .bundle
-            .partitions
-            .values()
-            .find_map(|partition| partition.views.get(view))
+        let shard = generation.only_shard();
+        let view_data = shard
+            .data
+            .views
+            .get(view)
             .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
-        let fragment = self.fragment_for(session, &generation)?;
+        let fragment = self.fragment_for(session, shard)?;
         let mut rows = view_data.row_space.project(&fragment.view());
         rows.run_optimize();
         Ok(rows)
@@ -504,7 +499,7 @@ impl Engine {
             &open.served,
             &registered,
             vocabulary,
-            &generation.partition_source(),
+            &open.served.shard.partition_source(),
             level,
         );
         let places = crate::derived::Placement::of_segments(&open.served.segments);

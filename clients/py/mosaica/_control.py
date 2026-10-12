@@ -230,6 +230,10 @@ class Control:
         """
         return self._send("PUT", "/control/attributes", _json(body), {"content-type": JSON})
 
+    def declare_shards(self, body: dict) -> Answer:
+        """`PUT /control/shards`: the shard's size, as `{"size": n}`."""
+        return self._send("PUT", "/control/shards", _json(body), {"content-type": JSON})
+
     def declare_vocabulary(self, name: str, body: dict) -> Answer:
         """`PUT /control/vocabularies/{name}`: the value set, with a closed set's values on it."""
         return self._send("PUT", f"/control/vocabularies/{_segment(name)}", _json(body),

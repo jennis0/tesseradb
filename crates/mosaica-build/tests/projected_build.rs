@@ -25,8 +25,6 @@ use mosaica_build::input::{read_points, PointSurvey};
 use mosaica_build::{build, BuildArgs};
 use mosaica_spatial::{fixed32, AlignedSquare, Bounds, Projection};
 use mosaica_store::read::open_bundle;
-use mosaica_types::IdentityKey;
-
 
 /// That fixture's points file, as a reader of it needs it.
 fn source<'a>(path: &'a std::path::Path, fields: &'a Fields) -> mosaica_build::input::Source<'a> {
@@ -396,7 +394,6 @@ fn build_bundle(
     extent: Bounds,
     rows: u64,
 ) -> PathBuf {
-    const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
     let pairs = tmp.join("pairs.parquet");
     write_pairs(&pairs, rows);
     let out = tmp.join("bundle");
@@ -412,23 +409,9 @@ fn build_bundle(
             select: None,
             access: mosaica_build::config::AccessInput::relation(pairs),
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources,
-        out: out.clone(),
-        limit: None,
-        strict: false,
-        identity_key: IdentityKey::from_hex(KEY_HEX).unwrap(),
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&out)
     };
     build(&args).expect("the build succeeds");
     out

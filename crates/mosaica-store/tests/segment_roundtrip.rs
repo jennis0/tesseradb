@@ -461,7 +461,6 @@ fn a_manifest_without_an_identity_object_is_a_typed_error() {
         "bundle_format": 2,
         "created_at": "2026-07-28T00:00:00Z",
         "small_term_threshold": 32,
-        "entity_id_high_water": 0,
         "views": [],
         "partitions": [],
         "files": {}
@@ -483,12 +482,10 @@ fn a_view_without_a_quantisation_extent_is_a_typed_error() {
         "created_at": "2026-08-30T00:00:00Z",
         "vocabularies": [],
         "small_term_threshold": 32,
-        "entity_id_high_water": 0,
         "identity": {
             "construction": "siphash-2-4",
             "rounds": 1,
-            "key": "0123456789abcdef0123456789abcdef",
-            "shard_id": 0
+            "key": "0123456789abcdef0123456789abcdef"
         },
         // `incarnation` is present and `quantisation` is not, so the refusal below is about the
         // frame rather than about whichever required field serde happens to reach first

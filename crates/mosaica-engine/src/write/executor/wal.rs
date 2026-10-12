@@ -195,7 +195,8 @@ impl Executor {
             );
             return;
         }
-        let reclaim_below = match generation.buffer.oldest_wal_pos() {
+        let shard = generation.only_shard();
+        let reclaim_below = match shard.buffer.oldest_wal_pos() {
             // Nothing buffered: the whole durable prefix is reclaimable.
             None => self.log.wal.position(),
             Some(Some(oldest)) => oldest,
@@ -209,12 +210,13 @@ impl Executor {
             None => reclaim_below,
         };
 
-        let snapshot = generation.overlay.snapshot();
+        let snapshot = shard.overlay.snapshot();
         match self.log.wal.rotate(&snapshot, reclaim_below) {
             Ok(deleted) => {
                 self.log.mark_rotated();
                 let freed = self
                     .live
+                    .only_shard()
                     .with_allocator(|alloc| alloc.promote(self.log.wal.retained_from()));
                 if freed > 0 {
                     tracing::info!(

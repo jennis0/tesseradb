@@ -26,7 +26,7 @@
 
 mod common;
 
-use common::held_rows_declaration;
+use common::{derived_file, held_rows_declaration};
 use std::sync::Arc;
 
 use croaring::Bitmap;
@@ -710,10 +710,9 @@ fn a_hole_is_absent_and_an_empty_projection_is_a_live_artifact() {
 fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
     let fx = build_fixture(Shape::Runs);
     let tmp = TempDir::new().unwrap();
-    std::fs::create_dir_all(tmp.path().join("partitions/default/tile-index")).unwrap();
-    let rel = "partitions/default/tile-index/tile-index-000001-000.tsti";
+    let rel = derived_file(tmp.path(), "tile-index", "tile-index-000001-000.tsti");
     let index = TileIndex::build(&fx.membership(), UNIVERSE);
-    std::fs::write(tmp.path().join(rel), index.as_bytes()).unwrap();
+    std::fs::write(tmp.path().join(&rel), index.as_bytes()).unwrap();
 
     // A coordinate that is a number rather than a zero, so *moved down* is expressible as well as
     // *moved up*.
@@ -722,7 +721,7 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
     let projected_at = store.level_version(LAYER, 0);
     let entry = |view: &str, version: u64| mosaica_store::manifest::DerivedExtent {
         incarnation: Some(0),
-        path: rel.to_string(),
+        path: rel.clone(),
         view: Some(view.to_string()),
         layer: LAYER.to_string(),
         level: 0,
@@ -815,7 +814,7 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
     // its own, which is what every request did before the fold wrote anything.
     let projections = ArtifactProjections::new(std::env::temp_dir());
     let mut missing = entry("s0", projected_at);
-    missing.path = "partitions/default/tile-index/gone.tsti".to_string();
+    missing.path = derived_file(tmp.path(), "tile-index", "gone.tsti");
     projections.adopt_indexes(tmp.path(), "v00000", &[missing], &store);
     let _ = projections.get_or_build(
         "v00000",
@@ -920,12 +919,10 @@ fn the_folds_projection_and_the_derived_index_are_the_same_column() {
 fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_one() {
     let fx = build_fixture(Shape::Partitioned);
     let tmp = TempDir::new().unwrap();
-    std::fs::create_dir_all(tmp.path().join("partitions/default/tile-index")).unwrap();
-    std::fs::create_dir_all(tmp.path().join("partitions/default/row-column")).unwrap();
-    let index_rel = "partitions/default/tile-index/tile-index-000001-000.tsti";
+    let index_rel = derived_file(tmp.path(), "tile-index", "tile-index-000001-000.tsti");
     let index = TileIndex::build(&fx.membership(), UNIVERSE);
-    std::fs::write(tmp.path().join(index_rel), index.as_bytes()).unwrap();
-    let column_rel = "partitions/default/row-column/row-column-000001-000.tsrc";
+    std::fs::write(tmp.path().join(&index_rel), index.as_bytes()).unwrap();
+    let column_rel = derived_file(tmp.path(), "row-column", "row-column-000001-000.tsrc");
     let column = RowColumn::compose(
         fx.rows().membership(),
         fx.row_space.base_rows(),
@@ -933,16 +930,15 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
         &std::env::temp_dir(),
     )
     .expect("a partitioned level composes a label column");
-    std::fs::write(tmp.path().join(column_rel), column.as_bytes()).unwrap();
-    std::fs::create_dir_all(tmp.path().join("partitions/default/row-members")).unwrap();
-    let members_rel = "partitions/default/row-members/row-members-000001-000.tsrm";
+    std::fs::write(tmp.path().join(&column_rel), column.as_bytes()).unwrap();
+    let members_rel = derived_file(tmp.path(), "row-members", "row-members-000001-000.tsrm");
     let members = mosaica_store::derived::stage_row_members(
-        &tmp.path().join(column_rel),
+        &tmp.path().join(&column_rel),
         ServingLayout::RowMajorLabel,
         tmp.path(),
     )
     .expect("the column's members are written");
-    std::fs::rename(&members, tmp.path().join(members_rel)).unwrap();
+    std::fs::rename(&members, tmp.path().join(&members_rel)).unwrap();
 
     // The level before the fold's retirement and after it: the version moved by one.
     let mut before = fx.store.clone();
@@ -953,7 +949,7 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
     later.seed_level_version(LAYER, 0, 12);
     let index_entry = |version: u64| mosaica_store::manifest::DerivedExtent {
         incarnation: Some(0),
-        path: index_rel.to_string(),
+        path: index_rel.clone(),
         view: Some("s0".to_string()),
         layer: LAYER.to_string(),
         level: 0,
@@ -962,7 +958,7 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
     };
     let column_entry = |version: u64| mosaica_store::manifest::DerivedExtent {
         incarnation: Some(0),
-        path: column_rel.to_string(),
+        path: column_rel.clone(),
         view: Some("s0".to_string()),
         layer: LAYER.to_string(),
         level: 0,
@@ -973,7 +969,7 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
     };
     let members_entry = |version: u64| mosaica_store::manifest::DerivedExtent {
         incarnation: Some(0),
-        path: members_rel.to_string(),
+        path: members_rel.clone(),
         view: Some("s0".to_string()),
         layer: LAYER.to_string(),
         level: 0,

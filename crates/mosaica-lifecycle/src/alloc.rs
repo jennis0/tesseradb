@@ -1,9 +1,8 @@
 //! The entity-ID allocator, seeded from durable state at boot.
 //!
-//! `Allocator::new` is always seeded from `max(manifest_hw, replayed rows/leases)`: the highest
-//! entity ID any durable artefact (bundle manifest, or a replayed WAL row/lease) has ever claimed.
-//! Above that mark no id has been issued, and as long as the seed never goes backwards across a
-//! restart, no id above it is handed out twice.
+//! `Allocator::new` is seeded from `max(the shard record's high_water, replayed rows)`: the highest
+//! entity ID any durable record has claimed. Above that mark no id has been issued, and as long as
+//! the seed never goes backwards across a restart, no id above it is handed out twice.
 //!
 //! ## Freed ids
 //!
@@ -39,8 +38,9 @@
 //!
 //! Points are allocated **upward from 0**. Row-less entities — an artifact, and the entity a layer
 //! takes so that layer suppression can ride the deny lane — are allocated **downward from the
-//! top**. Both marks live in this one struct, and **exhaustion is the two marks meeting**, which is the
-//! true condition where a fixed ceiling per region would be a guess about the split.
+//! top**. Both marks live in this one struct, and **exhaustion is the two marks meeting**, or the
+//! high water reaching the shard's size. Meeting is the true condition where a fixed ceiling per
+//! region would be a guess about the split.
 //!
 //! **The reason is not identifier supply, which is where a reader looks first.** Three structures
 //! size themselves over entity *ranges* rather than entity counts: a flush or merge segment's row
@@ -57,8 +57,7 @@
 //!
 //! **The downward mark is durable on the same terms as the upward one** and must be, or a rotation
 //! and restart can re-issue a row-less id to a point: two entities, one `mosaica_id`. See
-//! [`low_water_from`], which is [`high_water_from`]'s mirror, and `allocator_floor`'s companion
-//! [`allocator_ceiling`].
+//! [`low_water_from`], which is [`high_water_from`]'s mirror, and [`allocator_ceiling`].
 //!
 //! `mosaica_lifecycle::buffer` already allocates term-extension ids downward from `u32::MAX` on the
 //! same argument in a different space; this is that pattern applied to a second population.
@@ -68,7 +67,7 @@ use std::ops::Range;
 
 use croaring::Bitmap;
 use mosaica_types::layer::RESERVED_BLOCK;
-use mosaica_types::{EntityId, Tenancy, TermId};
+use mosaica_types::{check_room, EntityId, ShardFull, Tenancy, TermId};
 
 use crate::wal::WalRecord;
 
@@ -89,9 +88,11 @@ pub use mosaica_types::layer::ROWLESS_CEILING;
 /// nor [`Allocator::allocate_rowless`] moves its mark on the error path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllocError {
-    /// Issuing the requested range would carry the point region's mark into the row-less region's,
-    /// or past [`ENTITY_ID_CEILING`] when nothing row-less has been allocated. Both marks are
-    /// reported because "how much is left" is the gap between them and neither alone says it.
+    /// [`Allocator::room`]'s refusal.
+    Full(ShardFull),
+    /// Issuing the requested row-less run would carry the row-less mark into the point region.
+    /// Both marks are reported because "how much is left" is the gap between them and neither
+    /// alone says it.
     Exhausted { high_water: u64, low_water: u64 },
     /// The seeds already meet or cross — caught at open rather than at the first allocation, so a
     /// corrupt or hand-edited manifest mark fails closed immediately instead of silently colliding.
@@ -101,6 +102,7 @@ pub enum AllocError {
 impl std::fmt::Display for AllocError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            AllocError::Full(full) => full.fmt(f),
             AllocError::Exhausted {
                 high_water,
                 low_water,
@@ -185,6 +187,8 @@ pub struct Allocation {
 pub struct Allocator {
     high_water: u64,
     low_water: u64,
+    /// The shard's size, which `high_water` may not pass.
+    size: u64,
     /// Freed point ids, issued before any id from `high_water` (module doc).
     free: ByTenancy,
     /// Freed point ids held back until the log keeps no record older than the position beside
@@ -203,14 +207,43 @@ impl Allocator {
 
     /// [`Allocator::new`] with both marks supplied, for a restart that has recovered a row-less
     /// allocation. `low_water` is the lowest row-less id ever issued, or [`ROWLESS_CEILING`] if
-    /// none has been.
+    /// none has been. No size bounds it until [`Allocator::set_size`] gives one.
     pub fn with_marks(high_water: u64, low_water: u64) -> Self {
         Allocator {
             high_water,
             low_water,
+            size: u64::MAX,
             free: ByTenancy::new(),
             held: Vec::new(),
         }
+    }
+
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// Set the shard's size. The caller checks it against [`Allocator::high_water`] with
+    /// [`mosaica_types::check_shard_size`].
+    pub fn set_size(&mut self, size: u64) {
+        self.size = size;
+    }
+
+    /// How many of a window's `edits` and `items` take a freed id, in [`Allocator::allocate`]'s
+    /// order: an edit takes one at tenancy 0, and a new item one at any tenancy that is left.
+    fn reused(&self, edits: u64, items: u64) -> (u64, u64) {
+        let at_zero = self.free.get(&Tenancy::ZERO).map_or(0, Bitmap::cardinality);
+        let edits_reused = edits.min(at_zero);
+        let items_reused = items.min(cardinality_of(&self.free) - edits_reused);
+        (edits_reused, items_reused)
+    }
+
+    /// Whether a window of `edits` edits and `items` new items fits: the ids it takes from the
+    /// high water, after the freed ids, may pass neither the size nor the row-less mark. Held ids
+    /// are not counted.
+    pub fn room(&self, edits: u64, items: u64) -> Result<(), ShardFull> {
+        let (edits_reused, items_reused) = self.reused(edits, items);
+        let needed = (edits - edits_reused) + (items - items_reused);
+        check_room(self.size, self.low_water, self.high_water, needed)
     }
 
     /// [`Allocator::new`], refusing a seed that already meets the row-less mark — the check that
@@ -233,22 +266,13 @@ impl Allocator {
 
     /// Allocates **point** entity IDs for a commit window's `edits` new entities and its `items`
     /// new items, in the order the module doc gives. The high-water advances past every id it
-    /// gives. Refuses, leaving the allocator unchanged, if the ids from the high-water would reach
-    /// the row-less region: an allocation that overran it would put two entities on one
-    /// `mosaica_id`.
+    /// gives. Refuses, leaving the allocator unchanged, where [`Allocator::room`] does.
     pub fn allocate(&mut self, edits: u64, items: u64) -> Result<Allocation, AllocError> {
-        let at_zero = self.free.get(&Tenancy::ZERO).map_or(0, Bitmap::cardinality);
-        let edits_reused = edits.min(at_zero);
-        let items_reused = items.min(cardinality_of(&self.free) - edits_reused);
+        self.room(edits, items).map_err(AllocError::Full)?;
+        let (edits_reused, items_reused) = self.reused(edits, items);
         let lo = self.high_water;
         let mid = lo + (edits - edits_reused);
         let hi = mid + (items - items_reused);
-        if hi > self.low_water {
-            return Err(AllocError::Exhausted {
-                high_water: lo,
-                low_water: self.low_water,
-            });
-        }
         let mut allocation = Allocation {
             edits: take_lowest(&mut self.free, Tenancy::ZERO, edits_reused),
             items: Vec::with_capacity(items as usize),
@@ -385,7 +409,8 @@ impl Allocator {
 /// seeding contract — callers should rebuild with
 /// `Allocator::new(manifest_hw.max(high_water_from(&replayed)))` rather than carrying a
 /// pre-crash `Allocator::high_water()` value across a restart, since the allocator itself does
-/// not persist: only what actually made it into the WAL (or the bundle manifest) did.
+/// not persist: only what actually made it into the WAL (or the shard record in a side-manifest)
+/// did.
 pub fn high_water_from<'r>(records: impl IntoIterator<Item = &'r WalRecord>) -> u64 {
     let mut hw = 0u64;
     for rec in records {
@@ -404,9 +429,8 @@ pub fn high_water_from<'r>(records: impl IntoIterator<Item = &'r WalRecord>) -> 
             // An overlay snapshot names entities that were certainly allocated, so it raises the
             // floor — but only for entities something has *denied*, which is a weak bound and not
             // the mechanism. Rotation deletes the `IngestBatch` records this function really
-            // derives from; what replaces them is the side-manifest's own `entity_id_high_water`,
-            // refreshed at every flush publication — never the build `MANIFEST.json`, which would
-            // reallocate every flushed entity id and violate I9.
+            // derives from; what replaces them is the shard record's `high_water` in the
+            // side-manifest, refreshed at every publication.
             WalRecord::OverlaySnapshot { entries } => {
                 for entry in entries {
                     let candidate = entry.entity_id.raw() + 1;
@@ -436,7 +460,8 @@ pub fn high_water_from<'r>(records: impl IntoIterator<Item = &'r WalRecord>) -> 
             | WalRecord::UniqueDeclare { .. }
             | WalRecord::VocabularyDeclare { .. }
             | WalRecord::ViewGroupCreate { .. }
-            | WalRecord::PlainViewCreate { .. } => {}
+            | WalRecord::PlainViewCreate { .. }
+            | WalRecord::ShardsDeclare { .. } => {}
         }
     }
     hw
@@ -547,37 +572,13 @@ pub fn low_water_from<'r>(records: impl IntoIterator<Item = &'r WalRecord>) -> u
 /// The ceiling a restart seeds its row-less mark from: the lowest of everything durable that could
 /// name an allocated row-less id.
 ///
-/// [`allocator_floor`]'s mirror, and it takes the **minimum** where that one takes the maximum —
-/// the two regions grow towards each other, so "furthest along" is downward here. The same three
-/// homes apply: the bundle manifest, every side manifest, and the WAL term that rotation reclaims
-/// ([`low_water_from`]), and only the combination is correct.
-pub fn allocator_ceiling(bundle_low_water: u64, side_manifest_low_waters: &[u64]) -> u64 {
+/// The homes are every side-manifest and the WAL term that rotation reclaims ([`low_water_from`]),
+/// and only the combination is correct.
+pub fn allocator_ceiling(side_manifest_low_waters: &[u64]) -> u64 {
     side_manifest_low_waters
         .iter()
         .copied()
-        .fold(bundle_low_water, u64::min)
-}
-
-/// The floor a restart seeds its allocator from: the highest of everything durable that could
-/// name an allocated id.
-///
-/// **This exists as a function because the fold makes the two manifest values disagree on
-/// purpose, and the safety of that is a property of this expression rather than of either
-/// writer.** `publish_fold` lowers `MANIFEST.json`'s `entity_id_high_water` to the *snapshot's*
-/// entity bound — it has a second reader, the base locator's declared length, for which a live
-/// value would claim every post-snapshot entity — and writes the live value into
-/// `SEGMENTS-<n>.json` instead. Either field read alone therefore reissues ids: the bundle's
-/// because the fold lowered it, the side-manifest's because a build writes none. Only the `max`
-/// is correct, and a change on either side has to re-check it here (compaction §12's obligation
-/// 10, and `write.rs`'s note at the fold's manifest assembly).
-///
-/// The WAL term is the third home and the one rotation reclaims, which is why it cannot stand
-/// alone either: see [`high_water_from`].
-pub fn allocator_floor(bundle_high_water: u64, side_manifest_high_waters: &[u64]) -> u64 {
-    side_manifest_high_waters
-        .iter()
-        .copied()
-        .fold(bundle_high_water, u64::max)
+        .fold(ROWLESS_CEILING, u64::min)
 }
 
 /// One item awaiting entity-ID assignment at serve time (append ingest).
@@ -614,9 +615,7 @@ fn signature_sort_key(terms: &[TermId]) -> Vec<u32> {
 /// identical signatures take adjacent ids from the high-water, which is what makes their postings
 /// compress as runs; freed ids come first and scatter among other signatures' runs.
 ///
-/// Fallible: propagates [`AllocError::Exhausted`] from the underlying
-/// `Allocator::allocate` rather than swallowing it — a batch that would exhaust the entity-ID
-/// space has no effect, exactly as `allocate` leaves the allocator unchanged on that error.
+/// Fails, leaving the allocator unchanged, where [`Allocator::allocate`] does.
 pub fn assign_sorted(items: &mut [PendingItem], alloc: &mut Allocator) -> Result<(), AllocError> {
     // Compute each item's signature sort key once, up front, rather than inside
     // the comparator — `sort_by`'s comparator can be called O(n log n) times, and
@@ -735,10 +734,7 @@ mod tests {
         alloc.release_after(0, at(0, &[5]));
         alloc.release_after(0, at(4, &[3]));
         alloc.promote(0);
-        assert!(matches!(
-            alloc.allocate(1, 3),
-            Err(AllocError::Exhausted { .. })
-        ));
+        assert!(matches!(alloc.allocate(1, 3), Err(AllocError::Full(_))));
         assert_eq!(listed(alloc.free()), vec![(0, vec![5]), (4, vec![3])]);
         assert_eq!(alloc.high_water(), ROWLESS_CEILING - 1);
         let given = alloc.allocate(1, 2).unwrap();
@@ -746,6 +742,52 @@ mod tests {
             (given.edits, given.items),
             (vec![5], vec![3, ROWLESS_CEILING - 1])
         );
+    }
+
+    #[test]
+    fn freed_ids_come_before_the_size_and_held_ids_do_not() {
+        let mut alloc = Allocator::new(8);
+        alloc.set_size(10);
+        alloc.release_after(1, at(0, &[2]));
+        alloc.release_after(1, at(1, &[3]));
+        alloc.release_after(5, at(0, &[4]));
+        alloc.promote(1);
+        let full = |needed| {
+            Err(ShardFull {
+                limit: mosaica_types::ShardLimit::Size(10),
+                high_water: 8,
+                needed,
+            })
+        };
+        assert_eq!(
+            alloc.room(1, 3),
+            Ok(()),
+            "the edit takes 2, two items take 3 and 8, and one 9"
+        );
+        assert_eq!(alloc.room(1, 4), full(3), "the held 4 is not counted");
+        assert_eq!(alloc.room(3, 0), Ok(()));
+        assert_eq!(
+            alloc.room(4, 0),
+            full(3),
+            "an edit takes no id above tenancy 0"
+        );
+        assert_eq!(
+            alloc.allocate(1, 4),
+            Err(AllocError::Full(full(3).unwrap_err()))
+        );
+        assert_eq!(alloc.high_water(), 8, "a refused window takes nothing");
+        assert_eq!(listed(alloc.free()), vec![(0, vec![2]), (1, vec![3])]);
+        let given = alloc.allocate(1, 3).unwrap();
+        assert_eq!((given.edits, given.items), (vec![2], vec![3, 8, 9]));
+        assert_eq!(
+            alloc.room(0, 1),
+            full(1).map_err(|f| ShardFull {
+                high_water: 10,
+                ..f
+            })
+        );
+        alloc.set_size(11);
+        assert_eq!(alloc.allocate(0, 1).unwrap().items, vec![10]);
     }
 
     #[test]
@@ -787,10 +829,7 @@ mod tests {
         // would share a mosaica_id and `invert` would return the WRONG one.
         let mut a = Allocator::new(ROWLESS_CEILING - 2);
         assert!(a.allocate(0, 1).is_ok());
-        assert!(matches!(
-            a.allocate(5, 5),
-            Err(AllocError::Exhausted { .. })
-        ));
+        assert!(matches!(a.allocate(5, 5), Err(AllocError::Full(_))));
         // The failed call must not have moved the high-water mark (the batch has no effect).
         assert_eq!(a.high_water(), ROWLESS_CEILING - 1);
 
@@ -845,19 +884,16 @@ mod tests {
             Err(AllocError::Exhausted { .. })
         ));
 
-        // Upward: the same wall, met from the other side, and the refusal reports both marks so
-        // "how much is left" is answerable from the error alone.
+        // Upward: the same wall from the other side.
         assert!(a.allocate(0, RESERVED_BLOCK).is_ok());
-        match a.allocate(0, 1) {
-            Err(AllocError::Exhausted {
-                high_water,
-                low_water,
-            }) => {
-                assert_eq!(high_water, ROWLESS_CEILING);
-                assert_eq!(low_water, ROWLESS_CEILING);
-            }
-            other => panic!("expected exhaustion, got {other:?}"),
-        }
+        assert_eq!(
+            a.allocate(0, 1),
+            Err(AllocError::Full(ShardFull {
+                limit: mosaica_types::ShardLimit::End(ROWLESS_CEILING),
+                high_water: ROWLESS_CEILING,
+                needed: 1,
+            }))
+        );
 
         // And a request whose *width* overflows a u64 is refused rather than wrapping into a run
         // that looks valid.
@@ -959,13 +995,10 @@ mod tests {
     }
 
     #[test]
-    fn allocator_ceiling_takes_the_minimum_where_the_floor_takes_the_maximum() {
-        // The two regions grow towards each other, so "furthest along" is downward here. Reading
-        // either mark from one home alone reissues ids, which is why both functions exist.
-        assert_eq!(allocator_floor(10, &[7, 42, 3]), 42);
-        assert_eq!(allocator_ceiling(ROWLESS_CEILING, &[]), ROWLESS_CEILING);
+    fn allocator_ceiling_takes_the_minimum() {
+        assert_eq!(allocator_ceiling(&[]), ROWLESS_CEILING);
         assert_eq!(
-            allocator_ceiling(ROWLESS_CEILING, &[ROWLESS_CEILING - 8, ROWLESS_CEILING - 2]),
+            allocator_ceiling(&[ROWLESS_CEILING - 8, ROWLESS_CEILING - 2]),
             ROWLESS_CEILING - 8
         );
     }

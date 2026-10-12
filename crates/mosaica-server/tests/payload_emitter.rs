@@ -20,8 +20,8 @@ use tempfile::TempDir;
 /// every object below is one the running service created from a payload.
 const ITEMS: u64 = 64;
 
-/// The declaration these tests post: two plain views, a view group, two vocabularies (one with
-/// inline values), three attributes and one layer.
+/// The declaration these tests post: a shard size, two plain views, a view group, two
+/// vocabularies (one with inline values), three attributes and one layer.
 ///
 /// **No `render` and no `auto`** — both are emitted as declared and both are refused at a running
 /// service, which [`the_route_refuses_render_naming_the_key`] pins separately. Everything else here
@@ -36,6 +36,9 @@ shapes  = "shapes.parquet"
 [defaults]
 source          = "points"
 allocation_view = "atlas"
+
+[shards]
+size = 4096
 
 [[view]]
 name             = "atlas"
@@ -161,6 +164,9 @@ async fn every_emitted_body_is_taken_by_its_route() {
     let served = Served::build(|dir| build_fixture(dir, ITEMS)).await;
     let dir = TempDir::new().unwrap();
     let payloads = payloads(dir.path(), DECLARATION);
+
+    let (status, answer) = put(&served, "/control/shards", &payloads["shards"]).await;
+    accepted(status, &answer, "shards");
 
     for entry in payloads["vocabularies"].as_array().unwrap() {
         let name = entry["name"].as_str().unwrap();

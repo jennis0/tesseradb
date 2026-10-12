@@ -182,8 +182,10 @@ impl CoalescePlan {
 pub(crate) struct CoalesceContext {
     pub(crate) prefix_dir: PathBuf,
     pub(crate) prefix: String,
-    /// Where this pass writes, prefix-relative. Never reused: two passes writing one path would
-    /// truncate files the other has memory-mapped.
+    /// The pass's id, which names its dictionary extent's directory. Never reused: two passes
+    /// writing one path would truncate files the other has memory-mapped.
+    pub(crate) id: String,
+    /// `<shard>/coalesced/<id>`: where the pass writes all but its dictionary extent.
     pub(crate) out_rel: String,
 }
 

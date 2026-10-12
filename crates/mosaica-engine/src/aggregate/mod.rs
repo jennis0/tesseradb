@@ -486,6 +486,7 @@ impl Engine {
             _ => None,
         }) {
             generation
+                .only_shard()
                 .filter_columns
                 .admit(expr, true, &reaches)
                 .map_err(filter_refusal)?;
@@ -557,7 +558,7 @@ impl Engine {
                 open => open?,
             };
             let composing = Instant::now();
-            let sets = match set::compose(self, &open, &generation, req, planned.prefer_row) {
+            let sets = match set::compose(self, &open, req, planned.prefer_row) {
                 Err(EngineError::Cancelled) => break ResponseEndedBy::Deadline,
                 sets => sets?,
             };
@@ -575,7 +576,7 @@ impl Engine {
             }
             let stamp = (
                 generation.segments_version,
-                generation.overlay_version,
+                open.served.shard.overlay_version,
                 open.geometry.fragment.watermark,
             );
             if position.stamp.is_some_and(|held| held != stamp) {

@@ -81,82 +81,36 @@ impl Fixture {
         self.root.join(&engine.generation().prefix)
     }
 
+    /// The files with extension `ext` under derived `kind` in the prefix now being served.
+    fn files(&self, engine: &Engine, kind: &str, ext: &str) -> Vec<std::path::PathBuf> {
+        live_shard_files(&self.root, engine, kind)
+            .into_iter()
+            .filter(|p| p.extension().is_some_and(|e| e == ext))
+            .collect()
+    }
+
     /// The containment partitions the fold wrote into the prefix now being served.
     fn containment_files(&self, engine: &Engine) -> Vec<std::path::PathBuf> {
-        let dir = self
-            .live_prefix(engine)
-            .join("partitions")
-            .join("default")
-            .join("containment");
-        std::fs::read_dir(&dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e == "tscp"))
-            .collect()
+        self.files(engine, "containment", "tscp")
     }
 
     /// The tile-index extent columns the fold wrote into the prefix now being served — one per
     /// `(view, layer, level)`, because an extent is a pair of rows and a row space is per view.
     fn tile_index_files(&self, engine: &Engine) -> Vec<std::path::PathBuf> {
-        let dir = self
-            .live_prefix(engine)
-            .join("partitions")
-            .join("default")
-            .join("tile-index");
-        std::fs::read_dir(&dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e == "tsti"))
-            .collect()
+        self.files(engine, "tile-index", "tsti")
     }
 
     fn membership_files(&self, engine: &Engine) -> Vec<std::path::PathBuf> {
-        let dir = self
-            .live_prefix(engine)
-            .join("partitions")
-            .join("default")
-            .join("members");
-        std::fs::read_dir(&dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e == "tsmb"))
-            .collect()
+        self.files(engine, "members", "tsmb")
     }
 
-    /// The `level_versions` the newest side manifest of the live prefix states, as
-    /// `(layer, level, version)`.
-    fn stated_level_versions(&self, engine: &Engine) -> Vec<(String, u32, u64)> {
-        let dir = self.live_prefix(engine).join("partitions").join("default");
-        let newest = std::fs::read_dir(&dir)
-            .expect("the partition directory exists")
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("SEGMENTS-") && n.ends_with(".json"))
-            })
-            .max()
-            .expect("the live prefix carries a side manifest");
-        let json: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(newest).unwrap()).unwrap();
-        json["level_versions"]
-            .as_array()
-            .expect("level_versions is a list")
+    /// The `level_versions` the served side manifest states, as `(layer, level, version)`.
+    fn stated_level_versions(&self) -> Vec<(String, u32, u64)> {
+        side_manifest(&self.root)
+            .only_shard()
+            .level_versions
             .iter()
-            .map(|v| {
-                (
-                    v["layer"].as_str().unwrap().to_string(),
-                    v["level"].as_u64().unwrap() as u32,
-                    v["version"].as_u64().unwrap(),
-                )
-            })
+            .map(|v| (v.layer.clone(), v.level, v.version))
             .collect()
     }
 }
@@ -449,7 +403,7 @@ fn a_fold_that_retires_a_member_names_no_partition_for_that_level() {
         "the fold retired a member of this level, so it wrote no partition for it"
     );
     assert!(
-        fx.stated_level_versions(&engine)
+        fx.stated_level_versions()
             .iter()
             .any(|(layer, level, _)| layer == "clusters/a" && *level == 0),
         "and it states the level's version, so a restart seeds the level at the version the \
@@ -580,14 +534,14 @@ fn a_fold_that_retires_a_member_writes_the_tile_index_the_publication_adopts() {
         1,
         "the request read the warmed form"
     );
-    let stated_after_retiring = fx.stated_level_versions(&engine);
+    let stated_after_retiring = fx.stated_level_versions();
 
     // The stamped version is the one the level actually has once the retirement has run: a
     // second fold, which retires nothing, states the store's own version for the level, and it
     // is the same number.
     fold(&engine);
     assert_eq!(
-        fx.stated_level_versions(&engine),
+        fx.stated_level_versions(),
         stated_after_retiring,
         "the first fold stated the version the level had after its retirement"
     );

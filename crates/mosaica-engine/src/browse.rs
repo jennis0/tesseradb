@@ -53,7 +53,6 @@ use mosaica_types::layer::{HierarchyKind, RegisteredLayer};
 use mosaica_types::{EntityId, MosaicaId};
 
 use crate::artifacts::{ArtifactVerdict, ArtifactView};
-use crate::compose::compose;
 use crate::compose::EffectiveMask;
 use crate::error::Result;
 use crate::filter::FilterExpr;
@@ -247,16 +246,16 @@ impl crate::Engine {
             .bundle
             .partitions
             .values()
-            .filter(|partition| partition.views.contains_key(view))
+            .filter(|partition| partition.only_shard().views.contains_key(view))
             .count();
         if carriers > 1 {
             return Err(EngineError::MultiPartitionView(view.to_string()));
         }
-        let view_data = generation
-            .bundle
-            .partitions
-            .values()
-            .find_map(|partition| partition.views.get(view))
+        let shard = generation.only_shard();
+        let view_data = shard
+            .data
+            .views
+            .get(view)
             .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
 
         // **The layer, resolved through the principal's own reachable set** — one probe for a
@@ -284,7 +283,7 @@ impl crate::Engine {
             })
         };
         let layer = self
-            .readable_layer(session, &generation, req.layer, view)
+            .readable_layer(session, shard, req.layer, view)
             .map_err(refused)?;
         if !layer.declaration.depends_on.is_empty() {
             return Err(EngineError::BrowseRefused(BrowseRefused::AttachedLayer(
@@ -307,25 +306,15 @@ impl crate::Engine {
         // so that a stage field arriving here is a change to this line and not to a discard.
         let mut _probe = crate::timing::Probe::new();
         let (geometry, key) =
-            self.session_geometry(session, &generation, view, view_data, &None, &mut _probe)?;
-        let denied = generation
-            .denied()
-            .get(view)
-            .ok_or_else(|| EngineError::DenyMaskMissing {
-                view: view.to_string(),
-            })?;
-        let mask = compose(
-            session.satisfied(),
-            &generation.overlay,
-            &generation.buffer,
-            Arc::clone(&geometry.projection),
-            &view_data.row_space,
-            denied,
-            generation.buffered_rows(view),
-        );
+            self.session_geometry(session, &generation, shard, view, &None, &mut _probe)?;
+        let denied = shard.denied_in(view)?;
+        let projection = Arc::clone(&geometry.projection);
+        let mask =
+            shard.compose(session.satisfied(), projection, view, &view_data.row_space, denied);
         let served_view = crate::viewport::ServedView {
             session,
             generation: &generation,
+            shard,
             name: view,
             data: view_data,
             segments: segments_with_row_bases(view, view_data)?,
@@ -333,6 +322,7 @@ impl crate::Engine {
             mask_identity: self.mask_identity(
                 session,
                 &generation,
+                shard,
                 &geometry,
                 key.segments_version,
             ),
@@ -362,7 +352,6 @@ impl crate::Engine {
         let mut names: HashMap<(u32, u32), Option<String>> = HashMap::new();
         let mut keys: HashMap<(u32, u32), Option<String>> = HashMap::new();
         let mut filtered: HashMap<(u32, u32), u64> = HashMap::new();
-        let shard = generation.bundle.manifest.identity.shard_id;
         for (walked, runs) in layer.runs.iter().enumerate() {
             let walked = walked as u32;
             let mut level_read = self.read_level(&served_view, &mask, &layer, walked, false)?;
@@ -380,15 +369,14 @@ impl crate::Engine {
                 else {
                     continue;
                 };
-                let Some(mosaica_id) = self.artifact_id(shard, entity) else {
+                let Some(mosaica_id) = self.artifact_id(entity) else {
                     continue;
                 };
                 // Content decides servability as well as text: a viewer containing no content's
                 // generating set receives no artifact at all rather than one with its description
                 // missing (decision 0076), which is why this runs inside the gate and not beside
                 // the row build.
-                let Some(content) =
-                    level_read.content(self, &generation, &layer, ordinal, entity, rank)
+                let Some(content) = level_read.content(self, shard, &layer, ordinal, entity, rank)
                 else {
                     continue;
                 };
@@ -726,7 +714,7 @@ impl<'a, 'c> Namer<'a, 'c> {
 
     fn attached_name(&self, level: u32, ordinal: u32) -> Option<String> {
         let (engine, served, mask) = (self.engine, self.served, self.mask);
-        let generation = served.generation;
+        let shard = served.shard;
         let target_layer = self.layer.declaration.name.as_str();
         let target = self.layer.runs[level as usize]
             .entity_of(u64::from(ordinal))
@@ -736,7 +724,7 @@ impl<'a, 'c> Namer<'a, 'c> {
                 .names()
                 .filter_map(|name| {
                     engine
-                        .readable_layer(served.session, generation, name, served.name)
+                        .readable_layer(served.session, shard, name, served.name)
                         .ok()
                 })
                 .filter(|label| {
@@ -809,8 +797,7 @@ impl<'a, 'c> Namer<'a, 'c> {
                         let ArtifactVerdict::Serve { rank, .. } = view.verdict(entity, at) else {
                             return None;
                         };
-                        read.content(engine, generation, label, at, entity, rank)?
-                            .name()
+                        read.content(engine, shard, label, at, entity, rank)?.name()
                     })
                 })
             })

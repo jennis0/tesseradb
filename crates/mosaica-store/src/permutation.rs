@@ -1491,7 +1491,7 @@ impl SegmentExtent {
         entity_hi: u64,
         row_base: u32,
         key: &mosaica_types::IdentityKey,
-        shard_id: u32,
+        shard: mosaica_types::ShardId,
     ) -> Result<Self> {
         let (seg_id, mosaica_ids) = (segment.seg_id.as_str(), segment.columns.mosaica_id());
         let mut entities = Vec::with_capacity(mosaica_ids.len());
@@ -1501,7 +1501,7 @@ impl SegmentExtent {
             // past it would put a row under an entity id that names a different item.
             let entity = segment
                 .entities
-                .entity_of(local as u32, raw, key, shard_id, seg_id)?;
+                .entity_of(local as u32, raw, key, shard, seg_id)?;
             entities.push(entity.raw());
         }
         // The same check `with_extent` applies to an extent arriving from a flush, applied here
@@ -2313,10 +2313,10 @@ impl RowSpace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mosaica_types::EntityId;
     use rand::rngs::StdRng;
     use rand::seq::SliceRandom;
     use rand::{Rng, SeedableRng};
-    use mosaica_types::EntityId;
 
     /// A permutation over `bound` entity slots in which each entity holds a row with probability
     /// `density`, in an order the seed decides — written through the real writer and read back

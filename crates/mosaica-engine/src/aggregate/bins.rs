@@ -184,7 +184,11 @@ impl Numbers {
             return Err(refused(AggregateRefused::BinsOnBool(column.to_string())));
         }
         let kind = Kind::of(ty).filter(|_| !vocabulary).ok_or_else(unfit)?;
-        let held = generation.filter_columns.value_layers(column).is_some();
+        let held = generation
+            .only_shard()
+            .filter_columns
+            .value_layers(column)
+            .is_some();
         let drawn = manifest
             .render_scalars()
             .any(|scalar| scalar.name == column);
@@ -584,7 +588,9 @@ impl Numbers {
         empty: impl Fn() -> T + Sync + Send,
     ) -> (T, u64) {
         let layers = cx
-            .generation
+            .open
+            .served
+            .shard
             .filter_columns
             .value_layers(&self.column)
             .expect("a held field has value layers");
@@ -618,7 +624,7 @@ impl Numbers {
             .reduce(|| (empty(), 0), |(a, m), (b, n)| (a.merge(b), m + n));
         crate::categories::buffered_values(
             &cx.generation.bundle.manifest,
-            &cx.generation.buffer,
+            &cx.open.served.shard.buffer,
             &self.column,
             &mut |entity, value| {
                 if !entities.contains(entity) || matches!(value, WalScalar::Null) {

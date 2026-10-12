@@ -165,7 +165,7 @@ fn an_accepted_deny_moves_no_geometry() {
 
     let after = engine.generation();
     assert!(
-        after.overlay_version > before.overlay_version,
+        after.only_shard().overlay_version > before.only_shard().overlay_version,
         "the deny is in force"
     );
     assert_eq!(
@@ -240,6 +240,7 @@ fn a_deny_only_node_rotates_at_the_tick_and_the_suppression_survives_restart() {
     assert!(
         reopened
             .generation()
+            .only_shard()
             .overlay
             .is_suppressed(EntityId::new(entity)),
         "the suppression must survive the rotation it was reclaimed under"
@@ -428,16 +429,9 @@ fn a_retry_that_finds_nothing_to_flush_still_reaches_the_promised_number() {
 fn segments_dir(root: &std::path::Path, view: &str) -> std::path::PathBuf {
     let current: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(root.join("CURRENT")).unwrap()).unwrap();
-    let partitions = root
-        .join(current["prefix"].as_str().unwrap())
-        .join("partitions");
-    let partition = std::fs::read_dir(&partitions)
-        .unwrap()
-        .next()
-        .expect("the bundle has a partition")
-        .unwrap()
-        .path();
-    mosaica_store::view_path(&partition, view).join("segments")
+    root.join(current["prefix"].as_str().unwrap())
+        .join(common::SHARD.view_rel(view))
+        .join("segments")
 }
 
 /// Whether a full-coverage viewer is served `entity`, ingested at (0.5, 0.5), in `view`.

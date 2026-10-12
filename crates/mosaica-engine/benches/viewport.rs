@@ -89,9 +89,9 @@ fn ensure_bundle() -> PathBuf {
             attribute_sources: Vec::new(),
             out: bundle_root.clone(),
             limit: Some(ITEM_LIMIT),
+            shard_size: None,
             strict: false,
             identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-            shard_id: 0,
             layers: Vec::new(),
             layer_inputs: Vec::new(),
             scoped_layers: Default::default(),
@@ -113,9 +113,14 @@ fn first_dictionary_descriptor(bundle_root: &Path) -> String {
     String::from_utf8(data[4..4 + len].to_vec()).unwrap()
 }
 
+fn postings_path(bundle_root: &Path) -> PathBuf {
+    let layout = mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO);
+    bundle_root.join("v00000").join(layout.postings_rel())
+}
+
 fn bench_fragment_build(c: &mut Criterion) {
     let bundle_root = ensure_bundle();
-    let postings_path = bundle_root.join("v00000/partitions/default/terms/postings.arrow");
+    let postings_path = postings_path(&bundle_root);
     let postings = PostingsReader::open(&postings_path, true).expect("postings should open");
     let vocab = postings.term_count();
 
@@ -132,7 +137,7 @@ fn bench_fragment_build(c: &mut Criterion) {
 
 fn bench_compose(c: &mut Criterion) {
     let bundle_root = ensure_bundle();
-    let postings_path = bundle_root.join("v00000/partitions/default/terms/postings.arrow");
+    let postings_path = postings_path(&bundle_root);
     let postings = PostingsReader::open(&postings_path, true).expect("postings should open");
     let vocab = postings.term_count();
     let terms: Vec<TermId> = (0..vocab.min(1000)).map(TermId::new).collect();
@@ -144,7 +149,7 @@ fn bench_compose(c: &mut Criterion) {
         .expect("fragment build should succeed");
 
     let bundle = open_bundle(&bundle_root).expect("bundle should open");
-    let view = &bundle.partitions["default"].views["s0"];
+    let view = &bundle.only_shard().views["s0"];
     let base = Arc::new(RowProjection::walk(&fragment, &view.row_space));
 
     let satisfied: rustc_hash::FxHashSet<TermId> = terms.iter().copied().collect();

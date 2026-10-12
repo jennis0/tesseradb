@@ -16,7 +16,7 @@ mod common;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{Float64Array, StringArray, UInt64Array};
@@ -132,9 +132,9 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
         attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -196,13 +196,11 @@ fn ingest_and_flush(engine: &Engine, root: &Path) -> Vec<EntityId> {
     }
 }
 
-fn partition_dir(root: &Path) -> PathBuf {
-    root.join(current_prefix(root)).join("partitions/default")
-}
-
 fn text_extents(root: &Path) -> Vec<mosaica_store::manifest::TextExtent> {
-    open_bundle(root).expect("the bundle opens").partitions["default"]
-        .manifest
+    open_bundle(root)
+        .expect("the bundle opens")
+        .only_shard()
+        .record
         .text_extents
         .clone()
 }
@@ -213,7 +211,7 @@ fn text_extents(root: &Path) -> Vec<mosaica_store::manifest::TextExtent> {
 /// composed layers instead would let a fold that merged nothing and carried every extent forward
 /// answer these questions correctly.
 fn base_index(root: &Path) -> BTreeMap<String, croaring::Bitmap> {
-    let dir = partition_dir(root).join("attrs/prose");
+    let dir = shard_dir(root).join("attrs/prose");
     let dict = mosaica_filter::SortedDict::open_dir(&dir, mosaica_filter::Access::Read)
         .expect("the merged token dictionary opens");
     let postings = mosaica_filter::ColumnPostings::open(&dir.join("postings.arrow"), false)

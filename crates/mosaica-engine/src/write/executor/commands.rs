@@ -28,19 +28,18 @@ pub(super) fn roster_error(e: mosaica_lifecycle::RosterError) -> ExecError {
 /// buffered in `views` is deleted, since the drop discards that row, and one with a buffered row in
 /// another view is kept. The cost is [`view_entities`]'s walk, then a `row_of` per other view and
 /// a buffer lookup per entity found.
-pub(super) fn dangling_entities(generation: &Generation, views: &[String]) -> Vec<EntityId> {
+pub(super) fn dangling_entities(shard: &Shard, views: &[String]) -> Vec<EntityId> {
     let in_views = |view: &String| views.contains(view);
-    view_entities(generation, views)
+    view_entities(shard, views)
         .iter()
         .map(|raw| EntityId::new(u64::from(raw)))
         .filter(|entity| {
-            let in_another_view = generation.bundle.partitions.values().any(|partition| {
-                partition
-                    .views
-                    .iter()
-                    .any(|(id, data)| !in_views(id) && data.row_space.row_of(*entity).is_some())
-            });
-            let buffered_elsewhere = generation
+            let in_another_view = shard
+                .data
+                .views
+                .iter()
+                .any(|(id, data)| !in_views(id) && data.row_space.row_of(*entity).is_some());
+            let buffered_elsewhere = shard
                 .buffer
                 .rows_of(*entity)
                 .any(|item| !in_views(&item.view));
@@ -59,35 +58,33 @@ pub(super) fn dangling_entities(generation: &Generation, views: &[String]) -> Ve
 /// The cost is a walk of the views' own slots, on the executor loop: the base permutation's
 /// present pages ([`mosaica_store::permutation::Permutation::try_for_each_slot`]) and each
 /// extent's rows, then the buffer once.
-pub(super) fn view_entities(generation: &Generation, views: &[String]) -> croaring::Bitmap {
+pub(super) fn view_entities(shard: &Shard, views: &[String]) -> croaring::Bitmap {
     let mut entities = croaring::Bitmap::new();
     for view in views {
-        for partition in generation.bundle.partitions.values() {
-            let Some(view_data) = partition.views.get(view) else {
-                continue;
-            };
-            let row_space = &view_data.row_space;
-            let _ = row_space.base().try_for_each_slot(
-                |entity, _| -> Result<(), std::convert::Infallible> {
-                    entities.add(entity as u32);
-                    Ok(())
-                },
-            );
-            for extent in row_space.extents() {
-                entities.extend(extent.pairs().map(|(entity, _)| entity as u32));
-            }
+        let Some(view_data) = shard.data.views.get(view) else {
+            continue;
+        };
+        let row_space = &view_data.row_space;
+        let _ = row_space.base().try_for_each_slot(
+            |entity, _| -> Result<(), std::convert::Infallible> {
+                entities.add(entity as u32);
+                Ok(())
+            },
+        );
+        for extent in row_space.extents() {
+            entities.extend(extent.pairs().map(|(entity, _)| entity as u32));
         }
     }
     // Buffered rows are in the view (`rows()`, joins included): a point acknowledged and not
     // yet flushed is an entity of this view, and an exclusion taken without it would leave every
     // such point out of the membership for ever: the one asymmetry between the two spellings
     // that would not be stale but wrong.
-    for (entity, item) in generation.buffer.rows() {
+    for (entity, item) in shard.buffer.rows() {
         if views.iter().any(|view| view == &item.view) {
             entities.add(entity.raw() as u32);
         }
     }
-    entities.andnot_inplace(generation.overlay.deleted_set());
+    entities.andnot_inplace(shard.overlay.deleted_set());
     entities
 }
 
@@ -197,11 +194,8 @@ pub(crate) struct PublishedBatch {
 /// The refusal of a publication naming a deleted member or content source, where it names one.
 /// A suppressed one is accepted, being a live member temporarily outside every mask. The detail is
 /// the caller's 422 body, so it gives a count and an artifact's position, never an entity id.
-fn deleted_in_publication(
-    generation: &Generation,
-    artifacts: &[IncomingArtifact],
-) -> Option<ExecError> {
-    let deleted = generation.overlay.deleted_set();
+fn deleted_in_publication(shard: &Shard, artifacts: &[IncomingArtifact]) -> Option<ExecError> {
+    let deleted = shard.overlay.deleted_set();
     let (count, first_artifact) =
         first_deleted(artifacts.iter().enumerate().map(|(index, artifact)| {
             let in_contents: u64 = artifact
@@ -225,10 +219,10 @@ fn deleted_in_publication(
 /// The refusal of a growth whose joining members include a deleted one, on
 /// [`deleted_in_publication`]'s terms: a count and the key of the first join naming one.
 fn deleted_in_growth(
-    generation: &Generation,
+    shard: &Shard,
     joins: &[mosaica_lifecycle::IncomingGrowth],
 ) -> Option<ExecError> {
-    let deleted = generation.overlay.deleted_set();
+    let deleted = shard.overlay.deleted_set();
     let (count, first_key) = first_deleted(
         joins
             .iter()
@@ -279,7 +273,7 @@ impl Executor {
                 reply,
             } => {
                 if !stamp.follow_since(&self.generation.load_full(), |generation| {
-                    crate::edited::follow_changes(generation, &mut changes)
+                    crate::edited::follow_changes(generation.only_shard(), &mut changes)
                 }) {
                     reply.fail(ExecError::Stale);
                     return;
@@ -315,6 +309,7 @@ impl Executor {
             Command::DeclareAttribute { request, reply } => {
                 self.commit_attribute_declare(*request, reply)
             }
+            Command::DeclareShards { size, reply } => self.commit_shards_declare(size, reply),
             Command::DeclareVocabulary { request, reply } => {
                 self.commit_vocabulary_declare(*request, reply)
             }
@@ -338,12 +333,12 @@ impl Executor {
             } => {
                 let generation = self.generation.load_full();
                 if !stamp.follow_since(&generation, |generation| {
-                    crate::edited::follow_artifacts(generation, &mut artifacts)
+                    crate::edited::follow_artifacts(generation.only_shard(), &mut artifacts)
                 }) {
                     reply.fail(ExecError::Stale);
                     return;
                 }
-                if let Some(refusal) = deleted_in_publication(&generation, &artifacts) {
+                if let Some(refusal) = deleted_in_publication(generation.only_shard(), &artifacts) {
                     reply.fail(refusal);
                     return;
                 }
@@ -358,12 +353,12 @@ impl Executor {
             } => {
                 let generation = self.generation.load_full();
                 if !stamp.follow_since(&generation, |generation| {
-                    crate::edited::follow_growth(generation, &mut joins)
+                    crate::edited::follow_growth(generation.only_shard(), &mut joins)
                 }) {
                     reply.fail(ExecError::Stale);
                     return;
                 }
-                if let Some(refusal) = deleted_in_growth(&generation, &joins) {
+                if let Some(refusal) = deleted_in_growth(generation.only_shard(), &joins) {
                     reply.fail(refusal);
                     return;
                 }
@@ -534,7 +529,7 @@ impl Executor {
                         .collect(),
                     None => registered.declaration.views.clone(),
                 };
-                view_entities(&generation, &views)
+                view_entities(generation.only_shard(), &views)
             });
             let started = std::time::Instant::now();
             let members = artifact
@@ -809,10 +804,11 @@ impl Executor {
         // the served list; a scoped family's per-view columns are opened by the first flush that
         // writes one, as a family declared at the build is for a view created since. Built before
         // the append, so a column this process cannot hold is refused with nothing written.
+        let shard = generation.only_shard();
         let filter_columns = match &compiled {
             crate::attributes::CompiledAttribute::Entity(d) => {
                 let declared_index = manifest.declared_scalars.len() - 1;
-                match generation.filter_columns.with_runtime_column(
+                match shard.filter_columns.with_runtime_column(
                     d,
                     declared_index,
                     &manifest.vocabularies,
@@ -826,9 +822,7 @@ impl Executor {
                     }
                 }
             }
-            crate::attributes::CompiledAttribute::Scoped(_) => {
-                Arc::clone(&generation.filter_columns)
-            }
+            crate::attributes::CompiledAttribute::Scoped(_) => Arc::clone(&shard.filter_columns),
         };
         let record = WalRecord::AttributeDeclare {
             declaration: Box::new(compiled.declaration(request.title.clone())),
@@ -861,10 +855,10 @@ impl Executor {
             _ => Arc::clone(&generation.suggest),
         };
         let bundle = generation.bundle.with_views(manifest);
-        let next = generation.with(|g| {
+        let next = generation.with_shard(shard.id(), |g, s| {
             g.bundle = bundle;
             g.vocabularies = vocabularies;
-            g.filter_columns = filter_columns;
+            s.filter_columns = filter_columns;
             g.suggest = suggest;
         });
         self.publish(next, started);
@@ -877,6 +871,33 @@ impl Executor {
                 self.publish_new_unique_index(&d.name, started);
             }
         }
+        reply.ack(false);
+    }
+
+    /// `PUT /control/shards`: declare the point shard's size while the service runs.
+    pub(super) fn commit_shards_declare(&mut self, size: u64, reply: Reply<bool>) {
+        let (held, high_water) = {
+            let shard = self.live.only_shard();
+            (shard.size(), shard.high_water())
+        };
+        if let Err(e) = mosaica_types::check_shard_size(size, high_water) {
+            reply.fail(ExecError::ShardSize(e));
+            return;
+        }
+        if size == held {
+            reply.ack(true);
+            return;
+        }
+        let record = WalRecord::ShardsDeclare { size };
+        if let Err(e) = self.make_durable(&[&record], "a shard size declaration") {
+            reply.fail(e);
+            return;
+        }
+        self.live
+            .only_shard()
+            .with_allocator(|alloc| alloc.set_size(size));
+        // Durable in the log and not yet in a manifest: the next publication restates it.
+        self.side_manifests.behind_live = true;
         reply.ack(false);
     }
 
@@ -1264,7 +1285,7 @@ impl Executor {
         let ids = generation.bundle.manifest.view_ids_for_key(&owner, &key);
         // Computed before the drop applies, because the probe reads the row space the drop is
         // about to take away.
-        let dangling = dangling_entities(&generation, &ids);
+        let dangling = dangling_entities(generation.only_shard(), &ids);
         let prepared = self
             .live
             .with_roster(|roster| roster.prepare_drop(&owner, &key, dangling.clone()));
@@ -1328,22 +1349,22 @@ impl Executor {
             .manifest
             .with_roster(&created, &tombstones);
         let bundle = generation.bundle.with_views(manifest);
+        let shard = generation.only_shard();
         let buffer = if dropped.is_empty() {
-            Arc::clone(&generation.buffer)
+            Arc::clone(&shard.buffer)
         } else {
-            let mut buffer = (*generation.buffer).clone();
+            let mut buffer = (*shard.buffer).clone();
             buffer.remove_views(dropped);
             self.health
                 .buffered_items
                 .store(buffer.len(), Ordering::SeqCst);
             Arc::new(buffer)
         };
-        let next = generation.with(|g| {
+        let next = generation.with_shard(shard.id(), |g, s| {
             g.bundle = bundle;
-            g.buffer = buffer;
+            s.buffer = buffer;
             if !dropped.is_empty() {
-                g.filter_columns =
-                    Arc::new(generation.filter_columns.without_scoped_columns(dropped));
+                s.filter_columns = Arc::new(shard.filter_columns.without_scoped_columns(dropped));
             }
         });
         self.publish(next, started);

@@ -110,9 +110,9 @@ fn build_bundle(dir: &Path) -> std::path::PathBuf {
         attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
         out: out.clone(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -227,7 +227,7 @@ fn every_table_of_the_pass_is_the_one_counted_row_by_row() {
     let (generation, mask) = engine
         .composed_mask(&session, "s0")
         .expect("the mask composes");
-    let view_data = &generation.bundle.partitions["default"].views["s0"];
+    let view_data = &generation.bundle.only_shard().views["s0"];
     let segments = segments_with_row_bases("s0", view_data).expect("the segments resolve");
     assert_eq!(segments.len(), 2, "the flush wrote a segment of its own");
     let flushed = segments[1].1..segments[1].1 + segments[1].0.row_count;
@@ -260,6 +260,7 @@ fn every_table_of_the_pass_is_the_one_counted_row_by_row() {
         .row_entities()
         .expect("the view has row-entity.u32");
     let codes = generation
+        .only_shard()
         .filter_columns
         .entity_codes("kind")
         .expect("kind is indexed");

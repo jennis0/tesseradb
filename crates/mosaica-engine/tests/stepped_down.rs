@@ -28,13 +28,16 @@ fn fabricate_stepped_down(root: &std::path::Path) {
     let current: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(root.join("CURRENT")).unwrap()).unwrap();
     let prefix = current["prefix"].as_str().unwrap().to_string();
-    let dir = root.join(&prefix).join("partitions").join("default");
+    let dir = common::partition_dir(root, &prefix);
     let mut manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("SEGMENTS-0.json")).unwrap())
             .unwrap();
-    manifest["deltas"] = serde_json::json!([1]);
+    manifest["shards"]["records"][0]["deltas"] = serde_json::json!([1]);
     manifest["files"] = serde_json::json!({
-        "partitions/default/never-written.arrow": { "size": 1, "sha256": "0".repeat(64) }
+        format!("{}/never-written.arrow", common::SHARD.rel()): {
+            "size": 1,
+            "sha256": "0".repeat(64)
+        }
     });
     std::fs::write(
         dir.join("SEGMENTS-1.json"),

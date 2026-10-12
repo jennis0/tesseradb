@@ -3,6 +3,11 @@ pub use identity::{
     IdentityError, IdentityKey, ItemHigh, MosaicaId, Tenancy, IDENTITY_CONSTRUCTION,
     IDENTITY_ROUNDS,
 };
+mod shard;
+pub use shard::{
+    check_room, check_shard_size, only, ShardFull, ShardId, ShardLimit, ShardRow, ShardSizeError,
+    SHARD_SIZE_DEFAULT,
+};
 
 /// The process's own memory — the allocator's retention and the kernel's resident figures.
 ///
@@ -229,9 +234,11 @@ pub struct GenerationStamp {
 // per key list over the base rows. A 34 bundle lacks the file and is refused.
 // 36: a side-manifest carries `tenancy_index`, the files of each number's tenancy, and
 // `retired_numbers`. A 35 manifest lacks the fields and is refused as malformed.
+// 37: per-entity and per-view files are under `partitions/<p>/shards/<s>/` and dictionary extents
+// under `dictionary/`; a side-manifest carries `shards`. A 36 bundle is refused.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility.
-pub const BUNDLE_FORMAT: u32 = 36;
+pub const BUNDLE_FORMAT: u32 = 37;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;

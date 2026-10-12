@@ -275,7 +275,8 @@ fn side_manifests(dir: &std::path::Path) -> Vec<Vec<std::path::PathBuf>> {
     let bundle = dir.join("bundle");
     let current: serde_json::Value =
         serde_json::from_slice(&std::fs::read(bundle.join("CURRENT")).unwrap()).unwrap();
-    let partitions = bundle.join(current["prefix"].as_str().unwrap()).join("partitions");
+    let partitions =
+        mosaica_store::layout::partitions_dir(&bundle.join(current["prefix"].as_str().unwrap()));
     let mut out = Vec::new();
     for partition in std::fs::read_dir(partitions).unwrap().flatten() {
         let mut numbered: Vec<(u64, std::path::PathBuf)> = std::fs::read_dir(partition.path())

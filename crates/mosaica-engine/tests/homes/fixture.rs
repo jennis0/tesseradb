@@ -24,10 +24,12 @@ use mosaica_build::{
     ViewArgs,
 };
 use mosaica_engine::filter::{FilterExpr, FilterOperand};
-use mosaica_engine::{Engine, EngineConfig, Session, ViewportRequest};
+use mosaica_engine::{Engine, EngineConfig, IngestReceipt, IngestRequest, Session, ViewportRequest};
+use mosaica_lifecycle::wal::WalScalar;
+use mosaica_lifecycle::IngestRow;
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_spatial::Projection;
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, MosaicaId};
 
 pub const N: u64 = 24;
 /// The item edited.
@@ -313,9 +315,9 @@ pub fn build_homes(dir: &Path) -> std::path::PathBuf {
         attribute_sources: mosaica_build::config::AttributeSource::over(world, &schema),
         out: out.clone(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -344,6 +346,35 @@ pub fn open(tmp: &Path, root: &Path) -> Engine {
     engine.start_write_executor(8).expect("the executor starts");
     engine.set_background_refresh_for_test(false);
     engine
+}
+
+/// Ingest `row` through `view` as batch `batch`, its body hash the batch's bytes.
+pub fn send(engine: &Engine, batch: &str, view: &str, row: IngestRow) -> IngestReceipt {
+    let mut body_hash = [0u8; 32];
+    body_hash[..batch.len()].copy_from_slice(batch.as_bytes());
+    engine
+        .ingest(IngestRequest {
+            batch_id: batch.to_string(),
+            body_hash,
+            view: Some(view.to_string()),
+            rows: vec![row],
+            artifacts: Default::default(),
+            strict: false,
+            mosaica_id_column: false,
+        })
+        .unwrap_or_else(|e| panic!("{batch} is accepted: {e}"))
+}
+
+/// A row naming `mosaica_id`, or a new item, with every value omitted.
+pub fn bare(mosaica_id: Option<MosaicaId>) -> IngestRow {
+    IngestRow {
+        mosaica_id,
+        labels: None,
+        position: None,
+        scalars: vec![WalScalar::Null; DECLARED],
+        scoped: vec![WalScalar::Null; 2],
+        omitted: (0..DECLARED + 2).collect(),
+    }
 }
 
 pub fn label_layer() -> mosaica_types::layer::LayerDeclaration {

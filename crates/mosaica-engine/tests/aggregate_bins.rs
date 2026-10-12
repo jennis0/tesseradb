@@ -356,9 +356,9 @@ fn build_gated_views(dir: &Path, items: &[Item], views: &[GatedView<'_>]) -> Pat
         attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
         out: out.clone(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -1649,7 +1649,7 @@ fn an_item_joining_another_view_is_sampled_with_its_indexed_values() {
         assert_eq!(receipt.created, 0, "{batch}");
         wait_until("the flush", Duration::from_secs(60), || {
             fx.engine.request_flush();
-            fx.engine.generation().buffer.is_empty()
+            fx.engine.generation().only_shard().buffer.is_empty()
         });
     };
     // Every declared column, `id` alone given.
@@ -1762,7 +1762,7 @@ fn a_sample_read_partly_from_the_band_and_partly_by_scanning_is_the_oracles() {
         .expect("the ingest is accepted");
     wait_until("the flush", Duration::from_secs(60), || {
         fx.engine.request_flush();
-        fx.engine.generation().buffer.is_empty()
+        fx.engine.generation().only_shard().buffer.is_empty()
     });
     fx.items.extend(added);
     for item in fx.items.iter_mut() {
@@ -2281,7 +2281,8 @@ fn the_figures_are_the_oracles_through_every_change() {
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();
         wait_until("the flush", Duration::from_secs(60), || {
-            engine.write_executor_stats().flushes > flushes && engine.generation().buffer.is_empty()
+            engine.write_executor_stats().flushes > flushes
+                && engine.generation().only_shard().buffer.is_empty()
         });
     };
     let change = |engine: &Engine, sources: &[u64], op: ChangeOp| {

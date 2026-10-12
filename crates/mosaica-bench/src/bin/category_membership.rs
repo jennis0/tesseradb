@@ -119,11 +119,15 @@ fn main() {
         .map(|v| v.values.iter().map(|x| (x.code, x.key.clone())).collect())
         .unwrap_or_default();
 
-    let part_dir = prefix_dir.join("partitions/default");
-    let view_dir = part_dir.join("views/s0");
-    let permutation = Permutation::load(&view_dir.join("permutation.bin")).expect("permutation");
-    let columns =
-        ColumnsRef::load(&view_dir.join("segments/seg-0/columns.arrow")).expect("columns.arrow");
+    let layout = mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO);
+    let permutation =
+        Permutation::load(&prefix_dir.join(layout.permutation_rel("s0"))).expect("permutation");
+    let columns = ColumnsRef::load(
+        &prefix_dir
+            .join(layout.segment_rel("s0", "seg-0"))
+            .join("columns.arrow"),
+    )
+    .expect("columns.arrow");
 
     let codes: Vec<u32> = match columns.scalar(&column) {
         Some(ScalarSlice::U8(v)) => v.iter().map(|c| *c as u32).collect(),
@@ -220,7 +224,7 @@ fn main() {
 
     // ---- legend latency --------------------------------------------------------------------
     let postings =
-        PostingsReader::open(&part_dir.join("terms/postings.arrow"), true).expect("postings");
+        PostingsReader::open(&prefix_dir.join(layout.postings_rel()), true).expect("postings");
     let mut widths: Vec<(TermId, u64)> = (0..postings.term_count())
         .map(|t| {
             let term = TermId::new(t);

@@ -139,7 +139,7 @@ fn run(args: &Args) -> Result<(), String> {
     // rather than silently merged (concatenating segments would fabricate runs at the seams).
     let mut segments: Vec<(&str, &str, &SegmentData)> = Vec::new();
     for (phash, partition) in &bundle.partitions {
-        for (view_id, view) in &partition.views {
+        for (view_id, view) in &partition.only_shard().views {
             for seg in &view.segments {
                 segments.push((phash, view_id, seg));
             }

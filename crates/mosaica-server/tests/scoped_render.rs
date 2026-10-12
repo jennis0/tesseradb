@@ -710,19 +710,15 @@ async fn a_view_outside_the_group_is_byte_identical_to_a_build_without_the_famil
 
     let tmp = TempDir::new().unwrap();
     let without = build_bundle(tmp.path(), false);
-    // `v00000/partitions/<phash>/views/world/segments/<seg>/` — walked rather than spelt, the
-    // partition hash and the segment id being the build's to choose.
+    // Found by listing: the segment id is the build's to choose.
     let segment_dir = |root: &Path| {
-        let one = |dir: &Path| {
-            std::fs::read_dir(dir)
-                .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
-                .next()
-                .expect("one entry")
-                .unwrap()
-                .path()
-        };
-        let phash = one(&root.join("v00000").join("partitions"));
-        one(&phash.join("views").join("world").join("segments"))
+        let segments = root.join("v00000").join(SHARD.segments_rel("world"));
+        std::fs::read_dir(&segments)
+            .unwrap_or_else(|e| panic!("{}: {e}", segments.display()))
+            .next()
+            .expect("one segment")
+            .unwrap()
+            .path()
     };
     // **The listing as well as the bytes.** A presence bitmap is a file *beside* `columns.arrow`
     // (decision 0064), so a lane leaking into a view outside the scope could leave
@@ -2453,7 +2449,14 @@ async fn an_edit_in_a_dropped_view_holds_nothing_in_the_log() {
         .unwrap();
     assert_eq!(resp.status(), 200, "the drop is accepted");
     assert_eq!(
-        served.server.state.engine.generation().buffer.oldest_wal_pos(),
+        served
+            .server
+            .state
+            .engine
+            .generation()
+            .only_shard()
+            .buffer
+            .oldest_wal_pos(),
         None,
         "nothing buffered holds the log"
     );
@@ -2461,7 +2464,13 @@ async fn an_edit_in_a_dropped_view_holds_nothing_in_the_log() {
     let Served { server, tmp, .. } = served;
     let server = restart(server, &tmp).await;
     assert_eq!(
-        server.state.engine.generation().buffer.oldest_wal_pos(),
+        server
+            .state
+            .engine
+            .generation()
+            .only_shard()
+            .buffer
+            .oldest_wal_pos(),
         None,
         "and a restart does not buffer the edit again"
     );

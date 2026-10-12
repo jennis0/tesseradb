@@ -23,9 +23,6 @@ use mosaica_build::{build, build_in_memory, BuildArgs, BuildReport, RefusedRows}
 use mosaica_filter::{Access, RecordBlob, RecordValue};
 use mosaica_spatial::Bounds;
 use mosaica_store::unique::{UniqueIndexes, UniqueKey};
-use mosaica_types::IdentityKey;
-
-const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
 /// A Parquet file of the named columns.
 fn write(path: &Path, columns: Vec<(&str, ArrayRef)>) {
@@ -110,22 +107,12 @@ fn args(dir: &Path, declaration: &str, out: &Path) -> BuildArgs {
     BuildArgs {
         views,
         anchor,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources: acquired.attribute_sources,
-        out: out.to_path_buf(),
-        limit: None,
-        strict: false,
-        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        shard_id: 0,
+        shard_size: config.shard_size,
         layers,
         layer_inputs: acquired.layers,
-        scoped_layers: Default::default(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema: config.schema,
+        ..common::build_args(out)
     }
 }
 
@@ -136,6 +123,7 @@ fn holders(root: &Path, attribute: &str, keys: &[UniqueKey]) -> Vec<Vec<u32>> {
     let indexes = UniqueIndexes::open(
         &bundle.manifest,
         &partition.manifest,
+        &partition.only_shard().record,
         &root.join("v00000"),
         None,
     )
@@ -157,15 +145,10 @@ fn item(root: &Path, attribute: &str, value: u64) -> u32 {
 
 /// Each item's record, as `(declared position, value)`.
 fn records(root: &Path) -> HashMap<u32, Vec<(u16, RecordValue)>> {
-    let dir = root
-        .join("v00000")
-        .join("partitions")
-        .join("default")
-        .join("attrs")
-        .join("record");
+    let dir = root.join("v00000").join(common::SHARD.record_rel());
     let blob = RecordBlob::open_dir(&dir, Access::Read).expect("the blob opens");
     let bundle = mosaica_store::read::open_bundle(root).expect("the bundle opens");
-    (0..bundle.manifest.entity_id_high_water as u32)
+    (0..bundle.only_shard().record.high_water as u32)
         .map(|entity| {
             let fields = blob
                 .fields_of(entity)
@@ -217,6 +200,49 @@ unique = true
 "#;
 
 // -------------------------------------------------------------------------------------------
+
+/// Both build paths refuse one item past `[shards] size`; exactly the size builds and records it.
+#[test]
+fn a_build_over_its_shard_size_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    points(
+        &dir.join("points.parquet"),
+        &[Some(1), Some(2), Some(3), Some(2)],
+        Vec::new(),
+    );
+    let sized = |size: u64| format!("[shards]\nsize = {size}\n{ONE_VIEW}");
+    assert!(build(&args(dir, &sized(2), &dir.join("over-streamed"))).is_err());
+    assert!(build_in_memory(&args(dir, &sized(2), &dir.join("over-linear"))).is_err());
+
+    let (out, report) = both_ways(dir, &sized(3));
+    assert_eq!(report.items, 3, "a row naming an item takes no id");
+    let bundle = mosaica_store::read::open_bundle(&out).expect("the bundle opens");
+    let sizes: Vec<u64> = bundle.partitions.values().map(|p| p.shard_size).collect();
+    assert_eq!(sizes, [3]);
+}
+
+/// **A size of zero is refused by a build given its arguments directly**, as the declaration
+/// refuses it, though the files create no item to check it against.
+#[test]
+fn a_direct_build_with_a_shard_size_of_zero_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    points(&dir.join("points.parquet"), &[], Vec::new());
+    let zero = |out: &Path| BuildArgs {
+        shard_size: Some(0),
+        ..args(dir, ONE_VIEW, out)
+    };
+    let (streamed, linear) = (dir.join("zero-streamed"), dir.join("zero-linear"));
+    assert!(build(&zero(&streamed)).is_err());
+    assert!(build_in_memory(&zero(&linear)).is_err());
+    for out in [&streamed, &linear] {
+        assert!(mosaica_store::read::open_bundle(out).is_err(), "no bundle is published");
+    }
+
+    let (_, report) = both_ways(dir, ONE_VIEW);
+    assert_eq!(report.items, 0, "the same files build at the default size");
+}
 
 /// **(a) One unique field across two views, an attribute file and a members file.** A value in
 /// both views' points is one item in both, and the other files name items by it.
@@ -794,7 +820,7 @@ fn creation_order_and_not_an_ids_value_numbers_items() {
     let a = built(&dense, "dense");
     let b = built(&sparse, "sparse");
     let view = |root: &Path, file: &str| {
-        std::fs::read(root.join("v00000/partitions/default/views/s0").join(file)).unwrap()
+        std::fs::read(root.join("v00000").join(common::SHARD.view_rel("s0")).join(file)).unwrap()
     };
     for file in ["permutation.bin", mosaica_store::ROW_ENTITY_FILE] {
         assert_eq!(view(&a, file), view(&b, file), "{file}");

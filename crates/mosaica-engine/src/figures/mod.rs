@@ -30,7 +30,7 @@
 //!   place rather than walking again, so an ingest window never refills them. They are written to
 //!   the engine's cache directory and read back after a restart ([`persist`]).
 //! - **D's correction** is held per fragment, column version and deny version
-//!   ([`crate::Generation::deny_version`]), from the labels of the view's denied base rows
+//!   ([`crate::Shard::deny_version`]), from the labels of the view's denied base rows
 //!   ([`denied`]). It is loaded at the request's start like the mask it corrects, so a request that
 //!   starts after a suppression is accepted subtracts it. A cached count over F is never served
 //!   without it.
@@ -154,11 +154,7 @@ type WithPlaces = Arc<dyn Fn(&mut dyn FnMut(&[Placement<'_>])) + Send + Sync>;
 /// [`WithPlaces`] over one view of `bundle`.
 fn places_of_view(bundle: Arc<mosaica_store::read::Bundle>, view: String) -> WithPlaces {
     Arc::new(move |read: &mut dyn FnMut(&[Placement<'_>])| {
-        let Some(view_data) = bundle
-            .partitions
-            .values()
-            .find_map(|partition| partition.views.get(&view))
-        else {
+        let Some(view_data) = bundle.only_shard().views.get(&view) else {
             return;
         };
         if let Ok(segments) = crate::viewport::segments_with_row_bases(&view, view_data) {
@@ -868,6 +864,7 @@ impl FiguresCache {
         generation: &crate::Generation,
         projections: &crate::artifacts::ArtifactProjections,
     ) {
+        let shard = generation.only_shard();
         for address in self.labels.held.addresses() {
             let (view, layer, level) = &address;
             let Some((rows, at)) = projections.held_form_at(view, layer, *level) else {
@@ -876,7 +873,7 @@ impl FiguresCache {
             let Some(column) = rows.column_shared() else {
                 continue;
             };
-            let Some(mut denied) = generation.denied().get(view).cloned() else {
+            let Some(mut denied) = shard.denied().get(view).cloned() else {
                 continue;
             };
             denied.remove_range(column.base_rows()..);
@@ -885,7 +882,7 @@ impl FiguresCache {
                 Arc::clone(column),
                 at,
                 denied,
-                generation.bundle_identity(),
+                shard.bundle_identity(),
                 places_of_view(Arc::clone(&generation.bundle), view.clone()),
             );
         }
@@ -968,7 +965,7 @@ fn deny_version(
 ) -> (u64, Option<u64>) {
     let failing = !subtracted.is_subset(denied);
     (
-        served.generation.deny_version(served.name),
+        served.shard.deny_version(served.name),
         failing.then_some(served.mask_identity.overlay_version),
     )
 }

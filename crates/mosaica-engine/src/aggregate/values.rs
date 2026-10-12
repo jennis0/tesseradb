@@ -48,7 +48,11 @@ impl Field {
             .vocabularies
             .get(&vocabulary)
             .ok_or_else(not_countable)?;
-        let held = generation.filter_columns.value_layers(column).is_some();
+        let held = generation
+            .only_shard()
+            .filter_columns
+            .value_layers(column)
+            .is_some();
         let drawn = manifest
             .render_scalars()
             .any(|scalar| scalar.name == column);
@@ -157,7 +161,9 @@ impl Field {
         let membership = match self.derived {
             false => None,
             true => Some(
-                cx.generation
+                cx.open
+                    .served
+                    .shard
                     .filter_columns
                     .category_membership(&self.column, &cx.sets.candidate)
                     .map_err(|e| EngineError::VocabularyVisibilityUnavailable {
@@ -193,7 +199,7 @@ impl Field {
     }
 
     fn counts_by_entity(&self, cx: &Cx<'_>, entities: &croaring::Bitmap) -> Result<Counts> {
-        let generation = cx.generation;
+        let (generation, shard) = (cx.generation, cx.open.served.shard);
         let vocabulary = generation.vocabularies.get(&self.vocabulary);
         let each = |visit: &mut dyn FnMut(u32)| {
             if let Some(vocabulary) = vocabulary {
@@ -205,7 +211,7 @@ impl Field {
         let buffered = |visit: &mut dyn FnMut(u32, u32)| {
             crate::categories::buffered_codes(
                 &generation.bundle.manifest,
-                &generation.buffer,
+                &shard.buffer,
                 &self.column,
                 visit,
             )
@@ -214,7 +220,7 @@ impl Field {
             .engine
             .pool
             .install(|| {
-                generation.filter_columns.category_counts(
+                shard.filter_columns.category_counts(
                     &self.column,
                     entities,
                     CountCodes::All(&each),
@@ -261,12 +267,12 @@ impl Field {
     /// The per-entity codes [`Self::row_groups`] reads where the field is not drawn.
     pub(super) fn entity_codes<'g>(
         &self,
-        generation: &'g Generation,
+        shard: &'g crate::Shard,
     ) -> Result<Option<EntityCodes<'g>>> {
         if self.drawn {
             return Ok(None);
         }
-        generation
+        shard
             .filter_columns
             .entity_codes(&self.column)
             .map(Some)

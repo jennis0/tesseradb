@@ -41,7 +41,7 @@
 //! entry by the same `extend` the request path used to do.
 //!
 //! **The fragment cache comes from the generation being refreshed, never from a handle taken at
-//! startup.** A fold rotates it (`Generation::fragments`), so a pass holding the cache it was
+//! startup.** A fold rotates it (`Shard::fragments`), so a pass holding the cache it was
 //! constructed with would rebuild every entry's fragment under the *superseded* bundle identity —
 //! every folded-away entity back in every refreshed mask, published under the new geometry's key.
 //!
@@ -123,28 +123,24 @@ pub(crate) fn refresh_resident(
     projection_routes: &crate::projection::ProjectionRoutes,
 ) -> usize {
     let mut produced = 0usize;
+    let shard = generation.only_shard();
     for (key, previous) in cache.resident() {
         let carry = carry_for(&key, generation);
         if carry == Carry::Skip {
             continue;
         }
-        let Some(view_data) = generation
-            .bundle
-            .partitions
-            .values()
-            .find_map(|partition| partition.views.get(&key.view))
-        else {
+        let Some(view_data) = shard.data.views.get(&key.view) else {
             continue;
         };
 
         // **Built before the cache call, because `make` must be infallible** — the single-flight
         // state machine has no way to carry a failure out of a slot, and stuffing one into the
         // value would cache it (I13a).
-        let fragment = match generation.fragments.get_or_build_grant(
+        let fragment = match shard.fragments.get_or_build_grant(
             &previous.grant,
-            &generation.postings,
-            &generation.delta_postings,
-            generation.watermark,
+            &shard.postings,
+            &shard.delta_postings,
+            shard.watermark,
         ) {
             Ok(fragment) => fragment,
             Err(FragmentCacheError::Building | FragmentCacheError::Cancelled) => continue,
@@ -205,8 +201,8 @@ pub(crate) fn refresh_resident(
                     let inputs = crate::projection::ProjectionInputs {
                         fragment: &fragment,
                         satisfied: previous.grant.keys(),
-                        postings: &generation.postings,
-                        deltas: &generation.delta_postings,
+                        postings: &shard.postings,
+                        deltas: &shard.delta_postings,
                         images: view_data.term_images.as_deref(),
                         force: projection_routes.forced(),
                     };

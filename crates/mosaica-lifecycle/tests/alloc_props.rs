@@ -8,8 +8,7 @@ use proptest::prelude::*;
 
 use croaring::Bitmap;
 use mosaica_lifecycle::alloc::{
-    allocator_floor, assign_sorted, entities_named, high_water_from, union_of, Allocator,
-    ByTenancy, PendingItem,
+    assign_sorted, entities_named, high_water_from, union_of, Allocator, ByTenancy, PendingItem,
 };
 use mosaica_lifecycle::wal::{ChangeOp, WalRecord, WalRow};
 use mosaica_types::{EntityId, Tenancy, TermId};
@@ -88,45 +87,22 @@ proptest! {
         }
     }
 
-    /// **No entity id is reissued after a fold** (I9; compaction §12's obligation 10), across
-    /// fuzzed interleavings of ingest, flush, fold and crash.
-    ///
-    /// A fold is the one operation that makes the two durable high-water marks disagree *on
-    /// purpose*. `publish_fold` writes the **snapshot's** entity bound into `MANIFEST.json`,
-    /// because that field's other reader is the base locator's declared length and a live value
-    /// there would claim every post-snapshot entity; it writes the **live** value into
-    /// `SEGMENTS-<n>.json`. The rotation that follows then reclaims the WAL records the ids were
-    /// really derived from. So after a fold every one of the three homes is individually wrong —
-    /// the bundle manifest was lowered, the WAL was reclaimed — and only
-    /// `alloc::allocator_floor`'s `max` recovers the floor.
-    ///
-    /// **What this covers, and what it does not.** Like
-    /// `no_reuse_across_simulated_crashes` beside it, this is a model: it simulates the crash
-    /// rather than crashing a process, and it exercises the composition rule at its real function
-    /// rather than re-deriving it. The fold's *own* write — that `SEGMENTS-<n>.json` gets the live
-    /// value and `MANIFEST.json` the snapshot's — is a fact about IO and is pinned end to end by
-    /// `mosaica-engine`'s `the_watermark_and_high_water_published_are_the_live_ones_not_the_snapshot`
-    /// and `the_folded_manifests_high_water_is_the_snapshots_entity_space`. Obligation 10 needs
-    /// both; neither alone establishes it.
+    /// **No entity id is reissued after a fold**, across fuzzed interleavings of ingest, flush,
+    /// fold and crash. The fold's rotation reclaims the log, so after it the side-manifest's high
+    /// water is the only home of the ids the log named.
     #[test]
-    fn no_reuse_across_a_fold_that_lowers_the_bundles_high_water(
+    fn no_reuse_across_a_fold_that_reclaims_the_log(
         rounds in prop::collection::vec((1u64..32, any::<bool>(), any::<bool>()), 1..14),
     ) {
-        // The three durable homes, none of which is sufficient alone.
-        let mut bundle_high_water = 0u64;       // MANIFEST.json
+        // The two durable homes, neither of which is sufficient alone.
         let mut side_high_water = 0u64;         // SEGMENTS-<n>.json
         let mut wal: Vec<WalRecord> = Vec::new();
         let mut used: HashSet<u64> = HashSet::new();
 
         for (n, flush, fold) in rounds {
             // ---- restart, seeded exactly as `Engine::open` does ----------------------------
-            let seed = allocator_floor(bundle_high_water, &[side_high_water])
-                .max(high_water_from(&wal));
+            let seed = side_high_water.max(high_water_from(&wal));
             let mut alloc = Allocator::new(seed);
-            // A fold plans against the generation it opened on, so its snapshot bound is the
-            // entity space as of *now* — before this round's ingests, which is what makes the
-            // value it writes to `MANIFEST.json` strictly lower than the live one.
-            let planned_bound = seed;
 
             for id in alloc.allocate(0, n).unwrap().items {
                 prop_assert!(!used.contains(&id), "entity id {} reissued", id);
@@ -149,17 +125,13 @@ proptest! {
                 });
             }
 
-            if flush {
-                // A flush publication raises the side-manifest past the ids it consumed.
+            if flush || fold {
+                // A publication raises the side-manifest past the ids it consumed.
                 side_high_water = alloc.high_water();
             }
             if fold {
-                bundle_high_water = planned_bound;
-                side_high_water = alloc.high_water();
-                // The rotation behind the fold reclaims the log. Faithful precisely *because*
-                // the line above took the live value: it is what makes the reclaimed records
-                // redundant, and a fold that wrote the snapshot's bound here instead would
-                // reclaim ids nothing else records.
+                // The rotation behind the fold reclaims the log; the live high water above still
+                // records its ids.
                 wal.clear();
             }
             // `alloc` is dropped here — the crash.

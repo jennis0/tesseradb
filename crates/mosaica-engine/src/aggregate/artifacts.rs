@@ -79,7 +79,7 @@ impl Layer {
             })
         };
         let registered = engine
-            .readable_layer(session, generation, layer, view)
+            .readable_layer(session, generation.only_shard(), layer, view)
             .map_err(refused)?;
         check_level(&registered, level).map_err(refused)?;
         let levelled = matches!(
@@ -143,15 +143,9 @@ impl Layer {
         let engine = cx.engine;
         let served_view = &cx.open.served;
         let mask = &cx.open.mask;
-        let generation = cx.generation;
-        let shard = generation.bundle.manifest.identity.shard_id;
+        let shard = served_view.shard;
         let registered = engine
-            .readable_layer(
-                served_view.session,
-                generation,
-                &self.name,
-                served_view.name,
-            )
+            .readable_layer(served_view.session, shard, &self.name, served_view.name)
             .ok()
             .filter(|layer| layer.entity == self.entity)
             .filter(|layer| (self.level as usize) < layer.runs.len());
@@ -169,7 +163,7 @@ impl Layer {
                 let read =
                     engine.read_level(served_view, mask, layer, self.level, self.cut.is_some())?;
                 let readable = |ordinal: u32, entity: EntityId, rank: Option<u32>| {
-                    read.content(engine, generation, layer, ordinal, entity, rank)
+                    read.content(engine, shard, layer, ordinal, entity, rank)
                         .is_some()
                 };
                 match &self.cut {
@@ -231,7 +225,7 @@ impl Layer {
         };
         let mosaica_id = |ordinal: u32| -> Option<u64> {
             let entity = EntityId::new(entity_at(ordinal)?);
-            engine.artifact_id(shard, entity).map(|id| id.raw())
+            engine.artifact_id(entity).map(|id| id.raw())
         };
         let attached = registered
             .as_ref()
@@ -321,8 +315,7 @@ impl Layer {
                 Pick::Named(ids) => {
                     let mut listed: Vec<u32> = Vec::with_capacity(ids.len());
                     for &id in ids {
-                        let Some(entity) =
-                            crate::edited::artifact_named(&engine.identity_key, shard, id)
+                        let Some(entity) = crate::edited::artifact_named(&engine.identity_key, id)
                         else {
                             continue;
                         };
@@ -408,7 +401,7 @@ impl Layer {
                         let rank = *ranks.get(&o)?;
                         let entity = EntityId::new(entity_at(o)?);
                         let own = read
-                            .content(engine, generation, layer, o, entity, rank)
+                            .content(engine, shard, layer, o, entity, rank)
                             .and_then(|content| content.name());
                         namer.name(own, self.level, o)
                     })
@@ -451,7 +444,7 @@ impl Layer {
         let keys = chosen
             .iter()
             .map(|&entity| {
-                let id = engine.artifact_id(shard, EntityId::new(entity));
+                let id = engine.artifact_id(EntityId::new(entity));
                 Key::Id(id.map_or(0, |id| id.raw()))
             })
             .collect();
@@ -527,7 +520,7 @@ impl Targets {
             };
             let content = level.content(
                 engine,
-                cx.generation,
+                cx.open.served.shard,
                 layer,
                 attachment.ordinal,
                 attachment.entity,

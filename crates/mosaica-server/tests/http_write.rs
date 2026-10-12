@@ -245,6 +245,43 @@ async fn a_second_row_for_an_ingested_id_edits_its_item() {
     );
 }
 
+/// **A batch past the shard's size is `409`** and takes no id; `/control/status` reports the size
+/// `PUT /control/shards` declared.
+#[tokio::test]
+async fn a_batch_past_the_shard_size_is_refused_and_writes_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let high_water = control_status(&server).await["entity_id_high_water"]
+        .as_u64()
+        .unwrap();
+    let declared = server
+        .client
+        .put(server.control_url("/control/shards"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&serde_json::json!({ "size": high_water + 1 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(declared.status(), 201);
+    assert_eq!(
+        control_status(&server).await["shards"]["size"].as_u64(),
+        Some(high_water + 1)
+    );
+
+    let two = build_ingest_batch(&[(N_ITEMS + 1, 1.0, 1.0, "0"), (N_ITEMS + 2, 2.0, 2.0, "0")]);
+    let (status, refusal) = post_body(&server, "past-the-size", two).await;
+    assert_eq!(
+        (status, refusal["error"].as_str()),
+        (409, Some("conflict")),
+        "{refusal}"
+    );
+    assert_eq!(
+        control_status(&server).await["entity_id_high_water"].as_u64(),
+        Some(high_water),
+        "the refused batch took no id"
+    );
+}
+
 /// A row carrying the `id` of an item the build stored edits that item, as one ingested at the
 /// service does.
 #[tokio::test]
@@ -463,7 +500,11 @@ async fn ingest_without_an_id_returns_a_genuinely_resolvable_mosaica_id() {
     let (high, entity) = test_key()
         .invert(mosaica_types::MosaicaId::new(mosaica_id))
         .expect("a receipt names an item");
-    assert_eq!(high.shard, 0, "the fixture bundle is shard 0");
+    assert_eq!(
+        high.shard,
+        mosaica_types::ShardId::ZERO,
+        "the fixture bundle is shard 0"
+    );
     assert!(
         entity.raw() >= N_ITEMS,
         "an ingested item gets an entity id past the bundle's own"
@@ -924,12 +965,14 @@ async fn a_stepped_down_partition_is_not_ready() {
 
     // Copy SEGMENTS-0 to a newer SEGMENTS-1 naming a file that does not exist, so the walk steps
     // down to SEGMENTS-0 and serves.
-    let partition_dir = bundle_root.join("v00000/partitions/default");
+    let partition_dir =
+        mosaica_store::layout::partition_dir(&bundle_root.join("v00000"), "default");
     let mut value: serde_json::Value =
         serde_json::from_slice(&std::fs::read(partition_dir.join("SEGMENTS-0.json")).unwrap())
             .unwrap();
     value["segments_version"] = serde_json::json!(1);
-    value["files"]["partitions/default/views/s0/segments/seg-unsynced/columns.arrow"] =
+    let unsynced = SHARD.segment_rel("s0", "seg-unsynced");
+    value["files"][format!("{unsynced}/columns.arrow")] =
         serde_json::json!({ "size": 4, "sha256": "00".repeat(32) });
     std::fs::write(
         partition_dir.join("SEGMENTS-1.json"),
@@ -3082,6 +3125,7 @@ async fn a_body_or_query_of_the_wrong_shape_is_a_contract_refusal_on_every_contr
     let routes = [
         ("PUT", "/control/layers", wrong_shape.clone()),
         ("PUT", "/control/attributes", wrong_shape.clone()),
+        ("PUT", "/control/shards", wrong_shape.clone()),
         ("PUT", "/control/vocabularies/genre", wrong_shape.clone()),
         (
             "PATCH",
@@ -3131,6 +3175,7 @@ async fn a_body_or_query_of_the_wrong_shape_is_a_contract_refusal_on_every_contr
         ("PUT", "/control/layers?wiat=visible"),
         ("DELETE", "/control/layers/clusters?wiat=visible"),
         ("PUT", "/control/attributes?wiat=visible"),
+        ("PUT", "/control/shards?wiat=visible"),
         ("PUT", "/control/vocabularies/genre?wiat=visible"),
         ("PATCH", "/control/vocabularies/genre/values?wiat=visible"),
         ("PUT", "/control/view_groups/quarter?wiat=visible"),
@@ -3618,6 +3663,8 @@ const STATUS_SHAPE: &[(&str, &str)] = &[
     ("/sessions/sweep_at", "integer"),
     ("/sessions/sweeps", "integer"),
     ("/sessions/swept_total", "integer"),
+    ("/shards", "object"),
+    ("/shards/size", "integer"),
     ("/suggest_sets", "object"),
     ("/suggest_sets/builds", "integer"),
     ("/suggest_sets/bytes", "integer"),
@@ -4182,9 +4229,7 @@ async fn control_status_publishes_the_live_segment_count_per_view() {
 
     // The gauge is the generation's own set, not a counter that happens to agree with it today.
     let generation = server.state.engine.generation();
-    let live: usize = generation.bundle.partitions["default"].views["s0"]
-        .segments
-        .len();
+    let live: usize = generation.bundle.only_shard().views["s0"].segments.len();
     assert_eq!(
         after["segments"][0]["count"].as_u64().unwrap() as usize,
         live,

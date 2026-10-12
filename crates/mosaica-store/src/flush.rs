@@ -82,7 +82,6 @@ pub struct FlushInput<'a> {
     pub rows: Vec<FlushRow>,
     pub quantisation: Quantisation,
     pub identity_key: &'a IdentityKey,
-    pub shard_id: u32,
     pub scalar_schema: &'a [(String, ScalarType)],
     /// The indexed columns the bands copy ([`crate::bands::copied_beside`]).
     pub indexed: &'a [(String, ScalarType)],
@@ -103,16 +102,16 @@ pub struct FlushOutput {
     pub files: BTreeMap<String, FileDigest>,
     /// `entity_hi + 1` — see this module's doc.
     pub watermark: u64,
-    pub entity_id_high_water: u64,
+    pub high_water: u64,
 }
 
-/// Write one flush segment under `prefix_dir`, for `(partition, view)`.
+/// Write one flush segment of `view` under `prefix_dir`, in `layout`'s shard.
 ///
 /// Returns without fsyncing the directory: the caller's commit point is the side-manifest, and it
 /// is responsible for making every file here durable before writing it.
 pub fn write_flush_segment(
     prefix_dir: &Path,
-    partition: &str,
+    layout: crate::ShardLayout<'_>,
     view: &str,
     input: FlushInput<'_>,
 ) -> Result<FlushOutput> {
@@ -138,20 +137,9 @@ pub fn write_flush_segment(
         input.rows.iter().map(|r| r.entity_id.raw()),
     );
 
-    // **`view_rel`, never the joined id** (`views.md` §3.2): a group's view lays its files down
-    // at `views/<group>/<key>/` and a `files` key spelled `views/<group>:<key>/` names a path no
-    // reader will look at — every file under the view unverifiable, which the loader reads as a
-    // corrupt bundle. The path below and the key here must come from one derivation.
-    let rel = |name: &str| {
-        format!(
-            "partitions/{partition}/{}/segments/{}/{name}",
-            crate::view_rel(view),
-            input.seg_id
-        )
-    };
-    let seg_dir = crate::view_path(&prefix_dir.join("partitions").join(partition), view)
-        .join("segments")
-        .join(input.seg_id);
+    let seg_rel = layout.segment_rel(view, input.seg_id);
+    let rel = |name: &str| format!("{seg_rel}/{name}");
+    let seg_dir = prefix_dir.join(&seg_rel);
     fs::create_dir_all(&seg_dir).map_err(|source| StoreError::Io {
         path: seg_dir.clone(),
         source,
@@ -169,7 +157,7 @@ pub fn write_flush_segment(
         items.push(TilerItem {
             mosaica_id: mosaica_id_of(
                 input.identity_key,
-                ItemHigh::new(input.shard_id, row.tenancy),
+                ItemHigh::new(layout.shard, row.tenancy),
                 row.number,
             )?,
             qx: fixed32(row.x, q.x_min, q.x_max),
@@ -285,7 +273,7 @@ pub fn write_flush_segment(
         // Composition treats entities at or above the watermark as buffer-resident, so this is
         // `entity_hi + 1` and not `entity_hi`. See the module doc.
         watermark: entity_hi + 1,
-        entity_id_high_water: entity_hi + 1,
+        high_water: entity_hi + 1,
     })
 }
 
@@ -401,7 +389,9 @@ pub fn digest_of(path: &Path) -> Result<FileDigest> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::TEST_SHARD;
     use crate::read::ColumnsRef;
+    use mosaica_types::ShardId;
 
     const KEY_HEX: &str = "0123456789abcdef0123456789abcdef";
 
@@ -433,7 +423,7 @@ mod tests {
         let schema = [("score".to_string(), ScalarType::I32)];
         let out = write_flush_segment(
             dir,
-            "p",
+            TEST_SHARD,
             "s",
             FlushInput {
                 incarnation: 0,
@@ -441,7 +431,6 @@ mod tests {
                 rows,
                 quantisation: quantisation(),
                 identity_key: &key,
-                shard_id: 0,
                 scalar_schema: &schema,
                 indexed: &[],
                 row_base: 0,
@@ -449,7 +438,8 @@ mod tests {
             },
         )
         .expect("flush");
-        (out, dir.join("partitions/p/views/s/segments/seg-1"))
+        let seg_rel = TEST_SHARD.segment_rel("s", "seg-1");
+        (out, dir.join(seg_rel))
     }
 
     /// **The bitmap is in row space, and the fixture is arranged so entity space would be wrong.**
@@ -468,9 +458,10 @@ mod tests {
             ],
         );
 
+        let seg_rel = TEST_SHARD.segment_rel("s", "seg-1");
         assert!(
             out.files
-                .contains_key("partitions/p/views/s/segments/seg-1/presence/score.roaring"),
+                .contains_key(&format!("{seg_rel}/presence/score.roaring")),
             "the manifest must name the bitmap, or a missing one reads as 'every row present' \
              instead of refusing"
         );
@@ -526,7 +517,7 @@ mod tests {
         let key = IdentityKey::from_hex(KEY_HEX).unwrap();
         let named = |tenancy: u16, number: u64| {
             key.forward(
-                ItemHigh::new(0, Tenancy::new(tenancy).unwrap()),
+                ItemHigh::new(ShardId::ZERO, Tenancy::new(tenancy).unwrap()),
                 EntityId::new(number),
             )
             .unwrap()

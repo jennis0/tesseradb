@@ -276,17 +276,9 @@ fn rotate(engine: &Engine) {
 
 /// The live prefix's membership extents — the durable name count a publication's pack increments.
 fn membership_files(fx: &Fixture, engine: &Engine) -> usize {
-    let dir = fx
-        .root
-        .join(&engine.generation().prefix)
-        .join("partitions")
-        .join("default")
-        .join("members");
-    std::fs::read_dir(&dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x == "tsmb"))
+    live_shard_files(&fx.root, engine, "members")
+        .iter()
+        .filter(|p| p.extension().is_some_and(|x| x == "tsmb"))
         .count()
 }
 
@@ -1189,9 +1181,9 @@ fn built_fixture() -> Fixture {
         attribute_sources: mosaica_build::config::AttributeSource::over(points, &id_schema()),
         out: root.clone(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
         layers: config.layers,
         layer_inputs: config.layer_sources,
         scoped_layers: Default::default(),

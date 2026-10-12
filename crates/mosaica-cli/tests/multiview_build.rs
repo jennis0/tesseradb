@@ -8,7 +8,6 @@
 
 use std::fs::File;
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 
 use arrow::array::{
@@ -22,9 +21,8 @@ use parquet::arrow::ArrowWriter;
 use mosaica_store::read::open_bundle;
 use mosaica_types::EntityId;
 
-fn mosaica() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_mosaica"))
-}
+mod common;
+use common::mosaica;
 
 const ENTITIES: u64 = 30;
 /// `world` holds the first twenty; the group's two views overlap in the middle, so an entity is in
@@ -390,7 +388,14 @@ fn the_whole_declaration_builds_and_verifies() {
     let bundle = at("bundle");
     for key in ["q1", "q2"] {
         for file in ["values.arrow", "presence.roaring"] {
-            let rel = format!("partitions/default/attrs/sentiment/quarter/{key}/{file}");
+            let rel = format!(
+                "{}/{file}",
+                common::SHARD.scoped_column_rel(
+                    "sentiment",
+                    &format!("quarter:{key}"),
+                    mosaica_types::view::DECLARED_INCARNATION,
+                )
+            );
             assert!(bundle.join("v00000").join(&rel).is_file(), "{rel}");
         }
     }
@@ -399,14 +404,12 @@ fn the_whole_declaration_builds_and_verifies() {
     // `quarter:q2` does, in a different geometry (`views.md` §3.3).
     let opened = open_bundle(&bundle).expect("the bundle opens");
     assert_eq!(opened.manifest.views.len(), 5);
-    let partition = opened.partitions.get("default").expect("one partition");
+    let views = &opened.only_shard().views;
     for key in ["q1", "q2"] {
-        let owner = partition
-            .views
+        let owner = views
             .get(&format!("quarter:{key}"))
             .expect("the owning group's view");
-        let sharing = partition
-            .views
+        let sharing = views
             .get(&format!("quarter_alt:{key}"))
             .expect("the sharing group's view");
         let held = |view: &mosaica_store::read::ViewData| -> Vec<u64> {

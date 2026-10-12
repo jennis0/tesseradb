@@ -14,23 +14,13 @@ use common::*;
 use mosaica_engine::viewport::ViewportRequest;
 use mosaica_engine::Engine;
 use mosaica_lifecycle::wal::ChangeOp;
+use mosaica_store::manifest::EntitySet;
 use mosaica_types::EntityId;
 
-/// Rewrite `SEGMENTS-0.json` with `edit` applied to its parsed JSON. The side-manifest carries no
-/// digest of its own — only the `files` entries *inside* it are verified — so this needs no
-/// resealing.
-fn edit_segments_manifest(root: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
-    let path = root.join("v00000/partitions/default/SEGMENTS-0.json");
-    let mut value: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    edit(&mut value);
-    std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
-}
-
-/// One of a manifest's deny fields, holding `ids`, as it is written into the JSON.
-fn deny_set(ids: &[u64]) -> serde_json::Value {
+/// One of a manifest's deny fields, holding `ids`.
+fn deny_set(ids: &[u64]) -> EntitySet {
     let entities: croaring::Bitmap = ids.iter().map(|id| *id as u32).collect();
-    serde_json::to_value(mosaica_store::manifest::EntitySet::of(&entities)).unwrap()
+    EntitySet::of(&entities)
 }
 
 fn visible(engine: &Engine) -> u64 {
@@ -65,8 +55,8 @@ fn a_manifest_suppression_hides_its_entity_from_the_first_request() {
     ));
 
     let suppressed = entity_of_source(&root, 7);
-    edit_segments_manifest(&root, |value| {
-        value["deny"] = deny_set(&[suppressed]);
+    edit_side_manifest(&root, |manifest| {
+        manifest.only_shard_mut().deny = deny_set(&[suppressed]);
     });
 
     let after = visible(&open_engine(
@@ -100,8 +90,8 @@ fn a_manifest_tombstone_hides_its_entity_from_the_first_request() {
     ));
 
     let deleted = entity_of_source(&root, 11);
-    edit_segments_manifest(&root, |value| {
-        value["tombstones"] = deny_set(&[deleted]);
+    edit_side_manifest(&root, |manifest| {
+        manifest.only_shard_mut().tombstones = deny_set(&[deleted]);
     });
 
     let after = visible(&open_engine(
@@ -129,9 +119,10 @@ fn an_empty_deny_state_hides_nothing() {
         &tmp.path().join("cache-0"),
         &tmp.path().join("wal-0.log"),
     ));
-    edit_segments_manifest(&root, |value| {
-        value["deny"] = deny_set(&[]);
-        value["tombstones"] = deny_set(&[]);
+    edit_side_manifest(&root, |manifest| {
+        let record = manifest.only_shard_mut();
+        record.deny = deny_set(&[]);
+        record.tombstones = deny_set(&[]);
     });
     assert_eq!(
         visible(&open_engine(
@@ -190,8 +181,8 @@ fn a_wal_unsuppress_beats_a_manifest_suppression_that_predates_it() {
 
     // The manifest published between the two: it carries the suppression and knows nothing of the
     // unsuppress that followed.
-    edit_segments_manifest(&root, |value| {
-        value["deny"] = deny_set(&[entity]);
+    edit_side_manifest(&root, |manifest| {
+        manifest.only_shard_mut().deny = deny_set(&[entity]);
     });
 
     // Reopened on the **same** WAL — which is the whole point: the records that retire the

@@ -1,9 +1,74 @@
 //! What several build tests share.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use mosaica_build::BuildArgs;
 use mosaica_store::unique::{UniqueIndexes, UniqueKey};
+use mosaica_store::ShardLayout;
+use mosaica_types::{IdentityKey, ShardId};
+
+/// The built bundle's one shard, in the one partition a build writes.
+#[allow(dead_code)]
+pub const SHARD: ShardLayout<'static> = ShardLayout::new("default", ShardId::ZERO);
+
+/// The identity key every build test builds under.
+#[allow(dead_code)]
+pub fn test_key() -> IdentityKey {
+    IdentityKey::from_hex("000102030405060708090a0b0c0d0e0f").unwrap()
+}
+
+/// A build into `out` under [`test_key`], writing no oracle pairs, with every input empty. A test
+/// sets what it varies with struct update syntax.
+#[allow(dead_code)]
+pub fn build_args(out: &Path) -> BuildArgs {
+    BuildArgs {
+        views: Vec::new(),
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
+        attribute_sources: Vec::new(),
+        out: out.to_path_buf(),
+        limit: None,
+        shard_size: None,
+        strict: false,
+        identity_key: test_key(),
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
+        emit_oracle_pairs: false,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: Default::default(),
+    }
+}
+
+/// The prefix `CURRENT` names in the bundle at `out`.
+#[allow(dead_code)]
+pub fn current_prefix(out: &Path) -> String {
+    let current: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out.join("CURRENT")).unwrap()).unwrap();
+    current["prefix"].as_str().unwrap().to_string()
+}
+
+/// The directory of the prefix `CURRENT` names, which every [`SHARD`] path is relative to.
+#[allow(dead_code)]
+pub fn prefix_dir(out: &Path) -> PathBuf {
+    out.join(current_prefix(out))
+}
+
+/// [`SHARD`]'s directory in the prefix `CURRENT` names.
+#[allow(dead_code)]
+pub fn shard_dir(out: &Path) -> PathBuf {
+    SHARD.dir(&prefix_dir(out))
+}
+
+/// The one segment a build writes for view `s0`.
+#[allow(dead_code)]
+pub fn segment_dir(out: &Path) -> PathBuf {
+    prefix_dir(out).join(SHARD.segment_rel("s0", "seg-0"))
+}
 
 /// The entity each of `values` names in the `u64` unique column `attribute` of the bundle built at
 /// `root`. Entity ids are signature-sorted, so a source row's value is how a test finds the item
@@ -16,11 +81,14 @@ pub fn entities_of(
 ) -> HashMap<u64, u32> {
     let bundle = mosaica_store::read::open_bundle(root).expect("the built bundle opens");
     let (phash, partition) = bundle.partitions.iter().next().expect("one partition");
-    let current: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT")).unwrap();
-    let prefix = root.join(current["prefix"].as_str().expect("CURRENT names a prefix"));
-    let indexes = UniqueIndexes::open(&bundle.manifest, &partition.manifest, &prefix, None)
-        .unwrap_or_else(|e| panic!("partition {phash}'s unique indexes open: {e}"));
+    let indexes = UniqueIndexes::open(
+        &bundle.manifest,
+        &partition.manifest,
+        &partition.only_shard().record,
+        &prefix_dir(root),
+        None,
+    )
+    .unwrap_or_else(|e| panic!("partition {phash}'s unique indexes open: {e}"));
     let index = indexes
         .get(attribute)
         .unwrap_or_else(|| panic!("'{attribute}' is a unique column"));

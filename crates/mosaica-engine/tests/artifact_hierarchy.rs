@@ -1688,9 +1688,7 @@ fn parents_in_bundle(
     let dir = fx
         .root
         .join(&engine.generation().prefix)
-        .join("partitions")
-        .join("default")
-        .join("members");
+        .join(common::SHARD.members_rel());
     let mut found = None;
     for entry in std::fs::read_dir(&dir)
         .expect("the fold wrote record packs")

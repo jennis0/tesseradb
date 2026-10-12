@@ -1,18 +1,19 @@
 use std::collections::BTreeMap;
 
 use mosaica_store::manifest::{
-    DictExtent, EntityTermsExtent, FileDigest, RecordExtent, SegmentsManifest,
+    DictExtent, EntityTermsExtent, FileDigest, PartitionManifest, RecordExtent, ShardRecord,
 };
 use mosaica_store::merge::size_tier;
 
 use super::{CoalescePlan, CoalescePolicy, ColumnExtent, ColumnWindow, WindowKey};
 
-/// Plans a coalesce over `manifest`, sizing files from its digests and from `build_files`, the
-/// prefix's `MANIFEST.json` digests. Takes manifests rather than a generation so every selection
-/// rule is testable without an engine. `None` when no axis qualifies.
+/// Plans a coalesce over `record`, sizing files from `manifest`'s digests and from `build_files`,
+/// the prefix's `MANIFEST.json` digests. Takes manifests rather than a generation so every
+/// selection rule is testable without an engine. `None` when no axis qualifies.
 pub(crate) fn plan_coalesce(
     partition: &str,
-    manifest: &SegmentsManifest,
+    manifest: &PartitionManifest,
+    record: &ShardRecord,
     build_files: &BTreeMap<String, FileDigest>,
     policy: CoalescePolicy,
     is_live: &dyn Fn(&str, mosaica_types::view::ViewIncarnation) -> bool,
@@ -32,9 +33,9 @@ pub(crate) fn plan_coalesce(
     };
 
     if let Some(window) =
-        select_window(&manifest.deltas, policy.width, policy, |rel| size_of(rel))
+        select_window(&record.deltas, policy.width, policy, |rel| size_of(rel))
     {
-        plan.tiers = manifest.deltas[window].to_vec();
+        plan.tiers = record.deltas[window].to_vec();
     }
 
     let runs_policy = CoalescePolicy {
@@ -56,31 +57,31 @@ pub(crate) fn plan_coalesce(
     }
 
     // A layer's dictionary counts toward the input cap.
-    plan.attrs = column_windows(&manifest.attr_extents, policy, is_live, |extent| {
+    plan.attrs = column_windows(&record.attr_extents, policy, is_live, |extent| {
         extent.files().map(&size_of).sum()
     });
 
     {
         let size = |extent: &RecordExtent| extent.files().map(&size_of).sum();
-        if let Some(window) = widest_window(&manifest.record_extents, policy, size) {
-            plan.records = manifest.record_extents[window].to_vec();
+        if let Some(window) = widest_window(&record.record_extents, policy, size) {
+            plan.records = record.record_extents[window].to_vec();
         }
     }
 
     // A text extent's dictionary, postings and presence all count toward the input cap.
-    plan.texts = column_windows(&manifest.text_extents, policy, is_live, |extent| {
+    plan.texts = column_windows(&record.text_extents, policy, is_live, |extent| {
         extent.files().map(&size_of).sum()
     });
 
     {
         let size = |extent: &EntityTermsExtent| extent.files().map(&size_of).sum();
-        if let Some(window) = widest_window(&manifest.entity_terms_extents, policy, size) {
-            plan.terms = manifest.entity_terms_extents[window].to_vec();
+        if let Some(window) = widest_window(&record.entity_terms_extents, policy, size) {
+            plan.terms = record.entity_terms_extents[window].to_vec();
         }
     }
 
     // A lookup reads every live run of a unique column, so they coalesce on the key runs' policy.
-    for index in &manifest.unique_indexes {
+    for index in &record.unique_indexes {
         if let Some(window) =
             select_window(&index.live, policy.run_width, runs_policy, |rel| size_of(rel))
         {
@@ -93,8 +94,8 @@ pub(crate) fn plan_coalesce(
 
     // A lookup reads every live run of both directions of the edited-items map too.
     for (direction, runs) in [
-        (mosaica_store::edited::Direction::ByNumber, &manifest.edited_items.by_number),
-        (mosaica_store::edited::Direction::ByEntity, &manifest.edited_items.by_entity),
+        (mosaica_store::edited::Direction::ByNumber, &record.edited_items.by_number),
+        (mosaica_store::edited::Direction::ByEntity, &record.edited_items.by_entity),
     ] {
         if let Some(window) =
             select_window(&runs.live, policy.run_width, runs_policy, |rel| size_of(rel))

@@ -161,7 +161,6 @@ pub struct MergeSpec<'a> {
     pub seg_id: &'a str,
     pub inputs: &'a [MergeInput],
     pub identity_key: &'a IdentityKey,
-    pub shard_id: u32,
     pub scalar_schema: &'a [(String, ScalarType)],
     /// The indexed columns the bands copy ([`crate::bands::copied_beside`]), each banded row's
     /// value read from its input's copy.
@@ -196,7 +195,7 @@ const OP: &str = "execute_merge";
 /// `max_merged_segment_bytes` bounds, and 8 bytes per row an input lists below its span.
 pub fn execute_merge(
     prefix_dir: &Path,
-    partition: &str,
+    layout: crate::ShardLayout<'_>,
     view: &str,
     spec: MergeSpec<'_>,
 ) -> Result<MergeOutput> {
@@ -217,11 +216,7 @@ pub fn execute_merge(
         });
     }
 
-    let seg_path = |seg_id: &str| {
-        crate::view_path(&prefix_dir.join("partitions").join(partition), view)
-            .join("segments")
-            .join(seg_id)
-    };
+    let seg_path = |seg_id: &str| prefix_dir.join(layout.segment_rel(view, seg_id));
 
     let mut cursors: Vec<SegmentCursor> = spec
         .inputs
@@ -277,7 +272,7 @@ pub fn execute_merge(
         let cursor = &mut cursors[index];
         let row = cursor.row;
         let mosaica_id = MosaicaId::new(mosaica_raw);
-        let entity = cursor.entity(spec.identity_key, spec.shard_id)?;
+        let entity = cursor.entity(spec.identity_key, layout.shard)?;
         if spec
             .identity_key
             .invert(mosaica_id)
@@ -376,13 +371,8 @@ pub fn execute_merge(
     // The inputs' mappings go before the digests below, which read whole files.
     drop(cursors);
 
-    let rel = |name: &str| {
-        format!(
-            "partitions/{partition}/{}/segments/{}/{name}",
-            crate::view_rel(view),
-            spec.seg_id
-        )
-    };
+    let seg_rel = layout.segment_rel(view, spec.seg_id);
+    let rel = |name: &str| format!("{seg_rel}/{name}");
     let mut files = BTreeMap::new();
     for name in crate::SEGMENT_FILES {
         files.insert(rel(name), digest_of(&out_dir.join(name))?);
@@ -426,6 +416,7 @@ mod tests {
     use mosaica_types::EntityId;
 
     use crate::flush::{write_flush_segment, FlushInput, FlushRow};
+    use crate::layout::TEST_SHARD;
     use crate::manifest::Quantisation;
     use crate::read::{ColumnsRef, ScalarSlice};
 
@@ -452,7 +443,7 @@ mod tests {
             .collect();
         write_flush_segment(
             dir,
-            "p",
+            TEST_SHARD,
             "s",
             FlushInput {
                 incarnation: 0,
@@ -465,7 +456,6 @@ mod tests {
                     y_max: 1.0,
                 },
                 identity_key: &key,
-                shard_id: 0,
                 scalar_schema: &schema(),
                 indexed: &[],
                 row_base: 0,
@@ -519,14 +509,13 @@ mod tests {
         let key = IdentityKey::from_hex(KEY_HEX).expect("test key");
         let out = execute_merge(
             dir.path(),
-            "p",
+            TEST_SHARD,
             "s",
             MergeSpec {
                 incarnation: 0,
                 seg_id: "seg-m",
                 inputs: &[a, b],
                 identity_key: &key,
-                shard_id: 0,
                 scalar_schema: &schema(),
                 indexed: &[],
                 absent_ok: &[],
@@ -536,7 +525,7 @@ mod tests {
         .expect("merge");
         assert_eq!(out.segment.row_count, 8);
 
-        let merged = dir.path().join("partitions/p/views/s/segments/seg-m");
+        let merged = dir.path().join(TEST_SHARD.segment_rel("s", "seg-m"));
         let columns = ColumnsRef::load(&merged.join("columns.arrow")).expect("columns");
         let ScalarSlice::I32(scores) = columns.scalar("score").expect("score column") else {
             panic!("score is declared i32");
@@ -559,9 +548,10 @@ mod tests {
                 .all(|row| presence.contains(row)),
             "every other row carries a value, input B's included — and B has no bitmap of its own"
         );
-        assert!(out
-            .files
-            .contains_key("partitions/p/views/s/segments/seg-m/presence/score.roaring"));
+        assert!(out.files.contains_key(&format!(
+            "{}/presence/score.roaring",
+            TEST_SHARD.segment_rel("s", "seg-m")
+        )));
     }
 
     /// A merge whose inputs have no absence between them writes no bitmap, exactly as a flush with
@@ -574,14 +564,13 @@ mod tests {
         let key = IdentityKey::from_hex(KEY_HEX).expect("test key");
         let out = execute_merge(
             dir.path(),
-            "p",
+            TEST_SHARD,
             "s",
             MergeSpec {
                 incarnation: 0,
                 seg_id: "seg-m",
                 inputs: &[a, b],
                 identity_key: &key,
-                shard_id: 0,
                 scalar_schema: &schema(),
                 indexed: &[],
                 absent_ok: &[],
@@ -590,7 +579,7 @@ mod tests {
         )
         .expect("merge");
 
-        let merged = dir.path().join("partitions/p/views/s/segments/seg-m");
+        let merged = dir.path().join(TEST_SHARD.segment_rel("s", "seg-m"));
         assert!(!merged.join(RENDER_PRESENCE_DIR).exists());
         assert!(!out
             .files

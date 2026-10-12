@@ -24,7 +24,7 @@ use std::path::Path;
 
 use mosaica_filter::{Access, SortedDict, ValueColumn};
 use mosaica_spatial::tiler::ScalarType;
-use mosaica_store::manifest::{FileDigest, Manifest, SegmentsManifest};
+use mosaica_store::manifest::{FileDigest, Manifest, PartitionManifest, ShardRecord};
 
 use crate::error::{BuildError, Result};
 
@@ -116,30 +116,30 @@ impl KeywordCardinality {
 /// Every indexed keyword column the bundle at `prefix_dir` holds, entity-scoped attributes first
 /// and then each group-scoped family per view, read from the files the manifests name.
 ///
-/// `partitions` pairs each partition's hash with its side-manifest. A column whose dictionary or
-/// value column does not open is an error: the build has just written it, and a verify that could
-/// not read it is looking at a malformed bundle.
+/// `partitions` pairs each partition's hash with its manifest and its shard's record. A column
+/// whose dictionary or value column does not open is an error: the build has just written it, and
+/// a verify that could not read it is looking at a malformed bundle.
 pub fn keyword_cardinalities(
     prefix_dir: &Path,
     manifest: &Manifest,
-    partitions: &[(&str, &SegmentsManifest)],
+    partitions: &[(&str, &PartitionManifest, &ShardRecord)],
 ) -> Result<Vec<KeywordCardinality>> {
     let mut out = Vec::new();
-    for (phash, segments) in partitions {
-        let attrs_rel = format!("partitions/{phash}/attrs");
+    for &(phash, partition, record) in partitions {
+        let layout = mosaica_store::ShardLayout::new(phash, record.id);
         for scalar in &manifest.declared_scalars {
             if scalar.arrow_type != ScalarType::Keyword || !scalar.index {
                 continue;
             }
-            let dir_rel = format!("{attrs_rel}/{}", scalar.name);
+            let dir_rel = layout.column_rel(&scalar.name);
             let (distinct, present) = read_column(&prefix_dir.join(&dir_rel))?;
             out.push(KeywordCardinality {
                 attribute: scalar.name.clone(),
                 view: None,
                 distinct,
                 present,
-                rows: manifest.entity_id_high_water,
-                index_bytes: bytes_under(&dir_rel, &[&manifest.files, &segments.files]),
+                rows: record.high_water,
+                index_bytes: bytes_under(&dir_rel, &[&manifest.files, &partition.files]),
             });
         }
         for group in &manifest.groups {
@@ -148,13 +148,13 @@ pub fn keyword_cardinalities(
                     continue;
                 }
                 for view in &scalar.views {
-                    let mut dir_rel = format!("{attrs_rel}/{}", scalar.name);
-                    for component in mosaica_store::view_path_components(view) {
-                        dir_rel.push('/');
-                        dir_rel.push_str(component);
-                    }
+                    let dir_rel = layout.scoped_column_rel(
+                        &scalar.name,
+                        view,
+                        mosaica_types::view::DECLARED_INCARNATION,
+                    );
                     let (distinct, present) = read_column(&prefix_dir.join(&dir_rel))?;
-                    let rows = segments
+                    let rows = record
                         .segments
                         .iter()
                         .filter(|segment| &segment.view == view)
@@ -166,7 +166,7 @@ pub fn keyword_cardinalities(
                         distinct,
                         present,
                         rows,
-                        index_bytes: bytes_under(&dir_rel, &[&manifest.files, &segments.files]),
+                        index_bytes: bytes_under(&dir_rel, &[&manifest.files, &partition.files]),
                     });
                 }
             }
@@ -353,26 +353,27 @@ mod tests {
 
     #[test]
     fn bytes_are_summed_for_the_column_directory_alone() {
+        let attrs = "s/attrs";
         let mut files = BTreeMap::new();
         for (path, size) in [
-            ("partitions/default/attrs/uuid/dict.bin", 700u64),
-            ("partitions/default/attrs/uuid/values.arrow", 200),
-            ("partitions/default/attrs/uuid/presence.roaring", 30),
-            ("partitions/default/attrs/uuid/q/2026/dict.bin", 5000),
-            ("partitions/default/attrs/uuid2/dict.bin", 9000),
-            ("partitions/default/attrs/name/dict.bin", 11),
+            ("uuid/dict.bin", 700u64),
+            ("uuid/values.arrow", 200),
+            ("uuid/presence.roaring", 30),
+            ("uuid/q/2026/dict.bin", 5000),
+            ("uuid2/dict.bin", 9000),
+            ("name/dict.bin", 11),
         ] {
             files.insert(
-                path.to_string(),
+                format!("{attrs}/{path}"),
                 FileDigest {
                     size,
                     sha256: String::new(),
                 },
             );
         }
-        assert_eq!(bytes_under("partitions/default/attrs/uuid", &[&files]), 930);
+        assert_eq!(bytes_under(&format!("{attrs}/uuid"), &[&files]), 930);
         assert_eq!(
-            bytes_under("partitions/default/attrs/uuid/q/2026", &[&files]),
+            bytes_under(&format!("{attrs}/uuid/q/2026"), &[&files]),
             5000
         );
     }

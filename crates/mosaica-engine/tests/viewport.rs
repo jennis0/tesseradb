@@ -132,7 +132,11 @@ fn b_subset_session_sees_exactly_its_terms_items() {
     let key = test_key();
     for (mosaica_id, _) in out.points.iter() {
         let (high, entity) = key.invert(mosaica_id).expect("a served point is an item");
-        assert_eq!(high.shard, 0, "fixture uses shard 0 only");
+        assert_eq!(
+            high.shard,
+            mosaica_types::ShardId::ZERO,
+            "fixture uses shard 0 only"
+        );
         let source = new_to_source[&entity.raw()];
         assert_eq!(
             source % 3,
@@ -267,7 +271,7 @@ fn f_selection_returns_the_lowest_mosaica_ids_not_the_first_rows() {
     );
 
     let bundle = open_bundle(&bundle_root).unwrap();
-    let segment = &bundle.partitions["default"].views["s0"].segments[0];
+    let segment = &bundle.only_shard().views["s0"].segments[0];
     let ids = segment.columns.mosaica_id();
 
     // The definition's answer, computed independently of the engine: the three smallest identities
@@ -574,7 +578,7 @@ fn response_tile_order_and_point_concatenation_follow_tiles_for_bbox_not_morton_
         .unwrap();
 
     let bundle = open_bundle(&bundle_root).unwrap();
-    let segment = &bundle.partitions["default"].views["s0"].segments[0];
+    let segment = &bundle.only_shard().views["s0"].segments[0];
     let mosaica_ids = segment.columns.mosaica_id();
 
     let tiles = tiles_for_bbox(bbox, ZOOM, &extent());
@@ -1264,7 +1268,7 @@ fn a_restricted_tile_range_search_agrees_with_the_full_column_search() {
         &tmp.path().join("pairs.parquet"),
     );
     let bundle = open_bundle(&bundle_root).unwrap();
-    let segment = &bundle.partitions["default"].views["s0"].segments[0];
+    let segment = &bundle.only_shard().views["s0"].segments[0];
 
     for parent_depth in 0..5u8 {
         for offset in 1..=3u8 {

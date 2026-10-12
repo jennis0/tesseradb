@@ -352,6 +352,25 @@ class Database:
         self._mark_a_filled_column(block)
         return self._declared(self.blocks.add("attribute", block))
 
+    def declare_shards(self, size: int) -> dict:
+        """Declare the size of the shard the items are stored in, and return the `[shards]` table.
+
+        The size is the high water the shard may not pass. Without this declaration it is
+        4,026,531,840.
+
+        - `size`: a positive integer.
+
+        Before the first commit the size is written into `schema.toml`, and a first commit whose
+        tables create more items than it is refused. After it, the next `commit()` sends the size
+        where the server holds another; a page of rows that would take the shard past it is refused
+        with `409` while the other pages are sent, and a size below the database's high water is
+        refused.
+
+            db.declare_shards(50_000_000)
+        """
+        self.blocks.shard_size = size
+        return self._declared({"size": size})
+
     def declare_unique(self, name: str, unique: bool = True) -> dict:
         """Make an attribute already declared unique, or stop it being unique, and return its block.
 
@@ -1216,6 +1235,7 @@ class Database:
             "inserts": [_stored(insert) for insert in self.inserts],
             "pending": [_stored(insert) for insert in self.pending],
             "blocks": _tagged(self.blocks.blocks),
+            "shard_size": self.blocks.shard_size,
         }
         path = self.path / ".mosaica" / "declaration.json"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2192,6 +2212,7 @@ def _load(database: Database, state: dict) -> None:
     database.pending = [_restored(one) for one in state.get("pending", [])]
     for kind, blocks in state.get("blocks", {}).items():
         database.blocks.blocks[kind] = [_untagged(block) for block in blocks]
+    database.blocks.shard_size = state.get("shard_size")
 
 
 #: How an inline TOML table is marked in the JSON copy, to tell it from a block of its own.

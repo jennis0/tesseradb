@@ -68,8 +68,17 @@ fi
 # reactor. rayon itself is fine and expected.
 deny mosaica-engine tokio
 deny mosaica-store tokio
+# Partition and shard paths are built only in mosaica-store's layout module.
+if grep -rnE --include=*.rs '"partitions/|partitions/\{|join\("partitions"\)' crates/*/src \
+     | grep -v '^crates/mosaica-store/src/layout\.rs:'; then
+  echo "FAIL: a partition path is built outside crates/mosaica-store/src/layout.rs (lines above)."
+  echo "      Build it with mosaica_store::ShardLayout, or layout::partition_dir for a"
+  echo "      side-manifest."
+  fail=1
+fi
+
 # I4: no ID conversions in types
-if grep -rn "impl From" crates/mosaica-types/src/ | grep -E "EntityId|RowId|TermId|AttrLocalId|MosaicaId"; then
+if grep -rn "impl From" crates/mosaica-types/src/ | grep -E "EntityId|RowId|TermId|AttrLocalId|MosaicaId|ShardId|ShardRow"; then
   echo "FORBIDDEN: ID conversion in mosaica-types"; fail=1
 fi
 

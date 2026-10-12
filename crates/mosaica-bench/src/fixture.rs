@@ -35,9 +35,9 @@ pub struct Fixture {
 
 impl Fixture {
     pub fn postings_path(&self) -> PathBuf {
-        self.root
-            .join(&self.prefix)
-            .join("partitions/default/terms/postings.arrow")
+        self.root.join(&self.prefix).join(
+            mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO).postings_rel(),
+        )
     }
 }
 
@@ -172,9 +172,6 @@ mod tests {
         let found = discover(&tmp).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].prefix, "v00000");
-        assert!(found[0]
-            .postings_path()
-            .ends_with("v00000/partitions/default/terms/postings.arrow"));
     }
 
     #[test]

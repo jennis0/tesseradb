@@ -199,9 +199,9 @@ fn fixture_with(extra: &[(String, u64)]) -> Fixture {
         attribute_sources: mosaica_build::config::AttributeSource::over(points, &config.schema),
         out: root.clone(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
         layers: config.layers,
         layer_inputs: config.layer_sources,
         scoped_layers: Default::default(),
@@ -291,24 +291,21 @@ fn held_forms(column: &RowColumn, what: &str) -> Forms {
     out
 }
 
-/// The prefix `CURRENT` names and its partition manifest.
+/// The prefix `CURRENT` names and its side-manifest.
 fn manifest_at(root: &Path) -> (PathBuf, SegmentsManifest) {
-    let bundle = mosaica_store::read::open_bundle(root).expect("the bundle opens");
-    let prefix = root.join(current_prefix(root));
-    let manifest = bundle.partitions["default"].manifest.clone();
-    (prefix, manifest)
+    (root.join(current_prefix(root)), side_manifest(root))
 }
 
 /// Every stored member file, per `(layer, level)`, checked against its column's labels.
 fn stored_forms(root: &Path) -> BTreeMap<(String, u32), Forms> {
     let (prefix, manifest) = manifest_at(root);
     let mut out = BTreeMap::new();
-    for column in &manifest.derived_extents {
+    for column in &manifest.only_shard().derived_extents {
         let DerivedForm::RowColumn { layout } = column.form else {
             continue;
         };
         let beside: Vec<_> = manifest
-            .derived_extents
+            .only_shard().derived_extents
             .iter()
             .filter(|e| e.form == DerivedForm::RowMembers && e.same_level(column))
             .collect();

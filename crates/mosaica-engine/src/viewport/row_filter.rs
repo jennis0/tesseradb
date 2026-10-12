@@ -872,7 +872,7 @@ pub(crate) fn predicate_vocabulary<'a>(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn predicate_source<'a>(
     declaration: &mosaica_types::layer::LayerDeclaration,
-    generation: &'a crate::Generation,
+    shard: &'a crate::Shard,
     view: &str,
     view_data: &mosaica_store::read::ViewData,
     segments: &'a [(&'a mosaica_store::read::SegmentData, u32)],
@@ -884,7 +884,7 @@ pub(crate) fn predicate_source<'a>(
     match &declaration.membership {
         mosaica_types::layer::MembershipSource::Enumerated => None,
         mosaica_types::layer::MembershipSource::Attribute(field) => {
-            let values = generation.filter_columns.value_layers(field)?;
+            let values = shard.filter_columns.value_layers(field)?;
             Some(crate::artifacts::PredicateSource::Attribute(
                 crate::artifacts::AttributeSource {
                     values,
@@ -1014,24 +1014,25 @@ impl Engine {
             &dyn Fn(&crate::filter::FilterExpr, bool) -> Result<crate::filter::RoutedFilter>,
         ) -> Result<T>,
     ) -> Result<T> {
-        let candidate = self.filter_candidate(served.session, served.generation)?;
+        let candidate = self.filter_candidate(served.session, served.shard)?;
         let resolved = ResolvedLeaves::default();
         self.route_filters_under(served, mask, &candidate, &resolved, cancel, body)
     }
 
-    /// The entity-space set a request's filter is evaluated under: the session's fragment brought
-    /// forward to `generation`, with the deny state and the passing buffered entities composed in.
+    /// The entity-space set a request's filter is evaluated under in `shard`: the session's
+    /// fragment brought forward to it, with the deny state and the passing buffered entities
+    /// composed in.
     pub(crate) fn filter_candidate(
         &self,
         session: &Session,
-        generation: &Generation,
+        shard: &crate::Shard,
     ) -> Result<croaring::Bitmap> {
-        let fragment = self.fragment_for(session, generation)?;
+        let fragment = self.fragment_for(session, shard)?;
         Ok(crate::filter::candidate(
             &fragment,
             session.satisfied(),
-            &generation.overlay,
-            &generation.buffer,
+            &shard.overlay,
+            &shard.buffer,
         ))
     }
 
@@ -1039,15 +1040,15 @@ impl Engine {
     pub(crate) fn filter_candidate_within(
         &self,
         session: &Session,
-        generation: &Generation,
+        shard: &crate::Shard,
         within: &croaring::Bitmap,
     ) -> Result<croaring::Bitmap> {
-        let fragment = self.fragment_for(session, generation)?;
+        let fragment = self.fragment_for(session, shard)?;
         Ok(crate::filter::candidate_within(
             &fragment,
             session.satisfied(),
-            &generation.overlay,
-            &generation.buffer,
+            &shard.overlay,
+            &shard.buffer,
             within,
         ))
     }
@@ -1075,7 +1076,7 @@ impl Engine {
             |leaf: &crate::filter::MemberOfLeaf| self.member_rows(leaf, served, mask, resolved);
         let layers = |layer: &str| self.reaches_layer(served.session, layer);
         let unique = |column: &str, keys: &[mosaica_store::unique::UniqueKey]| {
-            unique_holders(served.generation, column, keys)
+            unique_holders(served.shard, column, keys)
         };
         let resolvers = crate::filter::RowLeafResolvers {
             regions: &regions,
@@ -1085,7 +1086,7 @@ impl Engine {
         };
         body(&|expr: &crate::filter::FilterExpr, prefer_row: bool| {
             served
-                .generation
+                .shard
                 .filter_columns
                 .evaluate_routed(expr, candidate, prefer_row, &resolvers)
                 .map_err(filter_refusal)
@@ -1263,11 +1264,11 @@ pub(crate) struct ResolvedLeaves {
 /// The entities holding `keys` in a unique column, by the column's index and the live entries
 /// beside it, deleted entities dropped. Visibility is the caller's.
 pub(crate) fn unique_holders(
-    generation: &Generation,
+    shard: &crate::Shard,
     column: &str,
     keys: &[mosaica_store::unique::UniqueKey],
 ) -> std::result::Result<Vec<u32>, crate::filter::FilterError> {
-    crate::unique::holders(generation, column, keys)
+    crate::unique::holders(shard, column, keys)
         .map(|found| found.into_iter().map(|(_, entity)| entity.raw() as u32).collect())
         .map_err(|e| crate::filter::FilterError::UniqueUnreadable {
             column: column.to_string(),

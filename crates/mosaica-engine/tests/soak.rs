@@ -160,13 +160,15 @@ fn sustained_ingest_leaves_every_axis_bounded_and_every_item_visible() {
     let generation = engine.generation();
     let partition = &generation.bundle.partitions["default"];
     let manifest = &partition.manifest;
-    let runs = live_runs(manifest);
-    let segments = partition.views["s0"].segments.len();
+    let shard = partition.only_shard();
+    let record = &shard.record;
+    let runs = live_runs(record);
+    let segments = shard.views["s0"].segments.len();
     let stats = engine.write_executor_stats();
     eprintln!(
         "soak: {ROUNDS} flushes → segments {segments}, deltas {}, key runs {runs}, dict extents \
          {} (merges {}, coalesces {}, refreshes {}, stale serves {}, full builds {})",
-        manifest.deltas.len(),
+        record.deltas.len(),
         manifest.dict_extents.len(),
         stats.merges,
         stats.coalesces,
@@ -180,9 +182,9 @@ fn sustained_ingest_leaves_every_axis_bounded_and_every_item_visible() {
         "the segment axis is unbounded: {segments} segments after {ROUNDS} flushes"
     );
     assert!(
-        manifest.deltas.len() <= ROUNDS * 3 / 4,
+        record.deltas.len() <= ROUNDS * 3 / 4,
         "the delta-tier axis is unbounded: {} tiers",
-        manifest.deltas.len()
+        record.deltas.len()
     );
     assert!(runs <= ROUNDS / 2, "the key-run axis is unbounded: {runs} runs");
     assert!(
@@ -219,7 +221,7 @@ fn sustained_ingest_leaves_every_axis_bounded_and_every_item_visible() {
     for (entity, key) in &ingested {
         assert_eq!(item_of_key(&engine, key), Some(*entity), "{key} lost its item");
         assert!(
-            partition.views["s0"].row_space.row_of(*entity).is_some(),
+            shard.views["s0"].row_space.row_of(*entity).is_some(),
             "entity {} lost its row",
             entity.raw()
         );
@@ -287,18 +289,19 @@ fn without_maintenance_every_axis_grows_one_per_flush() {
 
     let generation = engine.generation();
     let partition = &generation.bundle.partitions["default"];
+    let shard = partition.only_shard();
     assert_eq!(
-        partition.views["s0"].segments.len(),
+        shard.views["s0"].segments.len(),
         ROUNDS + 1,
         "the build segment plus one per flush — this is what the merge bounds"
     );
     assert_eq!(
-        partition.manifest.deltas.len(),
+        shard.record.deltas.len(),
         ROUNDS,
         "one tier per flush — this is what the coalesce bounds"
     );
     assert_eq!(
-        live_runs(&partition.manifest),
+        live_runs(&shard.record),
         ROUNDS,
         "one key run per flush"
     );
@@ -310,7 +313,7 @@ fn without_maintenance_every_axis_grows_one_per_flush() {
 }
 
 /// How many live runs of keys the fixture's unique `id` holds.
-fn live_runs(manifest: &mosaica_store::manifest::SegmentsManifest) -> usize {
-    let index = manifest.unique_indexes.iter().find(|i| i.attribute == "id");
+fn live_runs(record: &mosaica_store::manifest::ShardRecord) -> usize {
+    let index = record.unique_indexes.iter().find(|i| i.attribute == "id");
     index.expect("`id` is unique").live.len()
 }

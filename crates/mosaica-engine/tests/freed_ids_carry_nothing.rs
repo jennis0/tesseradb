@@ -103,19 +103,14 @@ fn entity_of(engine: &Engine, tid: MosaicaId) -> EntityId {
 /// The newest side-manifest's freed ids, free or held, and its retired numbers.
 fn pool(root: &Path) -> (croaring::Bitmap, croaring::Bitmap) {
     let bundle = mosaica_store::open_bundle(root).expect("the bundle opens");
-    let manifest = &bundle
-        .partitions
-        .values()
-        .next()
-        .expect("the fixture has one partition")
-        .manifest;
-    let freed = manifest
+    let record = &bundle.only_shard().record;
+    let freed = record
         .held_entities
         .iter()
         .filter_map(|held| held.entities.entities())
-        .chain(manifest.free_entities.entities())
+        .chain(record.free_entities.entities())
         .fold(croaring::Bitmap::new(), |all, ids| all.or(ids));
-    let retired = manifest.retired_numbers.entities().unwrap().clone();
+    let retired = record.retired_numbers.entities().unwrap().clone();
     (freed, retired)
 }
 
@@ -804,7 +799,7 @@ fn a_moved_entitys_suppression_stays_withdrawn_after_a_restart_replays_it() {
     });
 
     let check = |engine: &Engine, after: &str| {
-        let overlay = Arc::clone(&engine.generation().overlay);
+        let overlay = Arc::clone(&engine.generation().only_shard().overlay);
         assert!(
             !overlay.is_suppressed(number) && !overlay.is_suppressed(middle),
             "the entities the fold removed hold no suppression, after {after}"
@@ -881,7 +876,7 @@ fn a_fold_discarded_after_logging_the_unsuppression_hides_nothing_less() {
     std::fs::remove_dir(&blocker).unwrap();
 
     let hidden = |engine: &Engine, after: &str| {
-        let overlay = Arc::clone(&engine.generation().overlay);
+        let overlay = Arc::clone(&engine.generation().only_shard().overlay);
         assert!(
             overlay.is_deleted(number) && overlay.is_deleted(middle),
             "the old entities stay deleted, after {after}"
@@ -906,14 +901,14 @@ fn a_fold_discarded_after_logging_the_unsuppression_hides_nothing_less() {
     drop(engine);
     let engine = open(tmp.path(), &root);
     hidden(&engine, "a restart");
-    let overlay = Arc::clone(&engine.generation().overlay);
+    let overlay = Arc::clone(&engine.generation().only_shard().overlay);
     assert!(
         !overlay.is_suppressed(number) && !overlay.is_suppressed(middle),
         "the restart replayed the unsuppression the discarded fold logged"
     );
 
     fold(&engine);
-    let overlay = Arc::clone(&engine.generation().overlay);
+    let overlay = Arc::clone(&engine.generation().only_shard().overlay);
     assert!(
         !overlay.touches(number) && !overlay.touches(middle),
         "the next fold removes the old entities and their deny records"
@@ -1043,7 +1038,7 @@ fn an_entity_edited_away_before_its_flush_is_freed_without_its_suppression() {
 
     fold(&engine);
     publish_buffered(&engine);
-    let overlay = Arc::clone(&engine.generation().overlay);
+    let overlay = Arc::clone(&engine.generation().only_shard().overlay);
     assert!(!overlay.touches(number) && !overlay.touches(middle));
     assert!(
         overlay.is_suppressed(holds),

@@ -34,6 +34,7 @@ DEFINITIONAL = (
     "morton",
     "identity",
     "bundle",
+    "layout",
     "wire",
     "filters",
     "record_blob",

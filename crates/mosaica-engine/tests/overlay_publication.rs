@@ -47,15 +47,15 @@ fn engine_at(tmp: &Path, root: &Path, tick_secs: u64) -> Engine {
     engine
 }
 
-/// The newest side-manifest on disc, read the way the reader reads it — highest `n` first.
+/// [`side_manifest`] and the `n` it is published at, from one open.
 fn newest_manifest(root: &Path) -> (u64, SegmentsManifest) {
     let bundle = mosaica_store::open_bundle(root).expect("the bundle opens");
-    let partition = bundle.partitions.values().next().unwrap();
-    (partition.segments_n, partition.manifest.clone())
+    let partition = &bundle.partitions[PARTITION];
+    (partition.segments_n, partition.side_manifest())
 }
 
 fn suppressed_in(manifest: &SegmentsManifest) -> Vec<u64> {
-    ids_of(&manifest.deny)
+    ids_of(&manifest.only_shard().deny)
 }
 
 /// The ids one of a manifest's deny fields carries, ascending.
@@ -103,7 +103,7 @@ fn a_flush_manifest_carries_the_deny_state_at_publication() {
     );
     assert!(n >= 1, "the flush published a manifest above the build's");
     assert_eq!(
-        manifest.segments.len(),
+        manifest.only_shard().segments.len(),
         2,
         "and it is the flush's own manifest — the build segment plus the flushed one"
     );
@@ -129,7 +129,7 @@ fn an_unsuppress_is_absent_from_the_next_manifest() {
     wait_until("the first flush", WAIT, || {
         engine.write_executor_stats().flushes >= 1
     });
-    assert_eq!(suppressed_in(&newest_manifest(&root).1), vec![entity.raw()]);
+    assert_eq!(suppressed_in(&side_manifest(&root)), vec![entity.raw()]);
 
     engine
         .accept_change(entity, ChangeOp::Unsuppress)
@@ -140,7 +140,7 @@ fn an_unsuppress_is_absent_from_the_next_manifest() {
     });
 
     assert!(
-        suppressed_in(&newest_manifest(&root).1).is_empty(),
+        suppressed_in(&side_manifest(&root)).is_empty(),
         "the unsuppress removed the entry: complete current state, not a diff"
     );
 }
@@ -167,9 +167,9 @@ fn a_delete_reaches_tombstones_and_a_suppress_reaches_deny() {
         engine.write_executor_stats().flushes >= 1
     });
 
-    let (_, manifest) = newest_manifest(&root);
+    let manifest = side_manifest(&root);
     assert_eq!(suppressed_in(&manifest), vec![suppressed.raw()]);
-    assert_eq!(ids_of(&manifest.tombstones), vec![deleted.raw()]);
+    assert_eq!(ids_of(&manifest.only_shard().tombstones), vec![deleted.raw()]);
 }
 
 /// **The restore path this exists for**: a node opened from the bundle alone — no WAL — honours
@@ -209,7 +209,11 @@ fn a_node_restored_from_the_bundle_alone_honours_the_published_deny() {
          baseline, recovered from the manifest alone"
     );
     assert!(
-        restored.generation().overlay.is_suppressed(suppressed),
+        restored
+            .generation()
+            .only_shard()
+            .overlay
+            .is_suppressed(suppressed),
         "and the suppression is in force, not merely parsed"
     );
 }
@@ -310,7 +314,7 @@ fn a_run_of_denies_leaves_a_bounded_directory_and_a_reopen_hides_every_one() {
         });
         (suppressed, deleted, before, engine.generation().prefix.clone())
     };
-    let partition_dir = root.join(&prefix).join("partitions").join("default");
+    let partition_dir = common::partition_dir(&root, &prefix);
     let present: Vec<String> = std::fs::read_dir(&partition_dir)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
@@ -332,7 +336,15 @@ fn a_run_of_denies_leaves_a_bounded_directory_and_a_reopen_hides_every_one() {
         "every suppression and the deletion survived the pruning"
     );
     for entity in suppressed {
-        assert!(restored.generation().overlay.is_suppressed(entity));
+        assert!(restored
+            .generation()
+            .only_shard()
+            .overlay
+            .is_suppressed(entity));
     }
-    assert!(restored.generation().overlay.is_deleted(deleted));
+    assert!(restored
+        .generation()
+        .only_shard()
+        .overlay
+        .is_deleted(deleted));
 }

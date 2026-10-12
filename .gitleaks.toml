@@ -1,0 +1,10 @@
+# The identity keys the tests and benches build bundles with are public fixtures, not credentials.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test identity keys"
+regexes = [
+  '''^0123456789abcdef0123456789abcdef$''',
+  '''^000102030405060708090a0b0c0d0e0f$''',
+]

@@ -269,9 +269,9 @@ fn build_fixture_with_every_home(out: &Path, tmp: &Path, n: u64) {
         attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -311,27 +311,6 @@ fn visible(engine: &Engine, session: &mosaica_engine::Session) -> u64 {
         .sum()
 }
 
-fn partition_dir(root: &Path) -> PathBuf {
-    root.join(current_prefix(root)).join("partitions/default")
-}
-
-fn segment_dirs(root: &Path) -> Vec<PathBuf> {
-    let bundle = open_bundle(root).expect("the bundle opens");
-    let prefix = root.join(current_prefix(root));
-    bundle.partitions["default"]
-        .manifest
-        .segments
-        .iter()
-        .map(|segment| {
-            prefix
-                .join("partitions/default/views")
-                .join(&segment.view)
-                .join("segments")
-                .join(&segment.seg_id)
-        })
-        .collect()
-}
-
 // ---------------------------------------------------------------------------------------------
 // The homes
 // ---------------------------------------------------------------------------------------------
@@ -349,11 +328,11 @@ trait Files {
 
 impl Files for Home {
     fn files(self, root: &Path) -> Vec<PathBuf> {
-        let partition = partition_dir(root);
-        let attrs = partition.join("attrs");
+        let shard = shard_dir(root);
+        let attrs = shard.join("attrs");
         match self {
             Home::Row => {
-                let view = partition.join("views/s0");
+                let view = shard.join("views/s0");
                 vec![
                     view.join("permutation.bin"),
                     view.join(mosaica_store::ROW_ENTITY_FILE),
@@ -386,7 +365,7 @@ impl Files for Home {
                 attrs.join("prose/postings.arrow"),
             ],
             Home::RecordBlob => files_under(&attrs.join("record")),
-            Home::TermPostings => vec![partition.join("terms/postings.arrow")],
+            Home::TermPostings => vec![shard.join("terms/postings.arrow")],
             // Homes this fixture does not have: the second test, over the fixture that has every
             // home, reaches them. A suppression is not a file; it is asserted below, on the
             // suppressed survivor.
@@ -438,7 +417,7 @@ fn every_home_byte(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 /// `Home::Row`: the row this entity resolves to, through the only legal entity → row path (I4).
 fn row_of(root: &Path, entity: EntityId) -> Option<u32> {
     let bundle = open_bundle(root).expect("the bundle opens");
-    bundle.partitions["default"].views["s0"]
+    bundle.only_shard().views["s0"]
         .row_space
         .row_of(entity)
         .map(|row| row.raw())
@@ -480,7 +459,7 @@ fn rendered_rows(root: &Path) -> Vec<(u64, u8, i32, bool)> {
 /// dictionary. A number's is not expressible this way (`Codes::at` answers `u32::MAX` for anything
 /// that is not a category width), so `score` is read through [`scored_entities`] instead.
 fn value_column_code(root: &Path, column: &str, entity: EntityId) -> Option<u32> {
-    let dir = partition_dir(root).join("attrs").join(column);
+    let dir = shard_dir(root).join("attrs").join(column);
     mosaica_filter::ValueColumn::open_dir(&dir, mosaica_filter::Access::Read)
         .expect("the column opens")
         .value_of(entity.raw() as u32)
@@ -489,7 +468,7 @@ fn value_column_code(root: &Path, column: &str, entity: EntityId) -> Option<u32>
 
 /// `Home::ValueColumn`, for the numeric column: the entities the column holds any value for.
 fn scored_entities(root: &Path) -> croaring::Bitmap {
-    let dir = partition_dir(root).join("attrs/score");
+    let dir = shard_dir(root).join("attrs/score");
     mosaica_filter::ValueColumn::open_dir(&dir, mosaica_filter::Access::Read)
         .expect("the score column opens")
         .present()
@@ -497,7 +476,7 @@ fn scored_entities(root: &Path) -> croaring::Bitmap {
 
 /// `Home::CategoryPostings`: the entities `band` says carry `code`.
 fn band_carriers(root: &Path, code: u8) -> croaring::Bitmap {
-    let path = partition_dir(root).join("attrs/band/postings.arrow");
+    let path = shard_dir(root).join("attrs/band/postings.arrow");
     mosaica_filter::ColumnPostings::open_keyed(&path)
         .expect("the category postings open")
         .entities(AttrLocalId::new(u32::from(code)))
@@ -506,7 +485,7 @@ fn band_carriers(root: &Path, code: u8) -> croaring::Bitmap {
 
 /// `Home::KeywordDictionary`: every key the `tag` dictionary holds, in ordinal order.
 fn keyword_dictionary(root: &Path) -> Vec<(u32, String)> {
-    let dir = partition_dir(root).join("attrs/tag");
+    let dir = shard_dir(root).join("attrs/tag");
     let dict = mosaica_filter::SortedDict::open_dir(&dir, mosaica_filter::Access::Read)
         .expect("the keyword dictionary opens");
     let mut keys = Vec::new();
@@ -521,7 +500,7 @@ fn keyword_dictionary(root: &Path) -> Vec<(u32, String)> {
 /// ordinal for its carriers — which is the pairing the whole family rests on and the one a fold
 /// that rewrote only one half would break.
 fn text_index(root: &Path) -> BTreeMap<String, croaring::Bitmap> {
-    let dir = partition_dir(root).join("attrs/prose");
+    let dir = shard_dir(root).join("attrs/prose");
     let dict = mosaica_filter::SortedDict::open_dir(&dir, mosaica_filter::Access::Read)
         .expect("the token dictionary opens");
     let postings = mosaica_filter::ColumnPostings::open(&dir.join("postings.arrow"), false)
@@ -547,7 +526,7 @@ fn text_index(root: &Path) -> BTreeMap<String, croaring::Bitmap> {
 /// `Home::RecordBlob`: the blob's base, opened at the artefact — no mask, no overlay, no session.
 fn record_blob(root: &Path) -> mosaica_filter::RecordBlob {
     mosaica_filter::RecordBlob::open_dir(
-        &partition_dir(root).join("attrs/record"),
+        &shard_dir(root).join("attrs/record"),
         mosaica_filter::Access::Read,
     )
     .expect("the record blob opens")
@@ -576,7 +555,7 @@ fn all_term(root: &Path) -> TermId {
 }
 
 fn term_names(root: &Path, term: TermId, entity: EntityId) -> bool {
-    let path = partition_dir(root).join("terms/postings.arrow");
+    let path = shard_dir(root).join("terms/postings.arrow");
     let postings = PostingsReader::open(&path, false).expect("the term postings open");
     let entity = entity.raw() as u32;
     // Bound rather than returned as the tail expression, which would drop `postings` before the
@@ -1000,7 +979,7 @@ fn a_deletion_reaches_every_home() {
         "Home::RecordBlob: the walk did not cover the survivors"
     );
     let blocks = std::fs::read(
-        partition_dir(&root)
+        shard_dir(&root)
             .join("attrs/record")
             .join(mosaica_filter::RECORD_BLOCKS_FILE),
     )
@@ -1075,7 +1054,7 @@ fn stored(root: &Path, entities: &[EntityId]) -> Stored {
         rows: Vec::new(),
         words: Default::default(),
     };
-    for dir in dirs_under(&partition_dir(root).join("attrs")) {
+    for dir in dirs_under(&shard_dir(root).join("attrs")) {
         let holds =
             |present: &dyn Fn(u32) -> bool| entities.iter().any(|e| present(e.raw() as u32));
         if dir.join(mosaica_filter::VALUES_FILE).is_file() {
@@ -1114,9 +1093,7 @@ fn stored(root: &Path, entities: &[EntityId]) -> Stored {
 fn a_deletion_of_an_edited_item_reaches_every_home() {
     use homes::fixture as every;
     use mosaica_engine::filter::{FilterExpr, FilterOperand, Scalar};
-    use mosaica_engine::IngestRequest;
     use mosaica_lifecycle::wal::WalScalar;
-    use mosaica_lifecycle::IngestRow;
 
     let tmp = tempfile::tempdir().unwrap();
     let root = every::build_homes(tmp.path());
@@ -1125,33 +1102,10 @@ fn a_deletion_of_an_edited_item_reaches_every_home() {
     let first = EntityId::new(source_to_new_map(&root, "v00000")[&every::X]);
     let tid = engine.mosaica_id_of(first).unwrap();
 
-    let blank = |mosaica_id| IngestRow {
-        mosaica_id,
-        labels: None,
-        position: None,
-        scalars: vec![WalScalar::Null; every::DECLARED],
-        scoped: vec![WalScalar::Null; 2],
-        omitted: (0..every::DECLARED + 2).collect(),
-    };
-    let send = |engine: &Engine, batch: &str, row: IngestRow| {
-        let mut body_hash = [0u8; 32];
-        body_hash[..batch.len()].copy_from_slice(batch.as_bytes());
-        engine
-            .ingest(IngestRequest {
-                batch_id: batch.to_string(),
-                body_hash,
-                view: Some("s0".to_string()),
-                rows: vec![row],
-                artifacts: Default::default(),
-                strict: false,
-                mosaica_id_column: false,
-            })
-            .expect("the batch is accepted")
-    };
-    let mut edit = blank(Some(tid));
+    let mut edit = every::bare(Some(tid));
     edit.scalars[every::SCORE_AT] = WalScalar::I32(555);
     edit.omitted.retain(|at| *at != every::SCORE_AT);
-    assert_eq!(send(&engine, "edit", edit).edited, 1);
+    assert_eq!(every::send(&engine, "edit", "s0", edit).edited, 1);
     publish_buffered(&engine);
     fold(&engine);
     let moved = engine.resolve_mosaica_ids(&[tid]).unwrap()[0].expect("the edited item resolves");
@@ -1169,7 +1123,7 @@ fn a_deletion_of_an_edited_item_reaches_every_home() {
         .collect();
     let before = stored(&root, &entities);
     let named = |dirs: &[PathBuf]| -> BTreeSet<String> {
-        let attrs = partition_dir(&root).join("attrs");
+        let attrs = shard_dir(&root).join("attrs");
         dirs.iter()
             .map(|dir| dir.strip_prefix(&attrs).unwrap().display().to_string())
             .collect()
@@ -1279,12 +1233,12 @@ fn a_deletion_of_an_edited_item_reaches_every_home() {
                     served("s0", ident(every::ident_of(every::X))).is_empty(),
                     "{home:?}"
                 );
-                let mut fresh = blank(None);
+                let mut fresh = every::bare(None);
                 fresh.labels = Some(vec![ALL_TERM.to_string().into_bytes()]);
                 fresh.position = Some((500.0, 500.0));
                 fresh.scalars[every::IDENT_AT] = WalScalar::U64(every::ident_of(every::X));
                 fresh.omitted.retain(|at| *at != every::IDENT_AT);
-                let receipt = send(&engine, "fresh", fresh);
+                let receipt = every::send(&engine, "fresh", "s0", fresh);
                 assert_eq!(
                     receipt.created, 1,
                     "{home:?}: the deleted item's unique value is free for a new item"

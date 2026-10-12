@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{Array, Float64Array, LargeBinaryArray, UInt32Array, UInt64Array};
@@ -19,16 +19,9 @@ use parquet::arrow::ArrowWriter;
 use mosaica_build::{build, signature_sort_key, BuildArgs};
 use mosaica_spatial::Bounds;
 use mosaica_store::read::open_bundle;
-use mosaica_types::{IdentityKey, TermId};
+use mosaica_types::TermId;
 
 mod common;
-
-/// A fixed, non-degenerate test key shared by every fixture in this file.
-const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
-
-fn test_key() -> IdentityKey {
-    IdentityKey::from_hex(TEST_KEY_HEX).unwrap()
-}
 
 const N_ITEMS: u64 = 250;
 const N_TERMS: u64 = 17;
@@ -172,10 +165,6 @@ fn posting_entities(path: &Path, term: TermId) -> BTreeSet<u64> {
     out
 }
 
-fn partition_dir(root: &Path, prefix: &str) -> PathBuf {
-    root.join(prefix).join("partitions").join("default")
-}
-
 #[test]
 fn build_produces_a_verifiable_signature_sorted_bundle() {
     let tmp = tempfile::tempdir().unwrap();
@@ -197,23 +186,10 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
             select: None,
             access: mosaica_build::config::AccessInput::relation(pairs.clone()),
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources,
-        out: out.clone(),
-        limit: None,
-        strict: false,
-        identity_key: test_key(),
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
         emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&out)
     };
     let report = build(&args).expect("build should succeed");
     assert_eq!(report.items, N_ITEMS);
@@ -221,7 +197,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     // ---- (a) manifests present, digests verify (open_bundle is the read protocol) ----------
     let bundle = open_bundle(&out).expect("open_bundle must verify the freshly built bundle");
     assert_eq!(bundle.manifest.bundle_format, mosaica_types::BUNDLE_FORMAT);
-    assert_eq!(bundle.manifest.entity_id_high_water, N_ITEMS);
+    assert_eq!(bundle.only_shard().record.high_water, N_ITEMS);
     assert_eq!(bundle.manifest.small_term_threshold, 32);
     assert_eq!(bundle.manifest.partitions.len(), 1);
     assert_eq!(bundle.manifest.partitions[0].phash, "default");
@@ -235,17 +211,18 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     );
 
     let part = &bundle.partitions["default"];
+    let shard = part.only_shard();
     assert_eq!(part.segments_n, 0);
-    assert_eq!(part.manifest.watermark, N_ITEMS);
-    assert_eq!(part.manifest.entity_id_high_water, N_ITEMS);
-    assert_eq!(part.manifest.segments.len(), 1);
-    assert_eq!(part.manifest.segments[0].view, "s0");
-    assert_eq!(part.manifest.segments[0].row_count, N_ITEMS as u32);
-    assert_eq!(part.manifest.segments[0].entity_lo, 0);
-    assert_eq!(part.manifest.segments[0].entity_hi, N_ITEMS - 1);
-    assert!(part.manifest.deltas.is_empty());
-    assert!(!part.manifest.tombstones.carries());
-    assert!(!part.manifest.deny.carries());
+    assert_eq!(shard.record.watermark, N_ITEMS);
+    assert_eq!(shard.record.high_water, N_ITEMS);
+    assert_eq!(shard.record.segments.len(), 1);
+    assert_eq!(shard.record.segments[0].view, "s0");
+    assert_eq!(shard.record.segments[0].row_count, N_ITEMS as u32);
+    assert_eq!(shard.record.segments[0].entity_lo, 0);
+    assert_eq!(shard.record.segments[0].entity_hi, N_ITEMS - 1);
+    assert!(shard.record.deltas.is_empty());
+    assert!(!shard.record.tombstones.carries());
+    assert!(!shard.record.deny.carries());
     assert_eq!(part.manifest.dict_extents.len(), 1);
     assert_eq!(
         part.manifest.dict_extents[0].path,
@@ -262,40 +239,44 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
          empty, got {:?}",
         part.manifest.files
     );
-    for rel in [
-        "dictionary/terms-0.dict",
-        "partitions/default/terms/postings.arrow",
-        "partitions/default/terms/pairs.parquet",
+    let shard_files = [
+        "terms/postings.arrow",
+        "terms/pairs.parquet",
         // The unique `id` column's index, and the record blob that holds its values.
-        "partitions/default/entities/unique/id/base-0.keys",
-        "partitions/default/attrs/record/blocks.bin",
-        "partitions/default/attrs/record/directory.arrow",
-        "partitions/default/attrs/record/hasrow.roaring",
+        "entities/unique/id/base-0.keys",
+        "attrs/record/blocks.bin",
+        "attrs/record/directory.arrow",
+        "attrs/record/hasrow.roaring",
         // The entity→term transpose (contracts §2.4), unconditional: every entity has a label
         // set, so a build always writes one, and a bundle without it refuses at open.
-        "partitions/default/entities/terms/hasrow.roaring",
-        "partitions/default/entities/terms/offsets.u32",
-        "partitions/default/entities/terms/terms.u32",
+        "entities/terms/hasrow.roaring",
+        "entities/terms/offsets.u32",
+        "entities/terms/terms.u32",
         // The offsets' block bases: one u64 per 65,536 has-row ranks, which is what takes the
         // layer's pair count off a u32 ceiling.
-        "partitions/default/entities/terms/bases.u64",
-        "partitions/default/views/s0/permutation.bin",
-        "partitions/default/views/s0/row-entity.u32",
-        "partitions/default/views/s0/segments/seg-0/columns.arrow",
-        "partitions/default/views/s0/segments/seg-0/morton.u32",
+        "entities/terms/bases.u64",
+        "views/s0/permutation.bin",
+        "views/s0/row-entity.u32",
+        "views/s0/segments/seg-0/columns.arrow",
+        "views/s0/segments/seg-0/morton.u32",
         // The Morton column's run-length index, which selection walks per cell
         // (`mosaica_store::read::CutIndex`).
-        "partitions/default/views/s0/segments/seg-0/cuts.u32",
+        "views/s0/segments/seg-0/cuts.u32",
         // Each cell's code, and the identity bands (`mosaica_store::bands`).
-        "partitions/default/views/s0/segments/seg-0/cell-codes.u32",
-        "partitions/default/views/s0/segments/seg-0/bands.bin",
+        "views/s0/segments/seg-0/cell-codes.u32",
+        "views/s0/segments/seg-0/bands.bin",
         // The view's term images (`mosaica_store::term_images`), one file per view with rows.
-        "partitions/default/term-images/term-images-000000-000.timg",
+        "term-images/term-images-000000-000.timg",
         // The view's field tallies (`mosaica_store::field_tallies`).
-        "partitions/default/views/s0/field-tallies.bin",
-    ] {
+        "views/s0/field-tallies.bin",
+    ];
+    for rel in std::iter::once("dictionary/terms-0.dict".to_string()).chain(
+        shard_files
+            .iter()
+            .map(|rel| format!("{}/{rel}", common::SHARD.rel())),
+    ) {
         assert!(
-            bundle.manifest.files.contains_key(rel),
+            bundle.manifest.files.contains_key(&rel),
             "MANIFEST.json must list {rel}, got {:?}",
             bundle.manifest.files.keys().collect::<Vec<_>>()
         );
@@ -307,7 +288,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     );
 
     let prefix = &report.prefix;
-    let pdir = partition_dir(&out, prefix);
+    let pdir = common::shard_dir(&out);
 
     // ---- source id -> new entity id, through the unique `id` column ----------------------
     let source_to_new: BTreeMap<u64, u64> = common::entities_of(&out, "id", 0..N_ITEMS)
@@ -459,7 +440,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
         .is_some());
 
     // ---- permutation is a bijection over the segment's rows ------------------------------
-    let view = &part.views["s0"];
+    let view = &shard.views["s0"];
     assert_eq!(view.row_space.base().bound(), N_ITEMS);
     let mut rows: BTreeSet<u32> = BTreeSet::new();
     for e in 0..N_ITEMS {
@@ -492,23 +473,10 @@ fn build_refuses_to_clobber_an_existing_bundle() {
             select: None,
             access: mosaica_build::config::AccessInput::relation(pairs),
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources,
-        out: out.clone(),
-        limit: None,
-        strict: false,
-        identity_key: test_key(),
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
         emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&out)
     };
     build(&args).unwrap();
     // A second build into the same root would leave the first bundle's files half-overwritten
@@ -542,30 +510,17 @@ fn an_empty_selection_builds_an_empty_bundle() {
             select: None,
             access: mosaica_build::config::AccessInput::relation(pairs),
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources,
-        out: out.clone(),
         limit: Some(0),
-        strict: false,
-        identity_key: test_key(),
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
         emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&out)
     })
     .expect("a build that selects no rows writes a bundle with no items");
 
     let bundle = open_bundle(&out).expect("the empty bundle opens and its digests verify");
-    assert_eq!(bundle.manifest.entity_id_high_water, 0);
-    let partition = bundle.partitions.values().next().expect("one partition");
-    assert_eq!(partition.manifest.segments[0].row_count, 0);
+    assert_eq!(bundle.only_shard().record.high_water, 0);
+    assert_eq!(bundle.only_shard().record.segments[0].row_count, 0);
 }
 
 /// A points file storing Morton codes is exact only against the grid's own extent. Any other
@@ -592,25 +547,12 @@ fn morton_input_requires_the_identity_extent() {
             select: None,
             access: mosaica_build::config::AccessInput::relation(pairs.clone()),
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources: attribute_sources.clone(),
-        out: tmp
-            .path()
-            .join(format!("bundle-{extent:?}").replace(['/', ' '], "_")),
-        limit: None,
-        strict: false,
-        identity_key: test_key(),
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
         emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema: schema.clone(),
+        ..common::build_args(
+            &tmp.path().join(format!("bundle-{extent:?}").replace(['/', ' '], "_")),
+        )
     };
 
     // The caller's own extent, which the x/y branch would happily accept, must be rejected here.
@@ -648,28 +590,15 @@ fn morton_input_requires_the_identity_extent() {
             select: None,
             access: mosaica_build::config::AccessInput::relation(pairs),
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources,
-        out: out.clone(),
-        limit: None,
-        strict: false,
-        identity_key: test_key(),
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
         emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&out)
     })
     .unwrap();
     let bundle = open_bundle(&out).unwrap();
     let mut got: Vec<u64> =
-        std::fs::read(out.join("v00000/partitions/default/views/s0/segments/seg-0/morton.u32"))
+        std::fs::read(common::shard_dir(&out).join("views/s0/segments/seg-0/morton.u32"))
             .unwrap()
             .as_chunks::<4>()
             .0
@@ -705,23 +634,10 @@ fn build_rejects_an_unsafe_view_id() {
             select: None,
             access: mosaica_build::config::AccessInput::relation(pairs),
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources,
-        out: tmp.path().join("bundle"),
-        limit: None,
-        strict: false,
-        identity_key: test_key(),
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
         emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&tmp.path().join("bundle"))
     })
     .is_err());
 }
@@ -759,28 +675,16 @@ fn limit_filters_the_source_entity_id_prefix() {
             select: None,
             access: mosaica_build::config::AccessInput::relation(pairs),
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources,
-        out: out.clone(),
         limit: Some(100),
-        strict: false,
-        identity_key: test_key(),
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
         emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&out)
     })
     .unwrap();
     assert_eq!(report.items, 100);
     let bundle = open_bundle(&out).unwrap();
-    assert_eq!(bundle.manifest.entity_id_high_water, 100);
+    assert_eq!(bundle.only_shard().record.high_water, 100);
 }
 
 /// **A row group whose signed ids run from negative to small positive keeps every row `--limit`
@@ -827,23 +731,10 @@ fn limit_keeps_a_row_group_whose_signed_ids_start_below_zero() {
             select: None,
             access: mosaica_build::config::AccessInput::relation(pairs),
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources,
-        out: out.clone(),
         limit: Some(100),
-        strict: false,
-        identity_key: test_key(),
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&out)
     })
     .unwrap();
     assert_eq!(report.items, 100, "ids 0 to 99 are below the limit");
@@ -873,23 +764,10 @@ fn verify_accepts_a_freshly_built_bundle() {
             select: None,
             access: mosaica_build::config::AccessInput::relation(pairs),
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources,
-        out: out.clone(),
-        limit: None,
-        strict: false,
-        identity_key: test_key(),
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
         emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&out)
     })
     .unwrap();
 
@@ -924,27 +802,14 @@ fn verify_rejects_a_columns_file_whose_mosaica_ids_do_not_match_the_key() {
             select: None,
             access: mosaica_build::config::AccessInput::relation(pairs),
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources,
-        out: out.clone(),
-        limit: None,
-        strict: false,
-        identity_key: test_key(),
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
         emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&out)
     })
     .unwrap();
 
-    let columns_rel = "partitions/default/views/s0/segments/seg-0/columns.arrow".to_string();
+    let columns_rel = format!("{}/views/s0/segments/seg-0/columns.arrow", common::SHARD.rel());
     let columns_path = out.join(&report.prefix).join(&columns_rel);
 
     // ---- corrupt row 0's mosaica_id, keeping the schema and every other value intact --------
@@ -1236,23 +1101,9 @@ fn entity_ids_break_signature_ties_on_the_morton_code() {
                 select: None,
                 access: mosaica_build::config::AccessInput::relation(pairs),
             }],
-            anchor: 0,
-            groups: Vec::new(),
-            scoped_attributes: Vec::new(),
             attribute_sources,
-            out: out.clone(),
-            limit: None,
-            strict: false,
-            identity_key: test_key(),
-            shard_id: 0,
-            layers: Vec::new(),
-            layer_inputs: Vec::new(),
-            scoped_layers: Default::default(),
-            emit_oracle_pairs: false,
-            batch_items: None,
-            memory_budget: None,
-            band_rows: None,
             schema,
+            ..common::build_args(&out)
         };
         let report = if linear {
             mosaica_build::build_in_memory(&args)

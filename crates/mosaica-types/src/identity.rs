@@ -16,7 +16,7 @@
 //!
 //! An item's high half is an [`ItemHigh`]; an identifier whose kind bit is 1 names no item.
 
-use crate::EntityId;
+use crate::{EntityId, ShardId};
 
 /// Number of Feistel rounds in the `mosaica_id` construction. Fixed by the memo §1 — do
 /// not change.
@@ -41,7 +41,7 @@ pub enum IdentityError {
     /// `forward`'s entity input exceeded `u32::MAX`. Plan Important I-1: a truncating
     /// cast would make "collision-free by construction" false. See memo §1.8.
     EntityOutOfRange { entity: u64 },
-    /// A shard id does not fit the 19 bits [`ItemHigh`] gives it.
+    /// A shard id of [`ShardId::LIMIT`] or more.
     ShardOutOfRange { shard: u32 },
     /// A tenancy does not fit the 12 bits [`ItemHigh`] gives it.
     TenancyOutOfRange { tenancy: u16 },
@@ -80,8 +80,9 @@ impl std::fmt::Display for IdentityError {
             IdentityError::ShardOutOfRange { shard } => {
                 write!(
                     f,
-                    "shard id {shard} does not fit in 19 bits; a shard id must be below {}",
-                    ItemHigh::SHARD_LIMIT
+                    "shard id {shard} does not fit in {} bits; a shard id must be below {}",
+                    ShardId::BITS,
+                    ShardId::LIMIT
                 )
             }
             IdentityError::TenancyOutOfRange { tenancy } => {
@@ -154,45 +155,29 @@ impl Tenancy {
 }
 
 /// The high 32 bits of an item's `mosaica_id` input: `0 << 31 | shard << 12 | tenancy`.
-/// [`ItemHigh::pack`] refuses a shard of [`ItemHigh::SHARD_LIMIT`] or more.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ItemHigh {
-    pub shard: u32,
+    pub shard: ShardId,
     pub tenancy: Tenancy,
 }
 
-impl ItemHigh {
-    pub const SHARD_BITS: u32 = 19;
-    /// The lowest shard id that does not fit.
-    pub const SHARD_LIMIT: u32 = 1 << Self::SHARD_BITS;
-    const KIND_BIT: u32 = 1 << (Self::SHARD_BITS + Tenancy::BITS);
+const _: () = assert!(ShardId::BITS + Tenancy::BITS == 31);
 
+impl ItemHigh {
     #[inline]
-    pub const fn new(shard: u32, tenancy: Tenancy) -> Self {
+    pub const fn new(shard: ShardId, tenancy: Tenancy) -> Self {
         ItemHigh { shard, tenancy }
     }
 
-    pub fn pack(self) -> Result<u32, IdentityError> {
-        Self::check_shard(self.shard)?;
-        Ok((self.shard << Tenancy::BITS) | self.tenancy.0 as u32)
-    }
-
-    /// Refuses a shard id of [`ItemHigh::SHARD_LIMIT`] or more.
-    pub fn check_shard(shard: u32) -> Result<(), IdentityError> {
-        if shard >= Self::SHARD_LIMIT {
-            return Err(IdentityError::ShardOutOfRange { shard });
-        }
-        Ok(())
+    pub fn pack(self) -> u32 {
+        (self.shard.raw() << Tenancy::BITS) | self.tenancy.0 as u32
     }
 
     /// The item high half packed in `high`, or `None` when its kind bit is set and it names
-    /// something other than an item.
+    /// something other than an item. A set kind bit reads as a shard id [`ShardId::new`] refuses.
     pub fn unpack(high: u32) -> Option<ItemHigh> {
-        if high & Self::KIND_BIT != 0 {
-            return None;
-        }
         Some(ItemHigh {
-            shard: high >> Tenancy::BITS,
+            shard: ShardId::new(high >> Tenancy::BITS).ok()?,
             tenancy: Tenancy((high & Tenancy::MAX.0 as u32) as u16),
         })
     }
@@ -297,11 +282,10 @@ impl IdentityKey {
         (splitmix64((r as u64) ^ self.round_key(i)) >> 32) as u32
     }
 
-    /// The `mosaica_id` of the item at `high` holding `entity` as its number. Refuses a shard
-    /// [`ItemHigh::pack`] refuses, and an entity above `u32::MAX`, which a truncating cast
-    /// would let collide.
+    /// The `mosaica_id` of the item at `high` holding `entity` as its number. Refuses an entity
+    /// above `u32::MAX`, which a truncating cast would let collide.
     pub fn forward(&self, high: ItemHigh, entity: EntityId) -> Result<MosaicaId, IdentityError> {
-        self.forward_raw(high.pack()?, entity)
+        self.forward_raw(high.pack(), entity)
     }
 
     /// The item high half and number `id` was formed from, or `None` when `id` names no item.
@@ -357,7 +341,7 @@ mod tests {
     use super::*;
 
     const CANONICAL_KEY: &str = "000102030405060708090a0b0c0d0e0f";
-    const ITEM: ItemHigh = ItemHigh::new(0, Tenancy::ZERO);
+    const ITEM: ItemHigh = ItemHigh::new(ShardId::ZERO, Tenancy::ZERO);
 
     /// Loads `reference/vectors/mosaica_id.json`, shared with every test below that reads
     /// from it -- a single load point so a future correction to the file reaches every
@@ -556,8 +540,8 @@ mod tests {
     fn the_shard_and_the_tenancy_separate_identity_spaces() {
         // This keeps the shard and the tenancy from being tidied out of the input encoding.
         let key = IdentityKey::from_hex(CANONICAL_KEY).unwrap();
-        let shard_one = ItemHigh::new(1, Tenancy::ZERO);
-        let tenancy_one = ItemHigh::new(0, Tenancy::ZERO.next().unwrap());
+        let shard_one = ItemHigh::new(ShardId::new(1).unwrap(), Tenancy::ZERO);
+        let tenancy_one = ItemHigh::new(ShardId::ZERO, Tenancy::ZERO.next().unwrap());
         for e in 0u32..1000 {
             let e = EntityId::new(e as u64);
             let id0 = key.forward(ITEM, e).unwrap();
@@ -589,7 +573,7 @@ mod tests {
         let mut kinds = [0usize; 2];
         for (key, v) in cases {
             let kind = v["kind"].as_u64().unwrap();
-            let shard = v["shard"].as_u64().unwrap() as u32;
+            let shard = ShardId::new(v["shard"].as_u64().unwrap() as u32).unwrap();
             let tenancy = Tenancy::new(v["tenancy"].as_u64().unwrap() as u16).unwrap();
             let number = EntityId::new(v["number"].as_u64().unwrap());
             let high = v["high"].as_u64().unwrap() as u32;
@@ -600,7 +584,7 @@ mod tests {
             assert_eq!(key.invert_raw(id), (high, number), "{v}");
             if kind == 0 {
                 let item = ItemHigh::new(shard, tenancy);
-                assert_eq!(item.pack(), Ok(high), "{v}");
+                assert_eq!(item.pack(), high, "{v}");
                 assert_eq!(ItemHigh::unpack(high), Some(item), "{v}");
                 assert_eq!(key.forward(item, number), Ok(id), "{v}");
                 assert_eq!(key.invert(id), Some((item, number)), "{v}");
@@ -617,8 +601,10 @@ mod tests {
         for v in rejected {
             let shard = v["shard"].as_u64().unwrap() as u32;
             let tenancy = v["tenancy"].as_u64().unwrap() as u16;
-            let refused = Tenancy::new(tenancy).and_then(|t| ItemHigh::new(shard, t).pack());
-            assert!(refused.is_err(), "{v}");
+            assert!(
+                ShardId::new(shard).is_err() || Tenancy::new(tenancy).is_err(),
+                "{v}"
+            );
         }
     }
 
@@ -649,19 +635,12 @@ mod tests {
     }
 
     #[test]
-    fn a_shard_that_does_not_fit_is_refused() {
+    fn the_last_shard_and_tenancy_pack_below_the_kind_bit() {
         let key = IdentityKey::from_hex(CANONICAL_KEY).unwrap();
-        let last = ItemHigh::new(ItemHigh::SHARD_LIMIT - 1, Tenancy::MAX);
-        assert_eq!(last.pack(), Ok(0x7fff_ffff));
+        let last = ItemHigh::new(ShardId::new(ShardId::LIMIT - 1).unwrap(), Tenancy::MAX);
+        assert_eq!(last.pack(), 0x7fff_ffff);
         let id = key.forward(last, EntityId::new(9)).unwrap();
         assert_eq!(key.invert(id), Some((last, EntityId::new(9))));
-        assert!(matches!(
-            key.forward(
-                ItemHigh::new(ItemHigh::SHARD_LIMIT, Tenancy::ZERO),
-                EntityId::new(9)
-            ),
-            Err(IdentityError::ShardOutOfRange { .. })
-        ));
     }
 
     #[test]

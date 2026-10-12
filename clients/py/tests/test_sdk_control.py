@@ -172,18 +172,10 @@ def test_a_request_that_reaches_no_server_is_an_answer_and_not_an_exception():
 
 def test_a_commit_whose_pages_reach_no_server_reports_it_and_does_not_raise(tmp_path, monkeypatch):
     """A page that was never answered is a refusal the report carries, not an exception."""
-    import pandas as pd
+    from conftest import small
+    from mosaica._database import Database
 
-    from conftest import binary
-    from mosaica._database import Database, create
-
-    binary()
-    db = create(tmp_path / "db")
-    db.declare_view("map", extent={"min": 0.0, "max": 8.0})
-    db.declare_attribute("id", type="i64", unique=True)
-    rows = pd.DataFrame({"id": [1, 2], "x": [0.0, 1.0], "y": [0.0, 1.0],
-                         "access": ["public", "public"]})
-    db.insert("map", rows, x="x", y="y", access="access")
+    db, rows = small(tmp_path / "db")
     try:
         assert db.commit().ok
         db.insert("map", rows, x="x", y="y", access="access")

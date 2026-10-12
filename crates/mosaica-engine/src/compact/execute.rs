@@ -7,9 +7,7 @@ use mosaica_spatial::tiler::ScalarType;
 use mosaica_store::edited::{EditedRows, RowEntities};
 use mosaica_store::manifest::{DeclaredScalar, FileDigest, ManifestVocabulary, SegmentDescriptor};
 use mosaica_store::render_presence::RENDER_PRESENCE_DIR;
-use mosaica_store::{
-    fold_row_space, FoldRowSpaceSpec, FoldSegmentInput, PairsParquetWriter,
-};
+use mosaica_store::{fold_row_space, FoldRowSpaceSpec, FoldSegmentInput, PairsParquetWriter};
 use mosaica_types::IdentityKey;
 
 use crate::flush::{failed, remove_spool_on_error, MaintenanceFailed};
@@ -27,7 +25,6 @@ pub(crate) struct FoldContext {
     pub(crate) to_prefix: String,
     pub(crate) to_prefix_dir: PathBuf,
     pub(crate) identity_key: IdentityKey,
-    pub(crate) shard_id: u32,
     /// Per view: the bundle-wide render tail plus that view's group-scoped render lanes.
     pub(crate) scalar_schema: BTreeMap<String, Vec<(String, ScalarType)>>,
     /// The columns the bands copy beside the render tail, in every view.
@@ -116,9 +113,9 @@ pub(crate) fn execute(
     plan: FoldPlan,
     ctx: FoldContext,
 ) -> Result<CompletedFold, MaintenanceFailed> {
-    let partition_dir = ctx.to_prefix_dir.join("partitions").join(&plan.partition);
-    let terms_dir = partition_dir.join("terms");
-    let entities_dir = partition_dir.join("entities");
+    let layout = plan.layout();
+    let terms_dir = ctx.to_prefix_dir.join(layout.terms_rel());
+    let entities_dir = ctx.to_prefix_dir.join(layout.entities_rel());
     for dir in [&terms_dir, &entities_dir] {
         std::fs::create_dir_all(dir).map_err(failed("creating the new prefix"))?;
     }
@@ -193,16 +190,13 @@ fn fold_row_spaces(
                 view.view
             )));
         };
-        let view_rel = format!(
-            "partitions/{}/{}",
-            plan.partition,
-            mosaica_store::view_rel(&view.view)
-        );
+        let layout = plan.layout();
+        let view_rel = layout.view_rel(&view.view);
         let view_dir = ctx.to_prefix_dir.join(&view_rel);
         std::fs::create_dir_all(&view_dir).map_err(failed("creating the view"))?;
-        let segment_rel = format!("{view_rel}/segments/{}", ctx.seg_id);
+        let segment_rel = layout.segment_rel(&view.view, &ctx.seg_id);
         let segment_dir = ctx.to_prefix_dir.join(&segment_rel);
-        let permutation_rel = format!("{view_rel}/permutation.bin");
+        let permutation_rel = layout.permutation_rel(&view.view);
         let permutation_path = ctx.to_prefix_dir.join(&permutation_rel);
         let row_entity_rel = format!("{view_rel}/{}", mosaica_store::ROW_ENTITY_FILE);
         let row_entity_path = ctx.to_prefix_dir.join(&row_entity_rel);
@@ -236,7 +230,7 @@ fn fold_row_spaces(
             FoldRowSpaceSpec {
                 inputs: &inputs,
                 identity_key: &ctx.identity_key,
-                shard_id: ctx.shard_id,
+                shard: plan.shard,
                 scalar_schema: view_schema,
                 indexed: &ctx.band_schema,
                 absent_ok: ctx.absent_ok.get(&view.view).map_or(&[][..], Vec::as_slice),
@@ -280,22 +274,22 @@ fn derive_field_tallies(
     segments: &[SegmentDescriptor],
     out: &mut FoldOutput,
 ) -> Result<(), MaintenanceFailed> {
-    let partition_dir = ctx.to_prefix_dir.join("partitions").join(&plan.partition);
+    let layout = plan.layout();
     for segment in segments {
         let path = mosaica_store::field_tallies::derive_view(
-            &partition_dir,
+            &ctx.to_prefix_dir,
+            layout,
             &segment.view,
             &segment.seg_id,
             segment.row_count,
             &ctx.declared_scalars,
-            &|name| mosaica_filter::base_numbers(&partition_dir, name),
+            &|name| mosaica_filter::base_numbers(&ctx.to_prefix_dir.join(layout.column_rel(name))),
         )
         .map_err(failed("pass 4d (field tallies)"))?;
         out.push(
             format!(
-                "partitions/{}/{}/{}",
-                plan.partition,
-                mosaica_store::view_rel(&segment.view),
+                "{}/{}",
+                layout.view_rel(&segment.view),
                 mosaica_store::field_tallies::FIELD_TALLIES_FILE
             ),
             path,
@@ -313,8 +307,9 @@ fn fold_postings(
     terms_dir: &Path,
     out: &mut FoldOutput,
 ) -> Result<PathBuf, MaintenanceFailed> {
-    let postings_rel = format!("partitions/{}/terms/postings.arrow", plan.partition);
-    let pairs_rel = format!("partitions/{}/terms/pairs.parquet", plan.partition);
+    let layout = plan.layout();
+    let postings_rel = layout.postings_rel();
+    let pairs_rel = layout.pairs_rel();
     let postings_path = ctx.to_prefix_dir.join(&postings_rel);
     let pairs_path = ctx.to_prefix_dir.join(&pairs_rel);
     let spool_path = terms_dir.join("postings.spool");
@@ -368,11 +363,9 @@ fn derive_term_images(
         if segment.row_count == 0 || dict_len == 0 {
             continue;
         }
-        let permutation_path = ctx.to_prefix_dir.join(format!(
-            "partitions/{}/{}/permutation.bin",
-            plan.partition,
-            mosaica_store::view_rel(&segment.view)
-        ));
+        let permutation_path = ctx
+            .to_prefix_dir
+            .join(plan.layout().permutation_rel(&segment.view));
         // From pass 1's file, so the images match the permutation that is published.
         let permutation = mosaica_store::Permutation::load(&permutation_path)
             .map_err(failed("pass 2b (term images: the new permutation)"))?;
@@ -387,7 +380,7 @@ fn derive_term_images(
         };
         let file = mosaica_store::derived::term_image_file(
             &ctx.to_prefix_dir,
-            &plan.partition,
+            plan.layout(),
             TERM_IMAGE_MANIFEST_N,
             &mut index,
         )
@@ -452,7 +445,7 @@ fn fold_unique_indexes(
             .files()
             .map(|rel| ctx.from_prefix_dir.join(rel))
             .collect();
-        let out_rel = mosaica_store::unique::index_dir_rel(&plan.partition, &index.attribute);
+        let out_rel = plan.layout().unique_index_rel(&index.attribute);
         let written = mosaica_store::unique::merge_unique_runs(
             &inputs,
             &plan.tombstones,
@@ -503,10 +496,8 @@ fn fold_edited_items(
             direction,
             &inputs,
             &plan.tombstones,
-            &ctx.to_prefix_dir.join(mosaica_store::edited::runs_dir_rel(
-                &plan.partition,
-                direction,
-            )),
+            &ctx.to_prefix_dir
+                .join(plan.layout().edited_runs_rel(direction)),
             "base",
         )
         .map_err(failed("pass 3c (edited items)"))?;

@@ -215,6 +215,10 @@ class Planner:
             for column in columns
             if column.get("category")
         }
+        size = database.blocks.shard_size
+        self.sends_shard_size = (
+            size is not None and size != (control.status().get("shards") or {}).get("size")
+        )
 
     @property
     def inserts(self) -> list:
@@ -275,6 +279,15 @@ class Planner:
         the values pages that fill the columns it declared.
         """
         payloads = self.db._payloads() if self._pending(document) else {}
+        if self.sends_shard_size:
+            self.pages.append(
+                Page(
+                    kind="shards",
+                    name="shards",
+                    line=f"declare shard size {payloads['shards']['size']}",
+                    body=payloads["shards"],
+                )
+            )
         for entry in _placed(
             payloads.get("view_groups", []),
             lambda entry: entry["name"],
@@ -450,6 +463,8 @@ class Planner:
 
     def _pending(self, document: dict) -> bool:
         """Whether this declaration carries a block the database does not."""
+        if self.sends_shard_size:
+            return True
         for group in document.get("view_group", []):
             if group["name"] not in self.held_views:
                 return True
@@ -1299,6 +1314,8 @@ def _send(control: Control, page: Page, strict: bool = False) -> Answer:
         return control.declare_view(page.name, page.body)
     if page.kind == "attribute":
         return control.declare_attribute(page.body)
+    if page.kind == "shards":
+        return control.declare_shards(page.body)
     if page.kind == "vocabulary":
         return control.declare_vocabulary(page.name, page.body)
     if page.kind == "vocabulary_values":

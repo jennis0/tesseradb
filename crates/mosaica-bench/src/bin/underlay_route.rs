@@ -84,18 +84,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bundle = open_bundle(&args.fixture)?;
     // The frame is the view's (decision 0040); a built bundle declares one, and this harness
     // measures against it.
-    let q = bundle
+    let view = bundle
         .manifest
         .views
         .first()
-        .expect("a built bundle declares a view")
-        .quantisation;
-    let view_id = bundle
-        .partitions
-        .values()
-        .next()
-        .and_then(|p| p.views.keys().next().cloned())
-        .unwrap_or_else(|| "s0".to_string());
+        .expect("a built bundle declares a view");
+    let q = view.quantisation;
+    let view_id = view.id.clone();
     drop(bundle);
 
     let tmp = std::env::temp_dir().join(format!("mosaica-underlay-route-{}", std::process::id()));

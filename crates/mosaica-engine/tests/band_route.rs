@@ -167,9 +167,9 @@ fn build_fixture(root: &Path) {
         attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
         out: root.to_path_buf(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -395,11 +395,5 @@ fn the_band_route_serves_what_the_scan_serves_through_writes_a_fold_and_a_restar
 }
 
 fn segments(engine: &Engine) -> usize {
-    engine
-        .generation()
-        .bundle
-        .partitions
-        .values()
-        .map(|p| p.views["s0"].segments.len())
-        .sum()
+    engine.generation().bundle.only_shard().views["s0"].segments.len()
 }

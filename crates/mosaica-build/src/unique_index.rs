@@ -1,5 +1,5 @@
 //! The build's unique indexes: one per column declared `unique`, written as base runs of
-//! `(key, entity)` entries under `partitions/<p>/entities/unique/<attribute>/`.
+//! `(key, entity)` entries under a shard's `entities/unique/<attribute>/`.
 //!
 //! Each column's values are pushed through a bucketed spill sort under a share of the build's
 //! memory budget ([`mosaica_store::unique::UniqueSpill`]), which reports every key more than one
@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use mosaica_spatial::ScalarValue;
-use mosaica_store::unique::{index_dir_rel, key_of, KeyKind, UniqueKey, UniqueSpill, WrittenUniqueRun};
+use mosaica_store::unique::{key_of, KeyKind, UniqueKey, UniqueSpill, WrittenUniqueRun};
 
 use crate::column::EntityColumn;
 use crate::config::{Attribute, Schema};
@@ -97,7 +97,7 @@ pub(crate) fn spill_budget(budget: u64, room: u64) -> usize {
 /// runs are fsynced.
 pub(crate) fn write_unique_indexes<'a>(
     prefix_dir: &Path,
-    partition: &str,
+    layout: mosaica_store::ShardLayout<'_>,
     schema: &Schema,
     source_of: impl Fn(usize) -> UniqueSource<'a>,
     scratch: &Path,
@@ -118,7 +118,7 @@ pub(crate) fn write_unique_indexes<'a>(
         let store = |e: mosaica_store::StoreError| BuildError::Invalid(e.to_string());
         let mut spill = UniqueSpill::create(kind, scratch, spill_bytes).map_err(store)?;
         source.walk(attribute, &mut |entity, key, _| spill.push(key, entity).map_err(store))?;
-        let dir = prefix_dir.join(index_dir_rel(partition, &attribute.name));
+        let dir = prefix_dir.join(layout.unique_index_rel(&attribute.name));
         std::fs::create_dir_all(&dir).map_err(|e| BuildError::io(&dir, e))?;
         let mut duplicates = 0u64;
         let runs = spill

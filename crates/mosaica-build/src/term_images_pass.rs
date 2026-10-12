@@ -119,7 +119,7 @@ pub struct ViewTermImages {
 pub fn run(
     postings: &PostingsReader,
     prefix_dir: &Path,
-    partition: &str,
+    layout: mosaica_store::ShardLayout<'_>,
     view: &str,
     rows_in_view: u32,
     index: &mut DerivedIndex,
@@ -135,9 +135,7 @@ pub fn run(
     // pass loads the same file for the same reason. Its load is not shared with this one: that
     // pass returns before reaching it for a view with no drawn layer, and this one runs for every
     // view.
-    let permutation_path =
-        mosaica_store::view_path(&prefix_dir.join("partitions").join(partition), view)
-            .join("permutation.bin");
+    let permutation_path = prefix_dir.join(layout.permutation_rel(view));
     let permutation = Permutation::load(&permutation_path)?;
     let space = RowSpace::new(Arc::new(permutation), rows_in_view);
 
@@ -151,7 +149,7 @@ pub fn run(
         bound: space.base().bound(),
     };
 
-    let file = mosaica_store::derived::term_image_file(prefix_dir, partition, MANIFEST_N, index)?;
+    let file = mosaica_store::derived::term_image_file(prefix_dir, layout, MANIFEST_N, index)?;
 
     // The one adapter between the postings format and the derivation: `mosaica-store` does not
     // depend on `mosaica-authz`, so the shape is handed across and the walk is written where the

@@ -251,12 +251,7 @@ fn a_publication_survives_a_restart_and_its_entities_are_not_reissued() {
 
 /// Wait for the executor's drain close to publish the memberships, and return the extent files.
 fn published_extents(fx: &Fixture) -> Vec<std::path::PathBuf> {
-    let dir = fx
-        .root
-        .join("v00000")
-        .join("partitions")
-        .join("default")
-        .join("members");
+    let dir = fx.root.join("v00000").join(common::SHARD.members_rel());
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let found: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
@@ -391,11 +386,19 @@ fn an_artifacts_entity_takes_a_suppression_like_any_other() {
     engine
         .accept_change(entity, ChangeOp::Suppress)
         .expect("an artifact suppression is an ordinary change");
-    assert!(engine.generation().overlay.is_suppressed(entity));
+    assert!(engine
+        .generation()
+        .only_shard()
+        .overlay
+        .is_suppressed(entity));
 
     // And it comes back — a suppression is the reversible one of the two removal rules.
     engine.accept_change(entity, ChangeOp::Unsuppress).unwrap();
-    assert!(!engine.generation().overlay.is_suppressed(entity));
+    assert!(!engine
+        .generation()
+        .only_shard()
+        .overlay
+        .is_suppressed(entity));
 }
 
 /// **A membership that came back from an extent is read through that extent**, and it is the set

@@ -10,10 +10,10 @@
 //! wholly-ingested arm the refusal used to block).
 //!
 //! What the zero-item bundle must be is *ordinary*: empty segments, empty postings, a dictionary
-//! holding only what the declaration mints, `entity_id_high_water = 0`, every declared column
-//! present and empty, every declared layer registered with no artifacts, and the manifests and
-//! digests as for any other bundle. So the assertions here are the same ones the populated
-//! fixtures make, read off a bundle whose row count happens to be nothing.
+//! holding only what the declaration mints, a high water of 0, every declared column present and
+//! empty, every declared layer registered with no artifacts, and the manifests and digests as for
+//! any other bundle. So the assertions here are the same ones the populated fixtures make, read off
+//! a bundle whose row count happens to be nothing.
 //!
 //! **`extent = "auto"` over no rows stays a refusal** and is asserted here too: a frame cannot be
 //! fitted to nothing, and the message already names the remedy (state the box). That is the one
@@ -32,9 +32,8 @@ use parquet::arrow::ArrowWriter;
 use mosaica_build::{build, build_in_memory, BuildArgs};
 use mosaica_spatial::Bounds;
 use mosaica_store::read::open_bundle;
-use mosaica_types::IdentityKey;
 
-const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
+mod common;
 
 fn extent() -> Bounds {
     Bounds {
@@ -211,23 +210,8 @@ fn args(inputs: &Inputs, out: &Path) -> BuildArgs {
             select: None,
             access: mosaica_build::config::AccessInput::relation(inputs.pairs.clone()),
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
-        out: out.to_path_buf(),
-        limit: None,
-        strict: false,
-        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
         emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema: Default::default(),
+        ..common::build_args(out)
     }
 }
 
@@ -256,11 +240,12 @@ fn a_build_with_no_points_writes_a_bundle() {
     let bundle = open_bundle(&out).expect("a zero-item bundle opens and verifies");
     let partition = bundle.partitions.values().next().expect("one partition");
     let manifest = &partition.manifest;
+    let record = &partition.only_shard().record;
 
-    assert_eq!(manifest.entity_id_high_water, 0);
-    assert_eq!(manifest.watermark, 0);
-    assert_eq!(manifest.segments.len(), 1);
-    assert_eq!(manifest.segments[0].row_count, 0);
+    assert_eq!(record.high_water, 0);
+    assert_eq!(record.watermark, 0);
+    assert_eq!(record.segments.len(), 1);
+    assert_eq!(record.segments[0].row_count, 0);
 
     // Every declared column is present and empty — the schema is the bundle's, not the corpus's,
     // so a column exists because it was declared and not because a row carried a value.

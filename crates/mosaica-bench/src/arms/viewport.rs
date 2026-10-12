@@ -114,19 +114,14 @@ pub fn run(
         let bundle = open_bundle(&fixture.root)?;
         // The frame is the view's (decision 0040); a built bundle declares one, and this harness
         // measures against it.
-        let q = bundle
+        let view = bundle
             .manifest
             .views
             .first()
-            .expect("a built bundle declares a view")
-            .quantisation;
+            .expect("a built bundle declares a view");
+        let q = view.quantisation;
         let extent_span = q.x_max - q.x_min;
-        let view_id = bundle
-            .partitions
-            .values()
-            .next()
-            .and_then(|p| p.views.keys().next().cloned())
-            .unwrap_or_else(|| "s0".to_string());
+        let view_id = view.id.clone();
         drop(bundle);
 
         // §7.2's clause parameters are resolved from `EngineConfig` at open, not per request, so

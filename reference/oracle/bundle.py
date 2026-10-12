@@ -25,11 +25,7 @@ from pyroaring import BitMap
 
 from . import identity as identity_mod
 from . import morton as morton_mod
-
-#: The separator between a group's name and a view's key in a view id — `quarter:2026-Q3`
-#: (`views.md` §3.2). Transcribed from the design rather than imported from the Rust, like
-#: everything else here; `Bundle.view_dir` is the one place it is split on.
-GROUP_SEPARATOR = ":"
+from .layout import partition_dir, shard_dir, view_dir
 
 PERMUTATION_MAGIC = b"MSPM"
 # The two-level paged form (contracts 2.6). Version 1 was the flat array it replaced, and this
@@ -396,13 +392,8 @@ class Bundle:
             if "quantisation" not in view:
                 raise ValueError(f"view '{view_id}' declares no quantisation extent")
 
-        # `identity` (contracts r6, docs/evidence/memos/2026-07-30-tessera-id-construction.md
-        # §2): the bundle's key and the §13.3 shard prefix `mosaica_id` is built
-        # under. A bundle that *does* carry `identity` is read strictly, per the memo's
-        # fail-closed rule: bad construction/rounds/key/shard_id all refuse, none
-        # default. An absent object takes the PRE_R6_IDENTITY_FALLBACK_REMOVE_AT scaffold
-        # path above instead of raising -- see its docstring for why that is still
-        # tolerated and when it must go.
+        # A bundle carrying `identity` is read strictly: a bad construction, round count or key
+        # refuses. One without it takes the `PRE_R6_IDENTITY_FALLBACK_REMOVE_AT` path.
         identity_obj = self.manifest.get("identity")
         if identity_obj is not None:
             if identity_obj.get("construction") != "feistel-splitmix64-v1":
@@ -414,18 +405,21 @@ class Bundle:
             self.identity_key: identity_mod.IdentityKey | None = identity_mod.IdentityKey.from_hex(
                 identity_obj["key"]
             )
-            self.identity_shard_id: int | None = identity_obj["shard_id"]
         else:
             self.identity_key = None
-            self.identity_shard_id = None
 
-        # Phase 1: exactly one partition, "default".
-        partition_dir = self.prefix_dir / "partitions" / "default"
-        segments_path = partition_dir / "SEGMENTS-0.json"
-        self.segments_manifest = json.loads(segments_path.read_bytes())
-        self._verify_files(self.segments_manifest.get("files", {}))
+        segments_path = partition_dir(self.prefix_dir) / "SEGMENTS-0.json"
+        self.side_manifest = json.loads(segments_path.read_bytes())
+        records = self.side_manifest.get("shards", {}).get("records")
+        ids = None if records is None else [record.get("id") for record in records]
+        if ids != [0]:
+            raise ValueError(
+                f"{segments_path}: names shards {ids}; rebuild the bundle as one shard numbered 0"
+            )
+        self._shard_record = records[0]
+        self._verify_files(self.side_manifest.get("files", {}))
 
-        self._partition_dir = partition_dir
+        self._shard_dir = shard_dir(self.prefix_dir)
         self._segment_cache: dict[str, Segment] = {}
         self._permutation_cache: dict[str, Permutation] = {}
         # Derived per-view columns: pure functions of geometry and of the permutation, so they
@@ -436,7 +430,7 @@ class Bundle:
 
         # Dictionary: term_id (ordinal) -> descriptor bytes.
         self.dictionary: list[bytes] = []
-        for extent_entry in self.segments_manifest.get("dict_extents", []):
+        for extent_entry in self.side_manifest.get("dict_extents", []):
             dict_path = self.prefix_dir / extent_entry["path"]
             self.dictionary.extend(_read_dictionary(dict_path))
         self.descriptor_to_term_id = {d: i for i, d in enumerate(self.dictionary)}
@@ -455,6 +449,10 @@ class Bundle:
         self._view_geometry: dict[str, SourceGeometry] = {}
         self._position_cache: dict[str, list[int]] = {}
         self._unique_cache: dict[str, dict[int, int]] = {}
+
+    def shard_record(self) -> dict:
+        """The shard's record in `SEGMENTS-0.json`."""
+        return self._shard_record
 
     def _verify_files(self, files: dict) -> None:
         for rel, info in files.items():
@@ -498,22 +496,11 @@ class Bundle:
         return self.extent_of(next(iter(self.views)))
 
     def view_dir(self, view_id: str) -> Path:
-        """`views/<view>/`, or `views/<group>/<key>/` — the one place a view id becomes a path.
-
-        **Nested rather than joined**, because `:` is not a path character everywhere: the id a
-        request names and the manifest carries is `group:key`, and the directory is two components
-        (`views.md` §3.2; `mosaica_store::view_path`). A single joined component was what this
-        oracle laid down while every bundle had one plain view, and it named a directory no
-        multi-view build writes — so the failure would have been a missing file rather than a
-        wrong answer, which is the safe direction and still the wrong path.
-        """
-        path = self._partition_dir / "views"
-        for component in view_id.split(GROUP_SEPARATOR, 1):
-            path = path / component
-        return path
+        """`layout.view_dir` under the bundle's shard."""
+        return view_dir(self._shard_dir, view_id)
 
     def segment_dir(self, view_id: str) -> Path:
-        for seg in self.segments_manifest["segments"]:
+        for seg in self.shard_record()["segments"]:
             if seg["view"] == view_id:
                 return self.view_dir(view_id) / "segments" / seg["seg_id"]
         raise KeyError(f"no segment for view '{view_id}'")
@@ -639,7 +626,7 @@ class Bundle:
         for row in rows:
             entity_id = int(seg.entity_id[row])
             expected = int(seg.mosaica_id[row])
-            got = identity_mod.forward(self.identity_key, self.identity_shard_id, entity_id)
+            got = identity_mod.forward(self.identity_key, self.shard_record()["id"], entity_id)
             if got != expected:
                 raise ValueError(
                     f"identity cross-check failed at row {row}: entity {entity_id} forwards to "
@@ -647,20 +634,15 @@ class Bundle:
                 )
 
     def mosaica_id_of(self, entity_id: int) -> int:
-        """Pure function, no file read (memo §6): the identifier of the item the build gave
-        `entity_id` as its number, in the manifest's shard at tenancy 0. Requires a post-r6 bundle
-        (`identity` present in MANIFEST)."""
+        """The identifier of the item the build gave `entity_id`, in the bundle's shard at
+        tenancy 0."""
         if self.identity_key is None:
             raise ValueError("bundle has no `identity` object in MANIFEST (pre-r6 bundle)")
-        return identity_mod.forward_item(self.identity_key, self.identity_shard_id, 0, entity_id)
+        return identity_mod.forward_item(self.identity_key, self.shard_record()["id"], 0, entity_id)
 
     def derive_row_order(self, view_id: str) -> np.ndarray:
-        """Re-derive row order from `(source-recomputed morton, forward(identity.key,
-        identity.shard_id, entity_id))` ascending, with no further tiebreak (the
-        priority-as-identity-prefix fold; `mosaica_id` is already unique so nothing else is
-        needed to break ties). Row order is therefore key-dependent, where it previously
-        was not -- this reads `identity.key` and `identity.shard_id` from MANIFEST, which
-        `Bundle.__init__` already parses.
+        """Row order re-derived as `(morton from source geometry, forward(key, shard, entity_id))`
+        ascending; `mosaica_id` is unique, so nothing else breaks ties.
 
         Delegates to `row_order_from_geometry`, the module-level, key-dependent
         re-derivation -- computed from the *source* geometry and the permutation-derived
@@ -679,7 +661,7 @@ class Bundle:
         seg = self.segment(view_id)
         return row_order_from_geometry(
             self.identity_key,
-            self.identity_shard_id,
+            self.shard_record()["id"],
             seg.entity_id,
             self.row_morton_codes(view_id),
         )
@@ -691,9 +673,8 @@ class Bundle:
         return self._permutation_cache[view_id]
 
     def pairs_path(self, view_id: str = "default") -> Path:
-        # Phase 1 has one partition; pairs.parquet lives at partitions/default/terms/pairs.parquet
-        # regardless of view (postings/pairs are entity-space, not view-scoped).
-        return self._partition_dir / "terms" / "pairs.parquet"
+        # The shard's `terms/pairs.parquet`, whatever the view: pairs are entity-space.
+        return self._shard_dir / "terms" / "pairs.parquet"
 
     def unique_entities(self, attribute: str) -> dict[int, int]:
         """Every value of an integer unique attribute and the entity holding it, read from the
@@ -718,7 +699,7 @@ class Bundle:
                     "integer attribute's values can be read back from its index"
                 )
             (index,) = [
-                i for i in self.segments_manifest["unique_indexes"] if i["attribute"] == attribute
+                i for i in self.shard_record()["unique_indexes"] if i["attribute"] == attribute
             ]
             runs = [run["path"] for run in index["base"]] + list(index["live"])
             entities: dict[int, int] = {}
@@ -737,7 +718,7 @@ class Bundle:
     def postings(self, term_id: int) -> np.ndarray:
         """Term `term_id`'s sorted entity-id array, decoded from `terms/postings.arrow`."""
         if not hasattr(self, "_postings_array"):
-            self._postings_array = _read_postings_array(self._partition_dir / "terms" / "postings.arrow")
+            self._postings_array = _read_postings_array(self._shard_dir / "terms" / "postings.arrow")
         record = self._postings_array[term_id].as_py()
         tag = record[0]
         payload = record[1:]

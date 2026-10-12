@@ -505,7 +505,7 @@ fn probe_codes(
 /// Assert identity resolves in both directions and the entity has a row — for every sample.
 fn assert_identity(engine: &Engine, samples: &[Planted]) {
     let generation = engine.generation();
-    let row_space = &generation.bundle.partitions["default"].views["s0"].row_space;
+    let row_space = &generation.bundle.only_shard().views["s0"].row_space;
     for planted in samples {
         assert_eq!(
             item_of_key(engine, &planted.key),
@@ -599,13 +599,8 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
             timings.ack,
             timings.publish,
             timings.refresh,
-            engine.generation().bundle.partitions["default"].views["s0"]
-                .segments
-                .len(),
-            engine.generation().bundle.partitions["default"]
-                .manifest
-                .deltas
-                .len(),
+            engine.generation().bundle.only_shard().views["s0"].segments.len(),
+            engine.generation().bundle.only_shard().record.deltas.len(),
             stats.merges,
             stats.coalesces,
         );
@@ -613,9 +608,7 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
         // per live segment, so the request cost is the product — and the product is what stays
         // flat if the cost model holds. A raw per-request figure grows for two reasons at once
         // (more occupied tiles, more segments) and cannot tell which moved.
-        let segments = engine.generation().bundle.partitions["default"].views["s0"]
-            .segments
-            .len();
+        let segments = engine.generation().bundle.only_shard().views["s0"].segments.len();
         // **The write-path stage split, at scale.** Zero without `bench-timing`. A microbenchmark
         // at a 1M base and this at 250M disagree about where ingest spends its time — the map
         // occupancy and the bundle's key-run count both move — so the attribution has to
@@ -673,14 +666,20 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
 
     let generation = engine.generation();
     let partition = &generation.bundle.partitions["default"];
+    let shard = partition.only_shard();
     let manifest = &partition.manifest;
     let stats = engine.write_executor_stats();
     eprintln!(
         "  settled: segments={}, deltas={}, key runs={}, dict extents={} \
          (merges={}, coalesces={}, refreshes={}, full builds={})",
-        partition.views["s0"].segments.len(),
-        manifest.deltas.len(),
-        manifest.unique_indexes.iter().map(|i| i.live.len()).sum::<usize>(),
+        shard.views["s0"].segments.len(),
+        shard.record.deltas.len(),
+        shard
+            .record
+            .unique_indexes
+            .iter()
+            .map(|i| i.live.len())
+            .sum::<usize>(),
         manifest.dict_extents.len(),
         stats.merges,
         stats.coalesces,
@@ -716,9 +715,9 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
         "maintenance must not be failing its way to a low segment count: {stats:?}"
     );
     assert!(
-        partition.views["s0"].segments.len() < rounds + 1,
+        shard.views["s0"].segments.len() < rounds + 1,
         "the segment axis is unbounded at scale: {} segments after {rounds} flushes",
-        partition.views["s0"].segments.len()
+        shard.views["s0"].segments.len()
     );
 
     // ---- properties 1-4, against everything that has happened --------------------------------
@@ -807,6 +806,7 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
     assert!(
         reopened
             .generation()
+            .only_shard()
             .overlay
             .is_suppressed(suppressed.entity),
         "the suppression survives the restart"
@@ -1277,9 +1277,7 @@ fn a_streaming_read_of_the_whole_bundle_against_a_live_viewport() {
     // latency under IO contention; a session's update path is P2's subject, not this one's.
     let full = engine.authorise(&full_coverage_credential()).unwrap();
     let on_disc = bundle_bytes(&root);
-    let segments = engine.generation().bundle.partitions["default"].views["s0"]
-        .segments
-        .len();
+    let segments = engine.generation().bundle.only_shard().views["s0"].segments.len();
     // **The regime, stated before the figures, because the figures mean nothing without it.**
     let (cache, source) = page_cache_bound();
     let resident = on_disc <= cache;
@@ -1794,16 +1792,14 @@ fn p1_one_scale(base: u64) {
     }
     eprintln!("  {} deletions accepted", doomed.len());
 
-    let segments_before = engine.generation().bundle.partitions["default"].views["s0"]
-        .segments
-        .len();
+    let segments_before = engine.generation().bundle.only_shard().views["s0"].segments.len();
     let on_disc_before = bundle_bytes(&root);
     let live_before = live_bytes(&engine);
     // **The entity-space bound, which is the axis §3's mapped array scales on** — the highest
     // entity id the bundle's row geometry covers, which is what `permutation.bin` is sized by. Row
     // count is the axis it explicitly does *not* scale on, and reporting both is how a reader tells
     // the two apart when a corpus has one row per entity.
-    let entities = engine.generation().watermark;
+    let entities = engine.generation().only_shard().watermark;
 
     // **The input the coefficient is against is the bytes the fold reads**, which is what the live
     // manifests name — not everything on disc. A merge's consumed segments are still in the
@@ -1862,9 +1858,7 @@ fn p1_one_scale(base: u64) {
     let passes_delta = passes_peak.saturating_sub(baseline_rss);
     let publish_delta = publish_peak.saturating_sub(publish_baseline);
 
-    let segments_after = engine.generation().bundle.partitions["default"].views["s0"]
-        .segments
-        .len();
+    let segments_after = engine.generation().bundle.only_shard().views["s0"].segments.len();
     let live_after = live_bytes(&engine);
 
     // Authorised after the flip, so it serves the new prefix without waiting on a refresh this

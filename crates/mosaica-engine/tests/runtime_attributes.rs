@@ -152,9 +152,9 @@ fn build_fixture_with_schema(root: &Path, tmp: &Path) {
         attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
         out: root.to_path_buf(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -320,24 +320,11 @@ fn declared_names(engine: &Engine) -> Vec<String> {
 /// (`ingest.md` §6.3), so this is 0 before the fold and every partition after it.
 fn partitions_with_base(root: &Path, column: &str) -> (usize, usize) {
     let bundle = open_bundle(root).expect("the bundle opens");
-    let current: mosaica_store::manifest::CurrentPointer =
-        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).unwrap()).unwrap();
-    let (mut carrying, mut total) = (0, 0);
-    for phash in bundle.partitions.keys() {
-        total += 1;
-        if root
-            .join(&current.prefix)
-            .join("partitions")
-            .join(phash)
-            .join("attrs")
-            .join(column)
-            .join(mosaica_filter::VALUES_FILE)
-            .is_file()
-        {
-            carrying += 1;
-        }
-    }
-    (carrying, total)
+    let values = root
+        .join(current_prefix(root))
+        .join(common::SHARD.column_rel(column))
+        .join(mosaica_filter::VALUES_FILE);
+    (usize::from(values.is_file()), bundle.partitions.len())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -430,7 +417,11 @@ fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_b
     let old = EntityId::new(0);
 
     // The drill-down: absent for the older entity, from the schema, with no blob read.
-    let reads_before = engine.generation().filter_columns.record_reads();
+    let reads_before = engine
+        .generation()
+        .only_shard()
+        .filter_columns
+        .record_reads();
     let old_fields = fields_of(&engine, &session, old);
     assert_eq!(
         old_fields.keys().cloned().collect::<Vec<_>>(),
@@ -438,7 +429,11 @@ fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_b
         "an entity that predates the declaration carries none of the new columns"
     );
     assert_eq!(
-        engine.generation().filter_columns.record_reads(),
+        engine
+            .generation()
+            .only_shard()
+            .filter_columns
+            .record_reads(),
         reads_before,
         "absence is answered from the segment schema, never by opening a blob"
     );
@@ -452,7 +447,12 @@ fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_b
     assert_eq!(new_fields["tag"], ScalarOut::Utf8("eng".to_string()));
     assert_eq!(new_fields["memo"], ScalarOut::U16(7));
     assert!(
-        engine.generation().filter_columns.record_reads() > reads_before,
+        engine
+            .generation()
+            .only_shard()
+            .filter_columns
+            .record_reads()
+            > reads_before,
         "the entity whose row the flush wrote is read from the blob"
     );
 
@@ -1138,7 +1138,11 @@ fn a_record_coalesce_publishes_over_a_blob_declared_at_a_running_service() {
     // tick's.
     engine.set_coalesce_for_test(false);
 
-    let after = engine.generation().filter_columns.record_layers();
+    let after = engine
+        .generation()
+        .only_shard()
+        .filter_columns
+        .record_layers();
     assert!(
         after < flushes as usize,
         "the live record stack still holds a layer per flush ({after}), so the bound arrives only \
@@ -1155,7 +1159,11 @@ fn a_record_coalesce_publishes_over_a_blob_declared_at_a_running_service() {
     assert_eq!(served(&engine), expected, "a coalesced blob row reads back");
 
     let engine = restart(&fx, engine);
-    let reopened = engine.generation().filter_columns.record_layers();
+    let reopened = engine
+        .generation()
+        .only_shard()
+        .filter_columns
+        .record_layers();
     assert!(
         reopened <= after && reopened < flushes as usize,
         "the reopened bundle holds {reopened} layers where the live stack held {after}"

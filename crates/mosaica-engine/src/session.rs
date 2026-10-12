@@ -328,14 +328,8 @@ impl Engine {
         let auth_data_hash: [u8; 32] = Sha256::digest(auth_data).into();
 
         let fragment = generation
-            .fragments
-            .get_or_build_grant_waiting(
-                &grant,
-                &generation.postings,
-                &generation.delta_postings,
-                generation.watermark,
-                &mosaica_cache::NeverCancelled,
-            )
+            .only_shard()
+            .fragment(&grant)
             .map_err(fragment_error)?;
 
         let mut token_bytes = [0u8; 32];
@@ -398,8 +392,8 @@ impl Engine {
         self.row_projection_cache.prune_tokens(token_ids)
     }
 
-    /// `session`'s mask fragment at `generation`'s watermark — what the request path uses in place
-    /// of the frozen `Session::fragment`.
+    /// `session`'s mask fragment at `shard`'s watermark — what the request path uses in place of
+    /// the frozen `Session::fragment`.
     ///
     /// A fragment is frozen at authorise. A flush advances the watermark, which the watermark test
     /// alone catches. A fold advances no watermark; it rewrites the term index and rotates the
@@ -419,26 +413,17 @@ impl Engine {
     pub(crate) fn fragment_for(
         &self,
         session: &Session,
-        generation: &Generation,
+        shard: &crate::Shard,
     ) -> Result<Arc<FrozenFragment>> {
         // The identity test catches what the watermark test cannot: a fold rotates the bundle
         // identity without moving the watermark, and this fragment lives outside `FragmentCache`,
         // so rotating the cache does not reach it.
-        if session.fragment.identity == generation.bundle_identity()
-            && session.fragment.watermark >= generation.watermark
+        if session.fragment.identity == shard.bundle_identity()
+            && session.fragment.watermark >= shard.watermark
         {
             return Ok(Arc::clone(&session.fragment));
         }
-        generation
-            .fragments
-            .get_or_build_grant_waiting(
-                &session.grant,
-                &generation.postings,
-                &generation.delta_postings,
-                generation.watermark,
-                &mosaica_cache::NeverCancelled,
-            )
-            .map_err(fragment_error)
+        shard.fragment(&session.grant).map_err(fragment_error)
     }
 
     /// Which layers this principal may know exist. A layer's label is evaluated against the
@@ -481,6 +466,7 @@ impl Engine {
     /// layer is served.
     pub fn visible_layers(&self, session: &Session) -> Vec<mosaica_types::layer::RegisteredLayer> {
         let generation = self.generation();
+        let overlay = &generation.only_shard().overlay;
         self.reachable_layers(session)
             .names()
             .filter_map(|name| self.write.live().registered_layer(name))
@@ -488,8 +474,7 @@ impl Engine {
                 // Checked live, per call, against the current overlay: a layer's own entity
                 // carries its suppression. A layer has no fragment to fall through to, so no
                 // opinion here means not visible.
-                !generation.overlay.is_deleted(layer.entity)
-                    && !generation.overlay.is_suppressed(layer.entity)
+                !overlay.is_deleted(layer.entity) && !overlay.is_suppressed(layer.entity)
             })
             .collect()
     }

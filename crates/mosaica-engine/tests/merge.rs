@@ -165,14 +165,14 @@ fn served_ids(
 }
 
 fn segment_count(engine: &Engine) -> usize {
-    engine.generation().bundle.partitions["default"].views["s0"]
+    engine.generation().bundle.only_shard().views["s0"]
         .segments
         .len()
 }
 
 fn rows_of(engine: &Engine, entities: &[EntityId]) -> Vec<Option<u32>> {
     let generation = engine.generation();
-    let row_space = &generation.bundle.partitions["default"].views["s0"].row_space;
+    let row_space = &generation.bundle.only_shard().views["s0"].row_space;
     entities
         .iter()
         .map(|e| row_space.row_of(*e).map(|r| r.raw()))
@@ -337,7 +337,11 @@ fn a_suppression_survives_a_merge_and_still_hides_the_same_item() {
     );
     for entity in [inside, outside] {
         assert!(
-            engine.generation().overlay.is_suppressed(entity),
+            engine
+                .generation()
+                .only_shard()
+                .overlay
+                .is_suppressed(entity),
             "entity {} lost its suppression to the merge",
             entity.raw()
         );
@@ -434,7 +438,11 @@ fn an_unsuppress_after_a_merge_restores_the_item_that_was_suppressed() {
         "the unsuppress must restore the entity that was suppressed, at its own identity — a set \
          of the right size naming a different item is a mask resolved against a stale row space"
     );
-    assert!(!engine.generation().overlay.is_suppressed(entity));
+    assert!(!engine
+        .generation()
+        .only_shard()
+        .overlay
+        .is_suppressed(entity));
 }
 
 /// **A delete before a merge stays deleted across it and across a restart**, and the merge carries
@@ -472,8 +480,11 @@ fn a_delete_before_a_merge_stays_deleted_across_it_and_a_restart() {
     );
 
     assert!(
-        engine.generation().bundle.partitions["default"]
-            .manifest
+        engine
+            .generation()
+            .bundle
+            .only_shard()
+            .record
             .tombstones
             .entities()
             .expect("a written manifest's tombstones decode")
@@ -490,7 +501,11 @@ fn a_delete_before_a_merge_stays_deleted_across_it_and_a_restart() {
         after_delete,
         "and it is still deleted once the merged manifest is what the node opens"
     );
-    assert!(reopened.generation().overlay.is_deleted(deleted));
+    assert!(reopened
+        .generation()
+        .only_shard()
+        .overlay
+        .is_deleted(deleted));
 }
 
 /// **A suppression accepted while the merge is in flight is in force once it lands.**
@@ -530,7 +545,11 @@ fn a_suppression_racing_a_merge_is_in_force_once_both_have_landed() {
         "the suppression is in force whichever side of the swap it landed"
     );
     assert!(served.is_subset(&baseline));
-    assert!(engine.generation().overlay.is_suppressed(entity));
+    assert!(engine
+        .generation()
+        .only_shard()
+        .overlay
+        .is_suppressed(entity));
 }
 
 /// **A suppression accepted *inside* a merge's flight survives its publication** — the ordering
@@ -589,7 +608,11 @@ fn a_suppression_accepted_inside_a_merges_flight_survives_its_publication() {
         baseline.len() - 1,
         "the deny is in force before the merge publishes, which is what makes the ordering chosen          rather than raced"
     );
-    assert!(engine.generation().overlay.is_suppressed(entity));
+    assert!(engine
+        .generation()
+        .only_shard()
+        .overlay
+        .is_suppressed(entity));
 
     engine.set_merge_publication_paused_for_test(false);
     wait_until("the merge to publish", WAIT, || {
@@ -606,7 +629,11 @@ fn a_suppression_accepted_inside_a_merges_flight_survives_its_publication() {
         inside,
         "the publication re-derived the deny mask over the new row space from the live overlay:          the suppressed entity is still absent and no other entity took its place"
     );
-    assert!(engine.generation().overlay.is_suppressed(entity));
+    assert!(engine
+        .generation()
+        .only_shard()
+        .overlay
+        .is_suppressed(entity));
 }
 
 /// **The segment count comes down and nothing is lost doing it.**
@@ -725,14 +752,14 @@ fn a_merged_manifest_reopens_with_every_item_and_every_tier() {
     let reopened = engine_at(tmp.path(), &root);
     let generation = reopened.generation();
     assert_eq!(
-        generation.bundle.partitions["default"].views["s0"]
+        generation.bundle.only_shard().views["s0"]
             .segments
             .len(),
         2,
         "the reopened bundle holds the build segment and the merged one"
     );
     assert_eq!(
-        generation.delta_postings.len(),
+        generation.only_shard().delta_postings.len(),
         TIER_WIDTH,
         "every consumed segment's tier is still listed — its entities have rows in the merged \
          segment, and dropping one would make them invisible"
@@ -747,7 +774,7 @@ fn a_merged_manifest_reopens_with_every_item_and_every_tier() {
     );
     for (entity, key) in &items {
         assert!(
-            generation.bundle.partitions["default"].views["s0"]
+            generation.bundle.only_shard().views["s0"]
                 .row_space
                 .row_of(*entity)
                 .is_some(),
@@ -772,10 +799,9 @@ fn a_merged_manifest_reopens_with_every_item_and_every_tier() {
 /// (`Engine::set_merge_publication_paused_for_test`); unassisted, the window is one pool
 /// scheduling race wide.
 ///
-/// **Mutations this kills:** re-stamping `manifest.watermark` (or `entity_id_high_water`) from
-/// the completed unit in `crate::merge::rebase_into`; and gutting `check_manifest_publishable`,
-/// which is what turns the same mistake on the next durable scalar into a refused write rather
-/// than a silent regression.
+/// **Mutations this kills:** re-stamping `watermark` (or `high_water`) from the completed unit in
+/// `crate::merge::rebase_into`; and gutting `check_manifest_publishable`, which is what turns the
+/// same mistake on the next durable scalar into a refused write rather than a silent regression.
 #[test]
 fn a_reboot_after_a_merge_reads_back_the_watermark_the_process_served() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -820,7 +846,7 @@ fn a_reboot_after_a_merge_reads_back_the_watermark_the_process_served() {
         wait_until("the late flush to publish", WAIT, || {
             engine.write_executor_stats().flushes > flushes
         });
-        let watermark_served = engine.generation().watermark;
+        let watermark_served = engine.generation().only_shard().watermark;
 
         engine.set_merge_publication_paused_for_test(false);
         wait_until("the merge to publish", WAIT, || {
@@ -829,11 +855,12 @@ fn a_reboot_after_a_merge_reads_back_the_watermark_the_process_served() {
 
         let generation = engine.generation();
         assert_eq!(
-            generation.watermark, watermark_served,
+            generation.only_shard().watermark,
+            watermark_served,
             "a merge moves the watermark for no one, in memory included"
         );
         assert_eq!(
-            generation.bundle.partitions["default"].manifest.watermark, watermark_served,
+            generation.bundle.only_shard().record.watermark, watermark_served,
             "the manifest the merge published must carry the live watermark, not its plan-time \
              snapshot — the manifest is what a restart believes, and every later publication \
              clones it forward"
@@ -842,7 +869,7 @@ fn a_reboot_after_a_merge_reads_back_the_watermark_the_process_served() {
     };
 
     let reopened = open_engine_at(tmp.path(), &root);
-    let read_back = reopened.generation().watermark;
+    let read_back = reopened.generation().only_shard().watermark;
     assert!(
         read_back >= watermark_served,
         "the reboot read back watermark {read_back} where the running process served \
@@ -999,7 +1026,7 @@ fn flush_one_segment(engine: &Engine, tag: usize, rows: usize) -> Vec<EntityId> 
 
 /// The live extent list as `(seg_id, entity_lo, entity_hi)`, in listed (entity) order.
 fn extents_of(engine: &Engine) -> Vec<(String, u64, u64)> {
-    engine.generation().bundle.partitions["default"].views["s0"]
+    engine.generation().bundle.only_shard().views["s0"]
         .row_space
         .extents()
         .iter()
@@ -1313,7 +1340,7 @@ fn a_flush_handed_back_while_the_executor_is_parked_is_published_once() {
 
     // And the bundle on disc is one a restart opens, holding each late item at one row.
     let bundle = mosaica_store::open_bundle(&root).expect("the bundle on disc opens");
-    let row_space = &bundle.partitions["default"].views["s0"].row_space;
+    let row_space = &bundle.only_shard().views["s0"].row_space;
     let mut rows: Vec<u32> = late
         .iter()
         .map(|e| row_space.row_of(*e).expect("a late item has a row").raw())

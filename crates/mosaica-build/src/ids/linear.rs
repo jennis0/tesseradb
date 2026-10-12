@@ -138,7 +138,14 @@ pub(crate) fn number(args: &crate::BuildArgs) -> Result<Numbering> {
                 (rows, Some(lists.texts.clone()))
             }
         };
-        let (rows, mut tally) = decide(&read, &rows, &mut held, &mut next, limited.as_mut())?;
+        let (rows, mut tally) = decide(
+            &read,
+            &rows,
+            &mut held,
+            &mut next,
+            limited.as_mut(),
+            args.shard_size(),
+        )?;
         tally.merge(outside);
         let refused = match (&read.input, texts) {
             (_, Some(texts)) => tally.finish(&read.source, &read.object, |row| {
@@ -189,6 +196,7 @@ fn decide(
     held: &mut Held,
     next: &mut u64,
     mut limited: Option<&mut Limited>,
+    shard_size: u64,
 ) -> Result<(ReadRows, Tally)> {
     let mut tally = Tally::default();
     let mut positions: Vec<usize> = Vec::new();
@@ -226,7 +234,7 @@ fn decide(
             }
             Verdict::Names(entity) => entity.raw() as u32,
             Verdict::Creates => {
-                check_cap(*next + 1)?;
+                check_cap(*next + 1, shard_size)?;
                 let item = *next as u32;
                 *next += 1;
                 item

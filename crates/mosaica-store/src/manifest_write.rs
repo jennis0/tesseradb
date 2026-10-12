@@ -225,7 +225,7 @@ pub fn write_segments_manifest(
     n: u64,
     manifest: &SegmentsManifest,
 ) -> Result<()> {
-    let dir = prefix_dir.join("partitions").join(partition);
+    let dir = crate::layout::partition_dir(prefix_dir, partition);
     let path = dir.join(format!("SEGMENTS-{n}.json"));
     let bytes = serde_json::to_vec_pretty(manifest).map_err(|source| StoreError::Json {
         path: path.clone(),
@@ -285,7 +285,7 @@ pub const SIDE_MANIFESTS_KEPT: usize = 3;
 /// The directory entry is left unsynced: a deletion lost to a crash leaves a superseded manifest
 /// that the next publication prunes again.
 pub fn prune_superseded_segments_manifests(prefix_dir: &Path, partition: &str) -> Result<usize> {
-    let dir = prefix_dir.join("partitions").join(partition);
+    let dir = crate::layout::partition_dir(prefix_dir, partition);
     let mut present = crate::read::list_segments_manifests(&dir, partition)?;
     if present.len() <= SIDE_MANIFESTS_KEPT {
         return Ok(0);

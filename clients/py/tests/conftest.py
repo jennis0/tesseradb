@@ -93,6 +93,25 @@ def served(tmp_path, corpus):
         db.close()
 
 
+def small(path, size=None):
+    """One view and two items, at shard size `size` where given; returns the database and its
+    rows."""
+    import pandas as pd
+
+    from mosaica._database import create
+
+    binary()
+    db = create(path)
+    db.declare_view("map", extent={"min": 0.0, "max": 8.0})
+    db.declare_attribute("id", type="i64", unique=True)
+    if size is not None:
+        db.declare_shards(size)
+    rows = pd.DataFrame({"id": [1, 2], "x": [0.0, 1.0], "y": [0.0, 1.0],
+                         "access": ["public", "public"]})
+    db.insert("map", rows, x="x", y="y", access="access")
+    return db, rows
+
+
 @pytest.fixture
 def stub_bundle(monkeypatch, tmp_path):
     """The components' bundle, stubbed: no browser here, and nothing reads its text."""

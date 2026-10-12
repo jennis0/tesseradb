@@ -244,7 +244,6 @@ struct Scope<'a> {
     /// Under `parent`: the parent's position where this viewer is served it, and `None` where no
     /// artifact is its child.
     parent: Option<Option<(u32, u32)>>,
-    shard: u32,
     /// This viewer's slots over each level the page reads, where `slot` is named under a palette
     /// size.
     slots: Vec<Option<Arc<crate::slots::LevelSlots>>>,
@@ -266,7 +265,7 @@ impl Scope<'_> {
         };
         let supplied = read.content(
             self.engine,
-            self.generation,
+            self.open.served.shard,
             self.layer,
             ordinal,
             entity,
@@ -289,9 +288,7 @@ impl Scope<'_> {
     }
 
     fn mosaica_id(&self, entity: EntityId) -> Option<u64> {
-        self.engine
-            .artifact_id(self.shard, entity)
-            .map(|id| id.raw())
+        self.engine.artifact_id(entity).map(|id| id.raw())
     }
 
     /// The artifact `attachment` names, in its layer and level as this page read them, where the
@@ -316,7 +313,7 @@ impl Scope<'_> {
         let read = target.levels[level].as_ref()?;
         read.content(
             self.engine,
-            self.generation,
+            self.open.served.shard,
             target.layer,
             attachment.ordinal,
             attachment.entity,
@@ -428,12 +425,12 @@ impl Engine {
             })
         };
         let layer = self
-            .readable_layer(session, &generation, req.layer, req.view)
+            .readable_layer(session, generation.only_shard(), req.layer, req.view)
             .map_err(layer_refused)?;
         check_level(&layer, req.level).map_err(layer_refused)?;
         let named = req
             .ids
-            .map(|ids| self.named_positions(&generation, &layer, req.level, ids));
+            .map(|ids| self.named_positions(&layer, req.level, ids));
         let binding = Binding {
             route: Route::Artifacts,
             view: req.view,
@@ -464,6 +461,7 @@ impl Engine {
         }
         if let Some(expr) = &req.filter {
             generation
+                .only_shard()
                 .filter_columns
                 .admit(expr, true, &|layer| self.reaches_layer(session, layer))
                 .map_err(filter_refusal)?;
@@ -500,16 +498,14 @@ impl Engine {
     /// other identifier names nothing here.
     fn named_positions(
         &self,
-        generation: &Generation,
         layer: &RegisteredLayer,
         level: Option<u32>,
         ids: &[MosaicaId],
     ) -> Vec<(u32, u32, EntityId)> {
-        let shard = generation.bundle.manifest.identity.shard_id;
         let mut named: Vec<(u32, u32, EntityId)> = ids
             .iter()
             .filter_map(|&id| {
-                let entity = crate::edited::artifact_named(&self.identity_key, shard, id)?;
+                let entity = crate::edited::artifact_named(&self.identity_key, id)?;
                 let (name, at, ordinal) = self.write.live().locate_artifact(entity)?;
                 (name == layer.declaration.name && level.is_none_or(|level| level == at))
                     .then_some((at, ordinal, entity))
@@ -547,7 +543,7 @@ impl ArtifactsPager<'_> {
     ) -> Result<Option<T>> {
         let served = &open.served;
         let Ok(layer) =
-            engine.readable_layer(served.session, generation, self.req.layer, served.name)
+            engine.readable_layer(served.session, served.shard, self.req.layer, served.name)
         else {
             return Ok(None);
         };
@@ -620,7 +616,7 @@ impl ArtifactsPager<'_> {
         let parent = self
             .req
             .parent
-            .and_then(|parent| locate_in(engine, generation, &layer, parent));
+            .and_then(|parent| locate_in(engine, &layer, parent));
         if let Some((level, _, _)) = parent {
             read(&mut self.filter, &layer, &mut levels, level, geometry)?;
         }
@@ -709,7 +705,6 @@ impl ArtifactsPager<'_> {
             targets: &targets,
             filter_rows,
             parent: None,
-            shard: generation.bundle.manifest.identity.shard_id,
             slots,
         };
         if self.req.parent.is_some() {
@@ -972,12 +967,10 @@ impl ArtifactsPager<'_> {
 /// there.
 fn locate_in(
     engine: &Engine,
-    generation: &Generation,
     layer: &RegisteredLayer,
     id: MosaicaId,
 ) -> Option<(u32, u32, EntityId)> {
-    let shard = generation.bundle.manifest.identity.shard_id;
-    let entity = crate::edited::artifact_named(&engine.identity_key, shard, id)?;
+    let entity = crate::edited::artifact_named(&engine.identity_key, id)?;
     let (name, level, ordinal) = engine.write.live().locate_artifact(entity)?;
     (name == layer.declaration.name).then_some((level, ordinal, entity))
 }

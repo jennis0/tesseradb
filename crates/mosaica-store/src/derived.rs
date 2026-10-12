@@ -1215,16 +1215,16 @@ impl Drop for Filed {
     }
 }
 
-/// Create `prefix_dir/partitions/<partition>/<kind>`, or say why not.
-fn derived_dir(prefix_dir: &Path, partition: &str, kind: &str) -> Option<std::path::PathBuf> {
-    let dir = prefix_dir.join("partitions").join(partition).join(kind);
-    match std::fs::create_dir_all(&dir) {
-        Ok(()) => Some(dir),
-        Err(source) => {
-            tracing::warn!(path = %dir.display(), %source, "a derived-structure directory would not be created");
-            None
-        }
-    }
+/// Create the shard's directory for `kind`; returns it and its prefix-relative path.
+fn derived_dir(
+    prefix_dir: &Path,
+    layout: crate::ShardLayout<'_>,
+    kind: &str,
+) -> crate::Result<(std::path::PathBuf, String)> {
+    let rel = layout.derived_rel(kind);
+    let dir = prefix_dir.join(&rel);
+    std::fs::create_dir_all(&dir).map_err(crate::error::io(&dir))?;
+    Ok((dir, rel))
 }
 
 /// The running index each kind's files are named from, carried across every call one publication
@@ -1264,6 +1264,9 @@ pub struct DerivedFile {
     pub rel: String,
 }
 
+/// The derived kind, and directory, term images are filed under.
+pub const TERM_IMAGES_KIND: &str = "term-images";
+
 /// Make the directory one view's term images go in and name the file
 /// (`crate::term_images` for what it holds).
 ///
@@ -1273,23 +1276,18 @@ pub struct DerivedFile {
 /// across the calls of a single publication.
 pub fn term_image_file(
     prefix_dir: &Path,
-    partition: &str,
+    layout: crate::ShardLayout<'_>,
     n: u64,
     index: &mut DerivedIndex,
 ) -> crate::Result<DerivedFile> {
-    const KIND: &str = "term-images";
     let position = index.term_images;
     index.term_images += 1;
-    let dir = prefix_dir.join("partitions").join(partition).join(KIND);
-    std::fs::create_dir_all(&dir).map_err(|source| crate::StoreError::Io {
-        path: dir.clone(),
-        source,
-    })?;
-    let name = derived_name(KIND, n, position, "timg");
+    let (dir, dir_rel) = derived_dir(prefix_dir, layout, TERM_IMAGES_KIND)?;
+    let name = derived_name(TERM_IMAGES_KIND, n, position, "timg");
     Ok(DerivedFile {
         path: dir.join(&name),
         dir,
-        rel: format!("partitions/{partition}/{KIND}/{name}"),
+        rel: format!("{dir_rel}/{name}"),
     })
 }
 
@@ -1309,7 +1307,7 @@ fn derived_name(kind: &str, n: u64, index: usize, extension: &str) -> String {
 /// landed. A file that will not be written is a dropped entry: the level derives it on first use.
 pub fn file_derived(
     prefix_dir: &Path,
-    partition: &str,
+    layout: crate::ShardLayout<'_>,
     n: u64,
     index: &mut DerivedIndex,
     items: Vec<Filed>,
@@ -1335,8 +1333,12 @@ pub fn file_derived(
         // call's manifest entry may already carry.
         let name = derived_name(kind, n, *next, extension);
         *next += 1;
-        let Some(dir) = derived_dir(prefix_dir, partition, kind) else {
-            continue;
+        let (dir, dir_rel) = match derived_dir(prefix_dir, layout, kind) {
+            Ok(made) => made,
+            Err(error) => {
+                tracing::warn!(%error, "a derived-structure directory would not be created");
+                continue;
+            }
         };
         if let Err(error) = item.bytes.place(&dir.join(&name)) {
             tracing::warn!(
@@ -1353,7 +1355,7 @@ pub fn file_derived(
             dirs.push(dir);
         }
         entries.push(DerivedExtent {
-            path: format!("partitions/{partition}/{kind}/{name}"),
+            path: format!("{dir_rel}/{name}"),
             layer: item.layer.clone(),
             level: item.level,
             level_version: item.level_version,

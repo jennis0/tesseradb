@@ -9,14 +9,13 @@ refuse other than that line.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-
 from oracle.harness import run_build, write_deployment
+from oracle.record_blob import record_dir_of
 
 N = 8
 
@@ -130,8 +129,7 @@ type = "u32"
         f"the control build failed, so every refusal above may be the corpus's rather than the "
         f"schema's\nstderr: {result.stderr}"
     )
-    prefix = json.loads((out / "CURRENT").read_text())["prefix"]
-    record_dir = out / prefix / "partitions" / "default" / "attrs" / "record"
+    record_dir = record_dir_of(out)
     for filename in ("blocks.bin", "hasrow.roaring", "directory.arrow"):
         assert (record_dir / filename).is_file(), (
             f"the build succeeded but wrote no {filename} — the neither-key column was "

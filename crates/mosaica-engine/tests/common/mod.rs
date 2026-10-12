@@ -119,12 +119,95 @@ use mosaica_build::{build, BuildArgs};
 use mosaica_engine::{default_compute_threads, ArtifactOut, Engine, EngineConfig};
 use mosaica_lifecycle::UnallocatedRow;
 use mosaica_spatial::Bounds;
+use mosaica_store::manifest::SegmentsManifest;
 use mosaica_store::read::open_bundle;
-use mosaica_types::{EntityId, IdentityKey, ItemHigh, MosaicaId, Tenancy};
+use mosaica_types::{EntityId, IdentityKey, ItemHigh, MosaicaId, ShardId, Tenancy};
 
 pub const N_ITEMS: u64 = 10_000;
 pub const ALL_TERM: u64 = 0;
 pub const SUBSET_TERM: u64 = 1;
+
+/// The built bundle's partition, and its one shard.
+pub const PARTITION: &str = "default";
+pub const SHARD: mosaica_store::ShardLayout<'static> =
+    mosaica_store::ShardLayout::new(PARTITION, ShardId::ZERO);
+
+/// The built bundle's partition directory in `root`'s `prefix`: where its side-manifests are.
+pub fn partition_dir(root: &Path, prefix: &str) -> PathBuf {
+    mosaica_store::layout::partition_dir(&root.join(prefix), PARTITION)
+}
+
+/// The shard's directory in the prefix `CURRENT` names.
+pub fn shard_dir(root: &Path) -> PathBuf {
+    SHARD.dir(&root.join(current_prefix(root)))
+}
+
+/// The side-manifest `root` serves, as an open reads it.
+pub fn side_manifest(root: &Path) -> SegmentsManifest {
+    open_bundle(root).expect("the bundle opens").partitions[PARTITION].side_manifest()
+}
+
+/// The file of [`side_manifest`].
+pub fn side_manifest_path(root: &Path) -> PathBuf {
+    let n = open_bundle(root).expect("the bundle opens").partitions[PARTITION].segments_n;
+    partition_dir(root, &current_prefix(root)).join(format!("SEGMENTS-{n}.json"))
+}
+
+/// Rewrite the side-manifest `root` serves with `edit` applied. It carries no digest of its own,
+/// so this needs no resealing.
+pub fn edit_side_manifest(root: &Path, edit: impl FnOnce(&mut SegmentsManifest)) {
+    let path = side_manifest_path(root);
+    let mut manifest: SegmentsManifest =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    edit(&mut manifest);
+    std::fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+}
+
+/// The bundle's shard size, and each shard's id and high water, as an open reads them.
+pub fn shards_of(root: &Path) -> (u64, Vec<(ShardId, u64)>) {
+    let bundle = open_bundle(root).expect("the bundle opens");
+    let partition = &bundle.partitions[PARTITION];
+    let shards = partition
+        .shards
+        .iter()
+        .map(|shard| (shard.record.id, shard.record.high_water))
+        .collect();
+    (partition.shard_size, shards)
+}
+
+/// Every segment's directory in the prefix `CURRENT` names.
+pub fn segment_dirs(root: &Path) -> Vec<PathBuf> {
+    let bundle = open_bundle(root).expect("the bundle opens");
+    let prefix = root.join(current_prefix(root));
+    bundle
+        .only_shard()
+        .record
+        .segments
+        .iter()
+        .map(|segment| prefix.join(SHARD.segment_rel(&segment.view, &segment.seg_id)))
+        .collect()
+}
+
+/// The files of one derived `kind` in the shard of the prefix `engine` serves.
+pub fn live_shard_files(root: &Path, engine: &Engine, kind: &str) -> Vec<PathBuf> {
+    let dir = root
+        .join(&engine.generation().prefix)
+        .join(SHARD.derived_rel(kind));
+    std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .collect()
+}
+
+/// `name` in the shard's directory for derived `kind`, prefix-relative, with that directory
+/// created under `dir`.
+pub fn derived_file(dir: &Path, kind: &str, name: &str) -> String {
+    let kind_rel = SHARD.derived_rel(kind);
+    std::fs::create_dir_all(dir.join(&kind_rel)).unwrap();
+    format!("{kind_rel}/{name}")
+}
 
 /// A fixed, non-degenerate test key — the same canonical vector used across the identity
 /// construction's own tests (`mosaica_types::identity`'s `CANONICAL_KEY`) and
@@ -138,7 +221,10 @@ pub fn test_key() -> IdentityKey {
 
 /// The `mosaica_id` of the item of shard 0 holding `entity` as its number at `tenancy`.
 pub fn mosaica_id_at(entity: EntityId, tenancy: u16) -> MosaicaId {
-    let high = ItemHigh::new(0, Tenancy::new(tenancy).expect("a tenancy below 4,096"));
+    let high = ItemHigh::new(
+        ShardId::ZERO,
+        Tenancy::new(tenancy).expect("a tenancy below 4,096"),
+    );
     test_key().forward(high, entity).unwrap()
 }
 
@@ -278,6 +364,17 @@ pub fn write_pairs_n(path: &Path, n: u64) {
 /// Build the fixture bundle at `out` through `mosaica_build::build`, over an
 /// `n`-item synthetic corpus. See [`write_points_n`]'s doc for why this is parameterised.
 pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64) {
+    build_fixture_sized(out, points_path, pairs_path, n, None)
+}
+
+/// [`build_fixture_n`], declaring `[shards] size` where `shard_size` is given.
+pub fn build_fixture_sized(
+    out: &Path,
+    points_path: &Path,
+    pairs_path: &Path,
+    n: u64,
+    shard_size: Option<u64>,
+) {
     write_points_n(points_path, n);
     write_pairs_n(pairs_path, n);
     let schema = id_schema();
@@ -301,9 +398,9 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
         ),
         out: out.to_path_buf(),
         limit: None,
+        shard_size,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -399,9 +496,9 @@ pub fn build_corpus_fixture(
         ),
         out: out.to_path_buf(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -456,9 +553,9 @@ pub fn build_corpus_fixture_with_layers(
         ),
         out: out.to_path_buf(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
         layers: config.layers,
         layer_inputs: config.layer_sources,
         scoped_layers: Default::default(),
@@ -505,9 +602,9 @@ pub fn build_with_layers(
         ),
         out: out.to_path_buf(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
         layers: config.layers,
         layer_inputs: config.layer_sources,
         scoped_layers: Default::default(),
@@ -551,9 +648,9 @@ pub fn with_id(mut schema: mosaica_build::config::Schema) -> mosaica_build::conf
 /// Every `source_id -> entity_id` pair the bundle's unique `id` column holds in its runs.
 pub fn source_to_new_map(bundle_root: &Path, prefix: &str) -> BTreeMap<u64, u64> {
     let bundle = open_bundle(bundle_root).unwrap();
-    let part = &bundle.partitions["default"];
-    let runs = part
-        .manifest
+    let runs = bundle
+        .only_shard()
+        .record
         .unique_indexes
         .iter()
         .find(|runs| runs.attribute == "id")
@@ -583,21 +680,27 @@ pub fn source_to_new_map(bundle_root: &Path, prefix: &str) -> BTreeMap<u64, u64>
 /// Put `number` at `tenancy` in the built bundle's tenancy index, named and digested in its
 /// side-manifest as a publication names it.
 pub fn set_tenancy(bundle_root: &Path, number: EntityId, tenancy: u16) {
-    use mosaica_store::manifest::{SegmentsManifest, TenancyBit};
-    use mosaica_store::tenancy::{bits_of, TENANCY_DIR};
+    use mosaica_store::manifest::TenancyBit;
+    use mosaica_store::tenancy::bits_of;
 
-    let partition = bundle_root.join("v00000/partitions/default");
+    let prefix_dir = bundle_root.join("v00000");
     let bits = bits_of(&[(number.raw() as u32, tenancy)]);
-    let path = partition.join("SEGMENTS-0.json");
+    let path = partition_dir(bundle_root, "v00000").join("SEGMENTS-0.json");
     let mut manifest: SegmentsManifest =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    for (bit, file) in mosaica_store::tenancy::write(&partition.join(TENANCY_DIR), &bits).unwrap() {
+    let tenancy_rel = SHARD.tenancy_rel();
+    for (bit, file) in mosaica_store::tenancy::write(&prefix_dir.join(&tenancy_rel), &bits).unwrap()
+    {
         let name = file.file_name().unwrap().to_str().unwrap();
-        let rel = format!("partitions/default/{TENANCY_DIR}/{name}");
+        let rel = format!("{tenancy_rel}/{name}");
         manifest
+            .partition
             .files
             .insert(rel.clone(), mosaica_store::digest_of(&file).unwrap());
-        manifest.tenancy_index.push(TenancyBit { bit, path: rel });
+        manifest
+            .only_shard_mut()
+            .tenancy_index
+            .push(TenancyBit { bit, path: rel });
     }
     std::fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
 }
@@ -623,6 +726,20 @@ pub fn key_id(key: &str) -> u64 {
 /// The row values that give an item the `id` of `key`.
 pub fn keyed(key: &str) -> Vec<mosaica_lifecycle::wal::WalScalar> {
     vec![mosaica_lifecycle::wal::WalScalar::U64(key_id(key))]
+}
+
+/// A new item at the origin holding the `id` of `key`.
+pub fn keyed_row(key: &str) -> UnallocatedRow {
+    UnallocatedRow {
+        view: "s0".to_string(),
+        join: None,
+        descriptors: Vec::new(),
+        x: 0.0,
+        y: 0.0,
+        scalars: keyed(key),
+        terms: Vec::new(),
+        scoped: Vec::new(),
+    }
 }
 
 /// The live item holding the `id` of `key`, if any.

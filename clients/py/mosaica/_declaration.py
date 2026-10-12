@@ -57,6 +57,7 @@ class Declaration:
 
     def __init__(self) -> None:
         self.blocks: dict[str, list[dict]] = {kind: [] for kind in KINDS}
+        self.shard_size: int | None = None
 
     def add(self, kind: str, block: dict) -> dict:
         """Add a copy of `block` to the blocks of `kind`, and return the copy.
@@ -148,6 +149,8 @@ class Declaration:
             defaults["allocation_view"] = allocation_view
         if defaults:
             document["defaults"] = defaults
+        if self.shard_size is not None:
+            document["shards"] = {"size": self.shard_size}
 
         # A layer that named no views takes every one: the plain views by name, and each group by
         # its own, which draws the layer on every view of it, present and future.

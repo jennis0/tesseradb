@@ -212,6 +212,7 @@ fn mint_cells<'a>(
 
 /// The window could not be allocated: nothing was appended, nothing applied, and the high-water
 /// mark did not move. The one exit outside [`ClosingWindow`], since allocation is what failed.
+/// A full shard is refused at admission; this is the backstop.
 fn fail_allocation(
     health: &ExecutorHealth,
     error: AllocError,
@@ -219,9 +220,7 @@ fn fail_allocation(
     entries: u64,
     started: std::time::Instant,
 ) {
-    refuse_waiters(health, waiters, entries, started, || {
-        ExecError::Alloc(error)
-    });
+    refuse_waiters(health, waiters, entries, started, || ExecError::from(error));
 }
 
 /// Answer every waiter of a window that will not commit, and time the window.
@@ -307,13 +306,15 @@ impl Executor {
                 }
             };
             let Command::Ingest { submission, reply } = command else {
-                // A declaration reads the unique values the window has not applied, and a change
-                // to the view roster changes the views the window's rows are going into, so the
+                // A declaration reads the unique values the window has not applied, a shard size
+                // is checked against the high water the window has yet to take, and a change to
+                // the view roster changes the views the window's rows are going into, so the
                 // window closes first. Every other command is tolerable while a window is open: an
                 // edit's close carries the memberships and generating sets it finds then.
                 if matches!(
                     command,
                     Command::DeclareAttribute { .. }
+                        | Command::DeclareShards { .. }
                         | Command::CreateView { .. }
                         | Command::DropView { .. }
                         | Command::CreateViewGroup { .. }
@@ -425,6 +426,22 @@ impl Executor {
                     window = self.close_and_reopen(window);
                     admission = Admission::YieldedAfterClose;
                 }
+                // A batch that does not fit beside the open window closes it, and is refused if it
+                // does not fit alone.
+                let (edits, items) =
+                    mosaica_lifecycle::window::wanted(&submission.rows, submission.edits.len());
+                let room = |shard: &ShardWrite, window: &CommitWindow<Reply<Ingested>>| {
+                    let (held_edits, held_items) = window.wanted();
+                    shard.room(held_edits + edits, held_items + items)
+                };
+                if !window.is_empty() && room(self.live.only_shard(), &window).is_err() {
+                    window = self.close_and_reopen(window);
+                    admission = Admission::YieldedAfterClose;
+                }
+                if let Err(full) = room(self.live.only_shard(), &window) {
+                    reply.fail(ExecError::ShardFull(full));
+                    return (window, admission);
+                }
                 if let Some(entry) = self.admit(submission, reply) {
                     if window.is_empty() {
                         // Armed at the first entry: an empty window is never closed.
@@ -456,30 +473,25 @@ impl Executor {
             over_bound,
         } = submission;
         let generation = self.generation.load();
+        let shard = generation.only_shard();
         let creates = rows.iter().any(|row| row.join.is_none()) || !edits.is_empty();
         let stale = crate::unique::moved_since(&generation, &keys, unique_seq, creates)
             || edits.iter().any(|submitted| {
                 let old = submitted.edit.old;
-                generation.overlay.is_deleted(old)
-                    || crate::write::joined::views_holding(&generation, old) != submitted.held_views
+                shard.overlay.is_deleted(old)
+                    || crate::write::joined::views_holding(shard, old) != submitted.held_views
             })
             || slots.iter().any(|slot| match slot {
                 mosaica_lifecycle::Slot::Unchanged { entity, .. }
                 | mosaica_lifecycle::Slot::Joined { entity, .. } => {
-                    generation.overlay.is_deleted(*entity)
+                    shard.overlay.is_deleted(*entity)
                 }
                 _ => false,
             })
             || rows.iter().any(|row| match row.join {
                 Some(entity) => {
-                    generation.overlay.is_deleted(entity)
-                        || generation.bundle.partitions.values().any(|partition| {
-                            partition
-                                .views
-                                .get(&row.view)
-                                .is_some_and(|data| data.row_space.row_of(entity).is_some())
-                        })
-                        || generation.buffer.contains_in_view(entity, &row.view)
+                    shard.overlay.is_deleted(entity)
+                        || crate::edited::holds_in_view(shard, entity, &row.view)
                 }
                 None => false,
             });
@@ -518,7 +530,7 @@ impl Executor {
                 }
             }
             let entities: Vec<EntityId> = named.iter().map(|(entity, _)| *entity).collect();
-            match crate::edited::numbers_of(&generation, &entities) {
+            match crate::edited::numbers_of(shard, &entities) {
                 Ok(numbers) => named
                     .iter()
                     .zip(numbers)
@@ -611,23 +623,20 @@ impl Executor {
 
         // The allocator's freed ids are at this index's tenancies: a fold swaps its index in before
         // it releases the ids it freed, and both run on this thread.
-        let (identity, shard, tenancy) = {
+        let shard = self.live.only_shard();
+        let (identity, tenancy) = {
             let generation = self.generation.load();
             (
                 self.deps.identity_key,
-                generation.bundle.manifest.identity.shard_id,
-                Arc::clone(&generation.tenancy),
+                Arc::clone(&generation.only_shard().tenancy),
             )
         };
         let mosaica_id_of = |entity: EntityId| {
-            crate::edited::id_at(&identity, shard, tenancy.of(entity), entity)
+            crate::edited::id_at(&identity, shard.id, tenancy.of(entity), entity)
                 .map(|id| id.raw())
                 .expect("the allocator issues entities inside the identity space")
         };
-        let closed = match self
-            .live
-            .with_allocator(|a| window.allocate(a, mosaica_id_of))
-        {
+        let closed = match shard.with_allocator(|a| window.allocate(a, mosaica_id_of)) {
             Ok((closed, tally)) => {
                 // Recorded at allocation: a failed append still fragmented the entity axis.
                 self.health.record_fragmentation(tally);
@@ -728,7 +737,7 @@ impl Executor {
         for (index, entry) in closing.entries_mut().iter_mut().enumerate() {
             let (_, edits) = entry.rows_and_edits_mut();
             for edit in edits.iter_mut() {
-                edit.suppressed = generation.overlay.is_suppressed(edit.old);
+                edit.suppressed = generation.only_shard().overlay.is_suppressed(edit.old);
                 moved.push((edit.old, edit.rows[0].entity_id));
                 first_edit.get_or_insert(index);
             }
@@ -838,10 +847,11 @@ impl Executor {
             &vocabularies,
             mints,
         );
-        let mut buffer = (*generation.buffer).clone();
+        let shard = generation.only_shard();
+        let mut buffer = (*shard.buffer).clone();
         mark = self.health.lap(WriteStage::ApplyBufferClone, mark);
         let declared = &generation.bundle.manifest.declared_scalars;
-        let unique = !generation.unique_live.is_empty_schema();
+        let unique = !shard.unique_live.is_empty_schema();
 
         // What the buffered-row lists grow by: every entity this window buffered a row for.
         let mut inserted: Vec<EntityId> = Vec::new();
@@ -873,7 +883,7 @@ impl Executor {
             }
             for edit in entry.edits() {
                 let new = edit.rows[0].entity_id;
-                let overlay = overlay.get_or_insert_with(|| (*generation.overlay).clone());
+                let overlay = overlay.get_or_insert_with(|| (*shard.overlay).clone());
                 overlay.apply(edit.old, mosaica_lifecycle::ChangeOp::Delete);
                 deleted.push(edit.old);
                 newly_denied.push(edit.old);
@@ -888,7 +898,7 @@ impl Executor {
         // A joining row's values are its item's, whose entries are held already. An edited item's
         // old entity names nothing, so its entries go.
         let unique_live = unique.then(|| {
-            let mut unique_live = (*generation.unique_live).clone();
+            let mut unique_live = (*shard.unique_live).clone();
             if !deleted.is_empty() {
                 unique_live.remove_entities(&deleted.iter().map(|e| e.raw() as u32).collect());
             }
@@ -910,7 +920,7 @@ impl Executor {
         // An old entity's pair stays until the fold that removes the entity, which reads it to tell
         // an entity an edit made from an item's number.
         let edited_live = (!pairs.is_empty()).then(|| {
-            let mut edited_live = (*generation.edited_live).clone();
+            let mut edited_live = (*shard.edited_live).clone();
             edited_live.add(&pairs);
             edited_live
         });
@@ -921,21 +931,22 @@ impl Executor {
             .buffered_items
             .store(buffer.len(), Ordering::SeqCst);
 
-        let change = |g: &mut crate::GenerationParts| {
-            g.overlay_version = generation.overlay_version + 1;
+        let change = |g: &mut crate::GenerationParts, s: &mut crate::ShardParts| {
+            s.overlay_version = shard.overlay_version + 1;
             g.vocabularies = Arc::new(vocabularies);
             g.suggest = suggest;
             if let Some(unique_live) = unique_live {
-                g.unique_live = Arc::new(unique_live);
+                s.unique_live = Arc::new(unique_live);
             }
             if let Some(edited_live) = edited_live {
-                g.edited_live = Arc::new(edited_live);
+                s.edited_live = Arc::new(edited_live);
                 g.edit_epoch = generation.edit_epoch + 1;
             }
         };
         let next = match overlay {
-            None => generation.with_buffer(Arc::new(buffer), &inserted, change),
+            None => generation.with_buffer(shard.id(), Arc::new(buffer), &inserted, change),
             Some(overlay) => generation.with_denies(
+                shard.id(),
                 Arc::new(overlay),
                 &newly_denied,
                 Arc::new(buffer),

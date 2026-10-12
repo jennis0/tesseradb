@@ -64,6 +64,8 @@ mosaica-server = { path = ".", features = ["fault-injection", "bench-timing"] }
 tempfile = { workspace = true }
 mosaica-build = { path = "../mosaica-build" }
 mosaica-spatial = { path = "../mosaica-spatial" }
+# Where a bundle's files are, for the tests that reach into one on disc.
+mosaica-store = { path = "../mosaica-store" }
 parquet = { workspace = true }
 jsonschema = { version = "0.51", default-features = false }
 serde_yaml_ng = "0.10"

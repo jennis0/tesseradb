@@ -54,16 +54,18 @@ use mosaica_lifecycle::{IngestBuffer, Overlay};
 
 use crate::cache::RowProjectionCache;
 use crate::cache::KEEP_SUPERSEDED_GENERATIONS;
+use crate::edited::ARTIFACT_SHARD;
 use crate::geometry::{check_publishable, GeometryPublication, GeometryRefused};
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_store::manifest::{EntitySet, ManifestVocabulary, SegmentsManifest};
 use mosaica_store::merge::MergePolicy;
 use mosaica_store::render_presence::RENDER_PRESENCE_DIR;
 use mosaica_store::vocabulary::{MintError, Minted, Vocabularies};
-use mosaica_types::{EntityId, IdentityKey, TermId};
+use mosaica_store::ShardLayout;
+use mosaica_types::{EntityId, IdentityKey, ShardId, TermId};
 
 use crate::error::EngineError;
-use crate::{Generation, GenerationHandle};
+use crate::{Generation, GenerationHandle, Shard};
 
 /// Take a lock, recovering rather than panicking if a previous holder panicked.
 ///
@@ -300,7 +302,7 @@ pub(crate) fn retire_dead_view_artifacts(
 /// Everything [`WritePath::reconstruct`] rebuilds from durable state.
 pub(crate) struct WritePathState {
     wal: Wal,
-    allocator: Allocator,
+    shards: Vec<ShardWrite>,
     resolver_state: ResolverState,
     accepted_batches: AcceptedBatches,
     pub(crate) registry: LayerRegistry,
@@ -343,7 +345,7 @@ impl WritePath {
     pub(crate) fn new(state: WritePathState) -> Self {
         WritePath {
             live: Arc::new(LiveState {
-                allocator: Mutex::new(state.allocator),
+                shards: state.shards,
                 resolver_state: Mutex::new(state.resolver_state),
                 accepted_batches: Mutex::new(state.accepted_batches),
                 registry: Mutex::new(state.registry),
@@ -436,31 +438,17 @@ impl WritePath {
         let health = Arc::clone(&self.health);
         let live = Arc::clone(&self.live);
         // Read before the pointer moves into the thread. What the bundle's manifests already carry
-        // is this list's starting point: see the field for why it is held rather than re-cloned
-        // from a (stale) live manifest at each publication.
-        let seeded_membership_extents: Vec<mosaica_store::manifest::MembershipExtent> = generation
-            .load()
-            .bundle
-            .partitions
-            .values()
-            .flat_map(|p| p.manifest.membership_extents.iter().cloned())
-            .collect();
-        // The derived files the last fold or the build wrote, held for the same reason.
-        let seeded_derived_extents: Vec<mosaica_store::manifest::DerivedExtent> = generation
-            .load()
-            .bundle
-            .partitions
-            .values()
-            .flat_map(|p| p.manifest.derived_extents.iter().cloned())
-            .collect();
-        // The content half, seeded identically and for the identical reason.
-        let seeded_content_extents: Vec<mosaica_store::manifest::RecordExtent> = generation
-            .load()
-            .bundle
-            .partitions
-            .values()
-            .flat_map(|p| p.manifest.artifact_record_extents.iter().cloned())
-            .collect();
+        // is where each held artifact list starts: see [`SideManifests`] for why they are held
+        // rather than re-cloned from a (stale) live manifest at each publication.
+        let (seeded_membership_extents, seeded_derived_extents, seeded_content_extents) =
+            match generation.load().bundle.shard(ARTIFACT_SHARD) {
+                Some(shard) => (
+                    shard.record.membership_extents.clone(),
+                    shard.record.derived_extents.clone(),
+                    shard.record.artifact_record_extents.clone(),
+                ),
+                None => Default::default(),
+            };
         // What replay left in the log and no manifest carries: the same publication is owed for
         // it, and without this a node that restarted between a batch and its tick would wait for
         // the next batch to write one.
@@ -733,6 +721,12 @@ impl WritePath {
             request: Box::new(request),
             reply,
         })
+    }
+
+    /// Declare the point shard's size. Answers whether the shard already had this size, in which
+    /// case nothing was appended.
+    pub(crate) fn declare_shards(&self, size: u64) -> Result<bool, AcceptError> {
+        self.submit(|reply| Command::DeclareShards { size, reply })
     }
 
     /// Declare a vocabulary. Answers `(existing, added, titles)`: whether a vocabulary of that

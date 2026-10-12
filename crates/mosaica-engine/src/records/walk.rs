@@ -99,9 +99,8 @@ impl<'a> PageCx<'a> {
 
     /// The entity `segment`'s row `local` belongs to.
     fn entity_of(&self, segment: &SegmentData, local: u32) -> u32 {
-        let shard = self.generation.bundle.manifest.identity.shard_id;
         let entity = segment
-            .entity_of(local, &self.engine.identity_key, shard)
+            .entity_of(local, &self.engine.identity_key, self.open.served.shard.id())
             .expect("an opened segment's rows invert to its own shard");
         u32::try_from(entity.raw()).expect("entity ids are capped at u32::MAX by I9")
     }
@@ -217,7 +216,7 @@ struct Stretch {
 pub(crate) fn same_publication(a: &Generation, b: &Generation) -> bool {
     a.prefix == b.prefix
         && a.segments_version == b.segments_version
-        && Arc::ptr_eq(&a.overlay, &b.overlay)
+        && Arc::ptr_eq(&a.only_shard().overlay, &b.only_shard().overlay)
 }
 
 /// A taken row's key in `order`.
@@ -289,7 +288,7 @@ pub(super) fn filter_rows(
     let candidate = match candidate {
         Some(candidate) => candidate,
         None => {
-            whole = engine.filter_candidate(served.session, cx.generation)?;
+            whole = engine.filter_candidate(served.session, served.shard)?;
             &whole
         }
     };
@@ -483,7 +482,7 @@ impl Walk {
                 let mut candidate = Bitmap::of(&entities);
                 candidate.and_inplace(
                     &cx.engine
-                        .filter_candidate(cx.open.served.session, cx.generation)?,
+                        .filter_candidate(cx.open.served.session, cx.open.served.shard)?,
                 );
                 let row_bases: Vec<u32> = segments.iter().map(|&(_, base)| base).collect();
                 let domain = crossing_domain(&[parts], &row_bases);
@@ -512,7 +511,7 @@ impl Walk {
     ) -> Result<Option<Stretch>> {
         let candidate = cx
             .engine
-            .filter_candidate(cx.open.served.session, cx.generation)?;
+            .filter_candidate(cx.open.served.session, cx.open.served.shard)?;
         let from: u64 = scan.map_or(0, |(entity, _)| u64::from(entity) + 1);
         if from > u64::from(u32::MAX) {
             return Ok(None);
@@ -649,9 +648,11 @@ impl Walk {
         }
         items.sort_unstable();
         let entities: Bitmap = items.iter().map(|&(entity, _)| entity).collect();
-        let candidate =
-            cx.engine
-                .filter_candidate_within(cx.open.served.session, cx.generation, &entities)?;
+        let candidate = cx.engine.filter_candidate_within(
+            cx.open.served.session,
+            cx.open.served.shard,
+            &entities,
+        )?;
         drop(entities);
         if order == RecordsOrder::Stored {
             items.retain(|&(entity, _)| candidate.contains(entity));
@@ -734,18 +735,17 @@ fn driving_rows(cx: &PageCx<'_>, expr: &FilterExpr, most: u32) -> Result<Option<
 fn bounded_rows(cx: &PageCx<'_>, expr: &FilterExpr) -> Result<Option<Bitmap>> {
     Ok(match expr {
         FilterExpr::Leaf { column, operand } => {
-            let Some(keys) = cx.generation.filter_columns.unique_keys(column, operand) else {
+            let shard = cx.open.served.shard;
+            let Some(keys) = shard.filter_columns.unique_keys(column, operand) else {
                 return Ok(None);
             };
-            let holders: Bitmap = unique_holders(cx.generation, column, &keys)
+            let holders: Bitmap = unique_holders(shard, column, &keys)
                 .map_err(filter_refusal)?
                 .into_iter()
                 .collect();
-            let visible = cx.engine.filter_candidate_within(
-                cx.open.served.session,
-                cx.generation,
-                &holders,
-            )?;
+            let visible =
+                cx.engine
+                    .filter_candidate_within(cx.open.served.session, shard, &holders)?;
             let row_space = &cx.open.served.data.row_space;
             Some(
                 visible

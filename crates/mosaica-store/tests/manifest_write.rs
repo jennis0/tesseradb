@@ -3,56 +3,21 @@
 //! (compaction §10's rule paragraph).
 //!
 //! These tests exercise the writers exactly as a caller must: build a minimal but real bundle's
-//! segment/permutation/`SEGMENTS-0.json` by hand (the same fixture shape `bundle_read.rs` uses),
-//! then write `MANIFEST.json` and `CURRENT` through the two functions under test, then open the
-//! result with the real reader — never a hand-parsed assertion of either file's shape, matching
-//! `bundle_read.rs`'s own voice.
+//! segment/permutation/`SEGMENTS-0.json` with the tests' fixture, then write `MANIFEST.json` and
+//! `CURRENT` through the two functions under test, then open the result with the real reader —
+//! never a hand-parsed assertion of either file's shape, matching `bundle_read.rs`'s own voice.
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use sha2::{Digest, Sha256};
-
-use mosaica_spatial::tiler::{sort_batch, TilerItem};
-use mosaica_spatial::{fixed32, Bounds};
-use mosaica_store::manifest::{
-    EntitySet, IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation, SegmentDescriptor,
-    SegmentsManifest, ViewDescriptor,
-};
+use mosaica_store::layout::{partition_dir, partitions_dir};
+use mosaica_store::manifest::{Manifest, SegmentsManifest};
 use mosaica_store::manifest_write::{write_current, write_manifest_json};
-use mosaica_store::write::{write_permutation, write_segment};
 use mosaica_store::write_segments_manifest;
 use mosaica_store::{open_bundle, StoreError};
-use mosaica_types::{EntityId, MosaicaId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
-/// A synthetic `mosaica_id`-shaped value for test fixtures — see `bundle_read.rs`'s copy of the
-/// same helper for why full splitmix64 output rather than a raw seed.
-fn synthetic_mosaica_id(seed: u64) -> MosaicaId {
-    let mut z = seed.wrapping_add(0x9E3779B97F4A7C15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-    z ^= z >> 31;
-    MosaicaId::new(z)
-}
-
-fn unit_extent() -> Bounds {
-    Bounds {
-        x_min: 0.0,
-        x_max: 1.0,
-        y_min: 0.0,
-        y_max: 1.0,
-    }
-}
-
-fn hex_sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    out
-}
+mod fixture;
+use fixture::hex_sha256;
 
 /// Build the one-partition, one-view, one-segment fixture `MANIFEST.json` needs to sit beside
 /// for `open_bundle` to succeed — everything short of the two files this module's functions
@@ -63,110 +28,9 @@ fn hex_sha256(bytes: &[u8]) -> String {
 /// [`write_manifest_json_digest_changes_when_the_manifest_changes`] can build two otherwise
 /// identical manifests that differ in exactly one field.
 fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path::PathBuf) {
-    let extent = unit_extent();
-    let mut items: Vec<TilerItem> = (0..n)
-        .map(|entity_id| TilerItem {
-            mosaica_id: synthetic_mosaica_id(entity_id),
-            qx: fixed32(((entity_id * 37) % 100) as f64 / 100.0, 0.0, 1.0),
-            qy: fixed32(((entity_id * 61) % 100) as f64 / 100.0, 0.0, 1.0),
-            scalars: vec![],
-        })
-        .collect();
-    let mut entity_ids: Vec<EntityId> = (0..n).map(EntityId::new).collect();
-    let codes = sort_batch(&mut items, &mut entity_ids);
-
     let prefix_dir = root.join("v00000");
-    let partition_dir = prefix_dir.join("partitions").join("default");
-    let view_dir = partition_dir.join("views").join("main");
-    let seg_dir = view_dir.join("segments").join("seg0");
-    fs::create_dir_all(&seg_dir).expect("mkdir seg_dir");
-
-    write_segment(&seg_dir, &items, &codes, &[], &[]).expect("write_segment");
-    write_permutation(&view_dir.join("permutation.bin"), &entity_ids, n)
-        .expect("write_permutation");
-
-    let file_digest = |path: &Path| {
-        let bytes = fs::read(path).expect("read for digest");
-        mosaica_store::manifest::FileDigest {
-            size: bytes.len() as u64,
-            sha256: hex_sha256(&bytes),
-        }
-    };
-    let mut segments_files = BTreeMap::new();
-    segments_files.insert(
-        "partitions/default/views/main/permutation.bin".to_string(),
-        file_digest(&view_dir.join("permutation.bin")),
-    );
-    for name in mosaica_store::SEGMENT_FILES {
-        segments_files.insert(
-            format!("partitions/default/views/main/segments/seg0/{name}"),
-            file_digest(&seg_dir.join(name)),
-        );
-    }
-
-    let segments_manifest = SegmentsManifest {
-        watermark: n,
-        entity_id_high_water: n,
-        segments: vec![SegmentDescriptor {
-            incarnation: 0,
-            view: "main".to_string(),
-            seg_id: "seg0".to_string(),
-            row_count: items.len() as u32,
-            entity_lo: 0,
-            entity_hi: n.saturating_sub(1),
-        }],
-        deltas: vec![],
-        dict_extents: vec![],
-        tombstones: EntitySet::default(),
-        deny: EntitySet::default(),
-        vocabulary_extensions: vec![],
-        files: segments_files,
-        ..SegmentsManifest::empty()
-    };
-    fs::write(
-        partition_dir.join("SEGMENTS-0.json"),
-        serde_json::to_vec_pretty(&segments_manifest).expect("serialise SEGMENTS-0"),
-    )
-    .expect("write SEGMENTS-0.json");
-
-    let manifest = Manifest {
-        bundle_format: mosaica_types::BUNDLE_FORMAT,
-        created_at: created_at.to_string(),
-        declared_scalars: vec![],
-        vocabularies: vec![],
-        small_term_threshold: 32,
-        entity_id_high_water: n,
-        identity: IdentityDescriptor {
-            construction: IDENTITY_CONSTRUCTION.to_string(),
-            rounds: IDENTITY_ROUNDS,
-            key: "0123456789abcdef0123456789abcdef".to_string(),
-            shard_id: 0,
-        },
-        groups: Vec::new(),
-        views: vec![ViewDescriptor {
-            incarnation: 0,
-            point_default: Some("public".to_string()),
-            visibility: None,
-            id: "main".to_string(),
-            display_name: "Main".to_string(),
-            // The frame is the view's, not the bundle's (decision 0040).
-            quantisation: Quantisation {
-                x_min: extent.x_min,
-                x_max: extent.x_max,
-                y_min: extent.y_min,
-                y_max: extent.y_max,
-            },
-            projection: mosaica_spatial::Projection::None,
-        }],
-        partitions: vec![PartitionDescriptor {
-            phash: "default".to_string(),
-            required_terms: vec![],
-        }],
-        provenance: serde_json::json!({}),
-        files: BTreeMap::new(),
-    };
-
-    (manifest, prefix_dir)
+    fixture::publish_seg0(&prefix_dir, fixture::items_for(0, n));
+    (fixture::manifest(created_at), prefix_dir)
 }
 
 /// `write_manifest_json` writes bytes the reader can open, and the digest it hands back is the
@@ -185,10 +49,9 @@ fn write_manifest_json_then_write_current_round_trips_through_open_bundle() {
 
     let bundle = open_bundle(dir.path()).expect("open_bundle over a bundle these writers built");
     assert_eq!(bundle.manifest.bundle_format, mosaica_types::BUNDLE_FORMAT);
-    assert_eq!(bundle.manifest.entity_id_high_water, 64);
+    assert_eq!(bundle.only_shard().record.high_water, 64);
 
-    let partition = bundle.partitions.get("default").expect("default partition");
-    let view = partition.views.get("main").expect("main view");
+    let view = bundle.only_shard().views.get("main").expect("main view");
     assert_eq!(view.segments.len(), 1);
     assert_eq!(view.segments[0].row_count, 64);
 }
@@ -240,7 +103,7 @@ fn write_current_is_exactly_what_open_bundle_expects() {
     write_current(dir.path(), "v00000", &digest).expect("write_current");
 
     let bundle = open_bundle(dir.path()).expect("open_bundle must accept write_current's CURRENT");
-    assert_eq!(bundle.manifest.entity_id_high_water, 16);
+    assert_eq!(bundle.only_shard().record.high_water, 16);
 }
 
 /// A wrong `manifest_digest` in `CURRENT` must be refused, not silently accepted — the property
@@ -265,10 +128,8 @@ fn write_current_with_a_wrong_digest_is_caught_by_open_bundle_not_silently_serve
     }
 }
 
-/// The property the fold's identity rotation depends on (compaction §4's `bundle_identity`,
-/// carried on `Generation::fragments`): two manifests that differ in even one field must
-/// digest differently, or a fold that changed the corpus would leave every session's fragment
-/// cache believing nothing had rotated.
+/// Two manifests that differ in one field digest differently, or a fold that changed the corpus
+/// would leave every session's fragment cache believing nothing had rotated.
 #[test]
 fn write_manifest_json_digest_changes_when_the_manifest_changes() {
     let dir_a = tempfile::tempdir().expect("tempdir a");
@@ -290,15 +151,6 @@ fn write_manifest_json_digest_changes_when_the_manifest_changes() {
     assert_eq!(digest_a, digest_a_again);
 }
 
-/// An empty side-manifest. `watermark` is the field the refuse-to-replace test varies, so the
-/// two writers' manifests are distinguishable in the committed bytes.
-fn manifest_fixture() -> SegmentsManifest {
-    SegmentsManifest {
-        vocabulary_extensions: vec![],
-        ..SegmentsManifest::empty()
-    }
-}
-
 /// **Obligation 11: a side-manifest is never replaced.**
 ///
 /// A side-manifest is complete current state for its partition, not a diff, so a second write
@@ -316,14 +168,14 @@ fn manifest_fixture() -> SegmentsManifest {
 fn a_side_manifest_is_never_replaced() {
     let tmp = tempfile::TempDir::new().unwrap();
     let prefix_dir = tmp.path();
-    std::fs::create_dir_all(prefix_dir.join("partitions").join("default")).unwrap();
+    std::fs::create_dir_all(partition_dir(prefix_dir, "default")).unwrap();
 
-    let mut first = manifest_fixture();
-    first.watermark = 11;
+    let mut first = SegmentsManifest::empty();
+    first.only_shard_mut().watermark = 11;
     write_segments_manifest(prefix_dir, "default", 4, &first).expect("the first write commits");
 
-    let mut second = manifest_fixture();
-    second.watermark = 22;
+    let mut second = SegmentsManifest::empty();
+    second.only_shard_mut().watermark = 22;
     let refused = write_segments_manifest(prefix_dir, "default", 4, &second)
         .expect_err("the second write at the same n must be refused");
     assert!(
@@ -339,23 +191,16 @@ fn a_side_manifest_is_never_replaced() {
     );
 
     let committed: SegmentsManifest = serde_json::from_slice(
-        &std::fs::read(
-            prefix_dir
-                .join("partitions")
-                .join("default")
-                .join("SEGMENTS-4.json"),
-        )
-        .unwrap(),
+        &std::fs::read(partition_dir(prefix_dir, "default").join("SEGMENTS-4.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(
-        committed.watermark, 11,
+        committed.only_shard().watermark,
+        11,
         "the first writer's manifest is intact — the loser overwrote nothing"
     );
     assert!(
-        !prefix_dir
-            .join("partitions")
-            .join("default")
+        !partition_dir(prefix_dir, "default")
             .join("SEGMENTS-4.json.tmp")
             .exists(),
         "and the refused write left no temporary behind"
@@ -379,7 +224,7 @@ fn the_side_manifest_floor_is_every_file_present() {
         "an empty tree takes nothing"
     );
 
-    let live = root.join("v00000").join("partitions");
+    let live = partitions_dir(&root.join("v00000"));
     std::fs::create_dir_all(live.join("default")).unwrap();
     std::fs::write(live.join("default").join("SEGMENTS-3.json"), b"{}").unwrap();
     // Not a candidate at any n: the name does not end in `.json`, and a crashed write leaves one.
@@ -398,7 +243,7 @@ fn the_side_manifest_floor_is_every_file_present() {
     );
 
     // The prefix an in-flight compaction is building, which `CURRENT` does not name.
-    let pending = root.join("v00001").join("partitions").join("default");
+    let pending = partition_dir(&root.join("v00001"), "default");
     std::fs::create_dir_all(&pending).unwrap();
     std::fs::write(pending.join("SEGMENTS-11.json"), b"{}").unwrap();
     assert_eq!(
@@ -428,7 +273,7 @@ fn the_side_manifest_floor_follows_symlinked_directories() {
 
     // The real tree, outside the bundle root: `v00000` and one partition reach it only by link.
     let elsewhere = tmp.path().join("elsewhere");
-    let real_partition = elsewhere.join("v00000").join("partitions").join("default");
+    let real_partition = partition_dir(&elsewhere.join("v00000"), "default");
     std::fs::create_dir_all(&real_partition).unwrap();
     std::fs::write(real_partition.join("SEGMENTS-5.json"), b"{}").unwrap();
     let bundle = root.join("bundle");
@@ -445,12 +290,9 @@ fn the_side_manifest_floor_follows_symlinked_directories() {
     std::fs::create_dir_all(&real_second).unwrap();
     std::fs::write(real_second.join("SEGMENTS-8.json"), b"{}").unwrap();
     let live = root.join("live");
-    std::fs::create_dir_all(live.join("v00000").join("partitions")).unwrap();
-    std::os::unix::fs::symlink(
-        &real_second,
-        live.join("v00000").join("partitions").join("second"),
-    )
-    .unwrap();
+    std::fs::create_dir_all(partitions_dir(&live.join("v00000"))).unwrap();
+    std::os::unix::fs::symlink(&real_second, partition_dir(&live.join("v00000"), "second"))
+        .unwrap();
     assert_eq!(
         mosaica_store::highest_side_manifest_n(&live).unwrap(),
         Some(8),
@@ -472,7 +314,7 @@ fn the_side_manifest_floor_follows_symlinked_directories() {
 fn pruning_keeps_the_newest_manifests_and_never_the_lowest() {
     let tmp = tempfile::TempDir::new().unwrap();
     let prefix_dir = tmp.path().join("v00000");
-    let dir = prefix_dir.join("partitions").join("default");
+    let dir = partition_dir(&prefix_dir, "default");
     fs::create_dir_all(&dir).unwrap();
 
     let names = || {

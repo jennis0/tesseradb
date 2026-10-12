@@ -243,9 +243,9 @@ pub fn run_build(
                 attribute_sources: Vec::new(),
                 out: out.clone(),
                 limit: Some(scale),
+                shard_size: None,
                 strict: false,
                 identity_key: IdentityKey::from_hex(TEST_KEY_HEX)?,
-                shard_id: 0,
                 layers: Vec::new(),
                 layer_inputs: Vec::new(),
                 scoped_layers: Default::default(),
@@ -600,19 +600,14 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
         }
 
         let bundle = open_bundle(&fixture.root)?;
-        let q = bundle
+        let view = bundle
             .manifest
             .views
             .first()
-            .expect("a built bundle declares a view")
-            .quantisation;
+            .expect("a built bundle declares a view");
+        let q = view.quantisation;
         let extent_span = q.x_max - q.x_min;
-        let view_id = bundle
-            .partitions
-            .values()
-            .next()
-            .and_then(|p| p.views.keys().next().cloned())
-            .unwrap_or_else(|| "s0".to_string());
+        let view_id = view.id.clone();
         drop(bundle);
 
         let tmp = std::env::temp_dir().join(format!(

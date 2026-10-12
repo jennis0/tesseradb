@@ -80,6 +80,7 @@ pub(crate) fn name_items_in(
     table: &AddressTable,
 ) -> std::result::Result<NamedItems, crate::EngineError> {
     let declared = &generation.bundle.manifest.declared_scalars;
+    let shard = generation.only_shard();
     let mut unique: Vec<(u16, &DeclaredScalar, &[Option<AddressValue>])> = Vec::new();
     let mut ignored: Vec<String> = Vec::new();
     for (name, cells) in &table.columns {
@@ -87,7 +88,7 @@ pub(crate) fn name_items_in(
             .iter()
             .enumerate()
             .find(|(_, d)| d.name == *name)
-            .filter(|_| generation.unique.get(name).is_some());
+            .filter(|_| shard.unique.get(name).is_some());
         match found {
             Some((at, d)) => unique.push((at as u16, d, cells)),
             None => ignored.push(name.clone()),
@@ -138,7 +139,7 @@ pub(crate) fn name_items_in(
             }
             let mut verdicts: Vec<Verdict> = (0..table.rows).map(no_item).collect();
             let field = resolve::Identifier::Unique(*position);
-            for (at, entity) in crate::unique::holders(generation, &d.name, &keys).map_err(store)? {
+            for (at, entity) in crate::unique::holders(shard, &d.name, &keys).map_err(store)? {
                 let row = from[at];
                 verdicts[row] = match &verdicts[row] {
                     Verdict::Names(held) if *held != entity => {
@@ -238,7 +239,7 @@ impl resolve::Holdings for Addressed<'_> {
             .iter()
             .map(|k| UniqueKey::of_widened(kind, *k))
             .collect();
-        crate::unique::holders(self.generation, &declared.name, &keys)
+        crate::unique::holders(self.generation.only_shard(), &declared.name, &keys)
     }
 
     fn mosaica_holders(&self, ids: &[MosaicaId]) -> Result<Vec<Option<EntityId>>, StoreError> {
@@ -270,14 +271,15 @@ impl Engine {
     ) -> std::result::Result<Vec<Option<EntityId>>, StoreError> {
         let high_water = self.allocator_high_water();
         let low_water = self.allocator_low_water();
+        let shard = generation.only_shard();
         let named: Vec<Option<EntityId>> = ids
             .iter()
             .map(|id| crate::edited::number_named(&self.identity_key, generation, *id))
             .collect();
         let numbers: Vec<EntityId> = named.iter().flatten().copied().collect();
-        let mut held = crate::edited::entities_of_numbers(generation, &numbers, |entity| {
+        let mut held = crate::edited::entities_of_numbers(shard, &numbers, |entity| {
             if entity.raw() < high_water {
-                holds_item(generation, entity) && !generation.overlay.is_deleted(entity)
+                holds_item(shard, entity) && !shard.overlay.is_deleted(entity)
             } else {
                 entity.raw() >= low_water
             }
@@ -289,18 +291,9 @@ impl Engine {
             .collect())
     }
 
-    /// Does `view` hold a row for `entity`? "In the view" is the view's permutation and the
-    /// commit window's buffer: a row accepted but
-    /// not yet flushed is in no permutation, and missing it would let two batches hand one flush
-    /// two rows for one entity in one view.
+    /// Does `view` hold a row for `entity`, flushed or buffered?
     pub fn view_holds(&self, entity: EntityId, view: &str) -> bool {
-        let generation = self.generation();
-        generation.bundle.partitions.values().any(|partition| {
-            partition
-                .views
-                .get(view)
-                .is_some_and(|data| data.row_space.row_of(entity).is_some())
-        }) || generation.buffer.contains_in_view(entity, view)
+        crate::edited::holds_in_view(self.generation().only_shard(), entity, view)
     }
 
     /// An already-flushed entity's full term set, ascending, once the entity's own row has left
@@ -311,7 +304,7 @@ impl Engine {
     /// legitimately carries no label. A malformed layer is `None` and is logged, naming the
     /// artefact and not the entity.
     pub fn flushed_terms(&self, entity: EntityId) -> Option<Vec<TermId>> {
-        flushed_terms_of(&self.generation(), entity)
+        flushed_terms_of(self.generation().only_shard(), entity)
     }
 
     /// The body hash a batch id was accepted with, if it was: a batch replayed with the same
@@ -326,7 +319,7 @@ impl Engine {
     /// The wire `mosaica_id` of the item `entity` holds: the permutation of its number, returned
     /// instead of the raw `EntityId`, which never crosses the trust boundary.
     pub fn mosaica_id_of(&self, entity: EntityId) -> std::result::Result<MosaicaId, StoreError> {
-        self.mosaica_id_in(&self.generation.load_full(), entity)
+        self.mosaica_id_in(self.generation.load_full().only_shard(), entity)
     }
 
     /// Request a flush. Accepted at any time and executed promptly: the flag pulls the tick's
@@ -424,17 +417,15 @@ impl Engine {
         let entity = self.write.register_layer(declaration)?;
         // The blinding is total over the space the allocator will issue, so a row-less entity is
         // always inside it and this conversion cannot fail in practice.
-        let generation = self.generation();
-        self.issued_id(generation.bundle.manifest.identity.shard_id, entity)
+        self.issued_id(entity)
     }
 
     /// The `mosaica_id` of an entity a layer write just allocated, or the write's refusal.
     fn issued_id(
         &self,
-        shard: u32,
         entity: EntityId,
     ) -> std::result::Result<MosaicaId, crate::write::AcceptError> {
-        self.artifact_id(shard, entity).ok_or_else(|| {
+        self.artifact_id(entity).ok_or_else(|| {
             crate::write::AcceptError::Exec(mosaica_lifecycle::ExecError::LayerRefused {
                 detail: "an allocated entity id lies outside the identity space".to_string(),
             })
@@ -478,6 +469,16 @@ impl Engine {
         request: mosaica_lifecycle::AttributeRequest,
     ) -> std::result::Result<bool, crate::write::AcceptError> {
         self.write.declare_attribute(request)
+    }
+
+    /// Declare the point shard's size while the service runs. `true` where the shard already had
+    /// this size and nothing was appended.
+    /// Blocking — a tokio handler must call this inside `spawn_blocking`.
+    pub fn declare_shards(
+        &self,
+        size: u64,
+    ) -> std::result::Result<bool, crate::write::AcceptError> {
+        self.write.declare_shards(size)
     }
 
     /// Declare a vocabulary while the service runs. Answers `(existing, added, titles)`.
@@ -601,11 +602,10 @@ impl Engine {
         // the executor, so this passes over the empty set the record carries.
         self.refuse_rowless(artifacts.iter().map(|a| &a.members))?;
         let batch = self.write.publish_artifacts(layer, level, artifacts, at)?;
-        let shard = self.generation().bundle.manifest.identity.shard_id;
         let mosaica_ids = batch
             .entities
             .into_iter()
-            .map(|entity| self.issued_id(shard, entity))
+            .map(|entity| self.issued_id(entity))
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(PublishedArtifacts {
             mosaica_ids,
@@ -656,12 +656,11 @@ impl Engine {
     ) -> std::result::Result<Vec<GrownMembership>, crate::write::AcceptError> {
         self.refuse_rowless(joins.iter().map(|j| &j.joining))?;
         let grown = self.write.grow_memberships(layer, level, joins, at)?;
-        let shard = self.generation().bundle.manifest.identity.shard_id;
         grown
             .into_iter()
             .map(|receipt| {
                 Ok(GrownMembership {
-                    mosaica_id: self.issued_id(shard, receipt.entity)?,
+                    mosaica_id: self.issued_id(receipt.entity)?,
                     joined: receipt.joined,
                     filled: receipt.filled,
                     left: receipt.left,
@@ -737,16 +736,9 @@ pub struct PublishedArtifactAddress {
     pub key: Option<String>,
 }
 
-/// Whether `generation` holds `entity` as an item: a buffered row, a row in some view, or the
-/// label a flush wrote, which an item whose views were all dropped still holds. A fold that
-/// removes a deleted item removes all three.
-pub(crate) fn holds_item(generation: &Generation, entity: EntityId) -> bool {
-    generation.buffer.contains(entity)
-        || generation.bundle.partitions.values().any(|partition| {
-            partition
-                .views
-                .values()
-                .any(|view| view.row_space.row_of(entity).is_some())
-        })
-        || flushed_terms_of(generation, entity).is_some()
+/// Whether `shard` holds `entity` as an item: a buffered row, a row in some view, or the label a
+/// flush wrote, which an item whose views were all dropped still holds. A fold that removes a
+/// deleted item removes all three.
+pub(crate) fn holds_item(shard: &crate::Shard, entity: EntityId) -> bool {
+    crate::edited::holds(shard, entity) || flushed_terms_of(shard, entity).is_some()
 }

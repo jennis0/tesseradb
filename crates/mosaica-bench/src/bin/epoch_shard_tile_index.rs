@@ -135,7 +135,7 @@ fn open_fixture(args: &Args) -> Fixture {
             .expect("CURRENT parses");
     let prefix = current["prefix"].as_str().expect("CURRENT.prefix");
     let prefix_dir = args.fixture.join(prefix);
-    let partition_dir = prefix_dir.join("partitions").join("default");
+    let partition_dir = mosaica_store::layout::partition_dir(&prefix_dir, "default");
 
     // The highest SEGMENTS-<n>.json present. The store walks down from it verifying digests;
     // this bin reads the bundle only and takes the newest.
@@ -159,6 +159,7 @@ fn open_fixture(args: &Args) -> Fixture {
             .expect("segments manifest parses");
 
     let layer = manifest
+        .partition
         .layers
         .iter()
         .find(|l| l.declaration.name == args.layer)
@@ -170,6 +171,7 @@ fn open_fixture(args: &Args) -> Fixture {
         .expect("the layer names a view")
         .clone();
     let segments: Vec<_> = manifest
+        .only_shard()
         .segments
         .iter()
         .filter(|s| s.view == view)
@@ -181,8 +183,9 @@ fn open_fixture(args: &Args) -> Fixture {
         segments.len()
     );
     let row_count = segments[0].row_count;
-    let view_dir = partition_dir.join("views").join(&view);
-    let permutation_path = view_dir.join("permutation.bin");
+    let layout = mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO);
+    let view_dir = prefix_dir.join(layout.view_rel(&view));
+    let permutation_path = prefix_dir.join(layout.permutation_rel(&view));
     // Loaded for its bound only. The shard permutations below are written over the same bound,
     // and at N = 1 the written file is compared with this one byte for byte.
     let bound = Permutation::load(&permutation_path)
@@ -203,15 +206,15 @@ fn open_fixture(args: &Args) -> Fixture {
             .collect::<Vec<u32>>()
     };
     let morton = MortonSlice::load(
-        &view_dir
-            .join("segments")
-            .join(&segments[0].seg_id)
+        &prefix_dir
+            .join(layout.segment_rel(&view, &segments[0].seg_id))
             .join("morton.u32"),
     )
     .expect("morton.u32 loads");
     assert_eq!(morton.len(), row_count as usize);
 
     let extents: Vec<_> = manifest
+        .only_shard()
         .membership_extents
         .iter()
         .filter(|e| e.layer == args.layer && e.level == args.level)
@@ -949,16 +952,23 @@ fn check_whole(args: &Args, fixture: &Fixture, shard: &ShardBuild, index: &TileI
 
     let level_version = fixture
         .manifest
+        .only_shard()
         .level_versions
         .iter()
         .find(|v| v.layer == args.layer && v.level == args.level)
         .map(|v| v.version);
-    if let Some(extent) = fixture.manifest.derived_extents.iter().find(|e| {
-        e.form == mosaica_store::manifest::DerivedForm::TileIndex
-            && e.layer == args.layer
-            && e.level == args.level
-            && e.view.as_deref() == Some(fixture.view.as_str())
-    }) {
+    if let Some(extent) = fixture
+        .manifest
+        .only_shard()
+        .derived_extents
+        .iter()
+        .find(|e| {
+            e.form == mosaica_store::manifest::DerivedForm::TileIndex
+                && e.layer == args.layer
+                && e.level == args.level
+                && e.view.as_deref() == Some(fixture.view.as_str())
+        })
+    {
         let written = TileIndex::open(&fixture.prefix_dir.join(&extent.path))
             .expect("fold-written index opens");
         let bytes_identical = written.as_bytes() == index.as_bytes();

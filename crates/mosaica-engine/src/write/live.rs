@@ -34,15 +34,80 @@ pub(in crate::write) struct RegistryForPublication {
     pub low_water: u64,
 }
 
+/// One point shard's write state, on [`LiveState`]'s contract.
+pub(crate) struct ShardWrite {
+    pub(in crate::write) id: ShardId,
+    /// The entity id allocator. Written only by the executor, never by a handler: entity ids are
+    /// assigned at a window's close, on the one thread that also advances the high-water mark.
+    allocator: Mutex<Allocator>,
+}
+
+impl ShardWrite {
+    pub(in crate::write) fn new(id: ShardId, allocator: Allocator) -> ShardWrite {
+        ShardWrite {
+            id,
+            allocator: Mutex::new(allocator),
+        }
+    }
+
+    pub(crate) fn high_water(&self) -> u64 {
+        lock_recover(&self.allocator).high_water()
+    }
+
+    pub(crate) fn low_water(&self) -> u64 {
+        lock_recover(&self.allocator).low_water()
+    }
+
+    pub(crate) fn size(&self) -> u64 {
+        lock_recover(&self.allocator).size()
+    }
+
+    /// [`Allocator::room`], under the lock.
+    pub(in crate::write) fn room(
+        &self,
+        edits: u64,
+        items: u64,
+    ) -> Result<(), mosaica_types::ShardFull> {
+        lock_recover(&self.allocator).room(edits, items)
+    }
+
+    /// The allocator's freed ids and the sets it holds back, as a side-manifest records them.
+    pub(crate) fn freed(
+        &self,
+    ) -> (
+        mosaica_store::manifest::EntitySet,
+        Vec<mosaica_store::manifest::HeldEntities>,
+    ) {
+        use mosaica_lifecycle::union_of;
+        let alloc = lock_recover(&self.allocator);
+        let held = alloc
+            .held()
+            .iter()
+            .map(|(position, ids)| mosaica_store::manifest::HeldEntities {
+                position: *position,
+                entities: mosaica_store::manifest::EntitySet::of(&union_of(ids)),
+            })
+            .collect();
+        let free = mosaica_store::manifest::EntitySet::of(&union_of(alloc.free()));
+        (free, held)
+    }
+
+    /// Run `f` with the entity id allocator held. The window's whole allocation is one call to
+    /// this, so the sorted run and the high-water advance cannot be separated.
+    pub(in crate::write) fn with_allocator<R>(&self, f: impl FnOnce(&mut Allocator) -> R) -> R {
+        let mut alloc = lock_recover(&self.allocator);
+        f(&mut alloc)
+    }
+}
+
 /// State the handler side reads and the executor thread writes.
 ///
 /// Each field carries its own lock because it is read concurrently by a request path that is not
 /// the executor (`/control/ingest`'s replay check, `/control/status`'s high-water). The generation pointer is not held here: it is
 /// swapped by `Executor::publish_arc`, the crate's one non-atomic store.
 pub(crate) struct LiveState {
-    /// The entity id allocator. Written only by the executor, never by a handler: entity ids are
-    /// assigned at a window's close, on the one thread that also advances the high-water mark.
-    pub(in crate::write) allocator: Mutex<Allocator>,
+    /// Each point shard's write state, ascending by id.
+    pub(in crate::write) shards: Vec<ShardWrite>,
     /// The descriptor resolver's extension state. Resolved in the handler before submitting, not
     /// on the executor: signature-sorted assignment needs the term set to compute a sort key
     /// before any id exists, the structural exception argued at [`WritePath::resolve_terms`].
@@ -75,33 +140,9 @@ pub(crate) struct LiveState {
 }
 
 impl LiveState {
-    pub(crate) fn allocator_high_water(&self) -> u64 {
-        lock_recover(&self.allocator).high_water()
-    }
-
-    pub(crate) fn allocator_low_water(&self) -> u64 {
-        lock_recover(&self.allocator).low_water()
-    }
-
-    /// The allocator's freed ids and the sets it holds back, as a side-manifest records them.
-    pub(crate) fn allocator_freed(
-        &self,
-    ) -> (
-        mosaica_store::manifest::EntitySet,
-        Vec<mosaica_store::manifest::HeldEntities>,
-    ) {
-        use mosaica_lifecycle::union_of;
-        let alloc = lock_recover(&self.allocator);
-        let held = alloc
-            .held()
-            .iter()
-            .map(|(position, ids)| mosaica_store::manifest::HeldEntities {
-                position: *position,
-                entities: mosaica_store::manifest::EntitySet::of(&union_of(ids)),
-            })
-            .collect();
-        let free = mosaica_store::manifest::EntitySet::of(&union_of(alloc.free()));
-        (free, held)
+    /// The one shard written to until several are.
+    pub(crate) fn only_shard(&self) -> &ShardWrite {
+        mosaica_types::only(&self.shards)
     }
 
     /// Runs `f` with both the registry and the allocator held, in that lock order.
@@ -115,7 +156,7 @@ impl LiveState {
         f: impl FnOnce(&mut LayerRegistry, &mut Allocator) -> R,
     ) -> R {
         let mut registry = lock_recover(&self.registry);
-        let mut alloc = lock_recover(&self.allocator);
+        let mut alloc = lock_recover(&self.only_shard().allocator);
         f(&mut registry, &mut alloc)
     }
 
@@ -135,7 +176,7 @@ impl LiveState {
     ) -> R {
         let mut registry = lock_recover(&self.registry);
         let mut artifacts = lock_recover(&self.artifacts);
-        let mut alloc = lock_recover(&self.allocator);
+        let mut alloc = lock_recover(&self.only_shard().allocator);
         f(&mut registry, &mut artifacts, &mut alloc)
     }
 
@@ -439,7 +480,7 @@ impl LiveState {
     /// run handed out again at the next restart.
     pub(in crate::write) fn registry_for_publication(&self) -> RegistryForPublication {
         let registry = lock_recover(&self.registry);
-        let low_water = lock_recover(&self.allocator).low_water();
+        let low_water = self.only_shard().low_water();
         let (layers, tombstones) = registry.snapshot();
         RegistryForPublication {
             layers,
@@ -494,13 +535,6 @@ impl LiveState {
                     .or_else(|| state.0.get(d.as_slice()).copied())
             })
             .collect()
-    }
-
-    /// Run `f` with the entity id allocator held. The window's whole allocation is one call to
-    /// this, so the sorted run and the high-water advance cannot be separated.
-    pub(in crate::write) fn with_allocator<R>(&self, f: impl FnOnce(&mut Allocator) -> R) -> R {
-        let mut alloc = lock_recover(&self.allocator);
-        f(&mut alloc)
     }
 
     /// Index one accepted batch, at the position of the record that carries it.

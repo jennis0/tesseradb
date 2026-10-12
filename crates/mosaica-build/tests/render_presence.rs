@@ -14,6 +14,7 @@
 //! that class of divergence.
 
 mod common;
+use common::segment_dir;
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -33,9 +34,7 @@ use mosaica_spatial::tiler::ScalarType;
 use mosaica_spatial::Bounds;
 use mosaica_store::open_bundle;
 use mosaica_store::read::{ColumnsRef, ScalarSlice};
-use mosaica_types::IdentityKey;
 
-const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 const N: u64 = 40;
 
 /// Every fifth item has no score. **Never zero where it is present**, so a row holding zero in the
@@ -185,26 +184,12 @@ fn args(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
             select: None,
             access: mosaica_build::config::AccessInput::relation(pairs.to_path_buf()),
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources: mosaica_build::config::AttributeSource::over(
             points.to_path_buf(),
             &schema,
         ),
-        out,
-        limit: None,
-        strict: false,
-        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&out)
     }
 }
 
@@ -216,10 +201,6 @@ fn build_bundle() -> tempfile::TempDir {
     write_empty_pairs(&pairs);
     build(&args(&points, &pairs, dir.path().join("bundle"))).expect("the build succeeds");
     dir
-}
-
-fn segment_dir(out: &Path) -> PathBuf {
-    out.join("v00000/partitions/default/views/s0/segments/seg-0")
 }
 
 /// The bitmap says exactly which rows carry a score, and the column still holds the type's zero at
@@ -289,7 +270,10 @@ fn no_file_is_written_for_a_full_column_or_for_a_category() {
 fn the_bitmap_is_digested_and_a_missing_one_refuses_at_open() {
     let dir = build_bundle();
     let out = dir.path().join("bundle");
-    let rel = "partitions/default/views/s0/segments/seg-0/presence/score.roaring";
+    let rel = &format!(
+        "{}/presence/score.roaring",
+        common::SHARD.segment_rel("s0", "seg-0")
+    );
 
     let bundle = open_bundle(&out).expect("the bundle opens");
     let manifest = &bundle.manifest;

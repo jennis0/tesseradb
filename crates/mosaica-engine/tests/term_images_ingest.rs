@@ -212,9 +212,9 @@ fn build_bundle(dir: &Path, name: &str, entities: u64) -> std::path::PathBuf {
         attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &schema),
         out: out.clone(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -353,9 +353,9 @@ fn kept_descriptors(engine: &Engine, where_: &str) -> BTreeSet<String> {
     let generation = engine.generation();
     let view = generation
         .bundle
-        .partitions
-        .values()
-        .find_map(|partition| partition.views.get(VIEW))
+        .only_shard()
+        .views
+        .get(VIEW)
         .expect("the generation carries the view");
     let images = view
         .term_images
@@ -402,9 +402,9 @@ fn a_built_corpus_and_the_same_corpus_ingested_and_folded_agree() {
         let generation = ingested.generation();
         let view = generation
             .bundle
-            .partitions
-            .values()
-            .find_map(|partition| partition.views.get(VIEW))
+            .only_shard()
+            .views
+            .get(VIEW)
             .expect("the ingested generation carries the view");
         assert!(
             view.term_images.is_none(),

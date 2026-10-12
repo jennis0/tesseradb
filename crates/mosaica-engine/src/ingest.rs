@@ -180,7 +180,7 @@ impl Engine {
         }
         for attempt in 0..2 {
             let generation = self.generation();
-            let unique_seq = generation.unique_live.seq();
+            let unique_seq = generation.only_shard().unique_live.seq();
             let submitted = self.plan_ingest(&generation, &request).and_then(|planned| {
                 #[cfg(feature = "fault-injection")]
                 self.switches.hold_write_check_if_wanted();
@@ -397,8 +397,9 @@ impl Engine {
         // Each named item's number, which its `mosaica_id` is taken from and an edit keeps.
         let entities: Vec<EntityId> = order.iter().map(|(entity, _)| *entity).collect();
         let unreadable = |e: mosaica_store::StoreError| AcceptError::Unreadable(e.to_string());
-        let numbers = crate::edited::numbers_of(generation, &entities).map_err(unreadable)?;
-        let ids = crate::edited::ids_of_numbers(&self.identity_key, generation, &numbers)
+        let shard = generation.only_shard();
+        let numbers = crate::edited::numbers_of(shard, &entities).map_err(unreadable)?;
+        let ids = crate::edited::ids_of_numbers(&self.identity_key, shard, &numbers)
             .map_err(unreadable)?;
         let held: FxHashMap<EntityId, (EntityId, u64)> = entities
             .iter()
@@ -527,9 +528,10 @@ impl Engine {
         let row = &request.rows[at];
         let manifest = &generation.bundle.manifest;
         let declared = &manifest.declared_scalars;
-        let held_views = joined::views_holding(generation, old);
+        let shard = generation.only_shard();
+        let held_views = joined::views_holding(shard, old);
         let placing = view.zip(row.position);
-        let buffered = generation.buffer.get(old);
+        let buffered = shard.buffer.get(old);
         let own_view = match (placing, buffered) {
             (Some((view, _)), _) => view.id.clone(),
             (None, Some(item)) => item.view.clone(),
@@ -680,9 +682,10 @@ impl Engine {
         generation: &Generation,
         entity: EntityId,
     ) -> Result<Vec<Vec<u8>>, AcceptError> {
-        let terms: Vec<TermId> = match generation.buffer.get(entity) {
+        let shard = generation.only_shard();
+        let terms: Vec<TermId> = match shard.buffer.get(entity) {
             Some(item) => item.terms.clone(),
-            None => joined::flushed_terms_of(generation, entity).ok_or_else(|| {
+            None => joined::flushed_terms_of(shard, entity).ok_or_else(|| {
                 AcceptError::Unreadable("an edited item's label could not be read".to_string())
             })?,
         };
@@ -723,6 +726,7 @@ impl Engine {
         view: &crate::viewport::MetaView,
     ) -> Result<Option<(f64, f64)>, AcceptError> {
         if let Some(item) = generation
+            .only_shard()
             .buffer
             .rows_of(entity)
             .find(|item| item.view == view.id)
@@ -780,7 +784,7 @@ impl Engine {
         let row = &request.rows[at];
         let manifest = &generation.bundle.manifest;
         let declared = &manifest.declared_scalars;
-        let buffered = generation.buffer.get(entity);
+        let buffered = generation.only_shard().buffer.get(entity);
         let mut blob = match &stored.blobs {
             Some(blobs) => BlobRow::of(blobs.get(&entity).cloned()),
             None => BlobRow::default(),
@@ -800,7 +804,7 @@ impl Engine {
                 .lookup_terms(&generation.dict, &descriptors);
             let held: Option<Vec<TermId>> = match buffered {
                 Some(item) => Some(item.terms.clone()),
-                None => joined::flushed_terms_of(generation, entity),
+                None => joined::flushed_terms_of(generation.only_shard(), entity),
             };
             let same = match (supplied, held) {
                 (Some(mut supplied), Some(mut held)) => {
@@ -965,14 +969,14 @@ impl Engine {
         if wanted.is_empty() || resident.is_empty() {
             return Ok(Some(blobs));
         }
-        let read =
-            generation
-                .filter_columns
-                .records()
-                .for_each_row_in(&wanted, &mut |entity, fields| {
-                    blobs.insert(EntityId::new(u64::from(entity)), fields);
-                    Ok(())
-                });
+        let read = generation
+            .only_shard()
+            .filter_columns
+            .records()
+            .for_each_row_in(&wanted, &mut |entity, fields| {
+                blobs.insert(EntityId::new(u64::from(entity)), fields);
+                Ok(())
+            });
         match read {
             Ok(()) => Ok(Some(blobs)),
             Err(e) if whole => Err(AcceptError::Unreadable(format!("the record blob: {e}"))),
@@ -998,6 +1002,7 @@ impl Engine {
         view: &crate::viewport::MetaView,
     ) -> Result<Option<(u32, u32)>, AcceptError> {
         if let Some(item) = generation
+            .only_shard()
             .buffer
             .rows_of(entity)
             .find(|item| item.view == view.id)
@@ -1005,7 +1010,7 @@ impl Engine {
             return Ok(Some(fixed(view.quantisation, item.x, item.y)));
         }
         for partition in generation.bundle.partitions.values() {
-            let Some(view_data) = partition.views.get(&view.id) else {
+            let Some(view_data) = partition.only_shard().views.get(&view.id) else {
                 continue;
             };
             let found = crate::viewport::segment_row_of(&view.id, view_data, entity)
@@ -1068,7 +1073,9 @@ impl Engine {
         request: &IngestRequest,
         refusal: &Refusal,
     ) -> String {
-        let tid = |entity: EntityId| crate::unique::mosaica_id_text(self, generation, entity);
+        let tid = |entity: EntityId| {
+            crate::unique::mosaica_id_text(self, generation.only_shard(), entity)
+        };
         let value = |row: usize, field: Identifier| match field {
             Identifier::MosaicaId => "its mosaica_id".to_string(),
             Identifier::Unique(at) => {
@@ -1226,7 +1233,7 @@ impl resolve::Holdings for Held<'_> {
             .iter()
             .map(|k| UniqueKey::of_widened(kind, *k))
             .collect();
-        crate::unique::holders(self.generation, &d.name, &keys)
+        crate::unique::holders(self.generation.only_shard(), &d.name, &keys)
             .map_err(|e| AcceptError::Unreadable(e.to_string()))
     }
 

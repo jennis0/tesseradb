@@ -15,7 +15,7 @@
 //!
 //! ```text
 //! cargo run --release -p mosaica-bench --bin blob_framing_probe -- \
-//!     <bundle>/v00000/partitions/default/attrs/record [max blocks]
+//!     <bundle>/v00000/partitions/default/shards/0/attrs/record [max blocks]
 //! ```
 //!
 //! A block limit samples the first *n* blocks, which is a prefix of entity space rather than a

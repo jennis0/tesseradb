@@ -326,6 +326,31 @@ describe('Control against a live server', () => {
     expect(await control.limits()).toEqual(status.body.limits);
   });
 
+  it('declares the shard size, refuses a page that would take the shard past it, and takes the page once the size is raised', async (ctx) => {
+    live(ctx);
+    const highWater = Number((await control.status()).body.entity_id_high_water);
+    expect((await control.declareShards({size: highWater})).status).toBe(201);
+    expect((await control.declareShards({size: highWater})).body).toMatchObject({size: highWater, existing: true});
+    expect((await control.status()).body.shards).toEqual({size: highWater});
+    const q = meta.views.find((v) => v.id === 's0')!.quantisation;
+    const page = tableToIPC(
+      new Table({
+        x: vectorFromArray([q.xMin], new Float64()),
+        y: vectorFromArray([q.yMin], new Float64()),
+        access: vectorFromArray([['someone-else']], new List(new Field('item', new Utf8(), true))),
+        ...nulls(1)
+      }),
+      'stream'
+    );
+    const refused = await control.ingest(page, {view: 's0'});
+    expect(refused.status).toBe(409);
+    expect(Number((await control.status()).body.entity_id_high_water)).toBe(highWater);
+    expect((await control.declareShards({size: highWater - 1})).status).toBe(409);
+    expect((await control.declareShards({size: 0})).status).toBe(422);
+    expect((await control.declareShards({size: highWater + 1000})).status).toBe(201);
+    expect((await control.ingest(page, {view: 's0', batch: refused.batch})).body).toMatchObject({created: 1});
+  });
+
   it('revokes a session, after which its token is refused', async (ctx) => {
     live(ctx);
     const session = await client.authorise({terms: [TERM]});

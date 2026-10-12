@@ -19,10 +19,9 @@ use parquet::arrow::ArrowWriter;
 use mosaica_build::config::{Config, Fields};
 use mosaica_build::{build, BuildArgs};
 use mosaica_spatial::Bounds;
-use mosaica_types::IdentityKey;
 
+mod common;
 
-const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 const N: u64 = 40;
 
 fn extent() -> Bounds {
@@ -136,23 +135,9 @@ fn args(dir: &Path, config: &Config, out: PathBuf) -> BuildArgs {
             select: None,
             access: acquired_view.access,
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources: acquired.attribute_sources,
-        out,
-        limit: None,
-        strict: false,
-        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema: config.schema.clone(),
+        ..common::build_args(&out)
     }
 }
 

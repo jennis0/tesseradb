@@ -176,10 +176,10 @@ fn main() -> Result<(), BoxError> {
     let (generation, mask) = engine.composed_mask(&session, &args.view)?;
     let view_data = generation
         .bundle
-        .partitions
-        .values()
-        .find_map(|partition| partition.views.get(&args.view))
-        .ok_or("the view has no data in any partition")?;
+        .only_shard()
+        .views
+        .get(&args.view)
+        .ok_or("the bundle holds no such view")?;
     let segments = segments_with_row_bases(&args.view, view_data)?;
     let row_space = &view_data.row_space;
 

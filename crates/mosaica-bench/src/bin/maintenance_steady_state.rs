@@ -266,9 +266,9 @@ fn build_fixture(tmp: &Path, out: &Path) -> Result<(), Box<dyn std::error::Error
         attribute_sources: Vec::new(),
         out: out.to_path_buf(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: mosaica_types::IdentityKey::from_hex(KEY_HEX).expect("key"),
-        shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -378,6 +378,7 @@ impl Probe {
         let prefix_dir = self.root.join(&generation.prefix);
         let (partition, data) = generation.bundle.partitions.iter().next().expect("one partition");
         let m = &data.manifest;
+        let record = &data.only_shard().record;
         let stats = engine.write_executor_stats();
         let [merges, merge_failures, coalesces, coalesce_failures, coalesce_passes_failed] =
             self.carried;
@@ -388,21 +389,23 @@ impl Probe {
         let coalesce_passes_failed = coalesce_passes_failed + stats.coalesce_passes_failed;
 
         let (files, bytes) = walk(&prefix_dir, |_| true);
-        let segments_dir = mosaica_store::view_path(&prefix_dir.join("partitions").join(partition), VIEW).join("segments");
+        let layout = mosaica_store::ShardLayout::new(partition, record.id);
+        let segments_dir = prefix_dir.join(layout.segments_rel(VIEW));
         let merge_dirs = count_dirs(&segments_dir, "merge-");
-        let coalesce_dirs = count_dirs(&prefix_dir.join("partitions").join(partition).join("coalesced"), "coalesce-");
+        // An empty id names the directory every coalesce's is in.
+        let coalesce_dirs = count_dirs(&prefix_dir.join(layout.coalesced_rel("")), "coalesce-");
 
         self.check_side_manifests(&prefix_dir, partition, &generation.prefix)?;
 
         Ok(Row {
             tick: tick as u64,
-            segments: m.segments.iter().filter(|s| s.view == VIEW).count() as u64,
-            deltas: m.deltas.len() as u64,
+            segments: record.segments.iter().filter(|s| s.view == VIEW).count() as u64,
+            deltas: record.deltas.len() as u64,
             dicts: m.dict_extents.len() as u64,
-            attrs: m.attr_extents.len() as u64,
-            records: m.record_extents.len() as u64,
-            texts: m.text_extents.len() as u64,
-            terms: m.entity_terms_extents.len() as u64,
+            attrs: record.attr_extents.len() as u64,
+            records: record.record_extents.len() as u64,
+            texts: record.text_extents.len() as u64,
+            terms: record.entity_terms_extents.len() as u64,
             files,
             mib: bytes >> 20,
             geometry_mib: walk(&segments_dir, |_| true).1 >> 20,
@@ -420,7 +423,7 @@ impl Probe {
     }
 
     fn check_side_manifests(&mut self, prefix_dir: &Path, partition: &str, prefix: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let dir = prefix_dir.join("partitions").join(partition);
+        let dir = mosaica_store::layout::partition_dir(prefix_dir, partition);
         for entry in std::fs::read_dir(&dir)? {
             let name = entry?.file_name().to_string_lossy().into_owned();
             let Some(n) = name.strip_prefix("SEGMENTS-").and_then(|s| s.strip_suffix(".json")) else {
@@ -445,9 +448,10 @@ impl Probe {
 
 fn ordering_breaches(m: &SegmentsManifest) -> Vec<String> {
     let mut out = Vec::new();
-    let views: BTreeSet<&str> = m.segments.iter().map(|s| s.view.as_str()).collect();
+    let segments = &m.only_shard().segments;
+    let views: BTreeSet<&str> = segments.iter().map(|s| s.view.as_str()).collect();
     for view in views {
-        let segs: Vec<_> = m.segments.iter().filter(|s| s.view == view).collect();
+        let segs: Vec<_> = segments.iter().filter(|s| s.view == view).collect();
         for pair in segs.windows(2) {
             if pair[0].entity_hi >= pair[1].entity_lo {
                 out.push(format!(

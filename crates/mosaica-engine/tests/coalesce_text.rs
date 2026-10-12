@@ -133,9 +133,9 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
         attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &schema),
         out: out.to_path_buf(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -149,8 +149,10 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
 }
 
 fn text_extents(root: &Path) -> Vec<mosaica_store::manifest::TextExtent> {
-    open_bundle(root).expect("the bundle opens").partitions["default"]
-        .manifest
+    open_bundle(root)
+        .expect("the bundle opens")
+        .only_shard()
+        .record
         .text_extents
         .clone()
 }
@@ -202,7 +204,7 @@ fn flush_a_window(engine: &Engine, root: &Path, from: usize) -> Vec<u32> {
         .collect();
     tick_until(engine, "the text layers to coalesce", std::time::Duration::from_secs(60), || {
         let generation = engine.generation();
-        let live = &generation.bundle.partitions["default"].manifest.text_extents;
+        let live = &generation.bundle.only_shard().record.text_extents;
         live.iter().filter(|e| e.column == "prose").count() < COALESCE_WIDTH
     });
     entities
@@ -218,6 +220,7 @@ fn answers(engine: &Engine, terms: &[String]) -> BTreeMap<String, Vec<u32>> {
         .iter()
         .map(|term| {
             let answer = generation
+                .only_shard()
                 .filter_columns
                 .resolve(
                     "prose",
@@ -328,7 +331,11 @@ fn a_window_of_text_layers_becomes_one_and_answers_identically() {
     );
     // **The live generation, not only the manifest.** The base plus the coalesced layer is two.
     assert_eq!(
-        engine.generation().filter_columns.text_layer_count("prose"),
+        engine
+            .generation()
+            .only_shard()
+            .filter_columns
+            .text_layer_count("prose"),
         Some(2),
         "the process is still serving from the layers the coalesce replaced"
     );
@@ -417,7 +424,8 @@ fn a_coalesced_text_layer_that_does_not_cover_its_window_is_refused() {
         .into_iter()
         .find(|e| e.column == "prose")
         .expect("the coalesced extent");
-    let columns = &engine.generation().filter_columns;
+    let generation = engine.generation();
+    let columns = &generation.only_shard().filter_columns;
     let paths = |presence: &Path| mosaica_engine::filter::TextExtentPaths {
         column: "prose".to_string(),
         dict_rel: extent.dict.clone(),

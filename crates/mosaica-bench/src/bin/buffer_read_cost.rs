@@ -518,7 +518,7 @@ fn inspect(root: &Path, prefix: &str) -> Result<Fixture, Box<dyn std::error::Err
             .take(TERM_DENSITY)
             .map(String::into_bytes)
             .collect(),
-        high_water: bundle.manifest.entity_id_high_water,
+        high_water: bundle.only_shard().record.high_water,
         // A numeric column, so `Range { lo: None, hi: None }` — "carries a value at all" — is a
         // leaf the column can answer. A text or category column would refuse it, and a refused
         // filter measures nothing.
@@ -734,15 +734,14 @@ fn experiment_e2(root: &Path, depths: &[usize], runs: usize) -> Result<(), Box<d
     println!("(min of {runs}; entity ids past the bundle's high water, so every lookup misses)");
     println!("{:>10} {:>14} {:>16}", "buffered", "per view ms", "all views ms");
     let bundle = open_bundle(root)?;
-    let spaces: Vec<&mosaica_store::RowSpace> = bundle
-        .partitions
-        .values()
-        .flat_map(|partition| partition.views.values().map(|view| &view.row_space))
-        .collect();
+    let shard = bundle.only_shard();
+    let spaces: Vec<&mosaica_store::RowSpace> =
+        shard.views.values().map(|view| &view.row_space).collect();
+    let high_water = shard.record.high_water;
     for depth in depths {
         let mut buffer = IngestBuffer::new();
         for i in 0..*depth as u64 {
-            let entity = EntityId::new(bundle.manifest.entity_id_high_water + i);
+            let entity = EntityId::new(high_water + i);
             buffer.insert_row_with_terms(&wal_row(entity, VIEW, false), terms());
         }
         let all = best(runs, || {

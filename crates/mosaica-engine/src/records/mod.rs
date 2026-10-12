@@ -435,6 +435,7 @@ impl Engine {
         )?;
         if let Some(expr) = &req.filter {
             generation
+                .only_shard()
                 .filter_columns
                 .admit(expr, true, &|layer| self.reaches_layer(session, layer))
                 .map_err(filter_refusal)?;

@@ -31,7 +31,7 @@ use mosaica_store::term_images::{
     TermImageRefusal, TermImageStamp, TermImages, KEEP_ROWS_PER_CONTAINER,
 };
 use mosaica_store::RowSpace;
-use mosaica_types::{IdentityKey, TermId};
+use mosaica_types::TermId;
 
 /// Rows enough for a second Roaring container, which is what puts a term whose image is spread
 /// over both on the wrong side of the keep rule: thirty rows a container is a cut a scattered
@@ -43,12 +43,6 @@ const N_ITEMS: u64 = 70_000;
 /// in the view, and to the bottom left, which are the lowest. A term over both spans the two
 /// containers.
 const CORNER: u64 = 20;
-
-const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
-
-fn test_key() -> IdentityKey {
-    IdentityKey::from_hex(TEST_KEY_HEX).unwrap()
-}
 
 fn extent() -> Bounds {
     Bounds {
@@ -173,23 +167,9 @@ fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
             select: None,
             access: mosaica_build::config::AccessInput::relation(pairs.to_path_buf()),
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources,
-        out,
-        limit: None,
-        strict: false,
-        identity_key: test_key(),
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&out)
     }
 }
 
@@ -228,15 +208,15 @@ fn posting_bitmap(postings: &PostingsReader, term: u32) -> Option<Bitmap> {
 /// The one term-image file of a bundle with one view, and the row space it was projected through.
 fn images_of(root: &Path) -> (Arc<TermImages>, RowSpace, PathBuf) {
     let bundle = open_bundle(root).expect("the bundle opens");
-    let partition = bundle.partitions.get("default").expect("one partition");
-    let entry = partition
-        .manifest
+    let shard = bundle.only_shard();
+    let entry = shard
+        .record
         .term_image_extents
         .iter()
         .find(|entry| entry.view == "s0")
         .expect("the side-manifest names the view's term images");
     let path = root.join("v00000").join(&entry.path);
-    let view = partition.views.get("s0").expect("the view");
+    let view = shard.views.get("s0").expect("the view");
     let images = view
         .term_images
         .clone()
@@ -251,12 +231,7 @@ fn every_kept_image_is_the_projection_of_its_posting() {
     let (images, space, _) = images_of(&root);
 
     let postings = PostingsReader::open(
-        &root
-            .join("v00000")
-            .join("partitions")
-            .join("default")
-            .join("terms")
-            .join("postings.arrow"),
+        &root.join("v00000").join(common::SHARD.postings_rel()),
         true,
     )
     .expect("the postings open");
@@ -391,9 +366,7 @@ fn a_stamp_the_bundle_disagrees_with_leaves_the_view_walking() {
 
     let bundle = open_bundle(&root).expect("the bundle still opens");
     assert!(
-        bundle.partitions["default"].views["s0"]
-            .term_images
-            .is_none(),
+        bundle.only_shard().views["s0"].term_images.is_none(),
         "a refused file leaves the view with no images"
     );
 }
@@ -405,7 +378,7 @@ fn two_term_image_extents_for_one_view_refuse_the_bundle() {
     let temp = tempfile::TempDir::new().unwrap();
     let root = built(temp.path(), "streaming", build);
     rewrite_side_manifest(&root.join("v00000"), |manifest| {
-        let list = manifest["term_image_extents"]
+        let list = manifest["shards"]["records"][0]["term_image_extents"]
             .as_array_mut()
             .expect("the list the build wrote");
         let first = list[0].clone();
@@ -426,15 +399,13 @@ fn a_file_derived_under_another_keep_rule_leaves_the_view_walking() {
     let temp = tempfile::TempDir::new().unwrap();
     let root = built(temp.path(), "streaming", build);
     rewrite_side_manifest(&root.join("v00000"), |manifest| {
-        manifest["term_image_extents"][0]["keep_rows_per_container"] =
+        manifest["shards"]["records"][0]["term_image_extents"][0]["keep_rows_per_container"] =
             serde_json::Value::from(KEEP_ROWS_PER_CONTAINER - 1);
     });
 
     let bundle = open_bundle(&root).expect("the bundle still opens");
     assert!(
-        bundle.partitions["default"].views["s0"]
-            .term_images
-            .is_none(),
+        bundle.only_shard().views["s0"].term_images.is_none(),
         "a file under another keep rule leaves the view with no images"
     );
 }
@@ -505,10 +476,7 @@ fn rewrite_manifest(prefix: &Path, root: &Path, edit: impl FnOnce(&mut serde_jso
 /// Edit the partition's `SEGMENTS-0.json`. Nothing digests a side-manifest, so an edit to one
 /// needs no other file moved with it: the loader verifies the files it *names*.
 fn rewrite_side_manifest(prefix: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
-    let path = prefix
-        .join("partitions")
-        .join("default")
-        .join("SEGMENTS-0.json");
+    let path = mosaica_store::layout::partition_dir(prefix, "default").join("SEGMENTS-0.json");
     let mut manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     edit(&mut manifest);

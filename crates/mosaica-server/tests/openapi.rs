@@ -457,6 +457,7 @@ fn the_description_names_every_route_on_the_three_planes_and_no_other() {
             "/control/providers/{name}",
             "/control/sessions",
             "/control/sessions/end",
+            "/control/shards",
             "/control/status",
             "/control/view_groups/{name}",
             "/control/views/{group}/{key}",
@@ -547,6 +548,8 @@ fn every_closed_dto_is_declared_closed() {
         "AttributeDeclaration",
         "GroupScope",
         "AttributeDeclared",
+        "ShardsDeclaration",
+        "ShardsDeclared",
         "VocabularyDeclaration",
         "VocabularyValue",
         "VocabularyValues",
@@ -1304,7 +1307,7 @@ async fn every_control_route_needs_its_permission() {
         }
     }
     assert_eq!(
-        writes, 15,
+        writes, 16,
         "ingest, changes, the declarations, layers, artifacts, flush and compact"
     );
 }
@@ -2379,11 +2382,11 @@ async fn every_described_route_requires_its_planes_credential() {
         "/session/authorise and /session/revoke are the session plane's"
     );
     assert_eq!(
-        control_plane, 40,
+        control_plane, 41,
         "the control plane's operations are ingest, changes, status, flush, compact, \
-         the attribute, vocabulary, value-page, view group and plain view declarations, a group \
-         view's create and drop, a layer's registration and drop, an artifact publication \
-         and growth, and the catalogue's 24 verbs"
+         the attribute, shard size, vocabulary, value-page, view group and plain view \
+         declarations, a group view's create and drop, a layer's registration and drop, an \
+         artifact publication and growth, and the catalogue's 24 verbs"
     );
 }
 
@@ -3043,6 +3046,41 @@ async fn declarations_match_the_description() {
         .await
         .unwrap();
     assert_framework_refusal(&doc, &put, resp, 413).await;
+
+    // The shard's size: declared, restated, and refused below the high water or at zero.
+    let status = control(&f.server, &reqwest::Method::GET, "/control/status")
+        .send()
+        .await
+        .unwrap();
+    let high_water = assert_answer(&doc, &reqwest::Method::GET, status, 200).await
+        ["entity_id_high_water"]
+        .as_u64()
+        .unwrap();
+    let shards = json!({ "size": high_water + 100 });
+    assert_valid(&doc, "ShardsDeclaration", &shards);
+    let resp = send(&put, "/control/shards", &shards).await.unwrap();
+    let answer = assert_answer(&doc, &put, resp, 201).await;
+    assert_eq!(
+        (answer["size"].clone(), answer["existing"].clone()),
+        (json!(high_water + 100), json!(false))
+    );
+    let resp = send(&put, "/control/shards?wait=visible", &shards)
+        .await
+        .unwrap();
+    assert_eq!(assert_answer(&doc, &put, resp, 200).await["existing"], true);
+    let resp = send(&put, "/control/shards", &json!({ "size": high_water - 1 }))
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&put), resp, 409, "conflict").await;
+    for refused in [
+        json!({ "size": 0 }),
+        json!({ "size": -1 }),
+        json!({ "size": high_water + 100, "unknown": 1 }),
+    ] {
+        let resp = send(&put, "/control/shards", &refused).await.unwrap();
+        assert_refusal_to(&doc, Some(&put), resp, 422, "contract").await;
+    }
+    assert_invalid(&doc, "ShardsDeclaration", &json!({ "size": 0 }));
 
     // Vocabularies, and a page of values.
     let vocabulary = json!({ "title": "Genre", "value_set": "closed", "visibility": "public",

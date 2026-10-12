@@ -241,10 +241,18 @@ fn term_sets<T: Copy + Into<u32>>(presence: &Bitmap, values: &[T]) -> Vec<Bitmap
         .collect()
 }
 
-fn term_images(args: &Args, row_space: &mosaica_store::RowSpace, dir: &std::path::Path) {
+fn term_images(
+    args: &Args,
+    row_space: &mosaica_store::RowSpace,
+    prefix_dir: &std::path::Path,
+    layout: mosaica_store::ShardLayout<'_>,
+) {
     let name = args.term_images.as_deref().expect("a dimension");
-    let column = ValueColumn::open_dir(&dir.join("attrs").join(name), Access::MappedSequential)
-        .expect("the value column");
+    let column = ValueColumn::open_dir(
+        &prefix_dir.join(layout.column_rel(name)),
+        Access::MappedSequential,
+    )
+    .expect("the value column");
     let presence = column.present();
     let sets = match column.codes() {
         Codes::U32(v) => term_sets::<u32>(&presence, v.as_ref()),
@@ -310,14 +318,15 @@ fn main() {
         serde_json::from_slice(&std::fs::read(args.bundle.join("CURRENT")).unwrap()).unwrap();
     let prefix_dir = args.bundle.join(&current.prefix);
     let (phash, partition) = bundle.partitions.iter().next().expect("a partition");
-    let row_space = &partition.views.get(&args.view).expect("the view").row_space;
+    let shard = partition.only_shard();
+    let row_space = &shard.views.get(&args.view).expect("the view").row_space;
     assert_eq!(row_space.extent_count(), 0, "a bundle with extents");
     let bound = row_space.base().bound();
     let total_rows = row_space.total_rows();
-    let partition_dir = prefix_dir.join("partitions").join(phash);
+    let layout = mosaica_store::ShardLayout::new(phash, shard.record.id);
     eprintln!("bound {bound}, total_rows {total_rows}, opened in {open_s:.1} s");
     if args.term_images.is_some() {
-        term_images(&args, row_space, &partition_dir);
+        term_images(&args, row_space, &prefix_dir, layout);
         return;
     }
 
@@ -330,9 +339,8 @@ fn main() {
             .map(|e| prefix_dir.join(&e.path))
             .collect();
         let dict = Dict::load(&dicts).expect("the dictionary");
-        let postings =
-            PostingsReader::open(&partition_dir.join("terms").join("postings.arrow"), true)
-                .expect("the postings");
+        let postings = PostingsReader::open(&prefix_dir.join(layout.postings_rel()), true)
+            .expect("the postings");
         for spec in &args.countries {
             let (name, terms) = spec.split_once('=').expect("NAME=TERMS");
             let terms: Vec<String> = match terms.strip_prefix('@') {
@@ -359,7 +367,7 @@ fn main() {
         let (k, kind) = rest.split_once(':').expect("K:kind");
         let k: usize = k.parse().unwrap();
         let column = ValueColumn::open_dir(
-            &partition_dir.join("attrs").join(name),
+            &prefix_dir.join(layout.column_rel(name)),
             Access::MappedSequential,
         )
         .expect("the value column");

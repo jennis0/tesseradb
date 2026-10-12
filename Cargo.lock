@@ -2286,6 +2286,7 @@ dependencies = [
  "mosaica-lifecycle",
  "mosaica-server",
  "mosaica-spatial",
+ "mosaica-store",
  "mosaica-types",
  "mosaica-wire",
  "parking_lot",

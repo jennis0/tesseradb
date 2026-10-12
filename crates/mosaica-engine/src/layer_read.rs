@@ -23,7 +23,7 @@ use crate::figures::Figures;
 use crate::region::RegionVerdict;
 use crate::session::Session;
 use crate::viewport::ServedView;
-use crate::{Engine, Generation};
+use crate::Engine;
 
 /// Why a layer or a level named by a request cannot be read. Each names deployment schema the
 /// caller reads off `/v1/meta`, so refusing discloses nothing.
@@ -38,11 +38,11 @@ pub(crate) enum LayerRefusal {
 }
 
 impl Engine {
-    /// The layer `name` as this viewer may read it in `view`.
+    /// The layer `name` as this viewer may read it in `view`, whose rows are in `shard`.
     pub(crate) fn readable_layer(
         &self,
         session: &Session,
-        generation: &Generation,
+        shard: &crate::Shard,
         name: &str,
         view: &str,
     ) -> std::result::Result<RegisteredLayer, LayerRefusal> {
@@ -55,8 +55,8 @@ impl Engine {
             .registered_layer(name)
             .ok_or(LayerRefusal::Unknown)?;
         if !layer.declaration.draws_on(view)
-            || generation.overlay.is_deleted(layer.entity)
-            || generation.overlay.is_suppressed(layer.entity)
+            || shard.overlay.is_deleted(layer.entity)
+            || shard.overlay.is_suppressed(layer.entity)
         {
             return Err(LayerRefusal::Unknown);
         }
@@ -111,11 +111,11 @@ impl Engine {
             Some(vocabulary) => vocabulary.code_of(key),
             None => key.parse::<u32>().ok(),
         };
-        let source = generation.partition_source();
+        let source = served.shard.partition_source();
         let (rows, level_version) = self.write.live().with_artifacts(|store| {
             let predicate = crate::viewport::predicate_source(
                 &layer.declaration,
-                generation,
+                served.shard,
                 served.name,
                 served.data,
                 &served.segments,
@@ -159,7 +159,7 @@ impl Engine {
                     level,
                     level_version,
                     generation.segments_version,
-                    || LevelContent::build(generation.filter_columns.records(), runs),
+                    || LevelContent::build(served.shard.filter_columns.records(), runs),
                 ))
             }
             _ => None,
@@ -221,7 +221,7 @@ impl ReadLevel {
     ) -> ArtifactView<'a, EffectiveMask> {
         ArtifactView {
             declaration: &layer.declaration,
-            overlay: &served.generation.overlay,
+            overlay: &served.shard.overlay,
             labels: engine.label_gate(served.session, &layer.declaration),
             layer_reachable: true,
             rows: &self.rows,
@@ -241,14 +241,14 @@ impl ReadLevel {
     pub(crate) fn content(
         &self,
         engine: &Engine,
-        generation: &Generation,
+        shard: &crate::Shard,
         layer: &RegisteredLayer,
         ordinal: u32,
         entity: EntityId,
         rank: Option<u32>,
     ) -> Option<crate::viewport::Supplied> {
         engine.supplied_content(
-            generation,
+            shard,
             &layer.declaration,
             self.level,
             ordinal,

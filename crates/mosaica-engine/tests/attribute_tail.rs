@@ -188,9 +188,9 @@ fn build_placed_fixture(out: &Path, tmp: &Path, n: u64, at: impl Fn(u64) -> (f64
         ),
         out: out.to_path_buf(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -209,55 +209,29 @@ fn build_placed_fixture(out: &Path, tmp: &Path, n: u64, at: impl Fn(u64) -> (f64
 /// whose tail is present but misnamed, mistyped or short fails here exactly as it would in a
 /// request. Keyed by `mosaica_id` because every producer may reorder rows (see the module doc).
 fn tail_by_identity(root: &Path) -> BTreeMap<u64, (u8, i64, f32)> {
-    let bundle = open_bundle(root).expect("the bundle opens");
-    // The prefix is read from `CURRENT` rather than assumed, because a fold publishes into a new
-    // one — a hard-coded `v00000` would silently read the *pre-fold* segments and let the fold
-    // case pass without the fold's output ever being looked at.
-    let current: mosaica_store::manifest::CurrentPointer =
-        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT is readable"))
-            .expect("CURRENT parses");
-    let prefix = &current.prefix;
     let mut out = BTreeMap::new();
-    for (phash, partition) in &bundle.partitions {
-        for segment in &partition.manifest.segments {
-            let dir = root
-                .join(prefix)
-                .join("partitions")
-                .join(phash)
-                .join("views")
-                .join(&segment.view)
-                .join("segments")
-                .join(&segment.seg_id);
-            let columns = ColumnsRef::load(&dir.join("columns.arrow"))
-                .unwrap_or_else(|e| panic!("segment {} must open: {e}", segment.seg_id));
-            let ids = columns.mosaica_id();
-            let band = match columns.scalar("band") {
-                Some(ScalarSlice::U8(v)) => v,
-                other => panic!(
-                    "segment {} must carry 'band' as u8, found {other:?}",
-                    segment.seg_id
-                ),
-            };
-            let stamp = match columns.scalar("ingested_at") {
-                Some(ScalarSlice::I64(v)) => v,
-                other => panic!(
-                    "segment {} must carry 'ingested_at' as i64, found {other:?}",
-                    segment.seg_id
-                ),
-            };
-            let score = match columns.scalar("score") {
-                Some(ScalarSlice::F32(v)) => v,
-                other => panic!(
-                    "segment {} must carry 'score' as f32, found {other:?}",
-                    segment.seg_id
-                ),
-            };
-            assert_eq!(ids.len(), band.len(), "every column is one per row");
-            assert_eq!(ids.len(), stamp.len());
-            assert_eq!(ids.len(), score.len());
-            for row in 0..ids.len() {
-                out.insert(ids[row], (band[row], stamp[row], score[row]));
-            }
+    for dir in segment_dirs(root) {
+        let segment = dir.display();
+        let columns = ColumnsRef::load(&dir.join("columns.arrow"))
+            .unwrap_or_else(|e| panic!("segment {segment} must open: {e}"));
+        let ids = columns.mosaica_id();
+        let band = match columns.scalar("band") {
+            Some(ScalarSlice::U8(v)) => v,
+            other => panic!("segment {segment} must carry 'band' as u8, found {other:?}"),
+        };
+        let stamp = match columns.scalar("ingested_at") {
+            Some(ScalarSlice::I64(v)) => v,
+            other => panic!("segment {segment} must carry 'ingested_at' as i64, found {other:?}"),
+        };
+        let score = match columns.scalar("score") {
+            Some(ScalarSlice::F32(v)) => v,
+            other => panic!("segment {segment} must carry 'score' as f32, found {other:?}"),
+        };
+        assert_eq!(ids.len(), band.len(), "every column is one per row");
+        assert_eq!(ids.len(), stamp.len());
+        assert_eq!(ids.len(), score.len());
+        for row in 0..ids.len() {
+            out.insert(ids[row], (band[row], stamp[row], score[row]));
         }
     }
     out
@@ -377,9 +351,9 @@ fn both_build_implementations_write_the_same_tail() {
         ),
         out: out.to_path_buf(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -395,14 +369,16 @@ fn both_build_implementations_write_the_same_tail() {
     build(&args_for(&streamed)).expect("the streaming build succeeds");
     mosaica_build::build_in_memory(&args_for(&linear)).expect("the in-memory build succeeds");
 
-    let a = std::fs::read(
-        streamed.join("v00000/partitions/default/views/s0/segments/seg-0/columns.arrow"),
-    )
-    .unwrap();
-    let b = std::fs::read(
-        linear.join("v00000/partitions/default/views/s0/segments/seg-0/columns.arrow"),
-    )
-    .unwrap();
+    let columns = |root: &Path| {
+        std::fs::read(
+            root.join("v00000")
+                .join(common::SHARD.segment_rel("s0", "seg-0"))
+                .join("columns.arrow"),
+        )
+        .unwrap()
+    };
+    let a = columns(&streamed);
+    let b = columns(&linear);
     assert_eq!(
         a, b,
         "the two builds' columns.arrow must be byte-identical, tail included"
@@ -842,11 +818,7 @@ fn every_point_reads_the_segment_that_holds_it_across_tiles_of_several_segments(
         score: Option<f32>,
     }
     let bundle = open_bundle(&root).expect("the bundle opens");
-    let view_data = bundle
-        .partitions
-        .values()
-        .find_map(|p| p.views.get("s0"))
-        .expect("the bundle holds view s0");
+    let view_data = &bundle.only_shard().views["s0"];
     let segments = mosaica_engine::viewport::segments_with_row_bases("s0", view_data).unwrap();
     assert_eq!(segments.len(), 3, "the build and two flushes, unmerged");
     let mut stored = BTreeMap::new();
@@ -1106,9 +1078,9 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
         ),
         out: out.to_path_buf(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -1143,42 +1115,22 @@ fn non_prefix_row(engine: &Engine, audit: i64, band_code: u8, score: f32) -> Una
 /// Every `(mosaica_id, band, score)` in every live segment — the render tail read by name, the
 /// same truth-by-identity join `tail_by_identity` performs for the all-rendered fixture.
 fn non_prefix_tail_by_identity(root: &Path) -> BTreeMap<u64, (u8, f32)> {
-    let bundle = open_bundle(root).expect("the bundle opens");
-    let current: mosaica_store::manifest::CurrentPointer =
-        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT is readable"))
-            .expect("CURRENT parses");
-    let prefix = &current.prefix;
     let mut out = BTreeMap::new();
-    for (phash, partition) in &bundle.partitions {
-        for segment in &partition.manifest.segments {
-            let dir = root
-                .join(prefix)
-                .join("partitions")
-                .join(phash)
-                .join("views")
-                .join(&segment.view)
-                .join("segments")
-                .join(&segment.seg_id);
-            let columns = ColumnsRef::load(&dir.join("columns.arrow"))
-                .unwrap_or_else(|e| panic!("segment {} must open: {e}", segment.seg_id));
-            let ids = columns.mosaica_id();
-            let band = match columns.scalar("band") {
-                Some(ScalarSlice::U8(v)) => v,
-                other => panic!(
-                    "segment {} must carry 'band' as u8, found {other:?}",
-                    segment.seg_id
-                ),
-            };
-            let score = match columns.scalar("score") {
-                Some(ScalarSlice::F32(v)) => v,
-                other => panic!(
-                    "segment {} must carry 'score' as f32, found {other:?}",
-                    segment.seg_id
-                ),
-            };
-            for row in 0..ids.len() {
-                out.insert(ids[row], (band[row], score[row]));
-            }
+    for dir in segment_dirs(root) {
+        let segment = dir.display();
+        let columns = ColumnsRef::load(&dir.join("columns.arrow"))
+            .unwrap_or_else(|e| panic!("segment {segment} must open: {e}"));
+        let ids = columns.mosaica_id();
+        let band = match columns.scalar("band") {
+            Some(ScalarSlice::U8(v)) => v,
+            other => panic!("segment {segment} must carry 'band' as u8, found {other:?}"),
+        };
+        let score = match columns.scalar("score") {
+            Some(ScalarSlice::F32(v)) => v,
+            other => panic!("segment {segment} must carry 'score' as f32, found {other:?}"),
+        };
+        for row in 0..ids.len() {
+            out.insert(ids[row], (band[row], score[row]));
         }
     }
     out
@@ -1530,9 +1482,9 @@ fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
         ),
         out: out.to_path_buf(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -1545,19 +1497,14 @@ fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
     build(&args).expect("a build with blob-resident columns succeeds");
 }
 
-/// The partition's side-manifest, as the serving path holds it.
-fn side_manifest(root: &Path) -> mosaica_store::manifest::SegmentsManifest {
-    let bundle = open_bundle(root).expect("the bundle opens");
-    bundle.partitions["default"].manifest.clone()
-}
-
 /// The record stack exactly as drill-down will open it: the base blob under `attrs/record` plus
 /// every extent the manifest's `record_extents` names, oldest first.
 fn record_stack(root: &Path) -> mosaica_filter::RecordStack {
     let prefix_dir = root.join(current_prefix(root));
     let manifest = side_manifest(root);
-    let base = prefix_dir.join("partitions/default/attrs/record");
+    let base = prefix_dir.join(common::SHARD.record_rel());
     let extents: Vec<mosaica_filter::RecordExtentPaths> = manifest
+        .only_shard()
         .record_extents
         .iter()
         .map(|e| mosaica_filter::RecordExtentPaths {
@@ -1652,11 +1599,15 @@ fn a_flushed_record_extent_round_trips_through_the_stack() {
     drop(engine);
 
     let manifest = side_manifest(&root);
-    assert_eq!(manifest.record_extents.len(), 1, "one extent per flush");
-    let extent = &manifest.record_extents[0];
+    assert_eq!(
+        manifest.only_shard().record_extents.len(),
+        1,
+        "one extent per flush"
+    );
+    let extent = &manifest.only_shard().record_extents[0];
     for rel in [&extent.blocks, &extent.hasrow, &extent.directory] {
         assert!(
-            manifest.files.contains_key(rel),
+            manifest.partition.files.contains_key(rel),
             "an extent file the manifest names but does not digest: {rel}"
         );
     }
@@ -1723,9 +1674,9 @@ fn a_suppression_touches_no_blob_byte_and_only_the_fold_removes_a_deletion() {
     publish_buffered(&engine);
 
     let manifest = side_manifest(&root);
-    assert_eq!(manifest.record_extents.len(), 1);
+    assert_eq!(manifest.only_shard().record_extents.len(), 1);
     let prefix_dir = root.join(current_prefix(&root));
-    let extent = manifest.record_extents[0].clone();
+    let extent = manifest.only_shard().record_extents[0].clone();
     let extent_files = || -> Vec<Vec<u8>> {
         [&extent.blocks, &extent.hasrow, &extent.directory]
             .iter()
@@ -1770,9 +1721,9 @@ fn a_suppression_touches_no_blob_byte_and_only_the_fold_removes_a_deletion() {
 
     let manifest = side_manifest(&root);
     assert!(
-        manifest.record_extents.is_empty(),
+        manifest.only_shard().record_extents.is_empty(),
         "the fold consumed every record extent into the new base: {:?}",
-        manifest.record_extents
+        manifest.only_shard().record_extents
     );
     let stack = record_stack(&root);
     let suppressed = u32::try_from(entities[0].raw()).unwrap();
@@ -1808,9 +1759,7 @@ fn a_suppression_touches_no_blob_byte_and_only_the_fold_removes_a_deletion() {
     // The exhaustive walk over the folded base: every row is a surviving entity's, so the deleted
     // row's bytes are in no block (see this test's doc for why the walk is the byte argument).
     let base = mosaica_filter::RecordBlob::open_dir(
-        &root
-            .join(current_prefix(&root))
-            .join("partitions/default/attrs/record"),
+        &root.join(current_prefix(&root)).join(common::SHARD.record_rel()),
         mosaica_filter::Access::Read,
     )
     .expect("the folded base opens");
@@ -1882,13 +1831,17 @@ fn a_coalesce_collapses_record_extents_and_every_row_still_answers() {
         }
     }
     assert_eq!(
-        side_manifest(&root).record_extents.len(),
+        side_manifest(&root).only_shard().record_extents.len(),
         8,
         "one record extent per flush before the coalesce"
     );
     // The base plus one layer per extent, in the stack the *running* process reads from.
     assert_eq!(
-        engine.generation().filter_columns.record_layers(),
+        engine
+            .generation()
+            .only_shard()
+            .filter_columns
+            .record_layers(),
         9,
         "the live stack composes each flush's extent as it publishes"
     );
@@ -1897,7 +1850,14 @@ fn a_coalesce_collapses_record_extents_and_every_row_still_answers() {
         &engine,
         "the record extents to coalesce",
         std::time::Duration::from_secs(60),
-        || engine.generation().filter_columns.record_layers() < 9,
+        || {
+            engine
+                .generation()
+                .only_shard()
+                .filter_columns
+                .record_layers()
+                < 9
+        },
     );
 
     // **The live stack shrank with the manifest, before any restart.** The blob's layers ride on
@@ -1907,7 +1867,11 @@ fn a_coalesce_collapses_record_extents_and_every_row_still_answers() {
     // (I9). The count is the assertion because the count is the cost: a miss walks every layer,
     // and the whole point of the pass is that there are fewer of them.
     assert_eq!(
-        engine.generation().filter_columns.record_layers(),
+        engine
+            .generation()
+            .only_shard()
+            .filter_columns
+            .record_layers(),
         2,
         "the base plus the one coalesced extent, re-derived from the rebased manifest"
     );
@@ -1917,6 +1881,7 @@ fn a_coalesce_collapses_record_extents_and_every_row_still_answers() {
         let entity = u32::try_from(entity.raw()).unwrap();
         let fields = engine
             .generation()
+            .only_shard()
             .filter_columns
             .records()
             .fields_of(entity)
@@ -1933,10 +1898,10 @@ fn a_coalesce_collapses_record_extents_and_every_row_still_answers() {
 
     let manifest = side_manifest(&root);
     assert_eq!(
-        manifest.record_extents.len(),
+        manifest.only_shard().record_extents.len(),
         1,
         "eight extents became one: {:?}",
-        manifest.record_extents
+        manifest.only_shard().record_extents
     );
     let stack = record_stack(&root);
     for (entity, note, revision) in &ingested {

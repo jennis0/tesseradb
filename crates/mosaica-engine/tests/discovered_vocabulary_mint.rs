@@ -148,9 +148,9 @@ fn build_args(points: &Path, pairs: &Path, out: &Path, schema: Schema) -> BuildA
         ),
         out: out.to_path_buf(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
@@ -202,37 +202,20 @@ fn ingest_row(engine: &Engine, batch: &str, scalar: WalScalar) -> EntityId {
 /// One column's stored code for `entity`, read back through `ColumnsRef` by `mosaica_id` — the same
 /// route the serving path reads it. `None` if the entity has not reached a segment (not flushed).
 fn stored_code_of(root: &Path, column: &str, entity: EntityId) -> Option<u32> {
-    let bundle = open_bundle(root).expect("the bundle opens");
-    let current: mosaica_store::manifest::CurrentPointer =
-        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT is readable"))
-            .expect("CURRENT parses");
-    let prefix = &current.prefix;
     let mosaica_id = mosaica_id_at(entity, 0).raw();
-    for (phash, partition) in &bundle.partitions {
-        for segment in &partition.manifest.segments {
-            let dir = root
-                .join(prefix)
-                .join("partitions")
-                .join(phash)
-                .join("views")
-                .join(&segment.view)
-                .join("segments")
-                .join(&segment.seg_id);
-            let columns = ColumnsRef::load(&dir.join("columns.arrow"))
-                .unwrap_or_else(|e| panic!("segment {} must open: {e}", segment.seg_id));
-            let ids = columns.mosaica_id();
-            let Some(row) = ids.iter().position(|&id| id == mosaica_id) else {
-                continue;
-            };
-            return match columns.scalar(column) {
-                Some(ScalarSlice::U8(v)) => Some(v[row] as u32),
-                Some(ScalarSlice::U16(v)) => Some(v[row] as u32),
-                Some(ScalarSlice::U32(v)) => Some(v[row]),
-                other => {
-                    panic!("column '{column}' must be an unsigned category width, got {other:?}")
-                }
-            };
-        }
+    for dir in segment_dirs(root) {
+        let columns = ColumnsRef::load(&dir.join("columns.arrow"))
+            .unwrap_or_else(|e| panic!("segment {} must open: {e}", dir.display()));
+        let ids = columns.mosaica_id();
+        let Some(row) = ids.iter().position(|&id| id == mosaica_id) else {
+            continue;
+        };
+        return match columns.scalar(column) {
+            Some(ScalarSlice::U8(v)) => Some(v[row] as u32),
+            Some(ScalarSlice::U16(v)) => Some(v[row] as u32),
+            Some(ScalarSlice::U32(v)) => Some(v[row]),
+            other => panic!("column '{column}' must be an unsigned category width, got {other:?}"),
+        };
     }
     None
 }

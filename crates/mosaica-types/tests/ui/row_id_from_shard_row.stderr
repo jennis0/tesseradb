@@ -1,0 +1,10 @@
+error[E0599]: no method named `row` found for struct `ShardRow` in the current scope
+ --> tests/ui/row_id_from_shard_row.rs:7:64
+  |
+7 |     let _: RowId = ShardRow::new(ShardId::ZERO, RowId::new(7)).row();
+  |                                                                ^^^
+  |
+help: there is a method `borrow` with a similar name
+  |
+7 |     let _: RowId = ShardRow::new(ShardId::ZERO, RowId::new(7)).borrow();
+  |                                                                +++

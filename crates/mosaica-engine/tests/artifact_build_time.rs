@@ -223,9 +223,9 @@ fn try_fixture(topics: fn(&Path)) -> Result<Fixture, mosaica_build::BuildError> 
         attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &config.schema),
         out: root.clone(),
         limit: None,
+        shard_size: None,
         strict: false,
         identity_key: test_key(),
-        shard_id: 0,
         layers: config.layers,
         layer_inputs: config.layer_sources,
         scoped_layers: Default::default(),
@@ -437,20 +437,14 @@ fn a_built_bundle_carries_its_containment_partitions_and_the_first_request_claim
     let fx = fixture();
     let engine = fx.open();
     let generation = engine.generation();
-    let manifest = &generation
-        .bundle
-        .partitions
-        .values()
-        .next()
-        .expect("one partition")
-        .manifest;
+    let record = &generation.bundle.only_shard().record;
     assert!(
-        manifest
+        record
             .derived_extents
             .iter()
             .any(|e| e.form == mosaica_store::manifest::DerivedForm::Containment && e.layer == LABELS),
         "the label layer's generating sets have a partition the build composed: {:?}",
-        manifest.derived_extents
+        record.derived_extents
     );
 
     // The gauges: one adopted at the open, none composed by the request that used it.

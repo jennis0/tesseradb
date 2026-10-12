@@ -128,12 +128,7 @@ impl Executor {
             return self.advance_unique_declarations();
         }
         // Every entity a flush or a build can have given a value: the point region.
-        let high_water = generation
-            .bundle
-            .partitions
-            .values()
-            .map(|p| p.manifest.entity_id_high_water)
-            .fold(manifest.entity_id_high_water, u64::max);
+        let high_water = generation.only_shard().data.record.high_water;
         let mut wanted = croaring::Bitmap::new();
         wanted.add_range(0..high_water.min(u64::from(u32::MAX)) as u32);
         let attempt = self.unique_declarations.rounds.next_attempt();
@@ -170,10 +165,10 @@ impl Executor {
             at: pending.at,
             wanted,
             prior: pending.runs().map(|(run, _)| run.path.clone()).collect(),
-            out_dir: prefix_dir.join(mosaica_store::unique::index_dir_rel(
-                &partition,
-                &pending.attribute,
-            )),
+            out_dir: prefix_dir.join(
+                ShardLayout::new(&partition, generation.only_shard().id())
+                    .unique_index_rel(&pending.attribute),
+            ),
             prefix_dir,
             stem: format!("declared-{stamp}-{}", pending.rounds),
             memory_budget: ROUND_MEMORY,
@@ -261,10 +256,11 @@ impl Executor {
         // The values buffered since the round started, checked here where they are few.
         let at = pending.at;
         let ty = generation.bundle.manifest.declared_scalars[at].arrow_type;
+        let shard = generation.only_shard();
         let arrived: Vec<(EntityId, UniqueKey, WalScalar)> =
-            crate::unique::buffered_scalars(&generation.buffer)
+            crate::unique::buffered_scalars(&shard.buffer)
                 .into_iter()
-                .filter(|(entity, _)| !generation.overlay.is_deleted(*entity))
+                .filter(|(entity, _)| !shard.overlay.is_deleted(*entity))
                 .filter_map(|(entity, scalars)| {
                     let value = scalars.get(at)?;
                     let key = mosaica_store::unique::key_of(ty, value)?;
@@ -300,6 +296,7 @@ impl Executor {
         generation: &Generation,
         arrived: &[(EntityId, UniqueKey, WalScalar)],
     ) -> Result<Option<(u64, Vec<String>)>, String> {
+        let overlay = &generation.only_shard().overlay;
         let pending = self
             .unique_declarations
             .current
@@ -321,7 +318,7 @@ impl Executor {
         let mut held: FxHashMap<UniqueKey, EntityId> = pending
             .checked
             .iter()
-            .filter(|(entity, _)| !generation.overlay.is_deleted(**entity))
+            .filter(|(entity, _)| !overlay.is_deleted(**entity))
             .map(|(entity, key)| (*key, *entity))
             .collect();
         for (entity, key, value) in arrived {
@@ -348,7 +345,7 @@ impl Executor {
         let keys: Vec<UniqueKey> = arrived.iter().map(|(_, key, _)| *key).collect();
         for (i, holder) in index.lookup(&keys).map_err(|e| e.to_string())? {
             let holder = EntityId::new(u64::from(holder));
-            if holder != arrived[i].0 && !generation.overlay.is_deleted(holder) {
+            if holder != arrived[i].0 && !overlay.is_deleted(holder) {
                 note(arrived[i].1, &arrived[i].2);
             }
         }
@@ -478,28 +475,21 @@ impl Executor {
         let Some((partition, partition_data)) = generation.bundle.partitions.iter().next() else {
             return;
         };
-        let mut manifest = partition_data.manifest.clone();
+        let mut manifest = partition_data.side_manifest();
         let unique = index.is_some();
-        match index {
-            Some((runs, files)) => {
-                manifest.unique_indexes.retain(|held| held.attribute != attribute);
-                manifest.unique_indexes.push(runs);
-                manifest.files.extend(files);
-            }
-            None => {
-                if let Some(at) = manifest
-                    .unique_indexes
-                    .iter()
-                    .position(|held| held.attribute == attribute)
-                {
-                    let removed = manifest.unique_indexes.remove(at);
-                    for file in removed.files() {
-                        manifest.files.remove(file);
-                    }
-                }
-            }
+        let removed = mosaica_store::unique::set_unique_index(
+            &mut manifest.partition,
+            mosaica_types::only(&mut manifest.shards.records),
+            attribute,
+            index.as_ref().map(|(runs, _)| runs.clone()),
+        );
+        for file in removed.iter().flat_map(UniqueIndexRuns::files) {
+            manifest.partition.files.remove(file);
         }
-        write_deny_state(&mut manifest, &generation.overlay);
+        if let Some((_, files)) = index {
+            manifest.partition.files.extend(files);
+        }
+        write_deny_state(&mut manifest, &generation.only_shard().overlay);
         write_vocabulary_extensions(
             &mut manifest,
             &generation.vocabularies,
@@ -557,20 +547,21 @@ impl Executor {
             &bundle.partitions[partition].manifest,
         );
         let bundle = bundle.with_views(served);
-        let unique_indexes = match mosaica_store::unique::UniqueIndexes::open(
-            &bundle.manifest,
-            &bundle.partitions[partition].manifest,
+        let shard = generation.only_shard();
+        let unique_indexes = match reopen_unique(
             &self.prefix_dir(generation),
-            Some(&generation.unique),
+            &bundle,
+            &bundle.partitions[partition],
+            shard,
         ) {
-            Ok(indexes) => Arc::new(indexes),
+            Ok(indexes) => indexes,
             Err(e) => {
                 tracing::error!(error = %e, "ALARM: a unique index was published and could not be opened; a restart opens it");
                 return;
             }
         };
-        let mut unique_live = (*generation.unique_live).clone();
-        unique_live.set_unique(&bundle.manifest, &generation.buffer, attribute, unique);
+        let mut unique_live = (*shard.unique_live).clone();
+        unique_live.set_unique(&bundle.manifest, &shard.buffer, attribute, unique);
         let filter_columns = match bundle
             .manifest
             .declared_scalars
@@ -578,17 +569,17 @@ impl Executor {
             .find(|d| d.name == attribute)
         {
             Some(d) => Arc::new(
-                generation
+                shard
                     .filter_columns
                     .with_unique(d, &bundle.manifest.vocabularies),
             ),
-            None => Arc::clone(&generation.filter_columns),
+            None => Arc::clone(&shard.filter_columns),
         };
-        let next = generation.with(|g| {
+        let next = generation.with_shard(shard.id(), |g, s| {
             g.bundle = bundle;
-            g.unique = unique_indexes;
-            g.unique_live = Arc::new(unique_live);
-            g.filter_columns = filter_columns;
+            s.unique = unique_indexes;
+            s.unique_live = Arc::new(unique_live);
+            s.filter_columns = filter_columns;
         });
         self.publish(next, started);
     }

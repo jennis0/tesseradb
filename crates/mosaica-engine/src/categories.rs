@@ -202,6 +202,7 @@ impl Engine {
         let Some(vocabulary_name) = vocabulary_of(&generation.bundle.manifest, column) else {
             return Ok(None);
         };
+        let shard = generation.only_shard();
         let Some(vocabulary) = generation.vocabularies.get(&vocabulary_name) else {
             return Ok(None);
         };
@@ -220,19 +221,13 @@ impl Engine {
                 // fragment-resident — so a value carried only by entities a flush has published
                 // since would be derived as invisible from the stale one, and a viewer would be
                 // told a value they can see does not exist.
-                let fragment = self.fragment_for(session, &generation)?;
-                Some(crate::filter::candidate(
-                    &fragment,
-                    session.satisfied(),
-                    &generation.overlay,
-                    &generation.buffer,
-                ))
+                Some(self.filter_candidate(session, shard)?)
             }
         };
         let membership = match &candidate {
             None => None,
             Some(candidate) => Some(
-                generation
+                shard
                     .filter_columns
                     .category_membership(column, candidate)
                     .map_err(|e| EngineError::VocabularyVisibilityUnavailable {
@@ -374,7 +369,8 @@ impl Engine {
         let candidate = candidate.clone();
         let column = column.to_string();
         self.pool.spawn(move || {
-            let swept = generation.filter_columns.value_layers(&column).and_then(|layers| {
+            let columns = &generation.only_shard().filter_columns;
+            let swept = columns.value_layers(&column).and_then(|layers| {
                 crate::suggest_set::sweep(
                     layers.base().into_iter().chain(layers.extents()),
                     &candidate,
@@ -535,6 +531,7 @@ impl Engine {
         let Some(vocabulary_name) = vocabulary_of(&generation.bundle.manifest, column) else {
             return Ok(None);
         };
+        let shard = generation.only_shard();
         let Some(vocabulary) = generation.vocabularies.get(&vocabulary_name) else {
             return Ok(None);
         };
@@ -545,11 +542,7 @@ impl Engine {
             });
         };
         if let Some(view) = view {
-            let known = generation
-                .bundle
-                .partitions
-                .values()
-                .any(|partition| partition.views.contains_key(view));
+            let known = shard.data.views.contains_key(view);
             if !known || !session.visible_views().contains_view(view) {
                 return Err(EngineError::UnknownView(view.to_string()));
             }
@@ -560,7 +553,7 @@ impl Engine {
                     "a filter is evaluated in a view; name the view as well".to_string(),
                 ));
             }
-            generation
+            shard
                 .filter_columns
                 .admit(expr, false, &|layer| self.reaches_layer(session, layer))
                 .map_err(crate::viewport::filter_refusal)?;
@@ -575,19 +568,13 @@ impl Engine {
         // values served, which the visibility alone still decides.
         let derived = vocabulary.visibility() == Visibility::Derived;
         let candidate = if derived || counts {
-            let fragment = self.fragment_for(session, &generation)?;
-            Some(crate::filter::candidate(
-                &fragment,
-                session.satisfied(),
-                &generation.overlay,
-                &generation.buffer,
-            ))
+            Some(self.filter_candidate(session, shard)?)
         } else {
             None
         };
         let membership = match (&candidate, derived) {
             (Some(candidate), true) => Some(
-                generation
+                shard
                     .filter_columns
                     .category_membership(column, candidate)
                     .map_err(|e| EngineError::VocabularyVisibilityUnavailable {
@@ -606,7 +593,7 @@ impl Engine {
                 token_id: session.token_id(),
                 column: column.to_string(),
                 segments_version: generation.segments_version,
-                overlay_version: generation.overlay_version,
+                overlay_version: shard.overlay_version,
             };
             // **The index the set was swept against must still be the one the walk reads**, which
             // the value count is what says: a rebuild moves dense positions and moves neither
@@ -618,10 +605,9 @@ impl Engine {
                     // `candidate` is `Some` on this arm — `derived` composes it above or refuses.
                     let eligible = candidate.as_ref().is_some_and(|candidate| {
                         candidate.cardinality() <= max_suggest_set_entities
-                    }) && generation
-                        .filter_columns
-                        .value_layers(column)
-                        .is_some_and(|layers| layers.base().is_some() || layers.extents().next().is_some());
+                    }) && shard.filter_columns.value_layers(column).is_some_and(
+                        |layers| layers.base().is_some() || layers.extents().next().is_some(),
+                    );
                     if eligible {
                         self.dispatch_suggest_sweep(
                             key,
@@ -717,10 +703,10 @@ impl Engine {
                 total = Some(set.cardinality());
                 let codes: Vec<u32> = found.iter().map(|found| found.code).collect();
                 let buffered = |visit: &mut dyn FnMut(u32, u32)| {
-                    buffered_codes(&generation.bundle.manifest, &generation.buffer, column, visit)
+                    buffered_codes(&generation.bundle.manifest, &shard.buffer, column, visit)
                 };
                 let counted = self.pool.install(|| {
-                    generation.filter_columns.category_counts(
+                    shard.filter_columns.category_counts(
                         column,
                         set,
                         crate::filter::CountCodes::Only(&codes),

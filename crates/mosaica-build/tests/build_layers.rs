@@ -24,9 +24,7 @@ use common::assert_bundles_identical;
 use mosaica_build::{build, build_in_memory, BuildArgs};
 use mosaica_spatial::Bounds;
 use mosaica_store::read::open_bundle;
-use mosaica_types::IdentityKey;
 
-const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 const N_ITEMS: u64 = 250;
 
 fn extent() -> Bounds {
@@ -350,26 +348,12 @@ fn args(inputs: &Inputs, out: &Path) -> BuildArgs {
             select: None,
             access: mosaica_build::config::AccessInput::relation(inputs.pairs.clone()),
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources: mosaica_build::config::AttributeSource::over(
             inputs.points.clone(),
             &schema,
         ),
-        out: out.to_path_buf(),
-        limit: None,
-        strict: false,
-        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(out)
     }
 }
 
@@ -398,8 +382,7 @@ fn manifest_of(root: &Path) -> mosaica_store::manifest::SegmentsManifest {
         .values()
         .next()
         .expect("one partition")
-        .manifest
-        .clone()
+        .side_manifest()
 }
 
 /// **The headline: a built bundle carries its layers, and the mark that keeps their ids theirs.**
@@ -414,19 +397,19 @@ fn a_build_registers_its_layers_and_publishes_their_artifacts() {
     let manifest = manifest_of(&out);
 
     let names: Vec<&str> = manifest
-        .layers
+        .partition.layers
         .iter()
         .map(|l| l.declaration.name.as_str())
         .collect();
     assert_eq!(names, vec!["clusters/a", "topics/x"]);
     assert!(
-        manifest.entity_id_low_water < mosaica_types::layer::ROWLESS_CEILING,
+        manifest.partition.entity_id_low_water < mosaica_types::layer::ROWLESS_CEILING,
         "the row-less mark must record what the layers claimed"
     );
     // Layer entities and artifact runs alike come out of the row-less region, above every point.
-    for layer in &manifest.layers {
+    for layer in &manifest.partition.layers {
         assert!(layer.entity.raw() > N_ITEMS);
-        assert!(layer.entity.raw() >= manifest.entity_id_low_water);
+        assert!(layer.entity.raw() >= manifest.partition.entity_id_low_water);
         for runs in &layer.runs {
             assert!(runs.capacity() >= mosaica_types::layer::RESERVED_BLOCK);
         }
@@ -435,16 +418,16 @@ fn a_build_registers_its_layers_and_publishes_their_artifacts() {
     // Two levels' worth of memberships — one extent per level — and one content extent for the
     // label's two descriptions.
     let mut extents: Vec<(&str, u32)> = manifest
-        .membership_extents
+        .only_shard().membership_extents
         .iter()
         .map(|e| (e.layer.as_str(), e.count))
         .collect();
     extents.sort();
     assert_eq!(extents, vec![("clusters/a", 2), ("topics/x", 1)]);
-    assert_eq!(manifest.artifact_record_extents.len(), 1);
+    assert_eq!(manifest.only_shard().artifact_record_extents.len(), 1);
     assert_eq!(
         manifest
-            .membership_extents
+            .only_shard().membership_extents
             .iter()
             .map(|e| e.ordinal_lo)
             .max(),
@@ -472,17 +455,17 @@ fn both_build_paths_place_the_same_layers_on_the_same_entities() {
 
     let a = manifest_of(&streamed);
     let b = manifest_of(&linear);
-    assert_eq!(a.layers, b.layers);
-    assert_eq!(a.entity_id_low_water, b.entity_id_low_water);
-    assert_eq!(a.membership_extents, b.membership_extents);
+    assert_eq!(a.partition.layers, b.partition.layers);
+    assert_eq!(a.partition.entity_id_low_water, b.partition.entity_id_low_water);
+    assert_eq!(a.only_shard().membership_extents, b.only_shard().membership_extents);
 
     // **The bytes, not only the descriptors.** A `MembershipExtent` carries a path, a layer, a
     // level, an ordinal range and a count — and no digest — so two builds that resolved a member
     // to *different entities* would agree on every field above while their packed memberships
     // differed. The entity is what the Roaring blob holds, and this is the only place it is
     // compared.
-    assert!(!a.membership_extents.is_empty());
-    for extent in &a.membership_extents {
+    assert!(!a.only_shard().membership_extents.is_empty());
+    for extent in &a.only_shard().membership_extents {
         let one = std::fs::read(streamed.join("v00000").join(&extent.path)).unwrap();
         let other = std::fs::read(linear.join("v00000").join(&extent.path)).unwrap();
         assert_eq!(
@@ -491,8 +474,8 @@ fn both_build_paths_place_the_same_layers_on_the_same_entities() {
             extent.layer
         );
     }
-    assert_eq!(a.artifact_record_extents, b.artifact_record_extents);
-    for extent in &a.artifact_record_extents {
+    assert_eq!(a.only_shard().artifact_record_extents, b.only_shard().artifact_record_extents);
+    for extent in &a.only_shard().artifact_record_extents {
         for file in [&extent.blocks, &extent.hasrow, &extent.directory] {
             let one = std::fs::read(streamed.join("v00000").join(file)).unwrap();
             let other = std::fs::read(linear.join("v00000").join(file)).unwrap();
@@ -515,12 +498,12 @@ fn contiguous_and_gapped_source_ids_place_a_member_on_the_same_entity() {
 
     let a = manifest_of(&contiguous_out);
     let b = manifest_of(&gapped_out);
-    assert_eq!(a.layers, b.layers);
-    assert_eq!(a.membership_extents, b.membership_extents);
-    assert!(!a.membership_extents.is_empty());
+    assert_eq!(a.partition.layers, b.partition.layers);
+    assert_eq!(a.only_shard().membership_extents, b.only_shard().membership_extents);
+    assert!(!a.only_shard().membership_extents.is_empty());
     // The entity is in the Roaring blob and nowhere in the descriptor, exactly as in the
     // comparison of the two build paths above.
-    for extent in &a.membership_extents {
+    for extent in &a.only_shard().membership_extents {
         let one = std::fs::read(contiguous_out.join("v00000").join(&extent.path)).unwrap();
         let other = std::fs::read(gapped_out.join("v00000").join(&extent.path)).unwrap();
         assert_eq!(
@@ -661,7 +644,7 @@ fn a_label_layer_sorting_before_its_target_still_publishes() {
     run(&inputs, &out).expect("declaration order is what decides, not the layer's name");
     let manifest = manifest_of(&out);
     assert!(manifest
-        .membership_extents
+        .only_shard().membership_extents
         .iter()
         .any(|e| e.layer == "annotations/topics"));
 }
@@ -1858,12 +1841,12 @@ fn the_label_sugar_and_the_layer_written_out_build_the_same_bundle() {
     let manifest = manifest_of(&sugared);
     assert!(
         manifest
-            .layers
+            .partition.layers
             .iter()
             .any(|l| l.declaration.name == "topics/x"),
         "the sugared bundle carries no label layer: {:?}",
         manifest
-            .layers
+            .partition.layers
             .iter()
             .map(|l| &l.declaration.name)
             .collect::<Vec<_>>()
@@ -2101,7 +2084,7 @@ fn an_open_layer_mints_the_clusters_its_points_name() {
     });
     let manifest = manifest_of(&out);
     let counts: Vec<u32> = manifest
-        .membership_extents
+        .only_shard().membership_extents
         .iter()
         .map(|e| e.count)
         .collect();
@@ -2129,7 +2112,7 @@ fn an_open_layer_needs_no_artifacts_source() {
     let manifest = manifest_of(&out);
     assert_eq!(
         manifest
-            .membership_extents
+            .only_shard().membership_extents
             .iter()
             .map(|e| e.count)
             .collect::<Vec<_>>(),
@@ -2157,16 +2140,16 @@ fn a_minted_artifact_and_a_declared_one_are_the_same_artifact() {
     });
 
     let (minted, declared) = (manifest_of(&from_points), manifest_of(&from_table));
-    assert_eq!(minted.membership_extents, declared.membership_extents);
-    assert_eq!(minted.entity_id_low_water, declared.entity_id_low_water);
+    assert_eq!(minted.only_shard().membership_extents, declared.only_shard().membership_extents);
+    assert_eq!(minted.partition.entity_id_low_water, declared.partition.entity_id_low_water);
     assert_eq!(
-        minted.layers.iter().map(|l| &l.runs).collect::<Vec<_>>(),
-        declared.layers.iter().map(|l| &l.runs).collect::<Vec<_>>()
+        minted.partition.layers.iter().map(|l| &l.runs).collect::<Vec<_>>(),
+        declared.partition.layers.iter().map(|l| &l.runs).collect::<Vec<_>>()
     );
     // **The bytes, not only the descriptors**: an extent carries no digest, so two builds that put
     // one member on a different entity would agree on every field above.
-    assert!(!minted.membership_extents.is_empty());
-    for extent in &minted.membership_extents {
+    assert!(!minted.only_shard().membership_extents.is_empty());
+    for extent in &minted.only_shard().membership_extents {
         assert_eq!(
             std::fs::read(from_points.join("v00000").join(&extent.path)).unwrap(),
             std::fs::read(from_table.join("v00000").join(&extent.path)).unwrap(),
@@ -2175,11 +2158,11 @@ fn a_minted_artifact_and_a_declared_one_are_the_same_artifact() {
         );
     }
     assert_eq!(
-        minted.layers[0].declaration.value_set,
+        minted.partition.layers[0].declaration.value_set,
         mosaica_types::layer::ValueSet::Open
     );
     assert_eq!(
-        declared.layers[0].declaration.value_set,
+        declared.partition.layers[0].declaration.value_set,
         mosaica_types::layer::ValueSet::Closed
     );
 }
@@ -2901,7 +2884,7 @@ fn an_open_layer_mints_the_interior_parents_a_lineage_names() {
     let manifest = manifest_of(&out);
     assert_eq!(
         manifest
-            .membership_extents
+            .only_shard().membership_extents
             .iter()
             .map(|e| e.count)
             .collect::<Vec<_>>(),
@@ -3026,7 +3009,7 @@ fn a_build_mints_an_attribute_predicates_artifacts_from_its_column() {
 
     let manifest = manifest_of(&out);
     let layer = manifest
-        .layers
+        .partition.layers
         .iter()
         .find(|l| l.declaration.name == "bands/by-value")
         .expect("the predicate layer is registered");
@@ -3037,7 +3020,7 @@ fn a_build_mints_an_attribute_predicates_artifacts_from_its_column() {
         mosaica_types::layer::ServingLayout::RowMajorLabel
     );
     let version = manifest
-        .level_versions
+        .only_shard().level_versions
         .iter()
         .find(|v| v.layer == "bands/by-value" && v.level == 0)
         .expect("the level's version reaches the manifest");
@@ -3047,7 +3030,7 @@ fn a_build_mints_an_attribute_predicates_artifacts_from_its_column() {
     );
     assert_eq!(
         manifest
-            .membership_extents
+            .only_shard().membership_extents
             .iter()
             .filter(|e| e.layer == "bands/by-value")
             .count(),
@@ -3112,7 +3095,7 @@ fn a_build_publishes_a_shape_layers_shapes_and_discloses_the_kind() {
 
     let manifest = manifest_of(&out);
     let layer = manifest
-        .layers
+        .partition.layers
         .iter()
         .find(|l| l.declaration.name == "regions/boxes")
         .expect("the shape layer is registered");
@@ -3371,7 +3354,7 @@ fn a_predicate_over_a_category_column_mints_its_values() {
 
     let manifest = manifest_of(&out);
     let level = manifest
-        .level_versions
+        .only_shard().level_versions
         .iter()
         .find(|v| v.layer == "grades/by-value" && v.level == 0)
         .expect("the level's version reaches the manifest — the values were published at all");
@@ -3380,7 +3363,7 @@ fn a_predicate_over_a_category_column_mints_its_values() {
         "the values were minted in one publication"
     );
     let extents: Vec<_> = manifest
-        .membership_extents
+        .only_shard().membership_extents
         .iter()
         .filter(|e| e.layer == "grades/by-value")
         .collect();
@@ -3547,7 +3530,7 @@ fn a_label_set_with_no_member_table_builds_over_a_from_column_clustering() {
     });
     let manifest = manifest_of(&out);
     let names: Vec<&str> = manifest
-        .layers
+        .partition.layers
         .iter()
         .map(|l| l.declaration.name.as_str())
         .collect();

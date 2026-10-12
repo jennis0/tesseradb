@@ -894,10 +894,10 @@ mod tests {
             attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
             out: bundle.clone(),
             limit: None,
+            shard_size: None,
             strict: false,
             identity_key: mosaica_types::IdentityKey::from_hex("07070707070707070707070707070707")
                 .unwrap(),
-            shard_id: 0,
             layers: Vec::new(),
             layer_inputs: Vec::new(),
             scoped_layers: Default::default(),

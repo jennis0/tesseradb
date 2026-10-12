@@ -2,7 +2,7 @@
 
 use mosaica_types::{EntityId, TermId};
 
-use crate::Generation;
+use crate::{Generation, Shard};
 
 /// One entity's record-blob row, decompressed at most once however many blob-resident columns
 /// ask for it in one join. The outer `Option` is *not yet read*; the inner one is the blob's own
@@ -16,13 +16,9 @@ impl BlobRow {
         BlobRow(Some(fields))
     }
 
-    fn get(
-        &mut self,
-        generation: &Generation,
-        entity: u32,
-    ) -> &Option<Vec<mosaica_filter::RecordField>> {
+    fn get(&mut self, shard: &Shard, entity: u32) -> &Option<Vec<mosaica_filter::RecordField>> {
         self.0.get_or_insert_with(|| {
-            match generation.filter_columns.records().fields_of(entity) {
+            match shard.filter_columns.records().fields_of(entity) {
                 Ok(fields) => fields,
                 // The error's kind, never its `Display`, which would name the entity: this
                 // warning carries the artefact and the defect class for an operator chasing a
@@ -63,6 +59,7 @@ pub(crate) fn flushed_scalar_of(
     blob: &mut BlobRow,
 ) -> Option<mosaica_lifecycle::WalScalar> {
     let manifest = &generation.bundle.manifest;
+    let shard = generation.only_shard();
     let declared = manifest.declared_scalars.get(declared_index)?;
     let vocabularies = &manifest.vocabularies;
     // Entity ids are capped at `u32::MAX`; a violated invariant is loud rather than a `None`
@@ -70,13 +67,13 @@ pub(crate) fn flushed_scalar_of(
     let entity_raw = u32::try_from(entity.raw()).expect("entity ids are capped at u32::MAX by I9");
 
     let stored = if crate::filter::owes_value_column(declared, vocabularies) {
-        generation
+        shard
             .filter_columns
             .stored_value(&declared.name, entity_raw)
     } else if crate::filter::blob_resident(declared, vocabularies) {
         // The blob's rows are self-describing; a malformed row is a lost report here, warned
         // once per row by `BlobRow`.
-        blob.get(generation, entity_raw)
+        blob.get(shard, entity_raw)
             .as_ref()?
             .iter()
             .find_map(|f| (f.tag as usize == declared_index).then(|| f.value.clone()))
@@ -89,9 +86,9 @@ pub(crate) fn flushed_scalar_of(
 /// [`Engine::flushed_terms`]'s body. Not a method: the label arm runs on the serial writer,
 /// beside the generation its apply will clone from, and re-loading the pointer under itself is
 /// the race this closes.
-pub(crate) fn flushed_terms_of(generation: &Generation, entity: EntityId) -> Option<Vec<TermId>> {
+pub(crate) fn flushed_terms_of(shard: &Shard, entity: EntityId) -> Option<Vec<TermId>> {
     let entity = u32::try_from(entity.raw()).ok()?;
-    let terms = match generation.filter_columns.entity_terms().terms_of(entity) {
+    let terms = match shard.filter_columns.entity_terms().terms_of(entity) {
         Ok(terms) => terms?,
         Err(e) => {
             tracing::warn!(
@@ -112,7 +109,7 @@ pub(crate) fn flushed_terms_of(generation: &Generation, entity: EntityId) -> Opt
 /// value written through a sharing group's door and one through the owner's are read from the one
 /// column.
 pub(crate) fn flushed_scoped_of(
-    generation: &Generation,
+    shard: &Shard,
     entity: EntityId,
     family: &mosaica_store::manifest::ScopedScalar,
     owner_view: &str,
@@ -122,13 +119,13 @@ pub(crate) fn flushed_scoped_of(
     };
     let column = crate::filter::scoped_column_name(&family.name, owner_view);
     if !family.has_value_column() {
-        return generation
+        return shard
             .filter_columns
             .scoped_prose(&column, entity)
             .map(|prose| prose.map(mosaica_lifecycle::WalScalar::Utf8))
             .map_err(|e| crate::write::AcceptError::Unreadable(format!("'{column}': {e}")));
     }
-    let Some(stored) = generation.filter_columns.stored_value(&column, entity) else {
+    let Some(stored) = shard.filter_columns.stored_value(&column, entity) else {
         return Ok(None);
     };
     Ok(stored_as_wal(stored, &declared_of_scoped(family)))
@@ -287,33 +284,32 @@ pub(crate) fn held_scoped_value(
     owner_view: &str,
 ) -> Result<Option<mosaica_lifecycle::WalScalar>, crate::write::AcceptError> {
     let manifest = &generation.bundle.manifest;
+    let shard = generation.only_shard();
     let held = |value: mosaica_lifecycle::WalScalar| {
         (!scalar_is_absent(&value, declared)).then_some(value)
     };
-    let buffered = generation
+    let buffered = shard
         .buffer
         .rows_of(entity)
         .filter(|item| crate::write::scoped_owner_view_of(manifest, &item.view) == owner_view)
         .find_map(|item| item.scoped.get(at).cloned().and_then(held));
     match buffered {
         Some(value) => Ok(Some(value)),
-        None => Ok(flushed_scoped_of(generation, entity, family, owner_view)?.and_then(held)),
+        None => Ok(flushed_scoped_of(shard, entity, family, owner_view)?.and_then(held)),
     }
 }
 
 /// Every view `entity` holds a row in, flushed or buffered, sorted: what an edit carries, and
 /// what the executor compares with what the handler read.
-pub(crate) fn views_holding(generation: &Generation, entity: EntityId) -> Vec<String> {
-    let mut views: Vec<String> = generation
+pub(crate) fn views_holding(shard: &Shard, entity: EntityId) -> Vec<String> {
+    let mut views: Vec<String> = shard
         .buffer
         .rows_of(entity)
         .map(|item| item.view.clone())
         .collect();
-    for partition in generation.bundle.partitions.values() {
-        for (view, data) in &partition.views {
-            if data.row_space.row_of(entity).is_some() {
-                views.push(view.clone());
-            }
+    for (view, data) in &shard.data.views {
+        if data.row_space.row_of(entity).is_some() {
+            views.push(view.clone());
         }
     }
     views.sort_unstable();

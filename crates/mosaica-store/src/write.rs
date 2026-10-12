@@ -814,7 +814,7 @@ impl PagePlan {
     /// An empty plan over `[0, bound)`.
     ///
     /// **The bound ceiling is checked here, before any file exists.** A caller deriving a bound
-    /// from a corrupt `entity_id_high_water` gets a refusal from a `Vec` allocation, not from a
+    /// from a corrupt shard's `high_water` gets a refusal from a `Vec` allocation, not from a
     /// filled volume.
     pub fn new(bound: u64) -> io::Result<Self> {
         check_bound(bound)?;

@@ -25,11 +25,9 @@ use mosaica_filter::{Access, RecordBlob, RecordValue};
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_spatial::Bounds;
 use mosaica_store::open_bundle;
-use mosaica_types::IdentityKey;
 
 mod common;
 
-const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 const N: u64 = 40;
 
 /// The three blob-resident generation functions. Source 0 carries none of the three, so its
@@ -196,26 +194,12 @@ fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs 
             select: None,
             access: mosaica_build::config::AccessInput::relation(pairs.to_path_buf()),
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources: mosaica_build::config::AttributeSource::over(
             points.to_path_buf(),
             &schema,
         ),
-        out,
-        limit: None,
-        strict: false,
-        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&out)
     }
 }
 
@@ -230,20 +214,8 @@ fn build_with(schema: Schema, note: &dyn Fn(u64) -> Option<String>) -> tempfile:
     dir
 }
 
-fn current_prefix(out: &Path) -> String {
-    let current: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(out.join("CURRENT")).unwrap()).unwrap();
-    current["prefix"].as_str().unwrap().to_string()
-}
-
 fn record_dir(out: &Path) -> PathBuf {
-    let bundle = open_bundle(out).unwrap();
-    let phash = bundle.partitions.keys().next().unwrap().clone();
-    out.join(current_prefix(out))
-        .join("partitions")
-        .join(phash)
-        .join("attrs")
-        .join("record")
+    common::prefix_dir(out).join(common::SHARD.record_rel())
 }
 
 /// Every entity's blob row equals the fixture's own generation functions — field for field, tag
@@ -290,9 +262,8 @@ fn the_blob_files_are_under_the_manifest_digest() {
     let dir = build_with(blob_schema(), &note_of);
     let out = dir.path().join("bundle");
     let bundle = open_bundle(&out).unwrap();
-    let phash = bundle.partitions.keys().next().unwrap();
     for file in ["blocks.bin", "hasrow.roaring", "directory.arrow"] {
-        let key = format!("partitions/{phash}/attrs/record/{file}");
+        let key = format!("{}/{file}", common::SHARD.record_rel());
         assert!(
             bundle.manifest.files.contains_key(&key),
             "MANIFEST.files covers {key}; it holds {:?}",
@@ -350,7 +321,7 @@ fn refresh_digest(out: &Path, rel: &str) {
             .map(|b| format!("{b:02x}"))
             .collect::<String>()
     };
-    let prefix_dir = out.join(current_prefix(out));
+    let prefix_dir = common::prefix_dir(out);
     let bytes = std::fs::read(prefix_dir.join(rel)).expect("the damaged file reads back");
     let manifest_path = prefix_dir.join("MANIFEST.json");
     let mut manifest: serde_json::Value =
@@ -366,7 +337,7 @@ fn refresh_digest(out: &Path, rel: &str) {
     std::fs::write(
         out.join("CURRENT"),
         serde_json::to_vec_pretty(&serde_json::json!({
-            "prefix": current_prefix(out),
+            "prefix": common::current_prefix(out),
             "manifest_digest": hex(&manifest_bytes),
         }))
         .unwrap(),
@@ -407,17 +378,7 @@ fn verify_deep_refuses_a_blob_whose_bitmap_renames_a_rank() {
 
     let dir = build_with(blob_schema(), &note_of);
     let out = dir.path().join("bundle");
-    let rel = format!(
-        "partitions/{}/attrs/record/{}",
-        open_bundle(&out)
-            .unwrap()
-            .partitions
-            .keys()
-            .next()
-            .unwrap()
-            .clone(),
-        mosaica_filter::RECORD_HASROW_FILE
-    );
+    let rel = format!("{}/{}", common::SHARD.record_rel(), mosaica_filter::RECORD_HASROW_FILE);
     let hasrow_path = record_dir(&out).join(mosaica_filter::RECORD_HASROW_FILE);
     let mut bitmap =
         Bitmap::try_deserialize::<Portable>(&std::fs::read(&hasrow_path).unwrap()).unwrap();

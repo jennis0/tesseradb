@@ -155,7 +155,9 @@ fn read_run(cx: &PageCx<'_>, plan: &FieldPlan, rows: &[Taken], budget: usize) ->
     for (slot, field) in plan.named.iter().enumerate() {
         named.push(match &field.home {
             Home::Rendered => rendered_values(segments, field, rows),
-            Home::ValueColumn(column) => generation
+            Home::ValueColumn(column) => open
+                .served
+                .shard
                 .filter_columns
                 .stored_values(column, rows.iter().map(|row| row.entity)),
             Home::Record(tag) => {
@@ -176,7 +178,8 @@ fn read_run(cx: &PageCx<'_>, plan: &FieldPlan, rows: &[Taken], budget: usize) ->
         // The rows whose values are held, by run position, with their bytes.
         let mut kept: BinaryHeap<(usize, usize)> = BinaryHeap::new();
         let mut held = 0usize;
-        generation
+        open.served
+            .shard
             .filter_columns
             .records()
             .for_each_row_in(&croaring::Bitmap::of(&entities), &mut |entity, fields| {
@@ -218,7 +221,13 @@ fn read_run(cx: &PageCx<'_>, plan: &FieldPlan, rows: &[Taken], budget: usize) ->
                 SystemValues::Labels(
                     rows.iter()
                         .map(|row| {
-                            engine.labels_for(generation, open.served.session, row.entity, &mut parsed)
+                            engine.labels_for(
+                                generation,
+                                open.served.shard,
+                                open.served.session,
+                                row.entity,
+                                &mut parsed,
+                            )
                         })
                         .collect::<Result<_>>()?,
                 )

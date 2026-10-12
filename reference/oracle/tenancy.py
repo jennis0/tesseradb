@@ -42,11 +42,8 @@ class HolderCount:
         """The count for a `Bundle` opened as built, before a server has written to it."""
         if bundle.identity_key is None:
             raise ValueError("the bundle's MANIFEST carries no `identity`; rebuild it to read one")
-        return cls(
-            key=bundle.identity_key,
-            shard=bundle.identity_shard_id,
-            built=int(bundle.manifest["entity_id_high_water"]),
-        )
+        record = bundle.shard_record()
+        return cls(key=bundle.identity_key, shard=record["id"], built=int(record["high_water"]))
 
     def latest(self, number: int) -> int | None:
         """The tenancy of the latest item to hold `number`, or `None` where none has."""

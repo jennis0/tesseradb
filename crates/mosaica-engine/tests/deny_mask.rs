@@ -1,10 +1,5 @@
-//! The deny mask rides the generation (deny-lifecycle memo §1, §3).
-//!
-//! Composition used to answer the row-space question — *is this row denied* — by walking the deny
-//! sets and resolving `row_of` per denied entity, on every request. That made per-request work grow
-//! with denies **ever accepted**, which is a cost curve nothing retires: deletions wait on a
-//! compaction fold that does not exist. `Generation::denied` is the same fact as
-//! a row-space bitmap, folded into `compose`'s existing diffs with one `andnot`.
+//! The deny mask, `Shard::denied`: the deny sets as a row-space bitmap, subtracted in `compose`
+//! with one `andnot`.
 //!
 //! **Two representations of one truth, so the differential test is the licence for holding them.**
 //! The entity-space stores stay authoritative and `compose::verdict` stays the single answer
@@ -107,6 +102,7 @@ fn visible_count(engine: &Engine, session: &mosaica_engine::Session) -> u64 {
 fn denied_rows(engine: &Engine) -> croaring::Bitmap {
     engine
         .generation()
+        .only_shard()
         .denied()
         .get("s0")
         .expect("every view the bundle carries has an entry")
@@ -147,9 +143,10 @@ fn row_of(engine: &Engine, entity: EntityId) -> u32 {
     engine
         .generation()
         .bundle
-        .partitions
-        .values()
-        .find_map(|p| p.views["s0"].row_space.row_of(entity))
+        .only_shard()
+        .views["s0"]
+        .row_space
+        .row_of(entity)
         .expect("the entity has a row")
         .raw()
 }
@@ -413,9 +410,9 @@ fn a_join_published_before_the_entitys_own_row_is_drawn_from_the_buffer() {
     let view_of = |view: &str| {
         generation
             .bundle
-            .partitions
-            .values()
-            .find_map(|p| p.views.get(view))
+            .only_shard()
+            .views
+            .get(view)
             .expect("the view is in the generation")
     };
     assert!(
@@ -503,9 +500,9 @@ fn an_entrys_whole_life_serves_the_same_answer_at_every_step() {
         engine
             .generation()
             .bundle
-            .partitions
-            .values()
-            .find_map(|p| p.views.get(view))
+            .only_shard()
+            .views
+            .get(view)
             .expect("the view is in the generation")
             .row_space
             .row_of(entity)

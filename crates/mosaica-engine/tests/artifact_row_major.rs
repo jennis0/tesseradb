@@ -154,36 +154,6 @@ impl Fixture {
     fn member(&self, source_id: u64) -> EntityId {
         self.members(std::iter::once(source_id))[0]
     }
-
-    fn row_column_files(&self, engine: &Engine) -> Vec<std::path::PathBuf> {
-        let dir = self
-            .root
-            .join(&engine.generation().prefix)
-            .join("partitions")
-            .join("default")
-            .join("row-column");
-        std::fs::read_dir(&dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .collect()
-    }
-
-    fn tile_index_files(&self, engine: &Engine) -> Vec<std::path::PathBuf> {
-        let dir = self
-            .root
-            .join(&engine.generation().prefix)
-            .join("partitions")
-            .join("default")
-            .join("tile-index");
-        std::fs::read_dir(&dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .collect()
-    }
 }
 
 /// One served artifact, as a client sees it and with every identifier resolved to something two
@@ -289,9 +259,7 @@ fn wait_for_publication(fx: &Fixture, engine: &Engine, files: usize) {
     let dir = fx
         .root
         .join(&engine.generation().prefix)
-        .join("partitions")
-        .join("default")
-        .join("members");
+        .join(common::SHARD.members_rel());
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
         let held = std::fs::read_dir(&dir).into_iter().flatten().count();
@@ -669,11 +637,11 @@ fn a_label_pin_on_an_overlapping_level_falls_back_and_says_so() {
     fold(&engine);
     let _ = sweep(&engine);
     assert!(
-        fx.row_column_files(&engine).is_empty(),
+        live_shard_files(&fx.root, &engine, "row-column").is_empty(),
         "no column is written for a level whose memberships do not partition"
     );
     assert!(
-        !fx.tile_index_files(&engine).is_empty(),
+        !live_shard_files(&fx.root, &engine, "tile-index").is_empty(),
         "and the artifact-major structures are still written for it"
     );
 }
@@ -711,11 +679,11 @@ fn a_fold_over_a_row_major_level_writes_its_column_and_changes_no_answer() {
         "a fold that writes a level's column changes nothing a client sees"
     );
     assert!(
-        !fx.row_column_files(&engine).is_empty(),
+        !live_shard_files(&fx.root, &engine, "row-column").is_empty(),
         "the fold wrote the row-major column"
     );
     assert!(
-        fx.tile_index_files(&engine).is_empty(),
+        live_shard_files(&fx.root, &engine, "tile-index").is_empty(),
         "and wrote no tile index for a level that has nothing to index: a level served from its \
          column derives its extents from the column's own bytes"
     );
@@ -723,12 +691,14 @@ fn a_fold_over_a_row_major_level_writes_its_column_and_changes_no_answer() {
     let extents: Vec<_> = engine
         .generation()
         .bundle
-        .partitions
-        .values()
-        .flat_map(|p| p.manifest.derived_extents.iter().cloned())
+        .only_shard()
+        .record
+        .derived_extents
+        .iter()
         .filter(|e| matches!(e.form, mosaica_store::manifest::DerivedForm::RowColumn { .. }))
+        .cloned()
         .collect();
-    assert_eq!(extents.len(), fx.row_column_files(&engine).len());
+    assert_eq!(extents.len(), live_shard_files(&fx.root, &engine, "row-column").len());
     for extent in &extents {
         assert_eq!(
             extent.form,
@@ -983,7 +953,7 @@ fn flat_artifact_entity(engine: &Engine, key: &str) -> EntityId {
 /// The row of each of `sources` in the served row space, for a column check.
 fn rows_of(fx: &Fixture, engine: &Engine, sources: std::ops::Range<u64>) -> Vec<u32> {
     let generation = engine.generation();
-    let space = &generation.bundle.partitions["default"].views["s0"].row_space;
+    let space = &generation.bundle.only_shard().views["s0"].row_space;
     fx.members(sources)
         .into_iter()
         .map(|entity| space.row_of(entity).expect("every member has a row").raw())
@@ -1015,7 +985,7 @@ fn a_fold_that_retires_a_member_writes_the_column_the_publication_transposes() {
         .expect("the delete is accepted");
     fold(&engine);
     assert!(
-        !fx.row_column_files(&engine).is_empty(),
+        !live_shard_files(&fx.root, &engine, "row-column").is_empty(),
         "the fold wrote the level's column although the retirement moved the level"
     );
     assert_eq!(
@@ -1163,7 +1133,7 @@ fn a_column_the_level_has_moved_past_is_completed_rather_than_recomposed() {
     fold(&engine);
     let _ = sweep(&engine);
     assert!(
-        !fx.row_column_files(&engine).is_empty(),
+        !live_shard_files(&fx.root, &engine, "row-column").is_empty(),
         "the fold wrote a column to be behind"
     );
 
