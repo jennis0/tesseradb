@@ -232,9 +232,6 @@ pub(super) fn runtime_layers(
 pub struct ShardExtents<'a> {
     pub attrs: &'a [mosaica_store::manifest::AttrExtent],
     pub records: &'a [mosaica_store::manifest::RecordExtent],
-    /// An artifact's content extents, listed apart from a point's because their ownership differs
-    /// rather than their bytes.
-    pub artifact_records: &'a [mosaica_store::manifest::RecordExtent],
     pub entity_terms: &'a [mosaica_store::manifest::EntityTermsExtent],
     pub texts: &'a [mosaica_store::manifest::TextExtent],
 }
@@ -244,7 +241,6 @@ impl<'a> ShardExtents<'a> {
         ShardExtents {
             attrs: &record.attr_extents,
             records: &record.record_extents,
-            artifact_records: &record.artifact_record_extents,
             entity_terms: &record.entity_terms_extents,
             texts: &record.text_extents,
         }
@@ -400,13 +396,9 @@ impl FilterColumns {
                 columns.insert(name, column);
             }
         }
-        // Artifact content extents hold the same format and reader as a point's, listed
-        // separately because ownership differs, not bytes. Safe to open together because the two
-        // never share an id: artifact ids descend from the ceiling, point ids ascend from zero.
         let extent_paths: Vec<RecordExtentPaths> = extents
             .records
             .iter()
-            .chain(extents.artifact_records.iter())
             .map(|e| RecordExtentPaths {
                 blocks: prefix_dir.join(&e.blocks),
                 hasrow: prefix_dir.join(&e.hasrow),

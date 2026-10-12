@@ -190,11 +190,10 @@ pub enum ChangeOp {
     Unsuppress,
 }
 
-/// One entity's disposition inside a [`WalRecord::OverlaySnapshot`].
+/// One target's disposition inside a [`WalRecord::OverlaySnapshot`]: an item's entity in its
+/// shard, or an artifact's or a layer's in its layer space, each restored into its own overlay.
 ///
-/// Two shape decisions here are not free choices, and both are load-bearing for rotation.
-///
-/// **Keyed by [`EntityId`], never by an identifier a caller holds.** A snapshot keyed by one would
+/// **Keyed by target, never by an identifier a caller holds.** A snapshot keyed by one would
 /// re-resolve it at replay, and an entity deleted before it was ever flushed may resolve to
 /// nothing — so the node would refuse to open. A snapshot is state that was already resolved once;
 /// resolving it again can only lose. It is the same reason [`WalRecord::ChangeBatch`] is keyed by
@@ -203,7 +202,7 @@ pub enum ChangeOp {
 /// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OverlaySnapshotEntry {
-    pub entity_id: EntityId,
+    pub target: Target,
     pub op: ChangeOp,
 }
 
@@ -1074,8 +1073,9 @@ const WAL_MAGIC: [u8; 4] = *b"MWAL";
 // **34**: the magic is `MWAL`. A log at 33 is refused.
 // **35**: the variant table gained `ShardsDeclare`, a shard size declared while the service runs.
 // A log at 34 is refused.
-// **36**: `LayerCreate` carries the layer's space, and a `ChangeBatch` names each change's target,
-// an item in its shard or an artifact in its layer space. A log at 35 is refused.
+// **36**: `LayerCreate` carries the layer's space, and a `ChangeBatch` and an `OverlaySnapshot`
+// name each entry's target, an item in its shard or an artifact in its layer space. A log at 35 is
+// refused.
 const WAL_VERSION: u16 = 36;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already

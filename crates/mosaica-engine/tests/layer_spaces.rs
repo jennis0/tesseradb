@@ -271,4 +271,140 @@ fn a_dropped_layers_space_is_not_given_again_after_a_rotation_and_a_restart() {
     });
 }
 
+/// The deny state the side-manifest records for `space`: `(deleted, suppressed)` entity ids.
+fn space_deny(fx: &Fixture, space: LayerSpace) -> (Vec<u32>, Vec<u32>) {
+    let manifest = side_manifest(&fx.root);
+    let Some(record) = manifest.layer_spaces.iter().find(|r| r.space == space) else {
+        return (Vec::new(), Vec::new());
+    };
+    let ids = |set: &mosaica_store::manifest::EntitySet| {
+        set.entities().expect("decodes").iter().collect::<Vec<u32>>()
+    };
+    (ids(&record.tombstones), ids(&record.deny))
+}
+
+/// An artifact's and a layer's deny is kept in its layer space's overlay, through a publication, a
+/// WAL rotation that reclaims the change records and a restart: the shard's deny state never holds
+/// them, and the restart opens with both still denied.
+#[test]
+fn an_artifacts_and_a_layers_deny_survive_a_rotation_and_a_restart() {
+    let fx = fixture();
+    let (artifact, kept, suppressed_layer) = {
+        let engine = fx.open();
+        let (_, artifact) = register_and_publish(&fx, &engine, "clusters/a");
+        let (layer_b, _) = register_and_publish(&fx, &engine, "clusters/b");
+        let target = artifact_entity(&engine, artifact);
+        let layer_target = artifact_entity(&engine, layer_b);
+        engine
+            .accept_changes(vec![
+                (target, ChangeOp::Suppress),
+                (layer_target, ChangeOp::Suppress),
+            ])
+            .unwrap();
+        let Target::Artifact(space, entity) = target else {
+            panic!("an artifact's target")
+        };
+        tick_until(&engine, "the spaces' deny state's publication", WAIT, || {
+            space_deny(&fx, space).1 == vec![entity.raw() as u32]
+        });
+        assert!(
+            side_manifest(&fx.root).only_shard().deny.entities().unwrap().is_empty(),
+            "the shard's deny state holds no artifact or layer"
+        );
+        // Twice: the first rotation seals the member holding the changes, the second reclaims it.
+        tick(&engine);
+        tick(&engine);
+        (artifact, target, space_of(layer_b))
+    };
+    let changes = mosaica_lifecycle::Wal::open(&fx.wal)
+        .unwrap()
+        .records()
+        .filter(|r| matches!(r, Ok((_, WalRecord::ChangeBatch { .. }))))
+        .count();
+    assert_eq!(changes, 0, "only the rotation's snapshot carries the denies");
+
+    let engine = fx.open();
+    assert!(!card(&engine, artifact), "the artifact is still suppressed");
+    assert_eq!(engine.resolve_targets(&[artifact]).unwrap(), vec![Some(kept)]);
+    assert_eq!(
+        reachable(&engine),
+        vec!["clusters/a".to_string()],
+        "the layer in space {suppressed_layer} is still suppressed"
+    );
+    let status = engine.generation_status();
+    assert_eq!((status.overlay_depth, status.layer_spaces.depth), (0, 2));
+}
+
+/// A fold removes a deleted artifact's record from its layer space and its deletion from the
+/// space's deny state in the same publication, keeps every other artifact at its ordinal, and a
+/// restart serves what the fold left.
+#[test]
+fn a_fold_removes_a_deleted_artifacts_record_from_its_space() {
+    let fx = fixture();
+    let (deleted, kept) = {
+        let engine = fx.open();
+        engine.register_layer(declaration("clusters/a")).unwrap();
+        let ids = engine
+            .publish_artifacts(
+                "clusters/a".into(),
+                0,
+                vec![
+                    IncomingArtifact::from_entities(Some("c0".into()), fx.members(0..40)),
+                    IncomingArtifact::from_entities(Some("c1".into()), fx.members(40..80)),
+                ],
+            )
+            .unwrap();
+        let target = artifact_entity(&engine, ids[0]);
+        engine
+            .accept_changes(vec![(target, ChangeOp::Delete)])
+            .unwrap();
+        let status = engine.generation_status();
+        assert_eq!(
+            (status.retirable_deletions, status.layer_spaces.retirable),
+            (0, 1)
+        );
+        fold(&engine);
+        let status = engine.generation_status();
+        assert_eq!(status.layer_spaces.retirable, 0);
+        assert_eq!(engine.published_artifacts(), 1);
+        assert_eq!(space_deny(&fx, space_of(ids[0])), (Vec::new(), Vec::new()));
+        (ids[0], ids[1])
+    };
+
+    let engine = fx.open();
+    assert!(!card(&engine, deleted));
+    assert!(card(&engine, kept));
+    assert_eq!(engine.published_artifacts(), 1);
+    let at = engine
+        .locate_artifact(artifact_entity(&engine, kept))
+        .unwrap();
+    assert_eq!((at.ordinal, at.key.as_deref()), (1, Some("c1")));
+}
+
+/// A dropped layer's space leaves the next publication: no layer space record names it, and no
+/// member pack of the shard does.
+#[test]
+fn a_dropped_layers_space_leaves_the_next_publication() {
+    let fx = fixture();
+    let engine = fx.open();
+    let (dropped, _) = register_and_publish(&fx, &engine, "clusters/a");
+    let (kept, _) = register_and_publish(&fx, &engine, "clusters/b");
+    tick_until(&engine, "both spaces' publication", WAIT, || {
+        side_manifest(&fx.root).layer_spaces.len() == 2
+    });
+    engine.drop_layer("clusters/a".into()).unwrap();
+    tick_until(&engine, "the drop's publication", WAIT, || {
+        side_manifest(&fx.root).layer_spaces.len() == 1
+    });
+    let manifest = side_manifest(&fx.root);
+    assert_eq!(manifest.layer_spaces[0].space, space_of(kept));
+    assert!(!manifest.layer_spaces[0].record_extents.is_empty());
+    assert!(manifest
+        .only_shard()
+        .membership_extents
+        .iter()
+        .all(|extent| extent.space == space_of(kept)));
+    assert!(manifest.partition.next_layer_space > space_of(dropped).raw());
+}
+
 const WAIT: std::time::Duration = std::time::Duration::from_secs(30);

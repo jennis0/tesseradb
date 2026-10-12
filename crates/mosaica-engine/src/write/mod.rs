@@ -50,11 +50,10 @@ use mosaica_lifecycle::overlay::Replay;
 use mosaica_lifecycle::registry::LayerRegistry;
 use mosaica_lifecycle::wal::{ChangeOp, ExecutorWal, Wal, WalError, WalRecord, WalScalar};
 use mosaica_lifecycle::window::{ClosedEntry, CommitWindow, FragmentationTally, WindowEntry};
-use mosaica_lifecycle::{IngestBuffer, Overlay};
+use mosaica_lifecycle::{IngestBuffer, Overlay, Overlays};
 
 use crate::cache::RowProjectionCache;
 use crate::cache::KEEP_SUPERSEDED_GENERATIONS;
-use crate::edited::ARTIFACT_SHARD;
 use crate::geometry::{check_publishable, GeometryPublication, GeometryRefused};
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_store::manifest::{EntitySet, ManifestVocabulary, SegmentsManifest};
@@ -441,32 +440,50 @@ impl WritePath {
         // is where each held artifact list starts: see [`SideManifests`] for why they are held
         // rather than re-cloned from a (stale) live manifest at each publication.
         // A dropped layer's extents are not carried, whether or not its name is registered again.
-        let (seeded_membership_extents, seeded_derived_extents, seeded_content_extents) =
-            match generation.load().bundle.shard(ARTIFACT_SHARD) {
-                Some(shard) => {
-                    let registered = |layer: &str, space: LayerSpace| {
-                        live.registered_layer(layer)
-                            .is_some_and(|held| held.space == space)
-                    };
-                    let record = &shard.record;
-                    (
-                        record
-                            .membership_extents
-                            .iter()
-                            .filter(|e| registered(&e.layer, e.space))
-                            .cloned()
-                            .collect(),
-                        record
-                            .derived_extents
-                            .iter()
-                            .filter(|e| registered(&e.layer, e.space))
-                            .cloned()
-                            .collect(),
-                        record.artifact_record_extents.clone(),
-                    )
-                }
-                None => Default::default(),
+        let (seeded_membership_extents, seeded_derived_extents, seeded_spaces) = {
+            let generation = generation.load();
+            let registered = |layer: &str, space: LayerSpace| {
+                live.registered_layer(layer)
+                    .is_some_and(|held| held.space == space)
             };
+            let mut members = Vec::new();
+            let mut derived = Vec::new();
+            let mut spaces = std::collections::BTreeMap::new();
+            for partition in generation.bundle.partitions.values() {
+                let record = &partition.only_shard().record;
+                members.extend(
+                    record
+                        .membership_extents
+                        .iter()
+                        .filter(|e| registered(&e.layer, e.space))
+                        .cloned(),
+                );
+                let held = partition
+                    .layer_spaces
+                    .iter()
+                    .flat_map(|space| space.held_shapes.iter());
+                derived.extend(
+                    record
+                        .derived_extents
+                        .iter()
+                        .chain(held)
+                        .filter(|e| registered(&e.layer, e.space))
+                        .cloned(),
+                );
+                for space in &partition.layer_spaces {
+                    if live.layer_in_space(space.space).is_some() {
+                        spaces.insert(
+                            space.space,
+                            executor::HeldSpace {
+                                record_extents: space.record_extents.clone(),
+                                content_extents: space.content_extents.clone(),
+                            },
+                        );
+                    }
+                }
+            }
+            (members, derived, spaces)
+        };
         // What replay left in the log and no manifest carries: the same publication is owed for
         // it, and without this a node that restarted between a batch and its tick would wait for
         // the next batch to write one.
@@ -502,7 +519,7 @@ impl WritePath {
                         next_manifest_n,
                         seeded_membership_extents,
                         seeded_derived_extents,
-                        seeded_content_extents,
+                        seeded_spaces,
                         growth_unpublished,
                     ),
                     coalesce: executor::Background::sharing(

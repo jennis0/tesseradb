@@ -25,50 +25,116 @@ pub(super) fn view_row_space<'a>(
         .map(|v| &v.row_space)
 }
 
-/// Write one membership extent per packed level into the prefix and fsync it, returning the
-/// manifest entries. The file half of [`Executor::write_membership_extents`] and
-/// [`Executor::rewrite_membership_extents`], which differ only in where `ready` comes from.
-///
-/// The layer name never reaches the filename, since a name-derived path could escape the
-/// directory or collide; the manifest entry carries the name instead. The directory listing is
-/// fsynced too, so a crash cannot leave a manifest naming a file that was never written. A level
-/// of a layer `space_of` names no space for is registered no longer and is not written.
-pub(super) fn pack_membership_extents(
+/// What [`pack_levels`] wrote: the shard's member packs and each layer space's record packs.
+#[derive(Default)]
+pub(super) struct PackedLevels {
+    pub(super) members: Vec<mosaica_store::manifest::MembershipExtent>,
+    pub(super) records:
+        std::collections::BTreeMap<LayerSpace, Vec<mosaica_store::manifest::RecordPackExtent>>,
+}
+
+/// Write each packed level's two packs into the prefix, the records into its layer space and the
+/// members into `layout`'s shard, and fsync them, returning the manifest entries. The file half of
+/// [`Executor::write_membership_extents`] and [`Executor::rewrite_membership_extents`], which
+/// differ only in where `ready` comes from. A level of a layer `space_of` names no space for is
+/// registered no longer and is not written.
+pub(super) fn pack_levels(
     prefix_dir: &std::path::Path,
     layout: ShardLayout<'_>,
     n: u64,
     ready: Vec<mosaica_lifecycle::membership::PendingExtent>,
     space_of: impl Fn(&str) -> Option<LayerSpace>,
-) -> mosaica_store::Result<Vec<mosaica_store::manifest::MembershipExtent>> {
-    if ready.is_empty() {
-        return Ok(Vec::new());
+) -> mosaica_store::Result<PackedLevels> {
+    let mut packed = PackedLevels::default();
+    for (layer, level, ordinal_lo, blobs) in ready {
+        let Some(space) = space_of(&layer) else {
+            continue;
+        };
+        let mut writer = mosaica_store::membership::LevelPackWriter::create(
+            prefix_dir,
+            layout,
+            &layer,
+            space,
+            n,
+            level,
+            ordinal_lo,
+            blobs.len() as u32,
+        )?;
+        for (record, members) in &blobs {
+            writer.push(record, members)?;
+        }
+        let (records, members) = writer.finish()?;
+        packed.records.entry(space).or_default().push(records);
+        packed.members.push(members);
     }
-    let dir_rel = layout.members_rel();
-    let dir = prefix_dir.join(&dir_rel);
+    Ok(packed)
+}
+
+/// Write `rows` as one record-blob extent under `layout`'s content directory, named for the
+/// publication `n`, and fsync its three files.
+pub(super) fn write_content_extent(
+    prefix_dir: &std::path::Path,
+    layout: mosaica_store::LayerSpaceLayout<'_>,
+    n: u64,
+    mut rows: Vec<(EntityId, Vec<(u16, String)>)>,
+) -> mosaica_store::Result<mosaica_store::manifest::RecordExtent> {
+    let content_rel = layout.content_rel();
+    let dir = prefix_dir.join(&content_rel);
     std::fs::create_dir_all(&dir).map_err(|source| mosaica_store::StoreError::Io {
         path: dir.clone(),
         source,
     })?;
-    let mut entries = Vec::with_capacity(ready.len());
-    for (index, (layer, level, ordinal_lo, blobs)) in ready.into_iter().enumerate() {
-        let Some(space) = space_of(&layer) else {
-            continue;
-        };
-        let name = format!("members-{n:06}-{index:03}.tsmb");
-        let count = blobs.len() as u32;
-        let bytes = mosaica_store::membership::pack(ordinal_lo, &blobs);
-        mosaica_store::write_and_fsync(&dir.join(&name), &bytes)?;
-        entries.push(mosaica_store::manifest::MembershipExtent {
-            path: format!("{dir_rel}/{name}"),
-            layer,
-            space,
-            level,
-            ordinal_lo,
-            count,
-        });
+    let extent = mosaica_store::manifest::RecordExtent {
+        blocks: format!("{content_rel}/artifacts-{n:06}.blocks.bin"),
+        hasrow: format!("{content_rel}/artifacts-{n:06}.hasrow.roaring"),
+        directory: format!("{content_rel}/artifacts-{n:06}.directory.arrow"),
+    };
+    let io = |path: &std::path::Path| {
+        let path = path.to_path_buf();
+        move |source| mosaica_store::StoreError::Io {
+            path: path.clone(),
+            source,
+        }
+    };
+    let blocks = prefix_dir.join(&extent.blocks);
+    let hasrow = prefix_dir.join(&extent.hasrow);
+    let directory = prefix_dir.join(&extent.directory);
+    let mut writer = mosaica_filter_write::RecordBlobWriter::create(
+        &blocks,
+        &hasrow,
+        &directory,
+        mosaica_filter::RECORD_BLOCK_TARGET,
+    )
+    .map_err(io(&blocks))?;
+    // Ascending by entity, which the blob's block directory requires and publication order is not.
+    rows.sort_by_key(|(entity, _)| entity.raw());
+    for (entity, fields) in rows {
+        let entity = u32::try_from(entity.raw()).map_err(|_| {
+            mosaica_store::StoreError::MalformedBundle {
+                detail: format!(
+                    "artifact entity {} does not fit the u32 entity space",
+                    entity.raw()
+                ),
+            }
+        })?;
+        let fields: Vec<mosaica_filter::RecordFieldRef<'_>> = fields
+            .iter()
+            .map(|(tag, value)| mosaica_filter::RecordFieldRef {
+                tag: *tag,
+                value: mosaica_filter::RecordValueRef::Utf8(value),
+            })
+            .collect();
+        writer.push_row(entity, &fields).map_err(io(&blocks))?;
+    }
+    writer.finish().map_err(io(&blocks))?;
+    // `finish` syncs the blocks and not the two files that address them, and a torn addressing
+    // file refuses the space's whole record stack at open.
+    for path in [&hasrow, &directory] {
+        let file = std::fs::File::open(path).map_err(io(path))?;
+        file.sync_all().map_err(io(path))?;
     }
     mosaica_store::fsync_dir(&dir)?;
-    Ok(entries)
+    Ok(extent)
 }
 
 /// A record extent's files, resolved against the prefix directory that holds them. All three, and
@@ -567,7 +633,11 @@ impl Executor {
             tracing::warn!("discarding a completed merge that no longer rebases");
             return;
         }
-        write_deny_state(&mut manifest, &live.only_shard().overlay);
+        write_deny_state(
+            &mut manifest,
+            &live.only_shard().overlay,
+            &live.layer_spaces,
+        );
         write_vocabulary_extensions(
             &mut manifest,
             &live.vocabularies,
@@ -839,12 +909,9 @@ impl Executor {
         let records = if completed.record.is_none() {
             None
         } else {
-            // Both lists, one stack, as the open composes them: an artifact's content extents
-            // hold the same format and the same reader, and the two never share an entity.
             let extents: Vec<mosaica_filter::RecordExtentPaths> = record
                 .record_extents
                 .iter()
-                .chain(record.artifact_record_extents.iter())
                 .map(|e| record_extent_paths(&prefix_dir, e))
                 .collect();
             // The columns whose base no fold has written yet, which the schema owes no base
@@ -887,7 +954,7 @@ impl Executor {
         };
         // Complete current state, serialised fresh from the overlay this publication carries, the
         // same rule every other manifest write follows.
-        write_deny_state(&mut manifest, &shard.overlay);
+        write_deny_state(&mut manifest, &shard.overlay, &live.layer_spaces);
         write_vocabulary_extensions(
             &mut manifest,
             &live.vocabularies,
@@ -1633,49 +1700,67 @@ impl Executor {
         )> = Vec::new();
         for (partition, partition_data) in &live.bundle.partitions {
             let mut manifest = partition_data.side_manifest();
-            write_deny_state(&mut manifest, &live.only_shard().overlay);
-            // Membership extents are written before the manifest that names them, which is the
-            // whole of their durability contract: a manifest naming a missing extent refuses at
+            write_deny_state(
+                &mut manifest,
+                &live.only_shard().overlay,
+                &live.layer_spaces,
+            );
+            // Record and member packs are written before the manifest that names them, which is
+            // the whole of their durability contract: a manifest naming a missing pack refuses at
             // open, so the file has to be durable first. A failure here abandons the publication
             // rather than committing a manifest that omits them. An omission would read as no
             // artifact ever having been published, and rotation would then be free to reclaim the
             // log records holding the only other copy.
-            // Allocated first so the extents can be named after the publication that carries them:
+            // Allocated first so the packs can be named after the publication that carries them:
             // one sequence, not two, and a file whose name says which manifest introduced it.
             let n = self.side_manifests.take_manifest_n();
             let prefix_dir = self.prefix_dir(&live);
-            let published = match self.write_membership_extents(&prefix_dir, partition, n) {
-                Ok(published) => published,
+            let packed = match self.write_membership_extents(&prefix_dir, partition, n) {
+                Ok(packed) => packed,
                 Err(e) => {
                     tracing::error!(
                         error = %e,
                         partition = %partition,
-                        "ALARM: could not write the artifact membership extents; the memberships \
-                         stay WAL-durable and the log stays pinned, and the write is retried at the \
-                         next tick"
+                        "ALARM: could not write the artifact record and member packs; the \
+                         memberships stay WAL-durable and the log stays pinned, and the write is \
+                         retried at the next tick"
                     );
                     return;
                 }
             };
-            // Onto the held list; [`Executor::commit_side_manifest`] restates it into the manifest
-            // below.
+            // Onto the held lists; [`Executor::commit_side_manifest`] restates them into the
+            // manifest below.
             self.side_manifests
                 .membership_extents
-                .extend(published.clone());
-            if !published.is_empty() {
-                written.push((prefix_dir.clone(), published));
+                .extend(packed.members.clone());
+            for (space, records) in packed.records {
+                self.side_manifests
+                    .spaces
+                    .entry(space)
+                    .or_default()
+                    .record_extents
+                    .extend(records);
             }
-            // Supplied content goes into the record blob, the store points already use, in
-            // extents of its own but on the same list and behind the same reader. Artifact and
-            // point entities are two regions growing towards each other, so they stay disjoint,
-            // the rows never collide, and each side reads its tags against its own declaration.
-            match self.write_content_extent(&prefix_dir, partition, live.bundle.partitions.len(), n)
-            {
-                // Onto the held list, as the memberships are: an artifact whose content extent is
+            if !packed.members.is_empty() {
+                written.push((prefix_dir.clone(), packed.members));
+            }
+            // Supplied content goes into each layer space's own record blob, in the format and
+            // behind the reader points use.
+            let partitions = live.bundle.partitions.len();
+            match self.write_content_extents(&prefix_dir, partition, partitions, n) {
+                // Onto the held lists, as the memberships are: an artifact whose content extent is
                 // un-named comes back with its description unreadable and is withheld from every
                 // viewer, with the log already released.
-                Ok(Some(extent)) => self.side_manifests.artifact_record_extents.push(extent),
-                Ok(None) => {}
+                Ok(extents) => {
+                    for (space, extent) in extents {
+                        self.side_manifests
+                            .spaces
+                            .entry(space)
+                            .or_default()
+                            .content_extents
+                            .push(extent);
+                    }
+                }
                 Err(e) => {
                     tracing::error!(
                         error = %e,
@@ -1749,25 +1834,19 @@ impl Executor {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Write every not-yet-published artifact's supplied content as one record-blob extent.
-    ///
-    /// The same store, format and reader as a point's blob-resident fields, so filter and search
-    /// reach artifact properties the same way they reach a document's.
-    ///
-    /// The access rule differs, though the store is shared safely: a document's field is visible
-    /// to whoever may see the document, an artifact's content to whoever contains its generating
-    /// set entirely. The two never share an entity, so which rule governs a row is a range check
-    /// on its id.
-    pub(super) fn write_content_extent(
+    /// Write every not-yet-published artifact's supplied content as one record-blob extent in each
+    /// layer space that has any, in the format and behind the reader a point's blob-resident
+    /// fields use, so filter and search reach artifact properties the way they reach a document's.
+    pub(super) fn write_content_extents(
         &self,
         prefix_dir: &std::path::Path,
         partition: &str,
         partitions: usize,
         n: u64,
-    ) -> mosaica_store::Result<Option<mosaica_store::manifest::RecordExtent>> {
+    ) -> mosaica_store::Result<Vec<(LayerSpace, mosaica_store::manifest::RecordExtent)>> {
         let rows = self.live.unpublished_content();
         if rows.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
         // An artifact belongs to no partition, and this loop runs once per partition, so a second
         // partition would receive an extent holding the same artifact entities: two layers of one
@@ -1785,89 +1864,35 @@ impl Executor {
                 ),
             });
         }
-
-        let extents_rel = ShardLayout::new(partition, ARTIFACT_SHARD).record_extents_rel();
-        let dir = prefix_dir.join(&extents_rel);
-        std::fs::create_dir_all(&dir).map_err(|source| mosaica_store::StoreError::Io {
-            path: dir.clone(),
-            source,
-        })?;
-        let extent = mosaica_store::manifest::RecordExtent {
-            blocks: format!("{extents_rel}/artifacts-{n:06}.blocks.bin"),
-            hasrow: format!("{extents_rel}/artifacts-{n:06}.hasrow.roaring"),
-            directory: format!("{extents_rel}/artifacts-{n:06}.directory.arrow"),
-        };
-        let io = |path: &std::path::Path| {
-            let path = path.to_path_buf();
-            move |source| mosaica_store::StoreError::Io {
-                path: path.clone(),
-                source,
+        let mut by_space: std::collections::BTreeMap<LayerSpace, Vec<_>> = Default::default();
+        for (layer, entity, fields) in rows {
+            if let Some(space) = self.live.space_of(&layer) {
+                by_space.entry(space).or_default().push((entity, fields));
             }
-        };
-        let blocks = prefix_dir.join(&extent.blocks);
-        let hasrow = prefix_dir.join(&extent.hasrow);
-        let directory = prefix_dir.join(&extent.directory);
-        let mut writer = mosaica_filter_write::RecordBlobWriter::create(
-            &blocks,
-            &hasrow,
-            &directory,
-            mosaica_filter::RECORD_BLOCK_TARGET,
-        )
-        .map_err(io(&blocks))?;
-        // Ascending by entity, which the blob's block directory requires. Artifact ids descend as
-        // they are allocated, since the row-less region grows downward, so publication order is
-        // exactly the wrong order here, and sorting is not an optimisation.
-        let mut rows = rows;
-        rows.sort_by_key(|(entity, _)| entity.raw());
-        for (entity, fields) in rows {
-            let entity = u32::try_from(entity.raw()).map_err(|_| {
-                mosaica_store::StoreError::MalformedBundle {
-                    detail: format!(
-                        "artifact entity {} does not fit the u32 entity space",
-                        entity.raw()
-                    ),
-                }
-            })?;
-            let fields: Vec<mosaica_filter::RecordFieldRef<'_>> = fields
-                .iter()
-                .map(|(tag, value)| mosaica_filter::RecordFieldRef {
-                    tag: *tag,
-                    value: mosaica_filter::RecordValueRef::Utf8(value),
-                })
-                .collect();
-            writer.push_row(entity, &fields).map_err(io(&blocks))?;
         }
-        writer.finish().map_err(io(&blocks))?;
-        // `finish` syncs the blocks and not the two files that address them. The directory goes
-        // out through an Arrow writer and the has-row bitmap through a plain write, so a crash
-        // after the manifest is durable can leave either torn, and a torn addressing file refuses
-        // the whole record stack at open, taking every point's blob-resident field with it. The
-        // membership path syncs per file for the same reason; this one has to do it here because
-        // the blob writer is shared with the flush, which syncs its extent another way.
-        for path in [&hasrow, &directory] {
-            let file = std::fs::File::open(path).map_err(io(path))?;
-            file.sync_all().map_err(io(path))?;
+        let mut written = Vec::with_capacity(by_space.len());
+        for (space, rows) in by_space {
+            let layout = mosaica_store::LayerSpaceLayout::new(partition, space);
+            written.push((space, write_content_extent(prefix_dir, layout, n, rows)?));
         }
-        mosaica_store::fsync_dir(&dir)?;
-        Ok(Some(extent))
+        Ok(written)
     }
 
-    /// Pack every not-yet-published membership into one extent per level and fsync it, returning
-    /// the manifest entries.
+    /// Pack every not-yet-published artifact into one record pack and one member pack per level
+    /// and fsync them, returning the manifest entries.
     ///
-    /// One file per level per publication. Publication is append-only, so an extent covers a
-    /// contiguous ordinal range and no earlier extent is disturbed. A reader unions a level's
-    /// extents and the fold rewrites them into one.
+    /// Publication is append-only, so a pack covers a contiguous ordinal range and no earlier pack
+    /// is disturbed. A reader unions a level's packs and the fold rewrites them into one.
     pub(super) fn write_membership_extents(
         &self,
         prefix_dir: &std::path::Path,
         partition: &str,
         n: u64,
-    ) -> mosaica_store::Result<Vec<mosaica_store::manifest::MembershipExtent>> {
+    ) -> mosaica_store::Result<PackedLevels> {
         let ready = self.live.unpublished_memberships();
-        pack_membership_extents(
+        pack_levels(
             prefix_dir,
-            ShardLayout::new(partition, ARTIFACT_SHARD),
+            ShardLayout::new(partition, self.live.only_shard().id),
             n,
             ready,
             |layer| self.live.space_of(layer),
@@ -2206,7 +2231,7 @@ impl Executor {
         record
             .text_extents
             .extend(completed.text_extents.iter().cloned());
-        write_deny_state(&mut manifest, &shard.overlay);
+        write_deny_state(&mut manifest, &shard.overlay, &live.layer_spaces);
         n = self
             .health
             .flush_lap(crate::flush::FlushStage::ManifestDenyState, n);

@@ -106,11 +106,23 @@ impl Fixture {
 
     /// The `level_versions` the served side manifest states, as `(layer, level, version)`.
     fn stated_level_versions(&self) -> Vec<(String, u32, u64)> {
-        side_manifest(&self.root)
-            .only_shard()
-            .level_versions
+        let manifest = side_manifest(&self.root);
+        manifest
+            .layer_spaces
             .iter()
-            .map(|v| (v.layer.clone(), v.level, v.version))
+            .flat_map(|space| {
+                let layer = manifest
+                    .partition
+                    .layers
+                    .iter()
+                    .find(|layer| layer.space == space.space)
+                    .map(|layer| layer.declaration.name.clone())
+                    .unwrap_or_default();
+                space
+                    .level_versions
+                    .iter()
+                    .map(move |v| (layer.clone(), v.level, v.version))
+            })
             .collect()
     }
 }
@@ -1593,7 +1605,11 @@ fn deleting_a_cluster_deletes_its_labels_and_they_retire_at_the_same_fold() {
         assert_eq!(engine.published_artifacts(), 2);
 
         let cluster = artifact_entity(&engine, cluster_id);
-        assert_eq!(engine.overlay_depth(), 0, "nothing is denied yet");
+        assert_eq!(
+            engine.generation_status().layer_spaces.depth,
+            0,
+            "nothing is denied yet"
+        );
         engine
             .accept_changes(vec![(cluster, ChangeOp::Delete)])
             .expect("the delete is accepted");
@@ -1601,7 +1617,7 @@ fn deleting_a_cluster_deletes_its_labels_and_they_retire_at_the_same_fold() {
         // **Two dispositions from one command.** The cluster's own, and the label's — the cascade,
         // carried in the same window, on the same lane, with its own durable record.
         assert_eq!(
-            engine.overlay_depth(),
+            engine.generation_status().layer_spaces.retirable,
             2,
             "the label was deleted with its cluster rather than merely withheld behind it"
         );

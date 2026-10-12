@@ -178,7 +178,19 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
             &mut report,
         )?;
         check_dict_extents(&prefix_dir, &partition.manifest, &mut report)?;
-        check_record_blobs(&prefix_dir, layout, &bundle.manifest, shard, &mut report)?;
+        let contents: Vec<&mosaica_store::manifest::RecordExtent> = partition
+            .layer_spaces
+            .iter()
+            .flat_map(|space| space.content_extents.iter())
+            .collect();
+        check_record_blobs(
+            &prefix_dir,
+            layout,
+            &bundle.manifest,
+            shard,
+            &contents,
+            &mut report,
+        )?;
         check_scoped_render_lanes(&bundle.manifest, layout, shard, &mut report)?;
         check_cut_index(phash, shard, &mut report)?;
         check_bands(
@@ -189,7 +201,7 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
             shard,
             &mut report,
         )?;
-        check_band_labels(&prefix_dir, shard, &mut report)?;
+        check_band_labels(&prefix_dir, shard, &partition.layer_spaces, &mut report)?;
         check_row_members(root, &prefix_dir, shard, &mut report)?;
         check_unique_indexes(
             root,
@@ -931,17 +943,18 @@ fn check_bands(
 fn check_band_labels(
     prefix_dir: &Path,
     shard: &ShardData,
+    layer_spaces: &[mosaica_store::manifest::LayerSpaceRecord],
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
     use mosaica_store::manifest::{DerivedExtent, DerivedForm};
     use mosaica_types::layer::ServingLayout;
     let extents = &shard.record.derived_extents;
     let current = |e: &DerivedExtent| {
-        shard
-            .record
-            .level_versions
+        layer_spaces
             .iter()
-            .any(|v| v.layer == e.layer && v.level == e.level && v.version == e.level_version)
+            .filter(|space| space.space == e.space)
+            .flat_map(|space| space.level_versions.iter())
+            .any(|v| v.level == e.level && v.version == e.level_version)
     };
     let is_label_column = |e: &DerivedExtent| {
         matches!(
@@ -1426,13 +1439,14 @@ impl PairsCursor {
 /// **The base blob is walked where the manifest names its files**, not where the directory happens
 /// to exist: a build writes `attrs/record/` only where a column is blob-resident, and probing the
 /// filesystem would read a base deleted from under the manifest as "this bundle has no base".
-/// Extents come from the segments manifest's two lists, the flushes' and the artifact levels',
-/// which hold the same format and take the same reader.
+/// Extents come from the shard's list, the flushes', and each layer space's supplied content
+/// (`contents`), which hold the same format and take the same reader.
 fn check_record_blobs(
     prefix_dir: &Path,
     layout: ShardLayout<'_>,
     manifest: &Manifest,
     shard: &ShardData,
+    contents: &[&mosaica_store::manifest::RecordExtent],
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
     let record_rel = layout.record_rel();
@@ -1451,7 +1465,7 @@ fn check_record_blobs(
         .record
         .record_extents
         .iter()
-        .chain(shard.record.artifact_record_extents.iter())
+        .chain(contents.iter().copied())
     {
         layers.push((
             extent.blocks.clone(),

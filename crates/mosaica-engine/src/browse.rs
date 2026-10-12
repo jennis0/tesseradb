@@ -283,7 +283,7 @@ impl crate::Engine {
             })
         };
         let layer = self
-            .readable_layer(session, shard, req.layer, view)
+            .readable_layer(session, &generation, req.layer, view)
             .map_err(refused)?;
         if !layer.declaration.depends_on.is_empty() {
             return Err(EngineError::BrowseRefused(BrowseRefused::AttachedLayer(
@@ -376,7 +376,7 @@ impl crate::Engine {
                 // generating set receives no artifact at all rather than one with its description
                 // missing (decision 0076), which is why this runs inside the gate and not beside
                 // the row build.
-                let Some(content) = level_read.content(self, shard, &layer, ordinal, entity, rank)
+                let Some(content) = level_read.content(self, &layer, ordinal, entity, rank)
                 else {
                     continue;
                 };
@@ -714,7 +714,6 @@ impl<'a, 'c> Namer<'a, 'c> {
 
     fn attached_name(&self, level: u32, ordinal: u32) -> Option<String> {
         let (engine, served, mask) = (self.engine, self.served, self.mask);
-        let shard = served.shard;
         let target_layer = self.layer.declaration.name.as_str();
         let target = self.layer.runs[level as usize]
             .entity_of(u64::from(ordinal))
@@ -724,7 +723,7 @@ impl<'a, 'c> Namer<'a, 'c> {
                 .names()
                 .filter_map(|name| {
                     engine
-                        .readable_layer(served.session, shard, name, served.name)
+                        .readable_layer(served.session, served.generation, name, served.name)
                         .ok()
                 })
                 .filter(|label| {
@@ -797,7 +796,7 @@ impl<'a, 'c> Namer<'a, 'c> {
                         let ArtifactVerdict::Serve { rank, .. } = view.verdict(entity, at) else {
                             return None;
                         };
-                        read.content(engine, shard, label, at, entity, rank)?.name()
+                        read.content(engine, label, at, entity, rank)?.name()
                     })
                 })
             })

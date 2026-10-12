@@ -7182,7 +7182,7 @@ components:
       type: object
       additionalProperties: false
       description: The `GET /control/status` document. Counters count from the process's start; gauges are read when the request is answered. Byte figures are bytes and times are in the unit their name gives.
-      required: [entity_id_high_water, shards, publication, partitions, compute, bulk, artifacts, write_executor, ingest, limits, segments, overlay, compaction, fragmentation, row_projection_cache, projection_builds_by_route, fragment_cache, sessions, masked_count_cache, region_cache, derived_cache, suggest_sets, occupancy, heap]
+      required: [entity_id_high_water, shards, publication, partitions, compute, bulk, artifacts, write_executor, ingest, limits, segments, overlay, layer_spaces, compaction, fragmentation, row_projection_cache, projection_builds_by_route, fragment_cache, sessions, masked_count_cache, region_cache, derived_cache, suggest_sets, occupancy, heap]
       properties:
         entity_id_high_water:
           type: integer
@@ -7400,7 +7400,7 @@ components:
           type: object
           additionalProperties: false
           required: [depth, retirable, soft_limit_alarms]
-          description: The deletions and suppressions in force and not yet folded.
+          description: The point shard's deletions and suppressions of items in force and not yet folded.
           properties:
             depth:
               type: integer
@@ -7413,6 +7413,24 @@ components:
             soft_limit_alarms:
               type: integer
               minimum: 0
+        layer_spaces:
+          type: object
+          additionalProperties: false
+          required: [count, depth, retirable]
+          description: The deletions and suppressions of artifacts and layers in force, summed over every layer space.
+          properties:
+            count:
+              type: integer
+              minimum: 0
+              description: How many layer spaces there are, one per registered layer.
+            depth:
+              type: integer
+              minimum: 0
+              description: Deletions and suppressions together, a layer's own suppression included.
+            retirable:
+              type: integer
+              minimum: 0
+              description: Deleted artifacts, whose records a fold removes. The fold schedule counts them with the point shard's deletions.
         compaction:
           $ref: "#/components/schemas/CompactionStatus"
         fragmentation:

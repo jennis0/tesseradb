@@ -265,7 +265,6 @@ impl Scope<'_> {
         };
         let supplied = read.content(
             self.engine,
-            self.open.served.shard,
             self.layer,
             ordinal,
             entity,
@@ -313,7 +312,6 @@ impl Scope<'_> {
         let read = target.levels[level].as_ref()?;
         read.content(
             self.engine,
-            self.open.served.shard,
             target.layer,
             attachment.ordinal,
             attachment.entity,
@@ -429,7 +427,7 @@ impl Engine {
             })
         };
         let layer = self
-            .readable_layer(session, generation.only_shard(), req.layer, req.view)
+            .readable_layer(session, &generation, req.layer, req.view)
             .map_err(layer_refused)?;
         check_level(&layer, req.level).map_err(layer_refused)?;
         let named = req
@@ -547,7 +545,7 @@ impl ArtifactsPager<'_> {
     ) -> Result<Option<T>> {
         let served = &open.served;
         let Ok(layer) =
-            engine.readable_layer(served.session, served.shard, self.req.layer, served.name)
+            engine.readable_layer(served.session, served.generation, self.req.layer, served.name)
         else {
             return Ok(None);
         };

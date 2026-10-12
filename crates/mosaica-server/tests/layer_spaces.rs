@@ -287,3 +287,45 @@ async fn a_dropped_name_registers_again_and_its_old_identifiers_name_nothing() {
     let server = restart(server, &tmp).await;
     check(server).await;
 }
+
+/// `/control/status` counts the point shard's denies under `overlay` and the layer spaces' under
+/// `layer_spaces`, and a fold removes the deleted artifact's record and takes it off both counts.
+#[tokio::test]
+async fn status_counts_the_layer_spaces_denies_apart_from_the_shards() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve_standard(&tmp).await;
+    let (layer, artifact) = plant(&server).await;
+    let item = mosaica_id_of(&server, 0);
+    let status = control_status(&server).await;
+    assert_eq!(
+        status["layer_spaces"],
+        json!({ "count": 1, "depth": 0, "retirable": 0 })
+    );
+
+    let (status, body) = changes(
+        &server,
+        json!([
+            { "op": "delete", "match": { "mosaica_id": artifact.to_string() } },
+            { "op": "suppress", "match": { "mosaica_id": layer.to_string() } },
+            { "op": "suppress", "match": { "mosaica_id": item.to_string() } },
+        ]),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let status = control_status(&server).await;
+    assert_eq!(status["overlay"]["depth"], 1, "{status}");
+    assert_eq!(status["overlay"]["retirable"], 0, "{status}");
+    assert_eq!(
+        status["layer_spaces"],
+        json!({ "count": 1, "depth": 2, "retirable": 1 })
+    );
+
+    fold(&server).await;
+    let status = control_status(&server).await;
+    assert_eq!(status["overlay"]["depth"], 1, "{status}");
+    assert_eq!(
+        status["layer_spaces"],
+        json!({ "count": 1, "depth": 1, "retirable": 0 }),
+        "the fold removed the deleted artifact, and the layer's suppression stands"
+    );
+}

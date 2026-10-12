@@ -150,9 +150,10 @@ impl Engine {
                     return Tagging::None;
                 };
                 let declaration = &registered.declaration;
+                let overlay = served.generation.space_overlay(registered.space);
                 if !declaration.views.iter().any(|v| v == served.name)
-                    || served.shard.overlay.is_deleted(registered.entity)
-                    || served.shard.overlay.is_suppressed(registered.entity)
+                    || overlay.is_deleted(registered.entity)
+                    || overlay.is_suppressed(registered.entity)
                 {
                     return Tagging::None;
                 }
@@ -275,7 +276,7 @@ impl Engine {
             };
             let view = ArtifactView {
                 declaration,
-                overlay: &served.shard.overlay,
+                overlay: served.generation.space_overlay(registered.space),
                 labels: self.label_gate(served.session, declaration),
                 layer_reachable: true,
                 rows,
@@ -305,7 +306,7 @@ impl Engine {
                                         generation.segments_version,
                                         || {
                                             crate::artifact_content::LevelContent::build(
-                                                served.shard.filter_columns.records(),
+                                                generation.space_content(registered.space),
                                                 runs,
                                             )
                                         },
@@ -314,7 +315,7 @@ impl Engine {
                                 .clone()
                         });
                     self.supplied_content(
-                        served.shard,
+                        generation.space_content(registered.space),
                         declaration,
                         level,
                         ordinal,

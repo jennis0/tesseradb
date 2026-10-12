@@ -69,13 +69,29 @@ use memmap2::Mmap;
 
 use crate::error::{Result, StoreError};
 
-const MAGIC: &[u8; 4] = b"MSMB";
 /// Bumped whenever a blob's *content* changes shape, even though this module holds a blob opaquely:
 /// the refusal has to happen at the file, because the decoder on the other side of the boundary
-/// sees only bytes. From version 2 the artifact record carries its attachment — an extent written
-/// under version 1 restores every label as unattached, which serves the labels of suppressed
-/// clusters.
-const VERSION: u16 = 3;
+/// sees only bytes. From version 4 a level is two packs, a record pack in its layer space and a
+/// member pack in each shard, each with its own magic.
+const VERSION: u16 = 4;
+
+/// Which of a level's two packs a file is. The magic differs, so one is never decoded as the other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PackKind {
+    /// A shard's slice of each artifact's members, under the shard.
+    Members,
+    /// Each artifact's record without its members, under the layer space.
+    Records,
+}
+
+impl PackKind {
+    fn magic(self) -> &'static [u8; 4] {
+        match self {
+            PackKind::Members => b"MSMB",
+            PackKind::Records => b"MSRP",
+        }
+    }
+}
 const HEADER_LEN: usize = 4 + 2 + 2 + 4 + 4;
 
 fn malformed(path: &Path, detail: impl std::fmt::Display) -> StoreError {
@@ -89,12 +105,12 @@ fn malformed(path: &Path, detail: impl std::fmt::Display) -> StoreError {
 /// Returns the bytes rather than writing them, so the caller owns the durability sequence — the file
 /// must be fsynced **before** the manifest that names it, and only the caller knows where that
 /// manifest write sits.
-pub fn pack(ordinal_lo: u32, blobs: &[Vec<u8>]) -> Vec<u8> {
+pub fn pack(kind: PackKind, ordinal_lo: u32, blobs: &[Vec<u8>]) -> Vec<u8> {
     let count = blobs.len();
     let payload_len: usize = blobs.iter().map(Vec::len).sum();
     let mut out = Vec::with_capacity(HEADER_LEN + (count + 1) * 8 + payload_len);
 
-    out.extend_from_slice(MAGIC);
+    out.extend_from_slice(kind.magic());
     out.extend_from_slice(&VERSION.to_le_bytes());
     out.extend_from_slice(&0u16.to_le_bytes());
     out.extend_from_slice(&(count as u32).to_le_bytes());
@@ -133,6 +149,7 @@ pub fn pack(ordinal_lo: u32, blobs: &[Vec<u8>]) -> Vec<u8> {
 /// as a cluster that legitimately failed its bar.
 pub struct PackWriter {
     path: PathBuf,
+    kind: PackKind,
     file: BufWriter<File>,
     ordinal_lo: u32,
     count: u32,
@@ -144,7 +161,7 @@ pub struct PackWriter {
 
 impl PackWriter {
     /// Reserve the header and the offset table for `count` blobs, and position at the payload.
-    pub fn create(path: &Path, ordinal_lo: u32, count: u32) -> Result<PackWriter> {
+    pub fn create(path: &Path, kind: PackKind, ordinal_lo: u32, count: u32) -> Result<PackWriter> {
         let file = File::create(path).map_err(|source| StoreError::Io {
             path: path.to_path_buf(),
             source,
@@ -160,6 +177,7 @@ impl PackWriter {
         offsets.push(0);
         Ok(PackWriter {
             path: path.to_path_buf(),
+            kind,
             file,
             ordinal_lo,
             count,
@@ -195,6 +213,7 @@ impl PackWriter {
     pub fn finish(self) -> Result<()> {
         let PackWriter {
             path,
+            kind,
             file,
             ordinal_lo,
             count,
@@ -211,7 +230,7 @@ impl PackWriter {
             ));
         }
         let mut head = Vec::with_capacity(HEADER_LEN + offsets.len() * 8);
-        head.extend_from_slice(MAGIC);
+        head.extend_from_slice(kind.magic());
         head.extend_from_slice(&VERSION.to_le_bytes());
         head.extend_from_slice(&0u16.to_le_bytes());
         head.extend_from_slice(&count.to_le_bytes());
@@ -233,6 +252,96 @@ impl PackWriter {
     }
 }
 
+/// One level's two packs from one publication, written together: each artifact's record into its
+/// layer space and its members into the shard's slice, over the same ordinals. The one writer the
+/// build and a running service both use.
+///
+/// The names carry the publication `n`, the space and the level, never the layer's name, which is
+/// caller-shaped and could escape the directory.
+pub struct LevelPackWriter {
+    records: PackWriter,
+    members: PackWriter,
+    record_extent: crate::manifest::RecordPackExtent,
+    member_extent: crate::manifest::MembershipExtent,
+    dirs: [PathBuf; 2],
+}
+
+impl LevelPackWriter {
+    #[allow(clippy::too_many_arguments)]
+    pub fn create(
+        prefix_dir: &Path,
+        shard: crate::ShardLayout<'_>,
+        layer: &str,
+        space: mosaica_types::LayerSpace,
+        n: u64,
+        level: u32,
+        ordinal_lo: u32,
+        count: u32,
+    ) -> Result<LevelPackWriter> {
+        let records_rel = crate::LayerSpaceLayout::new(shard.partition, space).records_rel();
+        let members_rel = shard.members_rel();
+        let mut dirs = [prefix_dir.join(&records_rel), prefix_dir.join(&members_rel)];
+        for dir in &mut dirs {
+            std::fs::create_dir_all(&*dir).map_err(|source| StoreError::Io {
+                path: dir.clone(),
+                source,
+            })?;
+        }
+        let record_rel = format!("{records_rel}/records-{n:06}-{level}.tsrp");
+        let member_rel = format!("{members_rel}/members-{n:06}-{space}-{level}.tsmb");
+        Ok(LevelPackWriter {
+            records: PackWriter::create(
+                &prefix_dir.join(&record_rel),
+                PackKind::Records,
+                ordinal_lo,
+                count,
+            )?,
+            members: PackWriter::create(
+                &prefix_dir.join(&member_rel),
+                PackKind::Members,
+                ordinal_lo,
+                count,
+            )?,
+            record_extent: crate::manifest::RecordPackExtent {
+                path: record_rel,
+                level,
+                ordinal_lo,
+                count,
+            },
+            member_extent: crate::manifest::MembershipExtent {
+                path: member_rel,
+                layer: layer.to_string(),
+                space,
+                level,
+                ordinal_lo,
+                count,
+            },
+            dirs,
+        })
+    }
+
+    /// Append one artifact's record and members, in ordinal order. A hole is two empty blobs.
+    pub fn push(&mut self, record: &[u8], members: &[u8]) -> Result<()> {
+        self.records.push(record)?;
+        self.members.push(members)
+    }
+
+    /// Finish and fsync both packs and their directories, and return their manifest entries.
+    pub fn finish(
+        self,
+    ) -> Result<(
+        crate::manifest::RecordPackExtent,
+        crate::manifest::MembershipExtent,
+    )> {
+        self.records.finish()?;
+        self.members.finish()?;
+        for dir in &self.dirs {
+            crate::fsync_dir(dir)?;
+        }
+        Ok((self.record_extent, self.member_extent))
+    }
+}
+
 /// One extent, opened and validated. The mapping is held for the reader's life; blobs are slices
 /// into it, so nothing is copied until a caller decodes one.
 pub struct MembershipPack {
@@ -247,7 +356,7 @@ pub struct MembershipPack {
 
 impl MembershipPack {
     /// Open and validate. Every check here refuses rather than truncating — see the module doc.
-    pub fn open(path: &Path) -> Result<Self> {
+    pub fn open(path: &Path, kind: PackKind) -> Result<Self> {
         let file = File::open(path).map_err(|source| StoreError::Io {
             path: path.to_path_buf(),
             source,
@@ -274,8 +383,14 @@ impl MembershipPack {
                 ),
             ));
         }
-        if &map[0..4] != MAGIC {
-            return Err(malformed(path, "magic is not MSMB"));
+        if &map[0..4] != kind.magic() {
+            return Err(malformed(
+                path,
+                format!(
+                    "magic is not {}",
+                    String::from_utf8_lossy(kind.magic())
+                ),
+            ));
         }
         let version = u16::from_le_bytes([map[4], map[5]]);
         if version != VERSION {
@@ -2077,9 +2192,9 @@ mod tests {
     fn an_extent_round_trips_and_addresses_by_absolute_ordinal() {
         let tmp = tempfile::tempdir().unwrap();
         let blobs = vec![vec![1u8, 2, 3], Vec::new(), vec![9u8; 300]];
-        let path = write(tmp.path(), "m.tsmb", &pack(1000, &blobs));
+        let path = write(tmp.path(), "m.tsmb", &pack(PackKind::Members, 1000, &blobs));
 
-        let pack = MembershipPack::open(&path).unwrap();
+        let pack = MembershipPack::open(&path, PackKind::Members).unwrap();
         assert_eq!(pack.ordinal_lo(), 1000);
         assert_eq!(pack.count(), 3);
 
@@ -2104,14 +2219,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let blobs = vec![vec![1u8, 2, 3], Vec::new(), vec![9u8; 300], vec![4u8; 7]];
         let path = tmp.path().join("streamed.tsmb");
-        let mut writer = PackWriter::create(&path, 1000, blobs.len() as u32).unwrap();
+        let mut writer =
+            PackWriter::create(&path, PackKind::Members, 1000, blobs.len() as u32).unwrap();
         for blob in &blobs {
             writer.push(blob).unwrap();
         }
         writer.finish().unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), pack(1000, &blobs));
+        assert_eq!(std::fs::read(&path).unwrap(), pack(PackKind::Members, 1000, &blobs));
 
-        let opened = MembershipPack::open(&path).unwrap();
+        let opened = MembershipPack::open(&path, PackKind::Members).unwrap();
         assert_eq!(opened.ordinal_lo(), 1000);
         assert_eq!(opened.blob(1002).map(<[u8]>::len), Some(300));
     }
@@ -2123,13 +2239,13 @@ mod tests {
     fn a_streamed_extent_that_does_not_fill_its_range_refuses() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("short.tsmb");
-        let mut writer = PackWriter::create(&path, 0, 3).unwrap();
+        let mut writer = PackWriter::create(&path, PackKind::Members, 0, 3).unwrap();
         writer.push(&[1u8, 2]).unwrap();
         writer.push(&[3u8]).unwrap();
         assert!(writer.finish().is_err());
 
         let path = tmp.path().join("long.tsmb");
-        let mut writer = PackWriter::create(&path, 0, 2).unwrap();
+        let mut writer = PackWriter::create(&path, PackKind::Members, 0, 2).unwrap();
         writer.push(&[1u8]).unwrap();
         writer.push(&[2u8]).unwrap();
         assert!(writer.push(&[3u8]).is_err());
@@ -2138,8 +2254,8 @@ mod tests {
     #[test]
     fn an_empty_extent_is_well_formed() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = write(tmp.path(), "m.tsmb", &pack(0, &[]));
-        let pack = MembershipPack::open(&path).unwrap();
+        let path = write(tmp.path(), "m.tsmb", &pack(PackKind::Members, 0, &[]));
+        let pack = MembershipPack::open(&path, PackKind::Members).unwrap();
         assert_eq!(pack.count(), 0);
         assert_eq!(pack.iter().count(), 0);
         assert_eq!(pack.blob(0), None);
@@ -2152,36 +2268,50 @@ mod tests {
     #[test]
     fn truncation_refuses_rather_than_decoding_to_a_shorter_extent() {
         let tmp = tempfile::tempdir().unwrap();
-        let bytes = pack(0, &[vec![1u8; 50], vec![2u8; 50], vec![3u8; 50]]);
+        let bytes = pack(PackKind::Members, 0, &[vec![1u8; 50], vec![2u8; 50], vec![3u8; 50]]);
 
         for cut in [1usize, HEADER_LEN, HEADER_LEN + 8, bytes.len() - 1] {
             let path = write(tmp.path(), &format!("cut{cut}.tsmb"), &bytes[..cut]);
             assert!(
-                MembershipPack::open(&path).is_err(),
+                MembershipPack::open(&path, PackKind::Members).is_err(),
                 "a file cut to {cut} bytes must refuse"
             );
         }
         // And the whole file still opens, so the loop above is testing truncation rather than a
         // format that never opens at all.
         let path = write(tmp.path(), "whole.tsmb", &bytes);
-        assert_eq!(MembershipPack::open(&path).unwrap().count(), 3);
+        assert_eq!(MembershipPack::open(&path, PackKind::Members).unwrap().count(), 3);
     }
 
     #[test]
     fn a_foreign_or_future_file_refuses() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut bytes = pack(0, &[vec![7u8; 10]]);
+        let mut bytes = pack(PackKind::Members, 0, &[vec![7u8; 10]]);
 
         let mut wrong_magic = bytes.clone();
         wrong_magic[0] = b'X';
         let path = write(tmp.path(), "magic.tsmb", &wrong_magic);
-        assert!(MembershipPack::open(&path).is_err());
+        assert!(MembershipPack::open(&path, PackKind::Members).is_err());
 
         // A future version refuses rather than being read on this version's rules — the offsets
         // could mean something else entirely, and a plausible wrong answer is the failure mode.
         bytes[4] = 99;
         let path = write(tmp.path(), "version.tsmb", &bytes);
-        assert!(MembershipPack::open(&path).is_err());
+        assert!(MembershipPack::open(&path, PackKind::Members).is_err());
+    }
+
+    /// A level's two packs differ in their magic, so a record pack opened as a member pack, or the
+    /// reverse, refuses rather than decoding one artifact's record as its members.
+    #[test]
+    fn a_record_pack_is_never_opened_as_a_member_pack() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write(
+            tmp.path(),
+            "r.tsrp",
+            &pack(PackKind::Records, 0, &[vec![7u8; 10]]),
+        );
+        assert!(MembershipPack::open(&path, PackKind::Members).is_err());
+        assert_eq!(MembershipPack::open(&path, PackKind::Records).unwrap().count(), 1);
     }
 
     // ---- the containment partition ---------------------------------------------------------
@@ -2232,7 +2362,7 @@ mod tests {
 
         // A membership extent offered where a partition belongs: the distinct magic is what makes
         // that a refusal rather than a header that happens to parse.
-        assert!(ContainmentPack::from_bytes(pack(0, &[vec![7u8; 8]])).is_err());
+        assert!(ContainmentPack::from_bytes(pack(PackKind::Members, 0, &[vec![7u8; 8]])).is_err());
 
         let mut future = good.clone();
         future[4] = 99;
@@ -2271,14 +2401,14 @@ mod tests {
     #[test]
     fn offsets_that_go_backwards_refuse() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut bytes = pack(0, &[vec![1u8; 40], vec![2u8; 40]]);
+        let mut bytes = pack(PackKind::Members, 0, &[vec![1u8; 40], vec![2u8; 40]]);
         // Rewrite offsets[1] to point past offsets[2]. A reader that did not check would hand back
         // a slice with `from > to`, which panics, or — with the arithmetic reordered — one blob's
         // bytes under the other's ordinal.
         let at = HEADER_LEN + 8;
         bytes[at..at + 8].copy_from_slice(&999u64.to_le_bytes());
         let path = write(tmp.path(), "backwards.tsmb", &bytes);
-        assert!(MembershipPack::open(&path).is_err());
+        assert!(MembershipPack::open(&path, PackKind::Members).is_err());
     }
 
     // ---- the tile index's extent column -------------------------------------------------------
@@ -2335,7 +2465,7 @@ mod tests {
 
         // The two neighbouring formats offered where this one belongs: the distinct magic is what
         // makes each a refusal rather than a header that happens to parse.
-        assert!(TileIndexPack::from_bytes(pack(0, &[vec![7u8; 8]])).is_err());
+        assert!(TileIndexPack::from_bytes(pack(PackKind::Members, 0, &[vec![7u8; 8]])).is_err());
         assert!(TileIndexPack::from_bytes(containment_bytes(4)).is_err());
         assert!(ContainmentPack::from_bytes(good.clone()).is_err());
 
@@ -2520,7 +2650,7 @@ mod tests {
         // magics are what make each a refusal rather than a header that happens to parse.
         assert!(LabelColumnPack::from_bytes(tile_index_bytes()).is_err());
         assert!(LabelColumnPack::from_bytes(containment_bytes(4)).is_err());
-        assert!(LabelColumnPack::from_bytes(pack(0, &[vec![7u8; 8]])).is_err());
+        assert!(LabelColumnPack::from_bytes(pack(PackKind::Members, 0, &[vec![7u8; 8]])).is_err());
         assert!(ListColumnPack::from_bytes(good.clone()).is_err());
         assert!(LabelColumnPack::from_bytes(pack_list_column(2, &[0, 1], &[0])).is_err());
         assert!(TileIndexPack::from_bytes(good.clone()).is_err());

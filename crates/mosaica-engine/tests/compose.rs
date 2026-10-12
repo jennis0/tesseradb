@@ -625,12 +625,17 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
 
     // Reopen: fresh replay from disk, not the in-memory `Overlay`/`IngestBuffer` above.
     let wal = Wal::open(&wal_path).unwrap();
-    let mut replay = Replay::new(&dict, Overlay::new(), &mosaica_lifecycle::owner_id_only);
+    let mut replay = Replay::new(
+        &dict,
+        mosaica_lifecycle::Overlays::default(),
+        &mosaica_lifecycle::owner_id_only,
+    );
     for record in wal.records() {
         let (position, record) = record.unwrap();
         replay.apply(&record, position, |_, _| false);
     }
-    let (overlay, buffer, _resolver) = replay.finish();
+    let (overlays, buffer, _resolver) = replay.finish();
+    let overlay = overlays.items;
 
     assert!(
         overlay.is_deleted(e(ENTITY_X)),

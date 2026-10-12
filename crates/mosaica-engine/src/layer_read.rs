@@ -38,11 +38,11 @@ pub(crate) enum LayerRefusal {
 }
 
 impl Engine {
-    /// The layer `name` as this viewer may read it in `view`, whose rows are in `shard`.
+    /// The layer `name` as this viewer may read it in `view` of `generation`.
     pub(crate) fn readable_layer(
         &self,
         session: &Session,
-        shard: &crate::Shard,
+        generation: &crate::Generation,
         name: &str,
         view: &str,
     ) -> std::result::Result<RegisteredLayer, LayerRefusal> {
@@ -54,9 +54,10 @@ impl Engine {
             .live()
             .registered_layer(name)
             .ok_or(LayerRefusal::Unknown)?;
+        let overlay = generation.space_overlay(layer.space);
         if !layer.declaration.draws_on(view)
-            || shard.overlay.is_deleted(layer.entity)
-            || shard.overlay.is_suppressed(layer.entity)
+            || overlay.is_deleted(layer.entity)
+            || overlay.is_suppressed(layer.entity)
         {
             return Err(LayerRefusal::Unknown);
         }
@@ -159,7 +160,7 @@ impl Engine {
                     level,
                     level_version,
                     generation.segments_version,
-                    || LevelContent::build(served.shard.filter_columns.records(), runs),
+                    || LevelContent::build(generation.space_content(layer.space), runs),
                 ))
             }
             _ => None,
@@ -171,6 +172,7 @@ impl Engine {
             counts,
             filtered: None,
             contents,
+            content: generation.layer_spaces.get(&layer.space).and_then(|s| s.content.clone()),
         })
     }
 }
@@ -206,6 +208,8 @@ pub(crate) struct ReadLevel {
     /// set from [`ReadLevel::filtered_counts`].
     pub(crate) filtered: Option<Arc<Vec<u32>>>,
     contents: Option<Arc<LevelContent>>,
+    /// The layer space's supplied content on disc, for an artifact `contents` does not hold.
+    content: Option<Arc<mosaica_filter::RecordStack>>,
 }
 
 impl ReadLevel {
@@ -221,7 +225,7 @@ impl ReadLevel {
     ) -> ArtifactView<'a, EffectiveMask> {
         ArtifactView {
             declaration: &layer.declaration,
-            overlay: &served.shard.overlay,
+            overlay: served.generation.space_overlay(layer.space),
             labels: engine.label_gate(served.session, &layer.declaration),
             layer_reachable: true,
             rows: &self.rows,
@@ -241,14 +245,13 @@ impl ReadLevel {
     pub(crate) fn content(
         &self,
         engine: &Engine,
-        shard: &crate::Shard,
         layer: &RegisteredLayer,
         ordinal: u32,
         entity: EntityId,
         rank: Option<u32>,
     ) -> Option<crate::viewport::Supplied> {
         engine.supplied_content(
-            shard,
+            self.content.as_deref(),
             &layer.declaration,
             self.level,
             ordinal,

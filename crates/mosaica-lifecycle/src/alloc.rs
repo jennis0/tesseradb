@@ -432,8 +432,8 @@ pub fn high_water_from<'r>(records: impl IntoIterator<Item = &'r WalRecord>) -> 
             // derives from; what replaces them is the shard record's `high_water` in the
             // side-manifest, refreshed at every publication.
             WalRecord::OverlaySnapshot { entries } => {
-                for entry in entries {
-                    let candidate = entry.entity_id.raw() + 1;
+                for entity in entries.iter().filter_map(|entry| entry.target.item()) {
+                    let candidate = entity.raw() + 1;
                     if candidate > hw {
                         hw = candidate;
                     }
@@ -501,8 +501,8 @@ pub fn entities_named<'r>(records: impl IntoIterator<Item = &'r WalRecord>) -> B
                 }
             }
             WalRecord::OverlaySnapshot { entries } => {
-                for entry in entries {
-                    add(entry.entity_id);
+                for entity in entries.iter().filter_map(|entry| entry.target.item()) {
+                    add(entity);
                 }
             }
             WalRecord::ArtifactPublish { artifacts, .. } => {

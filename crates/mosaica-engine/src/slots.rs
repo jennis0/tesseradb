@@ -655,7 +655,8 @@ impl Engine {
             &mut crate::timing::Probe::new(),
         )?;
         open.served.cancel = cancel.clone();
-        let Ok(registered) = self.readable_layer(session, open.served.shard, layer, view) else {
+        let Ok(registered) = self.readable_layer(session, open.served.generation, layer, view)
+        else {
             return Ok(T::default());
         };
         let reachable = self.reachable_layers(session);
@@ -754,7 +755,7 @@ impl Engine {
                     continue;
                 }
                 if read
-                    .content(self, served.shard, layer, ordinal, entity, rank)
+                    .content(self, layer, ordinal, entity, rank)
                     .is_none()
                 {
                     continue;

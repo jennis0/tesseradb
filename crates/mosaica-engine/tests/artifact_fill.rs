@@ -112,14 +112,11 @@ fn join(fx: &Fixture, key: &str, sources: std::ops::Range<u64>) -> IncomingGrowt
 /// Wait for the executor's publication to write at least `want` artifact content extents — the
 /// files the filled values live in once the log is gone.
 fn content_extents(fx: &Fixture, want: usize) {
-    let dir = fx
-        .root
-        .join("v00000")
-        .join(common::SHARD.record_extents_rel());
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        let found = std::fs::read_dir(&dir)
-            .into_iter()
+        let found = common::content_dirs(&fx.root.join("v00000"))
+            .iter()
+            .flat_map(std::fs::read_dir)
             .flatten()
             .flatten()
             .map(|e| e.path())

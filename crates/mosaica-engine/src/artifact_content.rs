@@ -57,7 +57,7 @@ pub(crate) struct LevelContent {
 }
 
 impl LevelContent {
-    /// Read one level's contents out of the record blob.
+    /// Read one level's contents out of its layer space's record blob, where the prefix names one.
     ///
     /// `runs` is the level's own reserved entity space, which is what makes this a *bounded* read
     /// rather than a walk of the blob: artifact ids are allocated downward from the ceiling in
@@ -66,7 +66,13 @@ impl LevelContent {
     /// A malformed blob refuses at the read and leaves the level with no contents here — every
     /// artifact in it is then withheld, which is the same fail-closed answer the direct read gives
     /// for the same bytes.
-    pub(crate) fn build(records: &mosaica_filter::RecordStack, runs: &ReservedRuns) -> Self {
+    pub(crate) fn build(
+        records: Option<&mosaica_filter::RecordStack>,
+        runs: &ReservedRuns,
+    ) -> Self {
+        let Some(records) = records else {
+            return Self::default();
+        };
         let mut wanted = croaring::Bitmap::new();
         for run in runs.runs() {
             let (Ok(start), Ok(end)) = (u32::try_from(run.start), u32::try_from(run.end)) else {
@@ -127,6 +133,39 @@ impl LevelContent {
     pub(crate) fn bytes(&self) -> u64 {
         self.bytes
     }
+}
+
+/// Each layer space's supplied content, as `bundle`'s side-manifests name it under `prefix_dir`. A
+/// space naming no content extent has none. Any extent that will not open refuses the whole open,
+/// since an artifact whose content is unreadable is withheld from every viewer.
+pub(crate) fn open_space_contents(
+    prefix_dir: &std::path::Path,
+    bundle: &mosaica_store::read::Bundle,
+) -> Result<
+    BTreeMap<mosaica_types::LayerSpace, Arc<mosaica_filter::RecordStack>>,
+    mosaica_filter::RecordError,
+> {
+    let mut out = BTreeMap::new();
+    for partition in bundle.partitions.values() {
+        for space in &partition.layer_spaces {
+            if space.content_extents.is_empty() {
+                continue;
+            }
+            let paths: Vec<mosaica_filter::RecordExtentPaths> = space
+                .content_extents
+                .iter()
+                .map(|e| mosaica_filter::RecordExtentPaths {
+                    blocks: prefix_dir.join(&e.blocks),
+                    hasrow: prefix_dir.join(&e.hasrow),
+                    directory: prefix_dir.join(&e.directory),
+                })
+                .collect();
+            let stack =
+                mosaica_filter::RecordStack::open(None, &paths, mosaica_filter::Access::Mapped)?;
+            out.insert(space.space, Arc::new(stack));
+        }
+    }
+    Ok(out)
 }
 
 /// One [`LevelContent`] per `(layer, level)`, rebuilt when that level or the bundle beneath it

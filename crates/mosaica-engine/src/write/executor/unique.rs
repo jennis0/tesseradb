@@ -489,7 +489,11 @@ impl Executor {
         if let Some((_, files)) = index {
             manifest.partition.files.extend(files);
         }
-        write_deny_state(&mut manifest, &generation.only_shard().overlay);
+        write_deny_state(
+            &mut manifest,
+            &generation.only_shard().overlay,
+            &generation.layer_spaces,
+        );
         write_vocabulary_extensions(
             &mut manifest,
             &generation.vocabularies,

@@ -1217,12 +1217,7 @@ impl Drop for Filed {
 }
 
 /// Create the shard's directory for `kind`; returns it and its prefix-relative path.
-fn derived_dir(
-    prefix_dir: &Path,
-    layout: crate::ShardLayout<'_>,
-    kind: &str,
-) -> crate::Result<(std::path::PathBuf, String)> {
-    let rel = layout.derived_rel(kind);
+fn derived_dir(prefix_dir: &Path, rel: String) -> crate::Result<(std::path::PathBuf, String)> {
     let dir = prefix_dir.join(&rel);
     std::fs::create_dir_all(&dir).map_err(crate::error::io(&dir))?;
     Ok((dir, rel))
@@ -1283,7 +1278,7 @@ pub fn term_image_file(
 ) -> crate::Result<DerivedFile> {
     let position = index.term_images;
     index.term_images += 1;
-    let (dir, dir_rel) = derived_dir(prefix_dir, layout, TERM_IMAGES_KIND)?;
+    let (dir, dir_rel) = derived_dir(prefix_dir, layout.derived_rel(TERM_IMAGES_KIND))?;
     let name = derived_name(TERM_IMAGES_KIND, n, position, "timg");
     Ok(DerivedFile {
         path: dir.join(&name),
@@ -1334,7 +1329,14 @@ pub fn file_derived(
         // call's manifest entry may already carry.
         let name = derived_name(kind, n, *next, extension);
         *next += 1;
-        let (dir, dir_rel) = match derived_dir(prefix_dir, layout, kind) {
+        // A level's held shapes are the layer space's; every other form is the shard's.
+        let rel = match item.form {
+            DerivedForm::ShapeHeld => {
+                crate::LayerSpaceLayout::new(layout.partition, item.space).derived_rel(kind)
+            }
+            _ => layout.derived_rel(kind),
+        };
+        let (dir, dir_rel) = match derived_dir(prefix_dir, rel) {
             Ok(made) => made,
             Err(error) => {
                 tracing::warn!(%error, "a derived-structure directory would not be created");

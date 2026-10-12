@@ -3119,12 +3119,20 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
                 "count": s.segments,
             }))
             .collect::<Vec<_>>(),
-        // `depth` counts deletions and suppressions; `retirable` only the deletions, which a fold
-        // can retire and which the fold schedule keys on. Suppressions never retire.
+        // The point shard's: `depth` counts deletions and suppressions; `retirable` only the
+        // deletions, which a fold can retire and which the fold schedule keys on. Suppressions
+        // never retire.
         "overlay": {
             "depth": live.overlay_depth,
             "retirable": live.retirable_deletions,
             "soft_limit_alarms": executor.overlay_soft_limit_alarms,
+        },
+        // The same two figures summed over every layer space: denied artifacts and layers, and
+        // deleted artifacts, whose records a fold removes and which the fold schedule counts.
+        "layer_spaces": {
+            "count": live.layer_spaces.count,
+            "depth": live.layer_spaces.depth,
+            "retirable": live.layer_spaces.retirable,
         },
         // Alarm on `fold_failures` (each leaves a bundle-sized tree nothing reclaims) and on
         // `fold_refusals` rising while `folds` is flat; `fold_refusals_by_gate` names the standing

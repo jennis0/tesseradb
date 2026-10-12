@@ -373,11 +373,11 @@ impl Engine {
         generation: &Generation,
         ids: &[MosaicaId],
     ) -> Vec<Option<Target>> {
-        let overlay = &generation.only_shard().overlay;
         ids.iter()
             .map(|&id| {
                 let (space, entity) = crate::edited::artifact_named(&self.identity_key, id)?;
-                (self.write.live().artifact_held(space, entity) && !overlay.is_deleted(entity))
+                let deleted = generation.space_overlay(space).is_deleted(entity);
+                (self.write.live().artifact_held(space, entity) && !deleted)
                     .then_some(Target::Artifact(space, entity))
             })
             .collect()

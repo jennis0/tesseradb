@@ -210,7 +210,17 @@ impl Executor {
             None => reclaim_below,
         };
 
-        let snapshot = shard.overlay.snapshot();
+        // Each deny under the target it was accepted for: an artifact's in its layer space, never
+        // the shard's, where its entity would read as an item's at the next open.
+        let shard_id = shard.id();
+        let mut snapshot = shard.overlay.snapshot(|entity| Target::Item(shard_id, entity));
+        for (space, parts) in generation.layer_spaces.iter() {
+            snapshot.extend(
+                parts
+                    .overlay
+                    .snapshot(|entity| Target::Artifact(*space, entity)),
+            );
+        }
         match self.log.wal.rotate(&snapshot, reclaim_below) {
             Ok(deleted) => {
                 self.log.mark_rotated();

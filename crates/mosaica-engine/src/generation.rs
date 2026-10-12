@@ -8,7 +8,7 @@ use mosaica_authz::{
 use mosaica_lifecycle::{IngestBuffer, Overlay};
 use mosaica_store::read::{Bundle, ShardData};
 use mosaica_store::vocabulary::Vocabularies;
-use mosaica_types::{EntityId, ShardId};
+use mosaica_types::{EntityId, LayerSpace, ShardId};
 
 use crate::DenyMask;
 
@@ -43,6 +43,59 @@ pub struct GenerationParts {
     /// changes nothing it holds and a rebuild sorts for tens of seconds at 10⁷ values; a mint grows
     /// it with `vocabularies`.
     pub suggest: Arc<crate::suggest::SuggestIndexes>,
+    /// Each layer space's deny state and supplied content. A space absent here denies nothing and
+    /// has no content on disc.
+    pub layer_spaces: Arc<LayerSpaces>,
+}
+
+/// A generation's layer spaces, by space.
+pub type LayerSpaces = std::collections::BTreeMap<LayerSpace, LayerSpaceParts>;
+
+/// One layer space's state in a generation.
+#[derive(Clone, Default)]
+pub struct LayerSpaceParts {
+    /// Bumped on every change to `overlay`; what a content key reads a space's deny state by.
+    pub overlay_version: u64,
+    /// The space's deleted and suppressed artifacts, and the layer's own entity.
+    pub overlay: Arc<Overlay>,
+    /// The supplied content the prefix's manifest names for the space. Content published since is
+    /// read from the artifact store.
+    pub content: Option<Arc<mosaica_filter::RecordStack>>,
+}
+
+impl GenerationParts {
+    /// `space`'s overlay, or an empty one where the space holds no deny.
+    pub fn space_overlay(&self, space: LayerSpace) -> &Overlay {
+        static EMPTY: std::sync::OnceLock<Overlay> = std::sync::OnceLock::new();
+        match self.layer_spaces.get(&space) {
+            Some(parts) => &parts.overlay,
+            None => EMPTY.get_or_init(Overlay::new),
+        }
+    }
+
+    /// `space`'s supplied content on disc, where the prefix names any.
+    pub(crate) fn space_content(&self, space: LayerSpace) -> Option<&mosaica_filter::RecordStack> {
+        self.layer_spaces.get(&space)?.content.as_deref()
+    }
+
+    /// Across every space: how many artifacts and layers are denied, and how many of those are
+    /// deletions, which a fold removes the records of.
+    pub(crate) fn space_overlay_figures(&self) -> (usize, u64) {
+        self.layer_spaces.values().fold((0, 0), |(depth, deleted), parts| {
+            (
+                depth + parts.overlay.len(),
+                deleted + parts.overlay.deleted_len(),
+            )
+        })
+    }
+
+    /// Every space's overlay version, ascending by space: what moves a content key when an
+    /// artifact or a layer is denied.
+    pub(crate) fn space_overlay_versions(&self) -> impl Iterator<Item = (LayerSpace, u64)> + '_ {
+        self.layer_spaces
+            .iter()
+            .map(|(space, parts)| (*space, parts.overlay_version))
+    }
 }
 
 /// A point shard's state in a generation, less what is derived from it. [`Shard`] derefs to this.
@@ -505,6 +558,18 @@ impl Generation {
         )
     }
 
+    /// One number that moves when the shard's overlay or any layer space's does: what a stamp
+    /// over every deny compares.
+    pub(crate) fn deny_state_version(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = rustc_hash::FxHasher::default();
+        self.only_shard().overlay_version.hash(&mut hasher);
+        for (space, version) in self.space_overlay_versions() {
+            (space.raw(), version).hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
     /// A generation over an empty bundle of one shard, for in-crate tests that read a few scalars
     /// off one.
     #[cfg(test)]
@@ -555,6 +620,7 @@ impl Generation {
                 deny_epoch: 0,
                 vocabularies: Arc::new(Vocabularies::default()),
                 suggest: Arc::new(crate::suggest::SuggestIndexes::default()),
+                layer_spaces: Arc::default(),
             },
             vec![(
                 shard,
@@ -605,5 +671,6 @@ pub(crate) fn partition_of(
                 })
             })
             .collect(),
+        layer_spaces: manifest.layer_spaces,
     }
 }

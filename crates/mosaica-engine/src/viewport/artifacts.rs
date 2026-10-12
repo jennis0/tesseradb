@@ -223,9 +223,8 @@ impl Engine {
                 }
                 // Same order as `serve_artifacts`: a suppressed or deleted layer is served to
                 // nobody, so its form is not worth building.
-                if shard.overlay.is_deleted(layer.entity)
-                    || shard.overlay.is_suppressed(layer.entity)
-                {
+                let overlay = generation.space_overlay(layer.space);
+                if overlay.is_deleted(layer.entity) || overlay.is_suppressed(layer.entity) {
                     continue;
                 }
                 let vocabulary = predicate_vocabulary(&generation, &layer.declaration);
@@ -302,7 +301,7 @@ impl Engine {
                                 generation.segments_version,
                                 || {
                                     crate::artifact_content::LevelContent::build(
-                                        shard.filter_columns.records(),
+                                        generation.space_content(layer.space),
                                         runs,
                                     )
                                 },
@@ -352,9 +351,10 @@ impl Engine {
         }
         // Reachability, then live suppression — same order as `serve_artifacts`.
         let reachable = self.reachable_layers(served.session);
+        let overlay = generation.space_overlay(layer.space);
         if !reachable.contains(&name)
-            || shard.overlay.is_deleted(layer.entity)
-            || shard.overlay.is_suppressed(layer.entity)
+            || overlay.is_deleted(layer.entity)
+            || overlay.is_suppressed(layer.entity)
         {
             return Ok(None);
         }
@@ -413,7 +413,7 @@ impl Engine {
         let dependency_served = self.dependency_gate(&ctx);
         let artifact_view = crate::artifacts::ArtifactView {
             declaration: &layer.declaration,
-            overlay: &shard.overlay,
+            overlay: generation.space_overlay(layer.space),
             labels: self.label_gate(session, &layer.declaration),
             layer_reachable: true,
             rows: &rows,
@@ -515,7 +515,7 @@ impl Engine {
         } = gated;
         // Same call as the viewport's, so the two routes cannot serve different content.
         let Some(supplied) = self.supplied_content(
-            shard,
+            generation.space_content(layer.space),
             &layer.declaration,
             level,
             ordinal,
@@ -671,7 +671,7 @@ impl Engine {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn supplied_content(
         &self,
-        shard: &crate::Shard,
+        content: Option<&mosaica_filter::RecordStack>,
         declaration: &mosaica_types::layer::LayerDeclaration,
         level: u32,
         ordinal: u32,
@@ -681,7 +681,7 @@ impl Engine {
         table: Option<&crate::artifact_content::LevelContent>,
     ) -> Option<Supplied> {
         let mut values = self.supplied_values(
-            shard,
+            content,
             &declaration.name,
             level,
             ordinal,
@@ -703,7 +703,7 @@ impl Engine {
     #[allow(clippy::too_many_arguments)]
     fn supplied_values(
         &self,
-        shard: &crate::Shard,
+        content: Option<&mosaica_filter::RecordStack>,
         layer: &str,
         level: u32,
         ordinal: u32,
@@ -731,7 +731,8 @@ impl Engine {
             return Some(values);
         }
 
-        // Otherwise the record blob. Tags are `rank × kinds + kind` against the declaration.
+        // Otherwise the layer space's record blob. Tags are `rank × kinds + kind` against the
+        // declaration.
         if kinds == 0 {
             return Some(Vec::new());
         }
@@ -765,7 +766,7 @@ impl Engine {
                 })
             }
             None => {
-                let fields = shard.filter_columns.records().fields_of(entity).ok()??;
+                let fields = content?.fields_of(entity).ok()??;
                 values_for(base, kinds, materialise, |tag| {
                     fields
                         .iter()
@@ -805,9 +806,8 @@ impl Engine {
         let Some(layer) = self.write.live().registered_layer(&attachment.layer) else {
             return false;
         };
-        if ctx.served.shard.overlay.is_deleted(layer.entity)
-            || ctx.served.shard.overlay.is_suppressed(layer.entity)
-        {
+        let overlay = ctx.served.generation.space_overlay(layer.space);
+        if overlay.is_deleted(layer.entity) || overlay.is_suppressed(layer.entity) {
             return false;
         }
         // A layer not in this view has no membership here to serve.
@@ -888,7 +888,7 @@ impl Engine {
             .or_insert_with(|| self.label_gate(ctx.served.session, &layer.declaration));
         crate::artifacts::ArtifactView {
             declaration: &layer.declaration,
-            overlay: &ctx.served.shard.overlay,
+            overlay: ctx.served.generation.space_overlay(layer.space),
             labels,
             layer_reachable: true,
             rows: &rows,
@@ -1042,9 +1042,8 @@ impl Engine {
             return Ok(None);
         }
         // Asked per request: reachability may be cached but a suppression verdict may not.
-        if pass.served.shard.overlay.is_deleted(registered.entity)
-            || pass.served.shard.overlay.is_suppressed(registered.entity)
-        {
+        let overlay = pass.served.generation.space_overlay(registered.space);
+        if overlay.is_deleted(registered.entity) || overlay.is_suppressed(registered.entity) {
             return Ok(None);
         }
 
@@ -1181,7 +1180,7 @@ impl Engine {
         let rows: &crate::artifacts::ArtifactRows = &level.rows;
         crate::artifacts::ArtifactView {
             declaration: &layer.registered.declaration,
-            overlay: &served.shard.overlay,
+            overlay: served.generation.space_overlay(layer.registered.space),
             labels: self.label_gate(served.session, &layer.registered.declaration),
             layer_reachable: true,
             rows,
@@ -1376,7 +1375,12 @@ impl Engine {
         });
         for (key, at) in keyed {
             let content = match self.supplied_content(
-                level.layer.pass.served.shard,
+                level
+                    .layer
+                    .pass
+                    .served
+                    .generation
+                    .space_content(level.layer.registered.space),
                 &level.layer.registered.declaration,
                 level.level,
                 at.0,
@@ -1417,7 +1421,7 @@ impl Engine {
             served.generation.segments_version,
             || {
                 crate::artifact_content::LevelContent::build(
-                    served.shard.filter_columns.records(),
+                    served.generation.space_content(layer.registered.space),
                     level.runs,
                 )
             },

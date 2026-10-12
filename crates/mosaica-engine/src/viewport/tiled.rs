@@ -715,7 +715,9 @@ impl Engine {
                 return None;
             };
             let supplied = self.supplied_content(
-                pass.served.shard,
+                pass.served
+                    .generation
+                    .space_content(level.layer.registered.space),
                 &level.layer.registered.declaration,
                 level.level,
                 ordinal,

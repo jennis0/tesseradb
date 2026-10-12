@@ -437,7 +437,20 @@ fn a_build_registers_its_layers_and_publishes_their_artifacts() {
         .collect();
     extents.sort();
     assert_eq!(extents, vec![("clusters/a", 2), ("topics/x", 1)]);
-    assert_eq!(manifest.only_shard().artifact_record_extents.len(), 1);
+    // Records in each layer's space, beside the shard's members: one record pack per level, and
+    // the label's content in its own space.
+    let records: usize = manifest
+        .layer_spaces
+        .iter()
+        .map(|space| space.record_extents.len())
+        .sum();
+    assert_eq!(records, 2);
+    let contents: usize = manifest
+        .layer_spaces
+        .iter()
+        .map(|space| space.content_extents.len())
+        .sum();
+    assert_eq!(contents, 1);
     assert_eq!(
         manifest
             .only_shard().membership_extents
@@ -488,8 +501,26 @@ fn both_build_paths_place_the_same_layers_on_the_same_entities() {
             extent.layer
         );
     }
-    assert_eq!(a.only_shard().artifact_record_extents, b.only_shard().artifact_record_extents);
-    for extent in &a.only_shard().artifact_record_extents {
+    let contents = |m: &mosaica_store::manifest::SegmentsManifest| {
+        m.layer_spaces
+            .iter()
+            .flat_map(|space| space.content_extents.clone())
+            .collect::<Vec<_>>()
+    };
+    let records = |m: &mosaica_store::manifest::SegmentsManifest| {
+        m.layer_spaces
+            .iter()
+            .flat_map(|space| space.record_extents.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(records(&a), records(&b));
+    for extent in records(&a) {
+        let one = std::fs::read(streamed.join("v00000").join(&extent.path)).unwrap();
+        let other = std::fs::read(linear.join("v00000").join(&extent.path)).unwrap();
+        assert_eq!(one, other, "the record pack {} differs", extent.path);
+    }
+    assert_eq!(contents(&a), contents(&b));
+    for extent in &contents(&a) {
         for file in [&extent.blocks, &extent.hasrow, &extent.directory] {
             let one = std::fs::read(streamed.join("v00000").join(file)).unwrap();
             let other = std::fs::read(linear.join("v00000").join(file)).unwrap();
@@ -3033,13 +3064,10 @@ fn a_build_mints_an_attribute_predicates_artifacts_from_its_column() {
         layer.layout_of(0),
         mosaica_types::layer::ServingLayout::RowMajorLabel
     );
-    let version = manifest
-        .only_shard().level_versions
-        .iter()
-        .find(|v| v.layer == "bands/by-value" && v.level == 0)
+    let version = level_version(&manifest, "bands/by-value", 0)
         .expect("the level's version reaches the manifest");
     assert_eq!(
-        version.version, 1,
+        version, 1,
         "the values were minted in one publication"
     );
     assert_eq!(
@@ -3367,13 +3395,10 @@ fn a_predicate_over_a_category_column_mints_its_values() {
     assert!(report.items > 0);
 
     let manifest = manifest_of(&out);
-    let level = manifest
-        .only_shard().level_versions
-        .iter()
-        .find(|v| v.layer == "grades/by-value" && v.level == 0)
+    let level = level_version(&manifest, "grades/by-value", 0)
         .expect("the level's version reaches the manifest — the values were published at all");
     assert_eq!(
-        level.version, 1,
+        level, 1,
         "the values were minted in one publication"
     );
     let extents: Vec<_> = manifest
@@ -3576,4 +3601,26 @@ fn a_label_set_with_no_member_table_builds_over_a_from_column_clustering() {
         labels.shape.everywhere_fraction, clusters.shape.everywhere_fraction,
         "over the same memberships, so the same spread"
     );
+}
+
+/// The version `manifest` records for `layer`'s `level`, read from the layer's space.
+fn level_version(
+    manifest: &mosaica_store::manifest::SegmentsManifest,
+    layer: &str,
+    level: u32,
+) -> Option<u64> {
+    let space = manifest
+        .partition
+        .layers
+        .iter()
+        .find(|l| l.declaration.name == layer)?
+        .space;
+    manifest
+        .layer_spaces
+        .iter()
+        .find(|record| record.space == space)?
+        .level_versions
+        .iter()
+        .find(|v| v.level == level)
+        .map(|v| v.version)
 }

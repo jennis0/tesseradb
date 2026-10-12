@@ -105,7 +105,7 @@ pub use ingest::{IngestReceipt, IngestRequest};
 pub use error::EngineError;
 pub use session::Session;
 pub use slots::{check_palette_size, SlotStats, PALETTE_SIZES};
-pub use status::{GenerationStatus, PartitionStatus, ViewSegments};
+pub use status::{GenerationStatus, LayerSpacesStatus, PartitionStatus, ViewSegments};
 pub use mosaica_cache::{CacheStats, DEFAULT_WAIT_BUDGET_MS as DEFAULT_SINGLE_FLIGHT_WAIT_MS};
 pub use derived::ComputedProperty;
 pub use membership_column::MembershipColumn;
@@ -215,7 +215,9 @@ pub use mosaica_lifecycle::IngestRow;
 pub use mosaica_lifecycle::wal::{DeclaredFrame, PlainViewDeclaration, ViewGroupDeclaration};
 pub use mosaica_lifecycle::{DeclaredValue, VocabularyRequest};
 
-pub use generation::{Generation, GenerationParts, Shard, ShardParts};
+pub use generation::{
+    Generation, GenerationParts, LayerSpaceParts, LayerSpaces, Shard, ShardParts,
+};
 
 /// Per-view row-space deny masks — see [`Shard::denied`].
 pub type DenyMask = rustc_hash::FxHashMap<String, croaring::Bitmap>;

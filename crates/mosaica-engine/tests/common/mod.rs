@@ -1018,3 +1018,23 @@ pub fn held_rows_declaration(name: &str) -> mosaica_types::layer::LayerDeclarati
         shape: None,
     }
 }
+
+/// The supplied-content directories of every layer space under `prefix_dir`.
+pub fn content_dirs(prefix_dir: &Path) -> Vec<PathBuf> {
+    let first = mosaica_types::LayerSpace::ZERO;
+    let layers = mosaica_store::LayerSpaceLayout::new(SHARD.partition, first).dir(prefix_dir);
+    let Some(layers) = layers.parent() else {
+        return Vec::new();
+    };
+    std::fs::read_dir(layers)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let space = entry.file_name().to_str()?.parse().ok()?;
+            let space = mosaica_types::LayerSpace::new(space).ok()?;
+            Some(mosaica_store::LayerSpaceLayout::new(SHARD.partition, space).content_rel())
+        })
+        .map(|rel| prefix_dir.join(rel))
+        .collect()
+}

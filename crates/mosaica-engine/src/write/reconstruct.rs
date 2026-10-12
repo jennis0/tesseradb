@@ -35,15 +35,16 @@ pub(crate) struct ManifestSeed<'a> {
     /// every sharing group's. Replay's `ViewDrop` arm prunes the buffer with it, and it is passed
     /// rather than derived because `mosaica-lifecycle` holds no manifest.
     pub view_ids_of_key: &'a dyn Fn(&str, &str) -> Vec<String>,
-    /// Every published membership extent, across every partition's manifest, with the prefix
+    /// Every published member pack, across every partition's manifest, with the prefix
     /// directory their paths are relative to.
     pub membership_extents: &'a [mosaica_store::manifest::MembershipExtent],
-    /// Every `(layer, level)`'s artifact-write counter as of the publication, across every
-    /// partition's manifest.
+    /// Every layer space's record, across every partition's manifest: its record packs, which
+    /// pair with the member packs over the same ordinals, and its levels' artifact-write counters.
     ///
-    /// Seeded after the records and before the replay, or a level comes back at its record count
-    /// rather than the number the publication recorded. See `ArtifactStore::seed_level_version`.
-    pub level_versions: &'a [mosaica_store::manifest::LevelVersion],
+    /// The counters are seeded after the records and before the replay, or a level comes back at
+    /// its record count rather than the number the publication recorded. See
+    /// `ArtifactStore::seed_level_version`.
+    pub layer_spaces: &'a [mosaica_store::manifest::LayerSpaceRecord],
     pub prefix_dir: std::path::PathBuf,
     /// The served schema as the manifests make it: the build's columns with every side manifest's
     /// runtime declarations appended (`Manifest::with_attributes`). Replay compares each
@@ -71,10 +72,10 @@ impl WritePath {
         wal_path: &Path,
         seed: ManifestSeed<'_>,
         dict: &Dict,
-        initial_deny: &Overlay,
+        initial_deny: &Overlays,
         vocabularies: &mut Vocabularies,
         has_row: impl Fn(EntityId, &str) -> bool,
-    ) -> Result<(Overlay, IngestBuffer, WritePathState), EngineError> {
+    ) -> Result<(Overlays, IngestBuffer, WritePathState), EngineError> {
         let wal = Wal::open(wal_path).map_err(EngineError::Wal)?;
 
         // Two walks over the log, each holding one record at a time. The first rebuilds what the
@@ -306,93 +307,118 @@ impl WritePath {
         // How many memberships the seed holds on the heap because the mapping would not take.
         // Reached only on parser drift or damage; see the record arm below.
         let mut on_heap = 0usize;
-        for extent in seed.membership_extents {
-            let path = seed.prefix_dir.join(&extent.path);
-            // The pack is held for as long as the memberships read through it: one `Arc` per
-            // extent is cloned into each `Members`.
-            let pack = Arc::new(
-                mosaica_store::membership::MembershipPack::open(&path)
-                    .map_err(|e| EngineError::Malformed(e.to_string()))?,
-            );
-            let owner: Arc<dyn std::any::Any + Send + Sync> = pack.clone();
+        let open_pack = |rel: &str, kind, ordinal_lo: u32, count: u32| {
+            let pack = mosaica_store::membership::MembershipPack::open(
+                &seed.prefix_dir.join(rel),
+                kind,
+            )
+            .map_err(|e| EngineError::Malformed(e.to_string()))?;
             // The manifest and the file must agree about which artifacts this range names, or a
             // disagreement would serve one cluster's members under another's identity.
-            if pack.ordinal_lo() != extent.ordinal_lo || pack.count() != extent.count {
+            if pack.ordinal_lo() != ordinal_lo || pack.count() != count {
                 return Err(EngineError::Malformed(format!(
-                    "membership extent {} covers [{}, +{}) but the manifest names [{}, +{})",
-                    extent.path,
+                    "pack {rel} covers [{}, +{}) but the manifest names [{ordinal_lo}, +{count})",
                     pack.ordinal_lo(),
                     pack.count(),
-                    extent.ordinal_lo,
-                    extent.count
                 )));
             }
-            let Some(runs) = registry
-                .get(&extent.layer)
-                .filter(|layer| layer.space == extent.space)
-                .and_then(|layer| layer.runs.get(extent.level as usize))
-            else {
-                // A dropped layer's extents outlive it until the next fold rewrites the prefix,
-                // and its name may have been registered again in another space.
+            Ok(Arc::new(pack))
+        };
+        for space in seed.layer_spaces {
+            // A dropped layer's space outlives it in a manifest the log's drop postdates.
+            let Some((name, layer)) = registry.in_space(space.space) else {
                 continue;
             };
-            for (ordinal, blob) in pack.iter() {
-                // An empty blob is a hole, not a fault: the ordinal exists with no artifact, which
-                // is what a fold leaves behind where Rule F retired one. Treating it as undecodable
-                // would alarm on every level a deletion has touched.
-                if blob.is_empty() {
-                    continue;
-                }
-                let Some(entity) = runs.entity_of(ordinal as u64).map(EntityId::new) else {
-                    undecodable += 1;
-                    continue;
+            let name = name.to_string();
+            for extent in &space.record_extents {
+                let Some(runs) = layer.runs.get(extent.level as usize) else {
+                    return Err(EngineError::Malformed(format!(
+                        "record pack {} names level {} of layer space {}, which has no such level",
+                        extent.path, extent.level, space.space
+                    )));
                 };
-                match mosaica_lifecycle::membership::decode_record(entity, blob) {
-                    Some((mut record, shape)) => {
-                        // The membership is read through the pack's mapping and the decoded
-                        // bitmap is dropped, to avoid holding a heap bitmap per artifact.
-                        //
-                        // SAFETY: `blob` is a slice of `pack`'s read-only mapping, and `Members`
-                        // holds `owner` for as long as it holds the view. No extent file is
-                        // written twice (names come from a counter that only rises, one executor
-                        // per bundle root), so a mapped file is never truncated under a reader.
-                        let mapped = unsafe {
-                            mosaica_lifecycle::membership::mapped_members(blob, owner.clone())
-                        };
-                        // The same cardinality check `ArtifactStore::rehouse_members` makes: a
-                        // disagreement means the two readers drifted apart or the bytes are
-                        // damaged. Where it fails, the record keeps the bitmap it decoded.
-                        match mapped {
-                            Some(members)
-                                if members.cardinality() == record.members.cardinality() =>
-                            {
-                                record.members = members;
-                            }
-                            _ => on_heap += 1,
-                        }
-                        artifacts.seed(&extent.layer, extent.level, ordinal, record, shape)
+                let Some(members) = seed.membership_extents.iter().find(|m| {
+                    m.space == space.space
+                        && m.level == extent.level
+                        && m.ordinal_lo == extent.ordinal_lo
+                        && m.count == extent.count
+                }) else {
+                    return Err(EngineError::Malformed(format!(
+                        "record pack {} has no member pack over the same ordinals; the \
+                         artifacts it names would be served with no members",
+                        extent.path
+                    )));
+                };
+                let records = open_pack(
+                    &extent.path,
+                    mosaica_store::membership::PackKind::Records,
+                    extent.ordinal_lo,
+                    extent.count,
+                )?;
+                // The member pack is held for as long as the memberships read through it: one
+                // `Arc` per pack is cloned into each `Members`.
+                let pack = open_pack(
+                    &members.path,
+                    mosaica_store::membership::PackKind::Members,
+                    extent.ordinal_lo,
+                    extent.count,
+                )?;
+                let owner: Arc<dyn std::any::Any + Send + Sync> = pack.clone();
+                for ((ordinal, record_blob), (_, members_blob)) in records.iter().zip(pack.iter()) {
+                    // An empty pair is a hole, not a fault: the ordinal exists with no artifact,
+                    // which is what a fold leaves behind where Rule F retired one.
+                    if record_blob.is_empty() && members_blob.is_empty() {
+                        continue;
                     }
-                    None => undecodable += 1,
+                    let Some(entity) = runs.entity_of(ordinal as u64).map(EntityId::new) else {
+                        undecodable += 1;
+                        continue;
+                    };
+                    let decoded = mosaica_lifecycle::membership::decode_record(
+                        entity,
+                        record_blob,
+                        members_blob,
+                    );
+                    let Some((mut record, shape)) = decoded else {
+                        undecodable += 1;
+                        continue;
+                    };
+                    // The membership is read through the pack's mapping and the decoded bitmap is
+                    // dropped, to avoid holding a heap bitmap per artifact.
+                    //
+                    // SAFETY: `members_blob` is a slice of `pack`'s read-only mapping, and
+                    // `Members` holds `owner` for as long as it holds the view. No pack is written
+                    // twice (names come from a counter that only rises, one executor per bundle
+                    // root), so a mapped file is never truncated under a reader.
+                    let mapped = unsafe {
+                        mosaica_lifecycle::membership::mapped_members(members_blob, owner.clone())
+                    };
+                    // The same cardinality check `ArtifactStore::rehouse_members` makes: a
+                    // disagreement means the two readers drifted apart or the bytes are damaged.
+                    // Where it fails, the record keeps the bitmap it decoded.
+                    match mapped {
+                        Some(members) if members.cardinality() == record.members.cardinality() => {
+                            record.members = members;
+                        }
+                        _ => on_heap += 1,
+                    }
+                    artifacts.seed(&name, extent.level, ordinal, record, shape)
                 }
+                // How far the level reaches comes from the pack, not the records in it: a hole at
+                // the top is implied by nothing, so a level seeded from records alone would come
+                // back short.
+                artifacts.seed_extent_bound(
+                    &name,
+                    extent.level,
+                    extent.ordinal_lo.saturating_add(extent.count),
+                );
             }
-            // How far the level reaches comes from the extent, not the records in it: a hole at
-            // the top is implied by nothing, so a level seeded from records alone would come back
-            // short.
-            artifacts.seed_extent_bound(
-                &extent.layer,
-                extent.level,
-                extent.ordinal_lo.saturating_add(extent.count),
-            );
-        }
-        // The published version, before replay moves it. Every level the manifest names gets the
-        // counter the publication recorded, which the replay below then advances for every record
-        // past that publication. See `ArtifactStore::seed_level_version`.
-        for version in seed.level_versions.iter().filter(|version| {
-            registry
-                .get(&version.layer)
-                .is_some_and(|layer| layer.space == version.space)
-        }) {
-            artifacts.seed_level_version(&version.layer, version.level, version.version);
+            // The published version, before replay moves it. Every level the manifest names gets
+            // the counter the publication recorded, which the replay below then advances for every
+            // record past that publication. See `ArtifactStore::seed_level_version`.
+            for version in &space.level_versions {
+                artifacts.seed_level_version(&name, version.level, version.version);
+            }
         }
 
         // Same ordering rule again: the overlay is seeded and the log replayed on top, because
@@ -516,11 +542,11 @@ impl WritePath {
         allocator.set_size(size);
         // An id the manifest records as free and a kept record or the overlay names was issued
         // since the manifest was written.
-        named.or_inplace(overlay.deleted_set());
-        named.or_inplace(overlay.suppressed_set());
+        named.or_inplace(overlay.items.deleted_set());
+        named.or_inplace(overlay.items.suppressed_set());
         allocator.seed_freed(seed.free, seed.held, wal.retained_from(), &named);
 
-        let edited_live = crate::edited::EditedLive::derive(&edits, &buffer, &overlay);
+        let edited_live = crate::edited::EditedLive::derive(&edits, &buffer, &overlay.items);
 
         let resolver_state = resolver.into_state();
 

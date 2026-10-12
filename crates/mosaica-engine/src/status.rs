@@ -59,6 +59,18 @@ pub struct PartitionStatus {
     pub watermark: u64,
 }
 
+/// The layer spaces' overlay figures, summed over every space: what `/control/status` publishes
+/// as `layer_spaces`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayerSpacesStatus {
+    /// Registered layers, each holding one space.
+    pub count: usize,
+    /// Denied artifacts and layers.
+    pub depth: usize,
+    /// Deleted artifacts, whose records a fold removes.
+    pub retirable: u64,
+}
+
 /// What [`Engine::generation_status`] answers.
 #[derive(Debug, Clone)]
 pub struct GenerationStatus {
@@ -66,8 +78,11 @@ pub struct GenerationStatus {
     /// Sorted by `(partition, view)`.
     pub segments: Vec<ViewSegments>,
     pub live_rows: u64,
+    /// The point shard's denied items, and its deletions.
     pub overlay_depth: usize,
     pub retirable_deletions: u64,
+    /// The same two figures summed over every layer space, and how many layer spaces there are.
+    pub layer_spaces: LayerSpacesStatus,
     pub fragment_cache: mosaica_authz::fragment::CacheStats,
     pub fragment_cache_rebuilds: u64,
 }
@@ -331,6 +346,14 @@ impl Engine {
             live_rows: live_rows_of(&generation),
             overlay_depth: shard.overlay.len(),
             retirable_deletions: shard.overlay.deleted_len(),
+            layer_spaces: {
+                let (depth, retirable) = generation.space_overlay_figures();
+                LayerSpacesStatus {
+                    count: self.write.live().registered_layers().len(),
+                    depth,
+                    retirable,
+                }
+            },
             fragment_cache: shard.fragments.stats(),
             fragment_cache_rebuilds: shard.fragments.rebuild_count(),
         }

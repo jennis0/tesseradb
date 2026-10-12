@@ -373,9 +373,6 @@ pub(crate) fn id_at(
     key.forward(ItemHigh::new(shard, tenancy), number)
 }
 
-/// The shard whose directory holds the artifacts' files.
-pub(crate) const ARTIFACT_SHARD: ShardId = ShardId::ZERO;
-
 /// The layer space and entity `id` names as [`crate::Engine::artifact_id`] forms it, or `None`
 /// where it names an item. Whether that entity is an artifact is the caller's question.
 pub(crate) fn artifact_named(key: &IdentityKey, id: MosaicaId) -> Option<(LayerSpace, EntityId)> {

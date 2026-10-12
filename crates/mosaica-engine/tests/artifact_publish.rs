@@ -18,7 +18,7 @@ use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, Target};
 
 fn declaration(name: &str) -> LayerDeclaration {
     LayerDeclaration {
@@ -403,11 +403,14 @@ fn an_artifacts_entity_takes_a_suppression_like_any_other() {
     engine
         .accept_changes(vec![(entity, ChangeOp::Suppress)])
         .expect("an artifact suppression is an ordinary change");
-    assert!(engine
-        .generation()
-        .only_shard()
-        .overlay
-        .is_suppressed(entity.entity()));
+    let Target::Artifact(space, held) = entity else {
+        panic!("an artifact's target")
+    };
+    assert!(engine.generation().space_overlay(space).is_suppressed(held));
+    assert!(
+        !engine.generation().only_shard().overlay.touches(held),
+        "an artifact's deny is its layer space's, never the shard's"
+    );
 
     // And it comes back — a suppression is the reversible one of the two removal rules.
     engine.accept_changes(vec![(entity, ChangeOp::Unsuppress)]).unwrap();

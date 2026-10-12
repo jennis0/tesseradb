@@ -19,7 +19,8 @@ pub(super) struct Position {
     pub(super) group: u32,
     /// The last cell of `group` sent, on a table with cells.
     pub(super) after_cell: Option<u64>,
-    /// The segments version, overlay version and fragment watermark the last page counted under.
+    /// The segments version, the deny state version over every overlay and the fragment watermark
+    /// the last page counted under.
     pub(super) stamp: Option<(u64, u64, u64)>,
 }
 

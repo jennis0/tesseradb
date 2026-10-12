@@ -52,7 +52,7 @@ use mosaica_engine::tile_index::{Extent, TileIndex};
 use mosaica_lifecycle::membership::{decode_record, ArtifactRecord, ArtifactStore, Members};
 use mosaica_store::derived::tile_index_shifts;
 use mosaica_store::manifest::SegmentsManifest;
-use mosaica_store::membership::{row_column_width, MembershipPack};
+use mosaica_store::membership::{row_column_width, MembershipPack, PackKind};
 use mosaica_store::permutation::{Permutation, RowSpace};
 use mosaica_store::read::MortonSlice;
 use mosaica_store::write::write_permutation_iter;
@@ -231,16 +231,26 @@ fn open_fixture(args: &Args) -> Fixture {
     let mut memberships = 0u64;
     let mut undecodable = 0u32;
     for extent in &extents {
-        let pack =
-            MembershipPack::open(&prefix_dir.join(&extent.path)).expect("membership pack opens");
+        let pack = MembershipPack::open(&prefix_dir.join(&extent.path), PackKind::Members)
+            .expect("membership pack opens");
         assert_eq!(pack.ordinal_lo(), extent.ordinal_lo);
         assert_eq!(pack.count(), extent.count);
-        for (ordinal, blob) in pack.iter() {
-            if blob.is_empty() {
+        let record_extent = manifest
+            .layer_spaces
+            .iter()
+            .filter(|space| space.space == extent.space)
+            .flat_map(|space| space.record_extents.iter())
+            .find(|r| r.level == extent.level && r.ordinal_lo == extent.ordinal_lo)
+            .expect("a record pack beside the member pack");
+        let record_pack =
+            MembershipPack::open(&prefix_dir.join(&record_extent.path), PackKind::Records)
+                .expect("record pack opens");
+        for ((ordinal, blob), (_, record_blob)) in pack.iter().zip(record_pack.iter()) {
+            if blob.is_empty() && record_blob.is_empty() {
                 continue;
             }
             // The artifact's own entity is not used by anything below; the members are.
-            match decode_record(EntityId::new(0), blob) {
+            match decode_record(EntityId::new(0), record_blob, blob) {
                 Some((record, _)) => {
                     memberships += record.members.cardinality();
                     records.push((ordinal, record));
@@ -950,12 +960,20 @@ fn check_whole(args: &Args, fixture: &Fixture, shard: &ShardBuild, index: &TileI
         build_identical: None,
     };
 
+    let space = fixture
+        .manifest
+        .partition
+        .layers
+        .iter()
+        .find(|layer| layer.declaration.name == args.layer)
+        .map(|layer| layer.space);
     let level_version = fixture
         .manifest
-        .only_shard()
-        .level_versions
+        .layer_spaces
         .iter()
-        .find(|v| v.layer == args.layer && v.level == args.level)
+        .filter(|record| Some(record.space) == space)
+        .flat_map(|record| record.level_versions.iter())
+        .find(|v| v.level == args.level)
         .map(|v| v.version);
     if let Some(extent) = fixture
         .manifest

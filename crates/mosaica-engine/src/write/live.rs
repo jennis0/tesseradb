@@ -209,7 +209,7 @@ impl LiveState {
     /// [`mosaica_lifecycle::membership::ArtifactStore::unpublished_content`].
     pub(in crate::write) fn unpublished_content(
         &self,
-    ) -> Vec<(mosaica_types::EntityId, Vec<(u16, String)>)> {
+    ) -> Vec<mosaica_lifecycle::membership::ContentRow> {
         lock_recover(&self.artifacts).unpublished_content()
     }
 
@@ -266,7 +266,10 @@ impl LiveState {
         let (mut rehoused, mut kept) = (0u64, 0u64);
         for extent in extents {
             let path = prefix_dir.join(&extent.path);
-            let pack = match mosaica_store::membership::MembershipPack::open(&path) {
+            let pack = match mosaica_store::membership::MembershipPack::open(
+                &path,
+                mosaica_store::membership::PackKind::Members,
+            ) {
                 Ok(pack) => Arc::new(pack),
                 Err(error) => {
                     tracing::error!(
@@ -359,19 +362,17 @@ impl LiveState {
             .map(|(name, _)| name.to_string())
     }
 
-    /// The target an entity of the point overlay names: an artifact's or a layer's in its space,
-    /// or an item's in `shard`.
-    pub(crate) fn target_of(&self, shard: ShardId, entity: EntityId) -> Target {
+    /// Each artifact entity of `entities` as a target in its layer's space; one no live layer holds
+    /// is left out. Artifact entities are unique across spaces until each space numbers its own.
+    pub(crate) fn artifact_targets(&self, entities: &[EntityId]) -> Vec<Target> {
         let registry = lock_recover(&self.registry);
-        let space = registry
-            .locate(entity)
-            .and_then(|(name, ..)| registry.get(name))
-            .or_else(|| registry.iter().map(|(_, l)| l).find(|l| l.entity == entity))
-            .map(|layer| layer.space);
-        match space {
-            Some(space) => Target::Artifact(space, entity),
-            None => Target::Item(shard, entity),
-        }
+        entities
+            .iter()
+            .filter_map(|entity| {
+                let (name, ..) = registry.locate(*entity)?;
+                Some(Target::Artifact(registry.get(name)?.space, *entity))
+            })
+            .collect()
     }
 
     /// Resolve which layers a principal may know exist. See `LayerRegistry::resolve_for`. One
@@ -392,6 +393,13 @@ impl LiveState {
     /// caller applies the gate; this has no principal to resolve against.
     pub(crate) fn registered_layers(&self) -> Vec<mosaica_types::layer::RegisteredLayer> {
         lock_recover(&self.registry).snapshot()
+    }
+
+    /// The name of the live layer holding `space`.
+    pub(crate) fn layer_in_space(&self, space: LayerSpace) -> Option<String> {
+        lock_recover(&self.registry)
+            .in_space(space)
+            .map(|(name, _)| name.to_string())
     }
 
     /// The space of the layer registered under `name`.

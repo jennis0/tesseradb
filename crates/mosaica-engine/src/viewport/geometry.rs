@@ -68,7 +68,7 @@ impl Engine {
         // blocking on a build only the calling thread can drive would deadlock the pool.
         let (geometry, key) =
             self.session_geometry(session, generation, shard, view, cancel, probe)?;
-        let coordinates = self.view_coordinates(shard, &geometry, view);
+        let coordinates = self.view_coordinates(generation, &geometry, view);
         // Names the fragment this request composes against, which under stale-serve is the
         // entry's and not the newest one.
         let mask_identity =

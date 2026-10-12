@@ -78,12 +78,20 @@ fn record_moved_by(record: &ArtifactRecord, retired: &Bitmap) -> bool {
             .any(|content| content.generated_from.and_cardinality(retired) != 0)
 }
 
+/// One artifact's two blobs: its record ([`encode_record`]) and its members ([`encode_members`]).
+/// A hole is two empty blobs.
+pub type ArtifactBlobs = (Vec<u8>, Vec<u8>);
+
 /// One level's not-yet-published artifacts, ready to pack: `(layer, level, ordinal_lo, blobs)`.
 ///
 /// A tuple alias rather than a struct because it is a *transfer* between two modules that both
 /// already name these four things — a struct would be a third name for the same tuple, and the
 /// packer takes them apart again immediately.
-pub type PendingExtent = (String, u32, u32, Vec<Vec<u8>>);
+pub type PendingExtent = (String, u32, u32, Vec<ArtifactBlobs>);
+
+/// One artifact's supplied content as [`ArtifactStore::unpublished_content`] answers it:
+/// `(layer, entity, tagged values)`.
+pub type ContentRow = (String, EntityId, Vec<(u16, String)>);
 
 /// One level's not-yet-published **range**: `(layer, level, ordinal_lo, count)` — the same four
 /// things a [`PendingExtent`] names, with the blobs left where they are for a caller that will
@@ -2376,7 +2384,7 @@ impl ArtifactStore {
         self.pending_ranges()
             .into_iter()
             .map(|(layer, level, ordinal_lo, count)| {
-                let blobs: Vec<Vec<u8>> = self
+                let blobs: Vec<ArtifactBlobs> = self
                     .encode_pending(&layer, level, ordinal_lo, count)
                     .collect();
                 (layer, level, ordinal_lo, blobs)
@@ -2429,12 +2437,17 @@ impl ArtifactStore {
         level: u32,
         ordinal_lo: u32,
         count: u32,
-    ) -> impl Iterator<Item = Vec<u8>> + 'a {
+    ) -> impl Iterator<Item = ArtifactBlobs> + 'a {
         let slots = self.levels.get(&(layer.to_string(), level));
         (ordinal_lo..ordinal_lo + count).map(move |ordinal| {
             slots
                 .and_then(|slots| slots.get(ordinal as usize)?.as_ref())
-                .map(|record| encode_record(record, self.shape_of(layer, level, ordinal)))
+                .map(|record| {
+                    (
+                        encode_record(record, self.shape_of(layer, level, ordinal)),
+                        encode_members(record),
+                    )
+                })
                 .unwrap_or_default()
         })
     }
@@ -2547,7 +2560,7 @@ impl ArtifactStore {
             if slots.is_empty() {
                 continue;
             }
-            let blobs: Vec<Vec<u8>> = slots
+            let blobs: Vec<ArtifactBlobs> = slots
                 .iter()
                 .enumerate()
                 .map(|(ordinal, slot)| {
@@ -2555,7 +2568,7 @@ impl ArtifactStore {
                     // written rather than packed around, because an ordinal is identity and closing
                     // the gap would hand every later artifact its neighbour's `mosaica_id`.
                     let Some(record) = slot else {
-                        return Vec::new();
+                        return ArtifactBlobs::default();
                     };
                     // **Rule F's artifact arm.** An artifact whose own entity this fold executed
                     // leaves the level here, in the same publication that retires the overlay entry
@@ -2564,7 +2577,7 @@ impl ArtifactStore {
                     // would otherwise call it executed *vacuously* at the first fold and retire the
                     // entry while its slot went on being served.
                     if retired.contains(record.entity.raw() as u32) {
-                        return Vec::new();
+                        return ArtifactBlobs::default();
                     }
                     // **The shape survives a fold unchanged**: it is geometry, not rows, so nothing
                     // the fold renumbers reaches it; the fold re-resolves the rows against it. What
@@ -2572,12 +2585,12 @@ impl ArtifactStore {
                     // the artifact's rule is untouched.
                     let shape = self.shape_of(layer, *level, ordinal as u32);
                     if retired.is_empty() {
-                        return encode_record(record, shape);
+                        return (encode_record(record, shape), encode_members(record));
                     }
                     let mut record = record.clone();
                     record.members.to_mut().andnot_inplace(retired);
                     withdraw_content_of_retired_members(&mut record, retired);
-                    encode_record(&record, shape)
+                    (encode_record(&record, shape), encode_members(&record))
                 })
                 .collect();
             ready.push((layer.clone(), *level, 0, blobs));
@@ -2733,14 +2746,12 @@ impl ArtifactStore {
         moved
     }
 
-    /// The supplied content of every artifact not yet in a manifest, as `(entity, tagged values)`.
+    /// The supplied content of every artifact not yet in a manifest, as
+    /// `(layer, entity, tagged values)`, each written into its layer's space.
     ///
     /// **Tags are `rank × kinds + kind`, positions in the artifact's own layer declaration** —
     /// the same idiom a point row's tags follow, where a tag is a position in the manifest's
-    /// declared scalars. Artifact rows and point rows therefore share one store and one reader
-    /// while each reads its tags against its own declaration, which is safe because the two never
-    /// share an entity: the allocator issues artifact ids downward from the ceiling and point ids
-    /// upward from zero, so which declaration governs a row is a range check on its entity.
+    /// declared scalars, in a record blob of the layer's own.
     ///
     /// Every content of one artifact carries a value for every declared kind — refused at
     /// publication otherwise — so the stride is the same for all of them and is recoverable from
@@ -2751,7 +2762,7 @@ impl ArtifactStore {
     /// held no content when it was packed, so its entity is in no content extent and the row this
     /// writes is the first; the registry refuses a fill that would need a second
     /// ([`Self::content_row_is_packed`]).
-    pub fn unpublished_content(&self) -> Vec<(EntityId, Vec<(u16, String)>)> {
+    pub fn unpublished_content(&self) -> Vec<ContentRow> {
         let mut out = Vec::new();
         for ((layer, level), slots) in &self.levels {
             let from = *self
@@ -2795,7 +2806,7 @@ impl ArtifactStore {
                     }
                 }
                 if !fields.is_empty() {
-                    out.push((record.entity, fields));
+                    out.push((layer.clone(), record.entity, fields));
                 }
             }
         }
@@ -2942,15 +2953,14 @@ impl ArtifactStore {
     }
 }
 
-/// Encode one artifact for a packed extent: its caller key, its membership and its contents'
-/// generating sets, in one blob.
+/// Encode one artifact's record for its layer space's record pack: everything but its members and
+/// its contents' generating sets, which [`encode_members`] writes into the shard's slice.
 ///
 /// ```text
 /// blob       := u16 LE key_len | key bytes (UTF-8)
 ///             | u16 LE view_len | view bytes (UTF-8)   -- 0 on an entity-scoped layer
 ///             | u64 LE incarnation                     -- only where view_len is not 0
 ///             | u16 LE content_count
-///             | u32 LE members_len | membership bytes (portable Roaring)
 ///             | content*
 ///             | attachment
 ///             | parents
@@ -2958,7 +2968,6 @@ impl ArtifactStore {
 ///             | shape
 /// content    := digest (32 bytes, SHA-256 of the values)
 ///             | u64 LE cardinality                       -- the set's stored cardinality
-///             | u32 LE set_len | generating-set bytes (portable Roaring)
 /// attachment := u8 0                                     -- unattached
 ///             | u8 1 | u16 LE layer_len | layer bytes (UTF-8)
 ///                    | u32 LE level | u32 LE ordinal | u64 LE target entity
@@ -3010,15 +3019,7 @@ impl ArtifactStore {
 /// mean, and the bitmap library stays on one side of the boundary.
 pub fn encode_record(record: &ArtifactRecord, shape: Option<&ArtifactShapes>) -> Vec<u8> {
     let key = record.key.as_deref().unwrap_or_default().as_bytes();
-    let members = serialise_members(&record.members.whole());
-    let sets: Vec<Vec<u8>> = record
-        .contents
-        .iter()
-        .map(|v| serialise_members(&v.generated_from))
-        .collect();
-    let mut out = Vec::with_capacity(
-        8 + key.len() + members.len() + sets.iter().map(|s| s.len() + 44).sum::<usize>(),
-    );
+    let mut out = Vec::with_capacity(8 + key.len() + record.contents.len() * 40);
     // A key longer than a `u16` cannot round-trip, and truncating one would silently rename an
     // artifact. The control plane bounds the request body long before this, so the clamp is a
     // backstop; it refuses at encode rather than writing a key it cannot read back.
@@ -3043,16 +3044,12 @@ pub fn encode_record(record: &ArtifactRecord, shape: Option<&ArtifactShapes>) ->
     // encoding cannot read back, so it refuses rather than writing a prefix of the ranking. A
     // dropped content is a viewer served a *different* description from the one the caller
     // ranked for them.
-    let count = u16::try_from(sets.len()).unwrap_or(u16::MAX);
+    let count = u16::try_from(record.contents.len()).unwrap_or(u16::MAX);
     out.extend_from_slice(&count.to_le_bytes());
-    out.extend_from_slice(&(members.len() as u32).to_le_bytes());
-    out.extend_from_slice(&members);
     if count != u16::MAX {
-        for (content, set) in record.contents.iter().zip(&sets) {
+        for content in &record.contents {
             out.extend_from_slice(&content.digest);
             out.extend_from_slice(&content.cardinality.to_le_bytes());
-            out.extend_from_slice(&(set.len() as u32).to_le_bytes());
-            out.extend_from_slice(set);
         }
     }
     match &record.attached_to {
@@ -3120,36 +3117,45 @@ pub fn encode_record(record: &ArtifactRecord, shape: Option<&ArtifactShapes>) ->
     out
 }
 
-/// Where one packed blob's membership bytes are, without decoding a bitmap.
+/// Encode one artifact's members and its contents' generating sets for the shard's member pack:
+/// the shard's slice of what [`encode_record`] leaves out.
 ///
-/// **The build's one use for it**: an extent it has just written is mapped back, and a record's
-/// heap bitmap is replaced by a view over these bytes ([`Members::mapped`]). Nothing is copied and
-/// nothing is parsed but the four lengths [`encode_record`] puts in front — which is the whole
-/// reason the membership carries an explicit length rather than being the blob's tail.
+/// ```text
+/// blob := u32 LE members_len | membership bytes (portable Roaring)
+///       | u16 LE set_count   | per content: u32 LE set_len | generating-set bytes
+/// ```
 ///
-/// `None` where the framing does not hold, on [`decode_record`]'s rule: the caller keeps the
-/// bitmap it already has rather than adopting bytes it could not locate.
+/// Every length is explicit, so a truncated blob refuses rather than decoding as a shorter
+/// membership: an artifact with a low masked count for every viewer, which the criterion renders
+/// as absent with nothing to notice.
+pub fn encode_members(record: &ArtifactRecord) -> Vec<u8> {
+    let members = serialise_members(&record.members.whole());
+    let sets: Vec<Vec<u8>> = record
+        .contents
+        .iter()
+        .map(|v| serialise_members(&v.generated_from))
+        .collect();
+    let mut out =
+        Vec::with_capacity(6 + members.len() + sets.iter().map(|s| s.len() + 4).sum::<usize>());
+    out.extend_from_slice(&(members.len() as u32).to_le_bytes());
+    out.extend_from_slice(&members);
+    let count = u16::try_from(sets.len()).unwrap_or(u16::MAX);
+    out.extend_from_slice(&count.to_le_bytes());
+    if count != u16::MAX {
+        for set in &sets {
+            out.extend_from_slice(&(set.len() as u32).to_le_bytes());
+            out.extend_from_slice(set);
+        }
+    }
+    out
+}
+
+/// Where a member blob's membership bytes are, without decoding a bitmap: what a pack's mapping
+/// is rehoused from. `None` where the framing does not hold, and the caller keeps the bitmap it
+/// has.
 pub fn members_bytes(blob: &[u8]) -> Option<&[u8]> {
-    let key_len = u16::from_le_bytes(blob.get(0..2)?.try_into().ok()?) as usize;
-    if key_len == u16::MAX as usize {
-        return None;
-    }
-    // The view sits between the key and the content count (`bundle_format` 8), and is skipped
-    // here for the same reason the key is: this reader wants the membership's offset and parses
-    // only the lengths in front of it.
-    let at = 2 + key_len;
-    let view_len = u16::from_le_bytes(blob.get(at..at + 2)?.try_into().ok()?) as usize;
-    if view_len == u16::MAX as usize {
-        return None;
-    }
-    let at = at + 2 + view_len + if view_len == 0 { 0 } else { 8 };
-    let count = u16::from_le_bytes(blob.get(at..at + 2)?.try_into().ok()?) as usize;
-    if count == u16::MAX as usize {
-        return None;
-    }
-    let at = at + 2;
-    let members_len = u32::from_le_bytes(blob.get(at..at + 4)?.try_into().ok()?) as usize;
-    blob.get(at + 4..at + 4 + members_len)
+    let members_len = u32::from_le_bytes(blob.get(0..4)?.try_into().ok()?) as usize;
+    blob.get(4..4 + members_len)
 }
 
 /// One packed blob's membership as a view over the pack that carries the blob, rather than a copy
@@ -3174,7 +3180,8 @@ pub unsafe fn mapped_members(blob: &[u8], owner: Arc<dyn Any + Send + Sync>) -> 
     unsafe { Members::mapped(bytes, owner) }
 }
 
-/// The inverse, refusing anything it cannot read back exactly.
+/// The inverse of [`encode_record`] over the record and [`encode_members`] over its members,
+/// refusing anything it cannot read back exactly.
 ///
 /// **A refusal and never a partial record**, on [`deserialise_members`]'s argument: an artifact whose
 /// key was lost is one no edge can name, and an artifact whose membership decoded short is one with
@@ -3183,7 +3190,10 @@ pub unsafe fn mapped_members(blob: &[u8], owner: Arc<dyn Any + Send + Sync>) -> 
 pub fn decode_record(
     entity: EntityId,
     blob: &[u8],
+    members_blob: &[u8],
 ) -> Option<(ArtifactRecord, Option<ArtifactShapes>)> {
+    let (members, sets) = decode_members(members_blob)?;
+    let mut sets = sets.into_iter();
     let mut at = 0usize;
     let mut take = |n: usize| -> Option<&[u8]> {
         let end = at.checked_add(n)?;
@@ -3214,14 +3224,16 @@ pub fn decode_record(
     if count == u16::MAX as usize {
         return None;
     }
-    let members_len = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
-    let members = deserialise_members(take(members_len)?)?;
+    // The record and its members are two packs: a count that differs is two blobs that do not
+    // describe one artifact.
+    if sets.len() != count {
+        return None;
+    }
     let mut contents = Vec::with_capacity(count);
     for _ in 0..count {
         let digest: [u8; 32] = take(32)?.try_into().ok()?;
         let cardinality = u64::from_le_bytes(take(8)?.try_into().ok()?);
-        let set_len = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
-        let generated_from = deserialise_members(take(set_len)?)?;
+        let generated_from = sets.next()?;
         // **The pair is checked here, as `ArtifactStore::grow_set` checks it at replay**
         // (`ingest.md` §1.1). Containment reads the row-space operator against the stored
         // cardinality, and the two now come from different places in these bytes: an extent whose
@@ -3341,6 +3353,32 @@ pub fn decode_record(
         },
         shape,
     ))
+}
+
+/// The inverse of [`encode_members`]: the membership and each content's generating set.
+fn decode_members(blob: &[u8]) -> Option<(Bitmap, Vec<Bitmap>)> {
+    let mut at = 0usize;
+    let mut take = |n: usize| -> Option<&[u8]> {
+        let end = at.checked_add(n)?;
+        let view = blob.get(at..end)?;
+        at = end;
+        Some(view)
+    };
+    let members_len = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
+    let members = deserialise_members(take(members_len)?)?;
+    let count = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
+    if count == u16::MAX as usize {
+        return None;
+    }
+    let mut sets = Vec::with_capacity(count);
+    for _ in 0..count {
+        let set_len = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
+        sets.push(deserialise_members(take(set_len)?)?);
+    }
+    if at != blob.len() {
+        return None;
+    }
+    Some((members, sets))
 }
 
 /// Serialise a membership for the WAL, in CRoaring's portable form.
@@ -3506,6 +3544,15 @@ pub fn deserialise_members(bytes: &[u8]) -> Option<Bitmap> {
 mod tests {
     use super::*;
 
+    /// `record` through its two blobs and back, with no shape.
+    fn round_trip(record: &ArtifactRecord) -> Option<(ArtifactRecord, Option<ArtifactShapes>)> {
+        decode_record(
+            record.entity,
+            &encode_record(record, None),
+            &encode_members(record),
+        )
+    }
+
     fn record(entity: u64, members: &[u32]) -> ArtifactRecord {
         ArtifactRecord {
             entity: EntityId::new(entity),
@@ -3658,13 +3705,14 @@ mod tests {
         assert_eq!(ready.len(), ranges.len());
         let holed = ready.iter().find(|(layer, ..)| layer == "holed/h").unwrap();
         assert_eq!((holed.2, holed.3.len()), (0, 2));
-        assert!(holed.3[0].is_empty() && !holed.3[1].is_empty());
+        assert!(holed.3[0].0.is_empty() && holed.3[0].1.is_empty());
+        assert!(!holed.3[1].0.is_empty() && !holed.3[1].1.is_empty());
         for ((layer, level, lo, blobs), (r_layer, r_level, r_lo, count)) in
             ready.iter().zip(ranges.iter())
         {
             assert_eq!((layer, level, lo), (r_layer, r_level, r_lo));
             assert_eq!(blobs.len(), *count as usize);
-            let streamed: Vec<Vec<u8>> = store
+            let streamed: Vec<ArtifactBlobs> = store
                 .encode_pending(r_layer, *r_level, *r_lo, *count)
                 .collect();
             assert_eq!(*blobs, streamed);
@@ -3994,11 +4042,10 @@ mod tests {
         assert!(!store.rehouse_members("clusters/a", 0, 7, members));
     }
 
-    /// **The membership's bytes are where [`members_bytes`] says they are**, over a record with a
-    /// key, contents and an attachment in front of and behind them — the framing the build's
-    /// rehousing walks without decoding a bitmap.
+    /// **The membership's bytes are where [`members_bytes`] says they are**, ahead of the
+    /// contents' generating sets — the framing the rehousing walks without decoding a bitmap.
     #[test]
-    fn members_bytes_finds_the_membership_encode_record_wrote() {
+    fn members_bytes_finds_the_membership_encode_members_wrote() {
         let mut record = record(100, &[1, 2, 3, 70_000]);
         record.key = Some("a-key".to_string());
         record.contents = vec![ContentSet {
@@ -4013,7 +4060,7 @@ mod tests {
             ordinal: 3,
             entity: EntityId::new(400),
         });
-        let blob = encode_record(&record, None);
+        let blob = encode_members(&record);
         let bytes = members_bytes(&blob).expect("the framing holds");
         assert_eq!(
             deserialise_members(bytes).expect("a bitmap"),
@@ -4021,7 +4068,7 @@ mod tests {
             "the slice must be the membership and not a content's generating set"
         );
         // **A blob cut inside the membership answers None rather than a shorter one** — which is
-        // the whole point of the explicit length `encode_record` puts in front of it.
+        // the whole point of the explicit length `encode_members` puts in front of it.
         let end = bytes.as_ptr() as usize - blob.as_ptr() as usize + bytes.len();
         assert!(members_bytes(&blob[..end - 1]).is_none());
     }
@@ -4041,7 +4088,7 @@ mod tests {
             generated_from: Bitmap::of(&[2, 3]),
             cardinality: 2,
         }];
-        let blob: Arc<Vec<u8>> = Arc::new(encode_record(&record, None));
+        let blob: Arc<Vec<u8>> = Arc::new(encode_members(&record));
         let owner: Arc<dyn Any + Send + Sync> = blob.clone();
         // SAFETY: `blob` is the allocation `owner` holds, and it is read-only for as long as both
         // live.
@@ -4162,11 +4209,10 @@ mod tests {
         scoped.key = Some("c1".into());
         scoped.view = Some("q1".into());
         scoped.incarnation = 7;
-        let (restored, _) = decode_record(scoped.entity, &encode_record(&scoped, None))
-            .expect("the blob round-trips");
+        let (restored, _) = round_trip(&scoped).expect("the blob round-trips");
         assert_eq!(restored.view.as_deref(), Some("q1"));
         assert_eq!(restored.incarnation, 7);
-        let blob = encode_record(&scoped, None);
+        let blob = encode_members(&scoped);
         assert_eq!(
             members_bytes(&blob),
             Some(&serialise_members(&scoped.members.whole())[..])
@@ -4176,8 +4222,7 @@ mod tests {
 
         let mut plain = record(101, &[4]);
         plain.key = Some("c1".into());
-        let (restored, _) = decode_record(plain.entity, &encode_record(&plain, None))
-            .expect("the blob round-trips");
+        let (restored, _) = round_trip(&plain).expect("the blob round-trips");
         assert_eq!(restored.view, None);
 
         // The two keys are one key in two views, and the store that seeds from the extents keeps
@@ -4223,12 +4268,13 @@ mod tests {
             },
         ];
         let blob = encode_record(&r, None);
-        let (back, _) = decode_record(r.entity, &blob).expect("a whole blob decodes");
+        let members = encode_members(&r);
+        let (back, _) = decode_record(r.entity, &blob, &members).expect("a whole blob decodes");
         assert_eq!(back.parents, r.parents, "every parent, in order");
 
         let mut root = r.clone();
         root.parents.clear();
-        let (back, _) = decode_record(root.entity, &encode_record(&root, None)).unwrap();
+        let (back, _) = round_trip(&root).unwrap();
         assert!(back.parents.is_empty(), "a root is an explicit zero");
 
         // A duplicate edge or an out-of-order list is not one this writer produced: the record is
@@ -4239,22 +4285,22 @@ mod tests {
             ordinal: 0,
         });
         assert!(
-            decode_record(twice.entity, &encode_record(&twice, None)).is_none(),
+            round_trip(&twice).is_none(),
             "a duplicate edge refuses"
         );
         let mut backwards = r.clone();
         backwards.parents.reverse();
         assert!(
-            decode_record(backwards.entity, &encode_record(&backwards, None)).is_none(),
+            round_trip(&backwards).is_none(),
             "an unsorted list refuses"
         );
 
         // Every truncation inside the list refuses rather than decoding as fewer parents.
-        let whole = decode_record(root.entity, &encode_record(&root, None)).is_some();
+        let whole = round_trip(&root).is_some();
         assert!(whole);
         for len in 0..blob.len() {
             assert!(
-                decode_record(r.entity, &blob[..len]).is_none(),
+                decode_record(r.entity, &blob[..len], &encode_members(&r)).is_none(),
                 "a blob truncated to {len} of {} bytes must refuse",
                 blob.len()
             );
@@ -4268,22 +4314,23 @@ mod tests {
         let mut r = record(100, &[1, 2, 3]);
         r.access = canonical_access(&[b"team-b".to_vec(), b"team-a".to_vec()]);
         let blob = encode_record(&r, None);
-        let (back, _) = decode_record(r.entity, &blob).expect("a whole blob decodes");
+        let members = encode_members(&r);
+        let (back, _) = decode_record(r.entity, &blob, &members).expect("a whole blob decodes");
         assert_eq!(back.access, vec![b"team-a".to_vec(), b"team-b".to_vec()]);
 
         let plain = record(101, &[1]);
-        let (back, _) = decode_record(plain.entity, &encode_record(&plain, None)).unwrap();
+        let (back, _) = round_trip(&plain).unwrap();
         assert!(back.access.is_empty());
 
         let mut backwards = r.clone();
         backwards.access.reverse();
-        assert!(decode_record(backwards.entity, &encode_record(&backwards, None)).is_none());
+        assert!(round_trip(&backwards).is_none());
         let mut twice = r.clone();
         twice.access.push(b"team-b".to_vec());
-        assert!(decode_record(twice.entity, &encode_record(&twice, None)).is_none());
+        assert!(round_trip(&twice).is_none());
 
         for len in 0..blob.len() {
-            assert!(decode_record(r.entity, &blob[..len]).is_none());
+            assert!(decode_record(r.entity, &blob[..len], &encode_members(&r)).is_none());
         }
     }
 
@@ -4341,23 +4388,46 @@ mod tests {
         }];
         let whole = encode_record(&r, None);
         assert!(
-            decode_record(r.entity, &whole).is_some(),
+            decode_record(r.entity, &whole, &encode_members(&r)).is_some(),
             "the pair agrees, so the record decodes"
         );
 
         r.contents[0].cardinality = 1;
         let corrupt = encode_record(&r, None);
         assert!(
-            decode_record(r.entity, &corrupt).is_none(),
+            decode_record(r.entity, &corrupt, &encode_members(&r)).is_none(),
             "a cardinality smaller than the set it travels with is damage: a principal holding \
              one member of three would satisfy |G ∩ M| == |G|"
         );
 
         r.contents[0].cardinality = 9;
         assert!(
-            decode_record(r.entity, &encode_record(&r, None)).is_none(),
+            round_trip(&r).is_none(),
             "and a larger one is damage too, though it fails containment for everybody"
         );
+    }
+
+    /// A record decodes only beside the members blob written for it: a members blob whose
+    /// content count differs, or one cut short, refuses rather than restoring the artifact with
+    /// fewer generating sets or a shorter membership.
+    #[test]
+    fn a_record_and_a_members_blob_that_do_not_agree_are_refused() {
+        let mut r = record(100, &[1, 2, 3]);
+        r.contents = vec![ContentSet {
+            values: Some(vec!["a label".into()]),
+            digest: content_digest(&["a label".to_string()]),
+            generated_from: Bitmap::of(&[1, 2]),
+            cardinality: 2,
+        }];
+        let blob = encode_record(&r, None);
+        let members = encode_members(&r);
+        assert!(decode_record(r.entity, &blob, &members).is_some());
+        let mut bare = r.clone();
+        bare.contents.clear();
+        assert!(decode_record(r.entity, &blob, &encode_members(&bare)).is_none());
+        for len in 0..members.len() {
+            assert!(decode_record(r.entity, &blob, &members[..len]).is_none());
+        }
     }
 
     #[test]
@@ -4382,7 +4452,9 @@ mod tests {
             ("map".into(), vec![9]),
         ]);
         let blob = encode_record(&r, shape.as_ref());
-        let (back, back_shape) = decode_record(r.entity, &blob).expect("a whole blob decodes");
+        let members = encode_members(&r);
+        let (back, back_shape) =
+            decode_record(r.entity, &blob, &members).expect("a whole blob decodes");
         assert_eq!(back.attached_to, r.attached_to);
         assert_eq!(back.key, r.key);
         assert_eq!(
@@ -4401,7 +4473,8 @@ mod tests {
         let mut plain = r.clone();
         plain.attached_to = None;
         let plain_blob = encode_record(&plain, None);
-        let (restored, restored_shape) = decode_record(plain.entity, &plain_blob).unwrap();
+        let (restored, restored_shape) =
+            decode_record(plain.entity, &plain_blob, &encode_members(&plain)).unwrap();
         assert_eq!(restored.attached_to, None);
         assert_eq!(restored.members, plain.members);
         assert_eq!(restored_shape, None);
@@ -4415,7 +4488,7 @@ mod tests {
         viewless.push(3);
         viewless.extend_from_slice(&0u16.to_le_bytes());
         assert!(
-            decode_record(plain.entity, &viewless).is_none(),
+            decode_record(plain.entity, &viewless, &encode_members(&plain)).is_none(),
             "a shape for no view is an artifact with no membership rule"
         );
         assert!(ArtifactShapes::new(vec![("a".into(), vec![])]).is_none());
@@ -4426,7 +4499,7 @@ mod tests {
         // byte, and a reader that shrugged at a missing tail would decode it as unattached.
         for len in (plain_blob.len() - 1)..blob.len() {
             assert!(
-                decode_record(r.entity, &blob[..len]).is_none(),
+                decode_record(r.entity, &blob[..len], &encode_members(&r)).is_none(),
                 "a blob truncated to {len} of {} bytes must refuse",
                 blob.len()
             );
@@ -5059,7 +5132,11 @@ mod tests {
         );
         assert_eq!(
             store.unpublished_content(),
-            vec![(EntityId::new(100), vec![(0u16, "shipping".to_string())])],
+            vec![(
+                "topics/x".to_string(),
+                EntityId::new(100),
+                vec![(0u16, "shipping".to_string())]
+            )],
             "a filled record below the high-water is written beside the tail"
         );
         assert_eq!(store.oldest_wal_pos(), Some(40), "pinned at the fill");

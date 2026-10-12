@@ -1739,30 +1739,70 @@ pub struct MembershipExtent {
     pub count: u32,
 }
 
-/// One `(layer, level)`'s artifact-write counter, as of the publication this manifest describes.
+/// One level's artifact-write counter, as of the publication this manifest describes. A
+/// structure derived from the level is adopted only at the version it was written for.
 ///
-/// **The counter is what a derived structure is valid *for*, and until now it lived only in
-/// memory.** `ArtifactStore` counts the writes that have landed on each level, and everything
-/// derived from a level — its row-space projection, its lineage, its containment partition — is
-/// correct only for the version it was derived from. A restart rebuilt the store from these
-/// manifests and started every level's counter at whatever the seeding happened to produce, so a
-/// coordinate recorded before the restart could not be compared with one after it.
+/// Per level and not one counter for the store: a store-wide counter makes one publication
+/// anywhere invalidate every level's derived form everywhere.
 ///
-/// **Per `(layer, level)` and not one counter for the store**, for `ArtifactStore::versions`' own
-/// reason: a store-wide counter makes one publication anywhere invalidate every level's derived
-/// form everywhere (`design/artifact-serving-at-scale.md` §8.1).
-///
-/// A level present in `membership_extents` and absent here is a level whose version is unknown,
-/// which is not the same as zero — see [`ShardRecord::level_versions`].
+/// A level present in its space's record packs and absent here is a level whose version is
+/// unknown, which is not the same as zero.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LevelVersion {
-    pub layer: String,
-    /// The layer's space, on [`MembershipExtent::space`]'s argument.
-    pub space: LayerSpace,
     pub level: u32,
     /// How many artifact writes had landed on this level when this manifest was written.
     pub version: u64,
+}
+
+/// One record pack of a layer space: one publication's artifact records for one level, members
+/// apart (`crate::membership`). The level's members are in each shard's [`MembershipExtent`]
+/// over the same ordinals.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RecordPackExtent {
+    /// Prefix-relative path of the pack.
+    pub path: String,
+    pub level: u32,
+    /// The first ordinal this pack covers; also in the file, and checked against it at open.
+    pub ordinal_lo: u32,
+    pub count: u32,
+}
+
+/// One layer space's state in a [`SegmentsManifest`]: its own deny state, its artifacts' records,
+/// supplied content and held shapes, and its levels' versions. A space whose layer is not in
+/// [`PartitionManifest::layers`] refuses the open.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayerSpaceRecord {
+    pub space: LayerSpace,
+    /// The space's deleted artifacts whose records a fold has not yet removed.
+    pub tombstones: EntitySet,
+    /// The space's suppressed artifacts, and the layer's own entity where the layer is suppressed.
+    /// Never the union with [`Self::tombstones`], on [`ShardRecord::deny`]'s argument.
+    pub deny: EntitySet,
+    pub record_extents: Vec<RecordPackExtent>,
+    /// The artifacts' supplied content, in the record-blob format.
+    pub content_extents: Vec<RecordExtent>,
+    /// A lost list restarts every level at zero, which a structure derived under the old numbering
+    /// could match.
+    pub level_versions: Vec<LevelVersion>,
+    /// The levels' held shape decompositions, each a [`DerivedForm::ShapeHeld`].
+    pub held_shapes: Vec<DerivedExtent>,
+}
+
+impl LayerSpaceRecord {
+    /// A space that denies nothing and names no file.
+    pub fn empty(space: LayerSpace) -> LayerSpaceRecord {
+        LayerSpaceRecord {
+            space,
+            tombstones: EntitySet::default(),
+            deny: EntitySet::default(),
+            record_extents: Vec::new(),
+            content_extents: Vec::new(),
+            level_versions: Vec::new(),
+            held_shapes: Vec::new(),
+        }
+    }
 }
 
 /// One file derived from an artifact level: a containment partition, a tile index, a row-major
@@ -1963,6 +2003,8 @@ pub struct SegmentsManifest {
     #[serde(flatten)]
     pub partition: PartitionManifest,
     pub shards: Shards,
+    /// One per registered layer, ascending by space.
+    pub layer_spaces: Vec<LayerSpaceRecord>,
 }
 
 /// The point shards of a [`SegmentsManifest`].
@@ -2197,8 +2239,8 @@ pub struct ShardRecord {
     /// union would make every deletion look retirable by an unsuppress.
     #[serde(default)]
     pub deny: EntitySet,
-    /// Every packed membership extent this shard holds — see [`MembershipExtent`]. Empty in a
-    /// bundle straight out of `mosaica build`, which registers no layers and publishes no artifacts.
+    /// This shard's slice of every artifact's members, one pack per publication per level — see
+    /// [`MembershipExtent`]. The records are in the layer spaces' [`RecordPackExtent`]s.
     pub membership_extents: Vec<MembershipExtent>,
     /// Every derived artifact file this shard holds. See [`DerivedExtent`].
     pub derived_extents: Vec<DerivedExtent>,
@@ -2208,18 +2250,6 @@ pub struct ShardRecord {
     ///
     /// A lost list sends every session through a permutation walk, with no fault reported.
     pub term_image_extents: Vec<TermImageExtent>,
-    /// Every record-blob extent holding artifact-supplied content, in [`Self::record_extents`]'
-    /// format. Kept apart because an artifact publication restates its whole list from a stale
-    /// manifest while a coalesce consumes point extents, so on one list each would undo the other.
-    /// Not coalesced or folded. Artifact ids descend from the ceiling and point ids ascend from
-    /// zero, so the two never share an entity.
-    pub artifact_record_extents: Vec<RecordExtent>,
-    /// Every `(layer, level)`'s artifact-write counter as of this publication — see
-    /// [`LevelVersion`].
-    ///
-    /// A lost list restarts every level at zero, which a structure derived under the old numbering
-    /// could match.
-    pub level_versions: Vec<LevelVersion>,
 }
 
 impl PartitionManifest {
@@ -2270,8 +2300,6 @@ impl ShardRecord {
             membership_extents: Vec::new(),
             derived_extents: Vec::new(),
             term_image_extents: Vec::new(),
-            artifact_record_extents: Vec::new(),
-            level_versions: Vec::new(),
         }
     }
 }
@@ -2381,6 +2409,7 @@ impl SegmentsManifest {
                 size: mosaica_types::SHARD_SIZE_DEFAULT,
                 records: vec![ShardRecord::empty(ShardId::ZERO)],
             },
+            layer_spaces: Vec::new(),
         }
     }
 
@@ -2398,6 +2427,32 @@ impl SegmentsManifest {
                     .collect::<Vec<_>>()
                     .join(", ")
             )),
+        }
+    }
+
+    /// Refuses a manifest whose layer spaces are not ascending, or name a space no registered
+    /// layer holds: its records would be served under no layer, or a dropped one's.
+    pub(crate) fn check_layer_spaces(&self) -> std::result::Result<(), String> {
+        if self
+            .layer_spaces
+            .windows(2)
+            .any(|pair| pair[0].space >= pair[1].space)
+        {
+            return Err("the side-manifest's layer spaces are not ascending".to_string());
+        }
+        match self.layer_spaces.iter().find(|record| {
+            !self
+                .partition
+                .layers
+                .iter()
+                .any(|layer| layer.space == record.space)
+        }) {
+            Some(record) => Err(format!(
+                "the side-manifest names layer space {}, which no registered layer holds. \
+                 Rebuild the bundle.",
+                record.space
+            )),
+            None => Ok(()),
         }
     }
 
@@ -2431,9 +2486,18 @@ impl SegmentsManifest {
     /// re-exposes every entity denied since the older manifest was written.
     pub fn deny_disposition_state(&self) -> Vec<&'static str> {
         let records = &self.shards.records;
+        let spaces = &self.layer_spaces;
         [
-            ("tombstones", records.iter().any(|r| r.tombstones.carries())),
-            ("deny", records.iter().any(|r| r.deny.carries())),
+            (
+                "tombstones",
+                records.iter().any(|r| r.tombstones.carries())
+                    || spaces.iter().any(|s| s.tombstones.carries()),
+            ),
+            (
+                "deny",
+                records.iter().any(|r| r.deny.carries())
+                    || spaces.iter().any(|s| s.deny.carries()),
+            ),
         ]
         .into_iter()
         .filter(|(name, carried)| *carried && DENY_DISPOSITION_STATE.contains(name))
@@ -2450,13 +2514,19 @@ impl SegmentsManifest {
         // they are listed here past the honoured-name filter below and the manifest is refused
         // rather than served as though nothing were denied.
         let records = &self.shards.records;
+        let spaces = &self.layer_spaces;
         let partition = &self.partition;
         let mut fields: Vec<&'static str> = [
             (
                 "tombstones",
-                records.iter().any(|r| r.tombstones.undecodable()),
+                records.iter().any(|r| r.tombstones.undecodable())
+                    || spaces.iter().any(|s| s.tombstones.undecodable()),
             ),
-            ("deny", records.iter().any(|r| r.deny.undecodable())),
+            (
+                "deny",
+                records.iter().any(|r| r.deny.undecodable())
+                    || spaces.iter().any(|s| s.deny.undecodable()),
+            ),
         ]
         .into_iter()
         .filter(|(_, undecodable)| *undecodable)
@@ -2647,6 +2717,52 @@ mod tests {
     /// The refusal is the half worth testing. There is no `serde(default)` on the field, so a
     /// manifest written without it fails to parse rather than parsing as a partition whose views
     /// have no images, which is what a list lost in transit would look like.
+    /// A layer space's deny state is deny-disposition state as a shard's is, so a manifest
+    /// carrying an artifact's suppression is never stepped past, and one whose space deny state
+    /// does not decode is refused.
+    #[test]
+    fn a_layer_spaces_deny_state_is_never_stepped_past() {
+        let space = LayerSpace::new(3).unwrap();
+        let mut manifest = SegmentsManifest::empty();
+        manifest.only_shard_mut().deltas = vec!["d".to_string()];
+        let mut record = LayerSpaceRecord::empty(space);
+        record.deny = EntitySet::of(&croaring::Bitmap::of(&[9]));
+        manifest.layer_spaces.push(record);
+        assert_eq!(manifest.deny_disposition_state(), vec!["deny"]);
+
+        let mut manifest = SegmentsManifest::empty();
+        let mut record = LayerSpaceRecord::empty(space);
+        record.tombstones = serde_json::from_value(serde_json::json!("AAAA")).unwrap();
+        manifest.layer_spaces.push(record);
+        assert_eq!(
+            manifest.honourability(),
+            Honourability::Unready {
+                fields: vec!["tombstones"]
+            }
+        );
+    }
+
+    /// The list is required: a lost one must not read as a partition with no layer spaces.
+    #[test]
+    fn a_layer_space_list_round_trips_and_an_absent_one_is_refused() {
+        let mut manifest = SegmentsManifest::empty();
+        let mut record = LayerSpaceRecord::empty(LayerSpace::new(2).unwrap());
+        record.level_versions.push(LevelVersion {
+            level: 1,
+            version: 4,
+        });
+        manifest.layer_spaces.push(record);
+        let json = serde_json::to_value(&manifest).unwrap();
+        let back: SegmentsManifest = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(back.layer_spaces.len(), 1);
+        assert_eq!(back.layer_spaces[0].space, LayerSpace::new(2).unwrap());
+        assert_eq!(back.layer_spaces[0].level_versions[0].version, 4);
+
+        let mut json = json;
+        json.as_object_mut().unwrap().remove("layer_spaces");
+        assert!(serde_json::from_value::<SegmentsManifest>(json).is_err());
+    }
+
     #[test]
     fn a_term_image_list_round_trips_and_an_absent_one_is_refused() {
         let mut manifest = SegmentsManifest::empty();
