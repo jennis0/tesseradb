@@ -1,0 +1,7 @@
+error[E0277]: the trait bound `ShardRow: From<LayerSpace>` is not satisfied
+ --> tests/ui/shard_row_from_layer_space.rs:6:40
+  |
+6 |     let _: ShardRow = LayerSpace::ZERO.into();
+  |                                        ^^^^ the trait `From<LayerSpace>` is not implemented for `ShardRow`
+  |
+  = note: required for `LayerSpace` to implement `Into<ShardRow>`

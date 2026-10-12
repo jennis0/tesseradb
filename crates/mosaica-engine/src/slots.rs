@@ -235,7 +235,7 @@ pub(crate) struct WithheldKey {
     credential: [u8; 32],
     view: String,
     layer: String,
-    entity: u64,
+    space: u32,
     level: u32,
     palette: u8,
     registry_version: u64,
@@ -533,7 +533,7 @@ impl Engine {
                 credential: served.session.auth_data_hash(),
                 view: served.name.to_string(),
                 layer: name.to_string(),
-                entity: layer.entity.raw(),
+                space: layer.space.raw(),
                 level,
                 palette,
                 registry_version: self.write.live().registry_version(),
@@ -759,7 +759,7 @@ impl Engine {
                 {
                     continue;
                 }
-                let Some(id) = self.artifact_id(entity) else {
+                let Some(id) = self.artifact_id(layer.space, entity) else {
                     continue;
                 };
                 at[ordinal as usize] = clusters.len() as u32;

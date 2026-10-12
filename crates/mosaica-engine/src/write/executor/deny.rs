@@ -23,7 +23,7 @@ pub const DENY_DURABILITY_ATTEMPTS: usize = DENY_DURABILITY_BACKOFF.len() + 1;
 /// One request in an open deny window, with everything needed to apply it and answer its caller.
 pub(super) struct DenyEntry {
     /// In request order; one record carries them all.
-    pub(super) changes: Vec<(EntityId, ChangeOp)>,
+    pub(super) changes: Vec<(Target, ChangeOp)>,
     /// `None` for the deletions a window's deletions cascade to, which have no caller to answer
     /// but are otherwise an ordinary entry.
     pub(super) reply: Option<Reply<()>>,
@@ -91,7 +91,10 @@ impl Executor {
             .iter()
             .flat_map(|e| e.changes.iter())
             .filter(|(_, op)| matches!(op, ChangeOp::Delete))
-            .map(|(entity, _)| *entity)
+            .filter_map(|(target, _)| match target {
+                Target::Artifact(_, entity) => Some(*entity),
+                Target::Item(..) => None,
+            })
             .collect();
         if deleted.is_empty() {
             return;
@@ -102,10 +105,11 @@ impl Executor {
         if cascade.is_empty() {
             return;
         }
+        let shard = self.generation.load().only_shard().id();
         entries.push(DenyEntry {
             changes: cascade
                 .into_iter()
-                .map(|entity| (entity, ChangeOp::Delete))
+                .map(|entity| (self.live.target_of(shard, entity), ChangeOp::Delete))
                 .collect(),
             reply: None,
         });
@@ -132,7 +136,7 @@ impl Executor {
         self.observe_wal();
 
         if let Some((index, error)) = failed_at {
-            let applied: Vec<(EntityId, ChangeOp)> = entries
+            let applied: Vec<(Target, ChangeOp)> = entries
                 .iter()
                 .flat_map(|e| e.changes.iter().copied())
                 .filter(|(_, op)| matches!(op, ChangeOp::Delete | ChangeOp::Suppress))
@@ -153,7 +157,7 @@ impl Executor {
         // Durable, not yet in force. See `pause_point`.
         self.pause_point(PauseSiteArg::AfterFsync);
 
-        let applied: Vec<(EntityId, ChangeOp)> = entries
+        let applied: Vec<(Target, ChangeOp)> = entries
             .iter()
             .flat_map(|e| e.changes.iter().copied())
             .collect();
@@ -202,7 +206,8 @@ impl Executor {
     /// Clone the overlay once, apply every change in the window in order, publish once. Pins are
     /// never invalidated by this: a pin fixes `(prefix, segments_version)`, and this bumps
     /// `overlay_version` instead, so a suppression applies to a pinned request the moment accepted.
-    pub(super) fn apply_changes(&self, changes: Vec<(EntityId, ChangeOp)>) {
+    /// An artifact's or a layer's entity is in the point overlay too, above every point's.
+    pub(super) fn apply_changes(&self, changes: Vec<(Target, ChangeOp)>) {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
         let shard = generation.only_shard();
@@ -210,7 +215,8 @@ impl Executor {
         let mut newly_denied: Vec<EntityId> = Vec::new();
         let mut deleted: Vec<EntityId> = Vec::new();
         let mut unsuppressed = false;
-        for (entity, op) in changes {
+        for (target, op) in changes {
+            let entity = target.entity();
             match op {
                 ChangeOp::Delete => {
                     newly_denied.push(entity);

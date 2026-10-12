@@ -166,8 +166,8 @@ impl Fx {
             .collect()
     }
 
-    /// An artifact's entity, by the identifier a read served.
-    fn entity_of(&self, id: u64) -> EntityId {
+    /// An artifact's target, by the identifier a read served.
+    fn entity_of(&self, id: u64) -> mosaica_types::Target {
         artifact_entity(self.engine(), MosaicaId::new(id))
     }
 }
@@ -1068,10 +1068,10 @@ fn a_deny_accepted_mid_read_applies_from_the_next_response() {
     let all = read_all(engine, &session, &request(FLOOR, &fields));
     let id_of: HashMap<String, u64> = keys(&all).into_iter().zip(ids(&all)).collect();
     engine
-        .accept_change(fx.entity_of(id_of["f4"]), ChangeOp::Suppress)
+        .accept_changes(vec![(fx.entity_of(id_of["f4"]), ChangeOp::Suppress)])
         .unwrap();
     engine
-        .accept_change(fx.entity_of(id_of["f6"]), ChangeOp::Delete)
+        .accept_changes(vec![(fx.entity_of(id_of["f6"]), ChangeOp::Delete)])
         .unwrap();
     // f8 keeps FLOOR_COUNT - 1 of its members.
     for entity in fx.entities(floor_members(8).skip(FLOOR_COUNT as usize - 1)) {

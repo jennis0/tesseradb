@@ -122,7 +122,7 @@ fn a_snapshot_replays_in_position_and_never_displaces_what_precedes_it() {
     {
         let mut wal = Wal::open(&path).unwrap();
         wal.append(&WalRecord::ChangeBatch {
-            changes: vec![(EntityId::new(8), ChangeOp::Delete)],
+            changes: vec![(item(EntityId::new(8)), ChangeOp::Delete)],
         })
         .unwrap();
         wal.append(&WalRecord::OverlaySnapshot {
@@ -166,4 +166,8 @@ fn a_snapshot_unions_with_state_already_applied() {
         live.is_suppressed(EntityId::new(2)),
         "applying a snapshot must not discard what was already there"
     );
+}
+
+fn item(entity: EntityId) -> mosaica_types::Target {
+    mosaica_types::Target::Item(mosaica_types::ShardId::ZERO, entity)
 }

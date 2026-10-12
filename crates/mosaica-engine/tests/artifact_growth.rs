@@ -661,7 +661,7 @@ fn growing_a_suppressed_artifact_leaves_it_suppressed() {
     let id = publish(&fx, &engine, 0..300);
     let entity = artifact_entity(&engine, id);
 
-    engine.accept_change(entity, ChangeOp::Suppress).unwrap();
+    engine.accept_changes(vec![(entity, ChangeOp::Suppress)]).unwrap();
     assert!(
         artifacts_of(&engine, &full_coverage_credential()).is_empty(),
         "the suppression is in force at the ack"
@@ -673,7 +673,7 @@ fn growing_a_suppressed_artifact_leaves_it_suppressed() {
         "and it is still in force: growth is not a route back into service"
     );
 
-    engine.accept_change(entity, ChangeOp::Unsuppress).unwrap();
+    engine.accept_changes(vec![(entity, ChangeOp::Unsuppress)]).unwrap();
     assert_eq!(
         count(&engine),
         310,
@@ -762,25 +762,6 @@ fn a_deleted_point_may_not_join() {
         refused.contains("deleted"),
         "the refusal says what is wrong with it: {refused}"
     );
-    assert_eq!(count(&engine), 300);
-}
-
-/// A member with no row is refused here exactly as it is at publication: it would count towards the
-/// declared size the proportional criterion divides by while being visible to nobody.
-#[test]
-fn a_join_naming_something_other_than_a_point_is_refused() {
-    let fx = fixture();
-    let engine = fx.open();
-    let id = publish(&fx, &engine, 0..300);
-    let artifact = artifact_entity(&engine, id);
-
-    engine
-        .grow_memberships(
-            "clusters/a".into(),
-            0,
-            vec![IncomingGrowth::from_entities("c0".into(), vec![artifact])],
-        )
-        .expect_err("an artifact is not a document");
     assert_eq!(count(&engine), 300);
 }
 

@@ -28,7 +28,7 @@ pub(in crate::write) type ResolverState = (FxHashMap<Vec<u8>, TermId>, u32);
 /// The layer registry as a side-manifest carries it, with the allocator's row-less mark.
 pub(in crate::write) struct RegistryForPublication {
     pub layers: Vec<mosaica_types::layer::RegisteredLayer>,
-    pub tombstones: Vec<String>,
+    pub next_space: u32,
     /// The registry's version counter.
     pub version: u64,
     pub low_water: u64,
@@ -160,8 +160,14 @@ impl LiveState {
         f(&mut registry, &mut alloc)
     }
 
+    /// Applies a registry record, and a drop to the artifact store too, so a layer registered
+    /// later under the name starts from no artifact.
     pub(in crate::write) fn apply_registry_record(&self, record: &WalRecord) {
-        lock_recover(&self.registry).apply(record);
+        let mut registry = lock_recover(&self.registry);
+        registry.apply(record);
+        if let WalRecord::LayerDrop { name, .. } = record {
+            lock_recover(&self.artifacts).remove_layer(name);
+        }
     }
 
     /// Runs `f` with the registry, the artifact store and the allocator held, in that lock order.
@@ -312,12 +318,60 @@ impl LiveState {
         lock_recover(&self.artifacts).retire(retired)
     }
 
-    /// Where an entity sits: `(layer, level, ordinal)`. Addressing only. See
-    /// [`LayerRegistry::locate`].
-    pub(crate) fn locate_artifact(&self, entity: EntityId) -> Option<(String, u32, u32)> {
+    /// Where an entity of `space` sits: `(layer, level, ordinal)`. Addressing only. See
+    /// [`LayerRegistry::locate_in`].
+    pub(crate) fn locate_artifact(
+        &self,
+        space: LayerSpace,
+        entity: EntityId,
+    ) -> Option<(String, u32, u32)> {
         lock_recover(&self.registry)
-            .locate(entity)
+            .locate_in(space, entity)
             .map(|(name, level, ordinal)| (name.to_string(), level, ordinal))
+    }
+
+    /// Whether `entity` of `space` is a live layer's own entity or an artifact its levels hold.
+    pub(crate) fn artifact_held(&self, space: LayerSpace, entity: EntityId) -> bool {
+        let registry = lock_recover(&self.registry);
+        if registry
+            .in_space(space)
+            .is_some_and(|(_, layer)| layer.entity == entity)
+        {
+            return true;
+        }
+        let Some((name, level, ordinal)) = registry.locate_in(space, entity) else {
+            return false;
+        };
+        lock_recover(&self.artifacts)
+            .get(name, level, ordinal)
+            .is_some()
+    }
+
+    /// The name of the live layer whose own entity `entity` of `space` is.
+    pub(crate) fn layer_of_own_entity(
+        &self,
+        space: LayerSpace,
+        entity: EntityId,
+    ) -> Option<String> {
+        lock_recover(&self.registry)
+            .in_space(space)
+            .filter(|(_, layer)| layer.entity == entity)
+            .map(|(name, _)| name.to_string())
+    }
+
+    /// The target an entity of the point overlay names: an artifact's or a layer's in its space,
+    /// or an item's in `shard`.
+    pub(crate) fn target_of(&self, shard: ShardId, entity: EntityId) -> Target {
+        let registry = lock_recover(&self.registry);
+        let space = registry
+            .locate(entity)
+            .and_then(|(name, ..)| registry.get(name))
+            .or_else(|| registry.iter().map(|(_, l)| l).find(|l| l.entity == entity))
+            .map(|layer| layer.space);
+        match space {
+            Some(space) => Target::Artifact(space, entity),
+            None => Target::Item(shard, entity),
+        }
     }
 
     /// Resolve which layers a principal may know exist. See `LayerRegistry::resolve_for`. One
@@ -337,7 +391,12 @@ impl LiveState {
     /// Every registered layer, as the registry holds it: the declarations, never a decision. The
     /// caller applies the gate; this has no principal to resolve against.
     pub(crate) fn registered_layers(&self) -> Vec<mosaica_types::layer::RegisteredLayer> {
-        lock_recover(&self.registry).snapshot().0
+        lock_recover(&self.registry).snapshot()
+    }
+
+    /// The space of the layer registered under `name`.
+    pub(crate) fn space_of(&self, name: &str) -> Option<LayerSpace> {
+        lock_recover(&self.registry).get(name).map(|layer| layer.space)
     }
 
     /// One registered layer, by name. The caller has already established the name is reachable.
@@ -481,10 +540,9 @@ impl LiveState {
     pub(in crate::write) fn registry_for_publication(&self) -> RegistryForPublication {
         let registry = lock_recover(&self.registry);
         let low_water = self.only_shard().low_water();
-        let (layers, tombstones) = registry.snapshot();
         RegistryForPublication {
-            layers,
-            tombstones,
+            layers: registry.snapshot(),
+            next_space: registry.next_space(),
             version: registry.version(),
             low_water,
         }

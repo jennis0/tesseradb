@@ -710,10 +710,9 @@ impl ArtifactProjections {
         self.cached.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
-    /// Drop everything held for one layer, in every view. Called when the layer is dropped: a
-    /// dropped name is tombstoned and the serving path resolves it through the registry before
-    /// reaching this cache, so a form left behind could never be handed to anybody, only stay
-    /// resident.
+    /// Drop everything held for one layer, in every view. Called when the layer is dropped: a name
+    /// registered again is another layer whose levels' versions continue past the dropped one's,
+    /// so a form left behind could never be handed to anybody, only stay resident.
     pub fn forget(&self, layer: &str) {
         self.cached
             .lock()

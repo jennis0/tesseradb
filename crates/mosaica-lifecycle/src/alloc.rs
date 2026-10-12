@@ -489,8 +489,10 @@ pub fn entities_named<'r>(records: impl IntoIterator<Item = &'r WalRecord>) -> B
                 }
             }
             WalRecord::ChangeBatch { changes } => {
-                for (entity, _) in changes {
-                    add(*entity);
+                for (target, _) in changes {
+                    if let Some(entity) = target.item() {
+                        add(entity);
+                    }
                 }
             }
             WalRecord::ViewDrop { deleted, .. } => {
@@ -541,9 +543,9 @@ pub fn entities_named<'r>(records: impl IntoIterator<Item = &'r WalRecord>) -> B
 /// on the first restart after a large publication — with every artifact in it already suppressible
 /// by a `mosaica_id` a caller holds.
 ///
-/// **A drop does not raise it.** The name is tombstoned and the ids are not reclaimed (decision
-/// 0072 is settled and unbuilt), so a dropped layer's run must stay below the mark: raising it
-/// would reissue exactly the ids whose bookmarks and suppressions are still live.
+/// **A drop does not raise it.** The ids are not reclaimed (decision 0072 is settled and
+/// unbuilt), so a dropped layer's run must stay below the mark: raising it would reissue exactly
+/// the ids whose bookmarks and suppressions are still live.
 pub fn low_water_from<'r>(records: impl IntoIterator<Item = &'r WalRecord>) -> u64 {
     let mut lw = ROWLESS_CEILING;
     for rec in records {
@@ -931,6 +933,7 @@ mod tests {
                 shape: None,
             }),
             layer_entity: EntityId::new(entity),
+            space: mosaica_types::LayerSpace::ZERO,
             runs: vec![ReservedRuns::from_runs(vec![EntityRun {
                 start: run_start,
                 end: run_start + RESERVED_BLOCK,
@@ -1039,7 +1042,10 @@ mod tests {
         // Change records carry no entity-ID information beyond an entity already allocated.
         assert_eq!(
             high_water_from(&[WalRecord::ChangeBatch {
-                changes: vec![(EntityId::new(1), crate::wal::ChangeOp::Delete)],
+                changes: vec![(
+                    mosaica_types::Target::Item(mosaica_types::ShardId::ZERO, EntityId::new(1)),
+                    crate::wal::ChangeOp::Delete,
+                )],
             }]),
             0
         );

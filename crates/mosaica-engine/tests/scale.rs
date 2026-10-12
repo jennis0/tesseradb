@@ -1783,7 +1783,7 @@ fn p1_one_scale(base: u64) {
         .iter()
         .map(|&entity| {
             engine
-                .submit_changes(vec![(entity, ChangeOp::Delete)])
+                .submit_changes(vec![(item(entity), ChangeOp::Delete)])
                 .expect("the deny lane accepts a delete")
         })
         .collect();

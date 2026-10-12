@@ -1,6 +1,7 @@
-//! A point shard's number, and a row named together with its shard.
+//! A point shard's number, a layer space's number, a row named together with its shard, and what
+//! a resolved `mosaica_id` names.
 
-use crate::{IdentityError, RowId};
+use crate::{EntityId, IdentityError, RowId};
 
 /// A point shard's number, below [`ShardId::LIMIT`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -43,6 +44,82 @@ impl TryFrom<u32> for ShardId {
 
     fn try_from(raw: u32) -> Result<ShardId, IdentityError> {
         ShardId::new(raw)
+    }
+}
+
+/// A layer space's number, below [`LayerSpace::LIMIT`]. Each registered layer has one, and no
+/// number is given to a second layer.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(try_from = "u32")
+)]
+pub struct LayerSpace(u32);
+
+impl LayerSpace {
+    /// The bits an artifact's identifier gives its layer space.
+    pub const BITS: u32 = 31;
+    /// The lowest layer space that does not fit.
+    pub const LIMIT: u32 = 1 << Self::BITS;
+    pub const ZERO: LayerSpace = LayerSpace(0);
+
+    /// Refuses a layer space of [`LayerSpace::LIMIT`] or more.
+    pub fn new(raw: u32) -> Result<LayerSpace, IdentityError> {
+        if raw >= Self::LIMIT {
+            return Err(IdentityError::LayerSpaceOutOfRange { space: raw });
+        }
+        Ok(LayerSpace(raw))
+    }
+
+    #[inline]
+    pub const fn raw(self) -> u32 {
+        self.0
+    }
+
+    /// The space numbered one higher, or `None` past the last.
+    pub fn next(self) -> Option<LayerSpace> {
+        LayerSpace::new(self.0 + 1).ok()
+    }
+}
+
+impl std::fmt::Display for LayerSpace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl TryFrom<u32> for LayerSpace {
+    type Error = IdentityError;
+
+    fn try_from(raw: u32) -> Result<LayerSpace, IdentityError> {
+        LayerSpace::new(raw)
+    }
+}
+
+/// What a resolved `mosaica_id` names: an item's entity in its shard, or an artifact's or a layer's
+/// entity in its layer space. The two never compare equal, whatever their entities.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum Target {
+    Item(ShardId, EntityId),
+    Artifact(LayerSpace, EntityId),
+}
+
+impl Target {
+    /// The entity, in the shard or the space the target names.
+    pub fn entity(self) -> EntityId {
+        match self {
+            Target::Item(_, entity) | Target::Artifact(_, entity) => entity,
+        }
+    }
+
+    /// The item's entity, or `None` for an artifact or a layer.
+    pub fn item(self) -> Option<EntityId> {
+        match self {
+            Target::Item(_, entity) => Some(entity),
+            Target::Artifact(..) => None,
+        }
     }
 }
 

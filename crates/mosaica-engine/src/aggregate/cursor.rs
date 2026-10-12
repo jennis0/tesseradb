@@ -95,7 +95,7 @@ impl AggregateCursor {
     }
 }
 
-/// A digest of what a request asks: its set, its reference, its groupings and the entity of each
+/// A digest of what a request asks: its set, its reference, its groupings and the space of each
 /// layer they name. A cursor is bound to it, so it continues only the request it was issued for,
 /// and not over a layer registered since under the same name.
 pub(super) fn digest(req: &AggregateRequest<'_>, layers: &[Option<u64>]) -> [u8; 32] {

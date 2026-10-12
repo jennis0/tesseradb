@@ -94,7 +94,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use mosaica_types::layer::{EntityRun, LayerDeclaration, ReservedRuns};
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, LayerSpace, Target};
 
 /// One declared-scalar value carried by a WAL row: the value type a build writes, under the name the
 /// log's records use.
@@ -198,7 +198,7 @@ pub enum ChangeOp {
 /// re-resolve it at replay, and an entity deleted before it was ever flushed may resolve to
 /// nothing — so the node would refuse to open. A snapshot is state that was already resolved once;
 /// resolving it again can only lose. It is the same reason [`WalRecord::ChangeBatch`] is keyed by
-/// entity, arrived at from the other end.
+/// target, arrived at from the other end.
 ///
 /// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -275,13 +275,13 @@ pub enum WalRecord {
     /// `ChangeBatch` earlier in the same file still applies before it. See [`crate::Replay`].
     OverlaySnapshot { entries: Vec<OverlaySnapshotEntry> },
     /// An accepted `/control/changes` request: every change it carries, in request order,
-    /// addressed by entity id. One record per request, so the request is durable whole or not at
-    /// all.
+    /// addressed by target: an item's entity in its shard, or an artifact's or a layer's in its
+    /// layer space. One record per request, so the request is durable whole or not at all.
     ///
-    /// Keyed by entity rather than by the identifier the caller supplied: the handler resolves a
+    /// Keyed by target rather than by the identifier the caller supplied: the handler resolves a
     /// `mosaica_id` or a unique value once, at admission, and replay applies what was decided
     /// without resolving anything.
-    ChangeBatch { changes: Vec<(EntityId, ChangeOp)> },
+    ChangeBatch { changes: Vec<(Target, ChangeOp)> },
     /// An accepted annotation-layer registration.
     ///
     /// **This record is what makes the row-less mark durable**, and that is not incidental to it.
@@ -306,6 +306,8 @@ pub enum WalRecord {
         /// The layer's own entity, so layer suppression rides `/control/changes` and the deny lane
         /// unchanged rather than needing a second mechanism.
         layer_entity: EntityId,
+        /// The layer's space. Replay applies it and resumes the registry's counter past it.
+        space: LayerSpace,
         /// The reserved runs backing each level, in level order. A layer declaring no levels has
         /// exactly one entry — its level 0.
         runs: Vec<ReservedRuns>,
@@ -333,9 +335,7 @@ pub enum WalRecord {
     },
     /// An accepted view drop. **The key is freed and the incarnation dies** (decision 0115): a
     /// key is a name the caller chose, so it may be created again, and what must not come back is
-    /// the predecessor's artifacts. `LayerDrop` still tombstones, and the difference is deliberate
-    /// — a layer name travels in bookmarks, edges and suppressions, where a view key addresses a
-    /// row space and nothing else.
+    /// the predecessor's artifacts.
     ///
     /// **The incarnation travels with it**, which is what makes the record self-sufficient under
     /// rotation: a death that did not say which incarnation died could not be told apart from a
@@ -349,11 +349,9 @@ pub enum WalRecord {
         /// The entities the drop left with a row in no view, flushed or buffered.
         deleted: Vec<EntityId>,
     },
-    /// An accepted layer drop. **The name is tombstoned, not freed**: it is refused on recreation
-    /// for ever, because bookmarks, edges and suppressions all travel by it and a name that once
-    /// meant something must not come to mean something else.
-    ///
-    /// The ids do not come back either: the allocator frees no row-less id.
+    /// An accepted layer drop. The name is freed: a later registration under it is a new layer in
+    /// a new space, so no identifier of the dropped layer names anything of the new one. The ids do
+    /// not come back: the allocator frees no row-less id.
     LayerDrop {
         name: String,
         /// The registry version this drop moved the counter to, on `LayerCreate::version`'s rule.
@@ -1076,7 +1074,9 @@ const WAL_MAGIC: [u8; 4] = *b"MWAL";
 // **34**: the magic is `MWAL`. A log at 33 is refused.
 // **35**: the variant table gained `ShardsDeclare`, a shard size declared while the service runs.
 // A log at 34 is refused.
-const WAL_VERSION: u16 = 35;
+// **36**: `LayerCreate` carries the layer's space, and a `ChangeBatch` names each change's target,
+// an item in its shard or an artifact in its layer space. A log at 35 is refused.
+const WAL_VERSION: u16 = 36;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -2488,7 +2488,10 @@ mod tests {
 
     fn record(tag: u8) -> WalRecord {
         WalRecord::ChangeBatch {
-            changes: vec![(EntityId::new(tag as u64), ChangeOp::Delete)],
+            changes: vec![(
+                Target::Item(mosaica_types::ShardId::ZERO, EntityId::new(tag as u64)),
+                ChangeOp::Delete,
+            )],
         }
     }
 
@@ -2601,6 +2604,7 @@ mod tests {
                 shape: None,
             }),
             layer_entity: EntityId::new(4_294_901_759),
+            space: LayerSpace::new(3).unwrap(),
             runs: vec![
                 ReservedRuns::from_runs(vec![EntityRun {
                     start: 4_294_836_224,
@@ -2617,18 +2621,27 @@ mod tests {
             name: "clusters/old".into(),
             version: 2,
         };
+        // A change to the layer and one to the item over the same entity stay two changes.
+        let entity = EntityId::new(4_294_901_759);
+        let changes = WalRecord::ChangeBatch {
+            changes: vec![
+                (Target::Artifact(LayerSpace::new(3).unwrap(), entity), ChangeOp::Suppress),
+                (Target::Item(mosaica_types::ShardId::ZERO, entity), ChangeOp::Delete),
+            ],
+        };
 
         let mut wal = Wal::open(&path).unwrap();
         let replayed = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
         assert!(replayed.is_empty());
         wal.append(&create).unwrap();
+        wal.append(&changes).unwrap();
         wal.append(&dropped).unwrap();
         wal.fsync().unwrap();
         drop(wal);
 
         let wal = Wal::open(&path).unwrap();
         let replayed = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
-        assert_eq!(replayed, vec![create, dropped]);
+        assert_eq!(replayed, vec![create, changes, dropped]);
     }
 
     #[test]

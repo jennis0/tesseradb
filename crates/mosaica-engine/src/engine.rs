@@ -565,8 +565,10 @@ fn reconstruct_writes(
     // the union.
     let manifest_layers: Vec<mosaica_types::layer::RegisteredLayer> =
         across_partitions(bundle, |p| p.manifest.layers.iter().cloned());
-    let manifest_layer_tombstones: Vec<String> =
-        across_partitions(bundle, |p| p.manifest.layer_tombstones.iter().cloned());
+    let next_layer_space = across_partitions(bundle, |p| [p.manifest.next_layer_space])
+        .into_iter()
+        .max()
+        .unwrap_or(0);
     // A view's key is the group's, not a partition's, so these belong to the deployment
     // whichever partition's manifest published them.
     let manifest_created_views: Vec<mosaica_types::view::CreatedView> =
@@ -609,7 +611,7 @@ fn reconstruct_writes(
             free,
             held,
             layers: &manifest_layers,
-            tombstones: &manifest_layer_tombstones,
+            next_layer_space,
             registry_version: across_partitions(bundle, |p| [p.manifest.layer_registry_version])
                 .into_iter()
                 .max()
@@ -892,6 +894,14 @@ fn adopt_derived_structures(
         .filter(|e| {
             crate::filter::carries_live_view(&incarnation_of, e.view.as_deref(), e.incarnation)
         })
+        // A dropped layer's structures stay listed until a fold, and its name may be registered
+        // again in another space.
+        .filter(|e| {
+            state
+                .registry
+                .get(&e.layer)
+                .is_some_and(|layer| layer.space == e.space)
+        })
         .collect();
 
     // The fold's containment partitions, adopted where their coordinate still holds; a
@@ -922,7 +932,7 @@ fn adopt_derived_structures(
     // Every spatial level's shapes decoded and decomposed, and every segment's piece claimed
     // or resolved and staged, before this engine serves a request.
     let shapes = Arc::new(crate::shapes::ShapeStore::new());
-    let (layers, _) = state.registry.snapshot();
+    let layers = state.registry.snapshot();
     let warmed = shapes.warm(
         bundle,
         &layers,

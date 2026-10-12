@@ -1305,7 +1305,12 @@ impl Executor {
             let record = WalRecord::ChangeBatch {
                 changes: unsuppressed
                     .iter()
-                    .map(|entity| (EntityId::new(u64::from(entity)), ChangeOp::Unsuppress))
+                    .map(|entity| {
+                        let target = self
+                            .live
+                            .target_of(shard.id(), EntityId::new(u64::from(entity)));
+                        (target, ChangeOp::Unsuppress)
+                    })
                     .collect(),
             };
             if let Err(failure) = self.append_and_sync(&[&record], None) {
@@ -1898,7 +1903,9 @@ impl Executor {
         retired: &croaring::Bitmap,
     ) -> mosaica_store::Result<Vec<mosaica_store::manifest::MembershipExtent>> {
         let ready = self.live.with_artifacts(|store| store.repack_all(retired));
-        pack_membership_extents(prefix_dir, layout, n, ready)
+        pack_membership_extents(prefix_dir, layout, n, ready, |layer| {
+            self.live.space_of(layer)
+        })
     }
 
     /// Compose and write this prefix's containment partitions, one file per `(layer, level)`.
@@ -1966,17 +1973,18 @@ impl Executor {
             &mut pass.index,
             composed
                 .into_iter()
-                .map(
-                    |(layer, level, level_version, bytes)| mosaica_store::derived::Filed {
+                .filter_map(|(layer, level, level_version, bytes)| {
+                    Some(mosaica_store::derived::Filed {
                         view: None,
                         incarnation: None,
+                        space: self.live.space_of(&layer)?,
                         layer,
                         level,
                         level_version,
                         form: mosaica_store::manifest::DerivedForm::Containment,
                         bytes: mosaica_store::derived::FiledBytes::InHand(bytes),
-                    },
-                )
+                    })
+                })
                 .collect(),
         )
     }
@@ -2385,9 +2393,14 @@ impl Executor {
                         let _ = std::fs::remove_file(&path);
                         return None;
                     };
+                    let Some(space) = self.live.space_of(&layer) else {
+                        let _ = std::fs::remove_file(&path);
+                        return None;
+                    };
                     Some(mosaica_store::derived::Filed {
                         view: Some(view),
                         incarnation: Some(incarnation),
+                        space,
                         layer,
                         level,
                         level_version,
@@ -2424,6 +2437,9 @@ impl Executor {
         });
         let mut filed: Vec<mosaica_store::derived::Filed> = Vec::new();
         for (layer, level) in &levels {
+            let Some(space) = self.live.space_of(layer) else {
+                continue;
+            };
             let version = self
                 .live
                 .with_artifacts(|store| store.level_version(layer, *level));
@@ -2462,6 +2478,7 @@ impl Executor {
                 filed.push(mosaica_store::derived::Filed {
                     view: Some(view.clone()),
                     incarnation: Some(incarnation),
+                    space,
                     layer: layer.clone(),
                     level: *level,
                     level_version: version,
@@ -2502,6 +2519,9 @@ impl Executor {
                 .filter(|(layer, _)| self.live.spatial_layer(layer))
                 .collect();
             for (layer, level) in &levels {
+                let Some(space) = self.live.space_of(layer) else {
+                    continue;
+                };
                 let version = store.level_version(layer, *level);
                 for (view, _) in fold_segments {
                     let Some(held) = self.deps.shapes.get(view, layer, *level) else {
@@ -2527,6 +2547,7 @@ impl Executor {
                     out.push(mosaica_store::derived::Filed {
                         view: Some(view.clone()),
                         incarnation: Some(incarnation),
+                        space,
                         layer: layer.clone(),
                         level: *level,
                         level_version: version,
@@ -2614,6 +2635,7 @@ impl Executor {
                     Some(mosaica_store::derived::Filed {
                         view: Some(view),
                         incarnation: Some(incarnation),
+                        space: self.live.space_of(&layer)?,
                         layer,
                         level,
                         level_version,

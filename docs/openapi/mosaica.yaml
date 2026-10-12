@@ -2646,10 +2646,12 @@ paths:
     delete:
       tags: ["control: layers"]
       operationId: dropLayer
-      summary: Drop a layer and retire its name.
+      summary: Drop a layer.
       description: |
-        The layer and its artifacts stop being served at once. Its name is never registered again,
-        since bookmarks, edges and suppressions name a layer, and its entity ids are not reused.
+        The layer and its artifacts stop being served at once. Its name may be registered again, as
+        a new layer: none of the dropped layer's `mosaica_id`s names the new layer or its artifacts.
+        A layer is removed this way and not by a deletion of its own `mosaica_id`, which
+        `/control/changes` refuses.
       security:
         - controlCredential: []
       parameters:

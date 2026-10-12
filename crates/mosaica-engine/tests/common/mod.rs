@@ -853,9 +853,14 @@ pub fn shape_of(
         .shape
 }
 
-/// The entity an artifact's served identifier names.
-pub fn artifact_entity(engine: &Engine, id: MosaicaId) -> EntityId {
-    engine.resolve_mosaica_ids(&[id]).unwrap()[0].expect("it names what was issued")
+/// The change target of the item `entity` of the one shard.
+pub fn item(entity: EntityId) -> mosaica_types::Target {
+    mosaica_types::Target::Item(mosaica_types::ShardId::ZERO, entity)
+}
+
+/// What an artifact's or a layer's served identifier names.
+pub fn artifact_entity(engine: &Engine, id: MosaicaId) -> mosaica_types::Target {
+    engine.resolve_targets(&[id]).unwrap()[0].expect("it names what was issued")
 }
 
 /// A one-row ingest at the fixture's centre, carrying `ALL_TERM`, under the caller's batch id.

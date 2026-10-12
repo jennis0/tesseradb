@@ -12,6 +12,7 @@ mod common;
 
 use common::*;
 use mosaica_engine::Engine;
+use mosaica_lifecycle::resolve::{Refusal, Verdict};
 use mosaica_lifecycle::{wal::ChangeOp, IncomingArtifact};
 use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
@@ -87,7 +88,7 @@ fn a_published_batch_takes_one_entity_per_artifact_and_none_of_them_is_the_layer
 
     // Distinct identifiers, distinct entities, and each resolves to the ordinal it was published
     // at — in the caller's submitted order.
-    let entities: Vec<EntityId> = ids.iter().map(|id| artifact_entity(&engine, *id)).collect();
+    let entities: Vec<_> = ids.iter().map(|id| artifact_entity(&engine, *id)).collect();
     let distinct: std::collections::BTreeSet<_> = entities.iter().collect();
     assert_eq!(distinct.len(), 3, "one entity per artifact");
 
@@ -170,26 +171,42 @@ fn a_second_batch_continues_the_numbering_rather_than_restarting_it() {
     );
 }
 
-/// A member with no row would count towards the artifact's declared size — the denominator the
-/// proportional criterion divides by — while being visible to nobody, so an artifact could be
-/// pushed below its own existence threshold by members that can never be seen.
+/// An artifact's or a layer's identifier names no item, so a row naming one in a member table is
+/// refused as one naming nothing is, and the identifiers differing from them only by the kind bit
+/// name items, not the artifact or the layer.
 #[test]
-fn a_membership_naming_something_other_than_a_point_is_refused() {
+fn an_artifacts_or_a_layers_identifier_names_no_item() {
     let fx = fixture();
     let engine = fx.open();
     let layer_id = engine.register_layer(declaration("clusters/a")).unwrap();
-    let layer_entity = artifact_entity(&engine, layer_id);
-
-    let mut members = fx.members(0..10);
-    members.push(layer_entity);
-    let refused = engine
-        .publish_artifacts("clusters/a".into(), 0, vec![artifact("c0", members)])
-        .expect_err("a layer is not a document");
-    assert!(
-        refused.to_string().contains("no point"),
-        "the refusal names what is wrong with it: {refused}"
-    );
-    assert_eq!(engine.published_artifacts(), 0);
+    let ids = engine
+        .publish_artifacts(
+            "clusters/a".into(),
+            0,
+            vec![artifact("c0", fx.members(0..10))],
+        )
+        .unwrap();
+    let point = fx.members(0..1)[0];
+    let table = mosaica_engine::AddressTable {
+        rows: 3,
+        mosaica_id: Some(vec![
+            Some(layer_id),
+            Some(ids[0]),
+            Some(engine.mosaica_id_of(point).unwrap()),
+        ]),
+        columns: Vec::new(),
+    };
+    let named = engine.name_items(&table).unwrap();
+    assert!(matches!(
+        named.verdicts[0],
+        Verdict::Refused(Refusal::UnknownMosaicaId { row: 0 })
+    ));
+    assert!(matches!(
+        named.verdicts[1],
+        Verdict::Refused(Refusal::UnknownMosaicaId { row: 1 })
+    ));
+    assert_eq!(named.verdicts[2], Verdict::Names(point));
+    assert_eq!(engine.resolve_mosaica_ids(&[layer_id, ids[0]]).unwrap(), vec![None, None]);
 }
 
 /// **The durability assertion.** The WAL is the only place a membership lives, so a restart is the
@@ -232,7 +249,7 @@ fn a_publication_survives_a_restart_and_its_entities_are_not_reissued() {
 
     // A fresh registration after the restart must not land on an entity an artifact holds.
     engine.register_layer(declaration("clusters/b")).unwrap();
-    let published: Vec<EntityId> = ids.iter().map(|id| artifact_entity(&engine, *id)).collect();
+    let published: Vec<_> = ids.iter().map(|id| artifact_entity(&engine, *id)).collect();
     engine
         .publish_artifacts(
             "clusters/b".into(),
@@ -384,21 +401,21 @@ fn an_artifacts_entity_takes_a_suppression_like_any_other() {
 
     let entity = artifact_entity(&engine, ids[0]);
     engine
-        .accept_change(entity, ChangeOp::Suppress)
+        .accept_changes(vec![(entity, ChangeOp::Suppress)])
         .expect("an artifact suppression is an ordinary change");
     assert!(engine
         .generation()
         .only_shard()
         .overlay
-        .is_suppressed(entity));
+        .is_suppressed(entity.entity()));
 
     // And it comes back — a suppression is the reversible one of the two removal rules.
-    engine.accept_change(entity, ChangeOp::Unsuppress).unwrap();
+    engine.accept_changes(vec![(entity, ChangeOp::Unsuppress)]).unwrap();
     assert!(!engine
         .generation()
         .only_shard()
         .overlay
-        .is_suppressed(entity));
+        .is_suppressed(entity.entity()));
 }
 
 /// **A membership that came back from an extent is read through that extent**, and it is the set

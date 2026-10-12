@@ -323,7 +323,7 @@ impl Engine {
                         false,
                         table.as_deref(),
                     )?;
-                    self.artifact_id(entity).map(|id| id.raw())
+                    self.artifact_id(registered.space, entity).map(|id| id.raw())
                 })
             };
             let mut lowest = |labels: &[u32]| -> Option<u64> {

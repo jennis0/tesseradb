@@ -46,8 +46,8 @@ use mosaica_lifecycle::ChangeOp;
 use mosaica_types::EntityId;
 
 use common::{
-    build_fixture, full_coverage_credential, item_of_id, item_of_key, keyed_row, open_engine, tick,
-    IngestRows, N_ITEMS,
+    build_fixture, full_coverage_credential, item, item_of_id, item_of_key, keyed_row, open_engine,
+    tick, IngestRows, N_ITEMS,
 };
 
 const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -2275,7 +2275,7 @@ fn the_deny_window_closes_at_its_bound() {
     let pending: Vec<_> = (0..bound + 1)
         .map(|_| {
             engine
-                .submit_changes(vec![(entity, ChangeOp::Suppress)])
+                .submit_changes(vec![(item(entity), ChangeOp::Suppress)])
                 .expect("the deny lane is unbounded and never refuses for load")
         })
         .collect();
@@ -2632,7 +2632,7 @@ fn park_on_a_new_deny_window(
 ) -> mosaica_engine::PendingChange {
     faults.arm_pause(PauseSite::AfterFsync, PauseAction::Stall);
     let pending = engine
-        .submit_changes(vec![(entity, ChangeOp::Suppress)])
+        .submit_changes(vec![(item(entity), ChangeOp::Suppress)])
         .expect("the deny lane accepts");
     faults.await_arrivals(PauseSite::AfterFsync, 1, WAIT);
     pending
@@ -2670,7 +2670,7 @@ fn drain_deny_windows(
     for i in 0..((windows - 1) * DENY_WINDOW_MAX_ENTRIES) {
         pending.push(
             engine
-                .submit_changes(vec![(entities[i % entities.len()], ChangeOp::Suppress)])
+                .submit_changes(vec![(item(entities[i % entities.len()]), ChangeOp::Suppress)])
                 .expect("the deny lane accepts"),
         );
     }

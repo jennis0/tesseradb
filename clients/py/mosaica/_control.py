@@ -311,8 +311,9 @@ class Control:
     def drop_layer(self, name: str, wait: bool = False) -> Answer:
         """`DELETE /control/layers/{name}`: remove an annotation layer.
 
-        The name cannot be declared again. `wait` holds the answer until readers no longer see
-        the layer, as for `flush`.
+        The name may be declared again, as a new layer that none of the dropped layer's
+        `mosaica_id`s names. `wait` holds the answer until readers no longer see the layer, as for
+        `flush`.
         """
         return self._send("DELETE", f"/control/layers/{_segment(name)}" + _wait(wait))
 

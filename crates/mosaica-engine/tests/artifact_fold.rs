@@ -592,7 +592,7 @@ fn own_entity_retired_at(retired: usize) {
 
     let deleted = artifact_entity(&engine, ids[retired]);
     engine
-        .accept_change(deleted, ChangeOp::Delete)
+        .accept_changes(vec![(deleted, ChangeOp::Delete)])
         .expect("an artifact takes a deletion like any other entity");
     assert_eq!(served(&engine), survivors, "hidden at the ack");
     fold(&engine);
@@ -1302,7 +1302,7 @@ fn a_deleted_artifact_leaves_the_level_at_the_fold_and_its_ordinal_stays_a_hole(
     let deleted = artifact_entity(&engine, ids[1]);
     let last_before = artifact_entity(&engine, ids[2]);
     engine
-        .accept_change(deleted, ChangeOp::Delete)
+        .accept_changes(vec![(deleted, ChangeOp::Delete)])
         .expect("an artifact takes a deletion like any other entity");
     assert_eq!(artifacts_of(&engine, &full_coverage_credential()).len(), 2, "hidden at the ack");
     fold(&engine);
@@ -1360,7 +1360,7 @@ fn deleting_the_last_artifact_of_a_level_does_not_hand_its_identity_to_the_next_
         // The **last** one, so the hole it leaves is at the top of the level.
         let entity = artifact_entity(&engine, ids[1]);
         engine
-            .accept_change(entity, ChangeOp::Delete)
+            .accept_changes(vec![(entity, ChangeOp::Delete)])
             .expect("the delete is accepted");
         fold(&engine);
         entity
@@ -1403,7 +1403,7 @@ fn a_deleted_artifact_does_not_return_when_its_overlay_entry_retires() {
         let id = publish(&fx, &engine, 0..300);
         let entity = artifact_entity(&engine, id);
         engine
-            .accept_change(entity, ChangeOp::Delete)
+            .accept_changes(vec![(entity, ChangeOp::Delete)])
             .expect("the delete is accepted");
         fold(&engine);
         assert!(artifacts_of(&engine, &full_coverage_credential()).is_empty());
@@ -1473,7 +1473,7 @@ fn a_label_stays_withheld_after_the_fold_that_retired_its_cluster() {
 
     let cluster = artifact_entity(&engine, cluster_id);
     engine
-        .accept_change(cluster, ChangeOp::Delete)
+        .accept_changes(vec![(cluster, ChangeOp::Delete)])
         .expect("the delete is accepted");
     assert!(
         artifacts_of(&engine, &full_coverage_credential()).is_empty(),
@@ -1595,7 +1595,7 @@ fn deleting_a_cluster_deletes_its_labels_and_they_retire_at_the_same_fold() {
         let cluster = artifact_entity(&engine, cluster_id);
         assert_eq!(engine.overlay_depth(), 0, "nothing is denied yet");
         engine
-            .accept_change(cluster, ChangeOp::Delete)
+            .accept_changes(vec![(cluster, ChangeOp::Delete)])
             .expect("the delete is accepted");
 
         // **Two dispositions from one command.** The cluster's own, and the label's — the cascade,

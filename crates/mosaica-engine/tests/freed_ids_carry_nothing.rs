@@ -1180,7 +1180,7 @@ fn a_deletion_resolved_before_its_entity_was_freed_does_not_reach_the_new_holder
     );
     publish_buffered(&engine);
 
-    let answered = engine.accept_changes_at(vec![(resolved, ChangeOp::Delete)], named.at);
+    let answered = engine.accept_changes_at(vec![(item(resolved), ChangeOp::Delete)], named.at);
     assert!(
         matches!(answered, Err(AcceptError::Exec(ExecError::Stale))),
         "the deletion is refused as stale: {answered:?}"
@@ -1222,7 +1222,7 @@ fn a_suppression_resolved_before_its_item_was_deleted_does_not_reach_the_new_hol
     );
     publish_buffered(&engine);
 
-    let answered = engine.accept_changes_at(vec![(resolved, ChangeOp::Suppress)], named.at);
+    let answered = engine.accept_changes_at(vec![(item(resolved), ChangeOp::Suppress)], named.at);
     assert!(
         matches!(answered, Err(AcceptError::Exec(ExecError::Stale))),
         "the suppression is refused as stale: {answered:?}"
@@ -1248,7 +1248,7 @@ fn a_deletion_resolved_before_an_edit_reaches_the_item_where_it_is_now() {
     publish_buffered(&engine);
     assert_ne!(entity_of(&engine, x), resolved, "the edit moved x");
     engine
-        .accept_changes_at(vec![(resolved, ChangeOp::Delete)], named.at)
+        .accept_changes_at(vec![(item(resolved), ChangeOp::Delete)], named.at)
         .unwrap();
     publish_buffered(&engine);
     let full = engine.authorise(&full_coverage_credential()).unwrap();

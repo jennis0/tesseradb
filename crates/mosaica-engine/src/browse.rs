@@ -369,7 +369,7 @@ impl crate::Engine {
                 else {
                     continue;
                 };
-                let Some(mosaica_id) = self.artifact_id(entity) else {
+                let Some(mosaica_id) = self.artifact_id(layer.space, entity) else {
                     continue;
                 };
                 // Content decides servability as well as text: a viewer containing no content's

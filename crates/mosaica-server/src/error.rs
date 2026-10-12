@@ -429,6 +429,13 @@ pub fn map_change_batch_error(
     ops: &[mosaica_lifecycle::ChangeOp],
     failure: mosaica_engine::AcceptError,
 ) -> ApiError {
+    // Refused before anything was applied: a deletion of a layer's own identifier.
+    if let mosaica_engine::AcceptError::Exec(mosaica_lifecycle::ExecError::LayerRefused {
+        detail,
+    }) = failure
+    {
+        return ApiError::Contract(detail);
+    }
     let Some(may_be_in_force) = change_request_in_force(ops, &failure) else {
         tracing::error!(detail = %failure, "a change request did not reach the write executor; answering 503 not-ready");
         return ApiError::NotReady;

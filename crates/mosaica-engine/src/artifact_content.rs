@@ -212,8 +212,7 @@ impl LevelContents {
 
     /// Drop every table held for one layer, when the layer is dropped — see
     /// [`crate::artifacts::ArtifactProjections::forget`], which carries the argument for all three
-    /// of these caches. Retention only: a tombstoned name never resolves through the registry
-    /// again, so nothing held here was reachable to be served.
+    /// of these caches. Retention only: nothing held here was reachable to be served.
     pub(crate) fn forget(&self, layer: &str) {
         self.cached
             .lock()

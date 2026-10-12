@@ -4986,8 +4986,7 @@ fn compile_layers(
     for block in &blocks {
         if !seen.insert(block.name.as_str()) {
             return Err(declaration_error(format!(
-                "layer '{}' is declared twice. A layer name is tombstoned on drop and never \
-                 reused, since bookmarks, edges and suppressions all travel by it",
+                "layer '{}' is declared twice. Declare each layer in one block",
                 block.name
             )));
         }
@@ -6296,7 +6295,7 @@ impl Config {
     /// registry (`views.md` §3.2).
     ///
     /// **The roster's durable home is the manifest** — one place, carried forward for ever, for
-    /// the reason `entity_id_low_water` and `layer_tombstones` are there (decision 0029).
+    /// the reason `entity_id_low_water` and `next_layer_space` are there (decision 0029).
     pub fn group_registry(
         &self,
         registry: &[BuildView],

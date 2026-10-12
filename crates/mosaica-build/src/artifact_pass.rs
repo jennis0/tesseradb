@@ -136,6 +136,7 @@ pub fn run(
 ) -> ArtifactPass {
     let started = Instant::now();
     let mut pass = ArtifactPass::default();
+    let spaces = spaces_of(&published.layers);
     // **One set of projection buffers for the whole pass.** Every walk below projects a membership
     // per artifact, and `Permutation::project` allocates and zeroes a 512 KB stamp on each call —
     // it is written for one call per session and says so. Shared through a `RefCell` because the
@@ -373,6 +374,7 @@ pub fn run(
             // **A build coins each key once, so every structure it writes is the declared
             // incarnation** (decision 0115). There is no drop at a build to leave a predecessor.
             incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
+            space: spaces[layer],
             layer: layer.clone(),
             level: *level,
             level_version: store.level_version(layer, *level),
@@ -466,6 +468,7 @@ pub fn run(
         let filed = |form: DerivedForm, path: std::path::PathBuf| Filed {
             view: Some(view.to_string()),
             incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
+            space: spaces[layer],
             layer: layer.clone(),
             level: *level,
             level_version,
@@ -558,6 +561,7 @@ pub fn run(
             shape_rows.push(Filed {
                 view: Some(view.to_string()),
                 incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
+                space: spaces[layer],
                 layer: layer.clone(),
                 level: *level,
                 level_version,
@@ -597,6 +601,7 @@ pub fn run(
             Filed {
                 view: Some(view.to_string()),
                 incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
+                space: spaces[layer],
                 layer: layer.clone(),
                 level: *level,
                 level_version,
@@ -667,6 +672,7 @@ const MANIFEST_N: u64 = 0;
 /// here is the store's rather than one view's drawn layers.
 pub fn containment(
     store: &ArtifactStore,
+    layers: &[mosaica_types::layer::RegisteredLayer],
     prefix_dir: &Path,
     layout: ShardLayout<'_>,
     index: &mut DerivedIndex,
@@ -687,6 +693,7 @@ pub fn containment(
         .levels_and_extents()
         .map(|(layer, level, _)| (layer.to_string(), level))
         .collect();
+    let spaces = spaces_of(layers);
     let mut composed: Vec<Filed> = Vec::new();
     for (layer, level) in &levels {
         let contents = |visit: &mut dyn FnMut(u32, &[&Bitmap])| {
@@ -727,6 +734,7 @@ pub fn containment(
         composed.push(Filed {
             view: None,
             incarnation: None,
+            space: spaces[layer],
             layer: layer.clone(),
             level: *level,
             level_version: store.level_version(layer, *level),
@@ -746,6 +754,16 @@ pub fn containment(
 /// The `everywhere` fraction decides a treed or spatial level's layout
 /// (`mosaica_types::layer::ROW_MAJOR_EVERYWHERE_FRACTION`), and blocks per artifact says how much
 /// work a membership is; both are reported for every level.
+/// Each registered layer's space, by name: every level a build writes is of one of them.
+fn spaces_of(
+    layers: &[mosaica_types::layer::RegisteredLayer],
+) -> std::collections::BTreeMap<String, mosaica_types::LayerSpace> {
+    layers
+        .iter()
+        .map(|layer| (layer.declaration.name.clone(), layer.space))
+        .collect()
+}
+
 pub fn report(pass: &ArtifactPass) {
     if pass.levels.is_empty() {
         return;

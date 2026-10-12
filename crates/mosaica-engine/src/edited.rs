@@ -19,7 +19,9 @@
 //! not read for it.
 
 use mosaica_store::StoreError;
-use mosaica_types::{EntityId, IdentityError, IdentityKey, ItemHigh, MosaicaId, ShardId, Tenancy};
+use mosaica_types::{
+    EntityId, IdentityError, IdentityKey, ItemHigh, LayerSpace, MosaicaId, ShardId, Target, Tenancy,
+};
 use rustc_hash::FxHashMap;
 
 use crate::{Generation, Shard};
@@ -199,19 +201,23 @@ pub(crate) fn follow_moves(shard: &Shard, set: &mut croaring::Bitmap) -> Result<
     Ok(())
 }
 
-/// `changes` with each change naming an entity an edit has moved an item away from also applied
-/// to the entity the item holds now. The change to the old entity stays, so the log names both.
+/// `changes` with each change naming an entity an edit has moved an item of `shard` away from
+/// also applied to the entity the item holds now. The change to the old entity stays, so the log
+/// names both. An artifact is never moved.
 pub(crate) fn follow_changes(
     shard: &Shard,
-    changes: &mut Vec<(EntityId, mosaica_lifecycle::ChangeOp)>,
+    changes: &mut Vec<(Target, mosaica_lifecycle::ChangeOp)>,
 ) -> Result<(), StoreError> {
     let mut followed = Vec::new();
-    for &(entity, op) in changes.iter() {
-        if !shard.overlay.is_deleted(entity) && holds(shard, entity) {
+    for &(target, op) in changes.iter() {
+        let Target::Item(at, entity) = target else {
+            continue;
+        };
+        if at != shard.id() || (!shard.overlay.is_deleted(entity) && holds(shard, entity)) {
             continue;
         }
         if let Some(now) = moved_to(shard, entity)? {
-            followed.push((now, op));
+            followed.push((Target::Item(at, now), op));
         }
     }
     changes.extend(followed);
@@ -367,22 +373,20 @@ pub(crate) fn id_at(
     key.forward(ItemHigh::new(shard, tenancy), number)
 }
 
-/// The shard an artifact's or a layer's `mosaica_id` is formed in, and whose directory holds its
-/// files.
+/// The shard whose directory holds the artifacts' files.
 pub(crate) const ARTIFACT_SHARD: ShardId = ShardId::ZERO;
 
-/// The entity `id` names as [`crate::Engine::artifact_id`] forms it, or `None` where it names none.
-/// Whether that entity is an artifact is the caller's question.
-pub(crate) fn artifact_named(key: &IdentityKey, id: MosaicaId) -> Option<EntityId> {
-    let (high, entity) = key.invert(id)?;
-    (high == ItemHigh::new(ARTIFACT_SHARD, Tenancy::ZERO)).then_some(entity)
+/// The layer space and entity `id` names as [`crate::Engine::artifact_id`] forms it, or `None`
+/// where it names an item. Whether that entity is an artifact is the caller's question.
+pub(crate) fn artifact_named(key: &IdentityKey, id: MosaicaId) -> Option<(LayerSpace, EntityId)> {
+    key.invert_artifact(id)
 }
 
 impl crate::Engine {
-    /// The `mosaica_id` of the artifact or layer `entity`, or `None` where `entity` lies outside
-    /// the identity space.
-    pub(crate) fn artifact_id(&self, entity: EntityId) -> Option<MosaicaId> {
-        id_at(&self.identity_key, ARTIFACT_SHARD, Tenancy::ZERO, entity).ok()
+    /// The `mosaica_id` of the artifact or layer `entity` of layer space `space`, or `None` where
+    /// `entity` lies outside the identity space.
+    pub(crate) fn artifact_id(&self, space: LayerSpace, entity: EntityId) -> Option<MosaicaId> {
+        self.identity_key.forward_artifact(space, entity).ok()
     }
 
     /// The `mosaica_id` of each of `entities` of `shard`: its number's permutation.

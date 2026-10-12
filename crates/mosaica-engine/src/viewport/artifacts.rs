@@ -331,11 +331,11 @@ impl Engine {
         let (session, generation, shard) = (served.session, served.generation, served.shard);
         let (view, view_data) = (served.name, served.data);
         let (segments, denied) = (&served.segments[..], served.denied);
-        let Some(entity) = crate::edited::artifact_named(&self.identity_key, id) else {
+        let Some((space, entity)) = crate::edited::artifact_named(&self.identity_key, id) else {
             return Ok(None);
         };
 
-        let Some((name, level, ordinal)) = self.write.live().locate_artifact(entity) else {
+        let Some((name, level, ordinal)) = self.write.live().locate_artifact(space, entity) else {
             return Ok(None);
         };
         let Some(layer) = self.write.live().registered_layer(&name) else {
@@ -1468,7 +1468,7 @@ impl Engine {
         check_cancelled(&ask.cancel)?;
         // The blinding is total over the allocator's space; a failure means the manifest and
         // allocator disagree, and dropping the artifact is the fail-closed reading of that.
-        let Some(mosaica_id) = self.artifact_id(entity) else {
+        let Some(mosaica_id) = self.artifact_id(layer.registered.space, entity) else {
             return Ok(());
         };
         // From the composed mask, and only from it: every property below is a function of the

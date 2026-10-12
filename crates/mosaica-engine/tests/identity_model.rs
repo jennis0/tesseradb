@@ -1299,7 +1299,7 @@ impl Run {
                 .resolve_mosaica_ids(&[MosaicaId::new(tid)])
                 .unwrap()[0]
                 .expect("a live item's mosaica_id names it");
-            changes.push((entity, op));
+            changes.push((item(entity), op));
             match op {
                 ChangeOp::Delete => {
                     if self.model.items.remove(&tid).is_some() {

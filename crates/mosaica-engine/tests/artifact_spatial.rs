@@ -587,7 +587,7 @@ fn a_deny_reaches_a_boundary_and_its_members() {
     // And the artifact's own entity: suppressed, it is absent whole.
     let id = served_id(&engine, grant, &key);
     engine
-        .accept_change(id, ChangeOp::Suppress)
+        .accept_changes(vec![(id, ChangeOp::Suppress)])
         .expect("an artifact's own suppression is accepted");
     assert!(
         !served(&engine, grant, 0, WHOLE_MAP).contains_key(&key),
@@ -597,7 +597,7 @@ fn a_deny_reaches_a_boundary_and_its_members() {
 
 /// The entity behind a served artifact, found by asking the identifier route to resolve what the
 /// viewport handed out — the same address a suppression names.
-fn served_id(engine: &Engine, grant: &str, key: &str) -> EntityId {
+fn served_id(engine: &Engine, grant: &str, key: &str) -> mosaica_types::Target {
     let session = engine.authorise(&grant_credential(grant)).unwrap();
     let names = [LAYER, POLYGONS];
     let mut request = mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX);
@@ -612,7 +612,7 @@ fn served_id(engine: &Engine, grant: &str, key: &str) -> EntityId {
     // Inverted through the admin plane's own resolver, the way `/control/changes` does — so the
     // suppression below exercises the misdirection guard rather than going round it.
     engine
-        .resolve_mosaica_ids(&[row.mosaica_id]).unwrap()[0]
+        .resolve_targets(&[row.mosaica_id]).unwrap()[0]
         .expect("an artifact identifier names the entity this deployment issued for it")
 }
 

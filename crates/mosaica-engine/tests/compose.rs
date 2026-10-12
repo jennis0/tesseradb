@@ -102,6 +102,10 @@ fn build_fixture() -> Fixture {
     }
 }
 
+fn item(id: u64) -> mosaica_types::Target {
+    mosaica_types::Target::Item(mosaica_types::ShardId::ZERO, e(id))
+}
+
 fn e(id: u64) -> EntityId {
     EntityId::new(id)
 }
@@ -584,26 +588,26 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
 
         // delete X -> suppress X -> unsuppress X (must stay excluded: delete is terminal).
         wal.append(&WalRecord::ChangeBatch {
-            changes: vec![(e(ENTITY_X), ChangeOp::Delete)],
+            changes: vec![(item(ENTITY_X), ChangeOp::Delete)],
         })
         .unwrap();
         wal.append(&WalRecord::ChangeBatch {
-            changes: vec![(e(ENTITY_X), ChangeOp::Suppress)],
+            changes: vec![(item(ENTITY_X), ChangeOp::Suppress)],
         })
         .unwrap();
         wal.append(&WalRecord::ChangeBatch {
-            changes: vec![(e(ENTITY_X), ChangeOp::Unsuppress)],
+            changes: vec![(item(ENTITY_X), ChangeOp::Unsuppress)],
         })
         .unwrap();
 
         // suppress Y -> delete Y: the other order, and the deletion must outlive an unsuppress
         // that never comes.
         wal.append(&WalRecord::ChangeBatch {
-            changes: vec![(e(ENTITY_Y), ChangeOp::Suppress)],
+            changes: vec![(item(ENTITY_Y), ChangeOp::Suppress)],
         })
         .unwrap();
         wal.append(&WalRecord::ChangeBatch {
-            changes: vec![(e(ENTITY_Y), ChangeOp::Delete)],
+            changes: vec![(item(ENTITY_Y), ChangeOp::Delete)],
         })
         .unwrap();
 

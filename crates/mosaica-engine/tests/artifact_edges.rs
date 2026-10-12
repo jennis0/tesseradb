@@ -175,7 +175,7 @@ fn suppressing_a_cluster_stops_its_labels_serving_on_a_held_identifier_too() {
     ));
 
     engine
-        .accept_change(artifact_entity(&engine, cluster_id), ChangeOp::Suppress)
+        .accept_changes(vec![(artifact_entity(&engine, cluster_id), ChangeOp::Suppress)])
         .unwrap();
 
     let after = artifacts_of(&engine, &full_coverage_credential());
@@ -194,7 +194,7 @@ fn suppressing_a_cluster_stops_its_labels_serving_on_a_held_identifier_too() {
 
     // The label's own entity was never touched, so lifting the cluster's suppression restores both.
     engine
-        .accept_change(artifact_entity(&engine, cluster_id), ChangeOp::Unsuppress)
+        .accept_changes(vec![(artifact_entity(&engine, cluster_id), ChangeOp::Unsuppress)])
         .unwrap();
     assert_eq!(
         labels_in(&artifacts_of(&engine, &full_coverage_credential())).len(),
@@ -258,7 +258,7 @@ fn suppressing_the_cluster_layer_stops_its_labels_serving() {
     let label_id = labels_in(&served)[0].mosaica_id;
 
     engine
-        .accept_change(artifact_entity(&engine, cluster_layer), ChangeOp::Suppress)
+        .accept_changes(vec![(artifact_entity(&engine, cluster_layer), ChangeOp::Suppress)])
         .unwrap();
 
     let after = artifacts_of(&engine, &full_coverage_credential());
@@ -294,7 +294,7 @@ fn an_attachment_survives_a_restart_and_still_withholds() {
     assert_eq!(labels_in(&served).len(), 1, "the label comes back");
 
     engine
-        .accept_change(artifact_entity(&engine, cluster_id), ChangeOp::Suppress)
+        .accept_changes(vec![(artifact_entity(&engine, cluster_id), ChangeOp::Suppress)])
         .unwrap();
     let after = artifacts_of(&engine, &full_coverage_credential());
     assert!(

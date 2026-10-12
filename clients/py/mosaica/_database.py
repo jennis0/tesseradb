@@ -1841,7 +1841,8 @@ class Database:
     def drop_layer(self, name: str, wait: bool = False) -> dict:
         """Remove an annotation layer, and return the server's answer.
 
-        - `name`: the layer's name. It cannot be used for a new layer afterwards.
+        - `name`: the layer's name. A new layer may be declared under it afterwards, and none of
+          the dropped layer's `mosaica_id`s names the new one.
         - `wait`: `True` returns only once readers no longer see the layer, or after the server's
           `serve.visible_wait_max_secs`, when the answer's `visible` is `false`.
 

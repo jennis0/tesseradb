@@ -20,7 +20,8 @@ pub(crate) struct ManifestSeed<'a> {
     pub free: mosaica_lifecycle::ByTenancy,
     pub held: Vec<(u64, mosaica_lifecycle::ByTenancy)>,
     pub layers: &'a [mosaica_types::layer::RegisteredLayer],
-    pub tombstones: &'a [String],
+    /// The highest `next_layer_space` any partition's manifest saved.
+    pub next_layer_space: u32,
     /// The highest layer registry version counter any partition's manifest saved.
     pub registry_version: u64,
     /// Every view created since the build, across every partition's manifest, and every
@@ -90,7 +91,7 @@ impl WritePath {
         // postdates manifest state, so seeding afterwards would resurrect a layer dropped since the
         // last publication, gate and all.
         let mut registry = LayerRegistry::new();
-        registry.seed(seed.layers, seed.tombstones, seed.registry_version);
+        registry.seed(seed.layers, seed.next_layer_space, seed.registry_version);
         // Same ordering rule as the registry above. The build's declared views are seeded first
         // because their keys are taken; forgetting them would let a create reissue one.
         let mut roster = mosaica_lifecycle::ViewRoster::new();
@@ -115,6 +116,9 @@ impl WritePath {
         // already has geometry is not buffered. A drop late in a held log therefore buffers most
         // of the log's rows until the walk ends.
         let mut last_view_drop: Option<u64> = None;
+        // Where each layer name was last registered or dropped. A record of the name's artifacts
+        // before that was written for a registration that is gone.
+        let mut registered_at: FxHashMap<String, u64> = FxHashMap::default();
 
         for item in wal.records_but_ingest() {
             let (position, record) = item.map_err(EngineError::Wal)?;
@@ -129,6 +133,12 @@ impl WritePath {
             registry.apply(&record);
             roster.apply(&record);
             match &record {
+                WalRecord::LayerCreate { declaration, .. } => {
+                    registered_at.insert(declaration.name.clone(), position);
+                }
+                WalRecord::LayerDrop { name, .. } => {
+                    registered_at.insert(name.clone(), position);
+                }
                 WalRecord::VocabularyDeclare { declaration } => {
                     let compiled =
                         crate::vocabularies::compile_record(declaration).ok_or_else(|| {
@@ -319,10 +329,11 @@ impl WritePath {
             }
             let Some(runs) = registry
                 .get(&extent.layer)
+                .filter(|layer| layer.space == extent.space)
                 .and_then(|layer| layer.runs.get(extent.level as usize))
             else {
-                // A dropped layer's extents outlive it until the next fold rewrites the prefix, so
-                // skipping them is correct: a tombstoned name is not a fault.
+                // A dropped layer's extents outlive it until the next fold rewrites the prefix,
+                // and its name may have been registered again in another space.
                 continue;
             };
             for (ordinal, blob) in pack.iter() {
@@ -376,7 +387,11 @@ impl WritePath {
         // The published version, before replay moves it. Every level the manifest names gets the
         // counter the publication recorded, which the replay below then advances for every record
         // past that publication. See `ArtifactStore::seed_level_version`.
-        for version in seed.level_versions {
+        for version in seed.level_versions.iter().filter(|version| {
+            registry
+                .get(&version.layer)
+                .is_some_and(|layer| layer.space == version.space)
+        }) {
             artifacts.seed_level_version(&version.layer, version.level, version.version);
         }
 
@@ -415,10 +430,12 @@ impl WritePath {
                     .seed_value(key, *code)
                     .map_err(|e| EngineError::Malformed(e.to_string()))?;
             }
-            // Before the record lands, as on the live path: a publication into a level holding no
-            // artifact chooses the level's layout.
-            registry.settle_layout(&artifacts, &record);
-            undecodable += artifacts.apply(&record, position);
+            if !names_dropped_registration(&record, position, &registered_at) {
+                // Before the record lands, as on the live path: a publication into a level holding
+                // no artifact chooses the level's layout.
+                registry.settle_layout(&artifacts, &record);
+                undecodable += artifacts.apply(&record, position);
+            }
             // A row whose (entity, view) already has geometry was given it by a flush; buffering it
             // would have the next flush write it twice. The test is per (entity, view), not a
             // watermark, since an entity may hold rows in several views.
@@ -526,4 +543,20 @@ impl WritePath {
             },
         ))
     }
+}
+
+/// Whether `record` writes the artifacts of a layer registered or dropped after `position`: one
+/// the name held before, which the registry no longer holds.
+fn names_dropped_registration(
+    record: &WalRecord,
+    position: u64,
+    registered_at: &FxHashMap<String, u64>,
+) -> bool {
+    let layer = match record {
+        WalRecord::ArtifactPublish { layer, .. }
+        | WalRecord::ArtifactGrow { layer, .. }
+        | WalRecord::ArtifactFill { layer, .. } => layer,
+        _ => return false,
+    };
+    registered_at.get(layer).is_some_and(|at| position < *at)
 }

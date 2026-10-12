@@ -31,12 +31,14 @@ pub(super) fn view_row_space<'a>(
 ///
 /// The layer name never reaches the filename, since a name-derived path could escape the
 /// directory or collide; the manifest entry carries the name instead. The directory listing is
-/// fsynced too, so a crash cannot leave a manifest naming a file that was never written.
+/// fsynced too, so a crash cannot leave a manifest naming a file that was never written. A level
+/// of a layer `space_of` names no space for is registered no longer and is not written.
 pub(super) fn pack_membership_extents(
     prefix_dir: &std::path::Path,
     layout: ShardLayout<'_>,
     n: u64,
     ready: Vec<mosaica_lifecycle::membership::PendingExtent>,
+    space_of: impl Fn(&str) -> Option<LayerSpace>,
 ) -> mosaica_store::Result<Vec<mosaica_store::manifest::MembershipExtent>> {
     if ready.is_empty() {
         return Ok(Vec::new());
@@ -49,6 +51,9 @@ pub(super) fn pack_membership_extents(
     })?;
     let mut entries = Vec::with_capacity(ready.len());
     for (index, (layer, level, ordinal_lo, blobs)) in ready.into_iter().enumerate() {
+        let Some(space) = space_of(&layer) else {
+            continue;
+        };
         let name = format!("members-{n:06}-{index:03}.tsmb");
         let count = blobs.len() as u32;
         let bytes = mosaica_store::membership::pack(ordinal_lo, &blobs);
@@ -56,6 +61,7 @@ pub(super) fn pack_membership_extents(
         entries.push(mosaica_store::manifest::MembershipExtent {
             path: format!("{dir_rel}/{name}"),
             layer,
+            space,
             level,
             ordinal_lo,
             count,
@@ -1864,6 +1870,7 @@ impl Executor {
             ShardLayout::new(partition, ARTIFACT_SHARD),
             n,
             ready,
+            |layer| self.live.space_of(layer),
         )
     }
 

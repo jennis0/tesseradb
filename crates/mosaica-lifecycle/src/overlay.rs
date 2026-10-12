@@ -374,9 +374,10 @@ impl<'a> Replay<'a> {
                 }
             }
             WalRecord::ChangeBatch { changes } => {
-                // No resolution at all: each entity was fixed at admission.
-                for (entity_id, op) in changes {
-                    self.overlay.apply(*entity_id, *op);
+                // No resolution at all: each target was fixed at admission. An artifact's and a
+                // layer's entity are in this overlay too, and lie above every point's.
+                for (target, op) in changes {
+                    self.overlay.apply(target.entity(), *op);
                 }
             }
             WalRecord::OverlaySnapshot { entries } => {
@@ -582,7 +583,10 @@ mod tests {
 
         let entity = EntityId::new(7);
         let suppress = WalRecord::ChangeBatch {
-            changes: vec![(entity, ChangeOp::Suppress)],
+            changes: vec![(
+                mosaica_types::Target::Item(mosaica_types::ShardId::ZERO, entity),
+                ChangeOp::Suppress,
+            )],
         };
 
         let mut once = Replay::new(&dict, Overlay::new(), &owner_id_only);

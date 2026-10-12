@@ -975,8 +975,8 @@ export class Control {
   }
 
   /**
-   * `DELETE /control/layers/{name}`: drops a layer that `declareLayer` declared. The name stays
-   * taken, so a later declaration under it is refused.
+   * `DELETE /control/layers/{name}`: drops a layer that `declareLayer` declared. The name may be
+   * declared again, as a new layer that none of the dropped layer's `mosaica_id`s names.
    */
   dropLayer(name: string, options: WriteOptions = {}): Promise<Answer> {
     return this.send('DELETE', withQuery(`/control/layers/${segment(name)}`, waiting(options)), options);

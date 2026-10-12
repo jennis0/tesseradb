@@ -19,7 +19,7 @@ use mosaica_lifecycle::command::{
 };
 use mosaica_lifecycle::membership::{IncomingArtifact, IncomingGrowth};
 use mosaica_lifecycle::wal::{ChangeOp, PlainViewDeclaration, ViewGroupDeclaration};
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, Target};
 
 use super::{AcceptError, ExecutorHealth, PublishedBatch};
 
@@ -207,17 +207,17 @@ pub(crate) enum Command {
     /// One accepted `/control/changes` request, applied whole. The only command on the deny lane
     /// ([`Command::is_never_shed`]).
     Changes {
-        changes: Vec<(EntityId, ChangeOp)>,
+        changes: Vec<(Target, ChangeOp)>,
         stamp: crate::edited::Stamp,
         reply: Reply<()>,
     },
-    /// Register an annotation layer. The answer is the layer's own entity, which the handler turns
-    /// into the `mosaica_id` a caller later suppresses the layer by.
+    /// Register an annotation layer. The answer is the layer's space and own entity, which the
+    /// handler turns into the `mosaica_id` a caller later suppresses the layer by.
     RegisterLayer {
         declaration: Box<mosaica_types::layer::LayerDeclaration>,
-        reply: Reply<EntityId>,
+        reply: Reply<(mosaica_types::LayerSpace, EntityId)>,
     },
-    /// Drop an annotation layer. Its name is never issued again.
+    /// Drop an annotation layer. Its name may be registered again, as a new layer.
     DropLayer { name: String, reply: Reply<()> },
     /// Create a view of a view group.
     CreateView {
@@ -284,7 +284,7 @@ pub(crate) enum Command {
         level: u32,
         joins: Vec<IncomingGrowth>,
         stamp: crate::edited::Stamp,
-        reply: Reply<Vec<MembershipGrown>>,
+        reply: Reply<(mosaica_types::LayerSpace, Vec<MembershipGrown>)>,
     },
 }
 
@@ -326,7 +326,7 @@ mod tests {
                 None,
             );
             let cmd = Command::Changes {
-                changes: vec![(EntityId::new(1), op)],
+                changes: vec![(Target::Item(mosaica_types::ShardId::ZERO, EntityId::new(1)), op)],
                 stamp: Default::default(),
                 reply,
             };

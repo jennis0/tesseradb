@@ -960,6 +960,9 @@ pub struct RegisteredLayer {
     /// The layer's own entity. Its only job is to give layer suppression somewhere to land, so
     /// `/control/changes` and the deny lane work on a layer exactly as they work on a point.
     pub entity: crate::EntityId,
+    /// The layer's space, which its artifacts' and its own identifiers carry. Given at
+    /// registration and never given to another layer.
+    pub space: crate::LayerSpace,
     /// One entry per level, in level order; a layer declaring no levels has exactly one, its
     /// level 0.
     pub runs: Vec<ReservedRuns>,

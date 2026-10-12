@@ -184,6 +184,8 @@ pub(super) fn refusal_of(e: mosaica_lifecycle::RegistryError) -> ExecError {
 /// names an artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PublishedBatch {
+    /// The layer's space, which every entity below is in.
+    pub(crate) space: LayerSpace,
     pub(crate) entities: Vec<EntityId>,
     pub(crate) created: u64,
     pub(crate) without_content: u64,
@@ -290,7 +292,11 @@ impl Executor {
             Command::RegisterLayer { declaration, reply } => self.commit_registry(
                 |registry, alloc| registry.prepare_create(*declaration, alloc),
                 |record| match record {
-                    WalRecord::LayerCreate { layer_entity, .. } => *layer_entity,
+                    WalRecord::LayerCreate {
+                        space,
+                        layer_entity,
+                        ..
+                    } => (*space, *layer_entity),
                     _ => unreachable!("prepare_create returns a LayerCreate"),
                 },
                 reply,
@@ -407,9 +413,11 @@ impl Executor {
         let served = self.generation.load_full();
         let views = crate::write::ServedViews(&served.bundle.manifest);
         let prepared = self.live.with_publication_state(|registry, store, alloc| {
-            registry.prepare_put(&layer, level, &incoming, store, alloc, &views)
+            let prepared = registry.prepare_put(&layer, level, &incoming, store, alloc, &views)?;
+            let space = registry.get(&layer).map(|registered| registered.space);
+            Ok((prepared, space.expect("prepare_put refuses a layer not registered")))
         });
-        let prepared = match prepared {
+        let (prepared, space) = match prepared {
             Ok(prepared) => prepared,
             Err(e) => {
                 reply.fail(refusal_of(e));
@@ -426,6 +434,7 @@ impl Executor {
             // Every key was held and every part identical: nothing to append, on
             // `commit_growth`'s no-op rule, and the acknowledgement is the held artifacts' own.
             reply.ack(PublishedBatch {
+                space,
                 entities: prepared.entities,
                 created: 0,
                 without_content: 0,
@@ -446,6 +455,7 @@ impl Executor {
         // needs no log for what it just published.
         self.apply_artifact_records(&records, &positions, Publish::Promptly);
         reply.ack(PublishedBatch {
+            space,
             entities: prepared.entities,
             created: prepared.created,
             without_content: prepared.without_content,
@@ -581,7 +591,7 @@ impl Executor {
         layer: String,
         level: u32,
         joins: Vec<mosaica_lifecycle::IncomingGrowth>,
-        reply: Reply<Vec<mosaica_lifecycle::MembershipGrown>>,
+        reply: Reply<(LayerSpace, Vec<mosaica_lifecycle::MembershipGrown>)>,
     ) {
         // `commit_artifacts`' reason: the version a held row form must be at for this delta to be
         // the one it is missing.
@@ -591,7 +601,9 @@ impl Executor {
         let prepared = self.live.with_publication_state(|registry, store, _| {
             let prepared = registry.prepare_grow(&layer, level, &joins, store)?;
             let grown = growth_receipt(registry, store, &layer, level, &joins, &prepared);
-            Ok::<_, mosaica_lifecycle::RegistryError>((prepared, grown))
+            let space = registry.get(&layer).map(|registered| registered.space);
+            let space = space.expect("prepare_grow refuses a layer not registered");
+            Ok::<_, mosaica_lifecycle::RegistryError>((prepared, (space, grown)))
         });
         let (prepared, grown) = match prepared {
             Ok(prepared) => prepared,
@@ -665,15 +677,16 @@ impl Executor {
 
         let ack = ack_of(&record);
         self.live.apply_registry_record(&record);
-        // A dropped layer's derived structures go with it. Retention only, never correctness: a
-        // tombstoned name never resolves through the registry again, so nothing held here is
-        // reachable to be served.
-        //
-        // The store's own copy of a dropped layer's memberships is not released here, because
-        // `ArtifactStore::remove_layer` is reached from nowhere: a drop touches the registry and
-        // stops there. Releasing it changes what the next fold repacks and how far back the
-        // rotation pin holds the log.
+        // A dropped layer's artifacts and derived structures go with it, so a layer registered
+        // again under the name starts from none of them. The next publication names none of its
+        // extents.
         if let WalRecord::LayerDrop { name, .. } = &record {
+            self.side_manifests
+                .membership_extents
+                .retain(|extent| extent.layer != *name);
+            self.side_manifests
+                .derived_extents
+                .retain(|extent| extent.layer != *name);
             // The deltas held for the tick describe forms that are going with the layer.
             self.pending_forms.retain(|(layer, _), _| layer != name);
             self.deps.artifact_projections.forget(name);
@@ -1314,10 +1327,13 @@ impl Executor {
         }
         let deleted = dangling.len() as u64;
         if !dangling.is_empty() {
+            let shard = served.only_shard().id();
             self.apply_changes(
                 dangling
                     .into_iter()
-                    .map(|entity| (entity, mosaica_lifecycle::ChangeOp::Delete))
+                    .map(|entity| {
+                        (Target::Item(shard, entity), mosaica_lifecycle::ChangeOp::Delete)
+                    })
                     .collect(),
             );
         }

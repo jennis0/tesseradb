@@ -1156,6 +1156,7 @@ pub struct Filed {
     pub view: Option<String>,
     pub incarnation: Option<mosaica_types::view::ViewIncarnation>,
     pub layer: String,
+    pub space: mosaica_types::LayerSpace,
     pub level: u32,
     pub level_version: u64,
     pub form: DerivedForm,
@@ -1357,6 +1358,7 @@ pub fn file_derived(
         entries.push(DerivedExtent {
             path: format!("{dir_rel}/{name}"),
             layer: item.layer.clone(),
+            space: item.space,
             level: item.level,
             level_version: item.level_version,
             view: item.view.clone(),

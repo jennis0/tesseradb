@@ -2213,7 +2213,8 @@ impl ArtifactStore {
             })
     }
 
-    /// Drop every artifact of a layer — what a layer drop leaves behind otherwise.
+    /// Drop every artifact of a layer, and what this store knows of its publication, so a layer
+    /// registered later under the name starts from no artifact.
     ///
     /// **The log pin is not lowered with them.** A rotation that reclaimed back to where this
     /// layer's publications sat would also reclaim every *other* layer's records in between, and
@@ -2239,6 +2240,9 @@ impl ArtifactStore {
             self.bump_lineage(layer, level);
         }
         self.levels.retain(|(l, _), _| l != layer);
+        self.published_through.retain(|(l, _), _| l != layer);
+        self.shapes.remove(layer);
+        self.vacated.retain(|(l, _), _| l != layer);
         self.keys.remove(layer);
         self.content_pending.retain(|(l, _, _)| l != layer);
         self.dependents.clear();
@@ -3767,15 +3771,17 @@ mod tests {
     /// The hazard the per-level grain would otherwise have: a form cached for
     /// `(view, layer, level)` outlives the layer, and a name arriving at that address again with a
     /// version the cache has already seen would be answered from the previous incarnation's
-    /// members. It is closed twice over — the registry tombstones a dropped name for ever, so the
-    /// address is never reoccupied at all — and this is the half that belongs here, because it is
-    /// the half a later decision to allow reuse would not silently invalidate.
+    /// members. A dropped name may be registered again, so the address is reoccupied, and what is
+    /// published there afterwards is unpublished however far the dropped layer's publication had
+    /// reached.
     #[test]
     fn a_dropped_layers_version_moves_and_is_never_forgotten() {
         let mut store = ArtifactStore::new();
         assert_eq!(store.apply(&publication("clusters/a", 0, 100, &[1]), 0), 0);
         let published = store.level_version("clusters/a", 0);
         assert!(published > 0);
+        store.mark_published("clusters/a", 0, 1);
+        assert!(store.unpublished().is_empty());
 
         store.remove_layer("clusters/a");
         let dropped = store.level_version("clusters/a", 0);
@@ -3792,6 +3798,12 @@ mod tests {
              that restarted at zero would let a form built over the artifacts that are gone \
              compare equal to the level that replaced them"
         );
+        let pending: Vec<(String, u32, u32)> = store
+            .unpublished()
+            .into_iter()
+            .map(|(layer, level, ordinal_lo, _)| (layer, level, ordinal_lo))
+            .collect();
+        assert_eq!(pending, vec![("clusters/a".to_string(), 0, 0)]);
     }
 
     /// A membership of `span` entities scattered over a `rows`-wide entity space, which is the

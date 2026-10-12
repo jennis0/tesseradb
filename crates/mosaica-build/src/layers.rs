@@ -552,6 +552,8 @@ pub struct PublishedLayers {
     /// those, so a mark that lived only there is lost at the first rotation and the next
     /// registration is handed ids a live layer already holds (decision 0074).
     pub low_water: u64,
+    /// The layer space the next registration takes, on [`Self::low_water`]'s argument.
+    pub next_layer_space: u32,
     pub membership_extents: Vec<MembershipExtent>,
     /// Every `(layer, level)`'s artifact-write counter as this build leaves it.
     ///
@@ -608,6 +610,7 @@ impl Default for PublishedLayers {
             split_coverage: Vec::new(),
             hierarchy_shapes: Vec::new(),
             low_water: mosaica_types::layer::ROWLESS_CEILING,
+            next_layer_space: 0,
             membership_extents: Vec::new(),
             level_versions: Vec::new(),
             artifact_record_extents: Vec::new(),
@@ -1982,9 +1985,14 @@ pub fn publish(
         }
     }
 
-    let (layers, _tombstones) = registry.snapshot();
+    let layers = registry.snapshot();
+    let spaces: BTreeMap<String, mosaica_types::LayerSpace> = layers
+        .iter()
+        .map(|layer| (layer.declaration.name.clone(), layer.space))
+        .collect();
     let mut published = PublishedLayers {
         layers,
+        next_layer_space: registry.next_space(),
         registry_version: registry.version(),
         artifact_views,
         containment_violations: violations,
@@ -1997,13 +2005,14 @@ pub fn publish(
     };
     published.level_versions = store
         .level_versions()
-        .map(
-            |(layer, level, version)| mosaica_store::manifest::LevelVersion {
+        .filter_map(|(layer, level, version)| {
+            Some(mosaica_store::manifest::LevelVersion {
                 layer: layer.to_string(),
+                space: *spaces.get(layer)?,
                 level,
                 version,
-            },
-        )
+            })
+        })
         .collect();
     write_membership_extents(&mut store, prefix_dir, layout, &mut published, &mut streamed)?;
     write_content_extent(&store, prefix_dir, layout, &mut published)?;
@@ -3155,9 +3164,16 @@ fn write_membership_extents(
         // they were in are the 34 GB glibc held for the rest of the run at rung 6.
         crate::trim_heap();
         published.paths.push(path);
+        let space = published
+            .layers
+            .iter()
+            .find(|registered| registered.declaration.name == layer)
+            .map(|registered| registered.space)
+            .expect("a published level's layer is registered");
         published.membership_extents.push(MembershipExtent {
             path: format!("{dir_rel}/{name}"),
             layer,
+            space,
             level,
             ordinal_lo,
             count,

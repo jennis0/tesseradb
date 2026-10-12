@@ -27,7 +27,7 @@ fn sidecar(base: &Path, n: u64) -> PathBuf {
 
 fn change(tag: u8) -> WalRecord {
     WalRecord::ChangeBatch {
-            changes: vec![(EntityId::new(tag as u64), ChangeOp::Suppress)],
+            changes: vec![(item(EntityId::new(tag as u64)), ChangeOp::Suppress)],
         }
 }
 
@@ -159,7 +159,7 @@ fn a_suppression_survives_the_reclamation_of_the_record_that_carried_it() {
     {
         let mut wal = Wal::open(&base).unwrap();
         wal.append(&WalRecord::ChangeBatch {
-            changes: vec![(entity, ChangeOp::Suppress)],
+            changes: vec![(item(entity), ChangeOp::Suppress)],
         })
         .unwrap();
         wal.fsync().unwrap();
@@ -361,4 +361,8 @@ fn the_first_member_starts_its_records_at_the_header() {
         wal.position(),
         "a member's file offset and the sequence position differ by exactly its header"
     );
+}
+
+fn item(entity: EntityId) -> mosaica_types::Target {
+    mosaica_types::Target::Item(mosaica_types::ShardId::ZERO, entity)
 }

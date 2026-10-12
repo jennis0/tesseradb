@@ -933,7 +933,7 @@ fn the_masked_count_cache_is_bounded_and_a_deny_is_not_outlived() {
 
 /// The entity behind one served artifact of the flat layer, by its key, through the admin
 /// plane's own resolver — the route `/control/changes` takes.
-fn flat_artifact_entity(engine: &Engine, key: &str) -> EntityId {
+fn flat_artifact_entity(engine: &Engine, key: &str) -> mosaica_types::Target {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let response = engine
         .viewport_artifacts(
@@ -947,7 +947,7 @@ fn flat_artifact_entity(engine: &Engine, key: &str) -> EntityId {
         .find(|a| a.layer == FLAT && a.key.as_deref() == Some(key))
         .expect("the artifact is served")
         .mosaica_id;
-    engine.resolve_mosaica_ids(&[id]).unwrap()[0].expect("it names what was issued")
+    engine.resolve_targets(&[id]).unwrap()[0].expect("it names what was issued")
 }
 
 /// The row of each of `sources` in the served row space, for a column check.
@@ -1039,7 +1039,7 @@ fn own_entity_retired(key: &str, retired: std::ops::Range<u64>, survivor: std::o
     );
     let entity = flat_artifact_entity(&engine, key);
     engine
-        .accept_change(entity, ChangeOp::Delete)
+        .accept_changes(vec![(entity, ChangeOp::Delete)])
         .expect("an artifact takes a deletion like any other entity");
     fold(&engine);
     assert_eq!(
@@ -1088,7 +1088,7 @@ fn own_entity_retired(key: &str, retired: std::ops::Range<u64>, survivor: std::o
         Some(ServingLayout::ArtifactMajor),
     );
     let twin_entity = flat_artifact_entity(&twin, key);
-    twin.accept_change(twin_entity, ChangeOp::Delete).unwrap();
+    twin.accept_changes(vec![(twin_entity, ChangeOp::Delete)]).unwrap();
     fold(&twin);
     assert_same(
         &live,

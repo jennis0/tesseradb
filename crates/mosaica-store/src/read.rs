@@ -542,7 +542,7 @@ impl Bundle {
     /// garbage the fold reclaims, and until then they are simply unreachable.
     ///
     /// Side-manifests are untouched — the roster's durable half is published by the ordinary
-    /// deny-state path at the next tick, on the mechanism `layer_tombstones` already uses.
+    /// deny-state path at the next tick, on the mechanism the layer registry already uses.
     pub fn with_views(&self, manifest: Manifest) -> Arc<Bundle> {
         let mut partitions = self.partitions.clone();
         for partition in partitions.values_mut() {

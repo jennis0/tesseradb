@@ -23,7 +23,7 @@ use mosaica_engine::{MetaView, ScopedScalar};
 use mosaica_lifecycle::ChangeOp;
 
 use mosaica_types::view::ViewMetadataValue;
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, Target};
 
 use crate::address::{Named, Table};
 use crate::decode::{labels_col, parse_ingest_batch, BodyEncoding, DecodeError, ParsedBatch};
@@ -727,16 +727,16 @@ fn run_changes(
             tables: named,
             ignored,
             at,
-        } = merged.name(state)?;
-        let mut changes: Vec<(EntityId, ChangeOp)> = Vec::with_capacity(ops.len());
+        } = merged.name_targets(state)?;
+        let mut changes: Vec<(Target, ChangeOp)> = Vec::with_capacity(ops.len());
         let mut refused = Vec::new();
         for (index, (named, op)) in named.iter().zip(&ops).enumerate() {
             match named[0] {
-                Named::Item(entity) => changes.push((entity, *op)),
-                Named::Refused(reason) if strict => {
+                Ok(target) => changes.push((target, *op)),
+                Err(reason) if strict => {
                     return Err(crate::address::strict_refusal("the request", index, reason))
                 }
-                Named::Refused(reason) => refused.push(crate::address::refused_json(index, reason)),
+                Err(reason) => refused.push(crate::address::refused_json(index, reason)),
             }
         }
         let done = ChangesDone {

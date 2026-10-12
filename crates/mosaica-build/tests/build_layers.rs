@@ -402,6 +402,19 @@ fn a_build_registers_its_layers_and_publishes_their_artifacts() {
         .map(|l| l.declaration.name.as_str())
         .collect();
     assert_eq!(names, vec!["clusters/a", "topics/x"]);
+    // Each layer its own space, in declaration order, and the counter past them.
+    let spaces: Vec<u32> = manifest.partition.layers.iter().map(|l| l.space.raw()).collect();
+    assert_eq!(spaces, vec![0, 1]);
+    assert_eq!(manifest.partition.next_layer_space, 2);
+    for extent in &manifest.only_shard().membership_extents {
+        let layer = manifest
+            .partition
+            .layers
+            .iter()
+            .find(|l| l.declaration.name == extent.layer)
+            .unwrap();
+        assert_eq!(extent.space, layer.space, "an extent names its layer's space");
+    }
     assert!(
         manifest.partition.entity_id_low_water < mosaica_types::layer::ROWLESS_CEILING,
         "the row-less mark must record what the layers claimed"
@@ -456,6 +469,7 @@ fn both_build_paths_place_the_same_layers_on_the_same_entities() {
     let a = manifest_of(&streamed);
     let b = manifest_of(&linear);
     assert_eq!(a.partition.layers, b.partition.layers);
+    assert_eq!(a.partition.next_layer_space, b.partition.next_layer_space);
     assert_eq!(a.partition.entity_id_low_water, b.partition.entity_id_low_water);
     assert_eq!(a.only_shard().membership_extents, b.only_shard().membership_extents);
 

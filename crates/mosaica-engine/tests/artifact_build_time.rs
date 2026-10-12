@@ -307,7 +307,7 @@ fn a_built_edge_withholds_its_label_when_the_cluster_is_suppressed() {
         .is_some());
 
     engine
-        .accept_change(artifact_entity(&engine, cluster_id), ChangeOp::Suppress)
+        .accept_changes(vec![(artifact_entity(&engine, cluster_id), ChangeOp::Suppress)])
         .unwrap();
 
     let after = artifacts_of(&engine, &full_coverage_credential());
@@ -375,7 +375,7 @@ fn a_built_bundle_takes_an_online_publication_beside_its_own() {
 fn a_later_online_registration_does_not_reissue_the_builds_ids() {
     let fx = fixture();
     let engine = fx.open();
-    let built: Vec<EntityId> = artifacts_of(&engine, &full_coverage_credential())
+    let built: Vec<mosaica_types::Target> = artifacts_of(&engine, &full_coverage_credential())
         .iter()
         .map(|a| artifact_entity(&engine, a.mosaica_id))
         .collect();
@@ -408,8 +408,15 @@ fn a_later_online_registration_does_not_reissue_the_builds_ids() {
         !built.contains(&online),
         "an entity a built artifact holds was handed to a new layer"
     );
+    // In a space past the build's, which the side-manifest's counter carried from the build.
+    let online_space = engine.registered_layer("clusters/online").unwrap().space;
+    for name in [CLUSTERS, LABELS] {
+        assert!(engine.registered_layer(name).unwrap().space < online_space);
+    }
     // And it lands below them, the row-less region growing downward from where the build left it.
-    assert!(built.iter().all(|e| online.raw() < e.raw()));
+    assert!(built
+        .iter()
+        .all(|e| online.entity().raw() < e.entity().raw()));
 
     // The built layers are still there and still reachable after the registration.
     let names: Vec<String> = engine

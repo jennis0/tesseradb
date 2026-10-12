@@ -158,13 +158,14 @@ async fn an_incoherent_declaration_is_refused() {
     assert!(meta_layers(&server, &["0"]).await.is_empty());
 }
 
-/// Drop tombstones the name for ever: the name is gone from `/v1/meta`, recreating it is refused,
-/// and it names no live layer.
+/// A drop takes the name out of `/v1/meta`, and the name registers again as a new layer, with an
+/// identifier of its own.
 #[tokio::test]
-async fn a_dropped_name_is_gone_from_meta_and_refused_on_recreation() {
+async fn a_dropped_name_is_gone_from_meta_and_registers_again() {
     let tmp = TempDir::new().unwrap();
     let server = serve_standard(&tmp).await;
-    register(&server, declaration("clusters/a", None)).await;
+    let (status, first) = put_layer(&server, declaration("clusters/a", None)).await;
+    assert_eq!(status, 201, "{first}");
     assert_eq!(meta_layers(&server, &["0"]).await.len(), 1);
 
     // 200 with a body, since every write acknowledgement carries its publication number.
@@ -175,17 +176,15 @@ async fn a_dropped_name_is_gone_from_meta_and_refused_on_recreation() {
         "the drop names the cycle it is published in: {body}"
     );
     assert!(meta_layers(&server, &["0"]).await.is_empty());
-
-    let (status, body) = put_layer(&server, declaration("clusters/a", None)).await;
-    assert_eq!(status, 422, "{body}");
-    assert_eq!(body["error"], "contract", "{body}");
-    // No live layer holds the name, so the refusal is the tombstone's and not a taken name's: a
-    // second drop finds nothing, where a live layer's drop is accepted.
+    // No live layer holds the name, so a second drop finds nothing.
     let (status, body) = drop_layer(&server, "clusters%2Fa").await;
     assert_eq!(status, 422, "{body}");
     assert_eq!(body["error"], "contract", "{body}");
-    register(&server, declaration("clusters/b", None)).await;
-    assert_eq!(drop_layer(&server, "clusters%2Fb").await.0, 200);
+
+    let (status, again) = put_layer(&server, declaration("clusters/a", None)).await;
+    assert_eq!(status, 201, "{again}");
+    assert_ne!(again["mosaica_id"], first["mosaica_id"]);
+    assert_eq!(meta_layers(&server, &["0"]).await.len(), 1);
 }
 
 /// `DELETE /control/layers/{name}`: the status and the body.

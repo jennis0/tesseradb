@@ -51,7 +51,7 @@ use mosaica_engine::{Engine, EngineConfig};
 use mosaica_lifecycle::wal::{ChangeOp, WalRow, WalScalar};
 use mosaica_lifecycle::{IngestBuffer, Overlay, UnallocatedRow};
 use mosaica_store::read::open_bundle;
-use mosaica_types::{EntityId, TermId};
+use mosaica_types::{EntityId, ShardId, Target, TermId};
 
 /// Descriptors per row. The density every other ingest arm in this crate writes at, so a figure
 /// here is comparable with one there.
@@ -514,7 +514,8 @@ fn experiment_b(
                 let count = DENY_WINDOW.min(target - depth);
                 let pending: Vec<_> = (0..count)
                     .map(|i| {
-                        engine.submit_changes(vec![(EntityId::new((next + i as u64) * DENY_STRIDE), ChangeOp::Suppress)])
+                        let entity = (next + i as u64) * DENY_STRIDE;
+                        engine.submit_changes(vec![(item(entity), ChangeOp::Suppress)])
                     })
                     .collect::<Result<_, _>>()?;
                 next += count as u64;
@@ -528,7 +529,8 @@ fn experiment_b(
                 let at = Instant::now();
                 let pending: Vec<_> = (0..size)
                     .map(|i| {
-                        engine.submit_changes(vec![(EntityId::new((next + i as u64) * DENY_STRIDE), ChangeOp::Suppress)])
+                        let entity = (next + i as u64) * DENY_STRIDE;
+                        engine.submit_changes(vec![(item(entity), ChangeOp::Suppress)])
                     })
                     .collect::<Result<_, _>>()?;
                 for p in pending {
@@ -964,7 +966,8 @@ fn experiment_e(
             let count = (*window).min(target - done);
             let pending: Vec<_> = (0..count)
                 .map(|i| {
-                    engine.submit_changes(vec![(EntityId::new((done + i) as u64 * DENY_STRIDE), ChangeOp::Suppress)])
+                    let entity = (done + i) as u64 * DENY_STRIDE;
+                    engine.submit_changes(vec![(item(entity), ChangeOp::Suppress)])
                 })
                 .collect::<Result<_, _>>()?;
             for p in pending {
@@ -1100,4 +1103,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let _ = std::fs::remove_dir_all(&scratch);
     Ok(())
+}
+
+/// The change target of the item `entity` of the one shard.
+fn item(entity: u64) -> Target {
+    Target::Item(ShardId::ZERO, EntityId::new(entity))
 }

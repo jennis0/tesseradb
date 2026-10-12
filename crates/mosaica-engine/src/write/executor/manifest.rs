@@ -7,11 +7,13 @@ use super::*;
 /// ([`crate::artifacts::ArtifactProjections::adopt_columns`]). Nothing completes a level's label
 /// column or its band-order copy, so those are dropped with every other file, and a level holds
 /// a copy only while the copy is current. A spatial layer's column is read only at its level's
-/// version, so it is dropped like any other file.
+/// version, so it is dropped like any other file. Only the layers in `spaces`, the registered
+/// ones by name, are named, each at its space.
 pub(super) fn artifact_coordinates(
     store: &ArtifactStore,
     held: &[mosaica_store::manifest::DerivedExtent],
     pending: Option<&PendingRetirement>,
+    spaces: &std::collections::BTreeMap<String, LayerSpace>,
     enumerated: &std::collections::BTreeSet<String>,
 ) -> (
     Vec<mosaica_store::manifest::LevelVersion>,
@@ -23,14 +25,18 @@ pub(super) fn artifact_coordinates(
     };
     let versions = store
         .level_versions()
-        .map(|(layer, level, _)| mosaica_store::manifest::LevelVersion {
-            layer: layer.to_string(),
-            level,
-            version: expected(layer, level),
+        .filter_map(|(layer, level, _)| {
+            Some(mosaica_store::manifest::LevelVersion {
+                layer: layer.to_string(),
+                space: *spaces.get(layer)?,
+                level,
+                version: expected(layer, level),
+            })
         })
         .collect();
     let still_true = held
         .iter()
+        .filter(|entry| spaces.get(&entry.layer) == Some(&entry.space))
         .filter(|entry| {
             let now = expected(&entry.layer, entry.level);
             match entry.form {
@@ -210,21 +216,21 @@ impl Executor {
             Some(fold) => (fold.written, Some(fold.pending_retirement)),
             None => (self.side_manifests.derived_extents.as_slice(), None),
         };
-        let enumerated = derived
+        let registered = self.live.registered_layers();
+        let spaces = registered
             .iter()
-            .filter(|entry| {
-                self.live
-                    .registered_layer(&entry.layer)
-                    .is_some_and(|registered| {
-                        registered.declaration.membership
-                            == mosaica_types::layer::MembershipSource::Enumerated
-                    })
-            })
-            .map(|entry| entry.layer.clone())
+            .map(|layer| (layer.declaration.name.clone(), layer.space))
             .collect();
-        let (level_versions, derived_extents) = self
-            .live
-            .with_artifacts(|store| artifact_coordinates(store, derived, pending, &enumerated));
+        let enumerated = registered
+            .iter()
+            .filter(|layer| {
+                layer.declaration.membership == mosaica_types::layer::MembershipSource::Enumerated
+            })
+            .map(|layer| layer.declaration.name.clone())
+            .collect();
+        let (level_versions, derived_extents) = self.live.with_artifacts(|store| {
+            artifact_coordinates(store, derived, pending, &spaces, &enumerated)
+        });
         let record = next.only_shard_mut();
         record.level_versions = level_versions;
         record.derived_extents = derived_extents;
@@ -273,7 +279,7 @@ impl Executor {
         let partition = &mut manifest.partition;
         partition.entity_id_low_water = partition.entity_id_low_water.min(registry.low_water);
         partition.layers = registry.layers;
-        partition.layer_tombstones = registry.tombstones;
+        partition.next_layer_space = partition.next_layer_space.max(registry.next_space);
         partition.layer_registry_version = registry.version;
         let (created_views, dead_view_incarnations) = self.live.roster_for_publication();
         partition.views = created_views;

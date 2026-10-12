@@ -221,44 +221,59 @@ def invert(key: IdentityKey, mosaica_id: int) -> tuple[int, int]:
     return shard_id, entity_id
 
 
-# The 32-bit high half of an identifier's input, most significant bit first: the kind (1 bit, 0
-# an item; 1 names no item), the shard (19 bits) and the tenancy (12 bits), the number of items
-# that held the low half as their number before. Written from `docs/sharding.md` §1.2 without
-# reading the Rust. `forward` and `invert` take and return the high half unpacked. A high half of
-# 0 is an item at shard 0, tenancy 0.
+# The 32-bit high half of an identifier's input, most significant bit first. The kind (1 bit) says
+# what the rest names. Kind 0 is an item: the shard (19 bits) and the tenancy (12 bits), the number
+# of items that held the low half as their number before. Kind 1 is an artifact or a layer: its
+# layer space (31 bits), and the low half is its entity in that space. Written from
+# `docs/sharding.md` §1.2 and §2.2 without reading the Rust. `forward` and `invert` take and return
+# the high half packed. A high half of 0 is an item at shard 0, tenancy 0.
 
 KIND_ITEM = 0
 KIND_ARTIFACT = 1
+KIND_SHIFT = 31
 SHARD_BITS = 19
 TENANCY_BITS = 12
+SPACE_BITS = 31
 MAX_SHARD = (1 << SHARD_BITS) - 1
 MAX_TENANCY = (1 << TENANCY_BITS) - 1
+MAX_SPACE = (1 << SPACE_BITS) - 1
 
 
-def pack_high(kind: int, shard: int, tenancy: int) -> int:
-    """`kind << 31 | shard << 12 | tenancy`, refusing a field too wide for its bits."""
-    if kind not in (KIND_ITEM, KIND_ARTIFACT):
-        raise IdentityError(f"kind must be 0 or 1; got {kind}")
+def pack_item_high(shard: int, tenancy: int) -> int:
+    """`0 << 31 | shard << 12 | tenancy`, refusing a field too wide for its bits."""
     if not (0 <= shard <= MAX_SHARD):
         raise IdentityError(f"shard must be below 2**{SHARD_BITS}; got {shard}")
     if not (0 <= tenancy <= MAX_TENANCY):
         raise IdentityError(f"tenancy must be below 2**{TENANCY_BITS}; got {tenancy}")
-    return (kind << (SHARD_BITS + TENANCY_BITS)) | (shard << TENANCY_BITS) | tenancy
+    return (KIND_ITEM << KIND_SHIFT) | (shard << TENANCY_BITS) | tenancy
 
 
-def unpack_high(high: int) -> tuple[int, int, int]:
-    """(kind, shard, tenancy) of a 32-bit high half. Every u32 unpacks."""
+def pack_artifact_high(space: int) -> int:
+    """`1 << 31 | space`, refusing a layer space too wide for its bits."""
+    if not (0 <= space <= MAX_SPACE):
+        raise IdentityError(f"layer space must be below 2**{SPACE_BITS}; got {space}")
+    return (KIND_ARTIFACT << KIND_SHIFT) | space
+
+
+def kind_of(high: int) -> int:
+    """The kind of a 32-bit high half."""
     if not (0 <= high <= MASK32):
         raise IdentityError(f"high half out of u32 range: {high}")
-    kind = high >> (SHARD_BITS + TENANCY_BITS)
-    shard = (high >> TENANCY_BITS) & MAX_SHARD
-    tenancy = high & MAX_TENANCY
-    return kind, shard, tenancy
+    return high >> KIND_SHIFT
 
 
-def pack_item_high(shard: int, tenancy: int) -> int:
-    """The high half of an item's identifier: kind 0."""
-    return pack_high(KIND_ITEM, shard, tenancy)
+def unpack_item_high(high: int) -> tuple[int, int] | None:
+    """(shard, tenancy) of an item's high half, or `None` where its kind is not an item's."""
+    if kind_of(high) != KIND_ITEM:
+        return None
+    return (high >> TENANCY_BITS) & MAX_SHARD, high & MAX_TENANCY
+
+
+def unpack_artifact_high(high: int) -> int | None:
+    """The layer space of an artifact's high half, or `None` where its kind is not an artifact's."""
+    if kind_of(high) != KIND_ARTIFACT:
+        return None
+    return high & MAX_SPACE
 
 
 def forward_item(key: IdentityKey, shard: int, tenancy: int, number: int) -> int:
@@ -266,13 +281,24 @@ def forward_item(key: IdentityKey, shard: int, tenancy: int, number: int) -> int
     return forward(key, pack_item_high(shard, tenancy), number)
 
 
-def invert_item(key: IdentityKey, mosaica_id: int) -> tuple[int, int, int, int]:
-    """(kind, shard, tenancy, number) of any `mosaica_id`. The kind is reported, not checked: an
-    identifier of kind 1 names no item, and its other 31 high bits are split as an item's would be,
-    so a caller resolving an item compares the kind first."""
+def forward_artifact(key: IdentityKey, space: int, entity: int) -> int:
+    """The `mosaica_id` of the artifact or layer at `entity` in layer space `space`."""
+    return forward(key, pack_artifact_high(space), entity)
+
+
+def invert_item(key: IdentityKey, mosaica_id: int) -> tuple[int, int, int] | None:
+    """(shard, tenancy, number) of an item's `mosaica_id`, or `None` where it names no item."""
     high, number = invert(key, mosaica_id)
-    kind, shard, tenancy = unpack_high(high)
-    return kind, shard, tenancy, number
+    item = unpack_item_high(high)
+    return None if item is None else (*item, number)
+
+
+def invert_artifact(key: IdentityKey, mosaica_id: int) -> tuple[int, int] | None:
+    """(layer space, entity) of an artifact's or a layer's `mosaica_id`, or `None` where it names
+    no artifact."""
+    high, entity = invert(key, mosaica_id)
+    space = unpack_artifact_high(high)
+    return None if space is None else (space, entity)
 
 
 def priority_of(mosaica_id: int) -> int:

@@ -461,7 +461,7 @@ impl Engine {
                 )
             })
             .collect::<Result<Vec<_>>>()?;
-        let layers: Vec<Option<u64>> = plans.iter().map(Plan::layer_entity).collect();
+        let layers: Vec<Option<u64>> = plans.iter().map(Plan::layer_space).collect();
         let binding = Binding {
             route: Route::Aggregate,
             view: req.view,

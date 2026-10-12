@@ -24,12 +24,12 @@
 //! layer*; it does not say *this layer is currently served*. Caching the second is the fail-open,
 //! and it is why [`ResolvedLayers`] carries a version key rather than a decision.
 //!
-//! ## A dropped name never comes back
+//! ## A dropped layer leaves nothing behind
 //!
-//! Drop tombstones the name for ever. Bookmarks, edges and suppressions all travel by it, so a name
-//! that once meant something must not come to mean something else — a recreated `clusters/topics`
-//! would silently inherit every stale reference to the old one. The ids do not come back either:
-//! the allocator frees no row-less id.
+//! A drop removes the layer, and its name may be registered again. The new registration is a new
+//! layer in a new space: spaces come from a counter that never goes back, and every identifier of
+//! an artifact or a layer carries its space, so no identifier the dropped layer issued names
+//! anything of the new one. The allocator frees no row-less id either.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -37,7 +37,7 @@ use mosaica_types::layer::{
     DeclarationError, EntityRun, LayerDeclaration, LevelShape, MembershipSource, RegisteredLayer,
     ReservedRuns,
 };
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, LayerSpace};
 
 use crate::alloc::{AllocError, Allocator};
 use crate::membership::{deserialise_members, serialise_members, ArtifactStore, IncomingArtifact};
@@ -71,8 +71,8 @@ pub enum RegistryError {
     Declaration(DeclarationError),
     /// A layer of this name is already registered.
     NameTaken(String),
-    /// This name was dropped. It is refused for ever — see the module doc.
-    NameTombstoned(String),
+    /// Every layer space has been given out.
+    SpacesExhausted,
     /// No such live layer.
     NoSuchLayer(String),
     /// The layer holds no such level. Levels are dense from 0, so this is a caller naming one the
@@ -464,10 +464,11 @@ impl std::fmt::Display for RegistryError {
         match self {
             RegistryError::Declaration(e) => write!(f, "{e}"),
             RegistryError::NameTaken(n) => write!(f, "a layer named {n} is already registered"),
-            RegistryError::NameTombstoned(n) => write!(
+            RegistryError::SpacesExhausted => write!(
                 f,
-                "the layer name {n} was dropped and cannot be reused: bookmarks, edges and \
-                 suppressions travel by it, so reusing it would silently redirect them"
+                "every one of the {} layer spaces has been given to a layer, and a space is never \
+                 given twice. No further layer can be registered",
+                LayerSpace::LIMIT
             ),
             RegistryError::NoSuchLayer(n) => write!(f, "no layer named {n}"),
             RegistryError::NoSuchLevel { layer, level } => {
@@ -897,7 +898,9 @@ impl ResolvedLayers {
 #[derive(Debug, Clone, Default)]
 pub struct LayerRegistry {
     layers: BTreeMap<String, RegisteredLayer>,
-    tombstones: BTreeSet<String>,
+    /// The space the next registration takes: past every space ever given, live or dropped.
+    /// [`LayerSpace::LIMIT`] once every space has been given.
+    next_space: u32,
     /// Where the next layer's own entity comes from: `[next, end)` of a block taken from the
     /// row-less region. Layer entities are handed out singly from here rather than from the
     /// allocator, because the allocator deals only in whole aligned blocks — see
@@ -939,13 +942,17 @@ impl LayerRegistry {
         self.layers.iter().map(|(k, v)| (k.as_str(), v))
     }
 
-    /// Whether this name has ever been dropped.
-    pub fn is_tombstoned(&self, name: &str) -> bool {
-        self.tombstones.contains(name)
+    /// The space the next registration takes, as a side-manifest carries it.
+    pub fn next_space(&self) -> u32 {
+        self.next_space
     }
 
-    pub fn tombstones(&self) -> impl Iterator<Item = &str> {
-        self.tombstones.iter().map(String::as_str)
+    /// The live layer holding `space`, by name.
+    pub fn in_space(&self, space: LayerSpace) -> Option<(&str, &RegisteredLayer)> {
+        self.layers
+            .iter()
+            .find(|(_, layer)| layer.space == space)
+            .map(|(name, layer)| (name.as_str(), layer))
     }
 
     /// Validates a registration and allocates its ids, returning the WAL record that makes it
@@ -963,9 +970,7 @@ impl LayerRegistry {
         if self.layers.contains_key(&declaration.name) {
             return Err(RegistryError::NameTaken(declaration.name));
         }
-        if self.tombstones.contains(&declaration.name) {
-            return Err(RegistryError::NameTombstoned(declaration.name));
-        }
+        let space = LayerSpace::new(self.next_space).map_err(|_| RegistryError::SpacesExhausted)?;
         for dep in &declaration.depends_on {
             if !self.layers.contains_key(dep) {
                 return Err(RegistryError::MissingDependency {
@@ -991,6 +996,7 @@ impl LayerRegistry {
         Ok(WalRecord::LayerCreate {
             declaration: Box::new(declaration),
             layer_entity,
+            space,
             runs,
             version: self.version + 1,
         })
@@ -2762,14 +2768,17 @@ impl LayerRegistry {
     /// `version` is the counter the manifest saved. The counter resumes from it or from the highest
     /// seeded layer's version, whichever is higher, so a registration replayed or made after the
     /// seed is never given a version lower than one already served.
-    pub fn seed(&mut self, layers: &[RegisteredLayer], tombstones: &[String], version: u64) {
+    ///
+    /// `next_space` is the counter the manifest saved, raised past every seeded layer's space.
+    pub fn seed(&mut self, layers: &[RegisteredLayer], next_space: u32, version: u64) {
         self.version = self.version.max(version);
+        self.next_space = self.next_space.max(next_space);
         for layer in layers {
             self.version = self.version.max(layer.version);
+            self.next_space = self.next_space.max(layer.space.raw() + 1);
             self.layers
                 .insert(layer.declaration.name.clone(), layer.clone());
         }
-        self.tombstones.extend(tombstones.iter().cloned());
     }
 
     /// Record one level's serving layout: the fold's re-evaluation, and the only thing that changes
@@ -2842,26 +2851,28 @@ impl LayerRegistry {
             .then(|| (layer.clone(), *level))
     }
 
-    /// This registry as a manifest carries it: every live layer, and every name ever dropped.
-    pub fn snapshot(&self) -> (Vec<RegisteredLayer>, Vec<String>) {
-        (
-            self.layers.values().cloned().collect(),
-            self.tombstones.iter().cloned().collect(),
-        )
+    /// Every live layer, as a manifest carries it.
+    pub fn snapshot(&self) -> Vec<RegisteredLayer> {
+        self.layers.values().cloned().collect()
     }
 
     /// Applies a durable registry record — the one path by which this state ever changes, taken by
     /// both the live write path and replay.
     ///
-    /// **Replay applies, it does not re-derive.** The ids come from the record, so a registration
-    /// lands on the same entities it was acked on, whatever the allocator's state; and a drop
-    /// tombstones whether or not the create that preceded it is still in the log, because a
-    /// tombstone that depended on seeing its own create would evaporate at the first rotation.
+    /// **Replay applies, it does not re-derive.** The ids and the space come from the record, so a
+    /// registration lands on the same entities and space it was acked on, whatever the
+    /// allocator's state. The space counter passes every space a record names, so a space is not
+    /// given again once its registration's record is the only trace of it.
+    ///
+    /// A replay runs over a seed that may already hold what a record did. A create or a drop whose
+    /// version is below that of the layer held under its name predates that registration, and
+    /// moves nothing but the counters.
     pub fn apply(&mut self, record: &WalRecord) {
         match record {
             WalRecord::LayerCreate {
                 declaration,
                 layer_entity,
+                space,
                 runs,
                 version,
             } => {
@@ -2869,6 +2880,10 @@ impl LayerRegistry {
                 // nothing.
                 let version = *version;
                 self.version = self.version.max(version);
+                self.next_space = self.next_space.max(space.raw() + 1);
+                if self.predates_held(&declaration.name, version) {
+                    return;
+                }
                 // A replay over a seed holding this registration keeps the layouts a fold recorded
                 // for it, so the files that fold wrote are adopted rather than composed again. A
                 // new registration starts from what its declaration says before anything is
@@ -2883,15 +2898,17 @@ impl LayerRegistry {
                         layouts,
                         declaration: (**declaration).clone(),
                         entity: *layer_entity,
+                        space: *space,
                         runs: runs.clone(),
                         version,
                     },
                 );
             }
             WalRecord::LayerDrop { name, version } => {
-                self.layers.remove(name);
-                self.tombstones.insert(name.clone());
                 self.version = self.version.max(*version);
+                if !self.predates_held(name, *version) {
+                    self.layers.remove(name);
+                }
             }
             // A publication's only effect on the *registry* is the reservation it grew. The
             // artifacts themselves belong to the store, applied from the same record.
@@ -2921,6 +2938,14 @@ impl LayerRegistry {
             }
             _ => {}
         }
+    }
+
+    /// Whether a registry record at `version` naming `name` was written before the registration
+    /// held under that name.
+    fn predates_held(&self, name: &str, version: u64) -> bool {
+        self.layers
+            .get(name)
+            .is_some_and(|held| held.version > version)
     }
 
     /// Resolves which layers this principal may know exist, once per session.
@@ -2973,6 +2998,16 @@ impl LayerRegistry {
                 runs.ordinal_of(entity.raw())
                     .map(|ordinal| (name.as_str(), level as u32, ordinal as u32))
             })
+        })
+    }
+
+    /// [`Self::locate`] inside the layer holding `space` alone: `None` where no live layer holds
+    /// the space or its runs do not hold `entity`.
+    pub fn locate_in(&self, space: LayerSpace, entity: EntityId) -> Option<(&str, u32, u32)> {
+        let (name, layer) = self.in_space(space)?;
+        layer.runs.iter().enumerate().find_map(|(level, runs)| {
+            runs.ordinal_of(entity.raw())
+                .map(|ordinal| (name, level as u32, ordinal as u32))
         })
     }
 
@@ -3137,20 +3172,25 @@ mod tests {
     }
 
     #[test]
-    fn a_dropped_name_is_refused_on_recreation_for_ever() {
+    fn a_dropped_name_registers_again_as_a_new_layer_in_a_new_space() {
         let mut reg = LayerRegistry::new();
         let mut alloc = Allocator::new(0);
         register(&mut reg, &mut alloc, declaration("clusters/a")).unwrap();
+        let first = reg.get("clusters/a").unwrap().clone();
 
         let drop = reg.prepare_drop("clusters/a").unwrap();
         reg.apply(&drop);
         assert!(reg.get("clusters/a").is_none());
-        assert!(reg.is_tombstoned("clusters/a"));
 
-        assert_eq!(
-            register(&mut reg, &mut alloc, declaration("clusters/a")),
-            Err(RegistryError::NameTombstoned("clusters/a".into()))
-        );
+        register(&mut reg, &mut alloc, declaration("clusters/a")).unwrap();
+        let second = reg.get("clusters/a").unwrap();
+        assert!(second.space > first.space);
+        assert_ne!(second.entity, first.entity);
+        assert!(reg.in_space(first.space).is_none());
+        assert_eq!(reg.next_space(), second.space.raw() + 1);
+
+        let drop = reg.prepare_drop("clusters/a").unwrap();
+        reg.apply(&drop);
         // And dropping what is not there is a refusal, not a silent success.
         assert_eq!(
             reg.prepare_drop("clusters/a").unwrap_err(),
@@ -3209,9 +3249,49 @@ mod tests {
             live.get("clusters/a").map(|l| l.entity)
         );
         assert_eq!(replayed.get("clusters/a"), live.get("clusters/a"));
-        // A drop tombstones even though this log never carried its create — a tombstone that
-        // needed to see its own create would evaporate at the first rotation.
-        assert!(replayed.is_tombstoned("clusters/b"));
+        assert!(replayed.get("clusters/b").is_none());
+    }
+
+    #[test]
+    fn replay_over_a_seed_skips_the_records_of_a_dropped_registration_of_the_same_name() {
+        let mut live = LayerRegistry::new();
+        let mut alloc = Allocator::new(0);
+        let mut log = Vec::new();
+        for name in ["clusters/a", "clusters/b"] {
+            let record = live.prepare_create(declaration(name), &mut alloc).unwrap();
+            live.apply(&record);
+            log.push(record);
+        }
+        for name in ["clusters/a", "clusters/b"] {
+            let drop = live.prepare_drop(name).unwrap();
+            live.apply(&drop);
+            log.push(drop);
+        }
+        let again = live
+            .prepare_create(declaration("clusters/a"), &mut alloc)
+            .unwrap();
+        live.apply(&again);
+        log.push(again);
+        live.set_layout("clusters/a", 0, ServingLayout::RowMajorLabel);
+
+        // The seed is a manifest written after every record, and the log still holds them all.
+        let mut replayed = LayerRegistry::new();
+        replayed.seed(&live.snapshot(), live.next_space(), live.version());
+        for record in &log {
+            replayed.apply(record);
+        }
+        assert_eq!(replayed.snapshot(), live.snapshot());
+        assert_eq!(replayed.next_space(), 3);
+
+        // With the log alone, the counter passes the dropped layers' spaces all the same.
+        let mut from_log = LayerRegistry::new();
+        for record in &log[2..] {
+            from_log.apply(record);
+        }
+        assert_eq!(from_log.next_space(), 3);
+        let mut alloc = Allocator::new(0);
+        register(&mut from_log, &mut alloc, declaration("clusters/c")).unwrap();
+        assert_eq!(from_log.get("clusters/c").unwrap().space.raw(), 3);
     }
 
     #[test]

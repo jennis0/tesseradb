@@ -321,7 +321,7 @@ fn suppressing_an_artifact_removes_it_from_the_viewport_and_from_drill_down_at_t
         .mosaica_id;
 
     let entity = artifact_entity(&engine, c0);
-    engine.accept_change(entity, ChangeOp::Suppress).unwrap();
+    engine.accept_changes(vec![(entity, ChangeOp::Suppress)]).unwrap();
 
     let after = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(after.len(), 1, "suppression takes effect at the ack");
@@ -332,7 +332,7 @@ fn suppressing_an_artifact_removes_it_from_the_viewport_and_from_drill_down_at_t
         .is_none());
 
     // Suppressing the *layer* takes both, and by the same route.
-    engine.accept_change(entity, ChangeOp::Unsuppress).unwrap();
+    engine.accept_changes(vec![(entity, ChangeOp::Unsuppress)]).unwrap();
     assert_eq!(artifacts_of(&engine, &full_coverage_credential()).len(), 2);
 }
 

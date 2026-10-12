@@ -377,7 +377,7 @@ struct Published {
 
 fn deletion(id: u64) -> WalRecord {
     WalRecord::ChangeBatch {
-        changes: vec![(EntityId::new(id), ChangeOp::Delete)],
+        changes: vec![(item(EntityId::new(id)), ChangeOp::Delete)],
     }
 }
 
@@ -398,4 +398,8 @@ fn row(id: u64) -> WalRecord {
             scoped: Vec::new(),
         }],
     }
+}
+
+fn item(entity: EntityId) -> mosaica_types::Target {
+    mosaica_types::Target::Item(mosaica_types::ShardId::ZERO, entity)
 }

@@ -178,9 +178,9 @@ struct HeldCounts {
 /// The artifacts route's pager.
 struct ArtifactsPager<'r> {
     req: ArtifactsRequest<'r>,
-    /// The layer's own entity when the read began: a layer registered since under the name is
-    /// another layer, and the read ends.
-    layer_entity: mosaica_types::EntityId,
+    /// The layer's space when the read began: a layer registered since under the name is another
+    /// layer in another space, and the read ends.
+    layer_space: mosaica_types::LayerSpace,
     properties: Vec<Property>,
     page_rows: u32,
     binding: Binding<'r>,
@@ -271,7 +271,7 @@ impl Scope<'_> {
             entity,
             rank,
         )?;
-        let mosaica_id = self.mosaica_id(entity)?;
+        let mosaica_id = self.mosaica_id(self.layer.space, entity)?;
         Some(Served {
             entity,
             mosaica_id,
@@ -287,8 +287,8 @@ impl Scope<'_> {
             .expect("a level asked about is read")
     }
 
-    fn mosaica_id(&self, entity: EntityId) -> Option<u64> {
-        self.engine.artifact_id(entity).map(|id| id.raw())
+    fn mosaica_id(&self, space: mosaica_types::LayerSpace, entity: EntityId) -> Option<u64> {
+        self.engine.artifact_id(space, entity).map(|id| id.raw())
     }
 
     /// The artifact `attachment` names, in its layer and level as this page read them, where the
@@ -325,7 +325,11 @@ impl Scope<'_> {
     /// The identifier of the artifact `attachment` names, where it is served.
     fn target(&self, attachment: &mosaica_lifecycle::membership::Attachment) -> Option<u64> {
         self.served_target(attachment)?;
-        self.mosaica_id(attachment.entity)
+        let target = self
+            .targets
+            .iter()
+            .find(|t| t.layer.declaration.name == attachment.layer)?;
+        self.mosaica_id(target.layer.space, attachment.entity)
     }
 
     /// Whether a served artifact passes `parent` and `q`: the narrowings that decide which served
@@ -438,7 +442,7 @@ impl Engine {
             auth_data_hash: session.auth_data_hash(),
             layer: Some(LayerBinding {
                 name: req.layer,
-                entity: layer.entity.raw(),
+                space: layer.space.raw(),
                 level: req.level,
             }),
             request: req.ids.map(ids_digest),
@@ -480,7 +484,7 @@ impl Engine {
         };
         let pager = ArtifactsPager {
             req,
-            layer_entity: layer.entity,
+            layer_space: layer.space,
             properties,
             page_rows,
             binding,
@@ -505,8 +509,8 @@ impl Engine {
         let mut named: Vec<(u32, u32, EntityId)> = ids
             .iter()
             .filter_map(|&id| {
-                let entity = crate::edited::artifact_named(&self.identity_key, id)?;
-                let (name, at, ordinal) = self.write.live().locate_artifact(entity)?;
+                let (space, entity) = crate::edited::artifact_named(&self.identity_key, id)?;
+                let (name, at, ordinal) = self.write.live().locate_artifact(space, entity)?;
                 (name == layer.declaration.name && level.is_none_or(|level| level == at))
                     .then_some((at, ordinal, entity))
             })
@@ -547,7 +551,7 @@ impl ArtifactsPager<'_> {
         else {
             return Ok(None);
         };
-        if layer.entity != self.layer_entity {
+        if layer.space != self.layer_space {
             return Ok(None);
         }
         if let Some(expr) = &self.req.filter {
@@ -970,8 +974,8 @@ fn locate_in(
     layer: &RegisteredLayer,
     id: MosaicaId,
 ) -> Option<(u32, u32, EntityId)> {
-    let entity = crate::edited::artifact_named(&engine.identity_key, id)?;
-    let (name, level, ordinal) = engine.write.live().locate_artifact(entity)?;
+    let (space, entity) = crate::edited::artifact_named(&engine.identity_key, id)?;
+    let (name, level, ordinal) = engine.write.live().locate_artifact(space, entity)?;
     (name == layer.declaration.name).then_some((level, ordinal, entity))
 }
 

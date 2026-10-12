@@ -390,10 +390,10 @@ fn a_suppressed_parent_does_not_take_its_child_with_it() {
     let served = artifacts_of(&engine, &credential, Some(1));
     assert_eq!(keys(&served), vec!["root"]);
     let root_entity = engine
-        .resolve_mosaica_ids(&[served[0].mosaica_id]).unwrap()[0]
+        .resolve_targets(&[served[0].mosaica_id]).unwrap()[0]
         .expect("it names what was issued");
     engine
-        .accept_change(root_entity, mosaica_lifecycle::wal::ChangeOp::Suppress)
+        .accept_changes(vec![(root_entity, mosaica_lifecycle::wal::ChangeOp::Suppress)])
         .expect("the suppress is accepted");
 
     assert_eq!(
@@ -445,11 +445,11 @@ fn a_deleted_parent_leaves_its_child_a_root() {
     let served = artifacts_of(&engine, &credential, Some(1));
     assert_eq!(keys(&served), vec!["root"]);
     let root_entity = engine
-        .resolve_mosaica_ids(&[served[0].mosaica_id]).unwrap()[0]
+        .resolve_targets(&[served[0].mosaica_id]).unwrap()[0]
         .expect("it names what was issued");
 
     engine
-        .accept_change(root_entity, mosaica_lifecycle::wal::ChangeOp::Delete)
+        .accept_changes(vec![(root_entity, mosaica_lifecycle::wal::ChangeOp::Delete)])
         .expect("the delete is accepted");
     assert_eq!(
         keys(&artifacts_of(&engine, &credential, None)),

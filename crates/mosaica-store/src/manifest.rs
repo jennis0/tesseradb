@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_spatial::Projection;
 use mosaica_types::layer::{RegisteredLayer, ServingLayout};
-use mosaica_types::{ShardId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+use mosaica_types::{LayerSpace, ShardId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
 use crate::error::{Result, StoreError};
 
@@ -1727,6 +1727,9 @@ pub struct MembershipExtent {
     /// Prefix-relative path of the packed extent.
     pub path: String,
     pub layer: String,
+    /// The layer's space. A layer registered again under a dropped one's name has another, so an
+    /// extent of the dropped layer is never read as the new one's.
+    pub space: LayerSpace,
     pub level: u32,
     /// The first ordinal this extent covers. **Also carried inside the file**, and checked against
     /// it at open: a manifest and a file that disagree about which artifacts a range names would
@@ -1755,6 +1758,8 @@ pub struct MembershipExtent {
 #[serde(deny_unknown_fields)]
 pub struct LevelVersion {
     pub layer: String,
+    /// The layer's space, on [`MembershipExtent::space`]'s argument.
+    pub space: LayerSpace,
     pub level: u32,
     /// How many artifact writes had landed on this level when this manifest was written.
     pub version: u64,
@@ -1777,6 +1782,8 @@ pub struct DerivedExtent {
     /// Prefix-relative path of the file.
     pub path: String,
     pub layer: String,
+    /// The layer's space, on [`MembershipExtent::space`]'s argument.
+    pub space: LayerSpace,
     pub level: u32,
     pub level_version: u64,
     pub view: Option<String>,
@@ -1789,6 +1796,7 @@ impl DerivedExtent {
     /// coordinates two files written together share.
     pub fn same_level(&self, other: &DerivedExtent) -> bool {
         self.layer == other.layer
+            && self.space == other.space
             && self.level == other.level
             && self.level_version == other.level_version
             && self.view == other.view
@@ -1986,11 +1994,12 @@ pub struct PartitionManifest {
     /// The annotation layer registry as of this publication, complete current state rather than a
     /// diff — the posture contracts §2.3 already fixes for `deny` and `tombstones`.
     pub layers: Vec<RegisteredLayer>,
-    /// Every layer name that has ever been dropped. **Carried for ever and never pruned**:
-    /// bookmarks, edges and suppressions all travel by name, so a name that once meant something
-    /// must not come to mean something else. A tombstone list that forgot would let a recreated
-    /// layer silently inherit every stale reference to the old one.
-    pub layer_tombstones: Vec<String>,
+    /// The layer space the next registration takes: past every space a layer has held, dropped
+    /// or not. Required for [`Self::entity_id_low_water`]'s reason: the WAL's `LayerCreate`
+    /// records also carry each space, and rotation reclaims them, so a counter that lived only
+    /// there would give a dropped layer's space to a new one, and a dropped layer's identifiers
+    /// would name the new layer's artifacts.
+    pub next_layer_space: u32,
     /// The layer registry's version counter: the last version handed to a registration or a drop.
     /// Open resumes the counter from it.
     pub layer_registry_version: u64,
@@ -2000,7 +2009,7 @@ pub struct PartitionManifest {
     /// WAL entries for replay, but rotation reclaims them — so a roster that lived only in the log
     /// is lost at the first rotation, and a reused key silently repoints every client cache keyed
     /// on the view (decision 0029). Carried forward for ever, exactly as
-    /// [`Self::entity_id_low_water`] and [`Self::layer_tombstones`] are
+    /// [`Self::entity_id_low_water`] and [`Self::next_layer_space`] are
     /// and for the same reason.
     ///
     /// The views a *build* declared are in `MANIFEST.json` and are not restated here: this list
@@ -2091,7 +2100,7 @@ pub struct PartitionManifest {
     /// and unreachable. Renamed rather than repurposed under the old name, so that nothing reads
     /// it as the burn it no longer is.
     ///
-    /// Carried forward at every publication, on `layer_tombstones`' argument: a mark that lives
+    /// Carried forward at every publication, on `next_layer_space`'s argument: a mark that lives
     /// only in the log is lost at the first rotation, and a reclaim that forgot an incarnation
     /// would leave its files on disc for ever.
     pub dead_view_incarnations: Vec<DeadIncarnation>,
@@ -2219,7 +2228,7 @@ impl PartitionManifest {
         PartitionManifest {
             entity_id_low_water: mosaica_types::layer::ROWLESS_CEILING,
             layers: Vec::new(),
-            layer_tombstones: Vec::new(),
+            next_layer_space: 0,
             layer_registry_version: 0,
             views: Vec::new(),
             scoped_columns: Vec::new(),
@@ -2295,12 +2304,11 @@ pub const HONOURED_STATE: &[&str] = &[
     "deny",
     "tombstones",
     "vocabulary_extensions",
-    // Both arrived with the code that reads them (`WritePath::reconstruct` seeds the registry from
-    // the manifest and replays the WAL on top). A reader carrying a layer list and ignoring it
+    // Arrived with the code that reads it (`WritePath::reconstruct` seeds the registry from the
+    // manifest and replays the WAL on top). A reader carrying a layer list and ignoring it
     // would serve a bundle as though no layer had ever been registered — every gate absent, every
     // reserved run available for reissue — which is the fail-open this list exists to close.
     "layers",
-    "layer_tombstones",
     // The roster's runtime half, on the same argument: a reader carrying created views and
     // ignoring them would serve a bundle as though the views did not exist — every request naming
     // one a 404 — and, worse, would admit a create on a key a live or tombstoned view already
@@ -2462,7 +2470,6 @@ impl SegmentsManifest {
                     !partition.vocabulary_extensions.is_empty(),
                 ),
                 ("layers", !partition.layers.is_empty()),
-                ("layer_tombstones", !partition.layer_tombstones.is_empty()),
                 ("views", !partition.views.is_empty()),
                 (
                     "dead_view_incarnations",
@@ -2712,6 +2719,7 @@ mod tests {
         let entry = |form: DerivedForm, view: Option<&str>| DerivedExtent {
             path: format!("{}/x", TEST_SHARD.derived_rel(form.dir())),
             layer: "regions".to_string(),
+            space: LayerSpace::new(4).unwrap(),
             level: 0,
             level_version: 3,
             view: view.map(str::to_string),
@@ -2898,7 +2906,6 @@ mod tests {
                 "tombstones",
                 "vocabulary_extensions",
                 "layers",
-                "layer_tombstones",
                 "views",
                 "dead_view_incarnations",
                 "attributes",
@@ -2912,10 +2919,10 @@ mod tests {
              unions on top. vocabulary_extensions: the loader seeds the live \
              `vocabulary::Vocabularies` from them before replay, which is what makes a minted \
              code survive a restart and what keeps it out of the next draw. \
-             layers/layer_tombstones: `WritePath::reconstruct` seeds the `LayerRegistry` from them \
+             layers: `WritePath::reconstruct` seeds the `LayerRegistry` from it \
              before replaying the WAL over the top, which is what makes a registration survive the \
-             rotation that reclaims its `LayerCreate` record — a reader carrying them and ignoring \
-             them would open a bundle as though no layer had ever been registered, every gate \
+             rotation that reclaims its `LayerCreate` record — a reader carrying it and ignoring \
+             it would open a bundle as though no layer had ever been registered, every gate \
              absent and every reserved run free for reissue. views/dead_view_incarnations: \
              `Engine::open` seeds the `ViewRoster` from them and amends the bundle's own manifest \
              with what it holds, before replaying the WAL over the top — which is what makes a \

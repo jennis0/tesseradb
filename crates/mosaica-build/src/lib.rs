@@ -2031,6 +2031,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // batched build does the same, and `tests/build_equivalence.rs` holds the two to one bundle.
     let containment_extents = crate::artifact_pass::containment(
         &artifact_store,
+        &published_layers.layers,
         &prefix_dir,
         layout,
         &mut derived_index,
@@ -2303,6 +2304,7 @@ fn write_manifests(
     let segments = SegmentsManifest {
         partition: mosaica_store::manifest::PartitionManifest {
             entity_id_low_water: published_layers.low_water,
+            next_layer_space: published_layers.next_layer_space,
             layers: published_layers.layers.clone(),
             layer_registry_version: published_layers.registry_version,
             dict_extents,

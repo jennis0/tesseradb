@@ -309,11 +309,11 @@ fn a_publication_that_adds_an_edge_is_in_the_next_requests_cut() {
 
 /// **A dropped layer's derived structures leave both caches, and nobody else's do.**
 ///
-/// Retention rather than correctness — a tombstoned name never resolves through the registry
-/// again, so a form left behind could not be served to anyone — but it is retention that does not
-/// come back: neither cache had a removal path, so each was bounded by the `(view, layer, level)`
-/// triples the process had ever seen rather than the ones it holds, and at the campaign's target a
-/// level's row form is gigabytes.
+/// Retention rather than correctness — a name registered again is another layer, whose levels'
+/// versions continue past the dropped one's, so a form left behind is never served — but it is
+/// retention that does not come back: neither cache had a removal path, so each was bounded by the
+/// `(view, layer, level)` triples the process had ever seen rather than the ones it holds, and at
+/// the campaign's target a level's row form is gigabytes.
 ///
 /// The layer beside it is the half that makes the assertion mean anything: `forget` has to be a
 /// scalpel, and a cache cleared wholesale would pass a test that only counted the drop.

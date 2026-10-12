@@ -96,7 +96,9 @@ pub use config::{
     default_compute_threads, EngineConfig, DEFAULT_MAX_MERGED_SEGMENT_BYTES, MIN_K_MIN,
     MIN_SELECTION_WIDTH,
 };
-pub use control::{AddressTable, AddressValue, GrownMembership, NamedItems, PublishedArtifacts};
+pub use control::{
+    AddressTable, AddressValue, GrownMembership, NamedItems, NamedTargets, PublishedArtifacts,
+};
 pub use edited::Stamp;
 pub use engine::Engine;
 pub use ingest::{IngestReceipt, IngestRequest};

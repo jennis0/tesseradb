@@ -695,7 +695,7 @@ fn a_suppression_racing_a_join_hides_the_artifact_and_keeps_the_join() {
         wait_for_queue(&engine, parked.base + 1);
         let suppress = s.spawn(|| {
             engine
-                .accept_change(entity, ChangeOp::Suppress)
+                .accept_changes(vec![(entity, ChangeOp::Suppress)])
                 .expect("a suppression is accepted")
         });
         wait_for_denies(&engine, denies_before + 1);
@@ -719,7 +719,7 @@ fn a_suppression_racing_a_join_hides_the_artifact_and_keeps_the_join() {
         "and a fold is not a retirement route for one"
     );
 
-    engine.accept_change(entity, ChangeOp::Unsuppress).unwrap();
+    engine.accept_changes(vec![(entity, ChangeOp::Unsuppress)]).unwrap();
     assert_eq!(
         count_of(&engine, "c0"),
         Some(301),
@@ -759,7 +759,7 @@ fn a_layers_suppression_covers_a_publication_that_landed_beside_it() {
         wait_for_queue(&engine, parked.base + 1);
         let suppress = s.spawn(|| {
             engine
-                .accept_change(layer_entity, ChangeOp::Suppress)
+                .accept_changes(vec![(layer_entity, ChangeOp::Suppress)])
                 .expect("a layer's suppression is accepted")
         });
         wait_for_denies(&engine, denies_before + 1);
@@ -786,7 +786,7 @@ fn a_layers_suppression_covers_a_publication_that_landed_beside_it() {
     );
 
     engine
-        .accept_change(layer_entity, ChangeOp::Unsuppress)
+        .accept_changes(vec![(layer_entity, ChangeOp::Unsuppress)])
         .unwrap();
     let keys: Vec<String> = artifacts_of(&engine, &full_coverage_credential())
         .into_iter()
@@ -1216,7 +1216,7 @@ fn built_fixture() -> Fixture {
 fn a_built_bundle_takes_the_mid_window_publication_without_reissuing_an_id() {
     let fx = built_fixture();
     let (engine, faults) = fx.open_with_faults();
-    let built: Vec<EntityId> = artifacts_of(&engine, &full_coverage_credential())
+    let built: Vec<mosaica_types::Target> = artifacts_of(&engine, &full_coverage_credential())
         .iter()
         .map(|a| artifact_entity(&engine, a.mosaica_id))
         .collect();
@@ -1275,11 +1275,9 @@ fn a_built_bundle_takes_the_mid_window_publication_without_reissuing_an_id() {
         "an entity the build spent was handed out a second time"
     );
     assert!(
-        built.iter().all(|e| online.raw() > e.raw()),
+        built.iter().all(|e| online.entity().raw() > e.entity().raw()),
         "the artifact region continued above where the build left it rather than restarting \
-         inside it: online {} built {:?}",
-        online.raw(),
-        built.iter().map(|e| e.raw()).collect::<Vec<_>>()
+         inside it: online {online:?} built {built:?}"
     );
 }
 

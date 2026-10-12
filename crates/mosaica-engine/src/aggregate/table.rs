@@ -362,10 +362,10 @@ impl Plan {
             }
     }
 
-    /// The layer's entity, on a layer grouping.
-    pub(super) fn layer_entity(&self) -> Option<u64> {
+    /// The layer's space, on a layer grouping.
+    pub(super) fn layer_space(&self) -> Option<u64> {
         match &self.outer {
-            Outer::Layer(layer) => Some(layer.entity()),
+            Outer::Layer(layer) => Some(layer.space()),
             _ => None,
         }
     }

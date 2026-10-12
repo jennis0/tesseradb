@@ -2437,8 +2437,8 @@ fn a_level_is_required_on_a_layer_with_several() {
     }
 }
 
-/// **A cursor opens only for its view**, and a layer dropped since is refused as unknown: its name
-/// cannot be registered again, and the cursor is bound to the layer's own entity besides.
+/// **A cursor opens only for its view**, and a layer dropped since is refused as unknown. A layer
+/// registered again under the name is another layer in another space, and refuses the cursor too.
 #[test]
 fn a_cursor_is_refused_under_another_view_or_over_a_dropped_layer() {
     use homes::{build_homes, open};
@@ -2475,10 +2475,16 @@ fn a_cursor_is_refused_under_another_view_or_over_a_dropped_layer() {
     engine.drop_layer("topics/major".into()).unwrap();
     req.cursor = Some(&token);
     assert!(matches!(
-        respond(engine, &session, req),
+        respond(engine, &session, req.clone()),
         Err(EngineError::RecordsRefused(
             mosaica_engine::RecordsRefused::UnknownLayer(_)
         ))
+    ));
+    plant(&fx, "topics/major", ServingLayout::ArtifactMajor);
+    let session = fx.session(true);
+    assert!(matches!(
+        respond(engine, &session, req),
+        Err(EngineError::CursorRefused)
     ));
 }
 
@@ -2648,7 +2654,7 @@ fn a_resumed_table_lists_only_the_artifacts_it_chose() {
         Some(ids["t2"].raw().to_string())
     );
     engine
-        .accept_change(artifact_entity(engine, ids["t0"]), ChangeOp::Delete)
+        .accept_changes(vec![(artifact_entity(engine, ids["t0"]), ChangeOp::Delete)])
         .unwrap();
     tick(engine);
     let token = trailer.next.unwrap();

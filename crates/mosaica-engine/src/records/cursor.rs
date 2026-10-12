@@ -46,11 +46,11 @@ pub(crate) struct Binding<'a> {
     pub(crate) request: Option<[u8; 32]>,
 }
 
-/// The layer an artifacts cursor is bound to: its name, its own entity, which a drop and a later
-/// registration never share, and the level the request named, if any.
+/// The layer an artifacts cursor is bound to: its name, its space, which a dropped layer and a
+/// later registration under its name never share, and the level the request named, if any.
 pub(crate) struct LayerBinding<'a> {
     pub(crate) name: &'a str,
-    pub(crate) entity: u64,
+    pub(crate) space: u32,
     pub(crate) level: Option<u32>,
 }
 
@@ -70,7 +70,7 @@ impl Binding<'_> {
                 aad.push(1);
                 aad.extend_from_slice(&(layer.name.len() as u64).to_le_bytes());
                 aad.extend_from_slice(layer.name.as_bytes());
-                aad.extend_from_slice(&layer.entity.to_le_bytes());
+                aad.extend_from_slice(&layer.space.to_le_bytes());
                 match layer.level {
                     None => aad.push(0),
                     Some(level) => {
@@ -308,16 +308,12 @@ mod tests {
     #[test]
     fn an_artifacts_cursor_opens_only_for_its_layer_and_level() {
         let key = CursorKey::of(KEY);
-        let artifacts = |name, entity, level| Binding {
+        let artifacts = |name, space, level| Binding {
             route: Route::Artifacts,
             view: "s0",
             incarnation: 0,
             auth_data_hash: [1; 32],
-            layer: Some(LayerBinding {
-                name,
-                entity,
-                level,
-            }),
+            layer: Some(LayerBinding { name, space, level }),
             request: None,
         };
         let cursor = ArtifactsCursor {
