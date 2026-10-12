@@ -233,6 +233,12 @@ jobs:
           print(' '.join(d['project']['dependencies'] + d['project']['optional-dependencies']['dev']))
           ")
       - run: reference/.venv/bin/ruff check --config reference/pyproject.toml reference conformance
+      # A walk that fails while its server still runs prints every thread's stack, and the runner
+      # image has no gdb. Without it the report falls back to each thread's state and wait channel,
+      # so a failed install is kept out of the gate.
+      - name: gdb, for the stacks of a server a failed walk leaves running
+        continue-on-error: true
+        run: sudo apt-get update -q && sudo apt-get install -yq gdb
       # Fixtures are built once and cached in /tmp by a stamped recipe; on a fresh runner every one
       # of them is built from scratch, which is most of this job's wall-clock.
       - run: reference/.venv/bin/pytest conformance/tests conformance/suite -v

@@ -42,6 +42,7 @@ decodes it back at the wire.
 
 from __future__ import annotations
 
+import itertools
 import json
 from dataclasses import dataclass
 from typing import Iterable, Sequence, Union
@@ -431,15 +432,22 @@ def canonicalise_aggregate(server, token: str, query: Aggregate) -> Json:
         body["reference"] = json.loads(query.reference)
     heads: dict[int, dict] = {}
     rows: dict[int, list[dict]] = {}
-    while True:
-        resp = requests.post(
-            f"{server.viewer_base}/v1/aggregate",
-            headers={"Authorization": f"Bearer {token}"},
-            json=body,
-            timeout=60,
-        )
-        resp.raise_for_status()
-        tables, trailer = table_rows(resp.content)
+    for page in itertools.count():
+        try:
+            resp = requests.post(
+                f"{server.viewer_base}/v1/aggregate",
+                headers={"Authorization": f"Bearer {token}"},
+                json=body,
+                timeout=60,
+            )
+            resp.raise_for_status()
+            tables, trailer = table_rows(resp.content)
+        except Exception as exc:
+            exc.add_note(
+                f"POST /v1/aggregate failed on page {page} of the read, "
+                f"cursor {body.get('cursor')!r}"
+            )
+            raise
         for head, table in tables:
             grouping = head["grouping"]
             heads.setdefault(grouping, {k: v for k, v in head.items() if k != "resumed"})
