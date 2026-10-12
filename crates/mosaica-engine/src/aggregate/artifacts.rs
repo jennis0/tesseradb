@@ -12,7 +12,7 @@
 
 use croaring::Bitmap;
 use mosaica_types::layer::{HierarchyKind, RegisteredLayer, ServingLayout};
-use mosaica_types::{EntityId, MosaicaId};
+use mosaica_types::{EntityId, LayerSpace, MosaicaId};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::set::Cx;
@@ -33,9 +33,8 @@ const CHUNK: u32 = 1024;
 /// One level of a layer as one request counts it.
 pub(super) struct Layer {
     name: String,
-    /// The layer's own entity when the read began: a layer registered since under the name is
-    /// another layer, and serves nothing to this read.
-    entity: EntityId,
+    /// The layer's space when the read began.
+    space: LayerSpace,
     level: u32,
     pick: Pick<MosaicaId>,
     cut: Option<Cut>,
@@ -79,7 +78,7 @@ impl Layer {
             })
         };
         let registered = engine
-            .readable_layer(session, generation.only_shard(), layer, view)
+            .readable_layer(session, generation, layer, view)
             .map_err(refused)?;
         check_level(&registered, level).map_err(refused)?;
         let levelled = matches!(
@@ -113,7 +112,7 @@ impl Layer {
         }
         Ok(Layer {
             name: layer.to_string(),
-            entity: registered.entity,
+            space: registered.space,
             level: level.unwrap_or(0),
             pick: pick.clone(),
             cut,
@@ -121,9 +120,9 @@ impl Layer {
         })
     }
 
-    /// The layer's own entity, which a cursor over this grouping is bound to.
-    pub(super) fn entity(&self) -> u64 {
-        self.entity.raw()
+    /// The layer's space, which a cursor over this grouping is bound to.
+    pub(super) fn space(&self) -> LayerSpace {
+        self.space
     }
 
     /// The table's groups under `cx`: the listed artifacts, `chosen` where the table has begun,
@@ -143,11 +142,14 @@ impl Layer {
         let engine = cx.engine;
         let served_view = &cx.open.served;
         let mask = &cx.open.mask;
-        let shard = served_view.shard;
         let registered = engine
-            .readable_layer(served_view.session, shard, &self.name, served_view.name)
+            .readable_layer_at(
+                served_view.session,
+                served_view.generation,
+                self.space,
+                served_view.name,
+            )
             .ok()
-            .filter(|layer| layer.entity == self.entity)
             .filter(|layer| (self.level as usize) < layer.runs.len());
         let reachable = engine.reachable_layers(served_view.session);
         let context = DependencyContext::new(served_view, mask, &reachable);
@@ -163,7 +165,7 @@ impl Layer {
                 let read =
                     engine.read_level(served_view, mask, layer, self.level, self.cut.is_some())?;
                 let readable = |ordinal: u32, entity: EntityId, rank: Option<u32>| {
-                    read.content(engine, shard, layer, ordinal, entity, rank)
+                    read.content(engine, layer, ordinal, entity, rank)
                         .is_some()
                 };
                 match &self.cut {
@@ -225,7 +227,7 @@ impl Layer {
         };
         let mosaica_id = |ordinal: u32| -> Option<u64> {
             let entity = EntityId::new(entity_at(ordinal)?);
-            engine.artifact_id(entity).map(|id| id.raw())
+            engine.artifact_id(self.space, entity).map(|id| id.raw())
         };
         let attached = registered
             .as_ref()
@@ -284,12 +286,12 @@ impl Layer {
         // A resumed table's artifacts are carried by entity: an ordinal that holds another entity
         // now, or none, stands for nothing.
         let ordinal_of = |entity: u64| -> u32 {
-            let Some((name, level, ordinal)) =
-                engine.write.live().locate_artifact(EntityId::new(entity))
+            let Some((level, ordinal)) =
+                engine.write.live().locate_artifact(self.space, EntityId::new(entity))
             else {
                 return u32::MAX;
             };
-            if name == self.name && level == self.level && entity_at(ordinal) == Some(entity) {
+            if level == self.level && entity_at(ordinal) == Some(entity) {
                 ordinal
             } else {
                 u32::MAX
@@ -315,19 +317,21 @@ impl Layer {
                 Pick::Named(ids) => {
                     let mut listed: Vec<u32> = Vec::with_capacity(ids.len());
                     for &id in ids {
-                        let Some(entity) = crate::edited::artifact_named(&engine.identity_key, id)
+                        let Some((space, entity)) = engine
+                            .identity_key
+                            .invert_artifact(id)
+                            .filter(|(space, _)| *space == self.space)
                         else {
                             continue;
                         };
-                        let Some((name, level, ordinal)) =
-                            engine.write.live().locate_artifact(entity)
+                        let Some((level, ordinal)) =
+                            engine.write.live().locate_artifact(space, entity)
                         else {
                             continue;
                         };
                         // The registry can be ahead of the page's generation: the ordinal must
                         // hold this entity in the runs the page reads.
-                        if name == self.name
-                            && level == self.level
+                        if level == self.level
                             && entity_at(ordinal) == Some(entity.raw())
                             && ordinals.binary_search(&ordinal).is_ok()
                             && !listed.contains(&ordinal)
@@ -401,7 +405,7 @@ impl Layer {
                         let rank = *ranks.get(&o)?;
                         let entity = EntityId::new(entity_at(o)?);
                         let own = read
-                            .content(engine, shard, layer, o, entity, rank)
+                            .content(engine, layer, o, entity, rank)
                             .and_then(|content| content.name());
                         namer.name(own, self.level, o)
                     })
@@ -444,7 +448,7 @@ impl Layer {
         let keys = chosen
             .iter()
             .map(|&entity| {
-                let id = engine.artifact_id(EntityId::new(entity));
+                let id = engine.artifact_id(self.space, EntityId::new(entity));
                 Key::Id(id.map_or(0, |id| id.raw()))
             })
             .collect();
@@ -488,14 +492,14 @@ impl Targets {
     ) -> Result<Targets> {
         let (engine, served, mask) = (cx.engine, &cx.open.served, &cx.open.mask);
         let mut targets = Targets::default();
-        let mut layers: FxHashMap<String, Option<RegisteredLayer>> = FxHashMap::default();
+        let mut layers: FxHashMap<LayerSpace, Option<RegisteredLayer>> = FxHashMap::default();
         for &ordinal in ordinals {
             let Some(attachment) = read.rows.attachment(ordinal) else {
                 continue;
             };
             let Some(layer) = layers
-                .entry(attachment.layer.clone())
-                .or_insert_with(|| engine.write.live().registered_layer(&attachment.layer))
+                .entry(attachment.space)
+                .or_insert_with(|| engine.write.live().layer_holding(attachment.space))
             else {
                 continue;
             };
@@ -520,7 +524,6 @@ impl Targets {
             };
             let content = level.content(
                 engine,
-                cx.open.served.shard,
                 layer,
                 attachment.ordinal,
                 attachment.entity,

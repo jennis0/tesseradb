@@ -87,16 +87,8 @@ mod ingest_rows {
                 strict: true,
                 mosaica_id_column: false,
             })?;
-            let entities = self
-                .resolve_mosaica_ids(
-                    &receipt
-                        .mosaica_ids
-                        .iter()
-                        .flatten()
-                        .copied()
-                        .collect::<Vec<_>>(),
-                )
-                .unwrap()
+            let ids: Vec<_> = receipt.mosaica_ids.iter().flatten().copied().collect();
+            let entities = super::items_of(self, &ids)
                 .into_iter()
                 .map(|entity| entity.expect("an accepted row names an item"))
                 .collect();
@@ -132,6 +124,19 @@ pub const PARTITION: &str = "default";
 pub const SHARD: mosaica_store::ShardLayout<'static> =
     mosaica_store::ShardLayout::new(PARTITION, ShardId::ZERO);
 
+/// The item each of `ids` names: `None` for one that names nothing, an artifact or a layer.
+pub fn items_of(engine: &Engine, ids: &[MosaicaId]) -> Vec<Option<EntityId>> {
+    engine
+        .resolve_targets(ids)
+        .unwrap()
+        .into_iter()
+        .map(|target| match target {
+            Some(mosaica_types::Target::Item(_, entity)) => Some(entity),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The built bundle's partition directory in `root`'s `prefix`: where its side-manifests are.
 pub fn partition_dir(root: &Path, prefix: &str) -> PathBuf {
     mosaica_store::layout::partition_dir(&root.join(prefix), PARTITION)
@@ -145,6 +150,12 @@ pub fn shard_dir(root: &Path) -> PathBuf {
 /// The side-manifest `root` serves, as an open reads it.
 pub fn side_manifest(root: &Path) -> SegmentsManifest {
     open_bundle(root).expect("the bundle opens").partitions[PARTITION].side_manifest()
+}
+
+/// The name of the layer `manifest` registers in `space`.
+pub fn layer_in(manifest: &SegmentsManifest, space: mosaica_types::LayerSpace) -> &str {
+    let layer = manifest.partition.layers.iter().find(|l| l.space == space);
+    &layer.expect("a registered layer holds the space").declaration.name
 }
 
 /// The file of [`side_manifest`].
@@ -425,6 +436,26 @@ pub struct Fixture {
     pub root: PathBuf,
     pub cache: PathBuf,
     pub wal: PathBuf,
+}
+
+impl Fixture {
+    pub fn open(&self) -> Engine {
+        open_engine_publishing(&self.root, &self.cache, &self.wal)
+    }
+
+    /// [`Fixture::open`] with the background refresh off, so a session stays on the generation it
+    /// was handed until it asks again.
+    pub fn open_unrefreshed(&self) -> Engine {
+        let engine = self.open();
+        engine.set_background_refresh_for_test(false);
+        engine
+    }
+
+    /// The entities the build gave the generator's `sources`.
+    pub fn members(&self, sources: impl IntoIterator<Item = u64>) -> Vec<EntityId> {
+        let map = source_to_new_map(&self.root, "v00000");
+        sources.into_iter().map(|s| EntityId::new(map[&s])).collect()
+    }
 }
 
 /// The `N_ITEMS` fixture, built into a temporary directory of its own.
@@ -853,9 +884,14 @@ pub fn shape_of(
         .shape
 }
 
-/// The entity an artifact's served identifier names.
-pub fn artifact_entity(engine: &Engine, id: MosaicaId) -> EntityId {
-    engine.resolve_mosaica_ids(&[id]).unwrap()[0].expect("it names what was issued")
+/// The change target of the item `entity` of the one shard.
+pub fn item(entity: EntityId) -> mosaica_types::Target {
+    mosaica_types::Target::Item(mosaica_types::ShardId::ZERO, entity)
+}
+
+/// What an artifact's or a layer's served identifier names.
+pub fn artifact_target(engine: &Engine, id: MosaicaId) -> mosaica_types::Target {
+    engine.resolve_targets(&[id]).unwrap()[0].expect("it names what was issued")
 }
 
 /// A one-row ingest at the fixture's centre, carrying `ALL_TERM`, under the caller's batch id.
@@ -944,10 +980,7 @@ pub fn unique_holders(
         .name_items(&table)?
         .verdicts
         .into_iter()
-        .map(|verdict| match verdict {
-            mosaica_lifecycle::resolve::Verdict::Names(entity) => Some(entity),
-            _ => None,
-        })
+        .map(Result::ok)
         .collect())
 }
 
@@ -985,31 +1018,56 @@ pub fn restore_wal(dir: &Path, snapshot: &[(std::ffi::OsString, Vec<u8>)]) {
     }
 }
 
-/// A flat layer that derives a hull, so its levels hold their rows: the declaration a test building
-/// forms directly through `ArtifactProjections::get_or_build` builds them for.
-pub fn held_rows_declaration(name: &str) -> mosaica_types::layer::LayerDeclaration {
+/// A flat, enumerated layer over `s0` that an artifact is served in when two of its members are
+/// visible, computing no content.
+pub fn flat_declaration(name: &str) -> mosaica_types::layer::LayerDeclaration {
     use mosaica_types::layer::*;
     LayerDeclaration {
         scope: Default::default(),
         name: name.into(),
-        title: None,
+        title: Some(format!("{name} (title)")),
         views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
         artifact_visibility: ArtifactVisibility::inherited(),
-        require_member_visibility: None,
+        require_member_visibility: Some(ExistenceCriterion::Count(2)),
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
             prune_children: false,
         },
-        content: ContentDeclaration {
-            computed: vec!["hull".into()],
-            supplied: Vec::new(),
-        },
+        content: Default::default(),
         depends_on: Vec::new(),
         levels: Vec::new(),
         layout: None,
         shape: None,
     }
+}
+
+/// A flat layer that derives a hull, so its levels hold their rows: the declaration a test building
+/// forms directly through `ArtifactProjections::get_or_build` builds them for.
+pub fn held_rows_declaration(name: &str) -> mosaica_types::layer::LayerDeclaration {
+    use mosaica_types::layer::*;
+    LayerDeclaration {
+        title: None,
+        require_member_visibility: None,
+        content: ContentDeclaration {
+            computed: vec!["hull".into()],
+            supplied: Vec::new(),
+        },
+        ..flat_declaration(name)
+    }
+}
+
+/// Wait for the side-manifest to list at least `want` artifact content extents.
+pub fn wait_for_content_extents(root: &Path, want: usize) {
+    let published = || {
+        let manifest = side_manifest(root);
+        manifest.layer_spaces.iter().map(|r| r.content_extents.len()).sum::<usize>()
+    };
+    wait_until(
+        &format!("{want} content extents published"),
+        std::time::Duration::from_secs(10),
+        || published() >= want,
+    );
 }

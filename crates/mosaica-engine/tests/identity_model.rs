@@ -1174,7 +1174,7 @@ impl Run {
             .map(|(_, tid)| *tid)
             .collect();
         let ids: Vec<MosaicaId> = moved.iter().map(|t| MosaicaId::new(*t)).collect();
-        let entities = self.engine().resolve_mosaica_ids(&ids).unwrap();
+        let entities = items_of(self.engine(), &ids);
         let highest = self.highest;
         for (tid, entity) in moved.iter().zip(entities) {
             let entity = entity.expect("an accepted row's item is named by its mosaica_id");
@@ -1294,12 +1294,9 @@ impl Run {
         for (target, op) in targets {
             let tid = live[*target as usize % live.len()];
             let op = [ChangeOp::Delete, ChangeOp::Suppress, ChangeOp::Unsuppress][*op as usize];
-            let entity = self
-                .engine()
-                .resolve_mosaica_ids(&[MosaicaId::new(tid)])
-                .unwrap()[0]
+            let entity = items_of(self.engine(), &[MosaicaId::new(tid)])[0]
                 .expect("a live item's mosaica_id names it");
-            changes.push((entity, op));
+            changes.push((item(entity), op));
             match op {
                 ChangeOp::Delete => {
                     if self.model.items.remove(&tid).is_some() {
@@ -1549,7 +1546,7 @@ impl Run {
         let model = &self.model;
         let tids: Vec<u64> = model.items.keys().copied().collect();
         let ids: Vec<MosaicaId> = tids.iter().map(|t| MosaicaId::new(*t)).collect();
-        let entities = self.engine().resolve_mosaica_ids(&ids).unwrap();
+        let entities = items_of(self.engine(), &ids);
         let mut held: BTreeMap<u64, u64> = BTreeMap::new();
         for (tid, entity) in tids.iter().zip(entities) {
             let entity = entity
@@ -1562,7 +1559,7 @@ impl Run {
         let deleted: Vec<MosaicaId> = model.deleted.iter().map(|t| MosaicaId::new(*t)).collect();
         for (tid, entity) in deleted
             .iter()
-            .zip(self.engine().resolve_mosaica_ids(&deleted).unwrap())
+            .zip(items_of(self.engine(), &deleted))
         {
             assert!(
                 entity.is_none(),
@@ -2192,7 +2189,7 @@ fn an_item_older_than_a_views_newest_rows_joins_it_in_place() {
     let older = send(&engine, "older", VIEWS[0], vec![row((10.0, 10.0))]).mosaica_ids[0].expect("an accepted row has a mosaica_id");
     send(&engine, "after", VIEWS[1], vec![row((25.0, 25.0))]);
     publish_buffered(&engine);
-    let entity = |engine: &Engine| engine.resolve_mosaica_ids(&[older]).unwrap()[0];
+    let entity = |engine: &Engine| items_of(engine, &[older])[0];
     let first = entity(&engine);
     // Where the item is served, and at what position in each view.
     let placed = |engine: &Engine| -> BTreeMap<String, (u32, u32)> {

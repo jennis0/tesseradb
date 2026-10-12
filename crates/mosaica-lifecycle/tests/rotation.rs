@@ -27,13 +27,13 @@ fn sidecar(base: &Path, n: u64) -> PathBuf {
 
 fn change(tag: u8) -> WalRecord {
     WalRecord::ChangeBatch {
-            changes: vec![(EntityId::new(tag as u64), ChangeOp::Suppress)],
+            changes: vec![(item(EntityId::new(tag as u64)), ChangeOp::Suppress)],
         }
 }
 
 fn suppression_of(entity: u64) -> OverlaySnapshotEntry {
     OverlaySnapshotEntry {
-        entity_id: EntityId::new(entity),
+        target: item(EntityId::new(entity)),
         op: ChangeOp::Suppress,
     }
 }
@@ -159,7 +159,7 @@ fn a_suppression_survives_the_reclamation_of_the_record_that_carried_it() {
     {
         let mut wal = Wal::open(&base).unwrap();
         wal.append(&WalRecord::ChangeBatch {
-            changes: vec![(entity, ChangeOp::Suppress)],
+            changes: vec![(item(entity), ChangeOp::Suppress)],
         })
         .unwrap();
         wal.fsync().unwrap();
@@ -168,17 +168,21 @@ fn a_suppression_survives_the_reclamation_of_the_record_that_carried_it() {
         overlay.apply(entity, ChangeOp::Suppress);
         // Rotate with everything below the current position reclaimable: the member holding the
         // change record goes, and only the snapshot carries the suppression forward.
-        let deleted = wal.rotate(&overlay.snapshot(), wal.position()).unwrap();
+        let deleted = wal.rotate(&overlay.snapshot(item), wal.position()).unwrap();
         assert_eq!(deleted, vec![1], "the record's own member must actually go");
     }
 
     let wal = Wal::open(&base).unwrap();
-    let mut replay = Replay::new(&dict, Overlay::new(), &mosaica_lifecycle::owner_id_only);
+    let mut replay = Replay::new(
+        &dict,
+        mosaica_lifecycle::Overlays::default(),
+        &mosaica_lifecycle::owner_id_only,
+    );
     for record in wal.records() {
         let (position, record) = record.unwrap();
         replay.apply(&record, position, |_, _| false);
     }
-    let (overlay, _buffer, _resolver) = replay.finish();
+    let overlay = replay.finish().0.items;
     assert!(
         overlay.is_suppressed(entity),
         "a live item's suppression retires only on unsuppress; reclaiming its record does not"
@@ -361,4 +365,8 @@ fn the_first_member_starts_its_records_at_the_header() {
         wal.position(),
         "a member's file offset and the sequence position differ by exactly its header"
     );
+}
+
+fn item(entity: EntityId) -> mosaica_types::Target {
+    mosaica_types::Target::Item(mosaica_types::ShardId::ZERO, entity)
 }

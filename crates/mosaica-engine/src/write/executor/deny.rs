@@ -23,7 +23,7 @@ pub const DENY_DURABILITY_ATTEMPTS: usize = DENY_DURABILITY_BACKOFF.len() + 1;
 /// One request in an open deny window, with everything needed to apply it and answer its caller.
 pub(super) struct DenyEntry {
     /// In request order; one record carries them all.
-    pub(super) changes: Vec<(EntityId, ChangeOp)>,
+    pub(super) changes: Vec<(Target, ChangeOp)>,
     /// `None` for the deletions a window's deletions cascade to, which have no caller to answer
     /// but are otherwise an ordinary entry.
     pub(super) reply: Option<Reply<()>>,
@@ -87,25 +87,20 @@ impl Executor {
     /// Add one entry deleting every artifact that depends on one this window deletes. Only
     /// `Delete` cascades: a suppressed dependent is withheld by the serving predicate instead.
     pub(super) fn cascade_dependents(&mut self, entries: &mut Vec<DenyEntry>) {
-        let deleted: Vec<EntityId> = entries
+        let deleted: Vec<Target> = entries
             .iter()
             .flat_map(|e| e.changes.iter())
             .filter(|(_, op)| matches!(op, ChangeOp::Delete))
-            .map(|(entity, _)| *entity)
+            .map(|(target, _)| *target)
             .collect();
-        if deleted.is_empty() {
-            return;
-        }
-        let cascade = self
-            .live
-            .with_artifacts(|store| store.cascade_from(&deleted));
+        let cascade = self.live.dependents_of(&deleted);
         if cascade.is_empty() {
             return;
         }
         entries.push(DenyEntry {
             changes: cascade
                 .into_iter()
-                .map(|entity| (entity, ChangeOp::Delete))
+                .map(|target| (target, ChangeOp::Delete))
                 .collect(),
             reply: None,
         });
@@ -132,7 +127,7 @@ impl Executor {
         self.observe_wal();
 
         if let Some((index, error)) = failed_at {
-            let applied: Vec<(EntityId, ChangeOp)> = entries
+            let applied: Vec<(Target, ChangeOp)> = entries
                 .iter()
                 .flat_map(|e| e.changes.iter().copied())
                 .filter(|(_, op)| matches!(op, ChangeOp::Delete | ChangeOp::Suppress))
@@ -153,7 +148,7 @@ impl Executor {
         // Durable, not yet in force. See `pause_point`.
         self.pause_point(PauseSiteArg::AfterFsync);
 
-        let applied: Vec<(EntityId, ChangeOp)> = entries
+        let applied: Vec<(Target, ChangeOp)> = entries
             .iter()
             .flat_map(|e| e.changes.iter().copied())
             .collect();
@@ -199,18 +194,34 @@ impl Executor {
         Err(last)
     }
 
-    /// Clone the overlay once, apply every change in the window in order, publish once. Pins are
-    /// never invalidated by this: a pin fixes `(prefix, segments_version)`, and this bumps
-    /// `overlay_version` instead, so a suppression applies to a pinned request the moment accepted.
-    pub(super) fn apply_changes(&self, changes: Vec<(EntityId, ChangeOp)>) {
+    /// Clone each overlay the window touches once, apply every change in the window in order to
+    /// the overlay its target names, publish once. Pins are never invalidated by this: a pin fixes
+    /// `(prefix, segments_version)`, and this bumps the overlay versions instead, so a suppression
+    /// applies to a pinned request the moment accepted.
+    pub(super) fn apply_changes(&self, changes: Vec<(Target, ChangeOp)>) {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
         let shard = generation.only_shard();
-        let mut overlay: Overlay = (*shard.overlay).clone();
+        let mut overlay: Option<Overlay> = None;
+        let mut spaces = (*generation.layer_spaces).clone();
+        let mut touched: std::collections::BTreeSet<LayerSpace> = Default::default();
         let mut newly_denied: Vec<EntityId> = Vec::new();
         let mut deleted: Vec<EntityId> = Vec::new();
         let mut unsuppressed = false;
-        for (entity, op) in changes {
+        for (target, op) in changes {
+            let entity = match target {
+                Target::Item(_, entity) => entity,
+                // A change resolved before its layer was dropped names a space nothing holds.
+                Target::Artifact(space, _) if !self.live.holds_space(space) => continue,
+                Target::Artifact(space, entity) => {
+                    let parts = spaces.entry(space).or_default();
+                    if touched.insert(space) {
+                        parts.overlay_version += 1;
+                    }
+                    Arc::make_mut(&mut parts.overlay).apply(entity, op);
+                    continue;
+                }
+            };
             match op {
                 ChangeOp::Delete => {
                     newly_denied.push(entity);
@@ -219,8 +230,20 @@ impl Executor {
                 ChangeOp::Suppress => newly_denied.push(entity),
                 ChangeOp::Unsuppress => unsuppressed = true,
             }
-            overlay.apply(entity, op);
+            overlay
+                .get_or_insert_with(|| (*shard.overlay).clone())
+                .apply(entity, op);
         }
+        let layer_spaces = Arc::new(spaces);
+        let deny_epoch = generation.deny_epoch + 1;
+        let Some(overlay) = overlay else {
+            let next = generation.with(|g| {
+                g.deny_epoch = deny_epoch;
+                g.layer_spaces = layer_spaces;
+            });
+            self.publish(next, started);
+            return;
+        };
 
         // Gauges `deleted ∪ suppressed`. Edge-triggered, or this WARN would fire on every
         // subsequent deny once the limit is crossed.
@@ -267,7 +290,8 @@ impl Executor {
         let next = if unsuppressed {
             generation.with_buffer(shard.id(), buffer, &[], |g, s| {
                 s.overlay_version = overlay_version;
-                g.deny_epoch = generation.deny_epoch + 1;
+                g.deny_epoch = deny_epoch;
+                g.layer_spaces = layer_spaces;
                 s.overlay = Arc::new(overlay);
                 s.unique_live = unique_live;
             })
@@ -275,7 +299,8 @@ impl Executor {
             let overlay = Arc::new(overlay);
             generation.with_denies(shard.id(), overlay, &newly_denied, buffer, &[], |g, s| {
                 s.overlay_version = overlay_version;
-                g.deny_epoch = generation.deny_epoch + 1;
+                g.deny_epoch = deny_epoch;
+                g.layer_spaces = layer_spaces;
                 s.unique_live = unique_live;
             })
         };

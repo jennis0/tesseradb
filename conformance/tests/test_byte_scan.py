@@ -161,6 +161,9 @@ its job changes completely, because its old job no longer exists.
   low-single-digits territory the pre-r6 design already accepted for the same scan (this risk is
   orthogonal to the handle-vs-`mosaica_id` question — it was already here, unchanged by this
   revision).
+- *Artifact entities* are floored as item ids are. An artifact's entity is in its layer's own space,
+  from 65,536 up, so the twenty this sweep publishes are all below the floor: they are swept for
+  in the identifier columns and the cursors, and not in numbers, shapes or text.
 
 **The identity-key sweep (brief step 1, new in this revision).** The deployment's 128-bit
 identity key (`identity.key` in MANIFEST; `IdentityKey(k0, k1)` in the oracle) inverts every
@@ -219,10 +222,22 @@ its own 8-byte stride against the unfiltered target set, and its `mosaica:x` and
 columns at their own stride against the floor-filtered set, since a position at the extent origin
 is `0.0`, whose bits are entity id 0. The declared fields' columns are corpus values the fixture
 planted and are not swept, as the points batch's `fx_key` is not. `mosaica:labels` and the head,
-page-end and trailer JSON get the decimal sweep. A cursor is opaque and encrypted under a fresh nonce, so its decoded bytes are uniform:
-every 8-byte window at every offset is swept against the unfiltered set and the identity key's
-halves, at the same `~1e-9` coincidence rate the `mosaica_id` column's sweep argues. A 4-byte
-sweep of the cursor is not run, for the chance-collision reason the `mosaica_id` column gets none.
+page-end and trailer JSON get the decimal sweep, all but the trailer's `stream_us`. A cursor is
+opaque and encrypted under a fresh nonce, so its decoded bytes are uniform: every 8-byte window at
+every offset is swept against the unfiltered set and the identity key's halves, at the same
+`~1e-9` coincidence rate the `mosaica_id` column's sweep argues. A 4-byte sweep of the cursor is
+not run, for the chance-collision reason the `mosaica_id` column gets none.
+
+*Why `stream_us` is trimmed, measured.* It is the response's elapsed time in microseconds, and a
+two-page response of 9,998 rows takes tens of milliseconds idle and over a hundred under load:
+across 240 items trailers its median was 44,270 and its maximum 228,094. The floored target
+set is every integer from 100,000 to 149,999, so any response taking between 0.10 s and 0.15 s
+is flagged. On a four-core machine with six busy processes beside it the sweep failed ten runs in
+ten, each time on a `stream_us` and on nothing else. It is trimmed as the drill-down's positions
+are, by key, and the trailer's other keys are swept; `split_items_frames` refuses a trailer whose
+keys are not exactly the five it knows, so no other field can arrive in the trailer unswept. The
+residual: an entity id written into the elapsed time is not caught. The artifacts read's trailer
+is the same frame and is trimmed the same way.
 
 **`POST /v1/artifacts` is swept whole too.** A layer is published over the catalogue after the
 items sweep, each artifact holding admitted and denied items alike, with a parent edge and a
@@ -589,10 +604,24 @@ def _artifacts_scan(payload: bytes) -> ArtifactsScan:
     return scan
 
 
+def artifact_entity(key, mosaica_id: int) -> int:
+    """The entity in its layer's space of an artifact's identifier, which must carry kind 1."""
+    inverted = identity_mod.invert_artifact(key, mosaica_id)
+    assert inverted is not None, f"{mosaica_id} was served as an artifact and names an item"
+    return inverted[1]
+
+
 def _cursor_windows(cursor: str) -> set[int]:
     """Every 8-byte little-endian window of a cursor's decoded bytes, at every offset: the cursor
     is opaque, so no alignment can be assumed."""
     return _le_windows(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)), 8)
+
+
+def _json_frames_without_elapsed(body: wire.ItemsBody) -> bytes:
+    """An items-shaped body's JSON frames for the decimal sweep: the head and every page end as
+    served, and the trailer without `stream_us` (module doc, `POST /v1/items`)."""
+    trailer = {k: v for k, v in body.trailer.items() if k != "stream_us"}
+    return b"\n".join([*body.json_payloads[:-1], json.dumps(trailer).encode()]) + b"\n"
 
 
 def _items_cursors(body: wire.ItemsBody) -> list[str]:
@@ -840,6 +869,28 @@ def test_every_scan_mechanism_catches_a_planted_entity_id():
     page_end = json.dumps({"next": None, "ended_by": "rows", "rows": planted}).encode()
     assert _decimal_windows(page_end, SAFE_ID_FLOOR) & targets, (
         "the JSON-frame sweep did not catch an entity id in a page end"
+    )
+    # The elapsed time is trimmed from the trailer, and only it: an id in `rows` is still caught.
+    def items_body(trailer: dict) -> wire.ItemsBody:
+        head = {"order": "map", "page_rows": 7}
+        end = json.dumps({"next": None, "ended_by": "end"}).encode()
+        payloads = [json.dumps(head).encode(), end, json.dumps(trailer).encode()]
+        return wire.ItemsBody(head, [], trailer, payloads)
+
+    trailer = {"pages": 1, "rows": planted, "next": None, "ended_by": "end", "stream_us": 7}
+    swept = _json_frames_without_elapsed(items_body(trailer))
+    assert _decimal_windows(swept, SAFE_ID_FLOOR) & targets, (
+        "the trailer's decimal sweep did not catch an entity id in `rows`; the elapsed-time trim "
+        "has blanked more than `stream_us`"
+    )
+    trailer = {"pages": 1, "rows": 7, "next": None, "ended_by": "end", "stream_us": planted}
+    swept = _json_frames_without_elapsed(items_body(trailer))
+    assert not (_decimal_windows(swept, SAFE_ID_FLOOR) & targets), (
+        "the elapsed-time trim did not remove `stream_us`, so a slow response reads as an id"
+    )
+    assert _decimal_windows(items_body(trailer).json_payloads[-1], SAFE_ID_FLOOR) & targets, (
+        "the untrimmed trailer does not carry `stream_us`, so the assertion above passes for the "
+        "wrong reason"
     )
     cursor = base64.urlsafe_b64encode(
         bytes(range(1, 20)) + planted.to_bytes(8, "little") + bytes(range(40, 60))
@@ -1099,7 +1150,7 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
             assert identity_key_raw not in raw, "identity key's raw 16 bytes found in an items body"
             responses += 1
             decoded = wire.split_items_frames(raw)
-            items_json += b"\n".join(decoded.json_payloads) + b"\n"
+            items_json += _json_frames_without_elapsed(decoded)
             for cursor in _items_cursors(decoded):
                 items_cursor_windows |= _cursor_windows(cursor)
             for records, _end in decoded.pages:
@@ -1232,7 +1283,7 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
         assert identity_key_raw not in raw, "identity key's raw 16 bytes found in an artifacts body"
         responses += 1
         decoded = wire.split_items_frames(raw)
-        artifact_text += b"\n".join(decoded.json_payloads) + b"\n"
+        artifact_text += _json_frames_without_elapsed(decoded)
         for cursor in _items_cursors(decoded):
             artifact_cursor_windows |= _cursor_windows(cursor)
         for records, _end in decoded.pages:
@@ -1250,21 +1301,19 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
     assert artifact_ids, "the artifacts read must return rows to mean anything"
     assert artifact_ids <= artifact_id_values, "the sweep missed the identifiers it was sent"
     assert artifact_shape_windows, "the artifacts read must carry shapes to sweep"
-    # The artifacts' own entities are internal too: every one this read served, by inverting the
-    # identifiers it was sent.
-    artifact_entities = {identity_mod.invert(identity_key, t)[1] for t in artifact_ids}
+    # The artifacts' own entities, inverted from the identifiers served. They are below
+    # `SAFE_ID_FLOOR`, so they are swept for in the identifier columns and the cursors only.
+    artifact_entities = {artifact_entity(identity_key, t) for t in artifact_ids}
     assert artifact_entities.isdisjoint(artifact_ids)
     leaked = artifact_id_values & (target_ids | artifact_entities)
     assert not leaked, f"entity id(s) in an artifacts identifier column: {sorted(leaked)[:20]}"
-    leaked = (artifact_number_values | artifact_shape_windows) & (
-        target_ids_high | artifact_entities
-    )
+    leaked = (artifact_number_values | artifact_shape_windows) & target_ids_high
     assert not leaked, f"entity id(s) in an artifacts number or shape: {sorted(leaked)[:20]}"
     leaked = artifact_cursor_windows & (target_ids | artifact_entities)
     assert not leaked, f"entity id(s) in the bytes of an artifacts cursor: {sorted(leaked)[:20]}"
     for half in (identity_key.k0, identity_key.k1):
         assert half not in artifact_id_values | artifact_number_values | artifact_cursor_windows
-    leaked = _decimal_windows(artifact_text, SAFE_ID_FLOOR) & (target_ids_high | artifact_entities)
+    leaked = _decimal_windows(artifact_text, SAFE_ID_FLOOR) & target_ids_high
     assert not leaked, f"entity id(s) as decimal text in an artifacts body: {sorted(leaked)[:20]}"
     assert identity_key_hex not in artifact_text.decode("utf-8", errors="replace")
 
@@ -1303,12 +1352,12 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
                     tile_number_values.add(int(value))
                 tile_text += "\n".join([row.key or "", *row.content]).encode() + b"\n"
     assert tile_ids, "the artifacts viewport must serve rows to mean anything"
-    tile_entities = {identity_mod.invert(identity_key, t)[1] for t in tile_ids}
+    tile_entities = {artifact_entity(identity_key, t) for t in tile_ids}
     leaked = tile_id_values & (target_ids | tile_entities)
     assert not leaked, f"entity id(s) in an artifacts viewport identifier: {sorted(leaked)[:20]}"
-    leaked = tile_number_values & (target_ids_high | tile_entities)
+    leaked = tile_number_values & target_ids_high
     assert not leaked, f"entity id(s) in an artifacts viewport number: {sorted(leaked)[:20]}"
-    leaked = _decimal_windows(tile_text, SAFE_ID_FLOOR) & (target_ids_high | tile_entities)
+    leaked = _decimal_windows(tile_text, SAFE_ID_FLOOR) & target_ids_high
     assert not leaked, f"entity id(s) as decimal text in an artifacts viewport: {sorted(leaked)[:20]}"
     for half in (identity_key.k0, identity_key.k1):
         assert half not in tile_id_values | tile_number_values

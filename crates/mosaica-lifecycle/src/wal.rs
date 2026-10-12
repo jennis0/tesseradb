@@ -94,7 +94,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use mosaica_types::layer::{EntityRun, LayerDeclaration, ReservedRuns};
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, LayerSpace, Target};
 
 /// One declared-scalar value carried by a WAL row: the value type a build writes, under the name the
 /// log's records use.
@@ -190,20 +190,18 @@ pub enum ChangeOp {
     Unsuppress,
 }
 
-/// One entity's disposition inside a [`WalRecord::OverlaySnapshot`].
+/// One target's disposition inside a [`WalRecord::OverlaySnapshot`].
 ///
-/// Two shape decisions here are not free choices, and both are load-bearing for rotation.
-///
-/// **Keyed by [`EntityId`], never by an identifier a caller holds.** A snapshot keyed by one would
+/// **Keyed by target, never by an identifier a caller holds.** A snapshot keyed by one would
 /// re-resolve it at replay, and an entity deleted before it was ever flushed may resolve to
 /// nothing — so the node would refuse to open. A snapshot is state that was already resolved once;
 /// resolving it again can only lose. It is the same reason [`WalRecord::ChangeBatch`] is keyed by
-/// entity, arrived at from the other end.
+/// target, arrived at from the other end.
 ///
 /// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OverlaySnapshotEntry {
-    pub entity_id: EntityId,
+    pub target: Target,
     pub op: ChangeOp,
 }
 
@@ -275,22 +273,15 @@ pub enum WalRecord {
     /// `ChangeBatch` earlier in the same file still applies before it. See [`crate::Replay`].
     OverlaySnapshot { entries: Vec<OverlaySnapshotEntry> },
     /// An accepted `/control/changes` request: every change it carries, in request order,
-    /// addressed by entity id. One record per request, so the request is durable whole or not at
+    /// addressed by [`Target`]. One record per request, so the request is durable whole or not at
     /// all.
     ///
-    /// Keyed by entity rather than by the identifier the caller supplied: the handler resolves a
+    /// Keyed by target rather than by the identifier the caller supplied: the handler resolves a
     /// `mosaica_id` or a unique value once, at admission, and replay applies what was decided
     /// without resolving anything.
-    ChangeBatch { changes: Vec<(EntityId, ChangeOp)> },
-    /// An accepted annotation-layer registration.
-    ///
-    /// **This record is what makes the row-less mark durable**, and that is not incidental to it.
-    /// `alloc::high_water_from` derives the restart seed from `IngestBatch` rows and
-    /// `OverlaySnapshot` entries and from nothing else, so a layer allocation that raised no mark
-    /// would survive a rotation and restart only until the next allocation reissued its ids — two
-    /// entities, one `mosaica_id`. [`crate::alloc::low_water_from`] reads this record and this
-    /// record alone, which is why the ids are carried here explicitly rather than being recomputed
-    /// from the declaration: a replay must apply what was decided, not re-derive it.
+    ChangeBatch { changes: Vec<(Target, ChangeOp)> },
+    /// An accepted annotation-layer registration. The space and the runs are carried rather than
+    /// recomputed from the declaration: a replay applies what was decided.
     ///
     /// **The whole declaration travels with it.** A layer's gate, criterion and structure are what
     /// decide whether it is reachable and what may be served from it, so a registration that
@@ -303,9 +294,8 @@ pub enum WalRecord {
         /// commit window. Postcard is transparent through the box, so the record's bytes are
         /// unchanged.
         declaration: Box<LayerDeclaration>,
-        /// The layer's own entity, so layer suppression rides `/control/changes` and the deny lane
-        /// unchanged rather than needing a second mechanism.
-        layer_entity: EntityId,
+        /// The layer's space. Replay applies it and resumes the registry's counter past it.
+        space: LayerSpace,
         /// The reserved runs backing each level, in level order. A layer declaring no levels has
         /// exactly one entry — its level 0.
         runs: Vec<ReservedRuns>,
@@ -333,9 +323,7 @@ pub enum WalRecord {
     },
     /// An accepted view drop. **The key is freed and the incarnation dies** (decision 0115): a
     /// key is a name the caller chose, so it may be created again, and what must not come back is
-    /// the predecessor's artifacts. `LayerDrop` still tombstones, and the difference is deliberate
-    /// — a layer name travels in bookmarks, edges and suppressions, where a view key addresses a
-    /// row space and nothing else.
+    /// the predecessor's artifacts.
     ///
     /// **The incarnation travels with it**, which is what makes the record self-sufficient under
     /// rotation: a death that did not say which incarnation died could not be told apart from a
@@ -349,13 +337,11 @@ pub enum WalRecord {
         /// The entities the drop left with a row in no view, flushed or buffered.
         deleted: Vec<EntityId>,
     },
-    /// An accepted layer drop. **The name is tombstoned, not freed**: it is refused on recreation
-    /// for ever, because bookmarks, edges and suppressions all travel by it and a name that once
-    /// meant something must not come to mean something else.
-    ///
-    /// The ids do not come back either: the allocator frees no row-less id.
+    /// An accepted layer drop. The name is freed; the space is never given again.
     LayerDrop {
         name: String,
+        /// The space of the registration it drops.
+        space: LayerSpace,
         /// The registry version this drop moved the counter to, on `LayerCreate::version`'s rule.
         version: u64,
     },
@@ -374,6 +360,8 @@ pub enum WalRecord {
     /// only reading under which the ordinals it claims are contiguous.
     ArtifactPublish {
         layer: String,
+        /// The space of the registration it was written for.
+        space: LayerSpace,
         level: u32,
         /// Blocks appended to this level's reservation because the batch outgrew it, in allocation
         /// order. **Empty in the ordinary case**, and carried here rather than derived because a
@@ -406,6 +394,8 @@ pub enum WalRecord {
     /// join. `ArtifactStore::oldest_wal_pos` holds the log at it, and the fold releases it.
     ArtifactGrow {
         layer: String,
+        /// The space of the registration it was written for.
+        space: LayerSpace,
         level: u32,
         growth: Vec<MembershipGrowth>,
     },
@@ -421,6 +411,8 @@ pub enum WalRecord {
     /// that carries them (`ArtifactStore::oldest_wal_pos`).
     ArtifactFill {
         layer: String,
+        /// The space of the registration it was written for.
+        space: LayerSpace,
         level: u32,
         /// Resolved from the caller's key on the executor and recorded, on
         /// [`MembershipGrowth::ordinal`]'s rule.
@@ -896,6 +888,7 @@ pub struct ParentRef {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PublishedAttachment {
     pub layer: String,
+    pub space: LayerSpace,
     pub level: u32,
     pub ordinal: u32,
     pub entity: EntityId,
@@ -1076,7 +1069,12 @@ const WAL_MAGIC: [u8; 4] = *b"MWAL";
 // **34**: the magic is `MWAL`. A log at 33 is refused.
 // **35**: the variant table gained `ShardsDeclare`, a shard size declared while the service runs.
 // A log at 34 is refused.
-const WAL_VERSION: u16 = 35;
+// **36**: `LayerCreate` carries the layer's space, and a `ChangeBatch` and an `OverlaySnapshot`
+// name each entry's target, an item in its shard or an artifact in its layer space. A log at 35 is
+// refused.
+// **37**: `LayerDrop` and the artifact records carry their registration's space, and an
+// attachment its target's. A log at 36 is refused.
+const WAL_VERSION: u16 = 37;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -2488,7 +2486,10 @@ mod tests {
 
     fn record(tag: u8) -> WalRecord {
         WalRecord::ChangeBatch {
-            changes: vec![(EntityId::new(tag as u64), ChangeOp::Delete)],
+            changes: vec![(
+                Target::Item(mosaica_types::ShardId::ZERO, EntityId::new(tag as u64)),
+                ChangeOp::Delete,
+            )],
         }
     }
 
@@ -2600,35 +2601,45 @@ mod tests {
                 layout: None,
                 shape: None,
             }),
-            layer_entity: EntityId::new(4_294_901_759),
+            space: LayerSpace::new(3).unwrap(),
             runs: vec![
                 ReservedRuns::from_runs(vec![EntityRun {
-                    start: 4_294_836_224,
-                    end: 4_294_901_760,
+                    start: 65_536,
+                    end: 131_072,
                 }]),
                 ReservedRuns::from_runs(vec![EntityRun {
-                    start: 4_294_770_688,
-                    end: 4_294_836_224,
+                    start: 131_072,
+                    end: 196_608,
                 }]),
             ],
             version: 1,
         };
         let dropped = WalRecord::LayerDrop {
             name: "clusters/old".into(),
+            space: LayerSpace::new(1).unwrap(),
             version: 2,
+        };
+        // A change to the layer and one to the item over the same entity stay two changes.
+        let entity = mosaica_types::layer::LAYER_ENTITY;
+        let changes = WalRecord::ChangeBatch {
+            changes: vec![
+                (Target::Artifact(LayerSpace::new(3).unwrap(), entity), ChangeOp::Suppress),
+                (Target::Item(mosaica_types::ShardId::ZERO, entity), ChangeOp::Delete),
+            ],
         };
 
         let mut wal = Wal::open(&path).unwrap();
         let replayed = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
         assert!(replayed.is_empty());
         wal.append(&create).unwrap();
+        wal.append(&changes).unwrap();
         wal.append(&dropped).unwrap();
         wal.fsync().unwrap();
         drop(wal);
 
         let wal = Wal::open(&path).unwrap();
         let replayed = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
-        assert_eq!(replayed, vec![create, dropped]);
+        assert_eq!(replayed, vec![create, changes, dropped]);
     }
 
     #[test]
@@ -2646,15 +2657,16 @@ mod tests {
         let second = Bitmap::new();
         let publish = WalRecord::ArtifactPublish {
             layer: "clusters/hdbscan-2026-08".into(),
+            space: LayerSpace::new(2).unwrap(),
             level: 0,
             extend_runs: vec![EntityRun {
-                start: 4_294_705_152,
-                end: 4_294_770_688,
+                start: 196_608,
+                end: 262_144,
             }],
             artifacts: vec![
                 PublishedArtifact {
                     ordinal: 65_535,
-                    entity: EntityId::new(4_294_836_223),
+                    entity: EntityId::new(131_071),
                     key: Some("c-0017".into()),
                     view: None,
                     incarnation: 0,
@@ -2670,7 +2682,7 @@ mod tests {
                 // decodes positionally, so this is the pair that would misread first.
                 PublishedArtifact {
                     ordinal: 65_536,
-                    entity: EntityId::new(4_294_705_152),
+                    entity: EntityId::new(196_608),
                     key: None,
                     // The view is the first optional the identity carries (T2c reads it); set
                     // here so a record naming one round-trips and a reader that lost it would
@@ -2689,9 +2701,10 @@ mod tests {
                     // `None` serves the label of a suppressed cluster.
                     attached_to: Some(PublishedAttachment {
                         layer: "clusters/hdbscan-2026-08".into(),
+                        space: LayerSpace::new(2).unwrap(),
                         level: 0,
                         ordinal: 17,
-                        entity: EntityId::new(4_294_901_759),
+                        entity: EntityId::new(65_553),
                     }),
                     // The fourth field, a list, and the one that decodes *after* the attachment
                     // — so a shape that lost a byte in the attachment would land here and read a
@@ -2761,6 +2774,7 @@ mod tests {
         let records = vec![
             WalRecord::ArtifactGrow {
                 layer: "topics/openalex".into(),
+                space: LayerSpace::new(5).unwrap(),
                 level: 0,
                 growth: vec![MembershipGrowth {
                     ordinal: 3,
@@ -2774,6 +2788,7 @@ mod tests {
             },
             WalRecord::ArtifactFill {
                 layer: "topics/openalex".into(),
+                space: LayerSpace::new(5).unwrap(),
                 level: 0,
                 ordinal: 3,
                 part: ArtifactPart::Content {
@@ -2784,6 +2799,7 @@ mod tests {
             },
             WalRecord::ArtifactFill {
                 layer: "topics/openalex".into(),
+                space: LayerSpace::new(5).unwrap(),
                 level: 0,
                 ordinal: 3,
                 part: ArtifactPart::Shape(
@@ -2792,6 +2808,7 @@ mod tests {
             },
             WalRecord::ArtifactFill {
                 layer: "topics/openalex".into(),
+                space: LayerSpace::new(5).unwrap(),
                 level: 1,
                 ordinal: 0,
                 part: ArtifactPart::Parents(vec![ParentRef {
@@ -2801,10 +2818,12 @@ mod tests {
             },
             WalRecord::ArtifactFill {
                 layer: "labels/openalex".into(),
+                space: LayerSpace::new(6).unwrap(),
                 level: 0,
                 ordinal: 9,
                 part: ArtifactPart::AttachedTo(PublishedAttachment {
                     layer: "topics/openalex".into(),
+                    space: LayerSpace::new(5).unwrap(),
                     level: 0,
                     ordinal: 3,
                     entity: EntityId::new(4_294_836_223),
@@ -2961,9 +2980,13 @@ mod tests {
         assert_eq!(replayed, records);
 
         // The membership route's own growth is what every reader applies today.
-        let membership =
-            crate::membership::growth_record("topics/openalex", 0, [(3u32, &Bitmap::of(&[1, 2]))])
-                .unwrap();
+        let membership = crate::membership::growth_record(
+            "topics/openalex",
+            LayerSpace::new(5).unwrap(),
+            0,
+            [(3u32, &Bitmap::of(&[1, 2]))],
+        )
+        .unwrap();
         assert_eq!(unbuilt_track(&membership), None);
     }
 

@@ -65,7 +65,7 @@ fn check(engine: &Engine, expected: &Expected, after: &str) {
         match home {
             // Readable whether or not the item may be seen.
             Home::EditedItems => {
-                let entity = engine.resolve_mosaica_ids(&[tid]).unwrap()[0].unwrap_or_else(|| {
+                let entity = items_of(engine, &[tid])[0].unwrap_or_else(|| {
                     panic!("Home::EditedItems: the mosaica_id names nothing, after {after}")
                 });
                 assert_eq!(
@@ -372,7 +372,7 @@ fn an_edit_carries_every_home() {
     check(&engine, &expected, "an edit of the suppressed item");
     publish_buffered(&engine);
     check(&engine, &expected, "its flush");
-    let moved = engine.resolve_mosaica_ids(&[tid]).unwrap()[0].unwrap();
+    let moved = items_of(&engine, &[tid])[0].unwrap();
     assert_ne!(moved, expected.first, "the edit gave the item a new entity");
     engine.accept_change(moved, ChangeOp::Unsuppress).unwrap();
     expected.suppressed = false;
@@ -622,7 +622,7 @@ fn a_growth_and_a_publication_queued_behind_an_edit_follow_the_item() {
     });
     publish_buffered(&engine);
     assert_ne!(
-        engine.resolve_mosaica_ids(&[tid]).unwrap()[0],
+        items_of(&engine, &[tid])[0],
         Some(entity(X)),
         "the edit moved the item"
     );
@@ -780,9 +780,9 @@ fn an_item_edited_twice_across_a_flush_is_found_at_its_last_entity_after_a_resta
     };
     edit(&engine, "to-b", "s0", set_score(555));
     publish_buffered(&engine);
-    let b = engine.resolve_mosaica_ids(&[tid]).unwrap()[0].unwrap();
+    let b = items_of(&engine, &[tid])[0].unwrap();
     edit(&engine, "to-c", "s0", set_score(777));
-    let c = engine.resolve_mosaica_ids(&[tid]).unwrap()[0].unwrap();
+    let c = items_of(&engine, &[tid])[0].unwrap();
     assert!(
         a != b && b != c && a != c,
         "each edit gave the item a new entity"
@@ -801,13 +801,13 @@ fn an_item_edited_twice_across_a_flush_is_found_at_its_last_entity_after_a_resta
     engine = open(tmp.path(), &root);
     for pass in ["the restart", "the flush after it"] {
         assert_eq!(
-            engine.resolve_mosaica_ids(&[tid]).unwrap()[0],
+            items_of(&engine, &[tid])[0],
             Some(c),
             "the mosaica_id names the last entity after {pass}"
         );
         for earlier in [a, b] {
             assert_eq!(
-                engine.resolve_mosaica_ids(&[engine.mosaica_id_of(earlier).unwrap()]).unwrap()[0],
+                items_of(&engine, &[engine.mosaica_id_of(earlier).unwrap()])[0],
                 Some(c),
                 "an earlier entity's mosaica_id is the item's, and names the last entity after {pass}"
             );
@@ -828,7 +828,7 @@ fn an_item_edited_twice_across_a_flush_is_found_at_its_last_entity_after_a_resta
         publish_buffered(&engine);
     }
 
-    let target = engine.resolve_mosaica_ids(&[tid]).unwrap()[0].unwrap();
+    let target = items_of(&engine, &[tid])[0].unwrap();
     engine.accept_change(target, ChangeOp::Suppress).unwrap();
     tick(&engine);
     let full = engine.authorise(&full_coverage_credential()).unwrap();

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .identity import KIND_ITEM, IdentityKey, forward_item, invert_item
+from .identity import IdentityKey, forward_item, invert_item
 
 
 @dataclass
@@ -57,8 +57,10 @@ class HolderCount:
     def _item(self, mosaica_id: int) -> tuple[int, int] | None:
         """The tenancy and number `mosaica_id` inverts to, or `None` where it names no item of
         this shard."""
-        kind, shard, tenancy, number = invert_item(self.key, mosaica_id)
-        return (tenancy, number) if kind == KIND_ITEM and shard == self.shard else None
+        item = invert_item(self.key, mosaica_id)
+        if item is None or item[0] != self.shard:
+            return None
+        return item[1], item[2]
 
     def number_of(self, mosaica_id: int) -> tuple[int, int]:
         """The tenancy and number an item's identifier inverts to. An identifier of another kind

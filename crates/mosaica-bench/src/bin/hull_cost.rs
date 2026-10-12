@@ -111,11 +111,14 @@ fn main() -> ExitCode {
 
             let mut clouds: Vec<Cloud> = Vec::new();
             for extent in &partition.only_shard().record.membership_extents {
-                if &extent.layer != name {
+                if extent.space != layer.space {
                     continue;
                 }
                 let path = prefix.join(Path::new(&extent.path));
-                let pack = match mosaica_store::membership::MembershipPack::open(&path) {
+                let pack = match mosaica_store::membership::LevelPack::open(
+                    &path,
+                    mosaica_store::membership::PackKind::Members,
+                ) {
                     Ok(p) => p,
                     Err(e) => {
                         eprintln!("{}: {e}", path.display());
@@ -124,15 +127,12 @@ fn main() -> ExitCode {
                     }
                 };
                 for (ordinal, blob) in pack.iter() {
-                    let Some((record, _)) = mosaica_lifecycle::membership::decode_record(
-                        mosaica_types::EntityId::new(1),
-                        blob,
-                    ) else {
+                    let Some(members) = mosaica_lifecycle::membership::members_bytes(blob)
+                        .and_then(mosaica_lifecycle::membership::deserialise_members)
+                    else {
                         continue;
                     };
-                    let visible = record
-                        .members
-                        .projected(|part| view.row_space.project_base(part));
+                    let visible = view.row_space.project_base(&members);
                     if visible.is_empty() {
                         continue;
                     }

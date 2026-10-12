@@ -9,8 +9,8 @@
 use std::collections::BTreeMap;
 
 use mosaica_engine::{AddressTable, AddressValue, Stamp};
-use mosaica_lifecycle::resolve::{Reason, Verdict};
-use mosaica_types::{EntityId, MosaicaId};
+use mosaica_lifecycle::resolve::Reason;
+use mosaica_types::{EntityId, MosaicaId, Target};
 
 use crate::error::{map_engine_error, ApiError};
 use crate::state::AppState;
@@ -131,17 +131,10 @@ impl<'de> serde::Deserialize<'de> for Cell {
     }
 }
 
-/// What one addressing row became.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Named {
-    Item(EntityId),
-    Refused(Reason),
-}
-
 /// What a request's rows named: one answer per row, table by table; the columns ignored; and the
 /// generation the rows were resolved against, which the write naming them carries.
-pub(crate) struct Names {
-    pub(crate) tables: Vec<Vec<Named>>,
+pub(crate) struct Names<T> {
+    pub(crate) tables: Vec<Vec<T>>,
     pub(crate) ignored: Vec<String>,
     pub(crate) at: Stamp,
 }
@@ -191,27 +184,52 @@ impl Merged {
         Ok(Merged { table, widths })
     }
 
-    /// Resolve every row.
-    pub(crate) fn name(&self, state: &AppState) -> Result<Names, ApiError> {
+    /// Resolve every row to the item it names.
+    pub(crate) fn name(
+        &self,
+        state: &AppState,
+    ) -> Result<Names<Result<EntityId, Reason>>, ApiError> {
         let named = state
             .engine
             .name_items(&self.table)
             .map_err(map_engine_error)?;
-        let mut verdicts = named.verdicts.into_iter().map(|verdict| match verdict {
-            Verdict::Names(entity) => Named::Item(entity),
-            Verdict::Refused(refusal) => Named::Refused(refusal.kind()),
-            Verdict::Creates => unreachable!("a call that addresses items creates none"),
-        });
-        let per_table = self
-            .widths
-            .iter()
-            .map(|rows| verdicts.by_ref().take(*rows).collect())
-            .collect();
+        let verdicts = named
+            .verdicts
+            .into_iter()
+            .map(|verdict| verdict.map_err(|refusal| refusal.kind()));
         Ok(Names {
-            tables: per_table,
+            tables: self.per_table(verdicts),
             ignored: named.ignored,
             at: named.at,
         })
+    }
+
+    /// Resolve every row to the item, the artifact or the layer it names.
+    pub(crate) fn name_targets(
+        &self,
+        state: &AppState,
+    ) -> Result<Names<Result<Target, Reason>>, ApiError> {
+        let named = state
+            .engine
+            .name_targets(&self.table)
+            .map_err(map_engine_error)?;
+        let verdicts = named
+            .verdicts
+            .into_iter()
+            .map(|verdict| verdict.map_err(|refusal| refusal.kind()));
+        Ok(Names {
+            tables: self.per_table(verdicts),
+            ignored: named.ignored,
+            at: named.at,
+        })
+    }
+
+    /// `rows`, one per row of the merged table, split back into the request's tables.
+    fn per_table<T>(&self, mut rows: impl Iterator<Item = T>) -> Vec<Vec<T>> {
+        self.widths
+            .iter()
+            .map(|width| rows.by_ref().take(*width).collect())
+            .collect()
     }
 }
 

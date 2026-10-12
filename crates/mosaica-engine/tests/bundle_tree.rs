@@ -20,7 +20,10 @@ use mosaica_types::{EntityId, ShardId, SHARD_SIZE_DEFAULT};
 fn in_place(rel: &str) -> bool {
     let parts: Vec<&str> = rel.split('/').collect();
     match parts.as_slice() {
-        ["MANIFEST.json"] | ["dictionary", _, ..] | ["partitions", _, "shards", "0", _, ..] => true,
+        ["MANIFEST.json"]
+        | ["dictionary", _, ..]
+        | ["partitions", _, "shards", "0", _, ..]
+        | ["partitions", _, "layers", _, _, ..] => true,
         ["partitions", _, name] => name
             .strip_prefix("SEGMENTS-")
             .and_then(|n| n.strip_suffix(".json"))

@@ -90,8 +90,8 @@ use mosaica_roaring::RankedRuns;
 
 pub use keyword::{coalesce_keyword_extents, fold_keyword_column, KeywordLayer};
 pub use record::{
-    coalesce_record_extents, fold_record_blob, merge_record_rows, write_prose, BlobRows, BlockPool,
-    RecordBlobWriter, RecordRows,
+    coalesce_record_extents, fold_record_blob, merge_record_rows, write_prose, write_text_rows,
+    BlobRows, BlockPool, RecordBlobWriter, RecordRows,
 };
 pub use text::{coalesce_text_extents, merge_text_layers, TextLayerRef};
 

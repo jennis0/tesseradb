@@ -31,7 +31,6 @@ use mosaica_engine::{
     ScalarOut, Session,
 };
 use mosaica_lifecycle::membership::{IncomingArtifact, IncomingContent};
-use mosaica_lifecycle::resolve::Verdict;
 use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
 use mosaica_lifecycle::{ExecError, IngestRow};
 use mosaica_types::{AttrLocalId, EntityId, MosaicaId};
@@ -96,7 +95,7 @@ fn create(label: &str, at: (f64, f64)) -> IngestRow {
 }
 
 fn entity_of(engine: &Engine, tid: MosaicaId) -> EntityId {
-    engine.resolve_mosaica_ids(&[tid]).unwrap()[0]
+    items_of(engine, &[tid])[0]
         .unwrap_or_else(|| panic!("{tid:?} names an item"))
 }
 
@@ -212,13 +211,13 @@ fn names_nothing(engine: &Engine, x: MosaicaId, after: &str) {
         );
     }
     assert_eq!(
-        engine.resolve_mosaica_ids(&[x]).unwrap(),
+        items_of(engine, &[x]),
         vec![None],
         "x names an entity, after {after}"
     );
     let named = name_one(engine, x);
     assert!(
-        !matches!(named.verdicts[0], Verdict::Names(_)),
+        named.verdicts[0].is_err(),
         "a change naming x names an item, after {after}: {:?}",
         named.verdicts[0]
     );
@@ -1138,7 +1137,7 @@ fn an_edit_resolved_before_its_entity_was_freed_does_not_reach_the_new_holder() 
 /// What `/control/changes` resolves `tid` to: its entity, and the generation it was named in.
 fn named(engine: &Engine, tid: MosaicaId) -> (EntityId, NamedItems) {
     let named = name_one(engine, tid);
-    let Verdict::Names(entity) = named.verdicts[0] else {
+    let Ok(entity) = named.verdicts[0] else {
         panic!("{tid:?} names an item: {:?}", named.verdicts[0]);
     };
     (entity, named)
@@ -1180,7 +1179,7 @@ fn a_deletion_resolved_before_its_entity_was_freed_does_not_reach_the_new_holder
     );
     publish_buffered(&engine);
 
-    let answered = engine.accept_changes_at(vec![(resolved, ChangeOp::Delete)], named.at);
+    let answered = engine.accept_changes_at(vec![(item(resolved), ChangeOp::Delete)], named.at);
     assert!(
         matches!(answered, Err(AcceptError::Exec(ExecError::Stale))),
         "the deletion is refused as stale: {answered:?}"
@@ -1222,7 +1221,7 @@ fn a_suppression_resolved_before_its_item_was_deleted_does_not_reach_the_new_hol
     );
     publish_buffered(&engine);
 
-    let answered = engine.accept_changes_at(vec![(resolved, ChangeOp::Suppress)], named.at);
+    let answered = engine.accept_changes_at(vec![(item(resolved), ChangeOp::Suppress)], named.at);
     assert!(
         matches!(answered, Err(AcceptError::Exec(ExecError::Stale))),
         "the suppression is refused as stale: {answered:?}"
@@ -1248,7 +1247,7 @@ fn a_deletion_resolved_before_an_edit_reaches_the_item_where_it_is_now() {
     publish_buffered(&engine);
     assert_ne!(entity_of(&engine, x), resolved, "the edit moved x");
     engine
-        .accept_changes_at(vec![(resolved, ChangeOp::Delete)], named.at)
+        .accept_changes_at(vec![(item(resolved), ChangeOp::Delete)], named.at)
         .unwrap();
     publish_buffered(&engine);
     let full = engine.authorise(&full_coverage_credential()).unwrap();
@@ -1588,7 +1587,7 @@ fn a_restart_before_the_rotation_issues_no_number_twice() {
         issued.len(),
         "no identifier is issued twice"
     );
-    let entities = engine.resolve_mosaica_ids(&issued).unwrap();
+    let entities = items_of(&engine, &issued);
     assert_eq!(entities[0], None, "y names nothing");
     let held: Vec<EntityId> = entities[1..].iter().map(|e| e.expect("an item")).collect();
     assert_eq!(

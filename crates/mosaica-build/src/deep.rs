@@ -45,7 +45,7 @@ use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchR
 
 use mosaica_authz::{DeltaTier, PostingRef, PostingsReader};
 use mosaica_store::manifest::{Manifest, PartitionManifest};
-use mosaica_store::read::ShardData;
+use mosaica_store::read::{PartitionData, ShardData};
 use mosaica_store::ShardLayout;
 
 use mosaica_types::{IdentityKey, MosaicaId};
@@ -178,7 +178,14 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
             &mut report,
         )?;
         check_dict_extents(&prefix_dir, &partition.manifest, &mut report)?;
-        check_record_blobs(&prefix_dir, layout, &bundle.manifest, shard, &mut report)?;
+        check_record_blobs(
+            &prefix_dir,
+            layout,
+            &bundle.manifest,
+            shard,
+            &partition.layer_spaces,
+            &mut report,
+        )?;
         check_scoped_render_lanes(&bundle.manifest, layout, shard, &mut report)?;
         check_cut_index(phash, shard, &mut report)?;
         check_bands(
@@ -189,8 +196,8 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
             shard,
             &mut report,
         )?;
-        check_band_labels(&prefix_dir, shard, &mut report)?;
-        check_row_members(root, &prefix_dir, shard, &mut report)?;
+        check_band_labels(&prefix_dir, partition, &mut report)?;
+        check_row_members(root, &prefix_dir, partition, &mut report)?;
         check_unique_indexes(
             root,
             &prefix_dir,
@@ -922,6 +929,14 @@ fn check_bands(
     Ok(())
 }
 
+/// The layer holding `space`, by its name and its space, as a check's refusal names it.
+fn layer_named(partition: &PartitionData, space: mosaica_types::LayerSpace) -> String {
+    match partition.manifest.layers.iter().find(|layer| layer.space == space) {
+        Some(layer) => format!("layer {} (space {space})", layer.declaration.name),
+        None => format!("layer space {space}"),
+    }
+}
+
 /// **Every current label column has a band label copy, and every copy holds its column's label at
 /// each entry's row.** A label column is current where the manifest records its level at the
 /// version it was written at: a [`DerivedForm::LevelLabels`] is named only then, and a row-major
@@ -930,18 +945,17 @@ fn check_bands(
 /// refusal names the file: the copy, or the column that has none.
 fn check_band_labels(
     prefix_dir: &Path,
-    shard: &ShardData,
+    partition: &PartitionData,
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
     use mosaica_store::manifest::{DerivedExtent, DerivedForm};
     use mosaica_types::layer::ServingLayout;
+    let shard = partition.only_shard();
     let extents = &shard.record.derived_extents;
     let current = |e: &DerivedExtent| {
-        shard
-            .record
-            .level_versions
-            .iter()
-            .any(|v| v.layer == e.layer && v.level == e.level && v.version == e.level_version)
+        mosaica_store::manifest::layer_space(&partition.layer_spaces, e.space)
+            .and_then(|space| space.level_version(e.level))
+            == Some(e.level_version)
     };
     let is_label_column = |e: &DerivedExtent| {
         matches!(
@@ -952,22 +966,17 @@ fn check_band_labels(
                 }
         )
     };
-    let same_level = |a: &DerivedExtent, b: &DerivedExtent| {
-        a.layer == b.layer
-            && a.level == b.level
-            && a.view == b.view
-            && a.level_version == b.level_version
-    };
     for column in extents.iter().filter(|e| is_label_column(e) && current(e)) {
         let copied = extents
             .iter()
-            .any(|e| matches!(e.form, DerivedForm::BandLabels { .. }) && same_level(e, column));
+            .any(|e| matches!(e.form, DerivedForm::BandLabels { .. }) && e.same_level(column));
         if !copied {
             return Err(disagrees(
                 prefix_dir.join(&column.path),
                 format!(
-                    "layer '{}' level {}'s label column has no copy in band order",
-                    column.layer, column.level
+                    "{} level {}'s label column has no copy in band order",
+                    layer_named(partition, column.space),
+                    column.level
                 ),
             ));
         }
@@ -979,7 +988,7 @@ fn check_band_labels(
         let path = prefix_dir.join(&copy.path);
         let column = extents
             .iter()
-            .find(|e| is_label_column(e) && same_level(e, copy))
+            .find(|e| is_label_column(e) && e.same_level(copy))
             .ok_or_else(|| disagrees(path.clone(), "names no label column".to_string()))?;
         let segment = copy
             .view
@@ -1021,11 +1030,12 @@ fn check_band_labels(
 fn check_row_members(
     root: &Path,
     prefix_dir: &Path,
-    shard: &ShardData,
+    partition: &PartitionData,
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
     use mosaica_store::manifest::DerivedForm;
     use mosaica_store::row_members::RowMembersPack;
+    let shard = partition.only_shard();
     let extents = &shard.record.derived_extents;
     for members in extents.iter().filter(|e| e.form == DerivedForm::RowMembers) {
         if !extents
@@ -1054,8 +1064,9 @@ fn check_row_members(
             return Err(disagrees(
                 column_path,
                 format!(
-                    "layer '{}' level {}'s column has no single member file beside it",
-                    column.layer, column.level
+                    "{} level {}'s column has no single member file beside it",
+                    layer_named(partition, column.space),
+                    column.level
                 ),
             ));
         };
@@ -1426,13 +1437,14 @@ impl PairsCursor {
 /// **The base blob is walked where the manifest names its files**, not where the directory happens
 /// to exist: a build writes `attrs/record/` only where a column is blob-resident, and probing the
 /// filesystem would read a base deleted from under the manifest as "this bundle has no base".
-/// Extents come from the segments manifest's two lists, the flushes' and the artifact levels',
+/// Extents come from the shard's list, the flushes', and each of `layer_spaces`' supplied content,
 /// which hold the same format and take the same reader.
 fn check_record_blobs(
     prefix_dir: &Path,
     layout: ShardLayout<'_>,
     manifest: &Manifest,
     shard: &ShardData,
+    layer_spaces: &[mosaica_store::manifest::LayerSpaceRecord],
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
     let record_rel = layout.record_rel();
@@ -1451,7 +1463,7 @@ fn check_record_blobs(
         .record
         .record_extents
         .iter()
-        .chain(shard.record.artifact_record_extents.iter())
+        .chain(layer_spaces.iter().flat_map(|space| space.content_extents.iter()))
     {
         layers.push((
             extent.blocks.clone(),

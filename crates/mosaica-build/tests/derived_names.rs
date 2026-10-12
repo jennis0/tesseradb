@@ -235,17 +235,17 @@ fn two_views_derived_files_do_not_collide() {
         record
             .derived_extents
             .iter()
-            .map(|e| (&e.view, &e.layer, e.level, &e.path))
+            .map(|e| (&e.view, e.space, e.level, &e.path))
             .collect::<Vec<_>>()
     );
 
     // **A containment partition is not per view**, so the two views share the level's one file
     // rather than each writing its own.
-    let containment: Vec<(&str, u32)> = record
+    let containment: Vec<(mosaica_types::LayerSpace, u32)> = record
         .derived_extents
         .iter()
         .filter(|e| e.form == mosaica_store::manifest::DerivedForm::Containment)
-        .map(|e| (e.layer.as_str(), e.level))
+        .map(|e| (e.space, e.level))
         .collect();
     let mut once = containment.clone();
     once.sort_unstable();

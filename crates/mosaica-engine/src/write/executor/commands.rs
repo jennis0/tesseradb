@@ -158,14 +158,18 @@ pub(super) fn growth_receipt(
 }
 
 /// The executor's refusal for a registry error: a differing fixed part is the caller's `409`
-/// (`ExecError::PartConflict`), everything else the `422` a refused layer operation has always
-/// been.
+/// (`ExecError::PartConflict`), and so is a layer space that has run out
+/// (`ExecError::LayerSpaceFull`); everything else is the `422` of a refused layer operation.
 pub(super) fn refusal_of(e: mosaica_lifecycle::RegistryError) -> ExecError {
     match e {
         // A second `excluding` on a held key is the same `409` a differing fixed part is: the
         // complement it asks for is a different set from the one the artifact holds.
         mosaica_lifecycle::RegistryError::PartConflict { .. }
         | mosaica_lifecycle::RegistryError::ExclusionOnHeldKey { .. } => ExecError::PartConflict {
+            detail: e.to_string(),
+        },
+        mosaica_lifecycle::RegistryError::SpacesExhausted
+        | mosaica_lifecycle::RegistryError::SpaceFull { .. } => ExecError::LayerSpaceFull {
             detail: e.to_string(),
         },
         other => ExecError::LayerRefused {
@@ -184,6 +188,8 @@ pub(super) fn refusal_of(e: mosaica_lifecycle::RegistryError) -> ExecError {
 /// names an artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PublishedBatch {
+    /// The layer's space, which every entity below is in.
+    pub(crate) space: LayerSpace,
     pub(crate) entities: Vec<EntityId>,
     pub(crate) created: u64,
     pub(crate) without_content: u64,
@@ -288,15 +294,15 @@ impl Executor {
                 self.commit_denies(entries)
             }
             Command::RegisterLayer { declaration, reply } => self.commit_registry(
-                |registry, alloc| registry.prepare_create(*declaration, alloc),
+                |registry| registry.prepare_create(*declaration),
                 |record| match record {
-                    WalRecord::LayerCreate { layer_entity, .. } => *layer_entity,
+                    WalRecord::LayerCreate { space, .. } => *space,
                     _ => unreachable!("prepare_create returns a LayerCreate"),
                 },
                 reply,
             ),
             Command::DropLayer { name, reply } => {
-                self.commit_registry(|registry, _| registry.prepare_drop(&name), |_| (), reply)
+                self.commit_registry(|registry| registry.prepare_drop(&name), |_| (), reply)
             }
             Command::CreateView {
                 group,
@@ -406,8 +412,8 @@ impl Executor {
         }
         let served = self.generation.load_full();
         let views = crate::write::ServedViews(&served.bundle.manifest);
-        let prepared = self.live.with_publication_state(|registry, store, alloc| {
-            registry.prepare_put(&layer, level, &incoming, store, alloc, &views)
+        let prepared = self.live.with_publication_state(|registry, store| {
+            registry.prepare_put(&layer, level, &incoming, store, &views)
         });
         let prepared = match prepared {
             Ok(prepared) => prepared,
@@ -426,6 +432,7 @@ impl Executor {
             // Every key was held and every part identical: nothing to append, on
             // `commit_growth`'s no-op rule, and the acknowledgement is the held artifacts' own.
             reply.ack(PublishedBatch {
+                space: prepared.space,
                 entities: prepared.entities,
                 created: 0,
                 without_content: 0,
@@ -446,6 +453,7 @@ impl Executor {
         // needs no log for what it just published.
         self.apply_artifact_records(&records, &positions, Publish::Promptly);
         reply.ack(PublishedBatch {
+            space: prepared.space,
             entities: prepared.entities,
             created: prepared.created,
             without_content: prepared.without_content,
@@ -581,14 +589,14 @@ impl Executor {
         layer: String,
         level: u32,
         joins: Vec<mosaica_lifecycle::IncomingGrowth>,
-        reply: Reply<Vec<mosaica_lifecycle::MembershipGrown>>,
+        reply: Reply<(LayerSpace, Vec<mosaica_lifecycle::MembershipGrown>)>,
     ) {
         // `commit_artifacts`' reason: the version a held row form must be at for this delta to be
         // the one it is missing.
         // The receipt is read beside the preparation, under the same lock and before the
         // record is applied: afterwards every joining member is a member, and how many were new
         // is gone.
-        let prepared = self.live.with_publication_state(|registry, store, _| {
+        let prepared = self.live.with_publication_state(|registry, store| {
             let prepared = registry.prepare_grow(&layer, level, &joins, store)?;
             let grown = growth_receipt(registry, store, &layer, level, &joins, &prepared);
             Ok::<_, mosaica_lifecycle::RegistryError>((prepared, grown))
@@ -611,7 +619,7 @@ impl Executor {
             // Every key resolved, nothing was joining and every part was held identically. No
             // record is owed for a no-op, and appending an empty one would pin the log at a
             // growth that changed nothing.
-            reply.ack(grown);
+            reply.ack((prepared.space, grown));
             return;
         }
 
@@ -624,11 +632,11 @@ impl Executor {
         };
         // Promptly, on `commit_artifacts`' rule: this is the operator's own growth route.
         self.apply_artifact_records(&records, &positions, Publish::Promptly);
-        reply.ack(grown);
+        reply.ack((prepared.space, grown));
     }
 
-    /// Validate, allocate, append, sync, apply: in that order, which is the whole of the
-    /// registry's durability contract.
+    /// Validate, append, sync, apply: in that order, which is the whole of the registry's
+    /// durability contract.
     ///
     /// Nothing is applied before the record is durable, and this is the opposite posture from a
     /// deny. A suppression is applied to the live overlay even when its append fails, because
@@ -641,19 +649,15 @@ impl Executor {
         &mut self,
         prepare: impl FnOnce(
             &mut LayerRegistry,
-            &mut Allocator,
-        )
-            -> std::result::Result<WalRecord, mosaica_lifecycle::RegistryError>,
+        ) -> std::result::Result<WalRecord, mosaica_lifecycle::RegistryError>,
         ack_of: impl FnOnce(&WalRecord) -> T,
         reply: Reply<T>,
     ) {
-        let prepared = self.live.with_registry_and_allocator(prepare);
+        let prepared = self.live.with_registry(prepare);
         let record = match prepared {
             Ok(record) => record,
             Err(e) => {
-                reply.fail(ExecError::LayerRefused {
-                    detail: e.to_string(),
-                });
+                reply.fail(refusal_of(e));
                 return;
             }
         };
@@ -665,15 +669,22 @@ impl Executor {
 
         let ack = ack_of(&record);
         self.live.apply_registry_record(&record);
-        // A dropped layer's derived structures go with it. Retention only, never correctness: a
-        // tombstoned name never resolves through the registry again, so nothing held here is
-        // reachable to be served.
-        //
-        // The store's own copy of a dropped layer's memberships is not released here, because
-        // `ArtifactStore::remove_layer` is reached from nowhere: a drop touches the registry and
-        // stops there. Releasing it changes what the next fold repacks and how far back the
-        // rotation pin holds the log.
-        if let WalRecord::LayerDrop { name, .. } = &record {
+        // The dropped layer's extents leave the next publication, and its space the generation.
+        if let WalRecord::LayerDrop { name, space, .. } = &record {
+            self.side_manifests.spaces.remove(space);
+            let generation = self.generation.load_full();
+            if generation.layer_spaces.contains_key(space) {
+                let mut spaces = (*generation.layer_spaces).clone();
+                spaces.remove(space);
+                let next = generation.with(|g| g.layer_spaces = Arc::new(spaces));
+                self.publish(next, std::time::Instant::now());
+            }
+            self.side_manifests
+                .membership_extents
+                .retain(|extent| extent.space != *space);
+            self.side_manifests
+                .derived_extents
+                .retain(|extent| extent.space != *space);
             // The deltas held for the tick describe forms that are going with the layer.
             self.pending_forms.retain(|(layer, _), _| layer != name);
             self.deps.artifact_projections.forget(name);
@@ -1303,7 +1314,7 @@ impl Executor {
         self.live.with_roster(|roster| roster.apply(&record));
         self.publish_roster(&generation, started, &ids);
         let served = self.generation.load_full();
-        let retired = self.live.with_publication_state(|registry, store, _| {
+        let retired = self.live.with_publication_state(|registry, store| {
             crate::write::retire_dead_view_artifacts(registry, store, &served.bundle.manifest)
         });
         for (layer, _) in &retired {
@@ -1314,10 +1325,13 @@ impl Executor {
         }
         let deleted = dangling.len() as u64;
         if !dangling.is_empty() {
+            let shard = served.only_shard().id();
             self.apply_changes(
                 dangling
                     .into_iter()
-                    .map(|entity| (entity, mosaica_lifecycle::ChangeOp::Delete))
+                    .map(|entity| {
+                        (Target::Item(shard, entity), mosaica_lifecycle::ChangeOp::Delete)
+                    })
                     .collect(),
             );
         }

@@ -60,8 +60,9 @@ pub(super) fn grouped_growth<'a>(
     held: Option<HeldMembers<'_>>,
 ) -> Result<Vec<(WalRecord, usize)>, String> {
     use std::collections::BTreeMap;
-    /// One `(layer, level)`'s joins: the source to blame for the append, and a bitmap per ordinal.
-    type Level = (usize, BTreeMap<u32, croaring::Bitmap>);
+    /// One `(layer, level)`'s joins: the source to blame for the append, the layer's space, and a
+    /// bitmap per ordinal.
+    type Level = (usize, LayerSpace, BTreeMap<u32, croaring::Bitmap>);
     // Ordered, so replay does not depend on hash iteration.
     let mut by_level: BTreeMap<(&str, u32), Level> = BTreeMap::new();
     for (index, memberships) in sources.enumerate() {
@@ -69,9 +70,9 @@ pub(super) fn grouped_growth<'a>(
             let Some(ordinal) = join.ordinal else {
                 continue;
             };
-            let (_, ordinals) = by_level
+            let (_, _, ordinals) = by_level
                 .entry((join.layer.as_str(), join.level))
-                .or_insert_with(|| (index, BTreeMap::new()));
+                .or_insert_with(|| (index, join.space, BTreeMap::new()));
             let joining = ordinals.entry(ordinal).or_default();
             for row in &join.rows {
                 let entity =
@@ -84,7 +85,7 @@ pub(super) fn grouped_growth<'a>(
     // What the artifact already holds is not a join, or a restating row would append a record
     // that changes nothing and pins the log. Read against the store before this commit applies.
     if let Some(held) = held {
-        for ((layer, level), (_, ordinals)) in &mut by_level {
+        for ((layer, level), (_, _, ordinals)) in &mut by_level {
             for (ordinal, joining) in ordinals.iter_mut() {
                 if held.restating.is_some_and(|rows| !joining.intersect(rows)) {
                     continue;
@@ -97,11 +98,11 @@ pub(super) fn grouped_growth<'a>(
     }
     Ok(by_level
         .into_iter()
-        .filter_map(|((layer, level), (index, ordinals))| {
+        .filter_map(|((layer, level), (index, space, ordinals))| {
             let joins = ordinals
                 .iter()
                 .map(|(ordinal, joining)| (*ordinal, joining));
-            mosaica_lifecycle::membership::growth_record(layer, level, joins)
+            mosaica_lifecycle::membership::growth_record(layer, space, level, joins)
                 .map(|record| (record, index))
         })
         .collect())
@@ -304,7 +305,7 @@ impl Executor {
         if artifacts.is_empty() {
             return Ok((Vec::new(), Vec::new()));
         }
-        self.live.with_publication_state(|registry, store, _| {
+        self.live.with_publication_state(|registry, store| {
             let memberships: Vec<mosaica_lifecycle::ResolvedMembership> = artifacts
                 .memberships
                 .iter()
@@ -319,6 +320,10 @@ impl Executor {
                         )
                         .map(|ordinal| mosaica_lifecycle::ResolvedMembership {
                             layer: join.layer.clone(),
+                            space: registry
+                                .get(&join.layer)
+                                .expect("a key resolved in a layer that is registered")
+                                .space,
                             level: join.level,
                             view: join.view.clone(),
                             key: join.key.clone(),
@@ -413,7 +418,7 @@ impl Executor {
             if wanted.is_empty() {
                 continue;
             }
-            let prepared = self.live.with_publication_state(|registry, store, alloc| {
+            let prepared = self.live.with_publication_state(|registry, store| {
                 let fresh: Vec<String> = wanted
                     .iter()
                     .filter(|key| store.ordinal_of_key(&layer, 0, None, key).is_none())
@@ -423,7 +428,7 @@ impl Executor {
                     return Ok(None);
                 }
                 registry
-                    .prepare_derive(&layer, 0, &fresh, store, alloc)
+                    .prepare_derive(&layer, 0, &fresh, store)
                     .map(Some)
                     .map_err(|e| e.to_string())
             })?;
@@ -474,7 +479,7 @@ impl Executor {
         use std::collections::BTreeMap;
         let served = self.generation.load_full();
         let views = crate::write::ServedViews(&served.bundle.manifest);
-        self.live.with_publication_state(|registry, store, alloc| {
+        self.live.with_publication_state(|registry, store| {
             let parents = parent_of_each_child(edges)?;
             // Re-resolved here, not trusted from admission, since a publication may land between.
             let mut resolved: BTreeMap<MintKey, u32> = BTreeMap::new();
@@ -531,7 +536,6 @@ impl Executor {
                         *level,
                         &incoming,
                         store,
-                        alloc,
                         &pending,
                         &views,
                     )
@@ -647,6 +651,7 @@ impl Executor {
                 layer,
                 level,
                 growth,
+                ..
             } => {
                 let mut joins = Vec::new();
                 let mut pages = Vec::new();
@@ -732,7 +737,7 @@ impl Executor {
         });
         let mut refused_per_record: Vec<Vec<usize>> = vec![Vec::new(); records.len()];
         let mut settled: Vec<(String, u32)> = Vec::new();
-        let undecodable = self.live.with_publication_state(|registry, store, _| {
+        let undecodable = self.live.with_publication_state(|registry, store| {
             records
                 .iter()
                 .zip(positions)

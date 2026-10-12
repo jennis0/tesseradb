@@ -4,9 +4,10 @@
 use std::path::{Path, PathBuf};
 
 use mosaica_types::view::{ViewIncarnation, DECLARED_INCARNATION};
-use mosaica_types::ShardId;
+use mosaica_types::{LayerSpace, ShardId};
 
 use crate::edited::Direction;
+use crate::manifest::RecordExtent;
 
 pub use mosaica_types::view::GROUP_SEPARATOR;
 
@@ -172,6 +173,54 @@ impl<'a> ShardLayout<'a> {
     }
 }
 
+/// Where one layer space's files live: its artifacts' records, their supplied content and their
+/// held shapes. A space's members are in each shard's slice, under [`ShardLayout::members_rel`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LayerSpaceLayout<'a> {
+    pub partition: &'a str,
+    pub space: LayerSpace,
+}
+
+impl<'a> LayerSpaceLayout<'a> {
+    pub const fn new(partition: &'a str, space: LayerSpace) -> Self {
+        LayerSpaceLayout { partition, space }
+    }
+
+    /// The space's directory, prefix-relative: `partitions/<partition>/layers/<space>`.
+    pub fn rel(self) -> String {
+        format!("{}/layers/{}", partition_rel(self.partition), self.space)
+    }
+
+    pub fn dir(self, prefix_dir: &Path) -> PathBuf {
+        prefix_dir.join(self.rel())
+    }
+
+    /// The record packs: one per publication per level.
+    pub fn records_rel(self) -> String {
+        format!("{}/records", self.rel())
+    }
+
+    /// The supplied content's record-blob extents.
+    pub fn content_rel(self) -> String {
+        format!("{}/content", self.rel())
+    }
+
+    /// The three files of the content extent named `stem`.
+    pub fn content_extent(self, stem: &str) -> RecordExtent {
+        let rel = self.content_rel();
+        RecordExtent {
+            blocks: format!("{rel}/{stem}.blocks.bin"),
+            hasrow: format!("{rel}/{stem}.hasrow.roaring"),
+            directory: format!("{rel}/{stem}.directory.arrow"),
+        }
+    }
+
+    /// The directory one kind of derived structure is filed in: a `DerivedForm::dir`.
+    pub fn derived_rel(self, kind: &str) -> String {
+        format!("{}/{kind}", self.rel())
+    }
+}
+
 #[cfg(test)]
 pub(crate) const TEST_SHARD: ShardLayout<'static> = ShardLayout::new("p", ShardId::ZERO);
 
@@ -201,6 +250,16 @@ mod tests {
             TEST_SHARD.scoped_column_rel("mood", "world", 2),
             "partitions/p/shards/0/attrs/mood/world@2"
         );
+    }
+
+    #[test]
+    fn a_layer_spaces_files_are_beside_the_shards_and_not_under_one() {
+        let space = LayerSpaceLayout::new("p", LayerSpace::new(7).unwrap());
+        assert_eq!(space.rel(), "partitions/p/layers/7");
+        assert_eq!(space.records_rel(), "partitions/p/layers/7/records");
+        assert_eq!(space.content_rel(), "partitions/p/layers/7/content");
+        assert_eq!(space.derived_rel("shape-held"), "partitions/p/layers/7/shape-held");
+        assert!(!space.rel().starts_with(&TEST_SHARD.rel()));
     }
 
     #[test]

@@ -1939,8 +1939,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
 
     // ---- 8. layers, and the artifacts published into them ------------------------------
     // Entity ids are assigned by now — an item's entity is its position in `staged` — so a member
-    // named by source id resolves, and the row-less region can be allocated against a settled
-    // point mark.
+    // named by source id resolves.
     let mut published_layers = if args.layers.is_empty() {
         crate::layers::PublishedLayers::default()
     } else {
@@ -2300,9 +2299,9 @@ fn write_manifests(
         .iter()
         .map(|index| index.attribute.clone())
         .collect();
-    let segments = SegmentsManifest {
+    let mut segments = SegmentsManifest {
         partition: mosaica_store::manifest::PartitionManifest {
-            entity_id_low_water: published_layers.low_water,
+            next_layer_space: published_layers.next_layer_space,
             layers: published_layers.layers.clone(),
             layer_registry_version: published_layers.registry_version,
             dict_extents,
@@ -2315,10 +2314,6 @@ fn write_manifests(
                 watermark: n,
                 high_water: n,
                 membership_extents: published_layers.membership_extents.clone(),
-                level_versions: published_layers.level_versions.clone(),
-                // Empty where no artifact was published or a structure would not compose; the
-                // level then composes on first use.
-                derived_extents: published_layers.derived_extents.clone(),
                 // One per view with images, in build order; a view with no rows, or a build
                 // with no terms, has none.
                 term_image_extents: term_images
@@ -2326,7 +2321,6 @@ fn write_manifests(
                     .flatten()
                     .map(|images| images.extent.clone())
                     .collect(),
-                artifact_record_extents: published_layers.artifact_record_extents.clone(),
                 // One per view, in registry order. `entity_hi` is inclusive here, exclusive from
                 // pass two; an empty build's saturates to 0.
                 segments: segments_written
@@ -2340,7 +2334,11 @@ fn write_manifests(
                 ..mosaica_store::manifest::ShardRecord::empty(SHARD)
             }],
         },
+        layer_spaces: published_layers.layer_spaces.clone(),
     };
+    // Empty where no artifact was published or a structure would not compose; the level then
+    // composes on first use.
+    segments.file_derived(published_layers.derived_extents.clone());
     let segments_path = partition_dir.join("SEGMENTS-0.json");
     write_json(&segments_path, &segments)?;
 

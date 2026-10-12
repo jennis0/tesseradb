@@ -23,7 +23,7 @@ fn sidecar(base: &Path, n: u64) -> std::path::PathBuf {
 
 fn sample_record(tag: u8) -> WalRecord {
     WalRecord::ChangeBatch {
-            changes: vec![(mosaica_types::EntityId::new(tag as u64), ChangeOp::Delete)],
+            changes: vec![(item(mosaica_types::EntityId::new(tag as u64)), ChangeOp::Delete)],
         }
 }
 
@@ -878,4 +878,8 @@ fn the_sync_offset_is_published_only_after_the_sync_that_makes_it_true() {
         vec![sample_record(1), sample_record(2)],
         "both records are inside the durable prefix a restart replays"
     );
+}
+
+fn item(entity: mosaica_types::EntityId) -> mosaica_types::Target {
+    mosaica_types::Target::Item(mosaica_types::ShardId::ZERO, entity)
 }

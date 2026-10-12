@@ -210,7 +210,16 @@ impl Executor {
             None => reclaim_below,
         };
 
-        let snapshot = shard.overlay.snapshot();
+        // An artifact's deny goes under its space; in the shard's its entity would read as an
+        // item's at the next open.
+        let snapshot = mosaica_lifecycle::overlay::snapshot(
+            shard.id(),
+            &shard.overlay,
+            generation
+                .layer_spaces
+                .iter()
+                .map(|(space, parts)| (*space, &*parts.overlay)),
+        );
         match self.log.wal.rotate(&snapshot, reclaim_below) {
             Ok(deleted) => {
                 self.log.mark_rotated();

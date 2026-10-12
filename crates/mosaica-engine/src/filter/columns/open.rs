@@ -154,6 +154,19 @@ fn entity_text_layers(
     )
 }
 
+/// A record extent's files, resolved against the prefix directory that holds them. All three, and
+/// any one missing is a refusal to open rather than "those entities have no record".
+pub(crate) fn record_extent_paths(
+    prefix_dir: &Path,
+    extent: &mosaica_store::manifest::RecordExtent,
+) -> RecordExtentPaths {
+    RecordExtentPaths {
+        blocks: prefix_dir.join(&extent.blocks),
+        hasrow: prefix_dir.join(&extent.hasrow),
+        directory: prefix_dir.join(&extent.directory),
+    }
+}
+
 /// The record blob's stack for one shard: the base the schema owes, plus every extent named.
 ///
 /// The base is owed exactly when the compiled schema has a blob-resident column with no other
@@ -232,9 +245,6 @@ pub(super) fn runtime_layers(
 pub struct ShardExtents<'a> {
     pub attrs: &'a [mosaica_store::manifest::AttrExtent],
     pub records: &'a [mosaica_store::manifest::RecordExtent],
-    /// An artifact's content extents, listed apart from a point's because their ownership differs
-    /// rather than their bytes.
-    pub artifact_records: &'a [mosaica_store::manifest::RecordExtent],
     pub entity_terms: &'a [mosaica_store::manifest::EntityTermsExtent],
     pub texts: &'a [mosaica_store::manifest::TextExtent],
 }
@@ -244,7 +254,6 @@ impl<'a> ShardExtents<'a> {
         ShardExtents {
             attrs: &record.attr_extents,
             records: &record.record_extents,
-            artifact_records: &record.artifact_record_extents,
             entity_terms: &record.entity_terms_extents,
             texts: &record.text_extents,
         }
@@ -400,18 +409,10 @@ impl FilterColumns {
                 columns.insert(name, column);
             }
         }
-        // Artifact content extents hold the same format and reader as a point's, listed
-        // separately because ownership differs, not bytes. Safe to open together because the two
-        // never share an id: artifact ids descend from the ceiling, point ids ascend from zero.
         let extent_paths: Vec<RecordExtentPaths> = extents
             .records
             .iter()
-            .chain(extents.artifact_records.iter())
-            .map(|e| RecordExtentPaths {
-                blocks: prefix_dir.join(&e.blocks),
-                hasrow: prefix_dir.join(&e.hasrow),
-                directory: prefix_dir.join(&e.directory),
-            })
+            .map(|e| record_extent_paths(prefix_dir, e))
             .collect();
         let records = open_record_stack(
             prefix_dir,

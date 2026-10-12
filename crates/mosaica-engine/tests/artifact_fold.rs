@@ -23,54 +23,27 @@ use mosaica_engine::Engine;
 use mosaica_lifecycle::membership::IncomingContent;
 use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_lifecycle::IncomingArtifact;
-use mosaica_types::layer::{
-    ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
-};
+use mosaica_types::layer::{ContentDeclaration, LayerDeclaration};
 use mosaica_types::EntityId;
 
 fn declaration(name: &str) -> LayerDeclaration {
     LayerDeclaration {
-        scope: Default::default(),
-        name: name.into(),
-        title: Some(format!("{name} (title)")),
-        views: vec!["s0".into()],
-        membership: MembershipSource::Enumerated,
-        value_set: Default::default(),
-        visibility: None,
-        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         // **No criterion**, deliberately: these cases are about what the membership *is* after a
         // fold, and a criterion would turn a wrong count into an absence, which is a weaker
         // assertion than a wrong number.
         require_member_visibility: None,
-        hierarchy: Hierarchy {
-            kind: HierarchyKind::Flat,
-            prune_children: false,
-        },
         content: ContentDeclaration {
             computed: vec!["centroid".into()],
             supplied: Vec::new(),
         },
-        depends_on: Vec::new(),
-        levels: Vec::new(),
         // Pinned to rows: these cases are about the tile index and the containment partition an
         // artifact-major level folds into, which a flat level is not served in otherwise.
         layout: Some(mosaica_types::layer::ServingLayout::ArtifactMajor),
-        shape: None,
+        ..flat_declaration(name)
     }
 }
 
 impl Fixture {
-    fn open(&self) -> Engine {
-        let engine = open_engine_publishing(&self.root, &self.cache, &self.wal);
-        engine.set_background_refresh_for_test(false);
-        engine
-    }
-
-    fn members(&self, source_ids: impl Iterator<Item = u64>) -> Vec<EntityId> {
-        let map = source_to_new_map(&self.root, "v00000");
-        source_ids.map(|s| EntityId::new(map[&s])).collect()
-    }
-
     /// The corpus entity behind one source id — what a delete or a suppress is addressed to.
     fn member(&self, source_id: u64) -> EntityId {
         self.members(std::iter::once(source_id))[0]
@@ -106,11 +79,23 @@ impl Fixture {
 
     /// The `level_versions` the served side manifest states, as `(layer, level, version)`.
     fn stated_level_versions(&self) -> Vec<(String, u32, u64)> {
-        side_manifest(&self.root)
-            .only_shard()
-            .level_versions
+        let manifest = side_manifest(&self.root);
+        manifest
+            .layer_spaces
             .iter()
-            .map(|v| (v.layer.clone(), v.level, v.version))
+            .flat_map(|space| {
+                let layer = manifest
+                    .partition
+                    .layers
+                    .iter()
+                    .find(|layer| layer.space == space.space)
+                    .map(|layer| layer.declaration.name.clone())
+                    .unwrap_or_default();
+                space
+                    .level_versions
+                    .iter()
+                    .map(move |v| (layer.clone(), v.level, v.version))
+            })
             .collect()
     }
 }
@@ -169,7 +154,7 @@ fn publish(
 #[test]
 fn a_fold_rewrites_the_memberships_into_the_prefix_it_publishes() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     publish(&fx, &engine, 0..300);
     let before = fx.live_prefix(&engine);
 
@@ -200,7 +185,7 @@ fn a_fold_rewrites_the_memberships_into_the_prefix_it_publishes() {
 #[test]
 fn a_deleted_member_is_gone_after_the_fold_and_a_suppressed_one_comes_back() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     publish(&fx, &engine, 0..300);
     assert_eq!(count(&engine), 300);
 
@@ -243,7 +228,7 @@ fn a_deleted_member_is_gone_after_the_fold_and_a_suppressed_one_comes_back() {
 fn what_the_fold_retired_is_gone_from_the_prefix_a_restart_opens() {
     let fx = fixture();
     {
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         publish(&fx, &engine, 0..300);
         engine
             .accept_change(fx.member(7), ChangeOp::Delete)
@@ -252,7 +237,7 @@ fn what_the_fold_retired_is_gone_from_the_prefix_a_restart_opens() {
         assert_eq!(count(&engine), 299);
     }
 
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     assert_eq!(
         engine.published_artifacts(),
         1,
@@ -267,24 +252,6 @@ fn what_the_fold_retired_is_gone_from_the_prefix_a_restart_opens() {
 
 // ---- the containment partition, across a restart -----------------------------------------------
 
-/// Run ticks until the log has rotated far enough that a restart replays nothing — which is what
-/// releases the artifact pins the fold has just cleared. Two, for `artifact_interleavings`'
-/// reason: the first seals the member the publication is in, the second reclaims it.
-fn rotate(engine: &Engine) {
-    for _ in 0..2 {
-        let before = engine.write_executor_stats().ticks;
-        engine.request_flush();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while engine.write_executor_stats().ticks <= before {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the tick that rotates the log never ran"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-    }
-}
-
 /// **The fold writes a containment partition and a restart takes it up.** The alternative is not a
 /// wrong answer — a level with no partition composes one on first use — it is the whole
 /// consolidation the fold exists to do, landing on whichever request arrives first instead.
@@ -296,7 +263,7 @@ fn rotate(engine: &Engine) {
 fn the_fold_writes_a_containment_partition_a_restart_adopts() {
     let fx = fixture();
     {
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         publish(&fx, &engine, 0..300);
         fold(&engine);
         assert_eq!(
@@ -304,10 +271,10 @@ fn the_fold_writes_a_containment_partition_a_restart_adopts() {
             1,
             "one partition per level, under the prefix the fold published"
         );
-        rotate(&engine);
+        reclaim_log(&engine);
     }
 
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     assert_eq!(
         engine.artifact_containment_partitions_adopted(),
         1,
@@ -333,7 +300,7 @@ fn the_fold_writes_a_containment_partition_a_restart_adopts() {
 fn a_growth_after_the_fold_leaves_the_partition_unadopted() {
     let fx = fixture();
     {
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         publish(&fx, &engine, 0..300);
         // Resolved before the fold: the `id` index is read from the prefix the fold is about to
         // reclaim.
@@ -351,7 +318,7 @@ fn a_growth_after_the_fold_leaves_the_partition_unadopted() {
                 )],
             )
             .expect("the growth is accepted");
-        rotate(&engine);
+        reclaim_log(&engine);
         assert_eq!(
             count(&engine),
             320,
@@ -359,7 +326,7 @@ fn a_growth_after_the_fold_leaves_the_partition_unadopted() {
         );
     }
 
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     assert_eq!(
         engine.artifact_containment_partitions_adopted(),
         0,
@@ -392,7 +359,7 @@ fn a_growth_after_the_fold_leaves_the_partition_unadopted() {
 #[test]
 fn a_fold_that_retires_a_member_names_no_partition_for_that_level() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     publish(&fx, &engine, 0..300);
     engine
         .accept_change(fx.member(7), ChangeOp::Delete)
@@ -409,10 +376,10 @@ fn a_fold_that_retires_a_member_names_no_partition_for_that_level() {
         "and it states the level's version, so a restart seeds the level at the version the \
          fold's other structures are stamped with"
     );
-    rotate(&engine);
+    reclaim_log(&engine);
     drop(engine);
 
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     assert_eq!(engine.artifact_containment_partitions_adopted(), 0);
     assert_eq!(count(&engine), 299, "and the retired member is gone");
     assert_eq!(
@@ -434,7 +401,7 @@ fn a_fold_that_retires_a_member_names_no_partition_for_that_level() {
 fn the_fold_writes_a_tile_index_a_restart_adopts() {
     let fx = fixture();
     {
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         publish(&fx, &engine, 0..300);
         fold(&engine);
         assert_eq!(
@@ -442,10 +409,10 @@ fn the_fold_writes_a_tile_index_a_restart_adopts() {
             1,
             "one column per (view, layer, level), under the prefix the fold published"
         );
-        rotate(&engine);
+        reclaim_log(&engine);
     }
 
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     // The first request for the level claims it; before that nothing has asked.
     assert_eq!(count(&engine), 300);
     assert_eq!(
@@ -466,7 +433,7 @@ fn the_fold_writes_a_tile_index_a_restart_adopts() {
 fn a_growth_after_the_fold_leaves_the_tile_index_unadopted() {
     let fx = fixture();
     {
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         publish(&fx, &engine, 0..300);
         // Resolved before the fold: the `id` index is read from the prefix the fold is about to
         // reclaim.
@@ -483,10 +450,10 @@ fn a_growth_after_the_fold_leaves_the_tile_index_unadopted() {
                 )],
             )
             .expect("the growth is accepted");
-        rotate(&engine);
+        reclaim_log(&engine);
     }
 
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     assert_eq!(
         count(&engine),
         320,
@@ -511,7 +478,7 @@ fn a_growth_after_the_fold_leaves_the_tile_index_unadopted() {
 #[test]
 fn a_fold_that_retires_a_member_writes_the_tile_index_the_publication_adopts() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     publish(&fx, &engine, 0..300);
     assert_eq!(count(&engine), 300);
     engine
@@ -546,10 +513,10 @@ fn a_fold_that_retires_a_member_writes_the_tile_index_the_publication_adopts() {
         "the first fold stated the version the level had after its retirement"
     );
     assert_eq!(engine.artifact_tile_indexes_adopted(), 2);
-    rotate(&engine);
+    reclaim_log(&engine);
     drop(engine);
 
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     assert_eq!(count(&engine), 299);
     assert_eq!(
         engine.artifact_tile_indexes_adopted(),
@@ -563,7 +530,7 @@ fn a_fold_that_retires_a_member_writes_the_tile_index_the_publication_adopts() {
 /// served whole, and a restart claims it again.
 fn own_entity_retired_at(retired: usize) {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.register_layer(declaration("clusters/a")).unwrap();
     let ids = engine
         .publish_artifacts(
@@ -590,9 +557,9 @@ fn own_entity_retired_at(retired: usize) {
         .map(|ordinal| (Some(format!("c{ordinal}")), 100))
         .collect();
 
-    let deleted = artifact_entity(&engine, ids[retired]);
+    let deleted = artifact_target(&engine, ids[retired]);
     engine
-        .accept_change(deleted, ChangeOp::Delete)
+        .accept_changes(vec![(deleted, ChangeOp::Delete)])
         .expect("an artifact takes a deletion like any other entity");
     assert_eq!(served(&engine), survivors, "hidden at the ack");
     fold(&engine);
@@ -607,10 +574,10 @@ fn own_entity_retired_at(retired: usize) {
         survivors,
         "the retired artifact is absent from the adopted index and the survivors are whole"
     );
-    rotate(&engine);
+    reclaim_log(&engine);
     drop(engine);
 
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     assert_eq!(served(&engine), survivors);
     assert_eq!(engine.artifact_tile_indexes_adopted(), 1);
 }
@@ -639,7 +606,7 @@ fn a_fold_that_retires_the_top_artifact_writes_an_index_the_survivors_fit() {
 #[test]
 fn a_second_fold_rewrites_what_the_first_one_wrote() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     publish(&fx, &engine, 0..300);
     fold(&engine);
     let after_first = fx.live_prefix(&engine);
@@ -700,7 +667,7 @@ fn ingest(engine: &Engine, name: &[u8]) -> EntityId {
 #[test]
 fn a_member_ingested_since_the_last_fold_counts_from_its_flush() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.register_layer(declaration("clusters/a")).unwrap();
 
     // A member that does not exist when the corpus is built: ingested here, and named by the
@@ -749,7 +716,7 @@ fn a_member_ingested_since_the_last_fold_counts_from_its_flush() {
 #[test]
 fn a_flush_disturbs_no_artifacts_count() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     publish(&fx, &engine, 0..300);
     assert_eq!(count(&engine), 300);
 
@@ -778,7 +745,7 @@ fn a_flush_disturbs_no_artifacts_count() {
 #[test]
 fn a_merge_that_renumbers_extent_rows_disturbs_no_artifacts_count() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.set_merge_for_test(false);
     publish(&fx, &engine, 0..300);
     assert_eq!(count(&engine), 300);
@@ -860,7 +827,7 @@ fn publish_described(fx: &Fixture, engine: &Engine) {
 fn a_deleted_source_withdraws_the_content_at_the_fold_and_the_artifact_with_it() {
     let fx = fixture();
     {
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         engine.register_layer(content_layer()).unwrap();
         publish_described(&fx, &engine);
         assert_eq!(
@@ -886,7 +853,7 @@ fn a_deleted_source_withdraws_the_content_at_the_fold_and_the_artifact_with_it()
         );
     }
 
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     assert!(
         artifacts_of(&engine, &full_coverage_credential()).is_empty(),
         "the withdrawal is what the prefix says, not something the process was remembering"
@@ -913,7 +880,7 @@ fn a_deleted_source_withdraws_the_content_at_the_fold_and_the_artifact_with_it()
 #[test]
 fn a_deleted_source_withdraws_only_the_content_whose_set_named_it() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.register_layer(content_layer()).unwrap();
 
     // The fixture gives the subset term to every third source id, so `7` is outside this set.
@@ -999,7 +966,7 @@ fn a_deleted_source_withdraws_only_the_content_whose_set_named_it() {
 #[test]
 fn publication_refuses_a_deleted_member_and_accepts_a_suppressed_one() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.register_layer(declaration("clusters/a")).unwrap();
 
     let deleted = fx.member(7);
@@ -1067,7 +1034,7 @@ fn publication_refuses_a_deleted_member_and_accepts_a_suppressed_one() {
 #[test]
 fn publication_refuses_a_generating_set_naming_a_deleted_document() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.register_layer(content_layer()).unwrap();
     engine
         .accept_change(fx.member(7), ChangeOp::Delete)
@@ -1108,7 +1075,7 @@ fn report_on_disk(fx: &Fixture, prefix: &str) -> serde_json::Value {
 #[test]
 fn the_fold_reports_what_its_deletions_took_from_every_artifact_that_held_them() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     let mut layer = declaration("clusters/a");
     layer.content.supplied = vec![mosaica_types::layer::SuppliedContent {
         name: "topic".into(),
@@ -1170,7 +1137,7 @@ fn the_fold_reports_what_its_deletions_took_from_every_artifact_that_held_them()
 #[test]
 fn a_fold_that_degraded_nothing_writes_an_empty_report_rather_than_none() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     publish(&fx, &engine, 0..300);
 
     fold(&engine);
@@ -1190,7 +1157,7 @@ fn a_fold_that_degraded_nothing_writes_an_empty_report_rather_than_none() {
 #[test]
 fn a_later_fold_does_not_reclaim_an_earlier_folds_report() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     publish(&fx, &engine, 0..300);
     engine
         .accept_change(fx.member(7), ChangeOp::Delete)
@@ -1222,7 +1189,7 @@ fn a_later_fold_does_not_reclaim_an_earlier_folds_report() {
 #[test]
 fn a_fold_whose_report_cannot_be_written_is_discarded_and_retires_nothing() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     publish(&fx, &engine, 0..300);
     engine
         .accept_change(fx.member(7), ChangeOp::Delete)
@@ -1281,7 +1248,7 @@ fn labels_over(target: &str) -> LayerDeclaration {
 #[test]
 fn a_deleted_artifact_leaves_the_level_at_the_fold_and_its_ordinal_stays_a_hole() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.register_layer(declaration("clusters/a")).unwrap();
     let ids = engine
         .publish_artifacts(
@@ -1299,10 +1266,10 @@ fn a_deleted_artifact_leaves_the_level_at_the_fold_and_its_ordinal_stays_a_hole(
 
     // The middle one, so a level that packed around the gap would be caught by the survivor after
     // it rather than by a count alone.
-    let deleted = artifact_entity(&engine, ids[1]);
-    let last_before = artifact_entity(&engine, ids[2]);
+    let deleted = artifact_target(&engine, ids[1]);
+    let last_before = artifact_target(&engine, ids[2]);
     engine
-        .accept_change(deleted, ChangeOp::Delete)
+        .accept_changes(vec![(deleted, ChangeOp::Delete)])
         .expect("an artifact takes a deletion like any other entity");
     assert_eq!(artifacts_of(&engine, &full_coverage_credential()).len(), 2, "hidden at the ack");
     fold(&engine);
@@ -1343,8 +1310,8 @@ fn deleting_the_last_artifact_of_a_level_does_not_hand_its_identity_to_the_next_
     // Resolved before the fold: `members` reads the built prefix's `id` index, and the fold
     // reclaims that prefix. Entities are stable across it, so the set is still the right one.
     let later_members = fx.members(200..300);
-    let deleted_entity = {
-        let engine = fx.open();
+    let deleted = {
+        let engine = fx.open_unrefreshed();
         engine.register_layer(declaration("clusters/a")).unwrap();
         let ids = engine
             .publish_artifacts(
@@ -1358,16 +1325,16 @@ fn deleting_the_last_artifact_of_a_level_does_not_hand_its_identity_to_the_next_
             .unwrap();
         wait_for_publication(&fx, &engine, 1);
         // The **last** one, so the hole it leaves is at the top of the level.
-        let entity = artifact_entity(&engine, ids[1]);
+        let target = artifact_target(&engine, ids[1]);
         engine
-            .accept_change(entity, ChangeOp::Delete)
+            .accept_changes(vec![(target, ChangeOp::Delete)])
             .expect("the delete is accepted");
         fold(&engine);
-        entity
+        target
     };
 
     // Reopened, so the level is what the extent says rather than what this process remembered.
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     let ids = engine
         .publish_artifacts(
             "clusters/a".into(),
@@ -1378,10 +1345,10 @@ fn deleting_the_last_artifact_of_a_level_does_not_hand_its_identity_to_the_next_
             )],
         )
         .unwrap();
-    let fresh = artifact_entity(&engine, ids[0]);
+    let fresh = artifact_target(&engine, ids[0]);
 
     assert_ne!(
-        fresh, deleted_entity,
+        fresh, deleted,
         "the new artifact took the deleted one's entity, so one identifier now names two artifacts"
     );
     assert_eq!(
@@ -1399,11 +1366,11 @@ fn deleting_the_last_artifact_of_a_level_does_not_hand_its_identity_to_the_next_
 fn a_deleted_artifact_does_not_return_when_its_overlay_entry_retires() {
     let fx = fixture();
     {
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         let id = publish(&fx, &engine, 0..300);
-        let entity = artifact_entity(&engine, id);
+        let target = artifact_target(&engine, id);
         engine
-            .accept_change(entity, ChangeOp::Delete)
+            .accept_changes(vec![(target, ChangeOp::Delete)])
             .expect("the delete is accepted");
         fold(&engine);
         assert!(artifacts_of(&engine, &full_coverage_credential()).is_empty());
@@ -1411,7 +1378,7 @@ fn a_deleted_artifact_does_not_return_when_its_overlay_entry_retires() {
 
     // **Reopened, which is where a surviving slot would show.** The overlay entry is retired and
     // gone from the manifest; nothing but the absence of the record keeps the artifact away.
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     assert!(
         artifacts_of(&engine, &full_coverage_credential()).is_empty(),
         "the artifact stayed gone across the retirement of the entry that was hiding it"
@@ -1432,7 +1399,7 @@ fn a_deleted_artifact_does_not_return_when_its_overlay_entry_retires() {
 #[test]
 fn a_label_stays_withheld_after_the_fold_that_retired_its_cluster() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.register_layer(declaration("clusters/a")).unwrap();
     engine.register_layer(labels_over("clusters/a")).unwrap();
     let cluster_id = engine
@@ -1471,9 +1438,9 @@ fn a_label_stays_withheld_after_the_fold_that_retired_its_cluster() {
         "the cluster and its label both serve to begin with"
     );
 
-    let cluster = artifact_entity(&engine, cluster_id);
+    let cluster = artifact_target(&engine, cluster_id);
     engine
-        .accept_change(cluster, ChangeOp::Delete)
+        .accept_changes(vec![(cluster, ChangeOp::Delete)])
         .expect("the delete is accepted");
     assert!(
         artifacts_of(&engine, &full_coverage_credential()).is_empty(),
@@ -1499,7 +1466,7 @@ fn a_label_stays_withheld_after_the_fold_that_retired_its_cluster() {
 fn supplied_content_survives_the_fold_and_the_restart_after_it() {
     let fx = fixture();
     {
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         let mut layer = declaration("topics/a");
         layer.content.supplied = vec![mosaica_types::layer::SuppliedContent {
             name: "topic".into(),
@@ -1532,7 +1499,7 @@ fn supplied_content_survives_the_fold_and_the_restart_after_it() {
     // **Restarted, which is the half that needs the blob.** The resident copy carries the values;
     // a record restored from a packed extent does not, and the serving path reads them from the
     // blob the fold carried forward.
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     let served = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(
         served.len(),
@@ -1556,7 +1523,7 @@ fn supplied_content_survives_the_fold_and_the_restart_after_it() {
 fn deleting_a_cluster_deletes_its_labels_and_they_retire_at_the_same_fold() {
     let fx = fixture();
     let cluster_entity = {
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         engine.register_layer(declaration("clusters/a")).unwrap();
         engine.register_layer(labels_over("clusters/a")).unwrap();
         let cluster_id = engine
@@ -1592,16 +1559,20 @@ fn deleting_a_cluster_deletes_its_labels_and_they_retire_at_the_same_fold() {
         assert_eq!(artifacts_of(&engine, &full_coverage_credential()).len(), 2);
         assert_eq!(engine.published_artifacts(), 2);
 
-        let cluster = artifact_entity(&engine, cluster_id);
-        assert_eq!(engine.overlay_depth(), 0, "nothing is denied yet");
+        let cluster = artifact_target(&engine, cluster_id);
+        assert_eq!(
+            engine.generation_status().layer_spaces.retirable,
+            0,
+            "nothing is deleted yet"
+        );
         engine
-            .accept_change(cluster, ChangeOp::Delete)
+            .accept_changes(vec![(cluster, ChangeOp::Delete)])
             .expect("the delete is accepted");
 
         // **Two dispositions from one command.** The cluster's own, and the label's — the cascade,
         // carried in the same window, on the same lane, with its own durable record.
         assert_eq!(
-            engine.overlay_depth(),
+            engine.generation_status().layer_spaces.retirable,
             2,
             "the label was deleted with its cluster rather than merely withheld behind it"
         );
@@ -1621,7 +1592,7 @@ fn deleting_a_cluster_deletes_its_labels_and_they_retire_at_the_same_fold() {
     // **Reopened, which is where a cascade that only hid the label would show.** The overlay
     // entries are retired and gone from the manifest, so nothing but the absence of the records
     // keeps either artifact away.
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     assert!(
         artifacts_of(&engine, &full_coverage_credential()).is_empty(),
         "the label stayed gone across the retirement of the entry that was hiding it"
@@ -1653,7 +1624,7 @@ fn deleting_a_cluster_deletes_its_labels_and_they_retire_at_the_same_fold() {
 fn a_fold_rehouses_every_membership_onto_the_prefix_it_published() {
     let fx = fixture();
     {
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         publish(&fx, &engine, 0..300);
     }
     // **The log goes, so the seed is the extent's own doing.** A WAL record postdates any state a
@@ -1663,7 +1634,7 @@ fn a_fold_rehouses_every_membership_onto_the_prefix_it_published() {
 
     // Reopened, so the memberships are the seed's views over the prefix's extent rather than the
     // heap bitmaps the publication built.
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     let superseded = fx.live_prefix(&engine);
     let seeded = engine.level_memberships_for_test("clusters/a", 0);
     assert_eq!(seeded.len(), 1);
@@ -1788,7 +1759,7 @@ fn count_of(engine: &Engine, layer: &str, key: &str) -> u64 {
 #[test]
 fn a_borrowing_label_takes_its_targets_flushed_member() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.register_layer(declaration("clusters/a")).unwrap();
     let fresh = ingest(&engine, b"fresh-for-the-label");
     let mut members = fx.members(0..300);
@@ -1828,7 +1799,7 @@ fn a_borrowing_label_takes_its_targets_flushed_member() {
 #[test]
 fn a_borrowing_label_keeps_its_targets_membership_across_a_fold() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     publish(&fx, &engine, 0..300);
     publish_borrowing_label(&engine);
     wait_for_publication(&fx, &engine, 2);

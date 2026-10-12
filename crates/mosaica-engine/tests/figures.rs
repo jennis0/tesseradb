@@ -362,7 +362,7 @@ impl Fixture {
 
     fn change_entities(&mut self, engine: &Engine, entities: &[EntityId], op: ChangeOp) {
         engine
-            .accept_changes(entities.iter().map(|e| (*e, op)).collect())
+            .accept_changes(entities.iter().map(|e| (item(*e), op)).collect())
             .unwrap();
         for e in entities {
             match op {

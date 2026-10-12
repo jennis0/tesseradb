@@ -215,7 +215,7 @@ fn mint_cells<'a>(
 /// A full shard is refused at admission; this is the backstop.
 fn fail_allocation(
     health: &ExecutorHealth,
-    error: AllocError,
+    error: mosaica_types::ShardFull,
     waiters: Vec<Vec<Reply<Ingested>>>,
     entries: u64,
     started: std::time::Instant,

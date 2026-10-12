@@ -23,8 +23,10 @@
 
 use croaring::Bitmap;
 
+use std::collections::BTreeMap;
+
 use mosaica_authz::Dict;
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, LayerSpace, ShardId, Target};
 
 use crate::buffer::{DescriptorResolver, IngestBuffer};
 use crate::wal::{ChangeOp, OverlaySnapshotEntry, WalRecord};
@@ -211,44 +213,74 @@ impl Overlay {
         executed.and(&self.deleted).and(&self.suppressed)
     }
 
-    /// Re-state this overlay as WAL records, so the `ChangeBatch` records it was accumulated
-    /// from can be deleted (lifecycle §4's rotation; [`WalRecord::OverlaySnapshot`]).
+    /// Re-state this overlay as WAL records, each entity named as `target` makes it, so the
+    /// `ChangeBatch` records it was accumulated from can be deleted (lifecycle §4's rotation;
+    /// [`WalRecord::OverlaySnapshot`]).
     ///
     /// **Entries are ordered by entity id**, so the same overlay always encodes to the same bytes.
     /// A record whose bytes depend on a set's iteration order is one that cannot be compared,
     /// re-derived, or re-encoded by [`crate::Wal::retry_durability`] with any confidence.
-    ///
-    /// There is no neutral-entry rule here any more, and its absence is the point: under one map a
-    /// `suppress → unsuppress` left a husk whose presence was load-bearing, so the snapshot had to
-    /// emit an `Unsuppress` to preserve it. Separate stores make the husk unrepresentable.
-    pub fn snapshot(&self) -> Vec<OverlaySnapshotEntry> {
+    pub fn snapshot(&self, target: impl Fn(EntityId) -> Target) -> Vec<OverlaySnapshotEntry> {
         let mut out = Vec::with_capacity(self.len());
         for entity in self.touched() {
             if self.is_deleted(entity) {
                 out.push(OverlaySnapshotEntry {
-                    entity_id: entity,
+                    target: target(entity),
                     op: ChangeOp::Delete,
                 });
             }
             if self.is_suppressed(entity) {
                 out.push(OverlaySnapshotEntry {
-                    entity_id: entity,
+                    target: target(entity),
                     op: ChangeOp::Suppress,
                 });
             }
         }
         out
     }
+}
 
-    /// Fold a snapshot back in.
-    ///
-    /// Applied, never assigned: the snapshot is a record in a position, and a `ChangeBatch`
-    /// earlier in the same file has already been applied when this runs.
-    pub fn apply_snapshot(&mut self, entries: &[OverlaySnapshotEntry]) {
-        for entry in entries {
-            self.apply(entry.entity_id, entry.op);
+/// The deny state of a shard's items and of every layer space's artifacts, each target in the
+/// overlay of the shard or the space it names.
+#[derive(Debug, Default, Clone)]
+pub struct Overlays {
+    pub items: Overlay,
+    /// One per layer space holding a deny; a space absent here denies nothing.
+    pub spaces: BTreeMap<LayerSpace, Overlay>,
+}
+
+impl Overlays {
+    /// Apply one change to the overlay its target names.
+    pub fn apply(&mut self, target: Target, op: ChangeOp) {
+        match target {
+            Target::Item(_, entity) => self.items.apply(entity, op),
+            Target::Artifact(space, entity) => {
+                self.spaces.entry(space).or_default().apply(entity, op)
+            }
         }
     }
+
+    /// Fold a snapshot back in, each entry into the overlay its target names. Applied, never
+    /// assigned: the snapshot is a record in a position, and a `ChangeBatch` earlier in the same
+    /// file has already been applied when this runs.
+    pub fn apply_snapshot(&mut self, entries: &[OverlaySnapshotEntry]) {
+        for entry in entries {
+            self.apply(entry.target, entry.op);
+        }
+    }
+}
+
+/// Every overlay re-stated as one snapshot: the items of `shard`, then each space's.
+pub fn snapshot<'o>(
+    shard: ShardId,
+    items: &Overlay,
+    spaces: impl IntoIterator<Item = (LayerSpace, &'o Overlay)>,
+) -> Vec<OverlaySnapshotEntry> {
+    let mut out = items.snapshot(|entity| Target::Item(shard, entity));
+    for (space, overlay) in spaces {
+        out.extend(overlay.snapshot(|entity| Target::Artifact(space, entity)));
+    }
+    out
 }
 
 /// Entity ids are capped at `u32::MAX` by the I9 allocator (contracts §2.6 r6), which is what lets
@@ -305,7 +337,7 @@ pub fn owner_id_only(group: &str, key: &str) -> Vec<String> {
 /// sequence (see [`DescriptorResolver::resume`]'s doc for why restarting descriptor extension ids
 /// would be fail-open).
 pub struct Replay<'a> {
-    overlay: Overlay,
+    overlay: Overlays,
     buffer: IngestBuffer,
     resolver: DescriptorResolver<'a>,
     view_ids_of_key: &'a dyn Fn(&str, &str) -> Vec<String>,
@@ -314,7 +346,7 @@ pub struct Replay<'a> {
 impl<'a> Replay<'a> {
     pub fn new(
         dict: &'a Dict,
-        seed: Overlay,
+        seed: Overlays,
         view_ids_of_key: &'a dyn Fn(&str, &str) -> Vec<String>,
     ) -> Self {
         // **The seed is the starting state, and replay runs over it — that order is load-bearing.**
@@ -353,10 +385,10 @@ impl<'a> Replay<'a> {
                 // An edit deletes the entity its item leaves and gives the new one the old one's
                 // suppression, both in the record that creates the new one.
                 for edit in edits {
-                    self.overlay.apply(edit.old, ChangeOp::Delete);
+                    self.overlay.items.apply(edit.old, ChangeOp::Delete);
                     if let Some(first) = edit.rows.first() {
                         if edit.suppressed {
-                            self.overlay.apply(first.entity_id, ChangeOp::Suppress);
+                            self.overlay.items.apply(first.entity_id, ChangeOp::Suppress);
                         }
                     }
                 }
@@ -374,9 +406,9 @@ impl<'a> Replay<'a> {
                 }
             }
             WalRecord::ChangeBatch { changes } => {
-                // No resolution at all: each entity was fixed at admission.
-                for (entity_id, op) in changes {
-                    self.overlay.apply(*entity_id, *op);
+                // No resolution at all: each target was fixed at admission, and names its overlay.
+                for (target, op) in changes {
+                    self.overlay.apply(*target, *op);
                 }
             }
             WalRecord::OverlaySnapshot { entries } => {
@@ -391,15 +423,10 @@ impl<'a> Replay<'a> {
             // read one.
             WalRecord::VocabularyMint { .. } => {}
             // **The registry is rebuilt by the caller, and only the deny lane is this replay's
-            // business.** A layer's own entity is an ordinary entity as far as the overlay is
-            // concerned: a suppression against it arrives as a `ChangeBatch` and is applied by
-            // the arm above, with no special case, which is the whole reason a layer takes an
-            // entity at all. What these records carry beyond that — the declaration and the
-            // reserved runs — belongs to the registry, which the write path rebuilds in its own
-            // walk of the log.
-            // An artifact's own entity is an ordinary entity here too, on the same argument: its
-            // suppression arrives as a `ChangeBatch`. The membership the record carries belongs
-            // to the artifact store, which the write path also rebuilds.
+            // business.** A suppression of a layer or an artifact arrives as a `ChangeBatch`
+            // naming its space and is applied by the arm above. What these records carry beyond
+            // that belongs to the registry and the artifact store, which the write path rebuilds
+            // in its own walk of the log.
             // **A drop discards the rows the buffer held for the view, here as on the live
             // path** (`views.md` §3.4, `Executor::publish_roster`). They name a coordinate system
             // that no longer exists, so nothing will ever give them geometry — and since a
@@ -421,7 +448,7 @@ impl<'a> Replay<'a> {
                 self.buffer
                     .remove_views(&(self.view_ids_of_key)(&view.group, &view.key));
                 for entity in deleted {
-                    self.overlay.apply(*entity, ChangeOp::Delete);
+                    self.overlay.items.apply(*entity, ChangeOp::Delete);
                 }
             }
             // A view create is the roster's, which the write path rebuilds, and names no entity.
@@ -441,9 +468,9 @@ impl<'a> Replay<'a> {
         }
     }
 
-    /// The overlay, the buffer and the resolver the records replayed to.
-    pub fn finish(mut self) -> (Overlay, IngestBuffer, DescriptorResolver<'a>) {
-        drop_deleted(&self.overlay, &mut self.buffer);
+    /// The overlays, the buffer and the resolver the records replayed to.
+    pub fn finish(mut self) -> (Overlays, IngestBuffer, DescriptorResolver<'a>) {
+        drop_deleted(&self.overlay.items, &mut self.buffer);
         (self.overlay, self.buffer, self.resolver)
     }
 }
@@ -582,16 +609,19 @@ mod tests {
 
         let entity = EntityId::new(7);
         let suppress = WalRecord::ChangeBatch {
-            changes: vec![(entity, ChangeOp::Suppress)],
+            changes: vec![(
+                mosaica_types::Target::Item(mosaica_types::ShardId::ZERO, entity),
+                ChangeOp::Suppress,
+            )],
         };
 
-        let mut once = Replay::new(&dict, Overlay::new(), &owner_id_only);
+        let mut once = Replay::new(&dict, Overlays::default(), &owner_id_only);
         once.apply(&suppress, 0, |_, _| false);
-        let (once, _, _) = once.finish();
-        let mut twice = Replay::new(&dict, Overlay::new(), &owner_id_only);
+        let once = once.finish().0.items;
+        let mut twice = Replay::new(&dict, Overlays::default(), &owner_id_only);
         twice.apply(&suppress, 0, |_, _| false);
         twice.apply(&suppress, 1, |_, _| false);
-        let (twice, _, _) = twice.finish();
+        let twice = twice.finish().0.items;
 
         assert_eq!(
             once.is_suppressed(entity),

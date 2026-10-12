@@ -5,8 +5,8 @@ pub use identity::{
 };
 mod shard;
 pub use shard::{
-    check_room, check_shard_size, only, ShardFull, ShardId, ShardLimit, ShardRow, ShardSizeError,
-    SHARD_SIZE_DEFAULT,
+    check_room, check_shard_size, only, LayerSpace, ShardFull, ShardId, ShardLimit, ShardRow,
+    ShardSizeError, Target, ENTITY_END, SHARD_SIZE_DEFAULT,
 };
 
 /// The process's own memory — the allocator's retention and the kernel's resident figures.
@@ -236,9 +236,14 @@ pub struct GenerationStamp {
 // `retired_numbers`. A 35 manifest lacks the fields and is refused as malformed.
 // 37: per-entity and per-view files are under `partitions/<p>/shards/<s>/` and dictionary extents
 // under `dictionary/`; a side-manifest carries `shards`. A 36 bundle is refused.
+// 38: each registered layer carries its layer space, the side-manifest `next_layer_space` and no
+// layer tombstones, and membership and derived extents and level versions name their layer's space.
+// An artifact's or a layer's identifier is of kind 1 over its space. A 37 bundle is refused.
+// 39: extents name their layer by its space alone, a space's record packs are `record_packs`, and a
+// stored attachment carries its target's space. A 38 bundle is refused.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility.
-pub const BUNDLE_FORMAT: u32 = 37;
+pub const BUNDLE_FORMAT: u32 = 39;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;

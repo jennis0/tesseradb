@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from oracle.identity import KIND_ARTIFACT, forward, pack_high
+from oracle.identity import forward_artifact
 from oracle.tenancy import HolderCount
 
 from .conftest import KEY, item
@@ -48,7 +48,7 @@ def test_a_deleted_items_number_is_taken_one_tenancy_higher_and_its_old_identifi
         pytest.param(item(3), id="the deleted item's own identifier"),
         pytest.param(item(4, 1), id="a number whose holder was not deleted"),
         pytest.param(item(12, 0, shard=1), id="another shard"),
-        pytest.param(forward(KEY, pack_high(KIND_ARTIFACT, 0, 0), 12), id="an artifact"),
+        pytest.param(forward_artifact(KEY, 0, 12), id="an artifact"),
     ],
 )
 def test_an_identifier_issued_out_of_turn_is_refused(count, issued):

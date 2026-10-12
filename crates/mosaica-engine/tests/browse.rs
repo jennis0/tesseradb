@@ -514,9 +514,9 @@ fn a_child_whose_parent_is_withheld_is_a_root() {
     // test can drive.
     let fx = fixture(None);
     let alpha = id_of(&fx, &full_coverage_credential(), "alpha");
-    let entity = fx.engine.resolve_mosaica_ids(&[alpha]).unwrap()[0].unwrap();
+    let target = artifact_target(&fx.engine, alpha);
     fx.engine
-        .accept_change(entity, mosaica_lifecycle::wal::ChangeOp::Suppress)
+        .accept_changes(vec![(target, mosaica_lifecycle::wal::ChangeOp::Suppress)])
         .unwrap();
     let roots = browse(
         &fx.engine,
@@ -588,18 +588,18 @@ fn a_rows_child_count_counts_only_the_children_this_principal_is_served() {
     );
 
     let one = id_of(&fx, &full_coverage_credential(), "alpha-one");
-    let entity = fx.engine.resolve_mosaica_ids(&[one]).unwrap()[0].unwrap();
+    let target = artifact_target(&fx.engine, one);
     fx.engine
-        .accept_change(entity, mosaica_lifecycle::wal::ChangeOp::Suppress)
+        .accept_changes(vec![(target, mosaica_lifecycle::wal::ChangeOp::Suppress)])
         .unwrap();
     let after = counts(&full_coverage_credential());
     assert_eq!(after[0], ("alpha".to_string(), 2), "the suppressed child is not counted");
     assert_eq!(counts(&subset_credential()), all(0));
 
     let two = id_of(&fx, &full_coverage_credential(), "alpha-two");
-    let entity = fx.engine.resolve_mosaica_ids(&[two]).unwrap()[0].unwrap();
+    let target = artifact_target(&fx.engine, two);
     fx.engine
-        .accept_change(entity, mosaica_lifecycle::wal::ChangeOp::Delete)
+        .accept_changes(vec![(target, mosaica_lifecycle::wal::ChangeOp::Delete)])
         .unwrap();
     let after = counts(&full_coverage_credential());
     assert_eq!(after[0], ("alpha".to_string(), 1), "nor is the deleted one");
@@ -1253,10 +1253,10 @@ fn a_write_to_a_label_layer_moves_the_names_on_the_next_browse() {
     let broad = full_coverage_credential();
     assert_eq!(lx.search(&broad, "only topic"), vec!["b3"]);
 
-    let x3 = artifact_entity(&lx.fx.engine, lx.ids["x3"]);
+    let x3 = artifact_target(&lx.fx.engine, lx.ids["x3"]);
     lx.fx
         .engine
-        .accept_change(x3, mosaica_lifecycle::wal::ChangeOp::Suppress)
+        .accept_changes(vec![(x3, mosaica_lifecycle::wal::ChangeOp::Suppress)])
         .unwrap();
     let names = lx.names(&broad);
     assert!(names.contains(&("b3".to_string(), None)), "{names:?}");

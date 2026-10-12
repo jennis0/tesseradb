@@ -69,17 +69,6 @@ fn declaration(
     }
 }
 
-impl Fixture {
-    fn open(&self) -> Engine {
-        open_engine_publishing(&self.root, &self.cache, &self.wal)
-    }
-
-    fn members(&self, source_ids: impl Iterator<Item = u64>) -> Vec<EntityId> {
-        let map = source_to_new_map(&self.root, "v00000");
-        source_ids.map(|s| EntityId::new(map[&s])).collect()
-    }
-}
-
 /// One node of a planted tree: a key, its parent's key, and the source ids it holds.
 fn node(
     fx: &Fixture,
@@ -384,16 +373,14 @@ fn a_suppressed_parent_does_not_take_its_child_with_it() {
         vec!["leaf", "other"]
     );
 
-    // The root's own entity, which is what a suppression addresses. Two leaves do not fit in a
+    // The root's own target, which is what a suppression addresses. Two leaves do not fit in a
     // budget of one, so this cut is the root alone — which is how the test names it without an
     // ordinal, none of which crosses the boundary.
     let served = artifacts_of(&engine, &credential, Some(1));
     assert_eq!(keys(&served), vec!["root"]);
-    let root_entity = engine
-        .resolve_mosaica_ids(&[served[0].mosaica_id]).unwrap()[0]
-        .expect("it names what was issued");
+    let root = artifact_target(&engine, served[0].mosaica_id);
     engine
-        .accept_change(root_entity, mosaica_lifecycle::wal::ChangeOp::Suppress)
+        .accept_changes(vec![(root, mosaica_lifecycle::wal::ChangeOp::Suppress)])
         .expect("the suppress is accepted");
 
     assert_eq!(
@@ -444,12 +431,10 @@ fn a_deleted_parent_leaves_its_child_a_root() {
     let credential = full_coverage_credential();
     let served = artifacts_of(&engine, &credential, Some(1));
     assert_eq!(keys(&served), vec!["root"]);
-    let root_entity = engine
-        .resolve_mosaica_ids(&[served[0].mosaica_id]).unwrap()[0]
-        .expect("it names what was issued");
+    let root = artifact_target(&engine, served[0].mosaica_id);
 
     engine
-        .accept_change(root_entity, mosaica_lifecycle::wal::ChangeOp::Delete)
+        .accept_changes(vec![(root, mosaica_lifecycle::wal::ChangeOp::Delete)])
         .expect("the delete is accepted");
     assert_eq!(
         keys(&artifacts_of(&engine, &credential, None)),
@@ -1685,29 +1670,33 @@ fn parents_in_bundle(
     engine: &Engine,
     key: &str,
 ) -> Vec<mosaica_lifecycle::wal::ParentRef> {
-    let dir = fx
-        .root
-        .join(&engine.generation().prefix)
-        .join(common::SHARD.members_rel());
+    use mosaica_store::membership::{LevelPack, PackKind};
+    let prefix_dir = fx.root.join(&engine.generation().prefix);
+    let manifest = common::side_manifest(&fx.root);
     let mut found = None;
-    for entry in std::fs::read_dir(&dir)
-        .expect("the fold wrote record packs")
-        .flatten()
-    {
-        let path = entry.path();
-        if path.extension().is_none_or(|e| e != "tsmb") {
-            continue;
-        }
-        let pack = mosaica_store::membership::MembershipPack::open(&path).expect("a pack opens");
-        for (_, blob) in pack.iter() {
-            if blob.is_empty() {
-                continue;
-            }
-            let (record, _) = mosaica_lifecycle::membership::decode_record(EntityId::new(1), blob)
-                .expect("a record the fold wrote decodes");
-            if record.key.as_deref() == Some(key) {
-                assert!(found.is_none(), "one artifact under {key}");
-                found = Some(record.parents);
+    for space in &manifest.layer_spaces {
+        for extent in &space.record_packs {
+            let members = manifest
+                .only_shard()
+                .membership_extents
+                .iter()
+                .find(|m| m.pairs(space.space, extent))
+                .expect("a member pack beside every record pack");
+            let records = LevelPack::open(&prefix_dir.join(&extent.path), PackKind::Records)
+                .expect("a record pack opens");
+            let members = LevelPack::open(&prefix_dir.join(&members.path), PackKind::Members)
+                .expect("a member pack opens");
+            for ((_, blob), (_, members)) in records.iter().zip(members.iter()) {
+                if blob.is_empty() {
+                    continue;
+                }
+                let (record, _) =
+                    mosaica_lifecycle::membership::decode_record(EntityId::new(1), blob, members)
+                        .expect("a record the fold wrote decodes");
+                if record.key.as_deref() == Some(key) {
+                    assert!(found.is_none(), "one artifact under {key}");
+                    found = Some(record.parents);
+                }
             }
         }
     }

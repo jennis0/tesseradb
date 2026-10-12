@@ -59,6 +59,18 @@ pub struct PartitionStatus {
     pub watermark: u64,
 }
 
+/// The layer spaces' overlay figures, summed over every space: what `/control/status` publishes
+/// as `layer_spaces`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayerSpacesStatus {
+    /// Registered layers, each holding one space.
+    pub count: usize,
+    /// Denied artifacts and layers.
+    pub depth: usize,
+    /// Deleted artifacts, whose records a fold removes.
+    pub retirable: u64,
+}
+
 /// What [`Engine::generation_status`] answers.
 #[derive(Debug, Clone)]
 pub struct GenerationStatus {
@@ -66,8 +78,10 @@ pub struct GenerationStatus {
     /// Sorted by `(partition, view)`.
     pub segments: Vec<ViewSegments>,
     pub live_rows: u64,
+    /// The point shard's denied items, and its deletions.
     pub overlay_depth: usize,
     pub retirable_deletions: u64,
+    pub layer_spaces: LayerSpacesStatus,
     pub fragment_cache: mosaica_authz::fragment::CacheStats,
     pub fragment_cache_rebuilds: u64,
 }
@@ -325,12 +339,18 @@ impl Engine {
     pub fn generation_status(&self) -> GenerationStatus {
         let generation = self.generation.load();
         let shard = generation.only_shard();
+        let (depth, retirable) = generation.space_overlay_figures();
         GenerationStatus {
             partitions: partition_status_of(&generation),
             segments: segment_counts_of(&generation),
             live_rows: live_rows_of(&generation),
             overlay_depth: shard.overlay.len(),
             retirable_deletions: shard.overlay.deleted_len(),
+            layer_spaces: LayerSpacesStatus {
+                count: self.write.live().layer_count(),
+                depth,
+                retirable,
+            },
             fragment_cache: shard.fragments.stats(),
             fragment_cache_rebuilds: shard.fragments.rebuild_count(),
         }
@@ -497,12 +517,6 @@ impl Engine {
     /// occupancy bound is checked against. Lags by at most one apply.
     pub fn buffered_items(&self) -> usize {
         self.write.health().buffered_items.load(Ordering::SeqCst)
-    }
-
-    /// One past the lowest row-less entity ever allocated. Read beside the high-water mark:
-    /// together they say how much of the entity space is left.
-    pub fn allocator_low_water(&self) -> u64 {
-        self.write.live().only_shard().low_water()
     }
 
     /// How many artifacts this node holds, across every layer. No per-layer form: that would be a

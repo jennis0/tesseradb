@@ -370,14 +370,14 @@ fn the_band_route_serves_what_the_scan_serves_through_writes_a_fold_and_a_restar
     check_all(&engine);
 
     // Deletions and suppressions, applied through the mask: the denied rows stay in the bands.
-    let mut changes: Vec<(EntityId, ChangeOp)> = (0..ROWS)
+    let mut changes: Vec<(mosaica_types::Target, ChangeOp)> = (0..ROWS)
         .filter(|e| e.is_multiple_of(3) && e.is_multiple_of(11))
-        .map(|e| (entity_of(&map, e), ChangeOp::Delete))
+        .map(|e| (item(entity_of(&map, e)), ChangeOp::Delete))
         .collect();
     changes.extend(
         (0..ROWS)
             .filter(|e| e.is_multiple_of(13) && *e != LONE)
-            .map(|e| (entity_of(&map, e), ChangeOp::Suppress)),
+            .map(|e| (item(entity_of(&map, e)), ChangeOp::Suppress)),
     );
     engine
         .accept_changes(changes)

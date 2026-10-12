@@ -515,7 +515,7 @@ fn assert_identity(engine: &Engine, samples: &[Planted]) {
         );
         let mosaica_id = engine.mosaica_id_of(planted.entity).expect("an opaque id");
         assert_eq!(
-            engine.resolve_mosaica_ids(&[mosaica_id]).expect("resolvable")[0],
+            items_of(engine, &[mosaica_id])[0],
             Some(planted.entity),
             "{} lost its mosaica_id",
             planted.key
@@ -1783,7 +1783,7 @@ fn p1_one_scale(base: u64) {
         .iter()
         .map(|&entity| {
             engine
-                .submit_changes(vec![(entity, ChangeOp::Delete)])
+                .submit_changes(vec![(item(entity), ChangeOp::Delete)])
                 .expect("the deny lane accepts a delete")
         })
         .collect();

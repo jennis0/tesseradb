@@ -91,7 +91,9 @@ import functools
 import itertools
 import json
 import re
+import shlex
 import shutil
+import sys
 import time
 import os
 import subprocess
@@ -563,6 +565,96 @@ def _discard_unflipped_prefixes(bundle_root: Path) -> tuple[str, ...]:
     return tuple(took)
 
 
+#: How much of `server.log` a failed walk prints.
+FAILURE_LOG_TAIL_BYTES = 16 * 1024
+
+#: The longest one attempt at reading a live server's stacks may take.
+STACK_TOOL_TIMEOUT_SECS = 30
+
+
+def _stack_commands(pid: int) -> list[list[str]]:
+    """The tools tried in turn for every thread's backtrace. `sudo` is there because Yama's
+    ``ptrace_scope`` of 1 refuses an attach to a process that is not the tracer's descendant, and
+    gdb is never the server's ancestor."""
+    gdb = [
+        "gdb",
+        "-nx",
+        "-iex",
+        "set debuginfod enabled off",
+        "-p",
+        str(pid),
+        "-batch",
+        "-ex",
+        "thread apply all bt",
+    ]
+    bounded = ["timeout", "-k", "5", str(STACK_TOOL_TIMEOUT_SECS)]
+    return [
+        [*bounded, *gdb],
+        ["sudo", "-n", *bounded, *gdb],
+        [*bounded, "eu-stack", "-p", str(pid)],
+    ]
+
+
+def _thread_backtraces(pid: int) -> tuple[str | None, list[str]]:
+    """The first tool's backtraces of every thread of `pid`, and why each tool before it gave
+    none."""
+    refused: list[str] = []
+    for argv in _stack_commands(pid):
+        try:
+            done = subprocess.run(  # nosemgrep
+                argv,
+                check=False,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=STACK_TOOL_TIMEOUT_SECS + 10,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            refused.append(f"{shlex.join(argv)}: {exc}")
+            continue
+        if re.search(r"^#\d+\s", done.stdout, re.MULTILINE):
+            return f"$ {shlex.join(argv)}\n{done.stdout}", refused
+        said = done.stderr.strip().splitlines()
+        refused.append(f"{shlex.join(argv)}: exit {done.returncode}: {said[-1] if said else ''}")
+    return None, refused
+
+
+def _thread_states(pid: int) -> str:
+    """Each thread's id, scheduler state, kernel wait channel and name — readable without
+    privilege when no tool can attach."""
+    lines = ["     tid state wchan                          name"]
+    for task in sorted(Path(f"/proc/{pid}/task").iterdir(), key=lambda t: int(t.name)):
+        try:
+            name = (task / "comm").read_text().strip()
+            wchan = (task / "wchan").read_text().strip() or "-"
+            stat = (task / "stat").read_text()
+        except OSError:
+            continue  # the thread exited while being listed
+        state = stat[stat.rindex(")") + 2 :].split()[0]
+        lines.append(f"{task.name:>8} {state:<5} {wchan:<30} {name}")
+    return "\n".join(lines)
+
+
+def server_diagnostics(pid: int | None, log_path: Path | None) -> str:
+    """What a hung server cannot report itself: every thread's backtrace of the live process
+    `pid` (or each thread's state, when no tool can attach), then the tail of `log_path`."""
+    parts = []
+    if pid is not None:
+        stacks, refused = _thread_backtraces(pid)
+        if stacks is None:
+            reasons = "\n".join(f"  {r}" for r in refused)
+            stacks = f"no backtrace could be taken:\n{reasons}\n{_thread_states(pid)}"
+        parts.append(f"--- threads of mosaica serve (pid {pid})\n{stacks}")
+    if log_path is not None and log_path.exists():
+        with log_path.open("rb") as log:
+            log.seek(max(0, log_path.stat().st_size - FAILURE_LOG_TAIL_BYTES))
+            tail = log.read()
+        parts.append(
+            f"--- last {len(tail)} bytes of {log_path}\n{tail.decode(errors='replace')}"
+        )
+    return "\n".join(parts)
+
+
 @dataclass
 class SuiteHarness:
     """One suite run's server, session and battery — the mutable context a plan walks.
@@ -610,6 +702,10 @@ class SuiteHarness:
     _scope_unit: str | None = field(default=None, init=False, repr=False)
     #: The last scope memory reading taken before its cgroup was reaped — the walk's measurement.
     memory_report: dict | None = field(default=None, init=False)
+    #: Every server this harness spawns appends its output here.
+    log_path: Path | None = field(default=None, init=False)
+    #: The current server's own argv, which is how its process is found under a scope.
+    _server_argv: list[bytes] | None = field(default=None, init=False, repr=False)
 
     @property
     def cache_dir(self) -> Path:
@@ -667,6 +763,7 @@ class SuiteHarness:
         env = os.environ.copy()
         env["MOSAICA_REFERENCE_OPERATOR_CRED"] = OPERATOR_CREDENTIAL
         argv = [str(binary), "serve", "--deployment", str(config_path)]
+        self._server_argv = [os.fsencode(a) for a in argv]
         if self.profile.memory_max is not None:
             self._reap_scope()  # a scope cannot be reused; a stale keeper must not outlive it
             self._scope_unit = f"mosaica-suite-{os.getpid()}-{next(_SCOPE_SEQ)}"
@@ -774,6 +871,33 @@ class SuiteHarness:
             "the cold-booted bundle never became ready",
             timeout=30.0,
         )
+
+    def _live_server_pid(self) -> int | None:
+        """The running server's pid: `self.proc` itself unless a scope wraps it, when it is
+        found by its argv, unique to this harness by the config path."""
+        if self._server_argv is None:
+            return None
+        candidates = [str(self.proc.pid)] if self.proc is not None else []
+        for entry in [*candidates, *os.listdir("/proc")]:
+            if not entry.isdigit():
+                continue
+            try:
+                cmdline = Path("/proc", entry, "cmdline").read_bytes()
+            except OSError:
+                continue
+            if cmdline.split(b"\0")[:-1] == self._server_argv:
+                return int(entry)
+        return None
+
+    def report_failure(self, stage_label: str) -> None:
+        """Write to stderr, for pytest to show beside the failure, the live server's threads and
+        the tail of its log. Never raises: the failure being reported is the one that matters."""
+        try:
+            text = server_diagnostics(self._live_server_pid(), self.log_path)
+        except Exception as exc:  # noqa: BLE001
+            text = f"the server's state could not be captured: {exc!r}"
+        sys.stderr.write(f"=== stage `{stage_label}` failed\n{text}\n")
+        sys.stderr.flush()
 
     # -- the constrained profile's scope (§12.5) ------------------------------------------------
 
@@ -1516,6 +1640,8 @@ def run_plan(h: SuiteHarness, plan: Sequence[Stage]) -> list[StageResult]:
     still holds exactly that stage — and any stage failure under a constrained profile passes
     through `raise_for_resource_outcome` first, so a run the kernel killed for memory surfaces
     as [`OutOfMemory`] rather than as whatever downstream error the death happened to cause.
+    Before any stage failure propagates, `report_failure` writes the server's threads, if it
+    still runs, and its log's tail to stderr.
     """
     results: list[StageResult] = []
     for stage in plan:
@@ -1531,6 +1657,7 @@ def run_plan(h: SuiteHarness, plan: Sequence[Stage]) -> list[StageResult]:
         except OutOfMemory:
             raise
         except Exception as exc:
+            h.report_failure(stage.label)
             h.raise_for_resource_outcome(stage.label, exc)
             raise
         delta = diff(before, after) if before is not None else None
@@ -1590,4 +1717,5 @@ __all__ = [
     "ensure_faults_cli_built",
     "run_plan",
     "scope_runner_unavailable",
+    "server_diagnostics",
 ]

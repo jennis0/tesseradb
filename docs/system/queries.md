@@ -329,7 +329,9 @@ Opening one item returns its whole record as this viewer may see it: every decla
 view the item appears in that this viewer can reach with its position there, and any attribute
 values scoped to those views. An identifier naming nothing and one naming an item this viewer may
 not see answer identically, both with a 404, so the response never distinguishes "does not exist"
-from "exists, but not for you."
+from "exists, but not for you." An artifact's or a layer's identifier names no item, even where
+its entity number in its layer space is one an item holds as its number
+([an artifact's identity](annotations.md#an-artifacts-identity)), and is answered the same way.
 
 The response also says why this viewer sees the item, as a sorted list of clauses, each written as
 label text. The item's labels are read as one disjunction, as they are indexed ([access

@@ -715,7 +715,10 @@ impl Engine {
                 return None;
             };
             let supplied = self.supplied_content(
-                pass.served.shard,
+                pass.served
+                    .generation
+                    .space_content(level.layer.registered.space)
+                    .map(Arc::as_ref),
                 &level.layer.registered.declaration,
                 level.level,
                 ordinal,
@@ -724,7 +727,7 @@ impl Engine {
                 true,
                 contents,
             )?;
-            let mosaica_id = self.artifact_id(entity)?.raw();
+            let mosaica_id = self.artifact_id(level.layer.registered.space, entity)?.raw();
             Some(Arc::new(Admitted {
                 mosaica_id,
                 passing: (ordinal, entity, masked_count, rank),

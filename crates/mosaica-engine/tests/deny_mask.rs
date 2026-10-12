@@ -292,7 +292,7 @@ fn a_deep_deny_set_changes_no_answer() {
         .iter()
         .map(|entity| {
             engine
-                .submit_changes(vec![(*entity, ChangeOp::Suppress)])
+                .submit_changes(vec![(item(*entity), ChangeOp::Suppress)])
                 .expect("the change is submitted")
         })
         .collect();

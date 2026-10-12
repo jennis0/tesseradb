@@ -12,49 +12,18 @@ mod common;
 
 use common::*;
 use mosaica_engine::Engine;
+use mosaica_lifecycle::resolve::Refusal;
 use mosaica_lifecycle::{wal::ChangeOp, IncomingArtifact};
-use mosaica_types::layer::{
-    ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
-    MembershipSource,
-};
+use mosaica_types::layer::{ContentDeclaration, LayerDeclaration};
 use mosaica_types::EntityId;
 
 fn declaration(name: &str) -> LayerDeclaration {
     LayerDeclaration {
-        scope: Default::default(),
-        name: name.into(),
-        title: Some(format!("{name} (title)")),
-        views: vec!["s0".into()],
-        membership: MembershipSource::Enumerated,
-        value_set: Default::default(),
-        visibility: None,
-        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
-        require_member_visibility: Some(ExistenceCriterion::Count(2)),
-        hierarchy: Hierarchy {
-            kind: HierarchyKind::Flat,
-            prune_children: false,
-        },
         content: ContentDeclaration {
             computed: vec!["centroid".into()],
             supplied: Vec::new(),
         },
-        depends_on: Vec::new(),
-        levels: Vec::new(),
-        layout: None,
-        shape: None,
-    }
-}
-
-impl Fixture {
-    fn open(&self) -> Engine {
-        open_engine_publishing(&self.root, &self.cache, &self.wal)
-    }
-
-    /// The corpus entities behind a run of source ids — what a clustering pipeline would resolve
-    /// its members to.
-    fn members(&self, source_ids: std::ops::Range<u64>) -> Vec<EntityId> {
-        let map = source_to_new_map(&self.root, "v00000");
-        source_ids.map(|s| EntityId::new(map[&s])).collect()
+        ..flat_declaration(name)
     }
 }
 
@@ -87,12 +56,12 @@ fn a_published_batch_takes_one_entity_per_artifact_and_none_of_them_is_the_layer
 
     // Distinct identifiers, distinct entities, and each resolves to the ordinal it was published
     // at — in the caller's submitted order.
-    let entities: Vec<EntityId> = ids.iter().map(|id| artifact_entity(&engine, *id)).collect();
-    let distinct: std::collections::BTreeSet<_> = entities.iter().collect();
+    let targets: Vec<_> = ids.iter().map(|id| artifact_target(&engine, *id)).collect();
+    let distinct: std::collections::BTreeSet<_> = targets.iter().collect();
     assert_eq!(distinct.len(), 3, "one entity per artifact");
 
-    for (i, entity) in entities.iter().enumerate() {
-        let at = engine.locate_artifact(*entity).expect("it is an artifact");
+    for (i, target) in targets.iter().enumerate() {
+        let at = engine.locate_artifact(*target).expect("it is an artifact");
         assert_eq!(at.layer, "clusters/a");
         assert_eq!(at.level, 0);
         assert_eq!(at.ordinal, i as u32);
@@ -101,12 +70,12 @@ fn a_published_batch_takes_one_entity_per_artifact_and_none_of_them_is_the_layer
 
     // The layer's own entity is not one of them, which is what keeps suppressing the layer from
     // suppressing artifact ordinal zero.
-    let layer_entity = artifact_entity(&engine, layer_id);
+    let layer_target = artifact_target(&engine, layer_id);
     assert!(
-        engine.locate_artifact(layer_entity).is_none(),
+        engine.locate_artifact(layer_target).is_none(),
         "a layer sits outside every level's run"
     );
-    assert!(!entities.contains(&layer_entity));
+    assert!(!targets.contains(&layer_target));
 }
 
 /// A second batch continues the first's numbering. Restarting it would overwrite the first batch's
@@ -136,7 +105,7 @@ fn a_second_batch_continues_the_numbering_rather_than_restarting_it() {
     assert_ne!(first[0], second[0]);
     assert_eq!(
         engine
-            .locate_artifact(artifact_entity(&engine, second[0]))
+            .locate_artifact(artifact_target(&engine, second[0]))
             .unwrap()
             .ordinal,
         1
@@ -170,38 +139,52 @@ fn a_second_batch_continues_the_numbering_rather_than_restarting_it() {
     );
 }
 
-/// A member with no row would count towards the artifact's declared size — the denominator the
-/// proportional criterion divides by — while being visible to nobody, so an artifact could be
-/// pushed below its own existence threshold by members that can never be seen.
+/// An artifact's or a layer's identifier in a member table is refused as naming no item.
 #[test]
-fn a_membership_naming_something_other_than_a_point_is_refused() {
+fn an_artifacts_or_a_layers_identifier_names_no_item() {
     let fx = fixture();
     let engine = fx.open();
     let layer_id = engine.register_layer(declaration("clusters/a")).unwrap();
-    let layer_entity = artifact_entity(&engine, layer_id);
-
-    let mut members = fx.members(0..10);
-    members.push(layer_entity);
-    let refused = engine
-        .publish_artifacts("clusters/a".into(), 0, vec![artifact("c0", members)])
-        .expect_err("a layer is not a document");
-    assert!(
-        refused.to_string().contains("no point"),
-        "the refusal names what is wrong with it: {refused}"
-    );
-    assert_eq!(engine.published_artifacts(), 0);
+    let ids = engine
+        .publish_artifacts(
+            "clusters/a".into(),
+            0,
+            vec![artifact("c0", fx.members(0..10))],
+        )
+        .unwrap();
+    let point = fx.members(0..1)[0];
+    let table = mosaica_engine::AddressTable {
+        rows: 3,
+        mosaica_id: Some(vec![
+            Some(layer_id),
+            Some(ids[0]),
+            Some(engine.mosaica_id_of(point).unwrap()),
+        ]),
+        columns: Vec::new(),
+    };
+    let named = engine.name_items(&table).unwrap();
+    assert!(matches!(
+        named.verdicts[0],
+        Err(Refusal::UnknownMosaicaId { row: 0 })
+    ));
+    assert!(matches!(
+        named.verdicts[1],
+        Err(Refusal::UnknownMosaicaId { row: 1 })
+    ));
+    assert_eq!(named.verdicts[2], Ok(point));
+    assert_eq!(items_of(&engine, &[layer_id, ids[0]]), vec![None, None]);
 }
 
 /// **The durability assertion.** The WAL is the only place a membership lives, so a restart is the
 /// whole test: the artifacts must come back at the same ordinals, on the same entities, with the
-/// same keys — and the row-less mark must have moved far enough that nothing reissues them.
+/// same keys, and a layer registered afterwards takes none of their identifiers.
 #[test]
 fn a_publication_survives_a_restart_and_its_entities_are_not_reissued() {
     let fx = fixture();
-    let (ids, low_water) = {
+    let ids = {
         let engine = fx.open();
         engine.register_layer(declaration("clusters/a")).unwrap();
-        let ids = engine
+        engine
             .publish_artifacts(
                 "clusters/a".into(),
                 0,
@@ -210,41 +193,39 @@ fn a_publication_survives_a_restart_and_its_entities_are_not_reissued() {
                     artifact("c1", fx.members(40..90)),
                 ],
             )
-            .unwrap();
-        (ids, engine.allocator_low_water())
+            .unwrap()
     };
 
     let engine = fx.open();
     assert_eq!(engine.published_artifacts(), 2);
-    assert!(
-        engine.allocator_low_water() <= low_water,
-        "the row-less mark comes back at least as far along as it was; a mark that regressed \
-         would reissue these artifacts' entities to the next layer registered"
-    );
-
     for (i, id) in ids.iter().enumerate() {
         let at = engine
-            .locate_artifact(artifact_entity(&engine, *id))
+            .locate_artifact(artifact_target(&engine, *id))
             .expect("the identifier the caller holds still names this artifact");
         assert_eq!(at.ordinal, i as u32);
         assert_eq!(at.key.as_deref(), Some(["c0", "c1"][i]));
     }
 
-    // A fresh registration after the restart must not land on an entity an artifact holds.
+    // A layer registered after the restart numbers its artifacts from the same entity in a space
+    // of its own, so the first of them has another identifier.
     engine.register_layer(declaration("clusters/b")).unwrap();
-    let published: Vec<EntityId> = ids.iter().map(|id| artifact_entity(&engine, *id)).collect();
-    engine
+    let fresh = engine
         .publish_artifacts(
             "clusters/b".into(),
             0,
             vec![artifact("d0", fx.members(0..10))],
         )
         .unwrap();
-    for entity in &published {
-        let at = engine.locate_artifact(*entity).unwrap();
+    assert!(!ids.contains(&fresh[0]));
+    assert_eq!(
+        artifact_target(&engine, fresh[0]).entity(),
+        artifact_target(&engine, ids[0]).entity()
+    );
+    for id in &ids {
+        let at = engine.locate_artifact(artifact_target(&engine, *id)).unwrap();
         assert_eq!(
             at.layer, "clusters/a",
-            "an entity issued before the restart still names the artifact it was issued for"
+            "an identifier issued before the restart still names the artifact it was issued for"
         );
     }
 }
@@ -314,7 +295,7 @@ fn a_published_membership_survives_the_loss_of_the_whole_log() {
     );
     for (i, id) in ids.iter().enumerate() {
         let at = engine
-            .locate_artifact(artifact_entity(&engine, *id))
+            .locate_artifact(artifact_target(&engine, *id))
             .expect("the identifier the caller holds still names this artifact");
         assert_eq!(at.ordinal, i as u32);
         assert_eq!(
@@ -382,23 +363,21 @@ fn an_artifacts_entity_takes_a_suppression_like_any_other() {
         )
         .unwrap();
 
-    let entity = artifact_entity(&engine, ids[0]);
+    let served = |engine: &Engine| {
+        artifacts_of(engine, &full_coverage_credential())
+            .iter()
+            .any(|a| a.mosaica_id == ids[0])
+    };
+    assert!(served(&engine));
+    let target = artifact_target(&engine, ids[0]);
     engine
-        .accept_change(entity, ChangeOp::Suppress)
+        .accept_changes(vec![(target, ChangeOp::Suppress)])
         .expect("an artifact suppression is an ordinary change");
-    assert!(engine
-        .generation()
-        .only_shard()
-        .overlay
-        .is_suppressed(entity));
+    assert!(!served(&engine), "a suppression withholds the artifact at the ack");
 
     // And it comes back — a suppression is the reversible one of the two removal rules.
-    engine.accept_change(entity, ChangeOp::Unsuppress).unwrap();
-    assert!(!engine
-        .generation()
-        .only_shard()
-        .overlay
-        .is_suppressed(entity));
+    engine.accept_changes(vec![(target, ChangeOp::Unsuppress)]).unwrap();
+    assert!(served(&engine), "the unsuppressed artifact is served again");
 }
 
 /// **A membership that came back from an extent is read through that extent**, and it is the set

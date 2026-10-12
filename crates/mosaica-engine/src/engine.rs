@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use mosaica_authz::{DeltaTier, Dict, FragmentCache, PostingsReader};
-use mosaica_lifecycle::{ByTenancy, Overlay};
+use mosaica_lifecycle::{ByTenancy, Overlay, Overlays};
 use mosaica_store::manifest::{CurrentPointer, Declarations};
 use mosaica_store::read::open_bundle;
 use mosaica_store::vocabulary::Vocabularies;
@@ -181,24 +181,25 @@ pub struct Engine {
     pub(crate) stage: crate::stage::StageDeps,
 }
 
-/// Every deny disposition the bundle's side-manifests carry, as the overlay a replay starts from.
-/// `deny` is the current suppression set and `tombstones` names entities already deleted, unioned
-/// across every partition since the overlay is engine-wide. The two stay apart: a seed that
-/// unioned them would let an unsuppress retire a deletion.
+/// Every deny disposition the bundle's side-manifests carry, as the overlays a replay starts from:
+/// the shard's items, and each layer space's artifacts. `deny` is the current suppression set and
+/// `tombstones` names entities already deleted, unioned across every partition since the overlays
+/// are engine-wide. The two stay apart: a seed that unioned them would let an unsuppress retire a
+/// deletion.
 ///
 /// A field whose bytes did not decode never reaches here — the reader refuses such a manifest
 /// rather than opening it — and the `Malformed` arm below is what keeps "did not decode" from
 /// becoming "nothing is denied" if it ever does.
-fn initial_deny_of(bundle: &Bundle) -> Result<Overlay> {
-    let mut deleted = croaring::Bitmap::new();
-    let mut suppressed = croaring::Bitmap::new();
-    for (key, partition) in &bundle.partitions {
-        let record = &partition.only_shard().record;
-        let sets = [
-            (&record.deny, &mut suppressed, "deny"),
-            (&record.tombstones, &mut deleted, "tombstones"),
-        ];
-        for (field, into, name) in sets {
+fn initial_deny_of(bundle: &Bundle) -> Result<Overlays> {
+    // `(deleted, suppressed)` for one target, unioned across the partitions.
+    type Sets = (croaring::Bitmap, croaring::Bitmap);
+    let union = |key: &str,
+                 deny: &mosaica_store::manifest::EntitySet,
+                 tombstones: &mosaica_store::manifest::EntitySet,
+                 (deleted, suppressed): &mut Sets|
+     -> Result<()> {
+        for (field, into, name) in [(deny, suppressed, "deny"), (tombstones, deleted, "tombstones")]
+        {
             let entities = field.entities().ok_or_else(|| {
                 EngineError::Malformed(format!(
                     "partition {key}'s side-manifest carries a {name} field that is not a \
@@ -207,8 +208,23 @@ fn initial_deny_of(bundle: &Bundle) -> Result<Overlay> {
             })?;
             into.or_inplace(entities);
         }
+        Ok(())
+    };
+    let mut items = Sets::default();
+    let mut spaces = std::collections::BTreeMap::<mosaica_types::LayerSpace, Sets>::new();
+    for (key, partition) in &bundle.partitions {
+        let record = &partition.only_shard().record;
+        union(key, &record.deny, &record.tombstones, &mut items)?;
+        for space in &partition.layer_spaces {
+            let into = spaces.entry(space.space).or_default();
+            union(key, &space.deny, &space.tombstones, into)?;
+        }
     }
-    Ok(Overlay::seeded(&deleted, &suppressed))
+    let seeded = |(deleted, suppressed): Sets| Overlay::seeded(&deleted, &suppressed);
+    Ok(Overlays {
+        items: seeded(items),
+        spaces: spaces.into_iter().map(|(space, sets)| (space, seeded(sets))).collect(),
+    })
 }
 
 /// One of the side manifests' lists, concatenated: the partitions by key ascending, an item whose
@@ -538,7 +554,7 @@ impl PrefixReaders {
 /// What a reconstruction of the write path leaves behind: the first generation's overlay and
 /// buffer, the write-side state the engine keeps, and the category bindings replay minted into.
 struct ReconstructedWrites {
-    overlay: mosaica_lifecycle::Overlay,
+    overlay: Overlays,
     buffer: mosaica_lifecycle::IngestBuffer,
     state: crate::write::WritePathState,
     vocabularies: Vocabularies,
@@ -556,17 +572,15 @@ fn reconstruct_writes(
 ) -> Result<ReconstructedWrites> {
     let initial_deny = initial_deny_of(bundle)?;
     let mut vocabularies = initial_vocabularies_of(bundle)?;
-    // The row-less mark's homes are the side manifests only; `MANIFEST.json` carries no such
-    // field.
-    let side_manifest_low_waters: Vec<u64> =
-        across_partitions(bundle, |p| [p.manifest.entity_id_low_water]);
     let (free, held) = freed_of(bundle, &readers.tenancy);
     // One partition today, so this concatenation is the whole registry; at more than one it is
     // the union.
     let manifest_layers: Vec<mosaica_types::layer::RegisteredLayer> =
         across_partitions(bundle, |p| p.manifest.layers.iter().cloned());
-    let manifest_layer_tombstones: Vec<String> =
-        across_partitions(bundle, |p| p.manifest.layer_tombstones.iter().cloned());
+    let next_layer_space = across_partitions(bundle, |p| [p.manifest.next_layer_space])
+        .into_iter()
+        .max()
+        .unwrap_or(0);
     // A view's key is the group's, not a partition's, so these belong to the deployment
     // whichever partition's manifest published them.
     let manifest_created_views: Vec<mosaica_types::view::CreatedView> =
@@ -593,23 +607,19 @@ fn reconstruct_writes(
         across_partitions(bundle, |p| {
             p.only_shard().record.membership_extents.iter().cloned()
         });
-    // The list that makes a level's derived structures placeable across a restart.
-    let manifest_level_versions: Vec<mosaica_store::manifest::LevelVersion> =
-        across_partitions(bundle, |p| {
-            p.only_shard().record.level_versions.iter().cloned()
-        });
+    let manifest_layer_spaces: Vec<mosaica_store::manifest::LayerSpaceRecord> =
+        across_partitions(bundle, |p| p.layer_spaces.iter().cloned());
     let record = &bundle.only_shard().record;
     let (overlay, buffer, state) = WritePath::reconstruct(
         wal_path,
         crate::write::ManifestSeed {
             shard: record.id,
             high_water: record.high_water,
-            low_water: mosaica_lifecycle::alloc::allocator_ceiling(&side_manifest_low_waters),
             size: shard_size_of(bundle),
             free,
             held,
             layers: &manifest_layers,
-            tombstones: &manifest_layer_tombstones,
+            next_layer_space,
             registry_version: across_partitions(bundle, |p| [p.manifest.layer_registry_version])
                 .into_iter()
                 .max()
@@ -621,7 +631,7 @@ fn reconstruct_writes(
             // buffered rows would flush into whatever takes the key next.
             view_ids_of_key: &|group: &str, key: &str| bundle.manifest.view_ids_for_key(group, key),
             membership_extents: &manifest_membership_extents,
-            level_versions: &manifest_level_versions,
+            layer_spaces: &manifest_layer_spaces,
             prefix_dir: readers.prefix_dir.clone(),
             manifest: &bundle.manifest,
             attributes: crate::attributes::RuntimeAttributes::seed(
@@ -793,11 +803,24 @@ fn first_generation(
     bundle: &Arc<Bundle>,
     state: &crate::write::WritePathState,
     vocabularies: Vocabularies,
-    overlay: mosaica_lifecycle::Overlay,
+    overlays: Overlays,
     buffer: mosaica_lifecycle::IngestBuffer,
     fragments: Arc<FragmentCache>,
     pool: &rayon::ThreadPool,
 ) -> Result<Arc<GenerationHandle>> {
+    let Overlays {
+        items: overlay,
+        spaces,
+    } = overlays;
+    let contents = crate::artifact_content::open_space_contents(&readers.prefix_dir, bundle)
+        .map_err(|e| EngineError::Malformed(e.to_string()))?;
+    let mut layer_spaces = crate::LayerSpaces::new();
+    for (space, overlay) in spaces {
+        layer_spaces.entry(space).or_default().overlay = Arc::new(overlay);
+    }
+    for (space, content) in contents {
+        layer_spaces.entry(space).or_default().content = Some(content);
+    }
     // The filter columns are carried forward by every generation successor: a restart composes
     // what the flushes before it published, not the build's coverage alone.
     let indexes = open_shard_indexes(
@@ -845,6 +868,7 @@ fn first_generation(
             fold_epoch: 0,
             free_epoch: 0,
             vocabularies: Arc::new(vocabularies),
+            layer_spaces: Arc::new(layer_spaces),
         },
         vec![(
             bundle.only_shard().record.id,
@@ -885,13 +909,13 @@ fn adopt_derived_structures(
     // level version, and they address rows the new view does not have.
     let incarnation_of = |view: &str| bundle.manifest.incarnation_of(view);
     let manifest_derived_extents: Vec<mosaica_store::manifest::DerivedExtent> =
-        across_partitions(bundle, |p| {
-            p.only_shard().record.derived_extents.iter().cloned()
-        })
+        across_partitions(bundle, |p| p.derived_extents().cloned())
         .into_iter()
         .filter(|e| {
             crate::filter::carries_live_view(&incarnation_of, e.view.as_deref(), e.incarnation)
         })
+        // A dropped layer's structures stay listed until a fold.
+        .filter(|e| state.registry.in_space(e.space).is_some())
         .collect();
 
     // The fold's containment partitions, adopted where their coordinate still holds; a
@@ -922,7 +946,7 @@ fn adopt_derived_structures(
     // Every spatial level's shapes decoded and decomposed, and every segment's piece claimed
     // or resolved and staged, before this engine serves a request.
     let shapes = Arc::new(crate::shapes::ShapeStore::new());
-    let (layers, _) = state.registry.snapshot();
+    let layers = state.registry.snapshot();
     let warmed = shapes.warm(
         bundle,
         &layers,
@@ -1293,6 +1317,8 @@ pub(crate) fn open_rotation(
         edited,
     } = open_shard_indexes(&prefix_dir, &bundle, &phash, &unfolded_attributes)
         .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;
+    let space_contents = crate::artifact_content::open_space_contents(&prefix_dir, &bundle)
+        .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;
     let tenancy = Arc::new(
         mosaica_store::read::open_tenancy_index(
             &prefix_dir,
@@ -1316,6 +1342,8 @@ pub(crate) fn open_rotation(
             tenancy,
             retired,
             frees: false,
+            retired_artifacts: std::collections::BTreeMap::new(),
+            space_contents,
         },
     ))
 }

@@ -196,6 +196,7 @@ fn build_fixture_n(artifacts: u32) -> Fixture {
         published.push(sets.clone());
         store.put(
             LAYER,
+            mosaica_types::LayerSpace::ZERO,
             0,
             ordinal,
             ArtifactRecord {
@@ -683,7 +684,7 @@ fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
     assert_eq!(composed_at, 7);
     let entry = |version: u64| mosaica_store::manifest::DerivedExtent {
         path: rel.clone(),
-        layer: LAYER.to_string(),
+        space: mosaica_types::LayerSpace::ZERO,
         level: 0,
         level_version: version,
         view: None,
@@ -769,7 +770,7 @@ fn an_adopted_partition_does_not_answer_under_another_prefix() {
         "v00000",
         &[mosaica_store::manifest::DerivedExtent {
             path: rel,
-            layer: LAYER.to_string(),
+            space: mosaica_types::LayerSpace::ZERO,
             level: 0,
             level_version: fx.store.level_version(LAYER, 0),
             view: None,

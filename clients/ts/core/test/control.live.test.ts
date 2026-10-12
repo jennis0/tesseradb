@@ -326,6 +326,32 @@ describe('Control against a live server', () => {
     expect(await control.limits()).toEqual(status.body.limits);
   });
 
+  it('counts a layer space per layer and its artifacts\' denies apart from the items\', until the layer is dropped', async (ctx) => {
+    live(ctx);
+    type Figures = {count: number; depth: number; retirable: number};
+    const figures = async () => {
+      const body = (await control.status()).body;
+      return {spaces: body.layer_spaces as Figures, items: body.overlay as {depth: number}};
+    };
+    const before = await figures();
+    const name = 'ts-live/spaces';
+    expect((await control.declareLayer(clusterLayerDeclaration({name, title: 'spaces', view: 's0', visibility: null, minVisible: null, computed: []}))).status).toBe(201);
+    const published = await control.publish(name, {level: 0, artifacts: [{key: 'kept', members: {[KEY]: ['row-2']}}, {key: 'gone', members: {[KEY]: ['row-3']}}]});
+    expect(published.status).toBe(201);
+    const [kept, gone] = (published.body.artifacts as {mosaica_id: string}[]).map((a) => a.mosaica_id);
+    expect((await figures()).spaces).toEqual({...before.spaces, count: before.spaces.count + 1});
+
+    const denied = await control.changes([{op: 'suppress', match: {mosaica_id: kept!}}, {op: 'delete', match: {mosaica_id: gone!}}]);
+    expect(denied).toMatchObject({status: 200, body: {accepted: 2, refused: []}});
+    expect(await figures()).toEqual({
+      spaces: {count: before.spaces.count + 1, depth: before.spaces.depth + 2, retirable: before.spaces.retirable + 1},
+      items: before.items
+    });
+
+    expect((await control.dropLayer(name, {wait: true})).status).toBe(200);
+    expect((await figures()).spaces).toEqual(before.spaces);
+  });
+
   it('declares the shard size, refuses a page that would take the shard past it, and takes the page once the size is raised', async (ctx) => {
     live(ctx);
     const highWater = Number((await control.status()).body.entity_id_high_water);

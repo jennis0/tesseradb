@@ -19,7 +19,7 @@ use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
     SuppliedContent,
 };
-use mosaica_types::{EntityId, MosaicaId};
+use mosaica_types::MosaicaId;
 
 const CLUSTERS: &str = "clusters/a";
 const LABELS: &str = "topics/x";
@@ -79,17 +79,6 @@ fn labels() -> LayerDeclaration {
         levels: Vec::new(),
         layout: None,
         shape: None,
-    }
-}
-
-impl Fixture {
-    fn open(&self) -> Engine {
-        open_engine_publishing(&self.root, &self.cache, &self.wal)
-    }
-
-    fn members(&self, source_ids: impl Iterator<Item = u64>) -> Vec<EntityId> {
-        let map = source_to_new_map(&self.root, "v00000");
-        source_ids.map(|s| EntityId::new(map[&s])).collect()
     }
 }
 
@@ -175,7 +164,7 @@ fn suppressing_a_cluster_stops_its_labels_serving_on_a_held_identifier_too() {
     ));
 
     engine
-        .accept_change(artifact_entity(&engine, cluster_id), ChangeOp::Suppress)
+        .accept_changes(vec![(artifact_target(&engine, cluster_id), ChangeOp::Suppress)])
         .unwrap();
 
     let after = artifacts_of(&engine, &full_coverage_credential());
@@ -194,7 +183,7 @@ fn suppressing_a_cluster_stops_its_labels_serving_on_a_held_identifier_too() {
 
     // The label's own entity was never touched, so lifting the cluster's suppression restores both.
     engine
-        .accept_change(artifact_entity(&engine, cluster_id), ChangeOp::Unsuppress)
+        .accept_changes(vec![(artifact_target(&engine, cluster_id), ChangeOp::Unsuppress)])
         .unwrap();
     assert_eq!(
         labels_in(&artifacts_of(&engine, &full_coverage_credential())).len(),
@@ -258,7 +247,7 @@ fn suppressing_the_cluster_layer_stops_its_labels_serving() {
     let label_id = labels_in(&served)[0].mosaica_id;
 
     engine
-        .accept_change(artifact_entity(&engine, cluster_layer), ChangeOp::Suppress)
+        .accept_changes(vec![(artifact_target(&engine, cluster_layer), ChangeOp::Suppress)])
         .unwrap();
 
     let after = artifacts_of(&engine, &full_coverage_credential());
@@ -294,7 +283,7 @@ fn an_attachment_survives_a_restart_and_still_withholds() {
     assert_eq!(labels_in(&served).len(), 1, "the label comes back");
 
     engine
-        .accept_change(artifact_entity(&engine, cluster_id), ChangeOp::Suppress)
+        .accept_changes(vec![(artifact_target(&engine, cluster_id), ChangeOp::Suppress)])
         .unwrap();
     let after = artifacts_of(&engine, &full_coverage_credential());
     assert!(

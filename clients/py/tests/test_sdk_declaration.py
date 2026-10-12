@@ -335,3 +335,48 @@ def test_a_size_declared_at_the_first_commit_refuses_a_later_page_past_it(tmp_pa
         assert db.status()["entity_id_high_water"] == 2
     finally:
         db.close()
+
+
+def test_status_counts_a_space_per_layer_and_its_annotations_denies_apart_from_the_items(tmp_path):
+    db, _ = small(tmp_path / "db")
+    try:
+        db.declare_layer("clusters", "flat", computed=[])
+        db.insert("clusters", members=pd.DataFrame({"key": ["kept", "gone"], "id": [1, 2]}), key="key")
+        assert db.commit().ok
+        assert db.status()["layer_spaces"] == {"count": 1, "depth": 0, "retirable": 0}
+        items = db.status()["overlay"]
+
+        served = db.artifacts("map", "clusters", ["key"]).to_pylist()
+        named = {row["key"]: row["mosaica_id"] for row in served}
+        assert db.suppress([named["kept"]]).accepted == 1
+        assert db.remove([named["gone"]]).accepted == 1
+        status = db.status()
+        assert status["layer_spaces"] == {"count": 1, "depth": 2, "retirable": 1}
+        assert status["overlay"] == items
+
+        db.drop_layer("clusters", wait=True)
+        assert db.status()["layer_spaces"] == {"count": 0, "depth": 0, "retirable": 0}
+    finally:
+        db.close()
+
+
+def test_a_dropped_layer_leaves_the_declaration_and_its_name_declares_a_new_layer(tmp_path):
+    db, rows = small(tmp_path / "db")
+    try:
+        db.declare_layer("clusters", "flat", computed=[])
+        db.insert("clusters", members=pd.DataFrame({"key": ["a"], "id": [1]}), key="key")
+        assert db.commit().ok
+        (dropped,) = db.artifacts("map", "clusters", ["key"]).column("mosaica_id").to_pylist()
+
+        db.drop_layer("clusters", wait=True)
+        db.insert("map", rows.assign(id=[3, 4]), x="x", y="y", access="access")
+        assert db.commit().ok
+        assert db.meta()["layers"] == []
+
+        db.declare_layer("clusters", "flat", computed=[])
+        db.insert("clusters", members=pd.DataFrame({"key": ["a"], "id": [1]}), key="key")
+        assert db.commit().ok
+        (new,) = db.artifacts("map", "clusters", ["key"]).column("mosaica_id").to_pylist()
+        assert new != dropped
+    finally:
+        db.close()

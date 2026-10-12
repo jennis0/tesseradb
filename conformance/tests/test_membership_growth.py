@@ -17,10 +17,9 @@ from __future__ import annotations
 
 import pytest
 import requests
-
+from layer_fixture import enumerated_layer
 from oracle.harness import spawn_server, stop_server
 from oracle.wire import decode_viewport_artifacts, decode_viewport_points
-
 from test_shape_membership import (
     PRINCIPALS,
     VIEW_ID,
@@ -33,25 +32,6 @@ from test_shape_membership import (
 #: Named without a slash: the route matches one path segment (`test_highlight.py` records the same
 #: fact about the publication route).
 LAYER = "growth-case"
-
-
-def _layer() -> dict:
-    return {
-        "name": LAYER,
-        "title": LAYER,
-        "views": [VIEW_ID],
-        "membership": "enumerated",
-        "value_set": "closed",
-        "visibility": None,
-        "artifact_visibility": {"field": None, "default": "inherited"},
-        "require_member_visibility": None,
-        "hierarchy": {"kind": "flat", "prune_children": False},
-        "content": {"computed": [], "supplied": []},
-        "depends_on": [],
-        "levels": [],
-        "layout": None,
-        "shape": None,
-    }
 
 
 def grow(server, **body) -> requests.Response:
@@ -104,7 +84,7 @@ def test_a_membership_grown_in_slices_serves_the_union_inside_each_principals_ma
     third = len(ids) // 3
     slices = [ids[:third], ids[third : 2 * third], ids[2 * third :]]
 
-    resp = server.register_layer(_layer())
+    resp = server.register_layer(enumerated_layer(LAYER, VIEW_ID))
     assert resp.status_code == 201, resp.text
     resp = server.publish_artifacts(
         LAYER, artifacts=[{"key": "whole", "members": {"mosaica_id": slices[0]}}], strict=True

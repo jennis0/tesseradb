@@ -13,7 +13,7 @@ mod window;
 
 pub(crate) use background::outstanding;
 pub(super) use background::Background;
-pub(super) use manifest::SideManifests;
+pub(super) use manifest::{HeldSpace, SideManifests};
 pub(in crate::write) use unique::UniqueDeclarations;
 pub(super) use wal::ExecutorLog;
 
@@ -77,6 +77,32 @@ pub(super) struct Executor {
 struct TickDue {
     due: bool,
     period_due: bool,
+}
+
+/// The layer spaces after a fold's swap: each space's executed artifact deletions retired, and
+/// its content opened over the new prefix.
+fn rotated_spaces(
+    previous: &crate::LayerSpaces,
+    rotation: &crate::geometry::PrefixRotation,
+) -> crate::LayerSpaces {
+    let mut next = previous.clone();
+    for parts in next.values_mut() {
+        parts.content = None;
+    }
+    for (space, content) in &rotation.space_contents {
+        next.entry(*space).or_default().content = Some(Arc::clone(content));
+    }
+    for (space, retired) in &rotation.retired_artifacts {
+        let Some(parts) = next.get_mut(space) else {
+            continue;
+        };
+        let mut overlay = (*parts.overlay).clone();
+        if overlay.retire(retired) > 0 {
+            parts.overlay = Arc::new(overlay);
+            parts.overlay_version += 1;
+        }
+    }
+    next
 }
 
 impl Executor {
@@ -373,6 +399,9 @@ impl Executor {
             }
             s.overlay_version = overlay_version;
             s.overlay = overlay;
+            if let Some(r) = &rotation {
+                g.layer_spaces = Arc::new(rotated_spaces(&previous.layer_spaces, r));
+            }
         });
         // Listed before the swap and deleted after it, so nothing is lost if the swap never lands.
         let superseded = rotation

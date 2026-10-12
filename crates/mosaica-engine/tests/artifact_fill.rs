@@ -20,7 +20,6 @@ use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
     SuppliedContent, SuppliedRequirement,
 };
-use mosaica_types::EntityId;
 
 /// **No existence criterion**, so a count that moved is a membership that moved and an artifact
 /// that vanished is one withheld — the two things these cases distinguish.
@@ -62,19 +61,6 @@ fn described(name: &str) -> LayerDeclaration {
     d
 }
 
-impl Fixture {
-    fn open(&self) -> Engine {
-        let engine = open_engine_publishing(&self.root, &self.cache, &self.wal);
-        engine.set_background_refresh_for_test(false);
-        engine
-    }
-
-    fn members(&self, source_ids: std::ops::Range<u64>) -> Vec<EntityId> {
-        let map = source_to_new_map(&self.root, "v00000");
-        source_ids.map(|s| EntityId::new(map[&s])).collect()
-    }
-}
-
 fn node(
     fx: &Fixture,
     key: &str,
@@ -109,43 +95,12 @@ fn join(fx: &Fixture, key: &str, sources: std::ops::Range<u64>) -> IncomingGrowt
     IncomingGrowth::from_entities(key.into(), fx.members(sources))
 }
 
-/// Wait for the executor's publication to write at least `want` artifact content extents — the
-/// files the filled values live in once the log is gone.
-fn content_extents(fx: &Fixture, want: usize) {
-    let dir = fx
-        .root
-        .join("v00000")
-        .join(common::SHARD.record_extents_rel());
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let found = std::fs::read_dir(&dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                p.file_name()
-                    .is_some_and(|n| n.to_string_lossy().starts_with("artifacts-"))
-                    && p.to_string_lossy().ends_with(".blocks.bin")
-            })
-            .count();
-        if found >= want {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "only {found} of {want} content extents were published within 10s"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
 /// **A parent fill on a held artifact is in the next request's cut, and only a parent fill
 /// rebuilds the lineage: a page of members joining leaves it held.**
 #[test]
 fn a_lineage_fill_moves_the_lineage_and_a_growth_does_not() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine
         .register_layer(declaration("clusters/tree", HierarchyKind::Nested))
         .unwrap();
@@ -226,7 +181,7 @@ fn a_lineage_fill_moves_the_lineage_and_a_growth_does_not() {
 
     // The fill comes back from a restart: the record replays through the one store method.
     drop(engine);
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     assert_eq!(
         served(&engine, "clusters/tree"),
         vec![("child".to_string(), 300)]
@@ -238,7 +193,7 @@ fn a_lineage_fill_moves_the_lineage_and_a_growth_does_not() {
 #[test]
 fn a_differing_part_is_refused_by_name_and_the_batch_has_no_effect() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine
         .register_layer(declaration("clusters/tree", HierarchyKind::Nested))
         .unwrap();
@@ -280,7 +235,7 @@ fn a_differing_part_is_refused_by_name_and_the_batch_has_no_effect() {
 fn a_content_fill_serves_a_withheld_artifact_and_outlives_the_log() {
     let fx = fixture();
     {
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         engine.register_layer(described("topics/a")).unwrap();
         let published = engine
             .put_artifacts(
@@ -331,7 +286,7 @@ fn a_content_fill_serves_a_withheld_artifact_and_outlives_the_log() {
         // record's own copy of the content, its digest in the membership extent, is rewritten
         // only by the fold, so the log is pinned at the fill until then: two rotations may not
         // reclaim the member holding it.
-        content_extents(&fx, 1);
+        wait_for_content_extents(&fx.root, 1);
         let holding = wal_members(&fx.wal)
             .pop()
             .expect("the log has at least one member");
@@ -347,7 +302,7 @@ fn a_content_fill_serves_a_withheld_artifact_and_outlives_the_log() {
 
     // A restart replays whatever the log still holds.
     {
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         let row = served_row(&engine, "topics/a", "t0").expect("served after a restart");
         assert_eq!(row.content, vec!["shipping".to_string()]);
 
@@ -363,7 +318,7 @@ fn a_content_fill_serves_a_withheld_artifact_and_outlives_the_log() {
 
     // And with the log gone, the extents are the only home the fill has.
     remove_the_whole_log(&fx.wal);
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     let row = served_row(&engine, "topics/a", "t0").expect("served from the extents alone");
     assert_eq!(
         row.content,
@@ -393,7 +348,7 @@ fn rotate(engine: &Engine) {
 #[test]
 fn a_mixed_put_mints_only_the_new_keys_and_an_identical_re_put_is_a_no_op() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine
         .register_layer(declaration("clusters/tree", HierarchyKind::Nested))
         .unwrap();
@@ -485,7 +440,7 @@ fn a_mixed_put_mints_only_the_new_keys_and_an_identical_re_put_is_a_no_op() {
 #[test]
 fn a_content_fill_reaches_an_artifact_published_bare_and_survives_a_fold() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.register_layer(described("topics/a")).unwrap();
     engine
         .put_artifacts(
@@ -531,7 +486,7 @@ fn a_content_fill_reaches_an_artifact_published_bare_and_survives_a_fold() {
     );
 
     drop(engine);
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     let row = served_row(&engine, "topics/a", "t0").expect("served after the fold and a restart");
     assert_eq!(row.content, vec!["filled".to_string()]);
 }

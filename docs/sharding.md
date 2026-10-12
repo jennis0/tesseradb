@@ -1,26 +1,21 @@
 # Sharding: several entity spaces in one process
 
-**Status:** design, 2026-10-09. Stages 0 to 2 are built: `count_ranges`; reuse of a deleted item's
-number at the next tenancy; and the shard as a parameter, with one shard under `shards/0/` and its
-declared size. Stage 1's churn on Tree of Life (§8.4) is still to run. Nothing else in this document
-is built. Each section says what the code does today and what changes.
+**Status:** design, 2026-10-09. Stages 0 to 3 are built: `count_ranges`; reuse of a deleted item's
+number at the next tenancy; the shard as a parameter, with one shard under `shards/0/` and its
+declared size; and layer spaces, with every artifact and layer identified in its layer's own space
+and its records stored there. Stage 1's churn on Tree of Life (§8.4) is still to run. Nothing else
+in this document is built. Each section says what the code does today and what changes.
 
 ## The limit
 
-Every item and every artifact takes its entity id from one `u32` space per bundle
-(`crates/mosaica-lifecycle/src/alloc.rs`). Items take ids upward from 0. Artifacts, and the entities
-that a suppression of a whole layer names, take aligned blocks of 65,536 downward from
-4,294,901,760, the highest block boundary below `u32::MAX`. The space is exhausted when the two
-marks meet.
+Every item takes its entity id from one `u32` space per bundle
+(`crates/mosaica-lifecycle/src/alloc.rs`), upward from 0. Artifacts and layers take theirs from
+their layer's own space (§2.2).
 
-Three things fill the space faster than the corpus grows.
-
-- A deleted item's number, the entity id it was first given and from which its `mosaica_id` is
-  derived, is never issued again. Every insert therefore spends an id for good. Under a steady rate
-  of deletions and inserts the space fills while the live corpus stays the same size. Only the ids
-  that edits leave behind are freed ([write path](system/write-path.md#freed-entity-ids)).
-- Artifact ids are never freed. A dropped layer's blocks stay below the mark.
-- Each level of a layer takes at least one block of 65,536, however few artifacts it holds.
+A deleted item's number, the entity id it was first given and from which its `mosaica_id` is
+derived, is never issued again. Every insert therefore spends an id for good. Under a steady rate
+of deletions and inserts the space fills while the live corpus stays the same size. Only the ids
+that edits leave behind are freed ([write path](system/write-path.md#freed-entity-ids)).
 
 The GBIF bundle holds 3,495,729,729 items, and its high water is the same figure
 (`probes/2026-10-05-serving-layers-bench/`). About 0.8 × 10⁹ ids are left for every insert it will
@@ -214,49 +209,62 @@ counter, `next_shard_id`.
 
 ### 2.2 A layer space
 
-Today an artifact takes its id from the top of the point space, in aligned blocks of 65,536 per
-level. A layer drop keeps the layer's name tombstoned for ever and frees none of its ids. There is
-no verb that replaces a layer. An artifact carries its view, and a scoped artifact carries its
-view's incarnation. Dropping a view retires the artifacts scoped to it.
-
-Under this design each registered layer has a layer space, `LayerSpace(u32)`, numbered below 2³¹
-from a monotone counter, `next_layer_space`, when the layer is registered. A layer space holds:
+Each registered layer has a layer space, `LayerSpace(u32)`, numbered below 2³¹ from a monotone
+counter, `next_layer_space`, when the layer is registered, at a build or at a running service. The
+counter is in the partition side-manifest, and a replay takes it past every space the WAL's
+registrations name, so a space is never given twice. A layer space holds:
 
 - the layer's own entity, id 0, which a suppression of the whole layer names;
-- the layer's levels, each a run of aligned blocks of 65,536 from block 1, as levels are laid out
-  today;
-- each artifact's record, supplied content, generating sets and edges;
-- the postings of the artifacts' own access labels;
-- an overlay of deleted and suppressed artifacts;
-- each level's next ordinal.
+- the layer's levels, each holding runs of aligned blocks of 65,536 from block 1: one block per
+  level at registration, and the space's next block whenever a publication outgrows a level's runs;
+- each artifact's record (key, view, edges, access labels, shape and declared sizes), its supplied
+  content and its level's held shapes;
+- an overlay of deleted and suppressed artifacts, and the layer's own suppression;
+- each level's version.
+
+A registration past the last space, and a publication needing more blocks than its space has left,
+are refused with `409`, naming the figures, as a full shard is. An artifact carries its view, and a
+scoped artifact carries its view's incarnation.
 
 A layer space has no row space. An artifact's members are points, and each point shard holds its
-own slice of every artifact's membership (§2.1).
+own slice of every artifact's membership and generating sets (§2.1).
 
-An artifact's id is never reused. A deleted artifact leaves a hole in its level's run. A view drop
-retires the artifacts scoped to that view by deleting them in the space's overlay, as it does today.
-Dropping a layer drops its space whole at the next publication, and the name stays tombstoned. A
-layer space is rewritten in place to remove the records of deleted artifacts, keeping every id, on
-its own gauges: the deleted artifacts and the size of its overlay. An artifact's deletion stays in
-the space's overlay, and its record in place, until every point shard's compaction has removed the
-artifact from that shard's slice and row forms, and a shard still naming a deleted artifact counts
-it among its own compaction's gauges.
+An artifact's id is never reused. A deleted artifact leaves a hole in its level's run. Dropping a
+view retires the artifacts scoped to it directly, removing their records at once. Not built yet:
+deleting them in the space's overlay instead, which stage 5 needs so that each shard reconciles its
+slices at its own compaction. With one shard, retiring them directly removes every part of them in
+one publication.
 
-An artifact's `mosaica_id` becomes
+Dropping a layer removes its space, and every shard's slices and row forms of it, from the next
+publication, and their files from the next compaction's prefix. Nothing of the layer is kept. Its
+name may be registered again, as a new layer in a new space, and since no space is given twice,
+none of the dropped layer's identifiers names the new layer or its artifacts. Anything keyed by a
+layer that can outlive a drop, such as a cursor, a cache entry or a file name, is keyed by its
+space.
+
+A point shard's compaction removes the records and supplied content of deleted artifacts, writing
+every layer space it touches again in the same publication and keeping every id.
+`/control/status` counts the spaces' deletions and suppressions under `layer_spaces`, apart from
+the shard's, and the compaction schedule counts the deleted artifacts with the shard's deleted
+items. Not built yet: a layer space rewritten on its own gauges, the deleted artifacts and the size
+of its overlay, and an artifact's deletion held in the space's overlay until every point shard's
+compaction has removed the artifact from that shard's slice and row forms. With one shard, the one
+compaction does both, so no deletion leaves an overlay while a shard still names its artifact.
+
+An artifact's or a layer's `mosaica_id` is
 
 ```text
 mosaica_id = FPE_k( (kind: 1) ‖ (layer space: 31) ‖ (entity: 32) )
 ```
 
-With artifacts gone from it, a point shard's ids run to `u32::MAX`, and the two-region allocator
-and its low water are removed.
+With artifacts gone from it, a point shard's ids run to `u32::MAX`, and it has no low water.
 
 ### 2.3 What stays global
 
 One copy for the bundle: the term dictionary, with the extents flushes add to it and their
 coalesced files, and the graph of conjunctions compiled from it,
-declared scalars and vocabularies, the registries of attributes, views, view groups and layers with
-their tombstones and view incarnations, the identity key, `CURRENT`, the manifest, the shard
+declared scalars and vocabularies, the registries of attributes, views, view groups and layers, the
+view incarnations, the identity key, `CURRENT`, the manifest, the shard
 records, the layer spaces' records, and `shards.size`. The WAL and the write executor stay one per
 partition, and there is one partition. Sessions and the identity catalogue are outside the bundle
 and unchanged.
@@ -280,8 +288,8 @@ flowchart TB
   subgraph L["layer space: one per registered layer"]
     direction TB
     L1["the layer's entity and its levels' runs"]
-    L2["records, content, generating sets, edges"]
-    L3["own-label postings, overlay"]
+    L2["records, content, held shapes, edges"]
+    L3["overlay"]
   end
 ```
 
@@ -332,7 +340,8 @@ tenancy 4,095.
 ### 2.6 Bundle layout
 
 Stage 2 builds the tree below with one shard and holds each shard's record in the partition's
-`SEGMENTS-<n>.json`; stage 5 gives each shard its own. Nothing global is under `shards/`, so a
+`SEGMENTS-<n>.json`, and stage 3 holds each layer space's record there too, in `layer_spaces`;
+stage 5 gives each shard and each space its own. Nothing global is under `shards/`, so a
 shard's directory can be linked or removed whole.
 
 ```text
@@ -360,8 +369,8 @@ bundle/
         row-column/  row-members/  labels/  band-labels/  shape-rows/
         containment/  tile-index/
       layers/<layer space>/
-        SEGMENTS-<n>.json                  # overlay, level runs and next ordinals
-        records/…  terms/postings.arrow  edges/…  shape-held/
+        SEGMENTS-<n>.json                  # from stage 5: overlay, extents, level versions
+        records/…  content/…  shape-held/  # records, edges among them; supplied content
 ```
 
 | Field | Where | Change |
@@ -372,7 +381,8 @@ bundle/
 | `shards` | partition side-manifest | new: one record per point shard: number, state, high water, pool size, retired count, identity (§3.6), when it opened and sealed |
 | `next_shard_id`, `next_layer_space` | partition side-manifest | new: monotone counters |
 | `shards.size` | partition side-manifest | new |
-| `layers[].space` | partition side-manifest, beside `layers` | new: the layer's space |
+| `layers[].space` | partition side-manifest, in each layer's record | new: the layer's space |
+| `layer_spaces` | partition side-manifest | new: one record per layer space: its deletions and suppressions, record and content extents, level versions and held shapes |
 | `files` | manifest | the same shape, covering every shard's files |
 
 A field a running service changes lives in the partition side-manifest. A compaction folds the
@@ -721,7 +731,8 @@ builds today's bundle, apart from the directory layout and the manifest.
   value below 100,000 (`conformance/tests/test_byte_scan.py`). §7 checks them by comparing every
   response field between the suite's two modes, where a per-shard figure differs from the one-shard
   answer. In the many-shard mode every entity id is below that floor too, so the scanner's floored
-  sweeps cover the default mode only.
+  sweeps cover the default mode only. Artifact entity ids below the floor are swept for in
+  identifier columns and cursors only ([security](system/security.md#evidence)).
 - The kind, the shard, the tenancy and the layer space sit inside the keyed permutation. A viewer
   cannot read them, order identifiers by them or count gaps between them. The permutation is a
   blinding, not encryption, and a holder of the bundle inverts it, as today.
@@ -757,7 +768,9 @@ builds today's bundle, apart from the directory layout and the manifest.
 The conformance suite runs in two modes: with the default shard size, and with a size small enough
 that every corpus spans several shards. Every assertion it makes today holds in both. The
 identifiers differ between the modes, as they differ between two builds, and so do the samples
-drawn by rank. The oracle derives every identifier itself, as it does today. It reads each item's shard and
+drawn by rank. The oracle derives every identifier itself, as it does today. It derives each
+artifact's and each layer's from the layer's space and its levels' runs in the side-manifest, and
+checks every publication's receipt against it. It reads each item's shard and
 number from the bundle, takes the tenancy from its own count of the items it has seen hold that
 number, never from the stored identifiers or the tenancy index, and checks each sample against its
 own selection over them. Every identifier a receipt carries must invert to the tenancy it expects.
@@ -782,7 +795,7 @@ Fixtures beyond that:
 | commit point | a crash between a flush's shard files and its partition file opens every shard at the previous publication |
 | runtime column | a column declared at a running service reads the same in every shard after one shard's compaction, and another shard's compaction writes that shard's base |
 | artifact delete | an artifact deleted while a sealed shard still names it is served on no route, and its deny holds until that shard's compaction removes it |
-| layer drop | its space is removed at the next publication; its artifacts' identifiers answer as naming nothing; its number is not reused |
+| layer drop | its space is removed at the next publication; its artifacts' identifiers answer as naming nothing; its number is not reused, and its name, registered again, names a new layer that answers to none of its identifiers |
 | kind routing | an artifact's `mosaica_id` sent to the item card, and an item's to the artifact card, names nothing |
 | two modes | every response field in the many-shard mode equals the default mode's, but identifiers and the samples drawn by rank, so no shard number, layer-space number or per-shard figure appears; the byte scanner finds no entity id |
 
@@ -923,7 +936,7 @@ bumps `WAL_VERSION`.
 | 0 | §8.1's benches; `count_ranges` in today's engine. Built for the density underlay's and the aggregate's cells, which are 1.4 to 10 times faster for a viewer who sees most of the map (`probes/2026-10-10-batched-cell-counts/`), and for the sweep's tile counts, whose count stage is 4 to 28 times faster for a viewer of 30% or more at depth 6 and deeper, and whose request is 6 to 43% faster for a viewer of 30% (`probes/2026-10-10-tile-counts-and-range-factor/`) | figures recorded in a probe |
 | 1 | the identity input gains the kind bit, the shard field and the tenancy, in the engine and in the oracle's own derivation and its vectors; the tenancy index, written by the compaction that frees numbers and read wherever an identifier is built or resolved; the executor's re-checks compare the tenancy, and a compaction that frees numbers moves the edit stamp; a compaction frees a deleted item's number with its last entity at the next tenancy and retires one at the cap; the threat model's stored-order residual (§6); format bump | reuse, stale identifier, early free, buffered delete and cap fixtures; §8.4 on one shard |
 | 2 | `ShardId`; every per-entity and per-view structure moves under `shards/0/`; the manifest and side-manifest split; `shards.size` declared and recorded, reaching the HTTP API, both clients and the CLI's declaration file, and a size that would open a second shard refused on both paths, as is an insert that would, batch by batch, until stage 5; the compile-fail tests but the `LayerSpace` case; format bump | the whole suite on rebuilt bundles |
-| 3 | layer spaces: artifact records, own-label postings, overlay and held shapes move out of the point space; the two-region allocator and its low water go; artifact identifiers take the kind bit; the `LayerSpace` compile-fail case; format bump | the whole suite on rebuilt bundles; layer drop and kind routing fixtures |
+| 3 | layer spaces: artifact records, supplied content, overlay and held shapes move out of the point space into one space per layer, and the point compaction writes each space it touches again; the two-region allocator and its low water go; artifact and layer identifiers take the kind bit and the layer space, and route by kind; a dropped layer leaves nothing and its name registers again; `/control/status` counts the layer spaces apart from the shard, on the HTTP API and both clients; the `LayerSpace` compile-fail case; format bump | the whole suite on rebuilt bundles; layer drop and kind routing fixtures |
 | 4 | `ShardedMask`; every route combined as §3.4 says, θ's occupied tiles merged; caches and response keys over every shard (§3.6); projections shared by grant, and the threat model's fourth shared cache; status's corpus-wide figures across shards; a build writes several shards past `shards.size`, and every write to such a bundle is refused | the conformance suite's tests that write nothing, marked as such, in both modes, and the two modes fixture; §8.1's tile-index run on MedCPT and PaperSeek; §8.2 |
 | 5 | per-shard allocation, pool and target; edits in their shard; denies resolved per shard (§4.4); flush, merge and compaction per shard, with bases tracked per shard; ingest opens shards; a key filter on every unique run; layer publication per shard, and artifact deletions held until every shard has removed them; the partition file as the commit point; format bump | the whole conformance suite in both modes; sealed shard, allocation, unique, build-equals-ingest, restart, stale identifier, commit point, runtime column and artifact delete fixtures; §8.3 and §8.4 at several shards |
 | 6 | seal, drop, status on all four surfaces, the CLI's first control-plane verbs; seal and drop logged, and a drop reconciling generating sets; refuse at open; parallel verification and its record; format bump | dropped and corrupt shard fixtures; seal, drop and the shard list through each surface |

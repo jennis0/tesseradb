@@ -644,8 +644,8 @@ fn hiding_a_cluster_gives_the_slots_of_a_corpus_without_it() {
         assert!(!before.contains_key(&ids[key].raw()), "{key} is not served");
     }
     for key in hidden {
-        let entity = artifact_entity(engine, ids[key]);
-        engine.accept_change(entity, ChangeOp::Suppress).unwrap();
+        let target = artifact_target(engine, ids[key]);
+        engine.accept_changes(vec![(target, ChangeOp::Suppress)]).unwrap();
     }
     let after = slots_of(engine, &session);
     assert_eq!(after, before);
@@ -663,7 +663,7 @@ fn after_a_suppression_only_nearby_clusters_change() {
     let before = slots_of(engine, &session);
     let gone = nodes.iter().find(|n| n.key == "b4-7-8").unwrap();
     engine
-        .accept_change(artifact_entity(engine, ids[&gone.key]), ChangeOp::Suppress)
+        .accept_changes(vec![(artifact_target(engine, ids[&gone.key]), ChangeOp::Suppress)])
         .unwrap();
     let after = slots_of(engine, &session);
     let width = 1000.0 / 16.0;
@@ -891,7 +891,7 @@ fn an_ingest_is_answered_from_the_slots_held_until_they_are_rebuilt() {
 
     let leaf = ids["b4-3-3"];
     engine
-        .accept_change(artifact_entity(engine, leaf), ChangeOp::Suppress)
+        .accept_changes(vec![(artifact_target(engine, leaf), ChangeOp::Suppress)])
         .unwrap();
     let after = slots_of(engine, &session);
     assert!(!after.contains_key(&leaf.raw()), "the suppression applies to the next request");

@@ -235,7 +235,7 @@ pub(crate) struct WithheldKey {
     credential: [u8; 32],
     view: String,
     layer: String,
-    entity: u64,
+    space: mosaica_types::LayerSpace,
     level: u32,
     palette: u8,
     registry_version: u64,
@@ -533,7 +533,7 @@ impl Engine {
                 credential: served.session.auth_data_hash(),
                 view: served.name.to_string(),
                 layer: name.to_string(),
-                entity: layer.entity.raw(),
+                space: layer.space,
                 level,
                 palette,
                 registry_version: self.write.live().registry_version(),
@@ -655,7 +655,8 @@ impl Engine {
             &mut crate::timing::Probe::new(),
         )?;
         open.served.cancel = cancel.clone();
-        let Ok(registered) = self.readable_layer(session, open.served.shard, layer, view) else {
+        let Ok(registered) = self.readable_layer(session, open.served.generation, layer, view)
+        else {
             return Ok(T::default());
         };
         let reachable = self.reachable_layers(session);
@@ -754,12 +755,12 @@ impl Engine {
                     continue;
                 }
                 if read
-                    .content(self, served.shard, layer, ordinal, entity, rank)
+                    .content(self, layer, ordinal, entity, rank)
                     .is_none()
                 {
                     continue;
                 }
-                let Some(id) = self.artifact_id(entity) else {
+                let Some(id) = self.artifact_id(layer.space, entity) else {
                     continue;
                 };
                 at[ordinal as usize] = clusters.len() as u32;

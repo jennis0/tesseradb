@@ -461,7 +461,7 @@ impl Engine {
                 )
             })
             .collect::<Result<Vec<_>>>()?;
-        let layers: Vec<Option<u64>> = plans.iter().map(Plan::layer_entity).collect();
+        let layers: Vec<_> = plans.iter().map(Plan::layer_space).collect();
         let binding = Binding {
             route: Route::Aggregate,
             view: req.view,
@@ -576,7 +576,7 @@ impl Engine {
             }
             let stamp = (
                 generation.segments_version,
-                open.served.shard.overlay_version,
+                generation.deny_state_version(),
                 open.geometry.fragment.watermark,
             );
             if position.stamp.is_some_and(|held| held != stamp) {

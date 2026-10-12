@@ -80,26 +80,6 @@ fn open_declaration(name: &str, layout: Option<ServingLayout>) -> LayerDeclarati
     }
 }
 
-impl Fixture {
-    fn open(&self) -> Engine {
-        let engine = open_engine_publishing(&self.root, &self.cache, &self.wal);
-        engine.set_background_refresh_for_test(false);
-        engine
-    }
-
-    /// The corpus entities behind a run of source ids.
-    fn members(&self, source_ids: std::ops::Range<u64>) -> Vec<EntityId> {
-        let map = source_to_new_map(&self.root, "v00000");
-        source_ids.map(|s| EntityId::new(map[&s])).collect()
-    }
-
-    /// The corpus entities behind a list of source ids, for the sets a page names.
-    fn ids(&self, source_ids: &[u64]) -> Vec<EntityId> {
-        let map = source_to_new_map(&self.root, "v00000");
-        source_ids.iter().map(|s| EntityId::new(map[s])).collect()
-    }
-}
-
 /// Every served artifact's key and masked count, ascending by key — what a viewer is told, which
 /// is what every assertion here is finally about.
 fn served(engine: &Engine) -> Vec<(String, u64)> {
@@ -169,7 +149,7 @@ fn publish_labelled(
         .map(|(rank, sources)| {
             mosaica_lifecycle::membership::IncomingContent::new(
                 vec![format!("{key} label {rank}")],
-                fx.ids(sources),
+                fx.members(sources.iter().copied()),
             )
         })
         .collect();
@@ -196,8 +176,8 @@ fn page(engine: &Engine, fx: &Fixture, key: &str, rank: u16, joining: Vec<u64>, 
             vec![IncomingGrowth::page_of_entities(
                 key.into(),
                 Some(rank),
-                fx.ids(&joining),
-                fx.ids(&leaving),
+                fx.members(joining),
+                fx.members(leaving),
             )],
         )
         .expect("a page of a generating set");
@@ -318,7 +298,7 @@ fn merge(engine: &Engine) -> Vec<EntityId> {
 #[test]
 fn a_growth_is_applied_to_the_warm_form_rather_than_rebuilding_it() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.register_layer(declaration(LAYER, None)).unwrap();
     publish(&engine, "a0", fx.members(0..100));
     publish(&engine, "a1", fx.members(500..600));
@@ -351,7 +331,7 @@ fn a_growth_is_applied_to_the_warm_form_rather_than_rebuilding_it() {
 #[test]
 fn a_publication_is_applied_to_the_warm_form_rather_than_rebuilding_it() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.register_layer(declaration(LAYER, None)).unwrap();
     publish(&engine, "a0", fx.members(0..100));
     assert_eq!(served(&engine), vec![("a0".to_string(), 100)]);
@@ -407,7 +387,7 @@ fn column_bytes(engine: &Engine, layer: &str) -> Vec<u8> {
 #[test]
 fn a_growth_amends_the_column_at_the_joined_rows_and_composes_nothing() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine
         .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorList)))
         .unwrap();
@@ -481,7 +461,7 @@ fn a_growth_amends_the_column_at_the_joined_rows_and_composes_nothing() {
 #[test]
 fn a_window_that_mints_and_grows_one_level_rebuilds_nothing() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine
         .register_layer(open_declaration(LAYER, None))
         .unwrap();
@@ -536,7 +516,7 @@ fn a_window_that_mints_and_grows_one_level_rebuilds_nothing() {
 #[test]
 fn an_ingested_member_counts_at_its_flush_and_the_fold_changes_nothing() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.register_layer(declaration(LAYER, None)).unwrap();
 
     // The tick that publishes the artifact also flushes the buffered row, so the flush is held
@@ -573,7 +553,7 @@ fn an_ingested_member_counts_at_its_flush_and_the_fold_changes_nothing() {
 #[test]
 fn a_member_that_joins_after_its_flush_counts_at_the_growth() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.register_layer(declaration(LAYER, None)).unwrap();
     publish(&engine, "a0", fx.members(0..100));
 
@@ -601,7 +581,7 @@ fn a_member_that_joins_after_its_flush_counts_at_the_growth() {
 #[test]
 fn a_growth_into_rows_already_amended_falls_back_on_the_label_form() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine
         .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorLabel)))
         .unwrap();
@@ -664,7 +644,7 @@ fn a_growth_into_rows_already_amended_falls_back_on_the_label_form() {
 fn a_merge_is_applied_to_the_warm_form_rather_than_rebuilding_it() {
     for layout in [ServingLayout::ArtifactMajor, ServingLayout::RowMajorList] {
         let fx = fixture();
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         engine
             .register_layer(declaration(LAYER, Some(layout)))
             .unwrap();
@@ -769,7 +749,7 @@ fn form_of(engine: &Engine, layer: &str) -> Vec<String> {
 fn an_amended_form_equals_one_built_from_scratch() {
     for layout in [ServingLayout::ArtifactMajor, ServingLayout::RowMajorLabel] {
         let fx = fixture();
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         engine
             .register_layer(declaration(LAYER, Some(layout)))
             .unwrap();
@@ -919,7 +899,7 @@ fn an_amended_form_equals_one_built_from_scratch() {
 #[test]
 fn a_restart_over_flushed_and_merged_rows_serves_the_level_from_its_column() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine
         .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorLabel)))
         .unwrap();
@@ -930,7 +910,7 @@ fn a_restart_over_flushed_and_merged_rows_serves_the_level_from_its_column() {
     let before = served(&engine);
     drop(engine);
 
-    let reopened = fx.open();
+    let reopened = fx.open_unrefreshed();
     assert_eq!(served(&reopened), before);
     let form = reopened
         .held_artifact_form_for_test("s0", LAYER, 0)
@@ -959,7 +939,7 @@ fn a_restart_after_writes_brings_the_folds_column_forward_without_holding_rows()
     // The two layouts that hold a column.
     for layout in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
         let fx = fixture();
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         engine
             .register_layer(declaration(LAYER, Some(layout)))
             .unwrap();
@@ -989,7 +969,7 @@ fn a_restart_after_writes_brings_the_folds_column_forward_without_holding_rows()
         );
         drop(engine);
 
-        let reopened = fx.open();
+        let reopened = fx.open_unrefreshed();
         assert_eq!(
             served(&reopened),
             before,
@@ -1045,7 +1025,7 @@ fn a_restart_after_writes_brings_the_folds_column_forward_without_holding_rows()
 #[test]
 fn a_restart_serves_denials_written_since_the_fold_to_a_restricted_viewer() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine
         .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorLabel)))
         .unwrap();
@@ -1079,7 +1059,7 @@ fn a_restart_serves_denials_written_since_the_fold_to_a_restricted_viewer() {
     assert_eq!(served(&engine), whole);
     drop(engine);
 
-    let reopened = fx.open();
+    let reopened = fx.open_unrefreshed();
     assert_eq!(counts_for(&reopened, &subset_credential()), subset);
     assert_eq!(served(&reopened), whole);
     assert!(
@@ -1099,7 +1079,7 @@ fn a_restart_serves_denials_written_since_the_fold_to_a_restricted_viewer() {
 #[test]
 fn a_restart_after_a_growth_into_anothers_base_rows_serves_the_level_as_a_list() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine
         .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorLabel)))
         .unwrap();
@@ -1115,7 +1095,7 @@ fn a_restart_after_a_growth_into_anothers_base_rows_serves_the_level_as_a_list()
     );
     drop(engine);
 
-    let reopened = fx.open();
+    let reopened = fx.open_unrefreshed();
     assert_eq!(served(&reopened), before);
     let form = reopened
         .held_artifact_form_for_test("s0", LAYER, 0)
@@ -1141,7 +1121,7 @@ fn a_restart_after_a_growth_into_anothers_base_rows_serves_the_level_as_a_list()
 #[test]
 fn a_restart_of_a_hull_level_behind_its_column_projects_the_level() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     let mut hulled = declaration(LAYER, Some(ServingLayout::RowMajorLabel));
     hulled.content.computed = vec!["hull".into()];
     engine.register_layer(hulled).unwrap();
@@ -1157,7 +1137,7 @@ fn a_restart_of_a_hull_level_behind_its_column_projects_the_level() {
     );
     drop(engine);
 
-    let reopened = fx.open();
+    let reopened = fx.open_unrefreshed();
     assert_eq!(served(&reopened), before);
     let form = reopened
         .held_artifact_form_for_test("s0", LAYER, 0)
@@ -1180,7 +1160,7 @@ fn a_restart_of_a_hull_level_behind_its_column_projects_the_level() {
 #[test]
 fn a_growth_over_a_mapped_membership_keeps_it_mapped_live_and_after_a_restart() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine
         .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorLabel)))
         .unwrap();
@@ -1213,7 +1193,7 @@ fn a_growth_over_a_mapped_membership_keeps_it_mapped_live_and_after_a_restart() 
     let before = served(&engine);
     drop(engine);
 
-    let reopened = fx.open();
+    let reopened = fx.open_unrefreshed();
     held(&reopened, "replayed");
     assert_eq!(served(&reopened), before);
     assert_eq!(reopened.columns_composed(), 0);
@@ -1227,7 +1207,7 @@ fn a_growth_over_a_mapped_membership_keeps_it_mapped_live_and_after_a_restart() 
 #[test]
 fn a_fold_after_joins_to_a_mapped_membership_maps_back_their_union() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine
         .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorLabel)))
         .unwrap();
@@ -1255,7 +1235,7 @@ fn a_fold_after_joins_to_a_mapped_membership_maps_back_their_union() {
     };
     check(&engine, "after the fold");
     drop(engine);
-    check(&fx.open(), "after a restart");
+    check(&fx.open_unrefreshed(), "after a restart");
 }
 
 /// **Members joining while a fold is in flight survive the fold and a restart.** The fold packed
@@ -1264,7 +1244,7 @@ fn a_fold_after_joins_to_a_mapped_membership_maps_back_their_union() {
 #[test]
 fn a_join_while_a_fold_is_in_flight_survives_the_fold_and_a_restart() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine
         .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorLabel)))
         .unwrap();
@@ -1295,7 +1275,7 @@ fn a_join_while_a_fold_is_in_flight_survives_the_fold_and_a_restart() {
     assert_eq!(served(&engine), whole);
     drop(engine);
 
-    let reopened = fx.open();
+    let reopened = fx.open_unrefreshed();
     assert_eq!(counts_for(&reopened, &subset_credential()), subset, "after a restart");
     assert_eq!(served(&reopened), whole, "after a restart");
 }
@@ -1311,7 +1291,7 @@ fn a_join_while_a_fold_is_in_flight_survives_the_fold_and_a_restart() {
 #[test]
 fn a_paged_generating_set_is_maintained_into_the_form_a_build_produces() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.register_layer(label_declaration(LABELS)).unwrap();
 
     // Two artifacts, one carrying two ranked contents so a withdrawal has a rank above it to move.
@@ -1510,7 +1490,7 @@ fn publish_generated_from(
 #[test]
 fn a_merge_that_moves_a_generating_sets_member_re_projects_the_set() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.register_layer(label_declaration(LABELS)).unwrap();
     engine.set_merge_for_test(false);
 

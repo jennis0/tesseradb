@@ -14,9 +14,10 @@
 //! required here). Do not change the round count, the round function, the packing or the
 //! key schedule: see the memo §1.
 //!
-//! An item's high half is an [`ItemHigh`]; an identifier whose kind bit is 1 names no item.
+//! An item's high half is an [`ItemHigh`], kind bit 0. An artifact's or a layer's high half is its
+//! [`LayerSpace`] under kind bit 1, and the low half is its entity in that space.
 
-use crate::{EntityId, ShardId};
+use crate::{EntityId, LayerSpace, ShardId};
 
 /// Number of Feistel rounds in the `mosaica_id` construction. Fixed by the memo §1 — do
 /// not change.
@@ -45,6 +46,8 @@ pub enum IdentityError {
     ShardOutOfRange { shard: u32 },
     /// A tenancy does not fit the 12 bits [`ItemHigh`] gives it.
     TenancyOutOfRange { tenancy: u16 },
+    /// A layer space of [`LayerSpace::LIMIT`] or more.
+    LayerSpaceOutOfRange { space: u32 },
 }
 
 impl std::fmt::Display for IdentityError {
@@ -83,6 +86,14 @@ impl std::fmt::Display for IdentityError {
                     "shard id {shard} does not fit in {} bits; a shard id must be below {}",
                     ShardId::BITS,
                     ShardId::LIMIT
+                )
+            }
+            IdentityError::LayerSpaceOutOfRange { space } => {
+                write!(
+                    f,
+                    "layer space {space} does not fit in {} bits; a layer space must be below {}",
+                    LayerSpace::BITS,
+                    LayerSpace::LIMIT
                 )
             }
             IdentityError::TenancyOutOfRange { tenancy } => {
@@ -162,6 +173,10 @@ pub struct ItemHigh {
 }
 
 const _: () = assert!(ShardId::BITS + Tenancy::BITS == 31);
+const _: () = assert!(LayerSpace::BITS == 31);
+
+/// The kind bit of a high half, set for an artifact or a layer.
+const ARTIFACT_KIND: u32 = 1 << 31;
 
 impl ItemHigh {
     #[inline]
@@ -293,6 +308,25 @@ impl IdentityKey {
     pub fn invert(&self, id: MosaicaId) -> Option<(ItemHigh, EntityId)> {
         let (high, entity) = self.invert_raw(id);
         Some((ItemHigh::unpack(high)?, entity))
+    }
+
+    /// The `mosaica_id` of the artifact or layer at `entity` in layer space `space`. Refuses an
+    /// entity above `u32::MAX`.
+    pub fn forward_artifact(
+        &self,
+        space: LayerSpace,
+        entity: EntityId,
+    ) -> Result<MosaicaId, IdentityError> {
+        self.forward_raw(ARTIFACT_KIND | space.raw(), entity)
+    }
+
+    /// The layer space and entity `id` was formed from, or `None` when `id` names an item.
+    pub fn invert_artifact(&self, id: MosaicaId) -> Option<(LayerSpace, EntityId)> {
+        let (high, entity) = self.invert_raw(id);
+        if high & ARTIFACT_KIND == 0 {
+            return None;
+        }
+        Some((LayerSpace::new(high & !ARTIFACT_KIND).ok()?, entity))
     }
 
     /// `FPE_k(high ‖ entity)` over any 32-bit high half.
@@ -563,9 +597,9 @@ mod tests {
         let sk_key = IdentityKey::from_hex(doc["secondary_key"]["key"].as_str().unwrap()).unwrap();
 
         let vectors = packed["vectors"].as_array().unwrap();
-        assert_eq!(vectors.len(), 8);
+        assert_eq!(vectors.len(), 12);
         let sk_vectors = packed["secondary_key_vectors"].as_array().unwrap();
-        assert_eq!(sk_vectors.len(), 2);
+        assert_eq!(sk_vectors.len(), 3);
         let cases = vectors
             .iter()
             .map(|v| (&key, v))
@@ -573,38 +607,64 @@ mod tests {
         let mut kinds = [0usize; 2];
         for (key, v) in cases {
             let kind = v["kind"].as_u64().unwrap();
-            let shard = ShardId::new(v["shard"].as_u64().unwrap() as u32).unwrap();
-            let tenancy = Tenancy::new(v["tenancy"].as_u64().unwrap() as u16).unwrap();
-            let number = EntityId::new(v["number"].as_u64().unwrap());
             let high = v["high"].as_u64().unwrap() as u32;
             let id = MosaicaId::new(parse_hex_u64(v["mosaica_id"].as_str().unwrap()));
             kinds[kind as usize] += 1;
 
-            assert_eq!(key.forward_raw(high, number), Ok(id), "{v}");
-            assert_eq!(key.invert_raw(id), (high, number), "{v}");
             if kind == 0 {
+                let shard = ShardId::new(v["shard"].as_u64().unwrap() as u32).unwrap();
+                let tenancy = Tenancy::new(v["tenancy"].as_u64().unwrap() as u16).unwrap();
+                let number = EntityId::new(v["number"].as_u64().unwrap());
                 let item = ItemHigh::new(shard, tenancy);
+                assert_eq!(key.forward_raw(high, number), Ok(id), "{v}");
+                assert_eq!(key.invert_raw(id), (high, number), "{v}");
                 assert_eq!(item.pack(), high, "{v}");
                 assert_eq!(ItemHigh::unpack(high), Some(item), "{v}");
                 assert_eq!(key.forward(item, number), Ok(id), "{v}");
                 assert_eq!(key.invert(id), Some((item, number)), "{v}");
+                assert_eq!(key.invert_artifact(id), None, "{v}");
             } else {
                 assert_eq!(kind, 1);
+                let space = LayerSpace::new(v["space"].as_u64().unwrap() as u32).unwrap();
+                let entity = EntityId::new(v["entity"].as_u64().unwrap());
+                assert_eq!(key.forward_raw(high, entity), Ok(id), "{v}");
+                assert_eq!(key.invert_raw(id), (high, entity), "{v}");
                 assert_eq!(ItemHigh::unpack(high), None, "{v}");
+                assert_eq!(key.forward_artifact(space, entity), Ok(id), "{v}");
+                assert_eq!(key.invert_artifact(id), Some((space, entity)), "{v}");
                 assert_eq!(key.invert(id), None, "{v}");
             }
         }
         assert!(kinds[0] > 0 && kinds[1] > 0);
 
         let rejected = packed["rejected_packings"].as_array().unwrap();
-        assert_eq!(rejected.len(), 2);
+        assert_eq!(rejected.len(), 3);
         for v in rejected {
+            if let Some(space) = v.get("space") {
+                assert!(LayerSpace::new(space.as_u64().unwrap() as u32).is_err(), "{v}");
+                continue;
+            }
             let shard = v["shard"].as_u64().unwrap() as u32;
             let tenancy = v["tenancy"].as_u64().unwrap() as u16;
             assert!(
                 ShardId::new(shard).is_err() || Tenancy::new(tenancy).is_err(),
                 "{v}"
             );
+        }
+    }
+
+    #[test]
+    fn ids_differing_only_by_the_kind_bit_name_different_things() {
+        let key = IdentityKey::from_hex(CANONICAL_KEY).unwrap();
+        for e in [0u64, 1, 65_536, u32::MAX as u64] {
+            let e = EntityId::new(e);
+            let item = key.forward(ITEM, e).unwrap();
+            let artifact = key.forward_artifact(LayerSpace::ZERO, e).unwrap();
+            assert_ne!(item, artifact);
+            assert_eq!(key.invert(item), Some((ITEM, e)));
+            assert_eq!(key.invert_artifact(item), None);
+            assert_eq!(key.invert_artifact(artifact), Some((LayerSpace::ZERO, e)));
+            assert_eq!(key.invert(artifact), None);
         }
     }
 

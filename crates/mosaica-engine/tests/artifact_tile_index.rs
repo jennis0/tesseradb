@@ -175,6 +175,7 @@ fn build_fixture(shape: Shape) -> Fixture {
             .collect();
         store.put(
             LAYER,
+            mosaica_types::LayerSpace::ZERO,
             0,
             ordinal,
             ArtifactRecord {
@@ -579,7 +580,8 @@ fn a_growth_between_two_reads_would_leave_the_extent_narrow() {
         was < grown_lo,
         "the growth must land outside the old extent"
     );
-    fx.store.put(LAYER, 0, ordinal, record, None);
+    fx.store
+        .put(LAYER, mosaica_types::LayerSpace::ZERO, 0, ordinal, record, None);
 
     let membership = fx.membership();
     let tiles = rows_of(&[grown_lo..=UNIVERSE - 1]);
@@ -723,7 +725,7 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
         incarnation: Some(0),
         path: rel.clone(),
         view: Some(view.to_string()),
-        layer: LAYER.to_string(),
+        space: mosaica_types::LayerSpace::ZERO,
         level: 0,
         level_version: version,
         form: mosaica_store::manifest::DerivedForm::TileIndex,
@@ -843,6 +845,7 @@ fn an_index_over_another_population_is_refused_and_the_level_derives_its_own() {
     for ordinal in 0..4u32 {
         small.put(
             LAYER,
+            mosaica_types::LayerSpace::ZERO,
             0,
             ordinal,
             ArtifactRecord {
@@ -951,7 +954,7 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
         incarnation: Some(0),
         path: index_rel.clone(),
         view: Some("s0".to_string()),
-        layer: LAYER.to_string(),
+        space: mosaica_types::LayerSpace::ZERO,
         level: 0,
         level_version: version,
         form: mosaica_store::manifest::DerivedForm::TileIndex,
@@ -960,7 +963,7 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
         incarnation: Some(0),
         path: column_rel.clone(),
         view: Some("s0".to_string()),
-        layer: LAYER.to_string(),
+        space: mosaica_types::LayerSpace::ZERO,
         level: 0,
         level_version: version,
         form: mosaica_store::manifest::DerivedForm::RowColumn {
@@ -971,7 +974,7 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
         incarnation: Some(0),
         path: members_rel.clone(),
         view: Some("s0".to_string()),
-        layer: LAYER.to_string(),
+        space: mosaica_types::LayerSpace::ZERO,
         level: 0,
         level_version: version,
         form: mosaica_store::manifest::DerivedForm::RowMembers,

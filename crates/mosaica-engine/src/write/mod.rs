@@ -41,7 +41,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use mosaica_authz::{DeltaTier, Dict, FragmentCache};
-use mosaica_lifecycle::alloc::{high_water_from, low_water_from, AllocError, Allocator};
+use mosaica_lifecycle::alloc::{high_water_from, Allocator};
 use mosaica_lifecycle::buffer::DescriptorResolver;
 use mosaica_lifecycle::command::{ExecError, SubmitError};
 use mosaica_lifecycle::faults::WalMeter;
@@ -50,11 +50,10 @@ use mosaica_lifecycle::overlay::Replay;
 use mosaica_lifecycle::registry::LayerRegistry;
 use mosaica_lifecycle::wal::{ChangeOp, ExecutorWal, Wal, WalError, WalRecord, WalScalar};
 use mosaica_lifecycle::window::{ClosedEntry, CommitWindow, FragmentationTally, WindowEntry};
-use mosaica_lifecycle::{IngestBuffer, Overlay};
+use mosaica_lifecycle::{IngestBuffer, Overlay, Overlays};
 
 use crate::cache::RowProjectionCache;
 use crate::cache::KEEP_SUPERSEDED_GENERATIONS;
-use crate::edited::ARTIFACT_SHARD;
 use crate::geometry::{check_publishable, GeometryPublication, GeometryRefused};
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_store::manifest::{EntitySet, ManifestVocabulary, SegmentsManifest};
@@ -62,7 +61,7 @@ use mosaica_store::merge::MergePolicy;
 use mosaica_store::render_presence::RENDER_PRESENCE_DIR;
 use mosaica_store::vocabulary::{MintError, Minted, Vocabularies};
 use mosaica_store::ShardLayout;
-use mosaica_types::{EntityId, IdentityKey, ShardId, TermId};
+use mosaica_types::{EntityId, IdentityKey, LayerSpace, ShardId, Target, TermId};
 
 use crate::error::EngineError;
 use crate::{Generation, GenerationHandle, Shard};
@@ -440,15 +439,37 @@ impl WritePath {
         // Read before the pointer moves into the thread. What the bundle's manifests already carry
         // is where each held artifact list starts: see [`SideManifests`] for why they are held
         // rather than re-cloned from a (stale) live manifest at each publication.
-        let (seeded_membership_extents, seeded_derived_extents, seeded_content_extents) =
-            match generation.load().bundle.shard(ARTIFACT_SHARD) {
-                Some(shard) => (
-                    shard.record.membership_extents.clone(),
-                    shard.record.derived_extents.clone(),
-                    shard.record.artifact_record_extents.clone(),
-                ),
-                None => Default::default(),
-            };
+        // A dropped layer's extents are not carried.
+        let (seeded_membership_extents, seeded_derived_extents, seeded_spaces) = {
+            let generation = generation.load();
+            let mut members = Vec::new();
+            let mut derived = Vec::new();
+            let mut spaces = std::collections::BTreeMap::new();
+            for partition in generation.bundle.partitions.values() {
+                let record = &partition.only_shard().record;
+                members.extend(
+                    record
+                        .membership_extents
+                        .iter()
+                        .filter(|e| live.holds_space(e.space))
+                        .cloned(),
+                );
+                derived.extend(
+                    partition
+                        .derived_extents()
+                        .filter(|e| live.holds_space(e.space))
+                        .cloned(),
+                );
+                spaces.extend(
+                    partition
+                        .layer_spaces
+                        .iter()
+                        .filter(|record| live.holds_space(record.space))
+                        .map(|record| (record.space, executor::HeldSpace::of(record))),
+                );
+            }
+            (members, derived, spaces)
+        };
         // What replay left in the log and no manifest carries: the same publication is owed for
         // it, and without this a node that restarted between a batch and its tick would wait for
         // the next batch to write one.
@@ -484,7 +505,7 @@ impl WritePath {
                         next_manifest_n,
                         seeded_membership_extents,
                         seeded_derived_extents,
-                        seeded_content_extents,
+                        seeded_spaces,
                         growth_unpublished,
                     ),
                     coalesce: executor::Background::sharing(
@@ -675,21 +696,21 @@ impl WritePath {
 
     /// Register an annotation layer and wait for its receipt.
     ///
-    /// Returns the layer's own entity, which the caller turns into a `mosaica_id`, the only
+    /// Returns the layer's space, whose own entity the caller turns into a `mosaica_id`, the only
     /// address by which the layer can later be suppressed, since an entity id never crosses the
     /// boundary. A failure means the layer does not exist, the opposite of a deny's posture: see
     /// `Executor::commit_registry`.
     pub(crate) fn register_layer(
         &self,
         declaration: mosaica_types::layer::LayerDeclaration,
-    ) -> Result<EntityId, AcceptError> {
+    ) -> Result<LayerSpace, AcceptError> {
         self.submit(|reply| Command::RegisterLayer {
             declaration: Box::new(declaration),
             reply,
         })
     }
 
-    /// Drop a layer, tombstoning its name for ever.
+    /// Drop a layer. Its name may be registered again, as a new layer in a new space.
     pub(crate) fn drop_layer(&self, name: String) -> Result<(), AcceptError> {
         self.submit(|reply| Command::DropLayer { name, reply })
     }
@@ -810,7 +831,7 @@ impl WritePath {
         level: u32,
         joins: Vec<mosaica_lifecycle::IncomingGrowth>,
         stamp: crate::edited::Stamp,
-    ) -> Result<Vec<mosaica_lifecycle::MembershipGrown>, AcceptError> {
+    ) -> Result<(LayerSpace, Vec<mosaica_lifecycle::MembershipGrown>), AcceptError> {
         self.submit(|reply| Command::GrowMemberships {
             layer,
             level,
@@ -825,7 +846,7 @@ impl WritePath {
     /// [`LifecycleHandle::enqueue`] before treating either half's `Err` as "nothing happened".
     pub(crate) fn submit_changes(
         &self,
-        changes: Vec<(EntityId, ChangeOp)>,
+        changes: Vec<(Target, ChangeOp)>,
         stamp: crate::edited::Stamp,
     ) -> Result<PendingChange, AcceptError> {
         let (reply, pending) = Reply::channel(

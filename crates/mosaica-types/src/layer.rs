@@ -618,9 +618,8 @@ pub struct LevelDeclaration {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LayerDeclaration {
-    /// The layer's identity. Tombstoned on drop and **never reused** — a name that once meant
-    /// something must not come to mean something else, since bookmarks, edges and suppressions all
-    /// travel by it.
+    /// The layer's name, unique among registered layers. A dropped layer's name can be registered
+    /// again, as a new layer in a new space.
     pub name: String,
     /// Human-readable, served as metadata. Optional — see [`LevelDeclaration::title`].
     pub title: Option<String>,
@@ -831,19 +830,27 @@ pub const MAX_TILE_DEPTH: u32 = 16;
 /// pays for a partial container at each end, on every operation, for ever.
 pub const RESERVED_BLOCK: u64 = 1 << 16;
 
-/// Where the row-less region starts counting **down** from: the highest [`RESERVED_BLOCK`] boundary
-/// at or below the entity-id ceiling (`u32::MAX`, contracts §2.6).
-///
-/// **The 65 535 ids above it are deliberately unusable.** Row-less allocation hands out whole
-/// aligned blocks so that a level's membership sits inside whole Roaring containers; starting at
-/// `u32::MAX` would make the *first* block the one that straddles a boundary, which is the case
-/// alignment exists to remove. One block out of 65 536 is the price.
-///
-/// It lives here rather than with the allocator because it is a fact about how entity space is
-/// divided, which several crates need and only one of them allocates.
-pub const ROWLESS_CEILING: u64 = (u32::MAX as u64) & !(RESERVED_BLOCK - 1);
+/// The entity a layer's own identifier names in its space. Its levels' runs start at
+/// [`FIRST_LEVEL_BLOCK`], so no artifact holds it.
+pub const LAYER_ENTITY: crate::EntityId = crate::EntityId::new(0);
 
-/// A contiguous, ascending run of reserved row-less entity ids.
+/// The block a layer space's first level starts at. Block 0 holds [`LAYER_ENTITY`] alone.
+pub const FIRST_LEVEL_BLOCK: u64 = 1;
+
+/// One past the last block a layer space holds: the last whole block below [`crate::ENTITY_END`].
+pub const SPACE_BLOCKS: u64 = crate::ENTITY_END / RESERVED_BLOCK;
+
+/// The block a space gives next: past every run in `runs`, or [`FIRST_LEVEL_BLOCK`] when there are
+/// none.
+pub fn next_block(runs: &[ReservedRuns]) -> u64 {
+    runs.iter()
+        .flat_map(ReservedRuns::runs)
+        .map(|run| run.end.div_ceil(RESERVED_BLOCK))
+        .max()
+        .unwrap_or(FIRST_LEVEL_BLOCK)
+}
+
+/// A contiguous, ascending run of artifact entity ids in a layer space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntityRun {
     /// Inclusive, and a multiple of [`RESERVED_BLOCK`].
@@ -868,25 +875,15 @@ impl EntityRun {
 
 /// The entity ids one level holds, as a **list** of runs in allocation order.
 ///
-/// **A list rather than one block, and that is not an optimisation.** A level that fills its
-/// reservation is extended by appending another block, and by then other layers have taken the ids
-/// immediately below it — the allocator is monotone downward and hands nobody a reserved gap. So a
-/// level's second block is *somewhere* below its first, not adjacent to it, and any scheme assuming
-/// one contiguous run either refuses to grow or reissues ids. Both are worse than a short walk.
-///
-/// **The representation's `ordinal = entity − entity_base` is this with one run**, which is the
-/// common case: a level fits its first block until it holds more than 65 536 artifacts. The general
-/// form keeps the property that mattered — no per-artifact lookup table in either direction — and
-/// pays a walk over a handful of runs instead.
+/// A level that fills its reservation appends its space's next block, which need not follow its
+/// last. Ordinals run through the runs in order.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReservedRuns {
     runs: Vec<EntityRun>,
 }
 
 impl ReservedRuns {
-    /// Builds from runs **in allocation order**, which is the order ordinals follow. Ascending
-    /// entity order would be wrong: the second block allocated sits at a *lower* address than the
-    /// first, so sorting would silently renumber every artifact in the level.
+    /// Builds from runs **in allocation order**, which is the order ordinals follow.
     pub fn from_runs(runs: Vec<EntityRun>) -> Self {
         ReservedRuns { runs }
     }
@@ -931,9 +928,7 @@ impl ReservedRuns {
         None
     }
 
-    /// Appends a block. Callers pass what the allocator returned, so alignment is the allocator's
-    /// property; this asserts it rather than enforcing it, because a misaligned run here means the
-    /// allocator is wrong and a silent fixup would hide that.
+    /// Appends a run of whole aligned blocks.
     pub fn push(&mut self, run: EntityRun) {
         debug_assert_eq!(
             run.start % RESERVED_BLOCK,
@@ -951,15 +946,13 @@ impl ReservedRuns {
 
 /// A registered layer, as it is held in memory and written to a manifest.
 ///
-/// **The ids are stored, never re-derived.** A registration must land on the entities it was acked
-/// on, whatever the allocator's state at replay: bookmarks, edges and suppressions all name them,
-/// and recomputing would move a layer under every one of them.
+/// **The runs are stored, never re-derived.** A registration must land on the entities it was
+/// acked on: bookmarks, edges and suppressions all name them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RegisteredLayer {
     pub declaration: LayerDeclaration,
-    /// The layer's own entity. Its only job is to give layer suppression somewhere to land, so
-    /// `/control/changes` and the deny lane work on a layer exactly as they work on a point.
-    pub entity: crate::EntityId,
+    /// The space its artifacts' and its own identifiers carry.
+    pub space: crate::LayerSpace,
     /// One entry per level, in level order; a layer declaring no levels has exactly one, its
     /// level 0.
     pub runs: Vec<ReservedRuns>,
@@ -985,6 +978,16 @@ pub struct RegisteredLayer {
     /// — see [`RegisteredLayer::layout_of`] — which is the fail-safe direction: the worst outcome
     /// is a row-major column nothing adopts, and the level is served the way it always was.
     pub layouts: Vec<ServingLayout>,
+}
+
+/// Each of `layers`' spaces, by the layer's name.
+pub fn spaces_by_name(
+    layers: &[RegisteredLayer],
+) -> std::collections::BTreeMap<String, crate::LayerSpace> {
+    layers
+        .iter()
+        .map(|layer| (layer.declaration.name.clone(), layer.space))
+        .collect()
 }
 
 impl RegisteredLayer {
@@ -1320,9 +1323,9 @@ impl LayerDeclaration {
             _ => {}
         }
 
-        // Levels address by `entity − level.entity_base` over a reserved run, so the set must be
-        // exactly 0..n: a repeat would give two levels one base, and a gap would reserve a run no
-        // address reaches.
+        // Levels address by ordinal within the level's runs, so the set must be exactly 0..n: a
+        // repeat would give two levels one set of runs, and a gap would reserve a run no address
+        // reaches.
         let mut seen: BTreeSet<u32> = BTreeSet::new();
         for level in &self.levels {
             if !seen.insert(level.level) {
@@ -2317,9 +2320,7 @@ mod tests {
 
     #[test]
     fn the_two_addressing_directions_agree_across_a_discontiguous_level() {
-        // A level extended after other layers took the ids below it: block B sits well under block
-        // A, and the ordinals run A then B because that is allocation order. Any scheme that sorted
-        // by entity would put B's artifacts first and renumber the level silently.
+        // Ordinals follow the runs' order, not entity order.
         let a = EntityRun {
             start: 900 * RESERVED_BLOCK,
             end: 901 * RESERVED_BLOCK,
@@ -2352,8 +2353,7 @@ mod tests {
 
     #[test]
     fn one_run_is_the_representations_subtraction() {
-        // The common case the design states: `ordinal = entity − entity_base`, with the general
-        // form degenerating to exactly that.
+        // One run: `ordinal = entity − run.start`.
         let base = 700 * RESERVED_BLOCK;
         let runs = ReservedRuns::from_runs(vec![EntityRun {
             start: base,
@@ -2363,6 +2363,25 @@ mod tests {
             assert_eq!(runs.entity_of(ordinal), Some(base + ordinal));
             assert_eq!(runs.ordinal_of(base + ordinal), Some(ordinal));
         }
+    }
+
+    #[test]
+    fn a_space_gives_blocks_past_every_run_and_holds_none_past_its_last() {
+        let block = |b: u64| EntityRun {
+            start: b * RESERVED_BLOCK,
+            end: (b + 1) * RESERVED_BLOCK,
+        };
+        assert_eq!(next_block(&[]), FIRST_LEVEL_BLOCK);
+        let levels = [
+            ReservedRuns::from_runs(vec![block(1), block(4)]),
+            ReservedRuns::from_runs(vec![block(2)]),
+        ];
+        assert_eq!(next_block(&levels), 5);
+        assert!(levels
+            .iter()
+            .all(|runs| runs.ordinal_of(LAYER_ENTITY.raw()).is_none()));
+        assert!(SPACE_BLOCKS * RESERVED_BLOCK <= u32::MAX as u64);
+        assert!((SPACE_BLOCKS + 1) * RESERVED_BLOCK > u32::MAX as u64);
     }
 
     #[test]

@@ -136,6 +136,7 @@ pub fn run(
 ) -> ArtifactPass {
     let started = Instant::now();
     let mut pass = ArtifactPass::default();
+    let spaces = mosaica_types::layer::spaces_by_name(&published.layers);
     // **One set of projection buffers for the whole pass.** Every walk below projects a membership
     // per artifact, and `Permutation::project` allocates and zeroes a 512 KB stamp on each call —
     // it is written for one call per session and says so. Shared through a `RefCell` because the
@@ -373,7 +374,7 @@ pub fn run(
             // **A build coins each key once, so every structure it writes is the declared
             // incarnation** (decision 0115). There is no drop at a build to leave a predecessor.
             incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
-            layer: layer.clone(),
+            space: spaces[layer],
             level: *level,
             level_version: store.level_version(layer, *level),
             form: DerivedForm::TileIndex,
@@ -466,7 +467,7 @@ pub fn run(
         let filed = |form: DerivedForm, path: std::path::PathBuf| Filed {
             view: Some(view.to_string()),
             incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
-            layer: layer.clone(),
+            space: spaces[layer],
             level: *level,
             level_version,
             form,
@@ -548,7 +549,7 @@ pub fn run(
         for ((layer, level), rows) in &resolved {
             let has_column = columns.iter().any(|e| {
                 matches!(e.form, DerivedForm::RowColumn { .. })
-                    && &e.layer == layer
+                    && e.space == spaces[layer]
                     && e.level == *level
             });
             if has_column {
@@ -558,7 +559,7 @@ pub fn run(
             shape_rows.push(Filed {
                 view: Some(view.to_string()),
                 incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
-                layer: layer.clone(),
+                space: spaces[layer],
                 level: *level,
                 level_version,
                 form: DerivedForm::ShapeRows {
@@ -597,7 +598,7 @@ pub fn run(
             Filed {
                 view: Some(view.to_string()),
                 incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
-                layer: layer.clone(),
+                space: spaces[layer],
                 level: *level,
                 level_version,
                 form: DerivedForm::ShapeHeld,
@@ -683,12 +684,12 @@ pub fn containment(
         }
     };
 
-    let levels: Vec<(String, u32)> = store
+    let levels: Vec<(String, u32, mosaica_types::LayerSpace)> = store
         .levels_and_extents()
-        .map(|(layer, level, _)| (layer.to_string(), level))
+        .filter_map(|(layer, level, _)| Some((layer.to_string(), level, store.space_of(layer)?)))
         .collect();
     let mut composed: Vec<Filed> = Vec::new();
-    for (layer, level) in &levels {
+    for (layer, level, space) in &levels {
         let contents = |visit: &mut dyn FnMut(u32, &[&Bitmap])| {
             for (ordinal, record) in store.level(layer, *level) {
                 let generating: Vec<&Bitmap> =
@@ -727,7 +728,7 @@ pub fn containment(
         composed.push(Filed {
             view: None,
             incarnation: None,
-            layer: layer.clone(),
+            space: *space,
             level: *level,
             level_version: store.level_version(layer, *level),
             form: DerivedForm::Containment,

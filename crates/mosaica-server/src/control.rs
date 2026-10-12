@@ -23,9 +23,9 @@ use mosaica_engine::{MetaView, ScopedScalar};
 use mosaica_lifecycle::ChangeOp;
 
 use mosaica_types::view::ViewMetadataValue;
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, Target};
 
-use crate::address::{Named, Table};
+use crate::address::Table;
 use crate::decode::{labels_col, parse_ingest_batch, BodyEncoding, DecodeError, ParsedBatch};
 use crate::error::{map_accept_error, map_change_batch_error, map_join_error, ApiError};
 use crate::health::is_ready;
@@ -727,16 +727,16 @@ fn run_changes(
             tables: named,
             ignored,
             at,
-        } = merged.name(state)?;
-        let mut changes: Vec<(EntityId, ChangeOp)> = Vec::with_capacity(ops.len());
+        } = merged.name_targets(state)?;
+        let mut changes: Vec<(Target, ChangeOp)> = Vec::with_capacity(ops.len());
         let mut refused = Vec::new();
         for (index, (named, op)) in named.iter().zip(&ops).enumerate() {
             match named[0] {
-                Named::Item(entity) => changes.push((entity, *op)),
-                Named::Refused(reason) if strict => {
+                Ok(target) => changes.push((target, *op)),
+                Err(reason) if strict => {
                     return Err(crate::address::strict_refusal("the request", index, reason))
                 }
-                Named::Refused(reason) => refused.push(crate::address::refused_json(index, reason)),
+                Err(reason) => refused.push(crate::address::refused_json(index, reason)),
             }
         }
         let done = ChangesDone {
@@ -1866,12 +1866,12 @@ fn resolve_member_lists(
         let mut entities = Vec::with_capacity(named.len());
         for (row, named) in named.into_iter().enumerate() {
             match named {
-                Named::Item(entity) => entities.push(entity),
-                Named::Refused(reason) if strict || list.whole => {
+                Ok(entity) => entities.push(entity),
+                Err(reason) if strict || list.whole => {
                     let what = format!("artifact {}'s `{}`", list.artifact, list.list);
                     return Err(crate::address::strict_refusal(&what, row, reason));
                 }
-                Named::Refused(reason) => refused.push(serde_json::json!({
+                Err(reason) => refused.push(serde_json::json!({
                     "artifact": list.artifact,
                     "list": list.list,
                     "row": row,
@@ -3119,12 +3119,19 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
                 "count": s.segments,
             }))
             .collect::<Vec<_>>(),
-        // `depth` counts deletions and suppressions; `retirable` only the deletions, which a fold
-        // can retire and which the fold schedule keys on. Suppressions never retire.
+        // The point shard's: `depth` counts deletions and suppressions; `retirable` only the
+        // deletions, which a fold can retire and which the fold schedule keys on. Suppressions
+        // never retire.
         "overlay": {
             "depth": live.overlay_depth,
             "retirable": live.retirable_deletions,
             "soft_limit_alarms": executor.overlay_soft_limit_alarms,
+        },
+        // The same two figures summed over the layer spaces, and how many spaces there are.
+        "layer_spaces": {
+            "count": live.layer_spaces.count,
+            "depth": live.layer_spaces.depth,
+            "retirable": live.layer_spaces.retirable,
         },
         // Alarm on `fold_failures` (each leaves a bundle-sized tree nothing reclaims) and on
         // `fold_refusals` rising while `folds` is flat; `fold_refusals_by_gate` names the standing

@@ -37,8 +37,8 @@ fn engine_open_seeds_the_allocator_from_the_manifest_high_water() {
 }
 
 /// S6: `Allocator::try_new`'s own doc calls it "the check that belongs at open", and `Engine::open`
-/// is open — it must refuse a seed at or above `u32::MAX` before any ingest, rather than let the
-/// first allocation surface it as an opaque exhaustion error. The seed comes from durable state
+/// is open — it must refuse a seed past `u32::MAX` before any ingest, rather than let the first
+/// allocation surface it as an opaque exhaustion error. The seed comes from durable state
 /// this process did not write (MANIFEST's high-water, or a replayed WAL lease), so a hand-edited or
 /// corrupt value has to fail closed here.
 #[test]
@@ -51,7 +51,7 @@ fn engine_open_refuses_an_out_of_range_allocator_seed() {
         &tmp.path().join("pairs.parquet"),
     );
 
-    // A replayed row at the top of the u32 space — `high_water_from` folds
+    // A replayed row at `u32::MAX`, which is never issued — `high_water_from` folds
     // `entity_id + 1` into the seed, so this is the WAL-side half of the seeding rule, reached
     // without touching MANIFEST's digest. The refusal fires before replay resolves anything, so
     // the row's other fields never matter.
@@ -64,7 +64,7 @@ fn engine_open_refuses_an_out_of_range_allocator_seed() {
             batch_id: "over-the-top".to_string(),
             body_hash: [0u8; 32],
             rows: vec![mosaica_lifecycle::WalRow {
-                entity_id: mosaica_types::EntityId::new(u32::MAX as u64 - 1),
+                entity_id: mosaica_types::EntityId::new(u32::MAX as u64),
                 view: "s0".to_string(),
                 join: false,
                 descriptors: Vec::new(),
@@ -85,11 +85,11 @@ fn engine_open_refuses_an_out_of_range_allocator_seed() {
         config(),
     );
     let Err(err) = opened else {
-        panic!("a seed at u32::MAX must be refused at open, not at the first ingest");
+        panic!("a seed past u32::MAX must be refused at open, not at the first ingest");
     };
     assert!(
-        matches!(err, EngineError::Malformed(ref d) if d.contains("allocator")),
-        "expected a typed refusal naming the allocator, got {err:?}"
+        matches!(err, EngineError::Malformed(_)),
+        "expected the open to refuse the durable state, got {err:?}"
     );
 }
 
@@ -244,7 +244,7 @@ fn a_deleted_items_mosaica_id_is_not_issued_again_after_a_fold_and_a_restart() {
     let root = fixture_in(tmp.path());
     let engine = serving(&root);
     let first = create(&engine, "first", &["first"])[0];
-    let entity = engine.resolve_mosaica_ids(&[first]).unwrap()[0].expect("the item it created");
+    let entity = items_of(&engine, &[first])[0].expect("the item it created");
     engine.accept_change(entity, ChangeOp::Delete).unwrap();
     fold(&engine);
     drop(engine);

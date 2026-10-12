@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_spatial::Projection;
 use mosaica_types::layer::{RegisteredLayer, ServingLayout};
-use mosaica_types::{ShardId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+use mosaica_types::{LayerSpace, ShardId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
 use crate::error::{Result, StoreError};
 
@@ -1726,7 +1726,9 @@ impl EntityTermsExtent {
 pub struct MembershipExtent {
     /// Prefix-relative path of the packed extent.
     pub path: String,
-    pub layer: String,
+    /// The layer's space. A layer registered again under a dropped one's name has another, so an
+    /// extent of the dropped layer is never read as the new one's.
+    pub space: LayerSpace,
     pub level: u32,
     /// The first ordinal this extent covers. **Also carried inside the file**, and checked against
     /// it at open: a manifest and a file that disagree about which artifacts a range names would
@@ -1736,28 +1738,115 @@ pub struct MembershipExtent {
     pub count: u32,
 }
 
-/// One `(layer, level)`'s artifact-write counter, as of the publication this manifest describes.
+impl MembershipExtent {
+    /// Whether `records`, a record pack of `space`, holds the records of this extent's members.
+    pub fn pairs(&self, space: LayerSpace, records: &RecordPackExtent) -> bool {
+        self.space == space
+            && self.level == records.level
+            && self.ordinal_lo == records.ordinal_lo
+            && self.count == records.count
+    }
+}
+
+/// One level's artifact-write counter, as of the publication this manifest describes. A
+/// structure derived from the level is adopted only at the version it was written for.
 ///
-/// **The counter is what a derived structure is valid *for*, and until now it lived only in
-/// memory.** `ArtifactStore` counts the writes that have landed on each level, and everything
-/// derived from a level — its row-space projection, its lineage, its containment partition — is
-/// correct only for the version it was derived from. A restart rebuilt the store from these
-/// manifests and started every level's counter at whatever the seeding happened to produce, so a
-/// coordinate recorded before the restart could not be compared with one after it.
-///
-/// **Per `(layer, level)` and not one counter for the store**, for `ArtifactStore::versions`' own
-/// reason: a store-wide counter makes one publication anywhere invalidate every level's derived
-/// form everywhere (`design/artifact-serving-at-scale.md` §8.1).
-///
-/// A level present in `membership_extents` and absent here is a level whose version is unknown,
-/// which is not the same as zero — see [`ShardRecord::level_versions`].
+/// A level present in its space's record packs and absent here is a level whose version is
+/// unknown, which is not the same as zero.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LevelVersion {
-    pub layer: String,
     pub level: u32,
     /// How many artifact writes had landed on this level when this manifest was written.
     pub version: u64,
+}
+
+/// One record pack of a layer space: one publication's artifact records for one level, members
+/// apart (`crate::membership`). The level's members are in each shard's [`MembershipExtent`]
+/// over the same ordinals.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RecordPackExtent {
+    /// Prefix-relative path of the pack.
+    pub path: String,
+    pub level: u32,
+    /// The first ordinal this pack covers; also in the file, and checked against it at open.
+    pub ordinal_lo: u32,
+    pub count: u32,
+}
+
+/// One layer space's state in a [`SegmentsManifest`]: its own deny state, its artifacts' records,
+/// supplied content and held shapes, and its levels' versions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayerSpaceRecord {
+    pub space: LayerSpace,
+    /// The space's deleted artifacts whose records a fold has not yet removed.
+    pub tombstones: EntitySet,
+    /// The space's suppressed artifacts, and the layer's own entity where the layer is suppressed.
+    /// Never the union with [`Self::tombstones`], on [`ShardRecord::deny`]'s argument.
+    pub deny: EntitySet,
+    pub record_packs: Vec<RecordPackExtent>,
+    /// The artifacts' supplied content, in the record-blob format.
+    pub content_extents: Vec<RecordExtent>,
+    /// A lost list restarts every level at zero, which a structure derived under the old numbering
+    /// could match.
+    pub level_versions: Vec<LevelVersion>,
+    /// The levels' held shape decompositions, each a [`DerivedForm::ShapeHeld`].
+    pub held_shapes: Vec<DerivedExtent>,
+}
+
+impl LayerSpaceRecord {
+    /// A space that denies nothing and names no file.
+    pub fn empty(space: LayerSpace) -> LayerSpaceRecord {
+        LayerSpaceRecord {
+            space,
+            tombstones: EntitySet::default(),
+            deny: EntitySet::default(),
+            record_packs: Vec::new(),
+            content_extents: Vec::new(),
+            level_versions: Vec::new(),
+            held_shapes: Vec::new(),
+        }
+    }
+
+    /// The version `level` is at, where the record states one.
+    pub fn level_version(&self, level: u32) -> Option<u64> {
+        self.level_versions
+            .iter()
+            .find(|v| v.level == level)
+            .map(|v| v.version)
+    }
+}
+
+/// The record of `space` in `spaces`, which is ascending by space.
+pub fn layer_space(spaces: &[LayerSpaceRecord], space: LayerSpace) -> Option<&LayerSpaceRecord> {
+    let at = spaces.binary_search_by_key(&space, |r| r.space).ok()?;
+    Some(&spaces[at])
+}
+
+/// The record of `space` in `spaces`, which is ascending by space, inserting an empty one in order
+/// where there is none.
+pub fn layer_space_mut(
+    spaces: &mut Vec<LayerSpaceRecord>,
+    space: LayerSpace,
+) -> &mut LayerSpaceRecord {
+    let at = match spaces.binary_search_by_key(&space, |r| r.space) {
+        Ok(at) => at,
+        Err(at) => {
+            spaces.insert(at, LayerSpaceRecord::empty(space));
+            at
+        }
+    };
+    &mut spaces[at]
+}
+
+/// `shard`'s derived files and every one of `spaces`' held shapes, as one list.
+pub(crate) fn derived_and_held<'a>(
+    shard: &'a ShardRecord,
+    spaces: &'a [LayerSpaceRecord],
+) -> impl Iterator<Item = &'a DerivedExtent> {
+    let held = spaces.iter().flat_map(|space| space.held_shapes.iter());
+    shard.derived_extents.iter().chain(held)
 }
 
 /// One file derived from an artifact level: a containment partition, a tile index, a row-major
@@ -1776,7 +1865,8 @@ pub struct LevelVersion {
 pub struct DerivedExtent {
     /// Prefix-relative path of the file.
     pub path: String,
-    pub layer: String,
+    /// The layer's space, on [`MembershipExtent::space`]'s argument.
+    pub space: LayerSpace,
     pub level: u32,
     pub level_version: u64,
     pub view: Option<String>,
@@ -1788,7 +1878,7 @@ impl DerivedExtent {
     /// Whether `other` was written for the same level, version, view and incarnation: the
     /// coordinates two files written together share.
     pub fn same_level(&self, other: &DerivedExtent) -> bool {
-        self.layer == other.layer
+        self.space == other.space
             && self.level == other.level
             && self.level_version == other.level_version
             && self.view == other.view
@@ -1955,6 +2045,8 @@ pub struct SegmentsManifest {
     #[serde(flatten)]
     pub partition: PartitionManifest,
     pub shards: Shards,
+    /// One per registered layer, ascending by space.
+    pub layer_spaces: Vec<LayerSpaceRecord>,
 }
 
 /// The point shards of a [`SegmentsManifest`].
@@ -1969,28 +2061,13 @@ pub struct Shards {
 /// The partition's fields of a [`SegmentsManifest`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PartitionManifest {
-    /// The row-less region's mark: one past the lowest entity any layer registration has claimed,
-    /// or `ROWLESS_CEILING` when none has.
-    ///
-    /// **Required, and this is the field decision 0074 calls the part to get right.** The WAL
-    /// carries the same mark in its `LayerCreate` records, and rotation reclaims those — so a mark
-    /// that lived only there is lost at the first rotation, and the next registration is handed ids
-    /// a live layer already holds: two entities, one `mosaica_id`. This is the home that survives,
-    /// exactly as a shard's [`ShardRecord::high_water`] is for the point region.
-    ///
-    /// **No `serde(default)`, and the reason is sharper here than elsewhere.** A default would make
-    /// an absent mark and a *lost* mark the same value, which is the fail-open the field exists to
-    /// close — and the safe-looking default is the ceiling, which is precisely the value that
-    /// reissues everything. A manifest omitting it is malformed, not layer-free.
-    pub entity_id_low_water: u64,
     /// The annotation layer registry as of this publication, complete current state rather than a
     /// diff — the posture contracts §2.3 already fixes for `deny` and `tombstones`.
     pub layers: Vec<RegisteredLayer>,
-    /// Every layer name that has ever been dropped. **Carried for ever and never pruned**:
-    /// bookmarks, edges and suppressions all travel by name, so a name that once meant something
-    /// must not come to mean something else. A tombstone list that forgot would let a recreated
-    /// layer silently inherit every stale reference to the old one.
-    pub layer_tombstones: Vec<String>,
+    /// The space the next registration takes, past every space a layer has held. Required:
+    /// rotation reclaims the WAL's `LayerCreate` records, so a counter kept only there would give
+    /// a dropped layer's space to a new one.
+    pub next_layer_space: u32,
     /// The layer registry's version counter: the last version handed to a registration or a drop.
     /// Open resumes the counter from it.
     pub layer_registry_version: u64,
@@ -2000,8 +2077,7 @@ pub struct PartitionManifest {
     /// WAL entries for replay, but rotation reclaims them — so a roster that lived only in the log
     /// is lost at the first rotation, and a reused key silently repoints every client cache keyed
     /// on the view (decision 0029). Carried forward for ever, exactly as
-    /// [`Self::entity_id_low_water`] and [`Self::layer_tombstones`] are
-    /// and for the same reason.
+    /// [`Self::next_layer_space`] is and for the same reason.
     ///
     /// The views a *build* declared are in `MANIFEST.json` and are not restated here: this list
     /// is the additions, and the served roster is the two together plus the WAL's own overlay.
@@ -2091,7 +2167,7 @@ pub struct PartitionManifest {
     /// and unreachable. Renamed rather than repurposed under the old name, so that nothing reads
     /// it as the burn it no longer is.
     ///
-    /// Carried forward at every publication, on `layer_tombstones`' argument: a mark that lives
+    /// Carried forward at every publication, on `next_layer_space`'s argument: a mark that lives
     /// only in the log is lost at the first rotation, and a reclaim that forgot an incarnation
     /// would leave its files on disc for ever.
     pub dead_view_incarnations: Vec<DeadIncarnation>,
@@ -2188,8 +2264,8 @@ pub struct ShardRecord {
     /// union would make every deletion look retirable by an unsuppress.
     #[serde(default)]
     pub deny: EntitySet,
-    /// Every packed membership extent this shard holds — see [`MembershipExtent`]. Empty in a
-    /// bundle straight out of `mosaica build`, which registers no layers and publishes no artifacts.
+    /// This shard's slice of every artifact's members, one pack per publication per level — see
+    /// [`MembershipExtent`]. The records are in the layer spaces' [`RecordPackExtent`]s.
     pub membership_extents: Vec<MembershipExtent>,
     /// Every derived artifact file this shard holds. See [`DerivedExtent`].
     pub derived_extents: Vec<DerivedExtent>,
@@ -2199,27 +2275,14 @@ pub struct ShardRecord {
     ///
     /// A lost list sends every session through a permutation walk, with no fault reported.
     pub term_image_extents: Vec<TermImageExtent>,
-    /// Every record-blob extent holding artifact-supplied content, in [`Self::record_extents`]'
-    /// format. Kept apart because an artifact publication restates its whole list from a stale
-    /// manifest while a coalesce consumes point extents, so on one list each would undo the other.
-    /// Not coalesced or folded. Artifact ids descend from the ceiling and point ids ascend from
-    /// zero, so the two never share an entity.
-    pub artifact_record_extents: Vec<RecordExtent>,
-    /// Every `(layer, level)`'s artifact-write counter as of this publication — see
-    /// [`LevelVersion`].
-    ///
-    /// A lost list restarts every level at zero, which a structure derived under the old numbering
-    /// could match.
-    pub level_versions: Vec<LevelVersion>,
 }
 
 impl PartitionManifest {
     /// A partition that declares and names nothing.
     pub fn empty() -> PartitionManifest {
         PartitionManifest {
-            entity_id_low_water: mosaica_types::layer::ROWLESS_CEILING,
             layers: Vec::new(),
-            layer_tombstones: Vec::new(),
+            next_layer_space: 0,
             layer_registry_version: 0,
             views: Vec::new(),
             scoped_columns: Vec::new(),
@@ -2261,8 +2324,6 @@ impl ShardRecord {
             membership_extents: Vec::new(),
             derived_extents: Vec::new(),
             term_image_extents: Vec::new(),
-            artifact_record_extents: Vec::new(),
-            level_versions: Vec::new(),
         }
     }
 }
@@ -2295,12 +2356,7 @@ pub const HONOURED_STATE: &[&str] = &[
     "deny",
     "tombstones",
     "vocabulary_extensions",
-    // Both arrived with the code that reads them (`WritePath::reconstruct` seeds the registry from
-    // the manifest and replays the WAL on top). A reader carrying a layer list and ignoring it
-    // would serve a bundle as though no layer had ever been registered — every gate absent, every
-    // reserved run available for reissue — which is the fail-open this list exists to close.
     "layers",
-    "layer_tombstones",
     // The roster's runtime half, on the same argument: a reader carrying created views and
     // ignoring them would serve a bundle as though the views did not exist — every request naming
     // one a 404 — and, worse, would admit a create on a key a live or tombstoned view already
@@ -2373,6 +2429,7 @@ impl SegmentsManifest {
                 size: mosaica_types::SHARD_SIZE_DEFAULT,
                 records: vec![ShardRecord::empty(ShardId::ZERO)],
             },
+            layer_spaces: Vec::new(),
         }
     }
 
@@ -2393,6 +2450,33 @@ impl SegmentsManifest {
         }
     }
 
+    /// Refuses a manifest whose layer spaces are not ascending, or name a space no registered
+    /// layer holds: its records would be served under no layer, or a dropped one's.
+    pub(crate) fn check_layer_spaces(&self) -> std::result::Result<(), String> {
+        if self
+            .layer_spaces
+            .windows(2)
+            .any(|pair| pair[0].space >= pair[1].space)
+        {
+            return Err("the side-manifest's layer spaces are not ascending. Rebuild the bundle."
+                .to_string());
+        }
+        match self.layer_spaces.iter().find(|record| {
+            !self
+                .partition
+                .layers
+                .iter()
+                .any(|layer| layer.space == record.space)
+        }) {
+            Some(record) => Err(format!(
+                "the side-manifest names layer space {}, which no registered layer holds. \
+                 Rebuild the bundle.",
+                record.space
+            )),
+            None => Ok(()),
+        }
+    }
+
     /// The one shard's record. A manifest that passed [`Self::check_served_shards`] has one.
     pub fn only_shard(&self) -> &ShardRecord {
         mosaica_types::only(&self.shards.records)
@@ -2401,6 +2485,36 @@ impl SegmentsManifest {
     /// [`Self::only_shard`], to edit.
     pub fn only_shard_mut(&mut self) -> &mut ShardRecord {
         mosaica_types::only(&mut self.shards.records)
+    }
+
+    /// The shard's derived files and every layer space's held shapes.
+    pub fn derived_extents(&self) -> impl Iterator<Item = &DerivedExtent> {
+        derived_and_held(self.only_shard(), &self.layer_spaces)
+    }
+
+    /// File `derived`, replacing what the manifest lists: each held shape under its space's
+    /// record, and the rest on the shard. A held shape of a space with no record is not filed.
+    pub fn file_derived(&mut self, derived: Vec<DerivedExtent>) {
+        for record in &mut self.layer_spaces {
+            record.held_shapes.clear();
+        }
+        let mut shard = Vec::new();
+        for extent in derived {
+            if extent.form != DerivedForm::ShapeHeld {
+                shard.push(extent);
+            } else if let Ok(at) =
+                self.layer_spaces.binary_search_by_key(&extent.space, |r| r.space)
+            {
+                self.layer_spaces[at].held_shapes.push(extent);
+            }
+        }
+        self.only_shard_mut().derived_extents = shard;
+    }
+
+    /// Every shard's and every layer space's `(tombstones, deny)`.
+    fn deny_sets(&self) -> impl Iterator<Item = (&EntitySet, &EntitySet)> {
+        self.shards.records.iter().map(|r| (&r.tombstones, &r.deny))
+            .chain(self.layer_spaces.iter().map(|s| (&s.tombstones, &s.deny)))
     }
 
     /// The state fields this manifest carries that [`HONOURED_STATE`] does not cover, by name.
@@ -2422,10 +2536,9 @@ impl SegmentsManifest {
     /// *files* fail to verify is one this reader cannot serve either, and stepping past it
     /// re-exposes every entity denied since the older manifest was written.
     pub fn deny_disposition_state(&self) -> Vec<&'static str> {
-        let records = &self.shards.records;
         [
-            ("tombstones", records.iter().any(|r| r.tombstones.carries())),
-            ("deny", records.iter().any(|r| r.deny.carries())),
+            ("tombstones", self.deny_sets().any(|(t, _)| t.carries())),
+            ("deny", self.deny_sets().any(|(_, d)| d.carries())),
         ]
         .into_iter()
         .filter(|(name, carried)| *carried && DENY_DISPOSITION_STATE.contains(name))
@@ -2444,11 +2557,8 @@ impl SegmentsManifest {
         let records = &self.shards.records;
         let partition = &self.partition;
         let mut fields: Vec<&'static str> = [
-            (
-                "tombstones",
-                records.iter().any(|r| r.tombstones.undecodable()),
-            ),
-            ("deny", records.iter().any(|r| r.deny.undecodable())),
+            ("tombstones", self.deny_sets().any(|(t, _)| t.undecodable())),
+            ("deny", self.deny_sets().any(|(_, d)| d.undecodable())),
         ]
         .into_iter()
         .filter(|(_, undecodable)| *undecodable)
@@ -2462,7 +2572,6 @@ impl SegmentsManifest {
                     !partition.vocabulary_extensions.is_empty(),
                 ),
                 ("layers", !partition.layers.is_empty()),
-                ("layer_tombstones", !partition.layer_tombstones.is_empty()),
                 ("views", !partition.views.is_empty()),
                 (
                     "dead_view_incarnations",
@@ -2635,6 +2744,48 @@ mod tests {
         assert_eq!(manifest.deny_disposition_state(), vec!["tombstones"]);
     }
 
+    #[test]
+    fn a_layer_spaces_deny_state_is_never_stepped_past() {
+        let space = LayerSpace::new(3).unwrap();
+        let mut manifest = SegmentsManifest::empty();
+        manifest.only_shard_mut().deltas = vec!["d".to_string()];
+        let mut record = LayerSpaceRecord::empty(space);
+        record.deny = deny_set(&[9]);
+        manifest.layer_spaces.push(record);
+        assert_eq!(manifest.deny_disposition_state(), vec!["deny"]);
+
+        let mut manifest = SegmentsManifest::empty();
+        let mut record = LayerSpaceRecord::empty(space);
+        record.tombstones = serde_json::from_value(serde_json::json!("AAAA")).unwrap();
+        manifest.layer_spaces.push(record);
+        assert_eq!(
+            manifest.honourability(),
+            Honourability::Unready {
+                fields: vec!["tombstones"]
+            }
+        );
+    }
+
+    #[test]
+    fn a_layer_space_list_round_trips_and_an_absent_one_is_refused() {
+        let mut manifest = SegmentsManifest::empty();
+        let mut record = LayerSpaceRecord::empty(LayerSpace::new(2).unwrap());
+        record.level_versions.push(LevelVersion {
+            level: 1,
+            version: 4,
+        });
+        manifest.layer_spaces.push(record);
+        let json = serde_json::to_value(&manifest).unwrap();
+        let back: SegmentsManifest = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(back.layer_spaces.len(), 1);
+        assert_eq!(back.layer_spaces[0].space, LayerSpace::new(2).unwrap());
+        assert_eq!(back.layer_spaces[0].level_versions[0].version, 4);
+
+        let mut json = json;
+        json.as_object_mut().unwrap().remove("layer_spaces");
+        assert!(serde_json::from_value::<SegmentsManifest>(json).is_err());
+    }
+
     /// The term-image list survives a round trip, and a manifest that omits it is refused.
     ///
     /// The refusal is the half worth testing. There is no `serde(default)` on the field, so a
@@ -2711,7 +2862,7 @@ mod tests {
     fn every_derived_form_round_trips_and_an_absent_list_is_refused() {
         let entry = |form: DerivedForm, view: Option<&str>| DerivedExtent {
             path: format!("{}/x", TEST_SHARD.derived_rel(form.dir())),
-            layer: "regions".to_string(),
+            space: LayerSpace::new(4).unwrap(),
             level: 0,
             level_version: 3,
             view: view.map(str::to_string),
@@ -2898,7 +3049,6 @@ mod tests {
                 "tombstones",
                 "vocabulary_extensions",
                 "layers",
-                "layer_tombstones",
                 "views",
                 "dead_view_incarnations",
                 "attributes",
@@ -2912,11 +3062,11 @@ mod tests {
              unions on top. vocabulary_extensions: the loader seeds the live \
              `vocabulary::Vocabularies` from them before replay, which is what makes a minted \
              code survive a restart and what keeps it out of the next draw. \
-             layers/layer_tombstones: `WritePath::reconstruct` seeds the `LayerRegistry` from them \
+             layers: `WritePath::reconstruct` seeds the `LayerRegistry` from it \
              before replaying the WAL over the top, which is what makes a registration survive the \
-             rotation that reclaims its `LayerCreate` record — a reader carrying them and ignoring \
-             them would open a bundle as though no layer had ever been registered, every gate \
-             absent and every reserved run free for reissue. views/dead_view_incarnations: \
+             rotation that reclaims its `LayerCreate` record — a reader carrying it and ignoring \
+             it would open a bundle as though no layer had ever been registered, every gate \
+             absent. views/dead_view_incarnations: \
              `Engine::open` seeds the `ViewRoster` from them and amends the bundle's own manifest \
              with what it holds, before replaying the WAL over the top — which is what makes a \
              view created while the service ran survive the rotation that reclaims its \

@@ -141,7 +141,7 @@ proptest! {
     /// **One allocation takes ids in the allocator's order**, over a pool of freed ids at fuzzed
     /// tenancies: an edit's new entity takes tenancy 0, lowest first, then the high-water; a new
     /// item takes the lowest tenancy, lowest id first, then the high-water; the edits draw first.
-    /// An allocation the space between the marks cannot hold is refused and takes nothing.
+    /// An allocation the shard's size cannot hold is refused and takes nothing.
     #[test]
     fn a_window_takes_ids_in_the_allocators_order(
         pool in prop::collection::btree_map(0u32..200, 0u16..4, 0..40),
@@ -150,7 +150,8 @@ proptest! {
         room in 0u64..60,
     ) {
         const HIGH_WATER: u64 = 1_000;
-        let mut alloc = Allocator::with_marks(HIGH_WATER, HIGH_WATER + room);
+        let mut alloc = Allocator::new(HIGH_WATER);
+        alloc.set_size(HIGH_WATER + room);
         let free = by_tenancy(pool.iter().map(|(&id, &tenancy)| (id, tenancy)));
         alloc.release_after(0, free.clone());
         alloc.promote(0);
@@ -377,7 +378,7 @@ struct Published {
 
 fn deletion(id: u64) -> WalRecord {
     WalRecord::ChangeBatch {
-        changes: vec![(EntityId::new(id), ChangeOp::Delete)],
+        changes: vec![(item(EntityId::new(id)), ChangeOp::Delete)],
     }
 }
 
@@ -398,4 +399,8 @@ fn row(id: u64) -> WalRecord {
             scoped: Vec::new(),
         }],
     }
+}
+
+fn item(entity: EntityId) -> mosaica_types::Target {
+    mosaica_types::Target::Item(mosaica_types::ShardId::ZERO, entity)
 }

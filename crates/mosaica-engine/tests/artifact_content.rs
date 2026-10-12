@@ -17,13 +17,13 @@ use common::*;
 use mosaica_engine::derived::DerivedContent;
 use mosaica_engine::Engine;
 use mosaica_lifecycle::membership::IncomingContent;
+use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_lifecycle::IncomingArtifact;
 use mosaica_spatial::morton::fixed32;
 use mosaica_types::layer::{
     ContentDeclaration, DeclarationError, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
-use mosaica_types::EntityId;
 
 fn declaration(name: &str, derived: &[&str]) -> LayerDeclaration {
     LayerDeclaration {
@@ -48,17 +48,6 @@ fn declaration(name: &str, derived: &[&str]) -> LayerDeclaration {
         levels: Vec::new(),
         layout: None,
         shape: None,
-    }
-}
-
-impl Fixture {
-    fn open(&self) -> Engine {
-        open_engine_publishing(&self.root, &self.cache, &self.wal)
-    }
-
-    fn members(&self, source_ids: impl Iterator<Item = u64>) -> Vec<EntityId> {
-        let map = source_to_new_map(&self.root, "v00000");
-        source_ids.map(|s| EntityId::new(map[&s])).collect()
     }
 }
 
@@ -481,37 +470,6 @@ fn corpus_independent_content_is_served_to_everyone_who_reaches_the_layer() {
     }
 }
 
-/// Wait for the executor's drain close to publish at least `want` artifact content extents.
-fn content_extents(fx: &Fixture, want: usize) -> Vec<std::path::PathBuf> {
-    let dir = fx
-        .root
-        .join("v00000")
-        .join(common::SHARD.record_extents_rel());
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let found: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                p.file_name()
-                    .is_some_and(|n| n.to_string_lossy().starts_with("artifacts-"))
-                    && p.to_string_lossy().ends_with(".blocks.bin")
-            })
-            .collect();
-        if found.len() >= want {
-            return found;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "only {} of {want} content extents were published within 10s",
-            found.len()
-        );
-        std::thread::yield_now();
-    }
-}
-
 /// **Two publications, and both labels survive the loss of the log.**
 ///
 /// The regression this exists for: an artifact publication starts from a *clone of the stale
@@ -541,7 +499,7 @@ fn two_publications_of_content_both_survive_the_loss_of_the_whole_log() {
                 )],
             )
             .unwrap();
-        content_extents(&fx, 1);
+        wait_for_content_extents(&fx.root, 1);
 
         engine
             .publish_artifacts(
@@ -554,7 +512,7 @@ fn two_publications_of_content_both_survive_the_loss_of_the_whole_log() {
                 )],
             )
             .unwrap();
-        content_extents(&fx, 2);
+        wait_for_content_extents(&fx.root, 2);
     }
 
     remove_the_whole_log(&fx.wal);
@@ -730,7 +688,7 @@ fn published_and_log_free(fx: &Fixture, labels: &[&str]) {
         engine
             .publish_artifacts("topics/a".into(), 0, batch)
             .unwrap();
-        content_extents(fx, 1);
+        wait_for_content_extents(&fx.root, 1);
     }
     remove_the_whole_log(&fx.wal);
 }
@@ -846,4 +804,125 @@ fn a_publication_after_the_table_is_built_rebuilds_it() {
         2,
         "the publication moved the level's version, so the table was read again"
     );
+}
+
+/// Whether any file under `dir` holds `text`: in its raw bytes, or in a row of a record blob, whose
+/// blocks are compressed.
+fn holds_text(dir: &std::path::Path, text: &str) -> bool {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(at) = stack.pop() {
+        for entry in std::fs::read_dir(&at).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            if bytes.windows(text.len()).any(|w| w == text.as_bytes()) {
+                return true;
+            }
+            let name = path.to_string_lossy().into_owned();
+            let Some(stem) = name.strip_suffix(".blocks.bin") else {
+                continue;
+            };
+            let Ok(blob) = mosaica_filter::RecordBlob::open(
+                &path,
+                std::path::Path::new(&format!("{stem}.hasrow.roaring")),
+                std::path::Path::new(&format!("{stem}.directory.arrow")),
+                mosaica_filter::Access::Read,
+            ) else {
+                continue;
+            };
+            let mut found = false;
+            blob.for_each_row(&mut |_, fields| {
+                found |= fields.iter().any(|field| {
+                    matches!(&field.value, mosaica_filter::RecordValue::Utf8(v) if v.contains(text))
+                });
+                Ok(())
+            })
+            .unwrap();
+            if found {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The labels a principal is served, by key.
+fn labels_served(engine: &Engine) -> Vec<(String, Vec<String>)> {
+    let mut served: Vec<(String, Vec<String>)> = artifacts_of(engine, &full_coverage_credential())
+        .into_iter()
+        .map(|a| (a.key.unwrap(), a.content))
+        .collect();
+    served.sort();
+    served
+}
+
+/// **A deleted artifact's supplied content leaves the disc at the fold that removes its record.**
+/// No byte of it is in any file of the prefix that fold publishes; it is served by nobody; and
+/// every other artifact's content is served unchanged, before a restart and after one.
+#[test]
+fn a_fold_removes_a_deleted_artifacts_content_from_the_disc() {
+    let fx = fixture();
+    let gone = "label-of-the-deleted-artifact-7f3a";
+    let kept = [
+        ("t1".to_string(), vec!["label-kept-beside-it-c41e".to_string()]),
+        ("t2".to_string(), vec!["label-kept-in-its-own-extent-9b0d".to_string()]),
+    ];
+    {
+        let engine = fx.open();
+        engine
+            .register_layer(label_layer("topics/a", true))
+            .unwrap();
+        let ids = engine
+            .publish_artifacts(
+                "topics/a".into(),
+                0,
+                vec![
+                    IncomingArtifact::with_content(
+                        Some("t0".into()),
+                        fx.members(0..100),
+                        vec![content(gone, &fx, 0..10)],
+                    ),
+                    IncomingArtifact::with_content(
+                        Some("t1".into()),
+                        fx.members(100..200),
+                        vec![content(&kept[0].1[0], &fx, 100..110)],
+                    ),
+                ],
+            )
+            .unwrap();
+        wait_for_content_extents(&fx.root, 1);
+        engine
+            .publish_artifacts(
+                "topics/a".into(),
+                0,
+                vec![IncomingArtifact::with_content(
+                    Some("t2".into()),
+                    fx.members(200..300),
+                    vec![content(&kept[1].1[0], &fx, 200..210)],
+                )],
+            )
+            .unwrap();
+        wait_for_content_extents(&fx.root, 2);
+        let before = fx.root.join(&engine.generation().prefix);
+        assert!(holds_text(&before, gone), "the scan finds the content while it is stored");
+
+        engine
+            .accept_changes(vec![(artifact_target(&engine, ids[0]), ChangeOp::Delete)])
+            .unwrap();
+        fold(&engine);
+        let after = fx.root.join(&engine.generation().prefix);
+        assert_ne!(after, before);
+        assert!(!holds_text(&after, gone), "no byte of the deleted content is in the new prefix");
+        for (_, labels) in &kept {
+            assert!(holds_text(&after, &labels[0]));
+        }
+        assert_eq!(labels_served(&engine), kept.to_vec());
+    }
+
+    let engine = fx.open();
+    assert_eq!(labels_served(&engine), kept.to_vec());
+    assert!(!holds_text(&fx.root.join(&engine.generation().prefix), gone));
 }

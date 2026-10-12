@@ -214,7 +214,9 @@ fn has_labels(engine: &Engine, layer: &str, level: u32) -> bool {
         .derived_extents
         .iter()
         .any(|e| {
-            e.layer == layer && e.level == level && matches!(e.form, DerivedForm::BandLabels { .. })
+            e.space == engine.registered_layer(layer).unwrap().space
+                && e.level == level
+                && matches!(e.form, DerivedForm::BandLabels { .. })
         })
 }
 
@@ -388,11 +390,9 @@ fn labels_tag_points_as_the_walk_does_through_growth_ingest_fold_and_suppression
     assert!(column(&before, TIERED).contains(&Some(r1)));
     assert!(column(&before, FLAT).contains(&Some(f2)));
     for id in [r1, f2] {
+        let target = artifact_target(&engine, mosaica_types::MosaicaId::new(id));
         engine
-            .accept_change(
-                artifact_entity(&engine, mosaica_types::MosaicaId::new(id)),
-                ChangeOp::Suppress,
-            )
+            .accept_changes(vec![(target, ChangeOp::Suppress)])
             .unwrap();
     }
     let after = engine.viewport(&session, request).unwrap();
@@ -587,6 +587,7 @@ fn a_built_bundle_tags_alike_before_and_after_an_ingest() {
     corpus.write_pairs_parquet(&pairs).unwrap();
     build_corpus_fixture_with_layers(&root, &points, &pairs, &corpus);
     let engine = open(&root, tmp.path());
+    let manifest = side_manifest(&root);
 
     let layers: Vec<String> = engine
         .generation()
@@ -595,7 +596,7 @@ fn a_built_bundle_tags_alike_before_and_after_an_ingest() {
         .record
         .derived_extents
         .iter()
-        .map(|e| e.layer.clone())
+        .map(|e| layer_in(&manifest, e.space).to_string())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();

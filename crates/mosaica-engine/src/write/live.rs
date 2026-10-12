@@ -25,13 +25,12 @@ pub(in crate::write) type AcceptedBatches = FxHashMap<String, AcceptedBatch>;
 /// extension id to hand out.
 pub(in crate::write) type ResolverState = (FxHashMap<Vec<u8>, TermId>, u32);
 
-/// The layer registry as a side-manifest carries it, with the allocator's row-less mark.
+/// The layer registry as a side-manifest carries it.
 pub(in crate::write) struct RegistryForPublication {
     pub layers: Vec<mosaica_types::layer::RegisteredLayer>,
-    pub tombstones: Vec<String>,
+    pub next_layer_space: u32,
     /// The registry's version counter.
     pub version: u64,
-    pub low_water: u64,
 }
 
 /// One point shard's write state, on [`LiveState`]'s contract.
@@ -52,10 +51,6 @@ impl ShardWrite {
 
     pub(crate) fn high_water(&self) -> u64 {
         lock_recover(&self.allocator).high_water()
-    }
-
-    pub(crate) fn low_water(&self) -> u64 {
-        lock_recover(&self.allocator).low_water()
     }
 
     pub(crate) fn size(&self) -> u64 {
@@ -145,39 +140,33 @@ impl LiveState {
         mosaica_types::only(&self.shards)
     }
 
-    /// Runs `f` with both the registry and the allocator held, in that lock order.
-    ///
-    /// One critical section: a registration reads one and writes both, and taking them separately
-    /// would let a second registration allocate between the name check and the run allocation.
-    /// This order is the only one taken anywhere, so it cannot deadlock against
-    /// [`LiveState::registry_for_publication`].
-    pub(in crate::write) fn with_registry_and_allocator<R>(
-        &self,
-        f: impl FnOnce(&mut LayerRegistry, &mut Allocator) -> R,
-    ) -> R {
-        let mut registry = lock_recover(&self.registry);
-        let mut alloc = lock_recover(&self.only_shard().allocator);
-        f(&mut registry, &mut alloc)
+    /// Runs `f` with the registry held: a registration's or a drop's preparation.
+    pub(in crate::write) fn with_registry<R>(&self, f: impl FnOnce(&mut LayerRegistry) -> R) -> R {
+        f(&mut lock_recover(&self.registry))
     }
 
+    /// Applies a registry record, and a drop to the artifact store too, so a layer registered
+    /// later under the name starts from no artifact.
     pub(in crate::write) fn apply_registry_record(&self, record: &WalRecord) {
-        lock_recover(&self.registry).apply(record);
+        let mut registry = lock_recover(&self.registry);
+        registry.apply(record);
+        if let WalRecord::LayerDrop { name, .. } = record {
+            lock_recover(&self.artifacts).remove_layer(name);
+        }
     }
 
-    /// Runs `f` with the registry, the artifact store and the allocator held, in that lock order.
+    /// Runs `f` with the registry and the artifact store held, in that lock order.
     ///
-    /// Extends `with_registry_and_allocator`'s order: a publication reads the level's cursor,
-    /// allocates against the registry's runs and writes both, so two batches taking the locks
-    /// separately would be handed the same ordinals. This order is taken everywhere the three are
-    /// held together, so it cannot deadlock.
+    /// A publication reads the level's cursor and the space's next block and writes both, so two
+    /// batches taking the locks separately would be handed the same ordinals. This order is taken
+    /// everywhere the two are held together, so it cannot deadlock.
     pub(in crate::write) fn with_publication_state<R>(
         &self,
-        f: impl FnOnce(&mut LayerRegistry, &mut ArtifactStore, &mut Allocator) -> R,
+        f: impl FnOnce(&mut LayerRegistry, &mut ArtifactStore) -> R,
     ) -> R {
         let mut registry = lock_recover(&self.registry);
         let mut artifacts = lock_recover(&self.artifacts);
-        let mut alloc = lock_recover(&self.only_shard().allocator);
-        f(&mut registry, &mut artifacts, &mut alloc)
+        f(&mut registry, &mut artifacts)
     }
 
     /// The bound rotation may not reclaim past, or `None` if no membership is at risk. See
@@ -203,7 +192,7 @@ impl LiveState {
     /// [`mosaica_lifecycle::membership::ArtifactStore::unpublished_content`].
     pub(in crate::write) fn unpublished_content(
         &self,
-    ) -> Vec<(mosaica_types::EntityId, Vec<(u16, String)>)> {
+    ) -> Vec<mosaica_lifecycle::membership::ContentRow> {
         lock_recover(&self.artifacts).unpublished_content()
     }
 
@@ -259,8 +248,14 @@ impl LiveState {
         let mut artifacts = lock_recover(&self.artifacts);
         let (mut rehoused, mut kept) = (0u64, 0u64);
         for extent in extents {
+            let Some(layer) = artifacts.layer_in(extent.space).map(str::to_string) else {
+                continue;
+            };
             let path = prefix_dir.join(&extent.path);
-            let pack = match mosaica_store::membership::MembershipPack::open(&path) {
+            let pack = match mosaica_store::membership::LevelPack::open(
+                &path,
+                mosaica_store::membership::PackKind::Members,
+            ) {
                 Ok(pack) => Arc::new(pack),
                 Err(error) => {
                     tracing::error!(
@@ -286,10 +281,10 @@ impl LiveState {
                 let mapped =
                     unsafe { mosaica_lifecycle::membership::mapped_members(blob, owner.clone()) };
                 let took = match mapped {
-                    // `MembershipPack::iter` answers the absolute ordinal, which is what the
+                    // `LevelPack::iter` answers the absolute ordinal, which is what the
                     // store addresses by.
                     Some(members) => {
-                        artifacts.rehouse_members(&extent.layer, extent.level, ordinal, members)
+                        artifacts.rehouse_members(&layer, extent.level, ordinal, members)
                     }
                     None => false,
                 };
@@ -307,17 +302,70 @@ impl LiveState {
     /// withdrawn. Returns the levels the retirement moved.
     pub(in crate::write) fn retire_artifacts(
         &self,
-        retired: &croaring::Bitmap,
+        retired: &mosaica_lifecycle::membership::Retired,
     ) -> Vec<(String, u32)> {
         lock_recover(&self.artifacts).retire(retired)
     }
 
-    /// Where an entity sits: `(layer, level, ordinal)`. Addressing only. See
-    /// [`LayerRegistry::locate`].
-    pub(crate) fn locate_artifact(&self, entity: EntityId) -> Option<(String, u32, u32)> {
+    /// Where an entity of `space` sits: `(level, ordinal)`. Addressing only. See
+    /// [`LayerRegistry::locate_in`].
+    pub(crate) fn locate_artifact(
+        &self,
+        space: LayerSpace,
+        entity: EntityId,
+    ) -> Option<(u32, u32)> {
         lock_recover(&self.registry)
-            .locate(entity)
-            .map(|(name, level, ordinal)| (name.to_string(), level, ordinal))
+            .locate_in(space, entity)
+            .map(|(_, level, ordinal)| (level, ordinal))
+    }
+
+    /// Whether `entity` of `space` is a live layer's own entity or an artifact its levels hold.
+    pub(crate) fn artifact_held(&self, space: LayerSpace, entity: EntityId) -> bool {
+        let registry = lock_recover(&self.registry);
+        if registry
+            .in_space(space)
+            .is_some_and(|_| entity == mosaica_types::layer::LAYER_ENTITY)
+        {
+            return true;
+        }
+        let Some((name, level, ordinal)) = registry.locate_in(space, entity) else {
+            return false;
+        };
+        lock_recover(&self.artifacts)
+            .get(name, level, ordinal)
+            .is_some()
+    }
+
+    /// The name of the live layer whose own entity `entity` of `space` is.
+    pub(crate) fn layer_of_own_entity(
+        &self,
+        space: LayerSpace,
+        entity: EntityId,
+    ) -> Option<String> {
+        lock_recover(&self.registry)
+            .in_space(space)
+            .filter(|_| entity == mosaica_types::layer::LAYER_ENTITY)
+            .map(|(name, _)| name.to_string())
+    }
+
+    /// Every artifact that depends, directly or transitively, on an artifact `deleted` names, as
+    /// a target in its layer's space; none of `deleted`. See [`ArtifactStore::cascade_from`].
+    pub(in crate::write) fn dependents_of(&self, deleted: &[Target]) -> Vec<Target> {
+        let roots: Vec<mosaica_lifecycle::membership::ArtifactAt> = deleted
+            .iter()
+            .filter_map(|target| match target {
+                Target::Artifact(space, entity) => Some((*space, *entity)),
+                Target::Item(..) => None,
+            })
+            .collect();
+        if roots.is_empty() {
+            return Vec::new();
+        }
+        lock_recover(&self.artifacts)
+            .cascade_from(&roots)
+            .into_iter()
+            .map(|(space, entity)| Target::Artifact(space, entity))
+            .collect()
     }
 
     /// Resolve which layers a principal may know exist. See `LayerRegistry::resolve_for`. One
@@ -337,7 +385,39 @@ impl LiveState {
     /// Every registered layer, as the registry holds it: the declarations, never a decision. The
     /// caller applies the gate; this has no principal to resolve against.
     pub(crate) fn registered_layers(&self) -> Vec<mosaica_types::layer::RegisteredLayer> {
-        lock_recover(&self.registry).snapshot().0
+        lock_recover(&self.registry).snapshot()
+    }
+
+    /// How many layers are registered.
+    pub(crate) fn layer_count(&self) -> usize {
+        lock_recover(&self.registry).len()
+    }
+
+    /// The name of the live layer holding `space`.
+    pub(crate) fn layer_in_space(&self, space: LayerSpace) -> Option<String> {
+        lock_recover(&self.registry)
+            .in_space(space)
+            .map(|(name, _)| name.to_string())
+    }
+
+    /// The live layer holding `space`, as [`Self::registered_layer`] answers it.
+    pub(crate) fn layer_holding(
+        &self,
+        space: LayerSpace,
+    ) -> Option<mosaica_types::layer::RegisteredLayer> {
+        lock_recover(&self.registry)
+            .in_space(space)
+            .map(|(_, layer)| layer.clone())
+    }
+
+    /// Whether a live layer holds `space`.
+    pub(crate) fn holds_space(&self, space: LayerSpace) -> bool {
+        lock_recover(&self.registry).in_space(space).is_some()
+    }
+
+    /// The space of the layer registered under `name`.
+    pub(crate) fn space_of(&self, name: &str) -> Option<LayerSpace> {
+        lock_recover(&self.registry).get(name).map(|layer| layer.space)
     }
 
     /// One registered layer, by name. The caller has already established the name is reachable.
@@ -476,17 +556,14 @@ impl LiveState {
     }
 
     /// The registry as a manifest carries it, read under one lock so that no registration lands
-    /// between its parts: a layer whose reserved run sat above the published mark would have that
-    /// run handed out again at the next restart.
+    /// between its parts: a layer whose space sat at or past the published counter would have that
+    /// space given again at the next restart.
     pub(in crate::write) fn registry_for_publication(&self) -> RegistryForPublication {
         let registry = lock_recover(&self.registry);
-        let low_water = self.only_shard().low_water();
-        let (layers, tombstones) = registry.snapshot();
         RegistryForPublication {
-            layers,
-            tombstones,
+            layers: registry.snapshot(),
+            next_layer_space: registry.next_layer_space(),
             version: registry.version(),
-            low_water,
         }
     }
 

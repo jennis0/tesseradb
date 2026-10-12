@@ -38,25 +38,42 @@ pub(crate) enum LayerRefusal {
 }
 
 impl Engine {
-    /// The layer `name` as this viewer may read it in `view`, whose rows are in `shard`.
+    /// The layer `name` as this viewer may read it in `view` of `generation`.
     pub(crate) fn readable_layer(
         &self,
         session: &Session,
-        shard: &crate::Shard,
+        generation: &crate::Generation,
         name: &str,
         view: &str,
     ) -> std::result::Result<RegisteredLayer, LayerRefusal> {
-        if !self.reachable_layers(session).contains(name) {
-            return Err(LayerRefusal::Unknown);
-        }
-        let layer = self
-            .write
-            .live()
-            .registered_layer(name)
-            .ok_or(LayerRefusal::Unknown)?;
-        if !layer.declaration.draws_on(view)
-            || shard.overlay.is_deleted(layer.entity)
-            || shard.overlay.is_suppressed(layer.entity)
+        let layer = self.write.live().registered_layer(name);
+        self.readable(session, generation, layer, view)
+    }
+
+    /// [`Self::readable_layer`] for the layer holding `space`: the one a read began on, if it
+    /// still holds it.
+    pub(crate) fn readable_layer_at(
+        &self,
+        session: &Session,
+        generation: &crate::Generation,
+        space: mosaica_types::LayerSpace,
+        view: &str,
+    ) -> std::result::Result<RegisteredLayer, LayerRefusal> {
+        let layer = self.write.live().layer_holding(space);
+        self.readable(session, generation, layer, view)
+    }
+
+    fn readable(
+        &self,
+        session: &Session,
+        generation: &crate::Generation,
+        layer: Option<RegisteredLayer>,
+        view: &str,
+    ) -> std::result::Result<RegisteredLayer, LayerRefusal> {
+        let layer = layer.ok_or(LayerRefusal::Unknown)?;
+        if !self.reachable_layers(session).contains(&layer.declaration.name)
+            || !layer.declaration.draws_on(view)
+            || generation.layer_denied(layer.space)
         {
             return Err(LayerRefusal::Unknown);
         }
@@ -152,18 +169,10 @@ impl Engine {
                 false => crate::figures::Geometry::None,
             },
         )?;
-        let contents = match layer.runs.get(level as usize) {
-            Some(runs) if !layer.declaration.content.supplied.is_empty() => {
-                Some(self.level_contents.get_or_build(
-                    name,
-                    level,
-                    level_version,
-                    generation.segments_version,
-                    || LevelContent::build(served.shard.filter_columns.records(), runs),
-                ))
-            }
-            _ => None,
-        };
+        let contents = layer
+            .runs
+            .get(level as usize)
+            .and_then(|runs| self.level_content(generation, layer, level, level_version, runs));
         Ok(ReadLevel {
             level,
             level_version,
@@ -171,7 +180,31 @@ impl Engine {
             counts,
             filtered: None,
             contents,
+            space_content: generation.space_content(layer.space).cloned(),
         })
+    }
+
+    /// `layer`'s supplied contents at `level`, read once for the level rather than once per
+    /// artifact: 408ms of a response whose points half is 1.3ms, decompressing one zstd block per
+    /// artifact, against 6.7ms read together. `None` where the layer supplies none.
+    pub(crate) fn level_content(
+        &self,
+        generation: &crate::Generation,
+        layer: &RegisteredLayer,
+        level: u32,
+        level_version: u64,
+        runs: &mosaica_types::layer::ReservedRuns,
+    ) -> Option<Arc<LevelContent>> {
+        if layer.declaration.content.supplied.is_empty() {
+            return None;
+        }
+        Some(self.level_contents.get_or_build(
+            &layer.declaration.name,
+            level,
+            level_version,
+            generation.segments_version,
+            || LevelContent::build(generation.space_content(layer.space).map(Arc::as_ref), runs),
+        ))
     }
 }
 
@@ -206,6 +239,8 @@ pub(crate) struct ReadLevel {
     /// set from [`ReadLevel::filtered_counts`].
     pub(crate) filtered: Option<Arc<Vec<u32>>>,
     contents: Option<Arc<LevelContent>>,
+    /// The layer space's supplied content on disc, for an artifact `contents` does not hold.
+    space_content: Option<Arc<mosaica_filter::RecordStack>>,
 }
 
 impl ReadLevel {
@@ -219,21 +254,16 @@ impl ReadLevel {
         layer: &'a RegisteredLayer,
         dependency_served: &'a dyn Fn(&Attachment) -> bool,
     ) -> ArtifactView<'a, EffectiveMask> {
-        ArtifactView {
-            declaration: &layer.declaration,
-            overlay: &served.shard.overlay,
-            labels: engine.label_gate(served.session, &layer.declaration),
-            layer_reachable: true,
-            rows: &self.rows,
+        ArtifactView::of(
+            served,
+            layer,
+            engine.label_gate(served.session, &layer.declaration),
+            &self.rows,
             mask,
             dependency_served,
-            containment: self
-                .rows
-                .partition()
-                .map(|p| p.answers(served.session.satisfied())),
-            denied: served.denied,
-            counts: self.counts.clone(),
-        }
+            self.rows.partition().map(|p| p.answers(served.session.satisfied())),
+            self.counts.clone(),
+        )
     }
 
     /// The content the verdict's `rank` chose, with any authored shape taken out of it, or
@@ -241,14 +271,13 @@ impl ReadLevel {
     pub(crate) fn content(
         &self,
         engine: &Engine,
-        shard: &crate::Shard,
         layer: &RegisteredLayer,
         ordinal: u32,
         entity: EntityId,
         rank: Option<u32>,
     ) -> Option<crate::viewport::Supplied> {
         engine.supplied_content(
-            shard,
+            self.space_content.as_deref(),
             &layer.declaration,
             self.level,
             ordinal,

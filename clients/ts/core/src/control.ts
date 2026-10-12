@@ -816,7 +816,10 @@ export class Control {
 
   /**
    * `GET /control/status`: the running database's state as JSON in `body`, including its
-   * publication counter, write executor, caches, admission and `limits`.
+   * publication counter, write executor, caches, admission and `limits`. `overlay` counts the
+   * deletions and suppressions of items that no fold has removed. `layer_spaces` counts the
+   * annotation layers' spaces in `count`, the deletions and suppressions of their artifacts and
+   * of the layers themselves in `depth`, and the deletions alone in `retirable`.
    */
   status(options: CallOptions = {}): Promise<Answer> {
     return this.send('GET', '/control/status', options);
@@ -856,7 +859,8 @@ export class Control {
   /**
    * `PUT /control/layers`: declares one annotation layer. The answer is `201` with the layer's
    * `name` and `mosaica_id`; a declaration that breaks the deployment's rules is refused with `422`
-   * saying why.
+   * saying why, and one past the last layer space, or declaring more levels than a space holds,
+   * with `409`. A dropped layer's name may be declared again.
    */
   declareLayer(declaration: object, options: WriteOptions = {}): Promise<Answer> {
     return this.sendJson('PUT', withQuery('/control/layers', waiting(options)), declaration, options);
@@ -936,8 +940,10 @@ export class Control {
    * excluded items and a content's `generated_from` are each a {@link MemberTable}. A member
    * naming no item, or two, is left out and listed in `refused`, and the rest are published; with
    * `strict` the request is refused at the first, `404` where it names no item and `409` where it
-   * names two. A `generated_from` member naming no item, or two, refuses the request, strict or
-   * not. Every other refusal applies nothing.
+   * names two. An artifact's or a layer's `mosaica_id` names no item. A `generated_from` member
+   * naming no item, or two, refuses the request, strict or not. A batch creating more artifacts
+   * than the level's layer space has ids left for is refused with `409`. Every other refusal
+   * applies nothing.
    */
   publish(layer: string, body: PublishRequest, options: StrictOptions = {}): Promise<Answer<ArtifactsPublished>> {
     const path = withQuery(`/control/layers/${segment(layer)}/artifacts`, naming(options));
@@ -964,19 +970,21 @@ export class Control {
 
   /**
    * `POST /control/changes`: deletes, suppresses and unsuppresses items, each named by its
-   * `match`. A deletion or suppression applies to every request from the moment it is accepted,
-   * without waiting for a publication. A change naming no item, or two, is listed in `refused` and
-   * the rest are applied; with `strict` the request is refused at the first, `404` where it names
-   * no item and `409` where it names two. Every item is checked before any is applied, so any
-   * other refusal applies nothing.
+   * `match`, and artifacts and layers, each named by its `mosaica_id`. A deletion or suppression
+   * applies to every request from the moment it is accepted, without waiting for a publication. A
+   * change naming no item, or two, is listed in `refused` and the rest are applied; with `strict`
+   * the request is refused at the first, `404` where it names no item and `409` where it names
+   * two. A request deleting a layer by its `mosaica_id` is refused with `422`, since `dropLayer`
+   * removes a layer. Every item is checked before any is applied, so any other refusal applies
+   * nothing.
    */
   changes(items: ChangeItem[], options: StrictOptions = {}): Promise<Answer<ChangesApplied>> {
     return this.sendJson('POST', withQuery('/control/changes', naming(options)), items, options) as Promise<Answer<ChangesApplied>>;
   }
 
   /**
-   * `DELETE /control/layers/{name}`: drops a layer that `declareLayer` declared. The name stays
-   * taken, so a later declaration under it is refused.
+   * `DELETE /control/layers/{name}`: drops a layer that `declareLayer` declared. The name may be
+   * declared again, as a new layer that none of the dropped layer's `mosaica_id`s names.
    */
   dropLayer(name: string, options: WriteOptions = {}): Promise<Answer> {
     return this.send('DELETE', withQuery(`/control/layers/${segment(name)}`, waiting(options)), options);

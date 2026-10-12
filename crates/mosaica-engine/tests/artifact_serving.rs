@@ -9,13 +9,13 @@
 mod common;
 
 use common::*;
-use mosaica_engine::{Engine, LayerSelection, ViewportRequest};
+use mosaica_engine::{LayerSelection, ViewportRequest};
 use mosaica_lifecycle::{wal::ChangeOp, IncomingArtifact};
 use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
-use mosaica_types::{EntityId, MosaicaId};
+use mosaica_types::MosaicaId;
 
 fn declaration(name: &str, criterion: Option<ExistenceCriterion>) -> LayerDeclaration {
     LayerDeclaration {
@@ -40,17 +40,6 @@ fn declaration(name: &str, criterion: Option<ExistenceCriterion>) -> LayerDeclar
         levels: Vec::new(),
         layout: None,
         shape: None,
-    }
-}
-
-impl Fixture {
-    fn open(&self) -> Engine {
-        open_engine_publishing(&self.root, &self.cache, &self.wal)
-    }
-
-    fn members(&self, source_ids: impl Iterator<Item = u64>) -> Vec<EntityId> {
-        let map = source_to_new_map(&self.root, "v00000");
-        source_ids.map(|s| EntityId::new(map[&s])).collect()
     }
 }
 
@@ -320,8 +309,8 @@ fn suppressing_an_artifact_removes_it_from_the_viewport_and_from_drill_down_at_t
         .expect("c0 is served")
         .mosaica_id;
 
-    let entity = artifact_entity(&engine, c0);
-    engine.accept_change(entity, ChangeOp::Suppress).unwrap();
+    let target = artifact_target(&engine, c0);
+    engine.accept_changes(vec![(target, ChangeOp::Suppress)]).unwrap();
 
     let after = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(after.len(), 1, "suppression takes effect at the ack");
@@ -332,7 +321,7 @@ fn suppressing_an_artifact_removes_it_from_the_viewport_and_from_drill_down_at_t
         .is_none());
 
     // Suppressing the *layer* takes both, and by the same route.
-    engine.accept_change(entity, ChangeOp::Unsuppress).unwrap();
+    engine.accept_changes(vec![(target, ChangeOp::Unsuppress)]).unwrap();
     assert_eq!(artifacts_of(&engine, &full_coverage_credential()).len(), 2);
 }
 

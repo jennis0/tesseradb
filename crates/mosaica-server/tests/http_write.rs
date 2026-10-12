@@ -427,14 +427,14 @@ fn concurrent_ingest_and_change_both_survive() {
             })
             .expect("ingest should be accepted");
         let mosaica_id = receipt.mosaica_ids[0].expect("an accepted row has a mosaica_id");
-        let entity = engine_b.resolve_mosaica_ids(&[mosaica_id]).unwrap()[0];
-        (mosaica_id, entity.expect("the item it created"))
+        let target = engine_b.resolve_targets(&[mosaica_id]).unwrap()[0];
+        (mosaica_id, target.expect("the item it created"))
     });
 
     change_thread.join().unwrap();
     // The id the EXECUTOR assigned, not one this test chose: assignment is off the caller, so the
     // identity to assert against is the one that comes back.
-    let (ingested_mosaica_id, ingested_entity) = ingest_thread.join().unwrap();
+    let (ingested_mosaica_id, ingested_target) = ingest_thread.join().unwrap();
 
     // The suppression's effect: a viewport count one lower than the full-coverage baseline.
     // (A buffered item has no row geometry — there is no flush — so the ingested
@@ -462,10 +462,8 @@ fn concurrent_ingest_and_change_both_survive() {
     // entity — a lost update (the ingest's generation swap silently reverted by a racing change, or
     // vice versa) would make this `None`.
     assert_eq!(
-        engine
-            .resolve_mosaica_ids(&[ingested_mosaica_id])
-            .expect("resolve_mosaica_ids should not fail for a healthy bundle")[0],
-        Some(ingested_entity),
+        engine.resolve_targets(&[ingested_mosaica_id]).unwrap()[0],
+        Some(ingested_target),
         "the concurrent ingest must have survived — a lost update would drop it from the live \
          buffer/established state"
     );
@@ -3566,6 +3564,10 @@ const STATUS_SHAPE: &[(&str, &str)] = &[
     ("/ingest/admission", "integer"),
     ("/ingest/in_flight", "integer"),
     ("/ingest/shed_total", "integer"),
+    ("/layer_spaces", "object"),
+    ("/layer_spaces/count", "integer"),
+    ("/layer_spaces/depth", "integer"),
+    ("/layer_spaces/retirable", "integer"),
     ("/limits", "object"),
     ("/limits/changes", "object"),
     ("/limits/changes/max_body_bytes", "integer"),

@@ -35,8 +35,8 @@ use mosaica_types::{IdentityKey, ShardId, BUNDLE_FORMAT};
 use crate::error::{read_to_vec, Result, StoreError};
 use crate::layout::ShardLayout;
 use crate::manifest::{
-    CurrentPointer, FileDigest, Honourability, Manifest, PartitionManifest, SegmentDescriptor,
-    SegmentsManifest, ShardRecord, Shards,
+    CurrentPointer, DerivedExtent, FileDigest, Honourability, LayerSpaceRecord, Manifest,
+    PartitionManifest, SegmentDescriptor, SegmentsManifest, ShardRecord, Shards,
 };
 use crate::permutation::{Permutation, RowSpace, SegmentExtent};
 use crate::render_presence::{render_presence_path, RenderPresence, RENDER_PRESENCE_DIR};
@@ -262,6 +262,8 @@ pub struct PartitionData {
     pub highest_candidate_n: u64,
     /// Ascending by id.
     pub shards: Vec<Arc<ShardData>>,
+    /// The side-manifest's `layer_spaces`, ascending by space.
+    pub layer_spaces: Vec<LayerSpaceRecord>,
 }
 
 /// One point shard of a partition.
@@ -308,6 +310,11 @@ impl PartitionData {
         Arc::make_mut(mosaica_types::only(&mut self.shards))
     }
 
+    /// The shard's derived files and every layer space's held shapes.
+    pub fn derived_extents(&self) -> impl Iterator<Item = &DerivedExtent> {
+        crate::manifest::derived_and_held(&self.only_shard().record, &self.layer_spaces)
+    }
+
     /// The side-manifest this partition was published with, to edit into the next one.
     pub fn side_manifest(&self) -> SegmentsManifest {
         SegmentsManifest {
@@ -320,6 +327,7 @@ impl PartitionData {
                     .map(|shard| shard.record.clone())
                     .collect(),
             },
+            layer_spaces: self.layer_spaces.clone(),
         }
     }
 
@@ -333,6 +341,7 @@ impl PartitionData {
         let SegmentsManifest {
             partition: manifest,
             shards: published_shards,
+            layer_spaces,
         } = published.manifest;
         if !published_shards
             .records
@@ -369,6 +378,7 @@ impl PartitionData {
             segments_n: published.n,
             highest_candidate_n: published.n,
             shards,
+            layer_spaces,
         })
     }
 }
@@ -542,7 +552,7 @@ impl Bundle {
     /// garbage the fold reclaims, and until then they are simply unreachable.
     ///
     /// Side-manifests are untouched — the roster's durable half is published by the ordinary
-    /// deny-state path at the next tick, on the mechanism `layer_tombstones` already uses.
+    /// deny-state path at the next tick, on the mechanism the layer registry already uses.
     pub fn with_views(&self, manifest: Manifest) -> Arc<Bundle> {
         let mut partitions = self.partitions.clone();
         for partition in partitions.values_mut() {
@@ -767,6 +777,7 @@ fn open_prefix(
                     size: shard_size,
                     records,
                 },
+            layer_spaces,
         } = selected.manifest;
         let digests = Digests {
             side: &partition_manifest.files,
@@ -796,6 +807,7 @@ fn open_prefix(
                 segments_n: selected.n,
                 highest_candidate_n: selected.highest_candidate_n,
                 shards,
+                layer_spaces,
             },
         );
     }
@@ -1318,7 +1330,10 @@ fn load_verifying_segments_manifest(
         };
         // Refused rather than stepped past: an older manifest would serve without the shards
         // this one names, and without their denies.
-        if let Err(detail) = segments_manifest.check_served_shards() {
+        if let Err(detail) = segments_manifest
+            .check_served_shards()
+            .and_then(|()| segments_manifest.check_layer_spaces())
+        {
             return Err(StoreError::MalformedBundle {
                 detail: format!("{}: {detail}", path.display()),
             });

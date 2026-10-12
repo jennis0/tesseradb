@@ -129,11 +129,12 @@ impl Engine {
     ///
     /// The content key hashes the fragment's watermark, not `segments_version` — a merge or
     /// compaction can move `segments_version` without adding rows to the visible set, which is
-    /// what would make an elision unsound — and `overlay_version`, because a suppression or
-    /// restoration moves counts a client must not keep presenting as current.
+    /// what would make an elision unsound — and the overlay versions of the shard and of every
+    /// layer space, exactly rather than through a 64-bit hash, because a suppression or
+    /// restoration moves what a client must not keep presenting as current.
     fn view_coordinates(
         &self,
-        shard: &crate::Shard,
+        generation: &crate::Generation,
         geometry: &SessionGeometry,
         view: &str,
     ) -> ViewCoordinates {
@@ -151,7 +152,11 @@ impl Engine {
         hasher.update(b"mosaica-content-key-v1");
         hasher.update(identity_key);
         hasher.update(geometry.fragment.watermark.to_le_bytes());
-        hasher.update(shard.overlay_version.to_le_bytes());
+        hasher.update(generation.only_shard().overlay_version.to_le_bytes());
+        for (space, parts) in generation.layer_spaces.iter() {
+            hasher.update(space.raw().to_le_bytes());
+            hasher.update(parts.overlay_version.to_le_bytes());
+        }
         hasher.update(self.boot_nonce.to_le_bytes());
         let content_digest: [u8; 32] = hasher.finalize().into();
         let mut content_key = [0u8; 16];

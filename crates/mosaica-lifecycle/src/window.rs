@@ -101,10 +101,10 @@
 
 use std::time::Instant;
 
-use mosaica_types::{EntityId, TermId};
+use mosaica_types::{EntityId, ShardFull, TermId};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::alloc::{assign_sorted, AllocError, Allocator, PendingItem};
+use crate::alloc::{assign_sorted, Allocator, PendingItem};
 use crate::command::{UnallocatedEdit, UnallocatedRow};
 use crate::wal::{RowOutcome, RowReceipt, WalEdit, WalRecord, WalRow};
 
@@ -204,6 +204,7 @@ impl WindowClaims {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedMembership {
     pub layer: String,
+    pub space: mosaica_types::LayerSpace,
     pub level: u32,
     /// As on [`crate::command::BatchMembership::view`].
     pub view: Option<String>,
@@ -717,7 +718,7 @@ impl<W> CommitWindow<W> {
         self,
         alloc: &mut Allocator,
         mosaica_id_of: impl Fn(EntityId) -> u64,
-    ) -> Result<(Vec<ClosedEntry<W>>, FragmentationTally), (AllocError, Vec<Vec<W>>)> {
+    ) -> Result<(Vec<ClosedEntry<W>>, FragmentationTally), (ShardFull, Vec<Vec<W>>)> {
         let mut entries = self.entries;
 
         // An edit's first row takes the new entity; its other rows take the same one after.
@@ -1221,12 +1222,13 @@ mod tests {
     fn a_window_that_exhausts_the_id_space_has_no_effect() {
         let mut w = CommitWindow::new(0);
         push(&mut w, entry("a", vec![row(&[1]), row(&[1])]));
-        let mut alloc = Allocator::new(u32::MAX as u64 - 1);
+        let mut alloc = Allocator::new(mosaica_types::ENTITY_END - 1);
         let err = w.allocate(&mut alloc, |e| e.raw());
-        let Err((AllocError::Full(_), waiters)) = err else {
-            panic!("a window past the u32 ceiling must be refused");
+        let Err((full, waiters)) = err else {
+            panic!("a window past the end of the shard's ids must be refused");
         };
-        assert_eq!(alloc.high_water(), u32::MAX as u64 - 1);
+        assert_eq!(full.limit, mosaica_types::ShardLimit::End(mosaica_types::ENTITY_END));
+        assert_eq!(alloc.high_water(), mosaica_types::ENTITY_END - 1);
         assert_eq!(
             waiters,
             vec![vec!["w"]],

@@ -48,12 +48,14 @@ pub(crate) enum FoldTrigger {
 
 /// What the schedule reads at a tick. The dead-bytes gauge needs a directory walk, so [`due`]
 /// takes it as a closure.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Gauges {
     /// The largest across the partition's views.
     pub(crate) live_segments: usize,
     /// Deletions only, not suppressions.
     pub(crate) retirable_deletions: u64,
+    /// The layer spaces' deletions, whose records a fold removes. They have no rows.
+    pub(crate) artifact_deletions: u64,
     /// Tombstoned rows included.
     pub(crate) live_rows: u64,
 }
@@ -84,7 +86,7 @@ pub(crate) fn due(
 
     // The any-hour routes come before the window so their reason is the one logged.
     if let Some(threshold) = schedule.after_deletions {
-        if gauges.retirable_deletions >= threshold {
+        if gauges.retirable_deletions + gauges.artifact_deletions >= threshold {
             return Some(FoldTrigger::RetirableDepth);
         }
     }
@@ -169,9 +171,35 @@ mod tests {
                 live_segments,
                 retirable_deletions,
                 live_rows: 0,
+                ..Gauges::default()
             },
             || None,
         )
+    }
+
+    #[test]
+    fn artifact_deletions_schedule_a_fold_and_move_no_ratio() {
+        let s = CompactionSchedule {
+            after_deletions: Some(10),
+            tombstoned_rows_fraction: Some(0.2),
+            ..schedule()
+        };
+        let gauges = |points: u64, artifacts: u64| Gauges {
+            live_segments: 1,
+            retirable_deletions: points,
+            artifact_deletions: artifacts,
+            live_rows: 1_000,
+        };
+        assert_eq!(
+            due(&s, at(10, 14), None, gauges(4, 6), || None),
+            Some(FoldTrigger::RetirableDepth)
+        );
+        assert_eq!(due(&s, at(10, 14), None, gauges(0, 9), || None), None);
+        let ratio_only = CompactionSchedule {
+            after_deletions: None,
+            ..s
+        };
+        assert_eq!(due(&ratio_only, at(10, 14), None, gauges(0, 300), || None), None);
     }
 
     /// Seconds since the epoch at `hour`:00 UTC on day `day`.
@@ -355,6 +383,7 @@ mod tests {
             live_segments: 1,
             retirable_deletions: deletions,
             live_rows: rows,
+            ..Gauges::default()
         };
 
         assert_eq!(
@@ -423,7 +452,8 @@ mod tests {
                 Gauges {
                     live_segments: 1,
                     retirable_deletions: 0,
-                    live_rows: 1
+                    live_rows: 1,
+                    ..Gauges::default()
                 },
                 walk
             ),
@@ -439,7 +469,8 @@ mod tests {
                 Gauges {
                     live_segments: 64,
                     retirable_deletions: 0,
-                    live_rows: 1
+                    live_rows: 1,
+                    ..Gauges::default()
                 },
                 walk
             ),
@@ -455,7 +486,8 @@ mod tests {
                 Gauges {
                     live_segments: 1,
                     retirable_deletions: 0,
-                    live_rows: 1
+                    live_rows: 1,
+                    ..Gauges::default()
                 },
                 walk
             ),
@@ -475,7 +507,8 @@ mod tests {
                 Gauges {
                     live_segments: 1,
                     retirable_deletions: 0,
-                    live_rows: 1
+                    live_rows: 1,
+                    ..Gauges::default()
                 },
                 walk
             ),
@@ -499,7 +532,8 @@ mod tests {
                 Gauges {
                     live_segments: 1,
                     retirable_deletions: 500,
-                    live_rows: 0
+                    live_rows: 0,
+                    ..Gauges::default()
                 },
                 || Some(DeadBytes {
                     on_disc: 1_000,

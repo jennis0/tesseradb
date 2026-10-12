@@ -62,6 +62,9 @@ flowchart TB
       perm["permutation<br/>entity id → row id"]
       segs["segments: rows in Morton order<br/>positions, drawn columns"]
     end
+    subgraph spaces["one layer space per annotation layer"]
+      artifacts["artifact records, supplied content,<br/>held shapes, the space's overlay"]
+    end
   end
   wal["write-ahead log<br/>ingests and denies since the last flush"]
   build["mosaica build"] --> bundle
@@ -122,7 +125,7 @@ neither. Beyond those, four checks apply:
 4. Each row that creates an item, and each edit, takes an id at the window's close: one a
    compaction freed, or else one past the shard's high water. The ids a batch would take from the
    high water may not carry it past the shard's size, declared by `[shards] size` at a build or by
-   `PUT /control/shards` at a running service, nor past the lowest id an annotation layer holds.
+   `PUT /control/shards` at a running service.
    The executor counts each batch as it joins the [commit window](#the-commit-window), against
    what the batches already in the window leave. Freed ids the window does not take are counted
    first, and ids still held for the log to rotate are not counted. A batch that does not fit
@@ -349,7 +352,11 @@ adopts the files the record names after checking their digests.
 
 `/control/changes` accepts three operations against an already-ingested item: delete, suppress,
 and unsuppress. Changing what an item is labelled is an ingest row naming the item and carrying
-the new label, which edits it ([edits](#edits)).
+the new label, which edits it ([edits](#edits)). The same three apply to an annotation artifact or
+a layer named by its `mosaica_id`, whose kind bit says which of the two it names
+([an artifact's identity](annotations.md#an-artifacts-identity)). A deletion of a layer by its own
+`mosaica_id` is refused with `422`, and nothing in its request is applied: a layer is removed by
+dropping it.
 
 ### Accepting a deny
 
@@ -372,9 +379,10 @@ item already suppressed is accepted and has no further effect. A deleted item na
 deletion sent again is listed as refused, and a retried request is safe to resend without
 `strict`.
 
-Only the entity id is written to the WAL, never a `mosaica_id`. The address is resolved once, when
-the request is accepted, into the entity it names, and that entity id is stable for the item's
-life, or until an edit moves the item to another.
+Only the entity id is written to the WAL, never a `mosaica_id`, beside the shard or the layer
+space that holds it. The address is resolved once, when the request is accepted, into the entity it
+names, and that entity id is stable for the item's life, or until an edit moves the item to
+another.
 
 A request is one command and one WAL record carrying every change in it, so it is durable whole or
 not at all. Requests are gathered into a window before any of them is written, the same shape
@@ -387,23 +395,25 @@ queue to a 429.
 
 A view drop deletes the items it leaves with a row in no view, flushed or buffered. The drop's own
 WAL record lists their entity ids, so the log never holds the drop without its deletions, and they
-enter the overlay and leave it as any deletion does.
+enter the overlay and leave it as any deletion does. The drop also removes from their layers the
+artifacts scoped to the dropped view, at once and without a deletion in any overlay.
 
 ### The overlay: two stores
 
 The overlay holds two separate records of what is hidden, one for deletions and one for
-suppressions, each a bitmap over entity ids. They are not one map with a status field. A single
-map would let the most recent write decide an item's status. The sequence delete, suppress,
-unsuppress would then leave the unsuppress as the last word and bring a deleted item back. Two
-separate stores rule that out. The unsuppress can only change the suppression record, which the
-deletion never touched.
+suppressions, each a bitmap over entity ids. The point shard has an overlay over its items'
+entities, and each layer space one over its artifacts' and its layer's. The two records are not one
+map with a status field. A single map would let the most recent write decide an item's status. The
+sequence delete, suppress, unsuppress would then leave the unsuppress as the last word and bring a
+deleted item back. Two separate stores rule that out. The unsuppress can only change the suppression
+record, which the deletion never touched.
 
 An entry **retires** when it leaves the overlay. Each store has exactly one route that does this:
 
 | Applies to | Removed by | Why only one route |
 |---|---|---|
 | A suppression (Rule S) | An explicit unsuppress, or the compaction that removes the entity it names | No rebuild or timer excludes a suppressed item on its own, so its invisibility depends entirely on this record for as long as the suppression stands. A compaction removes only deleted entities, whose rows are gone with it; an item that still exists keeps its suppression on its current entity |
-| A deletion (Rule F) | The compaction that removes the item's row and its term-index entries, and nothing else | The row still exists in a segment until that fold runs. Removing the record any earlier would leave a segment reachable that still contains the item |
+| A deletion (Rule F) | The compaction that removes the item's row and its term-index entries, or the artifact's record, and nothing else | The row still exists in a segment until that fold runs. Removing the record any earlier would leave a segment reachable that still contains the item |
 
 The mask a request subtracts from its answer, `denied[view]`, is derived from the union of the two
 stores. It is derived again in full at every geometry publication, a flush, a merge or a
@@ -530,7 +540,8 @@ Compaction is the one operation that may drop a row and its term-index entries. 
 single pass called a compaction, and it does three things nothing else in the write path can
 do:
 
-- it is the only way a deletion's overlay record is removed (Rule F);
+- it is the only way a deletion's overlay record is removed (Rule F), for an item or an
+  artifact;
 - it is the only way disc space a merge has orphaned is reclaimed;
 - it is the only way a partition returns to one segment and one term index. Flush and merge only
   ever add to those counts.
@@ -542,6 +553,12 @@ published. Between the snapshot and the compaction's publication, more flushes, 
 can still land: an entity a flush gave a fresh row to while the compaction was running is not retired
 this round, and the next fold takes it instead. If retirement followed the plan rather than what
 was actually removed, an entity whose row survived the compaction would lose the record hiding it.
+
+The same fold writes again every layer space that holds a deleted artifact, and publishes it with
+the point shard's new files. The space's records and supplied content are written without the
+deleted artifacts, the point shard's membership slices and row forms leave them out, and their
+deletions leave the space's overlay. No byte of a deleted artifact's content is in the prefix the
+fold publishes. A suppressed artifact or layer keeps its record and its suppression.
 
 The WAL is rotated from time to time, its oldest records dropped once every row they describe is
 safely on disc. Retiring an overlay entry does not remove every record of it at once: the WAL
@@ -580,8 +597,9 @@ compaction. An item deleted before any flush placed it has no rows, and the comp
 its deletion frees its number. The compaction raises the number's tenancy by one in the tenancy
 index it publishes, so the next item to take the number has a `mosaica_id` no earlier holder had,
 and a deleted item's `mosaica_id` goes on naming nothing. A number at the highest tenancy, 4,095, is
-retired instead: the side-manifest records it, and it is never issued again. Row-less entities,
-artifacts and layers, are never freed.
+retired instead: the side-manifest records it, and it is never issued again. Artifacts and layers
+take their entity ids from their layer's space, never from a shard, and a space's entity ids are
+never freed.
 
 A freed id is held back until the WAL has rotated past the compaction's publication. Until then a
 restart would replay records naming the id's previous holder, its rows, its deletion and its
@@ -634,9 +652,9 @@ it names the generation a response was answered from and carries no authorisatio
 client that re-issues a request always gets a correct answer, only a more or less current one. How
 a client uses the comparison is covered in serving.
 
-A fold is dispatched when un-retired deletions, segment count, orphaned disc space or tombstoned
-rows cross a threshold, or on request. Only one fold runs at a time, and a request arriving while
-one is running is refused rather than queued.
+A fold is dispatched when un-retired deletions of items and artifacts together, segment count,
+orphaned disc space or tombstoned rows cross a threshold, or on request. Only one fold runs at a
+time, and a request arriving while one is running is refused rather than queued.
 
 ## Cached state and artifacts
 

@@ -538,10 +538,7 @@ fn a_generation_from_before_a_coalesce_and_a_fold_still_answers_from_its_runs() 
         .verdicts;
     assert_eq!(
         found,
-        vec![
-            mosaica_lifecycle::resolve::Verdict::Names(a[0]),
-            mosaica_lifecycle::resolve::Verdict::Names(b[0])
-        ]
+        vec![Ok(a[0]), Ok(b[0])]
     );
 
     let superseded = fx.root.join(&held.prefix);
@@ -626,7 +623,7 @@ fn an_address_cell_is_checked_against_its_field_alone() {
         .expect("columns naming nothing are ignored");
     assert_eq!(
         named.verdicts,
-        vec![mosaica_lifecycle::resolve::Verdict::Names(built(&engine, 4))]
+        vec![Ok(built(&engine, 4))]
     );
     assert_eq!(named.ignored, ["score", "flags", "rank"]);
 }
@@ -1199,7 +1196,7 @@ fn an_edit_of_a_holder_during_a_declaration_keeps_its_value_held() {
         }
         assert!(is_unique(&engine, "doi"), "{when}");
         assert_ne!(
-            engine.resolve_mosaica_ids(&[tid]).unwrap()[0],
+            items_of(&engine, &[tid])[0],
             Some(holder),
             "the edit moved the holder, {when}"
         );

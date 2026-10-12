@@ -34,8 +34,7 @@ pub mod wal;
 pub mod window;
 
 pub use alloc::{
-    allocator_ceiling, assign_sorted, high_water_from, low_water_from, union_of, Allocation,
-    Allocator, ByTenancy, PendingItem,
+    assign_sorted, high_water_from, union_of, Allocation, Allocator, ByTenancy, PendingItem,
 };
 pub use buffer::{BufferedItem, DescriptorResolver, IngestBuffer};
 pub use command::{
@@ -47,7 +46,7 @@ pub use membership::{
     ArtifactRecord, ArtifactStore, FillOutcome, FixedParts, IncomingArtifact, IncomingGrowth,
     Members,
 };
-pub use overlay::{owner_id_only, Overlay, Replay};
+pub use overlay::{owner_id_only, Overlay, Overlays, Replay};
 pub use registry::{
     no_pending, EdgeCheck, GroupViews, LayerRegistry, PreparedGrow, PreparedPut, RegistryError,
     ResolvedLayers,

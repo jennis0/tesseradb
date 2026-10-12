@@ -577,7 +577,8 @@ struct RawIngest {
     ///
     /// Default: `64`.
     compaction_max_segments: Option<OrOff<u64>>,
-    /// At any hour, compact when this many deleted items wait to be removed, or `"off"`.
+    /// At any hour, compact when this many deleted items and annotations, counted together, wait to
+    /// be removed, or `"off"`.
     ///
     /// Type: integer or `"off"`.
     ///

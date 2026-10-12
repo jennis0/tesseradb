@@ -466,16 +466,10 @@ impl Engine {
     /// layer is served.
     pub fn visible_layers(&self, session: &Session) -> Vec<mosaica_types::layer::RegisteredLayer> {
         let generation = self.generation();
-        let overlay = &generation.only_shard().overlay;
         self.reachable_layers(session)
             .names()
             .filter_map(|name| self.write.live().registered_layer(name))
-            .filter(|layer| {
-                // Checked live, per call, against the current overlay: a layer's own entity
-                // carries its suppression. A layer has no fragment to fall through to, so no
-                // opinion here means not visible.
-                !overlay.is_deleted(layer.entity) && !overlay.is_suppressed(layer.entity)
-            })
+            .filter(|layer| !generation.layer_denied(layer.space))
             .collect()
     }
 }

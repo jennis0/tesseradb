@@ -161,8 +161,11 @@ class Control:
     def status(self) -> dict:
         """`GET /control/status`: the server's status report.
 
-        A refusal gives the server's error body, `{"error": ..., "detail": ...}`, and `{}` comes
-        only where no server answered.
+        `overlay` counts the deletions and suppressions of items that no fold has removed.
+        `layer_spaces` counts the annotation layers' spaces in `count`, the deletions and
+        suppressions of their annotations and of the layers themselves in `depth`, and the
+        deletions alone in `retirable`. A refusal gives the server's error body,
+        `{"error": ..., "detail": ...}`, and `{}` comes only where no server answered.
         """
         return self.status_answer().body
 
@@ -212,7 +215,8 @@ class Control:
         """`PUT /control/layers`: declare one annotation layer.
 
         `payload` is the layer's block as `mosaica check --payloads` prints it. The answer carries
-        the layer's `mosaica_id`.
+        the layer's `mosaica_id`. A dropped layer's name may be declared again. A declaration past
+        the last layer space, or declaring more levels than a space holds, is refused with `409`.
         """
         return self._send(
             "PUT", "/control/layers", json.dumps(payload).encode(), {"content-type": JSON}
@@ -270,9 +274,10 @@ class Control:
 
         `body` is the request's JSON, as bytes, each membership a member table. A member naming no
         item, or two, is left out and listed in the answer's `refused`, and the request is
-        otherwise applied whole or not at all. `strict=True` refuses the request at its first
-        refused member instead, with `404` or `409`. The answer gives each annotation's
-        `mosaica_id`.
+        otherwise applied whole or not at all; an annotation's or a layer's `mosaica_id` names no
+        item. `strict=True` refuses the request at its first refused member instead, with `404` or
+        `409`. A request creating more annotations than the level's layer space has ids left for
+        is refused with `409`. The answer gives each annotation's `mosaica_id`.
         """
         return self._send(
             "PUT", _artifacts(layer) + _query(strict=strict), body, {"content-type": JSON}
@@ -291,15 +296,17 @@ class Control:
         )
 
     def changes(self, items: list[dict], strict: bool = False) -> Answer:
-        """`POST /control/changes`: delete, suppress or unsuppress items.
+        """`POST /control/changes`: delete, suppress or unsuppress items, annotations and layers.
 
         `items` is one record per change, `{"op": ..., "match": {column: value, ...}}`: `op` is
         `"delete"`, `"suppress"` or `"unsuppress"`, and `match` names the item by its
-        `mosaica_id` and its values of unique columns, as `Database.addresses` gives it. A change
-        naming no item, or two, is listed in the answer's `refused` and the others are applied;
-        `strict=True` refuses the request at its first such change instead, with `404` or `409`.
-        A deletion or suppression applies to every request from the moment it is accepted. This
-        route never answers `429`.
+        `mosaica_id` and its values of unique columns, as `Database.addresses` gives it, or an
+        annotation or a layer by its `mosaica_id`. A change naming nothing, or two items, is
+        listed in the answer's `refused` and the others are applied; `strict=True` refuses the
+        request at its first such change instead, with `404` or `409`. A request deleting a layer
+        by its `mosaica_id` is refused with `422`; `drop_layer` removes a layer. A deletion or
+        suppression applies to every request from the moment it is accepted. This route never
+        answers `429`.
         """
         return self._send(
             "POST",
@@ -311,8 +318,9 @@ class Control:
     def drop_layer(self, name: str, wait: bool = False) -> Answer:
         """`DELETE /control/layers/{name}`: remove an annotation layer.
 
-        The name cannot be declared again. `wait` holds the answer until readers no longer see
-        the layer, as for `flush`.
+        The name may be declared again, as a new layer that none of the dropped layer's
+        `mosaica_id`s names. `wait` holds the answer until readers no longer see the layer, as for
+        `flush`.
         """
         return self._send("DELETE", f"/control/layers/{_segment(name)}" + _wait(wait))
 

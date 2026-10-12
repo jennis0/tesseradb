@@ -22,7 +22,7 @@
 
 use mosaica_types::{EntityId, ShardFull, ShardSizeError, TermId};
 
-use crate::alloc::{AllocError, PendingItem};
+use crate::alloc::PendingItem;
 use crate::wal::{WalError, WalRow, WalScalar};
 
 /// One row of an ingest batch as the caller sent it: the values that identify the item it names
@@ -424,12 +424,12 @@ pub enum ExecError {
     /// So the 500 means "at least one item is in force but not durable, and every deny in the
     /// request was attempted", never "the batch was refused".
     Wal(WalError),
-    /// Row-less entity-ID assignment refused → HTTP 500, fail closed, with no effect:
-    /// `Allocator::allocate_rowless` leaves both marks unchanged.
-    Alloc(AllocError),
     /// A batch needs more ids than the shard's size or the end of its ids leaves → HTTP **409**,
     /// no effect.
     ShardFull(ShardFull),
+    /// Every layer space has been given, or a level needs more blocks than its layer space has
+    /// left → HTTP **409**, no effect. The detail gives the figures.
+    LayerSpaceFull { detail: String },
     /// A shard size `mosaica_types::check_shard_size` refuses → HTTP **422** for a size of zero,
     /// **409** for one below the high water. No effect.
     ShardSize(ShardSizeError),
@@ -459,13 +459,12 @@ pub enum ExecError {
     /// reach the caller, who cannot otherwise act on it.
     VocabularyRefused { detail: String },
     /// A layer registration or drop was refused → HTTP 422, no effect. Every check runs before the
-    /// first allocation and before the WAL append, so a refusal leaves no ids spent, no record in
-    /// the log and no half-registered layer.
+    /// WAL append, so a refusal leaves no record in the log and no half-registered layer.
     ///
     /// **A rendered string, and it may reach the caller.** What it names is the caller's own
     /// declaration measured against the deployment's published rules — a name already taken, a
-    /// name tombstoned, a tree declaring levels — which is exactly the class of detail a caller can
-    /// act on and cannot otherwise obtain. It names no entity, no path and no other layer's terms.
+    /// tree declaring levels — which is exactly the class of detail a caller can act on and cannot
+    /// otherwise obtain. It names no entity, no path and no other layer's terms.
     LayerRefused { detail: String },
     /// An artifact record supplied a fixed part the artifact already holds, and the two differ
     /// (`ingest.md` §1.1) → **409**. Separate from [`Self::LayerRefused`] on
@@ -518,8 +517,8 @@ impl std::fmt::Display for ExecError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ExecError::Wal(e) => write!(f, "write-ahead log failure: {e}"),
-            ExecError::Alloc(e) => write!(f, "entity-id assignment refused: {e}"),
             ExecError::ShardFull(full) => full.fmt(f),
+            ExecError::LayerSpaceFull { detail } => write!(f, "{detail}"),
             ExecError::ShardSize(e) => e.fmt(f),
             ExecError::BatchConflict { batch_id } => write!(
                 f,
@@ -552,12 +551,9 @@ impl From<WalError> for ExecError {
     }
 }
 
-impl From<AllocError> for ExecError {
-    fn from(e: AllocError) -> Self {
-        match e {
-            AllocError::Full(full) => ExecError::ShardFull(full),
-            e => ExecError::Alloc(e),
-        }
+impl From<ShardFull> for ExecError {
+    fn from(full: ShardFull) -> Self {
+        ExecError::ShardFull(full)
     }
 }
 

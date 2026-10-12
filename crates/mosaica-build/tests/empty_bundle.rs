@@ -262,18 +262,16 @@ fn a_build_with_no_points_writes_a_bundle() {
     assert_eq!(manifest.dict_extents.len(), 1);
     assert_eq!(manifest.dict_extents[0].records, 1);
 
-    // The layer is registered, and the row-less mark records what it claimed: without it the
-    // first online registration would reissue ids this build already handed out (decision 0074).
+    // The layer is registered in space 0, and the counter records it: without it the first
+    // online registration would be given the space this build already gave.
     let names: Vec<&str> = manifest
         .layers
         .iter()
         .map(|l| l.declaration.name.as_str())
         .collect();
     assert_eq!(names, vec!["clusters/a"]);
-    assert!(manifest.entity_id_low_water < mosaica_types::layer::ROWLESS_CEILING);
-    for layer in &manifest.layers {
-        assert!(layer.entity.raw() >= manifest.entity_id_low_water);
-    }
+    assert_eq!(manifest.layers[0].space, mosaica_types::LayerSpace::ZERO);
+    assert_eq!(manifest.next_layer_space, 1);
 }
 
 /// The two builds agree about the empty bundle exactly as they agree about a populated one: the
