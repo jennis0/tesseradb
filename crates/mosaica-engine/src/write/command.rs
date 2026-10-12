@@ -19,7 +19,7 @@ use mosaica_lifecycle::command::{
 };
 use mosaica_lifecycle::membership::{IncomingArtifact, IncomingGrowth};
 use mosaica_lifecycle::wal::{ChangeOp, PlainViewDeclaration, ViewGroupDeclaration};
-use mosaica_types::{EntityId, Target};
+use mosaica_types::Target;
 
 use super::{AcceptError, ExecutorHealth, PublishedBatch};
 
@@ -211,11 +211,11 @@ pub(crate) enum Command {
         stamp: crate::edited::Stamp,
         reply: Reply<()>,
     },
-    /// Register an annotation layer. The answer is the layer's space and own entity, which the
-    /// handler turns into the `mosaica_id` a caller later suppresses the layer by.
+    /// Register an annotation layer. The answer is the layer's space, whose own entity the handler
+    /// turns into the `mosaica_id` a caller later suppresses the layer by.
     RegisterLayer {
         declaration: Box<mosaica_types::layer::LayerDeclaration>,
-        reply: Reply<(mosaica_types::LayerSpace, EntityId)>,
+        reply: Reply<mosaica_types::LayerSpace>,
     },
     /// Drop an annotation layer. Its name may be registered again, as a new layer.
     DropLayer { name: String, reply: Reply<()> },
@@ -326,7 +326,10 @@ mod tests {
                 None,
             );
             let cmd = Command::Changes {
-                changes: vec![(Target::Item(mosaica_types::ShardId::ZERO, EntityId::new(1)), op)],
+                changes: vec![(
+                    Target::Item(mosaica_types::ShardId::ZERO, mosaica_types::EntityId::new(1)),
+                    op,
+                )],
                 stamp: Default::default(),
                 reply,
             };

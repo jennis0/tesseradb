@@ -60,8 +60,32 @@ fn withdraw_content_of_retired_members(record: &mut ArtifactRecord, retired: &Bi
         .retain(|content| content.generated_from.and_cardinality(retired) == 0);
 }
 
-/// Whether retiring `retired` changes `record`: the artifact's own entity is retired, one of its
-/// members is, or a member of one of its contents' generating sets is.
+/// An artifact as the store names it: its layer, and its entity in that layer's space.
+pub type ArtifactAt = (String, EntityId);
+
+/// What a fold retires: the point entities it executed, and each layer's artifacts it executed,
+/// by the layer's name. A point and an artifact may share an entity number and never a set.
+#[derive(Debug, Clone, Default)]
+pub struct Retired {
+    pub points: Bitmap,
+    pub artifacts: BTreeMap<String, Bitmap>,
+}
+
+impl Retired {
+    pub fn is_empty(&self) -> bool {
+        self.points.is_empty() && self.artifacts.values().all(Bitmap::is_empty)
+    }
+
+    /// Whether the artifact at `entity` of `layer` is retired.
+    pub fn artifact(&self, layer: &str, entity: EntityId) -> bool {
+        self.artifacts
+            .get(layer)
+            .is_some_and(|retired| retired.contains(entity.raw() as u32))
+    }
+}
+
+/// Whether retiring changes `record`: its own entity is retired (`own`), or one of its members
+/// or a member of one of its contents' generating sets is among `points`.
 ///
 /// **The one predicate [`ArtifactStore::levels_moved_by`] and [`ArtifactStore::retire`] both
 /// read.** A fold asks the first before it writes its manifest and runs the second after the
@@ -69,9 +93,8 @@ fn withdraw_content_of_retired_members(record: &mut ArtifactRecord, retired: &Bi
 /// have once the retirement has moved it by one (`write.rs`'s `artifact_coordinates`). The two
 /// have to agree level for level: a level reported and not moved, or moved and not reported,
 /// would leave a structure held at a version that describes other records.
-fn record_moved_by(record: &ArtifactRecord, retired: &Bitmap) -> bool {
-    retired.contains(record.entity.raw() as u32)
-        || record.members.and_cardinality(retired) != 0
+fn record_moved_by(record: &ArtifactRecord, own: bool, retired: &Bitmap) -> bool {
+    own || record.members.and_cardinality(retired) != 0
         || record
             .contents
             .iter()
@@ -1115,7 +1138,7 @@ pub struct ArtifactStore {
     /// Per `(layer, level)`, the ordinal high-water already durable in a manifest. Everything at or
     /// above it lives only in the WAL, which is what the rotation pin holds the log for.
     published_through: BTreeMap<(String, u32), u32>,
-    /// `target entity → the entities of the artifacts attached to it`.
+    /// `target → the artifacts attached to it`, each named by its layer and its entity.
     ///
     /// **The inverse of [`Attachment`], maintained here because the deny lane reads it.** Deleting
     /// an artifact deletes the artifacts depending on it
@@ -1124,7 +1147,7 @@ pub struct ArtifactStore {
     /// scan of every level per deletion, on the one lane whose ack latency is a guarantee. It is an
     /// index and not a second copy of the truth: every entry is derived from a record's
     /// `attached_to`, added where the record enters and removed where it leaves.
-    dependents: BTreeMap<EntityId, Vec<EntityId>>,
+    dependents: BTreeMap<ArtifactAt, Vec<ArtifactAt>>,
     /// Per `(layer, level)`, how many artifact writes have landed on it. **A derived structure is
     /// valid only for the version of the level it was derived from**: a cache that missed a bump
     /// would serve a level with its newest artifacts absent, which a viewer cannot tell from
@@ -1213,10 +1236,12 @@ impl ArtifactStore {
                 .or_default()
                 .insert(key.clone(), ordinal);
         }
-        let edge = record
-            .attached_to
-            .as_ref()
-            .map(|attachment| (attachment.entity, record.entity));
+        let edge = record.attached_to.as_ref().map(|attachment| {
+            (
+                (attachment.layer.clone(), attachment.entity),
+                (layer.to_string(), record.entity),
+            )
+        });
         let idx = ordinal as usize;
         let previous = {
             let slots = self.levels.entry((layer.to_string(), level)).or_default();
@@ -1231,7 +1256,7 @@ impl ArtifactStore {
             previous
         };
         if let Some(previous) = previous {
-            self.forget_dependency(&previous);
+            self.forget_dependency(layer, &previous);
         }
         if let Some((target, dependent)) = edge {
             let entry = self.dependents.entry(target).or_default();
@@ -1261,15 +1286,16 @@ impl ArtifactStore {
             .and_then(Option::as_ref)
     }
 
-    /// Drop one record's outgoing dependency edge from the index.
-    fn forget_dependency(&mut self, record: &ArtifactRecord) {
+    /// Drop the outgoing dependency edge of `record`, of `layer`, from the index.
+    fn forget_dependency(&mut self, layer: &str, record: &ArtifactRecord) {
         let Some(attachment) = &record.attached_to else {
             return;
         };
-        if let Some(entry) = self.dependents.get_mut(&attachment.entity) {
-            entry.retain(|dependent| *dependent != record.entity);
+        let target = (attachment.layer.clone(), attachment.entity);
+        if let Some(entry) = self.dependents.get_mut(&target) {
+            entry.retain(|(l, entity)| !(l == layer && *entity == record.entity));
             if entry.is_empty() {
-                self.dependents.remove(&attachment.entity);
+                self.dependents.remove(&target);
             }
         }
     }
@@ -1284,20 +1310,21 @@ impl ArtifactStore {
     /// every layer it names in `depends_on`, so no edge can point back up the chain — and the
     /// dedup is what makes it safe anyway: an entity already collected is never expanded again.
     ///
-    /// An entity that is not an artifact — a point, a layer — has no dependents and answers
-    /// empty, which is what lets the deny lane ask this of every deletion it carries.
-    pub fn cascade_from(&self, roots: &[EntityId]) -> Vec<EntityId> {
-        let mut collected: std::collections::BTreeSet<EntityId> = std::collections::BTreeSet::new();
-        let mut frontier: Vec<EntityId> = roots.to_vec();
-        while let Some(entity) = frontier.pop() {
-            let Some(dependents) = self.dependents.get(&entity) else {
+    /// An artifact nothing attaches to, or a layer's own entity, has no dependents and answers
+    /// empty, which is what lets the deny lane ask this of every artifact deletion it carries.
+    pub fn cascade_from(&self, roots: &[ArtifactAt]) -> Vec<ArtifactAt> {
+        let mut collected: std::collections::BTreeSet<ArtifactAt> =
+            std::collections::BTreeSet::new();
+        let mut frontier: Vec<ArtifactAt> = roots.to_vec();
+        while let Some(at) = frontier.pop() {
+            let Some(dependents) = self.dependents.get(&at) else {
                 continue;
             };
             for dependent in dependents {
-                if roots.contains(dependent) || !collected.insert(*dependent) {
+                if roots.contains(dependent) || !collected.insert(dependent.clone()) {
                     continue;
                 }
-                frontier.push(*dependent);
+                frontier.push(dependent.clone());
             }
         }
         collected.into_iter().collect()
@@ -1599,9 +1626,12 @@ impl ArtifactStore {
                         FillOutcome::Differs
                     };
                 }
-                let dependent = record.entity;
+                let dependent = (layer.to_string(), record.entity);
                 record.attached_to = Some(wanted);
-                let entry = self.dependents.entry(attachment.entity).or_default();
+                let entry = self
+                    .dependents
+                    .entry((attachment.layer.clone(), attachment.entity))
+                    .or_default();
                 if !entry.contains(&dependent) {
                     entry.push(dependent);
                 }
@@ -2254,16 +2284,17 @@ impl ArtifactStore {
         self.keys.remove(layer);
         self.content_pending.retain(|(l, _, _)| l != layer);
         self.dependents.clear();
-        let edges: Vec<(EntityId, EntityId)> = self
+        let edges: Vec<(ArtifactAt, ArtifactAt)> = self
             .levels
-            .values()
-            .flatten()
-            .flatten()
-            .filter_map(|record| {
-                record
-                    .attached_to
-                    .as_ref()
-                    .map(|attachment| (attachment.entity, record.entity))
+            .iter()
+            .flat_map(|((layer, _), slots)| slots.iter().flatten().map(move |r| (layer, r)))
+            .filter_map(|(layer, record)| {
+                record.attached_to.as_ref().map(|attachment| {
+                    (
+                        (attachment.layer.clone(), attachment.entity),
+                        (layer.clone(), record.entity),
+                    )
+                })
             })
             .collect();
         for (target, dependent) in edges {
@@ -2353,16 +2384,16 @@ impl ArtifactStore {
     /// manifest names are the post-retirement ones. For a level reported here the retirement will
     /// move the version by exactly one, and that is the version the fold stamps the level's
     /// derived structures with: see `write.rs`'s `artifact_coordinates`.
-    pub fn levels_moved_by(&self, retired: &Bitmap) -> Vec<(String, u32)> {
+    pub fn levels_moved_by(&self, retired: &Retired) -> Vec<(String, u32)> {
         if retired.is_empty() {
             return Vec::new();
         }
         let mut moved = Vec::new();
         for ((layer, level), slots) in &self.levels {
-            let touched = slots
-                .iter()
-                .flatten()
-                .any(|record| record_moved_by(record, retired));
+            let touched = slots.iter().flatten().any(|record| {
+                let own = retired.artifact(layer, record.entity);
+                record_moved_by(record, own, &retired.points)
+            });
             if touched {
                 moved.push((layer.clone(), *level));
             }
@@ -2473,23 +2504,24 @@ impl ArtifactStore {
     /// credential and outside the leak register's viewer scope
     /// ([decision 0024](../../../docs/decisions/0024-operator-credential-is-out-of-scope.md)); a
     /// viewer-facing route carrying these numbers would be C8.
-    pub fn degradations(&self, retired: &Bitmap) -> Vec<Degradation> {
+    pub fn degradations(&self, retired: &Retired) -> Vec<Degradation> {
         let mut out = Vec::new();
         if retired.is_empty() {
             return out;
         }
+        let points = &retired.points;
         for ((layer, level), slots) in &self.levels {
             for (ordinal, slot) in slots.iter().enumerate() {
                 let Some(record) = slot else { continue };
                 // An artifact this fold retires outright is not *degraded* — it is gone, and its
                 // own deletion is what the caller already knows about.
-                if retired.contains(record.entity.raw() as u32) {
+                if retired.artifact(layer, record.entity) {
                     continue;
                 }
-                let members_lost = record.members.and_cardinality(retired);
+                let members_lost = record.members.and_cardinality(points);
                 let mut contents_lost = Vec::new();
                 for (rank, content) in record.contents.iter().enumerate() {
-                    let lost = content.generated_from.and_cardinality(retired);
+                    let lost = content.generated_from.and_cardinality(points);
                     if lost > 0 {
                         contents_lost.push((rank as u32, lost));
                     }
@@ -2554,7 +2586,8 @@ impl ArtifactStore {
     /// together ([`withdraw_content_of_retired_members`], decision 0135): containment is
     /// all-or-nothing and a set that lost a member fails it for every principal for ever; the
     /// caller re-declares.
-    pub fn repack_all(&self, retired: &Bitmap) -> Vec<PendingExtent> {
+    pub fn repack_all(&self, retired: &Retired) -> Vec<PendingExtent> {
+        let points = &retired.points;
         let mut ready = Vec::new();
         for ((layer, level), slots) in &self.levels {
             if slots.is_empty() {
@@ -2576,7 +2609,7 @@ impl ArtifactStore {
                     // deleted artifact has no rows and no postings, so compaction's derivation
                     // would otherwise call it executed *vacuously* at the first fold and retire the
                     // entry while its slot went on being served.
-                    if retired.contains(record.entity.raw() as u32) {
+                    if retired.artifact(layer, record.entity) {
                         return ArtifactBlobs::default();
                     }
                     // **The shape survives a fold unchanged**: it is geometry, not rows, so nothing
@@ -2584,12 +2617,12 @@ impl ArtifactStore {
                     // a deletion removes from such a layer is the *point*, which leaves the mask —
                     // the artifact's rule is untouched.
                     let shape = self.shape_of(layer, *level, ordinal as u32);
-                    if retired.is_empty() {
+                    if points.is_empty() {
                         return (encode_record(record, shape), encode_members(record));
                     }
                     let mut record = record.clone();
-                    record.members.to_mut().andnot_inplace(retired);
-                    withdraw_content_of_retired_members(&mut record, retired);
+                    record.members.to_mut().andnot_inplace(points);
+                    withdraw_content_of_retired_members(&mut record, points);
                     (encode_record(&record, shape), encode_members(&record))
                 })
                 .collect();
@@ -2613,23 +2646,25 @@ impl ArtifactStore {
     /// ones it read would be the global grain [`Self::versions`] exists to escape, in the one place
     /// where it is least affordable. Which levels change is [`record_moved_by`]'s answer, the one
     /// [`Self::levels_moved_by`] gave the fold before its manifest was written.
-    pub fn retire(&mut self, retired: &Bitmap) -> Vec<(String, u32)> {
+    pub fn retire(&mut self, retired: &Retired) -> Vec<(String, u32)> {
         if retired.is_empty() {
             return Vec::new();
         }
+        let points = &retired.points;
         // Collected during the walk and applied after it: both indexes are fields beside `levels`,
         // which is borrowed mutably here.
-        let mut gone: Vec<(EntityId, EntityId)> = Vec::new();
+        let mut gone: Vec<(ArtifactAt, ArtifactAt)> = Vec::new();
         let mut moved: Vec<(String, u32)> = Vec::new();
         for ((layer, level), slots) in self.levels.iter_mut() {
             let mut changed = false;
             for slot in slots.iter_mut() {
                 let Some(record) = slot else { continue };
-                if !record_moved_by(record, retired) {
+                let own = retired.artifact(layer, record.entity);
+                if !record_moved_by(record, own, points) {
                     continue;
                 }
                 changed = true;
-                if retired.contains(record.entity.raw() as u32) {
+                if own {
                     if let Some(key) = &record.key {
                         if let Some(keys) = self
                             .keys
@@ -2641,14 +2676,16 @@ impl ArtifactStore {
                         }
                     }
                     if let Some(attachment) = &record.attached_to {
-                        gone.push((attachment.entity, record.entity));
+                        gone.push((
+                            (attachment.layer.clone(), attachment.entity),
+                            (layer.clone(), record.entity),
+                        ));
                     }
                     *slot = None;
-                    changed = true;
                     continue;
                 }
-                record.members.to_mut().andnot_inplace(retired);
-                withdraw_content_of_retired_members(record, retired);
+                record.members.to_mut().andnot_inplace(points);
+                withdraw_content_of_retired_members(record, points);
             }
             if changed {
                 moved.push((layer.clone(), *level));
@@ -2672,7 +2709,7 @@ impl ArtifactStore {
             }
         }
         self.dependents
-            .retain(|target, _| !retired.contains(target.raw() as u32));
+            .retain(|(layer, entity), _| !retired.artifact(layer, *entity));
         moved
     }
 
@@ -2733,8 +2770,8 @@ impl ArtifactStore {
             }
             self.content_pending
                 .remove(&(layer.clone(), level, ordinal));
-            self.forget_dependency(&record);
-            self.dependents.remove(&record.entity);
+            self.forget_dependency(&layer, &record);
+            self.dependents.remove(&(layer.clone(), record.entity));
             if moved.last() != Some(&(layer.clone(), level)) {
                 moved.push((layer, level));
             }
@@ -3567,6 +3604,26 @@ mod tests {
         }
     }
 
+    fn at(layer: &str, entity: u64) -> ArtifactAt {
+        (layer.to_string(), EntityId::new(entity))
+    }
+
+    /// A retirement of `layer`'s artifacts at `entities`.
+    fn artifacts_of(layer: &str, entities: &[u32]) -> Retired {
+        Retired {
+            points: Bitmap::new(),
+            artifacts: BTreeMap::from([(layer.to_string(), Bitmap::of(entities))]),
+        }
+    }
+
+    /// A retirement of the points `entities`.
+    fn points(entities: &[u32]) -> Retired {
+        Retired {
+            points: Bitmap::of(entities),
+            artifacts: BTreeMap::new(),
+        }
+    }
+
     /// A record attached to `target`.
     fn attached(entity: u64, target: u64, layer: &str, ordinal: u32) -> ArtifactRecord {
         ArtifactRecord {
@@ -3593,18 +3650,22 @@ mod tests {
         store.put("glosses/y", 0, 0, attached(300, 200, "topics/x", 0), None);
 
         assert_eq!(
-            store.cascade_from(&[EntityId::new(100)]),
-            vec![EntityId::new(200), EntityId::new(300)],
+            store.cascade_from(&[at("clusters/a", 100)]),
+            vec![at("glosses/y", 300), at("topics/x", 200)],
             "the label and the label on the label, and neither of the untouched cluster's"
         );
         assert_eq!(
-            store.cascade_from(&[EntityId::new(100), EntityId::new(200)]),
-            vec![EntityId::new(300)],
+            store.cascade_from(&[at("clusters/a", 100), at("topics/x", 200)]),
+            vec![at("glosses/y", 300)],
             "a dependent already being deleted is not deleted a second time"
         );
         assert!(
-            store.cascade_from(&[EntityId::new(999)]).is_empty(),
+            store.cascade_from(&[at("clusters/a", 999)]).is_empty(),
             "an entity that is not an artifact has no dependents"
+        );
+        assert!(
+            store.cascade_from(&[at("topics/x", 100)]).is_empty(),
+            "another layer's artifact at the same entity has dependents of its own"
         );
     }
 
@@ -3681,11 +3742,46 @@ mod tests {
         let mut store = ArtifactStore::new();
         store.put("clusters/a", 0, 0, record(100, &[1, 2, 3]), None);
         store.put("topics/x", 0, 0, attached(200, 100, "clusters/a", 0), None);
-        store.retire(&Bitmap::of(&[200]));
+        store.retire(&artifacts_of("topics/x", &[200]));
         assert!(
-            store.cascade_from(&[EntityId::new(100)]).is_empty(),
+            store.cascade_from(&[at("clusters/a", 100)]).is_empty(),
             "the label is gone, so deleting its cluster cascades into nothing"
         );
+    }
+
+    /// An artifact, another layer's artifact and a point may share an entity number, and each is
+    /// retired by its own set alone.
+    #[test]
+    fn a_retirement_tells_a_point_and_each_layers_artifacts_apart() {
+        let mut store = ArtifactStore::new();
+        store.put("clusters/a", 0, 0, record(100, &[100, 7]), None);
+        store.put("clusters/b", 0, 0, record(100, &[100, 7]), None);
+        store.put("topics/x", 0, 0, attached(200, 100, "clusters/b", 0), None);
+
+        let moved = store.retire(&artifacts_of("clusters/a", &[100]));
+        assert_eq!(moved, vec![("clusters/a".to_string(), 0)]);
+        assert!(store.get("clusters/a", 0, 0).is_none());
+        assert_eq!(
+            store.get("clusters/b", 0, 0).unwrap().members,
+            Bitmap::of(&[100, 7]),
+            "the point 100 is a member still"
+        );
+        assert_eq!(
+            store.cascade_from(&[at("clusters/b", 100)]),
+            vec![at("topics/x", 200)]
+        );
+
+        store.retire(&points(&[100]));
+        assert_eq!(
+            store.get("clusters/b", 0, 0).unwrap().members,
+            Bitmap::of(&[7]),
+            "a point retires as a member, never as an artifact"
+        );
+        let packed = store.repack_all(&artifacts_of("clusters/b", &[100]));
+        let b = packed.iter().find(|(layer, ..)| layer == "clusters/b").unwrap();
+        assert!(b.3[0].0.is_empty(), "the artifact leaves the pack");
+        let x = packed.iter().find(|(layer, ..)| layer == "topics/x").unwrap();
+        assert!(!x.3[0].0.is_empty(), "an artifact at another entity stays");
     }
 
     /// **The streaming route and the materialising one answer the same thing.** A build takes
@@ -3771,7 +3867,7 @@ mod tests {
             .map(|(ordinal, _)| ordinal)
             .collect();
         assert_eq!(labels, vec![1]);
-        assert!(store.cascade_from(&[EntityId::new(101)]).is_empty());
+        assert!(store.cascade_from(&[at("clusters/q", 101)]).is_empty());
         assert!(store
             .retire_dead_views(|_, _, incarnation| incarnation == 2)
             .is_empty());
@@ -4633,7 +4729,10 @@ mod tests {
             .map(|(layer, level, version)| ((layer.to_string(), level), version))
             .collect();
 
-        let retired = Bitmap::of(&[100, 4, 6, 8]);
+        let retired = Retired {
+            points: Bitmap::of(&[4, 6, 8]),
+            artifacts: BTreeMap::from([("own".to_string(), Bitmap::of(&[100]))]),
+        };
         let mut reported = store.levels_moved_by(&retired);
         reported.sort();
         let mut moved = store.retire(&retired);
@@ -4727,7 +4826,7 @@ mod tests {
     fn a_growth_against_a_hole_adds_nothing() {
         let mut store = ArtifactStore::new();
         assert_eq!(store.apply(&publication("clusters/a", 0, 100, &[1]), 0), 0);
-        store.retire(&Bitmap::of(&[100]));
+        store.retire(&artifacts_of("clusters/a", &[100]));
 
         assert_eq!(
             store.apply(&growth("clusters/a", 0, 0, &[7, 8]), 8),
@@ -4827,7 +4926,7 @@ mod tests {
         );
         assert_eq!(store.apply(&growth("clusters/a", 0, 0, &[3, 4]), 8), 0);
 
-        store.retire(&Bitmap::of(&[3]));
+        store.retire(&points(&[3]));
         assert_eq!(
             store.get("clusters/a", 0, 0).unwrap().members,
             Bitmap::of(&[1, 2, 4]),
@@ -4930,8 +5029,8 @@ mod tests {
             assert_eq!(record.contents[0].digest, content_digest(&values));
             assert!(store.shape_of("clusters/a", 0, 1).is_some());
             assert_eq!(
-                store.cascade_from(&[EntityId::new(100)]),
-                vec![EntityId::new(101)],
+                store.cascade_from(&[at("clusters/a", 100)]),
+                vec![at("clusters/a", 101)],
                 "a filled attachment enters the dependency index"
             );
         };
@@ -5095,7 +5194,7 @@ mod tests {
         assert_eq!(store.lineage_version("clusters/t", 0), lineage + 1);
 
         // A retirement of a member of the level moves both, as a hole has no edges.
-        store.retire(&Bitmap::of(&[100]));
+        store.retire(&artifacts_of("clusters/t", &[100]));
         assert_eq!(store.lineage_version("clusters/t", 0), lineage + 2);
     }
 

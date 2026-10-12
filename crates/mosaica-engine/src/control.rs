@@ -527,10 +527,8 @@ impl Engine {
         &self,
         declaration: mosaica_types::layer::LayerDeclaration,
     ) -> std::result::Result<MosaicaId, crate::write::AcceptError> {
-        let (space, entity) = self.write.register_layer(declaration)?;
-        // The blinding is total over the space the allocator will issue, so a row-less entity is
-        // always inside it and this conversion cannot fail in practice.
-        self.issued_id(space, entity)
+        let space = self.write.register_layer(declaration)?;
+        self.issued_id(space, mosaica_types::layer::LAYER_ENTITY)
     }
 
     /// The `mosaica_id` of an entity of `space` a layer write just allocated, or the write's

@@ -76,6 +76,84 @@ pub(super) fn write_content_extent(
     prefix_dir: &std::path::Path,
     layout: mosaica_store::LayerSpaceLayout<'_>,
     n: u64,
+    rows: Vec<(EntityId, Vec<(u16, String)>)>,
+) -> mosaica_store::Result<mosaica_store::manifest::RecordExtent> {
+    write_content_rows(prefix_dir, layout, &format!("artifacts-{n:06}"), rows)
+}
+
+/// What a fold does with one content extent of a space whose deleted artifacts it removes.
+pub(super) enum ContentCarry {
+    /// The extent holds none of their rows, and is linked into the new prefix as it is.
+    Link,
+    /// The extent written again without their rows.
+    Rewritten(mosaica_store::manifest::RecordExtent),
+    /// Every row the extent held was theirs.
+    Emptied,
+}
+
+/// `extent` of `from_prefix` without the rows of the entities `retired`: [`ContentCarry::Link`]
+/// where it holds none, and otherwise its other rows written under `layout` in `to_prefix`, named
+/// for publication `n` and the extent's position `index` in its space's list.
+pub(super) fn content_without(
+    from_prefix: &std::path::Path,
+    to_prefix: &std::path::Path,
+    layout: mosaica_store::LayerSpaceLayout<'_>,
+    (n, index): (u64, usize),
+    extent: &mosaica_store::manifest::RecordExtent,
+    retired: &croaring::Bitmap,
+) -> mosaica_store::Result<ContentCarry> {
+    let paths = record_extent_paths(from_prefix, extent);
+    let unreadable = |e: mosaica_filter::RecordError| mosaica_store::StoreError::Io {
+        path: paths.blocks.clone(),
+        source: e.into(),
+    };
+    let blob = mosaica_filter::RecordBlob::open(
+        &paths.blocks,
+        &paths.hasrow,
+        &paths.directory,
+        mosaica_filter::Access::Read,
+    )
+    .map_err(unreadable)?;
+    if blob.hasrow().map_err(unreadable)?.and_cardinality(retired) == 0 {
+        return Ok(ContentCarry::Link);
+    }
+    let mut rows: Vec<(EntityId, Vec<(u16, String)>)> = Vec::new();
+    let mut other = None;
+    blob.for_each_row(&mut |entity, fields| {
+        if retired.contains(entity) {
+            return Ok(());
+        }
+        let mut values = Vec::with_capacity(fields.len());
+        for field in fields {
+            match field.value {
+                mosaica_filter::RecordValue::Utf8(value) => values.push((field.tag, value)),
+                value => other = Some(value),
+            }
+        }
+        rows.push((EntityId::new(u64::from(entity)), values));
+        Ok(())
+    })
+    .map_err(unreadable)?;
+    if let Some(value) = other {
+        return Err(mosaica_store::StoreError::MalformedBundle {
+            detail: format!(
+                "the content extent {} holds {value:?}, and supplied content is text",
+                extent.blocks
+            ),
+        });
+    }
+    if rows.is_empty() {
+        return Ok(ContentCarry::Emptied);
+    }
+    let stem = format!("artifacts-{n:06}-{index}");
+    write_content_rows(to_prefix, layout, &stem, rows).map(ContentCarry::Rewritten)
+}
+
+/// [`write_content_extent`] under the file stem `stem`.
+fn write_content_rows(
+    prefix_dir: &std::path::Path,
+    layout: mosaica_store::LayerSpaceLayout<'_>,
+    stem: &str,
     mut rows: Vec<(EntityId, Vec<(u16, String)>)>,
 ) -> mosaica_store::Result<mosaica_store::manifest::RecordExtent> {
     let content_rel = layout.content_rel();
@@ -85,9 +163,9 @@ pub(super) fn write_content_extent(
         source,
     })?;
     let extent = mosaica_store::manifest::RecordExtent {
-        blocks: format!("{content_rel}/artifacts-{n:06}.blocks.bin"),
-        hasrow: format!("{content_rel}/artifacts-{n:06}.hasrow.roaring"),
-        directory: format!("{content_rel}/artifacts-{n:06}.directory.arrow"),
+        blocks: format!("{content_rel}/{stem}.blocks.bin"),
+        hasrow: format!("{content_rel}/{stem}.hasrow.roaring"),
+        directory: format!("{content_rel}/{stem}.directory.arrow"),
     };
     let io = |path: &std::path::Path| {
         let path = path.to_path_buf();

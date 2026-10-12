@@ -41,7 +41,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use mosaica_authz::{DeltaTier, Dict, FragmentCache};
-use mosaica_lifecycle::alloc::{high_water_from, low_water_from, AllocError, Allocator};
+use mosaica_lifecycle::alloc::{high_water_from, Allocator};
 use mosaica_lifecycle::buffer::DescriptorResolver;
 use mosaica_lifecycle::command::{ExecError, SubmitError};
 use mosaica_lifecycle::faults::WalMeter;
@@ -710,14 +710,14 @@ impl WritePath {
 
     /// Register an annotation layer and wait for its receipt.
     ///
-    /// Returns the layer's space and own entity, which the caller turns into a `mosaica_id`, the
-    /// only address by which the layer can later be suppressed, since an entity id never crosses
-    /// the boundary. A failure means the layer does not exist, the opposite of a deny's posture:
-    /// see `Executor::commit_registry`.
+    /// Returns the layer's space, whose own entity the caller turns into a `mosaica_id`, the only
+    /// address by which the layer can later be suppressed, since an entity id never crosses the
+    /// boundary. A failure means the layer does not exist, the opposite of a deny's posture: see
+    /// `Executor::commit_registry`.
     pub(crate) fn register_layer(
         &self,
         declaration: mosaica_types::layer::LayerDeclaration,
-    ) -> Result<(LayerSpace, EntityId), AcceptError> {
+    ) -> Result<LayerSpace, AcceptError> {
         self.submit(|reply| Command::RegisterLayer {
             declaration: Box::new(declaration),
             reply,

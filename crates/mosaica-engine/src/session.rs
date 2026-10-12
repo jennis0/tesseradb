@@ -473,8 +473,7 @@ impl Engine {
                 // Checked live, per call, against the current overlay of the layer's space: a
                 // layer's own entity carries its suppression. A layer has no fragment to fall
                 // through to, so no opinion here means not visible.
-                let overlay = generation.space_overlay(layer.space);
-                !overlay.is_deleted(layer.entity) && !overlay.is_suppressed(layer.entity)
+                !generation.layer_denied(layer.space)
             })
             .collect()
     }

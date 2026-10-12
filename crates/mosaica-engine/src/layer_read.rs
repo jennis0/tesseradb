@@ -54,11 +54,7 @@ impl Engine {
             .live()
             .registered_layer(name)
             .ok_or(LayerRefusal::Unknown)?;
-        let overlay = generation.space_overlay(layer.space);
-        if !layer.declaration.draws_on(view)
-            || overlay.is_deleted(layer.entity)
-            || overlay.is_suppressed(layer.entity)
-        {
+        if !layer.declaration.draws_on(view) || generation.layer_denied(layer.space) {
             return Err(LayerRefusal::Unknown);
         }
         Ok(layer)

@@ -385,10 +385,8 @@ fn manifest_of(root: &Path) -> mosaica_store::manifest::SegmentsManifest {
         .side_manifest()
 }
 
-/// **The headline: a built bundle carries its layers, and the mark that keeps their ids theirs.**
-///
-/// A manifest without `entity_id_low_water` below the ceiling would hand the next online
-/// registration ids these layers already hold — two entities under one `mosaica_id`.
+/// **The headline: a built bundle carries its layers, each in its own space, and the counter that
+/// keeps those spaces theirs.**
 #[test]
 fn a_build_registers_its_layers_and_publishes_their_artifacts() {
     let inputs = inputs();
@@ -415,17 +413,12 @@ fn a_build_registers_its_layers_and_publishes_their_artifacts() {
             .unwrap();
         assert_eq!(extent.space, layer.space, "an extent names its layer's space");
     }
-    assert!(
-        manifest.partition.entity_id_low_water < mosaica_types::layer::ROWLESS_CEILING,
-        "the row-less mark must record what the layers claimed"
-    );
-    // Layer entities and artifact runs alike come out of the row-less region, above every point.
+    // Each space numbers its levels from block 1, past the layer's own entity 0.
     for layer in &manifest.partition.layers {
-        assert!(layer.entity.raw() > N_ITEMS);
-        assert!(layer.entity.raw() >= manifest.partition.entity_id_low_water);
-        for runs in &layer.runs {
-            assert!(runs.capacity() >= mosaica_types::layer::RESERVED_BLOCK);
-        }
+        assert_eq!(
+            layer.runs[0].entity_of(0),
+            Some(mosaica_types::layer::RESERVED_BLOCK)
+        );
     }
 
     // Two levels' worth of memberships — one extent per level — and one content extent for the
@@ -483,7 +476,6 @@ fn both_build_paths_place_the_same_layers_on_the_same_entities() {
     let b = manifest_of(&linear);
     assert_eq!(a.partition.layers, b.partition.layers);
     assert_eq!(a.partition.next_layer_space, b.partition.next_layer_space);
-    assert_eq!(a.partition.entity_id_low_water, b.partition.entity_id_low_water);
     assert_eq!(a.only_shard().membership_extents, b.only_shard().membership_extents);
 
     // **The bytes, not only the descriptors.** A `MembershipExtent` carries a path, a layer, a
@@ -2186,7 +2178,7 @@ fn a_minted_artifact_and_a_declared_one_are_the_same_artifact() {
 
     let (minted, declared) = (manifest_of(&from_points), manifest_of(&from_table));
     assert_eq!(minted.only_shard().membership_extents, declared.only_shard().membership_extents);
-    assert_eq!(minted.partition.entity_id_low_water, declared.partition.entity_id_low_water);
+    assert_eq!(minted.partition.next_layer_space, declared.partition.next_layer_space);
     assert_eq!(
         minted.partition.layers.iter().map(|l| &l.runs).collect::<Vec<_>>(),
         declared.partition.layers.iter().map(|l| &l.runs).collect::<Vec<_>>()

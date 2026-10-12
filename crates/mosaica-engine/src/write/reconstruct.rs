@@ -1,18 +1,15 @@
 use super::*;
 
 /// The manifest state a reconstruction starts from, before WAL replay unions what was written
-/// since: both entity-space marks and the registry's complete current view.
+/// since: the high water and the registry's complete current view.
 ///
 /// A struct rather than four arguments: the fields travel together and are all read from the same
 /// manifests, and a fifth stays a compile error here rather than a defaulted argument.
 pub(crate) struct ManifestSeed<'a> {
-    /// The shard the marks and freed ids below are of.
+    /// The shard the high water and freed ids below are of.
     pub shard: ShardId,
-    /// The shard record's `high_water`: the point region's floor.
+    /// The shard record's `high_water`.
     pub high_water: u64,
-    /// `min(ceiling, side manifests)`: the row-less region's ceiling. A build sets this whenever
-    /// its declaration carried layers, or the first online registration reissues their ids.
-    pub low_water: u64,
     /// The served side-manifest's `shards.size`.
     pub size: u64,
     /// The newest served side-manifest's freed ids, and the sets it holds back with their
@@ -294,11 +291,6 @@ impl WritePath {
                 _ => {}
             }
         }
-        // The layer-entity cursor cannot be inferred from the records: a `LayerCreate` says which
-        // entity a layer took, not how much of its block was left, and resuming from
-        // `max(entity) + 1` would be wrong once a drop retired the highest-numbered layer.
-        registry.reseed_entity_cursor();
-
         // Same ordering rule again: replay unions onto the manifests' membership extents. An
         // extent is addressed by absolute ordinal from the layer's reserved runs, so this must run
         // after the whole registry is replayed.
@@ -424,11 +416,8 @@ impl WritePath {
         // Same ordering rule again: the overlay is seeded and the log replayed on top, because
         // seeding after replay would revert an acked unsuppress the newest manifest predates.
         let mut replay = Replay::new(dict, initial_deny.clone(), seed.view_ids_of_key);
-        // The entity-space marks the records imply. The row-less mark takes the minimum where the
-        // point mark takes the maximum: the two regions grow towards each other, so "furthest
-        // along" is downward there.
+        // The high water the records imply.
         let mut wal_high_water = 0u64;
-        let mut wal_low_water = mosaica_lifecycle::alloc::ROWLESS_CEILING;
         // Every point entity a kept record names.
         let mut named = croaring::Bitmap::new();
         // Each edit's `(number, new entity)` whose first row no flush has written, and so whose
@@ -470,7 +459,6 @@ impl WritePath {
                 past_drops && has_row(entity, view)
             });
             wal_high_water = wal_high_water.max(high_water_from([&record]));
-            wal_low_water = wal_low_water.min(low_water_from([&record]));
             named.or_inplace(&mosaica_lifecycle::alloc::entities_named([&record]));
             if let WalRecord::IngestBatch { edits: batch, .. } = &record {
                 edits.extend(batch.iter().filter_map(|edit| {
@@ -518,21 +506,18 @@ impl WritePath {
             buffer.remove_in_view(entity, &view);
         }
 
-        // `try_with_marks`, not `with_marks`: the seeds come from durable state this run did not
-        // write, so a corrupt or hand-edited pair must be refused here, not as a later opaque
-        // exhaustion error.
-        let mut allocator = Allocator::try_with_marks(
-            seed.high_water.max(wal_high_water),
-            seed.low_water.min(wal_low_water),
-        )
-        .map_err(|e| {
-            EngineError::Malformed(format!(
-                "entity-ID allocator seed from durable state (MANIFEST high-water {}, WAL \
-                 high-water {wal_high_water}; MANIFEST low-water {}, WAL low-water \
-                 {wal_low_water}): {e}",
-                seed.high_water, seed.low_water,
-            ))
-        })?;
+        // `try_new`: the seed comes from durable state this run did not write, so a corrupt or
+        // hand-edited mark is refused here, not as a later opaque refusal.
+        let mut allocator = Allocator::try_new(seed.high_water.max(wal_high_water))
+            .ok_or_else(|| {
+                EngineError::Malformed(format!(
+                    "the high water durable state leaves (manifest {}, log {wal_high_water}) is \
+                     past {}, where a shard's ids end. Restore the side-manifest and log this \
+                     bundle was written with",
+                    seed.high_water,
+                    mosaica_lifecycle::alloc::ENTITY_END,
+                ))
+            })?;
         // A size no declaration could have left is refused at open, not at the first batch.
         mosaica_types::check_shard_size(size, allocator.high_water()).map_err(|e| {
             EngineError::Malformed(format!(

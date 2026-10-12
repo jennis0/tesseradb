@@ -211,14 +211,14 @@ fn an_artifacts_or_a_layers_identifier_names_no_item() {
 
 /// **The durability assertion.** The WAL is the only place a membership lives, so a restart is the
 /// whole test: the artifacts must come back at the same ordinals, on the same entities, with the
-/// same keys — and the row-less mark must have moved far enough that nothing reissues them.
+/// same keys, and a layer registered afterwards takes none of their identifiers.
 #[test]
 fn a_publication_survives_a_restart_and_its_entities_are_not_reissued() {
     let fx = fixture();
-    let (ids, low_water) = {
+    let ids = {
         let engine = fx.open();
         engine.register_layer(declaration("clusters/a")).unwrap();
-        let ids = engine
+        engine
             .publish_artifacts(
                 "clusters/a".into(),
                 0,
@@ -227,18 +227,11 @@ fn a_publication_survives_a_restart_and_its_entities_are_not_reissued() {
                     artifact("c1", fx.members(40..90)),
                 ],
             )
-            .unwrap();
-        (ids, engine.allocator_low_water())
+            .unwrap()
     };
 
     let engine = fx.open();
     assert_eq!(engine.published_artifacts(), 2);
-    assert!(
-        engine.allocator_low_water() <= low_water,
-        "the row-less mark comes back at least as far along as it was; a mark that regressed \
-         would reissue these artifacts' entities to the next layer registered"
-    );
-
     for (i, id) in ids.iter().enumerate() {
         let at = engine
             .locate_artifact(artifact_entity(&engine, *id))
@@ -247,21 +240,26 @@ fn a_publication_survives_a_restart_and_its_entities_are_not_reissued() {
         assert_eq!(at.key.as_deref(), Some(["c0", "c1"][i]));
     }
 
-    // A fresh registration after the restart must not land on an entity an artifact holds.
+    // A layer registered after the restart numbers its artifacts from the same entity in a space
+    // of its own, so the first of them has another identifier.
     engine.register_layer(declaration("clusters/b")).unwrap();
-    let published: Vec<_> = ids.iter().map(|id| artifact_entity(&engine, *id)).collect();
-    engine
+    let fresh = engine
         .publish_artifacts(
             "clusters/b".into(),
             0,
             vec![artifact("d0", fx.members(0..10))],
         )
         .unwrap();
-    for entity in &published {
-        let at = engine.locate_artifact(*entity).unwrap();
+    assert!(!ids.contains(&fresh[0]));
+    assert_eq!(
+        artifact_entity(&engine, fresh[0]).entity(),
+        artifact_entity(&engine, ids[0]).entity()
+    );
+    for id in &ids {
+        let at = engine.locate_artifact(artifact_entity(&engine, *id)).unwrap();
         assert_eq!(
             at.layer, "clusters/a",
-            "an entity issued before the restart still names the artifact it was issued for"
+            "an identifier issued before the restart still names the artifact it was issued for"
         );
     }
 }

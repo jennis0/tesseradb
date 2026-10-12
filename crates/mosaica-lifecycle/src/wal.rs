@@ -281,15 +281,8 @@ pub enum WalRecord {
     /// `mosaica_id` or a unique value once, at admission, and replay applies what was decided
     /// without resolving anything.
     ChangeBatch { changes: Vec<(Target, ChangeOp)> },
-    /// An accepted annotation-layer registration.
-    ///
-    /// **This record is what makes the row-less mark durable**, and that is not incidental to it.
-    /// `alloc::high_water_from` derives the restart seed from `IngestBatch` rows and
-    /// `OverlaySnapshot` entries and from nothing else, so a layer allocation that raised no mark
-    /// would survive a rotation and restart only until the next allocation reissued its ids — two
-    /// entities, one `mosaica_id`. [`crate::alloc::low_water_from`] reads this record and this
-    /// record alone, which is why the ids are carried here explicitly rather than being recomputed
-    /// from the declaration: a replay must apply what was decided, not re-derive it.
+    /// An accepted annotation-layer registration. The space and the runs are carried rather than
+    /// recomputed from the declaration: a replay applies what was decided.
     ///
     /// **The whole declaration travels with it.** A layer's gate, criterion and structure are what
     /// decide whether it is reachable and what may be served from it, so a registration that
@@ -302,9 +295,6 @@ pub enum WalRecord {
         /// commit window. Postcard is transparent through the box, so the record's bytes are
         /// unchanged.
         declaration: Box<LayerDeclaration>,
-        /// The layer's own entity, so layer suppression rides `/control/changes` and the deny lane
-        /// unchanged rather than needing a second mechanism.
-        layer_entity: EntityId,
         /// The layer's space. Replay applies it and resumes the registry's counter past it.
         space: LayerSpace,
         /// The reserved runs backing each level, in level order. A layer declaring no levels has
@@ -349,8 +339,8 @@ pub enum WalRecord {
         deleted: Vec<EntityId>,
     },
     /// An accepted layer drop. The name is freed: a later registration under it is a new layer in
-    /// a new space, so no identifier of the dropped layer names anything of the new one. The ids do
-    /// not come back: the allocator frees no row-less id.
+    /// a new space, so no identifier of the dropped layer names anything of the new one. The space
+    /// is not given again.
     LayerDrop {
         name: String,
         /// The registry version this drop moved the counter to, on `LayerCreate::version`'s rule.
@@ -2603,16 +2593,15 @@ mod tests {
                 layout: None,
                 shape: None,
             }),
-            layer_entity: EntityId::new(4_294_901_759),
             space: LayerSpace::new(3).unwrap(),
             runs: vec![
                 ReservedRuns::from_runs(vec![EntityRun {
-                    start: 4_294_836_224,
-                    end: 4_294_901_760,
+                    start: 65_536,
+                    end: 131_072,
                 }]),
                 ReservedRuns::from_runs(vec![EntityRun {
-                    start: 4_294_770_688,
-                    end: 4_294_836_224,
+                    start: 131_072,
+                    end: 196_608,
                 }]),
             ],
             version: 1,
@@ -2622,7 +2611,7 @@ mod tests {
             version: 2,
         };
         // A change to the layer and one to the item over the same entity stay two changes.
-        let entity = EntityId::new(4_294_901_759);
+        let entity = mosaica_types::layer::LAYER_ENTITY;
         let changes = WalRecord::ChangeBatch {
             changes: vec![
                 (Target::Artifact(LayerSpace::new(3).unwrap(), entity), ChangeOp::Suppress),
@@ -2661,13 +2650,13 @@ mod tests {
             layer: "clusters/hdbscan-2026-08".into(),
             level: 0,
             extend_runs: vec![EntityRun {
-                start: 4_294_705_152,
-                end: 4_294_770_688,
+                start: 196_608,
+                end: 262_144,
             }],
             artifacts: vec![
                 PublishedArtifact {
                     ordinal: 65_535,
-                    entity: EntityId::new(4_294_836_223),
+                    entity: EntityId::new(131_071),
                     key: Some("c-0017".into()),
                     view: None,
                     incarnation: 0,
@@ -2683,7 +2672,7 @@ mod tests {
                 // decodes positionally, so this is the pair that would misread first.
                 PublishedArtifact {
                     ordinal: 65_536,
-                    entity: EntityId::new(4_294_705_152),
+                    entity: EntityId::new(196_608),
                     key: None,
                     // The view is the first optional the identity carries (T2c reads it); set
                     // here so a record naming one round-trips and a reader that lost it would
@@ -2704,7 +2693,7 @@ mod tests {
                         layer: "clusters/hdbscan-2026-08".into(),
                         level: 0,
                         ordinal: 17,
-                        entity: EntityId::new(4_294_901_759),
+                        entity: EntityId::new(65_553),
                     }),
                     // The fourth field, a list, and the one that decodes *after* the attachment
                     // — so a shape that lost a byte in the attachment would land here and read a

@@ -150,10 +150,8 @@ impl Engine {
                     return Tagging::None;
                 };
                 let declaration = &registered.declaration;
-                let overlay = served.generation.space_overlay(registered.space);
                 if !declaration.views.iter().any(|v| v == served.name)
-                    || overlay.is_deleted(registered.entity)
-                    || overlay.is_suppressed(registered.entity)
+                    || served.generation.layer_denied(registered.space)
                 {
                     return Tagging::None;
                 }

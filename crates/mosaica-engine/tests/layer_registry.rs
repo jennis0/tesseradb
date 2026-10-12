@@ -13,8 +13,9 @@ use mosaica_engine::Engine;
 use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
-    MembershipSource, ROWLESS_CEILING,
+    MembershipSource, LAYER_ENTITY,
 };
+use mosaica_types::{LayerSpace, Target};
 
 fn declaration(name: &str, visibility: Option<&str>) -> LayerDeclaration {
     LayerDeclaration {
@@ -53,12 +54,7 @@ fn reachable(engine: &Engine, credential: &[u8]) -> Vec<String> {
 }
 
 /// Invert a layer's `mosaica_id` the way `/control/changes` does — through the admin plane's own
-/// resolver, so this exercises the misdirection guard rather than going round it.
-///
-/// **This is the assertion, not a convenience.** A layer's entity sits *above* the row-less mark,
-/// and the guard used to be a single `entity < high_water` test, which refuses every layer
-/// identifier this deployment has ever issued. The symptom would not have looked like a range
-/// check: suppressing a layer would simply have answered *no such thing*.
+/// resolver, so this exercises the routing rather than going round it.
 fn layer_entity(engine: &Engine, id: mosaica_types::MosaicaId) -> mosaica_types::Target {
     engine.resolve_targets(&[id]).unwrap()[0]
         .expect("a layer identifier names the entity this deployment issued for it")
@@ -138,17 +134,17 @@ fn suppressing_a_layers_entity_removes_it_at_the_ack() {
 #[test]
 fn a_registration_and_its_suppression_survive_a_restart_through_the_wal() {
     let fx = fixture();
-    let (id, low_water) = {
+    let (id, gated) = {
         let engine = fx.open();
         let id = engine
             .register_layer(declaration("clusters/a", None))
             .unwrap();
-        engine
+        let gated = engine
             .register_layer(declaration("clusters/gated", Some("1")))
             .unwrap();
         let entity = layer_entity(&engine, id);
         engine.accept_changes(vec![(entity, ChangeOp::Suppress)]).unwrap();
-        (id, engine.allocator_low_water())
+        (id, gated)
     };
 
     let engine = fx.open();
@@ -164,50 +160,53 @@ fn a_registration_and_its_suppression_survive_a_restart_through_the_wal() {
         "and the gated one still reaches the principal who holds its term"
     );
 
-    // The identifier is stable across the restart, which is what makes a held bookmark work — and
-    // the mark did not move back up, which is what stops the next registration reissuing these ids.
+    // The identifier is stable across the restart, which is what makes a held bookmark work, and
+    // the next registration is given another.
     let entity = layer_entity(&engine, id);
     engine.accept_changes(vec![(entity, ChangeOp::Unsuppress)]).unwrap();
     assert_eq!(
         reachable(&engine, &full_coverage_credential()),
         vec!["clusters/a".to_string()]
     );
-    assert_eq!(engine.allocator_low_water(), low_water);
+    let next = engine
+        .register_layer(declaration("clusters/b", None))
+        .unwrap();
+    assert!(next != id && next != gated);
 }
 
-/// Row-less allocation must not touch the point region, and both marks must come back from a
-/// restart. A mark that reset to the ceiling would reissue a live layer's entity to a point: two
-/// entities, one `mosaica_id`.
+/// A layer takes no point id, and the spaces given survive a restart: a layer registered after it
+/// is given a space no earlier layer held.
 #[test]
-fn the_two_regions_stay_apart_and_both_marks_survive() {
+fn registering_a_layer_takes_no_point_id_and_its_space_is_not_given_again() {
     let fx = fixture();
-    let (high, low) = {
+    let (high, spaces) = {
         let engine = fx.open();
         let before = engine.allocator_high_water();
-        for name in ["a", "b", "c"] {
-            engine
-                .register_layer(declaration(&format!("clusters/{name}"), None))
-                .unwrap();
-        }
+        let spaces: Vec<Target> = ["a", "b", "c"]
+            .iter()
+            .map(|name| {
+                let id = engine
+                    .register_layer(declaration(&format!("clusters/{name}"), None))
+                    .unwrap();
+                layer_entity(&engine, id)
+            })
+            .collect();
         assert_eq!(
             engine.allocator_high_water(),
             before,
             "registering a layer allocates no point ids"
         );
-        assert!(
-            engine.allocator_low_water() < ROWLESS_CEILING,
-            "and it did allocate row-less ones"
-        );
-        (engine.allocator_high_water(), engine.allocator_low_water())
+        (engine.allocator_high_water(), spaces)
     };
 
     let engine = fx.open();
     assert_eq!(engine.allocator_high_water(), high);
-    assert_eq!(
-        engine.allocator_low_water(),
-        low,
-        "the row-less mark is recovered, not reset — resetting reissues a live layer's ids"
-    );
+    let id = engine
+        .register_layer(declaration("clusters/d", None))
+        .unwrap();
+    let fourth = layer_entity(&engine, id);
+    assert!(!spaces.contains(&fourth));
+    assert_eq!(fourth, Target::Artifact(LayerSpace::new(3).unwrap(), LAYER_ENTITY));
 }
 
 /// A declaration that contradicts itself is refused before anything is allocated or appended, and
@@ -216,7 +215,6 @@ fn the_two_regions_stay_apart_and_both_marks_survive() {
 fn an_incoherent_declaration_is_refused_with_nothing_spent() {
     let fx = fixture();
     let engine = fx.open();
-    let before = engine.allocator_low_water();
 
     // Decision 0082's one forbidden combination: a tree's lineage is its edges, so it declares no
     // levels.
@@ -231,12 +229,15 @@ fn an_incoherent_declaration_is_refused_with_nothing_spent() {
         .expect_err("a nested layer may not declare levels");
     assert!(refused.to_string().contains("edges"), "{refused}");
 
-    assert_eq!(
-        engine.allocator_low_water(),
-        before,
-        "a refusal spends no ids: every check runs before the first allocation"
-    );
     assert!(reachable(&engine, &full_coverage_credential()).is_empty());
+    let id = engine
+        .register_layer(declaration("clusters/good", None))
+        .unwrap();
+    assert_eq!(
+        layer_entity(&engine, id),
+        Target::Artifact(LayerSpace::ZERO, LAYER_ENTITY),
+        "a refusal spends no space: every check runs before one is given"
+    );
 }
 
 /// **A layer labelled with a term no point carries** is reached by a principal whose credential

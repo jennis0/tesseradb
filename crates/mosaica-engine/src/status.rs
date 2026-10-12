@@ -522,12 +522,6 @@ impl Engine {
         self.write.health().buffered_items.load(Ordering::SeqCst)
     }
 
-    /// One past the lowest row-less entity ever allocated. Read beside the high-water mark:
-    /// together they say how much of the entity space is left.
-    pub fn allocator_low_water(&self) -> u64 {
-        self.write.live().only_shard().low_water()
-    }
-
     /// How many artifacts this node holds, across every layer. No per-layer form: that would be a
     /// corpus-wide count over objects a principal may not individually see.
     pub fn published_artifacts(&self) -> usize {

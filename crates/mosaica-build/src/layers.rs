@@ -16,8 +16,7 @@
 //! ## One implementation of the rules, not two
 //!
 //! Every validation and every allocation here runs through
-//! [`LayerRegistry`](mosaica_lifecycle::LayerRegistry) and
-//! [`Allocator`](mosaica_lifecycle::alloc::Allocator) — the same calls
+//! [`LayerRegistry`](mosaica_lifecycle::LayerRegistry) — the same calls
 //! `PUT /control/layers` makes, in the same order, producing the same WAL records, which this
 //! module then throws away because a build's durable output is its manifest. So a declaration
 //! refused online is refused here with the same words, an artifact's ordinals and entities come out
@@ -72,7 +71,6 @@ use std::path::{Path, PathBuf};
 use arrow::array::{Array, ListArray, UInt32Array};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-use mosaica_lifecycle::alloc::Allocator;
 use mosaica_lifecycle::membership::{
     ArtifactShapes, ArtifactStore, IncomingArtifact, IncomingAttachment, IncomingContent,
 };
@@ -547,12 +545,8 @@ pub struct PublishedLayers {
     pub split_coverage: Vec<SplitCoverage>,
     /// Per treed level, its edges as a graph — reported beside the layer and in `containment.json`.
     pub hierarchy_shapes: Vec<HierarchyShape>,
-    /// One past the lowest entity the layers and their artifacts claimed. **The mark that must
-    /// reach the manifest**: the WAL carries the same one in its records and rotation reclaims
-    /// those, so a mark that lived only there is lost at the first rotation and the next
-    /// registration is handed ids a live layer already holds (decision 0074).
-    pub low_water: u64,
-    /// The layer space the next registration takes, on [`Self::low_water`]'s argument.
+    /// The layer space the next registration takes. It must reach the manifest: the WAL carries
+    /// each space in its records and rotation reclaims those.
     pub next_layer_space: u32,
     /// The shard's member packs.
     pub membership_extents: Vec<MembershipExtent>,
@@ -604,7 +598,6 @@ impl Default for PublishedLayers {
             containment_violations: Vec::new(),
             split_coverage: Vec::new(),
             hierarchy_shapes: Vec::new(),
-            low_water: mosaica_types::layer::ROWLESS_CEILING,
             next_layer_space: 0,
             membership_extents: Vec::new(),
             layer_spaces: Vec::new(),
@@ -1655,9 +1648,8 @@ impl mosaica_lifecycle::GroupViews for DeclaredViews<'_> {
 /// Register every declaration, publish every artifact, and write the extents that carry them.
 ///
 /// `resolve` maps a **source** entity id to the entity this build assigned it, and `high_water` is
-/// the point region's mark — passed so the allocator refuses rather than letting the two regions
-/// meet unnoticed. `entries_per_batch` is how many member entries one publication batch holds
-/// ([`publication_batch_entries`]).
+/// one past the last entity it assigned. `entries_per_batch` is how many member entries one
+/// publication batch holds ([`publication_batch_entries`]).
 #[allow(clippy::too_many_arguments)]
 pub fn publish(
     plan: &mut LayerPlan,
@@ -1670,7 +1662,6 @@ pub fn publish(
     entries_per_batch: u64,
 ) -> Result<PublishedLayers> {
     let mut registry = LayerRegistry::new();
-    let mut alloc = Allocator::new(high_water);
     let mut store = ArtifactStore::new();
 
     for declaration in &plan.declarations {
@@ -1692,7 +1683,7 @@ pub fn publish(
             )));
         }
         let record = registry
-            .prepare_create(declaration.clone(), &mut alloc)
+            .prepare_create(declaration.clone())
             .map_err(|e| BuildError::Invalid(format!("layer {name}: {e}")))?;
         registry.apply(&record);
     }
@@ -1715,7 +1706,7 @@ pub fn publish(
             continue;
         }
         let record = registry
-            .prepare_derive(&declaration.name, 0, keys, &store, &mut alloc)
+            .prepare_derive(&declaration.name, 0, keys, &store)
             .map_err(|e| BuildError::Invalid(format!("deriving into {}: {e}", declaration.name)))?;
         registry.apply(&record);
         let refused = store.apply(&record, 0);
@@ -1899,7 +1890,6 @@ pub fn publish(
                     level,
                     &incoming,
                     &store,
-                    &mut alloc,
                     &mosaica_lifecycle::no_pending,
                     &DeclaredViews(views),
                 )
@@ -1988,7 +1978,6 @@ pub fn publish(
         containment_violations: violations,
         split_coverage: coverage,
         hierarchy_shapes,
-        low_water: alloc.low_water(),
         unclustered: plan.unclustered.clone(),
         minted: plan.minted.clone(),
         ..PublishedLayers::default()

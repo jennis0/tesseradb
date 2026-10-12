@@ -1679,8 +1679,7 @@ fn artifact_rows_are_the_oracles_and_a_withheld_artifact_shows_nowhere() {
                 .map(|(key, _, _)| key)
                 .collect();
             let count = |key: &str| members[key].iter().filter(|s| set.contains(s)).count() as u64;
-            let mut ranked: Vec<&str> = served.iter().copied().filter(|k| count(k) > 0).collect();
-            ranked.sort_by(|a, b| count(b).cmp(&count(a)).then(ids[a].cmp(&ids[b])));
+            let counted: Vec<&str> = served.iter().copied().filter(|k| count(k) > 0).collect();
             let expected = |listed: &[&str],
                             ids: &BTreeMap<&str, mosaica_types::MosaicaId>,
                             always: bool| {
@@ -1710,6 +1709,9 @@ fn artifact_rows_are_the_oracles_and_a_withheld_artifact_shows_nowhere() {
                 out
             };
             for (name, ids) in [("topics/major", &ids), ("topics/rows", &row_ids)] {
+                // Ties go to the lower identifier, which is each layer's own.
+                let mut ranked = counted.clone();
+                ranked.sort_by(|a, b| count(b).cmp(&count(a)).then(ids[a].cmp(&ids[b])));
                 let simple = |rows: &[Row]| -> Vec<(String, Option<String>, u64)> {
                     rows.iter()
                         .map(|r| (r.group.clone().unwrap(), r.key.clone(), r.count))
@@ -1778,9 +1780,13 @@ fn artifact_rows_are_the_oracles_and_a_withheld_artifact_shows_nowhere() {
                 .map(|r| (r.group, r.cell, r.count))
                 .collect::<Vec<_>>()
         };
-        let major = read("topics/major");
+        // The same cells; their order follows each layer's own identifiers, which break ties.
+        let mut major = read("topics/major");
+        let mut rows = read("topics/rows");
+        major.sort();
+        rows.sort();
         assert!(!major.is_empty());
-        assert_eq!(major, read("topics/rows"), "depth {depth}");
+        assert_eq!(major, rows, "depth {depth}");
     }
     assert_eq!(
         engine.layout_fallbacks(),

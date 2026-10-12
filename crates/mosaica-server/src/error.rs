@@ -357,7 +357,7 @@ pub fn map_accept_error(e: mosaica_engine::AcceptError) -> ApiError {
         AcceptError::Exec(ExecError::BatchConflict { batch_id }) => ApiError::Conflict(format!(
             "batch id '{batch_id}' was already accepted with a different body"
         )),
-        AcceptError::Exec(e @ (ExecError::Wal(_) | ExecError::Alloc(_))) => {
+        AcceptError::Exec(e @ ExecError::Wal(_)) => {
             tracing::error!(detail = %e, "the write executor refused; answering fail-closed");
             ApiError::FailClosed(
                 "the write could not be completed durably; a deletion or suppression in this \
@@ -367,6 +367,8 @@ pub fn map_accept_error(e: mosaica_engine::AcceptError) -> ApiError {
         }
         // The detail names the size, the high water and the ids needed.
         AcceptError::Exec(e @ ExecError::ShardFull(_)) => ApiError::Conflict(e.to_string()),
+        // The detail names the layer spaces given, or the level's need and its space's room.
+        AcceptError::Exec(ExecError::LayerSpaceFull { detail }) => ApiError::Conflict(detail),
         AcceptError::Exec(ExecError::ShardSize(e @ mosaica_types::ShardSizeError::Zero)) => {
             ApiError::Contract(e.to_string())
         }

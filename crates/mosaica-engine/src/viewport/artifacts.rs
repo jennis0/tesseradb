@@ -223,8 +223,7 @@ impl Engine {
                 }
                 // Same order as `serve_artifacts`: a suppressed or deleted layer is served to
                 // nobody, so its form is not worth building.
-                let overlay = generation.space_overlay(layer.space);
-                if overlay.is_deleted(layer.entity) || overlay.is_suppressed(layer.entity) {
+                if generation.layer_denied(layer.space) {
                     continue;
                 }
                 let vocabulary = predicate_vocabulary(&generation, &layer.declaration);
@@ -351,11 +350,7 @@ impl Engine {
         }
         // Reachability, then live suppression — same order as `serve_artifacts`.
         let reachable = self.reachable_layers(served.session);
-        let overlay = generation.space_overlay(layer.space);
-        if !reachable.contains(&name)
-            || overlay.is_deleted(layer.entity)
-            || overlay.is_suppressed(layer.entity)
-        {
+        if !reachable.contains(&name) || generation.layer_denied(layer.space) {
             return Ok(None);
         }
 
@@ -806,8 +801,7 @@ impl Engine {
         let Some(layer) = self.write.live().registered_layer(&attachment.layer) else {
             return false;
         };
-        let overlay = ctx.served.generation.space_overlay(layer.space);
-        if overlay.is_deleted(layer.entity) || overlay.is_suppressed(layer.entity) {
+        if ctx.served.generation.layer_denied(layer.space) {
             return false;
         }
         // A layer not in this view has no membership here to serve.
@@ -1042,8 +1036,7 @@ impl Engine {
             return Ok(None);
         }
         // Asked per request: reachability may be cached but a suppression verdict may not.
-        let overlay = pass.served.generation.space_overlay(registered.space);
-        if overlay.is_deleted(registered.entity) || overlay.is_suppressed(registered.entity) {
+        if pass.served.generation.layer_denied(registered.space) {
             return Ok(None);
         }
 

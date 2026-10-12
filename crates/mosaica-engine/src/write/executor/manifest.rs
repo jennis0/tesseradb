@@ -288,7 +288,10 @@ impl Executor {
                 Some(fold) => fold.records.get(&record.space).cloned().unwrap_or_default(),
                 None => held.map(|h| h.record_extents.clone()).unwrap_or_default(),
             };
-            record.content_extents = held.map(|h| h.content_extents.clone()).unwrap_or_default();
+            record.content_extents = match &fold {
+                Some(fold) => fold.contents.get(&record.space).cloned().unwrap_or_default(),
+                None => held.map(|h| h.content_extents.clone()).unwrap_or_default(),
+            };
             record.level_versions = level_versions
                 .iter()
                 .filter(|(space, _)| *space == record.space)
@@ -327,9 +330,8 @@ impl Executor {
 
     /// Restate the live registry, roster, shard size and runtime declarations into a side-manifest
     /// about to be committed, never carried forward from the partition's manifest, which is as of
-    /// the last geometry swap. `min`, not `max`, for the low-water mark: the row-less region grows
-    /// downward. A fold writes the declarations into its `MANIFEST.json` and sets its own list of
-    /// those made since it planned, so `fold` leaves them alone.
+    /// the last geometry swap. A fold writes the declarations into its `MANIFEST.json` and sets its
+    /// own list of those made since it planned, so `fold` leaves them alone.
     fn write_live_state(&self, manifest: &mut SegmentsManifest, fold: bool) {
         let registry = self.live.registry_for_publication();
         let shard = self.live.only_shard();
@@ -338,7 +340,6 @@ impl Executor {
         (record.free_entities, record.held_entities) = shard.freed();
         manifest.shards.size = shard.size();
         let partition = &mut manifest.partition;
-        partition.entity_id_low_water = partition.entity_id_low_water.min(registry.low_water);
         partition.layers = registry.layers;
         partition.next_layer_space = partition.next_layer_space.max(registry.next_space);
         partition.layer_registry_version = registry.version;

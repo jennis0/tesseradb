@@ -73,6 +73,13 @@ impl GenerationParts {
         }
     }
 
+    /// Whether the layer holding `space` is deleted or suppressed: a deny of its own entity.
+    pub(crate) fn layer_denied(&self, space: LayerSpace) -> bool {
+        let overlay = self.space_overlay(space);
+        let own = mosaica_types::layer::LAYER_ENTITY;
+        overlay.is_deleted(own) || overlay.is_suppressed(own)
+    }
+
     /// `space`'s supplied content on disc, where the prefix names any.
     pub(crate) fn space_content(&self, space: LayerSpace) -> Option<&mosaica_filter::RecordStack> {
         self.layer_spaces.get(&space)?.content.as_deref()

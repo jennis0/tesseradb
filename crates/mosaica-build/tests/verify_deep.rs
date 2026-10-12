@@ -261,7 +261,6 @@ fn flushed_bundle_at(root: &Path, tenancy: u16) {
 
     let mut manifest_1 = SegmentsManifest::empty();
     manifest_1.partition = PartitionManifest {
-        entity_id_low_water: seg0.partition.entity_id_low_water,
         layers: seg0.partition.layers.clone(),
         next_layer_space: seg0.partition.next_layer_space,
         layer_registry_version: seg0.partition.layer_registry_version,

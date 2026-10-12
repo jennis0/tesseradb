@@ -304,7 +304,7 @@ impl Executor {
         if artifacts.is_empty() {
             return Ok((Vec::new(), Vec::new()));
         }
-        self.live.with_publication_state(|registry, store, _| {
+        self.live.with_publication_state(|registry, store| {
             let memberships: Vec<mosaica_lifecycle::ResolvedMembership> = artifacts
                 .memberships
                 .iter()
@@ -413,7 +413,7 @@ impl Executor {
             if wanted.is_empty() {
                 continue;
             }
-            let prepared = self.live.with_publication_state(|registry, store, alloc| {
+            let prepared = self.live.with_publication_state(|registry, store| {
                 let fresh: Vec<String> = wanted
                     .iter()
                     .filter(|key| store.ordinal_of_key(&layer, 0, None, key).is_none())
@@ -423,7 +423,7 @@ impl Executor {
                     return Ok(None);
                 }
                 registry
-                    .prepare_derive(&layer, 0, &fresh, store, alloc)
+                    .prepare_derive(&layer, 0, &fresh, store)
                     .map(Some)
                     .map_err(|e| e.to_string())
             })?;
@@ -474,7 +474,7 @@ impl Executor {
         use std::collections::BTreeMap;
         let served = self.generation.load_full();
         let views = crate::write::ServedViews(&served.bundle.manifest);
-        self.live.with_publication_state(|registry, store, alloc| {
+        self.live.with_publication_state(|registry, store| {
             let parents = parent_of_each_child(edges)?;
             // Re-resolved here, not trusted from admission, since a publication may land between.
             let mut resolved: BTreeMap<MintKey, u32> = BTreeMap::new();
@@ -531,7 +531,6 @@ impl Executor {
                         *level,
                         &incoming,
                         store,
-                        alloc,
                         &pending,
                         &views,
                     )
@@ -732,7 +731,7 @@ impl Executor {
         });
         let mut refused_per_record: Vec<Vec<usize>> = vec![Vec::new(); records.len()];
         let mut settled: Vec<(String, u32)> = Vec::new();
-        let undecodable = self.live.with_publication_state(|registry, store, _| {
+        let undecodable = self.live.with_publication_state(|registry, store| {
             records
                 .iter()
                 .zip(positions)

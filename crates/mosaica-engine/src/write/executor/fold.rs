@@ -38,7 +38,7 @@ pub(super) fn available_memory() -> Option<u64> {
 /// row forms are omitted for a pending level and recompose on first use.
 pub(super) struct PendingRetirement {
     levels: Vec<(String, u32)>,
-    retired: croaring::Bitmap,
+    retired: mosaica_lifecycle::membership::Retired,
 }
 
 impl PendingRetirement {
@@ -60,9 +60,10 @@ impl PendingRetirement {
         level: u32,
     ) -> impl Iterator<Item = (u32, &'s mosaica_lifecycle::membership::ArtifactRecord)> + 's {
         let retired = &self.retired;
+        let layer = layer.to_string();
         store
-            .level(layer, level)
-            .filter(move |(_, record)| !retired.contains(record.entity.raw() as u32))
+            .level(&layer, level)
+            .filter(move |(_, record)| !retired.artifact(&layer, record.entity))
     }
 }
 
@@ -84,6 +85,9 @@ pub(super) struct FoldDerived<'a> {
         LayerSpace,
         Vec<mosaica_store::manifest::RecordPackExtent>,
     >,
+    /// Each layer space's content extents in the new prefix, without its deleted artifacts' rows.
+    pub(super) contents:
+        &'a std::collections::BTreeMap<LayerSpace, Vec<mosaica_store::manifest::RecordExtent>>,
     pub(super) pending_retirement: &'a PendingRetirement,
     /// The ids this fold frees, held back from the WAL position beside them.
     pub(super) freed: &'a mosaica_store::manifest::HeldEntities,
@@ -105,9 +109,7 @@ struct Freeing {
 /// number, or the entity itself where it is a number, is freed when the fold removes the number's
 /// last entity: the number and every entity the edited-items map pairs with it is executed here
 /// or already gone, holding no row, buffered or flushed, and no deny record. Until then the number
-/// resolves through the map, so its next holder would resolve to an entity of its last. An entity
-/// at or above `high_water`, the allocator's, is row-less (an artifact or a layer) and is never
-/// freed.
+/// resolves through the map, so its next holder would resolve to an entity of its last.
 ///
 /// Read before the swap, while the map still holds the pairs of the entities this fold removes,
 /// and on the executor thread, so no window commits between this read and the swap.
@@ -117,16 +119,12 @@ struct Freeing {
 fn freeing(
     shard: &Shard,
     executed: &croaring::Bitmap,
-    high_water: u64,
 ) -> Result<Freeing, mosaica_store::StoreError> {
     const CHUNK: usize = 1 << 16;
     let mut left = croaring::Bitmap::new();
     let mut candidates = croaring::Bitmap::new();
     let mut entities: Vec<EntityId> = Vec::with_capacity(CHUNK);
-    let mut iter = executed
-        .iter()
-        .take_while(|&entity| u64::from(entity) < high_water)
-        .peekable();
+    let mut iter = executed.iter().peekable();
     while iter.peek().is_some() {
         entities.clear();
         entities.extend(
@@ -1223,18 +1221,14 @@ impl Executor {
         let to_prefix_dir = self.deps.bundle_root.join(&completed.prefix);
         stairs.record("6 hand-off");
         // Every artifact deletion is executed here: an artifact has no rows, and its record and
-        // its members leave the packs this fold writes. One set with the points' while artifact
-        // entities and point entities are disjoint.
+        // its members leave the packs this fold writes.
         let executed_artifacts: std::collections::BTreeMap<LayerSpace, croaring::Bitmap> = live
             .layer_spaces
             .iter()
             .filter(|(_, parts)| parts.overlay.deleted_len() > 0)
             .map(|(space, parts)| (*space, parts.overlay.deleted_set().clone()))
             .collect();
-        let mut retired = executed.clone();
-        for deleted in executed_artifacts.values() {
-            retired.or_inplace(deleted);
-        }
+        let retired = self.live.retirement(executed.clone(), &executed_artifacts);
         let repacked = match self.rewrite_membership_extents(
             &to_prefix_dir,
             ShardLayout::new(&plan.partition, shard_id),
@@ -1290,7 +1284,7 @@ impl Executor {
                     .map(|d| (*d).clone()),
             );
         }
-        let freeing = match freeing(shard, &executed, self.live.only_shard().high_water()) {
+        let freeing = match freeing(shard, &executed) {
             Ok(freeing) => freeing,
             Err(e) => {
                 discard(&format!(
@@ -1379,10 +1373,6 @@ impl Executor {
 
         let mut segments_manifest = SegmentsManifest {
             partition: mosaica_store::manifest::PartitionManifest {
-                // Live: the fold does not renumber the row-less region, and a mark derived from its
-                // inputs would hand the next registration ids a live layer holds. The commit lowers
-                // it to the allocator's mark.
-                entity_id_low_water: live_manifest.entity_id_low_water,
                 // Only the declarations made since the fold planned: the fold's own
                 // `MANIFEST.json` already states the rest, with a base written for each.
                 attributes: runtime_attributes
@@ -1494,13 +1484,44 @@ impl Executor {
         let mut carried_rels: Vec<String> = carried_rels.into_iter().collect();
         // Content extents carry no entry in either manifest's `files`, so they are linked here
         // rather than through the digest loop above, from the held lists rather than the manifest
-        // (which can be behind the live generation). A dropped layer's space is not carried.
+        // (which can be behind the live generation). A dropped layer's space is not carried, and
+        // an extent holding a deleted artifact's row is written again without it.
+        let mut contents: std::collections::BTreeMap<
+            LayerSpace,
+            Vec<mosaica_store::manifest::RecordExtent>,
+        > = std::collections::BTreeMap::new();
         for (space, held) in &self.side_manifests.spaces {
             if self.live.layer_in_space(*space).is_none() {
                 continue;
             }
-            for extent in &held.content_extents {
-                carried_rels.extend(extent.files().map(String::from));
+            let layout = mosaica_store::LayerSpaceLayout::new(&plan.partition, *space);
+            let kept = contents.entry(*space).or_default();
+            for (index, extent) in held.content_extents.iter().enumerate() {
+                let carry = match executed_artifacts.get(space) {
+                    Some(retired) => match super::publications::content_without(
+                        &from_prefix_dir,
+                        &to_prefix_dir,
+                        layout,
+                        (manifest_n, index),
+                        extent,
+                        retired,
+                    ) {
+                        Ok(carry) => carry,
+                        Err(e) => {
+                            discard(&format!("a content extent would not be rewritten ({e})"));
+                            return;
+                        }
+                    },
+                    None => super::publications::ContentCarry::Link,
+                };
+                match carry {
+                    super::publications::ContentCarry::Link => {
+                        carried_rels.extend(extent.files().map(String::from));
+                        kept.push(extent.clone());
+                    }
+                    super::publications::ContentCarry::Rewritten(rewritten) => kept.push(rewritten),
+                    super::publications::ContentCarry::Emptied => {}
+                }
             }
         }
         if let Err(e) =
@@ -1537,6 +1558,7 @@ impl Executor {
             Some(FoldDerived {
                 written: &derived,
                 records: &repacked.records,
+                contents: &contents,
                 pending_retirement: &pending,
                 freed: &freed,
             }),
@@ -1598,6 +1620,11 @@ impl Executor {
         }
         for (space, records) in repacked.records {
             spaces.entry(space).or_default().record_extents = records;
+        }
+        for (space, kept) in contents {
+            if let Some(held) = spaces.get_mut(&space) {
+                held.content_extents = kept;
+            }
         }
         // Checked, not assumed: a pending level's structures were stamped with the version the
         // level would have after this retirement ([`PendingRetirement`]). If `retire` ever moves a
@@ -1964,7 +1991,7 @@ impl Executor {
         prefix_dir: &std::path::Path,
         layout: ShardLayout<'_>,
         n: u64,
-        retired: &croaring::Bitmap,
+        retired: &mosaica_lifecycle::membership::Retired,
     ) -> mosaica_store::Result<PackedLevels> {
         let ready = self.live.with_artifacts(|store| store.repack_all(retired));
         pack_levels(prefix_dir, layout, n, ready, |layer| self.live.space_of(layer))

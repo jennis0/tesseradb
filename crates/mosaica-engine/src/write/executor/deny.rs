@@ -87,28 +87,18 @@ impl Executor {
     /// Add one entry deleting every artifact that depends on one this window deletes. Only
     /// `Delete` cascades: a suppressed dependent is withheld by the serving predicate instead.
     pub(super) fn cascade_dependents(&mut self, entries: &mut Vec<DenyEntry>) {
-        let deleted: Vec<EntityId> = entries
+        let deleted: Vec<Target> = entries
             .iter()
             .flat_map(|e| e.changes.iter())
             .filter(|(_, op)| matches!(op, ChangeOp::Delete))
-            .filter_map(|(target, _)| match target {
-                Target::Artifact(_, entity) => Some(*entity),
-                Target::Item(..) => None,
-            })
+            .map(|(target, _)| *target)
             .collect();
-        if deleted.is_empty() {
-            return;
-        }
-        let cascade = self
-            .live
-            .with_artifacts(|store| store.cascade_from(&deleted));
+        let cascade = self.live.dependents_of(&deleted);
         if cascade.is_empty() {
             return;
         }
         entries.push(DenyEntry {
-            changes: self
-                .live
-                .artifact_targets(&cascade)
+            changes: cascade
                 .into_iter()
                 .map(|target| (target, ChangeOp::Delete))
                 .collect(),

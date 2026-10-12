@@ -11,9 +11,13 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 
 async fn publish(server: &TestServer, query: &str, body: Value) -> (u16, Value) {
+    publish_into(server, "clusters%2Fa", query, body).await
+}
+
+async fn publish_into(server: &TestServer, layer: &str, query: &str, body: Value) -> (u16, Value) {
     let resp = server
         .client
-        .put(server.control_url(&format!("/control/layers/clusters%2Fa/artifacts{query}")))
+        .put(server.control_url(&format!("/control/layers/{layer}/artifacts{query}")))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&body)
         .send()
@@ -114,7 +118,7 @@ fn as_item(id: u64) -> u64 {
 }
 
 /// Each identifier answers on its own kind's routes, and the item identifier differing from an
-/// artifact's or a layer's by the kind bit alone names nothing anywhere.
+/// artifact's by the kind bit alone names nothing anywhere.
 #[tokio::test]
 async fn an_identifier_routes_by_its_kind() {
     let tmp = TempDir::new().unwrap();
@@ -125,9 +129,11 @@ async fn an_identifier_routes_by_its_kind() {
 
     assert_eq!(artifact_card(&server, &token, artifact).await, 200);
     assert_eq!(post_item(&server, &token, item).await.status(), 200);
-    for id in [artifact, layer, as_item(artifact), as_item(layer)] {
+    for id in [artifact, layer, as_item(artifact)] {
         assert_eq!(post_item(&server, &token, id).await.status(), 404, "{id}");
     }
+    // The layer is entity 0 of its space, and the item identifier over its bits names item 0.
+    assert_eq!(post_item(&server, &token, as_item(layer)).await.status(), 200);
     for id in [item, layer, as_item(artifact), as_item(layer)] {
         assert_eq!(artifact_card(&server, &token, id).await, 404, "{id}");
     }
@@ -328,4 +334,145 @@ async fn status_counts_the_layer_spaces_denies_apart_from_the_shards() {
         json!({ "count": 1, "depth": 1, "retirable": 0 }),
         "the fold removed the deleted artifact, and the layer's suppression stands"
     );
+}
+
+/// The layer space an artifact's or a layer's identifier carries.
+fn space_of(id: u64) -> u64 {
+    let (space, _) = test_key().invert_artifact(MosaicaId::new(id)).unwrap();
+    u64::from(space.raw())
+}
+
+/// The spaces the newest side-manifest of the bundle at `root` names: its layer space records',
+/// and its shard's member packs' and row forms'.
+fn spaces_stored(root: &std::path::Path) -> Vec<u64> {
+    let manifest = newest_side_manifest(root);
+    let shard = &manifest["shards"]["records"][0];
+    let mut spaces: Vec<u64> = manifest["layer_spaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(shard["membership_extents"].as_array().unwrap())
+        .chain(shard["derived_extents"].as_array().unwrap())
+        .map(|record| record["space"].as_u64().unwrap())
+        .collect();
+    spaces.sort();
+    spaces.dedup();
+    spaces
+}
+
+/// A dropped layer leaves nothing behind. Of a layer holding a published, a suppressed and a
+/// deleted artifact, nothing is served after the drop and no identifier of it names anything; its
+/// space leaves the next side-manifest, and after the next fold no file of it is in the served
+/// prefix. A restart brings none of it back, and the name registered again is a new layer none of
+/// whose identifiers the dropped one issued.
+#[tokio::test]
+async fn a_dropped_layer_is_neither_served_nor_stored() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let server = serve_standard(&tmp).await;
+    let (layer, c0) = plant(&server).await;
+    let (status, body) = publish(
+        &server,
+        "",
+        json!({ "artifacts": [
+            { "key": "c1", "members": members(5..10) },
+            { "key": "c2", "members": members(10..15) },
+        ] }),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let ids: Vec<u64> = body["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| id_of(&a["mosaica_id"]))
+        .collect();
+    let (c1, c2) = (ids[0], ids[1]);
+    let (status, other) = put_layer(&server, flat_layer("clusters/b")).await;
+    assert_eq!(status, 201, "{other}");
+    let (status, body) = publish_into(
+        &server,
+        "clusters%2Fb",
+        "",
+        json!({ "artifacts": [{ "key": "k0", "members": members(0..5) }] }),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let kept = id_of(&body["artifacts"][0]["mosaica_id"]);
+    let (status, body) = changes(
+        &server,
+        json!([
+            { "op": "suppress", "match": { "mosaica_id": c1.to_string() } },
+            { "op": "delete", "match": { "mosaica_id": c2.to_string() } },
+        ]),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    fold(&server).await;
+    let (dropped_space, kept_space) = (space_of(layer), space_of(id_of(&other["mosaica_id"])));
+    assert_eq!(spaces_stored(&root), vec![dropped_space, kept_space]);
+
+    let resp = server
+        .client
+        .delete(server.control_url("/control/layers/clusters%2Fa"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let dropped = [layer, c0, c1, c2];
+    let served = |server: TestServer| async move {
+        let token = token_for(&server, &["0"]).await;
+        assert_eq!(layer_names(&server).await, vec!["clusters/b".to_string()]);
+        for id in dropped {
+            assert_eq!(artifact_card(&server, &token, id).await, 404, "{id}");
+        }
+        assert_eq!(artifact_card(&server, &token, kept).await, 200);
+        let names: Vec<Value> = dropped
+            .iter()
+            .map(|id| json!({ "op": "suppress", "match": { "mosaica_id": id.to_string() } }))
+            .collect();
+        let (status, body) = changes(&server, Value::Array(names)).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["accepted"], 0, "{body}");
+        assert_eq!(body["refused"].as_array().unwrap().len(), dropped.len(), "{body}");
+        server
+    };
+    let server = served(server).await;
+    tick(&server).await;
+    assert_eq!(spaces_stored(&root), vec![kept_space], "the drop's publication names none of it");
+
+    fold(&server).await;
+    assert_eq!(spaces_stored(&root), vec![kept_space]);
+    let (_, prefix) = live_prefix(&root);
+    let space_dir = mosaica_store::LayerSpaceLayout::new(
+        "default",
+        mosaica_types::LayerSpace::new(dropped_space as u32).unwrap(),
+    )
+    .dir(&prefix);
+    assert!(!space_dir.exists(), "no file of the dropped space is in the served prefix");
+    let mut packs: Vec<String> = newest_shard_record(&root)["membership_extents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|extent| extent["path"].as_str().unwrap().to_string())
+        .collect();
+    packs.sort();
+    let mut files: Vec<String> = std::fs::read_dir(prefix.join(SHARD.members_rel()))
+        .unwrap()
+        .flatten()
+        .map(|entry| format!("{}/{}", SHARD.members_rel(), entry.file_name().to_string_lossy()))
+        .collect();
+    files.sort();
+    assert_eq!(files, packs, "every member pack in the prefix is the kept layer's");
+
+    let server = served(restart(server, &tmp).await).await;
+    let (again, again_artifact) = plant(&server).await;
+    assert!(space_of(again) > dropped_space.max(kept_space));
+    assert!(!dropped.contains(&again) && !dropped.contains(&again_artifact));
+    let token = token_for(&server, &["0"]).await;
+    assert_eq!(artifact_card(&server, &token, again_artifact).await, 200);
+    for id in dropped {
+        assert_eq!(artifact_card(&server, &token, id).await, 404, "{id}");
+    }
 }

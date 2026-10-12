@@ -339,6 +339,11 @@ pub fn live_prefix(root: &Path) -> (String, std::path::PathBuf) {
 
 /// The shard record of the newest `SEGMENTS-<n>.json` in the live prefix of the bundle at `root`.
 pub fn newest_shard_record(root: &Path) -> serde_json::Value {
+    newest_side_manifest(root)["shards"]["records"][0].take()
+}
+
+/// The newest `SEGMENTS-<n>.json` in the live prefix of the bundle at `root`.
+pub fn newest_side_manifest(root: &Path) -> serde_json::Value {
     let partition = mosaica_store::layout::partition_dir(&live_prefix(root).1, "default");
     let (_, newest) = std::fs::read_dir(&partition)
         .expect("the partition directory")
@@ -350,9 +355,7 @@ pub fn newest_shard_record(root: &Path) -> serde_json::Value {
         })
         .max_by_key(|(n, _)| *n)
         .expect("a side-manifest");
-    let mut manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(newest).unwrap()).unwrap();
-    manifest["shards"]["records"][0].take()
+    serde_json::from_slice(&std::fs::read(newest).unwrap()).unwrap()
 }
 
 static STANDARD: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();

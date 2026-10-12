@@ -71,6 +71,12 @@ fn card(engine: &Engine, id: MosaicaId) -> bool {
     engine.artifact(&session, id, "s0", None).unwrap().is_some()
 }
 
+fn count(engine: &Engine, id: MosaicaId) -> Option<u64> {
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let out = engine.artifact(&session, id, "s0", None).unwrap()?;
+    Some(out.masked_count)
+}
+
 fn item_card(engine: &Engine, id: MosaicaId) -> bool {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     engine.item(&session, id).unwrap().is_some()
@@ -90,7 +96,8 @@ fn space_of(id: MosaicaId) -> LayerSpace {
 }
 
 /// An artifact's identifier and the item identifier over the same 32 bits but the kind bit name
-/// different things, and so do an item's and the artifact identifier over its number.
+/// different things, and so do an item's and the artifact identifier over its number. The layer's
+/// own entity is 0 of its space, so the item identifier over its bits names item 0.
 #[test]
 fn an_identifier_routes_by_its_kind() {
     let fx = fixture();
@@ -117,9 +124,10 @@ fn an_identifier_routes_by_its_kind() {
     for id in [artifact_as_item, item, item_as_artifact, layer, layer_as_item] {
         assert!(!card(&engine, id), "{id:?} names no artifact");
     }
-    for id in [artifact, artifact_as_item, item_as_artifact, layer, layer_as_item] {
+    for id in [artifact, artifact_as_item, item_as_artifact, layer] {
         assert!(!item_card(&engine, id), "{id:?} names no item");
     }
+    assert!(item_card(&engine, layer_as_item), "item 0 shares the layer's entity number");
     assert_eq!(
         engine
             .resolve_targets(&[artifact, artifact_as_item, layer, layer_as_item, item])
@@ -128,7 +136,7 @@ fn an_identifier_routes_by_its_kind() {
             Some(Target::Artifact(space, entity)),
             None,
             Some(Target::Artifact(space, layer_entity)),
-            None,
+            Some(Target::Item(ShardId::ZERO, layer_entity)),
             Some(Target::Item(ShardId::ZERO, point)),
         ]
     );
@@ -405,6 +413,209 @@ fn a_dropped_layers_space_leaves_the_next_publication() {
         .iter()
         .all(|extent| extent.space == space_of(kept)));
     assert!(manifest.partition.next_layer_space > space_of(dropped).raw());
+}
+
+/// Every file under `dir`, relative to `prefix`.
+fn files_under(prefix: &std::path::Path, dir: &std::path::Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(at) = stack.pop() {
+        for entry in std::fs::read_dir(&at).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let rel = path.strip_prefix(prefix).unwrap();
+                found.push(rel.to_string_lossy().into_owned());
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// A dropped layer leaves nothing behind. Of a layer holding a published, a suppressed and a
+/// deleted artifact, nothing is served after the drop; its space leaves the next side-manifest,
+/// and after the next fold the served prefix holds none of its member slices, row forms or
+/// records. A restart brings none of it back, and the name registered again is a new layer whose
+/// identifiers the dropped one never issued.
+#[test]
+fn a_dropped_layer_is_neither_served_nor_stored() {
+    let fx = fixture();
+    // Read before a fold removes the built prefix the map is read from.
+    let members = fx.members(0..120);
+    let (dropped, layer_a, kept) = {
+        let engine = fx.open();
+        let layer_a = engine.register_layer(declaration("clusters/a")).unwrap();
+        let mut ids = engine
+            .publish_artifacts(
+                "clusters/a".into(),
+                0,
+                vec![
+                    IncomingArtifact::from_entities(Some("c0".into()), members[..40].to_vec()),
+                    IncomingArtifact::from_entities(Some("c1".into()), members[40..80].to_vec()),
+                    IncomingArtifact::from_entities(Some("c2".into()), members[80..].to_vec()),
+                ],
+            )
+            .unwrap();
+        let kept = register_and_publish(&fx, &engine, "clusters/b");
+        engine
+            .accept_changes(vec![
+                (artifact_entity(&engine, ids[1]), ChangeOp::Suppress),
+                (artifact_entity(&engine, ids[2]), ChangeOp::Delete),
+            ])
+            .unwrap();
+        // A row form for each level, so the drop has derived files of its own to leave.
+        fold(&engine);
+        let space_a = space_of(layer_a);
+        let manifest = side_manifest(&fx.root);
+        assert!(manifest.layer_spaces.iter().any(|r| r.space == space_a));
+        assert!(manifest
+            .only_shard()
+            .membership_extents
+            .iter()
+            .any(|extent| extent.space == space_a));
+
+        engine.drop_layer("clusters/a".into()).unwrap();
+        ids.push(layer_a);
+        let served = |engine: &Engine| {
+            assert_eq!(reachable(engine), vec!["clusters/b".to_string()]);
+            assert!(ids.iter().all(|id| !card(engine, *id)));
+            assert!(engine.resolve_targets(&ids).unwrap().iter().all(Option::is_none));
+            assert_eq!(engine.published_artifacts(), 1);
+            assert!(card(engine, kept.1));
+        };
+        served(&engine);
+        tick_until(&engine, "the drop's publication", WAIT, || {
+            side_manifest(&fx.root).layer_spaces.iter().all(|r| r.space != space_a)
+        });
+
+        fold(&engine);
+        served(&engine);
+        let manifest = side_manifest(&fx.root);
+        let shard = manifest.only_shard();
+        assert!(manifest.layer_spaces.iter().all(|r| r.space != space_a));
+        assert!(shard.membership_extents.iter().all(|e| e.space != space_a));
+        assert!(shard.derived_extents.iter().all(|e| e.space != space_a));
+        assert!(
+            shard.derived_extents.iter().any(|e| e.space == space_of(kept.0)),
+            "the kept layer's row forms are where the dropped one's would be"
+        );
+        let prefix = fx.root.join(&engine.generation().prefix);
+        let space_dir = mosaica_store::LayerSpaceLayout::new(PARTITION, space_a).dir(&prefix);
+        assert!(!space_dir.exists(), "no file of the dropped space is in the new prefix");
+        let mut packs: Vec<String> =
+            shard.membership_extents.iter().map(|e| e.path.clone()).collect();
+        packs.sort();
+        assert_eq!(
+            files_under(&prefix, &prefix.join(SHARD.members_rel())),
+            packs,
+            "every member pack in the prefix is a kept layer's"
+        );
+        (ids, layer_a, kept)
+    };
+
+    let engine = fx.open();
+    assert_eq!(reachable(&engine), vec!["clusters/b".to_string()]);
+    assert!(dropped.iter().all(|id| !card(&engine, *id)));
+    assert!(engine.resolve_targets(&dropped).unwrap().iter().all(Option::is_none));
+    assert_eq!(engine.published_artifacts(), 1);
+    assert!(card(&engine, kept.1));
+
+    let again_layer = engine.register_layer(declaration("clusters/a")).unwrap();
+    let again_artifact = engine
+        .publish_artifacts(
+            "clusters/a".into(),
+            0,
+            vec![IncomingArtifact::from_entities(Some("c0".into()), members[..40].to_vec())],
+        )
+        .unwrap()[0];
+    let again = (again_layer, again_artifact);
+    assert!(space_of(again.0) > space_of(kept.0));
+    assert!(space_of(again.0) > space_of(layer_a));
+    assert!(!dropped.contains(&again.0) && !dropped.contains(&again.1));
+    assert!(card(&engine, again.1));
+    assert!(dropped.iter().all(|id| !card(&engine, *id)));
+}
+
+/// An item and an artifact at the same entity number, each in its own space, are two things: each
+/// identifier reaches its own, a deny of one leaves the other, and a fold that removes one keeps
+/// the other, across a restart.
+#[test]
+fn an_item_and_an_artifact_at_one_entity_number_are_two_things() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    // Enough items that one holds the entity the first artifact of space 0 takes.
+    let first = mosaica_types::layer::RESERVED_BLOCK;
+    build_fixture_n(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        first + 2,
+    );
+    let (cache, wal) = (tmp.path().join("cache"), tmp.path().join("wal.log"));
+    let open = || open_engine_publishing(&root, &cache, &wal);
+    let point = EntityId::new(first);
+    let other = EntityId::new(first + 1);
+    let (item_id, other_id, shared, kept) = {
+        let engine = open();
+        engine.register_layer(declaration("clusters/a")).unwrap();
+        let members = |range: std::ops::Range<u64>| range.map(EntityId::new).collect::<Vec<_>>();
+        let (below, across) = (members(first - 10..first), members(first - 10..first + 2));
+        let ids = engine
+            .publish_artifacts(
+                "clusters/a".into(),
+                0,
+                vec![
+                    IncomingArtifact::from_entities(Some("c0".into()), below),
+                    IncomingArtifact::from_entities(Some("c1".into()), across),
+                ],
+            )
+            .unwrap();
+        let shared = ids[0];
+        assert_eq!(
+            artifact_entity(&engine, shared),
+            Target::Artifact(LayerSpace::ZERO, point),
+            "the artifact sits at the item's number"
+        );
+        let item_id = engine.mosaica_id_of(point).unwrap();
+        let other_id = engine.mosaica_id_of(other).unwrap();
+        assert!(card(&engine, shared) && item_card(&engine, item_id));
+
+        // A deny of the item leaves the artifact, and the reverse.
+        engine.accept_changes(vec![(item(point), ChangeOp::Suppress)]).unwrap();
+        assert!(card(&engine, shared) && !item_card(&engine, item_id));
+        engine.accept_changes(vec![(item(point), ChangeOp::Unsuppress)]).unwrap();
+        engine
+            .accept_changes(vec![(artifact_entity(&engine, shared), ChangeOp::Delete)])
+            .unwrap();
+        assert!(!card(&engine, shared) && item_card(&engine, item_id));
+        engine.accept_changes(vec![(item(other), ChangeOp::Delete)]).unwrap();
+        assert!(card(&engine, ids[1]), "an item's deletion deletes no artifact at its number");
+        assert_eq!(count(&engine, ids[1]), Some(11));
+
+        fold(&engine);
+        assert!(!card(&engine, shared));
+        assert!(item_card(&engine, item_id), "the artifact's fold kept the item");
+        assert!(!item_card(&engine, other_id));
+        assert_eq!(
+            count(&engine, ids[1]),
+            Some(11),
+            "the item's fold kept the artifact, and the artifact's kept its member at that number"
+        );
+        assert_eq!(engine.resolve_mosaica_ids(&[item_id]).unwrap(), vec![Some(point)]);
+        (item_id, other_id, shared, ids[1])
+    };
+
+    let engine = open();
+    assert!(!card(&engine, shared));
+    assert_eq!(count(&engine, kept), Some(11));
+    assert!(item_card(&engine, item_id));
+    assert!(!item_card(&engine, other_id));
+    assert_eq!(
+        engine.resolve_targets(&[shared, item_id]).unwrap(),
+        vec![None, Some(item(point))]
+    );
 }
 
 const WAIT: std::time::Duration = std::time::Duration::from_secs(30);

@@ -6295,7 +6295,7 @@ impl Config {
     /// registry (`views.md` §3.2).
     ///
     /// **The roster's durable home is the manifest** — one place, carried forward for ever, for
-    /// the reason `entity_id_low_water` and `next_layer_space` are there (decision 0029).
+    /// the reason `next_layer_space` is there (decision 0029).
     pub fn group_registry(
         &self,
         registry: &[BuildView],

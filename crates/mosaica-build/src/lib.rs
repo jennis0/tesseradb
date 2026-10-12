@@ -1939,8 +1939,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
 
     // ---- 8. layers, and the artifacts published into them ------------------------------
     // Entity ids are assigned by now — an item's entity is its position in `staged` — so a member
-    // named by source id resolves, and the row-less region can be allocated against a settled
-    // point mark.
+    // named by source id resolves.
     let mut published_layers = if args.layers.is_empty() {
         crate::layers::PublishedLayers::default()
     } else {
@@ -2303,7 +2302,6 @@ fn write_manifests(
         .collect();
     let segments = SegmentsManifest {
         partition: mosaica_store::manifest::PartitionManifest {
-            entity_id_low_water: published_layers.low_water,
             next_layer_space: published_layers.next_layer_space,
             layers: published_layers.layers.clone(),
             layer_registry_version: published_layers.registry_version,

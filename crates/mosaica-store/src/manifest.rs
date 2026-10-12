@@ -2019,28 +2019,14 @@ pub struct Shards {
 /// The partition's fields of a [`SegmentsManifest`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PartitionManifest {
-    /// The row-less region's mark: one past the lowest entity any layer registration has claimed,
-    /// or `ROWLESS_CEILING` when none has.
-    ///
-    /// **Required, and this is the field decision 0074 calls the part to get right.** The WAL
-    /// carries the same mark in its `LayerCreate` records, and rotation reclaims those — so a mark
-    /// that lived only there is lost at the first rotation, and the next registration is handed ids
-    /// a live layer already holds: two entities, one `mosaica_id`. This is the home that survives,
-    /// exactly as a shard's [`ShardRecord::high_water`] is for the point region.
-    ///
-    /// **No `serde(default)`, and the reason is sharper here than elsewhere.** A default would make
-    /// an absent mark and a *lost* mark the same value, which is the fail-open the field exists to
-    /// close — and the safe-looking default is the ceiling, which is precisely the value that
-    /// reissues everything. A manifest omitting it is malformed, not layer-free.
-    pub entity_id_low_water: u64,
     /// The annotation layer registry as of this publication, complete current state rather than a
     /// diff — the posture contracts §2.3 already fixes for `deny` and `tombstones`.
     pub layers: Vec<RegisteredLayer>,
     /// The layer space the next registration takes: past every space a layer has held, dropped
-    /// or not. Required for [`Self::entity_id_low_water`]'s reason: the WAL's `LayerCreate`
-    /// records also carry each space, and rotation reclaims them, so a counter that lived only
-    /// there would give a dropped layer's space to a new one, and a dropped layer's identifiers
-    /// would name the new layer's artifacts.
+    /// or not. Required, with no `serde(default)`: the WAL's `LayerCreate` records also carry
+    /// each space, and rotation reclaims them, so a counter that lived only there would give a
+    /// dropped layer's space to a new one, and a dropped layer's identifiers would name the new
+    /// layer's artifacts.
     pub next_layer_space: u32,
     /// The layer registry's version counter: the last version handed to a registration or a drop.
     /// Open resumes the counter from it.
@@ -2051,8 +2037,7 @@ pub struct PartitionManifest {
     /// WAL entries for replay, but rotation reclaims them — so a roster that lived only in the log
     /// is lost at the first rotation, and a reused key silently repoints every client cache keyed
     /// on the view (decision 0029). Carried forward for ever, exactly as
-    /// [`Self::entity_id_low_water`] and [`Self::next_layer_space`] are
-    /// and for the same reason.
+    /// [`Self::next_layer_space`] is and for the same reason.
     ///
     /// The views a *build* declared are in `MANIFEST.json` and are not restated here: this list
     /// is the additions, and the served roster is the two together plus the WAL's own overlay.
@@ -2256,7 +2241,6 @@ impl PartitionManifest {
     /// A partition that declares and names nothing.
     pub fn empty() -> PartitionManifest {
         PartitionManifest {
-            entity_id_low_water: mosaica_types::layer::ROWLESS_CEILING,
             layers: Vec::new(),
             next_layer_space: 0,
             layer_registry_version: 0,

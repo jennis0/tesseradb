@@ -570,10 +570,6 @@ fn reconstruct_writes(
 ) -> Result<ReconstructedWrites> {
     let initial_deny = initial_deny_of(bundle)?;
     let mut vocabularies = initial_vocabularies_of(bundle)?;
-    // The row-less mark's homes are the side manifests only; `MANIFEST.json` carries no such
-    // field.
-    let side_manifest_low_waters: Vec<u64> =
-        across_partitions(bundle, |p| [p.manifest.entity_id_low_water]);
     let (free, held) = freed_of(bundle, &readers.tenancy);
     // One partition today, so this concatenation is the whole registry; at more than one it is
     // the union.
@@ -618,7 +614,6 @@ fn reconstruct_writes(
         crate::write::ManifestSeed {
             shard: record.id,
             high_water: record.high_water,
-            low_water: mosaica_lifecycle::alloc::allocator_ceiling(&side_manifest_low_waters),
             size: shard_size_of(bundle),
             free,
             held,

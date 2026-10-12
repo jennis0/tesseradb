@@ -34,8 +34,7 @@ pub mod wal;
 pub mod window;
 
 pub use alloc::{
-    allocator_ceiling, assign_sorted, high_water_from, low_water_from, union_of, Allocation,
-    Allocator, ByTenancy, PendingItem,
+    assign_sorted, high_water_from, union_of, Allocation, Allocator, ByTenancy, PendingItem,
 };
 pub use buffer::{BufferedItem, DescriptorResolver, IngestBuffer};
 pub use command::{
