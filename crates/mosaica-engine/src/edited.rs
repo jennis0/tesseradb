@@ -373,12 +373,6 @@ pub(crate) fn id_at(
     key.forward(ItemHigh::new(shard, tenancy), number)
 }
 
-/// The layer space and entity `id` names as [`crate::Engine::artifact_id`] forms it, or `None`
-/// where it names an item. Whether that entity is an artifact is the caller's question.
-pub(crate) fn artifact_named(key: &IdentityKey, id: MosaicaId) -> Option<(LayerSpace, EntityId)> {
-    key.invert_artifact(id)
-}
-
 impl crate::Engine {
     /// The `mosaica_id` of the artifact or layer `entity` of layer space `space`, or `None` where
     /// `entity` lies outside the identity space.

@@ -29,7 +29,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use common::{extent, open_engine, open_engine_publishing, test_key, wait_until};
+use common::{extent, items_of, open_engine, open_engine_publishing, test_key, wait_until};
 use mosaica_engine::{
     Engine, IngestRequest, ItemsRequest, PageEnd, RecordsHead, RecordsLimits, RecordsSink,
     Session, SinkResult,
@@ -903,7 +903,7 @@ fn deletions_and_suppressions_hide_items_from_a_read_all_session() {
     assert_eq!(served.len(), N as usize);
     let (deleted, suppressed) = (served[0].0, served[1].0);
     for (id, op) in [(deleted, ChangeOp::Delete), (suppressed, ChangeOp::Suppress)] {
-        let entity = engine.resolve_mosaica_ids(&[id]).unwrap()[0].expect("a built item");
+        let entity = items_of(&engine, &[id])[0].expect("a built item");
         engine.accept_change(entity, op).unwrap();
     }
 

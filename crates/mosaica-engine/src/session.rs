@@ -469,12 +469,7 @@ impl Engine {
         self.reachable_layers(session)
             .names()
             .filter_map(|name| self.write.live().registered_layer(name))
-            .filter(|layer| {
-                // Checked live, per call, against the current overlay of the layer's space: a
-                // layer's own entity carries its suppression. A layer has no fragment to fall
-                // through to, so no opinion here means not visible.
-                !generation.layer_denied(layer.space)
-            })
+            .filter(|layer| !generation.layer_denied(layer.space))
             .collect()
     }
 }

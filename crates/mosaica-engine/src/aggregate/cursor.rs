@@ -19,7 +19,7 @@ pub(super) struct Position {
     pub(super) group: u32,
     /// The last cell of `group` sent, on a table with cells.
     pub(super) after_cell: Option<u64>,
-    /// The segments version, the deny state version over every overlay and the fragment watermark
+    /// The segments version, [`crate::Generation::deny_state_version`] and the fragment watermark
     /// the last page counted under.
     pub(super) stamp: Option<(u64, u64, u64)>,
 }
@@ -99,7 +99,10 @@ impl AggregateCursor {
 /// A digest of what a request asks: its set, its reference, its groupings and the space of each
 /// layer they name. A cursor is bound to it, so it continues only the request it was issued for,
 /// and not over a layer registered since under the same name.
-pub(super) fn digest(req: &AggregateRequest<'_>, layers: &[Option<u64>]) -> [u8; 32] {
+pub(super) fn digest(
+    req: &AggregateRequest<'_>,
+    layers: &[Option<mosaica_types::LayerSpace>],
+) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"mosaica-aggregate-request-v1");
     let mut part = |text: String| {

@@ -35,9 +35,9 @@ pub(super) struct PackedLevels {
 
 /// Write each packed level's two packs into the prefix, the records into its layer space and the
 /// members into `layout`'s shard, and fsync them, returning the manifest entries. The file half of
-/// [`Executor::write_membership_extents`] and [`Executor::rewrite_membership_extents`], which
-/// differ only in where `ready` comes from. A level of a layer `space_of` names no space for is
-/// registered no longer and is not written.
+/// [`Executor::write_level_packs`] and [`Executor::rewrite_level_packs`], which differ only in
+/// where `ready` comes from. A level of a layer `space_of` names no space for is registered no
+/// longer and is not written.
 pub(super) fn pack_levels(
     prefix_dir: &std::path::Path,
     layout: ShardLayout<'_>,
@@ -70,18 +70,31 @@ pub(super) fn pack_levels(
 }
 
 /// Write `rows` as one record-blob extent under `layout`'s content directory, named for the
-/// publication `n`, and fsync its three files.
-pub(super) fn write_content_extent(
+/// publication `n`, and fsync it.
+fn write_content_extent(
     prefix_dir: &std::path::Path,
     layout: mosaica_store::LayerSpaceLayout<'_>,
     n: u64,
     rows: Vec<(EntityId, Vec<(u16, String)>)>,
 ) -> mosaica_store::Result<mosaica_store::manifest::RecordExtent> {
-    write_content_rows(prefix_dir, layout, &format!("artifacts-{n:06}"), rows)
+    let dir = prefix_dir.join(layout.content_rel());
+    std::fs::create_dir_all(&dir).map_err(|source| mosaica_store::StoreError::Io {
+        path: dir.clone(),
+        source,
+    })?;
+    let extent = layout.content_extent(&format!("artifacts-{n:06}"));
+    let paths = crate::filter::record_extent_paths(prefix_dir, &extent);
+    mosaica_filter_write::write_text_rows(&paths.blocks, &paths.hasrow, &paths.directory, rows)
+        .map_err(|source| mosaica_store::StoreError::Io {
+            path: paths.blocks.clone(),
+            source,
+        })?;
+    mosaica_store::fsync_dir(&dir)?;
+    Ok(extent)
 }
 
 /// What a fold does with one content extent of a space whose deleted artifacts it removes.
-pub(super) enum ContentCarry {
+enum ContentCarry {
     /// The extent holds none of their rows, and is linked into the new prefix as it is.
     Link,
     /// The extent written again without their rows.
@@ -93,7 +106,7 @@ pub(super) enum ContentCarry {
 /// `extent` of `from_prefix` without the rows of the entities `retired`: [`ContentCarry::Link`]
 /// where it holds none, and otherwise its other rows written under `layout` in `to_prefix`, named
 /// for publication `n` and the extent's position `index` in its space's list.
-pub(super) fn content_without(
+fn content_without(
     from_prefix: &std::path::Path,
     to_prefix: &std::path::Path,
     layout: mosaica_store::LayerSpaceLayout<'_>,
@@ -101,7 +114,7 @@ pub(super) fn content_without(
     extent: &mosaica_store::manifest::RecordExtent,
     retired: &croaring::Bitmap,
 ) -> mosaica_store::Result<ContentCarry> {
-    let paths = record_extent_paths(from_prefix, extent);
+    let paths = crate::filter::record_extent_paths(from_prefix, extent);
     let unreadable = |e: mosaica_filter::RecordError| mosaica_store::StoreError::Io {
         path: paths.blocks.clone(),
         source: e.into(),
@@ -113,118 +126,72 @@ pub(super) fn content_without(
         mosaica_filter::Access::Read,
     )
     .map_err(unreadable)?;
-    if blob.hasrow().map_err(unreadable)?.and_cardinality(retired) == 0 {
+    let hasrow = blob.hasrow().map_err(unreadable)?;
+    if hasrow.and_cardinality(retired) == 0 {
         return Ok(ContentCarry::Link);
     }
-    let mut rows: Vec<(EntityId, Vec<(u16, String)>)> = Vec::new();
-    let mut other = None;
-    blob.for_each_row(&mut |entity, fields| {
-        if retired.contains(entity) {
-            return Ok(());
-        }
-        let mut values = Vec::with_capacity(fields.len());
-        for field in fields {
-            match field.value {
-                mosaica_filter::RecordValue::Utf8(value) => values.push((field.tag, value)),
-                value => other = Some(value),
-            }
-        }
-        rows.push((EntityId::new(u64::from(entity)), values));
-        Ok(())
-    })
-    .map_err(unreadable)?;
-    if let Some(value) = other {
-        return Err(mosaica_store::StoreError::MalformedBundle {
-            detail: format!(
-                "the content extent {} holds {value:?}, and supplied content is text",
-                extent.blocks
-            ),
-        });
-    }
-    if rows.is_empty() {
+    if hasrow.andnot_cardinality(retired) == 0 {
         return Ok(ContentCarry::Emptied);
     }
-    let stem = format!("artifacts-{n:06}-{index}");
-    write_content_rows(to_prefix, layout, &stem, rows).map(ContentCarry::Rewritten)
-}
-
-/// [`write_content_extent`] under the file stem `stem`.
-fn write_content_rows(
-    prefix_dir: &std::path::Path,
-    layout: mosaica_store::LayerSpaceLayout<'_>,
-    stem: &str,
-    mut rows: Vec<(EntityId, Vec<(u16, String)>)>,
-) -> mosaica_store::Result<mosaica_store::manifest::RecordExtent> {
-    let content_rel = layout.content_rel();
-    let dir = prefix_dir.join(&content_rel);
-    std::fs::create_dir_all(&dir).map_err(|source| mosaica_store::StoreError::Io {
-        path: dir.clone(),
-        source,
-    })?;
-    let extent = mosaica_store::manifest::RecordExtent {
-        blocks: format!("{content_rel}/{stem}.blocks.bin"),
-        hasrow: format!("{content_rel}/{stem}.hasrow.roaring"),
-        directory: format!("{content_rel}/{stem}.directory.arrow"),
-    };
-    let io = |path: &std::path::Path| {
-        let path = path.to_path_buf();
-        move |source| mosaica_store::StoreError::Io {
-            path: path.clone(),
+    let dir = to_prefix.join(layout.content_rel());
+    let rewritten = layout.content_extent(&format!("artifacts-{n:06}-{index}"));
+    let to = crate::filter::record_extent_paths(to_prefix, &rewritten);
+    std::fs::create_dir_all(&dir)
+        .and_then(|()| {
+            mosaica_filter_write::fold_record_blob(
+                &[&blob],
+                retired,
+                &to.blocks,
+                &to.hasrow,
+                &to.directory,
+                mosaica_filter::RECORD_BLOCK_TARGET,
+            )
+        })
+        .map_err(|source| mosaica_store::StoreError::Io {
+            path: to.blocks.clone(),
             source,
-        }
-    };
-    let blocks = prefix_dir.join(&extent.blocks);
-    let hasrow = prefix_dir.join(&extent.hasrow);
-    let directory = prefix_dir.join(&extent.directory);
-    let mut writer = mosaica_filter_write::RecordBlobWriter::create(
-        &blocks,
-        &hasrow,
-        &directory,
-        mosaica_filter::RECORD_BLOCK_TARGET,
-    )
-    .map_err(io(&blocks))?;
-    // Ascending by entity, which the blob's block directory requires and publication order is not.
-    rows.sort_by_key(|(entity, _)| entity.raw());
-    for (entity, fields) in rows {
-        let entity = u32::try_from(entity.raw()).map_err(|_| {
-            mosaica_store::StoreError::MalformedBundle {
-                detail: format!(
-                    "artifact entity {} does not fit the u32 entity space",
-                    entity.raw()
-                ),
-            }
         })?;
-        let fields: Vec<mosaica_filter::RecordFieldRef<'_>> = fields
-            .iter()
-            .map(|(tag, value)| mosaica_filter::RecordFieldRef {
-                tag: *tag,
-                value: mosaica_filter::RecordValueRef::Utf8(value),
-            })
-            .collect();
-        writer.push_row(entity, &fields).map_err(io(&blocks))?;
-    }
-    writer.finish().map_err(io(&blocks))?;
-    // `finish` syncs the blocks and not the two files that address them, and a torn addressing
-    // file refuses the space's whole record stack at open.
-    for path in [&hasrow, &directory] {
-        let file = std::fs::File::open(path).map_err(io(path))?;
-        file.sync_all().map_err(io(path))?;
-    }
-    mosaica_store::fsync_dir(&dir)?;
-    Ok(extent)
+    // `finish` synced the blocks; the addressing files and the directory are synced here.
+    mosaica_store::fsync_written(&[to.hasrow, to.directory])?;
+    Ok(ContentCarry::Rewritten(rewritten))
 }
 
-/// A record extent's files, resolved against the prefix directory that holds them. All three, and
-/// any one missing is a refusal to open rather than "those entities have no record".
-pub(super) fn record_extent_paths(
-    prefix_dir: &std::path::Path,
-    extent: &mosaica_store::manifest::RecordExtent,
-) -> mosaica_filter::RecordExtentPaths {
-    mosaica_filter::RecordExtentPaths {
-        blocks: prefix_dir.join(&extent.blocks),
-        hasrow: prefix_dir.join(&extent.hasrow),
-        directory: prefix_dir.join(&extent.directory),
+/// Each layer space's content extents.
+pub(super) type SpaceContents =
+    std::collections::BTreeMap<LayerSpace, Vec<mosaica_store::manifest::RecordExtent>>;
+
+/// Each registered space's content extents, carried into the fold's new prefix `to` from `from`:
+/// an extent holding a deleted artifact's row (`executed`) is written again without it, and the
+/// rest are returned as rels to link.
+pub(super) fn carry_space_contents(
+    from: &std::path::Path,
+    to: &std::path::Path,
+    partition: &str,
+    n: u64,
+    held: &std::collections::BTreeMap<LayerSpace, HeldSpace>,
+    executed: &std::collections::BTreeMap<LayerSpace, croaring::Bitmap>,
+) -> mosaica_store::Result<(SpaceContents, Vec<String>)> {
+    let mut contents = SpaceContents::new();
+    let mut linked = Vec::new();
+    for (space, held) in held {
+        let layout = mosaica_store::LayerSpaceLayout::new(partition, *space);
+        let kept: &mut Vec<_> = contents.entry(*space).or_default();
+        for (index, extent) in held.content_extents.iter().enumerate() {
+            let carry = match executed.get(space) {
+                Some(retired) => content_without(from, to, layout, (n, index), extent, retired)?,
+                None => ContentCarry::Link,
+            };
+            match carry {
+                ContentCarry::Link => {
+                    linked.extend(extent.files().map(String::from));
+                    kept.push(extent.clone());
+                }
+                ContentCarry::Rewritten(rewritten) => kept.push(rewritten),
+                ContentCarry::Emptied => {}
+            }
+        }
     }
+    Ok((contents, linked))
 }
 
 /// An entity→term extent's four files, resolved against the prefix directory that holds them.
@@ -989,7 +956,7 @@ impl Executor {
             let extents: Vec<mosaica_filter::RecordExtentPaths> = record
                 .record_extents
                 .iter()
-                .map(|e| record_extent_paths(&prefix_dir, e))
+                .map(|e| crate::filter::record_extent_paths(&prefix_dir, e))
                 .collect();
             // The columns whose base no fold has written yet, which the schema owes no base
             // for — the list `Engine::open` passes, so this stack and the one a restart opens
@@ -1792,7 +1759,7 @@ impl Executor {
             // one sequence, not two, and a file whose name says which manifest introduced it.
             let n = self.side_manifests.take_manifest_n();
             let prefix_dir = self.prefix_dir(&live);
-            let packed = match self.write_membership_extents(&prefix_dir, partition, n) {
+            let packed = match self.write_level_packs(&prefix_dir, partition, n) {
                 Ok(packed) => packed,
                 Err(e) => {
                     tracing::error!(
@@ -1821,8 +1788,6 @@ impl Executor {
             if !packed.members.is_empty() {
                 written.push((prefix_dir.clone(), packed.members));
             }
-            // Supplied content goes into each layer space's own record blob, in the format and
-            // behind the reader points use.
             let partitions = live.bundle.partitions.len();
             match self.write_content_extents(&prefix_dir, partition, partitions, n) {
                 // Onto the held lists, as the memberships are: an artifact whose content extent is
@@ -1960,7 +1925,7 @@ impl Executor {
     ///
     /// Publication is append-only, so a pack covers a contiguous ordinal range and no earlier pack
     /// is disturbed. A reader unions a level's packs and the fold rewrites them into one.
-    pub(super) fn write_membership_extents(
+    pub(super) fn write_level_packs(
         &self,
         prefix_dir: &std::path::Path,
         partition: &str,
@@ -2125,7 +2090,7 @@ impl Executor {
         let record_paths: Vec<mosaica_filter::RecordExtentPaths> = completed
             .record_extent
             .iter()
-            .map(|e| record_extent_paths(&record_dir, e))
+            .map(|e| crate::filter::record_extent_paths(&record_dir, e))
             .collect();
         let entity_terms_paths = vec![entity_terms_extent_paths(
             &record_dir,

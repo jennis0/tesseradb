@@ -517,6 +517,42 @@ pub fn write_prose<'a>(
     Ok(())
 }
 
+/// Artifacts' supplied text as a record blob, one row per entity of `(tag, value)` fields, in any
+/// order. All three files are synced: a torn addressing file refuses the whole record stack at
+/// open, and [`RecordBlobWriter::finish`] syncs only the blocks.
+pub fn write_text_rows(
+    blocks_path: &Path,
+    hasrow_path: &Path,
+    directory_path: &Path,
+    mut rows: Vec<(mosaica_types::EntityId, Vec<(u16, String)>)>,
+) -> io::Result<()> {
+    let mut writer = RecordBlobWriter::create(
+        blocks_path,
+        hasrow_path,
+        directory_path,
+        mosaica_filter::RECORD_BLOCK_TARGET,
+    )?;
+    rows.sort_by_key(|(entity, _)| entity.raw());
+    for (entity, fields) in &rows {
+        let entity = u32::try_from(entity.raw()).map_err(|_| {
+            invalid(format!("artifact entity {} does not fit the u32 entity space", entity.raw()))
+        })?;
+        let fields: Vec<RecordFieldRef<'_>> = fields
+            .iter()
+            .map(|(tag, value)| RecordFieldRef {
+                tag: *tag,
+                value: mosaica_filter::RecordValueRef::Utf8(value),
+            })
+            .collect();
+        writer.push_row(entity, &fields)?;
+    }
+    writer.finish()?;
+    for path in [hasrow_path, directory_path] {
+        File::open(path)?.sync_all()?;
+    }
+    Ok(())
+}
+
 /// A window of record-blob extents merged into one by entity, for the entity-space coalesce.
 /// `inputs` are in manifest order, oldest first.
 ///

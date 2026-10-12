@@ -48,7 +48,7 @@ pub(crate) enum FoldTrigger {
 
 /// What the schedule reads at a tick. The dead-bytes gauge needs a directory walk, so [`due`]
 /// takes it as a closure.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Gauges {
     /// The largest across the partition's views.
     pub(crate) live_segments: usize,
@@ -170,15 +170,13 @@ mod tests {
             Gauges {
                 live_segments,
                 retirable_deletions,
-                artifact_deletions: 0,
                 live_rows: 0,
+                ..Gauges::default()
             },
             || None,
         )
     }
 
-    /// A layer space's deletions count towards the deletions route as a shard's do, since the
-    /// point fold is what removes their records; they have no rows, so the ratio ignores them.
     #[test]
     fn artifact_deletions_schedule_a_fold_and_move_no_ratio() {
         let s = CompactionSchedule {
@@ -197,6 +195,11 @@ mod tests {
             Some(FoldTrigger::RetirableDepth)
         );
         assert_eq!(due(&s, at(10, 14), None, gauges(0, 9), || None), None);
+        let ratio_only = CompactionSchedule {
+            after_deletions: None,
+            ..s
+        };
+        assert_eq!(due(&ratio_only, at(10, 14), None, gauges(0, 300), || None), None);
     }
 
     /// Seconds since the epoch at `hour`:00 UTC on day `day`.
@@ -379,8 +382,8 @@ mod tests {
         let healthy = |deletions: u64, rows: u64| Gauges {
             live_segments: 1,
             retirable_deletions: deletions,
-            artifact_deletions: 0,
             live_rows: rows,
+            ..Gauges::default()
         };
 
         assert_eq!(
@@ -449,8 +452,8 @@ mod tests {
                 Gauges {
                     live_segments: 1,
                     retirable_deletions: 0,
-                    artifact_deletions: 0,
-                    live_rows: 1
+                    live_rows: 1,
+                    ..Gauges::default()
                 },
                 walk
             ),
@@ -466,8 +469,8 @@ mod tests {
                 Gauges {
                     live_segments: 64,
                     retirable_deletions: 0,
-                    artifact_deletions: 0,
-                    live_rows: 1
+                    live_rows: 1,
+                    ..Gauges::default()
                 },
                 walk
             ),
@@ -483,8 +486,8 @@ mod tests {
                 Gauges {
                     live_segments: 1,
                     retirable_deletions: 0,
-                    artifact_deletions: 0,
-                    live_rows: 1
+                    live_rows: 1,
+                    ..Gauges::default()
                 },
                 walk
             ),
@@ -504,8 +507,8 @@ mod tests {
                 Gauges {
                     live_segments: 1,
                     retirable_deletions: 0,
-                    artifact_deletions: 0,
-                    live_rows: 1
+                    live_rows: 1,
+                    ..Gauges::default()
                 },
                 walk
             ),
@@ -529,8 +532,8 @@ mod tests {
                 Gauges {
                     live_segments: 1,
                     retirable_deletions: 500,
-                    artifact_deletions: 0,
-                    live_rows: 0
+                    live_rows: 0,
+                    ..Gauges::default()
                 },
                 || Some(DeadBytes {
                     on_disc: 1_000,

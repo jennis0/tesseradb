@@ -2097,7 +2097,6 @@ fn build_bundle(
         let artifact_store = std::mem::take(&mut published_layers.store);
         let containment = crate::artifact_pass::containment(
             &artifact_store,
-            &published_layers.layers,
             &prefix_dir,
             layout,
             &mut derived_index,

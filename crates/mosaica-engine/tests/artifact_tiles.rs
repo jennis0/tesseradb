@@ -176,7 +176,7 @@ fn visible_by_tile(fx: &Fixture, credential: &[u8], zoom: u8) -> BTreeMap<u64, B
         .iter()
         .map(|&id| MosaicaId::new(id))
         .collect();
-    let entities = fx.engine.resolve_mosaica_ids(&ids).unwrap();
+    let entities = items_of(&fx.engine, &ids);
     let mut points = entities
         .into_iter()
         .map(|e| fx.source_of[&e.unwrap().raw()]);

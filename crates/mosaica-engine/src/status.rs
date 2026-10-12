@@ -81,7 +81,6 @@ pub struct GenerationStatus {
     /// The point shard's denied items, and its deletions.
     pub overlay_depth: usize,
     pub retirable_deletions: u64,
-    /// The same two figures summed over every layer space, and how many layer spaces there are.
     pub layer_spaces: LayerSpacesStatus,
     pub fragment_cache: mosaica_authz::fragment::CacheStats,
     pub fragment_cache_rebuilds: u64,
@@ -340,19 +339,17 @@ impl Engine {
     pub fn generation_status(&self) -> GenerationStatus {
         let generation = self.generation.load();
         let shard = generation.only_shard();
+        let (depth, retirable) = generation.space_overlay_figures();
         GenerationStatus {
             partitions: partition_status_of(&generation),
             segments: segment_counts_of(&generation),
             live_rows: live_rows_of(&generation),
             overlay_depth: shard.overlay.len(),
             retirable_deletions: shard.overlay.deleted_len(),
-            layer_spaces: {
-                let (depth, retirable) = generation.space_overlay_figures();
-                LayerSpacesStatus {
-                    count: self.write.live().registered_layers().len(),
-                    depth,
-                    retirable,
-                }
+            layer_spaces: LayerSpacesStatus {
+                count: self.write.live().layer_count(),
+                depth,
+                retirable,
             },
             fragment_cache: shard.fragments.stats(),
             fragment_cache_rebuilds: shard.fragments.rebuild_count(),

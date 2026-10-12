@@ -463,8 +463,8 @@ pub enum ExecError {
     ///
     /// **A rendered string, and it may reach the caller.** What it names is the caller's own
     /// declaration measured against the deployment's published rules — a name already taken, a
-    /// tree declaring levels — which is exactly the class of detail a caller can
-    /// act on and cannot otherwise obtain. It names no entity, no path and no other layer's terms.
+    /// tree declaring levels — which is exactly the class of detail a caller can act on and cannot
+    /// otherwise obtain. It names no entity, no path and no other layer's terms.
     LayerRefused { detail: String },
     /// An artifact record supplied a fixed part the artifact already holds, and the two differ
     /// (`ingest.md` §1.1) → **409**. Separate from [`Self::LayerRefused`] on

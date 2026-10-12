@@ -442,7 +442,6 @@ impl WritePath {
         // A dropped layer's extents are not carried.
         let (seeded_membership_extents, seeded_derived_extents, seeded_spaces) = {
             let generation = generation.load();
-            let registered = |space: LayerSpace| live.layer_in_space(space).is_some();
             let mut members = Vec::new();
             let mut derived = Vec::new();
             let mut spaces = std::collections::BTreeMap::new();
@@ -452,32 +451,22 @@ impl WritePath {
                     record
                         .membership_extents
                         .iter()
-                        .filter(|e| registered(e.space))
+                        .filter(|e| live.holds_space(e.space))
                         .cloned(),
                 );
-                let held = partition
-                    .layer_spaces
-                    .iter()
-                    .flat_map(|space| space.held_shapes.iter());
                 derived.extend(
-                    record
-                        .derived_extents
-                        .iter()
-                        .chain(held)
-                        .filter(|e| registered(e.space))
+                    partition
+                        .derived_extents()
+                        .filter(|e| live.holds_space(e.space))
                         .cloned(),
                 );
-                for space in &partition.layer_spaces {
-                    if registered(space.space) {
-                        spaces.insert(
-                            space.space,
-                            executor::HeldSpace {
-                                record_packs: space.record_packs.clone(),
-                                content_extents: space.content_extents.clone(),
-                            },
-                        );
-                    }
-                }
+                spaces.extend(
+                    partition
+                        .layer_spaces
+                        .iter()
+                        .filter(|record| live.holds_space(record.space))
+                        .map(|record| (record.space, executor::HeldSpace::of(record))),
+                );
             }
             (members, derived, spaces)
         };

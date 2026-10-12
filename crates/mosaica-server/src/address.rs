@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 
 use mosaica_engine::{AddressTable, AddressValue, Stamp};
-use mosaica_lifecycle::resolve::{Reason, Verdict};
+use mosaica_lifecycle::resolve::Reason;
 use mosaica_types::{EntityId, MosaicaId, Target};
 
 use crate::error::{map_engine_error, ApiError};
@@ -131,16 +131,9 @@ impl<'de> serde::Deserialize<'de> for Cell {
     }
 }
 
-/// What one addressing row became.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Named {
-    Item(EntityId),
-    Refused(Reason),
-}
-
 /// What a request's rows named: one answer per row, table by table; the columns ignored; and the
 /// generation the rows were resolved against, which the write naming them carries.
-pub(crate) struct Names<T = Named> {
+pub(crate) struct Names<T> {
     pub(crate) tables: Vec<Vec<T>>,
     pub(crate) ignored: Vec<String>,
     pub(crate) at: Stamp,
@@ -192,16 +185,18 @@ impl Merged {
     }
 
     /// Resolve every row to the item it names.
-    pub(crate) fn name(&self, state: &AppState) -> Result<Names, ApiError> {
+    pub(crate) fn name(
+        &self,
+        state: &AppState,
+    ) -> Result<Names<Result<EntityId, Reason>>, ApiError> {
         let named = state
             .engine
             .name_items(&self.table)
             .map_err(map_engine_error)?;
-        let verdicts = named.verdicts.into_iter().map(|verdict| match verdict {
-            Verdict::Names(entity) => Named::Item(entity),
-            Verdict::Refused(refusal) => Named::Refused(refusal.kind()),
-            Verdict::Creates => unreachable!("a call that addresses items creates none"),
-        });
+        let verdicts = named
+            .verdicts
+            .into_iter()
+            .map(|verdict| verdict.map_err(|refusal| refusal.kind()));
         Ok(Names {
             tables: self.per_table(verdicts),
             ignored: named.ignored,

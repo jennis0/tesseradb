@@ -25,7 +25,7 @@ use mosaica_lifecycle::ChangeOp;
 use mosaica_types::view::ViewMetadataValue;
 use mosaica_types::{EntityId, Target};
 
-use crate::address::{Named, Table};
+use crate::address::Table;
 use crate::decode::{labels_col, parse_ingest_batch, BodyEncoding, DecodeError, ParsedBatch};
 use crate::error::{map_accept_error, map_change_batch_error, map_join_error, ApiError};
 use crate::health::is_ready;
@@ -1866,12 +1866,12 @@ fn resolve_member_lists(
         let mut entities = Vec::with_capacity(named.len());
         for (row, named) in named.into_iter().enumerate() {
             match named {
-                Named::Item(entity) => entities.push(entity),
-                Named::Refused(reason) if strict || list.whole => {
+                Ok(entity) => entities.push(entity),
+                Err(reason) if strict || list.whole => {
                     let what = format!("artifact {}'s `{}`", list.artifact, list.list);
                     return Err(crate::address::strict_refusal(&what, row, reason));
                 }
-                Named::Refused(reason) => refused.push(serde_json::json!({
+                Err(reason) => refused.push(serde_json::json!({
                     "artifact": list.artifact,
                     "list": list.list,
                     "row": row,
@@ -3127,8 +3127,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             "retirable": live.retirable_deletions,
             "soft_limit_alarms": executor.overlay_soft_limit_alarms,
         },
-        // The same two figures summed over every layer space: denied artifacts and layers, and
-        // deleted artifacts, whose records a fold removes and which the fold schedule counts.
+        // The same two figures summed over the layer spaces, and how many spaces there are.
         "layer_spaces": {
             "count": live.layer_spaces.count,
             "depth": live.layer_spaces.depth,

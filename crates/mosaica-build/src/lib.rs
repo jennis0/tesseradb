@@ -2030,7 +2030,6 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // batched build does the same, and `tests/build_equivalence.rs` holds the two to one bundle.
     let containment_extents = crate::artifact_pass::containment(
         &artifact_store,
-        &published_layers.layers,
         &prefix_dir,
         layout,
         &mut derived_index,
@@ -2300,7 +2299,7 @@ fn write_manifests(
         .iter()
         .map(|index| index.attribute.clone())
         .collect();
-    let segments = SegmentsManifest {
+    let mut segments = SegmentsManifest {
         partition: mosaica_store::manifest::PartitionManifest {
             next_layer_space: published_layers.next_layer_space,
             layers: published_layers.layers.clone(),
@@ -2315,14 +2314,6 @@ fn write_manifests(
                 watermark: n,
                 high_water: n,
                 membership_extents: published_layers.membership_extents.clone(),
-                // Empty where no artifact was published or a structure would not compose; the
-                // level then composes on first use. A level's held shapes are its space's.
-                derived_extents: published_layers
-                    .derived_extents
-                    .iter()
-                    .filter(|e| e.form != mosaica_store::manifest::DerivedForm::ShapeHeld)
-                    .cloned()
-                    .collect(),
                 // One per view with images, in build order; a view with no rows, or a build
                 // with no terms, has none.
                 term_image_extents: term_images
@@ -2343,23 +2334,11 @@ fn write_manifests(
                 ..mosaica_store::manifest::ShardRecord::empty(SHARD)
             }],
         },
-        layer_spaces: published_layers
-            .layer_spaces
-            .iter()
-            .map(|space| mosaica_store::manifest::LayerSpaceRecord {
-                held_shapes: published_layers
-                    .derived_extents
-                    .iter()
-                    .filter(|e| {
-                        e.form == mosaica_store::manifest::DerivedForm::ShapeHeld
-                            && e.space == space.space
-                    })
-                    .cloned()
-                    .collect(),
-                ..space.clone()
-            })
-            .collect(),
+        layer_spaces: published_layers.layer_spaces.clone(),
     };
+    // Empty where no artifact was published or a structure would not compose; the level then
+    // composes on first use.
+    segments.file_derived(published_layers.derived_extents.clone());
     let segments_path = partition_dir.join("SEGMENTS-0.json");
     write_json(&segments_path, &segments)?;
 

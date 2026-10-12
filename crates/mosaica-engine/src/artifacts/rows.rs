@@ -251,14 +251,14 @@ impl ArtifactRecords {
             .and_then(Option::as_ref)
     }
 
-    /// The ordinals of this level attached to the artifact at `(level, ordinal)` of `layer`,
+    /// The ordinals of this level attached to the artifact at `(level, ordinal)` of `space`,
     /// ascending.
-    pub(crate) fn attached_to<'s>(
-        &'s self,
-        layer: &'s str,
+    pub(crate) fn attached_to(
+        &self,
+        space: mosaica_types::LayerSpace,
         level: u32,
         ordinal: u32,
-    ) -> impl Iterator<Item = u32> + 's {
+    ) -> impl Iterator<Item = u32> + '_ {
         let index = self.attached_by.0.get_or_init(|| {
             let mut index: Vec<(u32, u32, u32)> = self
                 .attachments
@@ -274,7 +274,7 @@ impl ArtifactRecords {
             .iter()
             .take_while(move |&&(l, o, _)| (l, o) == (level, ordinal))
             .map(|&(_, _, at)| at)
-            .filter(move |&at| self.attachment(at).is_some_and(|a| a.layer == layer))
+            .filter(move |&at| self.attachment(at).is_some_and(|a| a.space == space))
     }
 
     /// The artifact's parent edges, as the registry holds them — ascending by ordinal, empty at

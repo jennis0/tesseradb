@@ -93,7 +93,9 @@ fn rotated_spaces(
         next.entry(*space).or_default().content = Some(Arc::clone(content));
     }
     for (space, retired) in &rotation.retired_artifacts {
-        let parts = next.entry(*space).or_default();
+        let Some(parts) = next.get_mut(space) else {
+            continue;
+        };
         let mut overlay = (*parts.overlay).clone();
         if overlay.retire(retired) > 0 {
             parts.overlay = Arc::new(overlay);

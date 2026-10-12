@@ -326,8 +326,7 @@ impl WritePath {
                     .find(|m| m.pairs(space.space, extent))
                 else {
                     return Err(EngineError::Malformed(format!(
-                        "record pack {} has no member pack over the same ordinals; the \
-                         artifacts it names would be served with no members",
+                        "record pack {} has no member pack over the same ordinals",
                         extent.path
                     )));
                 };
@@ -348,7 +347,7 @@ impl WritePath {
                 let owner: Arc<dyn std::any::Any + Send + Sync> = pack.clone();
                 for ((ordinal, record_blob), (_, members_blob)) in records.iter().zip(pack.iter()) {
                     // An empty pair is a hole, not a fault: the ordinal exists with no artifact,
-                    // which is what a fold leaves behind where Rule F retired one.
+                    // where a fold retired one.
                     if record_blob.is_empty() && members_blob.is_empty() {
                         continue;
                     }
@@ -407,7 +406,6 @@ impl WritePath {
         // Same ordering rule again: the overlay is seeded and the log replayed on top, because
         // seeding after replay would revert an acked unsuppress the newest manifest predates.
         let mut replay = Replay::new(dict, initial_deny.clone(), seed.view_ids_of_key);
-        // The high water the records imply.
         let mut wal_high_water = 0u64;
         // Every point entity a kept record names.
         let mut named = croaring::Bitmap::new();
@@ -485,7 +483,9 @@ impl WritePath {
             );
         }
 
-        let (overlay, mut buffer, resolver) = replay.finish();
+        let (mut overlay, mut buffer, resolver) = replay.finish();
+        // A dropped layer's denies leave with it, though the log and the manifest still hold them.
+        overlay.spaces.retain(|space, _| registry.in_space(*space).is_some());
 
         // Rows buffered up to the last view drop that a flush has already given geometry.
         let already_flushed: Vec<(EntityId, String)> = buffer

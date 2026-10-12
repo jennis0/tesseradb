@@ -6294,8 +6294,7 @@ impl Config {
     /// The group registry the manifest publishes, derived from a [`Config::build_views`]
     /// registry (`views.md` §3.2).
     ///
-    /// **The roster's durable home is the manifest** — one place, carried forward for ever, for
-    /// the reason `next_layer_space` is there (decision 0029).
+    /// **The roster's durable home is the manifest**: one place, carried forward for ever.
     pub fn group_registry(
         &self,
         registry: &[BuildView],

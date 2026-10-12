@@ -717,7 +717,8 @@ impl Engine {
             let supplied = self.supplied_content(
                 pass.served
                     .generation
-                    .space_content(level.layer.registered.space),
+                    .space_content(level.layer.registered.space)
+                    .map(Arc::as_ref),
                 &level.layer.registered.declaration,
                 level.level,
                 ordinal,

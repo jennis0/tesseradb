@@ -33,8 +33,7 @@ const CHUNK: u32 = 1024;
 /// One level of a layer as one request counts it.
 pub(super) struct Layer {
     name: String,
-    /// The layer's space when the read began: a layer registered since under the name is another
-    /// layer in another space, and serves nothing to this read.
+    /// The layer's space when the read began.
     space: LayerSpace,
     level: u32,
     pick: Pick<MosaicaId>,
@@ -122,8 +121,8 @@ impl Layer {
     }
 
     /// The layer's space, which a cursor over this grouping is bound to.
-    pub(super) fn space(&self) -> u64 {
-        u64::from(self.space.raw())
+    pub(super) fn space(&self) -> LayerSpace {
+        self.space
     }
 
     /// The table's groups under `cx`: the listed artifacts, `chosen` where the table has begun,
@@ -144,14 +143,13 @@ impl Layer {
         let served_view = &cx.open.served;
         let mask = &cx.open.mask;
         let registered = engine
-            .readable_layer(
+            .readable_layer_at(
                 served_view.session,
                 served_view.generation,
-                &self.name,
+                self.space,
                 served_view.name,
             )
             .ok()
-            .filter(|layer| layer.space == self.space)
             .filter(|layer| (self.level as usize) < layer.runs.len());
         let reachable = engine.reachable_layers(served_view.session);
         let context = DependencyContext::new(served_view, mask, &reachable);
@@ -288,12 +286,12 @@ impl Layer {
         // A resumed table's artifacts are carried by entity: an ordinal that holds another entity
         // now, or none, stands for nothing.
         let ordinal_of = |entity: u64| -> u32 {
-            let Some((name, level, ordinal)) =
+            let Some((level, ordinal)) =
                 engine.write.live().locate_artifact(self.space, EntityId::new(entity))
             else {
                 return u32::MAX;
             };
-            if name == self.name && level == self.level && entity_at(ordinal) == Some(entity) {
+            if level == self.level && entity_at(ordinal) == Some(entity) {
                 ordinal
             } else {
                 u32::MAX
@@ -319,20 +317,21 @@ impl Layer {
                 Pick::Named(ids) => {
                     let mut listed: Vec<u32> = Vec::with_capacity(ids.len());
                     for &id in ids {
-                        let Some((space, entity)) =
-                            crate::edited::artifact_named(&engine.identity_key, id)
+                        let Some((space, entity)) = engine
+                            .identity_key
+                            .invert_artifact(id)
+                            .filter(|(space, _)| *space == self.space)
                         else {
                             continue;
                         };
-                        let Some((name, level, ordinal)) =
+                        let Some((level, ordinal)) =
                             engine.write.live().locate_artifact(space, entity)
                         else {
                             continue;
                         };
                         // The registry can be ahead of the page's generation: the ordinal must
                         // hold this entity in the runs the page reads.
-                        if name == self.name
-                            && level == self.level
+                        if level == self.level
                             && entity_at(ordinal) == Some(entity.raw())
                             && ordinals.binary_search(&ordinal).is_ok()
                             && !listed.contains(&ordinal)
@@ -493,14 +492,14 @@ impl Targets {
     ) -> Result<Targets> {
         let (engine, served, mask) = (cx.engine, &cx.open.served, &cx.open.mask);
         let mut targets = Targets::default();
-        let mut layers: FxHashMap<String, Option<RegisteredLayer>> = FxHashMap::default();
+        let mut layers: FxHashMap<LayerSpace, Option<RegisteredLayer>> = FxHashMap::default();
         for &ordinal in ordinals {
             let Some(attachment) = read.rows.attachment(ordinal) else {
                 continue;
             };
             let Some(layer) = layers
-                .entry(attachment.layer.clone())
-                .or_insert_with(|| engine.write.live().registered_layer(&attachment.layer))
+                .entry(attachment.space)
+                .or_insert_with(|| engine.write.live().layer_holding(attachment.space))
             else {
                 continue;
             };

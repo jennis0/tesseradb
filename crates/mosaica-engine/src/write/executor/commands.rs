@@ -413,11 +413,9 @@ impl Executor {
         let served = self.generation.load_full();
         let views = crate::write::ServedViews(&served.bundle.manifest);
         let prepared = self.live.with_publication_state(|registry, store| {
-            let prepared = registry.prepare_put(&layer, level, &incoming, store, &views)?;
-            let space = registry.get(&layer).map(|registered| registered.space);
-            Ok((prepared, space.expect("prepare_put refuses a layer not registered")))
+            registry.prepare_put(&layer, level, &incoming, store, &views)
         });
-        let (prepared, space) = match prepared {
+        let prepared = match prepared {
             Ok(prepared) => prepared,
             Err(e) => {
                 reply.fail(refusal_of(e));
@@ -434,7 +432,7 @@ impl Executor {
             // Every key was held and every part identical: nothing to append, on
             // `commit_growth`'s no-op rule, and the acknowledgement is the held artifacts' own.
             reply.ack(PublishedBatch {
-                space,
+                space: prepared.space,
                 entities: prepared.entities,
                 created: 0,
                 without_content: 0,
@@ -455,7 +453,7 @@ impl Executor {
         // needs no log for what it just published.
         self.apply_artifact_records(&records, &positions, Publish::Promptly);
         reply.ack(PublishedBatch {
-            space,
+            space: prepared.space,
             entities: prepared.entities,
             created: prepared.created,
             without_content: prepared.without_content,
@@ -601,9 +599,7 @@ impl Executor {
         let prepared = self.live.with_publication_state(|registry, store| {
             let prepared = registry.prepare_grow(&layer, level, &joins, store)?;
             let grown = growth_receipt(registry, store, &layer, level, &joins, &prepared);
-            let space = registry.get(&layer).map(|registered| registered.space);
-            let space = space.expect("prepare_grow refuses a layer not registered");
-            Ok::<_, mosaica_lifecycle::RegistryError>((prepared, (space, grown)))
+            Ok::<_, mosaica_lifecycle::RegistryError>((prepared, grown))
         });
         let (prepared, grown) = match prepared {
             Ok(prepared) => prepared,
@@ -623,7 +619,7 @@ impl Executor {
             // Every key resolved, nothing was joining and every part was held identically. No
             // record is owed for a no-op, and appending an empty one would pin the log at a
             // growth that changed nothing.
-            reply.ack(grown);
+            reply.ack((prepared.space, grown));
             return;
         }
 
@@ -636,7 +632,7 @@ impl Executor {
         };
         // Promptly, on `commit_artifacts`' rule: this is the operator's own growth route.
         self.apply_artifact_records(&records, &positions, Publish::Promptly);
-        reply.ack(grown);
+        reply.ack((prepared.space, grown));
     }
 
     /// Validate, append, sync, apply: in that order, which is the whole of the registry's
@@ -673,9 +669,7 @@ impl Executor {
 
         let ack = ack_of(&record);
         self.live.apply_registry_record(&record);
-        // A dropped layer's artifacts and derived structures go with it, so a layer registered
-        // again under the name starts from none of them. The next publication names none of its
-        // extents, and its space leaves the generation.
+        // The dropped layer's extents leave the next publication, and its space the generation.
         if let WalRecord::LayerDrop { name, space, .. } = &record {
             self.side_manifests.spaces.remove(space);
             let generation = self.generation.load_full();

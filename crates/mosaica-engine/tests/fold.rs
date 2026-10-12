@@ -2766,7 +2766,7 @@ fn a_fold_carries_each_numbers_tenancy() {
     fold(&engine);
     assert_eq!(engine.generation().prefix, "v00001");
     assert_eq!(
-        engine.resolve_mosaica_ids(&[at(6), at(0)]).unwrap(),
+        items_of(&engine, &[at(6), at(0)]),
         vec![Some(entity), None]
     );
     drop(engine);
@@ -2774,7 +2774,7 @@ fn a_fold_carries_each_numbers_tenancy() {
     let restarted = open();
     assert_eq!(restarted.generation().prefix, "v00001");
     assert_eq!(
-        restarted.resolve_mosaica_ids(&[at(6), at(0)]).unwrap(),
+        items_of(&restarted, &[at(6), at(0)]),
         vec![Some(entity), None]
     );
 }

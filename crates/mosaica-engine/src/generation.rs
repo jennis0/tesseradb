@@ -45,22 +45,22 @@ pub struct GenerationParts {
     pub suggest: Arc<crate::suggest::SuggestIndexes>,
     /// Each layer space's deny state and supplied content. A space absent here denies nothing and
     /// has no content on disc.
-    pub layer_spaces: Arc<LayerSpaces>,
+    pub(crate) layer_spaces: Arc<LayerSpaces>,
 }
 
 /// A generation's layer spaces, by space.
-pub type LayerSpaces = std::collections::BTreeMap<LayerSpace, LayerSpaceParts>;
+pub(crate) type LayerSpaces = std::collections::BTreeMap<LayerSpace, LayerSpaceParts>;
 
 /// One layer space's state in a generation.
 #[derive(Clone, Default)]
-pub struct LayerSpaceParts {
+pub(crate) struct LayerSpaceParts {
     /// Bumped on every change to `overlay`; what a content key reads a space's deny state by.
-    pub overlay_version: u64,
+    pub(crate) overlay_version: u64,
     /// The space's deleted and suppressed artifacts, and the layer's own entity.
-    pub overlay: Arc<Overlay>,
+    pub(crate) overlay: Arc<Overlay>,
     /// The supplied content the prefix's manifest names for the space. Content published since is
     /// read from the artifact store.
-    pub content: Option<Arc<mosaica_filter::RecordStack>>,
+    pub(crate) content: Option<Arc<mosaica_filter::RecordStack>>,
 }
 
 impl GenerationParts {
@@ -81,8 +81,11 @@ impl GenerationParts {
     }
 
     /// `space`'s supplied content on disc, where the prefix names any.
-    pub(crate) fn space_content(&self, space: LayerSpace) -> Option<&mosaica_filter::RecordStack> {
-        self.layer_spaces.get(&space)?.content.as_deref()
+    pub(crate) fn space_content(
+        &self,
+        space: LayerSpace,
+    ) -> Option<&Arc<mosaica_filter::RecordStack>> {
+        self.layer_spaces.get(&space)?.content.as_ref()
     }
 
     /// Across every space: how many artifacts and layers are denied, and how many of those are
@@ -94,14 +97,6 @@ impl GenerationParts {
                 deleted + parts.overlay.deleted_len(),
             )
         })
-    }
-
-    /// Every space's overlay version, ascending by space: what moves a content key when an
-    /// artifact or a layer is denied.
-    pub(crate) fn space_overlay_versions(&self) -> impl Iterator<Item = (LayerSpace, u64)> + '_ {
-        self.layer_spaces
-            .iter()
-            .map(|(space, parts)| (*space, parts.overlay_version))
     }
 }
 
@@ -571,8 +566,8 @@ impl Generation {
         use std::hash::{Hash, Hasher};
         let mut hasher = rustc_hash::FxHasher::default();
         self.only_shard().overlay_version.hash(&mut hasher);
-        for (space, version) in self.space_overlay_versions() {
-            (space.raw(), version).hash(&mut hasher);
+        for (space, parts) in self.layer_spaces.iter() {
+            (space.raw(), parts.overlay_version).hash(&mut hasher);
         }
         hasher.finish()
     }

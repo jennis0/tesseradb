@@ -244,7 +244,7 @@ fn a_deleted_items_mosaica_id_is_not_issued_again_after_a_fold_and_a_restart() {
     let root = fixture_in(tmp.path());
     let engine = serving(&root);
     let first = create(&engine, "first", &["first"])[0];
-    let entity = engine.resolve_mosaica_ids(&[first]).unwrap()[0].expect("the item it created");
+    let entity = items_of(&engine, &[first])[0].expect("the item it created");
     engine.accept_change(entity, ChangeOp::Delete).unwrap();
     fold(&engine);
     drop(engine);

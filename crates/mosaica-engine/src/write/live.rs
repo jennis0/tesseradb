@@ -307,16 +307,16 @@ impl LiveState {
         lock_recover(&self.artifacts).retire(retired)
     }
 
-    /// Where an entity of `space` sits: `(layer, level, ordinal)`. Addressing only. See
+    /// Where an entity of `space` sits: `(level, ordinal)`. Addressing only. See
     /// [`LayerRegistry::locate_in`].
     pub(crate) fn locate_artifact(
         &self,
         space: LayerSpace,
         entity: EntityId,
-    ) -> Option<(String, u32, u32)> {
+    ) -> Option<(u32, u32)> {
         lock_recover(&self.registry)
             .locate_in(space, entity)
-            .map(|(name, level, ordinal)| (name.to_string(), level, ordinal))
+            .map(|(_, level, ordinal)| (level, ordinal))
     }
 
     /// Whether `entity` of `space` is a live layer's own entity or an artifact its levels hold.
@@ -388,11 +388,31 @@ impl LiveState {
         lock_recover(&self.registry).snapshot()
     }
 
+    /// How many layers are registered.
+    pub(crate) fn layer_count(&self) -> usize {
+        lock_recover(&self.registry).len()
+    }
+
     /// The name of the live layer holding `space`.
     pub(crate) fn layer_in_space(&self, space: LayerSpace) -> Option<String> {
         lock_recover(&self.registry)
             .in_space(space)
             .map(|(name, _)| name.to_string())
+    }
+
+    /// The live layer holding `space`, as [`Self::registered_layer`] answers it.
+    pub(crate) fn layer_holding(
+        &self,
+        space: LayerSpace,
+    ) -> Option<mosaica_types::layer::RegisteredLayer> {
+        lock_recover(&self.registry)
+            .in_space(space)
+            .map(|(_, layer)| layer.clone())
+    }
+
+    /// Whether a live layer holds `space`.
+    pub(crate) fn holds_space(&self, space: LayerSpace) -> bool {
+        lock_recover(&self.registry).in_space(space).is_some()
     }
 
     /// The space of the layer registered under `name`.

@@ -765,7 +765,7 @@ impl<'a, 'c> Namer<'a, 'c> {
                     let mut attached: Vec<u32> = read
                         .rows
                         .records()
-                        .attached_to(target_layer, level, ordinal)
+                        .attached_to(self.layer.space, level, ordinal)
                         .filter(|&at| read.rows.attachment(at).is_some_and(|a| a.entity == target))
                         .collect();
                     if attached.len() > 1 {

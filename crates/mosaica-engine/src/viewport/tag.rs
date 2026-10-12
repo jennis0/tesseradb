@@ -272,55 +272,45 @@ impl Engine {
                     crate::figures::Geometry::declared(declaration),
                 )?,
             };
-            let view = ArtifactView {
-                declaration,
-                overlay: served.generation.space_overlay(registered.space),
-                labels: self.label_gate(served.session, declaration),
-                layer_reachable: true,
+            let view = ArtifactView::of(
+                served,
+                registered,
+                self.label_gate(served.session, declaration),
                 rows,
                 mask,
                 dependency_served,
-                containment: rows
-                    .partition()
-                    .map(|p| p.answers(served.session.satisfied())),
-                denied: served.denied,
+                rows.partition().map(|p| p.answers(served.session.satisfied())),
                 counts,
-            };
-            let mut contents: Option<Arc<crate::artifact_content::LevelContent>> = None;
+            );
+            let contents = std::cell::OnceCell::new();
             let mut verdicts = Verdicts::over(rows.len());
             let mut mosaica_id = |ordinal: u32| -> Option<u64> {
                 verdicts.get_or(ordinal, || {
                     let entity = runs.entity_of(ordinal as u64).map(EntityId::new)?;
                     let rank = view.serves_visible_member(entity, ordinal).ok()?;
                     // The walk withholds an artifact whose content cannot be read back.
-                    let table =
-                        (rank.is_some() && !declaration.content.supplied.is_empty()).then(|| {
-                            contents
-                                .get_or_insert_with(|| {
-                                    self.level_contents.get_or_build(
-                                        name,
-                                        level,
-                                        level_version,
-                                        generation.segments_version,
-                                        || {
-                                            crate::artifact_content::LevelContent::build(
-                                                generation.space_content(registered.space),
-                                                runs,
-                                            )
-                                        },
-                                    )
-                                })
-                                .clone()
-                        });
+                    let table = rank.is_some().then(|| {
+                        contents
+                            .get_or_init(|| {
+                                self.level_content(
+                                    generation,
+                                    registered,
+                                    level,
+                                    level_version,
+                                    runs,
+                                )
+                            })
+                            .clone()
+                    });
                     self.supplied_content(
-                        generation.space_content(registered.space),
+                        generation.space_content(registered.space).map(Arc::as_ref),
                         declaration,
                         level,
                         ordinal,
                         entity,
                         rank,
                         false,
-                        table.as_deref(),
+                        table.flatten().as_deref(),
                     )?;
                     self.artifact_id(registered.space, entity).map(|id| id.raw())
                 })

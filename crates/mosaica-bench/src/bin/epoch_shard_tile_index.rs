@@ -248,6 +248,7 @@ fn open_fixture(args: &Args) -> Fixture {
         let record_pack =
             LevelPack::open(&prefix_dir.join(&record_extent.path), PackKind::Records)
                 .expect("record pack opens");
+        assert_eq!(record_pack.count(), extent.count);
         for ((ordinal, blob), (_, record_blob)) in pack.iter().zip(record_pack.iter()) {
             if blob.is_empty() && record_blob.is_empty() {
                 continue;

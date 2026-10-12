@@ -8,8 +8,8 @@ mod common;
 use common::*;
 use mosaica_engine::{AcceptError, AddressTable, Engine};
 use mosaica_lifecycle::resolve::Refusal;
-use mosaica_lifecycle::wal::{ChangeOp, WalRecord};
 use mosaica_lifecycle::membership::{IncomingAttachment, IncomingGrowth};
+use mosaica_lifecycle::wal::{ChangeOp, WalRecord};
 use mosaica_lifecycle::{ExecError, IncomingArtifact};
 use mosaica_types::layer::{
     ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
@@ -193,7 +193,7 @@ fn a_layer_is_not_deleted_by_its_own_identifier_and_is_suppressed_by_it() {
     ));
     assert_eq!(reachable(&engine), vec!["clusters/a".to_string()]);
     assert_eq!(
-        engine.resolve_mosaica_ids(&[engine.mosaica_id_of(point).unwrap()]).unwrap(),
+        items_of(&engine, &[engine.mosaica_id_of(point).unwrap()]),
         vec![Some(point)],
         "nothing in the refused request was applied"
     );
@@ -342,6 +342,49 @@ fn an_artifacts_and_a_layers_deny_survive_a_rotation_and_a_restart() {
     );
     let status = engine.generation_status();
     assert_eq!((status.overlay_depth, status.layer_spaces.depth), (0, 2));
+}
+
+/// A dropped layer's deny state goes with it: a layer suppressed by its own identifier, holding a
+/// suppressed artifact, and then dropped, is denied in no layer space after a restart that replays
+/// the suppressions, nor after the rotations that follow.
+#[test]
+fn a_dropped_layers_deny_does_not_come_back_at_a_restart() {
+    let fx = fixture();
+    {
+        let engine = fx.open();
+        let (layer, artifact) = register_and_publish(&fx, &engine, "clusters/a");
+        let targets = engine.resolve_targets(&[layer, artifact]).unwrap();
+        engine
+            .accept_changes(
+                targets
+                    .into_iter()
+                    .map(|target| (target.unwrap(), ChangeOp::Suppress))
+                    .collect(),
+            )
+            .unwrap();
+        engine.drop_layer("clusters/a".into()).unwrap();
+        assert_eq!(engine.generation_status().layer_spaces.depth, 0);
+    }
+    let engine = fx.open();
+    assert_eq!(engine.generation_status().layer_spaces.depth, 0);
+    // Twice: the first rotation seals the member holding the changes, the second reclaims it.
+    tick(&engine);
+    tick(&engine);
+    assert_eq!(engine.generation_status().layer_spaces.depth, 0);
+    drop(engine);
+    assert_eq!(fx.open().generation_status().layer_spaces.depth, 0);
+}
+
+/// A change resolved before its layer was dropped and applied after denies nothing.
+#[test]
+fn a_change_to_a_dropped_layers_artifact_denies_nothing() {
+    let fx = fixture();
+    let engine = fx.open();
+    let (_, artifact) = register_and_publish(&fx, &engine, "clusters/a");
+    let target = engine.resolve_targets(&[artifact]).unwrap()[0].unwrap();
+    engine.drop_layer("clusters/a".into()).unwrap();
+    let _ = engine.accept_changes(vec![(target, ChangeOp::Suppress)]);
+    assert_eq!(engine.generation_status().layer_spaces.depth, 0);
 }
 
 /// A fold removes a deleted artifact's record from its layer space and its deletion from the
@@ -604,7 +647,7 @@ fn an_item_and_an_artifact_at_one_entity_number_are_two_things() {
             Some(11),
             "the item's fold kept the artifact, and the artifact's kept its member at that number"
         );
-        assert_eq!(engine.resolve_mosaica_ids(&[item_id]).unwrap(), vec![Some(point)]);
+        assert_eq!(items_of(&engine, &[item_id]), vec![Some(point)]);
         (item_id, other_id, shared, ids[1])
     };
 
@@ -721,4 +764,63 @@ fn a_replayed_publication_into_a_dropped_layer_leaves_its_successors_runs() {
     let engine = fx.open();
     assert_eq!(engine.registered_layer("clusters/a").unwrap().runs, runs);
     assert!(card(&engine, again));
+}
+
+/// A publication that grew a layer's reservation, replayed over a side-manifest that already holds
+/// the growth, leaves the layer with the runs it had: the log no longer holds the registration, so
+/// the growth is not reset by replaying it.
+#[test]
+fn a_replayed_growth_the_side_manifest_holds_is_not_applied_again() {
+    let fx = fixture();
+    let runs = {
+        let engine = fx.open();
+        engine.register_layer(declaration("clusters/a")).unwrap();
+        tick_until(&engine, "the registration's publication", WAIT, || {
+            side_manifest(&fx.root)
+                .partition
+                .layers
+                .iter()
+                .any(|l| l.declaration.name == "clusters/a")
+        });
+        // Twice: the first rotation seals the member holding the registration, the second
+        // reclaims it.
+        tick(&engine);
+        tick(&engine);
+        // A growth holds the log from here until a fold, so the publication below keeps it.
+        register_and_publish(&fx, &engine, "clusters/b");
+        engine
+            .grow_memberships(
+                "clusters/b".into(),
+                0,
+                vec![IncomingGrowth::from_entities("c0".into(), fx.members(40..50))],
+            )
+            .unwrap();
+        let past_a_block = (0..=mosaica_types::layer::RESERVED_BLOCK)
+            .map(|i| IncomingArtifact::from_entities(Some(format!("c{i}")), Vec::new()))
+            .collect();
+        engine
+            .publish_artifacts("clusters/a".into(), 0, past_a_block)
+            .unwrap();
+        let runs = engine.registered_layer("clusters/a").unwrap().runs;
+        tick_until(&engine, "the growth's publication", WAIT, || {
+            side_manifest(&fx.root)
+                .partition
+                .layers
+                .iter()
+                .any(|l| l.declaration.name == "clusters/a" && l.runs == runs)
+        });
+        runs
+    };
+    let records: Vec<WalRecord> = mosaica_lifecycle::Wal::open(&fx.wal)
+        .unwrap()
+        .records()
+        .map(|r| r.unwrap().1)
+        .collect();
+    assert!(!records.iter().any(|r| matches!(r, WalRecord::LayerCreate { declaration, .. }
+        if declaration.name == "clusters/a")));
+    assert!(records.iter().any(|r| matches!(r, WalRecord::ArtifactPublish { layer, extend_runs, .. }
+        if layer == "clusters/a" && !extend_runs.is_empty())));
+
+    let engine = fx.open();
+    assert_eq!(engine.registered_layer("clusters/a").unwrap().runs, runs);
 }

@@ -2720,8 +2720,6 @@ fn an_empty_config_declares_nothing() {
     assert!(config.layers.is_empty());
 }
 
-/// Two blocks of one name are refused rather than read last-one-wins: a build declares each layer
-/// once.
 #[test]
 fn two_layers_of_one_name_are_refused() {
     let text = with_layer(LAYER);

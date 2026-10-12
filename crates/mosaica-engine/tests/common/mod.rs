@@ -87,16 +87,8 @@ mod ingest_rows {
                 strict: true,
                 mosaica_id_column: false,
             })?;
-            let entities = self
-                .resolve_mosaica_ids(
-                    &receipt
-                        .mosaica_ids
-                        .iter()
-                        .flatten()
-                        .copied()
-                        .collect::<Vec<_>>(),
-                )
-                .unwrap()
+            let ids: Vec<_> = receipt.mosaica_ids.iter().flatten().copied().collect();
+            let entities = super::items_of(self, &ids)
                 .into_iter()
                 .map(|entity| entity.expect("an accepted row names an item"))
                 .collect();
@@ -131,6 +123,19 @@ pub const SUBSET_TERM: u64 = 1;
 pub const PARTITION: &str = "default";
 pub const SHARD: mosaica_store::ShardLayout<'static> =
     mosaica_store::ShardLayout::new(PARTITION, ShardId::ZERO);
+
+/// The item each of `ids` names: `None` for one that names nothing, an artifact or a layer.
+pub fn items_of(engine: &Engine, ids: &[MosaicaId]) -> Vec<Option<EntityId>> {
+    engine
+        .resolve_targets(ids)
+        .unwrap()
+        .into_iter()
+        .map(|target| match target {
+            Some(mosaica_types::Target::Item(_, entity)) => Some(entity),
+            _ => None,
+        })
+        .collect()
+}
 
 /// The built bundle's partition directory in `root`'s `prefix`: where its side-manifests are.
 pub fn partition_dir(root: &Path, prefix: &str) -> PathBuf {
@@ -955,10 +960,7 @@ pub fn unique_holders(
         .name_items(&table)?
         .verdicts
         .into_iter()
-        .map(|verdict| match verdict {
-            mosaica_lifecycle::resolve::Verdict::Names(entity) => Some(entity),
-            _ => None,
-        })
+        .map(Result::ok)
         .collect())
 }
 

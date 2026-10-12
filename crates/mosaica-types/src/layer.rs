@@ -980,6 +980,16 @@ pub struct RegisteredLayer {
     pub layouts: Vec<ServingLayout>,
 }
 
+/// Each of `layers`' spaces, by the layer's name.
+pub fn spaces_by_name(
+    layers: &[RegisteredLayer],
+) -> std::collections::BTreeMap<String, crate::LayerSpace> {
+    layers
+        .iter()
+        .map(|layer| (layer.declaration.name.clone(), layer.space))
+        .collect()
+}
+
 impl RegisteredLayer {
     /// The layout recorded for one level. Absent is [`ServingLayout::ArtifactMajor`] — see
     /// [`RegisteredLayer::layouts`].
@@ -1314,7 +1324,8 @@ impl LayerDeclaration {
         }
 
         // Levels address by ordinal within the level's runs, so the set must be exactly 0..n: a
-        // repeat would give two levels one base, and a gap would reserve a run no address reaches.
+        // repeat would give two levels one set of runs, and a gap would reserve a run no address
+        // reaches.
         let mut seen: BTreeSet<u32> = BTreeSet::new();
         for level in &self.levels {
             if !seen.insert(level.level) {

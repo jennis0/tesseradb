@@ -211,10 +211,14 @@ impl Executor {
         for (target, op) in changes {
             let entity = match target {
                 Target::Item(_, entity) => entity,
+                // A change resolved before its layer was dropped names a space nothing holds.
+                Target::Artifact(space, _) if !self.live.holds_space(space) => continue,
                 Target::Artifact(space, entity) => {
                     let parts = spaces.entry(space).or_default();
+                    if touched.insert(space) {
+                        parts.overlay_version += 1;
+                    }
                     Arc::make_mut(&mut parts.overlay).apply(entity, op);
-                    touched.insert(space);
                     continue;
                 }
             };
@@ -229,11 +233,6 @@ impl Executor {
             overlay
                 .get_or_insert_with(|| (*shard.overlay).clone())
                 .apply(entity, op);
-        }
-        for space in &touched {
-            if let Some(parts) = spaces.get_mut(space) {
-                parts.overlay_version += 1;
-            }
         }
         let layer_spaces = Arc::new(spaces);
         let deny_epoch = generation.deny_epoch + 1;

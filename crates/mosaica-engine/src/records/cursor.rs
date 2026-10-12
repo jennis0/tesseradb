@@ -46,11 +46,11 @@ pub(crate) struct Binding<'a> {
     pub(crate) request: Option<[u8; 32]>,
 }
 
-/// The layer an artifacts cursor is bound to: its name, its space, which a dropped layer and a
-/// later registration under its name never share, and the level the request named, if any.
+/// The layer an artifacts cursor is bound to: its name, its space and the level the request named,
+/// if any.
 pub(crate) struct LayerBinding<'a> {
     pub(crate) name: &'a str,
-    pub(crate) space: u32,
+    pub(crate) space: mosaica_types::LayerSpace,
     pub(crate) level: Option<u32>,
 }
 
@@ -70,7 +70,7 @@ impl Binding<'_> {
                 aad.push(1);
                 aad.extend_from_slice(&(layer.name.len() as u64).to_le_bytes());
                 aad.extend_from_slice(layer.name.as_bytes());
-                aad.extend_from_slice(&layer.space.to_le_bytes());
+                aad.extend_from_slice(&layer.space.raw().to_le_bytes());
                 match layer.level {
                     None => aad.push(0),
                     Some(level) => {
@@ -313,7 +313,11 @@ mod tests {
             view: "s0",
             incarnation: 0,
             auth_data_hash: [1; 32],
-            layer: Some(LayerBinding { name, space, level }),
+            layer: Some(LayerBinding {
+                name,
+                space: mosaica_types::LayerSpace::new(space).unwrap(),
+                level,
+            }),
             request: None,
         };
         let cursor = ArtifactsCursor {

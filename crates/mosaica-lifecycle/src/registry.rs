@@ -317,6 +317,8 @@ impl GroupViews for NoGroupViews {
 /// as one covers a commit window's records.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedPut {
+    /// The layer's space.
+    pub space: LayerSpace,
     /// The new artifacts, or `None` where every key was held.
     pub publish: Option<WalRecord>,
     /// One [`WalRecord::ArtifactFill`] per fixed part filled on a held artifact.
@@ -338,6 +340,8 @@ pub struct PreparedPut {
 /// What [`LayerRegistry::prepare_grow`] prepared for one `PATCH` batch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedGrow {
+    /// The layer's space.
+    pub space: LayerSpace,
     /// The set deltas — members joining a membership, and members joining or leaving a generating
     /// set — or `None` where no row moved a set.
     pub growth: Option<WalRecord>,
@@ -1353,6 +1357,7 @@ impl LayerRegistry {
             .map(|record| crate::membership::members_added(record, store))
             .sum();
         Ok(PreparedPut {
+            space,
             publish,
             fills,
             growth,
@@ -2353,6 +2358,7 @@ impl LayerRegistry {
             });
         }
         Ok(PreparedGrow {
+            space,
             growth: (!growth.is_empty()).then(|| WalRecord::ArtifactGrow {
                 layer: layer_name.to_string(),
                 space,
@@ -2957,8 +2963,11 @@ impl LayerRegistry {
                 let Some(runs) = registered.runs.get_mut(*level as usize) else {
                     return;
                 };
+                // A side-manifest written after the record already holds its runs.
                 for run in extend_runs {
-                    runs.push(*run);
+                    if !runs.runs().contains(run) {
+                        runs.push(*run);
+                    }
                 }
             }
             _ => {}

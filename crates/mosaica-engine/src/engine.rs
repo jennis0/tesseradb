@@ -191,17 +191,15 @@ pub struct Engine {
 /// rather than opening it — and the `Malformed` arm below is what keeps "did not decode" from
 /// becoming "nothing is denied" if it ever does.
 fn initial_deny_of(bundle: &Bundle) -> Result<Overlays> {
-    let seeded = |key: &str,
-                  deny: &mosaica_store::manifest::EntitySet,
-                  tombstones: &mosaica_store::manifest::EntitySet,
-                  into: &mut Overlay|
+    // `(deleted, suppressed)` for one target, unioned across the partitions.
+    type Sets = (croaring::Bitmap, croaring::Bitmap);
+    let union = |key: &str,
+                 deny: &mosaica_store::manifest::EntitySet,
+                 tombstones: &mosaica_store::manifest::EntitySet,
+                 (deleted, suppressed): &mut Sets|
      -> Result<()> {
-        let mut deleted = into.deleted_set().clone();
-        let mut suppressed = into.suppressed_set().clone();
-        for (field, into, name) in [
-            (deny, &mut suppressed, "deny"),
-            (tombstones, &mut deleted, "tombstones"),
-        ] {
+        for (field, into, name) in [(deny, suppressed, "deny"), (tombstones, deleted, "tombstones")]
+        {
             let entities = field.entities().ok_or_else(|| {
                 EngineError::Malformed(format!(
                     "partition {key}'s side-manifest carries a {name} field that is not a \
@@ -210,19 +208,23 @@ fn initial_deny_of(bundle: &Bundle) -> Result<Overlays> {
             })?;
             into.or_inplace(entities);
         }
-        *into = Overlay::seeded(&deleted, &suppressed);
         Ok(())
     };
-    let mut overlays = Overlays::default();
+    let mut items = Sets::default();
+    let mut spaces = std::collections::BTreeMap::<mosaica_types::LayerSpace, Sets>::new();
     for (key, partition) in &bundle.partitions {
         let record = &partition.only_shard().record;
-        seeded(key, &record.deny, &record.tombstones, &mut overlays.items)?;
+        union(key, &record.deny, &record.tombstones, &mut items)?;
         for space in &partition.layer_spaces {
-            let into = overlays.spaces.entry(space.space).or_default();
-            seeded(key, &space.deny, &space.tombstones, into)?;
+            let into = spaces.entry(space.space).or_default();
+            union(key, &space.deny, &space.tombstones, into)?;
         }
     }
-    Ok(overlays)
+    let seeded = |(deleted, suppressed): Sets| Overlay::seeded(&deleted, &suppressed);
+    Ok(Overlays {
+        items: seeded(items),
+        spaces: spaces.into_iter().map(|(space, sets)| (space, seeded(sets))).collect(),
+    })
 }
 
 /// One of the side manifests' lists, concatenated: the partitions by key ascending, an item whose
@@ -605,7 +607,6 @@ fn reconstruct_writes(
         across_partitions(bundle, |p| {
             p.only_shard().record.membership_extents.iter().cloned()
         });
-    // Each space's records, content and level versions.
     let manifest_layer_spaces: Vec<mosaica_store::manifest::LayerSpaceRecord> =
         across_partitions(bundle, |p| p.layer_spaces.iter().cloned());
     let record = &bundle.only_shard().record;
@@ -811,13 +812,13 @@ fn first_generation(
         items: overlay,
         spaces,
     } = overlays;
-    let mut contents = crate::artifact_content::open_space_contents(&readers.prefix_dir, bundle)
+    let contents = crate::artifact_content::open_space_contents(&readers.prefix_dir, bundle)
         .map_err(|e| EngineError::Malformed(e.to_string()))?;
     let mut layer_spaces = crate::LayerSpaces::new();
     for (space, overlay) in spaces {
         layer_spaces.entry(space).or_default().overlay = Arc::new(overlay);
     }
-    for (space, content) in std::mem::take(&mut contents) {
+    for (space, content) in contents {
         layer_spaces.entry(space).or_default().content = Some(content);
     }
     // The filter columns are carried forward by every generation successor: a restart composes
@@ -908,10 +909,7 @@ fn adopt_derived_structures(
     // level version, and they address rows the new view does not have.
     let incarnation_of = |view: &str| bundle.manifest.incarnation_of(view);
     let manifest_derived_extents: Vec<mosaica_store::manifest::DerivedExtent> =
-        across_partitions(bundle, |p| {
-            let held = p.layer_spaces.iter().flat_map(|space| space.held_shapes.iter());
-            p.only_shard().record.derived_extents.iter().chain(held).cloned()
-        })
+        across_partitions(bundle, |p| p.derived_extents().cloned())
         .into_iter()
         .filter(|e| {
             crate::filter::carries_live_view(&incarnation_of, e.view.as_deref(), e.incarnation)

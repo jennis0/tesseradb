@@ -75,7 +75,7 @@ use mosaica_lifecycle::membership::{
     ArtifactShapes, ArtifactStore, IncomingArtifact, IncomingAttachment, IncomingContent,
 };
 use mosaica_lifecycle::LayerRegistry;
-use mosaica_store::manifest::{layer_space_mut, LayerSpaceRecord, MembershipExtent, RecordExtent};
+use mosaica_store::manifest::{layer_space_mut, LayerSpaceRecord, MembershipExtent};
 use mosaica_store::ShardLayout;
 use mosaica_types::layer::RegisteredLayer;
 use mosaica_types::layer::{parent_edges, LayerDeclaration, ValueSet};
@@ -550,15 +550,10 @@ pub struct PublishedLayers {
     pub next_layer_space: u32,
     /// The shard's member packs.
     pub membership_extents: Vec<MembershipExtent>,
-    /// One per registered layer, ascending by space: its record packs, its supplied content and
-    /// every level's artifact-write counter as this build leaves it. Its held shapes are filled in
-    /// from [`Self::derived_extents`] when the side-manifest is written.
-    ///
-    /// **The counters are emitted rather than left empty, and the difference is not cosmetic.** A
-    /// level absent from the list is a level whose version is *unknown* to the reader that opens
-    /// the bundle, which is not the same as zero (`manifest::LevelVersion`) — and a build that
-    /// published artifacts and said nothing about their versions would make the first restart's
-    /// coordinates unrelatable to the ones the build's own store held.
+    /// One per registered layer, ascending by space: its record packs, supplied content and every
+    /// level's version counter. A level absent from the list has an unknown version, not zero, so
+    /// every published level is listed. Held shapes are added from [`Self::derived_extents`] when
+    /// the side-manifest is written.
     pub layer_spaces: Vec<LayerSpaceRecord>,
     /// Every file written here, for `MANIFEST.files` — an undigested file is one a torn write
     /// cannot be attributed to.
@@ -1687,6 +1682,7 @@ pub fn publish(
             .map_err(|e| BuildError::Invalid(format!("layer {name}: {e}")))?;
         registry.apply(&record);
     }
+    let spaces = mosaica_types::layer::spaces_by_name(&registry.snapshot());
 
     verify_dependencies(plan)?;
 
@@ -1835,10 +1831,7 @@ pub fn publish(
             within_level_edges(&plan.declarations, layer),
         );
         let ordinal_lo = store.next_ordinal(layer, level);
-        let space = registry
-            .get(layer)
-            .map(|registered| registered.space)
-            .expect("a published level's layer is registered");
+        let space = spaces[layer];
         let mut writer = mosaica_store::membership::LevelPackWriter::create(
             prefix_dir,
             layout,
@@ -1965,10 +1958,6 @@ pub fn publish(
     }
 
     let layers = registry.snapshot();
-    let spaces: BTreeMap<String, mosaica_types::LayerSpace> = layers
-        .iter()
-        .map(|layer| (layer.declaration.name.clone(), layer.space))
-        .collect();
     let mut published = PublishedLayers {
         layers,
         next_layer_space: registry.next_layer_space(),
@@ -1981,11 +1970,9 @@ pub fn publish(
         minted: plan.minted.clone(),
         ..PublishedLayers::default()
     };
-    published.layer_spaces = spaces
-        .values()
-        .map(|space| LayerSpaceRecord::empty(*space))
-        .collect();
-    published.layer_spaces.sort_by_key(|record| record.space);
+    for space in spaces.values() {
+        layer_space_mut(&mut published.layer_spaces, *space);
+    }
     for (layer, level, version) in store.level_versions() {
         if let Some(space) = spaces.get(layer) {
             layer_space_mut(&mut published.layer_spaces, *space)
@@ -1993,7 +1980,14 @@ pub fn publish(
                 .push(mosaica_store::manifest::LevelVersion { level, version });
         }
     }
-    write_membership_extents(&mut store, prefix_dir, layout, &mut published, &mut streamed)?;
+    write_membership_extents(
+        &mut store,
+        prefix_dir,
+        layout,
+        &spaces,
+        &mut published,
+        &mut streamed,
+    )?;
     write_content_extent(&store, prefix_dir, layout, &spaces, &mut published)?;
     published.store = store;
     Ok(published)
@@ -3066,6 +3060,7 @@ fn write_membership_extents(
     store: &mut ArtifactStore,
     prefix_dir: &Path,
     layout: ShardLayout<'_>,
+    spaces: &BTreeMap<String, mosaica_types::LayerSpace>,
     published: &mut PublishedLayers,
     streamed: &mut BTreeMap<(String, u32), StreamedPack>,
 ) -> Result<()> {
@@ -3076,23 +3071,15 @@ fn write_membership_extents(
     let mut rehoused = 0u64;
     let mut kept = 0u64;
     for (layer, level, ordinal_lo, count) in ready {
-        let space = published
-            .layers
-            .iter()
-            .find(|registered| registered.declaration.name == layer)
-            .map(|registered| registered.space)
-            .expect("a published level's layer is registered");
+        let space = spaces[&layer];
         let (records, members) = match streamed.remove(&(layer.clone(), level)) {
             Some(pack)
                 if pack.members.ordinal_lo == ordinal_lo && pack.members.count == count =>
             {
                 (pack.records, pack.members)
             }
-            // **A streamed pack that disagrees is a refusal, not a re-encode.** The store's
-            // published memberships have been vacated — the empty set — so a re-encode would
-            // write a bundle of empty artifacts. The disagreement is a defect in the
-            // publication's own bookkeeping either way, and there is nothing here to recover
-            // from it with.
+            // Refused, not re-encoded: the store's published memberships are vacated, so a
+            // re-encode would write empty artifacts.
             Some(pack) => {
                 return Err(BuildError::Invalid(format!(
                     "{layer} level {level}: the publication streamed packs over ordinals \
@@ -3221,54 +3208,16 @@ fn write_content_extent(
             by_space.entry(*space).or_default().push((entity, fields));
         }
     }
-    for (space, mut rows) in by_space {
-        let content_rel =
-            mosaica_store::LayerSpaceLayout::new(layout.partition, space).content_rel();
-        let dir = prefix_dir.join(&content_rel);
+    for (space, rows) in by_space {
+        let space_layout = mosaica_store::LayerSpaceLayout::new(layout.partition, space);
+        let dir = prefix_dir.join(space_layout.content_rel());
         std::fs::create_dir_all(&dir).map_err(|e| BuildError::io(&dir, e))?;
-        let extent = RecordExtent {
-            blocks: format!("{content_rel}/artifacts-000000.blocks.bin"),
-            hasrow: format!("{content_rel}/artifacts-000000.hasrow.roaring"),
-            directory: format!("{content_rel}/artifacts-000000.directory.arrow"),
-        };
+        let extent = space_layout.content_extent("artifacts-000000");
         let blocks = prefix_dir.join(&extent.blocks);
         let hasrow = prefix_dir.join(&extent.hasrow);
         let directory = prefix_dir.join(&extent.directory);
-        let mut writer = mosaica_filter_write::RecordBlobWriter::create(
-            &blocks,
-            &hasrow,
-            &directory,
-            mosaica_filter::RECORD_BLOCK_TARGET,
-        )
-        .map_err(|e| BuildError::io(&blocks, e))?;
-        // **Ascending by entity**, which the blob's block directory requires and publication
-        // order is not.
-        rows.sort_by_key(|(entity, _)| entity.raw());
-        for (entity, fields) in rows {
-            let entity = u32::try_from(entity.raw()).map_err(|_| {
-                BuildError::Invalid(format!(
-                    "artifact entity {} does not fit the u32 entity space (I9's ceiling)",
-                    entity.raw()
-                ))
-            })?;
-            let fields: Vec<mosaica_filter::RecordFieldRef<'_>> = fields
-                .iter()
-                .map(|(tag, value)| mosaica_filter::RecordFieldRef {
-                    tag: *tag,
-                    value: mosaica_filter::RecordValueRef::Utf8(value),
-                })
-                .collect();
-            writer
-                .push_row(entity, &fields)
-                .map_err(|e| BuildError::io(&blocks, e))?;
-        }
-        writer.finish().map_err(|e| BuildError::io(&blocks, e))?;
-        // `finish` syncs the blocks and not the two files that address them, and a torn
-        // addressing file refuses the space's **whole** record stack at open.
-        for path in [&hasrow, &directory] {
-            let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
-            file.sync_all().map_err(|e| BuildError::io(path, e))?;
-        }
+        mosaica_filter_write::write_text_rows(&blocks, &hasrow, &directory, rows)
+            .map_err(|e| BuildError::io(&blocks, e))?;
         mosaica_store::fsync_dir(&dir).map_err(BuildError::Store)?;
         published.paths.extend([blocks, hasrow, directory]);
         layer_space_mut(&mut published.layer_spaces, space)

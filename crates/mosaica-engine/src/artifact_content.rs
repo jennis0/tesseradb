@@ -57,11 +57,11 @@ pub(crate) struct LevelContent {
 }
 
 impl LevelContent {
-    /// Read one level's contents out of its layer space's record blob, where the prefix names one.
+    /// Read one level's contents out of its layer space's record blob, if the prefix has one.
     ///
     /// `runs` is the level's own reserved entity space, which is what makes this a *bounded* read
-    /// rather than a walk of the blob: artifact ids are allocated downward from the ceiling in
-    /// whole blocks, so a level is one or a few contiguous ranges and the blob is in entity order.
+    /// rather than a walk of the blob: a level allocates whole blocks of its space, so it is one or
+    /// a few contiguous ranges and the blob is in entity order.
     ///
     /// A malformed blob refuses at the read and leaves the level with no contents here — every
     /// artifact in it is then withheld, which is the same fail-closed answer the direct read gives
@@ -154,11 +154,7 @@ pub(crate) fn open_space_contents(
             let paths: Vec<mosaica_filter::RecordExtentPaths> = space
                 .content_extents
                 .iter()
-                .map(|e| mosaica_filter::RecordExtentPaths {
-                    blocks: prefix_dir.join(&e.blocks),
-                    hasrow: prefix_dir.join(&e.hasrow),
-                    directory: prefix_dir.join(&e.directory),
-                })
+                .map(|e| crate::filter::record_extent_paths(prefix_dir, e))
                 .collect();
             let stack =
                 mosaica_filter::RecordStack::open(None, &paths, mosaica_filter::Access::Mapped)?;

@@ -113,7 +113,7 @@ fn an_identifier_at_a_tenancy_its_number_is_not_at_names_nothing() {
     let at = |tenancy: u16| mosaica_id_at(entity, tenancy);
 
     assert_eq!(
-        engine.resolve_mosaica_ids(&[at(3), at(0), at(2)]).unwrap(),
+        items_of(&engine, &[at(3), at(0), at(2)]),
         vec![Some(entity), None, None]
     );
     assert_eq!(engine.item(&session, at(0)).unwrap(), None);

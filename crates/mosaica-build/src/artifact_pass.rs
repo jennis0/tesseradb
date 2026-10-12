@@ -136,7 +136,7 @@ pub fn run(
 ) -> ArtifactPass {
     let started = Instant::now();
     let mut pass = ArtifactPass::default();
-    let spaces = spaces_of(&published.layers);
+    let spaces = mosaica_types::layer::spaces_by_name(&published.layers);
     // **One set of projection buffers for the whole pass.** Every walk below projects a membership
     // per artifact, and `Permutation::project` allocates and zeroes a 512 KB stamp on each call —
     // it is written for one call per session and says so. Shared through a `RefCell` because the
@@ -668,7 +668,6 @@ const MANIFEST_N: u64 = 0;
 /// here is the store's rather than one view's drawn layers.
 pub fn containment(
     store: &ArtifactStore,
-    layers: &[mosaica_types::layer::RegisteredLayer],
     prefix_dir: &Path,
     layout: ShardLayout<'_>,
     index: &mut DerivedIndex,
@@ -685,13 +684,12 @@ pub fn containment(
         }
     };
 
-    let levels: Vec<(String, u32)> = store
+    let levels: Vec<(String, u32, mosaica_types::LayerSpace)> = store
         .levels_and_extents()
-        .map(|(layer, level, _)| (layer.to_string(), level))
+        .filter_map(|(layer, level, _)| Some((layer.to_string(), level, store.space_of(layer)?)))
         .collect();
-    let spaces = spaces_of(layers);
     let mut composed: Vec<Filed> = Vec::new();
-    for (layer, level) in &levels {
+    for (layer, level, space) in &levels {
         let contents = |visit: &mut dyn FnMut(u32, &[&Bitmap])| {
             for (ordinal, record) in store.level(layer, *level) {
                 let generating: Vec<&Bitmap> =
@@ -730,7 +728,7 @@ pub fn containment(
         composed.push(Filed {
             view: None,
             incarnation: None,
-            space: spaces[layer],
+            space: *space,
             level: *level,
             level_version: store.level_version(layer, *level),
             form: DerivedForm::Containment,
@@ -749,16 +747,6 @@ pub fn containment(
 /// The `everywhere` fraction decides a treed or spatial level's layout
 /// (`mosaica_types::layer::ROW_MAJOR_EVERYWHERE_FRACTION`), and blocks per artifact says how much
 /// work a membership is; both are reported for every level.
-/// Each registered layer's space, by name: every level a build writes is of one of them.
-fn spaces_of(
-    layers: &[mosaica_types::layer::RegisteredLayer],
-) -> std::collections::BTreeMap<String, mosaica_types::LayerSpace> {
-    layers
-        .iter()
-        .map(|layer| (layer.declaration.name.clone(), layer.space))
-        .collect()
-}
-
 pub fn report(pass: &ArtifactPass) {
     if pass.levels.is_empty() {
         return;

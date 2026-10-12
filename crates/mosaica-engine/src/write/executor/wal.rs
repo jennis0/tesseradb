@@ -210,8 +210,8 @@ impl Executor {
             None => reclaim_below,
         };
 
-        // Each deny under the target it was accepted for: an artifact's in its layer space, never
-        // the shard's, where its entity would read as an item's at the next open.
+        // An artifact's deny goes under its space; in the shard's its entity would read as an
+        // item's at the next open.
         let snapshot = mosaica_lifecycle::overlay::snapshot(
             shard.id(),
             &shard.overlay,

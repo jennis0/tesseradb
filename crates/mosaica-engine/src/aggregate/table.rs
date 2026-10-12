@@ -363,7 +363,7 @@ impl Plan {
     }
 
     /// The layer's space, on a layer grouping.
-    pub(super) fn layer_space(&self) -> Option<u64> {
+    pub(super) fn layer_space(&self) -> Option<mosaica_types::LayerSpace> {
         match &self.outer {
             Outer::Layer(layer) => Some(layer.space()),
             _ => None,

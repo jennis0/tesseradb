@@ -606,10 +606,8 @@ fn a_deletion_reaches_every_home() {
     let by_value = item_of_id(&engine, DELETED_SOURCE)
         .expect("the index reads")
         .expect("the deleted item's `id` names it before the delete");
-    let by_mosaica = engine
-        .resolve_mosaica_ids(&[engine.mosaica_id_of(deleted).expect("a wire identifier")])
-        .unwrap()[0]
-        .expect("the identifier names a live item");
+    let id = engine.mosaica_id_of(deleted).expect("a wire identifier");
+    let by_mosaica = items_of(&engine, &[id])[0].expect("the identifier names a live item");
     assert_eq!(by_value, deleted, "the unique-field route names the item");
     assert_eq!(by_mosaica, deleted, "and so does the mosaica_id route");
 
@@ -1108,7 +1106,7 @@ fn a_deletion_of_an_edited_item_reaches_every_home() {
     assert_eq!(every::send(&engine, "edit", "s0", edit).edited, 1);
     publish_buffered(&engine);
     fold(&engine);
-    let moved = engine.resolve_mosaica_ids(&[tid]).unwrap()[0].expect("the edited item resolves");
+    let moved = items_of(&engine, &[tid])[0].expect("the edited item resolves");
     assert_ne!(moved, first, "the edit gave the item a new entity");
     let entities = [first, moved];
     let verified = mosaica_build::verify_deep(&root, &mosaica_build::VerifyOpts::default())
@@ -1246,7 +1244,7 @@ fn a_deletion_of_an_edited_item_reaches_every_home() {
             }
             Home::EditedItems => {
                 assert_eq!(
-                    engine.resolve_mosaica_ids(&[tid]).unwrap()[0],
+                    items_of(&engine, &[tid])[0],
                     None,
                     "{home:?}: the item's mosaica_id still resolves"
                 );

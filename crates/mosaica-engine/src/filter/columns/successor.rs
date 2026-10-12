@@ -35,11 +35,10 @@ impl TextExtentPaths {
             dict: prefix_dir.join(&extent.dict),
             postings: prefix_dir.join(&extent.postings),
             presence: prefix_dir.join(&extent.presence),
-            prose: extent.prose.as_ref().map(|prose| RecordExtentPaths {
-                blocks: prefix_dir.join(&prose.blocks),
-                hasrow: prefix_dir.join(&prose.hasrow),
-                directory: prefix_dir.join(&prose.directory),
-            }),
+            prose: extent
+                .prose
+                .as_ref()
+                .map(|prose| super::record_extent_paths(prefix_dir, prose)),
         }
     }
 }

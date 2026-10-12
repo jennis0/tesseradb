@@ -1840,6 +1840,15 @@ pub fn layer_space_mut(
     &mut spaces[at]
 }
 
+/// `shard`'s derived files and every one of `spaces`' held shapes, as one list.
+pub(crate) fn derived_and_held<'a>(
+    shard: &'a ShardRecord,
+    spaces: &'a [LayerSpaceRecord],
+) -> impl Iterator<Item = &'a DerivedExtent> {
+    let held = spaces.iter().flat_map(|space| space.held_shapes.iter());
+    shard.derived_extents.iter().chain(held)
+}
+
 /// One file derived from an artifact level: a containment partition, a tile index, a row-major
 /// column, a segment's shape row form, a level's held shapes, or a level's label column and its
 /// band-order copy.
@@ -2476,6 +2485,30 @@ impl SegmentsManifest {
     /// [`Self::only_shard`], to edit.
     pub fn only_shard_mut(&mut self) -> &mut ShardRecord {
         mosaica_types::only(&mut self.shards.records)
+    }
+
+    /// The shard's derived files and every layer space's held shapes.
+    pub fn derived_extents(&self) -> impl Iterator<Item = &DerivedExtent> {
+        derived_and_held(self.only_shard(), &self.layer_spaces)
+    }
+
+    /// File `derived`, replacing what the manifest lists: each held shape under its space's
+    /// record, and the rest on the shard. A held shape of a space with no record is not filed.
+    pub fn file_derived(&mut self, derived: Vec<DerivedExtent>) {
+        for record in &mut self.layer_spaces {
+            record.held_shapes.clear();
+        }
+        let mut shard = Vec::new();
+        for extent in derived {
+            if extent.form != DerivedForm::ShapeHeld {
+                shard.push(extent);
+            } else if let Ok(at) =
+                self.layer_spaces.binary_search_by_key(&extent.space, |r| r.space)
+            {
+                self.layer_spaces[at].held_shapes.push(extent);
+            }
+        }
+        self.only_shard_mut().derived_extents = shard;
     }
 
     /// Every shard's and every layer space's `(tombstones, deny)`.

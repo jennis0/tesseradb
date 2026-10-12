@@ -35,8 +35,8 @@ use mosaica_types::{IdentityKey, ShardId, BUNDLE_FORMAT};
 use crate::error::{read_to_vec, Result, StoreError};
 use crate::layout::ShardLayout;
 use crate::manifest::{
-    CurrentPointer, FileDigest, Honourability, LayerSpaceRecord, Manifest, PartitionManifest,
-    SegmentDescriptor, SegmentsManifest, ShardRecord, Shards,
+    CurrentPointer, DerivedExtent, FileDigest, Honourability, LayerSpaceRecord, Manifest,
+    PartitionManifest, SegmentDescriptor, SegmentsManifest, ShardRecord, Shards,
 };
 use crate::permutation::{Permutation, RowSpace, SegmentExtent};
 use crate::render_presence::{render_presence_path, RenderPresence, RENDER_PRESENCE_DIR};
@@ -308,6 +308,11 @@ impl PartitionData {
     /// [`Self::only_shard`], to edit.
     pub fn only_shard_mut(&mut self) -> &mut ShardData {
         Arc::make_mut(mosaica_types::only(&mut self.shards))
+    }
+
+    /// The shard's derived files and every layer space's held shapes.
+    pub fn derived_extents(&self) -> impl Iterator<Item = &DerivedExtent> {
+        crate::manifest::derived_and_held(&self.only_shard().record, &self.layer_spaces)
     }
 
     /// The side-manifest this partition was published with, to edit into the next one.

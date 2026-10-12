@@ -43,11 +43,15 @@ impl IngestRows for Engine {
             strict: false,
             mosaica_id_column: false,
         })?;
+        let ids: Vec<_> = receipt.mosaica_ids.iter().flatten().copied().collect();
         Ok(self
-            .resolve_mosaica_ids(&receipt.mosaica_ids.iter().flatten().copied().collect::<Vec<_>>())
+            .resolve_targets(&ids)
             .unwrap()
             .into_iter()
-            .map(|entity| entity.expect("an accepted row names an item"))
+            .map(|target| match target {
+                Some(mosaica_types::Target::Item(_, entity)) => entity,
+                _ => panic!("an accepted row names an item"),
+            })
             .collect())
     }
 }

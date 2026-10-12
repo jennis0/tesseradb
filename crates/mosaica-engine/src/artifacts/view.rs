@@ -145,6 +145,35 @@ pub struct ArtifactView<'a, M: MaskedSet> {
     pub counts: Option<Arc<Figures>>,
 }
 
+impl<'a, M: MaskedSet> ArtifactView<'a, M> {
+    /// The view over `layer` for `served`'s viewer, who reaches it: the layer's declaration, its
+    /// space's overlay and the view's deny set.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn of(
+        served: &crate::viewport::ServedView<'a>,
+        layer: &'a mosaica_types::layer::RegisteredLayer,
+        labels: LabelGate<'a>,
+        rows: &'a ArtifactRows,
+        mask: &'a M,
+        dependency_served: &'a dyn Fn(&Attachment) -> bool,
+        containment: Option<ContainmentAnswers<'a>>,
+        counts: Option<Arc<Figures>>,
+    ) -> Self {
+        ArtifactView {
+            declaration: &layer.declaration,
+            overlay: served.generation.space_overlay(layer.space),
+            labels,
+            layer_reachable: true,
+            rows,
+            mask,
+            dependency_served,
+            containment,
+            denied: served.denied,
+            counts,
+        }
+    }
+}
+
 impl<M: MaskedSet> ArtifactView<'_, M> {
     /// The one predicate.
     pub fn verdict(&self, artifact_entity: EntityId, ordinal: u32) -> ArtifactVerdict {

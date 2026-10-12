@@ -515,7 +515,7 @@ fn assert_identity(engine: &Engine, samples: &[Planted]) {
         );
         let mosaica_id = engine.mosaica_id_of(planted.entity).expect("an opaque id");
         assert_eq!(
-            engine.resolve_mosaica_ids(&[mosaica_id]).expect("resolvable")[0],
+            items_of(engine, &[mosaica_id])[0],
             Some(planted.entity),
             "{} lost its mosaica_id",
             planted.key

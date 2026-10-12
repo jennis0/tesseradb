@@ -49,19 +49,19 @@ impl Engine {
         table: &AddressTable,
     ) -> std::result::Result<NamedTargets, crate::EngineError> {
         let generation = self.generation.load_full();
-        let artifact_rows: Vec<(usize, MosaicaId)> = table
+        let artifact_rows: Vec<(usize, LayerSpace, EntityId)> = table
             .mosaica_id
             .iter()
             .flatten()
             .enumerate()
             .filter_map(|(row, id)| {
-                let id = (*id)?;
-                crate::edited::artifact_named(&self.identity_key, id).map(|_| (row, id))
+                let (space, entity) = self.identity_key.invert_artifact((*id)?)?;
+                Some((row, space, entity))
             })
             .collect();
         let mut items = table.clone();
         if let Some(ids) = items.mosaica_id.as_mut() {
-            for (row, _) in &artifact_rows {
+            for (row, ..) in &artifact_rows {
                 ids[*row] = None;
             }
         }
@@ -70,22 +70,17 @@ impl Engine {
         let mut verdicts: Vec<std::result::Result<Target, resolve::Refusal>> = named
             .verdicts
             .into_iter()
-            .map(|verdict| match verdict {
-                Verdict::Names(entity) => Ok(Target::Item(shard, entity)),
-                Verdict::Refused(refusal) => Err(refusal),
-                Verdict::Creates => unreachable!("a call that addresses items creates none"),
-            })
+            .map(|verdict| verdict.map(|entity| Target::Item(shard, entity)))
             .collect();
-        let ids: Vec<MosaicaId> = artifact_rows.iter().map(|(_, id)| *id).collect();
-        let targets = self.artifact_targets_in(&generation, &ids);
-        for ((row, _), target) in artifact_rows.iter().zip(targets) {
-            verdicts[*row] = match (&verdicts[*row], target) {
+        for &(row, space, entity) in &artifact_rows {
+            let target = self.artifact_target_in(&generation, space, entity);
+            verdicts[row] = match (&verdicts[row], target) {
                 (Ok(_), _) => Err(resolve::Refusal::NamesTwo {
-                    row: *row,
+                    row,
                     named: Vec::new(),
                 }),
                 (Err(_), Some(target)) => Ok(target),
-                (Err(_), None) => Err(resolve::Refusal::UnknownMosaicaId { row: *row }),
+                (Err(_), None) => Err(resolve::Refusal::UnknownMosaicaId { row }),
             };
         }
         Ok(NamedTargets {
@@ -131,7 +126,7 @@ pub enum AddressValue {
 /// generation it resolved them against, which a write naming the items carries.
 #[derive(Debug, Clone)]
 pub struct NamedItems {
-    pub verdicts: Vec<Verdict>,
+    pub verdicts: Vec<std::result::Result<EntityId, resolve::Refusal>>,
     pub ignored: Vec<String>,
     pub at: Stamp,
 }
@@ -236,6 +231,14 @@ pub(crate) fn name_items_in(
             resolve::resolve(&rows, &holdings, Batch::Names).map_err(store)?
         }
     };
+    let verdicts = verdicts
+        .into_iter()
+        .map(|verdict| match verdict {
+            Verdict::Names(entity) => Ok(entity),
+            Verdict::Refused(refusal) => Err(refusal),
+            Verdict::Creates => unreachable!("a call that addresses items creates none"),
+        })
+        .collect();
     Ok(NamedItems {
         verdicts,
         ignored,
@@ -282,7 +285,7 @@ fn key_of_value(
 }
 
 /// Who holds what for a call that addresses items: the unique indexes and their live entries,
-/// and every `mosaica_id` [`Engine::resolve_mosaica_ids`] resolves, deleted items left out.
+/// and every `mosaica_id` [`Engine::mosaica_ids_in`] resolves, deleted items left out.
 struct Addressed<'a> {
     engine: &'a Engine,
     generation: &'a Generation,
@@ -311,17 +314,9 @@ impl resolve::Holdings for Addressed<'_> {
 }
 
 impl Engine {
-    /// Resolve items' `mosaica_id`s to the entities holding them for the admin plane: `None` per
-    /// position for an identifier that names no item, an artifact's and a layer's among them.
-    pub fn resolve_mosaica_ids(
-        &self,
-        ids: &[MosaicaId],
-    ) -> std::result::Result<Vec<Option<EntityId>>, StoreError> {
-        self.mosaica_ids_in(&self.generation.load_full(), ids)
-    }
-
-    /// [`Self::resolve_mosaica_ids`] against `generation`. An identifier's number names the entity
-    /// the edited-items map holds for it, or the number itself where it has none
+    /// The item each of `ids` names in `generation`: `None` per position for an identifier that
+    /// names no item, an artifact's and a layer's among them. An identifier's number names the
+    /// entity the edited-items map holds for it, or the number itself where it has none
     /// ([`crate::edited`]). An item is named while `generation` holds it ([`holds_item`]) and has
     /// not deleted it: a fold that removes a deleted item also drops its deletion, so the overlay
     /// alone no longer says it is gone.
@@ -358,29 +353,30 @@ impl Engine {
         let generation = self.generation.load_full();
         let shard = generation.only_shard().id();
         let items = self.mosaica_ids_in(&generation, ids)?;
-        let artifacts = self.artifact_targets_in(&generation, ids);
-        Ok(items
-            .into_iter()
-            .zip(artifacts)
-            .map(|(item, artifact)| item.map(|entity| Target::Item(shard, entity)).or(artifact))
+        Ok(ids
+            .iter()
+            .zip(items)
+            .map(|(id, item)| match item {
+                Some(entity) => Some(Target::Item(shard, entity)),
+                None => {
+                    let (space, entity) = self.identity_key.invert_artifact(*id)?;
+                    self.artifact_target_in(&generation, space, entity)
+                }
+            })
             .collect())
     }
 
-    /// What each of `ids` names as an artifact's or a layer's identifier: the layer itself, or an
-    /// artifact its level holds that `generation` has not deleted. `None` for an item's identifier.
-    fn artifact_targets_in(
+    /// The layer itself, where `entity` is `space`'s own, or an artifact its level holds that
+    /// `generation` has not deleted.
+    fn artifact_target_in(
         &self,
         generation: &Generation,
-        ids: &[MosaicaId],
-    ) -> Vec<Option<Target>> {
-        ids.iter()
-            .map(|&id| {
-                let (space, entity) = crate::edited::artifact_named(&self.identity_key, id)?;
-                let deleted = generation.space_overlay(space).is_deleted(entity);
-                (self.write.live().artifact_held(space, entity) && !deleted)
-                    .then_some(Target::Artifact(space, entity))
-            })
-            .collect()
+        space: LayerSpace,
+        entity: EntityId,
+    ) -> Option<Target> {
+        let deleted = generation.space_overlay(space).is_deleted(entity);
+        (self.write.live().artifact_held(space, entity) && !deleted)
+            .then_some(Target::Artifact(space, entity))
     }
 
     /// Does `view` hold a row for `entity`, flushed or buffered?
@@ -505,9 +501,8 @@ impl Engine {
             return Err(crate::write::AcceptError::Exec(
                 mosaica_lifecycle::ExecError::LayerRefused {
                     detail: format!(
-                        "this request deletes layer '{name}' by its own mosaica_id, and a layer \
-                         is removed by dropping it. Send DELETE /control/layers/{name}, or \
-                         suppress the layer's mosaica_id to stop serving it"
+                        "this request deletes layer '{name}' by its mosaica_id; send DELETE \
+                         /control/layers/{name} to remove a layer"
                     ),
                 },
             ));
@@ -764,7 +759,8 @@ impl Engine {
         let Target::Artifact(space, entity) = target else {
             return None;
         };
-        let (layer, level, ordinal) = self.write.live().locate_artifact(space, entity)?;
+        let (level, ordinal) = self.write.live().locate_artifact(space, entity)?;
+        let layer = self.write.live().layer_in_space(space)?;
         let key = self.write.live().with_artifacts(|store| {
             store
                 .get(&layer, level, ordinal)

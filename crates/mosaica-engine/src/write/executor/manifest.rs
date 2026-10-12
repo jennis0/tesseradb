@@ -16,25 +16,22 @@ pub(super) fn artifact_coordinates(
     spaces: &std::collections::BTreeMap<String, LayerSpace>,
     enumerated: &std::collections::BTreeSet<String>,
 ) -> (
-    Vec<(LayerSpace, mosaica_store::manifest::LevelVersion)>,
+    std::collections::BTreeMap<LayerSpace, Vec<mosaica_store::manifest::LevelVersion>>,
     Vec<mosaica_store::manifest::DerivedExtent>,
 ) {
     let expected = |layer: &str, level: u32| match pending {
         Some(pending) => pending.version_after(store, layer, level),
         None => store.level_version(layer, level),
     };
-    let versions = store
-        .level_versions()
-        .filter_map(|(layer, level, _)| {
-            Some((
-                *spaces.get(layer)?,
-                mosaica_store::manifest::LevelVersion {
-                    level,
-                    version: expected(layer, level),
-                },
-            ))
-        })
-        .collect();
+    let mut versions = std::collections::BTreeMap::<_, Vec<_>>::new();
+    for (layer, level, _) in store.level_versions() {
+        if let Some(space) = spaces.get(layer) {
+            versions.entry(*space).or_default().push(mosaica_store::manifest::LevelVersion {
+                level,
+                version: expected(layer, level),
+            });
+        }
+    }
     let still_true = held
         .iter()
         .filter(|entry| {
@@ -73,10 +70,9 @@ impl std::fmt::Display for ManifestCommitRefused {
     }
 }
 
-/// Replace a manifest's deny fields with the overlays' live state, the shard's from `overlay` and
-/// each layer space's from `spaces`, restated fresh at every write rather than carried forward,
-/// as two separate sets and never their union: publishing the union would make every deletion
-/// look retirable by an unsuppress.
+/// Replace a manifest's deny fields, the shard's and each layer space's, with the overlays' live
+/// state, restated fresh at every write as two separate sets and never their union: publishing
+/// the union would make every deletion look retirable by an unsuppress.
 pub(super) fn write_deny_state(
     manifest: &mut SegmentsManifest,
     overlay: &Overlay,
@@ -157,6 +153,16 @@ pub(in crate::write) struct SideManifests {
 pub(in crate::write) struct HeldSpace {
     pub(in crate::write) record_packs: Vec<mosaica_store::manifest::RecordPackExtent>,
     pub(in crate::write) content_extents: Vec<mosaica_store::manifest::RecordExtent>,
+}
+
+impl HeldSpace {
+    /// What a side-manifest's record of the space lists.
+    pub(in crate::write) fn of(record: &mosaica_store::manifest::LayerSpaceRecord) -> HeldSpace {
+        HeldSpace {
+            record_packs: record.record_packs.clone(),
+            content_extents: record.content_extents.clone(),
+        }
+    }
 }
 
 impl SideManifests {
@@ -245,10 +251,7 @@ impl Executor {
             None => (self.side_manifests.derived_extents.as_slice(), None),
         };
         let registered = self.live.registered_layers();
-        let spaces = registered
-            .iter()
-            .map(|layer| (layer.declaration.name.clone(), layer.space))
-            .collect();
+        let spaces = mosaica_types::layer::spaces_by_name(&registered);
         let enumerated = registered
             .iter()
             .filter(|layer| {
@@ -256,47 +259,35 @@ impl Executor {
             })
             .map(|layer| layer.declaration.name.clone())
             .collect();
-        let (level_versions, derived_extents) = self.live.with_artifacts(|store| {
+        let (mut level_versions, derived_extents) = self.live.with_artifacts(|store| {
             artifact_coordinates(store, derived, pending, &spaces, &enumerated)
         });
-        let (held_shapes, derived_extents): (Vec<_>, Vec<_>) = derived_extents
-            .into_iter()
-            .partition(|e| e.form == mosaica_store::manifest::DerivedForm::ShapeHeld);
-        let record = next.only_shard_mut();
-        record.derived_extents = derived_extents;
         // The clone may predate these extents, so they are restated from the held lists.
         if fold.is_none() {
-            record.membership_extents = self.side_manifests.membership_extents.clone();
+            next.only_shard_mut().membership_extents =
+                self.side_manifests.membership_extents.clone();
         }
         // One record per registered layer, at its space; a dropped layer's leaves the manifest.
-        let registered_spaces: std::collections::BTreeSet<LayerSpace> =
-            spaces.values().copied().collect();
         next.layer_spaces
-            .retain(|record| registered_spaces.contains(&record.space));
-        for space in &registered_spaces {
-            mosaica_store::manifest::layer_space_mut(&mut next.layer_spaces, *space);
+            .retain(|record| registered.iter().any(|layer| layer.space == record.space));
+        for layer in &registered {
+            mosaica_store::manifest::layer_space_mut(&mut next.layer_spaces, layer.space);
         }
         for record in &mut next.layer_spaces {
-            let held = self.side_manifests.spaces.get(&record.space);
-            record.record_packs = match &fold {
-                Some(fold) => fold.records.get(&record.space).cloned().unwrap_or_default(),
-                None => held.map(|h| h.record_packs.clone()).unwrap_or_default(),
+            let (records, contents) = match &fold {
+                Some(fold) => (fold.records.get(&record.space), fold.contents.get(&record.space)),
+                None => self
+                    .side_manifests
+                    .spaces
+                    .get(&record.space)
+                    .map(|held| (&held.record_packs, &held.content_extents))
+                    .unzip(),
             };
-            record.content_extents = match &fold {
-                Some(fold) => fold.contents.get(&record.space).cloned().unwrap_or_default(),
-                None => held.map(|h| h.content_extents.clone()).unwrap_or_default(),
-            };
-            record.level_versions = level_versions
-                .iter()
-                .filter(|(space, _)| *space == record.space)
-                .map(|(_, version)| version.clone())
-                .collect();
-            record.held_shapes = held_shapes
-                .iter()
-                .filter(|e| e.space == record.space)
-                .cloned()
-                .collect();
+            record.record_packs = records.cloned().unwrap_or_default();
+            record.content_extents = contents.cloned().unwrap_or_default();
+            record.level_versions = level_versions.remove(&record.space).unwrap_or_default();
         }
+        next.file_derived(derived_extents);
         crate::geometry::check_manifest_publishable(partition_data, next)
             .map_err(ManifestCommitRefused::Regresses)?;
         mosaica_store::write_segments_manifest(prefix_dir, partition, n, next)

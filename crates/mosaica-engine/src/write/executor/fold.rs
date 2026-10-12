@@ -59,10 +59,11 @@ impl PendingRetirement {
         layer: &str,
         level: u32,
     ) -> impl Iterator<Item = (u32, &'s mosaica_lifecycle::membership::ArtifactRecord)> + 's {
-        let retired = &self.retired;
-        let space = store.space_of(layer);
+        let retired = store
+            .space_of(layer)
+            .and_then(|space| self.retired.artifacts.get(&space));
         store.level(layer, level).filter(move |(_, record)| {
-            !space.is_some_and(|space| retired.retires_artifact(space, record.entity))
+            !retired.is_some_and(|retired| retired.contains(record.entity.raw() as u32))
         })
     }
 }
@@ -86,8 +87,7 @@ pub(super) struct FoldDerived<'a> {
         Vec<mosaica_store::manifest::RecordPackExtent>,
     >,
     /// Each layer space's content extents in the new prefix, without its deleted artifacts' rows.
-    pub(super) contents:
-        &'a std::collections::BTreeMap<LayerSpace, Vec<mosaica_store::manifest::RecordExtent>>,
+    pub(super) contents: &'a super::publications::SpaceContents,
     pub(super) pending_retirement: &'a PendingRetirement,
     /// The ids this fold frees, held back from the WAL position beside them.
     pub(super) freed: &'a mosaica_store::manifest::HeldEntities,
@@ -1234,7 +1234,7 @@ impl Executor {
             points: executed.clone(),
             artifacts: executed_artifacts.clone(),
         };
-        let repacked = match self.rewrite_membership_extents(
+        let repacked = match self.rewrite_level_packs(
             &to_prefix_dir,
             ShardLayout::new(&plan.partition, shard_id),
             manifest_n,
@@ -1487,48 +1487,26 @@ impl Executor {
         // ---- link, write, write, flip ---------------------------------------------------------
         let from_prefix_dir = self.prefix_dir(&live);
         let mut carried_rels: Vec<String> = carried_rels.into_iter().collect();
-        // Content extents carry no entry in either manifest's `files`, so they are linked here
-        // rather than through the digest loop above, from the held lists rather than the manifest
-        // (which can be behind the live generation). A dropped layer's space is not carried, and
-        // an extent holding a deleted artifact's row is written again without it.
-        let mut contents: std::collections::BTreeMap<
-            LayerSpace,
-            Vec<mosaica_store::manifest::RecordExtent>,
-        > = std::collections::BTreeMap::new();
-        for (space, held) in &self.side_manifests.spaces {
-            if self.live.layer_in_space(*space).is_none() {
-                continue;
+        // Content extents carry no entry in either manifest's `files`, so they are linked here,
+        // from the held lists; an extent holding a deleted artifact's row is written again
+        // without it.
+        let contents = match super::publications::carry_space_contents(
+            &from_prefix_dir,
+            &to_prefix_dir,
+            &plan.partition,
+            manifest_n,
+            &self.side_manifests.spaces,
+            &executed_artifacts,
+        ) {
+            Ok((contents, linked)) => {
+                carried_rels.extend(linked);
+                contents
             }
-            let layout = mosaica_store::LayerSpaceLayout::new(&plan.partition, *space);
-            let kept = contents.entry(*space).or_default();
-            for (index, extent) in held.content_extents.iter().enumerate() {
-                let carry = match executed_artifacts.get(space) {
-                    Some(retired) => match super::publications::content_without(
-                        &from_prefix_dir,
-                        &to_prefix_dir,
-                        layout,
-                        (manifest_n, index),
-                        extent,
-                        retired,
-                    ) {
-                        Ok(carry) => carry,
-                        Err(e) => {
-                            discard(&format!("a content extent would not be rewritten ({e})"));
-                            return;
-                        }
-                    },
-                    None => super::publications::ContentCarry::Link,
-                };
-                match carry {
-                    super::publications::ContentCarry::Link => {
-                        carried_rels.extend(extent.files().map(String::from));
-                        kept.push(extent.clone());
-                    }
-                    super::publications::ContentCarry::Rewritten(rewritten) => kept.push(rewritten),
-                    super::publications::ContentCarry::Emptied => {}
-                }
+            Err(e) => {
+                discard(&format!("a content extent would not be rewritten ({e})"));
+                return;
             }
-        }
+        };
         if let Err(e) =
             mosaica_store::hard_link_forward(&from_prefix_dir, &to_prefix_dir, &carried_rels)
         {
@@ -1618,19 +1596,11 @@ impl Executor {
             );
         }
         self.side_manifests.membership_extents = repacked.members;
-        let spaces = &mut self.side_manifests.spaces;
-        spaces.retain(|space, _| segments_manifest.layer_spaces.iter().any(|r| r.space == *space));
-        for held in spaces.values_mut() {
-            held.record_packs.clear();
-        }
-        for (space, records) in repacked.records {
-            spaces.entry(space).or_default().record_packs = records;
-        }
-        for (space, kept) in contents {
-            if let Some(held) = spaces.get_mut(&space) {
-                held.content_extents = kept;
-            }
-        }
+        self.side_manifests.spaces = segments_manifest
+            .layer_spaces
+            .iter()
+            .map(|record| (record.space, HeldSpace::of(record)))
+            .collect();
         // Checked, not assumed: a pending level's structures were stamped with the version the
         // level would have after this retirement ([`PendingRetirement`]). If `retire` ever moves a
         // different set, a stamped structure would be carried at a version it does not describe.
@@ -1647,17 +1617,8 @@ impl Executor {
             );
         }
         let published = segments_manifest.only_shard();
-        let written: Vec<mosaica_store::manifest::DerivedExtent> = published
-            .derived_extents
-            .iter()
-            .chain(
-                segments_manifest
-                    .layer_spaces
-                    .iter()
-                    .flat_map(|space| space.held_shapes.iter()),
-            )
-            .cloned()
-            .collect();
+        let written: Vec<mosaica_store::manifest::DerivedExtent> =
+            segments_manifest.derived_extents().cloned().collect();
         self.side_manifests.derived_extents = self
             .live
             .with_artifacts(|store| held_at_current_version(store, &written));
@@ -1991,7 +1952,7 @@ impl Executor {
     /// covering `[0, len)`. Holes are written, not packed around: closing one would hand every
     /// later artifact in the level the identity of its neighbour, since an ordinal is the identity
     /// a caller's `mosaica_id` resolves to.
-    pub(super) fn rewrite_membership_extents(
+    pub(super) fn rewrite_level_packs(
         &self,
         prefix_dir: &std::path::Path,
         layout: ShardLayout<'_>,

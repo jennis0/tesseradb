@@ -2303,10 +2303,7 @@ pub fn unique_holders(
         .name_items(&table)?
         .verdicts
         .into_iter()
-        .map(|verdict| match verdict {
-            mosaica_lifecycle::resolve::Verdict::Names(entity) => Some(entity),
-            _ => None,
-        })
+        .map(Result::ok)
         .collect())
 }
 

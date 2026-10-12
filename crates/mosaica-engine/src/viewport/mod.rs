@@ -130,8 +130,8 @@ impl Engine {
     /// The content key hashes the fragment's watermark, not `segments_version` — a merge or
     /// compaction can move `segments_version` without adding rows to the visible set, which is
     /// what would make an elision unsound — and the overlay versions of the shard and of every
-    /// layer space, because a suppression or restoration of an item, an artifact or a layer moves
-    /// what a client must not keep presenting as current.
+    /// layer space, exactly rather than through a 64-bit hash, because a suppression or
+    /// restoration moves what a client must not keep presenting as current.
     fn view_coordinates(
         &self,
         generation: &crate::Generation,
@@ -153,9 +153,9 @@ impl Engine {
         hasher.update(identity_key);
         hasher.update(geometry.fragment.watermark.to_le_bytes());
         hasher.update(generation.only_shard().overlay_version.to_le_bytes());
-        for (space, version) in generation.space_overlay_versions() {
+        for (space, parts) in generation.layer_spaces.iter() {
             hasher.update(space.raw().to_le_bytes());
-            hasher.update(version.to_le_bytes());
+            hasher.update(parts.overlay_version.to_le_bytes());
         }
         hasher.update(self.boot_nonce.to_le_bytes());
         let content_digest: [u8; 32] = hasher.finalize().into();

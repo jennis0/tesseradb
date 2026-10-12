@@ -3,7 +3,7 @@ mod open;
 pub(in crate::filter) mod successor;
 
 pub use open::ShardExtents;
-pub(crate) use open::{open_entity_terms_stack, open_record_stack};
+pub(crate) use open::{open_entity_terms_stack, open_record_stack, record_extent_paths};
 
 use std::collections::BTreeMap;
 use std::path::Path;

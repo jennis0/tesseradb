@@ -7,6 +7,7 @@ use mosaica_types::view::{ViewIncarnation, DECLARED_INCARNATION};
 use mosaica_types::{LayerSpace, ShardId};
 
 use crate::edited::Direction;
+use crate::manifest::RecordExtent;
 
 pub use mosaica_types::view::GROUP_SEPARATOR;
 
@@ -202,6 +203,16 @@ impl<'a> LayerSpaceLayout<'a> {
     /// The supplied content's record-blob extents.
     pub fn content_rel(self) -> String {
         format!("{}/content", self.rel())
+    }
+
+    /// The three files of the content extent named `stem`.
+    pub fn content_extent(self, stem: &str) -> RecordExtent {
+        let rel = self.content_rel();
+        RecordExtent {
+            blocks: format!("{rel}/{stem}.blocks.bin"),
+            hasrow: format!("{rel}/{stem}.hasrow.roaring"),
+            directory: format!("{rel}/{stem}.directory.arrow"),
+        }
     }
 
     /// The directory one kind of derived structure is filed in: a `DerivedForm::dir`.

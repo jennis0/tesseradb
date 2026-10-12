@@ -12,7 +12,7 @@ mod common;
 
 use common::*;
 use mosaica_engine::Engine;
-use mosaica_lifecycle::resolve::{Refusal, Verdict};
+use mosaica_lifecycle::resolve::Refusal;
 use mosaica_lifecycle::{wal::ChangeOp, IncomingArtifact};
 use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
@@ -199,14 +199,14 @@ fn an_artifacts_or_a_layers_identifier_names_no_item() {
     let named = engine.name_items(&table).unwrap();
     assert!(matches!(
         named.verdicts[0],
-        Verdict::Refused(Refusal::UnknownMosaicaId { row: 0 })
+        Err(Refusal::UnknownMosaicaId { row: 0 })
     ));
     assert!(matches!(
         named.verdicts[1],
-        Verdict::Refused(Refusal::UnknownMosaicaId { row: 1 })
+        Err(Refusal::UnknownMosaicaId { row: 1 })
     ));
-    assert_eq!(named.verdicts[2], Verdict::Names(point));
-    assert_eq!(engine.resolve_mosaica_ids(&[layer_id, ids[0]]).unwrap(), vec![None, None]);
+    assert_eq!(named.verdicts[2], Ok(point));
+    assert_eq!(items_of(&engine, &[layer_id, ids[0]]), vec![None, None]);
 }
 
 /// **The durability assertion.** The WAL is the only place a membership lives, so a restart is the

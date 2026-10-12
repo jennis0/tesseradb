@@ -290,22 +290,8 @@ impl Engine {
                             }
                         },
                     );
-                    // Skipped where the layer declares no supplied content: nothing to read.
-                    if !layer.declaration.content.supplied.is_empty() {
-                        if let Some(runs) = layer.runs.get(level as usize) {
-                            self.level_contents.get_or_build(
-                                &layer.declaration.name,
-                                level,
-                                level_version,
-                                generation.segments_version,
-                                || {
-                                    crate::artifact_content::LevelContent::build(
-                                        generation.space_content(layer.space),
-                                        runs,
-                                    )
-                                },
-                            );
-                        }
+                    if let Some(runs) = layer.runs.get(level as usize) {
+                        self.level_content(&generation, layer, level, level_version, runs);
                     }
                 }
             }
@@ -328,17 +314,18 @@ impl Engine {
     ) -> Result<Option<GatedArtifact>> {
         let (session, generation, shard) = (served.session, served.generation, served.shard);
         let (view, view_data) = (served.name, served.data);
-        let (segments, denied) = (&served.segments[..], served.denied);
-        let Some((space, entity)) = crate::edited::artifact_named(&self.identity_key, id) else {
+        let segments = &served.segments[..];
+        let Some((space, entity)) = self.identity_key.invert_artifact(id) else {
             return Ok(None);
         };
 
-        let Some((name, level, ordinal)) = self.write.live().locate_artifact(space, entity) else {
+        let Some((level, ordinal)) = self.write.live().locate_artifact(space, entity) else {
             return Ok(None);
         };
-        let Some(layer) = self.write.live().registered_layer(&name) else {
+        let Some(layer) = self.write.live().layer_holding(space) else {
             return Ok(None);
         };
+        let name = layer.declaration.name.clone();
         if !layer.declaration.draws_on(view) {
             return Ok(None);
         }
@@ -406,18 +393,16 @@ impl Engine {
             .map(|p| p.answer_for_one(session.satisfied()));
         let ctx = DependencyContext::new(served, mask, &reachable);
         let dependency_served = self.dependency_gate(&ctx);
-        let artifact_view = crate::artifacts::ArtifactView {
-            declaration: &layer.declaration,
-            overlay: generation.space_overlay(layer.space),
-            labels: self.label_gate(session, &layer.declaration),
-            layer_reachable: true,
-            rows: &rows,
+        let artifact_view = crate::artifacts::ArtifactView::of(
+            served,
+            &layer,
+            self.label_gate(session, &layer.declaration),
+            &rows,
             mask,
-            dependency_served: &dependency_served,
+            &dependency_served,
             containment,
-            denied,
             counts,
-        };
+        );
         let verdict = artifact_view.verdict(entity, ordinal);
         ctx.finish()?;
         let crate::artifacts::ArtifactVerdict::Serve { masked_count, rank } = verdict else {
@@ -510,7 +495,7 @@ impl Engine {
         } = gated;
         // Same call as the viewport's, so the two routes cannot serve different content.
         let Some(supplied) = self.supplied_content(
-            generation.space_content(layer.space),
+            generation.space_content(layer.space).map(Arc::as_ref),
             &layer.declaration,
             level,
             ordinal,
@@ -885,18 +870,16 @@ impl Engine {
             .borrow_mut()
             .entry(attachment.layer.clone())
             .or_insert_with(|| self.label_gate(ctx.served.session, &layer.declaration));
-        crate::artifacts::ArtifactView {
-            declaration: &layer.declaration,
-            overlay: ctx.served.generation.space_overlay(layer.space),
+        crate::artifacts::ArtifactView::of(
+            ctx.served,
+            &layer,
             labels,
-            layer_reachable: true,
-            rows: &rows,
-            mask: ctx.mask,
-            dependency_served: &nested,
+            &rows,
+            ctx.mask,
+            &nested,
             containment,
-            denied: ctx.served.denied,
             counts,
-        }
+        )
         .verdict(entity, attachment.ordinal)
         .is_served()
     }
@@ -1176,21 +1159,17 @@ impl Engine {
         let (layer, pass) = (level.layer, level.layer.pass);
         let served = pass.served;
         let rows: &crate::artifacts::ArtifactRows = &level.rows;
-        crate::artifacts::ArtifactView {
-            declaration: &layer.registered.declaration,
-            overlay: served.generation.space_overlay(layer.registered.space),
-            labels: self.label_gate(served.session, &layer.registered.declaration),
-            layer_reachable: true,
+        crate::artifacts::ArtifactView::of(
+            served,
+            &layer.registered,
+            self.label_gate(served.session, &layer.registered.declaration),
             rows,
-            mask: pass.mask,
-            dependency_served: pass.dependency_served,
-            containment: rows
-                .partition()
-                .map(|p| p.answers(served.session.satisfied())),
-            denied: served.denied,
+            pass.mask,
+            pass.dependency_served,
+            rows.partition().map(|p| p.answers(served.session.satisfied())),
             // Kept on the level beside this, so derived geometry reads the same accumulation.
-            counts: level.counts.clone(),
-        }
+            level.counts.clone(),
+        )
     }
 
     /// What a treed layer draws at `zoom` over `bbox` under `budget`, as the treed frame of
@@ -1378,7 +1357,8 @@ impl Engine {
                     .pass
                     .served
                     .generation
-                    .space_content(level.layer.registered.space),
+                    .space_content(level.layer.registered.space)
+                    .map(Arc::as_ref),
                 &level.layer.registered.declaration,
                 level.level,
                 at.0,
@@ -1399,31 +1379,23 @@ impl Engine {
         Ok(())
     }
 
-    /// The level's supplied contents, read once for the level rather than once per artifact:
-    /// 408ms of a response whose points half is 1.3ms, decompressing one zstd block per artifact,
-    /// against 6.7ms read together. `None` where the layer supplies none or nothing is `wanted`.
+    /// [`Engine::level_content`] for a level pass, `None` where nothing is `wanted`.
     pub(super) fn level_contents_of(
         &self,
         level: &LevelPass<'_>,
         wanted: bool,
     ) -> Option<Arc<crate::artifact_content::LevelContent>> {
         let layer = level.layer;
-        let served = layer.pass.served;
-        if layer.registered.declaration.content.supplied.is_empty() || !wanted {
+        if !wanted {
             return None;
         }
-        Some(self.level_contents.get_or_build(
-            &layer.name,
+        self.level_content(
+            layer.pass.served.generation,
+            &layer.registered,
             level.level,
             level.level_version,
-            served.generation.segments_version,
-            || {
-                crate::artifact_content::LevelContent::build(
-                    served.generation.space_content(layer.registered.space),
-                    level.runs,
-                )
-            },
-        ))
+            level.runs,
+        )
     }
 
     /// The publisher's key of each of `ordinals` at this level, read from the level's slots under
