@@ -161,6 +161,10 @@ its job changes completely, because its old job no longer exists.
   low-single-digits territory the pre-r6 design already accepted for the same scan (this risk is
   orthogonal to the handle-vs-`mosaica_id` question — it was already here, unchanged by this
   revision).
+- *Artifact entities* are floored as item ids are. An artifact's entity is in its layer's own space,
+  from 65,536 up, so the twenty this sweep publishes are all below the floor: they are swept for
+  in the identifier columns and the cursors, and not in numbers, shapes or text. `security.md`'s
+  evidence table records the gap.
 
 **The identity-key sweep (brief step 1, new in this revision).** The deployment's 128-bit
 identity key (`identity.key` in MANIFEST; `IdentityKey(k0, k1)` in the oracle) inverts every
@@ -587,6 +591,13 @@ def _artifacts_scan(payload: bytes) -> ArtifactsScan:
                 for values in batch.column("content").to_pylist():
                     scan.text.extend(values)
     return scan
+
+
+def artifact_entity(key, mosaica_id: int) -> int:
+    """The entity in its layer's space of an artifact's identifier, which must carry kind 1."""
+    inverted = identity_mod.invert_artifact(key, mosaica_id)
+    assert inverted is not None, f"{mosaica_id} was served as an artifact and names an item"
+    return inverted[1]
 
 
 def _cursor_windows(cursor: str) -> set[int]:
@@ -1251,20 +1262,25 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
     assert artifact_ids <= artifact_id_values, "the sweep missed the identifiers it was sent"
     assert artifact_shape_windows, "the artifacts read must carry shapes to sweep"
     # The artifacts' own entities are internal too: every one this read served, by inverting the
-    # identifiers it was sent.
-    artifact_entities = {identity_mod.invert(identity_key, t)[1] for t in artifact_ids}
+    # identifiers it was sent. They are entities of the layer's space, from 65,536 up, so they are
+    # floored where item ids are: those below `SAFE_ID_FLOOR` are swept for in the identifier
+    # columns and the cursors alone.
+    artifact_entities = {artifact_entity(identity_key, t) for t in artifact_ids}
+    artifact_entities_high = {e for e in artifact_entities if e >= SAFE_ID_FLOOR}
     assert artifact_entities.isdisjoint(artifact_ids)
     leaked = artifact_id_values & (target_ids | artifact_entities)
     assert not leaked, f"entity id(s) in an artifacts identifier column: {sorted(leaked)[:20]}"
     leaked = (artifact_number_values | artifact_shape_windows) & (
-        target_ids_high | artifact_entities
+        target_ids_high | artifact_entities_high
     )
     assert not leaked, f"entity id(s) in an artifacts number or shape: {sorted(leaked)[:20]}"
     leaked = artifact_cursor_windows & (target_ids | artifact_entities)
     assert not leaked, f"entity id(s) in the bytes of an artifacts cursor: {sorted(leaked)[:20]}"
     for half in (identity_key.k0, identity_key.k1):
         assert half not in artifact_id_values | artifact_number_values | artifact_cursor_windows
-    leaked = _decimal_windows(artifact_text, SAFE_ID_FLOOR) & (target_ids_high | artifact_entities)
+    leaked = _decimal_windows(artifact_text, SAFE_ID_FLOOR) & (
+        target_ids_high | artifact_entities_high
+    )
     assert not leaked, f"entity id(s) as decimal text in an artifacts body: {sorted(leaked)[:20]}"
     assert identity_key_hex not in artifact_text.decode("utf-8", errors="replace")
 
@@ -1303,12 +1319,13 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
                     tile_number_values.add(int(value))
                 tile_text += "\n".join([row.key or "", *row.content]).encode() + b"\n"
     assert tile_ids, "the artifacts viewport must serve rows to mean anything"
-    tile_entities = {identity_mod.invert(identity_key, t)[1] for t in tile_ids}
+    tile_entities = {artifact_entity(identity_key, t) for t in tile_ids}
+    tile_entities_high = {e for e in tile_entities if e >= SAFE_ID_FLOOR}
     leaked = tile_id_values & (target_ids | tile_entities)
     assert not leaked, f"entity id(s) in an artifacts viewport identifier: {sorted(leaked)[:20]}"
-    leaked = tile_number_values & (target_ids_high | tile_entities)
+    leaked = tile_number_values & (target_ids_high | tile_entities_high)
     assert not leaked, f"entity id(s) in an artifacts viewport number: {sorted(leaked)[:20]}"
-    leaked = _decimal_windows(tile_text, SAFE_ID_FLOOR) & (target_ids_high | tile_entities)
+    leaked = _decimal_windows(tile_text, SAFE_ID_FLOOR) & (target_ids_high | tile_entities_high)
     assert not leaked, f"entity id(s) as decimal text in an artifacts viewport: {sorted(leaked)[:20]}"
     for half in (identity_key.k0, identity_key.k1):
         assert half not in tile_id_values | tile_number_values

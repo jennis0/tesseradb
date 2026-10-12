@@ -735,6 +735,41 @@ KEY_RUN_VERSION = 3
 KEY_RUN_PAGE = 4096
 
 
+def newest_side_manifest(root: Path | str, partition: str = "default") -> dict:
+    """The highest-numbered `SEGMENTS-<n>.json` of the prefix `CURRENT` names: what a running
+    server last published, where [`Bundle`] reads the build's `SEGMENTS-0.json`."""
+    root = Path(root)
+    prefix = json.loads((root / "CURRENT").read_text())["prefix"]
+    side_manifests = partition_dir(root / prefix, partition).glob("SEGMENTS-*.json")
+    newest = max(side_manifests, key=lambda path: int(path.stem.removeprefix("SEGMENTS-")))
+    return json.loads(newest.read_bytes())
+
+
+def registered_layer(side_manifest: dict, name: str) -> dict | None:
+    """The record of the layer registered as `name` in a side-manifest's `layers`, or `None`."""
+    named = (layer for layer in side_manifest["layers"] if layer["declaration"]["name"] == name)
+    return next(named, None)
+
+
+def layer_mosaica_id(key: identity_mod.IdentityKey, layer: dict) -> int:
+    """A layer's own identifier: entity 0 of its space (`docs/sharding.md` §2.2)."""
+    return identity_mod.forward_artifact(key, layer["space"], 0)
+
+
+def artifact_mosaica_id(key: identity_mod.IdentityKey, layer: dict, level: int, ordinal: int) -> int:
+    """The identifier of the artifact a level of `layer` gave `ordinal`: the level's entities taken
+    in order across its runs, each run in the order the level was given it."""
+    remaining = ordinal
+    for run in layer["runs"][level]["runs"]:
+        width = run["end"] - run["start"]
+        if remaining < width:
+            return identity_mod.forward_artifact(key, layer["space"], run["start"] + remaining)
+        remaining -= width
+    raise ValueError(
+        f"layer {layer['declaration']['name']!r} level {level} holds no ordinal {ordinal}"
+    )
+
+
 def _page_checksum_holds(page: bytes) -> bool:
     return zlib.crc32(page[: KEY_RUN_PAGE - 4]) == struct.unpack_from("<I", page, KEY_RUN_PAGE - 4)[0]
 

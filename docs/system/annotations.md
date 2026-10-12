@@ -39,8 +39,29 @@ flowchart TB
 a roll-up; between levels it is containment. A dependency edge attaches one artifact to another.
 Content is derived or supplied per artifact.*
 
-An artifact's position within its layer and level never reaches a client. On the wire it is a
-`mosaica_id`, exactly like a point's, resolved by the server on every request.
+## An artifact's identity
+
+Each registered layer has a layer space: a numbering of its own, apart from the items', from which
+the layer and its artifacts take their entity ids. Spaces are numbered from 0 in the order layers
+are registered, at a build or at a running service, and a space is never given to a second layer.
+There are 2³¹ of them, and a registration past the last is refused with `409`. The layer itself is
+entity 0 of its space, the entity a suppression of the whole layer names. Each level takes aligned
+runs of 65,536 entities from entity 65,536: one run when the layer is registered, and the space's
+next run whenever a publication outgrows the runs the level holds. A level's artifacts take its
+entities in the order they are first published. A publication that needs more entities than the
+space has left is refused with `409`, giving how many it needs and how many are left, and writes
+nothing.
+
+On the wire an artifact is a `mosaica_id`, as an item is, and the server resolves it on every
+request. The identity key permutes a 64-bit input. Its top bit, the kind, is 1 for an artifact or
+a layer, and the next 31 bits are the layer space and the low 32 the entity in it. An item's input
+has kind 0 and holds its shard, tenancy and number ([data model](data-model.md#identifiers)). An
+artifact's identifier therefore never names an item. The item card answers it as an identifier
+naming nothing, as the artifact card answers an item's, and a member table, a generating set or an
+ingest row naming it has that row refused as naming no item. `/control/changes` deletes, suppresses
+and unsuppresses an artifact or a layer by its `mosaica_id`. It refuses a request that deletes a
+layer by its own `mosaica_id` with `422`; dropping the layer removes it (below). An artifact's
+position within its layer and level never reaches a client.
 
 ## Declaring a layer
 
@@ -398,10 +419,12 @@ applied by the client, over its slot.
 
 ## How membership is stored
 
-An artifact's membership is stored in two spaces. Entity space is where an artifact's identity and
-its declared members live: durable, on disc, addressed the same way every point is, and untouched
-by how the map happens to be laid out. Row space is where every count and every drawn shape is
-computed: the same members as positions in one view's row order.
+An artifact is stored in three places. Its layer space holds its record: its key, view, edges,
+access labels, shape, declared sizes and supplied content, the held decomposition of its shape, and
+the deletions and suppressions of the layer and its artifacts. The point shard's entity space holds its
+declared members and its generating sets: durable, on disc, addressed the same way every point is,
+and untouched by how the map happens to be laid out. Row space is where every count and every drawn
+shape is computed: the same members as positions in one view's row order.
 
 A level is held in row space in one of three forms. Stored by artifact (`"rows"`), it keeps one
 bitmap of rows per artifact, and a tile index places each artifact by the span of its rows. Served
@@ -458,7 +481,7 @@ and any other level is served from a list column. The answers are the same eithe
 
 ```mermaid
 flowchart LR
-  subgraph entity["entity space: on disc, permanent"]
+  subgraph entity["the point shard's entity space: on disc, permanent"]
     mem["an artifact's members"]
   end
   subgraph row["row space: per view; amended by writes, written again at compaction"]
@@ -496,7 +519,8 @@ so it costs no more at request time than an enumerated one.
 | Compaction | The deleted member's row is dropped, and each enumerated or shape level served from a column has its column, member bitmaps and coverings written again over the new rows. What happens to content generated from the deleted member follows the layer's own declaration (below) | For content that was already withdrawn at the deletion, nothing changes; content declared permissive, and generated from more than the one deleted point, resumes serving |
 | An edit of a member: an ingest row changing its values, label or position ([edits](write-path.md#edits)) | The item moves to a new entity and keeps its `mosaica_id`. The new entity joins every enumerated artifact the old one was a member of, and every generating set it took part in; the old entity leaves them | Nothing changes in its memberships. The item leaves every view, and so every count, until the flush that places its new rows, and is counted again from the publication the edit's receipt names |
 | Suppression of the artifact itself | The artifact stops being served immediately. Nothing about it is stored differently; it resumes only on an explicit unsuppress | The artifact disappears the moment the suppression is accepted, and stays gone until an explicit unsuppress |
-| Deletion of the artifact itself | The artifact stops being served immediately. Its record, and every edge naming it, are removed at the next fold. Deleting it does not lift a suppression already on it: only an [explicit unsuppress](write-path.md#denies) does | The artifact disappears the moment the deletion is accepted, and never returns |
+| Deletion of the artifact itself | The artifact stops being served immediately. The next fold writes its layer space again without its record, its supplied content and every edge naming it, so none of the content's bytes is in the prefix that fold publishes. Deleting it does not lift a suppression already on it: only an [explicit unsuppress](write-path.md#denies) does | The artifact disappears the moment the deletion is accepted, and never returns |
+| Drop of a view of a group | The artifacts of every layer scoped to that group that belong to the dropped view are removed from their layer by the drop itself, without a deletion in the layer space's overlay | The artifacts disappear from the drop's publication, with the view |
 
 An ingested point's membership column carries the layer's edges as well as its memberships, exactly
 as a member file's does at a build: consecutive keys in one point's list name a parent and a child.
@@ -523,15 +547,32 @@ compaction removes the deleted point from the generating set, and the content re
 viewers who can see every point that remains, unless the deletion took the last of them, in which
 case it is dropped exactly as under strict.
 
+## Dropping a layer
+
+`DELETE /control/layers/{name}` drops a layer. The drop is written to the log before it is
+acknowledged, and no request that starts after the acknowledgement serves the layer or its
+artifacts on any route: every
+identifier the layer issued answers as one naming nothing, and a request naming the layer is
+answered as for a layer never registered. The layer's record, its space's record and the point
+shard's membership slices and row forms of the layer leave the next publication's side-manifest.
+Their files stay on disc, named by no manifest, until the next compaction writes a prefix without
+them. A restart replays the drop, so a crash between the acknowledgement and that publication drops
+the layer too.
+
+Nothing of a dropped layer is kept, and its name may be registered again. The new layer takes a
+new space, so none of the dropped layer's identifiers names it or its artifacts, and a bulk read's
+cursor issued over the dropped layer does not open over the new one.
+
 ## What is not built
 
 There is no way to declare an artifact at request time, an analyst's own selection, saved and
 shared through the control plane the way a layer itself can be. A caller wanting that has to build
 the artifact into a layer ahead of time, offline.
 
-There is no edit verb for an artifact. Correcting one means replacing the layer that declares it,
-which mints a fresh identity for every artifact in it rather than keeping the old ones. A client
-holding an old identifier finds it no longer resolves, exactly as with a point.
+There is no edit verb for an artifact. Correcting one means deleting it and publishing it again,
+which gives it a new identifier, or dropping its layer and registering the layer again, which gives
+every artifact in it a new one. A client holding an old identifier finds it names nothing, exactly
+as with a deleted point.
 
 A layer whose membership is an attribute predicate or a shape cannot declare a fractional
 membership requirement, because nothing yet defines what that layer's full membership is for a

@@ -316,7 +316,7 @@ The server starts one when any of these conditions holds, each set under `[inges
 |---|---|---|
 | `compaction_window_start`, `compaction_window_secs`, `compaction_window_min_segments` | `"00:00"`, 14400, 8 | A view has 8 segments or more during the four hours from midnight UTC |
 | `compaction_max_segments` | 64 | A view has 64 segments, at any hour |
-| `compaction_after_deletions` | 500000, the value of `overlay_soft_limit` | 500,000 deleted items are waiting to be removed |
+| `compaction_after_deletions` | 500000, the value of `overlay_soft_limit` | 500,000 deleted items and annotations, counted together, are waiting to be removed |
 | `compaction_dead_rows_fraction` | 0.2 | Deleted items waiting to be removed are at least a fifth of all rows |
 | `compaction_dead_bytes_ratio` | 1.0 | Files the bundle no longer uses take at least as much space as the files it does |
 

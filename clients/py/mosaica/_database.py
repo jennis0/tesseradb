@@ -1676,9 +1676,12 @@ class Database:
         - `strict`: `True` refuses the whole request at a row that names no item, or names two.
 
         A row naming no item, or two, is refused and the report lists it; the other rows are
-        applied. A `None` in the list, or a row whose cells are all null, names no item. A column
-        that is neither `mosaica_id` nor a unique attribute is not sent, and the report names it
-        in `ignored_columns`; a table with no other column is refused before anything is sent.
+        applied. A `None` in the list, or a row whose cells are all null, names no item. A
+        `mosaica_id` in the list may name an annotation instead, which stops being served at once
+        and whose record goes at the next compaction; a layer's is refused, and `drop_layer`
+        removes a layer. A column that is neither `mosaica_id` nor a unique attribute is not
+        sent, and the report names it in `ignored_columns`; a table with no other column is
+        refused before anything is sent.
         The items stop being served at once. Their rows are removed from disk at the next
         compaction; `compact()` asks for one.
 
@@ -1693,7 +1696,8 @@ class Database:
     def suppress(self, items: Any, strict: bool = False) -> ChangeReport:
         """Hide items until `unsuppress` lifts it, and return a report.
 
-        - `items`, `strict`: as for `remove`.
+        - `items`, `strict`: as for `remove`. A layer's `mosaica_id` hides the layer and its
+          annotations.
 
         A hidden item is left out of every answer from the moment the call returns.
         """
@@ -1823,7 +1827,9 @@ class Database:
         """The server's own report on this database, as a dictionary.
 
         It holds what the operator sees: how far writes have got, queue depths, and the page sizes
-        each write request accepts.
+        each write request accepts. `overlay` counts the items deleted or hidden and not yet
+        compacted. `layer_spaces` counts the layers in `count`, their annotations and the layers
+        themselves deleted or hidden in `depth`, and those deleted alone in `retirable`.
         """
         self._refuse_before_the_first_commit("status")
         return _accepted(self.control.status_answer(), "status")
@@ -1841,15 +1847,28 @@ class Database:
     def drop_layer(self, name: str, wait: bool = False) -> dict:
         """Remove an annotation layer, and return the server's answer.
 
-        - `name`: the layer's name. A new layer may be declared under it afterwards, and none of
-          the dropped layer's `mosaica_id`s names the new one.
+        - `name`: the layer's name, or the name of a label set.
         - `wait`: `True` returns only once readers no longer see the layer, or after the server's
           `serve.visible_wait_max_secs`, when the answer's `visible` is `false`.
 
-        The answer's `publication` names the publication from which readers no longer see it.
+        The answer's `publication` names the publication from which readers no longer see it. The
+        layer leaves this database's declaration with the inserts into it not yet committed, so
+        a later commit does not declare it again. A new layer may be declared under the name, and
+        none of the dropped layer's `mosaica_id`s names the new one.
         """
         self._refuse_before_the_first_commit("drop_layer")
-        return _accepted(self.control.drop_layer(name, wait), f"drop_layer {name}")
+        answer = _accepted(self.control.drop_layer(name, wait), f"drop_layer {name}")
+        layers = self.blocks.blocks["layer"]
+        layers[:] = [block for block in layers if block.get("name") != name]
+        for block in layers:
+            if (block.get("labels") or {}).get("name") == name:
+                del block["labels"]
+        self.pending = [
+            one for one in self.pending
+            if not (one.kind in ("layer", "labels") and one.target == name)
+        ]
+        self._save_state()
+        return answer
 
     def drop_view(self, group: str, key: str, wait: bool = False) -> dict:
         """Remove one view of a view group, and return the server's answer.

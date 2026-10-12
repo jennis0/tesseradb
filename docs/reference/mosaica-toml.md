@@ -126,7 +126,7 @@ Writes through the control plane: the limits on each request, and when buffered 
 | `compaction_window_secs` | integer | `14400` | How long the window stays open, in seconds. `0` never opens it, and a day or more never closes it. |
 | `compaction_window_min_segments` | integer | `8` | Inside the window, compact when a view has at least this many segments. `0` never compacts in the window. |
 | `compaction_max_segments` | integer or `"off"` | `64` | At any hour, compact when a view has this many segments, or `"off"`. |
-| `compaction_after_deletions` | integer or `"off"` | the value of `overlay_soft_limit` | At any hour, compact when this many deleted items wait to be removed, or `"off"`. |
+| `compaction_after_deletions` | integer or `"off"` | the value of `overlay_soft_limit` | At any hour, compact when this many deleted items and annotations, counted together, wait to be removed, or `"off"`. |
 | `compaction_dead_rows_fraction` | number or `"off"` | `0.2` | At any hour, compact when deleted items waiting to be removed reach this fraction of the stored rows, or `"off"`. |
 | `compaction_dead_bytes_ratio` | number or `"off"` | `1.0` | At any hour, compact when the bundle's unreferenced bytes on disc reach this ratio of the bytes its manifests name, or `"off"`. |
 

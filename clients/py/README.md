@@ -561,9 +561,9 @@ an API key or an OIDC access token.
 
 `remove()` puts a deletion in the overlay, and the compaction that removes its rows is what ends
 it; `compact()` is how one is asked for, and it is accepted rather than finished when the call
-returns. `drop_layer()` tombstones the name rather than freeing it, so a later declaration under
-it is refused and no stale reference reaches a different layer. `drop_view()` deletes the items
-it leaves in no view, as `remove()` deletes one, and the answer's `deleted` says how many.
+returns. After `drop_layer()` the name may be declared again, as a new layer that none of the
+dropped layer's `mosaica_id`s names, so no stale reference reaches it. `drop_view()` deletes the
+items it leaves in no view, as `remove()` deletes one, and the answer's `deleted` says how many.
 
 ## A deployment somebody else runs
 

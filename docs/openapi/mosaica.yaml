@@ -912,8 +912,8 @@ paths:
         this route names a view the principal cannot reach.
 
         `404 unknown` is the same status, code, detail and work for an identifier that names
-        nothing and one that names an item this principal may not see. Subject to compute
-        admission.
+        no item, an artifact's or a layer's among them, and one that names an item this principal
+        may not see. Subject to compute admission.
       security:
         - sessionToken: []
       parameters:
@@ -1799,7 +1799,7 @@ paths:
             - With `strict=true`, a row is refused: its values name more than one item, as when a row gives an item a unique value another item holds; its `mosaica_id` names no live or suppressed item; it names no item and carries no coordinates; or it names an item, or sets a unique value, an earlier row does
             - An item a row edits changed while the batch was checked; sending it again answers
             - The items the batch names changed while it was checked twice; sending it again answers
-            - The ids the batch's new and edited items take would carry the shard's high water past its size, or past the lowest id an annotation layer holds; the detail names the size, the high water and how many ids the batch needed
+            - The ids the batch's new and edited items take would carry the shard's high water past its size; the detail names the size, the high water and how many ids the batch needed
           content:
             application/json:
               schema:
@@ -1838,12 +1838,19 @@ paths:
     post:
       tags: ["control: changes"]
       operationId: changes
-      summary: Delete, suppress or lift the suppression of items.
+      summary: Delete, suppress or lift the suppression of items, artifacts and layers.
       description: |
         `delete` removes an item from every view and every count; the compaction fold removes its
         rows from disc. `suppress` hides an item from every viewer until `unsuppress` lifts it.
         There is no edit here: an item's access labels change by an ingest row naming the item with
         the new labels, and `op: "predicate"` is refused with that advice.
+
+        A `mosaica_id` may also name an annotation artifact or a layer, as a publication's or a
+        registration's answer gives it. A deleted artifact stops being served at once, and the next
+        fold removes its record and its supplied content. A suppressed layer stops being served
+        with all its artifacts until it is unsuppressed. A layer is not deleted here: a request
+        that deletes one by its own `mosaica_id` is `422` and applies nothing, and
+        `DELETE /control/layers/{name}` removes it.
 
         A change names its item in `match`, by its `mosaica_id`, a string of decimal digits, and
         by the values of fields declared unique: a keyword as a string, an integer or a timestamp
@@ -1907,6 +1914,7 @@ paths:
             - No change names its item by an identifying column
             - A `mosaica_id` that is not a decimal string
             - A `match` key that is neither `mosaica_id` nor a field declared unique, or a value that is not one of its field's
+            - A `delete` naming a layer by its own `mosaica_id`; the detail names the `DELETE /control/layers/{name}` to send instead
           content:
             application/json:
               schema:
@@ -2585,9 +2593,10 @@ paths:
         answer follows the write-ahead log's fsync and carries the layer's `mosaica_id`, the address
         `POST /control/changes` suppresses it by.
 
-        A layer's name is its identity for ever: a name already registered, or one a dropped layer
-        held, is `422`, including a second request with the same declaration. A refusal means the
-        layer does not exist.
+        A name already registered is `422`, including a second request with the same declaration.
+        A dropped layer's name may be registered again, and the layer it names is a new one: none
+        of the dropped layer's `mosaica_id`s names it or its artifacts. A refusal means the layer
+        does not exist.
       security:
         - controlCredential: []
       parameters:
@@ -2611,6 +2620,12 @@ paths:
           $ref: "#/components/responses/ControlBadCredential"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "409":
+          description: Every one of the 2³¹ layer spaces has been given to a layer, or the layer declares more levels than one layer space holds. Nothing was registered. The detail gives the figures.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "413":
           $ref: "#/components/responses/DeclarationTooLarge"
         "415":
@@ -2618,7 +2633,7 @@ paths:
         "422":
           description: |
             - An unknown field
-            - A name that is empty, `all`, registered, or held by a dropped layer
+            - A name that is empty, `all` or registered
             - A view that is neither a view nor a view group
             - A view outside the group a group-scoped layer names
             - A `depends_on` layer that is not registered, or the layer itself
@@ -2755,7 +2770,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: A held artifact holds a part with a different value, or a second `excluding` for a held key; or a member of a content's generating set, or with `strict=true` any member, names two items. Nothing was written.
+          description: A held artifact holds a part with a different value, or a second `excluding` for a held key; a member of a content's generating set, or with `strict=true` any member, names two items; or the artifacts the batch creates need more ids than the level's layer space has left, which the detail gives. Nothing was written.
           content:
             application/json:
               schema:
@@ -2770,7 +2785,7 @@ paths:
             - `view` missing on a layer scoped to a group or present on another
             - A member table whose columns differ in length, or tables left with no identifying column
             - A `mosaica_id` that is not a decimal string, or a value that is not one of its field's
-            - A member deleted after it was resolved, or one that names no item with a row
+            - A member deleted after it was resolved
             - An unknown layer or level, or a layer whose membership is an attribute
             - A shape on a layer that declares none, none on one that does, the wrong kind, or one over the vertex cap
             - Labels the layer does not take, or none where it requires them
@@ -2872,7 +2887,7 @@ paths:
             - `view` missing on a layer scoped to a group or present on another
             - A member table whose columns differ in length, or tables left with no identifying column
             - A `mosaica_id` that is not a decimal string, or a value that is not one of its field's
-            - A member deleted after it was resolved, or one that names no item with a row
+            - A member deleted after it was resolved
             - A shape the layer does not take
             - A content without a generating set on a layer whose content requires every member visible
           content:
@@ -6104,12 +6119,12 @@ components:
       type: object
       additionalProperties: false
       required: [op, match]
-      description: One change, and the item it names.
+      description: One change, and what it names, an item or by its `mosaica_id` an artifact or a layer.
       properties:
         op:
           type: string
           enum: [delete, suppress, unsuppress]
-          description: "`delete` removes the item; `suppress` hides it; `unsuppress` lifts a suppression."
+          description: "`delete` removes the item or the artifact; `suppress` hides it; `unsuppress` lifts a suppression."
         match:
           $ref: "#/components/schemas/AddressRow"
 
@@ -6180,7 +6195,7 @@ components:
     RefusalReason:
       type: string
       enum: [names_two_items, unknown_mosaica_id, names_no_item, one_item_twice, one_value_twice]
-      description: "`names_two_items`: the row's values name more than one item. `unknown_mosaica_id`: its `mosaica_id` names no live or suppressed item. `names_no_item`: its values name no item, in a request or a row that creates none. `one_item_twice`: an earlier kept row names the same item. `one_value_twice`: an earlier kept row sets the same unique value. Rows are decided in row order against the rows kept before them, so a refused row refuses no later row. Where two reasons apply to one row the first in this order is given: `unknown_mosaica_id`, `names_two_items`, `names_no_item`, `one_item_twice`, `one_value_twice`."
+      description: "`names_two_items`: the row's values name more than one item. `unknown_mosaica_id`: its `mosaica_id` names no live or suppressed item, as an artifact's or a layer's names none; on `/control/changes`, no live or suppressed item, artifact or layer. `names_no_item`: its values name no item, in a request or a row that creates none. `one_item_twice`: an earlier kept row names the same item. `one_value_twice`: an earlier kept row sets the same unique value. Rows are decided in row order against the rows kept before them, so a refused row refuses no later row. Where two reasons apply to one row the first in this order is given: `unknown_mosaica_id`, `names_two_items`, `names_no_item`, `one_item_twice`, `one_value_twice`."
 
     ChangesApplied:
       type: object
