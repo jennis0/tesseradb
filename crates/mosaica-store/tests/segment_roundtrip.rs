@@ -22,6 +22,8 @@ use mosaica_store::write::{write_permutation, write_segment};
 use mosaica_store::{ColumnsRef, StoreError};
 use mosaica_types::{EntityId, MosaicaId};
 
+const IDENTITY_HEX: &str = "0123456789abcdef0123456789abcdef";
+
 /// A synthetic `mosaica_id`-shaped value for test fixtures: full splitmix64 output over a
 /// seed, so its top 16 bits are a `priority` prefix like any real `mosaica_id` (contracts
 /// §2.6), without claiming this is the actual Feistel construction — `mosaica-types`'s identity
@@ -485,7 +487,7 @@ fn a_view_without_a_quantisation_extent_is_a_typed_error() {
         "identity": {
             "construction": "siphash-2-4",
             "rounds": 1,
-            "key": "0123456789abcdef0123456789abcdef"
+            "key": IDENTITY_HEX
         },
         // `incarnation` is present and `quantisation` is not, so the refusal below is about the
         // frame rather than about whichever required field serde happens to reach first

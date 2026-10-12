@@ -35,8 +35,8 @@ use mosaica_types::{IdentityKey, ShardId, BUNDLE_FORMAT};
 use crate::error::{read_to_vec, Result, StoreError};
 use crate::layout::ShardLayout;
 use crate::manifest::{
-    CurrentPointer, FileDigest, Honourability, Manifest, PartitionManifest, SegmentsManifest,
-    ShardRecord, Shards,
+    CurrentPointer, FileDigest, Honourability, Manifest, PartitionManifest, SegmentDescriptor,
+    SegmentsManifest, ShardRecord, Shards,
 };
 use crate::permutation::{Permutation, RowSpace, SegmentExtent};
 use crate::render_presence::{render_presence_path, RenderPresence, RENDER_PRESENCE_DIR};
@@ -840,8 +840,6 @@ fn open_shard(
         }
         sanitize_component("segment id", &seg_desc.seg_id)?;
 
-        let view_rel = layout.view_rel(&seg_desc.view);
-        let view_dir = prefix_dir.join(&view_rel);
         let is_new_view = !views.contains_key(&seg_desc.view);
         let perm_rel = layout.permutation_rel(&seg_desc.view);
         // A view created while the service runs has no base until a fold, so no `files` map names
@@ -852,61 +850,8 @@ fn open_shard(
         let view_entry = match views.get_mut(&seg_desc.view) {
             Some(entry) => entry,
             None => {
-                let permutation = if has_base {
-                    Permutation::load(&prefix_dir.join(&perm_rel))?
-                } else {
-                    Permutation::empty()?
-                };
-
-                // Optional: without it the view answers through the projecting route. Verified
-                // where named, since a wrong row→entity table would put another entity's verdict
-                // on a row.
-                let row_entity = if has_base
-                    && digests.names(&format!(
-                        "{view_rel}/{}",
-                        crate::row_entity::ROW_ENTITY_FILE
-                    )) {
-                    Some(Arc::new(crate::row_entity::RowToEntity::load(
-                        &view_dir.join(crate::row_entity::ROW_ENTITY_FILE),
-                    )?))
-                } else {
-                    None
-                };
-
-                // Optional, as `row-entity.u32` is: without it a field's figures come from walking
-                // the base rows.
-                let field_tallies = if has_base
-                    && digests.names(&format!(
-                        "{view_rel}/{}",
-                        crate::field_tallies::FIELD_TALLIES_FILE
-                    )) {
-                    let path = view_dir.join(crate::field_tallies::FIELD_TALLIES_FILE);
-                    crate::field_tallies::read(&path)?.map(Arc::new)
-                } else {
-                    None
-                };
-
-                // A base-less view's rows all belong to extents, so its base owns none.
-                let mut row_space = RowSpace::new(
-                    Arc::new(permutation),
-                    if has_base { seg_desc.row_count } else { 0 },
-                );
-                if let Some(table) = row_entity {
-                    row_space = row_space.with_row_entity(table);
-                }
-                views.insert(
-                    seg_desc.view.clone(),
-                    ViewData {
-                        shard: record.id,
-                        row_space,
-                        segments: Vec::new(),
-                        incarnation: seg_desc.incarnation,
-                        // Attached below, once the row count and the permutation's bound are
-                        // checked.
-                        term_images: None,
-                        field_tallies,
-                    },
-                );
+                let view = open_view(prefix_dir, layout, digests, seg_desc, has_base, record.id)?;
+                views.insert(seg_desc.view.clone(), view);
                 views.get_mut(&seg_desc.view).expect("just inserted")
             }
         };
@@ -916,26 +861,7 @@ fn open_shard(
         for name in crate::SEGMENT_FILES {
             digests.ensure(&format!("{seg_rel}/{name}"), &seg_dir.join(name))?;
         }
-        // Every presence bitmap `ColumnsRef::load` will read must be digested, so this walks the
-        // directory, not the manifest.
-        let presence_dir = seg_dir.join(RENDER_PRESENCE_DIR);
-        if presence_dir.is_dir() {
-            let entries = std::fs::read_dir(&presence_dir).map_err(|source| StoreError::Io {
-                path: presence_dir.clone(),
-                source,
-            })?;
-            for entry in entries {
-                let entry = entry.map_err(|source| StoreError::Io {
-                    path: presence_dir.clone(),
-                    source,
-                })?;
-                let rel = format!(
-                    "{seg_rel}/{RENDER_PRESENCE_DIR}/{}",
-                    entry.file_name().to_string_lossy()
-                );
-                digests.ensure(&rel, &entry.path())?;
-            }
-        }
+        ensure_presence_digests(digests, &seg_rel, &seg_dir)?;
 
         // A base segment's rows name their entities in the view's row-to-entity file. A flush
         // or merge segment lists the rows an edit moved, a file that must be there and verify
@@ -996,43 +922,135 @@ fn open_shard(
             )?;
         }
 
-        // A flush or merge segment owns rows above the base. [`SegmentExtent::rebuild`] maps them
-        // from its `mosaica_id` column, and `with_extent` refuses one that does not continue the
-        // row space.
         if !is_base_segment {
-            let row_base = u32::try_from(view_entry.row_space.total_rows()).map_err(|_| {
-                StoreError::MalformedBundle {
-                    detail: format!(
-                        "view '{}' already holds {} rows, so segment '{}' cannot begin \
-                         inside a u32 row space",
-                        seg_desc.view,
-                        view_entry.row_space.total_rows(),
-                        seg_desc.seg_id
-                    ),
-                }
-            })?;
-            let extent = SegmentExtent::rebuild(
-                &segment,
-                seg_desc.entity_lo,
-                seg_desc.entity_hi,
-                row_base,
-                identity_key,
-                record.id,
-            )?;
-            view_entry.row_space = view_entry.row_space.with_extent(extent).ok_or_else(|| {
-                StoreError::MalformedBundle {
-                    detail: format!(
-                        "segment '{}' does not continue view '{}'s row space",
-                        seg_desc.seg_id, seg_desc.view
-                    ),
-                }
-            })?;
+            attach_extent(view_entry, &segment, seg_desc, identity_key, record.id)?;
         }
 
         view_entry.segments.push(Arc::new(segment));
     }
 
     Ok(ShardData { record, views })
+}
+
+/// A view's row space as its base segment `seg_desc` leaves it, before any segment is attached.
+fn open_view(
+    prefix_dir: &Path,
+    layout: ShardLayout<'_>,
+    digests: Digests<'_>,
+    seg_desc: &SegmentDescriptor,
+    has_base: bool,
+    shard: ShardId,
+) -> Result<ViewData> {
+    let view_rel = layout.view_rel(&seg_desc.view);
+    let view_dir = prefix_dir.join(&view_rel);
+    let permutation = if has_base {
+        Permutation::load(&prefix_dir.join(layout.permutation_rel(&seg_desc.view)))?
+    } else {
+        Permutation::empty()?
+    };
+
+    // Optional: without it the view answers through the projecting route. Verified where named,
+    // since a wrong row→entity table would put another entity's verdict on a row.
+    let row_entity = if has_base
+        && digests.names(&format!("{view_rel}/{}", crate::row_entity::ROW_ENTITY_FILE))
+    {
+        Some(Arc::new(crate::row_entity::RowToEntity::load(
+            &view_dir.join(crate::row_entity::ROW_ENTITY_FILE),
+        )?))
+    } else {
+        None
+    };
+
+    // Optional, as `row-entity.u32` is: without it a field's figures come from walking the base
+    // rows.
+    let field_tallies = if has_base
+        && digests.names(&format!("{view_rel}/{}", crate::field_tallies::FIELD_TALLIES_FILE))
+    {
+        let path = view_dir.join(crate::field_tallies::FIELD_TALLIES_FILE);
+        crate::field_tallies::read(&path)?.map(Arc::new)
+    } else {
+        None
+    };
+
+    // A base-less view's rows all belong to extents, so its base owns none.
+    let mut row_space = RowSpace::new(
+        Arc::new(permutation),
+        if has_base { seg_desc.row_count } else { 0 },
+    );
+    if let Some(table) = row_entity {
+        row_space = row_space.with_row_entity(table);
+    }
+    Ok(ViewData {
+        shard,
+        row_space,
+        segments: Vec::new(),
+        incarnation: seg_desc.incarnation,
+        // Attached once the row count and the permutation's bound are checked.
+        term_images: None,
+        field_tallies,
+    })
+}
+
+/// Checks the digest of every presence bitmap under `seg_dir`. `ColumnsRef::load` reads each one,
+/// so this walks the directory, not the manifest.
+fn ensure_presence_digests(digests: Digests<'_>, seg_rel: &str, seg_dir: &Path) -> Result<()> {
+    let presence_dir = seg_dir.join(RENDER_PRESENCE_DIR);
+    if !presence_dir.is_dir() {
+        return Ok(());
+    }
+    let io = |source| StoreError::Io {
+        path: presence_dir.clone(),
+        source,
+    };
+    for entry in std::fs::read_dir(&presence_dir).map_err(io)? {
+        let entry = entry.map_err(io)?;
+        let rel = format!(
+            "{seg_rel}/{RENDER_PRESENCE_DIR}/{}",
+            entry.file_name().to_string_lossy()
+        );
+        digests.ensure(&rel, &entry.path())?;
+    }
+    Ok(())
+}
+
+/// Attaches a flush or merge segment's rows above the base. [`SegmentExtent::rebuild`] maps them
+/// from its `mosaica_id` column, and `with_extent` refuses one that does not continue the row
+/// space.
+fn attach_extent(
+    view: &mut ViewData,
+    segment: &SegmentData,
+    seg_desc: &SegmentDescriptor,
+    identity_key: &IdentityKey,
+    shard: ShardId,
+) -> Result<()> {
+    let row_base =
+        u32::try_from(view.row_space.total_rows()).map_err(|_| StoreError::MalformedBundle {
+            detail: format!(
+                "view '{}' already holds {} rows, so segment '{}' cannot begin inside a u32 row \
+                 space",
+                seg_desc.view,
+                view.row_space.total_rows(),
+                seg_desc.seg_id
+            ),
+        })?;
+    let extent = SegmentExtent::rebuild(
+        segment,
+        seg_desc.entity_lo,
+        seg_desc.entity_hi,
+        row_base,
+        identity_key,
+        shard,
+    )?;
+    view.row_space = view
+        .row_space
+        .with_extent(extent)
+        .ok_or_else(|| StoreError::MalformedBundle {
+            detail: format!(
+                "segment '{}' does not continue view '{}'s row space",
+                seg_desc.seg_id, seg_desc.view
+            ),
+        })?;
+    Ok(())
 }
 
 /// Reject a single opaque path component (`phash`, view id, seg id) that could otherwise

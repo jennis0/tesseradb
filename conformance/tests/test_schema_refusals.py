@@ -14,7 +14,6 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-
 from oracle.harness import run_build, write_deployment
 from oracle.record_blob import record_dir_of
 
