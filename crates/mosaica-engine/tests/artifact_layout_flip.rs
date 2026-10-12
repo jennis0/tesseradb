@@ -86,19 +86,6 @@ fn answers(engine: &Engine, credential: &[u8]) -> Vec<(Option<String>, u64)> {
     out
 }
 
-fn files(root: &std::path::Path, engine: &Engine, dir: &str) -> Vec<std::path::PathBuf> {
-    let dir = root
-        .join(&engine.generation().prefix)
-        .join(common::SHARD.rel())
-        .join(dir);
-    std::fs::read_dir(&dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .collect()
-}
-
 /// **The whole clause, straddled.** The level is artifact-major at publication, the fold observes a
 /// shape that argues otherwise, and every answer is the same on both sides of the flip.
 #[test]
@@ -171,19 +158,21 @@ fn the_fold_flips_a_scattered_level_and_the_answers_do_not_move() {
     // **The old form's files are not named and the new form's are.** The fold rewrites every level
     // into the prefix it publishes, so what it did not write is simply absent from the manifest —
     // which is how a flip drops what nothing will read again.
-    let columns = files(&root, &engine, "row-column");
+    let columns = live_shard_files(&root, &engine, "row-column");
     assert!(!columns.is_empty(), "the fold wrote the list column");
     assert!(
-        files(&root, &engine, "tile-index").is_empty(),
+        live_shard_files(&root, &engine, "tile-index").is_empty(),
         "and wrote no tile index for a level that has nothing to index"
     );
     let extents: Vec<_> = engine
         .generation()
         .bundle
-        .partitions
-        .values()
-        .flat_map(|p| p.only_shard().record.derived_extents.iter().cloned())
+        .only_shard()
+        .record
+        .derived_extents
+        .iter()
         .filter(|e| matches!(e.form, mosaica_store::manifest::DerivedForm::RowColumn { .. }))
+        .cloned()
         .collect();
     assert_eq!(
         extents.len(),
@@ -202,20 +191,15 @@ fn the_fold_flips_a_scattered_level_and_the_answers_do_not_move() {
             .join(&extent.path)
             .exists());
     }
-    let index_extents: usize = engine
+    let index_extents = engine
         .generation()
         .bundle
-        .partitions
-        .values()
-        .map(|p| {
-            p.only_shard()
-                .record
-                .derived_extents
-                .iter()
-                .filter(|e| e.form == mosaica_store::manifest::DerivedForm::TileIndex)
-                .count()
-        })
-        .sum();
+        .only_shard()
+        .record
+        .derived_extents
+        .iter()
+        .filter(|e| e.form == mosaica_store::manifest::DerivedForm::TileIndex)
+        .count();
     assert_eq!(
         index_extents, 0,
         "the flipped level's old-form entries are gone from the manifest"

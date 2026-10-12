@@ -1,7 +1,5 @@
-//! **The point shard's size**, declared at a build or at a running service: kept across a restart,
-//! a fold and both, and the high water an insert may not take the shard past. A batch that would is
-//! refused alone, the other batches of its commit window go in, and once the size is raised it goes
-//! in too. An edit takes an id as a new item does.
+//! `[shards] size`, declared at a build or at a running service, and the inserts and edits it
+//! refuses.
 
 mod common;
 
@@ -15,7 +13,6 @@ use common::*;
 use mosaica_engine::{AcceptError, Engine};
 use mosaica_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite};
 use mosaica_lifecycle::{ExecError, UnallocatedRow};
-use mosaica_store::read::open_bundle;
 use mosaica_types::{EntityId, ShardFull, ShardLimit, ShardSizeError, SHARD_SIZE_DEFAULT};
 
 /// Items the fixture builds.
@@ -35,7 +32,6 @@ fn built(size: Option<u64>) -> TempDir {
     tmp
 }
 
-/// An engine over the fixture with its executor running and the switchboard on it.
 fn engine_over(tmp: &Path) -> (Engine, Arc<FaultSwitchboard>) {
     let mut engine = open_engine(
         &tmp.join("bundle"),
@@ -49,36 +45,15 @@ fn engine_over(tmp: &Path) -> (Engine, Arc<FaultSwitchboard>) {
     (engine, faults)
 }
 
-/// The same bundle and log reopened. The old engine is dropped first so its executor releases the
-/// log.
+/// Reopens the bundle and log, dropping `engine` first so its executor releases the log.
 fn restart(tmp: &Path, engine: Engine) -> Engine {
     drop(engine);
     engine_over(tmp).0
 }
 
-/// The size the served side-manifest records.
-fn on_disc(tmp: &Path) -> Vec<u64> {
-    let bundle = open_bundle(&tmp.join("bundle")).expect("the bundle opens");
-    bundle.partitions.values().map(|p| p.shard_size).collect()
-}
-
-/// A new item at the origin holding the `id` of `key`.
-fn row(key: &str) -> UnallocatedRow {
-    UnallocatedRow {
-        view: "s0".to_string(),
-        join: None,
-        descriptors: vec![b"0".to_vec()],
-        x: 0.0,
-        y: 0.0,
-        scalars: keyed(key),
-        terms: Vec::new(),
-        scoped: Vec::new(),
-    }
-}
-
 /// `n` new items, holding the `id`s `{prefix}-0` onwards.
 fn rows(prefix: &str, n: usize) -> Vec<UnallocatedRow> {
-    (0..n).map(|i| row(&format!("{prefix}-{i}"))).collect()
+    (0..n).map(|i| keyed_row(&format!("{prefix}-{i}"))).collect()
 }
 
 fn full(size: u64, high_water: u64, needed: u64) -> ShardFull {
@@ -103,14 +78,12 @@ fn size_refused(result: Result<bool, AcceptError>) -> ShardSizeError {
     }
 }
 
-/// **A size declared at a running service is kept**: from the log alone, from the side-manifest a
-/// publication writes, across a fold, and across a restart after the fold.
 #[test]
 fn a_size_declared_at_a_running_service_survives_a_restart_a_fold_and_both() {
     let tmp = built(None);
     let (engine, _faults) = engine_over(tmp.path());
     assert_eq!(engine.shard_size(), SHARD_SIZE_DEFAULT);
-    assert_eq!(on_disc(tmp.path()), [SHARD_SIZE_DEFAULT]);
+    assert_eq!(shards_of(&tmp.path().join("bundle")).0, SHARD_SIZE_DEFAULT);
 
     let size = N + 10;
     assert!(!engine.declare_shards(size).expect("the size is declared"));
@@ -124,15 +97,15 @@ fn a_size_declared_at_a_running_service_survives_a_restart_a_fold_and_both() {
     assert_eq!(engine.shard_size(), size, "replayed from the log");
 
     publish_buffered(&engine);
-    assert_eq!(on_disc(tmp.path()), [size], "the publication restates it");
+    assert_eq!(shards_of(&tmp.path().join("bundle")).0, size, "the publication restates it");
     let engine = restart(tmp.path(), engine);
     assert_eq!(engine.shard_size(), size, "read from the side-manifest");
 
     fold(&engine);
     assert_eq!(engine.generation().prefix, "v00001");
     assert_eq!(
-        on_disc(tmp.path()),
-        [size],
+        shards_of(&tmp.path().join("bundle")).0,
+        size,
         "the fold's side-manifest carries it"
     );
     assert_eq!(engine.shard_size(), size);
@@ -140,7 +113,6 @@ fn a_size_declared_at_a_running_service_survives_a_restart_a_fold_and_both() {
     assert_eq!(engine.shard_size(), size, "after a fold and a restart");
 }
 
-/// **A size of zero and one below the high water are refused**, and leave the size as it was.
 #[test]
 fn a_size_of_zero_or_below_the_high_water_is_refused() {
     let tmp = built(None);
@@ -156,16 +128,14 @@ fn a_size_of_zero_or_below_the_high_water_is_refused() {
     assert_eq!(engine.shard_size(), SHARD_SIZE_DEFAULT);
     assert!(
         !engine.declare_shards(N).expect("a size at the high water"),
-        "a full shard is a size"
+        "a size at the high water is accepted"
     );
     let engine = restart(tmp.path(), engine);
     assert_eq!(engine.shard_size(), N);
 }
 
-/// **A batch past the size is refused alone.** Three batches are queued behind a parked window:
-/// the first fits, the second does not fit beside it nor after it, and the third fits after the
-/// first. The second changes nothing, and once the size is raised the same batch goes in as a new
-/// one.
+/// Three batches queue behind a parked window: `a` fits, `b` fits neither beside `a` nor after it,
+/// and `c` fits after `a`.
 #[test]
 fn a_batch_past_the_size_is_refused_alone_and_goes_in_once_the_size_is_raised() {
     let tmp = built(None);
@@ -208,7 +178,7 @@ fn a_batch_past_the_size_is_refused_alone_and_goes_in_once_the_size_is_raised() 
     assert_eq!(
         refused_for_room(results.next().unwrap()),
         full(size, N + 3, 3),
-        "b is measured against the shard a's window left"
+        "b is measured against the room a left"
     );
     assert_eq!(results.next().unwrap().expect("c fits after a").len(), 1);
     assert_eq!(engine.allocator_high_water(), size);
@@ -226,14 +196,12 @@ fn a_batch_past_the_size_is_refused_alone_and_goes_in_once_the_size_is_raised() 
     assert_eq!(engine.allocator_high_water(), size + 3);
 }
 
-/// **A build at a size refuses an insert past it**, as a running service does, and an edit takes
-/// an id as a new item does. A restart keeps the build's size.
 #[test]
 fn a_build_at_its_size_refuses_an_insert_and_an_edit_past_it() {
     let tmp = built(Some(N));
     let (engine, _faults) = engine_over(tmp.path());
     assert_eq!(engine.shard_size(), N);
-    assert_eq!(on_disc(tmp.path()), [N]);
+    assert_eq!(shards_of(&tmp.path().join("bundle")).0, N);
     assert_eq!(engine.allocator_high_water(), N);
 
     assert_eq!(
@@ -248,7 +216,7 @@ fn a_build_at_its_size_refuses_an_insert_and_an_edit_past_it() {
         x: 7.0,
         y: 7.0,
         scalars: vec![mosaica_lifecycle::wal::WalScalar::U64(1)],
-        ..row("unused")
+        ..keyed_row("unused")
     };
     assert_eq!(
         refused_for_room(engine.ingest_rows(vec![moved.clone()], "edit".into(), [2; 32])),

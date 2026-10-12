@@ -237,18 +237,6 @@ fn fixture() -> Fixture {
     }
 }
 
-fn manifest(fx: &Fixture) -> mosaica_store::manifest::SegmentsManifest {
-    let engine = open_engine(&fx.root, &fx.cache.join("m"), &fx.wal.with_extension("m"));
-    let generation = engine.generation();
-    generation
-        .bundle
-        .partitions
-        .values()
-        .next()
-        .expect("one partition")
-        .side_manifest()
-}
-
 /// **Finding 1's fix.** The build's own pass chooses each level's layout and records it, with no
 /// fold anywhere: a flat level is a label column whether or not the walk could place it, and a
 /// treed level under the count tiebreak is artifact-major.
@@ -305,7 +293,7 @@ fn the_build_records_the_layout_its_own_row_space_chooses() {
 #[test]
 fn the_manifest_names_a_column_for_each_flat_level_and_an_index_for_the_treed_one() {
     let fx = fixture();
-    let manifest = manifest(&fx);
+    let manifest = side_manifest(&fx.root);
 
     let is_column = |e: &&mosaica_store::manifest::DerivedExtent| matches!(e.form, mosaica_store::manifest::DerivedForm::RowColumn { .. });
     let is_index = |e: &&mosaica_store::manifest::DerivedExtent| e.form == mosaica_store::manifest::DerivedForm::TileIndex;

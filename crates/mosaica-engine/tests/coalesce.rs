@@ -43,7 +43,7 @@ fn live_runs(record: &mosaica_store::manifest::ShardRecord) -> &[String] {
 fn settle_coalesce(engine: &Engine) {
     tick_until(engine, "the coalesce to settle", WAIT, || {
         let generation = engine.generation();
-        let record = &generation.bundle.partitions["default"].only_shard().record;
+        let record = &generation.bundle.only_shard().record;
         generation.only_shard().delta_postings.len() == 1 && live_runs(record).len() < RUN_WIDTH
     });
 }
@@ -118,11 +118,6 @@ fn ingest_novel(engine: &Engine, i: usize) -> EntityId {
         .expect("ingest is accepted")[0]
 }
 
-fn manifest_of(root: &std::path::Path) -> mosaica_store::manifest::SegmentsManifest {
-    let bundle = mosaica_store::open_bundle(root).expect("the bundle opens");
-    bundle.partitions.values().next().unwrap().side_manifest()
-}
-
 /// **The pass bounds all three axes, and moves no geometry doing it.**
 ///
 /// Without it the three counts grow by one per tick for the life of the deployment, and each is a
@@ -155,7 +150,7 @@ fn a_coalesce_bounds_the_three_entity_space_axes_without_moving_geometry() {
         });
     }
 
-    let before = manifest_of(&root);
+    let before = side_manifest(&root);
     assert_eq!(
         before.only_shard().deltas.len(),
         WIDTH,
@@ -165,7 +160,7 @@ fn a_coalesce_bounds_the_three_entity_space_axes_without_moving_geometry() {
 
     settle_coalesce(&engine);
 
-    let after = manifest_of(&root);
+    let after = side_manifest(&root);
     assert_eq!(
         after.only_shard().deltas.len(),
         1,
@@ -228,7 +223,7 @@ fn a_merge_publishes_over_segments_whose_runs_a_coalesce_took() {
             publish_buffered(&engine);
         }
         settle_coalesce(&engine);
-        let coalesced = manifest_of(&root);
+        let coalesced = side_manifest(&root);
         let segments = coalesced.only_shard().segments.len();
 
         engine.set_merge_for_test(true);
@@ -236,7 +231,7 @@ fn a_merge_publishes_over_segments_whose_runs_a_coalesce_took() {
             engine.request_flush();
             engine.write_executor_stats().merges >= 1
         });
-        let merged = manifest_of(&root);
+        let merged = side_manifest(&root);
         assert!(merged.only_shard().segments.len() < segments);
         assert_eq!(
             merged.only_shard().unique_indexes,
@@ -298,7 +293,7 @@ fn a_coalesced_manifest_reopens_with_every_item_and_binding_intact() {
             "a value did not survive the restart"
         );
         assert!(
-            generation.bundle.partitions["default"].only_shard().views["s0"]
+            generation.bundle.only_shard().views["s0"]
                 .row_space
                 .row_of(*entity)
                 .is_some(),
@@ -352,7 +347,7 @@ fn a_configured_coalesce_width_reaches_selection_and_changes_when_the_pass_fires
         });
     }
     assert_eq!(
-        manifest_of(&root).only_shard().deltas.len(),
+        side_manifest(&root).only_shard().deltas.len(),
         2,
         "one tier per flush"
     );
@@ -363,7 +358,7 @@ fn a_configured_coalesce_width_reaches_selection_and_changes_when_the_pass_fires
     });
 
     assert_eq!(
-        manifest_of(&root).only_shard().deltas.len(),
+        side_manifest(&root).only_shard().deltas.len(),
         1,
         "two tiers became one at the configured width"
     );
@@ -409,7 +404,7 @@ fn a_coalesce_merges_the_entity_term_extents_and_every_entity_answers_the_same()
         });
     }
 
-    let before = manifest_of(&root);
+    let before = side_manifest(&root);
     assert_eq!(
         before.only_shard().entity_terms_extents.len(),
         WIDTH,
@@ -468,7 +463,7 @@ fn a_coalesce_merges_the_entity_term_extents_and_every_entity_answers_the_same()
 
     settle_coalesce(&engine);
 
-    let after = manifest_of(&root);
+    let after = side_manifest(&root);
     assert_eq!(
         after.only_shard().entity_terms_extents.len(),
         1,
@@ -553,7 +548,7 @@ fn a_pending_deletion_keeps_its_terms_across_a_coalesce() {
 
     settle_coalesce(&engine);
     assert_eq!(
-        manifest_of(&root).only_shard().entity_terms_extents.len(),
+        side_manifest(&root).only_shard().entity_terms_extents.len(),
         1
     );
 
@@ -582,7 +577,7 @@ fn a_pending_deletion_keeps_its_terms_across_a_coalesce() {
         std::thread::sleep(Duration::from_millis(10));
     }
 
-    let folded = manifest_of(&root);
+    let folded = side_manifest(&root);
     assert!(
         folded.only_shard().entity_terms_extents.is_empty(),
         "the fold rewrites the base and carries no extent forward: {:?}",
@@ -773,7 +768,7 @@ fn a_folds_carried_tiers_and_runs_are_coalesced_and_every_answer_holds_through_a
     });
 
     // Every carried entry is digested in the new prefix's MANIFEST.json.
-    let folded = manifest_of(&root);
+    let folded = side_manifest(&root);
     assert_eq!(
         folded.only_shard().deltas.len(),
         WIDTH,
@@ -817,7 +812,7 @@ fn a_folds_carried_tiers_and_runs_are_coalesced_and_every_answer_holds_through_a
 
     engine.set_coalesce_for_test(true);
     settle_coalesce(&engine);
-    let coalesced = manifest_of(&root);
+    let coalesced = side_manifest(&root);
     assert_eq!(
         coalesced.only_shard().deltas.len(),
         1,
@@ -1039,7 +1034,7 @@ fn interleaved_extents_from_two_views_coalesce_and_every_entity_answers_the_same
         "the two views' entities interleave: {s0:?} and {s1:?}"
     );
 
-    let manifest = manifest_of(&root);
+    let manifest = side_manifest(&root);
     let column_extents = |m: &mosaica_store::manifest::SegmentsManifest, column: &str| {
         m.only_shard()
             .attr_extents
@@ -1086,7 +1081,7 @@ fn interleaved_extents_from_two_views_coalesce_and_every_entity_answers_the_same
         );
         now.coalesces > stats.coalesces
     });
-    let after = manifest_of(&root);
+    let after = side_manifest(&root);
     assert_eq!(lists(&after), [1; 5], "every list collapsed to one extent");
     assert_eq!(
         interleaved_answers(&engine, &entities),

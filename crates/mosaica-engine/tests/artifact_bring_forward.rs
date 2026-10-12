@@ -1425,7 +1425,7 @@ fn flush_interleaved(
 
 /// One entity's row, or `None` while it is buffered.
 fn row_of(engine: &Engine, entity: EntityId) -> Option<u32> {
-    engine.generation().bundle.partitions["default"].only_shard().views["s0"]
+    engine.generation().bundle.only_shard().views["s0"]
         .row_space
         .row_of(entity)
         .map(|row| row.raw())

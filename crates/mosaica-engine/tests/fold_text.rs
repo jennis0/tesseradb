@@ -16,7 +16,7 @@ mod common;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{Float64Array, StringArray, UInt64Array};
@@ -196,13 +196,11 @@ fn ingest_and_flush(engine: &Engine, root: &Path) -> Vec<EntityId> {
     }
 }
 
-fn shard_dir(root: &Path) -> PathBuf {
-    common::SHARD.dir(&root.join(current_prefix(root)))
-}
-
 fn text_extents(root: &Path) -> Vec<mosaica_store::manifest::TextExtent> {
-    open_bundle(root).expect("the bundle opens").partitions["default"]
-        .only_shard().record
+    open_bundle(root)
+        .expect("the bundle opens")
+        .only_shard()
+        .record
         .text_extents
         .clone()
 }

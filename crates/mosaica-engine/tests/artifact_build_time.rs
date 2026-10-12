@@ -437,21 +437,14 @@ fn a_built_bundle_carries_its_containment_partitions_and_the_first_request_claim
     let fx = fixture();
     let engine = fx.open();
     let generation = engine.generation();
-    let manifest = &generation
-        .bundle
-        .partitions
-        .values()
-        .next()
-        .expect("one partition")
-        .only_shard()
-        .record;
+    let record = &generation.bundle.only_shard().record;
     assert!(
-        manifest
+        record
             .derived_extents
             .iter()
             .any(|e| e.form == mosaica_store::manifest::DerivedForm::Containment && e.layer == LABELS),
         "the label layer's generating sets have a partition the build composed: {:?}",
-        manifest.derived_extents
+        record.derived_extents
     );
 
     // The gauges: one adopted at the open, none composed by the request that used it.

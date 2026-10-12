@@ -322,34 +322,13 @@ fn check(engine: &Engine, expected: &Expected, after: &str) {
 }
 
 fn edit(engine: &Engine, batch: &str, view: &str, row: IngestRow) {
-    let receipt = engine
-        .ingest(IngestRequest {
-            batch_id: batch.to_string(),
-            body_hash: {
-                let mut hash = [0u8; 32];
-                hash[..batch.len()].copy_from_slice(batch.as_bytes());
-                hash
-            },
-            view: Some(view.to_string()),
-            rows: vec![row],
-            artifacts: Default::default(),
-            strict: false,
-            mosaica_id_column: false,
-        })
-        .expect("the edit is accepted");
+    let receipt = send(engine, batch, view, row);
     assert_eq!(receipt.edited, 1, "{batch} edits the item: {receipt:?}");
 }
 
 /// A row naming the item by its `mosaica_id` and carrying only what `set` gives it.
 fn naming(tid: MosaicaId, set: impl FnOnce(&mut IngestRow)) -> IngestRow {
-    let mut row = IngestRow {
-        mosaica_id: Some(tid),
-        labels: None,
-        position: None,
-        scalars: vec![WalScalar::Null; DECLARED],
-        scoped: vec![WalScalar::Null; 2],
-        omitted: (0..DECLARED + 2).collect(),
-    };
+    let mut row = bare(Some(tid));
     set(&mut row);
     row
 }
@@ -688,27 +667,6 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
-/// The newest side manifest of `root`'s partition, and its path.
-fn side_manifest(root: &Path) -> (std::path::PathBuf, serde_json::Value) {
-    let partition = common::partition_dir(&root.join(current_prefix(root)));
-    let newest = std::fs::read_dir(&partition)
-        .unwrap()
-        .filter_map(|entry| {
-            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
-            let n: u64 = name
-                .strip_prefix("SEGMENTS-")?
-                .strip_suffix(".json")?
-                .parse()
-                .ok()?;
-            Some(n)
-        })
-        .max()
-        .unwrap();
-    let path = partition.join(format!("SEGMENTS-{newest}.json"));
-    let manifest = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    (path, manifest)
-}
-
 /// **A bundle whose edited items disagree with themselves or with its rows is refused.** An
 /// edited item's flushed rows list their entities and the map holds its pairs both ways; a map
 /// missing one direction, a segment whose moved rows are not recorded, and a listed file that is
@@ -740,26 +698,27 @@ fn verify_refuses_edited_items_that_disagree() {
     // One direction of the map dropped.
     let one_way = tmp.path().join("one-way");
     copy_tree(&root, &one_way);
-    let (path, mut manifest) = side_manifest(&one_way);
-    manifest["shards"]["records"][0]["edited_items"]["by_entity"]["live"] = serde_json::json!([]);
-    std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    edit_side_manifest(&one_way, |manifest| {
+        manifest.only_shard_mut().edited_items.by_entity.live.clear();
+    });
     assert!(verify(&one_way).is_err(), "a map held one way is refused");
 
     // The moved rows' entities no longer recorded.
     let unrecorded = tmp.path().join("unrecorded");
     copy_tree(&root, &unrecorded);
-    let (path, mut manifest) = side_manifest(&unrecorded);
-    let files = manifest["files"].as_object_mut().unwrap();
-    let listed: Vec<String> = files
-        .keys()
-        .filter(|rel| rel.ends_with(mosaica_store::edited::EDITED_ROWS_FILE))
-        .cloned()
-        .collect();
+    let mut listed = Vec::new();
+    edit_side_manifest(&unrecorded, |manifest| {
+        let files = &mut manifest.partition.files;
+        listed = files
+            .keys()
+            .filter(|rel| rel.ends_with(mosaica_store::edited::EDITED_ROWS_FILE))
+            .cloned()
+            .collect();
+        for rel in &listed {
+            files.remove(rel);
+        }
+    });
     assert_eq!(listed.len(), 3, "one list per view the item holds a row in");
-    for rel in &listed {
-        files.remove(rel);
-    }
-    std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
     assert!(
         verify(&unrecorded).is_err(),
         "rows whose entity is not recorded are refused"

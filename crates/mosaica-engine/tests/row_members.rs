@@ -291,12 +291,9 @@ fn held_forms(column: &RowColumn, what: &str) -> Forms {
     out
 }
 
-/// The prefix `CURRENT` names and its partition manifest.
+/// The prefix `CURRENT` names and its side-manifest.
 fn manifest_at(root: &Path) -> (PathBuf, SegmentsManifest) {
-    let bundle = mosaica_store::read::open_bundle(root).expect("the bundle opens");
-    let prefix = root.join(current_prefix(root));
-    let manifest = bundle.partitions["default"].side_manifest();
-    (prefix, manifest)
+    (root.join(current_prefix(root)), side_manifest(root))
 }
 
 /// Every stored member file, per `(layer, level)`, checked against its column's labels.

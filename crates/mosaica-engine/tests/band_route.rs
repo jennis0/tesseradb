@@ -395,11 +395,5 @@ fn the_band_route_serves_what_the_scan_serves_through_writes_a_fold_and_a_restar
 }
 
 fn segments(engine: &Engine) -> usize {
-    engine
-        .generation()
-        .bundle
-        .partitions
-        .values()
-        .map(|p| p.only_shard().views["s0"].segments.len())
-        .sum()
+    engine.generation().bundle.only_shard().views["s0"].segments.len()
 }

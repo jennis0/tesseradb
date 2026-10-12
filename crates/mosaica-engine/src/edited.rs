@@ -419,8 +419,9 @@ mod tests {
     fn generation_with(dir: &std::path::Path, held: &[(u32, u16)]) -> Generation {
         let files = mosaica_store::tenancy::write(dir, &bits_of(held)).unwrap();
         let index = Arc::new(TenancyIndex::open(&files).unwrap());
-        Generation::synthetic("v00000", 1, 0, Overlay::new(), IngestBuffer::new())
-            .with_shard(ShardId::ZERO, |_, shard| shard.tenancy = index)
+        let generation =
+            Generation::synthetic("v00000", 1, 0, Overlay::new(), IngestBuffer::new());
+        generation.with_shard(generation.only_shard().id(), |_, shard| shard.tenancy = index)
     }
 
     fn id(key: &IdentityKey, shard: u32, tenancy: u16, number: u64) -> MosaicaId {
@@ -451,7 +452,8 @@ mod tests {
         assert_eq!(named(id(&key, 1, 3, 7)), None, "another shard's");
         assert!(matches!(
             super::named(&key, &generation, id(&key, 0, 2, 7)),
-            Some((shard, number, false)) if shard.id() == ShardId::ZERO && number == EntityId::new(7)
+            Some((shard, number, false))
+                if shard.id() == generation.only_shard().id() && number == EntityId::new(7)
         ));
     }
 

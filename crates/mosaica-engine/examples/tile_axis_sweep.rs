@@ -82,9 +82,9 @@ fn true_predictors(bundle: &Bundle, view: &str, zoom: u8, bbox: [f64; 4]) -> (u6
     };
     let tiles = tiles_for_bbox(bbox, zoom, &extent);
     let view_data = bundle
-        .partitions
-        .values()
-        .find_map(|p| p.only_shard().views.get(view))
+        .only_shard()
+        .views
+        .get(view)
         .expect("view should exist");
     let segment = view_data.segments.first().expect("one segment (R4)");
     let ranges = tile_ranges_all(segment, &tiles);
@@ -359,9 +359,9 @@ fn main() {
     // here rather than up with the other argument parsing.
     let universe = {
         let sd = bundle
-            .partitions
-            .values()
-            .find_map(|p| p.only_shard().views.get("s0"))
+            .only_shard()
+            .views
+            .get("s0")
             .expect("view s0");
         sd.segments.first().expect("one segment (R4)").row_count as u64
     };
@@ -414,9 +414,9 @@ fn main() {
     // Outside every timed region; costs one extra projection.
     {
         let view_data = bundle
-            .partitions
-            .values()
-            .find_map(|p| p.only_shard().views.get("s0"))
+            .only_shard()
+            .views
+            .get("s0")
             .expect("view s0");
         let segment = view_data.segments.first().expect("one segment (R4)");
         let universe = segment.row_count as u64;

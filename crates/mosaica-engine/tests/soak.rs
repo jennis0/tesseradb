@@ -160,9 +160,10 @@ fn sustained_ingest_leaves_every_axis_bounded_and_every_item_visible() {
     let generation = engine.generation();
     let partition = &generation.bundle.partitions["default"];
     let manifest = &partition.manifest;
-    let record = &partition.only_shard().record;
+    let shard = partition.only_shard();
+    let record = &shard.record;
     let runs = live_runs(record);
-    let segments = partition.only_shard().views["s0"].segments.len();
+    let segments = shard.views["s0"].segments.len();
     let stats = engine.write_executor_stats();
     eprintln!(
         "soak: {ROUNDS} flushes → segments {segments}, deltas {}, key runs {runs}, dict extents \
@@ -220,7 +221,7 @@ fn sustained_ingest_leaves_every_axis_bounded_and_every_item_visible() {
     for (entity, key) in &ingested {
         assert_eq!(item_of_key(&engine, key), Some(*entity), "{key} lost its item");
         assert!(
-            partition.only_shard().views["s0"].row_space.row_of(*entity).is_some(),
+            shard.views["s0"].row_space.row_of(*entity).is_some(),
             "entity {} lost its row",
             entity.raw()
         );
@@ -288,18 +289,19 @@ fn without_maintenance_every_axis_grows_one_per_flush() {
 
     let generation = engine.generation();
     let partition = &generation.bundle.partitions["default"];
+    let shard = partition.only_shard();
     assert_eq!(
-        partition.only_shard().views["s0"].segments.len(),
+        shard.views["s0"].segments.len(),
         ROUNDS + 1,
         "the build segment plus one per flush — this is what the merge bounds"
     );
     assert_eq!(
-        partition.only_shard().record.deltas.len(),
+        shard.record.deltas.len(),
         ROUNDS,
         "one tier per flush — this is what the coalesce bounds"
     );
     assert_eq!(
-        live_runs(&partition.only_shard().record),
+        live_runs(&shard.record),
         ROUNDS,
         "one key run per flush"
     );

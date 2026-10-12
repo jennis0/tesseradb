@@ -524,9 +524,9 @@ fn the_fixtures_terms_are_classified_as_every_other_case_assumes() {
     let generation = engine.generation();
     let view = generation
         .bundle
-        .partitions
-        .values()
-        .find_map(|partition| partition.only_shard().views.get(VIEW))
+        .only_shard()
+        .views
+        .get(VIEW)
         .expect("the fixture has one view");
     let images = view
         .term_images
@@ -876,9 +876,9 @@ fn a_view_with_no_image_table_is_still_priced_against_the_complement() {
     let generation = engine.generation();
     let view = generation
         .bundle
-        .partitions
-        .values()
-        .find_map(|partition| partition.only_shard().views.get(VIEW))
+        .only_shard()
+        .views
+        .get(VIEW)
         .expect("the fixture has one view");
     assert!(
         view.term_images.is_none(),
@@ -982,9 +982,9 @@ fn a_view_created_while_running_has_no_images_and_is_served_by_the_walk() {
     let generation = engine.generation();
     let view = generation
         .bundle
-        .partitions
-        .values()
-        .find_map(|partition| partition.only_shard().views.get(runtime_view))
+        .only_shard()
+        .views
+        .get(runtime_view)
         .expect("the runtime view is in the generation");
     assert!(
         view.term_images.is_none(),
@@ -1045,9 +1045,9 @@ fn every_route_agrees_after_a_fold_executes_a_delete() {
     let generation = engine.generation();
     let view = generation
         .bundle
-        .partitions
-        .values()
-        .find_map(|partition| partition.only_shard().views.get(VIEW))
+        .only_shard()
+        .views
+        .get(VIEW)
         .expect("the folded generation carries the view");
     assert!(
         view.term_images.is_some(),
@@ -1137,9 +1137,9 @@ fn a_view_created_while_running_gains_images_at_its_first_fold() {
     let generation = engine.generation();
     let view = generation
         .bundle
-        .partitions
-        .values()
-        .find_map(|partition| partition.only_shard().views.get(runtime_view))
+        .only_shard()
+        .views
+        .get(runtime_view)
         .expect("the folded generation carries the runtime view");
     assert!(
         view.term_images.is_some(),

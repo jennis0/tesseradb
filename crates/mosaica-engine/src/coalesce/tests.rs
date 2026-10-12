@@ -113,14 +113,7 @@ impl Fixture {
     }
 
     fn plan(&self) -> Option<CoalescePlan> {
-        plan_coalesce(
-            PARTITION,
-            &self.manifest.partition,
-            self.manifest.only_shard(),
-            &self.build_files,
-            policy(),
-            &all_live,
-        )
+        plan(&self.manifest, &self.build_files)
     }
 
     fn execute(&self, plan: CoalescePlan) -> Result<CompletedCoalesce, MaintenanceFailed> {
@@ -257,7 +250,7 @@ impl Fixture {
 
     fn column_rel(column: &str, view: Option<(&str, ViewIncarnation)>) -> String {
         match view {
-            None => format!("{}/attrs/{column}", SHARD.rel()),
+            None => SHARD.column_rel(column),
             Some((view, incarnation)) => SHARD.scoped_column_rel(column, view, incarnation),
         }
     }
@@ -310,7 +303,7 @@ impl Fixture {
     }
 
     fn write_record(&mut self, seg: &str, entities: &[u32]) {
-        let dir = format!("{}/attrs/record/extents", SHARD.rel());
+        let dir = SHARD.record_extents_rel();
         std::fs::create_dir_all(self.path(&dir)).unwrap();
         let extent = RecordExtent {
             blocks: format!("{dir}/{seg}.blocks.bin"),
@@ -762,10 +755,7 @@ fn a_window_whose_entry_has_gone_does_not_rebase() {
     let tier = &c.completed.tier.as_ref().unwrap().consumed[1];
     let mut manifest = c.before().clone();
     manifest.only_shard_mut().deltas.retain(|t| t != tier);
-    assert!(
-        rebased(manifest.clone(), &c.completed).is_none(),
-        "a tier has gone"
-    );
+    assert!(rebased(manifest, &c.completed).is_none(), "a tier has gone");
 
     let attr = &c.completed.attrs[0].consumed.extents[1].values;
     let mut manifest = c.before().clone();
@@ -774,7 +764,7 @@ fn a_window_whose_entry_has_gone_does_not_rebase() {
         .attr_extents
         .retain(|e| &e.values != attr);
     assert!(
-        rebased(manifest.clone(), &c.completed).is_none(),
+        rebased(manifest, &c.completed).is_none(),
         "an attribute extent has gone"
     );
 }
@@ -923,26 +913,16 @@ fn digest(size: u64) -> FileDigest {
 /// digested but never written, behind the build's dictionary.
 fn listed(flushes: u64) -> (SegmentsManifest, BTreeMap<String, FileDigest>) {
     let build_files = BTreeMap::from([("terms/terms-0.dict".to_string(), digest(4096))]);
-    let mut manifest = SegmentsManifest {
-        partition: mosaica_store::manifest::PartitionManifest {
-            dict_extents: vec![DictExtent {
-                path: "terms/terms-0.dict".to_string(),
-                records: 4,
-            }],
-            ..mosaica_store::manifest::PartitionManifest::empty()
-        },
-        shards: mosaica_store::manifest::Shards {
-            size: mosaica_types::SHARD_SIZE_DEFAULT,
-            records: vec![mosaica_store::manifest::ShardRecord {
-                unique_indexes: vec![UniqueIndexRuns {
-                    attribute: "doi".to_string(),
-                    base: Vec::new(),
-                    live: Vec::new(),
-                }],
-                ..mosaica_store::manifest::ShardRecord::empty(mosaica_types::ShardId::ZERO)
-            }],
-        },
-    };
+    let mut manifest = SegmentsManifest::empty();
+    manifest.partition.dict_extents = vec![DictExtent {
+        path: "terms/terms-0.dict".to_string(),
+        records: 4,
+    }];
+    manifest.only_shard_mut().unique_indexes = vec![UniqueIndexRuns {
+        attribute: "doi".to_string(),
+        base: Vec::new(),
+        live: Vec::new(),
+    }];
     for i in 0..flushes {
         let seg = format!("segments/flush-{i}");
         for name in ["delta.arrow", "doi.keys", "terms-0.dict"] {
@@ -1003,13 +983,22 @@ fn list_attr(
 }
 
 fn plan(manifest: &SegmentsManifest, build: &BTreeMap<String, FileDigest>) -> Option<CoalescePlan> {
+    plan_with(manifest, build, policy(), &all_live)
+}
+
+fn plan_with(
+    manifest: &SegmentsManifest,
+    build: &BTreeMap<String, FileDigest>,
+    policy: CoalescePolicy,
+    is_live: &dyn Fn(&str, ViewIncarnation) -> bool,
+) -> Option<CoalescePlan> {
     plan_coalesce(
         PARTITION,
         &manifest.partition,
         manifest.only_shard(),
         build,
-        policy(),
-        &all_live,
+        policy,
+        is_live,
     )
 }
 
@@ -1087,15 +1076,8 @@ fn the_key_runs_take_their_own_narrower_window_and_floor() {
         manifest.only_shard().unique_indexes[0].live[1].clone(),
         digest(8 << 20),
     );
-    let plan = plan_coalesce(
-        PARTITION,
-        &manifest.partition,
-        manifest.only_shard(),
-        &build_files,
-        CoalescePolicy::default(),
-        &all_live,
-    )
-    .expect("the runs qualify");
+    let plan = plan_with(&manifest, &build_files, CoalescePolicy::default(), &all_live)
+        .expect("the runs qualify");
     assert_eq!(plan.unique[0].runs.len(), 4);
     assert!(plan.tiers.is_empty() && plan.dicts.is_empty() && plan.attrs.is_empty());
 }
@@ -1124,28 +1106,12 @@ fn the_input_cap_narrows_one_columns_window_and_stalls_only_that_column() {
     }
     let mut policy = policy();
     policy.max_input_bytes = 5 << 20;
-    let narrowed = plan_coalesce(
-        PARTITION,
-        &manifest.partition,
-        manifest.only_shard(),
-        &build_files,
-        policy,
-        &all_live,
-    )
-    .unwrap();
+    let narrowed = plan_with(&manifest, &build_files, policy, &all_live).unwrap();
     assert_eq!(window_len(&narrowed, "title"), Some(2));
     assert_eq!(window_len(&narrowed, "department"), Some(3));
 
     policy.max_input_bytes = 1 << 20;
-    let stalled = plan_coalesce(
-        PARTITION,
-        &manifest.partition,
-        manifest.only_shard(),
-        &build_files,
-        policy,
-        &all_live,
-    )
-    .unwrap();
+    let stalled = plan_with(&manifest, &build_files, policy, &all_live).unwrap();
     assert_eq!(window_len(&stalled, "title"), None);
     assert_eq!(window_len(&stalled, "department"), Some(3));
 }
@@ -1174,15 +1140,7 @@ fn a_layers_dictionary_counts_toward_the_input_cap() {
     }
     let mut policy = policy();
     policy.max_input_bytes = 4 << 20;
-    let plan = plan_coalesce(
-        PARTITION,
-        &manifest.partition,
-        manifest.only_shard(),
-        &build_files,
-        policy,
-        &all_live,
-    )
-    .unwrap();
+    let plan = plan_with(&manifest, &build_files, policy, &all_live).unwrap();
     assert_eq!(
         window_len(&plan, "submitter"),
         Some(2),
@@ -1267,15 +1225,7 @@ fn a_dead_incarnations_window_is_not_planned() {
         }
     }
     let is_live = |v: &str, incarnation| v == view && incarnation == 4;
-    let plan = plan_coalesce(
-        PARTITION,
-        &manifest.partition,
-        manifest.only_shard(),
-        &build_files,
-        policy(),
-        &is_live,
-    )
-    .unwrap();
+    let plan = plan_with(&manifest, &build_files, policy(), &is_live).unwrap();
     assert_eq!(plan.attrs.len(), 1);
     assert_eq!(plan.attrs[0].incarnation, Some(4));
     assert!(plan.attrs[0]

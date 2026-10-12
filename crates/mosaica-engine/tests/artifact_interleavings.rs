@@ -276,16 +276,9 @@ fn rotate(engine: &Engine) {
 
 /// The live prefix's membership extents — the durable name count a publication's pack increments.
 fn membership_files(fx: &Fixture, engine: &Engine) -> usize {
-    let dir = fx
-        .root
-        .join(&engine.generation().prefix)
-        .join(common::SHARD.rel())
-        .join("members");
-    std::fs::read_dir(&dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x == "tsmb"))
+    live_shard_files(&fx.root, engine, "members")
+        .iter()
+        .filter(|p| p.extension().is_some_and(|x| x == "tsmb"))
         .count()
 }
 

@@ -87,7 +87,7 @@ fn engine_with_faults(tmp: &Path, root: &Path) -> (Engine, Arc<FaultSwitchboard>
 /// How many side-manifests the live prefix's default partition carries — the durable name count
 /// a manifest publish increments.
 fn side_manifest_count(root: &Path, prefix: &str) -> usize {
-    std::fs::read_dir(common::partition_dir(&root.join(prefix)))
+    std::fs::read_dir(common::partition_dir(root, prefix))
         .expect("the partition directory exists")
         .filter_map(|e| e.ok())
         .filter(|e| {

@@ -248,9 +248,9 @@ fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
 /// through, and its path on disc.
 fn images_of(root: &Path, prefix: &str, view: &str) -> (Arc<TermImages>, RowSpace, PathBuf) {
     let bundle = open_bundle(root).expect("the bundle opens");
-    let partition = bundle.partitions.get("default").expect("one partition");
-    let named: Vec<_> = partition
-        .only_shard().record
+    let shard = bundle.only_shard();
+    let named: Vec<_> = shard
+        .record
         .term_image_extents
         .iter()
         .filter(|entry| entry.view == view)
@@ -261,7 +261,7 @@ fn images_of(root: &Path, prefix: &str, view: &str) -> (Arc<TermImages>, RowSpac
         "the side-manifest names one term-image file for view '{view}'"
     );
     let path = root.join(prefix).join(&named[0].path);
-    let view = partition.only_shard().views.get(view).expect("the view");
+    let view = shard.views.get(view).expect("the view");
     let images = view
         .term_images
         .clone()
@@ -272,22 +272,17 @@ fn images_of(root: &Path, prefix: &str, view: &str) -> (Arc<TermImages>, RowSpac
 
 /// Every view's entry in the side-manifest of the bundle `CURRENT` names.
 fn extents_of(root: &Path) -> Vec<mosaica_store::manifest::TermImageExtent> {
-    open_bundle(root).expect("the bundle opens").partitions["default"]
-        .only_shard().record
+    open_bundle(root)
+        .expect("the bundle opens")
+        .only_shard()
+        .record
         .term_image_extents
         .clone()
 }
 
 fn postings_of(root: &Path, prefix: &str) -> PostingsReader {
-    PostingsReader::open(
-        &root
-            .join(prefix)
-            .join(common::SHARD.rel())
-            .join("terms")
-            .join("postings.arrow"),
-        true,
-    )
-    .expect("the postings open")
+    PostingsReader::open(&root.join(prefix).join(common::SHARD.postings_rel()), true)
+        .expect("the postings open")
 }
 
 fn posting_bitmap(postings: &PostingsReader, term: u32) -> Option<Bitmap> {
@@ -403,7 +398,7 @@ fn a_folds_images_are_the_projections_of_the_folds_own_postings() {
     let live = engine.generation();
     for view in VIEWS {
         assert!(
-            live.bundle.partitions["default"].only_shard().views[view]
+            live.bundle.only_shard().views[view]
                 .term_images
                 .is_some(),
             "the prefix the fold just wrote maps view '{view}'s images"

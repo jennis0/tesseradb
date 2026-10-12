@@ -114,9 +114,8 @@ fn first_dictionary_descriptor(bundle_root: &Path) -> String {
 }
 
 fn postings_path(bundle_root: &Path) -> PathBuf {
-    mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO)
-        .dir(&bundle_root.join("v00000"))
-        .join("terms/postings.arrow")
+    let layout = mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO);
+    bundle_root.join("v00000").join(layout.postings_rel())
 }
 
 fn bench_fragment_build(c: &mut Criterion) {
@@ -150,7 +149,7 @@ fn bench_compose(c: &mut Criterion) {
         .expect("fragment build should succeed");
 
     let bundle = open_bundle(&bundle_root).expect("bundle should open");
-    let view = &bundle.partitions["default"].only_shard().views["s0"];
+    let view = &bundle.only_shard().views["s0"];
     let base = Arc::new(RowProjection::walk(&fragment, &view.row_space));
 
     let satisfied: rustc_hash::FxHashSet<TermId> = terms.iter().copied().collect();

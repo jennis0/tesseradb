@@ -18,7 +18,7 @@
 
 mod common;
 
-use common::held_rows_declaration;
+use common::{derived_file, held_rows_declaration};
 use std::sync::Arc;
 
 use croaring::Bitmap;
@@ -671,12 +671,8 @@ fn a_level_composes_its_partition_once_for_every_view() {
 fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
     let fx = build_fixture();
     let tmp = TempDir::new().unwrap();
-    std::fs::create_dir_all(tmp.path().join(common::SHARD.derived_rel("containment"))).unwrap();
-    let rel = &format!(
-        "{}/containment-000001-000.tscp",
-        common::SHARD.derived_rel("containment")
-    );
-    std::fs::write(tmp.path().join(rel), fx.partition().as_bytes()).unwrap();
+    let rel = derived_file(tmp.path(), "containment", "containment-000001-000.tscp");
+    std::fs::write(tmp.path().join(&rel), fx.partition().as_bytes()).unwrap();
 
     // A coordinate that is a number rather than a zero, so *moved down* is expressible as well as
     // *moved up*: a level's version is a counter of writes, and a reader must not treat "lower"
@@ -686,7 +682,7 @@ fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
     let composed_at = store.level_version(LAYER, 0);
     assert_eq!(composed_at, 7);
     let entry = |version: u64| mosaica_store::manifest::DerivedExtent {
-        path: rel.to_string(),
+        path: rel.clone(),
         layer: LAYER.to_string(),
         level: 0,
         level_version: version,
@@ -752,7 +748,7 @@ fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
     // level recomposes, which is what every request did before the fold wrote anything.
     let projections = ArtifactProjections::new(std::env::temp_dir());
     let mut missing = entry(composed_at);
-    missing.path = format!("{}/gone.tscp", common::SHARD.derived_rel("containment"));
+    missing.path = derived_file(tmp.path(), "containment", "gone.tscp");
     projections.adopt_all(tmp.path(), "v00000", &[missing], &store);
     assert_eq!(projections.adopted(), 0);
 }
@@ -764,16 +760,15 @@ fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
 fn an_adopted_partition_does_not_answer_under_another_prefix() {
     let fx = build_fixture();
     let tmp = TempDir::new().unwrap();
-    std::fs::create_dir_all(tmp.path().join(common::SHARD.derived_rel("containment"))).unwrap();
-    let rel = &format!("{}/p.tscp", common::SHARD.derived_rel("containment"));
-    std::fs::write(tmp.path().join(rel), fx.partition().as_bytes()).unwrap();
+    let rel = derived_file(tmp.path(), "containment", "p.tscp");
+    std::fs::write(tmp.path().join(&rel), fx.partition().as_bytes()).unwrap();
 
     let projections = ArtifactProjections::new(std::env::temp_dir());
     projections.adopt_all(
         tmp.path(),
         "v00000",
         &[mosaica_store::manifest::DerivedExtent {
-            path: rel.to_string(),
+            path: rel,
             layer: LAYER.to_string(),
             level: 0,
             level_version: fx.store.level_version(LAYER, 0),

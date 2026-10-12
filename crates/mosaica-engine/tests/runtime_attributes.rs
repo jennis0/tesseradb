@@ -320,23 +320,11 @@ fn declared_names(engine: &Engine) -> Vec<String> {
 /// (`ingest.md` §6.3), so this is 0 before the fold and every partition after it.
 fn partitions_with_base(root: &Path, column: &str) -> (usize, usize) {
     let bundle = open_bundle(root).expect("the bundle opens");
-    let current: mosaica_store::manifest::CurrentPointer =
-        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).unwrap()).unwrap();
-    let (mut carrying, mut total) = (0, 0);
-    for phash in bundle.partitions.keys() {
-        total += 1;
-        if root
-            .join(&current.prefix)
-            .join(mosaica_store::ShardLayout::new(phash, mosaica_types::ShardId::ZERO).rel())
-            .join("attrs")
-            .join(column)
-            .join(mosaica_filter::VALUES_FILE)
-            .is_file()
-        {
-            carrying += 1;
-        }
-    }
-    (carrying, total)
+    let values = root
+        .join(current_prefix(root))
+        .join(common::SHARD.column_rel(column))
+        .join(mosaica_filter::VALUES_FILE);
+    (usize::from(values.is_file()), bundle.partitions.len())
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -45,7 +45,10 @@ use mosaica_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite, Step};
 use mosaica_lifecycle::ChangeOp;
 use mosaica_types::EntityId;
 
-use common::{build_fixture, IngestRows, full_coverage_credential, open_engine, item_of_id, item_of_key, keyed, tick, N_ITEMS};
+use common::{
+    build_fixture, full_coverage_credential, item_of_id, item_of_key, keyed_row, open_engine, tick,
+    IngestRows, N_ITEMS,
+};
 
 const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -67,20 +70,6 @@ fn engine_with_faults(tmp: &TempDir, queue_bound: usize) -> (Engine, Arc<FaultSw
         .start_write_executor_with_faults(queue_bound, Arc::clone(&faults))
         .expect("the executor starts once");
     (engine, faults)
-}
-
-/// A new item at the origin holding the `id` of `key`.
-fn row(key: &str) -> UnallocatedRow {
-    UnallocatedRow {
-        view: "s0".to_string(),
-        join: None,
-        descriptors: Vec::new(),
-        x: 0.0,
-        y: 0.0,
-        scalars: keyed(key),
-        terms: Vec::new(),
-        scoped: Vec::new(),
-    }
 }
 
 /// How many items a full-coverage viewport can see. Buffered (ingested) items have no row geometry
@@ -140,7 +129,7 @@ fn an_out_of_extent_row_is_refused_at_the_engine_boundary_with_no_id_burned() {
     let (engine, _faults) = engine_with_faults(&tmp, 8);
 
     let before = engine.allocator_high_water();
-    let mut adrift = row("adrift");
+    let mut adrift = keyed_row("adrift");
     adrift.x = 5000.0; // the fixture's extent is 0..1000 on both axes
 
     let err = engine
@@ -157,14 +146,14 @@ fn an_out_of_extent_row_is_refused_at_the_engine_boundary_with_no_id_burned() {
     );
 
     // NaN has no cell either, and `as u32` would saturate it to zero rather than erroring.
-    let mut nan = row("nan");
+    let mut nan = keyed_row("nan");
     nan.y = f64::NAN;
     assert!(engine
         .ingest_rows(vec![nan], "batch-nan".to_string(), [0u8; 32])
         .is_err());
 
     // A point exactly at the maximum occupies the top of the grid and belongs there.
-    let mut edge = row("edge");
+    let mut edge = keyed_row("edge");
     edge.x = 1000.0;
     edge.y = 1000.0;
     engine
@@ -183,7 +172,7 @@ fn the_executor_assigns_the_ids_and_the_live_index_answers_for_them() {
     let before = engine.allocator_high_water();
     let ids = engine
         .ingest_rows(
-            vec![row("post-build-key")],
+            vec![keyed_row("post-build-key")],
             "batch-1".to_string(),
             [0u8; 32],
         )
@@ -226,7 +215,7 @@ fn per_command_assignment_is_signature_sorted_and_monotone() {
 
     let mut rows = Vec::new();
     for i in 0..6u64 {
-        let mut r = row(&format!("sig-{i}"));
+        let mut r = keyed_row(&format!("sig-{i}"));
         r.descriptors = vec![if i % 2 == 0 {
             b"1".to_vec()
         } else {
@@ -255,7 +244,7 @@ fn per_command_assignment_is_signature_sorted_and_monotone() {
     );
 
     let next = engine
-        .ingest_rows(vec![row("after")], "after".to_string(), [2u8; 32])
+        .ingest_rows(vec![keyed_row("after")], "after".to_string(), [2u8; 32])
         .unwrap()[0];
     assert!(
         next.raw() > *even.iter().max().unwrap(),
@@ -443,7 +432,7 @@ fn deny_priority_survives_the_window(window_max_rows: Option<usize>) {
         workers.push(std::thread::spawn(move || {
             started.fetch_add(1, Ordering::SeqCst);
             let _ = e.ingest_rows(
-                vec![row(&format!("w-{i}"))],
+                vec![keyed_row(&format!("w-{i}"))],
                 format!("w-{i}"),
                 [i as u8; 32],
             );
@@ -537,8 +526,9 @@ fn a_deny_is_never_queued_behind_a_conflict_forced_window_split() {
     // conflict close this test is about. `Window::park` cannot be reused: it parks at `AfterFsync`.
     faults.arm_pause(PauseSite::BeforeAck, PauseAction::Stall);
     let e = Arc::clone(&engine);
-    let prime =
-        std::thread::spawn(move || e.ingest_rows(vec![row("prime")], "prime".into(), [0xEE; 32]));
+    let prime = std::thread::spawn(move || {
+        e.ingest_rows(vec![keyed_row("prime")], "prime".into(), [0xEE; 32])
+    });
     faults.await_arrivals(PauseSite::BeforeAck, 1, WAIT);
 
     // **Enqueued one at a time**, each wait on the executor's own `work_submitted` counter, so the
@@ -559,7 +549,7 @@ fn a_deny_is_never_queued_behind_a_conflict_forced_window_split() {
                 // all — the join answers it in place — which is why the workload is shaped this
                 // way.)
                 let _ = e.ingest_rows(
-                    vec![row(&format!("c-{i}"))],
+                    vec![keyed_row(&format!("c-{i}"))],
                     format!("pair-{i}-{half}"),
                     [(i as u8) * 2 + half; 32],
                 );
@@ -793,7 +783,7 @@ fn an_ingest_append_failure_applies_nothing() {
     let before_hw = engine.allocator_high_water();
     faults.fail_next_fsyncs(1);
     let err = engine
-        .ingest_rows(vec![row("never-lands")], "doomed".to_string(), [3u8; 32])
+        .ingest_rows(vec![keyed_row("never-lands")], "doomed".to_string(), [3u8; 32])
         .expect_err("an ingest whose append failed must be refused");
 
     assert!(
@@ -827,7 +817,7 @@ fn an_ingest_whose_durability_failed_stays_absent_across_a_reopen() {
 
     faults.fail_next_fsyncs(1);
     engine
-        .ingest_rows(vec![row("never-lands")], "doomed".to_string(), [3u8; 32])
+        .ingest_rows(vec![keyed_row("never-lands")], "doomed".to_string(), [3u8; 32])
         .expect_err("an ingest whose fsync failed must be refused");
     drop(engine);
 
@@ -946,7 +936,7 @@ fn a_torn_wal_stays_poisoned_and_still_applies_denies() {
 
     // An ingest after the poison is refused outright and applies nothing.
     assert!(engine
-        .ingest_rows(vec![row("after-poison")], "after".to_string(), [4u8; 32])
+        .ingest_rows(vec![keyed_row("after-poison")], "after".to_string(), [4u8; 32])
         .is_err());
     assert!(item_of_key(&engine, "after-poison").is_none());
 
@@ -1111,7 +1101,7 @@ fn an_executor_panic_is_reported_dead() {
 
     faults.arm_pause(PauseSite::AfterFsync, PauseAction::Panic);
     let in_flight = engine
-        .ingest_rows(vec![row("boom")], "boom".to_string(), [5u8; 32])
+        .ingest_rows(vec![keyed_row("boom")], "boom".to_string(), [5u8; 32])
         .expect_err("the executor panicked while holding this command, so no receipt can arrive");
     assert!(
         matches!(in_flight, AcceptError::Submit(SubmitError::ReceiptLost)),
@@ -1181,7 +1171,7 @@ fn an_engine_without_an_executor_refuses_writes_and_still_reads() {
 
     assert_eq!(engine.write_executor_posture(), ExecutorPosture::NotStarted);
     assert!(engine
-        .ingest_rows(vec![row("nope")], "nope".to_string(), [6u8; 32])
+        .ingest_rows(vec![keyed_row("nope")], "nope".to_string(), [6u8; 32])
         .is_err());
     assert_eq!(visible(&engine), N_ITEMS);
 }
@@ -1195,10 +1185,10 @@ fn a_row_holding_a_held_unique_value_names_its_item() {
     let (engine, _faults) = engine_with_faults(&tmp, 8);
 
     let first = engine
-        .ingest_rows(vec![row("dup")], "b1".to_string(), [7u8; 32])
+        .ingest_rows(vec![keyed_row("dup")], "b1".to_string(), [7u8; 32])
         .expect("the first batch is accepted")[0];
     let again = engine
-        .ingest_rows(vec![row("dup")], "b2".to_string(), [8u8; 32])
+        .ingest_rows(vec![keyed_row("dup")], "b2".to_string(), [8u8; 32])
         .expect("the same row again changes nothing");
     assert_eq!(again, vec![first]);
     assert_eq!(item_of_key(&engine, "dup"), Some(first));
@@ -1239,7 +1229,7 @@ impl Window {
         faults.arm_pause(PauseSite::AfterFsync, PauseAction::Stall);
         let e = Arc::clone(&engine);
         let prime = std::thread::spawn(move || {
-            e.ingest_rows(vec![row("prime")], "prime".to_string(), [0xEE; 32])
+            e.ingest_rows(vec![keyed_row("prime")], "prime".to_string(), [0xEE; 32])
         });
         faults.await_arrivals(PauseSite::AfterFsync, 1, WAIT);
         let high_water_before = engine.allocator_high_water();
@@ -1337,7 +1327,7 @@ fn sig_rows(
         .map(|i| {
             // The label resolves to the signature `low` or `high` holds: callers pass the terms of
             // `0` and `1`.
-            let mut r = row(&format!("{prefix}-{i}"));
+            let mut r = keyed_row(&format!("{prefix}-{i}"));
             r.descriptors = vec![if i % 2 == 0 {
                 b"1".to_vec()
             } else {
@@ -1465,7 +1455,7 @@ fn one_fsync_per_window() {
     );
 
     let batches: Vec<(String, Vec<UnallocatedRow>)> = (0..N)
-        .map(|i| (format!("b{i}"), vec![row(&format!("f{i}"))]))
+        .map(|i| (format!("b{i}"), vec![keyed_row(&format!("f{i}"))]))
         .collect();
     for r in window.run(batches) {
         r.expect("every submission is accepted");
@@ -1561,7 +1551,7 @@ fn every_unacked_waiter_in_a_partially_acked_window_gets_receipt_lost() {
     faults.arm_pause(PauseSite::AfterFsync, PauseAction::Stall);
     let e = Arc::clone(&engine);
     let prime = std::thread::spawn(move || {
-        e.ingest_rows(vec![row("prime")], "prime".to_string(), [0xEE; 32])
+        e.ingest_rows(vec![keyed_row("prime")], "prime".to_string(), [0xEE; 32])
     });
     faults.await_arrivals(PauseSite::AfterFsync, 1, WAIT);
 
@@ -1570,7 +1560,7 @@ fn every_unacked_waiter_in_a_partially_acked_window_gets_receipt_lost() {
         let e = Arc::clone(&engine);
         handles.push(std::thread::spawn(move || {
             e.ingest_rows(
-                vec![row(&format!("lost-{i}"))],
+                vec![keyed_row(&format!("lost-{i}"))],
                 format!("lost-{i}"),
                 [i as u8; 32],
             )
@@ -1621,9 +1611,9 @@ fn a_duplicate_unique_value_across_one_window_makes_one_item() {
 
     let window = Window::park(Arc::clone(&engine), faults);
     let got = window.run(vec![
-        ("first".to_string(), vec![row("same-key")]),
+        ("first".to_string(), vec![keyed_row("same-key")]),
         // A fresh batch id, as a client retry after a timeout produces.
-        ("retry".to_string(), vec![row("same-key")]),
+        ("retry".to_string(), vec![keyed_row("same-key")]),
     ]);
     let ids: Vec<Vec<EntityId>> = got
         .iter()
@@ -1663,7 +1653,7 @@ fn a_job_is_counted_completed_before_its_caller_is_answered() {
         (
             "an ingest",
             Box::new(|e| {
-                e.ingest_rows(vec![row("counted")], "counted".to_string(), [5; 32])
+                e.ingest_rows(vec![keyed_row("counted")], "counted".to_string(), [5; 32])
                     .expect("the ingest is accepted");
             }),
         ),
@@ -1730,7 +1720,7 @@ fn a_geometry_publication_leaves_the_work_counts_alone() {
     faults.arm_pause(PauseSite::AfterFsync, PauseAction::Stall);
     let e = Arc::clone(&engine);
     let caller = std::thread::spawn(move || {
-        e.ingest_rows(vec![row("queued")], "queued".to_string(), [6; 32])
+        e.ingest_rows(vec![keyed_row("queued")], "queued".to_string(), [6; 32])
     });
     faults.await_arrivals(PauseSite::AfterFsync, 1, WAIT);
 
@@ -1805,7 +1795,7 @@ fn an_idle_work_pass_arms_nothing() {
 fn anonymous_pair() -> Vec<UnallocatedRow> {
     (0..2)
         .map(|_| {
-            let mut r = row("ignored");
+            let mut r = keyed_row("ignored");
             r.scalars = Vec::new();
             r
         })
@@ -1865,7 +1855,7 @@ fn a_retry_joins_rather_than_reallocating() {
     // with, and both shapes commit one window.
     let a = enqueue(&engine, "same-batch", [9; 32], anonymous_pair(), 2);
     let retry = enqueue(&engine, "same-batch", [9; 32], anonymous_pair(), 3);
-    let c = enqueue(&engine, "other-batch", [7; 32], vec![row("c-0")], 4);
+    let c = enqueue(&engine, "other-batch", [7; 32], vec![keyed_row("c-0")], 4);
 
     window.faults.release();
     let first = a.join().unwrap().expect("accepted");
@@ -1965,7 +1955,7 @@ fn crash_child(dir: std::path::PathBuf) {
     let submitter = Arc::clone(&e);
     std::thread::spawn(move || {
         let _ = submitter.ingest_rows(
-            vec![row("crash-0"), row("crash-1")],
+            vec![keyed_row("crash-0"), keyed_row("crash-1")],
             CRASH_BATCH_ID.to_string(),
             CRASH_BODY_HASH,
         );
@@ -2042,7 +2032,7 @@ fn crash_parent() {
 
     let replayed = engine
         .ingest_rows(
-            vec![row("crash-0"), row("crash-1")],
+            vec![keyed_row("crash-0"), keyed_row("crash-1")],
             CRASH_BATCH_ID.to_string(),
             CRASH_BODY_HASH,
         )
@@ -2105,9 +2095,9 @@ fn held_plus_different_bytes_409s_without_disturbing_the_original() {
     let before = window.high_water_before;
     let fsyncs_before = engine.write_executor_stats().wal_fsyncs;
 
-    let a = enqueue(&engine, "same-batch", [1; 32], vec![row("held-0")], 2);
-    let retry = enqueue(&engine, "same-batch", [2; 32], vec![row("held-1")], 3);
-    let c = enqueue(&engine, "other-batch", [7; 32], vec![row("c-0")], 4);
+    let a = enqueue(&engine, "same-batch", [1; 32], vec![keyed_row("held-0")], 2);
+    let retry = enqueue(&engine, "same-batch", [2; 32], vec![keyed_row("held-1")], 3);
+    let c = enqueue(&engine, "other-batch", [7; 32], vec![keyed_row("c-0")], 4);
 
     window.faults.release();
     let original = a.join().unwrap().expect("the held original still applies");
@@ -2181,7 +2171,7 @@ fn every_id_a_window_issues_is_in_the_wal() {
             .map(|i| {
                 (
                     format!("w{i}"),
-                    vec![row(&format!("x{i}")), row(&format!("y{i}"))],
+                    vec![keyed_row(&format!("x{i}")), keyed_row(&format!("y{i}"))],
                 )
             })
             .collect();
@@ -2232,7 +2222,7 @@ fn a_windows_acks_follow_its_swap() {
     faults.arm_pause(PauseSite::BeforeAck, PauseAction::Stall);
     let e = Arc::clone(&engine);
     let submit = std::thread::spawn(move || {
-        e.ingest_rows(vec![row("in-force")], "in-force".to_string(), [3; 32])
+        e.ingest_rows(vec![keyed_row("in-force")], "in-force".to_string(), [3; 32])
     });
     faults.await_arrivals(PauseSite::BeforeAck, 1, WAIT);
 
@@ -2276,8 +2266,9 @@ fn the_deny_window_closes_at_its_bound() {
     faults.arm_pause(PauseSite::AfterFsync, PauseAction::Stall);
     let engine = Arc::new(engine);
     let e = Arc::clone(&engine);
-    let prime =
-        std::thread::spawn(move || e.ingest_rows(vec![row("prime")], "prime".into(), [0xEE; 32]));
+    let prime = std::thread::spawn(move || {
+        e.ingest_rows(vec![keyed_row("prime")], "prime".into(), [0xEE; 32])
+    });
     faults.await_arrivals(PauseSite::AfterFsync, 1, WAIT);
 
     let parked = engine.write_executor_stats();
@@ -2342,7 +2333,7 @@ fn the_fragmentation_counters_are_fed_by_window_closes_and_move_with_the_window(
         (0..ROWS)
             .map(|i| {
                 let s = (i as u32 * 7) % 8;
-                let mut r = row(&format!("frag-{i:03}"));
+                let mut r = keyed_row(&format!("frag-{i:03}"));
                 r.descriptors = vec![
                     format!("frag-term-{s}").into_bytes(),
                     format!("frag-term-{}", (s + 1) % 8).into_bytes(),
@@ -2438,7 +2429,7 @@ fn a_poisoned_node_writes_no_side_manifest_for_its_denies() {
     let (engine, faults) = engine_with_faults(&tmp, 8);
     let root = tmp.path().join("bundle");
     let manifests = || {
-        let dir = common::partition_dir(&root.join("v00000"));
+        let dir = common::partition_dir(&root, "v00000");
         let mut names: Vec<String> = std::fs::read_dir(dir)
             .unwrap()
             .filter_map(|e| e.ok())

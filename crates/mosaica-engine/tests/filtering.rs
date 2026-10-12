@@ -243,7 +243,6 @@ struct Fixture {
     /// The manifest's own view of the columns, snapshotted at build. Kept so a test that has
     /// deliberately corrupted a *file* can still reopen the columns: `open_bundle` verifies every
     /// digest, so it refuses first and the reader under test is never reached.
-    phash: String,
     manifest: mosaica_store::manifest::Manifest,
     extents: Vec<mosaica_store::manifest::AttrExtent>,
 }
@@ -333,9 +332,8 @@ fn fixture() -> Fixture {
         codes,
         archive_codes,
         prefix,
-        phash: phash.clone(),
         manifest: opened.manifest.clone(),
-        extents: opened.partitions[&phash].only_shard().record.attr_extents.clone(),
+        extents: opened.only_shard().record.attr_extents.clone(),
     }
 }
 
@@ -1099,7 +1097,7 @@ fn an_extent_file_the_manifest_names_but_that_is_absent_refuses_to_open() {
     let prefix = fx.bundle.join(current["prefix"].as_str().unwrap());
     let opened = open_bundle(&fx.bundle).unwrap();
     let phash = opened.partitions.keys().next().unwrap().clone();
-    let extents = opened.partitions[&phash].only_shard().record.attr_extents.clone();
+    let extents = opened.only_shard().record.attr_extents.clone();
     assert!(
         !extents.is_empty(),
         "the flush recorded its extents in the side-manifest"
@@ -2349,12 +2347,7 @@ fn a_range_composes_with_a_category_and_a_string() {
 
 /// Where the build wrote one column's derived postings.
 fn postings_path(fx: &Fixture, column: &str) -> std::path::PathBuf {
-    fx.bundle
-        .join(&fx.prefix)
-        .join(mosaica_store::ShardLayout::new(&fx.phash, mosaica_types::ShardId::ZERO).rel())
-        .join("attrs")
-        .join(column)
-        .join("postings.arrow")
+    attr_dir(fx, &fx.prefix, column).join("postings.arrow")
 }
 
 /// Reopen the fixture's columns from disk — used after a test has rewritten a postings file, since
@@ -2362,7 +2355,7 @@ fn postings_path(fx: &Fixture, column: &str) -> std::path::PathBuf {
 fn reopen(fx: &Fixture) -> Result<FilterColumns, mosaica_engine::filter::ComposeError> {
     FilterColumns::open(
         &fx.bundle.join(&fx.prefix),
-        mosaica_store::ShardLayout::new(&fx.phash, mosaica_types::ShardId::ZERO),
+        common::SHARD,
         // The manifest as it stood at the build: this fixture declares no view group
         // (`views.md` §5), so no incarnation is ever asked for.
         &fx.manifest,
@@ -2961,15 +2954,7 @@ fn a_folded_bundle_answers_every_filter_it_answered_before() {
         "every operand answers what it answered before"
     );
     assert_eq!(
-        folded
-            .bundle
-            .partitions
-            .values()
-            .next()
-            .expect("one partition")
-            .only_shard().record
-            .attr_extents
-            .len(),
+        folded.bundle.only_shard().record.attr_extents.len(),
         0,
         "every snapshot extent folded into the base; carrying an untouched one forward is declined"
     );
@@ -3022,11 +3007,7 @@ fn folded_column(fx: &Fixture, prefix: &str, column: &str) -> mosaica_filter::Va
 }
 
 fn attr_dir(fx: &Fixture, prefix: &str, column: &str) -> PathBuf {
-    fx.bundle
-        .join(prefix)
-        .join(mosaica_store::ShardLayout::new(&fx.phash, mosaica_types::ShardId::ZERO).rel())
-        .join("attrs")
-        .join(column)
+    fx.bundle.join(prefix).join(common::SHARD.column_rel(column))
 }
 
 /// The **key** a folded keyword column holds for one entity, resolved through the dictionary
@@ -3143,10 +3124,7 @@ fn a_deleted_entitys_value_leaves_the_column_and_every_predicate() {
     );
 
     let postings = mosaica_filter::ColumnPostings::open_keyed(
-        &fx.bundle
-            .join("v00001")
-            .join(mosaica_store::ShardLayout::new(&fx.phash, mosaica_types::ShardId::ZERO).rel())
-            .join("attrs/archive/postings.arrow"),
+        &attr_dir(&fx, "v00001", "archive").join("postings.arrow"),
     )
     .expect("the rebuilt postings open");
     let members = postings.entities(arch).expect("the code has members");
@@ -3320,10 +3298,7 @@ fn a_suppression_changes_no_attribute_artefact_across_the_fold() {
          suppression"
     );
     let postings = mosaica_filter::ColumnPostings::open_keyed(
-        &fx.bundle
-            .join("v00001")
-            .join(mosaica_store::ShardLayout::new(&fx.phash, mosaica_types::ShardId::ZERO).rel())
-            .join("attrs/archive/postings.arrow"),
+        &attr_dir(&fx, "v00001", "archive").join("postings.arrow"),
     )
     .expect("the rebuilt postings open");
     assert!(postings
@@ -3409,13 +3384,7 @@ fn an_extent_published_during_the_folds_flight_is_carried_forward_and_composed()
     }
 
     let (generation, cand) = live_candidate(&engine);
-    let partition = generation
-        .bundle
-        .partitions
-        .values()
-        .next()
-        .expect("one partition");
-    let extents = &partition.only_shard().record.attr_extents;
+    let extents = &generation.bundle.only_shard().record.attr_extents;
     assert!(
         !extents.is_empty(),
         "the flight's extents are named in the folded manifest — the list is half of publishing \
@@ -3488,10 +3457,8 @@ fn the_flip_maps_the_new_prefixs_columns_and_not_the_superseded_ones() {
     let Ok(before) = std::fs::read_to_string("/proc/self/maps") else {
         return;
     };
-    let folded_attrs = fx
-        .bundle
-        .join("v00001")
-        .join(mosaica_store::ShardLayout::new(&fx.phash, mosaica_types::ShardId::ZERO).rel())
+    let folded_attrs = common::SHARD
+        .dir(&fx.bundle.join("v00001"))
         .join("attrs")
         .display()
         .to_string();
@@ -3559,9 +3526,8 @@ fn flush_a_window(engine: &mosaica_engine::Engine, tag: &str, from: usize) -> Ve
 fn attrs_coalesced(engine: &mosaica_engine::Engine) {
     tick_until(engine, "the attribute extents to coalesce", std::time::Duration::from_secs(30), || {
         let generation = engine.generation();
-        let (_, partition) = generation.bundle.partitions.iter().next().unwrap();
         let mut per_column: BTreeMap<&str, usize> = BTreeMap::new();
-        for extent in &partition.only_shard().record.attr_extents {
+        for extent in &generation.bundle.only_shard().record.attr_extents {
             *per_column.entry(extent.column.as_str()).or_default() += 1;
         }
         per_column.values().all(|&n| n < COALESCE_WIDTH)
@@ -3571,9 +3537,8 @@ fn attrs_coalesced(engine: &mosaica_engine::Engine) {
 /// This partition's live `attr_extents`, per column.
 fn extents_per_column(fx: &Fixture) -> BTreeMap<String, usize> {
     let opened = open_bundle(&fx.bundle).unwrap();
-    let phash = opened.partitions.keys().next().unwrap().clone();
     let mut counts = BTreeMap::new();
-    for extent in &opened.partitions[&phash].only_shard().record.attr_extents {
+    for extent in &opened.only_shard().record.attr_extents {
         *counts.entry(extent.column.clone()).or_insert(0) += 1;
     }
     counts
@@ -4189,12 +4154,11 @@ fn a_coalesce_carries_a_deleted_but_unfolded_entitys_value_through() {
     flush_a_window(&engine, "kept2", COALESCE_WIDTH);
 
     let opened = open_bundle(&fx.bundle).unwrap();
-    let phash = opened.partitions.keys().next().unwrap().clone();
     let current: serde_json::Value =
         serde_json::from_slice(&std::fs::read(fx.bundle.join("CURRENT")).unwrap()).unwrap();
     let prefix = fx.bundle.join(current["prefix"].as_str().unwrap());
     let mut held = None;
-    for extent in &opened.partitions[&phash].only_shard().record.attr_extents {
+    for extent in &opened.only_shard().record.attr_extents {
         if extent.column != "title" {
             continue;
         }

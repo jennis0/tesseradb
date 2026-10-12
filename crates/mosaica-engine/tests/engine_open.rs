@@ -16,8 +16,8 @@ use mosaica_lifecycle::wal::{Wal, WalRecord};
 use common::*;
 
 /// `Engine::open` seeds the I9 allocator at `max(manifest high-water, WAL high-water)` — here,
-/// with an empty WAL, that is exactly the bundle's `entity_id_high_water` (== `N_ITEMS`, the
-/// bootstrap build's dense `0..n` assignment).
+/// with an empty WAL, that is exactly the shard record's high water (== `N_ITEMS`, the bootstrap
+/// build's dense `0..n` assignment).
 #[test]
 fn engine_open_seeds_the_allocator_from_the_manifest_high_water() {
     let tmp = TempDir::new().unwrap();

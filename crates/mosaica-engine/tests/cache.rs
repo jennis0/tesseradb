@@ -58,14 +58,7 @@ fn reopen(bundle_root: &Path) -> Arc<Bundle> {
 }
 
 fn watermark_of(bundle: &Bundle) -> u64 {
-    bundle
-        .partitions
-        .values()
-        .next()
-        .expect("the fixture bundle has one partition")
-        .only_shard()
-        .record
-        .watermark
+    bundle.only_shard().record.watermark
 }
 
 /// Publish a second, materially different geometry over `engine`, and return its

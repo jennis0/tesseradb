@@ -165,14 +165,14 @@ fn served_ids(
 }
 
 fn segment_count(engine: &Engine) -> usize {
-    engine.generation().bundle.partitions["default"].only_shard().views["s0"]
+    engine.generation().bundle.only_shard().views["s0"]
         .segments
         .len()
 }
 
 fn rows_of(engine: &Engine, entities: &[EntityId]) -> Vec<Option<u32>> {
     let generation = engine.generation();
-    let row_space = &generation.bundle.partitions["default"].only_shard().views["s0"].row_space;
+    let row_space = &generation.bundle.only_shard().views["s0"].row_space;
     entities
         .iter()
         .map(|e| row_space.row_of(*e).map(|r| r.raw()))
@@ -480,8 +480,11 @@ fn a_delete_before_a_merge_stays_deleted_across_it_and_a_restart() {
     );
 
     assert!(
-        engine.generation().bundle.partitions["default"]
-            .only_shard().record
+        engine
+            .generation()
+            .bundle
+            .only_shard()
+            .record
             .tombstones
             .entities()
             .expect("a written manifest's tombstones decode")
@@ -749,7 +752,7 @@ fn a_merged_manifest_reopens_with_every_item_and_every_tier() {
     let reopened = engine_at(tmp.path(), &root);
     let generation = reopened.generation();
     assert_eq!(
-        generation.bundle.partitions["default"].only_shard().views["s0"]
+        generation.bundle.only_shard().views["s0"]
             .segments
             .len(),
         2,
@@ -771,7 +774,7 @@ fn a_merged_manifest_reopens_with_every_item_and_every_tier() {
     );
     for (entity, key) in &items {
         assert!(
-            generation.bundle.partitions["default"].only_shard().views["s0"]
+            generation.bundle.only_shard().views["s0"]
                 .row_space
                 .row_of(*entity)
                 .is_some(),
@@ -796,10 +799,9 @@ fn a_merged_manifest_reopens_with_every_item_and_every_tier() {
 /// (`Engine::set_merge_publication_paused_for_test`); unassisted, the window is one pool
 /// scheduling race wide.
 ///
-/// **Mutations this kills:** re-stamping `manifest.watermark` (or `entity_id_high_water`) from
-/// the completed unit in `crate::merge::rebase_into`; and gutting `check_manifest_publishable`,
-/// which is what turns the same mistake on the next durable scalar into a refused write rather
-/// than a silent regression.
+/// **Mutations this kills:** re-stamping `watermark` (or `high_water`) from the completed unit in
+/// `crate::merge::rebase_into`; and gutting `check_manifest_publishable`, which is what turns the
+/// same mistake on the next durable scalar into a refused write rather than a silent regression.
 #[test]
 fn a_reboot_after_a_merge_reads_back_the_watermark_the_process_served() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -820,45 +822,45 @@ fn a_reboot_after_a_merge_reads_back_the_watermark_the_process_served() {
         // over the same four extents.
         engine.set_merge_for_test(false);
 
-            // The flush that advances the watermark past the merge's plan.
-            let batch: Vec<UnallocatedRow> = (0..ROWS_EACH)
-                .map(|t| {
-                    let descriptors = vec![b"0".to_vec()];
-                    UnallocatedRow {
-                        view: "s0".to_string(),
-                        join: None,
-                        x: ((t * TIER_WIDTH) * 20) as f64,
-                        y: 45.0,
-                        scalars: Vec::new(),
-                        terms: engine.resolve_terms(&descriptors),
-                        descriptors,
-                        scoped: Vec::new(),
-                    }
-                })
-                .collect();
-            engine
-                .ingest_rows(batch, "batch-late".to_string(), [9u8; 32])
-                .expect("ingest is accepted");
-            let flushes = engine.write_executor_stats().flushes;
-            engine.request_flush();
-            wait_until("the late flush to publish", WAIT, || {
-                engine.write_executor_stats().flushes > flushes
-            });
-            let watermark_served = engine.generation().only_shard().watermark;
+        // The flush that advances the watermark past the merge's plan.
+        let batch: Vec<UnallocatedRow> = (0..ROWS_EACH)
+            .map(|t| {
+                let descriptors = vec![b"0".to_vec()];
+                UnallocatedRow {
+                    view: "s0".to_string(),
+                    join: None,
+                    x: ((t * TIER_WIDTH) * 20) as f64,
+                    y: 45.0,
+                    scalars: Vec::new(),
+                    terms: engine.resolve_terms(&descriptors),
+                    descriptors,
+                    scoped: Vec::new(),
+                }
+            })
+            .collect();
+        engine
+            .ingest_rows(batch, "batch-late".to_string(), [9u8; 32])
+            .expect("ingest is accepted");
+        let flushes = engine.write_executor_stats().flushes;
+        engine.request_flush();
+        wait_until("the late flush to publish", WAIT, || {
+            engine.write_executor_stats().flushes > flushes
+        });
+        let watermark_served = engine.generation().only_shard().watermark;
 
         engine.set_merge_publication_paused_for_test(false);
         wait_until("the merge to publish", WAIT, || {
             engine.write_executor_stats().merges >= 1
         });
 
-            let generation = engine.generation();
-            assert_eq!(
-                generation.only_shard().watermark,
-                watermark_served,
-                "a merge moves the watermark for no one, in memory included"
-            );
-            assert_eq!(
-            generation.bundle.partitions["default"].only_shard().record.watermark, watermark_served,
+        let generation = engine.generation();
+        assert_eq!(
+            generation.only_shard().watermark,
+            watermark_served,
+            "a merge moves the watermark for no one, in memory included"
+        );
+        assert_eq!(
+            generation.bundle.only_shard().record.watermark, watermark_served,
             "the manifest the merge published must carry the live watermark, not its plan-time \
              snapshot — the manifest is what a restart believes, and every later publication \
              clones it forward"
@@ -1024,7 +1026,7 @@ fn flush_one_segment(engine: &Engine, tag: usize, rows: usize) -> Vec<EntityId> 
 
 /// The live extent list as `(seg_id, entity_lo, entity_hi)`, in listed (entity) order.
 fn extents_of(engine: &Engine) -> Vec<(String, u64, u64)> {
-    engine.generation().bundle.partitions["default"].only_shard().views["s0"]
+    engine.generation().bundle.only_shard().views["s0"]
         .row_space
         .extents()
         .iter()
@@ -1338,7 +1340,7 @@ fn a_flush_handed_back_while_the_executor_is_parked_is_published_once() {
 
     // And the bundle on disc is one a restart opens, holding each late item at one row.
     let bundle = mosaica_store::open_bundle(&root).expect("the bundle on disc opens");
-    let row_space = &bundle.partitions["default"].only_shard().views["s0"].row_space;
+    let row_space = &bundle.only_shard().views["s0"].row_space;
     let mut rows: Vec<u32> = late
         .iter()
         .map(|e| row_space.row_of(*e).expect("a late item has a row").raw())

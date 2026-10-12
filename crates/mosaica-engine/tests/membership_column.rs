@@ -149,8 +149,7 @@ impl Fixture {
         let dir = self
             .root
             .join(&engine.generation().prefix)
-            .join(common::SHARD.rel())
-            .join("members");
+            .join(common::SHARD.members_rel());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         loop {
             let held = std::fs::read_dir(&dir).into_iter().flatten().count();

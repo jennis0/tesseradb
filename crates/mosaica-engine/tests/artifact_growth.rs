@@ -88,20 +88,9 @@ impl Fixture {
         source_ids.map(|s| EntityId::new(map[&s])).collect()
     }
 
-    fn live_prefix(&self, engine: &Engine) -> std::path::PathBuf {
-        self.root.join(&engine.generation().prefix)
-    }
-
     fn membership_files(&self, engine: &Engine) -> Vec<std::path::PathBuf> {
-        let dir = self
-            .live_prefix(engine)
-            .join(common::SHARD.rel())
-            .join("members");
-        std::fs::read_dir(&dir)
+        live_shard_files(&self.root, engine, "members")
             .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
             .filter(|p| p.extension().is_some_and(|e| e == "tsmb"))
             .collect()
     }
@@ -1147,17 +1136,6 @@ fn a_joining_row_naming_another_artifact_still_grows_it() {
 /// How long a case here waits for the executor.
 const WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// The newest side-manifest on disc, read the way a reopen reads it.
-fn newest_side_manifest(root: &std::path::Path) -> mosaica_store::manifest::SegmentsManifest {
-    let bundle = mosaica_store::open_bundle(root).expect("the bundle opens");
-    bundle
-        .partitions
-        .values()
-        .next()
-        .expect("the fixture has one partition")
-        .side_manifest()
-}
-
 /// Register the open layer and wait out the side-manifest the registration publishes, so what a
 /// case counts afterwards is its batch's own publication and not the declaration's.
 fn registered(engine: &Engine) -> u64 {
@@ -1235,7 +1213,7 @@ fn a_tick_puts_them_in_the_prefix_and_a_restore_needs_no_log() {
             !fx.membership_files(&engine).is_empty()
         });
         assert!(
-            !newest_side_manifest(&fx.root).only_shard().membership_extents.is_empty(),
+            !side_manifest(&fx.root).only_shard().membership_extents.is_empty(),
             "the newest manifest names the extent the tick wrote"
         );
     }
@@ -1306,7 +1284,7 @@ fn a_suppression_still_publishes_at_once_and_takes_the_memberships_with_it() {
         engine.write_executor_stats().overlay_publications > published
     });
 
-    let manifest = newest_side_manifest(&fx.root);
+    let manifest = side_manifest(&fx.root);
     assert!(
         manifest
             .only_shard().deny

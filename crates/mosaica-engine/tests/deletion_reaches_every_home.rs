@@ -311,21 +311,6 @@ fn visible(engine: &Engine, session: &mosaica_engine::Session) -> u64 {
         .sum()
 }
 
-fn shard_dir(root: &Path) -> PathBuf {
-    common::SHARD.dir(&root.join(current_prefix(root)))
-}
-
-fn segment_dirs(root: &Path) -> Vec<PathBuf> {
-    let bundle = open_bundle(root).expect("the bundle opens");
-    let prefix = root.join(current_prefix(root));
-    bundle.partitions["default"]
-        .only_shard().record
-        .segments
-        .iter()
-        .map(|segment| prefix.join(common::SHARD.segment_rel(&segment.view, &segment.seg_id)))
-        .collect()
-}
-
 // ---------------------------------------------------------------------------------------------
 // The homes
 // ---------------------------------------------------------------------------------------------
@@ -432,7 +417,7 @@ fn every_home_byte(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 /// `Home::Row`: the row this entity resolves to, through the only legal entity → row path (I4).
 fn row_of(root: &Path, entity: EntityId) -> Option<u32> {
     let bundle = open_bundle(root).expect("the bundle opens");
-    bundle.partitions["default"].only_shard().views["s0"]
+    bundle.only_shard().views["s0"]
         .row_space
         .row_of(entity)
         .map(|row| row.raw())
@@ -1108,9 +1093,7 @@ fn stored(root: &Path, entities: &[EntityId]) -> Stored {
 fn a_deletion_of_an_edited_item_reaches_every_home() {
     use homes::fixture as every;
     use mosaica_engine::filter::{FilterExpr, FilterOperand, Scalar};
-    use mosaica_engine::IngestRequest;
     use mosaica_lifecycle::wal::WalScalar;
-    use mosaica_lifecycle::IngestRow;
 
     let tmp = tempfile::tempdir().unwrap();
     let root = every::build_homes(tmp.path());
@@ -1119,33 +1102,10 @@ fn a_deletion_of_an_edited_item_reaches_every_home() {
     let first = EntityId::new(source_to_new_map(&root, "v00000")[&every::X]);
     let tid = engine.mosaica_id_of(first).unwrap();
 
-    let blank = |mosaica_id| IngestRow {
-        mosaica_id,
-        labels: None,
-        position: None,
-        scalars: vec![WalScalar::Null; every::DECLARED],
-        scoped: vec![WalScalar::Null; 2],
-        omitted: (0..every::DECLARED + 2).collect(),
-    };
-    let send = |engine: &Engine, batch: &str, row: IngestRow| {
-        let mut body_hash = [0u8; 32];
-        body_hash[..batch.len()].copy_from_slice(batch.as_bytes());
-        engine
-            .ingest(IngestRequest {
-                batch_id: batch.to_string(),
-                body_hash,
-                view: Some("s0".to_string()),
-                rows: vec![row],
-                artifacts: Default::default(),
-                strict: false,
-                mosaica_id_column: false,
-            })
-            .expect("the batch is accepted")
-    };
-    let mut edit = blank(Some(tid));
+    let mut edit = every::bare(Some(tid));
     edit.scalars[every::SCORE_AT] = WalScalar::I32(555);
     edit.omitted.retain(|at| *at != every::SCORE_AT);
-    assert_eq!(send(&engine, "edit", edit).edited, 1);
+    assert_eq!(every::send(&engine, "edit", "s0", edit).edited, 1);
     publish_buffered(&engine);
     fold(&engine);
     let moved = engine.resolve_mosaica_ids(&[tid]).unwrap()[0].expect("the edited item resolves");
@@ -1273,12 +1233,12 @@ fn a_deletion_of_an_edited_item_reaches_every_home() {
                     served("s0", ident(every::ident_of(every::X))).is_empty(),
                     "{home:?}"
                 );
-                let mut fresh = blank(None);
+                let mut fresh = every::bare(None);
                 fresh.labels = Some(vec![ALL_TERM.to_string().into_bytes()]);
                 fresh.position = Some((500.0, 500.0));
                 fresh.scalars[every::IDENT_AT] = WalScalar::U64(every::ident_of(every::X));
                 fresh.omitted.retain(|at| *at != every::IDENT_AT);
-                let receipt = send(&engine, "fresh", fresh);
+                let receipt = every::send(&engine, "fresh", "s0", fresh);
                 assert_eq!(
                     receipt.created, 1,
                     "{home:?}: the deleted item's unique value is free for a new item"

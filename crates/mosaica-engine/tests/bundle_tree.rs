@@ -1,8 +1,6 @@
-//! **Where a bundle's files are.** The root holds `CURRENT`, the prefixes and the operator's
-//! `reports/`. A prefix holds `MANIFEST.json`, the term dictionary under `dictionary/`, and each
-//! partition's directory, which holds its side-manifests and its shards; every other file is under
-//! a shard's directory. Written against the paths themselves rather than the layout that derives
-//! them.
+//! Every file of a bundle is in its place: `CURRENT` and `reports/` at the root, `MANIFEST.json`
+//! and `dictionary/` in a prefix, side-manifests in a partition's directory, the rest under a
+//! shard's. Written against literal paths, not the layout module.
 
 mod common;
 #[path = "homes/fixture.rs"]
@@ -14,10 +12,9 @@ use std::time::Duration;
 
 use common::*;
 use fixture::*;
-use mosaica_engine::{Engine, EngineConfig, IngestRequest};
+use mosaica_engine::{Engine, EngineConfig};
 use mosaica_lifecycle::wal::WalScalar;
-use mosaica_lifecycle::IngestRow;
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, ShardId, SHARD_SIZE_DEFAULT};
 
 /// Whether a prefix-relative path is where a file of a prefix may be.
 fn in_place(rel: &str) -> bool {
@@ -139,36 +136,8 @@ fn engine_at(tmp: &Path, root: &Path) -> Engine {
     engine
 }
 
-fn send(engine: &Engine, batch: &str, row: IngestRow) {
-    let mut body_hash = [0u8; 32];
-    body_hash[..batch.len()].copy_from_slice(batch.as_bytes());
-    engine
-        .ingest(IngestRequest {
-            batch_id: batch.to_string(),
-            body_hash,
-            view: Some("s0".to_string()),
-            rows: vec![row],
-            artifacts: Default::default(),
-            strict: false,
-            mosaica_id_column: false,
-        })
-        .unwrap_or_else(|e| panic!("{batch} is accepted: {e}"));
-}
-
-/// A row with every value omitted.
-fn bare(mosaica_id: Option<mosaica_types::MosaicaId>) -> IngestRow {
-    IngestRow {
-        mosaica_id,
-        labels: None,
-        position: None,
-        scalars: vec![WalScalar::Null; DECLARED],
-        scoped: vec![WalScalar::Null; 2],
-        omitted: (0..DECLARED + 2).collect(),
-    }
-}
-
-/// Through a build, a layer's publication, flushes carrying new index keys and an edit, a merge, a
-/// coalesce, a fold and a restart, every file is in its place and every path a manifest names is.
+/// Every file, and every path a manifest names, is in its place after each kind of publication and
+/// a restart.
 #[test]
 fn every_file_is_global_or_its_partitions_or_in_its_shard() {
     let tmp = tempfile::tempdir().unwrap();
@@ -181,14 +150,14 @@ fn every_file_is_global_or_its_partitions_or_in_its_shard() {
     let mut edit = bare(Some(engine.mosaica_id_of(x).unwrap()));
     edit.scalars[SCORE_AT] = WalScalar::I32(555);
     edit.omitted.retain(|at| *at != SCORE_AT);
-    send(&engine, "edit", edit);
+    send(&engine, "edit", "s0", edit);
     publish_buffered(&engine);
     let stats = engine.write_executor_stats();
     for i in 0..4 {
         let mut row = bare(None);
         row.labels = Some(vec![format!("novel-{i}").into_bytes()]);
         row.position = Some((10.0 + f64::from(i), 20.0));
-        send(&engine, &format!("new-{i}"), row);
+        send(&engine, &format!("new-{i}"), "s0", row);
         publish_buffered(&engine);
     }
     tick_until(
@@ -218,7 +187,7 @@ fn every_file_is_global_or_its_partitions_or_in_its_shard() {
 fn assert_bases(root: &Path, after: &str) {
     let bundle = mosaica_store::open_bundle(root).expect("the bundle opens");
     for view in VIEWS {
-        let data = &bundle.partitions[PARTITION].only_shard().views[view];
+        let data = &bundle.only_shard().views[view];
         assert!(
             data.row_space.base_rows() > 0,
             "{view} has no base after {after}"
@@ -243,35 +212,22 @@ fn a_built_or_folded_view_opens_with_its_base_row_entities_and_field_tallies() {
     let mut row = bare(None);
     row.labels = Some(vec![b"0".to_vec()]);
     row.position = Some((10.0, 20.0));
-    send(&engine, "new", row);
+    send(&engine, "new", "s0", row);
     publish_buffered(&engine);
     fold(&engine);
     drop(engine);
     assert_bases(&root, "a fold");
 }
 
-/// The bundle's shard size, and each shard's number and high water, as an open reads them.
-fn shards_of(root: &Path) -> (u64, Vec<(u32, u64)>) {
-    let bundle = mosaica_store::open_bundle(root).expect("the bundle opens");
-    let partition = &bundle.partitions[PARTITION];
-    let shards = partition
-        .shards
-        .iter()
-        .map(|shard| (shard.record.id.raw(), shard.record.high_water))
-        .collect();
-    (partition.shard_size, shards)
-}
-
-/// **The shard's record and the shard size survive a flush, a fold and a restart.** Every
-/// publication restates the size, and the shard's high water only rises.
+/// Every publication restates the size, and the shard's high water only rises.
 #[test]
 fn the_shard_record_and_the_shard_size_survive_a_flush_a_fold_and_a_restart() {
     let tmp = tempfile::tempdir().unwrap();
     let root = build_homes(tmp.path());
     let (size, built) = shards_of(&root);
-    assert_eq!(size, mosaica_types::SHARD_SIZE_DEFAULT);
+    assert_eq!(size, SHARD_SIZE_DEFAULT);
     assert_eq!(built.len(), 1);
-    assert_eq!(built[0].0, 0);
+    assert_eq!(built[0].0, ShardId::ZERO);
     let new_row = |i: u32| {
         let mut row = bare(None);
         row.labels = Some(vec![b"0".to_vec()]);
@@ -280,11 +236,11 @@ fn the_shard_record_and_the_shard_size_survive_a_flush_a_fold_and_a_restart() {
     };
 
     let engine = engine_at(tmp.path(), &root);
-    send(&engine, "new-0", new_row(0));
+    send(&engine, "new-0", "s0", new_row(0));
     publish_buffered(&engine);
     let flushed = shards_of(&root);
-    assert_eq!(flushed.0, mosaica_types::SHARD_SIZE_DEFAULT, "after a flush");
-    assert_eq!(flushed.1, vec![(0, built[0].1 + 1)], "after a flush");
+    assert_eq!(flushed.0, SHARD_SIZE_DEFAULT, "after a flush");
+    assert_eq!(flushed.1, vec![(ShardId::ZERO, built[0].1 + 1)], "after a flush");
 
     fold(&engine);
     assert_eq!(shards_of(&root), flushed, "after a fold");
@@ -292,11 +248,11 @@ fn the_shard_record_and_the_shard_size_survive_a_flush_a_fold_and_a_restart() {
 
     let engine = engine_at(tmp.path(), &root);
     assert_eq!(shards_of(&root), flushed, "after a restart");
-    send(&engine, "new-1", new_row(1));
+    send(&engine, "new-1", "s0", new_row(1));
     publish_buffered(&engine);
     assert_eq!(
         shards_of(&root),
-        (mosaica_types::SHARD_SIZE_DEFAULT, vec![(0, built[0].1 + 2)]),
+        (SHARD_SIZE_DEFAULT, vec![(ShardId::ZERO, built[0].1 + 2)]),
         "after a flush that follows the restart"
     );
     drop(engine);

@@ -28,7 +28,7 @@ fn fabricate_stepped_down(root: &std::path::Path) {
     let current: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(root.join("CURRENT")).unwrap()).unwrap();
     let prefix = current["prefix"].as_str().unwrap().to_string();
-    let dir = common::partition_dir(&root.join(&prefix));
+    let dir = common::partition_dir(root, &prefix);
     let mut manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("SEGMENTS-0.json")).unwrap())
             .unwrap();

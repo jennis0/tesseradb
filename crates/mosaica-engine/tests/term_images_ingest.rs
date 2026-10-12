@@ -353,9 +353,9 @@ fn kept_descriptors(engine: &Engine, where_: &str) -> BTreeSet<String> {
     let generation = engine.generation();
     let view = generation
         .bundle
-        .partitions
-        .values()
-        .find_map(|partition| partition.only_shard().views.get(VIEW))
+        .only_shard()
+        .views
+        .get(VIEW)
         .expect("the generation carries the view");
     let images = view
         .term_images
@@ -402,9 +402,9 @@ fn a_built_corpus_and_the_same_corpus_ingested_and_folded_agree() {
         let generation = ingested.generation();
         let view = generation
             .bundle
-            .partitions
-            .values()
-            .find_map(|partition| partition.only_shard().views.get(VIEW))
+            .only_shard()
+            .views
+            .get(VIEW)
             .expect("the ingested generation carries the view");
         assert!(
             view.term_images.is_none(),

@@ -112,7 +112,7 @@ fn copy_tree(from: &Path, to: &Path) {
 
 /// The `SEGMENTS-<n>.json` names present under one prefix's only partition, sorted.
 fn side_manifests(root: &Path, prefix: &str) -> Vec<String> {
-    let dir = common::partition_dir(&root.join(prefix));
+    let dir = common::partition_dir(root, prefix);
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .unwrap()
         .filter_map(|e| e.ok())

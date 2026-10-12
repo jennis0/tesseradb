@@ -149,8 +149,10 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
 }
 
 fn text_extents(root: &Path) -> Vec<mosaica_store::manifest::TextExtent> {
-    open_bundle(root).expect("the bundle opens").partitions["default"]
-        .only_shard().record
+    open_bundle(root)
+        .expect("the bundle opens")
+        .only_shard()
+        .record
         .text_extents
         .clone()
 }
@@ -202,7 +204,7 @@ fn flush_a_window(engine: &Engine, root: &Path, from: usize) -> Vec<u32> {
         .collect();
     tick_until(engine, "the text layers to coalesce", std::time::Duration::from_secs(60), || {
         let generation = engine.generation();
-        let live = &generation.bundle.partitions["default"].only_shard().record.text_extents;
+        let live = &generation.bundle.only_shard().record.text_extents;
         live.iter().filter(|e| e.column == "prose").count() < COALESCE_WIDTH
     });
     entities

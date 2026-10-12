@@ -103,20 +103,14 @@ fn entity_of(engine: &Engine, tid: MosaicaId) -> EntityId {
 /// The newest side-manifest's freed ids, free or held, and its retired numbers.
 fn pool(root: &Path) -> (croaring::Bitmap, croaring::Bitmap) {
     let bundle = mosaica_store::open_bundle(root).expect("the bundle opens");
-    let manifest = &bundle
-        .partitions
-        .values()
-        .next()
-        .expect("the fixture has one partition")
-        .only_shard()
-        .record;
-    let freed = manifest
+    let record = &bundle.only_shard().record;
+    let freed = record
         .held_entities
         .iter()
         .filter_map(|held| held.entities.entities())
-        .chain(manifest.free_entities.entities())
+        .chain(record.free_entities.entities())
         .fold(croaring::Bitmap::new(), |all, ids| all.or(ids));
-    let retired = manifest.retired_numbers.entities().unwrap().clone();
+    let retired = record.retired_numbers.entities().unwrap().clone();
     (freed, retired)
 }
 
