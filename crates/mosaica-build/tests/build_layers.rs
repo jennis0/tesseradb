@@ -24,9 +24,7 @@ use common::assert_bundles_identical;
 use mosaica_build::{build, build_in_memory, BuildArgs};
 use mosaica_spatial::Bounds;
 use mosaica_store::read::open_bundle;
-use mosaica_types::IdentityKey;
 
-const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 const N_ITEMS: u64 = 250;
 
 fn extent() -> Bounds {
@@ -350,26 +348,12 @@ fn args(inputs: &Inputs, out: &Path) -> BuildArgs {
             select: None,
             access: mosaica_build::config::AccessInput::relation(inputs.pairs.clone()),
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources: mosaica_build::config::AttributeSource::over(
             inputs.points.clone(),
             &schema,
         ),
-        out: out.to_path_buf(),
-        limit: None,
-        shard_size: None,
-        strict: false,
-        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(out)
     }
 }
 

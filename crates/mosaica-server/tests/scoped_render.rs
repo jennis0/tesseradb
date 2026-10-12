@@ -710,22 +710,15 @@ async fn a_view_outside_the_group_is_byte_identical_to_a_build_without_the_famil
 
     let tmp = TempDir::new().unwrap();
     let without = build_bundle(tmp.path(), false);
-    // `v00000/partitions/<phash>/shards/0/views/world/segments/<seg>/` — walked rather than
-    // spelt, the partition hash and the segment id being the build's to choose.
+    // Found by listing: the segment id is the build's to choose.
     let segment_dir = |root: &Path| {
-        let one = |dir: &Path| {
-            std::fs::read_dir(dir)
-                .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
-                .next()
-                .expect("one entry")
-                .unwrap()
-                .path()
-        };
-        let prefix = root.join("v00000");
-        let phash = one(&mosaica_store::layout::partitions_dir(&prefix));
-        let phash = phash.file_name().unwrap().to_str().unwrap();
-        let shard = mosaica_store::ShardLayout::new(phash, mosaica_types::ShardId::ZERO);
-        one(&prefix.join(shard.view_rel("world")).join("segments"))
+        let segments = root.join("v00000").join(SHARD.segments_rel("world"));
+        std::fs::read_dir(&segments)
+            .unwrap_or_else(|e| panic!("{}: {e}", segments.display()))
+            .next()
+            .expect("one segment")
+            .unwrap()
+            .path()
     };
     // **The listing as well as the bytes.** A presence bitmap is a file *beside* `columns.arrow`
     // (decision 0064), so a lane leaking into a view outside the scope could leave

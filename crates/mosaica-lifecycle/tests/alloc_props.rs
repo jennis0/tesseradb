@@ -87,9 +87,9 @@ proptest! {
         }
     }
 
-    /// **No entity id is reissued after a fold** (I9), across fuzzed interleavings of ingest,
-    /// flush, fold and crash. A fold's rotation reclaims the log, so after it the shard record's
-    /// high water in the side-manifest is the only home of the ids the log named.
+    /// **No entity id is reissued after a fold**, across fuzzed interleavings of ingest, flush,
+    /// fold and crash. The fold's rotation reclaims the log, so after it the side-manifest's high
+    /// water is the only home of the ids the log named.
     #[test]
     fn no_reuse_across_a_fold_that_reclaims_the_log(
         rounds in prop::collection::vec((1u64..32, any::<bool>(), any::<bool>()), 1..14),
@@ -125,16 +125,13 @@ proptest! {
                 });
             }
 
-            if flush {
-                // A flush publication raises the side-manifest past the ids it consumed.
+            if flush || fold {
+                // A publication raises the side-manifest past the ids it consumed.
                 side_high_water = alloc.high_water();
             }
             if fold {
-                side_high_water = alloc.high_water();
-                // The rotation behind the fold reclaims the log. Faithful precisely *because*
-                // the line above took the live value: it is what makes the reclaimed records
-                // redundant, and a fold that wrote the snapshot's bound here instead would
-                // reclaim ids nothing else records.
+                // The rotation behind the fold reclaims the log; the live high water above still
+                // records its ids.
                 wal.clear();
             }
             // `alloc` is dropped here — the crash.

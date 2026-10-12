@@ -21,11 +21,10 @@ use mosaica_build::{build, BuildArgs};
 use mosaica_filter::{ColumnPostings, ValueColumn};
 use mosaica_spatial::Bounds;
 use mosaica_store::open_bundle;
-use mosaica_types::{AttrLocalId, IdentityKey};
+use mosaica_types::AttrLocalId;
 
 mod common;
 
-const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 const N: u64 = 40;
 
 /// `alpha` / `beta` / `gamma` in a fixed rotation, with every seventh item carrying no value at
@@ -36,10 +35,6 @@ fn department_of(e: u64) -> Option<String> {
         return None;
     }
     Some(["alpha", "beta", "gamma"][(e % 3) as usize].to_string())
-}
-
-fn test_key() -> IdentityKey {
-    IdentityKey::from_hex(TEST_KEY_HEX).unwrap()
 }
 
 fn extent() -> Bounds {
@@ -185,33 +180,13 @@ fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs 
             select: None,
             access: mosaica_build::config::AccessInput::relation(pairs.to_path_buf()),
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources: mosaica_build::config::AttributeSource::over(
             points.to_path_buf(),
             &schema,
         ),
-        out,
-        limit: None,
-        shard_size: None,
-        strict: false,
-        identity_key: test_key(),
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&out)
     }
-}
-
-fn current_prefix(out: &Path) -> String {
-    let current: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(out.join("CURRENT")).unwrap()).unwrap();
-    current["prefix"].as_str().unwrap().to_string()
 }
 
 /// The code the built bundle bound each vocabulary key to. Read from the manifest rather than
@@ -232,22 +207,11 @@ fn codes_of(out: &Path, column: &str) -> HashMap<String, u32> {
 }
 
 fn column_dir(out: &Path, column: &str) -> PathBuf {
-    let bundle = open_bundle(out).unwrap();
-    let phash = bundle.partitions.keys().next().unwrap().clone();
-    mosaica_store::ShardLayout::new(&phash, mosaica_types::ShardId::ZERO)
-        .dir(&out.join(current_prefix(out)))
-        .join("attrs")
-        .join(column)
+    common::prefix_dir(out).join(common::SHARD.column_rel(column))
 }
 
 fn postings_path(out: &Path, column: &str) -> PathBuf {
-    let bundle = open_bundle(out).unwrap();
-    let phash = bundle.partitions.keys().next().unwrap().clone();
-    mosaica_store::ShardLayout::new(&phash, mosaica_types::ShardId::ZERO)
-        .dir(&out.join(current_prefix(out)))
-        .join("attrs")
-        .join(column)
-        .join("postings.arrow")
+    column_dir(out, column).join("postings.arrow")
 }
 
 const FILTER_SCHEMA: &str = r#"
@@ -377,11 +341,7 @@ fn the_postings_file_is_under_the_manifest_digest() {
     let dir = build_with(FILTER_SCHEMA);
     let out = dir.path().join("bundle");
     let bundle = open_bundle(&out).unwrap();
-    let phash = bundle.partitions.keys().next().unwrap();
-    let key = format!(
-        "{}/attrs/department/postings.arrow",
-        mosaica_store::ShardLayout::new(phash, mosaica_types::ShardId::ZERO).rel()
-    );
+    let key = format!("{}/postings.arrow", common::SHARD.column_rel("department"));
     assert!(
         bundle.manifest.files.contains_key(&key),
         "MANIFEST.files covers {key}; it holds {:?}",
@@ -653,13 +613,7 @@ fn the_manifest_records_the_placement_the_tail_was_built_from() {
     assert_eq!(declared, vec!["department", "title", "id"]);
     // Only one is in the tail, and it is exactly what the segment carries.
     assert_eq!(tail, vec!["department"]);
-    let view = &bundle
-        .partitions
-        .values()
-        .next()
-        .unwrap()
-        .only_shard()
-        .views["s0"];
+    let view = &bundle.only_shard().views["s0"];
     let columns = &view.segments[0].columns;
     assert!(columns.scalar("department").is_some());
     assert!(columns.scalar("title").is_none());
@@ -687,13 +641,7 @@ fn a_filter_only_column_is_absent_from_the_hot_column() {
     .unwrap();
 
     let bundle = open_bundle(&out).unwrap();
-    let view = &bundle
-        .partitions
-        .values()
-        .next()
-        .unwrap()
-        .only_shard()
-        .views["s0"];
+    let view = &bundle.only_shard().views["s0"];
     let columns = &view.segments[0].columns;
     assert!(
         columns.scalar("department").is_some(),

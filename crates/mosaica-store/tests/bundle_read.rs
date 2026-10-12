@@ -4,45 +4,25 @@
 //! `row_of` loop, and `tile_ranges` against a linear scan of the morton array. Then corrupt
 //! one byte of `columns.arrow` and confirm `open_bundle` fails closed with a digest error.
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
 use croaring::Bitmap;
-use sha2::{Digest, Sha256};
 
-use mosaica_spatial::tiler::{sort_batch, TilerItem};
-use mosaica_spatial::{fixed32, split32, tiles_for_bbox, Bounds, Tile};
-use mosaica_store::manifest::{
-    CurrentPointer, EntitySet, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor,
-    Quantisation, SegmentDescriptor, SegmentsManifest, ViewDescriptor,
-};
-use mosaica_store::write::{write_permutation, write_segment};
-use mosaica_store::{open_bundle, tile_ranges, ShardLayout, StoreError};
-use mosaica_types::{EntityId, MosaicaId, ShardId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+use mosaica_spatial::{split32, tiles_for_bbox, Bounds, Tile};
+use mosaica_store::manifest::{CurrentPointer, EntitySet};
+use mosaica_store::{open_bundle, tile_ranges, StoreError};
+use mosaica_types::EntityId;
 
-const SHARD: ShardLayout<'static> = ShardLayout::new("default", ShardId::ZERO);
+mod fixture;
+use fixture::{build_bundle, file_digest, hex_sha256, SHARD};
 
-/// `file` in `seg_id` of the "main" view, prefix-relative.
 fn seg_file(seg_id: &str, file: &str) -> String {
     format!("{}/{file}", SHARD.segment_rel("main", seg_id))
 }
 
-/// The "default" partition's directory under `root`'s bundle prefix.
 fn partition_dir(root: &Path) -> std::path::PathBuf {
     mosaica_store::layout::partition_dir(&root.join("v00000"), "default")
-}
-
-/// A synthetic `mosaica_id`-shaped value for test fixtures: full splitmix64 output over a
-/// seed, so its top 16 bits are a `priority` prefix like any real `mosaica_id` (contracts
-/// §2.6), without claiming this is the actual Feistel construction — `mosaica-types`'s identity
-/// tests cover that separately.
-fn synthetic_mosaica_id(seed: u64) -> MosaicaId {
-    let mut z = seed.wrapping_add(0x9E3779B97F4A7C15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-    z ^= z >> 31;
-    MosaicaId::new(z)
 }
 
 fn unit_extent() -> Bounds {
@@ -52,147 +32,6 @@ fn unit_extent() -> Bounds {
         y_min: 0.0,
         y_max: 1.0,
     }
-}
-
-fn hex_sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    out
-}
-
-fn file_digest(path: &Path) -> FileDigest {
-    let bytes = fs::read(path).expect("read for digest");
-    FileDigest {
-        size: bytes.len() as u64,
-        sha256: hex_sha256(&bytes),
-    }
-}
-
-/// Build a tiny bundle at `root` with one partition ("default"), one view ("main"), one
-/// segment ("seg0"), `n` entities `0..n`. Returns the sorted items (row order) and their
-/// morton codes, so the test can independently recompute expectations.
-fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
-    let extent = unit_extent();
-    let mut items: Vec<TilerItem> = (0..n)
-        .map(|entity_id| TilerItem {
-            mosaica_id: synthetic_mosaica_id(entity_id),
-            // Spread points across the grid deterministically so tiles split them up.
-            qx: fixed32(((entity_id * 37) % 100) as f64 / 100.0, 0.0, 1.0),
-            qy: fixed32(((entity_id * 61) % 100) as f64 / 100.0, 0.0, 1.0),
-            scalars: vec![],
-        })
-        .collect();
-    let mut entity_ids: Vec<EntityId> = (0..n).map(EntityId::new).collect();
-    let codes = sort_batch(&mut items, &mut entity_ids);
-
-    let prefix_dir = root.join("v00000");
-    let view_dir = prefix_dir.join(SHARD.view_rel("main"));
-    let seg_dir = prefix_dir.join(SHARD.segment_rel("main", "seg0"));
-    fs::create_dir_all(&seg_dir).expect("mkdir seg_dir");
-
-    write_segment(&seg_dir, &items, &codes, &[], &[]).expect("write_segment");
-
-    let row_order_entities: Vec<EntityId> = entity_ids.clone();
-    let bound = n;
-    write_permutation(
-        &view_dir.join("permutation.bin"),
-        &row_order_entities,
-        bound,
-    )
-    .expect("write_permutation");
-
-    // SEGMENTS-0.json's `files` map: prefix-relative paths (R1) for every file this partition
-    // added since MANIFEST.
-    let mut segments_files = BTreeMap::new();
-    segments_files.insert(
-        format!("{}/permutation.bin", SHARD.view_rel("main")),
-        file_digest(&view_dir.join("permutation.bin")),
-    );
-    for name in mosaica_store::SEGMENT_FILES {
-        segments_files.insert(seg_file("seg0", name), file_digest(&seg_dir.join(name)));
-    }
-
-    let segments_manifest = SegmentsManifest {
-        partition: mosaica_store::manifest::PartitionManifest {
-            dict_extents: vec![],
-            files: segments_files,
-            ..mosaica_store::manifest::PartitionManifest::empty()
-        },
-        shards: mosaica_store::manifest::Shards {
-            size: mosaica_types::SHARD_SIZE_DEFAULT,
-            records: vec![mosaica_store::manifest::ShardRecord {
-                watermark: n,
-                high_water: n,
-                segments: vec![SegmentDescriptor {
-                    incarnation: 0,
-                    view: "main".to_string(),
-                    seg_id: "seg0".to_string(),
-                    row_count: items.len() as u32,
-                    entity_lo: 0,
-                    entity_hi: n.saturating_sub(1),
-                }],
-                deltas: vec![],
-                tombstones: EntitySet::default(),
-                deny: EntitySet::default(),
-                ..mosaica_store::manifest::ShardRecord::empty(mosaica_types::ShardId::ZERO)
-            }],
-        },
-    };
-    let segments_bytes = serde_json::to_vec_pretty(&segments_manifest).expect("serialise");
-    fs::write(partition_dir(root).join("SEGMENTS-0.json"), &segments_bytes)
-        .expect("write SEGMENTS-0");
-
-    let manifest = Manifest {
-        bundle_format: mosaica_types::BUNDLE_FORMAT,
-        created_at: "2026-07-28T00:00:00Z".to_string(),
-        declared_scalars: vec![],
-        vocabularies: vec![],
-        small_term_threshold: 32,
-        identity: IdentityDescriptor {
-            construction: IDENTITY_CONSTRUCTION.to_string(),
-            rounds: IDENTITY_ROUNDS,
-            key: "0123456789abcdef0123456789abcdef".to_string(),
-        },
-        groups: Vec::new(),
-        views: vec![ViewDescriptor {
-            incarnation: 0,
-            point_default: Some("public".to_string()),
-            visibility: None,
-            id: "main".to_string(),
-            display_name: "Main".to_string(),
-            // The frame is the view's, not the bundle's (decision 0040).
-            quantisation: Quantisation {
-                x_min: extent.x_min,
-                x_max: extent.x_max,
-                y_min: extent.y_min,
-                y_max: extent.y_max,
-            },
-            projection: mosaica_spatial::Projection::None,
-        }],
-        partitions: vec![PartitionDescriptor {
-            phash: "default".to_string(),
-            required_terms: vec![],
-        }],
-        provenance: serde_json::json!({}),
-        files: BTreeMap::new(),
-    };
-    let manifest_bytes = serde_json::to_vec_pretty(&manifest).expect("serialise");
-    fs::write(prefix_dir.join("MANIFEST.json"), &manifest_bytes).expect("write MANIFEST.json");
-
-    let current = CurrentPointer {
-        prefix: "v00000".to_string(),
-        manifest_digest: hex_sha256(&manifest_bytes),
-    };
-    fs::write(
-        root.join("CURRENT"),
-        serde_json::to_vec_pretty(&current).expect("serialise CURRENT"),
-    )
-    .expect("write CURRENT");
-
-    (items, codes)
 }
 
 #[test]
@@ -241,7 +80,7 @@ fn permutation_project_matches_per_entity_row_of_loop() {
     let (items, _codes) = build_bundle(dir.path(), 500);
 
     let bundle = open_bundle(dir.path()).expect("open_bundle");
-    let view = &bundle.partitions["default"].only_shard().views["main"];
+    let view = &bundle.only_shard().views["main"];
 
     // A mask over roughly half the entity space, including a few IDs outside [0, n) — those
     // must be silently skipped (no row here), not treated as an error.
@@ -276,7 +115,7 @@ fn tile_ranges_agrees_with_linear_scan_of_morton_array() {
     let (_items, codes) = build_bundle(dir.path(), 300);
 
     let bundle = open_bundle(dir.path()).expect("open_bundle");
-    let seg = &bundle.partitions["default"].only_shard().views["main"].segments[0];
+    let seg = &bundle.only_shard().views["main"].segments[0];
 
     // A handful of tiles at different depths, including the whole-grid tile (depth 0).
     for tile in [
@@ -327,7 +166,7 @@ fn tile_ranges_covers_the_whole_segment_at_depth_zero() {
     let (_items, codes) = build_bundle(dir.path(), 300);
 
     let bundle = open_bundle(dir.path()).expect("open_bundle");
-    let seg = &bundle.partitions["default"].only_shard().views["main"].segments[0];
+    let seg = &bundle.only_shard().views["main"].segments[0];
 
     let whole = tile_ranges(
         seg,
@@ -407,13 +246,17 @@ fn add_segments_manifest(root: &Path, n: u64, edit: impl FnOnce(&mut serde_json:
 // error instead of *serving* — and serving is the failure being guarded against.
 // -------------------------------------------------------------------------------------------
 
-/// Name a file in this manifest's `files` map that does not exist on disk, so verification fails
-/// for this candidate and no other. Any digest will do: the file cannot be opened, so it never
-/// reaches the comparison.
 fn deny_set(ids: &[u32]) -> EntitySet {
     EntitySet::of(&ids.iter().copied().collect::<croaring::Bitmap>())
 }
 
+fn shard0(value: &mut serde_json::Value) -> &mut serde_json::Value {
+    &mut value["shards"]["records"][0]
+}
+
+/// Name a file in this manifest's `files` map that does not exist on disk, so verification fails
+/// for this candidate and no other. Any digest will do: the file cannot be opened, so it never
+/// reaches the comparison.
 fn name_a_missing_file(value: &mut serde_json::Value) {
     value["files"][seg_file("seg-unsynced", "columns.arrow")] =
         serde_json::json!({ "size": 4, "sha256": "00".repeat(32) });
@@ -425,13 +268,12 @@ fn a_manifest_carrying_tombstones_opens_and_carries_them_forward() {
     build_bundle(dir.path(), 50);
 
     edit_segments_manifest(dir.path(), |value| {
-        value["shards"]["records"][0]["tombstones"] =
-            serde_json::to_value(deny_set(&[17])).unwrap();
+        shard0(value)["tombstones"] = serde_json::to_value(deny_set(&[17])).unwrap();
     });
 
     let bundle = open_bundle(dir.path()).expect("tombstones are honoured, so this opens");
     assert_eq!(
-        bundle.partitions["default"].only_shard().record.tombstones.entities().unwrap().to_vec(),
+        bundle.only_shard().record.tombstones.entities().unwrap().to_vec(),
         vec![17],
         "the loader must carry the deletion to whoever seeds the overlay from it — an opened \
          manifest whose tombstones went nowhere serves entity 17"
@@ -444,11 +286,11 @@ fn a_manifest_carrying_a_deny_entry_opens_and_carries_it_forward() {
     build_bundle(dir.path(), 50);
 
     edit_segments_manifest(dir.path(), |value| {
-        value["shards"]["records"][0]["deny"] = serde_json::to_value(deny_set(&[17])).unwrap();
+        shard0(value)["deny"] = serde_json::to_value(deny_set(&[17])).unwrap();
     });
 
     let bundle = open_bundle(dir.path()).expect("deny is honoured, so this opens");
-    let deny = &bundle.partitions["default"].only_shard().record.deny;
+    let deny = &bundle.only_shard().record.deny;
     assert_eq!(deny.entities().unwrap().to_vec(), vec![17]);
 }
 
@@ -468,7 +310,7 @@ fn a_deny_carrying_candidate_that_fails_verification_is_unready_never_stepped_pa
     build_bundle(dir.path(), 50);
 
     add_segments_manifest(dir.path(), 1, |value| {
-        value["shards"]["records"][0]["deny"] = serde_json::to_value(deny_set(&[17])).unwrap();
+        shard0(value)["deny"] = serde_json::to_value(deny_set(&[17])).unwrap();
         name_a_missing_file(value);
     });
 
@@ -506,7 +348,7 @@ fn a_deny_field_that_does_not_decode_makes_the_partition_unready() {
         // On the newest manifest, whose files all verify: nothing but the undecodable field is
         // wrong with it.
         add_segments_manifest(dir.path(), 1, |value| {
-            value["shards"]["records"][0][field] = damaged.clone();
+            shard0(value)[field] = damaged.clone();
         });
 
         match open_bundle(dir.path())
@@ -529,8 +371,7 @@ fn a_tombstone_carrying_candidate_that_fails_verification_is_unready_too() {
     build_bundle(dir.path(), 50);
 
     add_segments_manifest(dir.path(), 1, |value| {
-        value["shards"]["records"][0]["tombstones"] =
-            serde_json::to_value(deny_set(&[17])).unwrap();
+        shard0(value)["tombstones"] = serde_json::to_value(deny_set(&[17])).unwrap();
         name_a_missing_file(value);
     });
 
@@ -558,11 +399,8 @@ fn a_deny_alongside_deltas_is_not_stepped_past_either() {
     build_bundle(dir.path(), 50);
 
     add_segments_manifest(dir.path(), 1, |value| {
-        value["shards"]["records"][0]["deny"] = serde_json::to_value(deny_set(&[17])).unwrap();
-        value["shards"]["records"][0]["deltas"] = serde_json::json!([format!(
-            "{}/delta.arrow",
-            ShardLayout::new("p", ShardId::ZERO).segment_rel("s0", "flush-1-1")
-        )]);
+        shard0(value)["deny"] = serde_json::to_value(deny_set(&[17])).unwrap();
+        shard0(value)["deltas"] = serde_json::json!([seg_file("flush-1-1", "delta.arrow")]);
         name_a_missing_file(value);
     });
 
@@ -599,7 +437,7 @@ fn the_walk_refuses_a_deny_it_reaches_only_after_stepping_down() {
     let dir = tempfile::tempdir().expect("tempdir");
     build_bundle(dir.path(), 50);
     add_segments_manifest(dir.path(), 1, |value| {
-        value["shards"]["records"][0]["deny"] = serde_json::to_value(deny_set(&[17])).unwrap();
+        shard0(value)["deny"] = serde_json::to_value(deny_set(&[17])).unwrap();
         name_a_missing_file(value);
     });
     add_segments_manifest(dir.path(), 2, name_a_missing_file);
@@ -628,10 +466,7 @@ fn a_candidate_with_no_deny_state_steps_down_and_serves() {
     let dir = tempfile::tempdir().expect("tempdir");
     build_bundle(dir.path(), 50);
     add_segments_manifest(dir.path(), 1, |value| {
-        value["shards"]["records"][0]["deltas"] = serde_json::json!([format!(
-            "{}/delta.arrow",
-            ShardLayout::new("p", ShardId::ZERO).segment_rel("s0", "flush-1-1")
-        )]);
+        shard0(value)["deltas"] = serde_json::json!([seg_file("flush-1-1", "delta.arrow")]);
         name_a_missing_file(value);
     });
 
@@ -711,8 +546,7 @@ fn a_manifest_with_no_unhonourable_state_opens_at_the_highest_n() {
     );
 }
 
-/// A side-manifest naming no shard, two shards, or one shard numbered other than 0 is refused at
-/// open, and the older manifest below it is not served in its place.
+/// The valid SEGMENTS-0 below it is not served in its place.
 #[test]
 fn a_side_manifest_of_anything_but_shard_zero_alone_is_refused() {
     let shapes: [fn(&mut serde_json::Value); 3] = [
@@ -1022,7 +856,7 @@ fn open_bundle_rejects_a_path_traversing_segment_id() {
     // joined onto the bundle root and opened — a digest-verified manifest is safe from content
     // tampering, not from carrying unsafe *values*.
     edit_segments_manifest(dir.path(), |value| {
-        value["shards"]["records"][0]["segments"][0]["seg_id"] = serde_json::json!("../../evil");
+        shard0(value)["segments"][0]["seg_id"] = serde_json::json!("../../evil");
     });
 
     let err =
@@ -1091,7 +925,7 @@ fn tile_ranges_all_agrees_with_the_full_column_search_over_depths_bboxes_and_ord
     // tile's *end* rather than its *start* begins to lie.
     let (_items, _codes) = build_bundle(dir.path(), 5_000);
     let bundle = open_bundle(dir.path()).expect("open_bundle");
-    let seg = &bundle.partitions["default"].only_shard().views["main"].segments[0];
+    let seg = &bundle.only_shard().views["main"].segments[0];
     let extent = unit_extent();
 
     // Every bbox shape a viewport request can produce a tile set from, including the ones a
@@ -1138,7 +972,7 @@ fn tile_ranges_all_agrees_with_the_full_column_search_for_arbitrary_tile_sets() 
     let dir = tempfile::tempdir().expect("tempdir");
     let (_items, _codes) = build_bundle(dir.path(), 5_000);
     let bundle = open_bundle(dir.path()).expect("open_bundle");
-    let seg = &bundle.partitions["default"].only_shard().views["main"].segments[0];
+    let seg = &bundle.only_shard().views["main"].segments[0];
 
     // Randomised rather than `proptest`-generated so the bundle fixture (tempdir, Arrow write,
     // real SHA-256 digests) is built once instead of once per generated case. The seed is fixed,
@@ -1158,7 +992,7 @@ fn tile_ranges_all_over_an_empty_tile_set_is_empty() {
     let dir = tempfile::tempdir().expect("tempdir");
     build_bundle(dir.path(), 64);
     let bundle = open_bundle(dir.path()).expect("open_bundle");
-    let seg = &bundle.partitions["default"].only_shard().views["main"].segments[0];
+    let seg = &bundle.only_shard().views["main"].segments[0];
     assert!(mosaica_store::tile_ranges_all(seg, &[]).is_empty());
 }
 
@@ -1180,8 +1014,8 @@ fn a_just_written_prefix_opens_to_the_same_bundle_without_re_verifying_it() {
         .expect("a prefix this process wrote");
 
     // Same bundle, by every structure a request reads.
-    let a = &verified.partitions["default"].only_shard().views["main"].segments[0];
-    let b = &trusted.partitions["default"].only_shard().views["main"].segments[0];
+    let a = &verified.only_shard().views["main"].segments[0];
+    let b = &trusted.only_shard().views["main"].segments[0];
     assert_eq!(a.seg_id, b.seg_id);
     assert_eq!(a.row_count, items.len() as u32);
     assert_eq!(b.row_count, a.row_count);
@@ -1241,7 +1075,7 @@ fn a_just_written_prefix_still_refuses_a_manifest_that_disagrees_with_its_own_fi
     build_bundle(dir.path(), 40);
 
     edit_segments_manifest(dir.path(), |value| {
-        value["shards"]["records"][0]["segments"][0]["row_count"] = serde_json::json!(39);
+        shard0(value)["segments"][0]["row_count"] = serde_json::json!(39);
     });
 
     let err = mosaica_store::open_written_prefix(dir.path(), "v00000")
@@ -1306,7 +1140,7 @@ fn a_padded_manifest_carrying_a_deny_is_refused_never_stepped_past() {
     build_bundle(dir.path(), 50);
 
     add_segments_manifest_named(dir.path(), "SEGMENTS-01.json", 1, |value| {
-        value["shards"]["records"][0]["deny"] = serde_json::to_value(deny_set(&[17])).unwrap();
+        shard0(value)["deny"] = serde_json::to_value(deny_set(&[17])).unwrap();
     });
 
     match open_bundle(dir.path()).expect_err(

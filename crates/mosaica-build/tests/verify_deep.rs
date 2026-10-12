@@ -11,6 +11,7 @@
 //! a checker nobody has seen fail is a checker nobody knows works).
 
 mod common;
+use common::SHARD;
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -33,17 +34,12 @@ use mosaica_store::manifest::{
     TenancyBit,
 };
 use mosaica_store::tenancy::bits_of;
-use mosaica_store::{write_segments_manifest, ShardLayout, StoreError};
-use mosaica_types::{EntityId, IdentityKey, ShardId, TermId, SMALL_TERM_THRESHOLD_DEFAULT};
+use mosaica_store::{write_segments_manifest, StoreError};
+use mosaica_types::{EntityId, ShardId, TermId, SMALL_TERM_THRESHOLD_DEFAULT};
 
-const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 const N_ITEMS: u64 = 48;
 /// The build entity the fixture deletes.
 const DELETED: u32 = 5;
-/// Where the fixture's tenancy index is written, prefix-relative.
-const SHARD: ShardLayout<'static> = ShardLayout::new("default", ShardId::ZERO);
-
-/// `file` under the default shard, prefix-relative.
 fn shard_rel(file: &str) -> String {
     format!("{}/{file}", SHARD.rel())
 }
@@ -156,23 +152,10 @@ fn built_bundle_with(root: &Path, n: u64, score: Option<Score>) {
             select: None,
             access: mosaica_build::config::AccessInput::relation(pairs),
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources,
-        out: out.clone(),
-        limit: None,
-        shard_size: None,
-        strict: false,
-        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
         emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&out)
     };
     build(&args).expect("the batch build succeeds");
 }
@@ -204,7 +187,7 @@ fn flushed_bundle_at(root: &Path, tenancy: u16) {
     assert_eq!(n, N_ITEMS);
 
     // Two flushed entities.
-    let key = IdentityKey::from_hex(TEST_KEY_HEX).unwrap();
+    let key = common::test_key();
     let rows = vec![
         FlushRow {
             entity_id: EntityId::new(n),
@@ -225,7 +208,7 @@ fn flushed_bundle_at(root: &Path, tenancy: u16) {
     ];
     let flush = write_flush_segment(
         &prefix_dir,
-        mosaica_store::ShardLayout::new("default", ShardId::ZERO),
+        SHARD,
         "s0",
         FlushInput {
             incarnation: 0,
@@ -870,7 +853,6 @@ fn a_missing_scoped_render_lane_is_refused_and_an_intact_one_is_counted() {
     let (schema, attribute_sources) = common::id_attributes(&points);
     build(&BuildArgs {
         views: vec![view("2026-Q1"), view("2026-Q2")],
-        anchor: 0,
         groups: vec![mosaica_build::GroupDescriptor {
             title: None,
             point_default: Some("public".to_string()),
@@ -913,19 +895,8 @@ fn a_missing_scoped_render_lane_is_refused_and_an_intact_one_is_counted() {
             source: None,
         }],
         attribute_sources,
-        out: out.clone(),
-        limit: None,
-        shard_size: None,
-        strict: false,
-        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&out)
     })
     .expect("a rendered scoped family builds");
 
@@ -1075,15 +1046,14 @@ fn banded_bundle(temp: &tempfile::TempDir) -> (PathBuf, String, mosaica_store::b
 fn a_band_entry_that_is_not_its_row_is_refused() {
     let temp = tempfile::TempDir::new().unwrap();
     let (root, rel, bands) = banded_bundle(&temp);
-    let rel = rel.as_str();
     drop(bands);
-    let path = root.join("v00000").join(rel);
+    let path = root.join("v00000").join(&rel);
     let mut bytes = fs::read(&path).unwrap();
     bytes[4096] ^= 1;
     fs::write(&path, &bytes).unwrap();
-    refresh_digest(&root, rel);
+    refresh_digest(&root, &rel);
 
-    expect_refused_on(&root, rel);
+    expect_refused_on(&root, &rel);
 }
 
 /// A render copy that does not hold its row's value is refused.
@@ -1091,16 +1061,15 @@ fn a_band_entry_that_is_not_its_row_is_refused() {
 fn a_render_copy_that_is_not_its_rows_value_is_refused() {
     let temp = tempfile::TempDir::new().unwrap();
     let (root, rel, bands) = banded_bundle(&temp);
-    let rel = rel.as_str();
     let at = bands.copy_range("score").expect("score is copied").start;
     drop(bands);
-    let path = root.join("v00000").join(rel);
+    let path = root.join("v00000").join(&rel);
     let mut bytes = fs::read(&path).unwrap();
     bytes[at] ^= 1;
     fs::write(&path, &bytes).unwrap();
-    refresh_digest(&root, rel);
+    refresh_digest(&root, &rel);
 
-    expect_refused_on(&root, rel);
+    expect_refused_on(&root, &rel);
 }
 
 /// An indexed copy that does not hold its item's value is refused, and an intact one verifies.

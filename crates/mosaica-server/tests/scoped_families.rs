@@ -1237,16 +1237,10 @@ async fn ingest_scoped_with_nulls(
     ingested_ids(&body)
 }
 
-/// Request a compaction fold and block until it has published (`POST /control/compact`).
-/// Where one view's column of a group-scoped family lives under a shard directory.
-///
-/// **The key's directory carries its incarnation above the build's** (`views.md` §5,
-/// [decision 0115](../../../docs/decisions/0115-a-dropped-view-key-is-reusable.md)): a view a
-/// build declared is at `<key>/`, and one created while the service runs is at `<key>@<n>/`, so a
-/// recreated key's base never lands on the path its predecessor's occupies. The number is
-/// internal — no wire surface carries it — so a test matches the prefix rather than naming it.
-fn scoped_dir(shard: &std::path::Path, family: &str, key: &str) -> std::path::PathBuf {
-    let group = shard.join("attrs").join(family).join("quarter");
+/// Where one view's column of group-scoped `family` lives under `shard_dir`: `<key>/`, or
+/// `<key>@<n>/` for a key created at the service. `<n>` is internal, so this matches the prefix.
+fn scoped_dir(shard_dir: &std::path::Path, family: &str, key: &str) -> std::path::PathBuf {
+    let group = shard_dir.join("attrs").join(family).join("quarter");
     let exact = group.join(key);
     if exact.is_dir() {
         return exact;
@@ -1263,34 +1257,6 @@ fn scoped_dir(shard: &std::path::Path, family: &str, key: &str) -> std::path::Pa
                 .is_some_and(|n| n.starts_with(&suffixed))
         })
         .unwrap_or(exact)
-}
-
-/// The newest side-manifest of the live prefix's only partition.
-fn side_manifest(served: &Served) -> Value {
-    let root = served.tmp.path().join("bundle");
-    let current: Value =
-        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).unwrap()).unwrap();
-    let partition = mosaica_store::layout::partition_dir(
-        &root.join(current["prefix"].as_str().expect("CURRENT names a prefix")),
-        "default",
-    );
-    let newest = std::fs::read_dir(&partition)
-        .expect("the partition directory")
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("SEGMENTS-"))
-        })
-        .max_by_key(|p| {
-            p.file_stem()
-                .and_then(|n| n.to_str())
-                .and_then(|n| n.trim_start_matches("SEGMENTS-").parse::<u64>().ok())
-                .unwrap_or(0)
-        })
-        .expect("a side-manifest");
-    serde_json::from_slice(&std::fs::read(newest).unwrap()).unwrap()
 }
 
 /// Every answer the write path owes, at one stage of it.
@@ -1544,9 +1510,9 @@ async fn every_scoped_family_survives_ingest_flush_layering_fold_and_restart() {
         .await;
         drain(&served.server).await;
     }
-    let manifest = side_manifest(&served);
+    let record = newest_shard_record(&served.tmp.path().join("bundle"));
     let layers = |column: &str, view: &str| {
-        manifest["shards"]["records"][0]["attr_extents"]
+        record["attr_extents"]
             .as_array()
             .expect("attr_extents")
             .iter()
@@ -1556,7 +1522,7 @@ async fn every_scoped_family_survives_ingest_flush_layering_fold_and_restart() {
     assert!(
         layers("mood", "quarter:2026-Q1") >= 3,
         "the fillers stacked layers on `2026-Q1`'s column: {}",
-        manifest["shards"]["records"][0]["attr_extents"]
+        record["attr_extents"]
     );
     assert_eq!(
         layers("mood", &format!("quarter:{MINTED_KEY}")),
@@ -1568,17 +1534,14 @@ async fn every_scoped_family_survives_ingest_flush_layering_fold_and_restart() {
 
     // ---- the fold -----------------------------------------------------------------------------
     fold(&served.server).await;
-    let root = served.tmp.path().join("bundle");
-    let current: Value =
-        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).unwrap()).unwrap();
-    let shard = mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO)
-        .dir(&root.join(current["prefix"].as_str().expect("CURRENT names a prefix")));
+    let (_, prefix_dir) = live_prefix(&served.tmp.path().join("bundle"));
+    let shard_dir = SHARD.dir(&prefix_dir);
     // The folded prefix carries a directory per `(family, view)`, the minted view included — a
     // fold that wrote the bundle-wide columns alone would leave a prefix these are simply not in,
     // and the families would be served as absent from the first read.
     for family in ["mood", "sector", "score"] {
         for key in ["2026-Q1", "2026-Q3", MINTED_KEY] {
-            let dir = scoped_dir(&shard, family, key);
+            let dir = scoped_dir(&shard_dir, family, key);
             assert!(
                 dir.join("values.arrow").is_file(),
                 "the fold wrote {family}'s column for {key}: {}",
@@ -1588,7 +1551,7 @@ async fn every_scoped_family_survives_ingest_flush_layering_fold_and_restart() {
     }
     for key in ["2026-Q1", "2026-Q3", MINTED_KEY] {
         // Text owes no value column, per view exactly as bundle-wide: a dictionary and postings.
-        let dir = scoped_dir(&shard, "note", key);
+        let dir = scoped_dir(&shard_dir, "note", key);
         assert!(
             dir.join("postings.arrow").is_file(),
             "the fold wrote `note`'s index for {key}: {}",

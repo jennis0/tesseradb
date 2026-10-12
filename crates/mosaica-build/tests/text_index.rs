@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{Float64Array, StringArray, UInt64Array};
@@ -23,11 +23,9 @@ use mosaica_filter::{Access, RecordBlob, RecordValue, SortedDict};
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_spatial::Bounds;
 use mosaica_store::read::open_bundle;
-use mosaica_types::IdentityKey;
 
 mod common;
 
-const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 const N: u64 = 64;
 
 /// Source `e`'s prose. Mixed script on purpose: the analyser is one pipeline with nothing
@@ -136,39 +134,12 @@ fn build_with(schema: Schema) -> tempfile::TempDir {
             select: None,
             access: mosaica_build::config::AccessInput::relation(pairs),
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &schema),
-        out,
-        limit: None,
-        shard_size: None,
-        strict: false,
-        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&out)
     })
     .expect("a build with a text column succeeds");
     dir
-}
-
-fn current_prefix(out: &Path) -> String {
-    let current: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(out.join("CURRENT")).unwrap()).unwrap();
-    current["prefix"].as_str().unwrap().to_string()
-}
-
-fn shard_dir(out: &Path) -> PathBuf {
-    let bundle = open_bundle(out).unwrap();
-    let phash = bundle.partitions.keys().next().unwrap().clone();
-    mosaica_store::ShardLayout::new(&phash, mosaica_types::ShardId::ZERO)
-        .dir(&out.join(current_prefix(out)))
 }
 
 /// **The index and the blob, both, from one build.**
@@ -176,7 +147,7 @@ fn shard_dir(out: &Path) -> PathBuf {
 fn an_indexed_text_column_writes_a_token_index_and_a_blob_row() {
     let dir = build_with(text_schema(true));
     let out = dir.path().join("bundle");
-    let column_dir = shard_dir(&out).join("attrs").join("abstract");
+    let column_dir = common::prefix_dir(&out).join(common::SHARD.column_rel("abstract"));
 
     // --- entity space: the dictionary holds the analyser's terms, deduplicated and sorted.
     let dict = SortedDict::open_dir(&column_dir, Access::Read).expect("the token dictionary opens");
@@ -230,7 +201,8 @@ fn an_indexed_text_column_writes_a_token_index_and_a_blob_row() {
     }
 
     // --- and the third home: the prose itself, which no posting could reconstruct.
-    let blob = RecordBlob::open_dir(&shard_dir(&out).join("attrs").join("record"), Access::Read)
+    let record_dir = common::prefix_dir(&out).join(common::SHARD.record_rel());
+    let blob = RecordBlob::open_dir(&record_dir, Access::Read)
         .expect("an indexed text column still has a blob row");
     for source in [0u64, 1, 2, 3, 63] {
         let entity = source_of[&source];
@@ -261,7 +233,7 @@ fn an_indexed_text_column_writes_a_token_index_and_a_blob_row() {
 fn an_unindexed_text_column_has_the_blob_row_and_no_index() {
     let dir = build_with(text_schema(false));
     let out = dir.path().join("bundle");
-    let column_dir = shard_dir(&out).join("attrs").join("abstract");
+    let column_dir = common::prefix_dir(&out).join(common::SHARD.column_rel("abstract"));
     assert!(
         !column_dir.join(mosaica_filter::DICT_FILE).exists(),
         "an unindexed text column wrote a dictionary"
@@ -271,7 +243,8 @@ fn an_unindexed_text_column_has_the_blob_row_and_no_index() {
         "an unindexed text column wrote postings"
     );
 
-    let blob = RecordBlob::open_dir(&shard_dir(&out).join("attrs").join("record"), Access::Read)
+    let record_dir = common::prefix_dir(&out).join(common::SHARD.record_rel());
+    let blob = RecordBlob::open_dir(&record_dir, Access::Read)
         .expect("the blob is where an unindexed text value lives");
     let source_of = common::entities_of(&out, "id", 0..N);
     assert_eq!(
@@ -443,10 +416,9 @@ fn match_never_answers_outside_the_candidate() {
 
 fn open_columns(out: &Path) -> mosaica_engine::filter::FilterColumns {
     let bundle = open_bundle(out).unwrap();
-    let phash = bundle.partitions.keys().next().unwrap().clone();
     mosaica_engine::filter::FilterColumns::open(
-        &out.join(current_prefix(out)),
-        mosaica_store::ShardLayout::new(&phash, bundle.only_shard().record.id),
+        &common::prefix_dir(out),
+        common::SHARD,
         &bundle.manifest,
         // A built bundle has flushed nothing, so every column is its base layer alone.
         Default::default(),

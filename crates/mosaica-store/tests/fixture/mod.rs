@@ -1,14 +1,9 @@
 //! A hand-assembled bundle, and the pieces a flush would publish into it.
 //!
-//! Separate from `bundle_read.rs`'s own copy because that file's fixture returns the tiler items
-//! it built (its assertions compare against them) and hard-codes one segment. This one exists to
-//! be *added to*.
-//!
 //! Each test binary compiles this module on its own, so a helper only one of them uses is dead
 //! code in the others. That is what the allow below is for, and it is scoped to this fixture.
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -17,8 +12,8 @@ use sha2::{Digest, Sha256};
 use mosaica_spatial::fixed32;
 use mosaica_spatial::tiler::{sort_batch, TilerItem};
 use mosaica_store::manifest::{
-    CurrentPointer, EntitySet, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor,
-    Quantisation, SegmentDescriptor, SegmentsManifest, ViewDescriptor,
+    CurrentPointer, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation,
+    SegmentDescriptor, SegmentsManifest, ViewDescriptor,
 };
 use mosaica_store::permutation::SegmentExtent;
 use mosaica_store::read::SegmentData;
@@ -32,14 +27,16 @@ pub const PARTITION: &str = "default";
 pub const SHARD: ShardLayout<'static> = ShardLayout::new(PARTITION, ShardId::ZERO);
 pub const VIEW: &str = "main";
 
-fn synthetic_mosaica_id(seed: u64) -> MosaicaId {
+/// A `mosaica_id`-shaped value: splitmix64 over `seed`, so its top 16 bits are a priority prefix
+/// like a real one's.
+pub fn synthetic_mosaica_id(seed: u64) -> MosaicaId {
     let mut z = seed.wrapping_add(0x9E3779B97F4A7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
     MosaicaId::new(z ^ (z >> 31))
 }
 
-fn hex_sha256(bytes: &[u8]) -> String {
+pub fn hex_sha256(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut out = String::with_capacity(64);
     for byte in digest {
@@ -48,7 +45,7 @@ fn hex_sha256(bytes: &[u8]) -> String {
     out
 }
 
-fn file_digest(path: &Path) -> FileDigest {
+pub fn file_digest(path: &Path) -> FileDigest {
     let bytes = fs::read(path).expect("read for digest");
     FileDigest {
         size: bytes.len() as u64,
@@ -56,7 +53,8 @@ fn file_digest(path: &Path) -> FileDigest {
     }
 }
 
-fn items_for(entity_lo: u64, count: u64) -> Vec<TilerItem> {
+/// Items for entities `[entity_lo, entity_lo + count)`, spread over a 100 x 100 grid.
+pub fn items_for(entity_lo: u64, count: u64) -> Vec<TilerItem> {
     (entity_lo..entity_lo + count)
         .map(|e| TilerItem {
             mosaica_id: synthetic_mosaica_id(e),
@@ -67,69 +65,57 @@ fn items_for(entity_lo: u64, count: u64) -> Vec<TilerItem> {
         .collect()
 }
 
-/// A one-segment bundle over entities `[0, n)`, at prefix `v00000`.
-pub fn build_bundle(root: &Path, n: u64) {
-    let mut items = items_for(0, n);
+/// A one-segment bundle over entities `[0, n)`, at prefix `v00000`. Returns its items in row
+/// order and their Morton codes.
+pub fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
+    let built = publish_seg0(&root.join("v00000"), items_for(0, n));
+    publish_manifest(root, "2026-08-02T00:00:00Z");
+    built
+}
+
+/// Sorts `items`, entities `[0, n)` in order, into `seg0` of [`VIEW`], writes its permutation, and
+/// publishes both as `SEGMENTS-0`. Returns the items in row order and their Morton codes.
+pub fn publish_seg0(prefix_dir: &Path, mut items: Vec<TilerItem>) -> (Vec<TilerItem>, Vec<u32>) {
+    let n = items.len() as u64;
     let mut entity_ids: Vec<EntityId> = (0..n).map(EntityId::new).collect();
     let codes = sort_batch(&mut items, &mut entity_ids);
 
-    let prefix_dir = root.join("v00000");
-    let partition_dir = mosaica_store::layout::partition_dir(&prefix_dir, PARTITION);
-    let view_dir = prefix_dir.join(SHARD.view_rel(VIEW));
-    let seg_dir = prefix_dir.join(SHARD.segment_rel(VIEW, "seg0"));
+    let seg_rel = SHARD.segment_rel(VIEW, "seg0");
+    let seg_dir = prefix_dir.join(&seg_rel);
     fs::create_dir_all(&seg_dir).expect("mkdir");
-
     write_segment(&seg_dir, &items, &codes, &[], &[]).expect("write_segment");
-    write_permutation(&view_dir.join("permutation.bin"), &entity_ids, n).expect("permutation");
+    let permutation_rel = SHARD.permutation_rel(VIEW);
+    write_permutation(&prefix_dir.join(&permutation_rel), &entity_ids, n).expect("permutation");
 
-    let mut files = BTreeMap::new();
-    files.insert(
-        format!("{}/permutation.bin", SHARD.view_rel(VIEW)),
-        file_digest(&view_dir.join("permutation.bin")),
-    );
-    for name in mosaica_store::SEGMENT_FILES {
-        files.insert(
-            format!("{}/{name}", SHARD.segment_rel(VIEW, "seg0")),
-            file_digest(&seg_dir.join(name)),
-        );
-    }
+    let mut manifest = SegmentsManifest::empty();
+    let rels = mosaica_store::SEGMENT_FILES.iter().map(|name| format!("{seg_rel}/{name}"));
+    manifest.partition.files = std::iter::once(permutation_rel)
+        .chain(rels)
+        .map(|rel| {
+            let digest = file_digest(&prefix_dir.join(&rel));
+            (rel, digest)
+        })
+        .collect();
+    let record = manifest.only_shard_mut();
+    (record.watermark, record.high_water) = (n, n);
+    record.segments = vec![SegmentDescriptor {
+        incarnation: 0,
+        view: VIEW.into(),
+        seg_id: "seg0".into(),
+        row_count: n as u32,
+        entity_lo: 0,
+        entity_hi: n.saturating_sub(1),
+    }];
+    mosaica_store::write_segments_manifest(prefix_dir, PARTITION, 0, &manifest)
+        .expect("SEGMENTS-0");
+    (items, codes)
+}
 
-    let segments_manifest = SegmentsManifest {
-        partition: mosaica_store::manifest::PartitionManifest {
-            dict_extents: vec![],
-            vocabulary_extensions: vec![],
-            files,
-            ..mosaica_store::manifest::PartitionManifest::empty()
-        },
-        shards: mosaica_store::manifest::Shards {
-            size: mosaica_types::SHARD_SIZE_DEFAULT,
-            records: vec![mosaica_store::manifest::ShardRecord {
-                watermark: n,
-                high_water: n,
-                segments: vec![SegmentDescriptor {
-                    incarnation: 0,
-                    view: VIEW.to_string(),
-                    seg_id: "seg0".to_string(),
-                    row_count: n as u32,
-                    entity_lo: 0,
-                    entity_hi: n.saturating_sub(1),
-                }],
-                deltas: vec![],
-                tombstones: EntitySet::default(),
-                deny: EntitySet::default(),
-                ..mosaica_store::manifest::ShardRecord::empty(mosaica_types::ShardId::ZERO)
-            }],
-        },
-    };
-    fs::write(
-        partition_dir.join("SEGMENTS-0.json"),
-        serde_json::to_vec_pretty(&segments_manifest).expect("serialise"),
-    )
-    .expect("write SEGMENTS-0");
-
-    let manifest = Manifest {
+/// The bundle manifest over [`VIEW`] in [`PARTITION`] on the unit square.
+pub fn manifest(created_at: &str) -> Manifest {
+    Manifest {
         bundle_format: mosaica_types::BUNDLE_FORMAT,
-        created_at: "2026-08-02T00:00:00Z".to_string(),
+        created_at: created_at.to_string(),
         declared_scalars: vec![],
         vocabularies: vec![],
         small_term_threshold: 32,
@@ -145,7 +131,6 @@ pub fn build_bundle(root: &Path, n: u64) {
             visibility: None,
             id: VIEW.to_string(),
             display_name: VIEW.to_string(),
-            // The frame is the view's, not the bundle's (decision 0040).
             quantisation: Quantisation {
                 x_min: 0.0,
                 x_max: 1.0,
@@ -159,10 +144,14 @@ pub fn build_bundle(root: &Path, n: u64) {
             required_terms: vec![],
         }],
         provenance: serde_json::json!({}),
-        files: BTreeMap::new(),
-    };
-    let manifest_bytes = serde_json::to_vec_pretty(&manifest).expect("serialise");
-    fs::write(prefix_dir.join("MANIFEST.json"), &manifest_bytes).expect("write MANIFEST");
+        files: Default::default(),
+    }
+}
+
+/// Writes [`manifest`] as `v00000`'s `MANIFEST.json` and points `CURRENT` at it.
+pub fn publish_manifest(root: &Path, created_at: &str) {
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest(created_at)).expect("serialise");
+    fs::write(root.join("v00000/MANIFEST.json"), &manifest_bytes).expect("write MANIFEST");
 
     fs::write(
         root.join("CURRENT"),
@@ -187,9 +176,7 @@ pub fn flush_segment(
     entity_lo: u64,
     count: u64,
 ) -> (SegmentData, SegmentExtent) {
-    let row_base = bundle.partitions[PARTITION].only_shard().views[VIEW]
-        .row_space
-        .total_rows() as u32;
+    let row_base = bundle.only_shard().views[VIEW].row_space.total_rows() as u32;
     let seg_id = format!("seg-{entity_lo}-{count}");
     let key = IdentityKey::from_hex("0123456789abcdef0123456789abcdef").expect("test key");
 

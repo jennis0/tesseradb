@@ -574,24 +574,14 @@ fn args(dir: &Path, declaration: &str, out: &Path) -> BuildArgs {
         layer.views = Config::expand_layer_views(&registry, &layer.views);
     }
     BuildArgs {
-        views,
         anchor,
         groups,
         scoped_attributes,
         attribute_sources: acquired.attribute_sources,
-        out: out.to_path_buf(),
-        limit: None,
-        shard_size: None,
-        strict: false,
-        identity_key: test_key(),
         layers,
         layer_inputs: acquired.layers,
-        scoped_layers: Default::default(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema: config.schema,
+        ..build_args(out, views)
     }
 }
 

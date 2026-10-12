@@ -23,9 +23,6 @@ use mosaica_build::{build, build_in_memory, BuildArgs, BuildReport, RefusedRows}
 use mosaica_filter::{Access, RecordBlob, RecordValue};
 use mosaica_spatial::Bounds;
 use mosaica_store::unique::{UniqueIndexes, UniqueKey};
-use mosaica_types::IdentityKey;
-
-const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
 /// A Parquet file of the named columns.
 fn write(path: &Path, columns: Vec<(&str, ArrayRef)>) {
@@ -110,22 +107,12 @@ fn args(dir: &Path, declaration: &str, out: &Path) -> BuildArgs {
     BuildArgs {
         views,
         anchor,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources: acquired.attribute_sources,
-        out: out.to_path_buf(),
-        limit: None,
         shard_size: config.shard_size,
-        strict: false,
-        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         layers,
         layer_inputs: acquired.layers,
-        scoped_layers: Default::default(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema: config.schema,
+        ..common::build_args(out)
     }
 }
 
@@ -158,10 +145,7 @@ fn item(root: &Path, attribute: &str, value: u64) -> u32 {
 
 /// Each item's record, as `(declared position, value)`.
 fn records(root: &Path) -> HashMap<u32, Vec<(u16, RecordValue)>> {
-    let dir = mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO)
-        .dir(&root.join("v00000"))
-        .join("attrs")
-        .join("record");
+    let dir = root.join("v00000").join(common::SHARD.record_rel());
     let blob = RecordBlob::open_dir(&dir, Access::Read).expect("the blob opens");
     let bundle = mosaica_store::read::open_bundle(root).expect("the bundle opens");
     (0..bundle.only_shard().record.high_water as u32)
@@ -217,8 +201,7 @@ unique = true
 
 // -------------------------------------------------------------------------------------------
 
-/// **A build whose files create more items than `[shards] size` is refused**, by both numberings,
-/// and one creating exactly as many builds and records the size it was declared with.
+/// Both build paths refuse one item past `[shards] size`; exactly the size builds and records it.
 #[test]
 fn a_build_over_its_shard_size_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
@@ -836,9 +819,8 @@ fn creation_order_and_not_an_ids_value_numbers_items() {
     };
     let a = built(&dense, "dense");
     let b = built(&sparse, "sparse");
-    let shard = mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO);
     let view = |root: &Path, file: &str| {
-        std::fs::read(root.join("v00000").join(shard.view_rel("s0")).join(file)).unwrap()
+        std::fs::read(root.join("v00000").join(common::SHARD.view_rel("s0")).join(file)).unwrap()
     };
     for file in ["permutation.bin", mosaica_store::ROW_ENTITY_FILE] {
         assert_eq!(view(&a, file), view(&b, file), "{file}");

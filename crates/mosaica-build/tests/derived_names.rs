@@ -23,9 +23,8 @@ use parquet::arrow::ArrowWriter;
 use mosaica_build::{build, BuildArgs, ViewArgs};
 use mosaica_spatial::Bounds;
 use mosaica_store::read::open_bundle;
-use mosaica_types::IdentityKey;
 
-const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
+mod common;
 
 /// The prefix a build publishes into. Every manifest path is relative to it.
 const PREFIX: &str = "v00000";
@@ -207,42 +206,25 @@ fn two_views_derived_files_do_not_collide() {
             view("wide", "wide.parquet"),
             view("narrow", "narrow.parquet"),
         ],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources: mosaica_build::config::AttributeSource::over(
             dir.join("wide.parquet"),
             &config.schema,
         ),
-        out: out.clone(),
-        limit: None,
-        shard_size: None,
-        strict: false,
-        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         layers: config.layers,
         layer_inputs: config.layer_sources,
-        scoped_layers: Default::default(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema: config.schema,
+        ..common::build_args(&out)
     })
     .expect("a two-view build with a layer succeeds");
 
     let bundle = open_bundle(&out).expect("the bundle opens");
-    let manifest = &bundle
-        .partitions
-        .get("default")
-        .expect("one partition")
-        .only_shard()
-        .record;
+    let record = &bundle.only_shard().record;
 
     // **Every derived path is named once.** Two entries naming one file is the defect itself: one
     // of them describes bytes that are not there any more.
     let mut paths: Vec<&str> = Vec::new();
-    paths.extend(manifest.derived_extents.iter().map(|e| e.path.as_str()));
-    paths.extend(manifest.term_image_extents.iter().map(|e| e.path.as_str()));
+    paths.extend(record.derived_extents.iter().map(|e| e.path.as_str()));
+    paths.extend(record.term_image_extents.iter().map(|e| e.path.as_str()));
     let total = paths.len();
     paths.sort_unstable();
     paths.dedup();
@@ -250,7 +232,7 @@ fn two_views_derived_files_do_not_collide() {
         paths.len(),
         total,
         "two derived manifest entries name one file: {:?}",
-        manifest
+        record
             .derived_extents
             .iter()
             .map(|e| (&e.view, &e.layer, e.level, &e.path))
@@ -259,7 +241,7 @@ fn two_views_derived_files_do_not_collide() {
 
     // **A containment partition is not per view**, so the two views share the level's one file
     // rather than each writing its own.
-    let containment: Vec<(&str, u32)> = manifest
+    let containment: Vec<(&str, u32)> = record
         .derived_extents
         .iter()
         .filter(|e| e.form == mosaica_store::manifest::DerivedForm::Containment)
@@ -276,7 +258,7 @@ fn two_views_derived_files_do_not_collide() {
 
     // **Each column is its own view's.** `wide` is 60 rows and `narrow` 25; before the counter
     // both entries named a 25-row column.
-    let columns: Vec<(&str, u32)> = manifest
+    let columns: Vec<(&str, u32)> = record
         .derived_extents
         .iter()
         .filter(|e| {

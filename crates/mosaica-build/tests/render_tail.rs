@@ -37,11 +37,9 @@ use mosaica_build::{build, BuildArgs};
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_spatial::Bounds;
 use mosaica_store::read::{ColumnsRef, ScalarSlice};
-use mosaica_types::IdentityKey;
 
 mod common;
-
-const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
+use common::segment_dir;
 
 /// Not a multiple of 64, and not a multiple of 8 — the two word sizes the presence bitmap and the
 /// packed booleans are stored in.
@@ -239,26 +237,12 @@ fn args(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
             select: None,
             access: mosaica_build::config::AccessInput::relation(pairs.to_path_buf()),
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources: mosaica_build::config::AttributeSource::over(
             points.to_path_buf(),
             &schema,
         ),
-        out,
-        limit: None,
-        shard_size: None,
-        strict: false,
-        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&out)
     }
 }
 
@@ -270,13 +254,6 @@ fn build_bundle() -> tempfile::TempDir {
     write_empty_pairs(&pairs);
     build(&args(&points, &pairs, dir.path().join("bundle"))).expect("the build succeeds");
     dir
-}
-
-fn segment_dir(out: &Path) -> PathBuf {
-    out.join("v00000").join(
-        mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO)
-            .segment_rel("s0", "seg-0"),
-    )
 }
 
 /// Entity id → source id, through the unique `id` column.
@@ -292,7 +269,7 @@ fn source_of_entity(out: &Path) -> HashMap<u32, u64> {
 /// source id** (§11.1), so the values a row carries can only be checked against the item they
 /// belong to by going back through both.
 fn source_of_row(out: &Path, columns: &ColumnsRef) -> Vec<u64> {
-    let key = IdentityKey::from_hex(TEST_KEY_HEX).unwrap();
+    let key = common::test_key();
     let sources = source_of_entity(out);
     columns
         .mosaica_id()

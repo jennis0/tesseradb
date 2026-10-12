@@ -1369,33 +1369,9 @@ async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
     );
 }
 
-/// The prefix `CURRENT` names, and the directory it is.
-fn live_prefix(served: &Served) -> (String, std::path::PathBuf) {
-    let root = served.tmp.path().join("bundle");
-    let current: Value =
-        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).unwrap()).unwrap();
-    let prefix = current["prefix"].as_str().unwrap().to_string();
-    let dir = root.join(&prefix);
-    (prefix, dir)
-}
-
-/// The views the newest `SEGMENTS-<n>.json` of `prefix`'s only partition names a segment for.
-fn segment_views(prefix_dir: &Path) -> Vec<String> {
-    let partition = mosaica_store::layout::partition_dir(prefix_dir, "default");
-    let mut manifests: Vec<std::path::PathBuf> = std::fs::read_dir(&partition)
-        .expect("the partition directory")
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("SEGMENTS-") && n.ends_with(".json"))
-        })
-        .collect();
-    manifests.sort();
-    let newest = manifests.last().expect("a side-manifest per partition");
-    let document: Value = serde_json::from_slice(&std::fs::read(newest).unwrap()).unwrap();
-    let mut views: Vec<String> = document["shards"]["records"][0]["segments"]
+/// The views the newest side-manifest of the bundle at `root` names a segment for.
+fn segment_views(root: &Path) -> Vec<String> {
+    let mut views: Vec<String> = newest_shard_record(root)["segments"]
         .as_array()
         .expect("the segment list")
         .iter()
@@ -1407,7 +1383,7 @@ fn segment_views(prefix_dir: &Path) -> Vec<String> {
 }
 
 /// Every directory under `root` whose path names `view_id`'s own two components — the shape
-/// `mosaica_store::view_rel` lays a group's view down in, `views/<group>/<key>`.
+/// `ShardLayout::view_rel` lays a group's view down in, `views/<group>/<key>`.
 fn view_dirs(root: &Path, group: &str, key: &str) -> Vec<std::path::PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>, want: &Path) {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -1484,9 +1460,9 @@ async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_a_recreate_adopts_not
     );
     drain(&served.server).await;
 
-    let (_, base_dir) = live_prefix(&served);
+    let root = served.tmp.path().join("bundle");
     assert_eq!(
-        segment_views(&base_dir),
+        segment_views(&root),
         vec![
             "quarter:2026-Q1".to_string(),
             "quarter:2026-Q2".to_string(),
@@ -1500,12 +1476,12 @@ async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_a_recreate_adopts_not
     assert_eq!(body["deleted"], 0, "every item of the view is in `world` too");
 
     fold(&served.server).await;
-    let (folded, folded_dir) = live_prefix(&served);
+    let (folded, folded_dir) = live_prefix(&root);
     assert_ne!(folded, "v00000", "the fold published a new prefix");
 
     // (a) The plan omitted the dropped view — on the owner and on the group sharing its key.
     assert_eq!(
-        segment_views(&folded_dir),
+        segment_views(&root),
         vec!["quarter:2026-Q2".to_string(), "world".to_string()],
         "the fold carries no segment for a view the bundle no longer has"
     );
@@ -1527,7 +1503,6 @@ async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_a_recreate_adopts_not
     // makes the reclamation deterministic: the superseded prefix is reclaimed when its last reader
     // lets go, and the startup sweep takes any that stands.
     let served = served.restart().await;
-    let root = served.tmp.path().join("bundle");
     assert!(
         view_dirs(&root, "quarter", "2026-Q1").is_empty(),
         "after the fold and the sweep no prefix under the bundle root holds the dropped view"
@@ -1599,9 +1574,8 @@ async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_a_recreate_adopts_not
         "the fold executed them, so their overlay entries retire (Rule F) — an entity carried \
          forward by a segment the fold kept would not have"
     );
-    let (_, second) = live_prefix(&served);
     assert_eq!(
-        segment_views(&second),
+        segment_views(&root),
         vec!["world".to_string()],
         "and the second dropped view left the plan as the first did"
     );
@@ -2343,9 +2317,9 @@ async fn a_recreated_key_holds_only_its_own_rows_across_a_replay_and_a_fold() {
 
     // ---- the fold --------------------------------------------------------------------------
     fold(&served.server).await;
-    let (_, folded_dir) = live_prefix(&served);
+    let views = segment_views(&served.tmp.path().join("bundle"));
     assert!(
-        segment_views(&folded_dir).contains(&"quarter:2026-Q5".to_string()),
+        views.contains(&"quarter:2026-Q5".to_string()),
         "the recreated view is folded like any other"
     );
     let served = served.restart().await;

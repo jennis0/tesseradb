@@ -208,10 +208,9 @@ fn a_group_with_no_roster_builds_its_minted_views() {
     assert_eq!(opened.manifest.views.len(), 4, "one plain view and three minted");
 
     // Each minted view holds its own entities and nothing else.
-    let partition = opened.partitions.get("default").expect("one partition");
+    let views = &opened.only_shard().views;
     for (key, range) in POPULATION {
-        let view = partition
-            .only_shard().views
+        let view = views
             .get(&format!("quarter:{key}"))
             .expect("a minted view is in the bundle");
         let rows = (0..ENTITIES)

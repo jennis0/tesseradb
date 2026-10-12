@@ -10,10 +10,10 @@
 //! wholly-ingested arm the refusal used to block).
 //!
 //! What the zero-item bundle must be is *ordinary*: empty segments, empty postings, a dictionary
-//! holding only what the declaration mints, `entity_id_high_water = 0`, every declared column
-//! present and empty, every declared layer registered with no artifacts, and the manifests and
-//! digests as for any other bundle. So the assertions here are the same ones the populated
-//! fixtures make, read off a bundle whose row count happens to be nothing.
+//! holding only what the declaration mints, a high water of 0, every declared column present and
+//! empty, every declared layer registered with no artifacts, and the manifests and digests as for
+//! any other bundle. So the assertions here are the same ones the populated fixtures make, read off
+//! a bundle whose row count happens to be nothing.
 //!
 //! **`extent = "auto"` over no rows stays a refusal** and is asserted here too: a frame cannot be
 //! fitted to nothing, and the message already names the remedy (state the box). That is the one
@@ -32,9 +32,8 @@ use parquet::arrow::ArrowWriter;
 use mosaica_build::{build, build_in_memory, BuildArgs};
 use mosaica_spatial::Bounds;
 use mosaica_store::read::open_bundle;
-use mosaica_types::IdentityKey;
 
-const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
+mod common;
 
 fn extent() -> Bounds {
     Bounds {
@@ -211,23 +210,8 @@ fn args(inputs: &Inputs, out: &Path) -> BuildArgs {
             select: None,
             access: mosaica_build::config::AccessInput::relation(inputs.pairs.clone()),
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
-        out: out.to_path_buf(),
-        limit: None,
-        shard_size: None,
-        strict: false,
-        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
         emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema: Default::default(),
+        ..common::build_args(out)
     }
 }
 

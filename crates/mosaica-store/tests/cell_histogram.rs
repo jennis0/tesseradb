@@ -4,51 +4,14 @@
 //! statistics match what was constructed — including the bbox drilldown, whose region excludes
 //! exactly one designed cell.
 
-use std::collections::BTreeMap;
-use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use sha2::{Digest, Sha256};
+use mosaica_spatial::fixed32;
+use mosaica_spatial::tiler::TilerItem;
 
-use mosaica_spatial::tiler::{sort_batch, TilerItem};
-use mosaica_spatial::{fixed32, Bounds};
-use mosaica_store::manifest::{
-    CurrentPointer, EntitySet, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor,
-    Quantisation, SegmentDescriptor, SegmentsManifest, ViewDescriptor,
-};
-use mosaica_store::write::{write_permutation, write_segment};
-use mosaica_store::ShardLayout;
-use mosaica_types::{EntityId, MosaicaId, ShardId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
-
-const SHARD: ShardLayout<'static> = ShardLayout::new("default", ShardId::ZERO);
-
-/// A synthetic `mosaica_id`-shaped value (splitmix64 over a seed) — same stand-in as
-/// `bundle_read.rs`; the identity construction itself is not under test here.
-fn synthetic_mosaica_id(seed: u64) -> MosaicaId {
-    let mut z = seed.wrapping_add(0x9E3779B97F4A7C15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-    z ^= z >> 31;
-    MosaicaId::new(z)
-}
-
-fn hex_sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    out
-}
-
-fn file_digest(path: &Path) -> FileDigest {
-    let bytes = fs::read(path).expect("read for digest");
-    FileDigest {
-        size: bytes.len() as u64,
-        sha256: hex_sha256(&bytes),
-    }
-}
+mod fixture;
+use fixture::synthetic_mosaica_id;
 
 /// The designed occupancy: `(cx, cy, rows)` — distinct 16-bit cells, so each entry is one
 /// distinct Morton code carrying exactly `rows` rows. The first five sit in the depth-1 tile
@@ -67,12 +30,6 @@ const CELLS: [(u16, u16, u64); 6] = [
 /// unit extent. Point coordinates are cell centres, so quantisation cannot straddle a cell
 /// boundary.
 fn build_bundle(root: &Path) {
-    let extent = Bounds {
-        x_min: 0.0,
-        x_max: 1.0,
-        y_min: 0.0,
-        y_max: 1.0,
-    };
     let mut items: Vec<TilerItem> = Vec::new();
     for &(cx, cy, rows) in &CELLS {
         for _ in 0..rows {
@@ -84,108 +41,8 @@ fn build_bundle(root: &Path) {
             });
         }
     }
-    let n = items.len() as u64;
-    let mut entity_ids: Vec<EntityId> = (0..n).map(EntityId::new).collect();
-    let codes = sort_batch(&mut items, &mut entity_ids);
-
-    let prefix_dir = root.join("v00000");
-    let view_dir = prefix_dir.join(SHARD.view_rel("main"));
-    let seg_dir = prefix_dir.join(SHARD.segment_rel("main", "seg0"));
-    fs::create_dir_all(&seg_dir).expect("mkdir seg_dir");
-
-    write_segment(&seg_dir, &items, &codes, &[], &[]).expect("write_segment");
-    write_permutation(&view_dir.join("permutation.bin"), &entity_ids, n)
-        .expect("write_permutation");
-
-    let mut segments_files = BTreeMap::new();
-    let rels = std::iter::once(format!("{}/permutation.bin", SHARD.view_rel("main"))).chain(
-        mosaica_store::SEGMENT_FILES
-            .iter()
-            .map(|name| format!("{}/{name}", SHARD.segment_rel("main", "seg0"))),
-    );
-    for rel in rels {
-        segments_files.insert(rel.clone(), file_digest(&prefix_dir.join(&rel)));
-    }
-
-    let segments_manifest = SegmentsManifest {
-        partition: mosaica_store::manifest::PartitionManifest {
-            dict_extents: vec![],
-            files: segments_files,
-            ..mosaica_store::manifest::PartitionManifest::empty()
-        },
-        shards: mosaica_store::manifest::Shards {
-            size: mosaica_types::SHARD_SIZE_DEFAULT,
-            records: vec![mosaica_store::manifest::ShardRecord {
-                watermark: n,
-                high_water: n,
-                segments: vec![SegmentDescriptor {
-                    incarnation: 0,
-                    view: "main".to_string(),
-                    seg_id: "seg0".to_string(),
-                    row_count: items.len() as u32,
-                    entity_lo: 0,
-                    entity_hi: n - 1,
-                }],
-                deltas: vec![],
-                tombstones: EntitySet::default(),
-                deny: EntitySet::default(),
-                ..mosaica_store::manifest::ShardRecord::empty(mosaica_types::ShardId::ZERO)
-            }],
-        },
-    };
-    let segments_bytes = serde_json::to_vec_pretty(&segments_manifest).expect("serialise");
-    fs::write(
-        mosaica_store::layout::partition_dir(&prefix_dir, "default").join("SEGMENTS-0.json"),
-        &segments_bytes,
-    )
-    .expect("write SEGMENTS-0");
-
-    let manifest = Manifest {
-        bundle_format: mosaica_types::BUNDLE_FORMAT,
-        created_at: "2026-07-31T00:00:00Z".to_string(),
-        declared_scalars: vec![],
-        vocabularies: vec![],
-        small_term_threshold: 32,
-        identity: IdentityDescriptor {
-            construction: IDENTITY_CONSTRUCTION.to_string(),
-            rounds: IDENTITY_ROUNDS,
-            key: "0123456789abcdef0123456789abcdef".to_string(),
-        },
-        groups: Vec::new(),
-        views: vec![ViewDescriptor {
-            incarnation: 0,
-            point_default: Some("public".to_string()),
-            visibility: None,
-            id: "main".to_string(),
-            display_name: "Main".to_string(),
-            // The frame is the view's, not the bundle's (decision 0040).
-            quantisation: Quantisation {
-                x_min: extent.x_min,
-                x_max: extent.x_max,
-                y_min: extent.y_min,
-                y_max: extent.y_max,
-            },
-            projection: mosaica_spatial::Projection::None,
-        }],
-        partitions: vec![PartitionDescriptor {
-            phash: "default".to_string(),
-            required_terms: vec![],
-        }],
-        provenance: serde_json::json!({}),
-        files: BTreeMap::new(),
-    };
-    let manifest_bytes = serde_json::to_vec_pretty(&manifest).expect("serialise");
-    fs::write(prefix_dir.join("MANIFEST.json"), &manifest_bytes).expect("write MANIFEST.json");
-
-    let current = CurrentPointer {
-        prefix: "v00000".to_string(),
-        manifest_digest: hex_sha256(&manifest_bytes),
-    };
-    fs::write(
-        root.join("CURRENT"),
-        serde_json::to_vec_pretty(&current).expect("serialise CURRENT"),
-    )
-    .expect("write CURRENT");
+    fixture::publish_seg0(&root.join("v00000"), items);
+    fixture::publish_manifest(root, "2026-07-31T00:00:00Z");
 }
 
 /// The non-empty buckets a histogram array should carry, as `(label, cells, rows)`.

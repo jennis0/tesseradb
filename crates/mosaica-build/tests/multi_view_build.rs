@@ -21,10 +21,7 @@ use parquet::arrow::ArrowWriter;
 use mosaica_build::{build, BuildArgs, ViewArgs};
 use mosaica_spatial::Bounds;
 use mosaica_store::read::open_bundle;
-use mosaica_types::{EntityId, IdentityKey};
-
-
-const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
+use mosaica_types::EntityId;
 
 /// `world` holds 0..24; `quarter` holds 12..36. 12..24 is the overlap — the ordinary case
 /// (`views.md` §4) — and 24..36 is in `quarter` alone, which is the case a plain build could
@@ -157,21 +154,9 @@ fn two_views_are_two_row_spaces_over_one_entity_space() {
                 metadata: Default::default(),
             }],
         }],
-        scoped_attributes: Vec::new(),
         attribute_sources,
-        out: out.clone(),
-        limit: None,
-        shard_size: None,
-        strict: false,
-        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&out)
     })
     .expect("a two-view build succeeds");
 
@@ -193,12 +178,9 @@ fn two_views_are_two_row_spaces_over_one_entity_space() {
         .iter()
         .any(|v| v.id == "quarter:2026-Q2"));
 
-    let partition = bundle.partitions.get("default").expect("one partition");
-    let world = partition.only_shard().views.get("world").expect("the plain view");
-    let quarter = partition
-        .only_shard().views
-        .get("quarter:2026-Q2")
-        .expect("the group's view");
+    let views = &bundle.only_shard().views;
+    let world = views.get("world").expect("the plain view");
+    let quarter = views.get("quarter:2026-Q2").expect("the group's view");
     assert_eq!(
         world.segments[0].row_count,
         (WORLD.end - WORLD.start) as u32
@@ -298,23 +280,9 @@ fn a_label_that_disagrees_between_views_refuses() {
     let (schema, attribute_sources) = common::id_attributes(&a);
     build(&BuildArgs {
         views: vec![field_view("a", &a), field_view("b", &b)],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources,
-        out: dir.path().join("bundle"),
-        limit: None,
-        shard_size: None,
-        strict: false,
-        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&dir.path().join("bundle"))
     })
     .expect_err("a disagreeing label refuses");
     assert!(
@@ -346,23 +314,10 @@ fn a_discriminator_selects_each_views_rows_out_of_one_file() {
             selected_view("quarter_alt:2026-Q2", "2026-Q2", &points, &pairs),
             selected_view("quarter_alt:2026-Q3", "2026-Q3", &points, &pairs),
         ],
-        anchor: 0,
         groups: vec![alt_group(&["2026-Q2", "2026-Q3"])],
-        scoped_attributes: Vec::new(),
         attribute_sources,
-        out: out.clone(),
-        limit: None,
-        shard_size: None,
-        strict: false,
-        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&out)
     })
     .expect("a form B build succeeds");
 
@@ -372,9 +327,9 @@ fn a_discriminator_selects_each_views_rows_out_of_one_file() {
     assert_eq!(report.views[1].rows, QUARTER.end - QUARTER.start);
 
     let bundle = open_bundle(&out).expect("the bundle opens");
-    let partition = bundle.partitions.get("default").expect("one partition");
-    let q2 = partition.only_shard().views.get("quarter_alt:2026-Q2").expect("Q2");
-    let q3 = partition.only_shard().views.get("quarter_alt:2026-Q3").expect("Q3");
+    let views = &bundle.only_shard().views;
+    let q2 = views.get("quarter_alt:2026-Q2").expect("Q2");
+    let q3 = views.get("quarter_alt:2026-Q3").expect("Q3");
     let (mut both, mut q2_only, mut q3_only) = (0u64, 0u64, 0u64);
     for entity in 0..ENTITIES {
         let entity = EntityId::new(entity);
@@ -407,23 +362,7 @@ fn a_discriminator_value_outside_the_roster_refuses() {
             &points,
             &pairs,
         )],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
-        out: dir.path().join("bundle"),
-        limit: None,
-        shard_size: None,
-        strict: false,
-        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema: Default::default(),
+        ..common::build_args(&dir.path().join("bundle"))
     })
     .expect_err("a key nobody declared refuses");
     let message = format!("{error}");
@@ -923,30 +862,16 @@ fn a_roster_key_with_no_rows_is_an_empty_view() {
             selected_view("quarter_alt:2026-Q2", "2026-Q2", &points, &pairs),
             selected_view("quarter_alt:2026-Q3", "2026-Q3", &points, &pairs),
         ],
-        anchor: 0,
         groups: vec![alt_group(&["2026-Q2", "2026-Q3"])],
-        scoped_attributes: Vec::new(),
         attribute_sources,
-        out: out.clone(),
-        limit: None,
-        shard_size: None,
-        strict: false,
-        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&out)
     })
     .expect("an empty view builds");
 
     assert_eq!(report.views[1].rows, 0);
     let bundle = open_bundle(&out).expect("the bundle opens");
-    let partition = bundle.partitions.get("default").expect("one partition");
-    let empty = partition.only_shard().views.get("quarter_alt:2026-Q3").expect("Q3");
+    let empty = bundle.only_shard().views.get("quarter_alt:2026-Q3").expect("Q3");
     assert_eq!(empty.segments[0].row_count, 0);
     for entity in 0..ENTITIES {
         assert!(empty.row_space.row_of(EntityId::new(entity)).is_none());
@@ -1025,7 +950,6 @@ fn a_group_scoped_attribute_is_one_column_per_view_of_the_group() {
             selected_view("quarter_alt:2026-Q2", "2026-Q2", &points, &pairs),
             selected_view("quarter_alt:2026-Q3", "2026-Q3", &points, &pairs),
         ],
-        anchor: 0,
         groups: vec![alt_group(&["2026-Q2", "2026-Q3"])],
         scoped_attributes: vec![mosaica_build::ScopedColumnFamily {
             attribute: sentiment,
@@ -1034,19 +958,8 @@ fn a_group_scoped_attribute_is_one_column_per_view_of_the_group() {
             source: None,
         }],
         attribute_sources,
-        out: out.clone(),
-        limit: None,
-        shard_size: None,
-        strict: false,
-        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&out)
     })
     .expect("a scoped family builds");
 
@@ -1058,9 +971,10 @@ fn a_group_scoped_attribute_is_one_column_per_view_of_the_group() {
         .map(|s| s.name.as_str())
         .collect();
     assert_eq!(declared, ["id"], "a scoped family is no declared scalar");
-    let attrs = mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO)
-        .dir(&out.join("v00000"))
-        .join("attrs/sentiment/quarter_alt");
+    let attrs = out
+        .join("v00000")
+        .join(common::SHARD.column_rel("sentiment"))
+        .join("quarter_alt");
     for (key, present) in [("2026-Q2", q2_present), ("2026-Q3", q3_present)] {
         let values = attrs.join(key).join("values.arrow");
         let presence = attrs.join(key).join("presence.roaring");
@@ -1178,7 +1092,6 @@ fn a_sparse_views_permutation_costs_its_pages_and_not_its_bound() {
             view_args("world", &world_points, &pairs),
             view_args("quarter:2026-Q2", &sparse_points, &pairs),
         ],
-        anchor: 0,
         groups: vec![mosaica_store::manifest::GroupDescriptor {
             title: None,
             name: "quarter".to_string(),
@@ -1195,30 +1108,15 @@ fn a_sparse_views_permutation_costs_its_pages_and_not_its_bound() {
                 metadata: Default::default(),
             }],
         }],
-        scoped_attributes: Vec::new(),
         attribute_sources,
-        out: out.clone(),
-        limit: None,
-        shard_size: None,
-        strict: false,
-        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&out)
     })
     .expect("a wide two-view build succeeds");
 
     let bundle = open_bundle(&out).expect("the bundle opens");
-    let partition = bundle.partitions.get("default").expect("one partition");
-    let sparse = partition
-        .only_shard().views
-        .get("quarter:2026-Q2")
-        .expect("the group's view");
+    let views = &bundle.only_shard().views;
+    let sparse = views.get("quarter:2026-Q2").expect("the group's view");
     let base = sparse.row_space.base();
     assert_eq!(base.bound(), WIDE, "every view is bounded by entity space");
     assert_eq!(base.page_count(), 4);
@@ -1243,7 +1141,7 @@ fn a_sparse_views_permutation_costs_its_pages_and_not_its_bound() {
 
     // The dense view over the same entity space keeps every page, which is the degenerate case:
     // it pays the directory and its padding and nothing else.
-    let world = partition.only_shard().views.get("world").expect("the plain view");
+    let world = views.get("world").expect("the plain view");
     assert_eq!(world.row_space.base().present_pages(), 4);
     let dense = std::fs::metadata(world.row_space.base().path())
         .expect("stat")

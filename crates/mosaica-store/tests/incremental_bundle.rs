@@ -39,8 +39,8 @@ fn an_incremental_bundle_shares_its_base_mappings() {
         )
         .unwrap();
 
-    let a = &base.partitions[PARTITION].only_shard().views[VIEW];
-    let b = &next.partitions[PARTITION].only_shard().views[VIEW];
+    let a = &base.only_shard().views[VIEW];
+    let b = &next.only_shard().views[VIEW];
     assert!(
         Arc::ptr_eq(a.row_space.base(), b.row_space.base()),
         "the base permutation was re-opened, not shared"
@@ -74,8 +74,8 @@ fn a_flushed_entity_resolves_and_the_base_is_untouched() {
         )
         .unwrap();
 
-    let before = &base.partitions[PARTITION].only_shard().views[VIEW].row_space;
-    let after = &next.partitions[PARTITION].only_shard().views[VIEW].row_space;
+    let before = &base.only_shard().views[VIEW].row_space;
+    let after = &next.only_shard().views[VIEW].row_space;
 
     for e in 0..50u64 {
         assert_eq!(
@@ -143,14 +143,9 @@ fn a_merge_substitutes_the_consumed_segments() {
             },
         )
         .unwrap();
-    assert_eq!(
-        two.partitions[PARTITION].only_shard().views[VIEW]
-            .segments
-            .len(),
-        3
-    );
+    assert_eq!(two.only_shard().views[VIEW].segments.len(), 3);
 
-    let consumed: Vec<String> = two.partitions[PARTITION].only_shard().views[VIEW].segments[1..]
+    let consumed: Vec<String> = two.only_shard().views[VIEW].segments[1..]
         .iter()
         .map(|s| s.seg_id.clone())
         .collect();
@@ -176,7 +171,7 @@ fn a_merge_substitutes_the_consumed_segments() {
         )
         .unwrap();
 
-    let view = &after.partitions[PARTITION].only_shard().views[VIEW];
+    let view = &after.only_shard().views[VIEW];
     assert_eq!(view.segments.len(), 2, "two segments collapsed into one");
     assert_eq!(view.row_space.extent_count(), 1);
     for e in 50..=53u64 {
@@ -187,10 +182,7 @@ fn a_merge_substitutes_the_consumed_segments() {
         );
     }
     assert!(
-        Arc::ptr_eq(
-            &two.partitions[PARTITION].only_shard().views[VIEW].segments[0],
-            &view.segments[0]
-        ),
+        Arc::ptr_eq(&two.only_shard().views[VIEW].segments[0], &view.segments[0]),
         "the untouched build segment is still shared"
     );
 }
@@ -268,7 +260,7 @@ fn the_original_generation_is_unchanged_by_a_publication() {
         )
         .unwrap();
 
-    let view = &base.partitions[PARTITION].only_shard().views[VIEW];
+    let view = &base.only_shard().views[VIEW];
     assert_eq!(view.segments.len(), 1);
     assert_eq!(view.row_space.extent_count(), 0);
     assert_eq!(view.row_space.total_rows(), 50);

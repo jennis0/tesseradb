@@ -22,9 +22,8 @@ use mosaica_build::{build, BuildArgs, ScopedLayer, ViewArgs};
 use mosaica_engine::browse::{BrowseForm, BrowseRequest};
 use mosaica_spatial::Bounds;
 use mosaica_store::read::open_bundle;
-use mosaica_types::IdentityKey;
 
-const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
+mod common;
 
 /// Both views hold every entity, so a masked count that came from the wrong view's artifact would
 /// still be a plausible number — which is why the assertions below are on the artifact *count*
@@ -344,26 +343,16 @@ fn build_with_labels(
     }
     build(&BuildArgs {
         views,
-        anchor: 0,
         groups,
-        scoped_attributes: Vec::new(),
         attribute_sources: mosaica_build::config::AttributeSource::over(
             dir.join("a.parquet"),
             &config.schema,
         ),
-        out: dir.join("bundle"),
-        limit: None,
-        shard_size: None,
-        strict: false,
-        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         layers,
         layer_inputs: config.layer_sources.clone(),
         scoped_layers: scoped_layers.into_iter().collect(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema: config.schema.clone(),
+        ..common::build_args(&dir.join("bundle"))
     })
 }
 

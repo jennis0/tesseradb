@@ -31,7 +31,7 @@ use mosaica_store::term_images::{
     TermImageRefusal, TermImageStamp, TermImages, KEEP_ROWS_PER_CONTAINER,
 };
 use mosaica_store::RowSpace;
-use mosaica_types::{IdentityKey, TermId};
+use mosaica_types::TermId;
 
 /// Rows enough for a second Roaring container, which is what puts a term whose image is spread
 /// over both on the wrong side of the keep rule: thirty rows a container is a cut a scattered
@@ -43,12 +43,6 @@ const N_ITEMS: u64 = 70_000;
 /// in the view, and to the bottom left, which are the lowest. A term over both spans the two
 /// containers.
 const CORNER: u64 = 20;
-
-const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
-
-fn test_key() -> IdentityKey {
-    IdentityKey::from_hex(TEST_KEY_HEX).unwrap()
-}
 
 fn extent() -> Bounds {
     Bounds {
@@ -173,23 +167,9 @@ fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
             select: None,
             access: mosaica_build::config::AccessInput::relation(pairs.to_path_buf()),
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources,
-        out,
-        limit: None,
-        shard_size: None,
-        strict: false,
-        identity_key: test_key(),
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&out)
     }
 }
 
@@ -228,16 +208,15 @@ fn posting_bitmap(postings: &PostingsReader, term: u32) -> Option<Bitmap> {
 /// The one term-image file of a bundle with one view, and the row space it was projected through.
 fn images_of(root: &Path) -> (Arc<TermImages>, RowSpace, PathBuf) {
     let bundle = open_bundle(root).expect("the bundle opens");
-    let partition = bundle.partitions.get("default").expect("one partition");
-    let entry = partition
-        .only_shard()
+    let shard = bundle.only_shard();
+    let entry = shard
         .record
         .term_image_extents
         .iter()
         .find(|entry| entry.view == "s0")
         .expect("the side-manifest names the view's term images");
     let path = root.join("v00000").join(&entry.path);
-    let view = partition.only_shard().views.get("s0").expect("the view");
+    let view = shard.views.get("s0").expect("the view");
     let images = view
         .term_images
         .clone()
@@ -252,10 +231,7 @@ fn every_kept_image_is_the_projection_of_its_posting() {
     let (images, space, _) = images_of(&root);
 
     let postings = PostingsReader::open(
-        &mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO)
-            .dir(&root.join("v00000"))
-            .join("terms")
-            .join("postings.arrow"),
+        &root.join("v00000").join(common::SHARD.postings_rel()),
         true,
     )
     .expect("the postings open");
@@ -390,9 +366,7 @@ fn a_stamp_the_bundle_disagrees_with_leaves_the_view_walking() {
 
     let bundle = open_bundle(&root).expect("the bundle still opens");
     assert!(
-        bundle.partitions["default"].only_shard().views["s0"]
-            .term_images
-            .is_none(),
+        bundle.only_shard().views["s0"].term_images.is_none(),
         "a refused file leaves the view with no images"
     );
 }
@@ -431,9 +405,7 @@ fn a_file_derived_under_another_keep_rule_leaves_the_view_walking() {
 
     let bundle = open_bundle(&root).expect("the bundle still opens");
     assert!(
-        bundle.partitions["default"].only_shard().views["s0"]
-            .term_images
-            .is_none(),
+        bundle.only_shard().views["s0"].term_images.is_none(),
         "a file under another keep rule leaves the view with no images"
     );
 }

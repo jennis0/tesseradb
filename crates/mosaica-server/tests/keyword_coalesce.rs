@@ -137,30 +137,7 @@ async fn answers(server: &TestServer, token: &str) -> Vec<(String, BTreeSet<u64>
 
 /// This partition's `attr_extents` entries for `tag`, from the newest side-manifest.
 fn tag_extents(root: &Path) -> Vec<Value> {
-    let current: Value =
-        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).unwrap()).unwrap();
-    let partition = mosaica_store::layout::partition_dir(
-        &root.join(current["prefix"].as_str().expect("CURRENT names a prefix")),
-        "default",
-    );
-    let newest = std::fs::read_dir(&partition)
-        .expect("the partition directory")
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("SEGMENTS-"))
-        })
-        .max_by_key(|p| {
-            p.file_stem()
-                .and_then(|n| n.to_str())
-                .and_then(|n| n.trim_start_matches("SEGMENTS-").parse::<u64>().ok())
-                .unwrap_or(0)
-        })
-        .expect("a side-manifest");
-    let manifest: Value = serde_json::from_slice(&std::fs::read(newest).unwrap()).unwrap();
-    manifest["shards"]["records"][0]["attr_extents"]
+    newest_shard_record(root)["attr_extents"]
         .as_array()
         .expect("attr_extents")
         .iter()

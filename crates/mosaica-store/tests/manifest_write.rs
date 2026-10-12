@@ -3,59 +3,21 @@
 //! (compaction §10's rule paragraph).
 //!
 //! These tests exercise the writers exactly as a caller must: build a minimal but real bundle's
-//! segment/permutation/`SEGMENTS-0.json` by hand (the same fixture shape `bundle_read.rs` uses),
-//! then write `MANIFEST.json` and `CURRENT` through the two functions under test, then open the
-//! result with the real reader — never a hand-parsed assertion of either file's shape, matching
-//! `bundle_read.rs`'s own voice.
+//! segment/permutation/`SEGMENTS-0.json` with the tests' fixture, then write `MANIFEST.json` and
+//! `CURRENT` through the two functions under test, then open the result with the real reader —
+//! never a hand-parsed assertion of either file's shape, matching `bundle_read.rs`'s own voice.
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use sha2::{Digest, Sha256};
-
-use mosaica_spatial::tiler::{sort_batch, TilerItem};
-use mosaica_spatial::{fixed32, Bounds};
 use mosaica_store::layout::{partition_dir, partitions_dir};
-use mosaica_store::manifest::{
-    EntitySet, IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation, SegmentDescriptor,
-    SegmentsManifest, ViewDescriptor,
-};
+use mosaica_store::manifest::{Manifest, SegmentsManifest};
 use mosaica_store::manifest_write::{write_current, write_manifest_json};
-use mosaica_store::write::{write_permutation, write_segment};
 use mosaica_store::write_segments_manifest;
-use mosaica_store::{open_bundle, ShardLayout, StoreError};
-use mosaica_types::{EntityId, MosaicaId, ShardId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+use mosaica_store::{open_bundle, StoreError};
 
-const SHARD: ShardLayout<'static> = ShardLayout::new("default", ShardId::ZERO);
-
-/// A synthetic `mosaica_id`-shaped value for test fixtures — see `bundle_read.rs`'s copy of the
-/// same helper for why full splitmix64 output rather than a raw seed.
-fn synthetic_mosaica_id(seed: u64) -> MosaicaId {
-    let mut z = seed.wrapping_add(0x9E3779B97F4A7C15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-    z ^= z >> 31;
-    MosaicaId::new(z)
-}
-
-fn unit_extent() -> Bounds {
-    Bounds {
-        x_min: 0.0,
-        x_max: 1.0,
-        y_min: 0.0,
-        y_max: 1.0,
-    }
-}
-
-fn hex_sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    out
-}
+mod fixture;
+use fixture::hex_sha256;
 
 /// Build the one-partition, one-view, one-segment fixture `MANIFEST.json` needs to sit beside
 /// for `open_bundle` to succeed — everything short of the two files this module's functions
@@ -66,115 +28,9 @@ fn hex_sha256(bytes: &[u8]) -> String {
 /// [`write_manifest_json_digest_changes_when_the_manifest_changes`] can build two otherwise
 /// identical manifests that differ in exactly one field.
 fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path::PathBuf) {
-    let extent = unit_extent();
-    let mut items: Vec<TilerItem> = (0..n)
-        .map(|entity_id| TilerItem {
-            mosaica_id: synthetic_mosaica_id(entity_id),
-            qx: fixed32(((entity_id * 37) % 100) as f64 / 100.0, 0.0, 1.0),
-            qy: fixed32(((entity_id * 61) % 100) as f64 / 100.0, 0.0, 1.0),
-            scalars: vec![],
-        })
-        .collect();
-    let mut entity_ids: Vec<EntityId> = (0..n).map(EntityId::new).collect();
-    let codes = sort_batch(&mut items, &mut entity_ids);
-
     let prefix_dir = root.join("v00000");
-    let view_dir = prefix_dir.join(SHARD.view_rel("main"));
-    let seg_dir = prefix_dir.join(SHARD.segment_rel("main", "seg0"));
-    fs::create_dir_all(&seg_dir).expect("mkdir seg_dir");
-
-    write_segment(&seg_dir, &items, &codes, &[], &[]).expect("write_segment");
-    write_permutation(&view_dir.join("permutation.bin"), &entity_ids, n)
-        .expect("write_permutation");
-
-    let file_digest = |path: &Path| {
-        let bytes = fs::read(path).expect("read for digest");
-        mosaica_store::manifest::FileDigest {
-            size: bytes.len() as u64,
-            sha256: hex_sha256(&bytes),
-        }
-    };
-    let mut segments_files = BTreeMap::new();
-    segments_files.insert(
-        format!("{}/permutation.bin", SHARD.view_rel("main")),
-        file_digest(&view_dir.join("permutation.bin")),
-    );
-    for name in mosaica_store::SEGMENT_FILES {
-        segments_files.insert(
-            format!("{}/{name}", SHARD.segment_rel("main", "seg0")),
-            file_digest(&seg_dir.join(name)),
-        );
-    }
-
-    let segments_manifest = SegmentsManifest {
-        partition: mosaica_store::manifest::PartitionManifest {
-            dict_extents: vec![],
-            vocabulary_extensions: vec![],
-            files: segments_files,
-            ..mosaica_store::manifest::PartitionManifest::empty()
-        },
-        shards: mosaica_store::manifest::Shards {
-            size: mosaica_types::SHARD_SIZE_DEFAULT,
-            records: vec![mosaica_store::manifest::ShardRecord {
-                watermark: n,
-                high_water: n,
-                segments: vec![SegmentDescriptor {
-                    incarnation: 0,
-                    view: "main".to_string(),
-                    seg_id: "seg0".to_string(),
-                    row_count: items.len() as u32,
-                    entity_lo: 0,
-                    entity_hi: n.saturating_sub(1),
-                }],
-                deltas: vec![],
-                tombstones: EntitySet::default(),
-                deny: EntitySet::default(),
-                ..mosaica_store::manifest::ShardRecord::empty(mosaica_types::ShardId::ZERO)
-            }],
-        },
-    };
-    fs::write(
-        partition_dir(&prefix_dir, "default").join("SEGMENTS-0.json"),
-        serde_json::to_vec_pretty(&segments_manifest).expect("serialise SEGMENTS-0"),
-    )
-    .expect("write SEGMENTS-0.json");
-
-    let manifest = Manifest {
-        bundle_format: mosaica_types::BUNDLE_FORMAT,
-        created_at: created_at.to_string(),
-        declared_scalars: vec![],
-        vocabularies: vec![],
-        small_term_threshold: 32,
-        identity: IdentityDescriptor {
-            construction: IDENTITY_CONSTRUCTION.to_string(),
-            rounds: IDENTITY_ROUNDS,
-            key: "0123456789abcdef0123456789abcdef".to_string(),
-        },
-        groups: Vec::new(),
-        views: vec![ViewDescriptor {
-            incarnation: 0,
-            point_default: Some("public".to_string()),
-            visibility: None,
-            id: "main".to_string(),
-            display_name: "Main".to_string(),
-            // The frame is the view's, not the bundle's (decision 0040).
-            quantisation: Quantisation {
-                x_min: extent.x_min,
-                x_max: extent.x_max,
-                y_min: extent.y_min,
-                y_max: extent.y_max,
-            },
-            projection: mosaica_spatial::Projection::None,
-        }],
-        partitions: vec![PartitionDescriptor {
-            phash: "default".to_string(),
-            required_terms: vec![],
-        }],
-        provenance: serde_json::json!({}),
-        files: BTreeMap::new(),
-    };
-
-    (manifest, prefix_dir)
+    fixture::publish_seg0(&prefix_dir, fixture::items_for(0, n));
+    (fixture::manifest(created_at), prefix_dir)
 }
 
 /// `write_manifest_json` writes bytes the reader can open, and the digest it hands back is the
@@ -195,8 +51,7 @@ fn write_manifest_json_then_write_current_round_trips_through_open_bundle() {
     assert_eq!(bundle.manifest.bundle_format, mosaica_types::BUNDLE_FORMAT);
     assert_eq!(bundle.only_shard().record.high_water, 64);
 
-    let partition = bundle.partitions.get("default").expect("default partition");
-    let view = partition.only_shard().views.get("main").expect("main view");
+    let view = bundle.only_shard().views.get("main").expect("main view");
     assert_eq!(view.segments.len(), 1);
     assert_eq!(view.segments[0].row_count, 64);
 }
@@ -273,10 +128,8 @@ fn write_current_with_a_wrong_digest_is_caught_by_open_bundle_not_silently_serve
     }
 }
 
-/// The property the fold's identity rotation depends on (compaction §4's `bundle_identity`,
-/// carried on `Shard::fragments`): two manifests that differ in even one field must
-/// digest differently, or a fold that changed the corpus would leave every session's fragment
-/// cache believing nothing had rotated.
+/// Two manifests that differ in one field digest differently, or a fold that changed the corpus
+/// would leave every session's fragment cache believing nothing had rotated.
 #[test]
 fn write_manifest_json_digest_changes_when_the_manifest_changes() {
     let dir_a = tempfile::tempdir().expect("tempdir a");
@@ -298,12 +151,6 @@ fn write_manifest_json_digest_changes_when_the_manifest_changes() {
     assert_eq!(digest_a, digest_a_again);
 }
 
-/// An empty side-manifest. `watermark` is the field the refuse-to-replace test varies, so the
-/// two writers' manifests are distinguishable in the committed bytes.
-fn manifest_fixture() -> SegmentsManifest {
-    SegmentsManifest::empty()
-}
-
 /// **Obligation 11: a side-manifest is never replaced.**
 ///
 /// A side-manifest is complete current state for its partition, not a diff, so a second write
@@ -323,11 +170,11 @@ fn a_side_manifest_is_never_replaced() {
     let prefix_dir = tmp.path();
     std::fs::create_dir_all(partition_dir(prefix_dir, "default")).unwrap();
 
-    let mut first = manifest_fixture();
+    let mut first = SegmentsManifest::empty();
     first.only_shard_mut().watermark = 11;
     write_segments_manifest(prefix_dir, "default", 4, &first).expect("the first write commits");
 
-    let mut second = manifest_fixture();
+    let mut second = SegmentsManifest::empty();
     second.only_shard_mut().watermark = 22;
     let refused = write_segments_manifest(prefix_dir, "default", 4, &second)
         .expect_err("the second write at the same n must be refused");

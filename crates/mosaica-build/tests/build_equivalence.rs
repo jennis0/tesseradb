@@ -46,18 +46,9 @@ use parquet::arrow::ArrowWriter;
 
 use mosaica_build::{build, build_in_memory, BuildArgs};
 use mosaica_spatial::Bounds;
-use mosaica_types::IdentityKey;
 
 const N_ITEMS: u64 = 4_000;
 const N_TERMS: u64 = 61;
-
-/// A fixed, non-degenerate test key shared by every fixture in this file — never a mint, since
-/// the tests need a stable, reproducible identity to assert byte equality against.
-const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
-
-fn test_key() -> IdentityKey {
-    IdentityKey::from_hex(TEST_KEY_HEX).unwrap()
-}
 
 fn extent() -> Bounds {
     Bounds {
@@ -375,26 +366,13 @@ fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
             select: None,
             access: mosaica_build::config::AccessInput::relation(pairs.to_path_buf()),
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
         attribute_sources: mosaica_build::config::AttributeSource::over(
             points.to_path_buf(),
             &schema,
         ),
-        out,
-        limit: None,
-        shard_size: None,
-        strict: false,
-        identity_key: test_key(),
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
         emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema,
+        ..common::build_args(&out)
     }
 }
 
@@ -871,15 +849,7 @@ fn batched_build_is_byte_identical_to_the_batched_reference() {
     let single = temp.path().join("single");
     build(&args_for(&points, &pairs, single.clone())).unwrap();
     let permutation = |out: &std::path::Path| {
-        std::fs::read(
-            out.join("v00000")
-                .join(
-                    mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO)
-                        .view_rel("s0"),
-                )
-                .join("permutation.bin"),
-        )
-        .unwrap()
+        std::fs::read(out.join("v00000").join(common::SHARD.permutation_rel("s0"))).unwrap()
     };
     let batched_perm = permutation(&streaming_out);
     let single_perm = permutation(&single);
@@ -962,12 +932,8 @@ fn entity_ids_follow_signature_order() {
 
     // Recover each entity's signature from pairs.parquet, which is the (term, entity) relation.
     let bundle = mosaica_store::read::open_bundle(&out).unwrap();
-    let partition = bundle.partitions.values().next().unwrap();
-    let n = partition.only_shard().record.high_water as usize;
-    let pairs_path = mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::ZERO)
-        .dir(&out.join("v00000"))
-        .join("terms")
-        .join("pairs.parquet");
+    let n = bundle.only_shard().record.high_water as usize;
+    let pairs_path = out.join("v00000").join(common::SHARD.pairs_rel());
     let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
         File::open(&pairs_path).unwrap(),
     )
@@ -1042,23 +1008,9 @@ fn reference_build_at_scale() {
                 "data/scaled/pairs/categories-subclass.pairs.parquet",
             )),
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
-        out,
         limit: Some(limit),
-        shard_size: None,
-        strict: false,
-        identity_key: test_key(),
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
         emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema: Default::default(),
+        ..common::build_args(&out)
     })
     .unwrap();
     assert_eq!(report.items, limit);
