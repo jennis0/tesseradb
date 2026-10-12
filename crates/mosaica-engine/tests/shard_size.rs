@@ -150,6 +150,8 @@ fn a_batch_past_the_size_is_refused_alone_and_goes_in_once_the_size_is_raised() 
     let prime =
         std::thread::spawn(move || primer.ingest_rows(rows("prime", 1), "prime".into(), [9; 32]));
     faults.await_arrivals(PauseSite::AfterFsync, 1, WAIT);
+    // Already counts the size's declaration and the priming batch.
+    let queued = engine.write_executor_stats().work_submitted;
 
     let batches = [("a", 2usize), ("b", 3), ("c", 1)];
     let results = Arc::new(Mutex::new(Vec::new()));
@@ -162,7 +164,7 @@ fn a_batch_past_the_size_is_refused_alone_and_goes_in_once_the_size_is_raised() 
             out.lock().unwrap().push((batch, answer));
         }));
         wait_until("the batch reaches the queue", WAIT, || {
-            engine.write_executor_stats().work_submitted >= i as u64 + 2
+            engine.write_executor_stats().work_submitted > queued + i as u64
         });
     }
     faults.release();
