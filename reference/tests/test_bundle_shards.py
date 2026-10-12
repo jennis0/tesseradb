@@ -23,7 +23,7 @@ def _bundle(root: Path, records: list[dict]) -> Path:
     identity = {
         "construction": "feistel-splitmix64-v1",
         "rounds": ROUNDS,
-        "key": bytes(range(16)).hex(),
+        "key": "000102030405060708090a0b0c0d0e0f",
     }
     manifest = json.dumps({"files": {}, "views": [], "identity": identity}).encode()
     (prefix / "MANIFEST.json").write_bytes(manifest)
