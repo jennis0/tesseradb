@@ -52,7 +52,7 @@ use mosaica_engine::tile_index::{Extent, TileIndex};
 use mosaica_lifecycle::membership::{decode_record, ArtifactRecord, ArtifactStore, Members};
 use mosaica_store::derived::tile_index_shifts;
 use mosaica_store::manifest::SegmentsManifest;
-use mosaica_store::membership::{row_column_width, MembershipPack, PackKind};
+use mosaica_store::membership::{row_column_width, LevelPack, PackKind};
 use mosaica_store::permutation::{Permutation, RowSpace};
 use mosaica_store::read::MortonSlice;
 use mosaica_store::write::write_permutation_iter;
@@ -213,11 +213,18 @@ fn open_fixture(args: &Args) -> Fixture {
     .expect("morton.u32 loads");
     assert_eq!(morton.len(), row_count as usize);
 
+    let space = manifest
+        .partition
+        .layers
+        .iter()
+        .find(|layer| layer.declaration.name == args.layer)
+        .expect("the layer is registered")
+        .space;
     let extents: Vec<_> = manifest
         .only_shard()
         .membership_extents
         .iter()
-        .filter(|e| e.layer == args.layer && e.level == args.level)
+        .filter(|e| e.space == space && e.level == args.level)
         .collect();
     assert!(!extents.is_empty(), "no membership extent for the level");
     let ordinals = extents
@@ -231,19 +238,15 @@ fn open_fixture(args: &Args) -> Fixture {
     let mut memberships = 0u64;
     let mut undecodable = 0u32;
     for extent in &extents {
-        let pack = MembershipPack::open(&prefix_dir.join(&extent.path), PackKind::Members)
+        let pack = LevelPack::open(&prefix_dir.join(&extent.path), PackKind::Members)
             .expect("membership pack opens");
         assert_eq!(pack.ordinal_lo(), extent.ordinal_lo);
         assert_eq!(pack.count(), extent.count);
-        let record_extent = manifest
-            .layer_spaces
-            .iter()
-            .filter(|space| space.space == extent.space)
-            .flat_map(|space| space.record_extents.iter())
-            .find(|r| r.level == extent.level && r.ordinal_lo == extent.ordinal_lo)
+        let record_extent = mosaica_store::manifest::layer_space(&manifest.layer_spaces, space)
+            .and_then(|record| record.record_packs.iter().find(|r| extent.pairs(space, r)))
             .expect("a record pack beside the member pack");
         let record_pack =
-            MembershipPack::open(&prefix_dir.join(&record_extent.path), PackKind::Records)
+            LevelPack::open(&prefix_dir.join(&record_extent.path), PackKind::Records)
                 .expect("record pack opens");
         for ((ordinal, blob), (_, record_blob)) in pack.iter().zip(record_pack.iter()) {
             if blob.is_empty() && record_blob.is_empty() {
@@ -967,14 +970,11 @@ fn check_whole(args: &Args, fixture: &Fixture, shard: &ShardBuild, index: &TileI
         .iter()
         .find(|layer| layer.declaration.name == args.layer)
         .map(|layer| layer.space);
-    let level_version = fixture
-        .manifest
-        .layer_spaces
-        .iter()
-        .filter(|record| Some(record.space) == space)
-        .flat_map(|record| record.level_versions.iter())
-        .find(|v| v.level == args.level)
-        .map(|v| v.version);
+    let level_version = space
+        .and_then(|space| {
+            mosaica_store::manifest::layer_space(&fixture.manifest.layer_spaces, space)
+        })
+        .and_then(|record| record.level_version(args.level));
     if let Some(extent) = fixture
         .manifest
         .only_shard()
@@ -982,7 +982,7 @@ fn check_whole(args: &Args, fixture: &Fixture, shard: &ShardBuild, index: &TileI
         .iter()
         .find(|e| {
             e.form == mosaica_store::manifest::DerivedForm::TileIndex
-                && e.layer == args.layer
+                && Some(e.space) == space
                 && e.level == args.level
                 && e.view.as_deref() == Some(fixture.view.as_str())
         })

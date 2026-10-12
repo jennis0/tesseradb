@@ -9,6 +9,7 @@ use common::*;
 use mosaica_engine::{AcceptError, AddressTable, Engine};
 use mosaica_lifecycle::resolve::Refusal;
 use mosaica_lifecycle::wal::{ChangeOp, WalRecord};
+use mosaica_lifecycle::membership::{IncomingAttachment, IncomingGrowth};
 use mosaica_lifecycle::{ExecError, IncomingArtifact};
 use mosaica_types::layer::{
     ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
@@ -282,7 +283,7 @@ fn a_dropped_layers_space_is_not_given_again_after_a_rotation_and_a_restart() {
 /// The deny state the side-manifest records for `space`: `(deleted, suppressed)` entity ids.
 fn space_deny(fx: &Fixture, space: LayerSpace) -> (Vec<u32>, Vec<u32>) {
     let manifest = side_manifest(&fx.root);
-    let Some(record) = manifest.layer_spaces.iter().find(|r| r.space == space) else {
+    let Some(record) = mosaica_store::manifest::layer_space(&manifest.layer_spaces, space) else {
         return (Vec::new(), Vec::new());
     };
     let ids = |set: &mosaica_store::manifest::EntitySet| {
@@ -406,7 +407,7 @@ fn a_dropped_layers_space_leaves_the_next_publication() {
     });
     let manifest = side_manifest(&fx.root);
     assert_eq!(manifest.layer_spaces[0].space, space_of(kept));
-    assert!(!manifest.layer_spaces[0].record_extents.is_empty());
+    assert!(!manifest.layer_spaces[0].record_packs.is_empty());
     assert!(manifest
         .only_shard()
         .membership_extents
@@ -619,3 +620,105 @@ fn an_item_and_an_artifact_at_one_entity_number_are_two_things() {
 }
 
 const WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A layer attached to a dropped one is not attached to the layer registered again under its name:
+/// its artifacts are neither served under the new layer's artifacts nor deleted with them, before
+/// a restart or after one.
+#[test]
+fn a_dependant_of_a_dropped_layer_does_not_attach_to_its_successor() {
+    let fx = fixture();
+    let label = {
+        let engine = fx.open();
+        register_and_publish(&fx, &engine, "clusters/a");
+        let mut labels = declaration("labels/a");
+        labels.depends_on = vec!["clusters/a".into()];
+        engine.register_layer(labels).unwrap();
+        let label = engine
+            .publish_artifacts(
+                "labels/a".into(),
+                0,
+                vec![IncomingArtifact::attached(
+                    Some("l0".into()),
+                    fx.members(0..40),
+                    Vec::new(),
+                    IncomingAttachment {
+                        layer: "clusters/a".into(),
+                        level: 0,
+                        key: "c0".into(),
+                    },
+                )],
+            )
+            .unwrap()[0];
+        assert!(card(&engine, label));
+        engine.drop_layer("clusters/a".into()).unwrap();
+        assert!(!card(&engine, label), "its target is gone");
+
+        let (_, again) = register_and_publish(&fx, &engine, "clusters/a");
+        assert!(!card(&engine, label), "the new layer's c0 is not its target");
+        engine
+            .accept_changes(vec![(artifact_entity(&engine, again), ChangeOp::Delete)])
+            .unwrap();
+        assert_eq!(
+            engine.generation_status().layer_spaces.retirable,
+            1,
+            "the deletion took nothing with it"
+        );
+        label
+    };
+
+    let engine = fx.open();
+    assert!(!card(&engine, label));
+    assert_eq!(engine.generation_status().layer_spaces.retirable, 1);
+}
+
+/// A publication that grew a dropped layer's reservation is not replayed onto the layer registered
+/// again under its name, when the log holding both is replayed over a side-manifest holding the
+/// new one: the new layer comes back with its own runs.
+#[test]
+fn a_replayed_publication_into_a_dropped_layer_leaves_its_successors_runs() {
+    let fx = fixture();
+    let (runs, again) = {
+        let engine = fx.open();
+        // A growth holds the log from here until a fold, so the publication below keeps it.
+        register_and_publish(&fx, &engine, "clusters/b");
+        engine
+            .grow_memberships(
+                "clusters/b".into(),
+                0,
+                vec![IncomingGrowth::from_entities("c0".into(), fx.members(40..50))],
+            )
+            .unwrap();
+        engine.register_layer(declaration("clusters/a")).unwrap();
+        let past_a_block = (0..=mosaica_types::layer::RESERVED_BLOCK)
+            .map(|i| IncomingArtifact::from_entities(Some(format!("c{i}")), Vec::new()))
+            .collect();
+        engine
+            .publish_artifacts("clusters/a".into(), 0, past_a_block)
+            .unwrap();
+        engine.drop_layer("clusters/a".into()).unwrap();
+        let (layer, again) = register_and_publish(&fx, &engine, "clusters/a");
+        tick_until(&engine, "the new layer's publication", WAIT, || {
+            side_manifest(&fx.root)
+                .partition
+                .layers
+                .iter()
+                .any(|l| l.space == space_of(layer))
+        });
+        let runs = engine.registered_layer("clusters/a").unwrap().runs;
+        assert_eq!(runs[0].capacity(), mosaica_types::layer::RESERVED_BLOCK);
+        (runs, again)
+    };
+    let creates = mosaica_lifecycle::Wal::open(&fx.wal)
+        .unwrap()
+        .records()
+        .filter(|r| {
+            matches!(r, Ok((_, WalRecord::LayerCreate { declaration, .. }))
+                if declaration.name == "clusters/a")
+        })
+        .count();
+    assert_eq!(creates, 2, "the log still holds the dropped registration");
+
+    let engine = fx.open();
+    assert_eq!(engine.registered_layer("clusters/a").unwrap().runs, runs);
+    assert!(card(&engine, again));
+}

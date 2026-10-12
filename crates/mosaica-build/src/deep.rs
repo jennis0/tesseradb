@@ -950,11 +950,9 @@ fn check_band_labels(
     use mosaica_types::layer::ServingLayout;
     let extents = &shard.record.derived_extents;
     let current = |e: &DerivedExtent| {
-        layer_spaces
-            .iter()
-            .filter(|space| space.space == e.space)
-            .flat_map(|space| space.level_versions.iter())
-            .any(|v| v.level == e.level && v.version == e.level_version)
+        mosaica_store::manifest::layer_space(layer_spaces, e.space)
+            .and_then(|space| space.level_version(e.level))
+            == Some(e.level_version)
     };
     let is_label_column = |e: &DerivedExtent| {
         matches!(
@@ -965,22 +963,16 @@ fn check_band_labels(
                 }
         )
     };
-    let same_level = |a: &DerivedExtent, b: &DerivedExtent| {
-        a.layer == b.layer
-            && a.level == b.level
-            && a.view == b.view
-            && a.level_version == b.level_version
-    };
     for column in extents.iter().filter(|e| is_label_column(e) && current(e)) {
         let copied = extents
             .iter()
-            .any(|e| matches!(e.form, DerivedForm::BandLabels { .. }) && same_level(e, column));
+            .any(|e| matches!(e.form, DerivedForm::BandLabels { .. }) && e.same_level(column));
         if !copied {
             return Err(disagrees(
                 prefix_dir.join(&column.path),
                 format!(
-                    "layer '{}' level {}'s label column has no copy in band order",
-                    column.layer, column.level
+                    "layer space {} level {}'s label column has no copy in band order",
+                    column.space, column.level
                 ),
             ));
         }
@@ -992,7 +984,7 @@ fn check_band_labels(
         let path = prefix_dir.join(&copy.path);
         let column = extents
             .iter()
-            .find(|e| is_label_column(e) && same_level(e, copy))
+            .find(|e| is_label_column(e) && e.same_level(copy))
             .ok_or_else(|| disagrees(path.clone(), "names no label column".to_string()))?;
         let segment = copy
             .view
@@ -1067,8 +1059,8 @@ fn check_row_members(
             return Err(disagrees(
                 column_path,
                 format!(
-                    "layer '{}' level {}'s column has no single member file beside it",
-                    column.layer, column.level
+                    "layer space {} level {}'s column has no single member file beside it",
+                    column.space, column.level
                 ),
             ));
         };

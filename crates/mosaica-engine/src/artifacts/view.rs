@@ -636,6 +636,7 @@ mod tests {
             ArtifactRecords {
                 attachments: vec![Some(Attachment {
                     layer: CLUSTERS.to_string(),
+                    space: mosaica_types::LayerSpace::ZERO,
                     level: 0,
                     ordinal: 3,
                     entity: CLUSTER_ENTITY,

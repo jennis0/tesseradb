@@ -459,12 +459,11 @@ pub enum ExecError {
     /// reach the caller, who cannot otherwise act on it.
     VocabularyRefused { detail: String },
     /// A layer registration or drop was refused → HTTP 422, no effect. Every check runs before the
-    /// first allocation and before the WAL append, so a refusal leaves no ids spent, no record in
-    /// the log and no half-registered layer.
+    /// WAL append, so a refusal leaves no record in the log and no half-registered layer.
     ///
     /// **A rendered string, and it may reach the caller.** What it names is the caller's own
     /// declaration measured against the deployment's published rules — a name already taken, a
-    /// name tombstoned, a tree declaring levels — which is exactly the class of detail a caller can
+    /// tree declaring levels — which is exactly the class of detail a caller can
     /// act on and cannot otherwise obtain. It names no entity, no path and no other layer's terms.
     LayerRefused { detail: String },
     /// An artifact record supplied a fixed part the artifact already holds, and the two differ

@@ -190,8 +190,7 @@ pub enum ChangeOp {
     Unsuppress,
 }
 
-/// One target's disposition inside a [`WalRecord::OverlaySnapshot`]: an item's entity in its
-/// shard, or an artifact's or a layer's in its layer space, each restored into its own overlay.
+/// One target's disposition inside a [`WalRecord::OverlaySnapshot`].
 ///
 /// **Keyed by target, never by an identifier a caller holds.** A snapshot keyed by one would
 /// re-resolve it at replay, and an entity deleted before it was ever flushed may resolve to
@@ -274,8 +273,8 @@ pub enum WalRecord {
     /// `ChangeBatch` earlier in the same file still applies before it. See [`crate::Replay`].
     OverlaySnapshot { entries: Vec<OverlaySnapshotEntry> },
     /// An accepted `/control/changes` request: every change it carries, in request order,
-    /// addressed by target: an item's entity in its shard, or an artifact's or a layer's in its
-    /// layer space. One record per request, so the request is durable whole or not at all.
+    /// addressed by [`Target`]. One record per request, so the request is durable whole or not at
+    /// all.
     ///
     /// Keyed by target rather than by the identifier the caller supplied: the handler resolves a
     /// `mosaica_id` or a unique value once, at admission, and replay applies what was decided
@@ -338,11 +337,11 @@ pub enum WalRecord {
         /// The entities the drop left with a row in no view, flushed or buffered.
         deleted: Vec<EntityId>,
     },
-    /// An accepted layer drop. The name is freed: a later registration under it is a new layer in
-    /// a new space, so no identifier of the dropped layer names anything of the new one. The space
-    /// is not given again.
+    /// An accepted layer drop. The name is freed; the space is never given again.
     LayerDrop {
         name: String,
+        /// The space of the registration it drops.
+        space: LayerSpace,
         /// The registry version this drop moved the counter to, on `LayerCreate::version`'s rule.
         version: u64,
     },
@@ -361,6 +360,8 @@ pub enum WalRecord {
     /// only reading under which the ordinals it claims are contiguous.
     ArtifactPublish {
         layer: String,
+        /// The space of the registration it was written for.
+        space: LayerSpace,
         level: u32,
         /// Blocks appended to this level's reservation because the batch outgrew it, in allocation
         /// order. **Empty in the ordinary case**, and carried here rather than derived because a
@@ -393,6 +394,8 @@ pub enum WalRecord {
     /// join. `ArtifactStore::oldest_wal_pos` holds the log at it, and the fold releases it.
     ArtifactGrow {
         layer: String,
+        /// The space of the registration it was written for.
+        space: LayerSpace,
         level: u32,
         growth: Vec<MembershipGrowth>,
     },
@@ -408,6 +411,8 @@ pub enum WalRecord {
     /// that carries them (`ArtifactStore::oldest_wal_pos`).
     ArtifactFill {
         layer: String,
+        /// The space of the registration it was written for.
+        space: LayerSpace,
         level: u32,
         /// Resolved from the caller's key on the executor and recorded, on
         /// [`MembershipGrowth::ordinal`]'s rule.
@@ -883,6 +888,7 @@ pub struct ParentRef {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PublishedAttachment {
     pub layer: String,
+    pub space: LayerSpace,
     pub level: u32,
     pub ordinal: u32,
     pub entity: EntityId,
@@ -1066,7 +1072,9 @@ const WAL_MAGIC: [u8; 4] = *b"MWAL";
 // **36**: `LayerCreate` carries the layer's space, and a `ChangeBatch` and an `OverlaySnapshot`
 // name each entry's target, an item in its shard or an artifact in its layer space. A log at 35 is
 // refused.
-const WAL_VERSION: u16 = 36;
+// **37**: `LayerDrop` and the artifact records carry their registration's space, and an
+// attachment its target's. A log at 36 is refused.
+const WAL_VERSION: u16 = 37;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -2608,6 +2616,7 @@ mod tests {
         };
         let dropped = WalRecord::LayerDrop {
             name: "clusters/old".into(),
+            space: LayerSpace::new(1).unwrap(),
             version: 2,
         };
         // A change to the layer and one to the item over the same entity stay two changes.
@@ -2648,6 +2657,7 @@ mod tests {
         let second = Bitmap::new();
         let publish = WalRecord::ArtifactPublish {
             layer: "clusters/hdbscan-2026-08".into(),
+            space: LayerSpace::new(2).unwrap(),
             level: 0,
             extend_runs: vec![EntityRun {
                 start: 196_608,
@@ -2691,6 +2701,7 @@ mod tests {
                     // `None` serves the label of a suppressed cluster.
                     attached_to: Some(PublishedAttachment {
                         layer: "clusters/hdbscan-2026-08".into(),
+                        space: LayerSpace::new(2).unwrap(),
                         level: 0,
                         ordinal: 17,
                         entity: EntityId::new(65_553),
@@ -2763,6 +2774,7 @@ mod tests {
         let records = vec![
             WalRecord::ArtifactGrow {
                 layer: "topics/openalex".into(),
+                space: LayerSpace::new(5).unwrap(),
                 level: 0,
                 growth: vec![MembershipGrowth {
                     ordinal: 3,
@@ -2776,6 +2788,7 @@ mod tests {
             },
             WalRecord::ArtifactFill {
                 layer: "topics/openalex".into(),
+                space: LayerSpace::new(5).unwrap(),
                 level: 0,
                 ordinal: 3,
                 part: ArtifactPart::Content {
@@ -2786,6 +2799,7 @@ mod tests {
             },
             WalRecord::ArtifactFill {
                 layer: "topics/openalex".into(),
+                space: LayerSpace::new(5).unwrap(),
                 level: 0,
                 ordinal: 3,
                 part: ArtifactPart::Shape(
@@ -2794,6 +2808,7 @@ mod tests {
             },
             WalRecord::ArtifactFill {
                 layer: "topics/openalex".into(),
+                space: LayerSpace::new(5).unwrap(),
                 level: 1,
                 ordinal: 0,
                 part: ArtifactPart::Parents(vec![ParentRef {
@@ -2803,10 +2818,12 @@ mod tests {
             },
             WalRecord::ArtifactFill {
                 layer: "labels/openalex".into(),
+                space: LayerSpace::new(6).unwrap(),
                 level: 0,
                 ordinal: 9,
                 part: ArtifactPart::AttachedTo(PublishedAttachment {
                     layer: "topics/openalex".into(),
+                    space: LayerSpace::new(5).unwrap(),
                     level: 0,
                     ordinal: 3,
                     entity: EntityId::new(4_294_836_223),
@@ -2963,9 +2980,13 @@ mod tests {
         assert_eq!(replayed, records);
 
         // The membership route's own growth is what every reader applies today.
-        let membership =
-            crate::membership::growth_record("topics/openalex", 0, [(3u32, &Bitmap::of(&[1, 2]))])
-                .unwrap();
+        let membership = crate::membership::growth_record(
+            "topics/openalex",
+            LayerSpace::new(5).unwrap(),
+            0,
+            [(3u32, &Bitmap::of(&[1, 2]))],
+        )
+        .unwrap();
         assert_eq!(unbuilt_track(&membership), None);
     }
 

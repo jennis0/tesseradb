@@ -37,13 +37,9 @@
 use std::collections::BTreeMap;
 
 use croaring::Bitmap;
-use mosaica_types::{check_room, EntityId, ShardFull, Tenancy, TermId};
+use mosaica_types::{check_room, EntityId, ShardFull, Tenancy, TermId, ENTITY_END};
 
 use crate::wal::WalRecord;
-
-/// Where a point shard's ids end, exclusive: an entity id is a `u32`, and `u32::MAX` itself is
-/// never issued, so a half-open range of entity ids always has an end that fits.
-pub const ENTITY_END: u64 = u32::MAX as u64;
 
 /// Freed point ids by the tenancy each is at. A tenancy holding no id has no entry.
 pub type ByTenancy = BTreeMap<Tenancy, Bitmap>;

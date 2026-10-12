@@ -214,7 +214,9 @@ fn has_labels(engine: &Engine, layer: &str, level: u32) -> bool {
         .derived_extents
         .iter()
         .any(|e| {
-            e.layer == layer && e.level == level && matches!(e.form, DerivedForm::BandLabels { .. })
+            e.space == engine.registered_layer(layer).unwrap().space
+                && e.level == level
+                && matches!(e.form, DerivedForm::BandLabels { .. })
         })
 }
 
@@ -585,6 +587,7 @@ fn a_built_bundle_tags_alike_before_and_after_an_ingest() {
     corpus.write_pairs_parquet(&pairs).unwrap();
     build_corpus_fixture_with_layers(&root, &points, &pairs, &corpus);
     let engine = open(&root, tmp.path());
+    let manifest = side_manifest(&root);
 
     let layers: Vec<String> = engine
         .generation()
@@ -593,7 +596,7 @@ fn a_built_bundle_tags_alike_before_and_after_an_ingest() {
         .record
         .derived_extents
         .iter()
-        .map(|e| e.layer.clone())
+        .map(|e| layer_in(&manifest, e.space).to_string())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();

@@ -114,9 +114,6 @@ impl WritePath {
         // already has geometry is not buffered. A drop late in a held log therefore buffers most
         // of the log's rows until the walk ends.
         let mut last_view_drop: Option<u64> = None;
-        // Where each layer name was last registered or dropped. A record of the name's artifacts
-        // before that was written for a registration that is gone.
-        let mut registered_at: FxHashMap<String, u64> = FxHashMap::default();
 
         for item in wal.records_but_ingest() {
             let (position, record) = item.map_err(EngineError::Wal)?;
@@ -131,12 +128,6 @@ impl WritePath {
             registry.apply(&record);
             roster.apply(&record);
             match &record {
-                WalRecord::LayerCreate { declaration, .. } => {
-                    registered_at.insert(declaration.name.clone(), position);
-                }
-                WalRecord::LayerDrop { name, .. } => {
-                    registered_at.insert(name.clone(), position);
-                }
                 WalRecord::VocabularyDeclare { declaration } => {
                     let compiled =
                         crate::vocabularies::compile_record(declaration).ok_or_else(|| {
@@ -300,7 +291,7 @@ impl WritePath {
         // Reached only on parser drift or damage; see the record arm below.
         let mut on_heap = 0usize;
         let open_pack = |rel: &str, kind, ordinal_lo: u32, count: u32| {
-            let pack = mosaica_store::membership::MembershipPack::open(
+            let pack = mosaica_store::membership::LevelPack::open(
                 &seed.prefix_dir.join(rel),
                 kind,
             )
@@ -322,19 +313,18 @@ impl WritePath {
                 continue;
             };
             let name = name.to_string();
-            for extent in &space.record_extents {
+            for extent in &space.record_packs {
                 let Some(runs) = layer.runs.get(extent.level as usize) else {
                     return Err(EngineError::Malformed(format!(
                         "record pack {} names level {} of layer space {}, which has no such level",
                         extent.path, extent.level, space.space
                     )));
                 };
-                let Some(members) = seed.membership_extents.iter().find(|m| {
-                    m.space == space.space
-                        && m.level == extent.level
-                        && m.ordinal_lo == extent.ordinal_lo
-                        && m.count == extent.count
-                }) else {
+                let Some(members) = seed
+                    .membership_extents
+                    .iter()
+                    .find(|m| m.pairs(space.space, extent))
+                else {
                     return Err(EngineError::Malformed(format!(
                         "record pack {} has no member pack over the same ordinals; the \
                          artifacts it names would be served with no members",
@@ -394,13 +384,14 @@ impl WritePath {
                         }
                         _ => on_heap += 1,
                     }
-                    artifacts.seed(&name, extent.level, ordinal, record, shape)
+                    artifacts.seed(&name, space.space, extent.level, ordinal, record, shape)
                 }
                 // How far the level reaches comes from the pack, not the records in it: a hole at
                 // the top is implied by nothing, so a level seeded from records alone would come
                 // back short.
                 artifacts.seed_extent_bound(
                     &name,
+                    space.space,
                     extent.level,
                     extent.ordinal_lo.saturating_add(extent.count),
                 );
@@ -445,7 +436,7 @@ impl WritePath {
                     .seed_value(key, *code)
                     .map_err(|e| EngineError::Malformed(e.to_string()))?;
             }
-            if !names_dropped_registration(&record, position, &registered_at) {
+            if names_held_registration(&registry, &record) {
                 // Before the record lands, as on the live path: a publication into a level holding
                 // no artifact chooses the level's layout.
                 registry.settle_layout(&artifacts, &record);
@@ -515,7 +506,7 @@ impl WritePath {
                      past {}, where a shard's ids end. Restore the side-manifest and log this \
                      bundle was written with",
                     seed.high_water,
-                    mosaica_lifecycle::alloc::ENTITY_END,
+                    mosaica_types::ENTITY_END,
                 ))
             })?;
         // A size no declaration could have left is refused at open, not at the first batch.
@@ -556,18 +547,13 @@ impl WritePath {
     }
 }
 
-/// Whether `record` writes the artifacts of a layer registered or dropped after `position`: one
-/// the name held before, which the registry no longer holds.
-fn names_dropped_registration(
-    record: &WalRecord,
-    position: u64,
-    registered_at: &FxHashMap<String, u64>,
-) -> bool {
-    let layer = match record {
-        WalRecord::ArtifactPublish { layer, .. }
-        | WalRecord::ArtifactGrow { layer, .. }
-        | WalRecord::ArtifactFill { layer, .. } => layer,
-        _ => return false,
-    };
-    registered_at.get(layer).is_some_and(|at| position < *at)
+/// Whether `record`, where it writes a layer's artifacts, was written for the registration the
+/// replayed registry holds under the layer's name.
+fn names_held_registration(registry: &LayerRegistry, record: &WalRecord) -> bool {
+    match record {
+        WalRecord::ArtifactPublish { layer, space, .. }
+        | WalRecord::ArtifactGrow { layer, space, .. }
+        | WalRecord::ArtifactFill { layer, space, .. } => registry.names_held(layer, *space),
+        _ => true,
+    }
 }

@@ -280,7 +280,7 @@ fn extents_of(engine: &Engine, layer: &str) -> Vec<DerivedExtent> {
         .record
         .derived_extents
         .iter()
-        .filter(|e| e.layer == layer)
+        .filter(|e| e.space == engine.registered_layer(layer).unwrap().space)
         .cloned()
         .collect()
 }

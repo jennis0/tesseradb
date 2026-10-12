@@ -449,7 +449,8 @@ fn a_built_bundle_carries_its_containment_partitions_and_the_first_request_claim
         record
             .derived_extents
             .iter()
-            .any(|e| e.form == mosaica_store::manifest::DerivedForm::Containment && e.layer == LABELS),
+            .any(|e| e.form == mosaica_store::manifest::DerivedForm::Containment
+                && e.space == engine.registered_layer(LABELS).unwrap().space),
         "the label layer's generating sets have a partition the build composed: {:?}",
         record.derived_extents
     );

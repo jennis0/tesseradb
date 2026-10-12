@@ -301,7 +301,7 @@ fn the_manifest_names_a_column_for_each_flat_level_and_an_index_for_the_treed_on
         .only_shard().derived_extents
         .iter()
         .filter(is_column)
-        .filter(|e| e.layer == SPREAD || e.layer == CLUMPED)
+        .filter(|e| [SPREAD, CLUMPED].contains(&layer_in(&manifest, e.space)))
         .collect();
     assert_eq!(columns.len(), 2, "one column per (view, layer, level)");
     assert_eq!(columns[0].view.as_deref(), Some("s0"));
@@ -316,7 +316,7 @@ fn the_manifest_names_a_column_for_each_flat_level_and_an_index_for_the_treed_on
             .only_shard().derived_extents
             .iter()
             .filter(is_column)
-            .all(|e| e.layer != TREED),
+            .all(|e| layer_in(&manifest, e.space) != TREED),
         "an artifact-major level has no column"
     );
 
@@ -324,7 +324,7 @@ fn the_manifest_names_a_column_for_each_flat_level_and_an_index_for_the_treed_on
         .only_shard().derived_extents
         .iter()
         .filter(is_index)
-        .filter(|e| e.layer == TREED)
+        .filter(|e| layer_in(&manifest, e.space) == TREED)
         .collect();
     assert_eq!(indexes.len(), 1, "one index per (view, layer, level)");
     assert!(
@@ -332,7 +332,7 @@ fn the_manifest_names_a_column_for_each_flat_level_and_an_index_for_the_treed_on
             .only_shard().derived_extents
             .iter()
             .filter(is_index)
-            .all(|e| e.layer != SPREAD && e.layer != CLUMPED),
+            .all(|e| ![SPREAD, CLUMPED].contains(&layer_in(&manifest, e.space))),
         "a row-major level has nothing to index — its candidacy is a scan of the viewport"
     );
 

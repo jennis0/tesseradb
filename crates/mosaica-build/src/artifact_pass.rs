@@ -375,7 +375,6 @@ pub fn run(
             // incarnation** (decision 0115). There is no drop at a build to leave a predecessor.
             incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
             space: spaces[layer],
-            layer: layer.clone(),
             level: *level,
             level_version: store.level_version(layer, *level),
             form: DerivedForm::TileIndex,
@@ -469,7 +468,6 @@ pub fn run(
             view: Some(view.to_string()),
             incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
             space: spaces[layer],
-            layer: layer.clone(),
             level: *level,
             level_version,
             form,
@@ -551,7 +549,7 @@ pub fn run(
         for ((layer, level), rows) in &resolved {
             let has_column = columns.iter().any(|e| {
                 matches!(e.form, DerivedForm::RowColumn { .. })
-                    && &e.layer == layer
+                    && e.space == spaces[layer]
                     && e.level == *level
             });
             if has_column {
@@ -562,7 +560,6 @@ pub fn run(
                 view: Some(view.to_string()),
                 incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
                 space: spaces[layer],
-                layer: layer.clone(),
                 level: *level,
                 level_version,
                 form: DerivedForm::ShapeRows {
@@ -602,7 +599,6 @@ pub fn run(
                 view: Some(view.to_string()),
                 incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
                 space: spaces[layer],
-                layer: layer.clone(),
                 level: *level,
                 level_version,
                 form: DerivedForm::ShapeHeld,
@@ -735,7 +731,6 @@ pub fn containment(
             view: None,
             incarnation: None,
             space: spaces[layer],
-            layer: layer.clone(),
             level: *level,
             level_version: store.level_version(layer, *level),
             form: DerivedForm::Containment,

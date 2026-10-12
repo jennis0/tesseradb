@@ -60,10 +60,10 @@ impl PendingRetirement {
         level: u32,
     ) -> impl Iterator<Item = (u32, &'s mosaica_lifecycle::membership::ArtifactRecord)> + 's {
         let retired = &self.retired;
-        let layer = layer.to_string();
-        store
-            .level(&layer, level)
-            .filter(move |(_, record)| !retired.artifact(&layer, record.entity))
+        let space = store.space_of(layer);
+        store.level(layer, level).filter(move |(_, record)| {
+            !space.is_some_and(|space| retired.retires_artifact(space, record.entity))
+        })
     }
 }
 
@@ -246,16 +246,18 @@ fn held_at_current_version(
     entries
         .iter()
         .filter(|entry| {
-            let now = store.level_version(&entry.layer, entry.level);
-            if now == entry.level_version {
+            let now = store
+                .layer_in(entry.space)
+                .map(|layer| store.level_version(layer, entry.level));
+            if now == Some(entry.level_version) {
                 return true;
             }
             tracing::error!(
-                layer = %entry.layer,
+                space = %entry.space,
                 level = entry.level,
                 form = entry.form.dir(),
                 stamped = entry.level_version,
-                now,
+                now = ?now,
                 "ALARM: a fold-written derived file is stamped with a version the level does not \
                  carry after the retirement; it is dropped and the level recomposes on first use"
             );
@@ -1228,7 +1230,10 @@ impl Executor {
             .filter(|(_, parts)| parts.overlay.deleted_len() > 0)
             .map(|(space, parts)| (*space, parts.overlay.deleted_set().clone()))
             .collect();
-        let retired = self.live.retirement(executed.clone(), &executed_artifacts);
+        let retired = mosaica_lifecycle::membership::Retired {
+            points: executed.clone(),
+            artifacts: executed_artifacts.clone(),
+        };
         let repacked = match self.rewrite_membership_extents(
             &to_prefix_dir,
             ShardLayout::new(&plan.partition, shard_id),
@@ -1616,10 +1621,10 @@ impl Executor {
         let spaces = &mut self.side_manifests.spaces;
         spaces.retain(|space, _| segments_manifest.layer_spaces.iter().any(|r| r.space == *space));
         for held in spaces.values_mut() {
-            held.record_extents.clear();
+            held.record_packs.clear();
         }
         for (space, records) in repacked.records {
-            spaces.entry(space).or_default().record_extents = records;
+            spaces.entry(space).or_default().record_packs = records;
         }
         for (space, kept) in contents {
             if let Some(held) = spaces.get_mut(&space) {
@@ -2067,7 +2072,6 @@ impl Executor {
                         view: None,
                         incarnation: None,
                         space: self.live.space_of(&layer)?,
-                        layer,
                         level,
                         level_version,
                         form: mosaica_store::manifest::DerivedForm::Containment,
@@ -2490,7 +2494,6 @@ impl Executor {
                         view: Some(view),
                         incarnation: Some(incarnation),
                         space,
-                        layer,
                         level,
                         level_version,
                         form,
@@ -2537,7 +2540,7 @@ impl Executor {
                     matches!(
                         c.form,
                         mosaica_store::manifest::DerivedForm::RowColumn { .. }
-                    ) && &c.layer == layer
+                    ) && c.space == space
                         && c.level == *level
                         && c.view.as_ref() == Some(view)
                 });
@@ -2568,7 +2571,6 @@ impl Executor {
                     view: Some(view.clone()),
                     incarnation: Some(incarnation),
                     space,
-                    layer: layer.clone(),
                     level: *level,
                     level_version: version,
                     form: mosaica_store::manifest::DerivedForm::ShapeRows {
@@ -2637,7 +2639,6 @@ impl Executor {
                         view: Some(view.clone()),
                         incarnation: Some(incarnation),
                         space,
-                        layer: layer.clone(),
                         level: *level,
                         level_version: version,
                         form: mosaica_store::manifest::DerivedForm::ShapeHeld,
@@ -2725,7 +2726,6 @@ impl Executor {
                         view: Some(view),
                         incarnation: Some(incarnation),
                         space: self.live.space_of(&layer)?,
-                        layer,
                         level,
                         level_version,
                         form: mosaica_store::manifest::DerivedForm::TileIndex,

@@ -1726,7 +1726,6 @@ impl EntityTermsExtent {
 pub struct MembershipExtent {
     /// Prefix-relative path of the packed extent.
     pub path: String,
-    pub layer: String,
     /// The layer's space. A layer registered again under a dropped one's name has another, so an
     /// extent of the dropped layer is never read as the new one's.
     pub space: LayerSpace,
@@ -1739,11 +1738,18 @@ pub struct MembershipExtent {
     pub count: u32,
 }
 
+impl MembershipExtent {
+    /// Whether `records`, a record pack of `space`, holds the records of this extent's members.
+    pub fn pairs(&self, space: LayerSpace, records: &RecordPackExtent) -> bool {
+        self.space == space
+            && self.level == records.level
+            && self.ordinal_lo == records.ordinal_lo
+            && self.count == records.count
+    }
+}
+
 /// One level's artifact-write counter, as of the publication this manifest describes. A
 /// structure derived from the level is adopted only at the version it was written for.
-///
-/// Per level and not one counter for the store: a store-wide counter makes one publication
-/// anywhere invalidate every level's derived form everywhere.
 ///
 /// A level present in its space's record packs and absent here is a level whose version is
 /// unknown, which is not the same as zero.
@@ -1770,8 +1776,7 @@ pub struct RecordPackExtent {
 }
 
 /// One layer space's state in a [`SegmentsManifest`]: its own deny state, its artifacts' records,
-/// supplied content and held shapes, and its levels' versions. A space whose layer is not in
-/// [`PartitionManifest::layers`] refuses the open.
+/// supplied content and held shapes, and its levels' versions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerSpaceRecord {
     pub space: LayerSpace,
@@ -1780,7 +1785,7 @@ pub struct LayerSpaceRecord {
     /// The space's suppressed artifacts, and the layer's own entity where the layer is suppressed.
     /// Never the union with [`Self::tombstones`], on [`ShardRecord::deny`]'s argument.
     pub deny: EntitySet,
-    pub record_extents: Vec<RecordPackExtent>,
+    pub record_packs: Vec<RecordPackExtent>,
     /// The artifacts' supplied content, in the record-blob format.
     pub content_extents: Vec<RecordExtent>,
     /// A lost list restarts every level at zero, which a structure derived under the old numbering
@@ -1797,12 +1802,42 @@ impl LayerSpaceRecord {
             space,
             tombstones: EntitySet::default(),
             deny: EntitySet::default(),
-            record_extents: Vec::new(),
+            record_packs: Vec::new(),
             content_extents: Vec::new(),
             level_versions: Vec::new(),
             held_shapes: Vec::new(),
         }
     }
+
+    /// The version `level` is at, where the record states one.
+    pub fn level_version(&self, level: u32) -> Option<u64> {
+        self.level_versions
+            .iter()
+            .find(|v| v.level == level)
+            .map(|v| v.version)
+    }
+}
+
+/// The record of `space` in `spaces`, which is ascending by space.
+pub fn layer_space(spaces: &[LayerSpaceRecord], space: LayerSpace) -> Option<&LayerSpaceRecord> {
+    let at = spaces.binary_search_by_key(&space, |r| r.space).ok()?;
+    Some(&spaces[at])
+}
+
+/// The record of `space` in `spaces`, which is ascending by space, inserting an empty one in order
+/// where there is none.
+pub fn layer_space_mut(
+    spaces: &mut Vec<LayerSpaceRecord>,
+    space: LayerSpace,
+) -> &mut LayerSpaceRecord {
+    let at = match spaces.binary_search_by_key(&space, |r| r.space) {
+        Ok(at) => at,
+        Err(at) => {
+            spaces.insert(at, LayerSpaceRecord::empty(space));
+            at
+        }
+    };
+    &mut spaces[at]
 }
 
 /// One file derived from an artifact level: a containment partition, a tile index, a row-major
@@ -1821,7 +1856,6 @@ impl LayerSpaceRecord {
 pub struct DerivedExtent {
     /// Prefix-relative path of the file.
     pub path: String,
-    pub layer: String,
     /// The layer's space, on [`MembershipExtent::space`]'s argument.
     pub space: LayerSpace,
     pub level: u32,
@@ -1835,8 +1869,7 @@ impl DerivedExtent {
     /// Whether `other` was written for the same level, version, view and incarnation: the
     /// coordinates two files written together share.
     pub fn same_level(&self, other: &DerivedExtent) -> bool {
-        self.layer == other.layer
-            && self.space == other.space
+        self.space == other.space
             && self.level == other.level
             && self.level_version == other.level_version
             && self.view == other.view
@@ -2022,11 +2055,9 @@ pub struct PartitionManifest {
     /// The annotation layer registry as of this publication, complete current state rather than a
     /// diff — the posture contracts §2.3 already fixes for `deny` and `tombstones`.
     pub layers: Vec<RegisteredLayer>,
-    /// The layer space the next registration takes: past every space a layer has held, dropped
-    /// or not. Required, with no `serde(default)`: the WAL's `LayerCreate` records also carry
-    /// each space, and rotation reclaims them, so a counter that lived only there would give a
-    /// dropped layer's space to a new one, and a dropped layer's identifiers would name the new
-    /// layer's artifacts.
+    /// The space the next registration takes, past every space a layer has held. Required:
+    /// rotation reclaims the WAL's `LayerCreate` records, so a counter kept only there would give
+    /// a dropped layer's space to a new one.
     pub next_layer_space: u32,
     /// The layer registry's version counter: the last version handed to a registration or a drop.
     /// Open resumes the counter from it.
@@ -2316,10 +2347,6 @@ pub const HONOURED_STATE: &[&str] = &[
     "deny",
     "tombstones",
     "vocabulary_extensions",
-    // Arrived with the code that reads it (`WritePath::reconstruct` seeds the registry from the
-    // manifest and replays the WAL on top). A reader carrying a layer list and ignoring it
-    // would serve a bundle as though no layer had ever been registered — every gate absent, every
-    // reserved run available for reissue — which is the fail-open this list exists to close.
     "layers",
     // The roster's runtime half, on the same argument: a reader carrying created views and
     // ignoring them would serve a bundle as though the views did not exist — every request naming
@@ -2422,7 +2449,8 @@ impl SegmentsManifest {
             .windows(2)
             .any(|pair| pair[0].space >= pair[1].space)
         {
-            return Err("the side-manifest's layer spaces are not ascending".to_string());
+            return Err("the side-manifest's layer spaces are not ascending. Rebuild the bundle."
+                .to_string());
         }
         match self.layer_spaces.iter().find(|record| {
             !self
@@ -2450,6 +2478,12 @@ impl SegmentsManifest {
         mosaica_types::only(&mut self.shards.records)
     }
 
+    /// Every shard's and every layer space's `(tombstones, deny)`.
+    fn deny_sets(&self) -> impl Iterator<Item = (&EntitySet, &EntitySet)> {
+        self.shards.records.iter().map(|r| (&r.tombstones, &r.deny))
+            .chain(self.layer_spaces.iter().map(|s| (&s.tombstones, &s.deny)))
+    }
+
     /// The state fields this manifest carries that [`HONOURED_STATE`] does not cover, by name.
     ///
     /// **A list of names, never a bool**, because the operator has to be told *which* build
@@ -2469,19 +2503,9 @@ impl SegmentsManifest {
     /// *files* fail to verify is one this reader cannot serve either, and stepping past it
     /// re-exposes every entity denied since the older manifest was written.
     pub fn deny_disposition_state(&self) -> Vec<&'static str> {
-        let records = &self.shards.records;
-        let spaces = &self.layer_spaces;
         [
-            (
-                "tombstones",
-                records.iter().any(|r| r.tombstones.carries())
-                    || spaces.iter().any(|s| s.tombstones.carries()),
-            ),
-            (
-                "deny",
-                records.iter().any(|r| r.deny.carries())
-                    || spaces.iter().any(|s| s.deny.carries()),
-            ),
+            ("tombstones", self.deny_sets().any(|(t, _)| t.carries())),
+            ("deny", self.deny_sets().any(|(_, d)| d.carries())),
         ]
         .into_iter()
         .filter(|(name, carried)| *carried && DENY_DISPOSITION_STATE.contains(name))
@@ -2498,19 +2522,10 @@ impl SegmentsManifest {
         // they are listed here past the honoured-name filter below and the manifest is refused
         // rather than served as though nothing were denied.
         let records = &self.shards.records;
-        let spaces = &self.layer_spaces;
         let partition = &self.partition;
         let mut fields: Vec<&'static str> = [
-            (
-                "tombstones",
-                records.iter().any(|r| r.tombstones.undecodable())
-                    || spaces.iter().any(|s| s.tombstones.undecodable()),
-            ),
-            (
-                "deny",
-                records.iter().any(|r| r.deny.undecodable())
-                    || spaces.iter().any(|s| s.deny.undecodable()),
-            ),
+            ("tombstones", self.deny_sets().any(|(t, _)| t.undecodable())),
+            ("deny", self.deny_sets().any(|(_, d)| d.undecodable())),
         ]
         .into_iter()
         .filter(|(_, undecodable)| *undecodable)
@@ -2696,21 +2711,13 @@ mod tests {
         assert_eq!(manifest.deny_disposition_state(), vec!["tombstones"]);
     }
 
-    /// The term-image list survives a round trip, and a manifest that omits it is refused.
-    ///
-    /// The refusal is the half worth testing. There is no `serde(default)` on the field, so a
-    /// manifest written without it fails to parse rather than parsing as a partition whose views
-    /// have no images, which is what a list lost in transit would look like.
-    /// A layer space's deny state is deny-disposition state as a shard's is, so a manifest
-    /// carrying an artifact's suppression is never stepped past, and one whose space deny state
-    /// does not decode is refused.
     #[test]
     fn a_layer_spaces_deny_state_is_never_stepped_past() {
         let space = LayerSpace::new(3).unwrap();
         let mut manifest = SegmentsManifest::empty();
         manifest.only_shard_mut().deltas = vec!["d".to_string()];
         let mut record = LayerSpaceRecord::empty(space);
-        record.deny = EntitySet::of(&croaring::Bitmap::of(&[9]));
+        record.deny = deny_set(&[9]);
         manifest.layer_spaces.push(record);
         assert_eq!(manifest.deny_disposition_state(), vec!["deny"]);
 
@@ -2726,7 +2733,6 @@ mod tests {
         );
     }
 
-    /// The list is required: a lost one must not read as a partition with no layer spaces.
     #[test]
     fn a_layer_space_list_round_trips_and_an_absent_one_is_refused() {
         let mut manifest = SegmentsManifest::empty();
@@ -2747,6 +2753,11 @@ mod tests {
         assert!(serde_json::from_value::<SegmentsManifest>(json).is_err());
     }
 
+    /// The term-image list survives a round trip, and a manifest that omits it is refused.
+    ///
+    /// The refusal is the half worth testing. There is no `serde(default)` on the field, so a
+    /// manifest written without it fails to parse rather than parsing as a partition whose views
+    /// have no images, which is what a list lost in transit would look like.
     #[test]
     fn a_term_image_list_round_trips_and_an_absent_one_is_refused() {
         let mut manifest = SegmentsManifest::empty();
@@ -2818,7 +2829,6 @@ mod tests {
     fn every_derived_form_round_trips_and_an_absent_list_is_refused() {
         let entry = |form: DerivedForm, view: Option<&str>| DerivedExtent {
             path: format!("{}/x", TEST_SHARD.derived_rel(form.dir())),
-            layer: "regions".to_string(),
             space: LayerSpace::new(4).unwrap(),
             level: 0,
             level_version: 3,
@@ -3023,7 +3033,7 @@ mod tests {
              before replaying the WAL over the top, which is what makes a registration survive the \
              rotation that reclaims its `LayerCreate` record — a reader carrying it and ignoring \
              it would open a bundle as though no layer had ever been registered, every gate \
-             absent and every reserved run free for reissue. views/dead_view_incarnations: \
+             absent. views/dead_view_incarnations: \
              `Engine::open` seeds the `ViewRoster` from them and amends the bundle's own manifest \
              with what it holds, before replaying the WAL over the top — which is what makes a \
              view created while the service ran survive the rotation that reclaims its \

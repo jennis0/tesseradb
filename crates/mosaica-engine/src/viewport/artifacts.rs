@@ -798,7 +798,12 @@ impl Engine {
         if !ctx.reachable.contains(&attachment.layer) {
             return false;
         }
-        let Some(layer) = self.write.live().registered_layer(&attachment.layer) else {
+        let Some(layer) = self
+            .write
+            .live()
+            .registered_layer(&attachment.layer)
+            .filter(|layer| layer.space == attachment.space)
+        else {
             return false;
         };
         if ctx.served.generation.layer_denied(layer.space) {

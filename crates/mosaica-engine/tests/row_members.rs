@@ -304,6 +304,7 @@ fn stored_forms(root: &Path) -> BTreeMap<(String, u32), Forms> {
         let DerivedForm::RowColumn { layout } = column.form else {
             continue;
         };
+        let layer = layer_in(&manifest, column.space).to_string();
         let beside: Vec<_> = manifest
             .only_shard().derived_extents
             .iter()
@@ -312,8 +313,7 @@ fn stored_forms(root: &Path) -> BTreeMap<(String, u32), Forms> {
         assert_eq!(
             beside.len(),
             1,
-            "{}: one member file beside its column",
-            column.layer
+            "{layer}: one member file beside its column"
         );
         let labels = RowColumn::open_labels(&prefix.join(&column.path), layout).unwrap();
         let pack = mosaica_store::row_members::RowMembersPack::open(&prefix.join(&beside[0].path))
@@ -329,19 +329,18 @@ fn stored_forms(root: &Path) -> BTreeMap<(String, u32), Forms> {
                 .unwrap_or_default();
             assert_eq!(
                 &held, rows,
-                "{} ordinal {ordinal}'s stored members",
-                column.layer
+                "{layer} ordinal {ordinal}'s stored members"
             );
             let covering: Vec<(u32, u32)> = pack.covering(ordinal).collect();
             assert_covers(
                 &covering,
                 rows,
-                &format!("{} ordinal {ordinal}'s stored covering", column.layer),
+                &format!("{layer} ordinal {ordinal}'s stored covering"),
             );
             forms.push((held, covering));
         }
         assert!(
-            out.insert((column.layer.clone(), column.level), forms)
+            out.insert((layer, column.level), forms)
                 .is_none(),
             "one column per level in one view"
         );

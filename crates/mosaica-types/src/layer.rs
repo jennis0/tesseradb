@@ -618,9 +618,8 @@ pub struct LevelDeclaration {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LayerDeclaration {
-    /// The layer's identity. Tombstoned on drop and **never reused** — a name that once meant
-    /// something must not come to mean something else, since bookmarks, edges and suppressions all
-    /// travel by it.
+    /// The layer's name, unique among registered layers. A dropped layer's name can be registered
+    /// again, as a new layer in a new space.
     pub name: String,
     /// Human-readable, served as metadata. Optional — see [`LevelDeclaration::title`].
     pub title: Option<String>,
@@ -838,13 +837,11 @@ pub const LAYER_ENTITY: crate::EntityId = crate::EntityId::new(0);
 /// The block a layer space's first level starts at. Block 0 holds [`LAYER_ENTITY`] alone.
 pub const FIRST_LEVEL_BLOCK: u64 = 1;
 
-/// One past the last block a layer space holds: the last whole block below `u32::MAX`, where
-/// entity ids end.
-pub const SPACE_BLOCKS: u64 = u32::MAX as u64 / RESERVED_BLOCK;
+/// One past the last block a layer space holds: the last whole block below [`crate::ENTITY_END`].
+pub const SPACE_BLOCKS: u64 = crate::ENTITY_END / RESERVED_BLOCK;
 
-/// The block a layer space gives next: past every run of `runs`, its levels' runs, or
-/// [`FIRST_LEVEL_BLOCK`] where they hold none. A space is never given to a second layer, so its
-/// runs are everything it has given.
+/// The block a space gives next: past every run in `runs`, or [`FIRST_LEVEL_BLOCK`] when there are
+/// none.
 pub fn next_block(runs: &[ReservedRuns]) -> u64 {
     runs.iter()
         .flat_map(ReservedRuns::runs)
@@ -878,10 +875,8 @@ impl EntityRun {
 
 /// The entity ids one level holds, as a **list** of runs in allocation order.
 ///
-/// A level that fills its reservation is extended by appending the space's next block, and by then
-/// the layer's other levels may have taken the blocks after its own, so a level's second run need
-/// not follow its first. `ordinal = entity − run.start` holds within a run, and a walk over the
-/// runs finds the rest.
+/// A level that fills its reservation appends its space's next block, which need not follow its
+/// last. Ordinals run through the runs in order.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReservedRuns {
     runs: Vec<EntityRun>,
@@ -949,16 +944,14 @@ impl ReservedRuns {
     }
 }
 
-/// A registered layer, as it is held in memory and written to a manifest. Its own identifier is
-/// [`LAYER_ENTITY`] of its space.
+/// A registered layer, as it is held in memory and written to a manifest.
 ///
 /// **The runs are stored, never re-derived.** A registration must land on the entities it was
 /// acked on: bookmarks, edges and suppressions all name them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RegisteredLayer {
     pub declaration: LayerDeclaration,
-    /// The layer's space, which its artifacts' and its own identifiers carry. Given at
-    /// registration and never given to another layer.
+    /// The space its artifacts' and its own identifiers carry.
     pub space: crate::LayerSpace,
     /// One entry per level, in level order; a layer declaring no levels has exactly one, its
     /// level 0.
@@ -1320,9 +1313,8 @@ impl LayerDeclaration {
             _ => {}
         }
 
-        // Levels address by `entity − level.entity_base` over a reserved run, so the set must be
-        // exactly 0..n: a repeat would give two levels one base, and a gap would reserve a run no
-        // address reaches.
+        // Levels address by ordinal within the level's runs, so the set must be exactly 0..n: a
+        // repeat would give two levels one base, and a gap would reserve a run no address reaches.
         let mut seen: BTreeSet<u32> = BTreeSet::new();
         for level in &self.levels {
             if !seen.insert(level.level) {
@@ -2317,9 +2309,7 @@ mod tests {
 
     #[test]
     fn the_two_addressing_directions_agree_across_a_discontiguous_level() {
-        // A level extended after other layers took the ids below it: block B sits well under block
-        // A, and the ordinals run A then B because that is allocation order. Any scheme that sorted
-        // by entity would put B's artifacts first and renumber the level silently.
+        // Ordinals follow the runs' order, not entity order.
         let a = EntityRun {
             start: 900 * RESERVED_BLOCK,
             end: 901 * RESERVED_BLOCK,
@@ -2352,8 +2342,7 @@ mod tests {
 
     #[test]
     fn one_run_is_the_representations_subtraction() {
-        // The common case the design states: `ordinal = entity − entity_base`, with the general
-        // form degenerating to exactly that.
+        // One run: `ordinal = entity − run.start`.
         let base = 700 * RESERVED_BLOCK;
         let runs = ReservedRuns::from_runs(vec![EntityRun {
             start: base,

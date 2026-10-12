@@ -28,7 +28,7 @@ pub(in crate::write) type ResolverState = (FxHashMap<Vec<u8>, TermId>, u32);
 /// The layer registry as a side-manifest carries it.
 pub(in crate::write) struct RegistryForPublication {
     pub layers: Vec<mosaica_types::layer::RegisteredLayer>,
-    pub next_space: u32,
+    pub next_layer_space: u32,
     /// The registry's version counter.
     pub version: u64,
 }
@@ -248,8 +248,11 @@ impl LiveState {
         let mut artifacts = lock_recover(&self.artifacts);
         let (mut rehoused, mut kept) = (0u64, 0u64);
         for extent in extents {
+            let Some(layer) = artifacts.layer_in(extent.space).map(str::to_string) else {
+                continue;
+            };
             let path = prefix_dir.join(&extent.path);
-            let pack = match mosaica_store::membership::MembershipPack::open(
+            let pack = match mosaica_store::membership::LevelPack::open(
                 &path,
                 mosaica_store::membership::PackKind::Members,
             ) {
@@ -278,10 +281,10 @@ impl LiveState {
                 let mapped =
                     unsafe { mosaica_lifecycle::membership::mapped_members(blob, owner.clone()) };
                 let took = match mapped {
-                    // `MembershipPack::iter` answers the absolute ordinal, which is what the
+                    // `LevelPack::iter` answers the absolute ordinal, which is what the
                     // store addresses by.
                     Some(members) => {
-                        artifacts.rehouse_members(&extent.layer, extent.level, ordinal, members)
+                        artifacts.rehouse_members(&layer, extent.level, ordinal, members)
                     }
                     None => false,
                 };
@@ -302,24 +305,6 @@ impl LiveState {
         retired: &mosaica_lifecycle::membership::Retired,
     ) -> Vec<(String, u32)> {
         lock_recover(&self.artifacts).retire(retired)
-    }
-
-    /// What a fold retires: `points`, and each live layer's artifacts among `artifacts`, by
-    /// space. A space no live layer holds has nothing left to retire.
-    pub(in crate::write) fn retirement(
-        &self,
-        points: croaring::Bitmap,
-        artifacts: &std::collections::BTreeMap<LayerSpace, croaring::Bitmap>,
-    ) -> mosaica_lifecycle::membership::Retired {
-        let registry = lock_recover(&self.registry);
-        let artifacts = artifacts
-            .iter()
-            .filter_map(|(space, deleted)| {
-                let (name, _) = registry.in_space(*space)?;
-                Some((name.to_string(), deleted.clone()))
-            })
-            .collect();
-        mosaica_lifecycle::membership::Retired { points, artifacts }
     }
 
     /// Where an entity of `space` sits: `(layer, level, ordinal)`. Addressing only. See
@@ -366,14 +351,10 @@ impl LiveState {
     /// Every artifact that depends, directly or transitively, on an artifact `deleted` names, as
     /// a target in its layer's space; none of `deleted`. See [`ArtifactStore::cascade_from`].
     pub(in crate::write) fn dependents_of(&self, deleted: &[Target]) -> Vec<Target> {
-        let registry = lock_recover(&self.registry);
         let roots: Vec<mosaica_lifecycle::membership::ArtifactAt> = deleted
             .iter()
             .filter_map(|target| match target {
-                Target::Artifact(space, entity) => {
-                    let (name, _) = registry.in_space(*space)?;
-                    Some((name.to_string(), *entity))
-                }
+                Target::Artifact(space, entity) => Some((*space, *entity)),
                 Target::Item(..) => None,
             })
             .collect();
@@ -383,7 +364,7 @@ impl LiveState {
         lock_recover(&self.artifacts)
             .cascade_from(&roots)
             .into_iter()
-            .filter_map(|(name, entity)| Some(Target::Artifact(registry.get(&name)?.space, entity)))
+            .map(|(space, entity)| Target::Artifact(space, entity))
             .collect()
     }
 
@@ -561,7 +542,7 @@ impl LiveState {
         let registry = lock_recover(&self.registry);
         RegistryForPublication {
             layers: registry.snapshot(),
-            next_space: registry.next_space(),
+            next_layer_space: registry.next_layer_space(),
             version: registry.version(),
         }
     }

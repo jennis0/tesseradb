@@ -147,6 +147,12 @@ pub fn side_manifest(root: &Path) -> SegmentsManifest {
     open_bundle(root).expect("the bundle opens").partitions[PARTITION].side_manifest()
 }
 
+/// The name of the layer `manifest` registers in `space`.
+pub fn layer_in(manifest: &SegmentsManifest, space: mosaica_types::LayerSpace) -> &str {
+    let layer = manifest.partition.layers.iter().find(|l| l.space == space);
+    &layer.expect("a registered layer holds the space").declaration.name
+}
+
 /// The file of [`side_manifest`].
 pub fn side_manifest_path(root: &Path) -> PathBuf {
     let n = open_bundle(root).expect("the bundle opens").partitions[PARTITION].segments_n;

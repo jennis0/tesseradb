@@ -1155,7 +1155,6 @@ pub fn encode_expression(mut clauses: Vec<&[u32]>) -> Vec<u32> {
 pub struct Filed {
     pub view: Option<String>,
     pub incarnation: Option<mosaica_types::view::ViewIncarnation>,
-    pub layer: String,
     pub space: mosaica_types::LayerSpace,
     pub level: u32,
     pub level_version: u64,
@@ -1216,11 +1215,11 @@ impl Drop for Filed {
     }
 }
 
-/// Create the shard's directory for `kind`; returns it and its prefix-relative path.
-fn derived_dir(prefix_dir: &Path, rel: String) -> crate::Result<(std::path::PathBuf, String)> {
-    let dir = prefix_dir.join(&rel);
+/// Create `rel` under the prefix and return its path.
+fn derived_dir(prefix_dir: &Path, rel: &str) -> crate::Result<std::path::PathBuf> {
+    let dir = prefix_dir.join(rel);
     std::fs::create_dir_all(&dir).map_err(crate::error::io(&dir))?;
-    Ok((dir, rel))
+    Ok(dir)
 }
 
 /// The running index each kind's files are named from, carried across every call one publication
@@ -1278,7 +1277,8 @@ pub fn term_image_file(
 ) -> crate::Result<DerivedFile> {
     let position = index.term_images;
     index.term_images += 1;
-    let (dir, dir_rel) = derived_dir(prefix_dir, layout.derived_rel(TERM_IMAGES_KIND))?;
+    let dir_rel = layout.derived_rel(TERM_IMAGES_KIND);
+    let dir = derived_dir(prefix_dir, &dir_rel)?;
     let name = derived_name(TERM_IMAGES_KIND, n, position, "timg");
     Ok(DerivedFile {
         path: dir.join(&name),
@@ -1329,14 +1329,13 @@ pub fn file_derived(
         // call's manifest entry may already carry.
         let name = derived_name(kind, n, *next, extension);
         *next += 1;
-        // A level's held shapes are the layer space's; every other form is the shard's.
-        let rel = match item.form {
+        let dir_rel = match item.form {
             DerivedForm::ShapeHeld => {
                 crate::LayerSpaceLayout::new(layout.partition, item.space).derived_rel(kind)
             }
             _ => layout.derived_rel(kind),
         };
-        let (dir, dir_rel) = match derived_dir(prefix_dir, rel) {
+        let dir = match derived_dir(prefix_dir, &dir_rel) {
             Ok(made) => made,
             Err(error) => {
                 tracing::warn!(%error, "a derived-structure directory would not be created");
@@ -1345,7 +1344,7 @@ pub fn file_derived(
         };
         if let Err(error) = item.bytes.place(&dir.join(&name)) {
             tracing::warn!(
-                layer = %item.layer,
+                space = %item.space,
                 level = item.level,
                 view = ?item.view,
                 kind,
@@ -1359,7 +1358,6 @@ pub fn file_derived(
         }
         entries.push(DerivedExtent {
             path: format!("{dir_rel}/{name}"),
-            layer: item.layer.clone(),
             space: item.space,
             level: item.level,
             level_version: item.level_version,

@@ -75,7 +75,7 @@ use mosaica_lifecycle::membership::{
     ArtifactShapes, ArtifactStore, IncomingArtifact, IncomingAttachment, IncomingContent,
 };
 use mosaica_lifecycle::LayerRegistry;
-use mosaica_store::manifest::{LayerSpaceRecord, MembershipExtent, RecordExtent};
+use mosaica_store::manifest::{layer_space_mut, LayerSpaceRecord, MembershipExtent, RecordExtent};
 use mosaica_store::ShardLayout;
 use mosaica_types::layer::RegisteredLayer;
 use mosaica_types::layer::{parent_edges, LayerDeclaration, ValueSet};
@@ -1842,7 +1842,6 @@ pub fn publish(
         let mut writer = mosaica_store::membership::LevelPackWriter::create(
             prefix_dir,
             layout,
-            layer,
             space,
             0,
             level,
@@ -1972,7 +1971,7 @@ pub fn publish(
         .collect();
     let mut published = PublishedLayers {
         layers,
-        next_layer_space: registry.next_space(),
+        next_layer_space: registry.next_layer_space(),
         registry_version: registry.version(),
         artifact_views,
         containment_violations: violations,
@@ -1988,8 +1987,8 @@ pub fn publish(
         .collect();
     published.layer_spaces.sort_by_key(|record| record.space);
     for (layer, level, version) in store.level_versions() {
-        if let Some(record) = space_record(&mut published.layer_spaces, spaces.get(layer)) {
-            record
+        if let Some(space) = spaces.get(layer) {
+            layer_space_mut(&mut published.layer_spaces, *space)
                 .level_versions
                 .push(mosaica_store::manifest::LevelVersion { level, version });
         }
@@ -2992,15 +2991,6 @@ struct StreamedPack {
     members: MembershipExtent,
 }
 
-/// The record `space` names in `records`, where it is one.
-fn space_record<'r>(
-    records: &'r mut [LayerSpaceRecord],
-    space: Option<&mosaica_types::LayerSpace>,
-) -> Option<&'r mut LayerSpaceRecord> {
-    let space = space?;
-    records.iter_mut().find(|record| record.space == *space)
-}
-
 /// Whether a layer's hierarchy edges run **within** a level, which is what stops its levels being
 /// published in batches.
 ///
@@ -3117,7 +3107,7 @@ fn write_membership_extents(
             // before that loop runs — is encoded from the store here.
             None => {
                 let mut writer = mosaica_store::membership::LevelPackWriter::create(
-                    prefix_dir, layout, &layer, space, 0, level, ordinal_lo, count,
+                    prefix_dir, layout, space, 0, level, ordinal_lo, count,
                 )
                 .map_err(BuildError::Store)?;
                 let mut pushed = 0u32;
@@ -3143,9 +3133,9 @@ fn write_membership_extents(
         published
             .paths
             .extend([members_path, prefix_dir.join(&records.path)]);
-        if let Some(record) = space_record(&mut published.layer_spaces, Some(&space)) {
-            record.record_extents.push(records);
-        }
+        layer_space_mut(&mut published.layer_spaces, space)
+            .record_packs
+            .push(records);
         published.membership_extents.push(members);
     }
     // A pack nothing claimed is a level the publication streamed and `pending_ranges` did not
@@ -3190,7 +3180,7 @@ fn map_level_memberships(
     kept: &mut u64,
 ) -> Result<u64> {
     let pack = std::sync::Arc::new(
-        mosaica_store::membership::MembershipPack::open(
+        mosaica_store::membership::LevelPack::open(
             path,
             mosaica_store::membership::PackKind::Members,
         )
@@ -3281,9 +3271,9 @@ fn write_content_extent(
         }
         mosaica_store::fsync_dir(&dir).map_err(BuildError::Store)?;
         published.paths.extend([blocks, hasrow, directory]);
-        if let Some(record) = space_record(&mut published.layer_spaces, Some(&space)) {
-            record.content_extents.push(extent);
-        }
+        layer_space_mut(&mut published.layer_spaces, space)
+            .content_extents
+            .push(extent);
     }
     Ok(())
 }

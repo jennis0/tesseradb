@@ -37,13 +37,15 @@ pub(super) fn artifact_coordinates(
         .collect();
     let still_true = held
         .iter()
-        .filter(|entry| spaces.get(&entry.layer) == Some(&entry.space))
         .filter(|entry| {
-            let now = expected(&entry.layer, entry.level);
+            let Some((layer, _)) = spaces.iter().find(|(_, space)| **space == entry.space) else {
+                return false;
+            };
+            let now = expected(layer, entry.level);
             match entry.form {
                 mosaica_store::manifest::DerivedForm::RowColumn { .. }
                 | mosaica_store::manifest::DerivedForm::RowMembers
-                    if enumerated.contains(&entry.layer) =>
+                    if enumerated.contains(layer) =>
                 {
                     entry.level_version <= now
                 }
@@ -84,11 +86,7 @@ pub(super) fn write_deny_state(
     record.deny = EntitySet::of(overlay.suppressed_set());
     record.tombstones = EntitySet::of(overlay.deleted_set());
     for space in spaces.keys() {
-        if !manifest.layer_spaces.iter().any(|r| r.space == *space) {
-            manifest
-                .layer_spaces
-                .push(mosaica_store::manifest::LayerSpaceRecord::empty(*space));
-        }
+        mosaica_store::manifest::layer_space_mut(&mut manifest.layer_spaces, *space);
     }
     for record in &mut manifest.layer_spaces {
         let overlay = match spaces.get(&record.space) {
@@ -157,7 +155,7 @@ pub(in crate::write) struct SideManifests {
 /// One layer space's files as [`SideManifests`] holds them.
 #[derive(Clone, Debug, Default)]
 pub(in crate::write) struct HeldSpace {
-    pub(in crate::write) record_extents: Vec<mosaica_store::manifest::RecordPackExtent>,
+    pub(in crate::write) record_packs: Vec<mosaica_store::manifest::RecordPackExtent>,
     pub(in crate::write) content_extents: Vec<mosaica_store::manifest::RecordExtent>,
 }
 
@@ -276,17 +274,13 @@ impl Executor {
         next.layer_spaces
             .retain(|record| registered_spaces.contains(&record.space));
         for space in &registered_spaces {
-            if !next.layer_spaces.iter().any(|r| r.space == *space) {
-                next.layer_spaces
-                    .push(mosaica_store::manifest::LayerSpaceRecord::empty(*space));
-            }
+            mosaica_store::manifest::layer_space_mut(&mut next.layer_spaces, *space);
         }
-        next.layer_spaces.sort_by_key(|record| record.space);
         for record in &mut next.layer_spaces {
             let held = self.side_manifests.spaces.get(&record.space);
-            record.record_extents = match &fold {
+            record.record_packs = match &fold {
                 Some(fold) => fold.records.get(&record.space).cloned().unwrap_or_default(),
-                None => held.map(|h| h.record_extents.clone()).unwrap_or_default(),
+                None => held.map(|h| h.record_packs.clone()).unwrap_or_default(),
             };
             record.content_extents = match &fold {
                 Some(fold) => fold.contents.get(&record.space).cloned().unwrap_or_default(),
@@ -341,7 +335,7 @@ impl Executor {
         manifest.shards.size = shard.size();
         let partition = &mut manifest.partition;
         partition.layers = registry.layers;
-        partition.next_layer_space = partition.next_layer_space.max(registry.next_space);
+        partition.next_layer_space = partition.next_layer_space.max(registry.next_layer_space);
         partition.layer_registry_version = registry.version;
         let (created_views, dead_view_incarnations) = self.live.roster_for_publication();
         partition.views = created_views;

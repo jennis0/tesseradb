@@ -439,13 +439,10 @@ impl WritePath {
         // Read before the pointer moves into the thread. What the bundle's manifests already carry
         // is where each held artifact list starts: see [`SideManifests`] for why they are held
         // rather than re-cloned from a (stale) live manifest at each publication.
-        // A dropped layer's extents are not carried, whether or not its name is registered again.
+        // A dropped layer's extents are not carried.
         let (seeded_membership_extents, seeded_derived_extents, seeded_spaces) = {
             let generation = generation.load();
-            let registered = |layer: &str, space: LayerSpace| {
-                live.registered_layer(layer)
-                    .is_some_and(|held| held.space == space)
-            };
+            let registered = |space: LayerSpace| live.layer_in_space(space).is_some();
             let mut members = Vec::new();
             let mut derived = Vec::new();
             let mut spaces = std::collections::BTreeMap::new();
@@ -455,7 +452,7 @@ impl WritePath {
                     record
                         .membership_extents
                         .iter()
-                        .filter(|e| registered(&e.layer, e.space))
+                        .filter(|e| registered(e.space))
                         .cloned(),
                 );
                 let held = partition
@@ -467,15 +464,15 @@ impl WritePath {
                         .derived_extents
                         .iter()
                         .chain(held)
-                        .filter(|e| registered(&e.layer, e.space))
+                        .filter(|e| registered(e.space))
                         .cloned(),
                 );
                 for space in &partition.layer_spaces {
-                    if live.layer_in_space(space.space).is_some() {
+                    if registered(space.space) {
                         spaces.insert(
                             space.space,
                             executor::HeldSpace {
-                                record_extents: space.record_extents.clone(),
+                                record_packs: space.record_packs.clone(),
                                 content_extents: space.content_extents.clone(),
                             },
                         );

@@ -440,7 +440,7 @@ impl ShapeStore {
                 return held;
             }
         }
-        let entries = persisted.held_entries(view, layer, level, version);
+        let entries = persisted.held_entries(view, layer, level, version, store);
         let built = Arc::new(ShapeLevel::build(view, layer, level, store, entries));
         let (interior, boundary, max_interior, max_boundary) = built.decomposition_size();
         tracing::info!(
@@ -632,6 +632,7 @@ impl PersistedPieces<'_> {
         layer: &str,
         level: u32,
         version: u64,
+        store: &ArtifactStore,
     ) -> Vec<Option<HeldEntry>> {
         let Some(prefix_dir) = self.prefix_dir else {
             return Vec::new();
@@ -639,7 +640,7 @@ impl PersistedPieces<'_> {
         let Some(extent) = self.extents.iter().find(|e| {
             e.form == DerivedForm::ShapeHeld
                 && e.view.as_deref() == Some(view)
-                && e.layer == layer
+                && store.layer_in(e.space) == Some(layer)
                 && e.level == level
         }) else {
             return Vec::new();
@@ -685,7 +686,7 @@ impl PersistedPieces<'_> {
         let prefix_dir = self.prefix_dir?;
         let same_level = |e: &DerivedExtent| {
             e.view.as_deref() == Some(level.view.as_str())
-                && e.layer == level.layer
+                && store.layer_in(e.space) == Some(level.layer.as_str())
                 && e.level == level.level
         };
         let shape_rows = self.extents.iter().find_map(|e| match &e.form {

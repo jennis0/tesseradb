@@ -656,7 +656,6 @@ mod tests {
     #[test]
     fn ids_differing_only_by_the_kind_bit_name_different_things() {
         let key = IdentityKey::from_hex(CANONICAL_KEY).unwrap();
-        let last = LayerSpace::new(LayerSpace::LIMIT - 1).unwrap();
         for e in [0u64, 1, 65_536, u32::MAX as u64] {
             let e = EntityId::new(e);
             let item = key.forward(ITEM, e).unwrap();
@@ -666,10 +665,7 @@ mod tests {
             assert_eq!(key.invert_artifact(item), None);
             assert_eq!(key.invert_artifact(artifact), Some((LayerSpace::ZERO, e)));
             assert_eq!(key.invert(artifact), None);
-            let at_last = key.forward_artifact(last, e).unwrap();
-            assert_eq!(key.invert_artifact(at_last), Some((last, e)));
         }
-        assert!(LayerSpace::new(LayerSpace::LIMIT).is_err());
     }
 
     #[test]

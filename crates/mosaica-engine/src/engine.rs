@@ -916,14 +916,8 @@ fn adopt_derived_structures(
         .filter(|e| {
             crate::filter::carries_live_view(&incarnation_of, e.view.as_deref(), e.incarnation)
         })
-        // A dropped layer's structures stay listed until a fold, and its name may be registered
-        // again in another space.
-        .filter(|e| {
-            state
-                .registry
-                .get(&e.layer)
-                .is_some_and(|layer| layer.space == e.space)
-        })
+        // A dropped layer's structures stay listed until a fold.
+        .filter(|e| state.registry.in_space(e.space).is_some())
         .collect();
 
     // The fold's containment partitions, adopted where their coordinate still holds; a

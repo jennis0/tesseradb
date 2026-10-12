@@ -111,11 +111,11 @@ fn main() -> ExitCode {
 
             let mut clouds: Vec<Cloud> = Vec::new();
             for extent in &partition.only_shard().record.membership_extents {
-                if &extent.layer != name {
+                if extent.space != layer.space {
                     continue;
                 }
                 let path = prefix.join(Path::new(&extent.path));
-                let pack = match mosaica_store::membership::MembershipPack::open(
+                let pack = match mosaica_store::membership::LevelPack::open(
                     &path,
                     mosaica_store::membership::PackKind::Members,
                 ) {

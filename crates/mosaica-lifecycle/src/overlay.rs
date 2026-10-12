@@ -268,15 +268,19 @@ impl Overlays {
             self.apply(entry.target, entry.op);
         }
     }
+}
 
-    /// Every overlay re-stated as one snapshot: the items of `shard`, then each space's.
-    pub fn snapshot(&self, shard: ShardId) -> Vec<OverlaySnapshotEntry> {
-        let mut out = self.items.snapshot(|entity| Target::Item(shard, entity));
-        for (space, overlay) in &self.spaces {
-            out.extend(overlay.snapshot(|entity| Target::Artifact(*space, entity)));
-        }
-        out
+/// Every overlay re-stated as one snapshot: the items of `shard`, then each space's.
+pub fn snapshot<'o>(
+    shard: ShardId,
+    items: &Overlay,
+    spaces: impl IntoIterator<Item = (LayerSpace, &'o Overlay)>,
+) -> Vec<OverlaySnapshotEntry> {
+    let mut out = items.snapshot(|entity| Target::Item(shard, entity));
+    for (space, overlay) in spaces {
+        out.extend(overlay.snapshot(|entity| Target::Artifact(space, entity)));
     }
+    out
 }
 
 /// Entity ids are capped at `u32::MAX` by the I9 allocator (contracts §2.6 r6), which is what lets

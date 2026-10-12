@@ -76,11 +76,6 @@ impl LayerSpace {
     pub const fn raw(self) -> u32 {
         self.0
     }
-
-    /// The space numbered one higher, or `None` past the last.
-    pub fn next(self) -> Option<LayerSpace> {
-        LayerSpace::new(self.0 + 1).ok()
-    }
 }
 
 impl std::fmt::Display for LayerSpace {
@@ -98,7 +93,7 @@ impl TryFrom<u32> for LayerSpace {
 }
 
 /// What a resolved `mosaica_id` names: an item's entity in its shard, or an artifact's or a layer's
-/// entity in its layer space. The two never compare equal, whatever their entities.
+/// entity in its layer space.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Target {
@@ -177,6 +172,10 @@ pub fn check_shard_size(size: u64, high_water: u64) -> Result<(), ShardSizeError
     }
     Ok(())
 }
+
+/// Where entity ids end, exclusive: `u32::MAX` is never issued, so a half-open range's end fits a
+/// `u32`.
+pub const ENTITY_END: u64 = u32::MAX as u64;
 
 /// What a shard's high water may not pass: its size, or the end of its id space where that is
 /// lower.

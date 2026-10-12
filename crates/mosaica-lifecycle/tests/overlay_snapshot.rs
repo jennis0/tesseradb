@@ -182,7 +182,11 @@ fn a_snapshot_restores_each_deny_into_the_overlay_its_target_names() {
     overlays.apply(item(EntityId::new(6)), ChangeOp::Delete);
 
     let mut restored = Overlays::default();
-    restored.apply_snapshot(&overlays.snapshot(ShardId::ZERO));
+    restored.apply_snapshot(&mosaica_lifecycle::overlay::snapshot(
+        ShardId::ZERO,
+        &overlays.items,
+        overlays.spaces.iter().map(|(space, overlay)| (*space, overlay)),
+    ));
     assert!(restored.spaces[&space].is_suppressed(EntityId::new(5)));
     assert!(!restored.items.touches(EntityId::new(5)));
     assert!(restored.items.is_deleted(EntityId::new(6)));

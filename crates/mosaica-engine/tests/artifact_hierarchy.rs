@@ -1685,25 +1685,21 @@ fn parents_in_bundle(
     engine: &Engine,
     key: &str,
 ) -> Vec<mosaica_lifecycle::wal::ParentRef> {
-    use mosaica_store::membership::{MembershipPack, PackKind};
+    use mosaica_store::membership::{LevelPack, PackKind};
     let prefix_dir = fx.root.join(&engine.generation().prefix);
     let manifest = common::side_manifest(&fx.root);
     let mut found = None;
     for space in &manifest.layer_spaces {
-        for extent in &space.record_extents {
+        for extent in &space.record_packs {
             let members = manifest
                 .only_shard()
                 .membership_extents
                 .iter()
-                .find(|m| {
-                    m.space == space.space
-                        && m.level == extent.level
-                        && m.ordinal_lo == extent.ordinal_lo
-                })
+                .find(|m| m.pairs(space.space, extent))
                 .expect("a member pack beside every record pack");
-            let records = MembershipPack::open(&prefix_dir.join(&extent.path), PackKind::Records)
+            let records = LevelPack::open(&prefix_dir.join(&extent.path), PackKind::Records)
                 .expect("a record pack opens");
-            let members = MembershipPack::open(&prefix_dir.join(&members.path), PackKind::Members)
+            let members = LevelPack::open(&prefix_dir.join(&members.path), PackKind::Members)
                 .expect("a member pack opens");
             for ((_, blob), (_, members)) in records.iter().zip(members.iter()) {
                 if blob.is_empty() {

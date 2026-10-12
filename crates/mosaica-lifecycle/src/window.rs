@@ -204,6 +204,7 @@ impl WindowClaims {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedMembership {
     pub layer: String,
+    pub space: mosaica_types::LayerSpace,
     pub level: u32,
     /// As on [`crate::command::BatchMembership::view`].
     pub view: Option<String>,
@@ -1221,13 +1222,13 @@ mod tests {
     fn a_window_that_exhausts_the_id_space_has_no_effect() {
         let mut w = CommitWindow::new(0);
         push(&mut w, entry("a", vec![row(&[1]), row(&[1])]));
-        let mut alloc = Allocator::new(crate::alloc::ENTITY_END - 1);
+        let mut alloc = Allocator::new(mosaica_types::ENTITY_END - 1);
         let err = w.allocate(&mut alloc, |e| e.raw());
         let Err((full, waiters)) = err else {
             panic!("a window past the end of the shard's ids must be refused");
         };
-        assert_eq!(full.limit, mosaica_types::ShardLimit::End(crate::alloc::ENTITY_END));
-        assert_eq!(alloc.high_water(), crate::alloc::ENTITY_END - 1);
+        assert_eq!(full.limit, mosaica_types::ShardLimit::End(mosaica_types::ENTITY_END));
+        assert_eq!(alloc.high_water(), mosaica_types::ENTITY_END - 1);
         assert_eq!(
             waiters,
             vec![vec!["w"]],

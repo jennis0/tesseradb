@@ -375,6 +375,24 @@ fn run(
     build(&args)
 }
 
+/// The space of the layer registered as `name`.
+fn space_named(
+    manifest: &mosaica_store::manifest::SegmentsManifest,
+    name: &str,
+) -> mosaica_types::LayerSpace {
+    let layer = manifest.partition.layers.iter().find(|l| l.declaration.name == name);
+    layer.expect("the layer is registered").space
+}
+
+/// The name of the layer registered in `space`.
+fn name_in(
+    manifest: &mosaica_store::manifest::SegmentsManifest,
+    space: mosaica_types::LayerSpace,
+) -> &str {
+    let layer = manifest.partition.layers.iter().find(|l| l.space == space);
+    &layer.expect("a registered layer holds the space").declaration.name
+}
+
 fn manifest_of(root: &Path) -> mosaica_store::manifest::SegmentsManifest {
     let bundle = open_bundle(root).expect("a bundle built with layers opens");
     bundle
@@ -405,13 +423,10 @@ fn a_build_registers_its_layers_and_publishes_their_artifacts() {
     assert_eq!(spaces, vec![0, 1]);
     assert_eq!(manifest.partition.next_layer_space, 2);
     for extent in &manifest.only_shard().membership_extents {
-        let layer = manifest
-            .partition
-            .layers
-            .iter()
-            .find(|l| l.declaration.name == extent.layer)
-            .unwrap();
-        assert_eq!(extent.space, layer.space, "an extent names its layer's space");
+        assert!(
+            manifest.partition.layers.iter().any(|l| l.space == extent.space),
+            "an extent names its layer's space"
+        );
     }
     // Each space numbers its levels from block 1, past the layer's own entity 0.
     for layer in &manifest.partition.layers {
@@ -426,7 +441,7 @@ fn a_build_registers_its_layers_and_publishes_their_artifacts() {
     let mut extents: Vec<(&str, u32)> = manifest
         .only_shard().membership_extents
         .iter()
-        .map(|e| (e.layer.as_str(), e.count))
+        .map(|e| (name_in(&manifest, e.space), e.count))
         .collect();
     extents.sort();
     assert_eq!(extents, vec![("clusters/a", 2), ("topics/x", 1)]);
@@ -435,7 +450,7 @@ fn a_build_registers_its_layers_and_publishes_their_artifacts() {
     let records: usize = manifest
         .layer_spaces
         .iter()
-        .map(|space| space.record_extents.len())
+        .map(|space| space.record_packs.len())
         .sum();
     assert_eq!(records, 2);
     let contents: usize = manifest
@@ -490,7 +505,7 @@ fn both_build_paths_place_the_same_layers_on_the_same_entities() {
         assert_eq!(
             one, other,
             "the packed memberships of {} differ",
-            extent.layer
+            extent.path
         );
     }
     let contents = |m: &mosaica_store::manifest::SegmentsManifest| {
@@ -502,7 +517,7 @@ fn both_build_paths_place_the_same_layers_on_the_same_entities() {
     let records = |m: &mosaica_store::manifest::SegmentsManifest| {
         m.layer_spaces
             .iter()
-            .flat_map(|space| space.record_extents.clone())
+            .flat_map(|space| space.record_packs.clone())
             .collect::<Vec<_>>()
     };
     assert_eq!(records(&a), records(&b));
@@ -546,7 +561,7 @@ fn contiguous_and_gapped_source_ids_place_a_member_on_the_same_entity() {
         assert_eq!(
             one, other,
             "the packed memberships of {} differ",
-            extent.layer
+            extent.path
         );
     }
 }
@@ -683,7 +698,7 @@ fn a_label_layer_sorting_before_its_target_still_publishes() {
     assert!(manifest
         .only_shard().membership_extents
         .iter()
-        .any(|e| e.layer == "annotations/topics"));
+        .any(|e| e.space == space_named(&manifest, "annotations/topics")));
 }
 
 /// **The existence criterion cannot be omitted**, on the gate's argument: the value an absent line
@@ -2191,7 +2206,7 @@ fn a_minted_artifact_and_a_declared_one_are_the_same_artifact() {
             std::fs::read(from_points.join("v00000").join(&extent.path)).unwrap(),
             std::fs::read(from_table.join("v00000").join(&extent.path)).unwrap(),
             "the packed memberships of {} differ",
-            extent.layer
+            extent.path
         );
     }
     assert_eq!(
@@ -3066,7 +3081,7 @@ fn a_build_mints_an_attribute_predicates_artifacts_from_its_column() {
         manifest
             .only_shard().membership_extents
             .iter()
-            .filter(|e| e.layer == "bands/by-value")
+            .filter(|e| e.space == space_named(&manifest, "bands/by-value"))
             .count(),
         1,
         "a predicate layer's records are durable like any other's"
@@ -3396,7 +3411,7 @@ fn a_predicate_over_a_category_column_mints_its_values() {
     let extents: Vec<_> = manifest
         .only_shard().membership_extents
         .iter()
-        .filter(|e| e.layer == "grades/by-value")
+        .filter(|e| e.space == space_named(&manifest, "grades/by-value"))
         .collect();
     assert_eq!(
         extents.len(),
@@ -3607,12 +3622,5 @@ fn level_version(
         .iter()
         .find(|l| l.declaration.name == layer)?
         .space;
-    manifest
-        .layer_spaces
-        .iter()
-        .find(|record| record.space == space)?
-        .level_versions
-        .iter()
-        .find(|v| v.level == level)
-        .map(|v| v.version)
+    mosaica_store::manifest::layer_space(&manifest.layer_spaces, space)?.level_version(level)
 }

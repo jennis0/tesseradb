@@ -53,7 +53,6 @@ pub(super) fn pack_levels(
         let mut writer = mosaica_store::membership::LevelPackWriter::create(
             prefix_dir,
             layout,
-            &layer,
             space,
             n,
             level,
@@ -1816,7 +1815,7 @@ impl Executor {
                     .spaces
                     .entry(space)
                     .or_default()
-                    .record_extents
+                    .record_packs
                     .extend(records);
             }
             if !packed.members.is_empty() {

@@ -359,10 +359,13 @@ impl ArtifactProjections {
             let Some(view) = extent.view.as_deref() else {
                 continue;
             };
-            if store.level_version(&extent.layer, extent.level) != extent.level_version {
+            let Some(layer) = store.layer_in(extent.space) else {
+                continue;
+            };
+            if store.level_version(layer, extent.level) != extent.level_version {
                 continue;
             }
-            let address = (view.to_string(), extent.layer.clone(), extent.level);
+            let address = (view.to_string(), layer.to_string(), extent.level);
             let key = DerivedKey::of(prefix, extent.level_version);
             let path = prefix_dir.join(&extent.path);
             match &extent.form {
@@ -372,7 +375,7 @@ impl ArtifactProjections {
                             labels.insert(address, (key, Arc::new(pack)));
                         }
                         Err(error) => tracing::error!(
-                            layer = %extent.layer,
+                            layer = %layer,
                             level = extent.level,
                             view = %view,
                             path = %extent.path,
@@ -480,10 +483,13 @@ impl ArtifactProjections {
             .iter()
             .filter(|e| e.form == mosaica_store::manifest::DerivedForm::Containment)
         {
-            let level_version = store.level_version(&extent.layer, extent.level);
+            let Some(layer) = store.layer_in(extent.space) else {
+                continue;
+            };
+            let level_version = store.level_version(layer, extent.level);
             if level_version != extent.level_version {
                 tracing::info!(
-                    layer = %extent.layer,
+                    layer = %layer,
                     level = extent.level,
                     composed_at = extent.level_version,
                     now = level_version,
@@ -498,7 +504,7 @@ impl ArtifactProjections {
                     // A fault rather than a cadence: the manifest names a file the prefix should
                     // hold and it did not open.
                     tracing::error!(
-                        layer = %extent.layer,
+                        layer = %layer,
                         level = extent.level,
                         path = %extent.path,
                         %error,
@@ -513,7 +519,7 @@ impl ArtifactProjections {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(
-                    (extent.layer.clone(), extent.level),
+                    (layer.to_string(), extent.level),
                     (DerivedKey::of(prefix, level_version), partition),
                 );
         }
@@ -542,10 +548,13 @@ impl ArtifactProjections {
             else {
                 continue;
             };
-            let level_version = store.level_version(&extent.layer, extent.level);
+            let Some(layer) = store.layer_in(extent.space) else {
+                continue;
+            };
+            let level_version = store.level_version(layer, extent.level);
             if level_version != extent.level_version {
                 tracing::info!(
-                    layer = %extent.layer,
+                    layer = %layer,
                     level = extent.level,
                     view = %view,
                     projected_at = extent.level_version,
@@ -562,7 +571,7 @@ impl ArtifactProjections {
                     // A fault rather than a cadence: the manifest names a file the prefix should
                     // hold and it did not open.
                     tracing::error!(
-                        layer = %extent.layer,
+                        layer = %layer,
                         level = extent.level,
                         view = %view,
                         path = %extent.path,
@@ -577,7 +586,7 @@ impl ArtifactProjections {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(
-                    (view.to_string(), extent.layer.clone(), extent.level),
+                    (view.to_string(), layer.to_string(), extent.level),
                     (DerivedKey::of(prefix, level_version), index),
                 );
         }
@@ -611,10 +620,13 @@ impl ArtifactProjections {
                 continue;
             };
             let layout = *layout;
-            let level_version = store.level_version(&extent.layer, extent.level);
+            let Some(layer) = store.layer_in(extent.space) else {
+                continue;
+            };
+            let level_version = store.level_version(layer, extent.level);
             if level_version < extent.level_version {
                 tracing::warn!(
-                    layer = %extent.layer,
+                    layer = %layer,
                     level = extent.level,
                     view = %view,
                     written_at = extent.level_version,
@@ -630,7 +642,7 @@ impl ArtifactProjections {
             });
             let Some(members) = members else {
                 tracing::error!(
-                    layer = %extent.layer,
+                    layer = %layer,
                     level = extent.level,
                     view = %view,
                     path = %extent.path,
@@ -645,7 +657,7 @@ impl ArtifactProjections {
                     // A fault rather than a cadence: the manifest names a file the prefix should
                     // hold, in a form it claims to be in, and it did not open as that form.
                     tracing::error!(
-                        layer = %extent.layer,
+                        layer = %layer,
                         level = extent.level,
                         view = %view,
                         path = %extent.path,
@@ -661,7 +673,7 @@ impl ArtifactProjections {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(
-                    (view.to_string(), extent.layer.clone(), extent.level),
+                    (view.to_string(), layer.to_string(), extent.level),
                     (DerivedKey::of(prefix, extent.level_version), column),
                 );
         }

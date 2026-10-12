@@ -1,4 +1,4 @@
-//! The packed membership extent: many artifact memberships behind **one** manifest entry.
+//! A level's packed extents: many artifacts' records or members behind **one** manifest entry.
 //!
 //! # Why this file exists at all
 //!
@@ -30,7 +30,8 @@
 //! # The format
 //!
 //! ```text
-//! header  := magic "MSMB" | u16 version | u16 reserved | u32 count | u32 ordinal_lo
+//! header  := magic "MSMB" (member pack) or "MSRP" (record pack)
+//!          | u16 version | u16 reserved | u32 count | u32 ordinal_lo
 //! offsets := u64 LE × (count + 1)   -- into the payload region; offsets[0] == 0, ascending
 //! payload := count blobs, concatenated in ordinal order
 //! ```
@@ -68,12 +69,12 @@ use std::path::{Path, PathBuf};
 use memmap2::Mmap;
 
 use crate::error::{Result, StoreError};
+use crate::manifest::{MembershipExtent, RecordPackExtent};
 
 /// Bumped whenever a blob's *content* changes shape, even though this module holds a blob opaquely:
 /// the refusal has to happen at the file, because the decoder on the other side of the boundary
-/// sees only bytes. From version 4 a level is two packs, a record pack in its layer space and a
-/// member pack in each shard, each with its own magic.
-const VERSION: u16 = 4;
+/// sees only bytes.
+const VERSION: u16 = 5;
 
 /// Which of a level's two packs a file is. The magic differs, so one is never decoded as the other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -261,17 +262,15 @@ impl PackWriter {
 pub struct LevelPackWriter {
     records: PackWriter,
     members: PackWriter,
-    record_extent: crate::manifest::RecordPackExtent,
-    member_extent: crate::manifest::MembershipExtent,
+    record_extent: RecordPackExtent,
+    member_extent: MembershipExtent,
     dirs: [PathBuf; 2],
 }
 
 impl LevelPackWriter {
-    #[allow(clippy::too_many_arguments)]
     pub fn create(
         prefix_dir: &Path,
         shard: crate::ShardLayout<'_>,
-        layer: &str,
         space: mosaica_types::LayerSpace,
         n: u64,
         level: u32,
@@ -280,12 +279,9 @@ impl LevelPackWriter {
     ) -> Result<LevelPackWriter> {
         let records_rel = crate::LayerSpaceLayout::new(shard.partition, space).records_rel();
         let members_rel = shard.members_rel();
-        let mut dirs = [prefix_dir.join(&records_rel), prefix_dir.join(&members_rel)];
-        for dir in &mut dirs {
-            std::fs::create_dir_all(&*dir).map_err(|source| StoreError::Io {
-                path: dir.clone(),
-                source,
-            })?;
+        let dirs = [prefix_dir.join(&records_rel), prefix_dir.join(&members_rel)];
+        for dir in &dirs {
+            std::fs::create_dir_all(dir).map_err(crate::error::io(dir))?;
         }
         let record_rel = format!("{records_rel}/records-{n:06}-{level}.tsrp");
         let member_rel = format!("{members_rel}/members-{n:06}-{space}-{level}.tsmb");
@@ -302,15 +298,14 @@ impl LevelPackWriter {
                 ordinal_lo,
                 count,
             )?,
-            record_extent: crate::manifest::RecordPackExtent {
+            record_extent: RecordPackExtent {
                 path: record_rel,
                 level,
                 ordinal_lo,
                 count,
             },
-            member_extent: crate::manifest::MembershipExtent {
+            member_extent: MembershipExtent {
                 path: member_rel,
-                layer: layer.to_string(),
                 space,
                 level,
                 ordinal_lo,
@@ -329,10 +324,7 @@ impl LevelPackWriter {
     /// Finish and fsync both packs and their directories, and return their manifest entries.
     pub fn finish(
         self,
-    ) -> Result<(
-        crate::manifest::RecordPackExtent,
-        crate::manifest::MembershipExtent,
-    )> {
+    ) -> Result<(RecordPackExtent, MembershipExtent)> {
         self.records.finish()?;
         self.members.finish()?;
         for dir in &self.dirs {
@@ -344,7 +336,7 @@ impl LevelPackWriter {
 
 /// One extent, opened and validated. The mapping is held for the reader's life; blobs are slices
 /// into it, so nothing is copied until a caller decodes one.
-pub struct MembershipPack {
+pub struct LevelPack {
     map: Mmap,
     count: u32,
     ordinal_lo: u32,
@@ -354,7 +346,7 @@ pub struct MembershipPack {
     payload_at: usize,
 }
 
-impl MembershipPack {
+impl LevelPack {
     /// Open and validate. Every check here refuses rather than truncating — see the module doc.
     pub fn open(path: &Path, kind: PackKind) -> Result<Self> {
         let file = File::open(path).map_err(|source| StoreError::Io {
@@ -419,7 +411,7 @@ impl MembershipPack {
             ));
         }
 
-        let pack = MembershipPack {
+        let pack = LevelPack {
             map,
             count,
             ordinal_lo,
@@ -627,7 +619,7 @@ impl ContainmentPack {
             path: path.to_path_buf(),
             source,
         })?;
-        // SAFETY: as [`MembershipPack::open`] — read-only, and nothing truncates a published
+        // SAFETY: as [`LevelPack::open`] — read-only, and nothing truncates a published
         // prefix's files while a generation names them.
         let map = unsafe { Mmap::map(&file) }.map_err(|source| StoreError::Io {
             path: path.to_path_buf(),
@@ -975,7 +967,7 @@ impl TileIndexPack {
             path: path.to_path_buf(),
             source,
         })?;
-        // SAFETY: as [`MembershipPack::open`] — read-only, and nothing truncates a published
+        // SAFETY: as [`LevelPack::open`] — read-only, and nothing truncates a published
         // prefix's files while a generation names them.
         let map = unsafe { Mmap::map(&file) }.map_err(|source| StoreError::Io {
             path: path.to_path_buf(),
@@ -1534,7 +1526,7 @@ impl std::fmt::Debug for LabelColumnPack {
 impl LabelColumnPack {
     /// Open a fold-written label column, mapped in place.
     pub fn open(path: &Path) -> Result<Self> {
-        // SAFETY: as [`MembershipPack::open`] — read-only, and nothing truncates a published
+        // SAFETY: as [`LevelPack::open`] — read-only, and nothing truncates a published
         // prefix's files while a generation names them.
         let map = map_read_only(path)?;
         Self::frame(ContainmentBytes::Mapped(map), &path.display().to_string())
@@ -1730,7 +1722,7 @@ impl std::fmt::Debug for ListColumnPack {
 impl ListColumnPack {
     /// Open a fold-written list column, mapped in place.
     pub fn open(path: &Path) -> Result<Self> {
-        // SAFETY: as [`MembershipPack::open`].
+        // SAFETY: as [`LevelPack::open`].
         let map = map_read_only(path)?;
         Self::frame(ContainmentBytes::Mapped(map), &path.display().to_string())
     }
@@ -2194,7 +2186,7 @@ mod tests {
         let blobs = vec![vec![1u8, 2, 3], Vec::new(), vec![9u8; 300]];
         let path = write(tmp.path(), "m.tsmb", &pack(PackKind::Members, 1000, &blobs));
 
-        let pack = MembershipPack::open(&path, PackKind::Members).unwrap();
+        let pack = LevelPack::open(&path, PackKind::Members).unwrap();
         assert_eq!(pack.ordinal_lo(), 1000);
         assert_eq!(pack.count(), 3);
 
@@ -2227,7 +2219,7 @@ mod tests {
         writer.finish().unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), pack(PackKind::Members, 1000, &blobs));
 
-        let opened = MembershipPack::open(&path, PackKind::Members).unwrap();
+        let opened = LevelPack::open(&path, PackKind::Members).unwrap();
         assert_eq!(opened.ordinal_lo(), 1000);
         assert_eq!(opened.blob(1002).map(<[u8]>::len), Some(300));
     }
@@ -2255,7 +2247,7 @@ mod tests {
     fn an_empty_extent_is_well_formed() {
         let tmp = tempfile::tempdir().unwrap();
         let path = write(tmp.path(), "m.tsmb", &pack(PackKind::Members, 0, &[]));
-        let pack = MembershipPack::open(&path, PackKind::Members).unwrap();
+        let pack = LevelPack::open(&path, PackKind::Members).unwrap();
         assert_eq!(pack.count(), 0);
         assert_eq!(pack.iter().count(), 0);
         assert_eq!(pack.blob(0), None);
@@ -2273,14 +2265,14 @@ mod tests {
         for cut in [1usize, HEADER_LEN, HEADER_LEN + 8, bytes.len() - 1] {
             let path = write(tmp.path(), &format!("cut{cut}.tsmb"), &bytes[..cut]);
             assert!(
-                MembershipPack::open(&path, PackKind::Members).is_err(),
+                LevelPack::open(&path, PackKind::Members).is_err(),
                 "a file cut to {cut} bytes must refuse"
             );
         }
         // And the whole file still opens, so the loop above is testing truncation rather than a
         // format that never opens at all.
         let path = write(tmp.path(), "whole.tsmb", &bytes);
-        assert_eq!(MembershipPack::open(&path, PackKind::Members).unwrap().count(), 3);
+        assert_eq!(LevelPack::open(&path, PackKind::Members).unwrap().count(), 3);
     }
 
     #[test]
@@ -2291,17 +2283,15 @@ mod tests {
         let mut wrong_magic = bytes.clone();
         wrong_magic[0] = b'X';
         let path = write(tmp.path(), "magic.tsmb", &wrong_magic);
-        assert!(MembershipPack::open(&path, PackKind::Members).is_err());
+        assert!(LevelPack::open(&path, PackKind::Members).is_err());
 
         // A future version refuses rather than being read on this version's rules — the offsets
         // could mean something else entirely, and a plausible wrong answer is the failure mode.
         bytes[4] = 99;
         let path = write(tmp.path(), "version.tsmb", &bytes);
-        assert!(MembershipPack::open(&path, PackKind::Members).is_err());
+        assert!(LevelPack::open(&path, PackKind::Members).is_err());
     }
 
-    /// A level's two packs differ in their magic, so a record pack opened as a member pack, or the
-    /// reverse, refuses rather than decoding one artifact's record as its members.
     #[test]
     fn a_record_pack_is_never_opened_as_a_member_pack() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2310,8 +2300,8 @@ mod tests {
             "r.tsrp",
             &pack(PackKind::Records, 0, &[vec![7u8; 10]]),
         );
-        assert!(MembershipPack::open(&path, PackKind::Members).is_err());
-        assert_eq!(MembershipPack::open(&path, PackKind::Records).unwrap().count(), 1);
+        assert!(LevelPack::open(&path, PackKind::Members).is_err());
+        assert_eq!(LevelPack::open(&path, PackKind::Records).unwrap().count(), 1);
     }
 
     // ---- the containment partition ---------------------------------------------------------
@@ -2408,7 +2398,7 @@ mod tests {
         let at = HEADER_LEN + 8;
         bytes[at..at + 8].copy_from_slice(&999u64.to_le_bytes());
         let path = write(tmp.path(), "backwards.tsmb", &bytes);
-        assert!(MembershipPack::open(&path, PackKind::Members).is_err());
+        assert!(LevelPack::open(&path, PackKind::Members).is_err());
     }
 
     // ---- the tile index's extent column -------------------------------------------------------

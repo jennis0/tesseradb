@@ -672,31 +672,25 @@ impl Executor {
         }
 
         let ack = ack_of(&record);
-        let dropped_space = match &record {
-            WalRecord::LayerDrop { name, .. } => self.live.space_of(name),
-            _ => None,
-        };
         self.live.apply_registry_record(&record);
         // A dropped layer's artifacts and derived structures go with it, so a layer registered
         // again under the name starts from none of them. The next publication names none of its
         // extents, and its space leaves the generation.
-        if let Some(space) = dropped_space {
-            self.side_manifests.spaces.remove(&space);
+        if let WalRecord::LayerDrop { name, space, .. } = &record {
+            self.side_manifests.spaces.remove(space);
             let generation = self.generation.load_full();
-            if generation.layer_spaces.contains_key(&space) {
+            if generation.layer_spaces.contains_key(space) {
                 let mut spaces = (*generation.layer_spaces).clone();
-                spaces.remove(&space);
+                spaces.remove(space);
                 let next = generation.with(|g| g.layer_spaces = Arc::new(spaces));
                 self.publish(next, std::time::Instant::now());
             }
-        }
-        if let WalRecord::LayerDrop { name, .. } = &record {
             self.side_manifests
                 .membership_extents
-                .retain(|extent| extent.layer != *name);
+                .retain(|extent| extent.space != *space);
             self.side_manifests
                 .derived_extents
-                .retain(|extent| extent.layer != *name);
+                .retain(|extent| extent.space != *space);
             // The deltas held for the tick describe forms that are going with the layer.
             self.pending_forms.retain(|(layer, _), _| layer != name);
             self.deps.artifact_projections.forget(name);

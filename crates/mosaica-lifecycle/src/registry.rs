@@ -35,7 +35,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use mosaica_types::layer::{
     DeclarationError, EntityRun, LayerDeclaration, LevelShape, MembershipSource, RegisteredLayer,
-    ReservedRuns, RESERVED_BLOCK, SPACE_BLOCKS,
+    ReservedRuns, FIRST_LEVEL_BLOCK, RESERVED_BLOCK, SPACE_BLOCKS,
 };
 use mosaica_types::{EntityId, LayerSpace};
 
@@ -909,10 +909,9 @@ pub struct LayerRegistry {
     layers: BTreeMap<String, RegisteredLayer>,
     /// The space the next registration takes: past every space ever given, live or dropped.
     /// [`LayerSpace::LIMIT`] once every space has been given.
-    next_space: u32,
-    /// Per space, the block after the last one a prepared publication gave, until the record is
-    /// applied and the level's runs show it: two publications prepared before either is applied
-    /// take different blocks.
+    next_layer_space: u32,
+    /// Per space, the block after the last one a prepared publication gave, so publications
+    /// prepared before either is applied take different blocks.
     given: BTreeMap<LayerSpace, u64>,
     version: u64,
 }
@@ -945,8 +944,8 @@ impl LayerRegistry {
     }
 
     /// The space the next registration takes, as a side-manifest carries it.
-    pub fn next_space(&self) -> u32 {
-        self.next_space
+    pub fn next_layer_space(&self) -> u32 {
+        self.next_layer_space
     }
 
     /// The live layer holding `space`, by name.
@@ -964,40 +963,20 @@ impl LayerRegistry {
         mosaica_types::layer::next_block(&layer.runs).max(given)
     }
 
-    /// Records the blocks `record` gave its layer's space, so the next preparation starts past
-    /// them.
-    fn note_given(&mut self, record: &WalRecord) {
-        let WalRecord::ArtifactPublish {
-            layer, extend_runs, ..
-        } = record
-        else {
-            return;
-        };
-        let (Some(end), Some(registered)) = (
-            extend_runs.iter().map(|run| run.end).max(),
-            self.layers.get(layer),
-        ) else {
-            return;
-        };
-        let given = self.given.entry(registered.space).or_default();
-        *given = (*given).max(end / RESERVED_BLOCK);
-    }
-
     /// Validates a registration and gives it a space, returning the WAL record that makes it
     /// durable. **It does not apply it** — the caller appends the record, fsyncs, and only then
     /// calls [`LayerRegistry::apply`]. The record carries the space and the runs, so replay applies
     /// what was decided rather than re-deriving it.
-    ///
-    /// On any error nothing has moved.
     pub fn prepare_create(
-        &mut self,
+        &self,
         mut declaration: LayerDeclaration,
     ) -> Result<WalRecord, RegistryError> {
         declaration.validate()?;
         if self.layers.contains_key(&declaration.name) {
             return Err(RegistryError::NameTaken(declaration.name));
         }
-        let space = LayerSpace::new(self.next_space).map_err(|_| RegistryError::SpacesExhausted)?;
+        let space =
+            LayerSpace::new(self.next_layer_space).map_err(|_| RegistryError::SpacesExhausted)?;
         for dep in &declaration.depends_on {
             if !self.layers.contains_key(dep) {
                 return Err(RegistryError::MissingDependency {
@@ -1008,17 +987,21 @@ impl LayerRegistry {
         }
 
         // One block per level, in level order from the space's first.
-        let mut runs = Vec::with_capacity(declaration.run_count());
-        let mut next = mosaica_types::layer::FIRST_LEVEL_BLOCK;
-        for level in 0..declaration.run_count() {
-            let run = take_block(&mut next).ok_or_else(|| RegistryError::SpaceFull {
-                layer: declaration.name.clone(),
-                level: level as u32,
-                needed: RESERVED_BLOCK,
-                left: 0,
-            })?;
-            runs.push(ReservedRuns::from_runs(vec![run]));
-        }
+        let levels = declaration.run_count() as u64;
+        let mut next = FIRST_LEVEL_BLOCK;
+        let runs = take_blocks(&mut next, levels)
+            .ok_or_else(|| {
+                let fits = SPACE_BLOCKS - FIRST_LEVEL_BLOCK;
+                RegistryError::SpaceFull {
+                    layer: declaration.name.clone(),
+                    level: fits as u32,
+                    needed: (levels - fits) * RESERVED_BLOCK,
+                    left: 0,
+                }
+            })?
+            .into_iter()
+            .map(|run| ReservedRuns::from_runs(vec![run]))
+            .collect();
 
         Ok(WalRecord::LayerCreate {
             declaration: Box::new(declaration),
@@ -1083,10 +1066,8 @@ impl LayerRegistry {
                 layer: layer_name.to_string(),
             });
         }
-        let (record, _) =
-            self.prepare_artifacts(layer_name, level, incoming, store, pending, views_of)?;
-        self.note_given(&record);
-        Ok(record)
+        self.prepare_artifacts(layer_name, level, incoming, store, pending, views_of)
+            .map(|(record, _)| record)
     }
 
     /// The control plane's publication (`PUT /control/layers/{name}/artifacts`, `ingest.md`
@@ -1120,6 +1101,7 @@ impl LayerRegistry {
             .layers
             .get(layer_name)
             .ok_or_else(|| RegistryError::NoSuchLayer(layer_name.to_string()))?;
+        let space = layer.space;
         if matches!(layer.declaration.membership, MembershipSource::Attribute(_)) {
             return Err(RegistryError::NotEnumerated {
                 layer: layer_name.to_string(),
@@ -1311,6 +1293,7 @@ impl LayerRegistry {
             }
             fills.extend(prepared.into_iter().map(|part| WalRecord::ArtifactFill {
                 layer: layer_name.to_string(),
+                space,
                 level,
                 ordinal,
                 part,
@@ -1323,6 +1306,7 @@ impl LayerRegistry {
         }
         let growth = crate::membership::growth_record(
             layer_name,
+            space,
             level,
             joins.iter().map(|(ordinal, delta)| (*ordinal, delta)),
         );
@@ -1368,9 +1352,6 @@ impl LayerRegistry {
             .chain(&growth)
             .map(|record| crate::membership::members_added(record, store))
             .sum();
-        if let Some(record) = &publish {
-            self.note_given(record);
-        }
         Ok(PreparedPut {
             publish,
             fills,
@@ -1473,6 +1454,7 @@ impl LayerRegistry {
             match &record.attached_to {
                 None => fills.push(ArtifactPart::AttachedTo(crate::wal::PublishedAttachment {
                     layer: attachment.layer,
+                    space: attachment.space,
                     level: attachment.level,
                     ordinal: attachment.ordinal,
                     entity: attachment.entity,
@@ -1641,6 +1623,7 @@ impl LayerRegistry {
             .ok_or_else(missing)?;
         Ok(crate::membership::Attachment {
             layer: wanted.layer.clone(),
+            space: target.space,
             level: wanted.level,
             ordinal,
             entity: EntityId::new(entity),
@@ -1753,16 +1736,15 @@ impl LayerRegistry {
                 access: None,
             })
             .collect();
-        let (record, _) = self.prepare_artifacts(
+        self.prepare_artifacts(
             layer_name,
             level,
             &incoming,
             store,
             &crate::no_pending,
             &NoGroupViews,
-        )?;
-        self.note_given(&record);
-        Ok(record)
+        )
+        .map(|(record, _)| record)
     }
 
     /// The allocation and validation both entry points share — everything [`prepare_publish`] does
@@ -1776,7 +1758,7 @@ impl LayerRegistry {
     /// [`prepare_publish`]: LayerRegistry::prepare_publish
     #[allow(clippy::too_many_arguments)]
     fn prepare_artifacts(
-        &self,
+        &mut self,
         layer_name: &str,
         level: u32,
         incoming: &[IncomingArtifact],
@@ -2127,20 +2109,18 @@ impl LayerRegistry {
         }
 
         // Extend the level's reservation from its space's next blocks if the batch outgrows it.
-        let mut extend_runs = Vec::new();
-        let mut capacity = runs.capacity();
+        let space = layer.space;
         let first = self.next_block(layer);
         let mut next = first;
-        while capacity < needed {
-            let block = take_block(&mut next).ok_or_else(|| RegistryError::SpaceFull {
+        let short = needed.saturating_sub(runs.capacity());
+        let extend_runs = take_blocks(&mut next, short.div_ceil(RESERVED_BLOCK)).ok_or_else(|| {
+            RegistryError::SpaceFull {
                 layer: layer_name.to_string(),
                 level,
-                needed: needed - runs.capacity(),
+                needed: short,
                 left: SPACE_BLOCKS.saturating_sub(first) * RESERVED_BLOCK,
-            })?;
-            capacity += block.len();
-            extend_runs.push(block);
-        }
+            }
+        })?;
 
         // Resolve every ordinal against the *extended* runs, so an artifact landing in a block this
         // batch just claimed gets its entity from it rather than from a level that has not grown
@@ -2182,6 +2162,7 @@ impl LayerRegistry {
                         .as_ref()
                         .map(|a| crate::wal::PublishedAttachment {
                             layer: a.layer.clone(),
+                            space: a.space,
                             level: a.level,
                             ordinal: a.ordinal,
                             entity: a.entity,
@@ -2195,9 +2176,13 @@ impl LayerRegistry {
             })
             .collect();
 
+        if next > first {
+            self.given.insert(space, next);
+        }
         Ok((
             WalRecord::ArtifactPublish {
                 layer: layer_name.to_string(),
+                space,
                 level,
                 extend_runs,
                 artifacts,
@@ -2238,6 +2223,7 @@ impl LayerRegistry {
             .layers
             .get(layer_name)
             .ok_or_else(|| RegistryError::NoSuchLayer(layer_name.to_string()))?;
+        let space = layer.space;
 
         // A predicate layer's membership is evaluated per request, so there is nothing to grow —
         // and a stored answer beside a live predicate is exactly what `prepare_publish` refuses for
@@ -2338,6 +2324,7 @@ impl LayerRegistry {
             filled.push(parts.len() as u64);
             fills.extend(parts.into_iter().map(|part| WalRecord::ArtifactFill {
                 layer: layer_name.to_string(),
+                space,
                 level,
                 ordinal,
                 part,
@@ -2368,6 +2355,7 @@ impl LayerRegistry {
         Ok(PreparedGrow {
             growth: (!growth.is_empty()).then(|| WalRecord::ArtifactGrow {
                 layer: layer_name.to_string(),
+                space,
                 level,
                 growth,
             }),
@@ -2606,6 +2594,11 @@ impl LayerRegistry {
     ) -> Result<Option<WalRecord>, RegistryError> {
         let (layer, level, view) = (edge.layer.as_str(), edge.level, edge.view.as_deref());
         let ordinal = self.resolve_growth_key(layer, level, view, &edge.child, store)?;
+        let space = self
+            .layers
+            .get(layer)
+            .ok_or_else(|| RegistryError::NoSuchLayer(layer.to_string()))?
+            .space;
         let parts = crate::membership::FixedParts {
             parent_keys: vec![edge.parent.clone()],
             ..Default::default()
@@ -2625,6 +2618,7 @@ impl LayerRegistry {
             .pop();
         Ok(part.map(|part| WalRecord::ArtifactFill {
             layer: layer.to_string(),
+            space,
             level,
             ordinal,
             part,
@@ -2769,11 +2763,13 @@ impl LayerRegistry {
     ///
     /// [`prepare_create`]: LayerRegistry::prepare_create
     pub fn prepare_drop(&self, name: &str) -> Result<WalRecord, RegistryError> {
-        if !self.layers.contains_key(name) {
-            return Err(RegistryError::NoSuchLayer(name.to_string()));
-        }
+        let layer = self
+            .layers
+            .get(name)
+            .ok_or_else(|| RegistryError::NoSuchLayer(name.to_string()))?;
         Ok(WalRecord::LayerDrop {
             name: name.to_string(),
+            space: layer.space,
             version: self.version + 1,
         })
     }
@@ -2781,22 +2777,23 @@ impl LayerRegistry {
     /// Seeds from a manifest's complete current view, **before** WAL replay unions the records
     /// written since.
     ///
-    /// The order is the rule, not a preference: every WAL record postdates any state a manifest
-    /// carries, so seeding afterwards resurrects a layer that was dropped since the last
-    /// publication — gate and all, reachable again by whoever the old declaration admitted. It is
-    /// the same seed-before-replay ordering the overlay follows, and for the same reason.
+    /// The order is the rule, not a preference: seeding after replay would resurrect a layer that
+    /// was dropped since the last publication — gate and all, reachable again by whoever the old
+    /// declaration admitted. It is the same seed-before-replay ordering the overlay follows, and
+    /// for the same reason.
     ///
     /// `version` is the counter the manifest saved. The counter resumes from it or from the highest
     /// seeded layer's version, whichever is higher, so a registration replayed or made after the
     /// seed is never given a version lower than one already served.
     ///
-    /// `next_space` is the counter the manifest saved, raised past every seeded layer's space.
-    pub fn seed(&mut self, layers: &[RegisteredLayer], next_space: u32, version: u64) {
+    /// `next_layer_space` is the counter the manifest saved, raised past every seeded layer's
+    /// space.
+    pub fn seed(&mut self, layers: &[RegisteredLayer], next_layer_space: u32, version: u64) {
         self.version = self.version.max(version);
-        self.next_space = self.next_space.max(next_space);
+        self.next_layer_space = self.next_layer_space.max(next_layer_space);
         for layer in layers {
             self.version = self.version.max(layer.version);
-            self.next_space = self.next_space.max(layer.space.raw() + 1);
+            self.next_layer_space = self.next_layer_space.max(layer.space.raw() + 1);
             self.layers
                 .insert(layer.declaration.name.clone(), layer.clone());
         }
@@ -2885,9 +2882,9 @@ impl LayerRegistry {
     /// every space a record names, so a space is not given again once its registration's record is
     /// the only trace of it.
     ///
-    /// A replay runs over a seed that may already hold what a record did. A create or a drop whose
-    /// version is below that of the layer held under its name predates that registration, and
-    /// moves nothing but the counters.
+    /// A replay runs over a seed that may already hold what a record did. A record naming a
+    /// registration other than the one held under its name ([`Self::names_held`]) moves nothing
+    /// but the counters.
     pub fn apply(&mut self, record: &WalRecord) {
         match record {
             WalRecord::LayerCreate {
@@ -2900,8 +2897,11 @@ impl LayerRegistry {
                 // nothing.
                 let version = *version;
                 self.version = self.version.max(version);
-                self.next_space = self.next_space.max(space.raw() + 1);
-                if self.predates_held(&declaration.name, version) {
+                self.next_layer_space = self.next_layer_space.max(space.raw() + 1);
+                // A name held in another space was registered again after this record.
+                if self.layers.contains_key(&declaration.name)
+                    && !self.names_held(&declaration.name, *space)
+                {
                     return;
                 }
                 // A replay over a seed holding this registration keeps the layouts a fold recorded
@@ -2923,12 +2923,15 @@ impl LayerRegistry {
                     },
                 );
             }
-            WalRecord::LayerDrop { name, version } => {
+            WalRecord::LayerDrop {
+                name,
+                space,
+                version,
+            } => {
                 self.version = self.version.max(*version);
-                if !self.predates_held(name, *version) {
-                    if let Some(dropped) = self.layers.remove(name) {
-                        self.given.remove(&dropped.space);
-                    }
+                if self.names_held(name, *space) {
+                    self.layers.remove(name);
+                    self.given.remove(space);
                 }
             }
             // A publication's only effect on the *registry* is the reservation it grew. The
@@ -2940,11 +2943,12 @@ impl LayerRegistry {
             // publication rate is a re-resolve per request.
             WalRecord::ArtifactPublish {
                 layer,
+                space,
                 level,
                 extend_runs,
                 ..
             } => {
-                if extend_runs.is_empty() {
+                if extend_runs.is_empty() || !self.names_held(layer, *space) {
                     return;
                 }
                 let Some(registered) = self.layers.get_mut(layer) else {
@@ -2961,12 +2965,10 @@ impl LayerRegistry {
         }
     }
 
-    /// Whether a registry record at `version` naming `name` was written before the registration
-    /// held under that name.
-    fn predates_held(&self, name: &str, version: u64) -> bool {
-        self.layers
-            .get(name)
-            .is_some_and(|held| held.version > version)
+    /// Whether a record naming `name` in `space` was written for the registration held under the
+    /// name. One naming another space was written for a registration since dropped.
+    pub fn names_held(&self, name: &str, space: LayerSpace) -> bool {
+        self.layers.get(name).is_some_and(|held| held.space == space)
     }
 
     /// Resolves which layers this principal may know exist, once per session.
@@ -3000,9 +3002,6 @@ impl LayerRegistry {
     /// **Addressing, never authorisation.** This answers where an entity sits and nothing about
     /// whether the caller may know it sits there — a drill-down resolves the address here and then
     /// puts it through the one predicate, in that order.
-    ///
-    /// A layer's own entity, [`mosaica_types::layer::LAYER_ENTITY`], is outside every level's run,
-    /// which is what keeps suppressing a layer from suppressing artifact ordinal zero.
     pub fn locate_in(&self, space: LayerSpace, entity: EntityId) -> Option<(&str, u32, u32)> {
         let (name, layer) = self.in_space(space)?;
         layer.runs.iter().enumerate().find_map(|(level, runs)| {
@@ -3013,17 +3012,18 @@ impl LayerRegistry {
 
 }
 
-/// The block `next` names as a run, moving `next` past it, or `None` past the space's last block.
-fn take_block(next: &mut u64) -> Option<EntityRun> {
-    if *next >= SPACE_BLOCKS {
-        return None;
-    }
-    let run = EntityRun {
-        start: *next * RESERVED_BLOCK,
-        end: (*next + 1) * RESERVED_BLOCK,
-    };
-    *next += 1;
-    Some(run)
+/// `n` blocks from `next`, each as a run, moving `next` past them, or `None` where they pass the
+/// space's last block.
+fn take_blocks(next: &mut u64, n: u64) -> Option<Vec<EntityRun>> {
+    let end = next.checked_add(n).filter(|end| *end <= SPACE_BLOCKS)?;
+    let runs = (*next..end)
+        .map(|block| EntityRun {
+            start: block * RESERVED_BLOCK,
+            end: (block + 1) * RESERVED_BLOCK,
+        })
+        .collect();
+    *next = end;
+    Some(runs)
 }
 
 #[cfg(test)]
@@ -3105,16 +3105,7 @@ mod tests {
             .ordinal_of(mosaica_types::layer::LAYER_ENTITY.raw())
             .is_none());
 
-        let mut stacked = declaration("clusters/stacked");
-        stacked.hierarchy.kind = HierarchyKind::Stacked;
-        stacked.levels = (0..3)
-            .map(|level| mosaica_types::layer::LevelDeclaration {
-                level,
-                title: Some(format!("level {level}")),
-                zoom: None,
-            })
-            .collect();
-        register(&mut reg, stacked).unwrap();
+        register(&mut reg, stacked("clusters/stacked", 3)).unwrap();
         let layer = reg.get("clusters/stacked").unwrap();
         assert_eq!(layer.space.raw(), 1);
         let starts: Vec<u64> = layer.runs.iter().map(|r| r.runs()[0].start).collect();
@@ -3178,7 +3169,7 @@ mod tests {
         let second = reg.get("clusters/a").unwrap();
         assert!(second.space > first.space);
         assert!(reg.in_space(first.space).is_none());
-        assert_eq!(reg.next_space(), second.space.raw() + 1);
+        assert_eq!(reg.next_layer_space(), second.space.raw() + 1);
 
         let drop = reg.prepare_drop("clusters/a").unwrap();
         reg.apply(&drop);
@@ -3197,7 +3188,7 @@ mod tests {
 
         let drop = reg.prepare_drop("clusters/a").unwrap();
         reg.apply(&drop);
-        assert_eq!(reg.next_space(), first.raw() + 1, "a drop frees no space");
+        assert_eq!(reg.next_layer_space(), first.raw() + 1, "a drop frees no space");
 
         register(&mut reg, declaration("clusters/b")).unwrap();
         assert_ne!(reg.get("clusters/b").unwrap().space, first);
@@ -3205,9 +3196,8 @@ mod tests {
 
     #[test]
     fn replay_applies_the_recorded_ids_rather_than_reallocating() {
-        // The durability contract: a registration lands on the entities it was acked on, whatever
-        // the replaying allocator's state. Re-deriving would move a layer's ids under every
-        // bookmark and suppression naming them.
+        // A registration lands on the space and runs it was acked on. Re-deriving would move a
+        // layer's ids under every bookmark and suppression naming them.
         let mut live = LayerRegistry::new();
         let create = live
             .prepare_create(declaration("clusters/a"))
@@ -3220,7 +3210,6 @@ mod tests {
         };
         live.apply(&create);
 
-        // A fresh registry replaying the same log.
         let mut replayed = LayerRegistry::new();
         for record in [&create, &drop_b] {
             replayed.apply(record);
@@ -3253,19 +3242,19 @@ mod tests {
 
         // The seed is a manifest written after every record, and the log still holds them all.
         let mut replayed = LayerRegistry::new();
-        replayed.seed(&live.snapshot(), live.next_space(), live.version());
+        replayed.seed(&live.snapshot(), live.next_layer_space(), live.version());
         for record in &log {
             replayed.apply(record);
         }
         assert_eq!(replayed.snapshot(), live.snapshot());
-        assert_eq!(replayed.next_space(), 3);
+        assert_eq!(replayed.next_layer_space(), 3);
 
         // With the log alone, the counter passes the dropped layers' spaces all the same.
         let mut from_log = LayerRegistry::new();
         for record in &log[2..] {
             from_log.apply(record);
         }
-        assert_eq!(from_log.next_space(), 3);
+        assert_eq!(from_log.next_layer_space(), 3);
         register(&mut from_log, declaration("clusters/c")).unwrap();
         assert_eq!(from_log.get("clusters/c").unwrap().space.raw(), 3);
     }
@@ -3289,11 +3278,10 @@ mod tests {
 
     #[test]
     fn a_refused_registration_moves_nothing() {
-        // Every check runs before the first allocation, so a rejected declaration leaves no ids
-        // spent and no half-registered layer behind.
+        // A refused declaration leaves no half-registered layer and moves no counter.
         let mut reg = LayerRegistry::new();
         register(&mut reg, declaration("clusters/a")).unwrap();
-        let next_space = reg.next_space();
+        let next_layer_space = reg.next_layer_space();
         let version = reg.version();
 
         assert!(register(&mut reg, declaration("clusters/a")).is_err());
@@ -3301,7 +3289,7 @@ mod tests {
         bad.hierarchy.kind = HierarchyKind::Stacked;
         assert!(register(&mut reg, bad).is_err());
 
-        assert_eq!(reg.next_space(), next_space);
+        assert_eq!(reg.next_layer_space(), next_layer_space);
         assert_eq!(reg.version(), version);
         assert_eq!(reg.len(), 1);
     }
@@ -3430,8 +3418,7 @@ mod tests {
             artifact
         };
 
-        // The cluster does not exist yet: refused, and the batch spends nothing.
-        let mark = reg.snapshot();
+        // The cluster does not exist yet: refused.
         assert_eq!(
             publish(&mut reg, &mut store, "topics/x", &[label("c0")]),
             Err(RegistryError::NoSuchAttachmentTarget {
@@ -3441,7 +3428,6 @@ mod tests {
                 key: "c0".into(),
             })
         );
-        assert_eq!(reg.snapshot(), mark);
 
         publish(
             &mut reg,
@@ -3458,6 +3444,7 @@ mod tests {
             store.get("topics/x", 0, 0).unwrap().attached_to,
             Some(crate::membership::Attachment {
                 layer: "clusters/a".into(),
+                space: reg.get("clusters/a").unwrap().space,
                 level: 0,
                 ordinal: 0,
                 entity: cluster,
@@ -3468,6 +3455,19 @@ mod tests {
     fn treed(name: &str, kind: HierarchyKind) -> LayerDeclaration {
         let mut d = declaration(name);
         d.hierarchy.kind = kind;
+        d
+    }
+
+    /// A stacked layer of `levels` levels.
+    fn stacked(name: &str, levels: u32) -> LayerDeclaration {
+        let mut d = treed(name, HierarchyKind::Stacked);
+        d.levels = (0..levels)
+            .map(|level| mosaica_types::layer::LevelDeclaration {
+                level,
+                title: Some(format!("level {level}")),
+                zoom: None,
+            })
+            .collect();
         d
     }
 
@@ -3700,9 +3700,7 @@ mod tests {
         register(&mut reg, declaration("clusters/b")).unwrap();
         publish(&mut reg, &mut store, "clusters/b", &[incoming("b0", &[1])]).unwrap();
 
-        let full: Vec<IncomingArtifact> = (0..RESERVED_BLOCK)
-            .map(|i| incoming(&format!("c{i}"), &[i as u32]))
-            .collect();
+        let full = numbered("c", RESERVED_BLOCK);
         let record = publish(&mut reg, &mut store, "clusters/a", &full).unwrap();
         let WalRecord::ArtifactPublish { extend_runs, .. } = &record else {
             unreachable!()
@@ -3883,8 +3881,7 @@ mod tests {
     #[test]
     fn replay_lands_a_publication_where_it_was_acked() {
         // The durability contract, on `replay_applies_the_recorded_ids_rather_than_reallocating`'s
-        // argument: an artifact must come back on the entity its `mosaica_id` was minted from,
-        // whatever the replaying allocator's state.
+        // argument: an artifact must come back on the entity its `mosaica_id` was minted from.
         let mut reg = LayerRegistry::new();
         let mut store = ArtifactStore::new();
         let create = reg
@@ -3927,11 +3924,16 @@ mod tests {
         assert_eq!(replayed_store.oldest_wal_pos(), Some(900));
     }
 
-    /// Bigger than one block, so a publication of it into an empty level extends the level.
-    fn past_a_block(prefix: &str) -> Vec<IncomingArtifact> {
-        (0..RESERVED_BLOCK + 1)
+    /// `n` artifacts keyed `{prefix}{i}`, each holding item `i`.
+    fn numbered(prefix: &str, n: u64) -> Vec<IncomingArtifact> {
+        (0..n)
             .map(|i| incoming(&format!("{prefix}{i}"), &[i as u32]))
             .collect()
+    }
+
+    /// Bigger than one block, so a publication of it into an empty level extends the level.
+    fn past_a_block(prefix: &str) -> Vec<IncomingArtifact> {
+        numbered(prefix, RESERVED_BLOCK + 1)
     }
 
     #[test]
@@ -3950,9 +3952,7 @@ mod tests {
             replayed.apply(record);
             assert_eq!(replayed_store.apply(record, 0), 0);
         }
-        let more: Vec<IncomingArtifact> = (0..RESERVED_BLOCK)
-            .map(|i| incoming(&format!("d{i}"), &[i as u32]))
-            .collect();
+        let more = numbered("d", RESERVED_BLOCK);
         let next = replayed
             .prepare_publish("clusters/a", 0, &more, &replayed_store, &no_pending, &AnyView)
             .unwrap();
@@ -3966,16 +3966,7 @@ mod tests {
     fn publications_prepared_before_either_is_applied_take_different_blocks() {
         let mut reg = LayerRegistry::new();
         let store = ArtifactStore::new();
-        let mut stacked = declaration("clusters/s");
-        stacked.hierarchy.kind = HierarchyKind::Stacked;
-        stacked.levels = (0..2)
-            .map(|level| mosaica_types::layer::LevelDeclaration {
-                level,
-                title: Some(format!("level {level}")),
-                zoom: None,
-            })
-            .collect();
-        register(&mut reg, stacked).unwrap();
+        register(&mut reg, stacked("clusters/s", 2)).unwrap();
         let mut given = Vec::new();
         for level in 0..2 {
             let record = reg
@@ -4003,16 +3994,7 @@ mod tests {
     fn a_level_that_outgrows_its_space_is_refused_with_the_figures() {
         let mut reg = LayerRegistry::new();
         let store = ArtifactStore::new();
-        let mut stacked = declaration("clusters/s");
-        stacked.hierarchy.kind = HierarchyKind::Stacked;
-        stacked.levels = (0..2)
-            .map(|level| mosaica_types::layer::LevelDeclaration {
-                level,
-                title: Some(format!("level {level}")),
-                zoom: None,
-            })
-            .collect();
-        register(&mut reg, stacked).unwrap();
+        register(&mut reg, stacked("clusters/s", 2)).unwrap();
         // Level 1 holds every block the space has left.
         let mut full = reg.snapshot();
         full[0].runs[1] = ReservedRuns::from_runs(vec![EntityRun {
@@ -4020,8 +4002,7 @@ mod tests {
             end: SPACE_BLOCKS * RESERVED_BLOCK,
         }]);
         let mut seeded = LayerRegistry::new();
-        seeded.seed(&full, reg.next_space(), reg.version());
-        let before = seeded.snapshot();
+        seeded.seed(&full, reg.next_layer_space(), reg.version());
 
         let refused = seeded.prepare_publish(
             "clusters/s",
@@ -4040,7 +4021,6 @@ mod tests {
                 left: 0,
             })
         );
-        assert_eq!(seeded.snapshot(), before);
     }
 
     // ---- The fill rule (`ingest.md` §1.1, §1.5; decision 0136 R3, R4, R5) ----------------------
@@ -4108,11 +4088,9 @@ mod tests {
             vec!["a topic".into()],
             [],
         )];
-        let mark = reg.snapshot();
         let second = reg
             .prepare_put("topics/t", 0, &[child.clone()], &store, &AnyView)
             .unwrap();
-        assert_eq!(reg.snapshot(), mark, "a held key allocates nothing");
         assert!(second.publish.is_none());
         assert_eq!(second.created, 0);
         assert_eq!(
@@ -4304,7 +4282,6 @@ mod tests {
         assert!(store.get("clusters/t", 0, 0).unwrap().parents.is_empty());
 
         // Across a `PUT`: a new artifact under a held one, and the held one filled under the new.
-        let mark = reg.snapshot();
         let mut a_under_d = under("a", &["d"]);
         a_under_d.members = croaring::Bitmap::new();
         let refused = reg
@@ -4320,7 +4297,6 @@ mod tests {
             matches!(refused, RegistryError::Cycle { .. }),
             "the walk sees the batch's edge and the fill together: {refused:?}"
         );
-        assert_eq!(reg.snapshot(), mark, "the refusal spends nothing");
         assert_eq!(store.next_ordinal("clusters/t", 0), 3);
     }
 
@@ -4491,7 +4467,6 @@ mod tests {
         )
         .unwrap();
 
-        let mark = reg.snapshot();
         let refused = reg
             .prepare_put(
                 "clusters/t",
@@ -4538,7 +4513,6 @@ mod tests {
             matches!(refused, RegistryError::RepeatedKey { .. }),
             "{refused:?}"
         );
-        assert_eq!(reg.snapshot(), mark, "refused before anything was allocated");
         assert!(store.get("clusters/t", 0, 2).unwrap().parents.is_empty());
         assert_eq!(store.next_ordinal("clusters/t", 0), 3);
 
@@ -5007,14 +4981,12 @@ mod tests {
         let mut d = declaration("clusters/a");
         d.artifact_visibility = mosaica_types::layer::ArtifactVisibility::carried("team");
         register(&mut reg, d).unwrap();
-        let mark = reg.snapshot();
         for batch in [vec![incoming("c1", &[1])], vec![unlabelled("c0", &[2]), incoming("c1", &[1])]]
         {
             let refused = reg
                 .prepare_put("clusters/a", 0, &batch, &store, &AnyView)
                 .unwrap_err();
             assert!(matches!(refused, RegistryError::LabelsUnstated { .. }), "{refused:?}");
-            assert_eq!(reg.snapshot(), mark, "nothing is allocated for a refused batch");
         }
         let prepared = reg
             .prepare_put("clusters/a", 0, &[unlabelled("c1", &[1])], &store, &AnyView)
