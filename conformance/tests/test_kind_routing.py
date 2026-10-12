@@ -27,10 +27,8 @@ import io
 import time
 
 import pyarrow as pa
-import pyarrow.ipc as ipc
 import pytest
 import requests
-
 from oracle import catalogue
 from oracle import identity as identity_mod
 from oracle.bundle import (
@@ -41,6 +39,7 @@ from oracle.bundle import (
 )
 from oracle.harness import spawn_server, stop_server
 from oracle.wire import decode_viewport, split_items_frames
+from pyarrow import ipc
 
 VIEW = catalogue.VIEW_ID
 LAYER = "routing"
@@ -98,6 +97,7 @@ def published(server) -> None:
         headers={"Authorization": f"Bearer {server.operator_credential}"},
         timeout=60,
     )
+    resp.raise_for_status()
     assert resp.status_code == 202 and resp.json()["visible"], resp.text
 
 

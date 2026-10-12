@@ -25,7 +25,6 @@ import json
 
 import pytest
 import requests
-
 from oracle import identity as identity_mod
 from oracle.bundle import (
     artifact_mosaica_id,
@@ -35,7 +34,6 @@ from oracle.bundle import (
 )
 from oracle.harness import kill_server, spawn_server, stop_server
 from oracle.layout import layer_space_dir
-
 from test_kind_routing import (
     VIEW,
     artifact_card,
@@ -123,12 +121,14 @@ class Dropping:
 
 
 def drop(server, name: str, wait: bool = True) -> requests.Response:
-    return requests.delete(
+    resp = requests.delete(
         f"{server.control_base}/control/layers/{name}",
         params={"wait": "visible"} if wait else {},
         headers={"Authorization": f"Bearer {server.operator_credential}"},
         timeout=60,
     )
+    resp.raise_for_status()
+    return resp
 
 
 def spaces_named(side_manifest: dict) -> set[int]:
@@ -240,7 +240,7 @@ def test_the_name_registers_again_as_a_new_layer(dropping):
     assert not set(dropping.every_id(A)) & set(dropping.old)
     for (level, key), mosaica_id in dropping.ids[A].items():
         new_space, new_entity = identity_mod.invert_artifact(dropping.key, mosaica_id)
-        old_space, old_entity = identity_mod.invert_artifact(dropping.key, old_ids[(level, key)])
+        _, old_entity = identity_mod.invert_artifact(dropping.key, old_ids[(level, key)])
         assert (new_space, new_entity) == (2, old_entity), (level, key)
         assert artifact_card(dropping.server, dropping.token, mosaica_id)[0] == 200
     check_dropped(dropping, dropping.old, names_gone=False)

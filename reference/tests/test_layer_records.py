@@ -7,7 +7,6 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from oracle import identity
 from oracle.bundle import (
     artifact_mosaica_id,
