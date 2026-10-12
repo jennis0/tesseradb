@@ -1,85 +1,39 @@
-"""**An identifier's kind decides what it can name** (`docs/sharding.md` §2.2, §2.4), black-box,
-over the release binary and the mask catalogue.
+"""**An identifier's kind decides what it can name**, black-box, over the release binary and the
+mask catalogue.
 
 An artifact's and a layer's `mosaica_id` permute kind 1, the layer's space and the entity in it; an
 item's permutes kind 0, its shard, its tenancy and its number. The catalogue holds item numbers 0
 and 65,536. The layer registered here is the deployment's first, so it takes space 0, and it is
 entity 0 there; its first artifact is entity 65,536. Each differs from an item's input by the kind
-bit alone, which is the sharpest case for a route that reads one kind as the other.
-
-What is asserted, and by which second reader:
-
-- **Every identifier the server issued is the oracle's.** The oracle forwards the layer's space and
-  its level's runs, read from the side-manifest the server published, under the bundle's key, and
-  each receipt carries exactly those identifiers.
-- **Each card answers its own kind**, and answers the other kind's identifier byte for byte as it
-  answers one nobody was issued.
-- **A deny on one kind leaves the other kind served**, at the same entity number.
-- **A write naming an artifact or the layer names no item**: an ingest row and a member are refused
-  as naming no item, as an identifier nobody was issued is.
-- **An artifact-taking leaf given an item's identifier names nothing.**
-- All of it holds after a restart.
+bit alone.
 """
 
 from __future__ import annotations
 
 import io
-import time
 
 import pyarrow as pa
 import pytest
-import requests
+from layer_fixture import (
+    EVERY_TERM,
+    VIEW,
+    CatalogueServer,
+    artifact_card,
+    enumerated_layer,
+    matched,
+    stored,
+)
 from oracle import catalogue
 from oracle import identity as identity_mod
-from oracle.bundle import (
-    artifact_mosaica_id,
-    layer_mosaica_id,
-    newest_side_manifest,
-    registered_layer,
-)
-from oracle.harness import spawn_server, stop_server
-from oracle.wire import decode_viewport, split_items_frames
+from oracle.bundle import artifact_mosaica_id, layer_mosaica_id, registered_layer
+from oracle.wire import split_items_frames
 from pyarrow import ipc
 
-VIEW = catalogue.VIEW_ID
 LAYER = "routing"
-KIND_ARTIFACT_HIGH = identity_mod.pack_artifact_high(0)
+SPACE_0_HIGH = identity_mod.pack_artifact_high(0)
 #: The members of each artifact, by item number. Artifact `i` is entity 65,536 + i of the layer's
 #: space; the item at that number is a member of `a0` and `a2`, and not of `a1`.
 MEMBERS = {"a0": [0, 65_536, 1, 2], "a1": [10, 11], "a2": [65_538, 12]}
-
-
-def layer_declaration(name: str, levels: int = 0) -> dict:
-    """An enumerated layer over the catalogue's view, with no gate and no content: `flat` with no
-    levels, or `stacked` with `levels` of them."""
-    return {
-        "name": name,
-        "title": name,
-        "views": [VIEW],
-        "membership": "enumerated",
-        "value_set": "closed",
-        "visibility": None,
-        "artifact_visibility": {"field": None, "default": "inherited"},
-        "require_member_visibility": None,
-        "hierarchy": {"kind": "stacked" if levels else "flat", "prune_children": False},
-        "content": {"computed": [], "supplied": []},
-        "depends_on": [],
-        "levels": [{"level": level} for level in range(levels)],
-        "layout": None,
-        "shape": None,
-    }
-
-
-def stored(root, holds, timeout: float = 30.0) -> dict:
-    """The newest side-manifest of the bundle at `root` once `holds` is true of it. A running
-    server publishes its side-manifest after it answers the write that changed it."""
-    deadline = time.monotonic() + timeout
-    while True:
-        side_manifest = newest_side_manifest(root)
-        if holds(side_manifest):
-            return side_manifest
-        assert time.monotonic() < deadline, "the server never published the state asked for"
-        time.sleep(0.1)
 
 
 def stored_layer(root, name: str) -> dict:
@@ -88,31 +42,8 @@ def stored_layer(root, name: str) -> dict:
     return registered_layer(side_manifest, name)
 
 
-def published(server) -> None:
-    """Return once readers see every write the server answered before this call: a flush asked
-    for with `wait=visible`, whose answer waits for that publication."""
-    resp = requests.post(
-        f"{server.control_base}/control/flush",
-        params={"wait": "visible"},
-        headers={"Authorization": f"Bearer {server.operator_credential}"},
-        timeout=60,
-    )
-    resp.raise_for_status()
-    assert resp.status_code == 202 and resp.json()["visible"], resp.text
-
-
-def every_term() -> list[str]:
-    """Every block's term: a principal holding them all sees every catalogue item."""
-    return [block.descriptor for block in catalogue.BLOCKS.values()]
-
-
 def item_card(server, token: str, mosaica_id: int) -> tuple[int, bytes]:
     resp = server.item(token, mosaica_id)
-    return resp.status_code, resp.content
-
-
-def artifact_card(server, token: str, mosaica_id: int) -> tuple[int, bytes]:
-    resp = server.artifact_card(token, mosaica_id, VIEW)
     return resp.status_code, resp.content
 
 
@@ -122,20 +53,16 @@ def masked_count(server, token: str, mosaica_id: int) -> int:
     return resp.json()["masked_count"]
 
 
-def matched(server, token: str, filters: dict | None) -> int:
-    resp = server.viewport_response(token, VIEW, 0, catalogue.FULL_VIEWPORT, k=0, filters=filters)
-    tiles, _points = decode_viewport(resp.content)
-    return sum(t[2] for t in tiles)
-
-
 def read_by_ids(server, token: str, ids: list[int]) -> list[int]:
-    """The identifiers `POST /v1/artifacts` serves for `ids`, read whole."""
+    """The identifiers `POST /v1/artifacts` serves for `ids`, in one page."""
     resp = server.artifacts(
         token, view=VIEW, layer=LAYER, fields=["masked_count"], ids=[str(i) for i in ids]
     )
     assert resp.status_code == 200, resp.text
+    decoded = split_items_frames(resp.content)
+    assert decoded.trailer["next"] is None
     served = []
-    for records, _end in split_items_frames(resp.content).pages:
+    for records, _end in decoded.pages:
         with ipc.open_stream(io.BytesIO(records)) as reader:
             for batch in reader:
                 served.extend(batch.column("mosaica_id").to_pylist())
@@ -146,30 +73,19 @@ def refusals(body: dict) -> list[tuple[int, str]]:
     return [(row["row"], row["reason"]) for row in body["refused"]]
 
 
-class Routing:
+class Routing(CatalogueServer):
     """The server, the identifiers it issued and those the oracle derives for the catalogue."""
 
     def __init__(self, tmp_path_factory, private_catalogue_bundle, catalogue_bundle):
-        self.root = private_catalogue_bundle("kind-routing")
-        self.tmp = tmp_path_factory.mktemp("kind-routing-server")
-        self.key = catalogue_bundle.identity_key
+        super().__init__(
+            "kind-routing", tmp_path_factory, private_catalogue_bundle, catalogue_bundle
+        )
         numbers = {1, 65_537, *(n for members in MEMBERS.values() for n in members)}
         self.item = {n: catalogue_bundle.mosaica_id_of(n) for n in numbers}
-        #: Issued to nobody: item number `N_ITEMS`, and entity 65,536 of a space no layer holds.
+        #: Issued to nobody: item number `N_ITEMS`.
         self.no_item = identity_mod.forward_item(self.key, 0, 0, catalogue.N_ITEMS)
-        self.no_artifact = identity_mod.forward_artifact(self.key, 9_999, 65_536)
         #: Artifacts deleted on the way, which name nothing from then on.
         self.gone: list[int] = []
-        self.start()
-        self.token = self.server.authorise(every_term())["token"]
-
-    def start(self) -> None:
-        self.server, self.proc = spawn_server(self.root, self.tmp)
-
-    def restart(self) -> None:
-        stop_server(self.proc)
-        self.start()
-        self.token = self.server.authorise(every_term())["token"]
 
     def members(self, key: str) -> dict:
         return {"mosaica_id": [str(self.item[n]) for n in MEMBERS[key]]}
@@ -179,7 +95,7 @@ class Routing:
 def routing(tmp_path_factory, private_catalogue_bundle, catalogue_bundle):
     fixture = Routing(tmp_path_factory, private_catalogue_bundle, catalogue_bundle)
     server = fixture.server
-    resp = server.register_layer(layer_declaration(LAYER))
+    resp = server.register_layer(enumerated_layer(LAYER, VIEW))
     assert resp.status_code == 201, resp.text
     fixture.layer = int(resp.json()["mosaica_id"])
     resp = server.publish_artifacts(
@@ -187,9 +103,9 @@ def routing(tmp_path_factory, private_catalogue_bundle, catalogue_bundle):
     )
     assert resp.status_code == 201, resp.text
     fixture.artifacts = [int(row["mosaica_id"]) for row in resp.json()["artifacts"]]
-    published(server)
+    server.published()
     yield fixture
-    stop_server(fixture.proc)
+    fixture.stop()
 
 
 def test_every_identifier_the_server_issued_is_the_oracles(routing):
@@ -199,10 +115,9 @@ def test_every_identifier_the_server_issued_is_the_oracles(routing):
     assert routing.artifacts == [
         artifact_mosaica_id(routing.key, record, 0, ordinal) for ordinal in range(len(MEMBERS))
     ]
-    # The layer and item 0, and the first artifact and item 65,536, differ by the kind bit alone.
-    assert identity_mod.invert(routing.key, routing.layer) == (KIND_ARTIFACT_HIGH, 0)
+    assert identity_mod.invert(routing.key, routing.layer) == (SPACE_0_HIGH, 0)
     assert identity_mod.invert(routing.key, routing.item[0]) == (0, 0)
-    assert identity_mod.invert(routing.key, routing.artifacts[0]) == (KIND_ARTIFACT_HIGH, 65_536)
+    assert identity_mod.invert(routing.key, routing.artifacts[0]) == (SPACE_0_HIGH, 65_536)
     assert identity_mod.invert(routing.key, routing.item[65_536]) == (0, 65_536)
 
 
@@ -264,7 +179,7 @@ def test_a_write_naming_an_artifact_or_the_layer_names_no_item(routing):
                 "mosaica_id": pa.array([str(i) for i in ids], pa.string()),
                 "x": pa.array([1.0] * len(ids), pa.float64()),
                 "y": pa.array([1.0] * len(ids), pa.float64()),
-                "access": pa.array([[every_term()[0]]] * len(ids), pa.list_(pa.string())),
+                "access": pa.array([[EVERY_TERM[0]]] * len(ids), pa.list_(pa.string())),
             }
         )
         sink = io.BytesIO()
@@ -290,7 +205,7 @@ def test_a_write_naming_an_artifact_or_the_layer_names_no_item(routing):
     record = stored_layer(routing.root, LAYER)
     assert b == artifact_mosaica_id(routing.key, record, 0, len(MEMBERS))
     routing.artifacts.append(b)
-    published(server)
+    server.published()
     assert masked_count(server, routing.token, b) == 1
 
     def strict(named: int) -> int:

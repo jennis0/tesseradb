@@ -1677,8 +1677,7 @@ class Database:
 
         A row naming no item, or two, is refused and the report lists it; the other rows are
         applied. A `None` in the list, or a row whose cells are all null, names no item. A
-        `mosaica_id` in the list may name an annotation instead, which stops being served at once
-        and whose record goes at the next compaction; a layer's is refused, and `drop_layer`
+        `mosaica_id` in the list may name an annotation; a layer's is refused, and `drop_layer`
         removes a layer. A column that is neither `mosaica_id` nor a unique attribute is not
         sent, and the report names it in `ignored_columns`; a table with no other column is
         refused before anything is sent.
@@ -1858,11 +1857,7 @@ class Database:
         """
         self._refuse_before_the_first_commit("drop_layer")
         answer = _accepted(self.control.drop_layer(name, wait), f"drop_layer {name}")
-        layers = self.blocks.blocks["layer"]
-        layers[:] = [block for block in layers if block.get("name") != name]
-        for block in layers:
-            if (block.get("labels") or {}).get("name") == name:
-                del block["labels"]
+        self.blocks.remove_layer(name)
         self.pending = [
             one for one in self.pending
             if not (one.kind in ("layer", "labels") and one.target == name)

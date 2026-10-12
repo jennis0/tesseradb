@@ -402,12 +402,11 @@ artifacts scoped to the dropped view, at once and without a deletion in any over
 
 The overlay holds two separate records of what is hidden, one for deletions and one for
 suppressions, each a bitmap over entity ids. The point shard has an overlay over its items'
-entities, and each layer space one over its artifacts' and its layer's. The two records are not
-one map with a status field. A single
-map would let the most recent write decide an item's status. The sequence delete, suppress,
-unsuppress would then leave the unsuppress as the last word and bring a deleted item back. Two
-separate stores rule that out. The unsuppress can only change the suppression record, which the
-deletion never touched.
+entities, and each layer space one over its artifacts' and its layer's. The two records are not one
+map with a status field. A single map would let the most recent write decide an item's status. The
+sequence delete, suppress, unsuppress would then leave the unsuppress as the last word and bring a
+deleted item back. Two separate stores rule that out. The unsuppress can only change the suppression
+record, which the deletion never touched.
 
 An entry **retires** when it leaves the overlay. Each store has exactly one route that does this:
 
@@ -654,8 +653,8 @@ client that re-issues a request always gets a correct answer, only a more or les
 a client uses the comparison is covered in serving.
 
 A fold is dispatched when un-retired deletions of items and artifacts together, segment count,
-orphaned disc space or tombstoned rows cross a threshold, or on request. Only one fold runs at a time, and a request arriving while
-one is running is refused rather than queued.
+orphaned disc space or tombstoned rows cross a threshold, or on request. Only one fold runs at a
+time, and a request arriving while one is running is refused rather than queued.
 
 ## Cached state and artifacts
 

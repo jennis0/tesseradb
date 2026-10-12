@@ -4,11 +4,17 @@ holds its `SEGMENTS-<n>.json`, its shards and its layer spaces; the term diction
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 #: The separator between a group's name and a view's key in a view id: `quarter:2026-Q3`.
 #: `view_dir` is the one place it is split on.
 GROUP_SEPARATOR = ":"
+
+
+def live_prefix_dir(root: Path) -> Path:
+    """The prefix directory `CURRENT` names under the bundle root `root`."""
+    return root / json.loads((root / "CURRENT").read_text())["prefix"]
 
 
 def partition_dir(prefix_dir: Path, partition: str = "default") -> Path:

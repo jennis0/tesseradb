@@ -206,7 +206,7 @@ def test_packed_vectors_both_directions(vectors, canonical_key):
         _assert_packed_entry(canonical_key, case)
 
 
-def test_ids_differing_only_by_the_kind_bit_differ(vectors, canonical_key):
+def test_ids_differing_only_by_the_kind_bit_differ(canonical_key):
     item = ident.forward_item(canonical_key, 0, 0, 65536)
     artifact = ident.forward_artifact(canonical_key, 0, 65536)
     assert item != artifact

@@ -225,7 +225,6 @@ def test_compact_is_accepted(db):
 
 
 def test_a_layer_is_dropped_and_none_of_its_annotations_is_served(db):
-    """Declare has an inverse."""
     db.drop_layer("clusters")
     assert db.viewport_artifacts("map", 0, per_tile=5, layers="all").num_rows == 0
     assert "clusters" not in [layer["name"] for layer in db.meta()["layers"]]

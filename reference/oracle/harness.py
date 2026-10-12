@@ -780,6 +780,17 @@ class Server:
             timeout=30,
         )
 
+    def drop_layer(self, name: str, *, wait: bool = True) -> requests.Response:
+        """`DELETE /control/layers/{name}`. `wait` answers once readers no longer see the layer."""
+        resp = requests.delete(
+            f"{self.control_base}/control/layers/{name}",
+            params={"wait": "visible"} if wait else {},
+            headers={"Authorization": f"Bearer {self.operator_credential}"},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        return resp
+
     def publish_artifacts(self, layer: str, *, strict: bool = False, **body) -> requests.Response:
         """`PUT /control/layers/{name}/artifacts` — one publication into one level. `strict`
         refuses the whole publication at its first refused member."""
@@ -857,6 +868,18 @@ class Server:
                 return
             time.sleep(0.1)
         raise TimeoutError(f"no flush completed within {timeout}s")
+
+    def published(self, timeout: float = 120.0) -> None:
+        """Return once readers see every write the server answered before this call: a flush
+        asked for with `wait=visible`, whose answer waits for that publication."""
+        resp = requests.post(
+            f"{self.control_base}/control/flush",
+            params={"wait": "visible"},
+            headers={"Authorization": f"Bearer {self.operator_credential}"},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        assert resp.status_code == 202 and resp.json()["visible"], resp.text
 
     def compact(self, timeout: float = 300.0) -> None:
         """Ask for a compaction fold and **wait for one to land** (contracts §3.4).

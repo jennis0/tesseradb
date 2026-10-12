@@ -53,15 +53,14 @@ space has left is refused with `409`, giving how many it needs and how many are 
 nothing.
 
 On the wire an artifact is a `mosaica_id`, as an item is, and the server resolves it on every
-request. The identity key permutes a 64-bit input. Its top bit, the kind, is 1 for an artifact or
-a layer, and the next 31 bits are the layer space and the low 32 the entity in it. An item's input
-has kind 0 and holds its shard, tenancy and number ([data model](data-model.md#identifiers)). An
+request. The identity key permutes a 64-bit input. Its top bit, the kind, is 1 for an artifact or a
+layer, and the next 31 bits are the layer space and the low 32 the entity in it. An item's input has
+kind 0 and holds its shard, tenancy and number ([data model](data-model.md#identifiers)). An
 artifact's identifier therefore never names an item. The item card answers it as an identifier
 naming nothing, as the artifact card answers an item's, and a member table, a generating set or an
-ingest row naming it has that row refused as naming no item. `/control/changes` deletes, suppresses
-and unsuppresses an artifact or a layer by its `mosaica_id`. It refuses a request that deletes a
-layer by its own `mosaica_id` with `422`; dropping the layer removes it (below). An artifact's
-position within its layer and level never reaches a client.
+ingest row naming it has that row refused as naming no item. `/control/changes` deletes and
+suppresses an artifact or a layer by its `mosaica_id` ([denies](write-path.md#denies)). An
+artifact's position within its layer and level never reaches a client.
 
 ## Declaring a layer
 
@@ -421,10 +420,10 @@ applied by the client, over its slot.
 
 An artifact is stored in three places. Its layer space holds its record: its key, view, edges,
 access labels, shape, declared sizes and supplied content, the held decomposition of its shape, and
-the deletions and suppressions of the layer and its artifacts. The point shard's entity space holds its
-declared members and its generating sets: durable, on disc, addressed the same way every point is,
-and untouched by how the map happens to be laid out. Row space is where every count and every drawn
-shape is computed: the same members as positions in one view's row order.
+the deletions and suppressions of the layer and its artifacts. The point shard's entity space holds
+its declared members and its generating sets: durable, on disc, addressed the same way every point
+is, and untouched by how the map happens to be laid out. Row space is where every count and every
+drawn shape is computed: the same members as positions in one view's row order.
 
 A level is held in row space in one of three forms. Stored by artifact (`"rows"`), it keeps one
 bitmap of rows per artifact, and a tile index places each artifact by the span of its rows. Served
@@ -519,7 +518,7 @@ so it costs no more at request time than an enumerated one.
 | Compaction | The deleted member's row is dropped, and each enumerated or shape level served from a column has its column, member bitmaps and coverings written again over the new rows. What happens to content generated from the deleted member follows the layer's own declaration (below) | For content that was already withdrawn at the deletion, nothing changes; content declared permissive, and generated from more than the one deleted point, resumes serving |
 | An edit of a member: an ingest row changing its values, label or position ([edits](write-path.md#edits)) | The item moves to a new entity and keeps its `mosaica_id`. The new entity joins every enumerated artifact the old one was a member of, and every generating set it took part in; the old entity leaves them | Nothing changes in its memberships. The item leaves every view, and so every count, until the flush that places its new rows, and is counted again from the publication the edit's receipt names |
 | Suppression of the artifact itself | The artifact stops being served immediately. Nothing about it is stored differently; it resumes only on an explicit unsuppress | The artifact disappears the moment the suppression is accepted, and stays gone until an explicit unsuppress |
-| Deletion of the artifact itself | The artifact stops being served immediately. The next fold writes its layer space again without its record, its supplied content and every edge naming it, so none of the content's bytes is in the prefix that fold publishes. Deleting it does not lift a suppression already on it: only an [explicit unsuppress](write-path.md#denies) does | The artifact disappears the moment the deletion is accepted, and never returns |
+| Deletion of the artifact itself | The artifact stops being served immediately. The next fold removes its record, its supplied content and every edge naming it ([compaction](write-path.md#compaction)). Deleting it does not lift a suppression already on it: only an [explicit unsuppress](write-path.md#denies) does | The artifact disappears the moment the deletion is accepted, and never returns |
 | Drop of a view of a group | The artifacts of every layer scoped to that group that belong to the dropped view are removed from their layer by the drop itself, without a deletion in the layer space's overlay | The artifacts disappear from the drop's publication, with the view |
 
 An ingested point's membership column carries the layer's edges as well as its memberships, exactly
@@ -550,14 +549,13 @@ case it is dropped exactly as under strict.
 ## Dropping a layer
 
 `DELETE /control/layers/{name}` drops a layer. The drop is written to the log before it is
-acknowledged, and no request that starts after the acknowledgement serves the layer or its
-artifacts on any route: every
-identifier the layer issued answers as one naming nothing, and a request naming the layer is
-answered as for a layer never registered. The layer's record, its space's record and the point
-shard's membership slices and row forms of the layer leave the next publication's side-manifest.
-Their files stay on disc, named by no manifest, until the next compaction writes a prefix without
-them. A restart replays the drop, so a crash between the acknowledgement and that publication drops
-the layer too.
+acknowledged, and no request that starts after the acknowledgement serves the layer or its artifacts
+on any route: every identifier the layer issued answers as one naming nothing, and a request naming
+the layer is answered as for a layer never registered. The layer's record, its space's record and
+the point shard's membership slices and row forms of the layer leave the next publication's
+side-manifest. Their files stay on disc, named by no manifest, until the next compaction writes a
+prefix without them. A restart replays the drop, so a crash between the acknowledgement and that
+publication drops the layer too.
 
 Nothing of a dropped layer is kept, and its name may be registered again. The new layer takes a
 new space, so none of the dropped layer's identifiers names it or its artifacts, and a bulk read's

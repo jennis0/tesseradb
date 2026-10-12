@@ -404,7 +404,7 @@ def publish(server) -> None:
     assert response.status_code == 201, response.text
     labels = next(row[2] for row in TEAM_ROWS if row[0] == FILLED_LATER)
     fill(server, TEAMS, FILLED_LATER, labels)
-    published(server)
+    server.published()
 
 
 def fill(server, layer: str, key: str, labels: list[str]):
@@ -420,14 +420,3 @@ def fill(server, layer: str, key: str, labels: list[str]):
     assert response.status_code == 200, response.text
     return response
 
-
-def published(server) -> None:
-    """Wait for the publication that serves what was written: the flush route's own wait."""
-    import requests
-
-    response = requests.post(
-        f"{server.control_base}/control/flush?wait=visible",
-        headers={"Authorization": f"Bearer {server.operator_credential}"},
-        timeout=120,
-    )
-    assert response.status_code == 202 and response.json().get("visible") is True, response.text

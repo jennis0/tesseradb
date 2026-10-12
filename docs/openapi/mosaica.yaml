@@ -2594,9 +2594,7 @@ paths:
         `POST /control/changes` suppresses it by.
 
         A name already registered is `422`, including a second request with the same declaration.
-        A dropped layer's name may be registered again, and the layer it names is a new one: none
-        of the dropped layer's `mosaica_id`s names it or its artifacts. A refusal means the layer
-        does not exist.
+        A dropped layer's name may be registered again. A refusal means the layer does not exist.
       security:
         - controlCredential: []
       parameters:
@@ -2665,8 +2663,6 @@ paths:
       description: |
         The layer and its artifacts stop being served at once. Its name may be registered again, as
         a new layer: none of the dropped layer's `mosaica_id`s names the new layer or its artifacts.
-        A layer is removed this way and not by a deletion of its own `mosaica_id`, which
-        `/control/changes` refuses.
       security:
         - controlCredential: []
       parameters:
@@ -6119,7 +6115,7 @@ components:
       type: object
       additionalProperties: false
       required: [op, match]
-      description: One change, and what it names, an item or by its `mosaica_id` an artifact or a layer.
+      description: "One change and what it names: an item, or an artifact or a layer by its `mosaica_id`."
       properties:
         op:
           type: string
@@ -6195,7 +6191,7 @@ components:
     RefusalReason:
       type: string
       enum: [names_two_items, unknown_mosaica_id, names_no_item, one_item_twice, one_value_twice]
-      description: "`names_two_items`: the row's values name more than one item. `unknown_mosaica_id`: its `mosaica_id` names no live or suppressed item, as an artifact's or a layer's names none; on `/control/changes`, no live or suppressed item, artifact or layer. `names_no_item`: its values name no item, in a request or a row that creates none. `one_item_twice`: an earlier kept row names the same item. `one_value_twice`: an earlier kept row sets the same unique value. Rows are decided in row order against the rows kept before them, so a refused row refuses no later row. Where two reasons apply to one row the first in this order is given: `unknown_mosaica_id`, `names_two_items`, `names_no_item`, `one_item_twice`, `one_value_twice`."
+      description: "`names_two_items`: the row's values name more than one item. `unknown_mosaica_id`: its `mosaica_id` names no live or suppressed item (an artifact's or a layer's names none), or on `/control/changes` no live or suppressed item, artifact or layer. `names_no_item`: its values name no item, in a request or a row that creates none. `one_item_twice`: an earlier kept row names the same item. `one_value_twice`: an earlier kept row sets the same unique value. Rows are decided in row order against the rows kept before them, so a refused row refuses no later row. Where two reasons apply to one row the first in this order is given: `unknown_mosaica_id`, `names_two_items`, `names_no_item`, `one_item_twice`, `one_value_twice`."
 
     ChangesApplied:
       type: object

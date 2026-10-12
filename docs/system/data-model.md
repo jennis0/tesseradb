@@ -135,10 +135,8 @@ for the item's life in that bundle, across edits, sessions, restarts, flushes, m
 compactions, and a copy of the bundle keeps it. A rebuild issues a new `mosaica_id` for every item, and one from
 the old bundle does not name an item in the new one.
 
-An annotation artifact and a layer are named by a `mosaica_id` from the same permutation. Its
-input carries a kind bit that is 1 for them and 0 for an item, and in place of the shard and the
-tenancy the layer's own space, a numbering apart from the items' that the layer and its artifacts
-take their entity ids from. No artifact's or layer's `mosaica_id` names an item
+An annotation artifact and a layer are named by a `mosaica_id` from the same permutation. Their
+input carries a kind bit that sets them apart from items, so none of them names an item
 ([an artifact's identity](annotations.md#an-artifacts-identity)).
 
 ## Projections and the frame

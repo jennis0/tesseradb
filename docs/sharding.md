@@ -9,10 +9,8 @@ in this document is built. Each section says what the code does today and what c
 ## The limit
 
 Every item takes its entity id from one `u32` space per bundle
-(`crates/mosaica-lifecycle/src/alloc.rs`), upward from 0. Up to stage 3, artifacts and the entities
-that a suppression of a whole layer names took aligned blocks of 65,536 downward from
-4,294,901,760 in the same space, at least one block per level, and never freed them. The space was
-exhausted when the two marks met. Stage 3 gives each layer a space of its own (§2.2).
+(`crates/mosaica-lifecycle/src/alloc.rs`), upward from 0. Artifacts and layers take theirs from
+their layer's own space (§2.2).
 
 A deleted item's number, the entity id it was first given and from which its `mosaica_id` is
 derived, is never issued again. Every insert therefore spends an id for good. Under a steady rate
@@ -733,10 +731,8 @@ builds today's bundle, apart from the directory layout and the manifest.
   value below 100,000 (`conformance/tests/test_byte_scan.py`). §7 checks them by comparing every
   response field between the suite's two modes, where a per-shard figure differs from the one-shard
   answer. In the many-shard mode every entity id is below that floor too, so the scanner's floored
-  sweeps cover the default mode only. An artifact's entity id is below the floor for the first
-  34,464 artifacts of its layer's first level, so the floored sweeps do not cover those either, and
-  the scanner looks for them in identifier columns and cursors
-  ([security](system/security.md#evidence)).
+  sweeps cover the default mode only. Artifact entity ids below the floor are swept for in
+  identifier columns and cursors only ([security](system/security.md#evidence)).
 - The kind, the shard, the tenancy and the layer space sit inside the keyed permutation. A viewer
   cannot read them, order identifiers by them or count gaps between them. The permutation is a
   blinding, not encryption, and a holder of the bundle inverts it, as today.
@@ -799,7 +795,7 @@ Fixtures beyond that:
 | commit point | a crash between a flush's shard files and its partition file opens every shard at the previous publication |
 | runtime column | a column declared at a running service reads the same in every shard after one shard's compaction, and another shard's compaction writes that shard's base |
 | artifact delete | an artifact deleted while a sealed shard still names it is served on no route, and its deny holds until that shard's compaction removes it |
-| layer drop | its space is removed at the next publication; its artifacts' identifiers answer as naming nothing; its number is not reused, and its name registered again is a new layer none of whose identifiers it issued |
+| layer drop | its space is removed at the next publication; its artifacts' identifiers answer as naming nothing; its number is not reused, and its name, registered again, names a new layer that answers to none of its identifiers |
 | kind routing | an artifact's `mosaica_id` sent to the item card, and an item's to the artifact card, names nothing |
 | two modes | every response field in the many-shard mode equals the default mode's, but identifiers and the samples drawn by rank, so no shard number, layer-space number or per-shard figure appears; the byte scanner finds no entity id |
 

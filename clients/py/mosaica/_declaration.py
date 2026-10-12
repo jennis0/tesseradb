@@ -91,6 +91,15 @@ class Declaration:
                 return block
         raise Refusal(f"no layer named {name!r} is declared")
 
+    def remove_layer(self, name: str) -> None:
+        """Remove the layer named `name`, or the label set named `name` from the layer it labels.
+        A name declared for neither removes nothing."""
+        layers = self.blocks["layer"]
+        layers[:] = [block for block in layers if block.get("name") != name]
+        for block in layers:
+            if (block.get("labels") or {}).get("name") == name:
+                del block["labels"]
+
     def group(self, name: str) -> dict:
         """The block of the view group named `name`, or a refusal where none is declared."""
         for block in self.blocks["view_group"]:

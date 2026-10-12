@@ -25,7 +25,7 @@ from pyroaring import BitMap
 
 from . import identity as identity_mod
 from . import morton as morton_mod
-from .layout import partition_dir, shard_dir, view_dir
+from .layout import live_prefix_dir, partition_dir, shard_dir, view_dir
 
 PERMUTATION_MAGIC = b"MSPM"
 # The two-level paged form (contracts 2.6). Version 1 was the flat array it replaced, and this
@@ -410,13 +410,7 @@ class Bundle:
 
         segments_path = partition_dir(self.prefix_dir) / "SEGMENTS-0.json"
         self.side_manifest = json.loads(segments_path.read_bytes())
-        records = self.side_manifest.get("shards", {}).get("records")
-        ids = None if records is None else [record.get("id") for record in records]
-        if ids != [0]:
-            raise ValueError(
-                f"{segments_path}: names shards {ids}; rebuild the bundle as one shard numbered 0"
-            )
-        self._shard_record = records[0]
+        self._shard_record = shard_record(self.side_manifest)
         self._verify_files(self.side_manifest.get("files", {}))
 
         self._shard_dir = shard_dir(self.prefix_dir)
@@ -738,11 +732,20 @@ KEY_RUN_PAGE = 4096
 def newest_side_manifest(root: Path | str, partition: str = "default") -> dict:
     """The highest-numbered `SEGMENTS-<n>.json` of the prefix `CURRENT` names: what a running
     server last published, where [`Bundle`] reads the build's `SEGMENTS-0.json`."""
-    root = Path(root)
-    prefix = json.loads((root / "CURRENT").read_text())["prefix"]
-    side_manifests = partition_dir(root / prefix, partition).glob("SEGMENTS-*.json")
+    side_manifests = partition_dir(live_prefix_dir(Path(root)), partition).glob("SEGMENTS-*.json")
     newest = max(side_manifests, key=lambda path: int(path.stem.removeprefix("SEGMENTS-")))
     return json.loads(newest.read_bytes())
+
+
+def shard_record(side_manifest: dict) -> dict:
+    """The record of a side-manifest's one shard, which must be numbered 0."""
+    records = side_manifest.get("shards", {}).get("records")
+    ids = None if records is None else [record.get("id") for record in records]
+    if ids != [0]:
+        raise ValueError(
+            f"the side-manifest names shards {ids}; rebuild the bundle as one shard numbered 0"
+        )
+    return records[0]
 
 
 def registered_layer(side_manifest: dict, name: str) -> dict | None:
@@ -752,7 +755,7 @@ def registered_layer(side_manifest: dict, name: str) -> dict | None:
 
 
 def layer_mosaica_id(key: identity_mod.IdentityKey, layer: dict) -> int:
-    """A layer's own identifier: entity 0 of its space (`docs/sharding.md` §2.2)."""
+    """A layer's own identifier: entity 0 of its space."""
     return identity_mod.forward_artifact(key, layer["space"], 0)
 
 

@@ -1,48 +1,34 @@
-"""**A dropped layer leaves nothing behind** (`docs/sharding.md` §2.2), black-box, over the release
-binary and the mask catalogue.
+"""**A dropped layer leaves nothing behind**, black-box, over the release binary and the mask
+catalogue.
 
-Layer `drop-a` holds two levels and `drop-b` one. `drop-a` takes space 0 and `drop-b` space 1, and
-the oracle derives every identifier either issued from the side-manifest's record of the layer:
-its space, and its levels' runs, which it first checks are the aligned blocks of 65,536 the
-registration gives, one per level from entity 65,536. Then `drop-a` is dropped, with one artifact
-suppressed and one deleted. What is asserted:
-
-- **What is served**: `drop-a` is answered as a layer never registered, every identifier it issued
-  as one nobody was issued, and `drop-b` and every point count are unchanged.
-- **What is stored**: the next side-manifest names neither `drop-a` nor its space, in the layer
-  spaces or in the shard's membership slices and row forms, and the next compaction's prefix holds
-  no directory of the space.
-- **The name registers again** as a new layer in a new space, higher than every space given
-  before: the same keys at the same levels take the same entities there, and none of the new
-  identifiers is an old one.
-- **A restart brings none of it back**, and a drop acknowledged just before the process is killed
-  is replayed.
+Layer `drop-a` holds two levels and `drop-b` one; they take spaces 0 and 1. The oracle derives
+every identifier either issued from the layer's side-manifest record, after checking its runs are
+the aligned blocks of 65,536 registration gives, one per level from entity 65,536. `drop-a` is then
+dropped with one artifact suppressed and one deleted.
 """
 
 from __future__ import annotations
 
-import json
+from pathlib import Path
 
 import pytest
-import requests
+from layer_fixture import (
+    VIEW,
+    CatalogueServer,
+    artifact_card,
+    enumerated_layer,
+    matched,
+    stored,
+)
 from oracle import identity as identity_mod
 from oracle.bundle import (
     artifact_mosaica_id,
     layer_mosaica_id,
     newest_side_manifest,
     registered_layer,
+    shard_record,
 )
-from oracle.harness import kill_server, spawn_server, stop_server
-from oracle.layout import layer_space_dir
-from test_kind_routing import (
-    VIEW,
-    artifact_card,
-    every_term,
-    layer_declaration,
-    matched,
-    published,
-    stored,
-)
+from oracle.layout import layer_space_dir, live_prefix_dir
 
 A, B, C = "drop-a", "drop-b", "drop-c"
 #: The never-registered layer every route naming a dropped one is compared with.
@@ -56,33 +42,20 @@ ARTIFACTS = {
 BLOCK = 65_536
 
 
-class Dropping:
+class Dropping(CatalogueServer):
     """The server over a private copy of the catalogue, and what each layer issued."""
 
     def __init__(self, tmp_path_factory, private_catalogue_bundle, catalogue_bundle):
-        self.root = private_catalogue_bundle("layer-drop")
-        self.tmp = tmp_path_factory.mktemp("layer-drop-server")
-        self.bundle = catalogue_bundle
-        self.key = catalogue_bundle.identity_key
-        self.no_artifact = identity_mod.forward_artifact(self.key, 9_999, BLOCK)
+        super().__init__("layer-drop", tmp_path_factory, private_catalogue_bundle, catalogue_bundle)
         #: Each layer's own identifier and its artifacts', by `(level, key)`, as last registered.
         self.layer: dict[str, int] = {}
         self.ids: dict[str, dict[tuple[int, str], int]] = {}
-        self.start()
-
-    def start(self) -> None:
-        self.server, self.proc = spawn_server(self.root, self.tmp)
-        self.token = self.server.authorise(every_term())["token"]
-
-    def restart(self, crash: bool = False) -> None:
-        (kill_server if crash else stop_server)(self.proc)
-        self.start()
 
     def register(self, name: str) -> dict:
         """Register `name`, publish its artifacts level by level, and check every receipt against
         the identifiers the oracle derives from the layer's stored record."""
         levels = len(ARTIFACTS[name]) if name == A else 0
-        resp = self.server.register_layer(layer_declaration(name, levels))
+        resp = self.server.register_layer(enumerated_layer(name, VIEW, levels))
         assert resp.status_code == 201, resp.text
         self.layer[name] = int(resp.json()["mosaica_id"])
         self.ids[name] = {}
@@ -113,28 +86,17 @@ class Dropping:
             for ordinal, key in enumerate(artifacts):
                 derived = artifact_mosaica_id(self.key, record, level, ordinal)
                 assert self.ids[name][(level, key)] == derived, (name, level, key)
-        published(self.server)
+        self.server.published()
         return record
 
     def every_id(self, name: str) -> list[int]:
         return [self.layer[name], *self.ids[name].values()]
 
 
-def drop(server, name: str, wait: bool = True) -> requests.Response:
-    resp = requests.delete(
-        f"{server.control_base}/control/layers/{name}",
-        params={"wait": "visible"} if wait else {},
-        headers={"Authorization": f"Bearer {server.operator_credential}"},
-        timeout=60,
-    )
-    resp.raise_for_status()
-    return resp
-
-
 def spaces_named(side_manifest: dict) -> set[int]:
     """Every layer space a side-manifest names: its layers' and layer spaces' records, and the
     shard's membership slices and row forms."""
-    shard = side_manifest["shards"]["records"][0]
+    shard = shard_record(side_manifest)
     return {
         record["space"]
         for record in (
@@ -146,16 +108,12 @@ def spaces_named(side_manifest: dict) -> set[int]:
     }
 
 
-def live_prefix(root):
-    return root / json.loads((root / "CURRENT").read_text())["prefix"]
-
-
 @pytest.fixture(scope="module")
 def dropping(tmp_path_factory, private_catalogue_bundle, catalogue_bundle):
     fixture = Dropping(tmp_path_factory, private_catalogue_bundle, catalogue_bundle)
     fixture.spaces = {A: fixture.register(A)["space"], B: fixture.register(B)["space"]}
     yield fixture
-    stop_server(fixture.proc)
+    fixture.stop()
 
 
 def test_each_layer_takes_the_next_space_and_the_oracles_identifiers(dropping):
@@ -210,9 +168,9 @@ def test_a_dropped_layer_is_served_on_no_route(dropping):
     )
     assert resp.status_code == 200, resp.text
     visible = matched(server, token, None)
-    assert layer_space_dir(live_prefix(dropping.root), dropping.spaces[A]).is_dir()
+    assert layer_space_dir(live_prefix_dir(dropping.root), dropping.spaces[A]).is_dir()
 
-    resp = drop(server, A)
+    resp = server.drop_layer(A)
     assert resp.status_code == 200, resp.text
     assert resp.json()["visible"]
     dropping.old = dropping.every_id(A)
@@ -224,10 +182,11 @@ def test_nothing_of_a_dropped_layer_is_stored(dropping):
     gone, kept = dropping.spaces[A], dropping.spaces[B]
     side_manifest = stored(dropping.root, lambda m: gone not in spaces_named(m))
     assert spaces_named(side_manifest) == {kept}
-    assert not [path for path in side_manifest["files"] if f"/layers/{gone}/" in path]
+    gone_dir = layer_space_dir(Path(), gone)
+    assert not [path for path in side_manifest["files"] if Path(path).is_relative_to(gone_dir)]
 
     dropping.server.compact()
-    prefix = live_prefix(dropping.root)
+    prefix = live_prefix_dir(dropping.root)
     assert not layer_space_dir(prefix, gone).exists()
     assert layer_space_dir(prefix, kept).is_dir()
     assert spaces_named(newest_side_manifest(dropping.root)) == {kept}
@@ -254,15 +213,15 @@ def test_a_restart_brings_none_of_it_back(dropping):
     side_manifest = newest_side_manifest(dropping.root)
     assert dropping.spaces[A] not in spaces_named(side_manifest)
     assert side_manifest["next_layer_space"] == 3
-    assert dropping.register(C)["space"] == 3
+    dropping.spaces[C] = dropping.register(C)["space"]
+    assert dropping.spaces[C] == 3
 
 
 def test_a_drop_acknowledged_before_a_crash_is_replayed(dropping):
-    server = dropping.server
-    space = 3
+    server, space = dropping.server, dropping.spaces[C]
     c0 = dropping.ids[C][(0, "c0")]
     assert artifact_card(server, dropping.token, c0)[0] == 200
-    resp = drop(server, C, wait=False)
+    resp = server.drop_layer(C, wait=False)
     assert resp.status_code == 200, resp.text
     dropping.restart(crash=True)
 
@@ -275,4 +234,4 @@ def test_a_drop_acknowledged_before_a_crash_is_replayed(dropping):
     # publishes what the replay left, which holds nothing of the layer.
     server.compact()
     assert space not in spaces_named(newest_side_manifest(dropping.root))
-    assert not layer_space_dir(live_prefix(dropping.root), space).exists()
+    assert not layer_space_dir(live_prefix_dir(dropping.root), space).exists()
