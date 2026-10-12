@@ -1175,7 +1175,6 @@ fn claim(
 struct FileNumbers {
     base: u64,
     creates: bool,
-    /// The most items the files may create ([`check_cap`]).
     shard_size: u64,
     created: Created,
     /// How many rows name an item, and the mixed sum of their numbers.

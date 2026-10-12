@@ -378,7 +378,7 @@ impl Probe {
         let prefix_dir = self.root.join(&generation.prefix);
         let (partition, data) = generation.bundle.partitions.iter().next().expect("one partition");
         let m = &data.manifest;
-        let r = &data.only_shard().record;
+        let record = &data.only_shard().record;
         let stats = engine.write_executor_stats();
         let [merges, merge_failures, coalesces, coalesce_failures, coalesce_passes_failed] =
             self.carried;
@@ -389,23 +389,23 @@ impl Probe {
         let coalesce_passes_failed = coalesce_passes_failed + stats.coalesce_passes_failed;
 
         let (files, bytes) = walk(&prefix_dir, |_| true);
-        let shard = mosaica_store::ShardLayout::new(partition, mosaica_types::ShardId::ZERO);
-        let segments_dir = prefix_dir.join(shard.segments_rel(VIEW));
+        let layout = mosaica_store::ShardLayout::new(partition, record.id);
+        let segments_dir = prefix_dir.join(layout.segments_rel(VIEW));
         let merge_dirs = count_dirs(&segments_dir, "merge-");
         // An empty id names the directory every coalesce's is in.
-        let coalesce_dirs = count_dirs(&prefix_dir.join(shard.coalesced_rel("")), "coalesce-");
+        let coalesce_dirs = count_dirs(&prefix_dir.join(layout.coalesced_rel("")), "coalesce-");
 
         self.check_side_manifests(&prefix_dir, partition, &generation.prefix)?;
 
         Ok(Row {
             tick: tick as u64,
-            segments: r.segments.iter().filter(|s| s.view == VIEW).count() as u64,
-            deltas: r.deltas.len() as u64,
+            segments: record.segments.iter().filter(|s| s.view == VIEW).count() as u64,
+            deltas: record.deltas.len() as u64,
             dicts: m.dict_extents.len() as u64,
-            attrs: r.attr_extents.len() as u64,
-            records: r.record_extents.len() as u64,
-            texts: r.text_extents.len() as u64,
-            terms: r.entity_terms_extents.len() as u64,
+            attrs: record.attr_extents.len() as u64,
+            records: record.record_extents.len() as u64,
+            texts: record.text_extents.len() as u64,
+            terms: record.entity_terms_extents.len() as u64,
             files,
             mib: bytes >> 20,
             geometry_mib: walk(&segments_dir, |_| true).1 >> 20,
@@ -448,9 +448,10 @@ impl Probe {
 
 fn ordering_breaches(m: &SegmentsManifest) -> Vec<String> {
     let mut out = Vec::new();
-    let views: BTreeSet<&str> = m.only_shard().segments.iter().map(|s| s.view.as_str()).collect();
+    let segments = &m.only_shard().segments;
+    let views: BTreeSet<&str> = segments.iter().map(|s| s.view.as_str()).collect();
     for view in views {
-        let segs: Vec<_> = m.only_shard().segments.iter().filter(|s| s.view == view).collect();
+        let segs: Vec<_> = segments.iter().filter(|s| s.view == view).collect();
         for pair in segs.windows(2) {
             if pair[0].entity_hi >= pair[1].entity_lo {
                 out.push(format!(

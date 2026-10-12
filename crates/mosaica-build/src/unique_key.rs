@@ -24,7 +24,7 @@ use std::path::Path;
 
 use mosaica_filter::{Access, SortedDict, ValueColumn};
 use mosaica_spatial::tiler::ScalarType;
-use mosaica_store::manifest::{FileDigest, Manifest, SegmentsManifest};
+use mosaica_store::manifest::{FileDigest, Manifest, PartitionManifest, ShardRecord};
 
 use crate::error::{BuildError, Result};
 
@@ -116,17 +116,16 @@ impl KeywordCardinality {
 /// Every indexed keyword column the bundle at `prefix_dir` holds, entity-scoped attributes first
 /// and then each group-scoped family per view, read from the files the manifests name.
 ///
-/// `partitions` pairs each partition's hash with its side-manifest. A column whose dictionary or
-/// value column does not open is an error: the build has just written it, and a verify that could
-/// not read it is looking at a malformed bundle.
+/// `partitions` pairs each partition's hash with its manifest and its shard's record. A column
+/// whose dictionary or value column does not open is an error: the build has just written it, and
+/// a verify that could not read it is looking at a malformed bundle.
 pub fn keyword_cardinalities(
     prefix_dir: &Path,
     manifest: &Manifest,
-    partitions: &[(&str, &SegmentsManifest)],
+    partitions: &[(&str, &PartitionManifest, &ShardRecord)],
 ) -> Result<Vec<KeywordCardinality>> {
     let mut out = Vec::new();
-    for (phash, segments) in partitions {
-        let record = segments.only_shard();
+    for &(phash, partition, record) in partitions {
         let layout = mosaica_store::ShardLayout::new(phash, record.id);
         for scalar in &manifest.declared_scalars {
             if scalar.arrow_type != ScalarType::Keyword || !scalar.index {
@@ -140,7 +139,7 @@ pub fn keyword_cardinalities(
                 distinct,
                 present,
                 rows: record.high_water,
-                index_bytes: bytes_under(&dir_rel, &[&manifest.files, &segments.partition.files]),
+                index_bytes: bytes_under(&dir_rel, &[&manifest.files, &partition.files]),
             });
         }
         for group in &manifest.groups {
@@ -167,10 +166,7 @@ pub fn keyword_cardinalities(
                         distinct,
                         present,
                         rows,
-                        index_bytes: bytes_under(
-                            &dir_rel,
-                            &[&manifest.files, &segments.partition.files],
-                        ),
+                        index_bytes: bytes_under(&dir_rel, &[&manifest.files, &partition.files]),
                     });
                 }
             }

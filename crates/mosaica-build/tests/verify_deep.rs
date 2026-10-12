@@ -580,7 +580,7 @@ fn a_segment_whose_morton_column_is_out_of_order_is_refused() {
     expect_refusal(&root, "not sorted ascending");
 }
 
-/// Postings bounded by `entity_id_high_water`: the base file is rewritten with one term's
+/// Postings bounded by the shard's high water: the base file is rewritten with one term's
 /// posting naming an entity past the high water.
 #[test]
 fn a_posting_past_the_high_water_is_refused() {
@@ -595,7 +595,7 @@ fn a_posting_past_the_high_water_is_refused() {
     mosaica_authz::write_postings(&path, &per_term, SMALL_TERM_THRESHOLD_DEFAULT).unwrap();
     refresh_digest(&root, rel);
 
-    expect_refusal(&root, "entity_id_high_water");
+    expect_refusal(&root, "high water");
 }
 
 /// Postings sorted and duplicate-free: the first *carried* term's record is hand-encoded with its

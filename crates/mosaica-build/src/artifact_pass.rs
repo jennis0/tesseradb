@@ -624,11 +624,11 @@ pub fn run(
 /// resolve at the engine's open and are recorded in their pinned or default layout.
 fn load_build_segment(
     prefix_dir: &Path,
-    shard: ShardLayout<'_>,
+    layout: ShardLayout<'_>,
     view: &str,
     row_count: u32,
 ) -> Option<SegmentData> {
-    let dir = prefix_dir.join(shard.segment_rel(view, crate::BUILD_SEG_ID));
+    let dir = prefix_dir.join(layout.segment_rel(view, crate::BUILD_SEG_ID));
     match SegmentData::load(
         &dir,
         crate::BUILD_SEG_ID,
@@ -668,10 +668,10 @@ const MANIFEST_N: u64 = 0;
 pub fn containment(
     store: &ArtifactStore,
     prefix_dir: &Path,
-    shard: ShardLayout<'_>,
+    layout: ShardLayout<'_>,
     index: &mut DerivedIndex,
 ) -> Vec<mosaica_store::manifest::DerivedExtent> {
-    let postings_path = prefix_dir.join(shard.postings_rel());
+    let postings_path = prefix_dir.join(layout.postings_rel());
     let postings = match PostingsReader::open(&postings_path, true) {
         Ok(postings) => postings,
         Err(error) => {
@@ -737,7 +737,7 @@ pub fn containment(
             )),
         });
     }
-    derived::file_derived(prefix_dir, shard, MANIFEST_N, index, composed)
+    derived::file_derived(prefix_dir, layout, MANIFEST_N, index, composed)
 }
 
 /// The pass's own report, printed where `report_attribute_coverage` prints — so both entry points

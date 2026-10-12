@@ -861,12 +861,12 @@ fn run(args: Args) -> Result<(), String> {
         .iter()
         .next()
         .ok_or_else(|| "the bundle has no partition".to_string())?;
-    let view_data = partition
-        .only_shard()
+    let shard = partition.only_shard();
+    let view_data = shard
         .views
         .get(&args.view)
         .ok_or_else(|| {
-            let mut names: Vec<&String> = partition.only_shard().views.keys().collect();
+            let mut names: Vec<&String> = shard.views.keys().collect();
             names.sort();
             format!("no view '{}' in the bundle; it has {:?}", args.view, names)
         })?;
@@ -887,7 +887,7 @@ fn run(args: Args) -> Result<(), String> {
             String::from_utf8_lossy(bytes).into_owned()
         })
         .collect();
-    let layout = mosaica_store::ShardLayout::new(phash, partition.only_shard().record.id);
+    let layout = mosaica_store::ShardLayout::new(phash, shard.record.id);
     let postings_path = prefix_dir.join(layout.postings_rel());
     let postings = PostingsReader::open(&postings_path, true)
         .map_err(|e| format!("opening {}: {e}", postings_path.display()))?;

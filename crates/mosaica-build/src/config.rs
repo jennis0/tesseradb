@@ -254,10 +254,8 @@ struct DefaultsBlock {
     allocation_view: Option<String>,
 }
 
-/// The shard the items are stored in. Each new item, and each edit of an item, takes an id from
-/// it, an id a deletion freed first and otherwise one past the shard's high water. Without this
-/// table the size is 4,026,531,840. `PUT /control/shards` declares the same table at a running
-/// service.
+/// The shard the items are stored in. Without this table the size is 4,026,531,840.
+/// `PUT /control/shards` declares the same table at a running service.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ShardsBlock {
@@ -1239,8 +1237,7 @@ pub struct Config {
     /// reviewer diffing two builds' disclosure decisions still needs to know that a layer they did
     /// not write appeared because a `[layer.labels]` block asked for it.
     pub label_layers: BTreeMap<String, String>,
-    /// `[shards] size` as written, or `None` where the declaration has no `[shards]`, which builds
-    /// at [`mosaica_types::SHARD_SIZE_DEFAULT`].
+    /// `[shards] size` as written, or `None` where the declaration has no `[shards]`.
     pub shard_size: Option<u64>,
     /// `[defaults].allocation_view` as written, or `None` where the declaration named none.
     ///
@@ -2658,8 +2655,8 @@ impl Config {
         let base = path.parent().unwrap_or(Path::new("")).to_path_buf();
         let sources = Sources::compile(&base, file.sources.as_ref(), overrides)?;
         let defaults = Defaults::compile(file.defaults.as_ref(), &file.attribute, &sources)?;
-        // A build is an ingest into an empty database: the size is checked against a high water
-        // of 0 here, and against the items the files create as they are numbered.
+        // Here as well as at the build, so `mosaica check` refuses it. The items the files create
+        // are checked against it as they are numbered (`ids::check_cap`).
         let shard_size = file
             .shards
             .as_ref()
@@ -6453,7 +6450,8 @@ impl Config {
 
 /// The declaration, minus its acquisition keys, as the control plane's declaration routes take it
 /// (`configuration.md` §2; `ingest.md` §1.3): one array per runtime block kind, each in
-/// declaration order.
+/// declaration order, and `shards`, the `PUT /control/shards` body, where the declaration writes
+/// `[shards]`.
 ///
 /// **One implementation of declaration-to-payload** ([decision 0139](../../../docs/decisions/0139-one-implementation-between-build-and-ingest-and-across-a-type-family.md)).
 /// This serialises the same parsed types the build compiles from, so a key the parser accepts and
@@ -6482,7 +6480,6 @@ pub fn control_payloads(config: &Config) -> serde_json::Value {
         "views": view_payloads(config),
         "view_groups": view_group_payloads(config),
     });
-    // The body of `PUT /control/shards`, only where the declaration writes `[shards]`.
     if let Some(size) = config.shard_size {
         payloads["shards"] = serde_json::json!({ "size": size });
     }
@@ -6954,8 +6951,6 @@ fields = { id = "entity" }
         }
     }
 
-    /// **Shards**: `[shards]` is the `PUT /control/shards` body, and a declaration without it
-    /// emits no key, so nothing declares a size its author did not write.
     #[test]
     fn the_shard_payload_is_written_only_where_the_declaration_writes_it() {
         let (_dir, payloads) = every_key();
@@ -6973,7 +6968,6 @@ fields = { id = "entity" }
         assert!(control_payloads(&config).get("shards").is_none());
     }
 
-    /// A size of zero is refused at the declaration, by the rule a running service applies.
     #[test]
     fn a_shard_size_of_zero_is_refused() {
         let dir = tempfile::tempdir().unwrap();

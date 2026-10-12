@@ -923,7 +923,7 @@ fn build_bundle(
     // **`n = 0` is a bundle, not a refusal** (decision 0091): a deployment must be able to start
     // from a bundle with no points, with its frame stated, and take the whole corpus through
     // `/control/ingest`. Every stage below is walked for that case — empty segments, empty
-    // postings, a dictionary holding only what the declaration mints, `entity_id_high_water = 0`,
+    // postings, a dictionary holding only what the declaration mints, a high water of 0,
     // every declared column present and empty, every declared layer registered with no artifacts.
     // What is still refused is `extent = "auto"` over no rows, because a frame cannot be fitted to
     // nothing (`config::empty_auto_source`) — and that refusal already names the remedy.
@@ -952,7 +952,9 @@ fn build_bundle(
     timer.end(BuildStage::SourceIds, n);
 
     // ---- 2. the dictionary -----------------------------------------------------------
-    let dict_dir = args.out.join(PREFIX).join(mosaica_store::layout::DICTIONARY_DIR);
+    let prefix_dir = args.out.join(PREFIX);
+    let layout = ShardLayout::new(PHASH, SHARD);
+    let dict_dir = prefix_dir.join(mosaica_store::layout::DICTIONARY_DIR);
     std::fs::create_dir_all(&dict_dir).map_err(|e| BuildError::io(&dict_dir, e))?;
     // What every source term is called, established before any term id exists — a field-sourced
     // view's sorted vocabulary, or the relation's own integers (`crate::AccessPlan`).
@@ -1304,10 +1306,7 @@ fn build_bundle(
     // loop already visits them in the strictly ascending order the writer requires, and each
     // item's `sig` is already its sorted, deduplicated term list. Writing it here rather than from
     // the bands costs no second pass and no second relation in memory.
-    let entity_terms_dir = args
-        .out
-        .join(PREFIX)
-        .join(ShardLayout::new(PHASH, SHARD).entity_terms_rel());
+    let entity_terms_dir = prefix_dir.join(layout.entity_terms_rel());
     let mut entity_terms = mosaica_store::EntityTermsWriter::create(&entity_terms_dir)
         .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?;
     let mut sig_terms: Vec<u32> = Vec::new();
@@ -1512,10 +1511,8 @@ fn build_bundle(
         fsync_file(path)?;
     }
 
-    let prefix_dir = args.out.join(PREFIX);
-    let shard = ShardLayout::new(PHASH, SHARD);
-    let terms_dir = prefix_dir.join(shard.terms_rel());
-    let entities_dir = prefix_dir.join(shard.entities_rel());
+    let terms_dir = prefix_dir.join(layout.terms_rel());
+    let entities_dir = prefix_dir.join(layout.entities_rel());
     for dir in [&terms_dir, &entities_dir] {
         std::fs::create_dir_all(dir).map_err(|e| BuildError::io(dir, e))?;
     }
@@ -1529,10 +1526,10 @@ fn build_bundle(
     // disk, fail-closed. The integrity chain replacing the old third pairs scan: bucket
     // receipts -> in-process emit -> band receipts (count + anchor, verified on read) ->
     // per-term exact counts -> the total against the deduplicated relation.
-    let postings_path = prefix_dir.join(shard.postings_rel());
+    let postings_path = prefix_dir.join(layout.postings_rel());
     let pairs_path = args
         .emit_oracle_pairs
-        .then(|| prefix_dir.join(shard.pairs_rel()));
+        .then(|| prefix_dir.join(layout.pairs_rel()));
     let mut pairs_writer = pairs_path
         .as_deref()
         .map(PairsParquetWriter::create)
@@ -1676,7 +1673,7 @@ fn build_bundle(
     let (scoped_paths, scoped_render) = write_scoped_columns(
         args,
         &prefix_dir,
-        shard,
+        layout,
         n,
         &numbering,
         entity_of_ordinal,
@@ -1740,7 +1737,7 @@ fn build_bundle(
             &|number| (number < n).then(|| u64::from(entity_of_ordinal[number as usize])),
             n,
             &prefix_dir,
-            shard,
+            layout,
             &view_ids,
             &derived,
             publication_batch,
@@ -1774,7 +1771,7 @@ fn build_bundle(
     // build before any row space is written.
     let unique = crate::unique_index::write_unique_indexes(
         &prefix_dir,
-        shard,
+        layout,
         &args.schema,
         |column| match open_extents.iter().find(|extents| extents.column == column) {
             Some(extents) => crate::unique_index::UniqueSource::Extents(extents),
@@ -1786,7 +1783,7 @@ fn build_bundle(
     timer.end(BuildStage::UniqueIndexes, n);
     let (filter_paths, text_index) = write_filter_postings(
         &prefix_dir,
-        shard,
+        layout,
         &args.schema,
         &attributes_by_entity,
         &open_extents,
@@ -1832,7 +1829,7 @@ fn build_bundle(
     // number for three jobs, which is why the 615 s this block cost at 7.4×10⁷ points could be
     // modelled and not read.
     let record_paths = write_record_blob(
-        &prefix_dir.join(shard.record_rel()),
+        &prefix_dir.join(layout.record_rel()),
         &args.schema,
         n,
         &plan.routes,
@@ -1898,8 +1895,8 @@ fn build_bundle(
     let mut term_images: Vec<Option<crate::term_images_pass::ViewTermImages>> =
         Vec::with_capacity(args.views.len());
     for (index, view) in args.views.iter().enumerate() {
-        let view_dir = prefix_dir.join(shard.view_rel(&view.view_id));
-        let segment_dir = prefix_dir.join(shard.segment_rel(&view.view_id, SEG_ID));
+        let view_dir = prefix_dir.join(layout.view_rel(&view.view_id));
+        let segment_dir = prefix_dir.join(layout.segment_rel(&view.view_id, SEG_ID));
         std::fs::create_dir_all(&segment_dir).map_err(|e| BuildError::io(&segment_dir, e))?;
 
         // ---- the assembly: the view's rows, Morton-partitioned, straight from ordinal order ----
@@ -2020,7 +2017,7 @@ fn build_bundle(
             &mut published_layers,
             &artifact_store,
             &prefix_dir,
-            shard,
+            layout,
             &view.view_id,
             rows_in_view,
             tmp.path(),
@@ -2049,7 +2046,7 @@ fn build_bundle(
         let images = crate::term_images_pass::run(
             &postings,
             &prefix_dir,
-            shard,
+            layout,
             &view.view_id,
             rows_in_view,
             &mut derived_index,
@@ -2066,12 +2063,12 @@ fn build_bundle(
         // the value columns. The in-memory build calls the same function at the same point.
         view_files.push(mosaica_store::field_tallies::derive_view(
             &prefix_dir,
-            shard,
+            layout,
             &view.view_id,
             SEG_ID,
             rows_in_view,
             &crate::declared_scalars_of(&args.schema),
-            &|name| mosaica_filter::base_numbers(&prefix_dir.join(shard.column_rel(name))),
+            &|name| mosaica_filter::base_numbers(&prefix_dir.join(layout.column_rel(name))),
         )?);
 
         view_files.push(permutation_path);
@@ -2101,7 +2098,7 @@ fn build_bundle(
         let containment = crate::artifact_pass::containment(
             &artifact_store,
             &prefix_dir,
-            shard,
+            layout,
             &mut derived_index,
         );
         published_layers.store = artifact_store;
@@ -2759,7 +2756,7 @@ fn read_one_attribute_scan(
 fn write_scoped_columns(
     args: &BuildArgs,
     prefix_dir: &Path,
-    shard: ShardLayout<'_>,
+    layout: ShardLayout<'_>,
     n: u64,
     numbering: &crate::ids::Numbering,
     entity_of_ordinal: &[u32],
@@ -2819,7 +2816,7 @@ fn write_scoped_columns(
                 minters,
                 scratch,
             )?;
-            let column_dir = prefix_dir.join(shard.scoped_column_rel(
+            let column_dir = prefix_dir.join(layout.scoped_column_rel(
                 &attribute.name,
                 &view.view_id,
                 mosaica_types::view::DECLARED_INCARNATION,

@@ -1112,9 +1112,8 @@ struct ShardsBody {
     size: u64,
 }
 
-/// `PUT /control/shards`: declares the point shard's size, the high water an insert may not take
-/// it past. 201 when the size changed, 200 when the shard already had it, 422 for a size of zero,
-/// 409 for one below the shard's high water.
+/// `PUT /control/shards`: declares the point shard's size. 201 when the size changed, 200 when the
+/// shard already had it, 422 for a size of zero, 409 for one below the shard's high water.
 async fn declare_shards(
     State(state): State<Arc<AppState>>,
     ApiQuery(wait): ApiQuery<WaitQuery>,
@@ -2923,7 +2922,6 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
     let segments: Vec<mosaica_engine::ViewSegments> = live.segments;
     Ok(Json(serde_json::json!({
         "entity_id_high_water": state.engine.allocator_high_water(),
-        // The high water an insert may not take the shard past.
         "shards": { "size": state.engine.shard_size() },
         // Cycles completed since the executor started, one per cycle whatever it published: the
         // number a write acknowledgement's `publication` is compared against.

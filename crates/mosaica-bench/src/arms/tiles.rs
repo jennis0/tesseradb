@@ -36,10 +36,7 @@ pub fn run(ctx: &Context, zooms: &[u8], coverages: &[f64], seed: u64) -> Result<
         let stats = TermStats::compute(&postings)?;
         let bundle = open_bundle(&fixture.root)?;
 
-        let Some(partition) = bundle.partitions.values().next() else {
-            continue;
-        };
-        let Some(view) = partition.only_shard().views.values().next() else {
+        let Some(view) = bundle.only_shard().views.values().next() else {
             continue;
         };
         let Some(segment) = view.segments.first() else {

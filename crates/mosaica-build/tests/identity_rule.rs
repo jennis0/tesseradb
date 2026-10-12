@@ -239,6 +239,28 @@ fn a_build_over_its_shard_size_is_refused() {
     assert_eq!(sizes, [3]);
 }
 
+/// **A size of zero is refused by a build given its arguments directly**, as the declaration
+/// refuses it, though the files create no item to check it against.
+#[test]
+fn a_direct_build_with_a_shard_size_of_zero_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    points(&dir.join("points.parquet"), &[], Vec::new());
+    let zero = |out: &Path| BuildArgs {
+        shard_size: Some(0),
+        ..args(dir, ONE_VIEW, out)
+    };
+    let (streamed, linear) = (dir.join("zero-streamed"), dir.join("zero-linear"));
+    assert!(build(&zero(&streamed)).is_err());
+    assert!(build_in_memory(&zero(&linear)).is_err());
+    for out in [&streamed, &linear] {
+        assert!(mosaica_store::read::open_bundle(out).is_err(), "no bundle is published");
+    }
+
+    let (_, report) = both_ways(dir, ONE_VIEW);
+    assert_eq!(report.items, 0, "the same files build at the default size");
+}
+
 /// **(a) One unique field across two views, an attribute file and a members file.** A value in
 /// both views' points is one item in both, and the other files name items by it.
 #[test]

@@ -804,8 +804,7 @@ fn scratch_within_forecast(dir: &Path) {
     assert!(most <= forecast, "{most} bytes of scratch against a forecast of {forecast}");
 }
 
-/// **A build numbering past the most items a shard holds is refused**, at the item past the
-/// lower of its size and the end of its ids.
+/// The cap is the lower of the shard size and `ITEMS_MAX`.
 #[test]
 fn numbering_past_the_item_cap_is_refused() {
     assert!(super::check_cap(super::ITEMS_MAX, u64::MAX).is_ok());

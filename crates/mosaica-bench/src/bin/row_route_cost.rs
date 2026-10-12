@@ -76,18 +76,13 @@ fn inspect(root: &Path) -> Result<Fixture, Box<dyn std::error::Error>> {
     let bundle = open_bundle(root)?;
     // The frame is the view's (decision 0040); a built bundle declares one, and this harness
     // measures against it.
-    let q = bundle
+    let view = bundle
         .manifest
         .views
         .first()
-        .expect("a built bundle declares a view")
-        .quantisation;
-    let view = bundle
-        .partitions
-        .values()
-        .next()
-        .and_then(|p| p.only_shard().views.keys().next().cloned())
-        .unwrap_or_else(|| "s0".to_string());
+        .expect("a built bundle declares a view");
+    let q = view.quantisation;
+    let view = view.id.clone();
     let mut categories = Vec::new();
     for scalar in &bundle.manifest.declared_scalars {
         let Some(vocab_name) = &scalar.vocabulary else {

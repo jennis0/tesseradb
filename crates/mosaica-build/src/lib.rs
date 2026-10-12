@@ -145,9 +145,8 @@ pub(crate) fn report_hierarchies(shapes: &[crate::layers::HierarchyShape]) {
 /// [`BuildArgs`], shared by every view of the build.
 #[derive(Debug, Clone)]
 pub struct ViewArgs {
-    /// The view this row space belongs to: a plain view's name, or a group's view as the joined
-    /// `group:key` id (`views.md` §3.2). [`mosaica_store::ShardLayout::view_rel`] derives the
-    /// on-disc path.
+    /// The view this row space belongs to: a plain view's name, or a group's view as `group:key`.
+    /// [`mosaica_store::ShardLayout::view_rel`] derives its path.
     pub view_id: String,
     /// What turns each row's coordinates into a position in this view's frame, before anything is
     /// quantised (`projections.md` §3). [`mosaica_spatial::Projection::None`] — the default —
@@ -292,8 +291,7 @@ pub struct BuildArgs {
     /// Keep the items whose value of the declaration's one unique integer attribute is below this,
     /// and the rows of every file that name them ([`ids::Limit`]).
     pub limit: Option<u64>,
-    /// `[shards] size`: the most items the build may create, written into `SEGMENTS-0.json`.
-    /// `None` builds at [`mosaica_types::SHARD_SIZE_DEFAULT`] ([`BuildArgs::shard_size`]).
+    /// `[shards] size`; read through [`BuildArgs::shard_size`].
     pub shard_size: Option<u64>,
     /// Refuse the build at the first file with a row the identity rule refuses, rather than
     /// refusing those rows and reporting them ([`ids`]).
@@ -363,8 +361,7 @@ pub struct BuildArgs {
 }
 
 impl BuildArgs {
-    /// The size the build checks its items against and writes: the declared one, or
-    /// [`mosaica_types::SHARD_SIZE_DEFAULT`] where the declaration has no `[shards]`.
+    /// The declared size, or [`mosaica_types::SHARD_SIZE_DEFAULT`] where none is declared.
     pub fn shard_size(&self) -> u64 {
         self.shard_size.unwrap_or(mosaica_types::SHARD_SIZE_DEFAULT)
     }
@@ -413,7 +410,7 @@ pub struct BuildReport {
     /// One entry per view the build materialised, in registry order (`views.md` §7).
     pub views: Vec<ViewReport>,
     pub seg_id: String,
-    /// Number of items (= `entity_id_high_water`, since the bootstrap build allocates from 0).
+    /// Number of items (= the shard's high water, since the bootstrap build allocates from 0).
     pub items: u64,
     /// Number of distinct terms in the dictionary.
     pub terms: u64,
@@ -1178,11 +1175,14 @@ fn validate_args(args: &BuildArgs) -> Result<()> {
                 .into(),
         ));
     }
-    // The declaration's rule, for the callers that build these arguments directly.
+    // The declaration's rules, for the callers that build these arguments directly.
     config::require_sources(&args.schema, &args.attribute_sources)?;
-    // **The path is derived from the id, never the id used as a path** (`views.md` §3.2): a
-    // group's view is `group:key` and lives at `views/<group>/<key>/`, so what has to be safe is
-    // each component [`mosaica_store::view_path_components`] derives, not the joined form.
+    if let Some(size) = args.shard_size {
+        mosaica_types::check_shard_size(size, 0)
+            .map_err(|e| config::declaration_error(format!("[shards] size: {e}")))?;
+    }
+    // A group's view `group:key` lives at `views/<group>/<key>/`, so each component must be a
+    // safe path, not the joined id.
     for view in &args.views {
         for component in mosaica_store::view_path_components(&view.view_id) {
             if component.is_empty()
@@ -1421,10 +1421,9 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     }
 
     // ---- 2. intern each item's index keys ------------------------------------------
-    let dict_dir = args
-        .out
-        .join(PREFIX)
-        .join(mosaica_store::layout::DICTIONARY_DIR);
+    let prefix_dir = args.out.join(PREFIX);
+    let layout = ShardLayout::new(PHASH, SHARD);
+    let dict_dir = prefix_dir.join(mosaica_store::layout::DICTIONARY_DIR);
     fs::create_dir_all(&dict_dir).map_err(|e| BuildError::io(&dict_dir, e))?;
     let mut dict = DictWriter::new(&dict_dir);
 
@@ -1524,12 +1523,10 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         }
     }
 
-    let prefix_dir = args.out.join(PREFIX);
-    let shard = ShardLayout::new(PHASH, SHARD);
-    let terms_dir = prefix_dir.join(shard.terms_rel());
-    let entities_dir = prefix_dir.join(shard.entities_rel());
-    let view_dir = prefix_dir.join(shard.view_rel(&view.view_id));
-    let segment_dir = prefix_dir.join(shard.segment_rel(&view.view_id, SEG_ID));
+    let terms_dir = prefix_dir.join(layout.terms_rel());
+    let entities_dir = prefix_dir.join(layout.entities_rel());
+    let view_dir = prefix_dir.join(layout.view_rel(&view.view_id));
+    let segment_dir = prefix_dir.join(layout.segment_rel(&view.view_id, SEG_ID));
     for dir in [&terms_dir, &entities_dir, &view_dir, &segment_dir] {
         fs::create_dir_all(dir).map_err(|e| BuildError::io(dir, e))?;
     }
@@ -1540,14 +1537,14 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         fsync_file(path)?;
     }
 
-    let postings_path = prefix_dir.join(shard.postings_rel());
+    let postings_path = prefix_dir.join(layout.postings_rel());
     write_postings(&postings_path, &per_term, SMALL_TERM_THRESHOLD_DEFAULT)
         .map_err(|e| BuildError::io(&postings_path, e))?;
     fsync_file(&postings_path)?;
 
     let mut other_paths: Vec<PathBuf> = vec![postings_path.clone()];
     if args.emit_oracle_pairs {
-        let pairs_path = prefix_dir.join(shard.pairs_rel());
+        let pairs_path = prefix_dir.join(layout.pairs_rel());
         write_pairs_parquet(&pairs_path, &per_term)?;
         other_paths.push(pairs_path);
     }
@@ -1564,7 +1561,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // **Unconditional, unlike `pairs.parquet`.** That file is an oracle input a deployment may
     // legitimately omit; this one backs a request path and the write path's refusal, so a bundle
     // without it would answer a drill-down short and accept a re-label through a second view.
-    let entity_terms_dir = prefix_dir.join(shard.entity_terms_rel());
+    let entity_terms_dir = prefix_dir.join(layout.entity_terms_rel());
     let mut entity_terms = mosaica_store::EntityTermsWriter::create(&entity_terms_dir)
         .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?;
     for (position, item) in staged.iter().enumerate() {
@@ -1743,7 +1740,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         let scratch = crate::spill::TmpDir::create(&args.out)?;
         let written = crate::unique_index::write_unique_indexes(
             &prefix_dir,
-            shard,
+            layout,
             &args.schema,
             |column| crate::unique_index::UniqueSource::Items(&tiler_items, column),
             scratch.path(),
@@ -1828,7 +1825,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         // path is the equivalence oracle and is not observed, so it drops it.
         let (mut paths, _text) = pipeline::write_filter_postings(
             &prefix_dir,
-            shard,
+            layout,
             &args.schema,
             &by_entity,
             &open_extents,
@@ -1836,7 +1833,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 .unwrap_or_else(pipeline::detect_memory_budget),
         )?;
         paths.extend(pipeline::write_record_blob(
-            &prefix_dir.join(shard.record_rel()),
+            &prefix_dir.join(layout.record_rel()),
             &args.schema,
             tiler_items.len() as u64,
             &routes,
@@ -1923,7 +1920,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         fsync_file(&segment_dir.join(name))?;
     }
 
-    let permutation_path = prefix_dir.join(shard.permutation_rel(&view.view_id));
+    let permutation_path = prefix_dir.join(layout.permutation_rel(&view.view_id));
     let row_order: Vec<EntityId> = entity_ids;
     // `bound` is the partition view's max entity ID + 1. The bootstrap build allocates a dense
     // 0..n, so that is exactly the item count.
@@ -1980,7 +1977,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 &|source| by_source.get(&source).copied(),
                 n,
                 &prefix_dir,
-                shard,
+                layout,
                 std::slice::from_ref(&view.view_id),
                 // The linear build holds its values on the items rather than in typed entity
                 // columns, which is the only thing about the two builds this rule sees.
@@ -2024,7 +2021,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         &mut published_layers,
         &artifact_store,
         &prefix_dir,
-        shard,
+        layout,
         &view.view_id,
         n as u32,
         artifact_tmp.path(),
@@ -2032,8 +2029,12 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     );
     // The containment partitions are not per view, so they are filed once for the prefix. The
     // batched build does the same, and `tests/build_equivalence.rs` holds the two to one bundle.
-    let containment_extents =
-        crate::artifact_pass::containment(&artifact_store, &prefix_dir, shard, &mut derived_index);
+    let containment_extents = crate::artifact_pass::containment(
+        &artifact_store,
+        &prefix_dir,
+        layout,
+        &mut derived_index,
+    );
     drop(artifact_store);
     artifact_tmp.close()?;
     crate::artifact_pass::report(&artifact_pass);
@@ -2060,7 +2061,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         vec![crate::term_images_pass::run(
             &postings,
             &prefix_dir,
-            shard,
+            layout,
             &view.view_id,
             n as u32,
             &mut derived_index,
@@ -2074,12 +2075,12 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // value columns. The streaming build calls the same function at the same point.
     other_paths.push(mosaica_store::field_tallies::derive_view(
         &prefix_dir,
-        shard,
+        layout,
         &view.view_id,
         SEG_ID,
         n as u32,
         &declared_scalars_of(&args.schema),
-        &|name| mosaica_filter::base_numbers(&prefix_dir.join(shard.column_rel(name))),
+        &|name| mosaica_filter::base_numbers(&prefix_dir.join(layout.column_rel(name))),
     )?);
 
     // ---- 9. manifests ------------------------------------------------------------------
@@ -2102,7 +2103,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     other_paths.extend(
         containment_extents
             .iter()
-            .map(|entry| args.out.join(PREFIX).join(&entry.path)),
+            .map(|entry| prefix_dir.join(&entry.path)),
     );
     let mut report = write_manifests(
         args,
@@ -2243,7 +2244,8 @@ fn write_manifests(
     occupancies: &[Occupancy],
     term_images: &[Option<crate::term_images_pass::ViewTermImages>],
 ) -> Result<BuildReport> {
-    let partition_dir = mosaica_store::layout::partition_dir(&args.out.join(PREFIX), PHASH);
+    let prefix_dir = args.out.join(PREFIX);
+    let partition_dir = mosaica_store::layout::partition_dir(&prefix_dir, PHASH);
     // Contracts §2.2 / §2.3 divide the two `files` maps by *when* a file appeared:
     // `MANIFEST.files` covers every file present at build time, and `SEGMENTS-<n>.files` covers
     // only what has been added *since* that manifest was written (streamed segments, later
@@ -2251,7 +2253,6 @@ fn write_manifests(
     // in `MANIFEST.files` and `SEGMENTS-0.json`'s map is legitimately empty. (`open_bundle`
     // accepts a file verified via either map, so both splits load — but the spec's wording is
     // what the Python oracle and the conformance byte-scanner will be written against.)
-    let prefix_dir = args.out.join(PREFIX);
     let mut dict_extents = Vec::new();
     for path in &files.dict_paths {
         dict_extents.push(DictExtent {
@@ -2301,11 +2302,6 @@ fn write_manifests(
         .collect();
     let segments = SegmentsManifest {
         partition: mosaica_store::manifest::PartitionManifest {
-            // The row-less region's mark, and it must be the manifest's: the WAL carries the same
-            // one in its registration records and rotation reclaims those, so a mark that lived
-            // only there is lost at the first rotation and the next registration is handed ids a
-            // live layer already holds. `ROWLESS_CEILING` when the declaration carried no layer,
-            // which is the untouched region rather than a default standing in for a lost value.
             entity_id_low_water: published_layers.low_water,
             layers: published_layers.layers.clone(),
             layer_registry_version: published_layers.registry_version,
@@ -2320,22 +2316,19 @@ fn write_manifests(
                 high_water: n,
                 membership_extents: published_layers.membership_extents.clone(),
                 level_versions: published_layers.level_versions.clone(),
-                // **The post-bundle artifact pass's output** (`crate::artifact_pass`). Empty only
-                // where the build published no artifacts, or where a derived structure would not
-                // compose — each of which leaves the level composing it on first use.
+                // Empty where no artifact was published or a structure would not compose; the
+                // level then composes on first use.
                 derived_extents: published_layers.derived_extents.clone(),
-                // One entry per view that has images, in the order the views were built
-                // (`crate::term_images_pass`). A view with no rows, and a build over a dictionary
-                // with no terms, have none.
+                // One per view with images, in build order; a view with no rows, or a build
+                // with no terms, has none.
                 term_image_extents: term_images
                     .iter()
                     .flatten()
                     .map(|images| images.extent.clone())
                     .collect(),
                 artifact_record_extents: published_layers.artifact_record_extents.clone(),
-                // One per view the build materialised (`views.md` §7), in registry order.
-                // `entity_hi` is inclusive, and an empty build has no entity range at all — hence
-                // the saturating subtraction pass two hands over.
+                // One per view, in registry order. `entity_hi` is inclusive here, exclusive from
+                // pass two; an empty build's saturates to 0.
                 segments: segments_written
                     .iter()
                     .map(|descriptor| SegmentDescriptor {
@@ -2490,8 +2483,11 @@ fn write_manifests(
     // Read back from the files just written, before the manifest is, so a keyword column whose
     // dictionary does not open refuses here rather than after `CURRENT` has moved. The same pass
     // runs at `mosaica verify`, so the two report one set of figures.
-    let keyword_cardinalities =
-        unique_key::keyword_cardinalities(&prefix_dir, &manifest, &[(PHASH, &segments)])?;
+    let keyword_cardinalities = unique_key::keyword_cardinalities(
+        &prefix_dir,
+        &manifest,
+        &[(PHASH, &segments.partition, segments.only_shard())],
+    )?;
     unique_key::report_keyword_cardinalities(&keyword_cardinalities, bundle_bytes);
     // Both bundle artefacts, not written here: MANIFEST.json and CURRENT are pass 5's writers
     // too (compaction §10's rule paragraph — a bundle artefact's writer lives in
@@ -2638,25 +2634,17 @@ fn verified_open(
         }
     }
     // Sorted so two runs over one bundle report the columns in one order.
-    let mut side_manifests: Vec<(&str, SegmentsManifest)> = bundle
+    let mut partitions: Vec<_> = bundle
         .partitions
         .iter()
-        .map(|(phash, data)| (phash.as_str(), data.side_manifest()))
+        .map(|(phash, data)| (phash.as_str(), &data.manifest, &data.only_shard().record))
         .collect();
-    side_manifests.sort_by(|a, b| a.0.cmp(b.0));
-    let partitions: Vec<(&str, &SegmentsManifest)> = side_manifests
-        .iter()
-        .map(|(phash, manifest)| (*phash, manifest))
-        .collect();
+    partitions.sort_by(|a, b| a.0.cmp(b.0));
     let bundle_bytes = bundle
         .manifest
         .files
         .values()
-        .chain(
-            partitions
-                .iter()
-                .flat_map(|(_, segments)| segments.partition.files.values()),
-        )
+        .chain(bundle.partitions.values().flat_map(|data| data.manifest.files.values()))
         .map(|file| file.size)
         .sum();
     let keyword_cardinalities = unique_key::keyword_cardinalities(
@@ -2664,9 +2652,10 @@ fn verified_open(
         &bundle.manifest,
         &partitions,
     )?;
-    let entity_id_high_water = partitions
-        .iter()
-        .map(|(_, segments)| segments.only_shard().high_water)
+    let entity_id_high_water = bundle
+        .partitions
+        .values()
+        .map(|data| data.only_shard().record.high_water)
         .max()
         .unwrap_or(0);
     let report = VerifyReport {
@@ -3331,14 +3320,8 @@ mod tests {
     #[test]
     fn relative_paths_use_forward_slashes() {
         let prefix = Path::new("/bundle/v00000");
-        let path = mosaica_store::layout::partition_dir(prefix, "default").join("SEGMENTS-0.json");
-        assert_eq!(
-            relative_to(prefix, &path).unwrap(),
-            format!(
-                "{}/SEGMENTS-0.json",
-                mosaica_store::layout::partition_rel("default")
-            )
-        );
+        let path = prefix.join("a").join("b").join("c.json");
+        assert_eq!(relative_to(prefix, &path).unwrap(), "a/b/c.json");
     }
 }
 

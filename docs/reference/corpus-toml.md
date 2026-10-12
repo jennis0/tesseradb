@@ -28,7 +28,7 @@ What a block takes when it names no source of its own. `source` reaches a `[[vie
 
 ## `[shards]`
 
-The shard the items are stored in. Each new item, and each edit of an item, takes an id from it, an id a deletion freed first and otherwise one past the shard's high water. Without this table the size is 4,026,531,840. `PUT /control/shards` declares the same table at a running service.
+The shard the items are stored in. Without this table the size is 4,026,531,840. `PUT /control/shards` declares the same table at a running service.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |

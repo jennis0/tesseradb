@@ -365,11 +365,8 @@ pub fn map_accept_error(e: mosaica_engine::AcceptError) -> ApiError {
                     .to_string(),
             )
         }
-        // The detail names the shard's size, its high water and the ids the batch needed. Refused
-        // for the batch alone, before any id was taken.
+        // The detail names the size, the high water and the ids needed.
         AcceptError::Exec(e @ ExecError::ShardFull(_)) => ApiError::Conflict(e.to_string()),
-        // A size of zero is corrected and resent; one below the high water would need a second
-        // shard. Neither took effect.
         AcceptError::Exec(ExecError::ShardSize(e @ mosaica_types::ShardSizeError::Zero)) => {
             ApiError::Contract(e.to_string())
         }

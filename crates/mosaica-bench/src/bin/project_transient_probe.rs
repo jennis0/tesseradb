@@ -318,16 +318,12 @@ fn main() {
         serde_json::from_slice(&std::fs::read(args.bundle.join("CURRENT")).unwrap()).unwrap();
     let prefix_dir = args.bundle.join(&current.prefix);
     let (phash, partition) = bundle.partitions.iter().next().expect("a partition");
-    let row_space = &partition
-        .only_shard()
-        .views
-        .get(&args.view)
-        .expect("the view")
-        .row_space;
+    let shard = partition.only_shard();
+    let row_space = &shard.views.get(&args.view).expect("the view").row_space;
     assert_eq!(row_space.extent_count(), 0, "a bundle with extents");
     let bound = row_space.base().bound();
     let total_rows = row_space.total_rows();
-    let layout = mosaica_store::ShardLayout::new(phash, partition.only_shard().record.id);
+    let layout = mosaica_store::ShardLayout::new(phash, shard.record.id);
     eprintln!("bound {bound}, total_rows {total_rows}, opened in {open_s:.1} s");
     if args.term_images.is_some() {
         term_images(&args, row_space, &prefix_dir, layout);

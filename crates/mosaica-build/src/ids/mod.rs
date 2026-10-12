@@ -566,14 +566,12 @@ impl Limited {
 /// The most items a build numbers: the codes above it are the numbering's own.
 pub(crate) const ITEMS_MAX: u64 = u32::MAX as u64 - 4;
 
-/// Refuse a build whose files create `items` items where its shard of `size` holds fewer, before
-/// the number past the last is written: [`mosaica_types::check_room`] from a high water of 0, the
-/// ids ending at [`ITEMS_MAX`].
+/// Refuses a build whose files create `items` items, past a shard of `size` or [`ITEMS_MAX`];
+/// called before the item past the last is numbered.
 pub(crate) fn check_cap(items: u64, size: u64) -> Result<()> {
     use mosaica_types::ShardLimit;
-    let full = match mosaica_types::check_room(size, ITEMS_MAX, 0, items) {
-        Ok(()) => return Ok(()),
-        Err(full) => full,
+    let Err(full) = mosaica_types::check_room(size, ITEMS_MAX, 0, items) else {
+        return Ok(());
     };
     Err(BuildError::Invalid(match full.limit {
         ShardLimit::Size(size) => format!(
