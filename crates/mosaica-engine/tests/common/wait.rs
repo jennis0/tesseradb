@@ -81,3 +81,9 @@ pub fn tick(engine: &Engine) {
         || engine.write_executor_stats().ticks != before,
     );
 }
+
+/// Two ticks: the first seals the log member holding the records, the second reclaims it.
+pub fn reclaim_log(engine: &Engine) {
+    tick(engine);
+    tick(engine);
+}

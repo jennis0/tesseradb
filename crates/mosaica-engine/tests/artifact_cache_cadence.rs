@@ -67,17 +67,6 @@ fn treed(name: &str) -> LayerDeclaration {
 }
 
 impl Fixture {
-    fn open(&self) -> Engine {
-        let engine = open_engine_publishing(&self.root, &self.cache, &self.wal);
-        engine.set_background_refresh_for_test(false);
-        engine
-    }
-
-    fn members(&self, source_ids: std::ops::Range<u64>) -> Vec<EntityId> {
-        let map = source_to_new_map(&self.root, "v00000");
-        source_ids.map(|s| EntityId::new(map[&s])).collect()
-    }
-
     fn member(&self, source_id: u64) -> EntityId {
         self.members(source_id..source_id + 1)[0]
     }
@@ -126,7 +115,7 @@ fn served(engine: &Engine, layer: &str) -> Vec<(String, u64)> {
 #[test]
 fn a_write_to_one_layer_leaves_another_layers_row_form_alone() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.register_layer(flat("clusters/a")).unwrap();
     engine.register_layer(flat("clusters/b")).unwrap();
     publish(
@@ -198,7 +187,7 @@ fn a_write_to_one_layer_leaves_another_layers_row_form_alone() {
 #[test]
 fn a_publication_into_a_new_layer_rebuilds_only_its_own_level() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.register_layer(flat("clusters/a")).unwrap();
     publish(
         &engine,
@@ -236,7 +225,7 @@ fn a_publication_into_a_new_layer_rebuilds_only_its_own_level() {
 #[test]
 fn two_requests_over_one_tree_derive_its_lineage_once() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.register_layer(treed("clusters/tree")).unwrap();
     publish(
         &engine,
@@ -275,7 +264,7 @@ fn two_requests_over_one_tree_derive_its_lineage_once() {
 #[test]
 fn a_publication_that_adds_an_edge_is_in_the_next_requests_cut() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.register_layer(treed("clusters/tree")).unwrap();
     publish(
         &engine,
@@ -309,18 +298,16 @@ fn a_publication_that_adds_an_edge_is_in_the_next_requests_cut() {
 
 /// **A dropped layer's derived structures leave both caches, and nobody else's do.**
 ///
-/// Retention rather than correctness — a name registered again is another layer, whose levels'
-/// versions continue past the dropped one's, so a form left behind is never served — but it is
-/// retention that does not come back: neither cache had a removal path, so each was bounded by the
-/// `(view, layer, level)` triples the process had ever seen rather than the ones it holds, and at
-/// the campaign's target a level's row form is gigabytes.
+/// Retention rather than correctness: a name registered again continues its levels' versions, so a
+/// left-behind form is never served, but without removal neither cache would shrink below every
+/// `(view, layer, level)` the process has seen.
 ///
 /// The layer beside it is the half that makes the assertion mean anything: `forget` has to be a
 /// scalpel, and a cache cleared wholesale would pass a test that only counted the drop.
 #[test]
 fn dropping_a_layer_takes_its_row_form_and_its_lineage_with_it() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.register_layer(flat("clusters/a")).unwrap();
     engine.register_layer(treed("clusters/tree")).unwrap();
     publish(
@@ -387,7 +374,7 @@ fn dropping_a_layer_takes_its_row_form_and_its_lineage_with_it() {
 #[test]
 fn a_fold_rebuilds_every_row_form_and_only_the_lineages_it_moved() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.register_layer(flat("clusters/a")).unwrap();
     engine.register_layer(treed("clusters/tree")).unwrap();
     publish(
@@ -512,7 +499,7 @@ fn shape_of(
 #[test]
 fn a_pan_derives_each_shape_once_and_re_serves_it() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.register_layer(hulled("clusters/a")).unwrap();
     publish(
         &engine,
@@ -552,7 +539,7 @@ fn a_pan_derives_each_shape_once_and_re_serves_it() {
 #[test]
 fn a_write_re_derives_the_shape_it_moved() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.register_layer(hulled("clusters/a")).unwrap();
     publish(&engine, "clusters/a", vec![node(&fx, "c0", None, 0..200)]);
 
@@ -587,7 +574,7 @@ fn a_write_re_derives_the_shape_it_moved() {
 #[test]
 fn two_principals_over_one_artifact_get_two_shapes() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.register_layer(hulled("clusters/a")).unwrap();
     publish(&engine, "clusters/a", vec![node(&fx, "c0", None, 0..600)]);
 
@@ -629,7 +616,7 @@ fn row_major(name: &str) -> LayerDeclaration {
 /// is held for. The background fill is
 /// off so every entry below is one a request made.
 fn pruning_fixture(fx: &Fixture) -> Engine {
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.set_occupancy_stage_for_test(false);
     engine.register_layer(row_major("clusters/counts")).unwrap();
     engine.register_layer(hulled("clusters/shapes")).unwrap();

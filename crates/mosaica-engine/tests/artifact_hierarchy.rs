@@ -69,17 +69,6 @@ fn declaration(
     }
 }
 
-impl Fixture {
-    fn open(&self) -> Engine {
-        open_engine_publishing(&self.root, &self.cache, &self.wal)
-    }
-
-    fn members(&self, source_ids: impl Iterator<Item = u64>) -> Vec<EntityId> {
-        let map = source_to_new_map(&self.root, "v00000");
-        source_ids.map(|s| EntityId::new(map[&s])).collect()
-    }
-}
-
 /// One node of a planted tree: a key, its parent's key, and the source ids it holds.
 fn node(
     fx: &Fixture,
@@ -384,16 +373,14 @@ fn a_suppressed_parent_does_not_take_its_child_with_it() {
         vec!["leaf", "other"]
     );
 
-    // The root's own entity, which is what a suppression addresses. Two leaves do not fit in a
+    // The root's own target, which is what a suppression addresses. Two leaves do not fit in a
     // budget of one, so this cut is the root alone — which is how the test names it without an
     // ordinal, none of which crosses the boundary.
     let served = artifacts_of(&engine, &credential, Some(1));
     assert_eq!(keys(&served), vec!["root"]);
-    let root_entity = engine
-        .resolve_targets(&[served[0].mosaica_id]).unwrap()[0]
-        .expect("it names what was issued");
+    let root = artifact_target(&engine, served[0].mosaica_id);
     engine
-        .accept_changes(vec![(root_entity, mosaica_lifecycle::wal::ChangeOp::Suppress)])
+        .accept_changes(vec![(root, mosaica_lifecycle::wal::ChangeOp::Suppress)])
         .expect("the suppress is accepted");
 
     assert_eq!(
@@ -444,12 +431,10 @@ fn a_deleted_parent_leaves_its_child_a_root() {
     let credential = full_coverage_credential();
     let served = artifacts_of(&engine, &credential, Some(1));
     assert_eq!(keys(&served), vec!["root"]);
-    let root_entity = engine
-        .resolve_targets(&[served[0].mosaica_id]).unwrap()[0]
-        .expect("it names what was issued");
+    let root = artifact_target(&engine, served[0].mosaica_id);
 
     engine
-        .accept_changes(vec![(root_entity, mosaica_lifecycle::wal::ChangeOp::Delete)])
+        .accept_changes(vec![(root, mosaica_lifecycle::wal::ChangeOp::Delete)])
         .expect("the delete is accepted");
     assert_eq!(
         keys(&artifacts_of(&engine, &credential, None)),

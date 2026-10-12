@@ -1,5 +1,5 @@
-//! Stage 1's check: an empty layer exists, is reachable or not by gate, can be suppressed
-//! immediately and dropped — and all of it survives a restart.
+//! An empty layer exists, is reachable or not by gate, can be suppressed immediately and dropped,
+//! and all of it survives a restart.
 //!
 //! The four assertions here are the ones the artifact delivery plan names, and each fails a
 //! different way when it is wrong. The reachability one is the disclosure assertion: a layer whose
@@ -53,19 +53,6 @@ fn reachable(engine: &Engine, credential: &[u8]) -> Vec<String> {
         .collect()
 }
 
-/// Invert a layer's `mosaica_id` the way `/control/changes` does — through the admin plane's own
-/// resolver, so this exercises the routing rather than going round it.
-fn layer_entity(engine: &Engine, id: mosaica_types::MosaicaId) -> mosaica_types::Target {
-    engine.resolve_targets(&[id]).unwrap()[0]
-        .expect("a layer identifier names the entity this deployment issued for it")
-}
-
-impl Fixture {
-    fn open(&self) -> Engine {
-        open_engine_publishing(&self.root, &self.cache, &self.wal)
-    }
-}
-
 /// **The disclosure assertion.** A layer gated on a term the principal does not hold must be
 /// exactly as absent as a layer nobody registered — and the registry answers both with one probe of
 /// the same set, so there is no branch that could take a different amount of time.
@@ -114,9 +101,9 @@ fn suppressing_a_layers_entity_removes_it_at_the_ack() {
         .expect("registers");
     assert_eq!(reachable(&engine, &full_coverage_credential()).len(), 1);
 
-    let entity = layer_entity(&engine, id);
+    let target = artifact_target(&engine, id);
     engine
-        .accept_changes(vec![(entity, ChangeOp::Suppress)])
+        .accept_changes(vec![(target, ChangeOp::Suppress)])
         .expect("a layer suppression is an ordinary change");
 
     assert!(
@@ -125,7 +112,7 @@ fn suppressing_a_layers_entity_removes_it_at_the_ack() {
     );
 
     // And it comes back, because a suppression is the reversible one of the two removal rules.
-    engine.accept_changes(vec![(entity, ChangeOp::Unsuppress)]).unwrap();
+    engine.accept_changes(vec![(target, ChangeOp::Unsuppress)]).unwrap();
     assert_eq!(reachable(&engine, &full_coverage_credential()).len(), 1);
 }
 
@@ -142,8 +129,8 @@ fn a_registration_and_its_suppression_survive_a_restart_through_the_wal() {
         let gated = engine
             .register_layer(declaration("clusters/gated", Some("1")))
             .unwrap();
-        let entity = layer_entity(&engine, id);
-        engine.accept_changes(vec![(entity, ChangeOp::Suppress)]).unwrap();
+        let target = artifact_target(&engine, id);
+        engine.accept_changes(vec![(target, ChangeOp::Suppress)]).unwrap();
         (id, gated)
     };
 
@@ -162,8 +149,8 @@ fn a_registration_and_its_suppression_survive_a_restart_through_the_wal() {
 
     // The identifier is stable across the restart, which is what makes a held bookmark work, and
     // the next registration is given another.
-    let entity = layer_entity(&engine, id);
-    engine.accept_changes(vec![(entity, ChangeOp::Unsuppress)]).unwrap();
+    let target = artifact_target(&engine, id);
+    engine.accept_changes(vec![(target, ChangeOp::Unsuppress)]).unwrap();
     assert_eq!(
         reachable(&engine, &full_coverage_credential()),
         vec!["clusters/a".to_string()]
@@ -179,16 +166,16 @@ fn a_registration_and_its_suppression_survive_a_restart_through_the_wal() {
 #[test]
 fn registering_a_layer_takes_no_point_id_and_its_space_is_not_given_again() {
     let fx = fixture();
-    let (high, spaces) = {
+    let (high, layers) = {
         let engine = fx.open();
         let before = engine.allocator_high_water();
-        let spaces: Vec<Target> = ["a", "b", "c"]
+        let layers: Vec<Target> = ["a", "b", "c"]
             .iter()
             .map(|name| {
                 let id = engine
                     .register_layer(declaration(&format!("clusters/{name}"), None))
                     .unwrap();
-                layer_entity(&engine, id)
+                artifact_target(&engine, id)
             })
             .collect();
         assert_eq!(
@@ -196,7 +183,7 @@ fn registering_a_layer_takes_no_point_id_and_its_space_is_not_given_again() {
             before,
             "registering a layer allocates no point ids"
         );
-        (engine.allocator_high_water(), spaces)
+        (engine.allocator_high_water(), layers)
     };
 
     let engine = fx.open();
@@ -204,8 +191,8 @@ fn registering_a_layer_takes_no_point_id_and_its_space_is_not_given_again() {
     let id = engine
         .register_layer(declaration("clusters/d", None))
         .unwrap();
-    let fourth = layer_entity(&engine, id);
-    assert!(!spaces.contains(&fourth));
+    let fourth = artifact_target(&engine, id);
+    assert!(!layers.contains(&fourth));
     assert_eq!(fourth, Target::Artifact(LayerSpace::new(3).unwrap(), LAYER_ENTITY));
 }
 
@@ -234,7 +221,7 @@ fn an_incoherent_declaration_is_refused_with_nothing_spent() {
         .register_layer(declaration("clusters/good", None))
         .unwrap();
     assert_eq!(
-        layer_entity(&engine, id),
+        artifact_target(&engine, id),
         Target::Artifact(LayerSpace::ZERO, LAYER_ENTITY),
         "a refusal spends no space: every check runs before one is given"
     );

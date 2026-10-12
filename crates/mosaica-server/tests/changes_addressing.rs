@@ -45,17 +45,6 @@ async fn a_drawn_mosaica_id(server: &TestServer, token: &str) -> u64 {
     points.first().expect("the fixture draws points").0
 }
 
-async fn post_changes(server: &TestServer, body: &serde_json::Value) -> reqwest::Response {
-    server
-        .client
-        .post(server.control_url("/control/changes"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(body)
-        .send()
-        .await
-        .unwrap()
-}
-
 /// Ingest one item holding no unique value and return the `mosaica_id` the 200 carried: the only
 /// name that item has.
 async fn ingest_anonymous(server: &TestServer, batch_id: &str) -> u64 {

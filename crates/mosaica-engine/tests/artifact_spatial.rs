@@ -585,9 +585,9 @@ fn a_deny_reaches_a_boundary_and_its_members() {
     );
 
     // And the artifact's own entity: suppressed, it is absent whole.
-    let id = served_id(&engine, grant, &key);
+    let target = served_target(&engine, grant, &key);
     engine
-        .accept_changes(vec![(id, ChangeOp::Suppress)])
+        .accept_changes(vec![(target, ChangeOp::Suppress)])
         .expect("an artifact's own suppression is accepted");
     assert!(
         !served(&engine, grant, 0, WHOLE_MAP).contains_key(&key),
@@ -595,9 +595,9 @@ fn a_deny_reaches_a_boundary_and_its_members() {
     );
 }
 
-/// The entity behind a served artifact, found by asking the identifier route to resolve what the
+/// The target behind a served artifact, found by asking the identifier route to resolve what the
 /// viewport handed out — the same address a suppression names.
-fn served_id(engine: &Engine, grant: &str, key: &str) -> mosaica_types::Target {
+fn served_target(engine: &Engine, grant: &str, key: &str) -> mosaica_types::Target {
     let session = engine.authorise(&grant_credential(grant)).unwrap();
     let names = [LAYER, POLYGONS];
     let mut request = mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX);
@@ -609,11 +609,7 @@ fn served_id(engine: &Engine, grant: &str, key: &str) -> mosaica_types::Target {
         .into_iter()
         .find(|artifact| artifact.key.as_deref() == Some(key))
         .expect("the key is served");
-    // Inverted through the admin plane's own resolver, the way `/control/changes` does — so the
-    // suppression below exercises the misdirection guard rather than going round it.
-    engine
-        .resolve_targets(&[row.mosaica_id]).unwrap()[0]
-        .expect("an artifact identifier names the entity this deployment issued for it")
+    artifact_target(engine, row.mosaica_id)
 }
 
 /// **An absolute criterion fires on a shape exactly as it does on a stored set.** The number tested

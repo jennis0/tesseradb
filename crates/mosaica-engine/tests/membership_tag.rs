@@ -390,7 +390,7 @@ fn labels_tag_points_as_the_walk_does_through_growth_ingest_fold_and_suppression
     assert!(column(&before, TIERED).contains(&Some(r1)));
     assert!(column(&before, FLAT).contains(&Some(f2)));
     for id in [r1, f2] {
-        let target = artifact_entity(&engine, mosaica_types::MosaicaId::new(id));
+        let target = artifact_target(&engine, mosaica_types::MosaicaId::new(id));
         engine
             .accept_changes(vec![(target, ChangeOp::Suppress)])
             .unwrap();

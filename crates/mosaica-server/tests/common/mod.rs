@@ -1344,6 +1344,70 @@ pub async fn put_layer(
     (status, resp.json().await.unwrap_or(serde_json::Value::Null))
 }
 
+/// `DELETE /control/layers/{name}`: the status and the body.
+pub async fn drop_layer(server: &TestServer, name: &str) -> (u16, serde_json::Value) {
+    let encoded = name.replace('/', "%2F");
+    let resp = server
+        .client
+        .delete(server.control_url(&format!("/control/layers/{encoded}")))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or_default())
+}
+
+/// `PUT /control/layers/{layer}/artifacts{query}` with `body`: the status and the body, or null
+/// where there is none.
+pub async fn publish(
+    server: &TestServer,
+    layer: &str,
+    query: &str,
+    body: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    // A layer name is path-shaped, so its slash is percent-encoded into the one path segment the
+    // route captures.
+    let encoded = layer.replace('/', "%2F");
+    let resp = server
+        .client
+        .put(server.control_url(&format!("/control/layers/{encoded}/artifacts{query}")))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(serde_json::Value::Null))
+}
+
+/// `POST /control/changes` with `body`.
+pub async fn post_changes(server: &TestServer, body: &serde_json::Value) -> reqwest::Response {
+    server
+        .client
+        .post(server.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(body)
+        .send()
+        .await
+        .unwrap()
+}
+
+/// The layers `/v1/meta` lists for a principal holding `terms`.
+pub async fn meta_layers(server: &TestServer, terms: &[&str]) -> Vec<serde_json::Value> {
+    let token = token_for(server, terms).await;
+    let resp = server
+        .client
+        .get(server.viewer_url("/v1/meta"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    body["layers"].as_array().cloned().unwrap_or_default()
+}
+
 /// Register the layer `declaration` names, failing the test unless it is created.
 pub async fn register(server: &TestServer, declaration: serde_json::Value) {
     let (status, body) = put_layer(server, declaration).await;
@@ -1596,12 +1660,15 @@ pub fn ingested_ids(answer: &serde_json::Value) -> Vec<u64> {
         .as_array()
         .unwrap_or_else(|| panic!("the ingest answer carries mosaica_ids: {answer}"))
         .iter()
-        .map(|id| {
-            id.as_str()
-                .and_then(|digits| digits.parse().ok())
-                .unwrap_or_else(|| panic!("{id} is not a mosaica_id as a decimal string"))
-        })
+        .map(parse_id)
         .collect()
+}
+
+/// A `mosaica_id` as the wire sends it. Panics unless it is a decimal string.
+pub fn parse_id(id: &serde_json::Value) -> u64 {
+    id.as_str()
+        .and_then(|digits| digits.parse().ok())
+        .unwrap_or_else(|| panic!("{id} is not a mosaica_id as a decimal string"))
 }
 
 /// `POST /v1/items/{mosaica_id}` with no body fields set.
@@ -1611,6 +1678,23 @@ pub async fn post_item(server: &TestServer, token: &str, mosaica_id: u64) -> req
         .post(server.viewer_url(&format!("/v1/items/{mosaica_id}")))
         .bearer_auth(token)
         .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap()
+}
+
+/// `POST /v1/artifacts/{mosaica_id}` in `view`.
+pub async fn post_artifact(
+    server: &TestServer,
+    token: &str,
+    mosaica_id: u64,
+    view: &str,
+) -> reqwest::Response {
+    server
+        .client
+        .post(server.viewer_url(&format!("/v1/artifacts/{mosaica_id}")))
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "view": view }))
         .send()
         .await
         .unwrap()

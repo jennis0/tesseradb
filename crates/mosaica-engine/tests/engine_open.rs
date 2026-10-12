@@ -37,8 +37,8 @@ fn engine_open_seeds_the_allocator_from_the_manifest_high_water() {
 }
 
 /// S6: `Allocator::try_new`'s own doc calls it "the check that belongs at open", and `Engine::open`
-/// is open — it must refuse a seed past `u32::MAX`, where a shard's ids end, before any ingest, rather than let the
-/// first allocation surface it as an opaque exhaustion error. The seed comes from durable state
+/// is open — it must refuse a seed past `u32::MAX` before any ingest, rather than let the first
+/// allocation surface it as an opaque exhaustion error. The seed comes from durable state
 /// this process did not write (MANIFEST's high-water, or a replayed WAL lease), so a hand-edited or
 /// corrupt value has to fail closed here.
 #[test]

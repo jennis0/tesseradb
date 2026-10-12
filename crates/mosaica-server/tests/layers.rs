@@ -16,21 +16,6 @@ use common::*;
 use serde_json::json;
 use tempfile::TempDir;
 
-async fn meta_layers(server: &TestServer, terms: &[&str]) -> Vec<serde_json::Value> {
-    let auth = authorise(server, terms).await;
-    let token = auth["token"].as_str().unwrap();
-    let resp = server
-        .client
-        .get(server.viewer_url("/v1/meta"))
-        .bearer_auth(token)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    body["layers"].as_array().cloned().unwrap_or_default()
-}
-
 /// The minimum a declaration needs. `artifact_visibility` has no default, deliberately, so it is
 /// spelled out at every call — that field decides whether an artifact's existence derives from its
 /// members' visibility or from its own label, and a default would let a corpus-derived layer
@@ -169,7 +154,7 @@ async fn a_dropped_name_is_gone_from_meta_and_registers_again() {
     assert_eq!(meta_layers(&server, &["0"]).await.len(), 1);
 
     // 200 with a body, since every write acknowledgement carries its publication number.
-    let (status, body) = drop_layer(&server, "clusters%2Fa").await;
+    let (status, body) = drop_layer(&server, "clusters/a").await;
     assert_eq!(status, 200, "{body}");
     assert!(
         body["publication"].as_u64().is_some(),
@@ -177,7 +162,7 @@ async fn a_dropped_name_is_gone_from_meta_and_registers_again() {
     );
     assert!(meta_layers(&server, &["0"]).await.is_empty());
     // No live layer holds the name, so a second drop finds nothing.
-    let (status, body) = drop_layer(&server, "clusters%2Fa").await;
+    let (status, body) = drop_layer(&server, "clusters/a").await;
     assert_eq!(status, 422, "{body}");
     assert_eq!(body["error"], "contract", "{body}");
 
@@ -185,19 +170,6 @@ async fn a_dropped_name_is_gone_from_meta_and_registers_again() {
     assert_eq!(status, 201, "{again}");
     assert_ne!(again["mosaica_id"], first["mosaica_id"]);
     assert_eq!(meta_layers(&server, &["0"]).await.len(), 1);
-}
-
-/// `DELETE /control/layers/{name}`: the status and the body.
-async fn drop_layer(server: &TestServer, encoded: &str) -> (u16, serde_json::Value) {
-    let resp = server
-        .client
-        .delete(server.control_url(&format!("/control/layers/{encoded}")))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    let status = resp.status().as_u16();
-    (status, resp.json().await.unwrap_or_default())
 }
 
 /// Each layer's `/v1/meta` version as `(name, version)`.
@@ -216,7 +188,7 @@ async fn register_grown(server: &TestServer, name: &str) {
     let artifacts = json!({
         "artifacts": [{ "key": "c0", "members": members([0, 1, 2]) }]
     });
-    assert_eq!(publish(server, name, artifacts).await.0, 201);
+    assert_eq!(publish(server, name, "", artifacts).await.0, 201);
     let route = format!("/control/layers/{}/artifacts", name.replace('/', "%2F"));
     let grown = server
         .client
@@ -262,7 +234,7 @@ async fn a_restart_after_a_drop_leaves_every_layer_version_where_it_was() {
     let server = serve_standard(&tmp).await;
     register_grown(&server, "clusters/a").await;
     register_grown(&server, "clusters/b").await;
-    assert_eq!(drop_layer(&server, "clusters%2Fa").await.0, 200);
+    assert_eq!(drop_layer(&server, "clusters/a").await.0, 200);
     register_grown(&server, "clusters/c").await;
     assert_eq!(layer_versions(&server).await.len(), 2);
     assert_versions_survive_restarts(server, &tmp).await;
@@ -333,7 +305,7 @@ async fn crash_before_the_manifest_naming_a_new_layer(fold: bool) -> (Vec<(Strin
     let (server, faults) = serve_with_faults(&tmp).await;
     register(&server, declaration("clusters/a", None)).await;
     register(&server, declaration("clusters/b", None)).await;
-    assert_eq!(drop_layer(&server, "clusters%2Fb").await.0, 200);
+    assert_eq!(drop_layer(&server, "clusters/b").await.0, 200);
     if fold {
         flush_and_fold(&server, None).await;
     }
@@ -395,7 +367,7 @@ async fn a_registration_after_a_restart_takes_the_next_version() {
         let mut server = serve_standard(&tmp).await;
         register(&server, declaration("clusters/a", None)).await;
         register(&server, declaration("clusters/b", None)).await;
-        assert_eq!(drop_layer(&server, "clusters%2Fb").await.0, 200);
+        assert_eq!(drop_layer(&server, "clusters/b").await.0, 200);
         if restart_first {
             server = restart(server, &tmp).await;
         }
@@ -406,26 +378,6 @@ async fn a_registration_after_a_restart_takes_the_next_version() {
 }
 
 // ---- publication -------------------------------------------------------------------------------
-
-async fn publish(
-    server: &TestServer,
-    layer: &str,
-    body: serde_json::Value,
-) -> (u16, serde_json::Value) {
-    // A layer name is path-shaped, so its slash is percent-encoded into the one path segment the
-    // route captures — the same encoding the drop route already takes.
-    let encoded = layer.replace('/', "%2F");
-    let resp = server
-        .client
-        .put(server.control_url(&format!("/control/layers/{encoded}/artifacts")))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&body)
-        .send()
-        .await
-        .unwrap();
-    let status = resp.status().as_u16();
-    (status, resp.json().await.unwrap_or(serde_json::Value::Null))
-}
 
 /// The publication round trip, and the fields the response must not carry.
 ///
@@ -443,6 +395,7 @@ async fn publishing_artifacts_returns_an_identifier_each_and_never_an_ordinal() 
     let (status, body) = publish(
         &server,
         "clusters/a",
+        "",
         json!({
             "artifacts": [
                 { "key": "c0", "members": members([0, 1, 2]) },
@@ -483,21 +436,18 @@ async fn an_unresolvable_member_refuses_the_whole_batch() {
     let server = serve_standard(&tmp).await;
     register(&server, declaration("clusters/a", None)).await;
 
-    let resp = server
-        .client
-        .put(server.control_url("/control/layers/clusters%2Fa/artifacts?strict=true"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({
+    let (status, body) = publish(
+        &server,
+        "clusters/a",
+        "?strict=true",
+        json!({
             "artifacts": [
                 { "key": "c0", "members": members([0]) },
                 { "key": "c1", "members": members([1, u64::MAX]) },
             ]
-        }))
-        .send()
-        .await
-        .unwrap();
-    let status = resp.status().as_u16();
-    let body: serde_json::Value = resp.json().await.unwrap();
+        }),
+    )
+    .await;
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["error"], "unknown", "{body}");
     // Member 1 of artifact 1, the coordinate the caller's pipeline holds, and no other number.
@@ -528,6 +478,7 @@ async fn publishing_into_a_layer_that_does_not_take_artifacts_is_a_422() {
     let (status, body) = publish(
         &server,
         "regions/uk",
+        "",
         json!({
             "artifacts": [{ "key": "c0", "members": members([0]) }]
         }),
@@ -540,6 +491,7 @@ async fn publishing_into_a_layer_that_does_not_take_artifacts_is_a_422() {
     let (status, _) = publish(
         &server,
         "clusters/never",
+        "",
         json!({
             "artifacts": [{ "key": "c0", "members": members([0]) }]
         }),
@@ -569,7 +521,7 @@ async fn viewport_artifacts(
 
 /// The drawn shape of one artifact as `principal` is served it by its identifier.
 async fn drawn(server: &TestServer, terms: &[&str], mosaica_id: u64) -> Vec<Vec<Vec<[u32; 2]>>> {
-    let (status, body) = drill(server, terms, &mosaica_id.to_string()).await;
+    let (status, body) = drill(server, terms, mosaica_id).await;
     assert_eq!(status, 200, "{body}");
     serde_json::from_value(body["shape"].clone()).expect("a drawn shape")
 }
@@ -590,6 +542,7 @@ async fn the_artifacts_frame_carries_a_masked_count_and_no_unmasked_quantity() {
     let (status, body) = publish(
         &server,
         "clusters/a",
+        "",
         json!({
             "artifacts": [{ "key": "c0", "members": members }]
         }),
@@ -637,6 +590,7 @@ async fn a_response_with_no_artifacts_carries_no_artifacts_frame() {
     publish(
         &server,
         "clusters/a",
+        "",
         json!({
             "artifacts": [{ "key": "c0", "members": members([0, 1]) }]
         }),
@@ -672,6 +626,7 @@ async fn the_artifact_budget_is_accepted_and_never_met_by_sampling() {
     publish(
         &server,
         "clusters/a",
+        "",
         json!({
             "artifacts": [
                 { "key": "c0", "members": members([0, 3]) },
@@ -722,6 +677,7 @@ async fn the_artifacts_frame_serves_a_level_largest_first() {
         let (status, body) = publish(
             &server,
             "clusters/a",
+            "",
             json!({ "artifacts": artifacts }),
         )
         .await;
@@ -745,17 +701,9 @@ async fn the_artifacts_frame_serves_a_level_largest_first() {
     assert_eq!(order(viewport_artifacts(&server, &["0"], json!({})).await.unwrap()), first);
 }
 
-async fn drill(server: &TestServer, terms: &[&str], mosaica_id: &str) -> (u16, serde_json::Value) {
-    let auth = authorise(server, terms).await;
-    let token = auth["token"].as_str().unwrap();
-    let resp = server
-        .client
-        .post(server.viewer_url(&format!("/v1/artifacts/{mosaica_id}")))
-        .bearer_auth(token)
-        .json(&json!({ "view": "s0" }))
-        .send()
-        .await
-        .unwrap();
+async fn drill(server: &TestServer, terms: &[&str], mosaica_id: u64) -> (u16, serde_json::Value) {
+    let token = token_for(server, terms).await;
+    let resp = post_artifact(server, &token, mosaica_id, "s0").await;
     let status = resp.status().as_u16();
     (status, resp.json().await.unwrap_or(serde_json::Value::Null))
 }
@@ -777,6 +725,7 @@ async fn drilling_down_on_an_artifact_agrees_with_the_viewport_and_withholds_ide
     let (status, _) = publish(
         &server,
         "clusters/a",
+        "",
         json!({
             "artifacts": [{ "key": "c0", "members": members }]
         }),
@@ -788,9 +737,9 @@ async fn drilling_down_on_an_artifact_agrees_with_the_viewport_and_withholds_ide
         .await
         .unwrap();
     assert_eq!(served.len(), 1);
-    let id = served[0].mosaica_id.to_string();
+    let id = served[0].mosaica_id;
 
-    let (status, body) = drill(&server, &["0"], &id).await;
+    let (status, body) = drill(&server, &["0"], id).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["layer"], "clusters/a");
     assert_eq!(body["key"], "c0");
@@ -806,9 +755,9 @@ async fn drilling_down_on_an_artifact_agrees_with_the_viewport_and_withholds_ide
 
     // Below its criterion for this principal: `404`, and the same `404` a never-issued identifier
     // gets. A held identifier is not a way round the criterion.
-    let (status, withheld) = drill(&server, &["1"], &id).await;
+    let (status, withheld) = drill(&server, &["1"], id).await;
     assert_eq!(status, 404, "{withheld}");
-    let (nonexistent_status, nonexistent) = drill(&server, &["0"], "123456789").await;
+    let (nonexistent_status, nonexistent) = drill(&server, &["0"], 123_456_789).await;
     assert_eq!(nonexistent_status, 404);
     assert_eq!(
         withheld, nonexistent,
@@ -835,6 +784,7 @@ async fn the_artifacts_frame_carries_geometry_computed_for_the_asking_principal(
     let (status, body) = publish(
         &server,
         "clusters/a",
+        "",
         json!({
             "artifacts": [{ "key": "c0", "members": members }]
         }),
@@ -910,6 +860,7 @@ async fn plant_three_levels(server: &TestServer) {
         let (status, body) = publish(
             server,
             "admin/boundaries",
+            "",
             json!({
                 "level": level,
                 "artifacts": [{ "key": key, "members": members }]
@@ -1036,6 +987,7 @@ async fn one_cluster(server: &TestServer) {
     let (status, body) = publish(
         server,
         "clusters/a",
+        "",
         json!({
             "artifacts": [{ "key": "c0", "members": members }]
         }),
@@ -1133,7 +1085,7 @@ async fn the_drill_down_carries_the_hull_the_tiles_do_not() {
 
     let row = computed_row(&server, json!({ "computed": ["centroid"] })).await;
 
-    let (status, body) = drill(&server, &["0"], &row.mosaica_id.to_string()).await;
+    let (status, body) = drill(&server, &["0"], row.mosaica_id).await;
     assert_eq!(status, 200, "{body}");
     let rings = body["shape"]
         .as_array()
@@ -1229,6 +1181,7 @@ async fn a_predicate_shape_is_served_when_asked_and_is_the_same_for_every_princi
     let (status, body) = publish(
         &server,
         "boundaries/b",
+        "",
         json!({ "artifacts": [{ "key": "sw", "members": {}, "wkt": SQUARE }] }),
     )
     .await;
@@ -1280,6 +1233,7 @@ async fn a_shape_published_into_a_warm_level_is_served() {
     let (status, body) = publish(
         &server,
         "boundaries/b",
+        "",
         json!({ "artifacts": [{ "key": "sw", "members": {}, "wkt": SQUARE }] }),
     )
     .await;
@@ -1293,6 +1247,7 @@ async fn a_shape_published_into_a_warm_level_is_served() {
     let (status, body) = publish(
         &server,
         "boundaries/b",
+        "",
         json!({ "artifacts": [{ "key": "ne", "members": {}, "wkt": NE_SQUARE }] }),
     )
     .await;
@@ -1359,6 +1314,7 @@ async fn an_authored_polygon_content_is_canonicalised_at_publication_and_served_
     let (status, body) = publish(
         &server,
         "clusters/drawn",
+        "",
         json!({
             "artifacts": [{ "key": "c0", "members": members, "content": [{ "values": ["a name", "not a polygon"] }] }]
         }),
@@ -1370,6 +1326,7 @@ async fn an_authored_polygon_content_is_canonicalised_at_publication_and_served_
     let (status, body) = publish(
         &server,
         "clusters/drawn",
+        "",
         json!({
             "artifacts": [{ "key": "c0", "members": members, "content": [{ "values": ["a name", SQUARE] }] }]
         }),
@@ -1385,7 +1342,7 @@ async fn an_authored_polygon_content_is_canonicalised_at_publication_and_served_
 
     // The drill-down: the text in its slot, the shape's slot blank — the geometry travels as
     // rings under `shape` and never as the string.
-    let (status, body) = drill(&server, &["0"], &rows[0].mosaica_id.to_string()).await;
+    let (status, body) = drill(&server, &["0"], rows[0].mosaica_id).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["content"], json!(["a name", ""]));
     assert_eq!(body["shape"][0].as_array().map(Vec::len), Some(2));

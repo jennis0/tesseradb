@@ -2660,7 +2660,7 @@ fn a_resumed_table_lists_only_the_artifacts_it_chose() {
         Some(ids["t2"].raw().to_string())
     );
     engine
-        .accept_changes(vec![(artifact_entity(engine, ids["t0"]), ChangeOp::Delete)])
+        .accept_changes(vec![(artifact_target(engine, ids["t0"]), ChangeOp::Delete)])
         .unwrap();
     tick(engine);
     let token = trailer.next.unwrap();

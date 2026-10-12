@@ -438,6 +438,26 @@ pub struct Fixture {
     pub wal: PathBuf,
 }
 
+impl Fixture {
+    pub fn open(&self) -> Engine {
+        open_engine_publishing(&self.root, &self.cache, &self.wal)
+    }
+
+    /// [`Fixture::open`] with the background refresh off, so a session stays on the generation it
+    /// was handed until it asks again.
+    pub fn open_unrefreshed(&self) -> Engine {
+        let engine = self.open();
+        engine.set_background_refresh_for_test(false);
+        engine
+    }
+
+    /// The entities the build gave the generator's `sources`.
+    pub fn members(&self, sources: impl IntoIterator<Item = u64>) -> Vec<EntityId> {
+        let map = source_to_new_map(&self.root, "v00000");
+        sources.into_iter().map(|s| EntityId::new(map[&s])).collect()
+    }
+}
+
 /// The `N_ITEMS` fixture, built into a temporary directory of its own.
 pub fn fixture() -> Fixture {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -870,7 +890,7 @@ pub fn item(entity: EntityId) -> mosaica_types::Target {
 }
 
 /// What an artifact's or a layer's served identifier names.
-pub fn artifact_entity(engine: &Engine, id: MosaicaId) -> mosaica_types::Target {
+pub fn artifact_target(engine: &Engine, id: MosaicaId) -> mosaica_types::Target {
     engine.resolve_targets(&[id]).unwrap()[0].expect("it names what was issued")
 }
 
@@ -998,28 +1018,25 @@ pub fn restore_wal(dir: &Path, snapshot: &[(std::ffi::OsString, Vec<u8>)]) {
     }
 }
 
-/// A flat layer that derives a hull, so its levels hold their rows: the declaration a test building
-/// forms directly through `ArtifactProjections::get_or_build` builds them for.
-pub fn held_rows_declaration(name: &str) -> mosaica_types::layer::LayerDeclaration {
+/// A flat, enumerated layer over `s0` that an artifact is served in when two of its members are
+/// visible, computing no content.
+pub fn flat_declaration(name: &str) -> mosaica_types::layer::LayerDeclaration {
     use mosaica_types::layer::*;
     LayerDeclaration {
         scope: Default::default(),
         name: name.into(),
-        title: None,
+        title: Some(format!("{name} (title)")),
         views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
         artifact_visibility: ArtifactVisibility::inherited(),
-        require_member_visibility: None,
+        require_member_visibility: Some(ExistenceCriterion::Count(2)),
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
             prune_children: false,
         },
-        content: ContentDeclaration {
-            computed: vec!["hull".into()],
-            supplied: Vec::new(),
-        },
+        content: Default::default(),
         depends_on: Vec::new(),
         levels: Vec::new(),
         layout: None,
@@ -1027,22 +1044,30 @@ pub fn held_rows_declaration(name: &str) -> mosaica_types::layer::LayerDeclarati
     }
 }
 
-/// The supplied-content directories of every layer space under `prefix_dir`.
-pub fn content_dirs(prefix_dir: &Path) -> Vec<PathBuf> {
-    let first = mosaica_types::LayerSpace::ZERO;
-    let layers = mosaica_store::LayerSpaceLayout::new(SHARD.partition, first).dir(prefix_dir);
-    let Some(layers) = layers.parent() else {
-        return Vec::new();
+/// A flat layer that derives a hull, so its levels hold their rows: the declaration a test building
+/// forms directly through `ArtifactProjections::get_or_build` builds them for.
+pub fn held_rows_declaration(name: &str) -> mosaica_types::layer::LayerDeclaration {
+    use mosaica_types::layer::*;
+    LayerDeclaration {
+        title: None,
+        require_member_visibility: None,
+        content: ContentDeclaration {
+            computed: vec!["hull".into()],
+            supplied: Vec::new(),
+        },
+        ..flat_declaration(name)
+    }
+}
+
+/// Wait for the side-manifest to list at least `want` artifact content extents.
+pub fn wait_for_content_extents(root: &Path, want: usize) {
+    let published = || {
+        let manifest = side_manifest(root);
+        manifest.layer_spaces.iter().map(|r| r.content_extents.len()).sum::<usize>()
     };
-    std::fs::read_dir(layers)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| {
-            let space = entry.file_name().to_str()?.parse().ok()?;
-            let space = mosaica_types::LayerSpace::new(space).ok()?;
-            Some(mosaica_store::LayerSpaceLayout::new(SHARD.partition, space).content_rel())
-        })
-        .map(|rel| prefix_dir.join(rel))
-        .collect()
+    wait_until(
+        &format!("{want} content extents published"),
+        std::time::Duration::from_secs(10),
+        || published() >= want,
+    );
 }

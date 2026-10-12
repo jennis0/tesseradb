@@ -24,7 +24,6 @@ use mosaica_types::layer::{
     ContentDeclaration, DeclarationError, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
-use mosaica_types::EntityId;
 
 fn declaration(name: &str, derived: &[&str]) -> LayerDeclaration {
     LayerDeclaration {
@@ -49,17 +48,6 @@ fn declaration(name: &str, derived: &[&str]) -> LayerDeclaration {
         levels: Vec::new(),
         layout: None,
         shape: None,
-    }
-}
-
-impl Fixture {
-    fn open(&self) -> Engine {
-        open_engine_publishing(&self.root, &self.cache, &self.wal)
-    }
-
-    fn members(&self, source_ids: impl Iterator<Item = u64>) -> Vec<EntityId> {
-        let map = source_to_new_map(&self.root, "v00000");
-        source_ids.map(|s| EntityId::new(map[&s])).collect()
     }
 }
 
@@ -482,34 +470,6 @@ fn corpus_independent_content_is_served_to_everyone_who_reaches_the_layer() {
     }
 }
 
-/// Wait for the executor's drain close to publish at least `want` artifact content extents.
-fn content_extents(fx: &Fixture, want: usize) -> Vec<std::path::PathBuf> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let found: Vec<std::path::PathBuf> = common::content_dirs(&fx.root.join("v00000"))
-            .iter()
-            .flat_map(std::fs::read_dir)
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                p.file_name()
-                    .is_some_and(|n| n.to_string_lossy().starts_with("artifacts-"))
-                    && p.to_string_lossy().ends_with(".blocks.bin")
-            })
-            .collect();
-        if found.len() >= want {
-            return found;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "only {} of {want} content extents were published within 10s",
-            found.len()
-        );
-        std::thread::yield_now();
-    }
-}
-
 /// **Two publications, and both labels survive the loss of the log.**
 ///
 /// The regression this exists for: an artifact publication starts from a *clone of the stale
@@ -539,7 +499,7 @@ fn two_publications_of_content_both_survive_the_loss_of_the_whole_log() {
                 )],
             )
             .unwrap();
-        content_extents(&fx, 1);
+        wait_for_content_extents(&fx.root, 1);
 
         engine
             .publish_artifacts(
@@ -552,7 +512,7 @@ fn two_publications_of_content_both_survive_the_loss_of_the_whole_log() {
                 )],
             )
             .unwrap();
-        content_extents(&fx, 2);
+        wait_for_content_extents(&fx.root, 2);
     }
 
     remove_the_whole_log(&fx.wal);
@@ -728,7 +688,7 @@ fn published_and_log_free(fx: &Fixture, labels: &[&str]) {
         engine
             .publish_artifacts("topics/a".into(), 0, batch)
             .unwrap();
-        content_extents(fx, 1);
+        wait_for_content_extents(&fx.root, 1);
     }
     remove_the_whole_log(&fx.wal);
 }
@@ -933,7 +893,7 @@ fn a_fold_removes_a_deleted_artifacts_content_from_the_disc() {
                 ],
             )
             .unwrap();
-        content_extents(&fx, 1);
+        wait_for_content_extents(&fx.root, 1);
         engine
             .publish_artifacts(
                 "topics/a".into(),
@@ -945,12 +905,12 @@ fn a_fold_removes_a_deleted_artifacts_content_from_the_disc() {
                 )],
             )
             .unwrap();
-        content_extents(&fx, 2);
+        wait_for_content_extents(&fx.root, 2);
         let before = fx.root.join(&engine.generation().prefix);
         assert!(holds_text(&before, gone), "the scan finds the content while it is stored");
 
         engine
-            .accept_changes(vec![(artifact_entity(&engine, ids[0]), ChangeOp::Delete)])
+            .accept_changes(vec![(artifact_target(&engine, ids[0]), ChangeOp::Delete)])
             .unwrap();
         fold(&engine);
         let after = fx.root.join(&engine.generation().prefix);

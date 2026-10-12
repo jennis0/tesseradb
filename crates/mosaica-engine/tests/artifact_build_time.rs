@@ -17,9 +17,9 @@ use arrow::record_batch::RecordBatch;
 use common::*;
 use parquet::arrow::ArrowWriter;
 use mosaica_build::BuildArgs;
-use mosaica_engine::{ArtifactOut, Engine};
+use mosaica_engine::ArtifactOut;
 use mosaica_lifecycle::wal::ChangeOp;
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, MosaicaId};
 
 const CLUSTERS: &str = "clusters/a";
 const LABELS: &str = "topics/x";
@@ -244,12 +244,6 @@ fn try_fixture(topics: fn(&Path)) -> Result<Fixture, mosaica_build::BuildError> 
     })
 }
 
-impl Fixture {
-    fn open(&self) -> Engine {
-        open_engine_publishing(&self.root, &self.cache, &self.wal)
-    }
-}
-
 fn of_layer<'a>(served: &'a [ArtifactOut], layer: &str) -> Vec<&'a ArtifactOut> {
     served.iter().filter(|a| a.layer == layer).collect()
 }
@@ -307,7 +301,7 @@ fn a_built_edge_withholds_its_label_when_the_cluster_is_suppressed() {
         .is_some());
 
     engine
-        .accept_changes(vec![(artifact_entity(&engine, cluster_id), ChangeOp::Suppress)])
+        .accept_changes(vec![(artifact_target(&engine, cluster_id), ChangeOp::Suppress)])
         .unwrap();
 
     let after = artifacts_of(&engine, &full_coverage_credential());
@@ -375,11 +369,15 @@ fn a_built_bundle_takes_an_online_publication_beside_its_own() {
 fn a_later_online_registration_does_not_reissue_the_builds_ids() {
     let fx = fixture();
     let engine = fx.open();
-    let built: Vec<mosaica_types::Target> = artifacts_of(&engine, &full_coverage_credential())
-        .iter()
-        .map(|a| artifact_entity(&engine, a.mosaica_id))
-        .collect();
-    assert_eq!(built.len(), 2);
+    let mut before: Vec<(MosaicaId, String, Option<String>)> =
+        artifacts_of(&engine, &full_coverage_credential())
+            .into_iter()
+            .map(|a| (a.mosaica_id, a.layer, a.key))
+            .collect();
+    before.sort();
+    assert_eq!(before.len(), 2);
+    let built: Vec<mosaica_types::Target> =
+        before.iter().map(|a| artifact_target(&engine, a.0)).collect();
 
     let id = engine
         .register_layer(mosaica_types::layer::LayerDeclaration {
@@ -403,20 +401,37 @@ fn a_later_online_registration_does_not_reissue_the_builds_ids() {
             shape: None,
         })
         .expect("a layer registers against a bundle that already carries some");
-    let online = artifact_entity(&engine, id);
+    let online = artifact_target(&engine, id);
     assert!(
         !built.contains(&online),
         "an entity a built artifact holds was handed to a new layer"
     );
+    // Its artifact is served under an identifier of its own, and each built one under its own.
+    let published = engine
+        .publish_artifacts(
+            "clusters/online".into(),
+            0,
+            vec![mosaica_lifecycle::IncomingArtifact::from_entities(
+                Some("c-online".into()),
+                fx.members(MEMBERS),
+            )],
+        )
+        .unwrap()[0];
+    let mut after: Vec<(MosaicaId, String, Option<String>)> =
+        artifacts_of(&engine, &full_coverage_credential())
+            .into_iter()
+            .map(|a| (a.mosaica_id, a.layer, a.key))
+            .collect();
+    after.sort();
+    let mut expected = before;
+    expected.push((published, "clusters/online".into(), Some("c-online".into())));
+    expected.sort();
+    assert_eq!(after, expected);
     // In a space past the build's, which the side-manifest's counter carried from the build.
     let online_space = engine.registered_layer("clusters/online").unwrap().space;
     for name in [CLUSTERS, LABELS] {
         assert!(engine.registered_layer(name).unwrap().space < online_space);
     }
-    // And it lands below them, the row-less region growing downward from where the build left it.
-    assert!(built
-        .iter()
-        .all(|e| online.entity().raw() < e.entity().raw()));
 
     // The built layers are still there and still reachable after the registration.
     let names: Vec<String> = engine

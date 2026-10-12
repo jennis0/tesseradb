@@ -25,9 +25,7 @@ use mosaica_engine::{ArtifactOut, Engine};
 use mosaica_lifecycle::membership::IncomingContent;
 use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_lifecycle::{IncomingArtifact, IncomingGrowth};
-use mosaica_types::layer::{
-    ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
-};
+use mosaica_types::layer::{ContentDeclaration, LayerDeclaration};
 use mosaica_types::EntityId;
 
 /// **No existence criterion**, deliberately, as in the fold's own cases: these assertions are about
@@ -35,37 +33,16 @@ use mosaica_types::EntityId;
 /// weaker assertion of the two and the one this file exists to distinguish from a real absence.
 fn declaration(name: &str) -> LayerDeclaration {
     LayerDeclaration {
-        scope: Default::default(),
-        name: name.into(),
-        title: Some(format!("{name} (title)")),
-        views: vec!["s0".into()],
-        membership: MembershipSource::Enumerated,
-        value_set: Default::default(),
-        visibility: None,
-        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: None,
-        hierarchy: Hierarchy {
-            kind: HierarchyKind::Flat,
-            prune_children: false,
-        },
         content: ContentDeclaration {
             computed: vec!["centroid".into()],
             supplied: Vec::new(),
         },
-        depends_on: Vec::new(),
-        levels: Vec::new(),
-        layout: None,
-        shape: None,
+        ..flat_declaration(name)
     }
 }
 
 impl Fixture {
-    fn open(&self) -> Engine {
-        let engine = open_engine_publishing(&self.root, &self.cache, &self.wal);
-        engine.set_background_refresh_for_test(false);
-        engine
-    }
-
     /// The same engine with a one-second tick period, for the one case here whose subject is the
     /// WAL gauge: that gauge is sampled at most once per period, so at the shipped 90 s a test
     /// reading it after each of three events would sit out four and a half minutes.
@@ -73,19 +50,6 @@ impl Fixture {
         let engine = open_engine_publishing_with_tick_period(&self.root, &self.cache, &self.wal, 1);
         engine.set_background_refresh_for_test(false);
         engine
-    }
-
-    /// The corpus entities behind a run of source ids — what a clustering pipeline, or an ingest
-    /// carrying a cluster id, would resolve its members to.
-    fn members(&self, source_ids: std::ops::Range<u64>) -> Vec<EntityId> {
-        self.members_of(source_ids)
-    }
-
-    /// The same, over any run of source ids — what a generating set is drawn from, which is a
-    /// selection of the corpus rather than a contiguous range.
-    fn members_of(&self, source_ids: impl Iterator<Item = u64>) -> Vec<EntityId> {
-        let map = source_to_new_map(&self.root, "v00000");
-        source_ids.map(|s| EntityId::new(map[&s])).collect()
     }
 
     fn membership_files(&self, engine: &Engine) -> Vec<std::path::PathBuf> {
@@ -162,21 +126,6 @@ fn grow(fx: &Fixture, engine: &Engine, sources: std::ops::Range<u64>) {
     tick(engine);
 }
 
-/// Ask for a flush against an empty buffer, which is the deny-only regime's rotation: nothing to
-/// flush, so the tick rotates the log rather than publishing geometry.
-fn rotate(engine: &Engine) {
-    let before = engine.write_executor_stats().ticks;
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while engine.write_executor_stats().ticks == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the tick that rotates the log never ran"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
 /// Tick until the WAL gauge has been walked again, and return the reading.
 ///
 /// The sample is rate-limited to one per tick period (`Executor::sample_wal_gauge`), so a tick is
@@ -196,7 +145,7 @@ fn resampled_gauge(engine: &Engine) -> mosaica_engine::WalGauge {
     }
     let before = engine.write_executor_stats().wal.samples;
     loop {
-        rotate(engine);
+        tick(engine);
         let now = engine.write_executor_stats().wal;
         if now.samples > before {
             return now;
@@ -253,7 +202,7 @@ fn artifacts_for(engine: &Engine, credential: &[u8]) -> Vec<ArtifactOut> {
 #[test]
 fn a_growth_does_not_enter_the_generating_set() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.register_layer(described_declaration()).unwrap();
 
     let covered = |s: &u64| terms_of(*s).contains(&SUBSET_TERM);
@@ -272,7 +221,7 @@ fn a_growth_does_not_enter_the_generating_set() {
                 fx.members(0..300),
                 vec![IncomingContent::new(
                     vec!["shipping and logistics".into()],
-                    fx.members_of((0..300).filter(covered)),
+                    fx.members((0..300).filter(covered)),
                 )],
             )],
         )
@@ -327,7 +276,7 @@ fn a_growth_does_not_enter_the_generating_set() {
 fn a_point_that_joined_is_still_in_the_membership_after_a_restart() {
     let fx = fixture();
     {
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         publish(&fx, &engine, 0..300);
         assert_eq!(count(&engine), 300);
 
@@ -340,7 +289,7 @@ fn a_point_that_joined_is_still_in_the_membership_after_a_restart() {
         );
     }
 
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     assert_eq!(
         engine.published_artifacts(),
         1,
@@ -363,7 +312,7 @@ fn a_point_that_joined_is_still_in_the_membership_after_a_restart() {
 fn a_growth_reaches_the_prefix_the_fold_publishes_and_outlives_the_log() {
     let fx = fixture();
     {
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         publish(&fx, &engine, 0..300);
         grow(&fx, &engine, 300..310);
         assert_eq!(count(&engine), 310);
@@ -374,7 +323,7 @@ fn a_growth_reaches_the_prefix_the_fold_publishes_and_outlives_the_log() {
 
     remove_the_whole_log(&fx.wal);
 
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     assert_eq!(engine.published_artifacts(), 1);
     assert_eq!(
         count(&engine),
@@ -393,7 +342,7 @@ fn a_growth_reaches_the_prefix_the_fold_publishes_and_outlives_the_log() {
 fn a_later_publication_does_not_release_the_log_from_a_growth_below_it() {
     let fx = fixture();
     {
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         publish(&fx, &engine, 0..300);
         grow(&fx, &engine, 300..310);
 
@@ -412,7 +361,7 @@ fn a_later_publication_does_not_release_the_log_from_a_growth_below_it() {
         wait_for_publication(&fx, &engine, 2);
     }
 
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     let artifacts = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(artifacts.len(), 2, "both artifacts came back");
     let grown = artifacts
@@ -438,7 +387,7 @@ fn a_later_publication_does_not_release_the_log_from_a_growth_below_it() {
 fn a_rotation_may_not_reclaim_the_member_holding_a_growth() {
     let fx = fixture();
     {
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         publish(&fx, &engine, 0..300);
         grow(&fx, &engine, 300..310);
         // The growth is in whichever member was active when it was appended, which is the newest.
@@ -447,10 +396,8 @@ fn a_rotation_may_not_reclaim_the_member_holding_a_growth() {
             .expect("the log has at least one member");
 
         // The buffer is empty — a publication writes no rows — so the tick has nothing to flush
-        // and rotates instead. Twice, because the first seals the member the growth is in and the
-        // second is the one that would find it sealed and reclaim it.
-        rotate(&engine);
-        rotate(&engine);
+        // and rotates instead.
+        reclaim_log(&engine);
         assert!(
             wal_members(&fx.wal).contains(&holding),
             "{holding} holds the growth and is still there: rotation may not reclaim past it \
@@ -459,7 +406,7 @@ fn a_rotation_may_not_reclaim_the_member_holding_a_growth() {
         );
     }
 
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     assert_eq!(
         count(&engine),
         310,
@@ -490,7 +437,7 @@ fn visible(engine: &Engine) -> u64 {
 fn a_log_the_growth_holds_replays_to_what_was_served() {
     let fx = fixture();
     let (served, buffered) = {
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         publish(&fx, &engine, 0..300);
         grow(&fx, &engine, 300..310);
         for batch in 0..4 {
@@ -498,7 +445,7 @@ fn a_log_the_growth_holds_replays_to_what_was_served() {
                 ingest(&engine, &format!("batch-{batch}-{row}"));
             }
             publish_buffered(&engine);
-            rotate(&engine);
+            tick(&engine);
         }
         let buffered = ingest(&engine, "unflushed");
         assert!(
@@ -509,7 +456,7 @@ fn a_log_the_growth_holds_replays_to_what_was_served() {
         (visible(&engine), buffered)
     };
 
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     assert_eq!(count(&engine), 310, "the join replays");
     assert_eq!(visible(&engine), served, "the restart serves what was served");
     assert!(
@@ -554,7 +501,7 @@ fn a_suppression_accepted_while_a_growth_holds_the_log_holds_after_a_restart() {
             .sum::<u64>()
     };
     let before = {
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         publish(&fx, &engine, 0..300);
         grow(&fx, &engine, 300..310);
         let seen = restricted(&engine);
@@ -564,7 +511,7 @@ fn a_suppression_accepted_while_a_growth_holds_the_log_holds_after_a_restart() {
         for batch in 0..3 {
             ingest(&engine, &format!("after-{batch}"));
             publish_buffered(&engine);
-            rotate(&engine);
+            tick(&engine);
         }
         tick(&engine);
         assert_eq!(
@@ -580,7 +527,7 @@ fn a_suppression_accepted_while_a_growth_holds_the_log_holds_after_a_restart() {
         seen - 1
     };
 
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     assert_eq!(
         restricted(&engine),
         before,
@@ -657,11 +604,11 @@ fn the_wal_gauge_names_the_growth_pin_and_the_fold_releases_it() {
 #[test]
 fn growing_a_suppressed_artifact_leaves_it_suppressed() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     let id = publish(&fx, &engine, 0..300);
-    let entity = artifact_entity(&engine, id);
+    let target = artifact_target(&engine, id);
 
-    engine.accept_changes(vec![(entity, ChangeOp::Suppress)]).unwrap();
+    engine.accept_changes(vec![(target, ChangeOp::Suppress)]).unwrap();
     assert!(
         artifacts_of(&engine, &full_coverage_credential()).is_empty(),
         "the suppression is in force at the ack"
@@ -673,7 +620,7 @@ fn growing_a_suppressed_artifact_leaves_it_suppressed() {
         "and it is still in force: growth is not a route back into service"
     );
 
-    engine.accept_changes(vec![(entity, ChangeOp::Unsuppress)]).unwrap();
+    engine.accept_changes(vec![(target, ChangeOp::Unsuppress)]).unwrap();
     assert_eq!(
         count(&engine),
         310,
@@ -689,7 +636,7 @@ fn growing_a_suppressed_artifact_leaves_it_suppressed() {
 #[test]
 fn an_unknown_key_is_refused_rather_than_minted() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     publish(&fx, &engine, 0..300);
 
     let refused = engine
@@ -715,7 +662,7 @@ fn an_unknown_key_is_refused_rather_than_minted() {
 #[test]
 fn one_unknown_key_refuses_the_whole_batch() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     publish(&fx, &engine, 0..300);
 
     engine
@@ -741,7 +688,7 @@ fn one_unknown_key_refuses_the_whole_batch() {
 #[test]
 fn a_deleted_point_may_not_join() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     publish(&fx, &engine, 0..300);
 
     let deleted = fx.members(300..301)[0];
@@ -828,7 +775,7 @@ fn ingest_naming(engine: &Engine, batch: &str, layer: &str, key: &str) -> u64 {
 fn an_artifact_a_batch_minted_survives_a_restart() {
     let fx = fixture();
     {
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         engine
             .register_layer(open_declaration("clusters/a"))
             .unwrap();
@@ -847,7 +794,7 @@ fn an_artifact_a_batch_minted_survives_a_restart() {
         // state the restart below has to recover from.
     }
 
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     assert_eq!(
         engine.published_artifacts(),
         1,
@@ -875,7 +822,7 @@ fn an_artifact_a_batch_minted_survives_a_restart() {
 fn a_minted_artifact_survives_the_fold_that_rewrites_its_level() {
     let fx = fixture();
     {
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         engine
             .register_layer(open_declaration("clusters/a"))
             .unwrap();
@@ -885,7 +832,7 @@ fn a_minted_artifact_survives_the_fold_that_rewrites_its_level() {
     }
     remove_the_whole_log(&fx.wal);
 
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     let artifacts = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(
         artifacts.len(),
@@ -901,7 +848,7 @@ fn a_minted_artifact_survives_the_fold_that_rewrites_its_level() {
 #[test]
 fn a_closed_layers_unknown_key_refuses_the_batch() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine.register_layer(declaration("clusters/a")).unwrap();
 
     let before = engine.allocator_high_water();
@@ -1061,7 +1008,7 @@ fn a_joining_row_restating_its_membership_appends_no_growth() {
 #[test]
 fn a_joining_row_naming_another_artifact_still_grows_it() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine
         .create_plain_view(mosaica_engine::PlainViewDeclaration {
             name: "s1".to_string(),
@@ -1139,7 +1086,7 @@ fn registered(engine: &Engine) -> u64 {
 #[test]
 fn a_batchs_memberships_wait_for_the_tick() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     let published = registered(&engine);
 
     assert_eq!(
@@ -1186,7 +1133,7 @@ fn a_batchs_memberships_wait_for_the_tick() {
 fn a_tick_puts_them_in_the_prefix_and_a_restore_needs_no_log() {
     let fx = fixture();
     {
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         registered(&engine);
         ingest_naming(&engine, "b1", "clusters/a", "c0");
         publish_buffered(&engine);
@@ -1200,7 +1147,7 @@ fn a_tick_puts_them_in_the_prefix_and_a_restore_needs_no_log() {
     }
     remove_the_whole_log(&fx.wal);
 
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     let artifacts = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(artifacts.len(), 1, "recovered from the prefix alone");
     assert_eq!(artifacts[0].key.as_deref(), Some("c0"));
@@ -1215,7 +1162,7 @@ fn a_tick_puts_them_in_the_prefix_and_a_restore_needs_no_log() {
 fn memberships_no_tick_published_come_back_from_the_log() {
     let fx = fixture();
     {
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         registered(&engine);
         ingest_naming(&engine, "b1", "clusters/a", "c0");
         ingest_naming(&engine, "b2", "clusters/a", "c0");
@@ -1225,7 +1172,7 @@ fn memberships_no_tick_published_come_back_from_the_log() {
         );
     }
 
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     assert_eq!(
         engine.published_artifacts(),
         1,
@@ -1253,7 +1200,7 @@ fn memberships_no_tick_published_come_back_from_the_log() {
 #[test]
 fn a_suppression_still_publishes_at_once_and_takes_the_memberships_with_it() {
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     let published = registered(&engine);
     ingest_naming(&engine, "b1", "clusters/a", "c0");
 
@@ -1290,7 +1237,7 @@ fn a_suppression_still_publishes_at_once_and_takes_the_memberships_with_it() {
 fn a_fold_with_a_batchs_memberships_pending_produces_a_correct_bundle() {
     let fx = fixture();
     {
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         registered(&engine);
         ingest_naming(&engine, "b1", "clusters/a", "c0");
         publish_buffered(&engine);
@@ -1307,7 +1254,7 @@ fn a_fold_with_a_batchs_memberships_pending_produces_a_correct_bundle() {
     }
     remove_the_whole_log(&fx.wal);
 
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     let artifacts = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(artifacts.len(), 1);
     assert_eq!(artifacts[0].key.as_deref(), Some("c0"));
@@ -1334,7 +1281,7 @@ fn a_level_whose_items_come_to_overlap_is_served_from_a_list_column() {
     const CALLS: &str = "clusters/calls";
     const TAGGED: &str = "clusters/tagged";
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     let counts = |engine: &Engine, layer: &str| -> Vec<(String, u64)> {
         let mut out: Vec<(String, u64)> = artifacts_of(engine, &full_coverage_credential())
             .into_iter()
@@ -1439,7 +1386,7 @@ fn a_level_whose_items_come_to_overlap_is_served_from_a_list_column() {
     };
     check(&engine, "published", ServingLayout::RowMajorLabel);
     drop(engine);
-    let reopened = fx.open();
+    let reopened = fx.open_unrefreshed();
     check(&reopened, "after a restart", ServingLayout::RowMajorLabel);
     fold(&reopened);
     check(&reopened, "after a fold", ServingLayout::RowMajorList);

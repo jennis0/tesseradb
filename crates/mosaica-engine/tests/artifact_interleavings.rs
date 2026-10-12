@@ -112,20 +112,6 @@ impl Fixture {
         engine.set_background_refresh_for_test(false);
         (engine, faults)
     }
-
-    /// The same engine with no switchboard — for the cases whose ordering comes from a thread or
-    /// from `Engine`'s own fold controls rather than from a pause site.
-    fn open(&self) -> Engine {
-        let engine = open_engine_publishing(&self.root, &self.cache, &self.wal);
-        engine.set_background_refresh_for_test(false);
-        engine
-    }
-
-    /// The corpus entities behind a run of source ids.
-    fn members(&self, source_ids: std::ops::Range<u64>) -> Vec<EntityId> {
-        let map = source_to_new_map(&self.root, "v00000");
-        source_ids.map(|s| EntityId::new(map[&s])).collect()
-    }
 }
 
 // -------------------------------------------------------------------------------------------
@@ -262,16 +248,6 @@ fn count_of(engine: &Engine, key: &str) -> Option<u64> {
 fn settle(engine: &Engine) {
     publish_buffered(engine);
     fold(engine);
-}
-
-/// Ask for a flush against an empty buffer: nothing to flush, so the tick rotates the log rather
-/// than publishing geometry — the one place the growth pin bites.
-fn rotate(engine: &Engine) {
-    let before = engine.write_executor_stats().ticks;
-    engine.request_flush();
-    wait_until("the tick that rotates the log runs", WAIT, || {
-        engine.write_executor_stats().ticks > before
-    });
 }
 
 /// The live prefix's membership extents — the durable name count a publication's pack increments.
@@ -532,7 +508,7 @@ fn a_growth_that_lands_after_the_folds_pack_pins_the_log_again() {
         // members and the assertion below is about the late one. Without this they share the
         // active member and the early growth's pin — which the fold is about to release — would
         // keep it alive whatever the late growth did.
-        rotate(&engine);
+        tick(&engine);
         let early_member = wal_members(&fx.wal)
             .into_iter()
             .rev()
@@ -577,10 +553,7 @@ fn a_growth_that_lands_after_the_folds_pack_pins_the_log_again() {
             late_member, early_member,
             "the two growths must be in different members or this proves nothing"
         );
-        // Two rotations: the first seals the member the late growth is in, the second is the one
-        // that would find it sealed and reclaim it.
-        rotate(&engine);
-        rotate(&engine);
+        reclaim_log(&engine);
         let members = wal_members(&fx.wal);
         assert!(
             !members.contains(&early_member),
@@ -594,7 +567,7 @@ fn a_growth_that_lands_after_the_folds_pack_pins_the_log_again() {
         );
     }
 
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     assert_eq!(
         count_of(&engine, "c0"),
         Some(320),
@@ -609,7 +582,7 @@ fn a_growth_that_lands_after_the_folds_pack_pins_the_log_again() {
 fn the_membership_replays_the_same_on_either_side_of_the_folds_pack() {
     let fx = fixture();
     let before_the_pack = {
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         engine
             .register_layer(declaration(LAYER, ValueSet::Open))
             .unwrap();
@@ -627,11 +600,10 @@ fn the_membership_replays_the_same_on_either_side_of_the_folds_pack() {
         // A tail publication: its extent is packed above the high-water the grown record sits
         // below, and its publication marks the level published to the top.
         publish_and_pack(&fx, &engine, "c1", fx.members(400..410));
-        rotate(&engine);
-        rotate(&engine);
+        reclaim_log(&engine);
         drop(engine);
 
-        let engine = fx.open();
+        let engine = fx.open_unrefreshed();
         count_of(&engine, "c0").expect("c0 is served")
     };
     assert_eq!(
@@ -639,12 +611,12 @@ fn the_membership_replays_the_same_on_either_side_of_the_folds_pack() {
         "the growth survived a tail publication, two rotations and a restart on the log alone"
     );
 
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     fold(&engine);
     drop(engine);
     remove_the_whole_log(&fx.wal);
 
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     assert_eq!(
         count_of(&engine, "c0"),
         Some(before_the_pack),
@@ -686,7 +658,7 @@ fn a_suppression_racing_a_join_hides_the_artifact_and_keeps_the_join() {
     wait_until("the publication lands", WAIT, || {
         engine.published_artifacts() == 1
     });
-    let entity = artifact_entity(&engine, id);
+    let target = artifact_target(&engine, id);
 
     std::thread::scope(|s| {
         let parked = park(s, &engine, &faults);
@@ -695,7 +667,7 @@ fn a_suppression_racing_a_join_hides_the_artifact_and_keeps_the_join() {
         wait_for_queue(&engine, parked.base + 1);
         let suppress = s.spawn(|| {
             engine
-                .accept_changes(vec![(entity, ChangeOp::Suppress)])
+                .accept_changes(vec![(target, ChangeOp::Suppress)])
                 .expect("a suppression is accepted")
         });
         wait_for_denies(&engine, denies_before + 1);
@@ -719,7 +691,7 @@ fn a_suppression_racing_a_join_hides_the_artifact_and_keeps_the_join() {
         "and a fold is not a retirement route for one"
     );
 
-    engine.accept_changes(vec![(entity, ChangeOp::Unsuppress)]).unwrap();
+    engine.accept_changes(vec![(target, ChangeOp::Unsuppress)]).unwrap();
     assert_eq!(
         count_of(&engine, "c0"),
         Some(301),
@@ -740,7 +712,7 @@ fn a_layers_suppression_covers_a_publication_that_landed_beside_it() {
     let layer_id = engine
         .register_layer(declaration(LAYER, ValueSet::Open))
         .unwrap();
-    let layer_entity = artifact_entity(&engine, layer_id);
+    let layer_target = artifact_target(&engine, layer_id);
     publish_and_pack(&fx, &engine, "c0", fx.members(0..300));
 
     let late = fx.members(400..410);
@@ -759,7 +731,7 @@ fn a_layers_suppression_covers_a_publication_that_landed_beside_it() {
         wait_for_queue(&engine, parked.base + 1);
         let suppress = s.spawn(|| {
             engine
-                .accept_changes(vec![(layer_entity, ChangeOp::Suppress)])
+                .accept_changes(vec![(layer_target, ChangeOp::Suppress)])
                 .expect("a layer's suppression is accepted")
         });
         wait_for_denies(&engine, denies_before + 1);
@@ -786,7 +758,7 @@ fn a_layers_suppression_covers_a_publication_that_landed_beside_it() {
     );
 
     engine
-        .accept_changes(vec![(layer_entity, ChangeOp::Unsuppress)])
+        .accept_changes(vec![(layer_target, ChangeOp::Unsuppress)])
         .unwrap();
     let keys: Vec<String> = artifacts_of(&engine, &full_coverage_credential())
         .into_iter()
@@ -844,7 +816,7 @@ fn a_batchs_rows_and_its_joins_are_durable_together_and_applied_together() {
         // what the restart below has to read.
     }
 
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     assert_eq!(
         engine.published_artifacts(),
         1,
@@ -908,7 +880,7 @@ fn a_window_that_could_not_append_leaves_neither_the_rows_nor_the_joins() {
         );
     }
 
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     assert_eq!(
         engine.published_artifacts(),
         0,
@@ -946,7 +918,7 @@ fn a_reader_sees_the_membership_move_forward_through_whole_growths_only() {
     const STEP: u64 = 10;
 
     let fx = fixture();
-    let engine = fx.open();
+    let engine = fx.open_unrefreshed();
     engine
         .register_layer(declaration(LAYER, ValueSet::Open))
         .unwrap();
@@ -1209,16 +1181,15 @@ fn built_fixture() -> Fixture {
 /// is claimed by an online publication mid-window binds to that publication exactly as it does
 /// against a bundle written entirely through the control plane.
 ///
-/// The ids are the half a build can get wrong on its own: the row-less region grows downward from
-/// where the build left it, so an online artifact taking an id the build spent would be two
-/// entities under one `mosaica_id`.
+/// An online artifact in a built layer takes an entity past the build's, so no entity is issued
+/// twice.
 #[test]
 fn a_built_bundle_takes_the_mid_window_publication_without_reissuing_an_id() {
     let fx = built_fixture();
     let (engine, faults) = fx.open_with_faults();
     let built: Vec<mosaica_types::Target> = artifacts_of(&engine, &full_coverage_credential())
         .iter()
-        .map(|a| artifact_entity(&engine, a.mosaica_id))
+        .map(|a| artifact_target(&engine, a.mosaica_id))
         .collect();
     assert_eq!(built.len(), 1, "the build published one artifact");
     let members = fx.members(200..250);
@@ -1268,7 +1239,7 @@ fn a_built_bundle_takes_the_mid_window_publication_without_reissuing_an_id() {
     let online = artifacts_of(&engine, &full_coverage_credential())
         .iter()
         .find(|a| a.key.as_deref() == Some("k-online"))
-        .map(|a| artifact_entity(&engine, a.mosaica_id))
+        .map(|a| artifact_target(&engine, a.mosaica_id))
         .expect("the online artifact is served");
     assert!(
         !built.contains(&online),
@@ -1276,8 +1247,7 @@ fn a_built_bundle_takes_the_mid_window_publication_without_reissuing_an_id() {
     );
     assert!(
         built.iter().all(|e| online.entity().raw() > e.entity().raw()),
-        "the artifact region continued above where the build left it rather than restarting \
-         inside it: online {online:?} built {built:?}"
+        "the online artifact took an entity past the build's: online {online:?} built {built:?}"
     );
 }
 

@@ -33,7 +33,6 @@ use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
     SuppliedContent, SuppliedRequirement,
 };
-use mosaica_types::EntityId;
 
 const LAYER: &str = "topics/a";
 
@@ -66,20 +65,6 @@ fn label_layer(name: &str) -> LayerDeclaration {
         levels: Vec::new(),
         layout: None,
         shape: None,
-    }
-}
-
-impl Fixture {
-    fn open(&self) -> Engine {
-        open_engine_publishing(&self.root, &self.cache, &self.wal)
-    }
-
-    fn members(&self, source_ids: impl IntoIterator<Item = u64>) -> Vec<EntityId> {
-        let map = source_to_new_map(&self.root, "v00000");
-        source_ids
-            .into_iter()
-            .map(|s| EntityId::new(map[&s]))
-            .collect()
     }
 }
 
