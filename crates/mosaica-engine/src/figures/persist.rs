@@ -12,6 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
+use mosaica_types::LayerSpace;
 use rustc_hash::FxHashMap;
 use sha2::{Digest, Sha256};
 
@@ -45,36 +46,38 @@ pub(crate) fn sweep_other_identities(root: &Path, identity: &[u8; 32]) {
     }
 }
 
-/// What one fragment's counts are a function of, as a file stem.
+/// What one fragment's counts are a function of, as a file stem. The layer is named by its space,
+/// not its name: a layer registered again under a dropped one's name can reach, after a restart, a
+/// level version the dropped one wrote.
 pub(crate) fn counts_stem(
     terms: &[u8; 32],
     view: &str,
-    layer: &str,
+    space: LayerSpace,
     level: u32,
     geometry: Geometry,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"counts");
     hasher.update(terms);
-    for text in [view, layer] {
-        hasher.update((text.len() as u64).to_le_bytes());
-        hasher.update(text.as_bytes());
-    }
-    hasher.update(level.to_le_bytes());
+    level_of(&mut hasher, view, space, level);
     hasher.update([geometry as u8]);
     hex(&hasher.finalize())
 }
 
-/// What one level's denied-row labels in one view are a function of, as a file stem.
-pub(crate) fn denied_stem(view: &str, layer: &str, level: u32) -> String {
+/// What one level's denied-row labels in one view are a function of, as a file stem, the level
+/// named as [`counts_stem`] names it.
+pub(crate) fn denied_stem(view: &str, space: LayerSpace, level: u32) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"denied");
-    for text in [view, layer] {
-        hasher.update((text.len() as u64).to_le_bytes());
-        hasher.update(text.as_bytes());
-    }
-    hasher.update(level.to_le_bytes());
+    level_of(&mut hasher, view, space, level);
     hex(&hasher.finalize())
+}
+
+fn level_of(hasher: &mut Sha256, view: &str, space: LayerSpace, level: u32) {
+    hasher.update((view.len() as u64).to_le_bytes());
+    hasher.update(view.as_bytes());
+    hasher.update(space.raw().to_le_bytes());
+    hasher.update(level.to_le_bytes());
 }
 
 fn path_of(dir: &Path, stem: &str, at: u64, extension: &str) -> PathBuf {

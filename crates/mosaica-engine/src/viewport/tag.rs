@@ -264,7 +264,7 @@ impl Engine {
                 false => None,
                 true => self.figures(
                     served,
-                    name,
+                    registered.space,
                     level,
                     level_version,
                     rows,

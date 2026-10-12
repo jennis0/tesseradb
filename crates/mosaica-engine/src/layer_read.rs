@@ -159,7 +159,7 @@ impl Engine {
         });
         let counts = self.figures(
             served,
-            name,
+            layer.space,
             level,
             level_version,
             &rows,

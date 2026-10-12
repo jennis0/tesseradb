@@ -61,7 +61,8 @@ use std::sync::Arc;
 
 use croaring::Bitmap;
 
-use mosaica_types::layer::LayerDeclaration;
+use mosaica_types::layer::{LayerDeclaration, RegisteredLayer};
+use mosaica_types::LayerSpace;
 
 use crate::derived::{place, Placement};
 use crate::error::{EngineError, Result};
@@ -352,7 +353,7 @@ impl Engine {
     pub(crate) fn figures(
         &self,
         served: &ServedView<'_>,
-        layer: &str,
+        space: LayerSpace,
         level: u32,
         level_version: u64,
         rows: &crate::artifacts::ArtifactRows,
@@ -369,7 +370,7 @@ impl Engine {
         };
         let base_rows = column.base_rows();
         if base_rows != served.data.row_space.base_rows() {
-            return self.exact_figures(served, layer, level, level_version, column, mask, geometry);
+            return self.exact_figures(served, space, level, level_version, column, mask, geometry);
         }
         let identity = served.mask_identity;
         let (fragment, minus, plus, _) = mask.parts();
@@ -379,7 +380,7 @@ impl Engine {
             terms: identity.terms,
             identity: identity.fragment_identity,
             view: served.name.to_string(),
-            layer: layer.to_string(),
+            space,
             level,
             column: column.identity(),
             geometry,
@@ -387,7 +388,7 @@ impl Engine {
         let Some(counts) =
             self.fragment_counts(served, &key, level_version, column, fragment, &places)?
         else {
-            return self.exact_figures(served, layer, level, level_version, column, mask, geometry);
+            return self.exact_figures(served, space, level, level_version, column, mask, geometry);
         };
 
         let mut subtracted = minus.clone();
@@ -396,7 +397,7 @@ impl Engine {
             true => None,
             false => match self.deny_correction(
                 served,
-                layer,
+                space,
                 level,
                 level_version,
                 column,
@@ -407,7 +408,7 @@ impl Engine {
                 None => {
                     return self.exact_figures(
                         served,
-                        layer,
+                        space,
                         level,
                         level_version,
                         column,
@@ -430,7 +431,7 @@ impl Engine {
                 let key = TailKey {
                     token_id: identity.token_id,
                     view: served.name.to_string(),
-                    layer: layer.to_string(),
+                    space,
                     level,
                     column: column.identity(),
                     level_version,
@@ -503,7 +504,7 @@ impl Engine {
             .dir
             .as_ref()
             .map(|root| persist::identity_dir(root, &key.identity));
-        let stem = persist::counts_stem(&key.terms, &key.view, &key.layer, key.level, geometry);
+        let stem = persist::counts_stem(&key.terms, &key.view, key.space, key.level, geometry);
         let written = dir.clone().map(|dir| (dir, stem.clone()));
         let held = self
             .figures
@@ -616,7 +617,7 @@ impl Engine {
     fn deny_correction(
         &self,
         served: &ServedView<'_>,
-        layer: &str,
+        space: LayerSpace,
         level: u32,
         level_version: u64,
         column: &Arc<RowColumn>,
@@ -629,7 +630,7 @@ impl Engine {
             terms: identity.terms,
             identity: identity.fragment_identity,
             view: served.name.to_string(),
-            layer: layer.to_string(),
+            space,
             level,
             column: column.identity(),
             level_version,
@@ -644,7 +645,7 @@ impl Engine {
         let labels = match subtracted.intersect(&denied) {
             false => None,
             true => {
-                let address = (served.name.to_string(), layer.to_string(), level);
+                let address = (served.name.to_string(), space, level);
                 let wanted = Wanted {
                     identity: identity.fragment_identity,
                     column,
@@ -697,7 +698,7 @@ impl Engine {
     fn exact_figures(
         &self,
         served: &ServedView<'_>,
-        layer: &str,
+        space: LayerSpace,
         level: u32,
         level_version: u64,
         column: &Arc<RowColumn>,
@@ -707,7 +708,7 @@ impl Engine {
         use crate::compose::WholeMask;
         let key = FiguresKey::Exact(served.mask_identity.exact_key(
             served.name,
-            layer,
+            space,
             level,
             level_version,
             geometry,
@@ -772,12 +773,12 @@ impl LabelStore {
         }) {
             return Some((Arc::clone(exact), None));
         }
-        let (view, layer, level) = address;
+        let (view, space, level) = address;
         let dir = self
             .dir
             .as_ref()
             .map(|root| persist::identity_dir(root, &wanted.identity));
-        let stem = persist::denied_stem(view, layer, *level);
+        let stem = persist::denied_stem(view, *space, *level);
         let on_disk = || {
             dir.as_deref().and_then(|dir| {
                 persist::read_denied(
@@ -857,17 +858,23 @@ impl FiguresCache {
         });
     }
 
-    /// Queue every held level's labels to be brought to `generation`'s denied rows, at the version
-    /// of the form `projections` holds for it: what a deny does once it is acknowledged.
+    /// Queue every held level of a layer in `registered` to have its labels brought to
+    /// `generation`'s denied rows, at the version of the form `projections` holds for it: what a
+    /// deny does once it is acknowledged.
     pub(crate) fn refresh_denied(
         &self,
         generation: &crate::Generation,
         projections: &crate::artifacts::ArtifactProjections,
+        registered: &[RegisteredLayer],
     ) {
         let shard = generation.only_shard();
         for address in self.labels.held.addresses() {
-            let (view, layer, level) = &address;
-            let Some((rows, at)) = projections.held_form_at(view, layer, *level) else {
+            let (view, space, level) = &address;
+            let Some(layer) = registered.iter().find(|layer| layer.space == *space) else {
+                continue;
+            };
+            let name = &layer.declaration.name;
+            let Some((rows, at)) = projections.held_form_at(view, name, *level) else {
                 continue;
             };
             let Some(column) = rows.column_shared() else {
@@ -945,8 +952,8 @@ fn write_labels(
     address: &LevelAddress,
     bound: &AtomicU64,
 ) {
-    let (view, layer, level) = address;
-    let stem = persist::denied_stem(view, layer, *level);
+    let (view, space, level) = address;
+    let stem = persist::denied_stem(view, *space, *level);
     while let Some(newest) = held.to_write(address) {
         persist::write_denied(&persist::identity_dir(root, identity), &stem, &newest);
         held.wrote(address, newest.at);

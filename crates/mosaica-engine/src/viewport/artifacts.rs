@@ -379,7 +379,7 @@ impl Engine {
         });
         let counts = self.figures(
             served,
-            &name,
+            layer.space,
             level,
             level_version,
             &rows,
@@ -844,7 +844,7 @@ impl Engine {
         // The target's own figures, under the same key the viewport would read.
         let counts = self.figures(
             ctx.served,
-            &attachment.layer,
+            layer.space,
             attachment.level,
             level_version,
             &rows,
@@ -1119,7 +1119,7 @@ impl Engine {
         // row-major reads the histogram.
         let counts = self.figures(
             served,
-            &layer.name,
+            layer.registered.space,
             level,
             level_version,
             &rows,

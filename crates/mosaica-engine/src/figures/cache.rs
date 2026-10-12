@@ -37,6 +37,7 @@ use std::time::{Duration, Instant};
 
 use rustc_hash::FxHashMap;
 use mosaica_cache::{CacheWeight, Cancel, SingleFlightCache, WaitEnded, WaitingBuildError};
+use mosaica_types::LayerSpace;
 
 use super::counts::{CountsAt, Deltas, Reserves};
 use super::denied::DenyCorrection;
@@ -120,7 +121,8 @@ pub(crate) struct FieldTailKey {
 /// - `terms`: the session's grant ([`crate::Session::terms_digest`]).
 /// - `identity`: the bundle identity the fragment was unioned against. A fold rotates it, and
 ///   nothing else renumbers the base rows or rewrites the postings below them.
-/// - `view`, `layer`, `level`: what the column is of.
+/// - `view`, `space`, `level`: what the column is of. The layer is named by its space, never by its
+///   name, which a layer registered after a drop takes again.
 /// - `column`: [`crate::row_column::RowColumn::identity`], which a column composed, opened,
 ///   recomposed or claimed afresh moves. Within one, a growth or a publication is followed by its
 ///   steps, not by a new key.
@@ -134,7 +136,7 @@ pub(crate) struct FragmentKey {
     pub terms: [u8; 32],
     pub identity: [u8; 32],
     pub view: String,
-    pub layer: String,
+    pub space: LayerSpace,
     pub level: u32,
     pub column: u64,
     pub geometry: Geometry,
@@ -145,7 +147,7 @@ pub(crate) struct FragmentKey {
 pub(crate) struct ExactKey {
     pub terms: [u8; 32],
     pub view: String,
-    pub layer: String,
+    pub space: LayerSpace,
     pub level: u32,
     pub level_version: u64,
     pub geometry: Geometry,
@@ -164,7 +166,7 @@ pub(crate) struct DenyKey {
     pub terms: [u8; 32],
     pub identity: [u8; 32],
     pub view: String,
-    pub layer: String,
+    pub space: LayerSpace,
     pub level: u32,
     pub column: u64,
     pub level_version: u64,
@@ -178,7 +180,7 @@ pub(crate) struct DenyKey {
 pub(crate) struct TailKey {
     pub token_id: u64,
     pub view: String,
-    pub layer: String,
+    pub space: LayerSpace,
     pub level: u32,
     pub column: u64,
     pub level_version: u64,
@@ -210,7 +212,7 @@ impl MaskIdentity {
     pub(crate) fn exact_key(
         &self,
         view: &str,
-        layer: &str,
+        space: LayerSpace,
         level: u32,
         level_version: u64,
         geometry: Geometry,
@@ -218,7 +220,7 @@ impl MaskIdentity {
         ExactKey {
             terms: self.terms,
             view: view.to_string(),
-            layer: layer.to_string(),
+            space,
             level,
             level_version,
             geometry,
@@ -339,8 +341,8 @@ impl CacheWeight for Tail {
     }
 }
 
-/// `(view, layer, level)`.
-pub(crate) type LevelAddress = (String, String, u32);
+/// `(view, space, level)`.
+pub(crate) type LevelAddress = (String, LayerSpace, u32);
 
 /// The gauges an operator reads. Names no artifact and no principal.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -520,7 +522,7 @@ pub struct FiguresCache {
     pub(super) field_denies: SingleFlightCache<FieldDenyKey, FieldDeny>,
     /// The fields' tails, per session and generation.
     pub(super) field_tails: SingleFlightCache<FieldTailKey, Held>,
-    /// Per `(view, layer, level)`, the labels of the view's denied base rows.
+    /// Per `(view, space, level)`, the labels of the view's denied base rows.
     pub(super) labels: LabelStore,
     /// Where entries are persisted: one directory per bundle identity beneath it. `None` holds
     /// nothing on disk.
@@ -932,12 +934,12 @@ impl Drop for FiguresCache {
 mod tests {
     use super::*;
 
-    fn key(terms: u8, layer: &str, overlay: u64) -> FiguresKey {
+    fn key(terms: u8, overlay: u64) -> FiguresKey {
         FiguresKey::Exact(ExactKey {
             geometry: Geometry::None,
             terms: [terms; 32],
             view: "s0".into(),
-            layer: layer.into(),
+            space: LayerSpace::ZERO,
             level: 0,
             level_version: 1,
             segments_version: 1,
@@ -968,7 +970,7 @@ mod tests {
         let cache = FiguresCache::default();
         let built = std::sync::atomic::AtomicU32::new(0);
         for _ in 0..3 {
-            let held = get(&cache, key(1, "a", 0), || {
+            let held = get(&cache, key(1, 0), || {
                 built.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 counts(&[5, 6])
             });
@@ -998,7 +1000,7 @@ mod tests {
                 let (cache, builds, held) =
                     (Arc::clone(&cache), Arc::clone(&builds), Arc::clone(&held));
                 std::thread::spawn(move || {
-                    get(&cache, key(1, "a", 0), || {
+                    get(&cache, key(1, 0), || {
                         builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         held.lock().unwrap().recv().unwrap();
                         counts(&[3, 4])
@@ -1034,7 +1036,7 @@ mod tests {
         let builder = {
             let cache = Arc::clone(&cache);
             std::thread::spawn(move || {
-                get(&cache, key(1, "a", 0), || {
+                get(&cache, key(1, 0), || {
                     held.recv().unwrap();
                     counts(&[7])
                 })
@@ -1047,10 +1049,9 @@ mod tests {
         }
         let gone = crate::CancelToken::new();
         gone.cancel();
-        let waited =
-            cache.get_or_build(key(1, "a", 0), &DrawingTurn::default(), Some(&gone), |_| {
-                Some(counts(&[0]))
-            });
+        let waited = cache.get_or_build(key(1, 0), &DrawingTurn::default(), Some(&gone), |_| {
+            Some(counts(&[0]))
+        });
         assert_eq!(waited.err(), Some(WaitEnded::Cancelled));
         release.send(()).unwrap();
         assert_eq!(builder.join().unwrap(), 7);
@@ -1074,7 +1075,7 @@ mod tests {
                     Arc::clone(&open),
                 );
                 std::thread::spawn(move || {
-                    get(&cache, key(terms, "a", 0), || {
+                    get(&cache, key(terms, 0), || {
                         most.fetch_max(
                             walking.fetch_add(1, Ordering::SeqCst) + 1,
                             Ordering::SeqCst,
@@ -1110,18 +1111,16 @@ mod tests {
     #[test]
     fn a_deny_rotates_the_key_rather_than_editing_the_entry() {
         let cache = FiguresCache::default();
-        let before = get(&cache, key(1, "a", 4), || counts(&[10]));
+        let before = get(&cache, key(1, 4), || counts(&[10]));
         assert_eq!(before.newest().count(0), 10);
-        let after = get(&cache, key(1, "a", 5), || counts(&[9]));
+        let after = get(&cache, key(1, 5), || counts(&[9]));
         assert_eq!(
             after.newest().count(0),
             9,
             "the corrected count, not the held one"
         );
         assert_eq!(
-            get(&cache, key(1, "a", 4), || counts(&[0]))
-                .newest()
-                .count(0),
+            get(&cache, key(1, 4), || counts(&[0])).newest().count(0),
             10
         );
     }
@@ -1130,24 +1129,9 @@ mod tests {
     #[test]
     fn the_counts_are_the_term_sets_own() {
         let cache = FiguresCache::default();
-        assert_eq!(
-            get(&cache, key(1, "a", 0), || counts(&[3]))
-                .newest()
-                .count(0),
-            3
-        );
-        assert_eq!(
-            get(&cache, key(2, "a", 0), || counts(&[8]))
-                .newest()
-                .count(0),
-            8
-        );
-        assert_eq!(
-            get(&cache, key(1, "a", 0), || counts(&[0]))
-                .newest()
-                .count(0),
-            3
-        );
+        assert_eq!(get(&cache, key(1, 0), || counts(&[3])).newest().count(0), 3);
+        assert_eq!(get(&cache, key(2, 0), || counts(&[8])).newest().count(0), 8);
+        assert_eq!(get(&cache, key(1, 0), || counts(&[0])).newest().count(0), 3);
     }
 
     /// The bound evicts the least recently used, lowering it reclaims at once, and an entry
@@ -1156,25 +1140,23 @@ mod tests {
     fn the_budget_bounds_what_is_resident() {
         let floor = mosaica_cache::PER_ENTRY_FLOOR_BYTES;
         let cache = FiguresCache::new(2 * floor, None);
-        get(&cache, key(1, "a", 0), || counts(&[1, 1]));
-        get(&cache, key(2, "a", 0), || counts(&[2, 2]));
+        get(&cache, key(1, 0), || counts(&[1, 1]));
+        get(&cache, key(2, 0), || counts(&[2, 2]));
         assert_eq!(cache.stats().entries, 2);
 
-        get(&cache, key(1, "a", 0), || counts(&[0, 0]));
-        get(&cache, key(3, "a", 0), || counts(&[3, 3]));
+        get(&cache, key(1, 0), || counts(&[0, 0]));
+        get(&cache, key(3, 0), || counts(&[3, 3]));
         assert_eq!(cache.stats().entries, 2);
         assert_eq!(cache.stats().evictions, 1);
         assert_eq!(
-            get(&cache, key(1, "a", 0), || counts(&[0, 0]))
-                .newest()
-                .count(0),
+            get(&cache, key(1, 0), || counts(&[0, 0])).newest().count(0),
             1
         );
 
         cache.set_bound_bytes(0);
         assert_eq!(cache.stats().entries, 0);
         assert_eq!(cache.stats().resident_bytes, 0);
-        let held = get(&cache, key(4, "a", 0), || counts(&[9, 9]));
+        let held = get(&cache, key(4, 0), || counts(&[9, 9]));
         assert_eq!(held.newest().count(0), 9);
         assert_eq!(cache.stats().entries, 0);
     }
@@ -1192,7 +1174,7 @@ mod tests {
             let (cache, order) = (Arc::clone(&cache), Arc::clone(&order));
             std::thread::spawn(move || {
                 cache
-                    .get_or_build(key(1, "a", 0), &DrawingTurn::default(), None, |build| {
+                    .get_or_build(key(1, 0), &DrawingTurn::default(), None, |build| {
                         started.send(()).unwrap();
                         assert!(build.give_way());
                         order.lock().unwrap().push("walked");
@@ -1220,7 +1202,7 @@ mod tests {
         let _drawing = cache.drawing(&turn);
 
         let own = cache
-            .get_or_build(key(1, "a", 0), &turn, None, |build| {
+            .get_or_build(key(1, 0), &turn, None, |build| {
                 assert!(build.give_way());
                 Some(counts(&[3]))
             })
@@ -1232,7 +1214,7 @@ mod tests {
             let cache = Arc::clone(&cache);
             std::thread::spawn(move || {
                 cache
-                    .get_or_build(key(2, "a", 0), &DrawingTurn::default(), None, |build| {
+                    .get_or_build(key(2, 0), &DrawingTurn::default(), None, |build| {
                         started.send(()).unwrap();
                         assert!(build.give_way());
                         Some(counts(&[5]))
@@ -1244,7 +1226,7 @@ mod tests {
         };
         walking.recv().unwrap();
         let waited = cache
-            .get_or_build(key(2, "a", 0), &turn, None, |_| Some(counts(&[0])))
+            .get_or_build(key(2, 0), &turn, None, |_| Some(counts(&[0])))
             .unwrap();
         assert_eq!(waited.newest().count(0), 5);
         assert_eq!(builder.join().unwrap(), 5);
@@ -1264,7 +1246,7 @@ mod tests {
         let slow = {
             let cache = Arc::clone(&cache);
             std::thread::spawn(move || {
-                get(&cache, key(1, "a", 0), || {
+                get(&cache, key(1, 0), || {
                     started.send(()).unwrap();
                     held.recv().unwrap();
                     counts(&[1])
@@ -1280,7 +1262,7 @@ mod tests {
                 let turn = DrawingTurn::default();
                 let _drawing = cache.drawing(&turn);
                 cache
-                    .get_or_build(key(1, "a", 0), &turn, None, |_| Some(counts(&[0])))
+                    .get_or_build(key(1, 0), &turn, None, |_| Some(counts(&[0])))
                     .unwrap()
                     .newest()
                     .count(0)
@@ -1295,7 +1277,7 @@ mod tests {
             let cache = Arc::clone(&cache);
             std::thread::spawn(move || {
                 let got = cache
-                    .get_or_build(key(2, "a", 0), &DrawingTurn::default(), None, |build| {
+                    .get_or_build(key(2, 0), &DrawingTurn::default(), None, |build| {
                         assert!(build.give_way());
                         Some(counts(&[2]))
                     })
@@ -1330,7 +1312,7 @@ mod tests {
                 let (cache, held, started) =
                     (Arc::clone(&cache), Arc::clone(&held), started.clone());
                 std::thread::spawn(move || {
-                    get(&cache, key(terms, "a", 0), || {
+                    get(&cache, key(terms, 0), || {
                         started.send(()).unwrap();
                         held.lock().unwrap().recv().unwrap();
                         counts(&[u32::from(terms)])
@@ -1348,7 +1330,7 @@ mod tests {
         let queued = {
             let (cache, gone) = (Arc::clone(&cache), gone.clone());
             std::thread::spawn(move || {
-                cache.get_or_build(key(9, "a", 0), &DrawingTurn::default(), Some(&gone), |_| {
+                cache.get_or_build(key(9, 0), &DrawingTurn::default(), Some(&gone), |_| {
                     Some(counts(&[9]))
                 })
             })

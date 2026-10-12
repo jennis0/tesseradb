@@ -13,6 +13,7 @@ use croaring::Bitmap;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use mosaica_types::layer::ServingLayout;
+use mosaica_types::LayerSpace;
 
 use crate::artifacts::MembershipRows;
 use crate::derived::{place, Placement};
@@ -390,7 +391,7 @@ fn counts_and_labels_written_to_disk_read_back_whole_or_not_at_all() {
         Geometry::Box,
     );
     let dir = tempfile::tempdir().unwrap();
-    let stem = super::persist::counts_stem(&[1; 32], "s0", "layer", 0, Geometry::Box);
+    let stem = super::persist::counts_stem(&[1; 32], "s0", LayerSpace::ZERO, 0, Geometry::Box);
     super::persist::write_counts(dir.path(), &stem, &counts, reserves.as_deref());
     let (read, read_reserves) =
         super::persist::read_counts(dir.path(), &stem, 7, Geometry::Box).expect("it reads back");
@@ -408,7 +409,7 @@ fn counts_and_labels_written_to_disk_read_back_whole_or_not_at_all() {
 
     let denied = sample(&mut rng, 0..BASE, 0.1);
     let labels = DeniedLabels::read([3; 32], &column, 7, &denied, &places);
-    let stem = super::persist::denied_stem("s0", "layer", 0);
+    let stem = super::persist::denied_stem("s0", LayerSpace::ZERO, 0);
     super::persist::write_denied(dir.path(), &stem, &labels);
     let read = super::persist::read_denied(dir.path(), &stem, 7, [3; 32], column.identity())
         .expect("it reads back");
