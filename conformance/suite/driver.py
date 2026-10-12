@@ -601,7 +601,7 @@ def _thread_backtraces(pid: int) -> tuple[str | None, list[str]]:
     refused: list[str] = []
     for argv in _stack_commands(pid):
         try:
-            done = subprocess.run(
+            done = subprocess.run(  # nosemgrep: fixed debugger argv, as a list, with no shell
                 argv,
                 check=False,
                 capture_output=True,

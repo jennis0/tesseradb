@@ -27,7 +27,7 @@ time.sleep(600)
 @pytest.fixture
 def hung(tmp_path):
     """A three-thread process that never returns, and a 40 KiB log ending in a known line."""
-    proc = subprocess.Popen([sys.executable, "-c", HANGS])
+    proc = subprocess.Popen([sys.executable, "-c", HANGS])  # nosemgrep
     poll(
         lambda: len(os.listdir(f"/proc/{proc.pid}/task")) == 3,
         "the hanging process never started its threads",
