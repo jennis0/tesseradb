@@ -409,17 +409,18 @@ fn row_field_out(
     Some(flat_families!(out))
 }
 
-/// The hot-column value one already-flushed entity carries for `declared_index`, or `None` where
-/// no view holds a row for it, the column is not in the render tail, or the row's presence bitmap
-/// says the slot is empty. This home exists because `render = true, index = false` over a
-/// non-`derived` vocabulary owes no value column and is not blob-resident, so the hot column is
-/// the value's only store. Every view is scanned, and one holding no value is skipped rather than
-/// answering, because views can hold different tails lawfully and absence must never pre-empt a
-/// view that holds something. `None` means no view holds a present value. A malformed segment set
+/// The hot-column value one already-flushed entity of `shard` carries for `declared_index`, or
+/// `None` where no view holds a row for it, the column is not in the render tail, or the row's
+/// presence bitmap says the slot is empty. This home exists because `render = true, index = false`
+/// over a non-`derived` vocabulary owes no value column and is not blob-resident, so the hot column
+/// is the value's only store. Every view is scanned, and one holding no value is skipped rather
+/// than answering, because views can hold different tails lawfully and absence must never pre-empt
+/// a view that holds something. `None` means no view holds a present value. A malformed segment set
 /// is skipped too; where no view answers, the join is accepted unchecked. The warning names the
 /// view and never the entity.
 pub(crate) fn flushed_row_scalar(
     generation: &Generation,
+    shard: &crate::Shard,
     entity: EntityId,
     declared_index: usize,
 ) -> Option<mosaica_filter::RecordValue> {
@@ -431,7 +432,7 @@ pub(crate) fn flushed_row_scalar(
     let d = manifest.declared_scalars.get(declared_index)?;
     let render_scalars: Vec<_> = manifest.render_scalars().cloned().collect();
 
-    for (view, view_data) in &generation.only_shard().data.views {
+    for (view, view_data) in &shard.data.views {
         let resolved_row = match segment_row_of(view, view_data, entity) {
             Ok(resolved) => resolved,
             Err(e) => {

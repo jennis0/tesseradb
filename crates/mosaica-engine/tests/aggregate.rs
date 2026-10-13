@@ -34,7 +34,7 @@ use mosaica_engine::{
 use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
 use mosaica_lifecycle::UnallocatedRow;
 use mosaica_spatial::shape::{ShapeF64, Space};
-use mosaica_types::AttrLocalId;
+use mosaica_types::{AttrLocalId, ShardId};
 
 const N: u64 = 3_000;
 
@@ -1340,7 +1340,10 @@ fn with_cells(mut grouping: Grouping, depth: u8) -> Grouping {
 /// Every row this viewer may see in the view, as the stored geometry holds it: its 64-bit
 /// position and the item it belongs to.
 fn stored_rows<'a>(fx: &'a Fx, session: &Session) -> Vec<(u64, &'a Item)> {
-    let (generation, mask) = fx.engine.composed_mask(session, "s0").unwrap();
+    let (generation, mask) = fx
+        .engine
+        .composed_mask(session, "s0", ShardId::ZERO)
+        .unwrap();
     let view_data = &generation.bundle.only_shard().views["s0"];
     let segments = mosaica_engine::viewport::segments_with_row_bases("s0", view_data).unwrap();
     let tables = view_data
@@ -2006,7 +2009,10 @@ fn cells_over_the_segments_a_flush_adds_are_the_oracles() {
     let session = fx.session(true);
     ingest_items(&mut fx, 600, "cells");
     flush_and_show(&mut fx, &session);
-    let (generation, _) = fx.engine.composed_mask(&session, "s0").unwrap();
+    let (generation, _) = fx
+        .engine
+        .composed_mask(&session, "s0", ShardId::ZERO)
+        .unwrap();
     let segments = mosaica_engine::viewport::segments_with_row_bases(
         "s0",
         &generation.bundle.only_shard().views["s0"],

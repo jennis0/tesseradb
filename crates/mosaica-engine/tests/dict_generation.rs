@@ -11,7 +11,7 @@ use std::sync::Arc;
 use common::*;
 use mosaica_authz::{Dict, DictWriter};
 use mosaica_engine::GeometryPublication;
-use mosaica_types::TermId;
+use mosaica_types::{ShardId, TermId};
 
 /// Ordinals are stable across an extension: a term that resolved to 3 before still does, or
 /// every session authorised before the flush is now evaluating against a different term.
@@ -385,7 +385,7 @@ fn a_background_refresh_does_not_poison_a_later_authorise_of_the_same_credential
 /// How many entities the session's fragment holds.
 fn visible(engine: &mosaica_engine::Engine, session: &mosaica_engine::Session) -> u64 {
     engine
-        .session_fragment_for_test(session)
+        .session_fragment_for_test(session, ShardId::ZERO)
         .expect("the session's fragment")
         .view()
         .cardinality()

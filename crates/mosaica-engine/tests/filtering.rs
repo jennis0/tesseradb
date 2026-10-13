@@ -37,7 +37,7 @@ use mosaica_engine::ViewportRequest;
 use mosaica_lifecycle::command::UnallocatedRow;
 use mosaica_lifecycle::wal::WalScalar;
 use mosaica_store::read::open_bundle;
-use mosaica_types::AttrLocalId;
+use mosaica_types::{AttrLocalId, ShardId};
 
 const N: u64 = 60;
 /// The whole declared extent, so a depth-0 request covers every item.
@@ -371,7 +371,7 @@ fn candidate_for(fx: &Fixture, credential: &[u8]) -> (mosaica_engine::Engine, Bi
     let generation = engine.generation();
     let cand = candidate(
         &engine
-            .session_fragment_for_test(&session)
+            .session_fragment_for_test(&session, ShardId::ZERO)
             .expect("the session's fragment"),
         session.satisfied_for_test(),
         &generation.only_shard().overlay,
@@ -669,7 +669,7 @@ fn live_candidate(engine: &mosaica_engine::Engine) -> (Arc<mosaica_engine::Gener
     let generation = engine.generation();
     let cand = candidate(
         &engine
-            .session_fragment_for_test(&session)
+            .session_fragment_for_test(&session, ShardId::ZERO)
             .expect("the session's fragment"),
         session.satisfied_for_test(),
         &generation.only_shard().overlay,
@@ -3215,7 +3215,7 @@ fn a_session_from_before_a_fold_is_never_offered_the_retired_entitys_only_value(
         "the ingested entity is the value's only member, or the assertions below hold vacuously"
     );
     let held = engine
-        .session_fragment_for_test(&session)
+        .session_fragment_for_test(&session, ShardId::ZERO)
         .expect("the session's fragment");
 
     engine

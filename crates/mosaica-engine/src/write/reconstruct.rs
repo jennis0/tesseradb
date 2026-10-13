@@ -8,16 +8,11 @@ use super::*;
 /// A struct rather than four arguments: the fields travel together and are all read from the same
 /// manifests, and a fifth stays a compile error here rather than a defaulted argument.
 pub(crate) struct ManifestSeed<'a> {
-    /// The shard the high water and freed ids below are of.
-    pub shard: ShardId,
-    /// The shard record's `high_water`.
-    pub high_water: u64,
+    /// Every point shard's allocator seed, ascending by shard. The first is the write shard: the
+    /// one the log's records name, and whose slice of every membership the artifact store holds.
+    pub shards: Vec<ShardSeed>,
     /// The served side-manifest's `shards.size`.
     pub size: u64,
-    /// The newest served side-manifest's freed ids, and the sets it holds back with their
-    /// positions, by tenancy; empty where no manifest can be trusted to be the newest.
-    pub free: mosaica_lifecycle::ByTenancy,
-    pub held: Vec<(u64, mosaica_lifecycle::ByTenancy)>,
     pub layers: &'a [mosaica_types::layer::RegisteredLayer],
     /// The highest `next_layer_space` any partition's manifest saved.
     pub next_layer_space: u32,
@@ -34,9 +29,6 @@ pub(crate) struct ManifestSeed<'a> {
     /// every sharing group's. Replay's `ViewDrop` arm prunes the buffer with it, and it is passed
     /// rather than derived because `mosaica-lifecycle` holds no manifest.
     pub view_ids_of_key: &'a dyn Fn(&str, &str) -> Vec<String>,
-    /// Every point shard, ascending. Each holds its own slice of every artifact's membership and
-    /// generating sets, in a member pack beside each record pack.
-    pub shards: Vec<ShardId>,
     /// Every published member pack, across every partition's manifest, beside the shard holding
     /// it, with the prefix directory their paths are relative to.
     pub membership_extents: &'a [(ShardId, mosaica_store::manifest::MembershipExtent)],
@@ -63,6 +55,17 @@ pub(crate) struct ManifestSeed<'a> {
     pub view_declarations: crate::view_declarations::RuntimeViewDeclarations,
 }
 
+/// One point shard's allocator, as its record leaves it.
+pub(crate) struct ShardSeed {
+    pub shard: ShardId,
+    /// The shard record's `high_water`.
+    pub high_water: u64,
+    /// The newest served side-manifest's freed ids of this shard, and the sets it holds back with
+    /// their positions, by tenancy; empty where no manifest can be trusted to be the newest.
+    pub free: mosaica_lifecycle::ByTenancy,
+    pub held: Vec<(u64, mosaica_lifecycle::ByTenancy)>,
+}
+
 impl WritePath {
     /// Rebuilds the write-side state from durable storage: opens and replays the WAL, seeds the
     /// allocator, and rebuilds the descriptor resolver's extension, the
@@ -79,6 +82,13 @@ impl WritePath {
         has_row: impl Fn(EntityId, &str) -> bool,
     ) -> Result<(Overlays, IngestBuffer, WritePathState), EngineError> {
         let wal = Wal::open(wal_path).map_err(EngineError::Wal)?;
+        // A bundle of several shards takes no write, so no record of its log can be its own.
+        if seed.shards.len() > 1 && wal.records().next().is_some() {
+            return Err(EngineError::SeveralShardsLogged {
+                shards: seed.shards.len(),
+            });
+        }
+        let shard_ids: Vec<ShardId> = seed.shards.iter().map(|shard| shard.shard).collect();
 
         // Two walks over the log, each holding one record at a time. The first rebuilds what the
         // second is read against: the declarations, the registry an extent's ordinals resolve
@@ -299,8 +309,8 @@ impl WritePath {
             &registry,
             seed.layer_spaces,
             seed.membership_extents,
-            &seed.shards,
-            seed.shard,
+            &shard_ids,
+            shard_ids[0],
             &seed.prefix_dir,
         )?;
 
@@ -398,30 +408,41 @@ impl WritePath {
             buffer.remove_in_view(entity, &view);
         }
 
-        // `try_new`: the seed comes from durable state this run did not write, so a corrupt or
-        // hand-edited mark is refused here, not as a later opaque refusal.
-        let mut allocator = Allocator::try_new(seed.high_water.max(wal_high_water))
-            .ok_or_else(|| {
-                EngineError::Malformed(format!(
-                    "the high water durable state leaves (manifest {}, log {wal_high_water}) is \
-                     past {}, where a shard's ids end. Restore the side-manifest and log this \
-                     bundle was written with",
-                    seed.high_water,
-                    mosaica_types::ENTITY_END,
-                ))
-            })?;
-        // A size no declaration could have left is refused at open, not at the first batch.
-        mosaica_types::check_shard_size(size, allocator.high_water()).map_err(|e| {
-            EngineError::Malformed(format!(
-                "the shard size the manifest and the WAL leave ({size}) does not hold: {e}"
-            ))
-        })?;
-        allocator.set_size(size);
         // An id the manifest records as free and a kept record or the overlay names was issued
         // since the manifest was written.
         named.or_inplace(overlay.items.deleted_set());
         named.or_inplace(overlay.items.suppressed_set());
-        allocator.seed_freed(seed.free, seed.held, wal.retained_from(), &named);
+        let unnamed = croaring::Bitmap::new();
+        let mut shards = Vec::with_capacity(seed.shards.len());
+        for (at, shard) in seed.shards.into_iter().enumerate() {
+            // The log names the write shard alone, and the open refuses a log over several.
+            let (wal_high_water, named) = match at {
+                0 => (wal_high_water, &named),
+                _ => (0, &unnamed),
+            };
+            // `try_new`: the seed comes from durable state this run did not write, so a corrupt
+            // or hand-edited mark is refused here, not as a later opaque refusal.
+            let mut allocator = Allocator::try_new(shard.high_water.max(wal_high_water))
+                .ok_or_else(|| {
+                    EngineError::Malformed(format!(
+                        "the high water durable state leaves for shard {} (manifest {}, log \
+                         {wal_high_water}) is past {}, where a shard's ids end. Restore the \
+                         side-manifest and log this bundle was written with",
+                        shard.shard,
+                        shard.high_water,
+                        mosaica_types::ENTITY_END,
+                    ))
+                })?;
+            // A size no declaration could have left is refused at open, not at the first batch.
+            mosaica_types::check_shard_size(size, allocator.high_water()).map_err(|e| {
+                EngineError::Malformed(format!(
+                    "the shard size the manifest and the WAL leave ({size}) does not hold: {e}"
+                ))
+            })?;
+            allocator.set_size(size);
+            allocator.seed_freed(shard.free, shard.held, wal.retained_from(), named);
+            shards.push(ShardWrite::new(shard.shard, allocator));
+        }
 
         let edited_live = crate::edited::EditedLive::derive(&edits, &buffer, &overlay.items);
 
@@ -432,7 +453,7 @@ impl WritePath {
             buffer,
             WritePathState {
                 wal,
-                shards: vec![ShardWrite::new(seed.shard, allocator)],
+                shards,
                 resolver_state,
                 accepted_batches,
                 registry,

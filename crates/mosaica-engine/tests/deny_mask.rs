@@ -16,7 +16,7 @@ use common::*;
 use mosaica_engine::{Engine, EngineConfig, ViewportRequest};
 use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_lifecycle::UnallocatedRow;
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, ShardId};
 
 fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -590,7 +590,9 @@ fn an_entrys_whole_life_serves_the_same_answer_at_every_step() {
         entity: EntityId,
     ) {
         let session = engine.authorise(credential).expect("the credential authorises");
-        let (_, mask) = engine.composed_mask(&session, view).expect("a composed mask");
+        let (_, mask) = engine
+            .composed_mask(&session, view, ShardId::ZERO)
+            .expect("a composed mask");
         let row = row_in_view(engine, view, entity).expect("the join row published");
         let (base, _, plus, _) = mask.parts();
         assert!(

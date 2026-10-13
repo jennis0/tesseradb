@@ -12,7 +12,8 @@ use super::*;
 pub enum ExecutorPosture {
     /// `Engine::start_write_executor` was never called. Writes are refused; reads are unaffected.
     NotStarted = 0,
-    /// Executing normally.
+    /// Executing normally. Over a bundle of several shards, which takes no write, there is
+    /// nothing to execute and no thread runs.
     Running = 1,
     /// The WAL refuses every further operation. The executor is alive and still applies denies.
     /// A sync failure is repaired in process ([`Executor::recover_wal`]); a torn append is not, and

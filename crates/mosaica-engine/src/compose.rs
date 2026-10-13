@@ -559,7 +559,7 @@ pub struct ShardedMask {
     leaves: Vec<(ShardId, EffectiveMask)>,
     /// The leaves left out, ascending by shard: the first is where a viewer who sees nothing has
     /// the filter evaluated and narrowed ([`Self::filtered_leaves`]) and a level read
-    /// ([`Self::read_leaf`]), and [`Self::into_only_leaf`] answers with it on a view of one shard.
+    /// ([`Self::read_leaf`]), and [`Self::into_leaf`] answers with it.
     left_out: Vec<(ShardId, EffectiveMask)>,
 }
 
@@ -718,22 +718,14 @@ impl ShardedMask {
             .map_or_else(Bitmap::new, |leaf| leaf.visible_all().andnot(set))
     }
 
-    /// The one leaf of a mask over one shard, left out or not, for the bench and test hook
-    /// [`crate::Engine::composed_mask`]. Panics where the view has a second shard.
-    pub fn into_only_leaf(mut self) -> EffectiveMask {
-        self.assert_one_shard();
-        match self.leaves.pop() {
-            Some((_, leaf)) => leaf,
-            None => self.left_out.remove(0).1,
-        }
-    }
-
-    fn assert_one_shard(&self) {
-        assert!(
-            self.leaves.len() + self.left_out.len() == 1,
-            "a route read one shard's leaf of a mask over {} shards",
-            self.leaves.len() + self.left_out.len()
-        );
+    /// `shard`'s leaf, left out or not, for the bench and test hook
+    /// [`crate::Engine::composed_mask`]; `None` where the view has no part in `shard`.
+    pub fn into_leaf(self, shard: ShardId) -> Option<EffectiveMask> {
+        self.leaves
+            .into_iter()
+            .chain(self.left_out)
+            .find(|(held, _)| *held == shard)
+            .map(|(_, leaf)| leaf)
     }
 }
 
@@ -1432,23 +1424,16 @@ mod sharded_tests {
         assert!(nothing.read_leaf(zero).unwrap().is_highlighted(2));
     }
 
-    /// The hook answers with a one-shard mask's leaf whether or not it was left out.
+    /// The hook answers with a shard's leaf whether or not it was left out.
     #[test]
-    fn a_one_shard_mask_has_its_only_leaf_even_when_left_out() {
-        let nothing = leaf(Bitmap::new(), Bitmap::new(), Bitmap::new());
-        let empty = ShardedMask::new([(ShardId::ZERO, nothing)]);
-        assert_eq!(empty.leaves().count(), 0);
-        assert_eq!(empty.into_only_leaf().visible_total(), 0);
-        let one = leaf(Bitmap::of(&[4]), Bitmap::new(), Bitmap::new());
-        let held = ShardedMask::new([(ShardId::ZERO, one)]);
-        assert_eq!(held.into_only_leaf().visible_total(), 1);
-    }
-
-    #[test]
-    #[should_panic]
-    fn the_hook_refuses_a_second_shard() {
-        let one = || leaf(Bitmap::of(&[1]), Bitmap::new(), Bitmap::new());
-        let mask = ShardedMask::new([(ShardId::ZERO, one()), (ShardId::new(1).unwrap(), one())]);
-        let _ = mask.into_only_leaf();
+    fn a_shard_has_its_leaf_even_when_left_out() {
+        let one = ShardId::new(1).unwrap();
+        let nothing = || leaf(Bitmap::new(), Bitmap::new(), Bitmap::new());
+        let held = || leaf(Bitmap::of(&[4]), Bitmap::new(), Bitmap::new());
+        let mask = || ShardedMask::new([(ShardId::ZERO, nothing()), (one, held())]);
+        assert_eq!(mask().leaves().count(), 1);
+        assert_eq!(mask().into_leaf(ShardId::ZERO).unwrap().visible_total(), 0);
+        assert_eq!(mask().into_leaf(one).unwrap().visible_total(), 1);
+        assert!(mask().into_leaf(ShardId::new(2).unwrap()).is_none());
     }
 }

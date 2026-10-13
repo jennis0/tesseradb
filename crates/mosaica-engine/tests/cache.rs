@@ -488,7 +488,9 @@ fn fragment_evict_drops_the_memory_tier_not_the_sidecar() {
         0,
         "authorise builds no fragment"
     );
-    let built = engine.session_fragment_for_test(&session).unwrap();
+    let built = engine
+        .session_fragment_for_test(&session, ShardId::ZERO)
+        .unwrap();
     assert_eq!(
         engine.fragment_cache_rebuilds(),
         1,
@@ -520,7 +522,9 @@ fn fragment_evict_drops_the_memory_tier_not_the_sidecar() {
     // Another session of the same credential repopulates the tier from the sidecar: an entry
     // again, but NOT a rebuild.
     let again = engine.authorise(&full_coverage_credential()).unwrap();
-    let reopened = engine.session_fragment_for_test(&again).unwrap();
+    let reopened = engine
+        .session_fragment_for_test(&again, ShardId::ZERO)
+        .unwrap();
     assert_eq!(engine.fragment_cache_stats().entries, 1);
     assert_eq!(
         engine.fragment_cache_rebuilds(),

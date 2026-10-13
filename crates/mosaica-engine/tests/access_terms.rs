@@ -35,7 +35,7 @@ use mosaica_engine::{
     Session, SinkResult,
 };
 use mosaica_lifecycle::{ChangeOp, IngestRow};
-use mosaica_types::MosaicaId;
+use mosaica_types::{MosaicaId, ShardId};
 use mosaica_build::config::{AccessInput, AccessSource};
 use mosaica_build::{build, BuildArgs};
 
@@ -159,7 +159,7 @@ fn visible(dir: &Path, terms: &[&str]) -> u64 {
         .authorise(credential.as_bytes())
         .expect("a credential of known descriptors authorises");
     let cardinality = engine
-        .session_fragment_for_test(&session)
+        .session_fragment_for_test(&session, ShardId::ZERO)
         .unwrap()
         .view()
         .cardinality();
@@ -407,7 +407,7 @@ fn a_conjunction_admits_only_a_principal_satisfying_it() {
         .unwrap();
     assert_eq!(
         engine
-            .session_fragment_for_test(&session)
+            .session_fragment_for_test(&session, ShardId::ZERO)
             .unwrap()
             .view()
             .cardinality(),
@@ -929,11 +929,15 @@ fn deletions_and_suppressions_hide_items_from_a_read_all_session() {
 fn read_all_sessions_share_one_fragment() {
     let (_dir, engine) = expressions_engine();
     let first = engine.authorise_all().unwrap();
-    engine.session_fragment_for_test(&first).unwrap();
+    engine
+        .session_fragment_for_test(&first, ShardId::ZERO)
+        .unwrap();
     let before = engine.generation_status();
     assert_eq!(before.fragment_cache.entries, 1);
     let second = engine.authorise_all().unwrap();
-    engine.session_fragment_for_test(&second).unwrap();
+    engine
+        .session_fragment_for_test(&second, ShardId::ZERO)
+        .unwrap();
     let after = engine.generation_status();
     assert_eq!(after.fragment_cache_rebuilds, before.fragment_cache_rebuilds);
     assert_eq!(after.fragment_cache.entries, before.fragment_cache.entries);

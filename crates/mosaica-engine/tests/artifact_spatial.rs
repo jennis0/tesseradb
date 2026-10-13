@@ -41,7 +41,7 @@ use mosaica_engine::Engine;
 use mosaica_lifecycle::command::UnallocatedRow;
 use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_spatial::shape::Space;
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, ShardId};
 
 const N: u64 = 3_000;
 const SEED: u64 = 0x5EED;
@@ -862,7 +862,7 @@ fn publish_box(engine: &Engine, key: &str, bbox: [f64; 4]) -> mosaica_spatial::s
 /// `tests/artifact_bring_forward.rs`'s `form_of`, for a spatial level.
 fn form_of(engine: &Engine, layer: &str) -> Vec<String> {
     let rows = engine
-        .held_artifact_form_for_test("s0", layer, 0)
+        .held_artifact_form_for_test(ShardId::ZERO, "s0", layer, 0)
         .expect("the level's form is held");
     let mut out = vec![format!(
         "ordinals={} layout={:?} row_count={} everywhere={}",

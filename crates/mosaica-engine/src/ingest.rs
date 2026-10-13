@@ -163,6 +163,7 @@ impl Engine {
     ///
     /// Blocking: a tokio handler calls this inside `spawn_blocking`.
     pub fn ingest(&self, request: IngestRequest) -> Result<IngestReceipt, AcceptError> {
+        self.write.writable()?;
         #[cfg(feature = "fault-injection")]
         self.switches.park_ingest_while_wanted();
         // A stepped-down node would bury what it accepts under a manifest assembled from older
@@ -1238,7 +1239,7 @@ impl resolve::Holdings for Held<'_> {
     }
 
     fn mosaica_holders(&self, ids: &[MosaicaId]) -> Result<Vec<Option<EntityId>>, AcceptError> {
-        let high_water = self.engine.allocator_high_water();
+        let high_water = self.engine.write.live().only_shard().high_water();
         Ok(self
             .engine
             .mosaica_ids_in(self.generation, ids)

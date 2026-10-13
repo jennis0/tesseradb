@@ -78,7 +78,7 @@ pub struct GenerationStatus {
     /// Sorted by `(partition, view)`.
     pub segments: Vec<ViewSegments>,
     pub live_rows: u64,
-    /// The point shard's denied items, and its deletions.
+    /// The point shards' denied items, and their deletions, summed over the shards.
     pub overlay_depth: usize,
     pub retirable_deletions: u64,
     pub layer_spaces: LayerSpacesStatus,
@@ -91,35 +91,51 @@ pub(crate) fn live_rows_of(generation: &Generation) -> u64 {
         .bundle
         .partitions
         .values()
-        .flat_map(|partition| partition.only_shard().record.segments.iter())
+        .flat_map(|partition| partition.shards.iter())
+        .flat_map(|shard| shard.record.segments.iter())
         .map(|descriptor| u64::from(descriptor.row_count))
         .sum()
 }
 
-/// Live segments per (partition, view). A viewport pays a measured 1.4-1.6 µs per
-/// (tile × segment). Sorted, since the generation holds them in `HashMap`s and an operator diffing
-/// two responses must not see a reordering that means nothing.
-fn segment_counts_of(generation: &Generation) -> Vec<ViewSegments> {
-    let mut counts: Vec<ViewSegments> = generation
-        .bundle
-        .partitions
-        .iter()
-        .flat_map(|(partition, data)| {
-            data.only_shard().views
-                .iter()
-                .map(move |(view, view_data)| ViewSegments {
-                    partition: partition.clone(),
-                    view: view.clone(),
-                    segments: view_data.segments.len(),
-                })
-        })
-        .collect();
-    counts.sort_by(|a, b| (&a.partition, &a.view).cmp(&(&b.partition, &b.view)));
-    counts
+/// The point shards' denied items, summed.
+fn overlay_depth_of(generation: &Generation) -> usize {
+    generation.shards().map(|shard| shard.overlay.len()).sum()
 }
 
-/// Each partition's live `(segments_version, watermark)`, sorted by partition.
+/// The point shards' deletions, summed: what a fold can retire.
+fn retirable_deletions_of(generation: &Generation) -> u64 {
+    generation
+        .shards()
+        .map(|shard| shard.overlay.deleted_len())
+        .sum()
+}
+
+/// Live segments per (partition, view), summed over the shards. A viewport pays a measured 1.4-1.6
+/// µs per (tile × segment). Sorted, since the generation holds them in `HashMap`s and an operator
+/// diffing two responses must not see a reordering that means nothing.
+fn segment_counts_of(generation: &Generation) -> Vec<ViewSegments> {
+    let mut counts = std::collections::BTreeMap::<(&String, &String), usize>::new();
+    for (partition, data) in &generation.bundle.partitions {
+        for shard in &data.shards {
+            for (view, view_data) in &shard.views {
+                *counts.entry((partition, view)).or_default() += view_data.segments.len();
+            }
+        }
+    }
+    counts
+        .into_iter()
+        .map(|((partition, view), segments)| ViewSegments {
+            partition: partition.clone(),
+            view: view.clone(),
+            segments,
+        })
+        .collect()
+}
+
+/// Each partition's live `(segments_version, watermark)`, the watermark summed over the shards,
+/// sorted by partition.
 fn partition_status_of(generation: &Generation) -> Vec<PartitionStatus> {
+    let watermark = generation.shards().map(|shard| shard.watermark).sum();
     let mut rows: Vec<PartitionStatus> = generation
         .bundle
         .partitions
@@ -127,7 +143,7 @@ fn partition_status_of(generation: &Generation) -> Vec<PartitionStatus> {
         .map(|partition| PartitionStatus {
             partition: partition.clone(),
             segments_version: generation.segments_version,
-            watermark: generation.only_shard().watermark,
+            watermark,
         })
         .collect();
     rows.sort_by(|a, b| a.partition.cmp(&b.partition));
@@ -179,13 +195,14 @@ impl Engine {
         self.counters.driven_stretches.load(Ordering::Relaxed)
     }
 
+    /// The point shards' high waters, summed.
     pub fn allocator_high_water(&self) -> u64 {
-        self.write.live().only_shard().high_water()
+        self.write.live().high_water()
     }
 
-    /// The point shard's size: the high water an insert may not take it past.
+    /// The point shards' size: the high water an insert may not take a shard past.
     pub fn shard_size(&self) -> u64 {
-        self.write.live().only_shard().size()
+        self.write.live().shard_size()
     }
 
     /// The figures' gauges ([`crate::figures`]). Operator plane only: a count of structures,
@@ -330,14 +347,13 @@ impl Engine {
     /// in one response describe one publication.
     pub fn generation_status(&self) -> GenerationStatus {
         let generation = self.generation.load();
-        let shard = generation.only_shard();
         let (depth, retirable) = generation.space_overlay_figures();
         GenerationStatus {
             partitions: partition_status_of(&generation),
             segments: segment_counts_of(&generation),
             live_rows: live_rows_of(&generation),
-            overlay_depth: shard.overlay.len(),
-            retirable_deletions: shard.overlay.deleted_len(),
+            overlay_depth: overlay_depth_of(&generation),
+            retirable_deletions: retirable_deletions_of(&generation),
             layer_spaces: LayerSpacesStatus {
                 count: self.write.live().layer_count(),
                 depth,
@@ -348,9 +364,9 @@ impl Engine {
         }
     }
 
-    /// The live overlay's entry count, read off the current generation.
+    /// The point shards' overlay entries, summed, read off the current generation.
     pub fn overlay_depth(&self) -> usize {
-        self.generation.load().only_shard().overlay.len()
+        overlay_depth_of(&self.generation.load())
     }
 
     /// Rows the bundle's segments hold, tombstoned ones included: the only figure on
@@ -363,7 +379,7 @@ impl Engine {
     /// [`Engine::overlay_depth`]: this is what a fold can reduce, since a fold retires a
     /// suppression only of an entity it removes, which is deleted too.
     pub fn retirable_deletions(&self) -> u64 {
-        self.generation.load().only_shard().overlay.deleted_len()
+        retirable_deletions_of(&self.generation.load())
     }
 
     /// The row-projection cache's operator gauges, published as `projection_cache`. The fragment

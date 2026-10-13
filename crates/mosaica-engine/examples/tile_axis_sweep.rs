@@ -57,6 +57,7 @@ use mosaica_engine::viewport::ViewportRequest;
 use mosaica_engine::{Engine, EngineConfig, RowProjection};
 use mosaica_spatial::{tiles_for_bbox, Bounds};
 use mosaica_store::{open_bundle, tile_ranges_all, Bundle};
+use mosaica_types::ShardId;
 
 const REPS: usize = 25;
 const WARMUP: usize = 3;
@@ -218,7 +219,7 @@ fn width_for_coverage(engine: &Engine, all: &[String], target: f64, universe: u6
             .authorise(auth.as_bytes())
             .expect("authorise (coverage search)");
         let card = engine
-            .session_fragment_for_test(&s)
+            .session_fragment_for_test(&s, ShardId::ZERO)
             .expect("the session's fragment")
             .view()
             .cardinality();
@@ -425,7 +426,7 @@ fn main() {
         let segment = view_data.segments.first().expect("one segment (R4)");
         let universe = segment.row_count as u64;
         let fragment = engine_serial
-            .session_fragment_for_test(&session1)
+            .session_fragment_for_test(&session1, ShardId::ZERO)
             .expect("the session's fragment");
         let view = fragment.view();
         let ent: &Bitmap = &view;

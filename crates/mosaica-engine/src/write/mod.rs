@@ -206,6 +206,11 @@ pub enum AcceptError {
     /// The batch cannot be taken as sent: a row creates an item with no position or no label, or
     /// carries coordinates in a batch naming no view. Nothing was submitted.
     Contract(String),
+    /// The bundle holds several point shards, which a running service serves for reads only until
+    /// writes over several shards land. Nothing was submitted.
+    SeveralShards {
+        shards: usize,
+    },
 }
 
 impl std::fmt::Display for AcceptError {
@@ -249,6 +254,12 @@ impl std::fmt::Display for AcceptError {
             AcceptError::Conflict(detail) | AcceptError::Contract(detail) => {
                 write!(f, "{detail}")
             }
+            AcceptError::SeveralShards { shards } => write!(
+                f,
+                "this bundle holds {shards} point shards and takes no write until writes over \
+                 several shards land (stage 5 of the sharding plan); to write, serve a bundle of \
+                 one shard, built with a `[shards] size` of at least its item count"
+            ),
         }
     }
 }
@@ -399,6 +410,14 @@ impl WritePath {
             })?;
         tracing::debug!(root = %bundle_lock.path().display(), "bundle write lock taken");
         let wal = self.wal.take().expect("checked immediately above");
+        // A bundle of several shards takes no write, so no thread runs over it: nothing is
+        // logged, flushed, merged, folded or rotated, and the lock keeps every other writer out.
+        if self.writable().is_err() {
+            drop(wal);
+            self.bundle_lock = Some(bundle_lock);
+            self.health.advance(ExecutorPosture::Running);
+            return Ok(());
+        }
         let wal_position_at_start = wal.position();
 
         // The startup sweep runs before anything else and before the thread. `AlreadyStarted` is
@@ -600,6 +619,16 @@ impl WritePath {
         &self.health
     }
 
+    /// [`crate::Engine::writable`]'s rule. [`Self::submit`] and [`Self::submit_changes`], where
+    /// every write reaches the executor, ask it; so do the entries that read the write shard
+    /// before submitting.
+    pub(crate) fn writable(&self) -> Result<(), AcceptError> {
+        match self.live.shards.len() {
+            1 => Ok(()),
+            shards => Err(AcceptError::SeveralShards { shards }),
+        }
+    }
+
     fn handle(&self) -> Result<&LifecycleHandle, SubmitError> {
         // "Never started" and "died" get the same answer, and `SubmitError::ExecutorDead`'s own
         // doc already states the reason: there is no honest 200 to give when there is nothing left
@@ -646,6 +675,7 @@ impl WritePath {
     /// Open a reply channel, enqueue the command built around it, and wait for the answer that
     /// command's reply is typed to carry.
     fn submit<T>(&self, command: impl FnOnce(Reply<T>) -> Command) -> Result<T, AcceptError> {
+        self.writable()?;
         let (reply, pending) = Reply::channel(
             Some(Arc::clone(&self.health)),
             #[cfg(feature = "fault-injection")]
@@ -852,6 +882,7 @@ impl WritePath {
         changes: Vec<(Target, ChangeOp)>,
         stamp: crate::edited::Stamp,
     ) -> Result<PendingChange, AcceptError> {
+        self.writable()?;
         let (reply, pending) = Reply::channel(
             None,
             #[cfg(feature = "fault-injection")]

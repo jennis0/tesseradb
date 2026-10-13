@@ -26,7 +26,7 @@ use mosaica_lifecycle::membership::IncomingContent;
 use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_lifecycle::{IncomingArtifact, IncomingGrowth};
 use mosaica_types::layer::{ContentDeclaration, LayerDeclaration};
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, ShardId};
 
 /// **No existence criterion**, deliberately, as in the fold's own cases: these assertions are about
 /// what a membership *is*, and a criterion would turn a wrong count into an absence — which is the
@@ -1395,7 +1395,7 @@ fn a_level_whose_items_come_to_overlap_is_served_from_a_list_column() {
 /// The layout of the form a level of `layer` is served from in view `s0`.
 fn served_layout(engine: &Engine, layer: &str) -> mosaica_types::layer::ServingLayout {
     engine
-        .held_artifact_form_for_test("s0", layer, 0)
+        .held_artifact_form_for_test(ShardId::ZERO, "s0", layer, 0)
         .expect("a read built the level's form")
         .layout()
 }

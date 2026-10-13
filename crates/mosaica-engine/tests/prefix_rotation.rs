@@ -299,7 +299,9 @@ fn a_pre_rotation_fragment_is_unreachable_by_key_on_disc_and_across_a_restart() 
     let engine = engine_over_fixture(&tmp, &root, "cache", "wal.log");
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
-    engine.session_fragment_for_test(&session).unwrap();
+    engine
+        .session_fragment_for_test(&session, ShardId::ZERO)
+        .unwrap();
     let satisfied: Vec<_> = session.satisfied_for_test().iter().copied().collect();
     let key_before = engine
         .fragment_canonical_key(ShardId::ZERO, &satisfied)
@@ -337,7 +339,9 @@ fn a_pre_rotation_fragment_is_unreachable_by_key_on_disc_and_across_a_restart() 
     assert_ne!(key_after, key_before);
 
     let after = engine.authorise(&full_coverage_credential()).unwrap();
-    engine.session_fragment_for_test(&after).unwrap();
+    engine
+        .session_fragment_for_test(&after, ShardId::ZERO)
+        .unwrap();
     assert_eq!(
         engine.fragment_cache_rebuilds(),
         built + 1,

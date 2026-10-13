@@ -11,6 +11,8 @@ use mosaica_authz::FrozenFragment;
 use mosaica_authz::{DeltaTier, Dict};
 #[cfg(feature = "fault-injection")]
 use mosaica_types::EntityId;
+#[cfg(any(feature = "fault-injection", feature = "bench-timing"))]
+use mosaica_types::ShardId;
 
 #[cfg(feature = "fault-injection")]
 use crate::engine::open_rotation;
@@ -27,12 +29,16 @@ use crate::session::Session;
 use crate::write::PublishGeometryError;
 
 impl Engine {
-    /// `session`'s mask fragment in the live generation's one shard, as a request would read it.
+    /// `session`'s mask fragment in the live generation's `shard`, as a request would read it.
     #[cfg(any(feature = "fault-injection", feature = "bench-timing"))]
     #[doc(hidden)]
-    pub fn session_fragment_for_test(&self, session: &Session) -> Result<Arc<FrozenFragment>> {
+    pub fn session_fragment_for_test(
+        &self,
+        session: &Session,
+        shard: ShardId,
+    ) -> Result<Arc<FrozenFragment>> {
         let generation = self.generation.load();
-        self.fragment_for(session, generation.only_shard(), None)
+        self.fragment_for(session, shard_for_test(&generation, shard)?, None)
     }
 
     /// Turn the background refresh off, so a session stays in the stale-serve window instead of
@@ -452,11 +458,16 @@ impl Engine {
         &self,
         session: &Session,
         view: &str,
+        shard: ShardId,
     ) -> Result<croaring::Bitmap> {
         let generation = self.generation.load_full();
         let mut probe = crate::timing::Probe::new();
         let geometries = self.session_geometries(session, &generation, view, &None, &mut probe)?;
-        let (_, _, geometry) = mosaica_types::only(&geometries.sides);
+        let (_, _, geometry) = geometries
+            .sides
+            .iter()
+            .find(|(side, ..)| side.id() == shard)
+            .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
         Ok(geometry.projection.bitmap().clone())
     }
 
@@ -470,9 +481,10 @@ impl Engine {
         &self,
         session: &Session,
         view: &str,
+        shard: ShardId,
     ) -> Result<croaring::Bitmap> {
         let generation = self.generation.load_full();
-        let shard = generation.only_shard();
+        let shard = shard_for_test(&generation, shard)?;
         let view_data = shard
             .data
             .views
@@ -575,19 +587,19 @@ impl Engine {
         self.figures.settle();
     }
 
-    /// The row form this engine is holding for one `(view, layer, level)`, without building one —
-    /// for a differential that asserts it equals a form built from scratch. On a request path
-    /// this would serve whatever was last cached rather than the generation being served, which
-    /// is why no non-test caller reads it this way.
+    /// The row form this engine is holding for one `(shard, view, layer, level)`, without building
+    /// one — for a differential that asserts it equals a form built from scratch. On a request
+    /// path this would serve whatever was last cached rather than the generation being served,
+    /// which is why no non-test caller reads it this way.
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     pub fn held_artifact_form_for_test(
         &self,
+        shard: ShardId,
         view: &str,
         layer: &str,
         level: u32,
     ) -> Option<std::sync::Arc<crate::artifacts::ArtifactRows>> {
-        let shard = self.generation.load().only_shard().id();
         self.artifact_projections.held_form(shard, view, layer, level)
     }
 
@@ -731,4 +743,12 @@ impl Engine {
     ) -> Result<crate::NamedItems> {
         crate::control::name_items_in(self, generation, table)
     }
+}
+
+/// `generation`'s shard `id`, or an error naming it.
+#[cfg(any(feature = "fault-injection", feature = "bench-timing"))]
+fn shard_for_test(generation: &crate::Generation, id: ShardId) -> Result<&crate::Shard> {
+    generation
+        .shard(id)
+        .ok_or_else(|| crate::error::EngineError::Malformed(format!("no shard {id} is served")))
 }

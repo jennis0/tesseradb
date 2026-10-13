@@ -101,7 +101,8 @@ impl ShardWrite {
 /// the executor (`/control/ingest`'s replay check, `/control/status`'s high-water). The generation pointer is not held here: it is
 /// swapped by `Executor::publish_arc`, the crate's one non-atomic store.
 pub(crate) struct LiveState {
-    /// Each point shard's write state, ascending by id.
+    /// Each point shard's write state, ascending by id. The first is the write shard, whose slice
+    /// of every membership [`Self::artifacts`] holds.
     pub(in crate::write) shards: Vec<ShardWrite>,
     /// The descriptor resolver's extension state. Resolved in the handler before submitting, not
     /// on the executor: signature-sorted assignment needs the term set to compute a sort key
@@ -145,6 +146,16 @@ impl LiveState {
     /// The one shard written to until several are.
     pub(crate) fn only_shard(&self) -> &ShardWrite {
         mosaica_types::only(&self.shards)
+    }
+
+    /// Every shard's high water, summed.
+    pub(crate) fn high_water(&self) -> u64 {
+        self.shards.iter().map(ShardWrite::high_water).sum()
+    }
+
+    /// The size every shard is allocated to.
+    pub(crate) fn shard_size(&self) -> u64 {
+        self.shards[0].size()
     }
 
     /// Runs `f` with the registry held: a registration's or a drop's preparation.
@@ -196,7 +207,8 @@ impl LiveState {
         shard: ShardId,
         written: &'a ArtifactStore,
     ) -> &'a ArtifactStore {
-        if shard == self.only_shard().id {
+        // The first shard is the write shard.
+        if shard == self.shards[0].id {
             return written;
         }
         self.slices

@@ -62,6 +62,7 @@ use mosaica_engine::{compose::EffectiveMask, Engine, EngineConfig};
 use mosaica_spatial::{tiles_for_bbox, Bounds, Tile};
 use mosaica_store::read::{open_bundle, SegmentData};
 use mosaica_store::tile_ranges_all;
+use mosaica_types::ShardId;
 
 /// Server defaults, so the reference arm measures a deployment somebody runs (`arms::viewport`,
 /// and `viewport_sweep` beside this).
@@ -1398,7 +1399,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // land rather than have it overlap the first timed arm.
         std::thread::sleep(std::time::Duration::from_millis(500));
 
-        let (gen, mask) = engine.composed_mask(&session, &view_id)?;
+        let (gen, mask) = engine.composed_mask(&session, &view_id, ShardId::ZERO)?;
         let generation = generation.get_or_insert(gen);
         let view_data = generation
             .bundle

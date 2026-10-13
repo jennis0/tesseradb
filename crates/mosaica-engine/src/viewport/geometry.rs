@@ -519,7 +519,7 @@ impl Engine {
     }
 
     /// The generation a request would be answered from, and this session's composed mask over one
-    /// of its views of one shard, composed as [`Engine::viewport_stream`] composes it. The
+    /// of its views in `shard`, composed as [`Engine::viewport_stream`] composes it. The
     /// generation comes back beside the mask because the segments the mask addresses are its
     /// bundle's.
     // Public for `mosaica-bench`'s `identity_bands_probe`; not part of the engine's API.
@@ -528,13 +528,15 @@ impl Engine {
         &self,
         session: &Session,
         view: &str,
+        shard: ShardId,
     ) -> Result<(Arc<Generation>, EffectiveMask)> {
         let generation = self.generation.load_full();
         let mut probe = Probe::new();
         let mask = self
             .open_view(session, &generation, view, &None, &mut probe)?
             .mask
-            .into_only_leaf();
+            .into_leaf(shard)
+            .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
         Ok((generation, mask))
     }
 }

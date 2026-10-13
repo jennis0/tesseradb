@@ -23,7 +23,7 @@ use mosaica_lifecycle::{ChangeOp, IncomingArtifact, IncomingGrowth};
 use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource, ServingLayout,
 };
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, ShardId};
 
 const LAYER: &str = "clusters/a";
 const LABELS: &str = "topics/a";
@@ -354,7 +354,7 @@ fn a_publication_is_applied_to_the_warm_form_rather_than_rebuilding_it() {
 /// Every row's label list, read off the level's held column — the observable a column *is*.
 fn labels(engine: &Engine, layer: &str) -> Vec<Vec<u32>> {
     let rows = engine
-        .held_artifact_form_for_test("s0", layer, 0)
+        .held_artifact_form_for_test(ShardId::ZERO, "s0", layer, 0)
         .expect("the level's form is held");
     let column = rows.column().expect("this level is served row-major");
     (0..column.row_count())
@@ -370,7 +370,7 @@ fn labels(engine: &Engine, layer: &str) -> Vec<Vec<u32>> {
 /// The bytes of the level's packed column — the durable half, which an amendment may not touch.
 fn column_bytes(engine: &Engine, layer: &str) -> Vec<u8> {
     engine
-        .held_artifact_form_for_test("s0", layer, 0)
+        .held_artifact_form_for_test(ShardId::ZERO, "s0", layer, 0)
         .expect("the level's form is held")
         .column()
         .expect("this level is served row-major")
@@ -601,7 +601,7 @@ fn a_growth_into_rows_already_amended_falls_back_on_the_label_form() {
     assert_eq!(engine.layout_fallbacks(), fallbacks, "disjoint rows still partition");
     assert!(
         engine
-            .held_artifact_form_for_test("s0", LAYER, 0)
+            .held_artifact_form_for_test(ShardId::ZERO, "s0", LAYER, 0)
             .expect("held")
             .column()
             .is_some(),
@@ -621,7 +621,7 @@ fn a_growth_into_rows_already_amended_falls_back_on_the_label_form() {
     );
     assert!(
         engine
-            .held_artifact_form_for_test("s0", LAYER, 0)
+            .held_artifact_form_for_test(ShardId::ZERO, "s0", LAYER, 0)
             .expect("held")
             .column()
             .is_none(),
@@ -695,7 +695,7 @@ fn a_merge_is_applied_to_the_warm_form_rather_than_rebuilding_it() {
 /// Every observable half of one level's row form, in a shape two forms can be compared on.
 fn form_of(engine: &Engine, layer: &str) -> Vec<String> {
     let rows = engine
-        .held_artifact_form_for_test("s0", layer, 0)
+        .held_artifact_form_for_test(ShardId::ZERO, "s0", layer, 0)
         .expect("the level's form is held");
     let mut out = vec![format!(
         "ordinals={} layout={:?} row_count={} everywhere={}",
@@ -913,7 +913,7 @@ fn a_restart_over_flushed_and_merged_rows_serves_the_level_from_its_column() {
     let reopened = fx.open_unrefreshed();
     assert_eq!(served(&reopened), before);
     let form = reopened
-        .held_artifact_form_for_test("s0", LAYER, 0)
+        .held_artifact_form_for_test(ShardId::ZERO, "s0", LAYER, 0)
         .expect("the level's form is held");
     assert!(
         !form.membership().rows_held(),
@@ -976,7 +976,7 @@ fn a_restart_after_writes_brings_the_folds_column_forward_without_holding_rows()
             "{layout:?}: the restart serves what the live engine served"
         );
         let form = reopened
-            .held_artifact_form_for_test("s0", LAYER, 0)
+            .held_artifact_form_for_test(ShardId::ZERO, "s0", LAYER, 0)
             .expect("the level's form is held");
         assert!(
             !form.membership().rows_held(),
@@ -1064,7 +1064,7 @@ fn a_restart_serves_denials_written_since_the_fold_to_a_restricted_viewer() {
     assert_eq!(served(&reopened), whole);
     assert!(
         !reopened
-            .held_artifact_form_for_test("s0", LAYER, 0)
+            .held_artifact_form_for_test(ShardId::ZERO, "s0", LAYER, 0)
             .expect("the level's form is held")
             .membership()
             .rows_held(),
@@ -1098,7 +1098,7 @@ fn a_restart_after_a_growth_into_anothers_base_rows_serves_the_level_as_a_list()
     let reopened = fx.open_unrefreshed();
     assert_eq!(served(&reopened), before);
     let form = reopened
-        .held_artifact_form_for_test("s0", LAYER, 0)
+        .held_artifact_form_for_test(ShardId::ZERO, "s0", LAYER, 0)
         .expect("the level's form is held");
     assert_eq!(
         form.layout(),
@@ -1140,7 +1140,7 @@ fn a_restart_of_a_hull_level_behind_its_column_projects_the_level() {
     let reopened = fx.open_unrefreshed();
     assert_eq!(served(&reopened), before);
     let form = reopened
-        .held_artifact_form_for_test("s0", LAYER, 0)
+        .held_artifact_form_for_test(ShardId::ZERO, "s0", LAYER, 0)
         .expect("the level's form is held");
     assert!(form.membership().rows_held(), "a hull level holds its rows");
     assert_eq!(form.layout(), ServingLayout::RowMajorLabel);

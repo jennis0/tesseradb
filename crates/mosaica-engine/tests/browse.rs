@@ -46,7 +46,7 @@ use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource, SuppliedContent, SuppliedRequirement,
 };
-use mosaica_types::{EntityId, MosaicaId};
+use mosaica_types::{EntityId, MosaicaId, ShardId};
 
 const N: u64 = 900;
 const LAYER: &str = "clusters/tree";
@@ -949,7 +949,7 @@ fn a_session_from_before_a_fold_counts_none_of_the_entity_the_fold_retired() {
 
     let held = fx
         .engine
-        .session_fragment_for_test(&session)
+        .session_fragment_for_test(&session, ShardId::ZERO)
         .expect("the session's fragment");
     fx.engine
         .accept_change(doomed, mosaica_lifecycle::wal::ChangeOp::Delete)
