@@ -326,12 +326,9 @@ impl Engine {
         let names = artifacts::requested_layers(req.layers, &reachable);
         let taggings = self.taggings(&served, &names);
         let gathers = !highlight_only && swept.iter().any(|ts| !ts.rows.is_empty());
-        // Tags read a layer's artifacts under one shard's leaf: `only_leaf` refuses a view over
-        // several.
         let membership = if gathers && !names.is_empty() {
-            let mask = mask.only_leaf();
             let points = tag::tagged_points(&tiling.segments, &swept);
-            let ctx = DependencyContext::new(&served, mask, &reachable);
+            let ctx = DependencyContext::new(&served, &mask, &reachable);
             let dependency_served = self.dependency_gate(&ctx);
             let walked = match self.walk_set(&names, &taggings) {
                 walk if walk.is_empty() => None,
@@ -349,7 +346,7 @@ impl Engine {
                     };
                     Some(self.serve_artifacts(
                         &served,
-                        mask,
+                        &mask,
                         &tiling,
                         &ask,
                         walk,
@@ -363,7 +360,8 @@ impl Engine {
                 if let Tagging::Labels(registered) = tagging {
                     let tags = self.tag_layer(
                         &served,
-                        mask,
+                        &tiling.segments,
+                        &mask,
                         &req,
                         &dependency_served,
                         registered,
@@ -379,18 +377,15 @@ impl Engine {
                 .filter(|(_, tagging)| matches!(tagging, Tagging::Walk))
                 .map(|(name, _)| name.as_str())
                 .collect();
-            let rows: Vec<u32> = points.iter().map(|p| p.local_row()).collect();
             let mut columns = walked
                 .as_ref()
                 .map(|settled| {
-                    crate::membership_column::Resolved::new(
-                        rows.clone(),
-                        settled
-                            .served_layers
-                            .iter()
-                            .filter(|layer| walk_names.contains(&layer.name.as_str())),
-                    )
-                    .columns_for(&rows)
+                    let layers: Vec<&ServedLayer> = settled
+                        .served_layers
+                        .iter()
+                        .filter(|layer| walk_names.contains(&layer.name.as_str()))
+                        .collect();
+                    tag::membership_columns(&points, served.sides.len(), &layers)
                 })
                 .unwrap_or_default();
             // A layer tagging no point has no column, as a walked layer serving nothing has none.

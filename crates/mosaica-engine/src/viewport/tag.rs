@@ -23,7 +23,8 @@ use mosaica_store::membership::{LabelColumnPack, ROW_COLUMN_HOLE};
 use mosaica_types::layer::RegisteredLayer;
 
 use super::*;
-use crate::artifacts::{ArtifactRows, ArtifactView};
+use crate::artifacts::ArtifactRows;
+use crate::membership_column::{MembershipColumn, Resolved};
 use crate::row_column::RowColumn;
 use artifacts::level_is_selected;
 
@@ -39,10 +40,12 @@ pub(super) enum Tagging {
 }
 
 /// One served point, as its tag is read: its row, the segment holding it, by its place in the
-/// view's segments, and its entry in that segment's bands where the band route served it.
+/// view's segments, its shard's side, by its place among the view's sides, and its entry in that
+/// segment's bands where the band route served it.
 pub(super) struct TaggedPoint {
     row: ShardRow,
     segment: usize,
+    side: usize,
     entry: Option<u32>,
 }
 
@@ -68,11 +71,47 @@ pub(super) fn tagged_points(
             points.push(TaggedPoint {
                 row,
                 segment,
+                side: segments.segments[segment].side,
                 entry: ts.entries.as_ref().map(|entries| entries[i]),
             });
         }
     }
     points
+}
+
+/// The membership columns of `layers`, the walk's served layers, for `points`: each side's points
+/// resolved against the layers' forms in that side, aligned to `points`. `sides` is how many sides
+/// the view has.
+pub(super) fn membership_columns(
+    points: &[TaggedPoint],
+    sides: usize,
+    layers: &[&crate::membership_column::ServedLayer],
+) -> Vec<MembershipColumn> {
+    let mut by_side: Vec<Vec<usize>> = vec![Vec::new(); sides];
+    for (i, point) in points.iter().enumerate() {
+        by_side[point.side].push(i);
+    }
+    let mut columns: Vec<MembershipColumn> = Vec::new();
+    for (side, at) in by_side.iter().enumerate().filter(|(_, at)| !at.is_empty()) {
+        let rows: Vec<u32> = at.iter().map(|&i| points[i].local_row()).collect();
+        let resolved = Resolved::new(rows.clone(), layers.iter().copied(), side);
+        for column in resolved.columns_for(&rows) {
+            let held = match columns.iter().position(|held| held.layer == column.layer) {
+                Some(held) => held,
+                None => {
+                    columns.push(MembershipColumn {
+                        layer: column.layer.clone(),
+                        ids: vec![None; points.len()],
+                    });
+                    columns.len() - 1
+                }
+            };
+            for (&i, id) in at.iter().zip(column.ids) {
+                columns[held].ids[i] = id;
+            }
+        }
+    }
+    columns
 }
 
 /// Where one level's labels are read from for this request.
@@ -203,11 +242,14 @@ impl Engine {
             .collect()
     }
 
-    /// One layer's tag for every point, aligned to `points`.
+    /// One layer's tag for every point, aligned to `points`: each point's labels read in its own
+    /// shard's form of each level, and each label's verdict over every side.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn tag_layer(
         &self,
         served: &ServedView<'_>,
-        mask: &EffectiveMask,
+        segments: &ViewSegments<'_>,
+        mask: &ShardedMask,
         req: &ViewportRequest<'_>,
         dependency_served: &dyn Fn(&mosaica_lifecycle::membership::Attachment) -> bool,
         registered: &RegisteredLayer,
@@ -216,13 +258,6 @@ impl Engine {
         let generation = served.generation;
         let declaration = &registered.declaration;
         let name = &declaration.name;
-        let vocabulary = predicate_vocabulary(generation, declaration);
-        let source = served.only_side().shard.partition_source();
-        let base = served
-            .only_side()
-            .segments
-            .first()
-            .map(|&(segment, _)| segment);
 
         let mut tags: Vec<Option<u64>> = vec![None; points.len()];
         let mut open: Vec<usize> = (0..points.len()).collect();
@@ -235,39 +270,8 @@ impl Engine {
                 break;
             }
             let runs = &registered.runs[level as usize];
-            let ((rows, level_version), _) =
-                self.level_form(served, registered, vocabulary, &source, level);
-            let rows: &ArtifactRows = &rows;
-            let labels = LevelLabels {
-                rows: if rows.column().is_some() {
-                    RowLabels::Column
-                } else {
-                    match self.artifact_projections.level_labels(
-                        &generation.prefix,
-                        served.only_side().shard.id(),
-                        served.name,
-                        name,
-                        level,
-                        level_version,
-                    ) {
-                        Some(pack) => RowLabels::Pack(pack),
-                        None => RowLabels::Memberships,
-                    }
-                },
-                copy: base.and_then(|base| {
-                    self.artifact_projections
-                        .band_labels(
-                            &generation.prefix,
-                            served.only_side().shard.id(),
-                            served.name,
-                            name,
-                            level,
-                            level_version,
-                            base,
-                        )
-                        .map(|copy| (0, copy))
-                }),
-            };
+            let mut forms = self.level_forms(served, registered, level);
+            let level_version = forms.level_version();
 
             // The verdict as the walk reaches it, asked once per distinct label. The masked
             // counts are read only where the criterion needs more than the member in hand.
@@ -275,34 +279,67 @@ impl Engine {
                 declaration.require_member_visibility,
                 None | Some(mosaica_types::layer::ExistenceCriterion::Count(0 | 1))
             );
-            let counts = match needs_counts {
-                false => None,
-                true => self.figures(
+            if needs_counts {
+                self.count_level(
                     served,
-                    served.only_side(),
+                    mask,
                     registered.space,
                     level,
-                    level_version,
-                    rows,
-                    mask,
+                    &mut forms,
                     crate::figures::Geometry::declared(declaration),
-                )?,
-            };
-            let view = ArtifactView::of(
+                )?;
+            }
+            // Each side's labels: a served point is one the viewer sees, in a side the request
+            // reads.
+            let labels: Vec<Option<LevelLabels>> = served
+                .sides
+                .iter()
+                .enumerate()
+                .map(|(at, side)| {
+                    mask.read_leaf(side.shard.id())?;
+                    let (shard, version) = (side.shard.id(), forms.version(at));
+                    Some(LevelLabels {
+                        rows: if forms.rows[at].column().is_some() {
+                            RowLabels::Column
+                        } else {
+                            match self.artifact_projections.level_labels(
+                                &generation.prefix,
+                                shard,
+                                served.name,
+                                name,
+                                level,
+                                version,
+                            ) {
+                                Some(pack) => RowLabels::Pack(pack),
+                                None => RowLabels::Memberships,
+                            }
+                        },
+                        copy: side.segments.first().and_then(|&(base, _)| {
+                            self.artifact_projections
+                                .band_labels(
+                                    &generation.prefix,
+                                    shard,
+                                    served.name,
+                                    name,
+                                    level,
+                                    version,
+                                    base,
+                                )
+                                .map(|copy| (segments.start_of(at), copy))
+                        }),
+                    })
+                })
+                .collect();
+            let view = forms.view(
                 served,
+                mask,
                 registered,
                 self.label_gate(served.session, declaration),
                 dependency_served,
-                |side| crate::artifacts::ArtifactSide {
-                    rows,
-                    mask: Some(mask),
-                    denied: side.denied,
-                    containment: rows.partition().map(|p| p.answers(served.session.satisfied())),
-                    counts: counts.clone(),
-                },
+                false,
             );
             let contents = std::cell::OnceCell::new();
-            let mut verdicts = Verdicts::over(rows.len());
+            let mut verdicts = Verdicts::over(forms.first().len());
             let mut mosaica_id = |ordinal: u32| -> Option<u64> {
                 verdicts.get_or(ordinal, || {
                     let entity = runs.entity_of(ordinal as u64).map(EntityId::new)?;
@@ -346,7 +383,11 @@ impl Engine {
             let mut held = Vec::new();
             for &i in &open {
                 held.clear();
-                if !labels.read(rows.column(), &points[i], &mut held) {
+                let point = &points[i];
+                let read = labels[point.side].as_ref().is_some_and(|labels| {
+                    labels.read(forms.rows[point.side].column(), point, &mut held)
+                });
+                if !read {
                     unread.push(i);
                     continue;
                 }
@@ -356,21 +397,31 @@ impl Engine {
                 }
             }
             if !unread.is_empty() {
-                // Each unread point's row, ascending, beside the point it is.
-                let mut at: Vec<(u32, usize)> =
-                    unread.iter().map(|&i| (points[i].local_row(), i)).collect();
-                at.sort_unstable();
-                let mut set = croaring::Bitmap::new();
-                set.add_many(&at.iter().map(|&(row, _)| row).collect::<Vec<u32>>());
-                // `(point, label)` for every membership one of those rows holds.
+                // `(point, label)` for every membership an unread point's row holds, found in its
+                // own side.
                 let mut found: Vec<(usize, u32)> = Vec::new();
-                for ordinal in rows.index().candidates(&set).iter() {
-                    let Some(members) = rows.get(ordinal) else {
+                for (side, rows) in forms.rows.iter().enumerate() {
+                    // Each unread point's row in this side, ascending, beside the point it is.
+                    let mut at: Vec<(u32, usize)> = unread
+                        .iter()
+                        .filter(|&&i| points[i].side == side)
+                        .map(|&i| (points[i].local_row(), i))
+                        .collect();
+                    if at.is_empty() {
                         continue;
-                    };
-                    for row in members.and(&set).iter() {
-                        if let Ok(k) = at.binary_search_by_key(&row, |&(r, _)| r) {
-                            found.push((at[k].1, ordinal));
+                    }
+                    at.sort_unstable();
+                    let mut set = croaring::Bitmap::new();
+                    set.add_many(&at.iter().map(|&(row, _)| row).collect::<Vec<u32>>());
+                    let rows: &ArtifactRows = rows;
+                    for ordinal in rows.index().candidates(&set).iter() {
+                        let Some(members) = rows.get(ordinal) else {
+                            continue;
+                        };
+                        for row in members.and(&set).iter() {
+                            if let Ok(k) = at.binary_search_by_key(&row, |&(r, _)| r) {
+                                found.push((at[k].1, ordinal));
+                            }
                         }
                     }
                 }

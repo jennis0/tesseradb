@@ -84,7 +84,8 @@ pub struct MembershipColumn {
 /// One level this response served artifacts from, as the resolver reads it.
 pub(crate) struct ServedLevel {
     pub level: u32,
-    pub rows: Arc<ArtifactRows>,
+    /// The level's row form in each side of the view, in the order of its sides.
+    pub rows: Vec<Arc<ArtifactRows>>,
     pub lineage: Arc<Lineage>,
     /// Ordinal → identifier and response-local rung, for **exactly** the artifacts of this level
     /// in the response's artifacts frame. Filled after the dependent drop and after the rungs are
@@ -107,12 +108,16 @@ pub(crate) struct Resolved {
 }
 
 impl Resolved {
-    /// Resolve the response's rows against its served layers.
+    /// Resolve the response's rows in the side at `side` against its served layers.
     ///
-    /// `rows` is every row the emit pass will gather, in any order; it is sorted here once. Layers
-    /// with no served level contribute no column — the wire's rule that an absent column and an
-    /// all-null one say the same thing.
-    pub fn new<'a>(mut rows: Vec<u32>, layers: impl IntoIterator<Item = &'a ServedLayer>) -> Self {
+    /// `rows` is every row of that side the emit pass will gather, in any order; it is sorted here
+    /// once. Layers with no served level contribute no column — the wire's rule that an absent
+    /// column and an all-null one say the same thing.
+    pub fn new<'a>(
+        mut rows: Vec<u32>,
+        layers: impl IntoIterator<Item = &'a ServedLayer>,
+        side: usize,
+    ) -> Self {
         rows.sort_unstable();
         rows.dedup();
         let mut bitmap = Bitmap::new();
@@ -120,7 +125,7 @@ impl Resolved {
         let columns = layers
             .into_iter()
             .filter(|layer| layer.levels.iter().any(|l| !l.served.is_empty()))
-            .map(|layer| (layer.name.clone(), resolve_layer(&rows, &bitmap, layer)))
+            .map(|layer| (layer.name.clone(), resolve_layer(&rows, &bitmap, layer, side)))
             .collect();
         Resolved { rows, columns }
     }
@@ -149,7 +154,12 @@ impl Resolved {
 /// same whichever route found the candidates and in whatever order it met them.
 type Rank = (u32, u32, Reverse<u64>);
 
-fn resolve_layer(rows: &[u32], bitmap: &Bitmap, layer: &ServedLayer) -> Vec<Option<u64>> {
+fn resolve_layer(
+    rows: &[u32],
+    bitmap: &Bitmap,
+    layer: &ServedLayer,
+    side: usize,
+) -> Vec<Option<u64>> {
     let mut best: Vec<Option<Rank>> = vec![None; rows.len()];
     let mut consider = |i: usize, rank: Rank| {
         if best[i].is_none_or(|held| rank > held) {
@@ -167,7 +177,8 @@ fn resolve_layer(rows: &[u32], bitmap: &Bitmap, layer: &ServedLayer) -> Vec<Opti
                 .get(&ordinal)
                 .map(|&(id, rung)| (level.level, rung, Reverse(id.raw())))
         };
-        match level.rows.column() {
+        let form = &level.rows[side];
+        match form.column() {
             // Row-major: the point's leaf, then the best-ranked served ancestor-or-self of it
             // over every path. The stored lineage is climbed only to *find* the served
             // ancestors; what ranks them is the response's own rung.
@@ -186,7 +197,7 @@ fn resolve_layer(rows: &[u32], bitmap: &Bitmap, layer: &ServedLayer) -> Vec<Opti
             // intersection per served artifact.
             None => {
                 for (&ordinal, &(id, rung)) in &level.served {
-                    let Some(members) = level.rows.get(ordinal) else {
+                    let Some(members) = form.get(ordinal) else {
                         continue;
                     };
                     let rank = (level.level, rung, Reverse(id.raw()));
@@ -280,7 +291,7 @@ mod tests {
             name: "layer".into(),
             levels: vec![ServedLevel {
                 level: 0,
-                rows,
+                rows: vec![rows],
                 lineage: Arc::clone(lineage),
                 served: served_map(()),
             }],
@@ -336,10 +347,10 @@ mod tests {
         let column = |sets: &[Option<&[u32]>], lineage: &Arc<Lineage>| {
             let (artifact_major, row_major) = both_routes(sets, 3, lineage, &served);
             (
-                Resolved::new(rows.clone(), &[artifact_major]).columns_for(&rows)[0]
+                Resolved::new(rows.clone(), &[artifact_major], 0).columns_for(&rows)[0]
                     .ids
                     .clone(),
-                Resolved::new(rows.clone(), &[row_major]).columns_for(&rows)[0]
+                Resolved::new(rows.clone(), &[row_major], 0).columns_for(&rows)[0]
                     .ids
                     .clone(),
             )
@@ -364,8 +375,8 @@ mod tests {
     ) {
         let (artifact_major, row_major) = both_routes(sets, row_count, lineage, served);
         let rows: Vec<u32> = (0..row_count).collect();
-        let a = Resolved::new(rows.clone(), &[artifact_major]);
-        let r = Resolved::new(rows.clone(), &[row_major]);
+        let a = Resolved::new(rows.clone(), &[artifact_major], 0);
+        let r = Resolved::new(rows.clone(), &[row_major], 0);
         let a = &a.columns_for(&rows)[0].ids;
         let r = &r.columns_for(&rows)[0].ids;
         let want: Vec<Option<u64>> = rows
@@ -388,7 +399,7 @@ mod tests {
         assert_both_routes_agree(&sets, 6, &lineage, &served);
         let (artifact_major, _) = both_routes(&sets, 6, &lineage, &served);
         let rows: Vec<u32> = (0..6).collect();
-        let ids = Resolved::new(rows.clone(), &[artifact_major]).columns_for(&rows)[0]
+        let ids = Resolved::new(rows.clone(), &[artifact_major], 0).columns_for(&rows)[0]
             .ids
             .clone();
         assert_eq!(
@@ -430,7 +441,7 @@ mod tests {
         assert_both_routes_agree(&sets, 10, &lineage, &served);
         let (_, row_major) = both_routes(&sets, 10, &lineage, &served);
         let rows: Vec<u32> = (0..10).collect();
-        let ids = Resolved::new(rows.clone(), &[row_major]).columns_for(&rows)[0]
+        let ids = Resolved::new(rows.clone(), &[row_major], 0).columns_for(&rows)[0]
             .ids
             .clone();
         assert_eq!(

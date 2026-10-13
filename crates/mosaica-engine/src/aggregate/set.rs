@@ -199,12 +199,11 @@ pub(super) fn compose(
         served.only_side().shard,
         Some(served.only_side().fragment()),
     )?;
-    let resolved = ResolvedLeaves::default();
+    let resolved = ResolvedLeaves::new(&open.mask);
     let whole = || Set::whole(open);
     let (set, reference) = engine.route_filters_under(
         served,
         served.only_side(),
-        open.mask.only_leaf(),
         &candidate,
         &resolved,
         &req.cancel,
@@ -271,11 +270,10 @@ pub(crate) fn entities_passing(
     cancel: &Option<CancelToken>,
 ) -> Result<(Bitmap, Option<RegionVerdict>)> {
     check_cancelled(cancel)?;
-    let resolved = ResolvedLeaves::default();
-    let mask = open.mask.only_leaf();
+    let resolved = ResolvedLeaves::new(&open.mask);
     let served = &open.served;
     let side = served.only_side();
-    engine.route_filters_under(served, side, mask, candidate, &resolved, cancel, |route| {
+    engine.route_filters_under(served, side, candidate, &resolved, cancel, |route| {
         let set = routed(engine, open, route(expr, false)?)?;
         check_cancelled(cancel)?;
         let entities = match set.held {

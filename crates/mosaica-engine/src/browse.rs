@@ -53,7 +53,7 @@ use mosaica_types::layer::{HierarchyKind, RegisteredLayer};
 use mosaica_types::{EntityId, MosaicaId};
 
 use crate::artifacts::{ArtifactVerdict, ArtifactView};
-use crate::compose::EffectiveMask;
+use crate::compose::{EffectiveMask, ShardedMask};
 use crate::error::Result;
 use crate::filter::FilterExpr;
 use crate::layer_read::{check_level, LayerRefusal, ReadLevel};
@@ -296,7 +296,6 @@ impl crate::Engine {
             mask,
             ..
         } = self.open_view(session, &generation, view, &None, &mut _probe)?;
-        let mask = mask.into_only_leaf();
 
         // **The filter, evaluated once for the request and over the whole view.** Every route it
         // may take is asked for its whole-view answer: an entity-space verdict is projected whole,
@@ -326,7 +325,7 @@ impl crate::Engine {
             if let Some(filter_rows) = &filter_rows {
                 level_read.filtered = level_read.filtered_counts(self, &mask, filter_rows);
             }
-            let rows = &level_read.rows;
+            let rows = level_read.forms.first();
             let view_of = level_read.view(self, &served_view, &mask, &layer, &|_| false);
             for ordinal in 0..rows.len() as u32 {
                 let Some(entity) = runs.entity_of(ordinal as u64).map(EntityId::new) else {
@@ -640,7 +639,7 @@ pub(crate) type AttachedLevels = OnceCell<Vec<(RegisteredLayer, Vec<ReadLevel>)>
 pub(crate) struct Namer<'a, 'c> {
     engine: &'a Engine,
     served: &'a ServedView<'a>,
-    mask: &'a EffectiveMask,
+    mask: &'a ShardedMask,
     layer: &'a RegisteredLayer,
     reachable: &'a mosaica_lifecycle::ResolvedLayers,
     ctx: &'a DependencyContext<'c>,
@@ -654,7 +653,7 @@ impl<'a, 'c> Namer<'a, 'c> {
     pub(crate) fn new(
         engine: &'a Engine,
         served: &'a ServedView<'a>,
-        mask: &'a EffectiveMask,
+        mask: &'a ShardedMask,
         layer: &'a RegisteredLayer,
         reachable: &'a mosaica_lifecycle::ResolvedLayers,
         ctx: &'a DependencyContext<'c>,
@@ -730,11 +729,11 @@ impl<'a, 'c> Namer<'a, 'c> {
                 levels.iter().zip(views).find_map(|(read, view)| {
                     // An edge naming an entity the target slot no longer holds is into an
                     // artifact since republished over.
-                    let mut attached: Vec<u32> = read
-                        .rows
+                    let rows = read.forms.first();
+                    let mut attached: Vec<u32> = rows
                         .records()
                         .attached_to(self.layer.space, level, ordinal)
-                        .filter(|&at| read.rows.attachment(at).is_some_and(|a| a.entity == target))
+                        .filter(|&at| rows.attachment(at).is_some_and(|a| a.entity == target))
                         .collect();
                     if attached.len() > 1 {
                         let name = label.declaration.name.as_str();

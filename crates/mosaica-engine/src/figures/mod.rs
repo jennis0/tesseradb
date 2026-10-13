@@ -398,9 +398,10 @@ impl LevelFigures {
         self.len() == 0
     }
 
-    /// Whether these figures carry positions.
+    /// Whether these figures carry positions in every shard: a centroid or box summed over the
+    /// shards that carry them alone would be some shards' figure.
     pub fn has_geometry(&self) -> bool {
-        self.sides.iter().any(|side| side.has_geometry())
+        !self.sides.is_empty() && self.sides.iter().all(|side| side.has_geometry())
     }
 
     /// The mean position of the members this viewer may see in every shard, or `None` where they

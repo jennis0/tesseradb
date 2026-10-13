@@ -152,7 +152,7 @@ impl Layer {
             .ok()
             .filter(|layer| (self.level as usize) < layer.runs.len());
         let reachable = engine.reachable_layers(served_view.session);
-        let context = DependencyContext::new(served_view, mask, &reachable);
+        let context = DependencyContext::new(served_view, &cx.open.mask, &reachable);
         let dependency_served = engine.dependency_gate(&context);
         let mut ordinals: Vec<u32> = Vec::new();
         // Each served ordinal's rank, which its content is read under.
@@ -162,8 +162,13 @@ impl Layer {
             None => None,
             Some(layer) => {
                 // With a cut, the level's figures are the entry the map's treed frame reads.
-                let read =
-                    engine.read_level(served_view, mask, layer, self.level, self.cut.is_some())?;
+                let read = engine.read_level(
+                    served_view,
+                    &cx.open.mask,
+                    layer,
+                    self.level,
+                    self.cut.is_some(),
+                )?;
                 let readable = |ordinal: u32, entity: EntityId, rank: Option<u32>| {
                     read.content(engine, layer, ordinal, entity, rank)
                         .is_some()
@@ -172,7 +177,7 @@ impl Layer {
                     Some(cut) => {
                         let drawn = engine.drawn_cut(
                             served_view,
-                            mask,
+                            &cx.open.mask,
                             cut.zoom,
                             cut.bbox,
                             cut.budget,
@@ -194,9 +199,15 @@ impl Layer {
                         }
                     }
                     None => {
-                        let view = read.view(engine, served_view, mask, layer, &dependency_served);
+                        let view = read.view(
+                            engine,
+                            served_view,
+                            &cx.open.mask,
+                            layer,
+                            &dependency_served,
+                        );
                         let runs = &layer.runs[self.level as usize];
-                        for ordinal in 0..read.rows.len() as u32 {
+                        for ordinal in 0..read.forms.only().len() as u32 {
                             if ordinal % CHUNK == 0 {
                                 cx.check_cancelled()?;
                             }
@@ -232,18 +243,19 @@ impl Layer {
         let attached = registered
             .as_ref()
             .is_some_and(|layer| !layer.declaration.depends_on.is_empty());
-        let row_major = !attached && read.as_ref().is_some_and(|r| r.rows.column().is_some());
+        let row_major =
+            !attached && read.as_ref().is_some_and(|r| r.forms.only().column().is_some());
         // Over the whole visible set, each artifact's count is its figure, already held.
         let figures = read
             .as_ref()
             .filter(|_| row_major && cx.sets.set.is_whole())
-            .and_then(|read| read.counts.as_deref());
+            .and_then(|read| read.forms.figures.as_ref());
         // And where the column is a label column, a row is in at most one artifact, so the groups'
         // sizes are sums of those figures.
         let summed = figures.is_some()
             && read
                 .as_ref()
-                .and_then(|read| read.rows.column())
+                .and_then(|read| read.forms.only().column())
                 .is_some_and(|column| column.layout() == ServingLayout::RowMajorLabel);
         let set_rows = cx.sets.set.rows(cx);
         let reference_rows = cx.sets.reference.as_ref().map(|r| r.rows(cx));
@@ -258,11 +270,11 @@ impl Layer {
                     Some(figures) => ordinals.iter().map(|&o| figures.get(o)).collect(),
                     None => {
                         let histogram = read
-                            .filtered_counts(engine, mask, set_rows)
+                            .filtered_counts(engine, &cx.open.mask, std::slice::from_ref(set_rows))
                             .expect("a level with a column counts through it");
                         ordinals
                             .iter()
-                            .map(|&o| u64::from(histogram.get(o as usize).copied().unwrap_or(0)))
+                            .map(|&o| histogram.get(o as usize).copied().unwrap_or(0))
                             .collect()
                     }
                 };
@@ -391,7 +403,7 @@ impl Layer {
                 let namer = crate::browse::Namer::new(
                     engine,
                     served_view,
-                    mask,
+                    &cx.open.mask,
                     layer,
                     &reachable,
                     &context,
@@ -418,7 +430,7 @@ impl Layer {
             (Some(palette), Some(layer)) => {
                 let slots = engine.cluster_slots(
                     served_view,
-                    mask,
+                    &cx.open.mask,
                     layer,
                     self.level,
                     palette,
@@ -490,11 +502,11 @@ impl Targets {
         ordinals: &[u32],
         dependency_served: &dyn Fn(&mosaica_lifecycle::membership::Attachment) -> bool,
     ) -> Result<Targets> {
-        let (engine, served, mask) = (cx.engine, &cx.open.served, cx.open.mask.only_leaf());
+        let (engine, served, mask) = (cx.engine, &cx.open.served, &cx.open.mask);
         let mut targets = Targets::default();
         let mut layers: FxHashMap<LayerSpace, Option<RegisteredLayer>> = FxHashMap::default();
         for &ordinal in ordinals {
-            let Some(attachment) = read.rows.attachment(ordinal) else {
+            let Some(attachment) = read.forms.only().attachment(ordinal) else {
                 continue;
             };
             let Some(layer) = layers
@@ -546,7 +558,7 @@ fn members(
     ordinal: u32,
     rows: &Bitmap,
 ) -> Bitmap {
-    let (level, ordinal) = match read.rows.attachment(ordinal) {
+    let (level, ordinal) = match read.forms.only().attachment(ordinal) {
         None => (read, ordinal),
         Some(attachment) => {
             let key = (attachment.layer.clone(), attachment.level);
@@ -556,9 +568,10 @@ fn members(
             }
         }
     };
-    match level.rows.get(ordinal) {
+    let form = level.forms.only();
+    match form.get(ordinal) {
         Some(members) => members.and(rows),
-        None => level.rows.visible_rows(ordinal, mask).and(rows),
+        None => form.visible_rows(ordinal, mask).and(rows),
     }
 }
 
@@ -581,7 +594,7 @@ impl Served {
             .map(|&o| if self.serves(o) { o } else { u32::MAX })
             .collect();
         Some(LabelTable::new(
-            read.rows.len(),
+            read.forms.only().len(),
             self.ordinals.iter().copied(),
             &listed,
         ))
@@ -592,7 +605,7 @@ impl Served {
         let column = self
             .read
             .as_ref()
-            .and_then(|read| read.rows.column())
+            .and_then(|read| read.forms.only().column())
             .expect("a level read through its column has one");
         RowGroups::Labels { column, table }
     }

@@ -571,3 +571,32 @@ fn sums_over_shards_are_widened_before_they_are_added() {
         vec![2 * u64::from(u32::MAX), 1]
     );
 }
+
+/// A level's figures carry positions only where every shard's do: a centroid summed over the
+/// shards that carry positions alone would be some shards' figure.
+#[test]
+fn figures_carry_positions_only_where_every_shards_do() {
+    let placed = || {
+        let dense = Dense {
+            filled_at: 1,
+            counts: vec![2],
+            placed: vec![2],
+            sums: vec![[10, 20]],
+            boxes: vec![[1, 2, 9, 18]],
+        };
+        Arc::new(Figures {
+            counts: Arc::new(CountsAt::of(dense)),
+            reserves: None,
+            deny: None,
+            tail: None,
+            len: 1,
+            geometry: Geometry::Centroid,
+            exact: None,
+        })
+    };
+    let counted = || Arc::new(Figures::of_counts(vec![3]));
+    assert!(super::LevelFigures::of(vec![placed(), placed()]).has_geometry());
+    assert!(!super::LevelFigures::of(vec![placed(), counted()]).has_geometry());
+    assert!(!super::LevelFigures::of(vec![counted(), placed()]).has_geometry());
+    assert!(!super::LevelFigures::of(Vec::new()).has_geometry());
+}

@@ -506,47 +506,45 @@ impl Engine {
             .live()
             .registered_layer(layer)
             .ok_or_else(|| EngineError::UnknownView(layer.to_string()))?;
-        let vocabulary =
-            crate::viewport::predicate_vocabulary(&generation, &registered.declaration);
-        let ((rows, _), _) = self.level_form(
-            &open.served,
-            &registered,
-            vocabulary,
-            &open.served.only_side().shard.partition_source(),
-            level,
-        );
-        let places = crate::derived::Placement::of_segments(&open.served.only_side().segments);
+        let forms = self.level_forms(&open.served, &registered, level);
         let mut walked: std::collections::BTreeMap<u32, (u64, u64, [u64; 2], [u32; 4])> =
             Default::default();
-        let mut add = |ordinal: u32, row: u32| {
-            let entry = walked
-                .entry(ordinal)
-                .or_insert((0, 0, [0; 2], [u32::MAX, u32::MAX, 0, 0]));
-            entry.0 += 1;
-            if let Some((x, y)) = crate::derived::place(&places, row) {
-                entry.1 += 1;
-                entry.2[0] += u64::from(x);
-                entry.2[1] += u64::from(y);
-                entry.3 = [
-                    entry.3[0].min(x),
-                    entry.3[1].min(y),
-                    entry.3[2].max(x),
-                    entry.3[3].max(y),
-                ];
-            }
-        };
-        let visible = open.mask.only_leaf().visible_all();
-        match rows.column() {
-            Some(column) => {
-                for row in visible.iter() {
-                    column.for_each_label(row, |ordinal| add(ordinal, row));
+        for (at, side) in open.served.sides.iter().enumerate() {
+            let Some(leaf) = open.mask.read_leaf(side.shard.id()) else {
+                continue;
+            };
+            let places = crate::derived::Placement::of_segments(&side.segments);
+            let mut add = |ordinal: u32, row: u32| {
+                let entry = walked
+                    .entry(ordinal)
+                    .or_insert((0, 0, [0; 2], [u32::MAX, u32::MAX, 0, 0]));
+                entry.0 += 1;
+                if let Some((x, y)) = crate::derived::place(&places, row) {
+                    entry.1 += 1;
+                    entry.2[0] += u64::from(x);
+                    entry.2[1] += u64::from(y);
+                    entry.3 = [
+                        entry.3[0].min(x),
+                        entry.3[1].min(y),
+                        entry.3[2].max(x),
+                        entry.3[3].max(y),
+                    ];
                 }
-            }
-            None => {
-                for ordinal in 0..rows.len() as u32 {
-                    if let Some(members) = rows.get(ordinal) {
-                        for row in members.and(visible).iter() {
-                            add(ordinal, row);
+            };
+            let visible = leaf.visible_all();
+            let rows = &forms.rows[at];
+            match rows.column() {
+                Some(column) => {
+                    for row in visible.iter() {
+                        column.for_each_label(row, |ordinal| add(ordinal, row));
+                    }
+                }
+                None => {
+                    for ordinal in 0..rows.len() as u32 {
+                        if let Some(members) = rows.get(ordinal) {
+                            for row in members.and(visible).iter() {
+                                add(ordinal, row);
+                            }
                         }
                     }
                 }

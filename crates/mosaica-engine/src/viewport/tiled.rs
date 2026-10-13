@@ -11,14 +11,16 @@
 //! probe of the artifact's member bitmap against the tile's visible rows, or one scan of those rows
 //! reading their labels ([`RowColumn::candidates`]); both are exact, and the walk probes until the
 //! probes have cost what the scan would, then scans. A level stored any other way asks the tile
-//! index, as the whole-viewport walk does, and probes every candidate it proposes.
+//! index, as the whole-viewport walk does, and probes every candidate it proposes. Each shard the
+//! viewer sees anything in proposes and probes its own slice of the level in the tile; an artifact
+//! is present where any shard finds a visible member, and the quota is filled once over the union.
 //!
 //! A treed layer (`nested`, `dag`) keeps the whole-viewport walk and its budget cut, and is served
 //! as one frame with no tile, before the tiles. A dependent in a tile names a target served in that
 //! tile or in the treed frame.
 //!
-//! Every count, centroid and box is the level's figures over the viewer's visible set
-//! ([`crate::figures`]); nothing about a tile changes them.
+//! Every count, centroid and box is the level's figures over the viewer's visible set in every
+//! shard ([`crate::figures::LevelFigures`]); nothing about a tile changes them.
 
 use std::collections::BinaryHeap;
 
@@ -28,12 +30,15 @@ use rustc_hash::FxHashMap;
 use mosaica_types::layer::ComputedProperty;
 
 use super::artifacts::{
-    level_is_selected, lineage_kind, requested_layers, settle_response, tile_rows, viewport_sets,
-    ArtifactPass, LayerPass, LevelPass, Outside, Passing, ViewportSets, Walked,
+    level_is_selected, lineage_kind, matched_sides, matches_any, present_in, requested_layers,
+    settle_response, spans_rows, viewport_sets, ArtifactPass, LayerPass, LevelPass, Outside,
+    Passing, ViewportSets, Walked,
 };
 use super::*;
 use crate::artifact_content::LevelContent;
 use crate::artifacts::{ArtifactVerdict, ArtifactView};
+use crate::figures::LevelFigures;
+use crate::layer_read::LevelForms;
 use crate::row_column::RowColumn;
 use crate::row_members::LevelMembers;
 
@@ -291,14 +296,174 @@ fn labelled_above(column: &RowColumn, set: &Bitmap, base: u32) -> Bitmap {
 
 /// What one tile is answered over, and what the frame it builds may name.
 struct TileAsk<'a> {
-    sets: &'a ViewportSets<'a>,
-    spans: &'a [Range<u32>],
+    /// The tile's sets in each side the request reads and the tile spans a row of.
+    sets: &'a [ViewportSets<'a>],
+    /// The rows the tile spans in each side holding a part of it, by the side's place among the
+    /// view's sides, ascending.
+    spans: &'a [(usize, Vec<Range<u32>>)],
     per_tile: usize,
     /// The layers the request names: a dependent whose target's layer is among them is served only
     /// where the target is.
     in_request: &'a std::collections::BTreeSet<String>,
     /// The treed frame's rows.
     outside: &'a Outside,
+}
+
+/// One side's rows a request's filter, or its highlight, admits in a tile: the side's members, the
+/// rows, and the artifacts those rows carry at or above the members' base.
+type Admitting<'a> = (&'a LevelMembers, &'a Bitmap, Bitmap);
+
+/// What [`Admitting`] is in each side of `sets`, by the rows `admitted` gives there, or `None`
+/// where the request carries no such expression. `columns` holds each side's column and members,
+/// in the order of the view's sides.
+fn admitted_in<'a>(
+    sets: &'a [ViewportSets<'_>],
+    columns: &[(&'a RowColumn, &'a LevelMembers)],
+    admitted: impl Fn(&'a ViewportSets<'_>) -> Option<&'a Bitmap>,
+) -> Option<Vec<Admitting<'a>>> {
+    let sides: Vec<Admitting<'a>> = sets
+        .iter()
+        .filter_map(|set| {
+            let rows = admitted(set)?;
+            let (column, members) = columns[set.side];
+            Some((members, rows, labelled_above(column, rows, members.base_rows())))
+        })
+        .collect();
+    (!sides.is_empty()).then_some(sides)
+}
+
+impl TileAsk<'_> {
+    /// The rows the tile spans in the side at `side`.
+    fn spans_in(&self, side: usize) -> &[Range<u32>] {
+        self.spans
+            .binary_search_by_key(&side, |(held, _)| *held)
+            .map_or(&[][..], |at| self.spans[at].1.as_slice())
+    }
+}
+
+/// Each side's column and members, by the side's place among the view's sides, and the level's
+/// figures over every shard: what a tile of a level stored by row with its members is answered
+/// from.
+type Stored<'a> = (Vec<(&'a RowColumn, &'a LevelMembers)>, &'a LevelFigures);
+
+/// [`Stored`] for a level where every side's form has a column holding its members and the
+/// level's figures are summed; `None` otherwise, and the tile index answers.
+fn stored(forms: &LevelForms) -> Option<Stored<'_>> {
+    let figures = forms.figures.as_ref()?;
+    let columns = forms
+        .rows
+        .iter()
+        .map(|rows| {
+            let column = rows.column()?;
+            Some((column, column.members()?))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some((columns, figures))
+}
+
+/// The first `per_tile` artifacts of a level stored by row with its members that `admitted`
+/// serves, `targeted` keeps and that hold a visible member in `tile`, by [`by_count`]. Each side
+/// of `tile.sets` proposes the artifacts its members cover in the tile's spans there and those
+/// labelling its rows above the members' base, and answers presence for its own rows; the quota is
+/// filled once over every side's proposals.
+fn chosen_stored<A>(
+    tile: &TileAsk<'_>,
+    columns: &[(&RowColumn, &LevelMembers)],
+    counts: &LevelFigures,
+    admitted: impl FnMut(u32) -> Option<(u64, A)>,
+    targeted: &dyn Fn(u32) -> bool,
+) -> Vec<A> {
+    let mut presences: Vec<Presence<'_>> = Vec::with_capacity(tile.sets.len());
+    let mut candidates = Bitmap::new();
+    for set in tile.sets {
+        let (column, members) = columns[set.side];
+        let spans = tile.spans_in(set.side);
+        let here = set.viewport.here();
+        let base = members.base_rows();
+        let chunks: u64 = spans
+            .iter()
+            .filter(|span| span.start < base)
+            .map(|span| {
+                let last = span.end.min(base) - 1;
+                u64::from((last >> 16) - (span.start >> 16) + 1)
+            })
+            .sum();
+        let presence = Presence {
+            members,
+            column,
+            here,
+            above: labelled_above(column, here, base),
+            scanned: None,
+            probe: chunks * PROBE_ROWS_PER_CHUNK,
+            spent: 0,
+            scan: column.candidates_cost(here.cardinality()),
+        };
+        candidates.or_inplace(&presence.above);
+        for span in spans.iter().filter(|span| span.start < base) {
+            candidates.or_inplace(&members.overlapping(span.start..=span.end.min(base) - 1));
+        }
+        presences.push(presence);
+    }
+    by_count(
+        &candidates,
+        counts,
+        tile.per_tile,
+        admitted,
+        targeted,
+        |ordinal| presences.iter_mut().any(|presence| presence.holds(ordinal)),
+    )
+}
+
+/// The first `per_tile` of `candidates` that `admitted` serves, with its `mosaica_id`, that
+/// `targeted` keeps and that are `present` in the tile, by the level's figures over every shard:
+/// count descending, then `mosaica_id`. Candidates are taken a count at a time, so a verdict and a
+/// presence test are paid only down to the count that fills the quota, and a candidate `targeted`
+/// drops takes no place in it.
+fn by_count<A>(
+    candidates: &Bitmap,
+    counts: &LevelFigures,
+    per_tile: usize,
+    mut admitted: impl FnMut(u32) -> Option<(u64, A)>,
+    targeted: &dyn Fn(u32) -> bool,
+    mut present: impl FnMut(u32) -> bool,
+) -> Vec<A> {
+    let mut heap: BinaryHeap<(u64, u32)> = candidates
+        .iter()
+        .filter_map(|ordinal| {
+            let count = counts.get(ordinal);
+            (count > 0).then_some((count, ordinal))
+        })
+        .collect();
+    let mut chosen = Vec::new();
+    let mut group: Vec<u32> = Vec::new();
+    while chosen.len() < per_tile {
+        let Some((count, first)) = heap.pop() else {
+            break;
+        };
+        group.clear();
+        group.push(first);
+        while heap.peek().is_some_and(|&(next, _)| next == count) {
+            group.extend(heap.pop().map(|(_, ordinal)| ordinal));
+        }
+        let mut ranked: Vec<(u64, u32, A)> = group
+            .iter()
+            .filter_map(|&ordinal| {
+                let (id, admitted) = admitted(ordinal)?;
+                Some((id, ordinal, admitted))
+            })
+            .filter(|&(_, ordinal, _)| targeted(ordinal))
+            .collect();
+        ranked.sort_unstable_by_key(|&(id, ..)| id);
+        for (_, ordinal, admitted) in ranked {
+            if chosen.len() == per_tile {
+                break;
+            }
+            if present(ordinal) {
+                chosen.push(admitted);
+            }
+        }
+    }
+    chosen
 }
 
 /// `layers`, each after every layer of them it depends on, so a tile's dependents are chosen
@@ -378,7 +543,6 @@ impl Engine {
         let v_total = mask.visible_total();
         let (mask, region) =
             self.narrow_to_filters(&served, mask, &tiling, v_total, &tiles_req, &mut probe)?;
-        let mask = mask.into_only_leaf();
 
         sink.head(ViewportArtifactsHead {
             coordinates,
@@ -461,29 +625,37 @@ impl Engine {
                 contents: self.level_contents_of(level, true),
             })
             .collect();
+        let stored: Vec<Option<Stored<'_>>> =
+            levels.iter().map(|level| stored(&level.forms)).collect();
 
-        let row_bases: Vec<u32> = served
-            .only_side()
-            .segments
-            .iter()
-            .map(|&(_, base)| base)
-            .collect();
         for (at, tile) in tiling.tiles.iter().enumerate() {
             check_cancelled(&req.cancel)?;
-            let parts = std::slice::from_ref(&tiling.ranges[at]);
+            // The tile's rows in each side holding a part of it that the request reads: the
+            // sides it leaves out are not visited.
+            let spans: Vec<(usize, Vec<Range<u32>>)> = tiling
+                .tile_domains(at)
+                .into_iter()
+                .filter(|(side, _)| mask.read_leaf(served.sides[*side].shard.id()).is_some())
+                .collect();
+            let rows: Vec<(usize, Bitmap)> = spans
+                .iter()
+                .map(|(side, spans)| (*side, spans_rows(spans)))
+                .filter(|(_, rows)| !rows.is_empty())
+                .collect();
             let mut walked = Walked::default();
-            if let Some(rows) = tile_rows(&served, parts) {
-                let spans = crossing_domain(parts, &row_bases);
-                let sets = viewport_sets(&rows, &mask);
-                for ((level, view), state) in levels.iter().zip(&views).zip(&mut states) {
-                    let tile = TileAsk {
-                        sets: &sets,
-                        spans: &spans,
-                        per_tile: req.per_tile,
-                        in_request: &in_request,
-                        outside: &outside,
-                    };
-                    self.serve_tile_level(level, view, state, &tile, &mut walked)?;
+            if !rows.is_empty() {
+                let sets = viewport_sets(&served, &rows, &mask);
+                let tile = TileAsk {
+                    sets: &sets,
+                    spans: &spans,
+                    per_tile: req.per_tile,
+                    in_request: &in_request,
+                    outside: &outside,
+                };
+                for (((level, view), state), stored) in
+                    levels.iter().zip(&views).zip(&mut states).zip(&stored)
+                {
+                    self.serve_tile_level(level, view, state, stored.as_ref(), &tile, &mut walked)?;
                 }
             }
             ctx.finish()?;
@@ -497,78 +669,44 @@ impl Engine {
     /// One level's artifacts in one tile: the first `per_tile` of those served and present there,
     /// by whole visible count and then `mosaica_id`, assembled into `walked` with their filter
     /// bits taken inside the tile. A dependent whose target the frame does not hold takes no place
-    /// in the quota, since the frame would drop it.
+    /// in the quota, since the frame would drop it. Each side proposes its candidates and is asked
+    /// whether an artifact holds a visible member there; the quota is filled once over them all.
     fn serve_tile_level(
         &self,
         level: &LevelPass<'_>,
         view: &ArtifactView<'_, EffectiveMask>,
         state: &mut LevelState,
+        stored: Option<&Stored<'_>>,
         tile: &TileAsk<'_>,
         walked: &mut Walked,
     ) -> Result<()> {
-        let (sets, spans, per_tile) = (tile.sets, tile.spans, tile.per_tile);
-        let rows: &crate::artifacts::ArtifactRows = &level.rows;
+        let (sets, per_tile) = (tile.sets, tile.per_tile);
+        let forms = &level.forms;
+        let first: &crate::artifacts::ArtifactRows = forms.first();
         let held: &Walked = walked;
-        let targeted = |ordinal: u32| match rows.attachment(ordinal) {
+        let targeted = |ordinal: u32| match first.attachment(ordinal) {
             Some(target) if tile.in_request.contains(&target.layer) => {
                 let at = (target.layer.clone(), target.level, target.ordinal);
                 held.serves(&at) || tile.outside.contains_key(&at)
             }
             _ => true,
         };
-        let stored = rows
-            .column()
-            .and_then(|column| Some((column, column.members()?, level.counts.as_deref()?)));
         let chosen: Vec<(Arc<Admitted>, FilterBits)> = match stored {
-            Some((column, members, counts)) => {
-                let here = sets.viewport.here();
-                let base = members.base_rows();
-                let chunks: u64 = spans
-                    .iter()
-                    .filter(|span| span.start < base)
-                    .map(|span| {
-                        let last = span.end.min(base) - 1;
-                        u64::from((last >> 16) - (span.start >> 16) + 1)
-                    })
-                    .sum();
-                let mut presence = Presence {
-                    members,
-                    column,
-                    here,
-                    above: labelled_above(column, here, base),
-                    scanned: None,
-                    probe: chunks * PROBE_ROWS_PER_CHUNK,
-                    spent: 0,
-                    scan: column.candidates_cost(here.cardinality()),
+            Some((columns, counts)) => {
+                let admitted = |ordinal: u32| {
+                    self.admitted(level, view, state, ordinal)
+                        .map(|admitted| (admitted.mosaica_id, admitted))
                 };
-                let mut candidates = presence.above.clone();
-                for span in spans.iter().filter(|span| span.start < base) {
-                    candidates
-                        .or_inplace(&members.overlapping(span.start..=span.end.min(base) - 1));
-                }
-                let chosen = self.by_count(
-                    level,
-                    view,
-                    state,
-                    counts,
-                    &candidates,
-                    per_tile,
-                    &targeted,
-                    |o| presence.holds(o),
-                );
-                // The filter's and the highlight's rows in the tile, each with the artifacts its rows
-                // above the base carry.
-                let matched = sets
-                    .matched_here
-                    .as_ref()
-                    .map(|set| (set, labelled_above(column, set, base)));
-                let highlighted = sets
-                    .highlighted_here
-                    .as_ref()
-                    .map(|set| (set, labelled_above(column, set, base)));
-                let holds = |ordinal: u32, set: &Option<(&Bitmap, Bitmap)>| {
-                    set.as_ref().map(|(rows, above)| {
-                        above.contains(ordinal) || members.members(ordinal).intersects(rows)
+                let chosen = chosen_stored(tile, columns, counts, admitted, &targeted);
+                // The filter's and the highlight's rows in the tile, each with the artifacts its
+                // rows above the base carry.
+                let matched = admitted_in(sets, columns, |set| set.matched_here.as_ref());
+                let highlighted = admitted_in(sets, columns, |set| set.highlighted_here.as_ref());
+                let holds = |ordinal: u32, sides: &Option<Vec<Admitting<'_>>>| {
+                    sides.as_ref().map(|sides| {
+                        sides.iter().any(|(members, rows, above)| {
+                            above.contains(ordinal) || members.members(ordinal).intersects(rows)
+                        })
                     })
                 };
                 chosen
@@ -582,18 +720,15 @@ impl Engine {
             }
             None => {
                 let chosen = self.by_index(level, view, state, sets, per_tile, &targeted);
-                let matched = sets.matched_here.as_ref().map(|here| rows.matched(here));
-                let highlighted = sets
-                    .highlighted_here
-                    .as_ref()
-                    .map(|here| rows.matched(here));
+                let matched = matched_sides(forms, sets, |set| set.matched_here.as_ref());
+                let highlighted = matched_sides(forms, sets, |set| set.highlighted_here.as_ref());
                 chosen
                     .into_iter()
                     .map(|admitted| {
                         let ordinal = admitted.passing.0;
                         let bits = (
-                            matched.as_ref().map(|m| rows.matches(m, ordinal)),
-                            highlighted.as_ref().map(|m| rows.matches(m, ordinal)),
+                            matches_any(forms, &matched, ordinal),
+                            matches_any(forms, &highlighted, ordinal),
                         );
                         (admitted, bits)
                     })
@@ -614,79 +749,21 @@ impl Engine {
         Ok(())
     }
 
-    /// The first `per_tile` of `candidates` that are served, `targeted` and `present`, by the
-    /// level's figures: count descending, then `mosaica_id`. Candidates are taken a count at a
-    /// time, so a verdict and a presence test are paid only down to the count that fills the quota.
-    #[allow(clippy::too_many_arguments)]
-    fn by_count(
-        &self,
-        level: &LevelPass<'_>,
-        view: &ArtifactView<'_, EffectiveMask>,
-        state: &mut LevelState,
-        counts: &crate::figures::Figures,
-        candidates: &Bitmap,
-        per_tile: usize,
-        targeted: &dyn Fn(u32) -> bool,
-        mut present: impl FnMut(u32) -> bool,
-    ) -> Vec<Arc<Admitted>> {
-        let mut heap: BinaryHeap<(u64, u32)> = candidates
-            .iter()
-            .filter_map(|ordinal| {
-                let count = counts.get(ordinal);
-                (count > 0).then_some((count, ordinal))
-            })
-            .collect();
-        let mut chosen = Vec::new();
-        let mut group: Vec<u32> = Vec::new();
-        while chosen.len() < per_tile {
-            let Some((count, first)) = heap.pop() else {
-                break;
-            };
-            group.clear();
-            group.push(first);
-            while heap.peek().is_some_and(|&(next, _)| next == count) {
-                group.extend(heap.pop().map(|(_, ordinal)| ordinal));
-            }
-            let mut ranked: Vec<Arc<Admitted>> = group
-                .iter()
-                .filter_map(|&ordinal| self.admitted(level, view, state, ordinal))
-                .filter(|admitted| targeted(admitted.passing.0))
-                .collect();
-            ranked.sort_unstable_by_key(|admitted| admitted.mosaica_id);
-            for admitted in ranked {
-                if chosen.len() == per_tile {
-                    break;
-                }
-                if present(admitted.passing.0) {
-                    chosen.push(admitted);
-                }
-            }
-        }
-        chosen
-    }
-
     /// The first `per_tile` artifacts the tile index proposes in the tile that hold a visible
     /// member there and are served and `targeted`, by whole visible count and then `mosaica_id`.
+    /// Each side proposes the candidates of its own form, probed against its own leaf.
     fn by_index(
         &self,
         level: &LevelPass<'_>,
         view: &ArtifactView<'_, EffectiveMask>,
         state: &mut LevelState,
-        sets: &ViewportSets<'_>,
+        sets: &[ViewportSets<'_>],
         per_tile: usize,
         targeted: &dyn Fn(u32) -> bool,
     ) -> Vec<Arc<Admitted>> {
-        let rows: &crate::artifacts::ArtifactRows = &level.rows;
-        let candidates = rows.candidacy(&sets.viewport, level.counts.as_deref());
+        let present = present_in(&level.forms, sets, |ordinal| view.admits_label(ordinal));
         let mut ranked: Vec<Arc<Admitted>> = Vec::new();
-        for ordinal in candidates.iter() {
-            // An artifact its own label withholds has no membership probed.
-            if !view.admits_label(ordinal) {
-                continue;
-            }
-            if !rows.candidate_in(ordinal, &candidates, &sets.viewport, level.layer.pass.mask) {
-                continue;
-            }
+        for ordinal in present.iter() {
             if let Some(admitted) = self.admitted(level, view, state, ordinal) {
                 if targeted(ordinal) {
                     ranked.push(admitted);
@@ -748,7 +825,177 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::artifacts::MembershipRows;
+    use crate::figures::Figures;
     use mosaica_types::layer::ServingLayout;
+
+    /// One shard's rows of a stored level: each ordinal's members, the rows, what the viewer sees
+    /// and the tile's spans there.
+    struct Held {
+        sets: Vec<Vec<u32>>,
+        rows: u32,
+        visible: Vec<u32>,
+        spans: Vec<Range<u32>>,
+    }
+
+    /// [`chosen_stored`] over `shards`, each a side of the tile, by `ids` with every candidate
+    /// served.
+    fn chosen_over(shards: &[&Held], ids: &[u64], per_tile: usize) -> Vec<u32> {
+        let forms: Vec<crate::artifacts::ArtifactRows> = shards
+            .iter()
+            .map(|held| {
+                let sets: Vec<Option<&[u32]>> =
+                    held.sets.iter().map(|set| Some(set.as_slice())).collect();
+                let rows = crate::artifacts::ArtifactRows::synthetic(&sets, None);
+                let column = RowColumn::compose(
+                    rows.membership(),
+                    held.rows,
+                    ServingLayout::RowMajorLabel,
+                    &std::env::temp_dir(),
+                )
+                .expect("the memberships partition");
+                crate::artifacts::ArtifactRows::synthetic(&sets, Some(Arc::new(column)))
+            })
+            .collect();
+        let columns: Vec<(&RowColumn, &LevelMembers)> = forms
+            .iter()
+            .map(|form| {
+                let column = form.column().expect("composed above");
+                (column, column.members().expect("a composed column holds its members"))
+            })
+            .collect();
+        let leaves: Vec<EffectiveMask> = shards
+            .iter()
+            .map(|held| EffectiveMask::of_rows(Bitmap::of(&held.visible)))
+            .collect();
+        let rows: Vec<Bitmap> = shards.iter().map(|held| spans_rows(&held.spans)).collect();
+        let sets: Vec<ViewportSets<'_>> = (0..shards.len())
+            .map(|side| ViewportSets {
+                side,
+                mask: &leaves[side],
+                viewport: crate::tile_index::Viewport::compose(&rows[side], &leaves[side]),
+                matched_here: None,
+                highlighted_here: None,
+            })
+            .collect();
+        let spans: Vec<(usize, Vec<Range<u32>>)> = shards
+            .iter()
+            .enumerate()
+            .map(|(side, held)| (side, held.spans.clone()))
+            .collect();
+        let counts = LevelFigures::of(
+            shards
+                .iter()
+                .map(|held| {
+                    let counts = held
+                        .sets
+                        .iter()
+                        .map(|set| set.iter().filter(|row| held.visible.contains(row)).count())
+                        .map(|count| count as u32)
+                        .collect();
+                    Arc::new(Figures::of_counts(counts))
+                })
+                .collect(),
+        );
+        let (in_request, outside) = (std::collections::BTreeSet::new(), Outside::default());
+        let tile = TileAsk {
+            sets: &sets,
+            spans: &spans,
+            per_tile,
+            in_request: &in_request,
+            outside: &outside,
+        };
+        chosen_stored(&tile, &columns, &counts, |o| Some((ids[o as usize], o)), &|_| true)
+    }
+
+    /// A tile of a stored level over two shards: each shard proposes the artifacts its members
+    /// cover in its spans and finds the ones it sees there, the quota is filled once over both by
+    /// the count over both, and the answer is that of one shard holding both shards' rows.
+    #[test]
+    fn a_stored_levels_tile_is_proposed_and_found_in_every_shard() {
+        let a = Held {
+            sets: vec![vec![0, 1], vec![2, 3], vec![4, 5], vec![6], vec![]],
+            rows: 8,
+            visible: vec![0, 2, 4, 5, 6, 7],
+            spans: vec![Range { start: 0, end: 4 }],
+        };
+        let b = Held {
+            sets: vec![vec![], vec![0], vec![1, 2], vec![3], vec![4, 5]],
+            rows: 6,
+            visible: vec![0, 1, 3, 4, 5],
+            spans: vec![Range { start: 2, end: 6 }],
+        };
+        let shifted = |rows: &[u32]| rows.iter().map(|row| row + 8).collect::<Vec<u32>>();
+        let one = Held {
+            sets: (0..5)
+                .map(|o| [a.sets[o].clone(), shifted(&b.sets[o])].concat())
+                .collect(),
+            rows: 14,
+            visible: [a.visible.clone(), shifted(&b.visible)].concat(),
+            spans: vec![0..4, 10..14],
+        };
+        let ids = [50, 40, 30, 20, 10];
+        // Ordinal 2, the most visible over both shards, has no visible member in the tile. By
+        // count over both shards, then identifier: 4, 3 and 1 (2 each; ids 10, 20, 40), then 0.
+        let ranked = [4, 3, 1, 0];
+        for per_tile in 0..=5 {
+            let expected: Vec<u32> = ranked.iter().copied().take(per_tile).collect();
+            assert_eq!(chosen_over(&[&a, &b], &ids, per_tile), expected, "{per_tile}");
+            assert_eq!(chosen_over(&[&one], &ids, per_tile), expected, "{per_tile}");
+        }
+    }
+
+    /// A tile's artifacts over two shards are those of one shard holding both: candidates from
+    /// either, ranked by the count over both, then by `mosaica_id`, present where either holds a
+    /// visible member in the tile, each once, and a dependent whose target the frame does not
+    /// hold taking no place in the quota.
+    #[test]
+    fn a_tiles_artifacts_over_two_shards_are_those_of_one_shard_holding_both() {
+        let counts: [Vec<u32>; 2] = [vec![5, 0, 3, 2, 0, 4, 1, 0], vec![0, 6, 3, 2, 1, 0, 0, 2]];
+        let summed: Vec<u32> = (0..8).map(|o| counts[0][o] + counts[1][o]).collect();
+        let figures = |sides: &[Vec<u32>]| {
+            LevelFigures::of(
+                sides
+                    .iter()
+                    .map(|side| Arc::new(Figures::of_counts(side.clone())))
+                    .collect(),
+            )
+        };
+        let (two, one) = (figures(&counts), figures(std::slice::from_ref(&summed)));
+        let candidates = [Bitmap::of(&[0, 2, 3, 5, 6]), Bitmap::of(&[1, 2, 3, 4, 7])];
+        let present = [Bitmap::of(&[0, 3, 5]), Bitmap::of(&[1, 2, 3, 4, 7])];
+        let union = |sets: &[Bitmap; 2]| sets[0].or(&sets[1]);
+        // Identifiers out of ordinal order. The verdict withholds ordinal 6, and ordinal 1 depends
+        // on a target the frame does not hold.
+        let ids: [u64; 8] = [40, 10, 30, 31, 50, 20, 60, 11];
+        let admitted = |o: u32| (o != 6).then_some((ids[o as usize], o));
+        let targeted = |o: u32| o != 1;
+        for per_tile in 0..=8 {
+            let over_two = by_count(
+                &union(&candidates),
+                &two,
+                per_tile,
+                admitted,
+                &targeted,
+                |o| present.iter().any(|side| side.contains(o)),
+            );
+            let over_one = by_count(
+                &union(&candidates),
+                &one,
+                per_tile,
+                admitted,
+                &targeted,
+                |o| union(&present).contains(o),
+            );
+            let mut expected: Vec<u32> = (0..8u32)
+                .filter(|&o| summed[o as usize] > 0 && o != 6 && o != 1)
+                .filter(|&o| union(&present).contains(o))
+                .collect();
+            expected.sort_by_key(|&o| (std::cmp::Reverse(summed[o as usize]), ids[o as usize]));
+            expected.truncate(per_tile);
+            assert_eq!(over_two, expected, "per_tile {per_tile}");
+            assert_eq!(over_one, expected, "per_tile {per_tile}");
+        }
+    }
 
     /// What [`PROBE_ROWS_PER_CHUNK`] is set from: the time a probe that finds nothing takes for
     /// each 2¹⁶-row chunk of a tile, over the time the scan takes for each visible row. Run with

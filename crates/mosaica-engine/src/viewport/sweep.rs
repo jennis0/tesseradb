@@ -139,6 +139,25 @@ impl Tiling<'_> {
         let rows = spans.iter().map(|r| r.len() as u64).sum();
         (super::row_filter::merged_spans(spans), rows)
     }
+
+    /// The rows tile `tile`'s parts span in each side holding one of them, as
+    /// [`Self::domain_in`] spans a side's: by the side's place among the view's sides, ascending.
+    pub(super) fn tile_domains(&self, tile: usize) -> Vec<(usize, Vec<Range<u32>>)> {
+        let mut sides: Vec<(usize, Vec<Range<u32>>)> = Vec::new();
+        // A tile's parts ascend by their segment's place, and a side's segments are contiguous.
+        let first = self.starts[tile];
+        for at in first..first + self.ranges[tile].len() {
+            let (segment, span) = self.part((tile, at));
+            match sides.last_mut() {
+                Some((side, spans)) if *side == segment.side => spans.push(span),
+                _ => sides.push((segment.side, vec![span])),
+            }
+        }
+        sides
+            .into_iter()
+            .map(|(side, spans)| (side, super::row_filter::merged_spans(spans)))
+            .collect()
+    }
 }
 
 /// One segment of a view in one shard.
@@ -189,6 +208,11 @@ impl<'a> ViewSegments<'a> {
             segments,
             sides: held,
         }
+    }
+
+    /// The place among the view's segments of the first segment of the side at `side`.
+    pub(super) fn start_of(&self, side: usize) -> usize {
+        self.sides[side].1
     }
 
     /// The shard of the side at `side`.

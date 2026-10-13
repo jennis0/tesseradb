@@ -168,14 +168,14 @@ pub struct ArtifactSide<'a, M: MaskedSet> {
 
 impl<'a, M: MaskedSet> ArtifactView<'a, M> {
     /// The view over `layer` for `served`'s viewer, who reaches it: the layer's declaration and
-    /// its space's overlay, and `side`'s answer for each of the view's shards, so no shard can be
-    /// left out of a sum.
+    /// its space's overlay, and `side`'s answer for each of the view's shards, given its place
+    /// among them, so no shard can be left out of a sum.
     pub(crate) fn of(
         served: &crate::viewport::ServedView<'a>,
         layer: &'a mosaica_types::layer::RegisteredLayer,
         labels: LabelGate<'a>,
         dependency_served: &'a dyn Fn(&Attachment) -> bool,
-        side: impl FnMut(&crate::viewport::ServedSide<'a>) -> ArtifactSide<'a, M>,
+        mut side: impl FnMut(usize, &crate::viewport::ServedSide<'a>) -> ArtifactSide<'a, M>,
     ) -> Self {
         ArtifactView {
             declaration: &layer.declaration,
@@ -183,7 +183,12 @@ impl<'a, M: MaskedSet> ArtifactView<'a, M> {
             labels,
             layer_reachable: true,
             dependency_served,
-            sides: served.sides.iter().map(side).collect(),
+            sides: served
+                .sides
+                .iter()
+                .enumerate()
+                .map(|(at, served)| side(at, served))
+                .collect(),
         }
     }
 }
@@ -916,6 +921,36 @@ mod tests {
         )
         .verdict(EntityId::new(999), 0)
         .is_served());
+    }
+
+    /// An artifact split across two shards is served only on both shards' counts: the verdict
+    /// counts the viewer's members in both against the criterion, which neither shard's alone
+    /// clears, and each shard's visible rows are its own slice of the members the viewer sees.
+    #[test]
+    fn a_split_artifact_is_served_only_on_both_shards_counts() {
+        let d = declaration(false, Some(ExistenceCriterion::Count(4)));
+        let (a, b) = one_level(rows_of(&[&[1, 2, 3]]), rows_of(&[&[1, 2, 5]]));
+        let (seen_a, seen_b) = (Bitmap::of(&[1, 2, 9]), Bitmap::of(&[2, 5]));
+        assert_eq!(
+            view_of(&d, vec![side(&a, Some(&seen_a)), side(&b, Some(&seen_b))])
+                .verdict(EntityId::new(999), 0),
+            ArtifactVerdict::Serve {
+                masked_count: 4,
+                rank: None
+            }
+        );
+        for alone in [
+            vec![side(&a, Some(&seen_a)), side(&b, None)],
+            vec![side(&a, None), side(&b, Some(&seen_b))],
+        ] {
+            assert_eq!(
+                view_of(&d, alone).verdict(EntityId::new(999), 0),
+                ArtifactVerdict::Absent(Withheld::Criterion)
+            );
+        }
+        let operand = [a.visible_rows(0, &seen_a), b.visible_rows(0, &seen_b)];
+        assert_eq!(operand, [Bitmap::of(&[1, 2]), Bitmap::of(&[2, 5])]);
+        assert_eq!(operand.iter().map(Bitmap::cardinality).sum::<u64>(), 4);
     }
 
     /// The partition's arm answers per side, over that side's slice, and the mask answers a side

@@ -59,6 +59,14 @@ impl<'a> ServedView<'a> {
             .expect("a shard holding the view")
     }
 
+    /// Each side's locator of its segments' positions, in the order of [`Self::sides`].
+    pub(crate) fn locators(&self) -> Vec<crate::derived::RowLocator<'a>> {
+        self.sides
+            .iter()
+            .map(|side| crate::derived::RowLocator::new(side.segments.clone()))
+            .collect()
+    }
+
     /// The one side of a view of one shard, for a route that does not yet read every shard.
     /// Panics where the view has a second shard.
     pub(crate) fn only_side(&self) -> &ServedSide<'a> {

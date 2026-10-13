@@ -115,7 +115,7 @@ pub(crate) fn authored_rings(
 /// than risk unbounded recursion.
 const DEPENDENCY_CHAIN_MAX: u32 = 16;
 
-/// What [`Engine::gated_artifact`] answers: the artifact, located, with its level's row form and
+/// What [`Engine::gated_artifact`] answers: the artifact, located, with its level's row forms and
 /// the verdict's two outputs.
 pub(super) struct GatedArtifact {
     pub(super) name: String,
@@ -123,12 +123,11 @@ pub(super) struct GatedArtifact {
     pub(super) ordinal: u32,
     pub(super) entity: mosaica_types::EntityId,
     pub(super) layer: mosaica_types::layer::RegisteredLayer,
-    pub(super) rows: Arc<crate::artifacts::ArtifactRows>,
+    /// The level in every side, with the masked counts the gate read, so derived geometry reuses
+    /// this gate's walk of the mask instead of repeating it.
+    pub(super) forms: crate::layer_read::LevelForms,
     pub(super) masked_count: u64,
     pub(super) rank: Option<u32>,
-    /// The level's masked counts where it has them, so derived geometry reuses this gate's
-    /// walk of the mask instead of repeating it.
-    pub(super) counts: Option<Arc<crate::figures::Figures>>,
 }
 
 /// One request's state, as the dependency prerequisite needs it: gathered once per response,
@@ -139,7 +138,7 @@ pub(super) struct GatedArtifact {
 /// disagree about what the viewer sees.
 pub(crate) struct DependencyContext<'a> {
     served: &'a ServedView<'a>,
-    mask: &'a crate::compose::EffectiveMask,
+    mask: &'a ShardedMask,
     reachable: &'a mosaica_lifecycle::ResolvedLayers,
     /// Each target layer's label test for this viewer, settled once per request: a named default
     /// is evaluated once rather than once per candidate.
@@ -171,7 +170,7 @@ impl<'a> DependencyContext<'a> {
 
     pub(crate) fn new(
         served: &'a ServedView<'a>,
-        mask: &'a crate::compose::EffectiveMask,
+        mask: &'a ShardedMask,
         reachable: &'a mosaica_lifecycle::ResolvedLayers,
     ) -> Self {
         DependencyContext {
@@ -213,7 +212,6 @@ impl Engine {
         }
         let first = generation.shards().next().map(|shard| shard.id());
         for shard in generation.shards() {
-            let source = shard.partition_source();
             for (view, view_data) in &shard.data.views {
                 let Ok(segments) = segments_with_row_bases(view, view_data) else {
                     continue;
@@ -233,39 +231,22 @@ impl Engine {
                         None => key.parse::<u32>().ok(),
                     };
                     for level in 0..layer.runs.len() as u32 {
-                        let recorded = layer.layout_of(level);
                         // The engine's own pool: the decode fans out, and running it outside
                         // `install` would spill onto rayon's global pool instead of the one sized
                         // for this deployment.
                         let ((rows, level_version), lineage_version) = self.pool.install(|| {
                             self.write.live().with_artifacts(|written| {
-                                let predicate = predicate_source(
-                                    &layer.declaration,
-                                    shard,
-                                    view,
-                                    view_data,
-                                    &segments,
-                                    &code_of_key,
-                                    &self.shapes,
-                                    written,
-                                    level,
-                                );
-                                let store = self.write.live().slice_of(shard.id(), written);
                                 (
-                                    self.artifact_projections.get_or_build(
-                                        &generation.prefix,
-                                        shard.id(),
+                                    self.form_in(
+                                        &generation,
+                                        shard,
                                         view,
-                                        &layer.declaration.name,
+                                        view_data,
+                                        &segments,
+                                        layer,
                                         level,
-                                        store,
+                                        &code_of_key,
                                         written,
-                                        &view_data.row_space,
-                                        Some(&source),
-                                        recorded,
-                                        predicate.as_ref(),
-                                        generation.segments_version,
-                                        &layer.declaration,
                                     ),
                                     written.lineage_version(&layer.declaration.name, level),
                                 )
@@ -319,13 +300,10 @@ impl Engine {
     pub(super) fn gated_artifact(
         &self,
         served: &ServedView<'_>,
-        mask: &EffectiveMask,
+        mask: &ShardedMask,
         id: MosaicaId,
     ) -> Result<Option<GatedArtifact>> {
-        let (session, generation, shard) =
-            (served.session, served.generation, served.only_side().shard);
-        let (view, view_data) = (served.name, served.only_side().data);
-        let segments = &served.only_side().segments[..];
+        let (session, generation, view) = (served.session, served.generation, served.name);
         let Some((space, entity)) = self.identity_key.invert_artifact(id) else {
             return Ok(None);
         };
@@ -352,75 +330,21 @@ impl Engine {
             return Ok(None);
         }
 
-        let source = shard.partition_source();
-        let recorded = layer.layout_of(level);
         // Resolved from the same generation the viewport uses: same membership, either route.
-        let vocabulary = predicate_vocabulary(generation, &layer.declaration);
-        let code_of_key = |key: &str| match vocabulary {
-            Some(vocabulary) => vocabulary.code_of(key),
-            None => key.parse::<u32>().ok(),
-        };
-        let (rows, level_version) = self.write.live().with_artifacts(|written| {
-            let predicate = predicate_source(
-                &layer.declaration,
-                shard,
-                view,
-                view_data,
-                segments,
-                &code_of_key,
-                &self.shapes,
-                written,
-                level,
-            );
-            let store = self.write.live().slice_of(shard.id(), written);
-            // The version the form is of, not the store's: they differ between an accepted write
-            // and the tick that publishes it.
-            self.artifact_projections.get_or_build(
-                &generation.prefix,
-                shard.id(),
-                view,
-                &name,
-                level,
-                store,
-                written,
-                &view_data.row_space,
-                Some(&source),
-                recorded,
-                predicate.as_ref(),
-                generation.segments_version,
-                &layer.declaration,
-            )
-        });
-        let counts = self.figures(
+        let forms = self.counted_level(
             served,
-            served.only_side(),
-            layer.space,
-            level,
-            level_version,
-            &rows,
             mask,
+            &layer,
+            level,
             crate::figures::Geometry::declared(&layer.declaration),
         )?;
-        let carried_counts = counts.clone();
-        // The same containment the viewport builds, from the same partition.
+        // The same containment the viewport builds, from the same partitions.
         let ctx = DependencyContext::new(served, mask, &reachable);
         let dependency_served = self.dependency_gate(&ctx);
-        let artifact_view = crate::artifacts::ArtifactView::of(
-            served,
-            &layer,
-            self.label_gate(session, &layer.declaration),
-            &dependency_served,
-            |side| crate::artifacts::ArtifactSide {
-                rows: &rows,
-                mask: Some(mask),
-                denied: side.denied,
-                containment: rows
-                    .partition()
-                    .map(|p| p.answer_for_one(session.satisfied())),
-                counts: counts.clone(),
-            },
-        );
-        let verdict = artifact_view.verdict(entity, ordinal);
+        let labels = self.label_gate(session, &layer.declaration);
+        let verdict = forms
+            .view(served, mask, &layer, labels, &dependency_served, true)
+            .verdict(entity, ordinal);
         ctx.finish()?;
         let crate::artifacts::ArtifactVerdict::Serve { masked_count, rank } = verdict else {
             return Ok(None);
@@ -431,10 +355,9 @@ impl Engine {
             ordinal,
             entity,
             layer,
-            rows,
+            forms,
             masked_count,
             rank,
-            counts: carried_counts,
         }))
     }
 
@@ -461,7 +384,7 @@ impl Engine {
         let generation = self.generation.load_full();
         let mut probe = Probe::new();
         let open = self.open_view(session, &generation, view, &None, &mut probe)?;
-        let (served, mask) = (&open.served, open.mask.only_leaf());
+        let (served, mask) = (&open.served, &open.mask);
         let mask_identity = served.mask_identity;
         let Some(gated) = self.gated_artifact(served, mask, id)? else {
             return Ok(None);
@@ -472,10 +395,9 @@ impl Engine {
             ordinal,
             entity,
             layer,
-            rows,
+            forms,
             masked_count,
             rank,
-            counts,
         } = gated;
         // Same call as the viewport's, so the two routes cannot serve different content.
         let Some(supplied) = self.supplied_content(
@@ -518,19 +440,14 @@ impl Engine {
                 shards: mask_identity.shards,
                 properties: crate::derived::cache::properties_bits(&declared_derived),
             };
-            match counts.as_ref().filter(|c| c.has_geometry()) {
+            match forms.figures.as_ref().filter(|f| f.has_geometry()) {
                 // The accumulation the level's own figures carry.
                 Some(figures) => crate::derived::accumulated(&declared_derived, figures, ordinal),
                 None => {
                     let content = self.derived_geometry.get_or_derive(key, || {
-                        let view_data = served.only_side().data;
-                        let Ok(segments) = segments_with_row_bases(view, view_data) else {
-                            // Unreachable in practice; fail closed with empty content otherwise.
-                            return crate::derived::DerivedContent::default();
-                        };
-                        let locator = crate::derived::RowLocator::new(segments);
-                        let visible = rows.visible_rows(ordinal, mask);
-                        crate::derived::compute(&declared_derived, &visible, &locator)
+                        let locators = served.locators();
+                        let visible = forms.visible(ordinal, mask, &locators);
+                        crate::derived::compute(&declared_derived, &visible)
                     });
                     (*content).clone()
                 }
@@ -790,58 +707,22 @@ impl Engine {
         let Some(entity) = record.filter(|entity| *entity == attachment.entity) else {
             return false;
         };
-        let recorded = layer.layout_of(attachment.level);
-        // The target's own membership, evaluated the same way its serving route would.
-        let vocabulary = predicate_vocabulary(ctx.served.generation, &layer.declaration);
-        let code_of_key = |key: &str| match vocabulary {
-            Some(vocabulary) => vocabulary.code_of(key),
-            None => key.parse::<u32>().ok(),
-        };
-        let shard = ctx.served.only_side().shard.id();
-        let (rows, level_version) = self.write.live().with_artifacts(|written| {
-            let predicate = predicate_source(
-                &layer.declaration,
-                ctx.served.only_side().shard,
-                ctx.served.name,
-                ctx.served.only_side().data,
-                &ctx.served.only_side().segments,
-                &code_of_key,
-                &self.shapes,
-                written,
-                attachment.level,
-            );
-            let store = self.write.live().slice_of(shard, written);
-            self.artifact_projections.get_or_build(
-                &ctx.served.generation.prefix,
-                shard,
-                ctx.served.name,
-                &attachment.layer,
-                attachment.level,
-                store,
-                written,
-                &ctx.served.only_side().data.row_space,
-                Some(&ctx.served.only_side().shard.partition_source()),
-                recorded,
-                predicate.as_ref(),
-                ctx.served.generation.segments_version,
-                &layer.declaration,
-            )
-        });
-        // The target's own figures, under the same key the viewport would read.
-        let counts = self.figures(
+        // The target's own membership and each side's figures, evaluated the same way its
+        // serving route would, under the same keys the viewport reads. A prerequisite asks only
+        // whether the target is *served*: never for its geometry, and never for the sum of the
+        // sides' figures, which the verdict does not read.
+        let mut forms = self.level_forms(ctx.served, &layer, attachment.level);
+        let counted = self.count_sides(
             ctx.served,
-            ctx.served.only_side(),
+            ctx.mask,
             layer.space,
             attachment.level,
-            level_version,
-            &rows,
-            ctx.mask,
-            // A prerequisite asks whether the target is *served*, never for its geometry.
+            &mut forms,
             crate::figures::Geometry::None,
         );
-        let Some(counts) = ctx.held(counts) else {
+        if ctx.held(counted).is_none() {
             return false;
-        };
+        }
         let nested = |a: &mosaica_lifecycle::membership::Attachment| {
             self.dependency_served(ctx, a, depth - 1)
         };
@@ -852,25 +733,13 @@ impl Engine {
             .borrow_mut()
             .entry(attachment.layer.clone())
             .or_insert_with(|| self.label_gate(ctx.served.session, &layer.declaration));
-        crate::artifacts::ArtifactView::of(
-            ctx.served,
-            &layer,
-            labels,
-            &nested,
-            |side| crate::artifacts::ArtifactSide {
-                rows: &rows,
-                mask: Some(ctx.mask),
-                denied: side.denied,
-                // Lazily and load-bearing: runs once per candidate, so settling a whole expression
-                // table here would turn a per-artifact question into whole-population work.
-                containment: rows
-                    .partition()
-                    .map(|p| p.answer_for_one(ctx.served.session.satisfied())),
-                counts: counts.clone(),
-            },
-        )
-        .verdict(entity, attachment.ordinal)
-        .is_served()
+        // Containment settled lazily and load-bearing: this runs once per candidate, so settling
+        // a whole expression table here would turn a per-artifact question into
+        // whole-population work.
+        forms
+            .view(ctx.served, ctx.mask, &layer, labels, &nested, true)
+            .verdict(entity, attachment.ordinal)
+            .is_served()
     }
 
     /// The prerequisite as the predicate takes it: a closure over one request's state.
@@ -898,7 +767,7 @@ impl Engine {
     pub(super) fn serve_artifacts(
         &self,
         served: &ServedView<'_>,
-        mask: &crate::compose::EffectiveMask,
+        mask: &ShardedMask,
         tiling: &Tiling,
         ask: &ArtifactAsk<'_>,
         names: Vec<String>,
@@ -908,11 +777,13 @@ impl Engine {
         if names.is_empty() {
             return Ok(Settled::default());
         }
-        // The rows this request's tiles span, which every set below is taken over.
-        let Some(tile_rows) = tile_rows(served, &tiling.ranges) else {
+        // The rows this request's tiles span in each side, which every set below is taken over.
+        // Where they span none, no layer can have a candidate.
+        let tile_rows = tile_rows(served, mask, tiling);
+        if tile_rows.is_empty() {
             return Ok(Settled::default());
-        };
-        let sets = viewport_sets(&tile_rows, mask);
+        }
+        let sets = viewport_sets(served, &tile_rows, mask);
         let walked = self.walk_layers(served, ask, mask, names, &sets, dependency_served)?;
         Ok(settle_response(walked, in_request, &Outside::default()))
     }
@@ -924,9 +795,9 @@ impl Engine {
         &self,
         served: &ServedView<'_>,
         ask: &ArtifactAsk<'_>,
-        mask: &crate::compose::EffectiveMask,
+        mask: &ShardedMask,
         names: Vec<String>,
-        sets: &ViewportSets<'_>,
+        sets: &[ViewportSets<'_>],
         dependency_served: &dyn Fn(&mosaica_lifecycle::membership::Attachment) -> bool,
     ) -> Result<Walked> {
         let pass = ArtifactPass::new(served, ask, mask, dependency_served);
@@ -960,25 +831,20 @@ impl Engine {
                 } = self.level_cut(&level, sets);
                 served_levels.push(ServedLevel {
                     level: number,
-                    rows: Arc::clone(&level.rows),
+                    rows: level.forms.rows.clone(),
                     lineage: Arc::clone(&lineage),
                     // Filled once the response's membership is settled, below.
                     served: std::collections::HashMap::new(),
                 });
                 // Built after candidacy: the filter decides nothing about which artifacts are
                 // served.
-                let matched = sets
-                    .matched_here
-                    .as_ref()
-                    .map(|here| level.rows.matched(here));
-                let highlighted = sets
-                    .highlighted_here
-                    .as_ref()
-                    .map(|here| level.rows.matched(here));
+                let matched = matched_sides(&level.forms, sets, |set| set.matched_here.as_ref());
+                let highlighted =
+                    matched_sides(&level.forms, sets, |set| set.highlighted_here.as_ref());
                 let bits = |ordinal: u32| -> FilterBits {
                     (
-                        matched.as_ref().map(|m| level.rows.matches(m, ordinal)),
-                        highlighted.as_ref().map(|m| level.rows.matches(m, ordinal)),
+                        matches_any(&level.forms, &matched, ordinal),
+                        matches_any(&level.forms, &highlighted, ordinal),
                     )
                 };
                 self.assemble_level(&level, passing, &cut, &bits, &mut walked)?;
@@ -998,7 +864,6 @@ impl Engine {
         pass: &'a ArtifactPass<'a>,
         name: String,
     ) -> Result<Option<LayerPass<'a>>> {
-        let generation = pass.served.generation;
         let Some(registered) = self.write.live().registered_layer(&name) else {
             // Dropped between the resolution and here — the same answer as a gate failure.
             return Ok(None);
@@ -1028,72 +893,17 @@ impl Engine {
             .filter(|property| pass.ask.computed.selects(*property))
             .collect();
 
-        let vocabulary = predicate_vocabulary(generation, &registered.declaration);
         Ok(Some(LayerPass {
             pass,
             name,
             registered,
             declared_derived,
-            vocabulary,
         }))
     }
 
-    /// One level's row form in this request's view and the version it is of, from one call so
-    /// that a histogram is never filed under a later version than the column it counts, with the
-    /// version of the level's lineage beside them.
-    pub(crate) fn level_form(
-        &self,
-        served: &ServedView<'_>,
-        registered: &mosaica_types::layer::RegisteredLayer,
-        vocabulary: Option<&mosaica_store::vocabulary::VocabularyMinter>,
-        source: &crate::containment::PartitionSource<'_>,
-        level: u32,
-    ) -> ((Arc<crate::artifacts::ArtifactRows>, u64), u64) {
-        let generation = served.generation;
-        let code_of_key = |key: &str| match vocabulary {
-            Some(vocabulary) => vocabulary.code_of(key),
-            None => key.parse::<u32>().ok(),
-        };
-        let recorded = registered.layout_of(level);
-        let name = &registered.declaration.name;
-        let shard = served.only_side().shard.id();
-        self.write.live().with_artifacts(|written| {
-            let predicate = predicate_source(
-                &registered.declaration,
-                served.only_side().shard,
-                served.name,
-                served.only_side().data,
-                &served.only_side().segments,
-                &code_of_key,
-                &self.shapes,
-                written,
-                level,
-            );
-            let store = self.write.live().slice_of(shard, written);
-            (
-                self.artifact_projections.get_or_build(
-                    &generation.prefix,
-                    shard,
-                    served.name,
-                    name,
-                    level,
-                    store,
-                    written,
-                    &served.only_side().data.row_space,
-                    Some(source),
-                    recorded,
-                    predicate.as_ref(),
-                    generation.segments_version,
-                    &registered.declaration,
-                ),
-                written.lineage_version(name, level),
-            )
-        })
-    }
-
-    /// **Stage one: this level, resolved for this request** — the row form and the version it is
-    /// of, and the level's figures. Everything the gate, the cut and the assembly read of the
-    /// level is settled here and read from there.
+    /// **Stage one: this level, resolved for this request** — the row form in every side and the
+    /// version each is of, and the level's figures. Everything the gate, the cut and the
+    /// assembly read of the level is settled here and read from there.
     pub(super) fn level_pass<'a>(
         &self,
         layer: &'a LayerPass<'a>,
@@ -1101,23 +911,11 @@ impl Engine {
         runs: &'a mosaica_types::layer::ReservedRuns,
     ) -> Result<LevelPass<'a>> {
         let (pass, served) = (layer.pass, layer.pass.served);
-        let ((rows, level_version), lineage_version) = self.level_form(
+        let forms = self.counted_level(
             served,
-            &layer.registered,
-            layer.vocabulary,
-            &pass.source,
-            level,
-        );
-        // Decided by the level's layout, never the request: artifact-major counts per artifact,
-        // row-major reads the histogram.
-        let counts = self.figures(
-            served,
-            served.only_side(),
-            layer.registered.space,
-            level,
-            level_version,
-            &rows,
             pass.mask,
+            &layer.registered,
+            level,
             crate::figures::Geometry::declared(&layer.registered.declaration),
         )?;
         // The level's slots, where the request named a palette size.
@@ -1136,10 +934,7 @@ impl Engine {
             layer,
             level,
             runs,
-            rows,
-            level_version,
-            lineage_version,
-            counts,
+            forms,
             slots,
         })
     }
@@ -1152,20 +947,15 @@ impl Engine {
     ) -> crate::artifacts::ArtifactView<'a, crate::compose::EffectiveMask> {
         let (layer, pass) = (level.layer, level.layer.pass);
         let served = pass.served;
-        let rows: &crate::artifacts::ArtifactRows = &level.rows;
-        crate::artifacts::ArtifactView::of(
+        // The counts are kept on the level beside this, so derived geometry reads the same
+        // accumulation.
+        level.forms.view(
             served,
+            pass.mask,
             &layer.registered,
             self.label_gate(served.session, &layer.registered.declaration),
             pass.dependency_served,
-            |side| crate::artifacts::ArtifactSide {
-                rows,
-                mask: Some(pass.mask),
-                denied: side.denied,
-                containment: rows.partition().map(|p| p.answers(served.session.satisfied())),
-                // Kept on the level beside this, so derived geometry reads the same accumulation.
-                counts: level.counts.clone(),
-            },
+            false,
         )
     }
 
@@ -1177,7 +967,7 @@ impl Engine {
     pub(crate) fn drawn_cut(
         &self,
         served: &ServedView<'_>,
-        mask: &crate::compose::EffectiveMask,
+        mask: &ShardedMask,
         zoom: u8,
         bbox: [f64; 4],
         budget: Option<u32>,
@@ -1207,13 +997,13 @@ impl Engine {
             return Ok(None);
         }
         let level = self.level_pass(&layer, 0, runs)?;
-        let rows = tile_rows(served, &tiling.ranges).unwrap_or_default();
-        Ok(Some(self.level_cut(&level, &viewport_sets(&rows, mask))))
+        let rows = tile_rows(served, mask, &tiling);
+        Ok(Some(self.level_cut(&level, &viewport_sets(served, &rows, mask))))
     }
 
     /// The verdicts over the candidates `sets` proposes on one level, and the cut through those
     /// that pass.
-    fn level_cut(&self, level: &LevelPass<'_>, sets: &ViewportSets<'_>) -> DrawnCut {
+    fn level_cut(&self, level: &LevelPass<'_>, sets: &[ViewportSets<'_>]) -> DrawnCut {
         let passing = self.gate_candidates(level, sets);
         let (lineage, served) = self.cut_level(level, &passing);
         DrawnCut {
@@ -1224,28 +1014,16 @@ impl Engine {
     }
 
     /// **Stage two: the verdict, for every candidate the viewport touches** — the ordinals that
-    /// pass, with the two outputs their verdict carried.
-    fn gate_candidates(&self, level: &LevelPass<'_>, sets: &ViewportSets<'_>) -> Vec<Passing> {
-        let pass = level.layer.pass;
-        let rows: &crate::artifacts::ArtifactRows = &level.rows;
+    /// pass, ascending, with the two outputs their verdict carried. Each side proposes the
+    /// candidates its form holds a visible member of in the tiles; each is then given the verdict
+    /// over every side.
+    fn gate_candidates(&self, level: &LevelPass<'_>, sets: &[ViewportSets<'_>]) -> Vec<Passing> {
         let view = self.level_view(level);
         // Every candidate is tested before any is cut: a loop that decided and pruned in one
         // step could let a node's neighbours reach its verdict.
+        let present = present_in(&level.forms, sets, |ordinal| view.admits_label(ordinal));
         let mut passing = Vec::new();
-        // Replaces a sweep over every ordinal: an artifact in no node the viewport touches has
-        // no visible member, so skipping it withholds nothing. Holes and artifacts with no
-        // projected membership stay live on the identifier route, which walks no index. Or, on
-        // a row-major level, a scan over the viewport intersected with the mask.
-        let candidates = rows.candidacy(&sets.viewport, level.counts.as_deref());
-        for ordinal in candidates.iter() {
-            // An artifact its own label withholds has no membership probed.
-            if !view.admits_label(ordinal) {
-                continue;
-            }
-            // Every candidate pays a masked probe, on whichever route is cheapest for it.
-            if !rows.candidate_in(ordinal, &candidates, &sets.viewport, pass.mask) {
-                continue;
-            }
+        for ordinal in present.iter() {
             let Some(entity) = level.runs.entity_of(ordinal as u64).map(EntityId::new) else {
                 continue;
             };
@@ -1271,8 +1049,8 @@ impl Engine {
         let lineage = self.level_lineage(
             &layer.registered,
             level.level,
-            level.lineage_version,
-            &level.rows,
+            level.forms.lineage_version,
+            level.forms.first(),
         );
         let ordinals: Vec<u32> = passing.iter().map(|&(o, ..)| o).collect();
         // Ascending and deduplicated, so the assembly's membership test is a binary search.
@@ -1390,7 +1168,7 @@ impl Engine {
             layer.pass.served.generation,
             &layer.registered,
             level.level,
-            level.level_version,
+            level.forms.level_version(),
             level.runs,
         )
     }
@@ -1432,7 +1210,7 @@ impl Engine {
         let (layer, pass) = (level.layer, level.layer.pass);
         let (served, ask) = (pass.served, pass.ask);
         let (name, number) = (&layer.name, level.level);
-        let rows: &crate::artifacts::ArtifactRows = &level.rows;
+        let rows: &crate::artifacts::ArtifactRows = level.forms.first();
         let full = ask.rows == ArtifactRows::Full;
         // Checked once per artifact served: without this a client that has gone is discovered
         // only once the whole frame is ready, after minutes deriving geometry nobody reads.
@@ -1456,18 +1234,18 @@ impl Engine {
                 layer: name.clone(),
                 level: number,
                 ordinal,
-                level_version: level.level_version,
+                level_version: level.forms.level_version(),
                 shards: served.mask_identity.shards,
                 properties: crate::derived::cache::properties_bits(&layer.declared_derived),
             };
             // The accumulation where the level has one; nothing here walks the mask again.
-            match level.counts.as_ref().filter(|c| c.has_geometry()) {
+            match level.forms.figures.as_ref().filter(|f| f.has_geometry()) {
                 Some(figures) => {
                     crate::derived::accumulated(&layer.declared_derived, figures, ordinal)
                 }
                 None => (*self.derived_geometry.get_or_derive(key, || {
-                    let visible = rows.visible_rows(ordinal, pass.mask);
-                    crate::derived::compute(&layer.declared_derived, &visible, &pass.locator)
+                    let visible = level.forms.visible(ordinal, pass.mask, &pass.locators);
+                    crate::derived::compute(&layer.declared_derived, &visible)
                 }))
                 .clone(),
             }
@@ -1552,19 +1330,18 @@ pub(super) struct ArtifactPass<'a> {
     pub(super) served: &'a ServedView<'a>,
     pub(super) ask: &'a ArtifactAsk<'a>,
     /// The viewer's composed mask, which every verdict and every derived property reads.
-    pub(super) mask: &'a crate::compose::EffectiveMask,
+    pub(super) mask: &'a ShardedMask,
     /// The dependency prerequisite, closed over this request's state.
     pub(super) dependency_served: &'a dyn Fn(&mosaica_lifecycle::membership::Attachment) -> bool,
-    pub(super) locator: crate::derived::RowLocator<'a>,
-    /// The postings, which are the generation's, not any layer's.
-    pub(super) source: crate::containment::PartitionSource<'a>,
+    /// Each side's locator, in the order of the view's sides.
+    pub(super) locators: Vec<crate::derived::RowLocator<'a>>,
 }
 
 impl<'a> ArtifactPass<'a> {
     pub(super) fn new(
         served: &'a ServedView<'a>,
         ask: &'a ArtifactAsk<'a>,
-        mask: &'a crate::compose::EffectiveMask,
+        mask: &'a ShardedMask,
         dependency_served: &'a dyn Fn(&mosaica_lifecycle::membership::Attachment) -> bool,
     ) -> Self {
         ArtifactPass {
@@ -1572,8 +1349,7 @@ impl<'a> ArtifactPass<'a> {
             ask,
             mask,
             dependency_served,
-            locator: crate::derived::RowLocator::new(served.only_side().segments.clone()),
-            source: served.only_side().shard.partition_source(),
+            locators: served.locators(),
         }
     }
 }
@@ -1586,9 +1362,6 @@ pub(super) struct LayerPass<'a> {
     pub(super) registered: mosaica_types::layer::RegisteredLayer,
     /// The derived properties this layer declares **and** this request asked for.
     declared_derived: Vec<crate::derived::ComputedProperty>,
-    /// The predicate's inputs, resolved per level: per-level for a spatial layer, nothing for a
-    /// stored-membership one.
-    vocabulary: Option<&'a mosaica_store::vocabulary::VocabularyMinter>,
 }
 
 /// One level of one layer, as [`Engine::level_pass`] settles it: the values the gate, the cut and
@@ -1598,64 +1371,134 @@ pub(super) struct LevelPass<'a> {
     pub(super) level: u32,
     /// The level's reserved entity runs — ordinal to entity.
     pub(super) runs: &'a mosaica_types::layer::ReservedRuns,
-    /// This view's row form of the level's membership, and the version it is of.
-    pub(super) rows: Arc<crate::artifacts::ArtifactRows>,
-    level_version: u64,
-    lineage_version: u64,
-    /// The level's masked counts and accumulated geometry where it has them — `None` on an
-    /// artifact-major level.
-    pub(super) counts: Option<Arc<crate::figures::Figures>>,
+    /// The level's row form in every side and the version each is of, with its masked counts and
+    /// accumulated geometry where it has them — none on an artifact-major level.
+    pub(super) forms: crate::layer_read::LevelForms,
     /// This viewer's slots over the level, where the request named a palette size.
     pub(super) slots: Option<Arc<crate::slots::LevelSlots>>,
 }
 
-/// The row-space sets one response, or one tile of it, is answered over, composed once for every
-/// layer in it.
+/// The row-space sets one response, or one tile of it, is answered over in one side, composed
+/// once for every layer in it.
 pub(super) struct ViewportSets<'a> {
+    /// The side's place among the view's sides.
+    pub(super) side: usize,
+    /// The viewer's leaf in the side.
+    pub(super) mask: &'a crate::compose::EffectiveMask,
     /// The tiles as one masked set — the candidate generator every level walks.
     pub(super) viewport: crate::tile_index::Viewport<'a>,
     pub(super) matched_here: Option<croaring::Bitmap>,
     pub(super) highlighted_here: Option<croaring::Bitmap>,
 }
 
-/// The tiles as one row-space set: the merged global spans of every tile resolved, reusing
-/// `crossing_domain` so this and the filter's crossing cannot disagree about which rows a request
-/// covers.
-///
-/// `None` where those tiles span no row: no layer can have a candidate there.
+/// The rows the request's tiles span in each side the request reads, by the side's place among
+/// the view's sides: the spans [`Tiling::domain_in`] gives the side's filter, so the two cannot
+/// disagree about which rows a request covers. A side where the tiles span no row is not here.
 pub(super) fn tile_rows(
     served: &ServedView<'_>,
-    ranges: &[Vec<(usize, Range<u32>)>],
-) -> Option<croaring::Bitmap> {
-    let row_bases: Vec<u32> = served
-        .only_side()
-        .segments
+    mask: &ShardedMask,
+    tiling: &Tiling,
+) -> Vec<(usize, croaring::Bitmap)> {
+    served
+        .sides
         .iter()
-        .map(|&(_, base)| base)
-        .collect();
-    let mut tile_rows = croaring::Bitmap::new();
-    for span in crossing_domain(ranges, &row_bases) {
-        tile_rows.add_range(span);
-    }
-    (!tile_rows.is_empty()).then_some(tile_rows)
+        .enumerate()
+        .filter(|(_, side)| mask.read_leaf(side.shard.id()).is_some())
+        .map(|(at, _)| (at, spans_rows(&tiling.domain_in(at).0)))
+        .filter(|(_, rows)| !rows.is_empty())
+        .collect()
 }
 
-/// The three sets every layer is answered against, composed once from the rows the tiles span.
-pub(super) fn viewport_sets<'a>(
-    tile_rows: &'a croaring::Bitmap,
-    mask: &'a crate::compose::EffectiveMask,
-) -> ViewportSets<'a> {
-    // Hoisted out of every layer and every artifact, built once per request.
-    let viewport = crate::tile_index::Viewport::compose(tile_rows, mask);
-    // `None` is an unfiltered request — no column on the wire.
-    let matched_here = mask.matched_rows(viewport.here());
-    // `None` is a request carrying no highlight.
-    let highlighted_here = mask.highlighted_rows(viewport.here());
-    ViewportSets {
-        viewport,
-        matched_here,
-        highlighted_here,
+/// `spans` as one set of rows.
+pub(super) fn spans_rows(spans: &[Range<u32>]) -> croaring::Bitmap {
+    let mut rows = croaring::Bitmap::new();
+    for span in spans {
+        rows.add_range(span.clone());
     }
+    rows
+}
+
+/// The three sets every layer is answered against in each side of `rows`, composed once from the
+/// rows the tiles span there.
+pub(super) fn viewport_sets<'a>(
+    served: &ServedView<'_>,
+    rows: &'a [(usize, croaring::Bitmap)],
+    mask: &'a ShardedMask,
+) -> Vec<ViewportSets<'a>> {
+    rows.iter()
+        .filter_map(|(at, rows)| {
+            let mask = mask.read_leaf(served.sides[*at].shard.id())?;
+            // Hoisted out of every layer and every artifact, built once per request.
+            let viewport = crate::tile_index::Viewport::compose(rows, mask);
+            Some(ViewportSets {
+                side: *at,
+                mask,
+                // `None` is an unfiltered request — no column on the wire.
+                matched_here: mask.matched_rows(viewport.here()),
+                // `None` is a request carrying no highlight.
+                highlighted_here: mask.highlighted_rows(viewport.here()),
+                viewport,
+            })
+        })
+        .collect()
+}
+
+/// The artifacts of one level holding a member the viewer sees in `sets`, ascending: each side
+/// proposes candidates from its own form and probes each against its own leaf, and an artifact is
+/// present where any side finds one. An artifact `admits_label` withholds has no membership
+/// probed.
+pub(super) fn present_in(
+    forms: &crate::layer_read::LevelForms,
+    sets: &[ViewportSets<'_>],
+    admits_label: impl Fn(u32) -> bool,
+) -> croaring::Bitmap {
+    let mut present = croaring::Bitmap::new();
+    for set in sets {
+        let rows: &crate::artifacts::ArtifactRows = &forms.rows[set.side];
+        // Replaces a sweep over every ordinal: an artifact in no node the viewport touches has no
+        // visible member, so skipping it withholds nothing. Holes and artifacts with no projected
+        // membership stay live on the identifier route, which walks no index. Or, on a row-major
+        // level, a scan over the viewport intersected with the mask.
+        let candidates = rows.candidacy(&set.viewport, forms.counts[set.side].as_deref());
+        for ordinal in candidates.iter() {
+            if present.contains(ordinal) || !admits_label(ordinal) {
+                continue;
+            }
+            // Every candidate pays a masked probe, on whichever route is cheapest for it.
+            if rows.candidate_in(ordinal, &candidates, &set.viewport, set.mask) {
+                present.add(ordinal);
+            }
+        }
+    }
+    present
+}
+
+/// What a request's filter, or its highlight, admits of one level in `sets`: in each side,
+/// [`crate::artifacts::ArtifactRows::matched`] over the rows `admitted` gives there, or `None`
+/// where the request carries no such expression.
+pub(super) fn matched_sides<'s>(
+    forms: &crate::layer_read::LevelForms,
+    sets: &'s [ViewportSets<'_>],
+    admitted: impl Fn(&'s ViewportSets<'_>) -> Option<&'s croaring::Bitmap>,
+) -> Option<Vec<(usize, crate::artifacts::Matched<'s>)>> {
+    let sides: Vec<_> = sets
+        .iter()
+        .filter_map(|set| Some((set.side, forms.rows[set.side].matched(admitted(set)?))))
+        .collect();
+    (!sides.is_empty()).then_some(sides)
+}
+
+/// Whether the artifact at `ordinal` holds a member [`matched_sides`] admits in any side.
+pub(super) fn matches_any(
+    forms: &crate::layer_read::LevelForms,
+    matched: &Option<Vec<(usize, crate::artifacts::Matched<'_>)>>,
+    ordinal: u32,
+) -> Option<bool> {
+    matched.as_ref().map(|sides| {
+        sides
+            .iter()
+            .any(|(at, matched)| forms.rows[*at].matches(matched, ordinal))
+    })
 }
 
 impl Walked {
@@ -1949,4 +1792,71 @@ fn orphaned_dependents(
         }
     }
     dropped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::artifacts::ArtifactRows;
+    use crate::layer_read::LevelForms;
+
+    /// One shard's rows of a level: each ordinal's members, what the viewer sees, and the tile's
+    /// spans there.
+    type Held<'a> = (&'a [&'a [u32]], &'a [u32], &'a [Range<u32>]);
+
+    /// The artifacts of a level each of `shards` proposes in its tile rows and holds a visible
+    /// member of there, the one at `withheld` withheld by its label.
+    fn present_over(shards: &[Held<'_>], withheld: u32) -> Vec<u32> {
+        let forms = LevelForms::synthetic(
+            shards
+                .iter()
+                .map(|(sets, ..)| {
+                    let sets: Vec<Option<&[u32]>> = sets.iter().map(|set| Some(*set)).collect();
+                    ArtifactRows::synthetic(&sets, None)
+                })
+                .collect(),
+        );
+        let leaves: Vec<EffectiveMask> = shards
+            .iter()
+            .map(|(_, visible, _)| EffectiveMask::of_rows(croaring::Bitmap::of(visible)))
+            .collect();
+        let rows: Vec<croaring::Bitmap> =
+            shards.iter().map(|(.., spans)| spans_rows(spans)).collect();
+        let sets: Vec<ViewportSets<'_>> = (0..shards.len())
+            .map(|side| ViewportSets {
+                side,
+                mask: &leaves[side],
+                viewport: crate::tile_index::Viewport::compose(&rows[side], &leaves[side]),
+                matched_here: None,
+                highlighted_here: None,
+            })
+            .collect();
+        present_in(&forms, &sets, |ordinal| ordinal != withheld)
+            .iter()
+            .collect()
+    }
+
+    /// The candidates a cut is taken over, over two shards: each shard proposes from its own
+    /// form and probes against its own leaf, and an artifact is present where either finds a
+    /// visible member in the tiles, as in one shard holding both shards' rows.
+    #[test]
+    fn a_levels_candidates_over_two_shards_are_the_union_of_each_shards() {
+        // Ordinal 0 is seen in the tiles only in the first shard, 1 only in the second, 2 in
+        // neither, 3 in both, and 4 is withheld by its label.
+        let (tile_a, tile_b) = ([Range { start: 0, end: 6 }], [Range { start: 1, end: 6 }]);
+        let a: Held<'_> = (&[&[1, 2], &[7], &[9], &[4, 5], &[1]], &[1, 3, 4, 9], &tile_a);
+        let b: Held<'_> = (&[&[7], &[2, 3], &[0], &[5], &[2]], &[2, 5], &tile_b);
+        assert_eq!(present_over(&[a, b], 4), vec![0, 1, 3]);
+        assert_eq!(present_over(&[a], 4), vec![0, 3]);
+        assert_eq!(present_over(&[b], 4), vec![1, 3]);
+        // One shard holding both: the second shard's rows from 10.
+        let shifted = |rows: &[u32]| rows.iter().map(|row| row + 10).collect::<Vec<u32>>();
+        let sets: Vec<Vec<u32>> = (0..5)
+            .map(|o| [a.0[o].to_vec(), shifted(b.0[o])].concat())
+            .collect();
+        let sets: Vec<&[u32]> = sets.iter().map(Vec::as_slice).collect();
+        let visible = [a.1.to_vec(), shifted(b.1)].concat();
+        let one: Held<'_> = (&sets, &visible, &[0..6, 11..16]);
+        assert_eq!(present_over(&[one], 4), vec![0, 1, 3]);
+    }
 }

@@ -553,13 +553,13 @@ impl DecodeSource<'_> {
 /// has no leaf, so a request counts, walks and selects nothing in it; which shards those are
 /// depends on where the viewer's items sit, so nothing keyed or served may depend on the list.
 /// Every operation names the shard it asks about, and answers for a shard without a leaf as for an
-/// empty one. A viewer who sees nothing has the request's filter evaluated in the first shard's
-/// empty leaf ([`Self::filtered_leaves`]).
+/// empty one. A viewer who sees nothing has the request's filter evaluated, and a layer's
+/// artifacts read, in the first shard's empty leaf ([`Self::filtered_leaves`]).
 pub struct ShardedMask {
     leaves: Vec<(ShardId, EffectiveMask)>,
     /// The leaves left out, ascending by shard: the first is where a viewer who sees nothing has
-    /// the filter evaluated and narrowed ([`Self::filtered_leaves`]), and [`Self::only_leaf`]
-    /// answers with it on a view of one shard.
+    /// the filter evaluated and narrowed ([`Self::filtered_leaves`]) and a level read
+    /// ([`Self::read_leaf`]), and [`Self::only_leaf`] answers with it on a view of one shard.
     left_out: Vec<(ShardId, EffectiveMask)>,
 }
 
@@ -619,6 +619,20 @@ impl ShardedMask {
             false => &self.leaves[..],
         };
         leaves.iter().map(|(shard, leaf)| (*shard, leaf))
+    }
+
+    /// The leaf a request reads `shard` through: one of [`Self::filtered_leaves`], so `shard`'s
+    /// leaf, or where the viewer sees nothing in any shard, the first shard's empty one. `None` for
+    /// every other shard, which the request leaves out.
+    pub fn read_leaf(&self, shard: ShardId) -> Option<&EffectiveMask> {
+        match self.leaves.is_empty() {
+            true => self
+                .left_out
+                .first()
+                .filter(|(first, _)| *first == shard)
+                .map(|(_, leaf)| leaf),
+            false => self.leaf(shard),
+        }
     }
 
     /// Each of [`Self::filtered_leaves`] narrowed by its shard's filter rows.
@@ -1415,9 +1429,15 @@ mod sharded_tests {
         assert!(!mask.is_highlighted(ShardRow::new(one, RowId::new(3))));
         assert!(!mask.is_highlighted(ShardRow::new(zero, RowId::new(2))));
 
+        let read: Vec<bool> = [zero, one, two]
+            .map(|shard| mask.read_leaf(shard).is_some())
+            .to_vec();
+        assert_eq!(read, vec![false, true, true]);
+
         let nothing = ShardedMask::new([(one, none()), (zero, none())]);
         let evaluated: Vec<ShardId> = nothing.filtered_leaves().map(|(shard, _)| shard).collect();
         assert_eq!(evaluated, vec![zero]);
+        assert!(nothing.read_leaf(zero).is_some() && nothing.read_leaf(one).is_none());
         let nothing = ShardedMask::new([(zero, none())]).with_highlights(vec![(zero, admits())]);
         assert!(nothing.only_leaf().is_highlighted(2));
     }

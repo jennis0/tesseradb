@@ -952,12 +952,13 @@ impl Engine {
         let mut region_verdict: Option<crate::region::RegionVerdict> = None;
         let mut filters = Vec::new();
         let mut highlights = Vec::new();
-        for (shard, leaf) in mask.filtered_leaves() {
+        let resolved = ResolvedLeaves::new(&mask);
+        for (shard, _) in mask.filtered_leaves() {
             let at = served.side_of(shard);
             let side = &served.sides[at];
             let (domain, rows_in_ranges) = tiling.domain_in(at);
             let (filter_rows, highlight_rows) =
-                self.route_filters(served, side, leaf, &req.cancel, |route| {
+                self.route_filters(served, side, &resolved, &req.cancel, |route| {
                     // `count_matched` excludes the highlight from the `filter_matched` probe: its
                     // cardinality is not the filter's.
                     let mut evaluate = |expr: &crate::filter::FilterExpr,
@@ -1013,28 +1014,27 @@ impl Engine {
         ))
     }
 
-    /// Route this request's filter expressions in one side against its pre-filter leaf there,
-    /// `mask`: build the entity-space candidate over the session's fragment at the shard's
-    /// watermark, close the region and `member_of` resolvers over `mask`, and hand `body` a `route`
-    /// that puts one expression through them. A fragment of an earlier watermark, such as a
-    /// stale-served projection's, would silently omit every entity flushed since, under-reporting
-    /// in a way indistinguishable from a correct answer. `mask` is the pre-filter
-    /// mask and both resolvers close over it, so a highlight routed against an already-filtered
-    /// mask would make the two positions of one clause mean different things. What `body` does
-    /// with a [`crate::filter::RoutedFilter`] is the caller's.
+    /// Route this request's filter expressions in one side: build the entity-space candidate over
+    /// the session's fragment at the shard's watermark, close the region and `member_of` resolvers
+    /// over `resolved`, and hand `body` a `route` that puts one expression through them. A
+    /// fragment of an earlier watermark, such as a stale-served projection's, would silently omit
+    /// every entity flushed since, under-reporting in a way indistinguishable from a correct
+    /// answer. Both resolvers read the side through `resolved`'s mask, the request's before any
+    /// filter narrows it, so a highlight routed against an already-filtered mask would make the
+    /// two positions of one clause mean different things. What `body` does with a
+    /// [`crate::filter::RoutedFilter`] is the caller's.
     pub(crate) fn route_filters<T>(
         &self,
         served: &ServedView<'_>,
         side: &ServedSide<'_>,
-        mask: &EffectiveMask,
+        resolved: &ResolvedLeaves<'_>,
         cancel: &Option<CancelToken>,
         body: impl FnOnce(
             &dyn Fn(&crate::filter::FilterExpr, bool) -> Result<crate::filter::RoutedFilter>,
         ) -> Result<T>,
     ) -> Result<T> {
         let candidate = self.filter_candidate(served.session, side.shard, Some(side.fragment()))?;
-        let resolved = ResolvedLeaves::default();
-        self.route_filters_under(served, side, mask, &candidate, &resolved, cancel, body)
+        self.route_filters_under(served, side, &candidate, resolved, cancel, body)
     }
 
     /// The entity-space set a request's filter is evaluated under in `shard`: the session's
@@ -1076,26 +1076,24 @@ impl Engine {
     /// [`Self::route_filters`] under a candidate the caller composed: a subset of
     /// [`Self::filter_candidate`]'s set, never wider, since every scan returns a subset of it.
     /// A region or `member_of` leaf `resolved` holds is answered from it, and one it does not is
-    /// resolved and kept there; the caller holds it only while `side` and `mask` are the ones it
-    /// was filled under.
-    #[allow(clippy::too_many_arguments)]
+    /// resolved and kept there; the caller holds it only while `served` and its mask are the ones
+    /// it was filled under.
     pub(crate) fn route_filters_under<T>(
         &self,
         served: &ServedView<'_>,
         side: &ServedSide<'_>,
-        mask: &EffectiveMask,
         candidate: &croaring::Bitmap,
-        resolved: &ResolvedLeaves,
+        resolved: &ResolvedLeaves<'_>,
         cancel: &Option<CancelToken>,
         body: impl FnOnce(
             &dyn Fn(&crate::filter::FilterExpr, bool) -> Result<crate::filter::RoutedFilter>,
         ) -> Result<T>,
     ) -> Result<T> {
         let regions = |leaf: &crate::filter::RegionLeaf| {
-            self.region_rows(leaf, served, side, mask, resolved, cancel)
+            self.region_rows(leaf, served, side, resolved, cancel)
         };
         let members =
-            |leaf: &crate::filter::MemberOfLeaf| self.member_rows(leaf, served, mask, resolved);
+            |leaf: &crate::filter::MemberOfLeaf| self.member_rows(leaf, served, side, resolved);
         let layers = |layer: &str| self.reaches_layer(served.session, layer);
         let unique = |column: &str, keys: &[mosaica_store::unique::UniqueKey]| {
             unique_holders(side.shard, column, keys)
@@ -1114,52 +1112,84 @@ impl Engine {
         })
     }
 
-    /// A region leaf's rows under `mask`, from `resolved` where it holds them, and resolved and
-    /// kept there otherwise.
+    /// A region leaf's rows in `side`, from `resolved` where it holds them, and resolved and kept
+    /// there otherwise.
     pub(crate) fn region_rows(
         &self,
         leaf: &crate::filter::RegionLeaf,
         served: &ServedView<'_>,
         side: &ServedSide<'_>,
-        mask: &EffectiveMask,
-        resolved: &ResolvedLeaves,
+        resolved: &ResolvedLeaves<'_>,
         cancel: &Option<CancelToken>,
     ) -> std::result::Result<crate::region::RegionRows, crate::filter::FilterError> {
+        let shard = side.shard.id();
         let held = resolved
             .regions
             .borrow()
             .iter()
-            .find(|(held, _)| held == leaf)
-            .map(|(_, rows)| rows.clone());
+            .find(|(at, held, _)| *at == shard && held == leaf)
+            .map(|(_, _, rows)| rows.clone());
         if let Some(rows) = held {
             return Ok(rows);
         }
-        let rows = self.resolve_region(leaf, served, side, mask, cancel)?;
-        resolved.regions.borrow_mut().push((leaf.clone(), rows.clone()));
+        let rows = self.resolve_region(leaf, served, side, resolved, cancel)?;
+        resolved
+            .regions
+            .borrow_mut()
+            .push((shard, leaf.clone(), rows.clone()));
         Ok(rows)
     }
 
-    /// A `member_of` leaf's rows under `mask`, from `resolved` where it holds them, and resolved
-    /// and kept there otherwise.
+    /// A `member_of` leaf's rows in `side`, from `resolved` where it holds them, and resolved and
+    /// kept there otherwise.
     pub(crate) fn member_rows(
         &self,
         leaf: &crate::filter::MemberOfLeaf,
         served: &ServedView<'_>,
-        mask: &EffectiveMask,
-        resolved: &ResolvedLeaves,
+        side: &ServedSide<'_>,
+        resolved: &ResolvedLeaves<'_>,
     ) -> std::result::Result<croaring::Bitmap, crate::filter::FilterError> {
+        let shard = side.shard.id();
         let held = resolved
             .members
             .borrow()
             .iter()
-            .find(|(held, _)| held == leaf)
-            .map(|(_, rows)| rows.clone());
+            .find(|(at, held, _)| *at == shard && held == leaf)
+            .map(|(_, _, rows)| rows.clone());
         if let Some(rows) = held {
             return Ok(rows);
         }
-        let rows = self.resolve_member_of(leaf, served, mask)?;
-        resolved.members.borrow_mut().push((leaf.clone(), rows.clone()));
+        let rows = self.resolve_member_of(leaf, served, side, resolved)?;
+        resolved
+            .members
+            .borrow_mut()
+            .push((shard, leaf.clone(), rows.clone()));
         Ok(rows)
+    }
+
+    /// The artifact `id` names, gated for this request over every shard under `resolved`'s mask:
+    /// the verdict, its count and its containment are each shard's summed, decided once before
+    /// any shard reads the artifact's members. Held in `resolved` for the request's other sides.
+    fn gated_once(
+        &self,
+        served: &ServedView<'_>,
+        resolved: &ResolvedLeaves<'_>,
+        id: MosaicaId,
+    ) -> Result<Option<std::rc::Rc<super::artifacts::GatedArtifact>>> {
+        let held = resolved
+            .gates
+            .borrow()
+            .iter()
+            .find(|(held, _)| *held == id)
+            .map(|(_, gated)| gated.clone());
+        if let Some(gated) = held {
+            return Ok(gated);
+        }
+        let gated = self
+            .gated_artifact(served, resolved.mask, id)?
+            .map(std::rc::Rc::new);
+        resolved.gates.borrow_mut().push((id, gated.clone()));
+        Ok(gated)
     }
 
     /// Whether `session` reaches `layer`: whether a `member_of` may name it.
@@ -1178,9 +1208,10 @@ impl Engine {
         leaf: &crate::filter::RegionLeaf,
         served: &ServedView<'_>,
         side: &ServedSide<'_>,
-        mask: &EffectiveMask,
+        resolved: &ResolvedLeaves<'_>,
         cancel: &Option<CancelToken>,
     ) -> std::result::Result<crate::region::RegionRows, crate::filter::FilterError> {
+        let mask = resolved.leaf(side);
         use crate::filter::{FilterError, RegionLeaf};
         let segments = &side.segments[..];
         let never_cancelled = CancelToken::new();
@@ -1218,22 +1249,25 @@ impl Engine {
                     Err(mosaica_cache::WaitEnded::Budget) => Arc::new(build()),
                 };
                 Ok(RegionRows {
-                    rows: entry.rows_under(mask, segments),
+                    rows: mask.map_or_else(croaring::Bitmap::new, |mask| {
+                        entry.rows_under(mask, segments)
+                    }),
                     verdict: entry.verdict(),
                 })
             }
             RegionLeaf::Artifact(id) => {
                 let gated = self
-                    .gated_artifact(served, mask, *id)
+                    .gated_once(served, resolved, *id)
                     .map_err(|e| FilterError::RegionUnavailable(e.to_string()))?;
-                let rows = match gated {
-                    Some(gated)
+                let rows = match (gated, mask) {
+                    (Some(gated), Some(mask))
                         if gated.layer.declaration.drawn_shape()
                             != Some(mosaica_types::layer::DrawnShape::Authored) =>
                     {
-                        // `membership ∩ M_auth`, from whichever half of the form holds it — see
-                        // [`crate::artifacts::ArtifactRows::visible_rows`].
-                        gated.rows.visible_rows(gated.ordinal, mask)
+                        // `membership ∩ M_auth` in this side, from whichever half of its form
+                        // holds it — see [`crate::artifacts::ArtifactRows::visible_rows`].
+                        let at = served.side_of(side.shard.id());
+                        gated.forms.rows[at].visible_rows(gated.ordinal, mask)
                     }
                     _ => croaring::Bitmap::new(),
                 };
@@ -1245,44 +1279,72 @@ impl Engine {
         }
     }
 
-    /// Answer one `member_of` leaf for one request, whose layer the filter's admission has already
-    /// found this principal reaches. The artifact must pass its own existence criterion through
-    /// the same [`Engine::gated_artifact`] the drill-down calls. An artifact that does
-    /// not pass — names nothing, is of another layer, is suppressed, is below the criterion — is
-    /// the empty operand, one answer for every reason: refusing instead would make the leaf an
-    /// existence oracle over what the criterion withholds. The membership is read two ways,
-    /// decided by the level's layout: artifact-major intersects the held row bitmap with the
-    /// composed mask; row-major scans visible rows comparing labels. Either way the answer is
-    /// `membership ∩ M_auth`.
+    /// Answer one `member_of` leaf in one side of one request, whose layer the filter's admission
+    /// has already found this principal reaches. The artifact must pass its own existence
+    /// criterion through the same [`Engine::gated_artifact`] the drill-down calls, over every
+    /// shard, before this side reads its members. An artifact that does not pass — names nothing,
+    /// is of another layer, is suppressed, is below the criterion — is the empty operand, one
+    /// answer for every reason: refusing instead would make the leaf an existence oracle over what
+    /// the criterion withholds. The membership is read two ways, decided by the level's layout:
+    /// artifact-major intersects the held row bitmap with the side's leaf; row-major scans visible
+    /// rows comparing labels. Either way the answer is `membership ∩ M_auth` in the side.
     pub(crate) fn resolve_member_of(
         &self,
         leaf: &crate::filter::MemberOfLeaf,
         served: &ServedView<'_>,
-        mask: &EffectiveMask,
+        side: &ServedSide<'_>,
+        resolved: &ResolvedLeaves<'_>,
     ) -> std::result::Result<croaring::Bitmap, crate::filter::FilterError> {
         use crate::filter::FilterError;
         let gated = self
-            .gated_artifact(served, mask, leaf.artifact)
+            .gated_once(served, resolved, leaf.artifact)
             .map_err(|e| FilterError::MemberOfUnavailable(e.to_string()))?;
         // An identifier of another layer is answered exactly as one that resolves to nothing.
-        let Some(gated) = gated.filter(|g| g.name == leaf.layer) else {
+        let gated = gated.filter(|g| g.name == leaf.layer);
+        let (Some(gated), Some(mask)) = (gated, resolved.leaf(side)) else {
             return Ok(croaring::Bitmap::new());
         };
+        let rows = &gated.forms.rows[served.side_of(side.shard.id())];
         // The counter says which levels answer `member_of` at the column's cost rather than the
         // bitmap's.
-        if !gated.rows.membership().rows_held() {
+        if !rows.membership().rows_held() {
             self.counters.member_of_column_walks.fetch_add(1, Ordering::Relaxed);
         }
-        Ok(gated.rows.visible_rows(gated.ordinal, mask))
+        Ok(rows.visible_rows(gated.ordinal, mask))
     }
 }
 
-/// The region and `member_of` leaves answered under one view and mask, so a leaf evaluated again
-/// under them is resolved once.
-#[derive(Default)]
-pub(crate) struct ResolvedLeaves {
-    regions: std::cell::RefCell<Vec<(crate::filter::RegionLeaf, crate::region::RegionRows)>>,
-    members: std::cell::RefCell<Vec<(crate::filter::MemberOfLeaf, croaring::Bitmap)>>,
+/// The region and `member_of` leaves answered for one request under one view: each artifact a
+/// leaf names, gated once over every shard under the request's mask before any filter narrows it,
+/// and each leaf's rows in each shard it was evaluated in, so a leaf evaluated again is resolved
+/// once.
+pub(crate) struct ResolvedLeaves<'m> {
+    mask: &'m ShardedMask,
+    gates: std::cell::RefCell<
+        Vec<(MosaicaId, Option<std::rc::Rc<super::artifacts::GatedArtifact>>)>,
+    >,
+    regions: std::cell::RefCell<
+        Vec<(ShardId, crate::filter::RegionLeaf, crate::region::RegionRows)>,
+    >,
+    members: std::cell::RefCell<Vec<(ShardId, crate::filter::MemberOfLeaf, croaring::Bitmap)>>,
+}
+
+impl<'m> ResolvedLeaves<'m> {
+    /// Nothing resolved yet under `mask`, the request's mask before any filter narrows it.
+    pub(crate) fn new(mask: &'m ShardedMask) -> Self {
+        ResolvedLeaves {
+            mask,
+            gates: Default::default(),
+            regions: Default::default(),
+            members: Default::default(),
+        }
+    }
+
+    /// The leaf `side` is read through, the one the gates were taken under, or `None` where the
+    /// request leaves the side out.
+    fn leaf(&self, side: &ServedSide<'_>) -> Option<&'m EffectiveMask> {
+        self.mask.read_leaf(side.shard.id())
+    }
 }
 
 /// The entities holding `keys` in a unique column, by the column's index and the live entries

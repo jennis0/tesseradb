@@ -76,7 +76,7 @@ pub(super) struct PageCx<'a> {
     pub(super) open: &'a OpenView<'a>,
     pub(super) generation: &'a Arc<Generation>,
     /// The region and `member_of` leaves answered under this page's mask.
-    resolved: ResolvedLeaves,
+    resolved: ResolvedLeaves<'a>,
 }
 
 impl<'a> PageCx<'a> {
@@ -89,7 +89,7 @@ impl<'a> PageCx<'a> {
             engine,
             open,
             generation,
-            resolved: ResolvedLeaves::default(),
+            resolved: ResolvedLeaves::new(&open.mask),
         }
     }
 
@@ -307,7 +307,6 @@ pub(super) fn filter_rows(
     engine.route_filters_under(
         served,
         side,
-        cx.open.mask.only_leaf(),
         candidate,
         &cx.resolved,
         cancel,
@@ -729,7 +728,6 @@ fn region_verdict(
                     leaf,
                     &cx.open.served,
                     cx.open.served.only_side(),
-                    cx.open.mask.only_leaf(),
                     &cx.resolved,
                     cancel,
                 )
@@ -796,7 +794,7 @@ fn bounded_rows(cx: &PageCx<'_>, expr: &FilterExpr) -> Result<Option<Bitmap>> {
                 .member_rows(
                     leaf,
                     &cx.open.served,
-                    cx.open.mask.only_leaf(),
+                    cx.open.served.only_side(),
                     &cx.resolved,
                 )
                 .map_err(filter_refusal)?,
