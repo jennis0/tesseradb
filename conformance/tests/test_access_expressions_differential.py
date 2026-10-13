@@ -17,6 +17,8 @@ from oracle import wire
 from oracle.harness import JOIN_FIELD, spawn_server, stop_server
 from pyarrow import ipc
 
+pytestmark = pytest.mark.writes_nothing
+
 
 @pytest.fixture(scope="module")
 def expression_server(tmp_path_factory):

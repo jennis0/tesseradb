@@ -51,6 +51,8 @@ from oracle import viewport as vp
 from oracle.bundle import Bundle
 from oracle.wire import decode_viewport
 
+pytestmark = pytest.mark.writes_nothing
+
 VIEW = cat.VIEW_ID
 
 # `(x0, y0, x1, y1)`, the request's bbox order — NOT `Bundle.extent`'s order for the same four
@@ -78,7 +80,7 @@ def _oracle_state(bundle: Bundle, case, depth: int):
     the service — see `oracle/viewport.py`'s module doc for why taking it from the thing under test
     makes every density assertion circular.
     """
-    mask = set(case.entities)
+    mask = cat.items_of(bundle, case.entities)
     v_total = vp.visible_total(bundle, mask, VIEW)
     return mask, v_total, vp.Selection(bundle, mask, VIEW, depth)
 

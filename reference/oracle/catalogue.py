@@ -130,6 +130,7 @@ from .harness import (
     fixture_dir,
     open_bundle_with_source,
     recipe_matches,
+    shards_toml,
     write_deployment,
     write_recipe,
 )
@@ -922,6 +923,18 @@ CONTAINER_SIZE = 1 << 16
 # asserts its own floor matches this one, so the two cannot drift apart.
 HIGH_ID_FLOOR = 100_000
 
+# The shard size of the many-shard mode. The smallest that keeps `filler_tail` astride 131,072
+# inside shard 0, so both container claims still hold there; the remaining 18,927 items, the tail
+# of `filler_tail` and all of `high_tail`, form shard 1. Every number in shard 1 is below
+# `HIGH_ID_FLOOR`, and no size that splits the corpus keeps `high_tail` above it, so the claims
+# `verify()` makes for the byte scan's floor hold in the one-shard mode only.
+SHARD_SIZE_MANY = 131_073
+
+
+def schema_toml() -> str:
+    """The declaration the build reads: [`SCHEMA_TOML`] and the mode's `[shards]` table."""
+    return SCHEMA_TOML + shards_toml(N_ITEMS, size=SHARD_SIZE_MANY)
+
 
 @dataclass(frozen=True)
 class MaskCase:
@@ -1318,7 +1331,7 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
         # The declaration's *content*, not just its filename. `build_argv` below reduces paths to
         # basenames, so an edited `SCHEMA_TOML` under an unchanged name would leave the receipt
         # identical and reuse a bundle whose columns no longer match the declaration.
-        "schema": SCHEMA_TOML,
+        "schema": schema_toml(),
         "build_argv": [Path(a).name if a.startswith("/") else a for a in argv],
     }
 
@@ -1364,7 +1377,7 @@ def build_catalogue_bundle(work_dir: Path | None = None) -> tuple[Path, list[int
     write_corpus(work_dir)
     # Written on the build path only, beside the corpus and for the same reason: writing it
     # unconditionally is what let bundle and corpus diverge before.
-    (work_dir / SCHEMA_NAME).write_text(SCHEMA_TOML)
+    (work_dir / SCHEMA_NAME).write_text(schema_toml())
     write_deployment(
         work_dir / DEPLOYMENT_NAME, bundle=bundle_root, schema=work_dir / SCHEMA_NAME
     )
@@ -1421,6 +1434,9 @@ class VerificationReport:
     row_count: int = 0
     blocks: dict[str, set[int]] = field(default_factory=dict)
     failures: list[str] = field(default_factory=list)
+    #: The claims made for the byte scan's floor (check 8), which a bundle of several shards
+    #: cannot meet ([`SHARD_SIZE_MANY`]).
+    floor_failures: list[str] = field(default_factory=list)
 
 
 def verify(bundle: Bundle) -> VerificationReport:
@@ -1444,7 +1460,9 @@ def verify(bundle: Bundle) -> VerificationReport:
        a multiple of 65,536 in one shard, which is the only reason the case exists;
     5. `full_100pct` spans every container of every shard the corpus reaches;
     6. `all_in_one_tile`'s rows really share one depth-6 tile;
-    7. the crossover cases really sit either side of 5%.
+    7. the crossover cases really sit either side of 5%;
+    8. `high_tail` lies wholly above `HIGH_ID_FLOOR` and another block reaches above it, reported
+       in `floor_failures`.
     """
     report = VerificationReport()
     seg = bundle.segment(VIEW_ID)
@@ -1465,11 +1483,6 @@ def verify(bundle: Bundle) -> VerificationReport:
     expected_offset = 1 if public_term == 0 else 0
 
     source_of = source_of_entity(bundle)
-    first_number = {}
-    numbered = 0
-    for record in bundle.shards:
-        first_number[record["id"]] = numbered
-        numbered += int(record["high_water"])
     for block in BLOCKS.values():
         term_id = bundle.term_id_of(block.descriptor.encode("ascii"))
         if term_id is None:
@@ -1483,7 +1496,7 @@ def verify(bundle: Bundle) -> VerificationReport:
             )
         postings = set(int(e) for e in bundle.postings(term_id).tolist())
         report.blocks[block.name] = postings
-        built = {first_number[shard] + number for shard, number in map(item_of_key, postings)}
+        built = {bundle.build_number(item) for item in postings}
         if built != block.entities:
             report.failures.append(
                 f"block {block.name}: postings are not the contiguous range "
@@ -1555,19 +1568,19 @@ def verify(bundle: Bundle) -> VerificationReport:
         # make deleting or renaming the block a silent pass — and `outside_above` below would still
         # be satisfied by `filler_tail`, so `verify()` would report green on a corpus that cannot
         # supply the byte-scan's grant set at all.
-        report.failures.append(
+        report.floor_failures.append(
             "high_tail is absent from the corpus, so no grant set can put entity ids above "
             f"{HIGH_ID_FLOOR} on both sides of it — see the layout note"
         )
     if high_tail and min(numbers(high_tail)) < HIGH_ID_FLOOR:
-        report.failures.append(
+        report.floor_failures.append(
             f"high_tail starts at {min(numbers(high_tail))}, below the byte-scan floor "
             f"{HIGH_ID_FLOOR} — its members are no longer all separable from the small integers "
             "the harness emits"
         )
     outside_above = {e for e in numbers(everything - high_tail) if e >= HIGH_ID_FLOOR}
     if not outside_above:
-        report.failures.append(
+        report.floor_failures.append(
             f"no block outside high_tail reaches above {HIGH_ID_FLOOR}, so a grant of high_tail "
             "leaves nothing denied above the floor and the byte-scan can only check one direction"
         )

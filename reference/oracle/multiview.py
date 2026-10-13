@@ -121,6 +121,7 @@ from .harness import (
     ensure_cli_built,
     fixture_dir,
     recipe_matches,
+    shards_toml,
     write_deployment,
     write_recipe,
 )
@@ -518,6 +519,11 @@ def _source_name(key: str) -> str:
 SCHEMA_TOML = _schema_toml()
 
 
+def schema_toml() -> str:
+    """The declaration the build reads: [`SCHEMA_TOML`] and the mode's `[shards]` table."""
+    return SCHEMA_TOML + shards_toml(N_ITEMS)
+
+
 # ---------------------------------------------------------------------------------------------
 # Writing the corpus, and building it
 # ---------------------------------------------------------------------------------------------
@@ -648,7 +654,7 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
         "geometry_seed": _GEOMETRY_SEED,
         # The declaration's *content*, since the extents, the roster and both attributes live in
         # it and an edit under an unchanged filename would otherwise reuse a stale bundle.
-        "schema": SCHEMA_TOML,
+        "schema": schema_toml(),
         "build_argv": [Path(a).name if a.startswith("/") else a for a in argv],
     }
 
@@ -673,7 +679,7 @@ def build_multiview_bundle(work_dir: Path | None = None) -> Path:
     if bundle_root.exists():
         shutil.rmtree(bundle_root)
     write_corpus(work_dir)
-    (work_dir / SCHEMA_NAME).write_text(SCHEMA_TOML)
+    (work_dir / SCHEMA_NAME).write_text(schema_toml())
     write_deployment(
         work_dir / DEPLOYMENT_NAME, bundle=bundle_root, schema=work_dir / SCHEMA_NAME
     )

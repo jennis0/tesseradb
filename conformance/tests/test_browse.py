@@ -50,6 +50,8 @@ from test_shape_membership import (
     visible,
 )
 
+pytestmark = pytest.mark.writes_nothing
+
 
 TREE = "regions/tree"
 

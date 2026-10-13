@@ -99,7 +99,14 @@ import pyarrow as pa
 import pyarrow.ipc as ipc
 
 from oracle import morton
-from oracle.harness import CLI_BIN, REPO_ROOT, cli_build, ensure_cli_built, write_deployment
+from oracle.harness import (
+    CLI_BIN,
+    REPO_ROOT,
+    cli_build,
+    ensure_cli_built,
+    shards_toml,
+    write_deployment,
+)
 
 from .battery import Categories, Item, Meta, Recorded, Viewport
 from .canonical import Json, Streamed
@@ -241,6 +248,8 @@ def materialise_corpus(
     )
     if run.returncode != 0:
         raise RuntimeError(f"corpus materialisation failed:\n{run.stdout}\n{run.stderr}")
+    with (out_dir / "config.toml").open("a") as declaration:
+        declaration.write(shards_toml(n))
     return CorpusFiles(
         seed=seed,
         n=n,

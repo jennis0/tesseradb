@@ -61,9 +61,18 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .harness import cli_build, ensure_cli_built, join_attribute_toml, write_deployment
+from .harness import (
+    cli_build,
+    ensure_cli_built,
+    join_attribute_toml,
+    shards_toml,
+    write_deployment,
+)
 
 N_BASE_ITEMS = 400
+#: The shard size of the many-shard mode: a few dozen items, so the base corpus spans nine shards
+#: and the canary shares the last with base items.
+SHARD_SIZE_MANY = 48
 N_TERMS = 6
 EXTENT = "0,65536,0,65536"
 VIEW_ID = "s0"
@@ -172,6 +181,7 @@ def build_canary_states(work_dir: Path) -> tuple[Path, Path, Path]:
         'source = "points"\n'
         'point_visibility = { source = "pairs", default = "public" }\n\n'
         + join_attribute_toml("points")
+        + shards_toml(N_BASE_ITEMS, size=SHARD_SIZE_MANY)
     )
 
     for points_path, pairs_path, out_dir in (
@@ -237,7 +247,8 @@ def verify_allocation_rules(free_bundle: Path, canary_bundle: Path) -> list[str]
 
     failures: list[str] = []
     free = Bundle(free_bundle).segment(VIEW_ID)
-    canary = Bundle(canary_bundle).segment(VIEW_ID)
+    canary_build = Bundle(canary_bundle)
+    canary = canary_build.segment(VIEW_ID)
     if free.mosaica_id is None or canary.mosaica_id is None:
         return ["a canary bundle has no stored mosaica_id column (pre-r6 build)"]
 
@@ -276,9 +287,10 @@ def verify_allocation_rules(free_bundle: Path, canary_bundle: Path) -> list[str]
             f"the canary's row is not at the Morton-maximal corner (code "
             f"{int(canary.morton[last])} != {0xFFFF_FFFF}) — allocation rule 2"
         )
-    if int(canary.entity_id[last]) != N_BASE_ITEMS:
+    numbered = canary_build.build_number(int(canary.entity_id[last]))
+    if numbered != N_BASE_ITEMS:
         failures.append(
-            f"the canary's entity id is {int(canary.entity_id[last])}, not {N_BASE_ITEMS} — it "
+            f"the canary was numbered {numbered}, not {N_BASE_ITEMS} — it "
             "was not allocated after all real IDs (allocation rules 1 and 5)"
         )
     return failures

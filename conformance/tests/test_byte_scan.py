@@ -306,8 +306,9 @@ import requests
 from oracle import catalogue
 from oracle import identity as identity_mod
 from oracle import mask as mask_mod
+from oracle.bundle import Bundle
 from oracle.catalogue import open_catalogue_bundle
-from oracle.harness import spawn_server, stop_server
+from oracle.harness import Server, many_shards, spawn_server, stop_server
 from oracle import wire
 from oracle.wire import decode_viewport_with_subcells, split_frames
 
@@ -646,6 +647,7 @@ def _decode_mosaica_ids(points_bytes: bytes) -> list[int]:
 PLANTED_ENTITY_ID = 145_000
 
 
+@pytest.mark.writes_nothing
 def test_the_catalogue_bundles_identity_column_agrees_with_its_key(catalogue_bundle):
     """The structural half of I10's assurance, against **the bundle this module scans**.
 
@@ -700,6 +702,7 @@ def _subcell_stream(cells: list[int], counts: list[int]) -> bytes:
     return sink.getvalue()
 
 
+@pytest.mark.writes_nothing
 def test_every_scan_mechanism_catches_a_planted_entity_id():
     """The negative control conformance §4.3 asks for: **a planted emission the scanner must
     flag.**
@@ -931,9 +934,24 @@ def byte_scan_server(tmp_path_factory, private_catalogue_bundle):
     stop_server(proc)
 
 
-def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
-    byte_scan_server, catalogue_bundle_root: Path
-):
+class Grant(NamedTuple):
+    """The scan's session and the entity ids its sweeps look for. `admitted` and `denied` are
+    oracle item keys; the two target sets hold each item's number in its shard, which is what a
+    leak would carry."""
+
+    server: Server
+    log_path: Path
+    bundle: Bundle
+    descriptors: list[bytes]
+    token: str
+    admitted: set[int]
+    denied: set[int]
+    target_ids: set[int]
+    target_ids_high: set[int]
+
+
+@pytest.fixture(scope="module")
+def grant(byte_scan_server, catalogue_bundle_root: Path) -> Grant:
     server, log_path = byte_scan_server
     oracle_bundle = open_catalogue_bundle(catalogue_bundle_root)
     assert oracle_bundle.identity_key is not None, "fixture must be a post-r6 bundle"
@@ -965,21 +983,48 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
 
     # Unfiltered target set — used ONLY for the mosaica_id column's own scan (module doc: no
     # floor needed there; `code` and the log/item text scans below use the floor-filtered set).
-    target_ids = admitted | denied
+    # Two items of different shards may share a number, which is then one target.
+    target_ids = _numbers(admitted | denied)
     assert admitted, "fixture/grant choice must admit >= 1 entity for this test to mean anything"
     assert denied, "fixture/grant choice must deny >= 1 entity for this test to mean anything"
 
     # Floor-filtered target set — used for `code`'s windows, the log (binary + decimal) and the
     # /v1/items decimal scan (module doc).
-    admitted_high = {e for e in admitted if e >= SAFE_ID_FLOOR}
-    denied_high = {e for e in denied if e >= SAFE_ID_FLOOR}
-    assert admitted_high, "fixture/grant choice must admit >= SAFE_ID_FLOOR entities"
+    admitted_high = {e for e in _numbers(admitted) if e >= SAFE_ID_FLOOR}
+    denied_high = {e for e in _numbers(denied) if e >= SAFE_ID_FLOOR}
+    # In the many-shard mode `high_tail` lies in the catalogue's second shard, whose every number is
+    # below the floor (`catalogue.SHARD_SIZE_MANY`), so no admitted id is above it and the floored
+    # sweeps there look for denied ids only.
+    if not many_shards():
+        assert admitted_high, "fixture/grant choice must admit >= SAFE_ID_FLOOR entities"
     assert denied_high, "fixture/grant choice must deny >= SAFE_ID_FLOOR entities"
     # Both preconditions above are properties of the catalogue's layout, guaranteed by its
     # `high_tail` block and checked by `catalogue.verify()`. This equality is what stops the two
     # from drifting apart — the layout would go on satisfying a floor this scan no longer uses.
     assert SAFE_ID_FLOOR == catalogue.HIGH_ID_FLOOR
-    target_ids_high = admitted_high | denied_high
+    return Grant(
+        server,
+        log_path,
+        oracle_bundle,
+        granted_descriptors,
+        token,
+        admitted,
+        denied,
+        target_ids,
+        admitted_high | denied_high,
+    )
+
+
+def _numbers(items: set[int]) -> set[int]:
+    """Each item's number in its shard."""
+    return {number for _shard, number in map(identity_mod.item_of_key, items)}
+
+
+@pytest.mark.writes_nothing
+def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(grant: Grant):
+    server, log_path, oracle_bundle, token = grant.server, grant.log_path, grant.bundle, grant.token
+    admitted, target_ids, target_ids_high = grant.admitted, grant.target_ids, grant.target_ids_high
+    granted_descriptors = grant.descriptors
 
     identity_key = oracle_bundle.identity_key
     identity_key_hex = oracle_bundle.manifest["identity"]["key"]
@@ -1201,9 +1246,23 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
     assert identity_key_hex not in items_text_str
     assert str(identity_key.k0) not in items_text_str and str(identity_key.k1) not in items_text_str
 
+    _assert_the_log_holds_no_target(log_path, target_ids_high, oracle_bundle)
+
+
+def test_no_entity_id_crosses_the_artifacts_routes(grant: Grant):
+    """The artifacts routes, over a layer this test publishes, and the log again after them."""
+    server, log_path, oracle_bundle, token = grant.server, grant.log_path, grant.bundle, grant.token
+    target_ids, target_ids_high = grant.target_ids, grant.target_ids_high
+    identity_key = oracle_bundle.identity_key
+    identity_key_hex = oracle_bundle.manifest["identity"]["key"]
+    identity_key_raw = bytes.fromhex(identity_key_hex)
+
     # --- POST /v1/artifacts: a layer published over the catalogue, read whole, every frame swept -
     # Each group holds admitted and denied items alike, so every count is a partial one.
-    seen, unseen = sorted(admitted_high), sorted(denied_high)
+    seen, unseen = (
+        sorted(e for e in items if identity_mod.item_of_key(e)[1] >= SAFE_ID_FLOOR)
+        for items in (grant.admitted, grant.denied)
+    )
     groups = [seen[i : i + 200] + unseen[i : i + 200] for i in range(0, 4_000, 200)]
     resp = server.register_layer(
         {
@@ -1361,6 +1420,15 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
     assert not leaked, f"entity id(s) as decimal text in an artifacts viewport: {sorted(leaked)[:20]}"
     for half in (identity_key.k0, identity_key.k1):
         assert half not in tile_id_values | tile_number_values
+
+    _assert_the_log_holds_no_target(log_path, target_ids_high, oracle_bundle)
+
+
+def _assert_the_log_holds_no_target(log_path: Path, target_ids_high: set[int], oracle_bundle):
+    """The server's whole log so far holds no target id and no form of the identity key."""
+    identity_key = oracle_bundle.identity_key
+    identity_key_hex = oracle_bundle.manifest["identity"]["key"]
+    identity_key_raw = bytes.fromhex(identity_key_hex)
 
     # --- server log: text, so scan for decimal substrings, not just raw LE bytes -----------------
     log_bytes = log_path.read_bytes()

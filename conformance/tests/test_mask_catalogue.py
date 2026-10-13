@@ -21,7 +21,10 @@ import pytest
 from oracle import catalogue as cat
 from oracle import mask as mask_mod
 from oracle.bundle import Bundle
+from oracle.harness import many_shards, spawn_server, stop_server
 from oracle.wire import decode_viewport_points
+
+pytestmark = pytest.mark.writes_nothing
 
 
 def test_the_catalogue_bundle_identity_column_is_the_manifest_keys_permutation(
@@ -62,6 +65,10 @@ def test_the_catalogue_corpus_is_the_shape_it_claims(catalogue_bundle: Bundle):
     report = cat.verify(catalogue_bundle)
     assert not report.failures, "the mask catalogue has drifted:\n  " + "\n  ".join(report.failures)
     assert report.row_count == cat.N_ITEMS
+    if not many_shards():
+        assert not report.floor_failures, "the mask catalogue has drifted:\n  " + "\n  ".join(
+            report.floor_failures
+        )
 
 
 @pytest.mark.parametrize("case", cat.catalogue(), ids=lambda c: c.name)
@@ -79,7 +86,7 @@ def test_each_case_reaches_exactly_the_entity_set_it_names(catalogue_bundle: Bun
     assert None not in term_ids, f"{case.name}: a grant descriptor is not in the dictionary"
 
     from_pairs = mask_mod.mask_of(term_ids, catalogue_bundle.pairs())
-    assert from_pairs == set(case.entities), (
+    assert from_pairs == cat.items_of(catalogue_bundle, case.entities), (
         f"{case.name} ({case.attacks}): the pairs-derived mask is not the entity set the case "
         f"names — got {len(from_pairs)} entities, expected {len(case.entities)}"
     )
@@ -202,7 +209,7 @@ def test_fx_key_is_served_in_the_points_batch(catalogue_bundle: Bundle, catalogu
         )
 
 
-def test_the_catalogues_principals_reach_the_split_route(catalogue_server):
+def test_the_catalogues_principals_reach_the_split_route(tmp_path, private_catalogue_bundle):
     """**A session whose terms have images is served through them**, not merely offered them.
 
     A row projection is built by one of three routes, chosen from the principal's own grant
@@ -222,12 +229,20 @@ def test_the_catalogues_principals_reach_the_split_route(catalogue_server):
     The catalogue supplies a principal with a kept term without needing one added: its blocks run
     to tens of thousands of entities over three Roaring containers of row space, far above the keep
     rule's thirty rows per container.
+
+    Its own server, because a projection is shared by every session with the same grant: on a
+    server that earlier tests served the same cases over, every projection here is already built
+    and the counter does not move.
     """
-    before = catalogue_server.status()["projection_builds_by_route"]
-    for case in cat.catalogue():
-        token = catalogue_server.authorise(list(case.grants))["token"]
-        catalogue_server.viewport(token, cat.VIEW_ID, 4, cat.FULL_VIEWPORT, k=30)
-    after = catalogue_server.status()["projection_builds_by_route"]
+    server, proc = spawn_server(private_catalogue_bundle("split-route"), tmp_path)
+    try:
+        before = server.status()["projection_builds_by_route"]
+        for case in cat.catalogue():
+            token = server.authorise(list(case.grants))["token"]
+            server.viewport(token, cat.VIEW_ID, 4, cat.FULL_VIEWPORT, k=30)
+        after = server.status()["projection_builds_by_route"]
+    finally:
+        stop_server(proc)
 
     assert sum(after.values()) > sum(before.values()), (
         "no projection was built at all across the whole catalogue, so this test asserted "

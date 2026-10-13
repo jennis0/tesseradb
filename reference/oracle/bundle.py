@@ -454,6 +454,13 @@ class Bundle:
     def _shard_dir(self, shard: int) -> Path:
         return shard_dir(self.prefix_dir, shard=shard)
 
+    def build_number(self, item: int) -> int:
+        """`item`'s number in the build's numbering, which runs shard by shard, each shard's
+        numbers following the previous shards' high waters."""
+        shard, number = identity_mod.item_of_key(item)
+        before = (int(r["high_water"]) for r in self.shards if r["id"] < shard)
+        return sum(before) + number
+
     def _verify_files(self, files: dict) -> None:
         for rel, info in files.items():
             path = self.prefix_dir / rel

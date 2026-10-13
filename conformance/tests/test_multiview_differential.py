@@ -93,6 +93,8 @@ from oracle.bundle import Bundle
 from oracle.mask import mask_of
 from oracle.wire import decode_viewport, decode_viewport_points
 
+pytestmark = pytest.mark.writes_nothing
+
 #: The zoom every count comparison is made at, and one deeper for the partial viewport. Depth 2 is
 #: sixteen tiles over a whole frame, which is enough for a per-tile disagreement to have somewhere
 #: to hide and few enough for the literal oracle to answer in milliseconds.

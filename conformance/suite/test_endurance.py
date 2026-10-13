@@ -1161,6 +1161,7 @@ def _print_report(
 # -- always-on checks (no server, no corpus) ----------------------------------------------------
 
 
+@pytest.mark.writes_nothing
 def test_the_defaults_are_the_design_tier():
     """§16's endurance row, transcribed: thousands of writes, 100+ folds, sampled verification —
     so an untouched environment runs the real thing, and a developing run must shrink it
@@ -1181,6 +1182,7 @@ def test_the_defaults_are_the_design_tier():
     assert p.rounds == p.ladder_writes + p.writes_per_cycle * p.folds
 
 
+@pytest.mark.writes_nothing
 def test_the_verify_cadence_grammar():
     assert parse_verify_cadence("every:25") == 25
     assert parse_verify_cadence("each") == 1

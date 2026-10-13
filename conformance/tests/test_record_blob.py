@@ -26,8 +26,12 @@ the addressing that will serve them is self-consistent.
 
 from __future__ import annotations
 
+import pytest
 from oracle import catalogue as cat
 from oracle import record_blob as rb
+from oracle.identity import item_key, item_of_key
+
+pytestmark = pytest.mark.writes_nothing
 
 
 def _blob_tags(manifest: dict) -> set[int]:
@@ -70,29 +74,36 @@ def test_the_blob_declares_exactly_the_fixtures_blob_columns(catalogue_bundle):
     }
 
 
-def test_the_blob_addressing_is_self_consistent(catalogue_bundle_root, catalogue_bundle):
-    """The whole walk, one call: blocks tile the file, ranks tile the rank space, rows tile
-    their blocks, discriminants agree with has-row's rank order, fields frame exactly, tags are
-    blob-resident columns only — and has-row's membership is what the generation functions
+def test_the_blob_addressing_is_self_consistent(catalogue_bundle):
+    """The whole walk, one call per shard: blocks tile the file, ranks tile the rank space, rows
+    tile their blocks, discriminants agree with has-row's rank order, fields frame exactly, tags
+    are blob-resident columns only — and has-row's membership is what the generation functions
     planted, which is the fixture-input half of the relation."""
-    failures = rb.self_check(
-        rb.record_dir_of(catalogue_bundle_root),
-        expected_entities=cat.blob_entities_expected(catalogue_bundle),
-        allowed_tags=_blob_tags(catalogue_bundle.manifest),
-    )
+    expected = cat.blob_entities_expected(catalogue_bundle)
+    failures = []
+    for shard, record_dir in rb.record_dirs_of(catalogue_bundle).items():
+        failures += rb.self_check(
+            record_dir,
+            expected_entities={
+                number for in_shard, number in map(item_of_key, expected) if in_shard == shard
+            },
+            allowed_tags=_blob_tags(catalogue_bundle.manifest),
+        )
     assert not failures, "the blob's addressing has drifted:\n" + "\n".join(failures)
 
 
-def test_an_oversized_row_gets_an_oversized_block_of_its_own(catalogue_bundle_root, catalogue_bundle):
+def test_an_oversized_row_gets_an_oversized_block_of_its_own(catalogue_bundle):
     """Records §3's "a target, not a cap", on the artefact: the planted 320,000-byte note must land
     in a block above the target holding exactly that one row — never split across blocks — and
     the corpus must cut enough ordinary blocks that the first/last-of-block drill-down cases
     (records §10's catalogue) are non-degenerate when they land."""
     from pyroaring import BitMap  # noqa: PLC0415
 
-    record_dir = rb.record_dir_of(catalogue_bundle_root)
-    headers = rb.block_headers(record_dir)
-    hasrow = list(BitMap.deserialize((record_dir / rb.HASROW_FILE).read_bytes()))
+    headers = []
+    hasrow = {}
+    for shard, record_dir in rb.record_dirs_of(catalogue_bundle).items():
+        headers += [{**h, "shard": shard} for h in rb.block_headers(record_dir)]
+        hasrow[shard] = list(BitMap.deserialize((record_dir / rb.HASROW_FILE).read_bytes()))
 
     assert len(headers) > 2, (
         f"{len(headers)} blocks — too few for block-boundary cases to mean anything"
@@ -110,7 +121,7 @@ def test_an_oversized_row_gets_an_oversized_block_of_its_own(catalogue_bundle_ro
     # **source** id the note was planted on, so it crosses to entity space here rather than being
     # compared as though the two were one number.
     oversize_entity = cat.entity_of_source(catalogue_bundle, cat.NOTE_OVERSIZE_ID)
-    oversize_entities = {b["first_entity"] for b in oversized}
+    oversize_entities = {item_key(b["shard"], b["first_entity"]) for b in oversized}
     assert oversize_entities == {oversize_entity}, (
         f"the oversized rows belong to {sorted(oversize_entities)}, not entity "
         f"{oversize_entity} (source {cat.NOTE_OVERSIZE_ID}), which is where the note was planted"
@@ -118,4 +129,4 @@ def test_an_oversized_row_gets_an_oversized_block_of_its_own(catalogue_bundle_ro
     # The block's own statement of its first entity and the has-row bitmap's member at that rank
     # are two files' answers to one question, and the walk above rests on their agreeing.
     for block in headers:
-        assert hasrow[block["first_rank"]] == block["first_entity"]
+        assert hasrow[block["shard"]][block["first_rank"]] == block["first_entity"]

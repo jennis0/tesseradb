@@ -22,6 +22,43 @@ sys.path.insert(0, str(REPO_ROOT / "reference"))
 # `suite.canonical` — correctness-suite §12.2 — rather than keeping its own copy).
 sys.path.insert(0, str(REPO_ROOT / "conformance"))
 
+# **Two modes.** `MOSAICA_CONFORMANCE_SHARDS=many` builds every corpus over several shards
+# (`oracle.harness.shards_toml`). A bundle of several shards takes no write until stage 5 of the
+# sharding plan, so that mode runs only the tests marked `writes_nothing`. A test so marked that
+# writes, itself or through a fixture, is answered 409 there and fails.
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "writes_nothing: the test and its fixtures make no write over HTTP: no ingest, change, "
+        "declaration, publication, drop, flush or compaction. Only these run in the many-shard "
+        "mode.",
+    )
+
+
+def pytest_report_header(config):
+    from oracle.harness import SHARDS_ENV, many_shards  # noqa: PLC0415
+
+    if many_shards():
+        return (
+            f"{SHARDS_ENV}=many: every corpus is built over several shards, and tests not marked "
+            "writes_nothing are deselected, since such a bundle takes no write until stage 5"
+        )
+    return None
+
+
+def pytest_collection_modifyitems(config, items):
+    from oracle.harness import many_shards  # noqa: PLC0415
+
+    if not many_shards():
+        return
+    writes = [item for item in items if item.get_closest_marker("writes_nothing") is None]
+    if writes:
+        config.hook.pytest_deselected(items=writes)
+        items[:] = [item for item in items if item.get_closest_marker("writes_nothing")]
+
+
 # **Every fixture in this suite is synthesised from a seed.** Nothing here reads the Phase 0
 # corpus, so the suite runs from a clean checkout with no external data — which is what lets it run
 # in CI at all. The byte-scan and the restart-replay module used to build from a 250,000-item

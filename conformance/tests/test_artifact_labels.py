@@ -180,6 +180,7 @@ def check_names(server, token, terms) -> None:
             assert found == nothing, (terms, text)
 
 
+@pytest.mark.writes_nothing
 def test_the_fixture_separates_two_principals_by_one_label():
     """The oracle's own claim, before anything rests on it. Principals `1` and `1, 2` are served
     different artifacts because of labels. Every artifact but the unlabelled `t-open`, which holds

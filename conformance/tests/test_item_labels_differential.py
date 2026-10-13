@@ -40,6 +40,8 @@ from oracle import catalogue as cat
 from oracle.identity import item_key
 from oracle.wire import decode_viewport, decode_viewport_points
 
+pytestmark = pytest.mark.writes_nothing
+
 VIEW = cat.VIEW_ID
 
 #: Enough drill-downs to cover both shapes of item in every case (carrying a granted term only, and

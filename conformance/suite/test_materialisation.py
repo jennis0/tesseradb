@@ -30,6 +30,8 @@ import pytest
 
 from .verification import materialise_corpus
 
+pytestmark = pytest.mark.writes_nothing
+
 #: Small: this checks a file set, not any value in it, so the corpus only has to be large enough
 #: that every declared relation has rows to write. The materialisation is the whole cost.
 SEED = 20260830

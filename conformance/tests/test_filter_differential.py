@@ -65,6 +65,8 @@ from oracle import filters as filt
 from oracle import viewport as vp
 from oracle.wire import FRAME_TRAILER, decode_viewport, decode_viewport_points, split_frames
 
+pytestmark = pytest.mark.writes_nothing
+
 ZOOM = 3
 
 # The sweep expression: disjunction across both columns, with a category leaf mixing a key
@@ -137,9 +139,10 @@ def test_the_filter_columns_are_decorrelated_from_the_grant_structure(
     for case in cat.catalogue():
         if len(case.entities) < 100:
             continue
+        entities = cat.items_of(catalogue_bundle, case.entities)
         for value in ("alpha", "beta", "gamma"):
-            inside = members[value] & case.entities
-            assert 0 < len(inside) < len(case.entities), (
+            inside = members[value] & entities
+            assert 0 < len(inside) < len(entities), (
                 f"department={value} selects {len(inside)} of {case.name}'s "
                 f"{len(case.entities)} entities — all or none, so the filter and the mask are "
                 "correlated and every cross-principal assertion is vacuous"
@@ -150,7 +153,7 @@ def test_the_filter_columns_are_decorrelated_from_the_grant_structure(
     for case in cat.catalogue():
         if case.name == "full_100pct":
             continue
-        assert not members["omega"] & case.entities, (
+        assert not members["omega"] & cat.items_of(catalogue_bundle, case.entities), (
             f"{case.name} can see an omega member, so no catalogue principal is blind to it and "
             "the hidden-value test has no principal to run as"
         )
@@ -251,7 +254,7 @@ def test_i12_a_filter_narrows_matched_and_never_touches_visible(
         )
 
     # The oracle's side: brute-force M_sel from the fixture's planted values, then §7.1 counts.
-    m_auth = set(case.entities)
+    m_auth = cat.items_of(catalogue_bundle, case.entities)
     m_sel = filt.evaluate(SWEEP_EXPR, catalogue_filter_columns, m_auth)
     assert m_sel <= m_auth  # structural in the oracle; the engine half is the assertions below
 
@@ -311,7 +314,8 @@ def test_a_live_theta_never_thins_a_filtered_selection(
     # And the membership, not just the counts: the served set is the oracle's brute-force M_sel,
     # exactly — the same equality the saturated sweep asserts, now with θ live enough to have
     # thinned it if the rule regressed.
-    m_sel = filt.evaluate(SWEEP_EXPR, catalogue_filter_columns, set(case.entities))
+    m_auth = cat.items_of(catalogue_bundle, case.entities)
+    m_sel = filt.evaluate(SWEEP_EXPR, catalogue_filter_columns, m_auth)
     assert _served_entities(filtered, entity_of_fx) == m_sel
 
 
@@ -463,7 +467,7 @@ def test_a_public_category_answers_exactly_what_the_definition_says(
     """
     case = sweep_cases[case_name]
     token = catalogue_server.authorise(list(case.grants))["token"]
-    m_auth = set(case.entities)
+    m_auth = cat.items_of(catalogue_bundle, case.entities)
     m_sel = filt.evaluate(expr, catalogue_filter_columns, m_auth)
 
     raw = catalogue_server.viewport(
@@ -487,7 +491,7 @@ def test_the_two_routes_compose_with_each_other(
     leaf is evaluated under the earlier one's result."""
     case = sweep_cases["crossover_above"]
     token = catalogue_server.authorise(list(case.grants))["token"]
-    m_auth = set(case.entities)
+    m_auth = cat.items_of(catalogue_bundle, case.entities)
 
     for expr in (
         {"all_of": [{"archive": {"eq": "red"}}, {"department": {"in": ["alpha", "beta"]}}]},
@@ -530,7 +534,7 @@ def test_a_nested_tree_agrees_with_brute_force_and_its_algebra(
 ):
     case = sweep_cases["crossover_above"]
     token = catalogue_server.authorise(list(case.grants))["token"]
-    m_auth = set(case.entities)
+    m_auth = cat.items_of(catalogue_bundle, case.entities)
 
     m_sel = filt.evaluate(NESTED_EXPR, catalogue_filter_columns, m_auth)
     assert m_sel, "the nested expression selects nothing — the case tests an empty corner"
@@ -625,7 +629,7 @@ def test_an_over_deep_expression_is_a_contract_refusal_not_a_server_fault(
 
 
 def test_none_of_requires_a_value_and_names_one_column(
-    catalogue_server, catalogue_filter_columns, entity_of_fx, sweep_cases
+    catalogue_bundle, catalogue_server, catalogue_filter_columns, entity_of_fx, sweep_cases
 ):
     """**Decision 0066 on the wire**: `none_of` means *carries a value in this column, and none of
     these matches it* — so an item carrying no value for the column is outside it, where a
@@ -643,7 +647,7 @@ def test_none_of_requires_a_value_and_names_one_column(
     raw = catalogue_server.viewport(token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr)
     served = _served_entities(raw, entity_of_fx)
 
-    m_auth = set(case.entities)
+    m_auth = cat.items_of(catalogue_bundle, case.entities)
     expected = filt.evaluate(expr, catalogue_filter_columns, m_auth)
     assert served == expected
 

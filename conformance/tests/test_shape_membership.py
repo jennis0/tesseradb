@@ -43,6 +43,7 @@ from oracle.harness import (
     cli_build,
     ensure_cli_built,
     join_attribute_toml,
+    shards_toml,
     spawn_server,
     stop_server,
     write_deployment,
@@ -56,6 +57,8 @@ SEED = 20260829
 
 LATTICE_STEP = 1024
 N_RANDOM = 1500
+#: The lattice's points and the scatter's: what [`fixture_points`] builds.
+N_POINTS = (int(EXTENT_MAX) // LATTICE_STEP) ** 2 + N_RANDOM
 N_INGEST = 200
 WHOLE_MAP = [0.0, 0.0, EXTENT_MAX, EXTENT_MAX]
 
@@ -273,7 +276,7 @@ artifacts = [
 
   [layer.shape]
   kind = "bbox"
-"""
+""" + shards_toml(N_POINTS)
 
 
 def build_bundle(work: Path, points) -> Path:

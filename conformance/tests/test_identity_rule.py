@@ -35,6 +35,7 @@ from oracle.bundle import Bundle
 from oracle.harness import (
     cli_build,
     ensure_cli_built,
+    shards_toml,
     spawn_server,
     stop_server,
     write_deployment,
@@ -125,7 +126,7 @@ def pristine_bundle(tmp_path_factory) -> Path:
         ),
         work / "points.parquet",
     )
-    (work / "identity.toml").write_text(CONFIG)
+    (work / "identity.toml").write_text(CONFIG + shards_toml(N_ITEMS))
     bundle = work / "bundle"
     deployment = write_deployment(work / "mosaica.toml", bundle=bundle, schema=work / "identity.toml")
     cli_build(deployment, bundle)

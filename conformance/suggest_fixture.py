@@ -50,6 +50,7 @@ from oracle.harness import (
     cli_build,
     ensure_cli_built,
     join_attribute_toml,
+    shards_toml,
     write_deployment,
 )
 
@@ -522,7 +523,7 @@ def build_suggest_bundle(work_dir: Path) -> Path:
     _write_vocabulary(work_dir / "topicvalues.parquet", TOPIC_VALUES)
     _write_vocabulary(work_dir / "archivevalues.parquet", ARCHIVE_VALUES)
     config = work_dir / "suggest.toml"
-    config.write_text(CONFIG_TOML)
+    config.write_text(CONFIG_TOML + shards_toml(N_ITEMS))
 
     bundle = work_dir / "bundle"
     deployment = write_deployment(work_dir / "mosaica.toml", bundle=bundle, schema=config)

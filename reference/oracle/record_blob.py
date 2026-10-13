@@ -42,7 +42,6 @@ and the manifest's digest over `blocks.bin` is what stands against it.
 
 from __future__ import annotations
 
-import json
 import struct
 from pathlib import Path
 
@@ -108,10 +107,13 @@ _KIND_UTF8 = 12
 _KIND_LIST = 13
 
 
-def record_dir_of(bundle_root: Path) -> Path:
-    """`attrs/record/` of the bundle's one shard, under its current prefix."""
-    current = json.loads((bundle_root / "CURRENT").read_text())
-    return shard_dir(bundle_root / current["prefix"]) / "attrs" / "record"
+def record_dirs_of(bundle) -> dict[int, Path]:
+    """`attrs/record/` of each shard of `bundle`, an oracle `Bundle`, by shard. Each shard's blob
+    names its rows by their numbers in that shard."""
+    return {
+        record["id"]: shard_dir(bundle.prefix_dir, shard=record["id"]) / "attrs" / "record"
+        for record in bundle.shards
+    }
 
 
 def _frame_value(payload: bytes, pos: int, kind: int, where: str, failures: list[str]) -> int:

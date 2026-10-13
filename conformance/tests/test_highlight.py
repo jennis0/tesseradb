@@ -36,6 +36,7 @@ import pytest
 
 from oracle.harness import (
     CLI_BIN,
+    JOIN_FIELD,
     REPO_ROOT,
     cli_build,
     spawn_server,
@@ -126,6 +127,7 @@ def highlight_server(tmp_path_factory):
     stop_server(proc)
 
 
+@pytest.mark.writes_nothing
 def test_the_served_set_is_identical_with_and_without_a_highlight(highlight_server):
     server, _points = highlight_server
     for terms in PRINCIPALS:
@@ -143,6 +145,7 @@ def test_the_served_set_is_identical_with_and_without_a_highlight(highlight_serv
                     assert points_of(lit) == points_of(plain), what
 
 
+@pytest.mark.writes_nothing
 def test_the_counts_nest_and_the_highlighted_count_is_the_conjunctions(highlight_server):
     server, _points = highlight_server
     for terms in PRINCIPALS:
@@ -162,6 +165,7 @@ def test_the_counts_nest_and_the_highlighted_count_is_the_conjunctions(highlight
             )
 
 
+@pytest.mark.writes_nothing
 def test_the_point_bit_is_present_only_with_a_highlight_and_is_the_oracles(highlight_server):
     server, points = highlight_server
     for terms in PRINCIPALS:
@@ -185,6 +189,7 @@ def test_the_point_bit_is_present_only_with_a_highlight_and_is_the_oracles(highl
         assert sum(1 for b in bits if b) == want, f"{terms}: served {sum(bits)}, oracle {want}"
 
 
+@pytest.mark.writes_nothing
 def test_the_artifact_bit_is_the_conjunctions_and_moves_nothing_else(highlight_server):
     server, _points = highlight_server
     for terms in PRINCIPALS:
@@ -216,6 +221,7 @@ def test_the_artifact_bit_is_the_conjunctions_and_moves_nothing_else(highlight_s
             )
 
 
+@pytest.mark.writes_nothing
 def test_the_highlight_projection_serves_the_same_rows_in_a_two_column_frame(highlight_server):
     server, _points = highlight_server
     for terms in PRINCIPALS:
@@ -243,6 +249,7 @@ def test_the_highlight_projection_serves_the_same_rows_in_a_two_column_frame(hig
         assert bare.column("mosaica_id").to_pylist() == plain.column("mosaica_id").to_pylist()
 
 
+@pytest.mark.writes_nothing
 def test_an_unknown_point_rows_value_is_refused(highlight_server):
     server, _points = highlight_server
     token = server.authorise(["1", "2"])["token"]
@@ -250,6 +257,7 @@ def test_an_unknown_point_rows_value_is_refused(highlight_server):
     assert resp.status_code == 422, resp.text
 
 
+@pytest.mark.writes_nothing
 def test_highlighted_is_a_reserved_column_name(tmp_path):
     points = fixture_points()
     work = tmp_path / "reserved"
@@ -269,47 +277,80 @@ def test_highlighted_is_a_reserved_column_name(tmp_path):
     assert "reserved" in (result.stderr + result.stdout).lower()
 
 
-#: A clustering and the labels attached to it — registered at runtime through the control plane,
-#: because no built fixture in this suite declares a dependent layer and the rule under test is
-#: about one layer hanging from another (decision 0089).
-#:
-#: **Named without a slash**, unlike the path-shaped layers a corpus declares:
-#: `PUT /control/layers/{name}/artifacts` matches one path segment, so a name carrying one is a
-#: 404 at the router rather than a refusal from the handler. That is a fact about the control
-#: plane's addressing and not about this case, so it is worked around here and reported.
+#: A clustering and a label attached to it, declared at the build: the rule under test is about
+#: one layer hanging from another (decision 0089). The cluster holds the points whose `fx_key`, the
+#: source id, is below [`BOUND`]; the label holds ten that are not.
 CLUSTERS = "case-clusters"
 LABELS = "case-labels"
+BOUND = 2000
 
 
-def _layer(name: str, *, depends_on: list[str], supplied: bool) -> dict:
-    layer = {
-        "name": name,
-        "title": name,
-        "views": [VIEW_ID],
-        "membership": "enumerated",
-        "visibility": None,
-        "artifact_visibility": {"field": None, "default": "inherited"},
-        "require_member_visibility": None,
-        "hierarchy": {"kind": "flat", "prune_children": False},
-        "content": {
-            "computed": [],
-            # `inherited`: the content is true whether or not a document exists, so containment is
-            # vacuous and no generating set travels with it (C28).
-            "supplied": (
-                [{"name": "label", "type": "text", "require_member_visibility": "inherited"}]
-                if supplied
-                else []
-            ),
-        },
-        "depends_on": depends_on,
-        "levels": [],
-        "layout": None,
-        "shape": None,
-    }
-    return layer
+def dependent_layers_toml() -> str:
+    cluster = ", ".join(str(sid) for sid in range(BOUND))
+    label = ", ".join(str(sid) for sid in range(BOUND, BOUND + 10))
+    attached = f'attached_layer = "{CLUSTERS}", attached_key = "c-hit"'
+    contents = 'contents = [["hit"]]'
+    return f"""
+[[layer]]
+name = "{CLUSTERS}"
+title = "{CLUSTERS}"
+views = ["{VIEW_ID}"]
+membership = "enumerated"
+visibility = "public"
+artifact_visibility = {{ default = "inherited" }}
+require_member_visibility = "none"
+hierarchy = {{ kind = "flat", prune_children = false }}
+artifacts = [
+  {{ key = "c-hit", members = {{ {JOIN_FIELD} = [{cluster}] }} }},
+]
+
+[[layer]]
+name = "{LABELS}"
+title = "{LABELS}"
+views = ["{VIEW_ID}"]
+membership = "enumerated"
+visibility = "public"
+artifact_visibility = {{ default = "inherited" }}
+require_member_visibility = "none"
+hierarchy = {{ kind = "flat", prune_children = false }}
+depends_on = ["{CLUSTERS}"]
+artifacts = [
+  {{ key = "label-hit", members = {{ {JOIN_FIELD} = [{label}] }}, {attached}, {contents} }},
+]
+
+  [[layer.content.supplied]]
+  name = "label"
+  type = "text"
+  require_member_visibility = "inherited"
+"""
 
 
-def test_a_dependent_artifact_carries_its_targets_highlight_bit(highlight_server):
+@pytest.fixture(scope="module")
+def dependent_server(tmp_path_factory):
+    """The highlight fixture with [`CLUSTERS`] and [`LABELS`] beside its layers."""
+    work = tmp_path_factory.mktemp("highlight-dependent")
+    build_bundle(work, fixture_points())
+    (work / "dependent.toml").write_text(
+        config_toml() + gated_layer_toml() + dependent_layers_toml()
+    )
+    bundle = work / "bundle-dependent"
+    deployment = write_deployment(
+        work / "mosaica-dependent.toml", bundle=bundle, schema=work / "dependent.toml"
+    )
+    cli_build(deployment, bundle)
+    server, proc = spawn_server(
+        bundle,
+        tmp_path_factory.mktemp("highlight-dependent-server"),
+        max_k=100_000,
+        k_max_marks=100_000,
+        theta_target_marks=10**12,
+    )
+    yield server
+    stop_server(proc)
+
+
+@pytest.mark.writes_nothing
+def test_a_dependent_artifact_carries_its_targets_highlight_bit(dependent_server):
     """**A label's `highlighted` is its cluster's**, exactly as its `matched` is (contracts §3.2
     r74; decision 0104's argument) — and its `masked_count` is its own.
 
@@ -320,39 +361,14 @@ def test_a_dependent_artifact_carries_its_targets_highlight_bit(highlight_server
     label that inherited one bit and kept its own for the other disagrees with itself here, and no
     assertion about `matched` alone can see that — the label's own answer is a well-formed `false`.
     """
-    server, _points = highlight_server
+    server = dependent_server
     token = server.authorise(["1", "2"])["token"]
-    table = decode_viewport_points(body(server, token, 0, WHOLE_MAP))
-    ids = table.column("mosaica_id").to_pylist()
-    keys = table.column("fx_key").to_pylist()
-    inside = [str(i) for i, k in zip(ids, keys) if k < 2000]
-    outside = [str(i) for i, k in zip(ids, keys) if k >= 2000]
-    assert len(inside) > 10 and len(outside) > 10, "the fixture must plant both cases"
-
-    for name, depends_on, supplied in ((CLUSTERS, [], False), (LABELS, [CLUSTERS], True)):
-        resp = server.register_layer(_layer(name, depends_on=depends_on, supplied=supplied))
-        assert resp.status_code == 201, resp.text
-    resp = server.publish_artifacts(
-        CLUSTERS,
-        artifacts=[{"key": "c-hit", "members": {"mosaica_id": inside}}],
-        strict=True,
+    keys = decode_viewport_points(body(server, token, 0, WHOLE_MAP)).column("fx_key").to_pylist()
+    assert sorted(k for k in keys if k < BOUND + 10) == list(range(BOUND + 10)), (
+        "the principal must see every member of both artifacts"
     )
-    assert resp.status_code in (200, 201, 202), resp.text
-    resp = server.publish_artifacts(
-        LABELS,
-        artifacts=[
-            {
-                "key": "label-hit",
-                "members": {"mosaica_id": outside[:10]},
-                "content": [{"values": ["hit"]}],
-                "attached_to": {"layer": CLUSTERS, "level": 0, "key": "c-hit"},
-            }
-        ],
-        strict=True,
-    )
-    assert resp.status_code in (200, 201, 202), resp.text
 
-    clause = below(2000)
+    clause = below(BOUND)
     served = {
         (a.layer, a.key): a
         for a in decode_viewport_artifacts(

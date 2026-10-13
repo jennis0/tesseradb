@@ -27,6 +27,7 @@ from .harness import (
     cli_build,
     ensure_cli_built,
     join_attribute_toml,
+    shards_toml,
     write_deployment,
 )
 
@@ -129,7 +130,7 @@ def build_bundle(work_dir: Path) -> Path:
     work_dir.mkdir(parents=True, exist_ok=True)
     _write_points(work_dir / "points.parquet")
     config = work_dir / "expressions.toml"
-    config.write_text(CONFIG_TOML)
+    config.write_text(CONFIG_TOML + shards_toml(N_ITEMS))
     bundle = work_dir / "bundle"
     deployment = write_deployment(work_dir / "mosaica.toml", bundle=bundle, schema=config)
     cli_build(deployment, bundle)
