@@ -201,9 +201,10 @@ unique = true
 
 // -------------------------------------------------------------------------------------------
 
-/// Both build paths refuse one item past `[shards] size`; exactly the size builds and records it.
+/// A build places the item past `[shards] size` in a second shard, and the linear build, which
+/// writes one shard, refuses it; exactly the size builds one shard and records the size.
 #[test]
-fn a_build_over_its_shard_size_is_refused() {
+fn a_build_over_its_shard_size_writes_a_second_shard() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     points(
@@ -212,7 +213,15 @@ fn a_build_over_its_shard_size_is_refused() {
         Vec::new(),
     );
     let sized = |size: u64| format!("[shards]\nsize = {size}\n{ONE_VIEW}");
-    assert!(build(&args(dir, &sized(2), &dir.join("over-streamed"))).is_err());
+    let over = dir.join("over-streamed");
+    build(&args(dir, &sized(2), &over)).expect("the build writes a second shard");
+    let bundle = mosaica_store::read::open_bundle(&over).expect("the bundle opens");
+    let high_waters: Vec<u64> = bundle.partitions["default"]
+        .shards
+        .iter()
+        .map(|shard| shard.record.high_water)
+        .collect();
+    assert_eq!(high_waters, [2, 1]);
     assert!(build_in_memory(&args(dir, &sized(2), &dir.join("over-linear"))).is_err());
 
     let (out, report) = both_ways(dir, &sized(3));

@@ -2655,8 +2655,8 @@ impl Config {
         let base = path.parent().unwrap_or(Path::new("")).to_path_buf();
         let sources = Sources::compile(&base, file.sources.as_ref(), overrides)?;
         let defaults = Defaults::compile(file.defaults.as_ref(), &file.attribute, &sources)?;
-        // Here as well as at the build, so `mosaica check` refuses it. The items the files create
-        // are checked against it as they are numbered (`ids::check_cap`).
+        // Here as well as at the build, so `mosaica check` refuses it. A build places the items
+        // past it in further shards.
         let shard_size = file
             .shards
             .as_ref()

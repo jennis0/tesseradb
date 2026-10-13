@@ -504,7 +504,7 @@ impl LevelPack {
 // at      := u32 LE x (ordinals + 1)   -- into `ids`; at[0] == 0, ascending, at[ordinals] == pairs
 // ids     := id_width bytes x pairs, padded to a 4-byte boundary
 // expr_at := u32 LE x (expressions + 1) -- into `words`; expr_at[0] == 0, ascending
-// words   := u32 LE x words            -- per expression: nclauses, (len, terms...)*
+// words   := u32 LE x words            -- per expression: members, nclauses, (len, terms...)*
 // ```
 //
 // **Every array is 4-byte framed and read one integer at a time** rather than transmuted from the
@@ -516,7 +516,7 @@ const CONTAINMENT_MAGIC: &[u8; 4] = b"MSCP";
 /// Bumped whenever the array layout or the word encoding changes. There is no compatibility to
 /// keep (decision 0048); the number exists so a stale local file is a loud refusal rather than a
 /// silent misread of a containment answer.
-const CONTAINMENT_VERSION: u16 = 2;
+const CONTAINMENT_VERSION: u16 = 3;
 const CONTAINMENT_HEADER_LEN: usize = 4 + 2 + 2 + 4 + 4 + 4 + 4;
 
 fn containment_malformed(what: &str, detail: impl std::fmt::Display) -> StoreError {
@@ -752,20 +752,21 @@ impl ContainmentPack {
                 ));
             }
         }
-        // Each expression's own framing: `nclauses` followed by exactly that many `(len, terms…)`
-        // runs, ending exactly where the next expression begins. An expression that framed short
-        // would drop clauses, and a dropped clause is a member nobody has to be able to see.
+        // Each expression's own framing: `members`, then `nclauses` followed by exactly that many
+        // `(len, terms…)` runs, ending exactly where the next expression begins. An expression
+        // that framed short would drop clauses, and a dropped clause is a member nobody has to be
+        // able to see.
         for id in 0..expressions as usize {
             let lo = pack.expression_at(id) as usize;
             let hi = pack.expression_at(id + 1) as usize;
-            if lo >= hi {
+            if lo + 1 >= hi {
                 return Err(containment_malformed(
                     what,
-                    format!("expression {id} has no clause count"),
+                    format!("expression {id} has no member or clause count"),
                 ));
             }
-            let mut at = lo + 1;
-            for _ in 0..pack.word(lo) {
+            let mut at = lo + 2;
+            for _ in 0..pack.word(lo + 1) {
                 if at >= hi {
                     return Err(containment_malformed(
                         what,
@@ -2308,9 +2309,10 @@ mod tests {
 
     /// One small partition: two ordinals, three pairs, two expressions.
     fn containment_bytes(id_width: u8) -> Vec<u8> {
-        // Expression 0: one clause `{1, 2}`. Expression 1: two clauses, `{1}` and `{3}`.
-        let words = vec![1u32, 2, 1, 2, /* expr 1 */ 2, 1, 1, 1, 3];
-        let expr_at = vec![0u32, 4, 9];
+        // Expression 0: two members, one clause `{1, 2}`. Expression 1: two members, two clauses,
+        // `{1}` and `{3}`.
+        let words = vec![2u32, 1, 2, 1, 2, /* expr 1 */ 2, 2, 1, 1, 1, 3];
+        let expr_at = vec![0u32, 5, 11];
         pack_containment(id_width, &[0, 2, 3], &[0, 1, 0], &expr_at, &words)
     }
 
@@ -2331,9 +2333,9 @@ mod tests {
                 assert_eq!(pack.id_width(), id_width);
                 assert_eq!((pack.at(0), pack.at(1), pack.at(2)), (0, 2, 3));
                 assert_eq!((pack.id(0), pack.id(1), pack.id(2)), (0, 1, 0));
-                assert_eq!(pack.expression_at(1), 4);
-                assert_eq!(pack.word(0), 1);
-                assert_eq!(pack.word(4), 2);
+                assert_eq!(pack.expression_at(1), 5);
+                assert_eq!((pack.word(0), pack.word(1)), (2, 1));
+                assert_eq!((pack.word(5), pack.word(6)), (2, 2));
             }
             assert_eq!(mapped.as_bytes(), owned.as_bytes());
         }
@@ -2377,8 +2379,8 @@ mod tests {
 
         // A clause length reaching past its own expression.
         let mut overrun = good.clone();
-        let words_at = overrun.len() - 9 * 4;
-        overrun[words_at + 4..words_at + 8].copy_from_slice(&99u32.to_le_bytes());
+        let words_at = overrun.len() - 11 * 4;
+        overrun[words_at + 8..words_at + 12].copy_from_slice(&99u32.to_le_bytes());
         assert!(ContainmentPack::from_bytes(overrun).is_err());
 
         // Ordinal offsets that do not span the column.

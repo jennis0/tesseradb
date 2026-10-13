@@ -241,9 +241,11 @@ pub struct GenerationStamp {
 // An artifact's or a layer's identifier is of kind 1 over its space. A 37 bundle is refused.
 // 39: extents name their layer by its space alone, a space's record packs are `record_packs`, and a
 // stored attachment carries its target's space. A 38 bundle is refused.
+// 40: a containment expression carries the size of the set it was composed over. A 39 bundle is
+// refused.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility.
-pub const BUNDLE_FORMAT: u32 = 39;
+pub const BUNDLE_FORMAT: u32 = 40;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;

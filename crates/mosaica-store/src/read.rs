@@ -300,7 +300,7 @@ impl PartitionData {
         self.shards.iter().find(|shard| shard.record.id == id)
     }
 
-    /// The partition's one shard; the open refuses any other count.
+    /// The partition's one shard, for a caller that reads a partition of one shard.
     pub fn only_shard(&self) -> &ShardData {
         mosaica_types::only(&self.shards)
     }

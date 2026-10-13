@@ -163,7 +163,7 @@ use crate::observer::{BuildObserver, BuildStage, StageTimer};
 use crate::spill;
 use crate::{
     fsync_file, validate_args, write_manifests, BuildArgs, BuildReport, BundleFiles,
-    PairsParquetWriter, PHASH, PREFIX, SEG_ID, SHARD,
+    PairsParquetWriter, PREFIX, SEG_ID,
 };
 
 /// One item's position in the signature sort. 16 bytes, four-byte aligned — every field is a
@@ -950,10 +950,13 @@ fn build_bundle(
     // another item's position, with nothing to notice.
 
     timer.end(BuildStage::SourceIds, n);
+    // The shards the items fill, in allocation order. Everything up to the
+    // assignment walk is global; everything after it that writes entity space writes each
+    // shard's files at its own ids.
+    let spans = crate::ShardSpan::of(n, args.shard_size())?;
 
     // ---- 2. the dictionary -----------------------------------------------------------
     let prefix_dir = args.out.join(PREFIX);
-    let layout = ShardLayout::new(PHASH, SHARD);
     let dict_dir = prefix_dir.join(mosaica_store::layout::DICTIONARY_DIR);
     std::fs::create_dir_all(&dict_dir).map_err(|e| BuildError::io(&dict_dir, e))?;
     // What every source term is called, established before any term id exists — a field-sourced
@@ -1306,9 +1309,15 @@ fn build_bundle(
     // loop already visits them in the strictly ascending order the writer requires, and each
     // item's `sig` is already its sorted, deduplicated term list. Writing it here rather than from
     // the bands costs no second pass and no second relation in memory.
-    let entity_terms_dir = prefix_dir.join(layout.entity_terms_rel());
-    let mut entity_terms = mosaica_store::EntityTermsWriter::create(&entity_terms_dir)
-        .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?;
+    //
+    // One transpose per shard, each opened as the walk reaches the shard's first entity.
+    let entity_terms_writer = |span: &crate::ShardSpan| {
+        mosaica_store::EntityTermsWriter::create(&prefix_dir.join(span.layout().entity_terms_rel()))
+            .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))
+    };
+    let mut entity_terms_paths: Vec<PathBuf> = Vec::new();
+    let mut entity_terms_shard = 0usize;
+    let mut entity_terms = entity_terms_writer(&spans[0])?;
     let mut sig_terms: Vec<u32> = Vec::new();
     for k in 0..plan.batches {
         let ordinal_lo = k * plan.batch_items;
@@ -1462,8 +1471,20 @@ fn build_bundle(
                         ))
                     })?;
             }
+            while u64::from(entity) >= spans[entity_terms_shard].hi {
+                entity_terms_shard += 1;
+                let next = entity_terms_writer(&spans[entity_terms_shard])?;
+                entity_terms_paths.extend(
+                    std::mem::replace(&mut entity_terms, next)
+                        .finish()
+                        .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?,
+                );
+            }
             entity_terms
-                .push(entity, &sig_terms)
+                .push(
+                    entity - spans[entity_terms_shard].lo as u32,
+                    &sig_terms,
+                )
                 .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?;
         }
         entities[ordinal_lo as usize..ordinal_lo as usize + batch_len].copy_from_slice(&assigned);
@@ -1504,17 +1525,23 @@ fn build_bundle(
         );
     }
 
-    let entity_terms_paths = entity_terms
-        .finish()
-        .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?;
+    entity_terms_paths.extend(
+        entity_terms
+            .finish()
+            .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?,
+    );
     for path in &entity_terms_paths {
         fsync_file(path)?;
     }
 
-    let terms_dir = prefix_dir.join(layout.terms_rel());
-    let entities_dir = prefix_dir.join(layout.entities_rel());
-    for dir in [&terms_dir, &entities_dir] {
-        std::fs::create_dir_all(dir).map_err(|e| BuildError::io(dir, e))?;
+    for span in &spans {
+        let layout = span.layout();
+        for dir in [
+            prefix_dir.join(layout.terms_rel()),
+            prefix_dir.join(layout.entities_rel()),
+        ] {
+            std::fs::create_dir_all(&dir).map_err(|e| BuildError::io(&dir, e))?;
+        }
     }
 
     timer.end(BuildStage::Assignment, n);
@@ -1526,16 +1553,34 @@ fn build_bundle(
     // disk, fail-closed. The integrity chain replacing the old third pairs scan: bucket
     // receipts -> in-process emit -> band receipts (count + anchor, verified on read) ->
     // per-term exact counts -> the total against the deduplicated relation.
-    let postings_path = prefix_dir.join(layout.postings_rel());
-    let pairs_path = args
-        .emit_oracle_pairs
-        .then(|| prefix_dir.join(layout.pairs_rel()));
-    let mut pairs_writer = pairs_path
-        .as_deref()
-        .map(PairsParquetWriter::create)
-        .transpose()?;
-    let mut spool = mosaica_authz::PostingsSpool::create(&tmp.path().join("postings.spool"))
-        .map_err(|e| BuildError::io(&postings_path, e))?;
+    //
+    // **One postings file per shard**, each holding every term: a term's ascending entities are
+    // cut at the shards' bounds, and each part is written at its shard's ids.
+    let postings_paths: Vec<PathBuf> = spans
+        .iter()
+        .map(|span| prefix_dir.join(span.layout().postings_rel()))
+        .collect();
+    let pairs_paths: Vec<PathBuf> = match args.emit_oracle_pairs {
+        true => spans
+            .iter()
+            .map(|span| prefix_dir.join(span.layout().pairs_rel()))
+            .collect(),
+        false => Vec::new(),
+    };
+    let mut pairs_writers: Vec<PairsParquetWriter> = pairs_paths
+        .iter()
+        .map(|path| PairsParquetWriter::create(path))
+        .collect::<std::result::Result<_, _>>()?;
+    let mut spools: Vec<mosaica_authz::PostingsSpool> = spans
+        .iter()
+        .zip(&postings_paths)
+        .map(|(span, path)| {
+            mosaica_authz::PostingsSpool::create(
+                &tmp.path().join(format!("postings-{}.spool", span.id)),
+            )
+            .map_err(|e| BuildError::io(path, e))
+        })
+        .collect::<Result<_>>()?;
     let mut written = 0u64;
     for (j, &(band_lo, band_hi)) in plan.band_bounds.iter().enumerate() {
         let width = (band_hi - band_lo) as usize;
@@ -1588,26 +1633,29 @@ fn build_bundle(
         let mut t = 0usize;
         while t < width {
             let hi = (t + ENCODE_CHUNK_TERMS).min(width);
-            let encoded: Vec<Vec<u8>> = (t..hi)
-                .into_par_iter()
-                .map(|local| {
-                    let slice = &flat[offsets[local] as usize..offsets[local + 1] as usize];
-                    encode_posting(
-                        band_lo as usize + local,
-                        slice,
-                        SMALL_TERM_THRESHOLD_DEFAULT,
-                    )
-                    .map_err(|e| BuildError::io(&postings_path, e))
-                })
-                .collect::<Result<_>>()?;
-            for (local, record) in (t..hi).zip(encoded) {
-                spool
-                    .append(&record)
-                    .map_err(|e| BuildError::io(&postings_path, e))?;
-                let slice = &flat[offsets[local] as usize..offsets[local + 1] as usize];
-                written += slice.len() as u64;
-                if let Some(writer) = pairs_writer.as_mut() {
-                    writer.push_run(band_lo + local as u32, slice)?;
+            for (k, span) in spans.iter().enumerate() {
+                let encoded: Vec<(Vec<u8>, std::borrow::Cow<'_, [u32]>)> = (t..hi)
+                    .into_par_iter()
+                    .map(|local| {
+                        let slice = span
+                            .slice(&flat[offsets[local] as usize..offsets[local + 1] as usize]);
+                        let record = encode_posting(
+                            band_lo as usize + local,
+                            &slice,
+                            SMALL_TERM_THRESHOLD_DEFAULT,
+                        )
+                        .map_err(|e| BuildError::io(&postings_paths[k], e))?;
+                        Ok((record, slice))
+                    })
+                    .collect::<Result<_>>()?;
+                for (local, (record, slice)) in (t..hi).zip(encoded) {
+                    spools[k]
+                        .append(&record)
+                        .map_err(|e| BuildError::io(&postings_paths[k], e))?;
+                    written += slice.len() as u64;
+                    if let Some(writer) = pairs_writers.get_mut(k) {
+                        writer.push_run(band_lo + local as u32, &slice)?;
+                    }
                 }
             }
             t = hi;
@@ -1622,13 +1670,13 @@ fn build_bundle(
             "postings hold {written} pairs but the relation has {pair_count}"
         )));
     }
-    if let Some(writer) = pairs_writer {
+    for writer in pairs_writers {
         writer.finish()?;
     }
-    spool
-        .finish(&postings_path)
-        .map_err(|e| BuildError::io(&postings_path, e))?;
-    fsync_file(&postings_path)?;
+    for (spool, path) in spools.into_iter().zip(&postings_paths) {
+        spool.finish(path).map_err(|e| BuildError::io(path, e))?;
+        fsync_file(path)?;
+    }
 
     timer.end(BuildStage::PostingsWrite, pair_count);
 
@@ -1651,7 +1699,7 @@ fn build_bundle(
     // The columns' files live in the same `.build-tmp/` as the spill and band files, so a killed
     // build leaves them to the next `TmpDir::create` exactly as it leaves those.
     let scratch = crate::column::ColumnScratch::new(tmp.path());
-    let (attributes_by_entity, mut spilled, coverage) = read_attributes_by_entity(
+    let (mut attributes_by_entity, mut spilled, coverage) = read_attributes_by_entity(
         args,
         n,
         &plan.routes,
@@ -1670,10 +1718,10 @@ fn build_bundle(
     // Here, beside the attribute tail, because it wants exactly what the tail wants: the numbers
     // and `entity_of_ordinal`, both alive, and entity ids final under I9. One column per view of
     // the group, in entity space; nothing per row space.
-    let (scoped_paths, scoped_render) = write_scoped_columns(
+    let (scoped_paths, mut scoped_render) = write_scoped_columns(
         args,
         &prefix_dir,
-        layout,
+        &spans,
         n,
         &numbering,
         entity_of_ordinal,
@@ -1732,12 +1780,14 @@ fn build_bundle(
         )?;
         // The member rows are read, so every file's numbers have served their last reader.
         drop(numbering);
+        // The member packs are written over every entity, in shard 0's directory, and cut into
+        // one a shard once the artifact pass has read them (`layers::split_member_packs`).
         crate::layers::publish(
             &mut plan,
             &|number| (number < n).then(|| u64::from(entity_of_ordinal[number as usize])),
             n,
             &prefix_dir,
-            layout,
+            spans[0].layout(),
             &view_ids,
             &derived,
             publication_batch,
@@ -1761,7 +1811,7 @@ fn build_bundle(
     for column in spilled.iter_mut() {
         column.cascade(fan_in)?;
     }
-    let open_extents: Vec<crate::extents::OpenExtents> = spilled
+    let mut open_extents: Vec<crate::extents::OpenExtents> = spilled
         .iter()
         .map(crate::extents::ExtentColumn::open)
         .collect::<Result<_>>()?;
@@ -1769,36 +1819,47 @@ fn build_bundle(
     // Here, where every column's values are still readable from the column or the extents the
     // join spilled, and before the passes that release them. A value held twice refuses the
     // build before any row space is written.
-    let unique = crate::unique_index::write_unique_indexes(
-        &prefix_dir,
-        layout,
-        &args.schema,
-        |column| match open_extents.iter().find(|extents| extents.column == column) {
-            Some(extents) => crate::unique_index::UniqueSource::Extents(extents),
-            None => crate::unique_index::UniqueSource::Column(&attributes_by_entity[column]),
-        },
-        tmp.path(),
-        plan.sizing.unique_spill as usize,
-    )?;
+    //
+    // Each shard's runs hold its own items: the identity rule has already decided, over every
+    // file, which item holds each value.
+    let mut unique = Vec::with_capacity(spans.len());
+    for span in &spans {
+        window_shard(&mut attributes_by_entity, &mut open_extents, span);
+        unique.push(crate::unique_index::write_unique_indexes(
+            &prefix_dir,
+            span.layout(),
+            &args.schema,
+            |column| match open_extents.iter().find(|extents| extents.column == column) {
+                Some(extents) => crate::unique_index::UniqueSource::Extents(extents),
+                None => crate::unique_index::UniqueSource::Column(&attributes_by_entity[column]),
+            },
+            tmp.path(),
+            plan.sizing.unique_spill as usize,
+        )?);
+    }
     timer.end(BuildStage::UniqueIndexes, n);
-    let (filter_paths, text_index) = write_filter_postings(
-        &prefix_dir,
-        layout,
-        &args.schema,
-        &attributes_by_entity,
-        &open_extents,
-        plan.budget,
-    )?;
-    // The text columns' share, charged out of the block rather than measured beside it — the two
-    // interleave over one column loop, so a boundary in time cannot separate them.
-    timer.charge(BuildStage::TextIndex, text_index.elapsed, text_index.terms);
+    let mut filter_paths = Vec::new();
+    for span in &spans {
+        window_shard(&mut attributes_by_entity, &mut open_extents, span);
+        let (paths, text_index) = write_filter_postings(
+            &prefix_dir,
+            span.layout(),
+            &args.schema,
+            &attributes_by_entity,
+            &open_extents,
+            plan.budget,
+        )?;
+        filter_paths.extend(paths);
+        // The text columns' share, charged out of the block rather than measured beside it — the
+        // two interleave over one column loop, so a boundary in time cannot separate them.
+        timer.charge(BuildStage::TextIndex, text_index.elapsed, text_index.terms);
+    }
     // **A column with no blob row is dead here, not two stages further on.** The blob reads the
     // columns whose values have no other home ([`blob_resident`]); the segment write reads the
     // render columns. A column that is neither — an `index = true` keyword, say — has just met its
     // last reader, and holding it to the release below costs the blob's whole stage. Measured on
     // 125,789,091 GBIF occurrences: `specieskey`'s offsets and arena are 3.15 GB against a 19.4 GB
     // peak that fell on the record blob (`probes/2026-09-10-build-disk/`).
-    let mut attributes_by_entity = attributes_by_entity;
     for (column, attribute) in attributes_by_entity
         .iter_mut()
         .zip(args.schema.attributes.iter())
@@ -1813,7 +1874,6 @@ fn build_bundle(
     // **And the same line for a spilled column's extents.** An indexed keyword's extents are the
     // dictionary pass's alone, so they go back to the disk here rather than standing through the
     // record blob, which is the phase the measured peak falls on.
-    let mut open_extents = open_extents;
     open_extents
         .retain(|extents| blob_resident(&args.schema, &args.schema.attributes[extents.column]));
     for column in spilled.iter_mut() {
@@ -1828,14 +1888,18 @@ fn build_bundle(
     // with everything else. **Its own stage**: it and the postings and the release below were one
     // number for three jobs, which is why the 615 s this block cost at 7.4×10⁷ points could be
     // modelled and not read.
-    let record_paths = write_record_blob(
-        &prefix_dir.join(layout.record_rel()),
-        &args.schema,
-        n,
-        &plan.routes,
-        &attributes_by_entity,
-        &open_extents,
-    )?;
+    let mut record_paths = Vec::new();
+    for span in &spans {
+        window_shard(&mut attributes_by_entity, &mut open_extents, span);
+        record_paths.extend(write_record_blob(
+            &prefix_dir.join(span.layout().record_rel()),
+            &args.schema,
+            span.len(),
+            &plan.routes,
+            &attributes_by_entity,
+            &open_extents,
+        )?);
+    }
     // Both readers are done, so the extents go back to the disk before the row spaces are
     // written. A build that failed above leaves them to `TmpDir::close`.
     drop(open_extents);
@@ -1867,7 +1931,7 @@ fn build_bundle(
     }
     timer.end(BuildStage::ColumnRelease, n);
 
-    // ---- 9/10. pass two: one row space per view (`views.md` §7) ----------------------
+    // ---- 9/10. pass two: one row space per view and shard (`views.md` §7) ---------------
     // **The build below is what it always was, run once per view.** What is not one-view-at-a-
     // time is everything above: identity, the dictionary, the postings and the attribute
     // columns are entity space and were built once, over the union of every view's
@@ -1875,11 +1939,25 @@ fn build_bundle(
     // frame (decision 0040), Morton-sorts and writes its segment, its permutation and its
     // row→entity file.
     //
+    // **Each shard's part of a view is sorted on its own**: its rows are the view's
+    // rows whose items it holds, and its permutation, segment and every structure derived from
+    // them are over its own ids.
+    //
     // A view holds a **subset** of entity space — its `present` bits — so its permutation is
     // sentinel wherever it does not, and `row_count` is the view's population rather than `n`.
     let mut view_files: Vec<PathBuf> = Vec::new();
-    let mut segments: Vec<mosaica_store::manifest::SegmentDescriptor> = Vec::new();
-    let mut occupancies: Vec<crate::Occupancy> = Vec::with_capacity(args.views.len());
+    let mut shards: Vec<crate::ShardWritten> = spans
+        .iter()
+        .zip(unique)
+        .map(|(span, unique)| crate::ShardWritten {
+            span: *span,
+            segments: Vec::new(),
+            occupancies: Vec::new(),
+            term_images: Vec::new(),
+            unique,
+            membership_extents: Vec::new(),
+        })
+        .collect();
     let mut artifact_paths: Vec<PathBuf> = Vec::new();
     // Accumulated across the views, like the extents beside them: what a scoped layer's artifacts
     // came to in each view is per view or it says nothing (`views.md` §3.5).
@@ -1888,17 +1966,18 @@ fn build_bundle(
     // names files from this, so the second view's files cannot be named after the first's — see
     // `mosaica_store::derived::DerivedIndex`.
     let mut derived_index = mosaica_store::derived::DerivedIndex::default();
-    // **Opened once for the build, not once per view.** The postings are entity space and every
-    // view projects the same ones through its own permutation (`crate::term_images_pass`).
-    let postings = mosaica_authz::postings::PostingsReader::open(&postings_path, true)
-        .map_err(|e| BuildError::io(&postings_path, e))?;
-    let mut term_images: Vec<Option<crate::term_images_pass::ViewTermImages>> =
-        Vec::with_capacity(args.views.len());
+    // **Opened once for the build, not once per view.** A shard's postings are its entity space
+    // and every view projects the same ones through its own permutation
+    // (`crate::term_images_pass`).
+    let postings: Vec<mosaica_authz::postings::PostingsReader> = postings_paths
+        .iter()
+        .map(|path| {
+            mosaica_authz::postings::PostingsReader::open(path, true)
+                .map_err(|e| BuildError::io(path, e))
+        })
+        .collect::<Result<_>>()?;
+    let several = spans.len() > 1;
     for (index, view) in args.views.iter().enumerate() {
-        let view_dir = prefix_dir.join(layout.view_rel(&view.view_id));
-        let segment_dir = prefix_dir.join(layout.segment_rel(&view.view_id, SEG_ID));
-        std::fs::create_dir_all(&segment_dir).map_err(|e| BuildError::io(&segment_dir, e))?;
-
         // ---- the assembly: the view's rows, Morton-partitioned, straight from ordinal order ----
         //
         // **No entity-order geometry.** What stood here permuted `x` and `y` into two
@@ -1906,28 +1985,43 @@ fn build_bundle(
         // the heap, and built the row→entity, residual and `mosaica_id` columns as three more
         // vectors beside it. At rung 6 that was a 70 GB peak the residency model had no term for.
         // `crate::assembly` is the same rows in the same order with one bucket held at a time.
-        let (partitioned, boundaries, page_plan) = {
-            let source = crate::assembly::RowSource {
-                view_dir: &view_dir,
-                view: &view.view_id,
-                tmp: tmp.path(),
-                x: geometry[index].x.as_slice(),
-                y: geometry[index].y.as_slice(),
-                present: &geometry[index].present,
-                entity_of_ordinal,
-                n,
-                identity_key: &args.identity_key,
-                shard: SHARD,
-                rows_hint: geometry[index].rows,
+        //
+        // Every shard's rows are partitioned before any segment is written, so the view's
+        // geometry is released before the first of them.
+        let mut partitioned = Vec::with_capacity(spans.len());
+        let mut view_rows = 0u64;
+        for span in &spans {
+            let layout = span.layout();
+            let view_dir = prefix_dir.join(layout.view_rel(&view.view_id));
+            let segment_dir = prefix_dir.join(layout.segment_rel(&view.view_id, SEG_ID));
+            std::fs::create_dir_all(&segment_dir).map_err(|e| BuildError::io(&segment_dir, e))?;
+            // Names this part's spill files apart from every other's.
+            let label = format!("{}-{}", view.view_id, span.id);
+            let (rows, boundaries, page_plan) = {
+                let source = crate::assembly::RowSource {
+                    view_dir: &view_dir,
+                    view: &label,
+                    tmp: tmp.path(),
+                    x: geometry[index].x.as_slice(),
+                    y: geometry[index].y.as_slice(),
+                    present: &geometry[index].present,
+                    entity_of_ordinal,
+                    ordinals: batch_ordinals(span, plan.batch_items, n),
+                    entity_lo: span.lo as u32,
+                    n: span.len(),
+                    identity_key: &args.identity_key,
+                    shard: span.id,
+                    rows_hint: geometry[index].rows.min(span.len()),
+                };
+                crate::assembly::partition_rows(&source)?
             };
-            crate::assembly::partition_rows(&source)?
-        };
-        if partitioned.rows() != geometry[index].rows {
+            view_rows += rows.rows();
+            partitioned.push((span, view_dir, segment_dir, label, rows, boundaries, page_plan));
+        }
+        if view_rows != geometry[index].rows {
             return Err(input_changed(&format!(
-                "view '{}': {} rows in the segment for the {} its points file selected",
-                view.view_id,
-                partitioned.rows(),
-                geometry[index].rows
+                "view '{}': {view_rows} rows in the segments for the {} its points file selected",
+                view.view_id, geometry[index].rows
             )));
         }
         // **This view's ordinal-space geometry has served its only reader.** The row partition
@@ -1935,91 +2029,105 @@ fn build_bundle(
         // view, released before the segment write rather than after the artifact pass.
         geometry[index].x = spill::MappedU32::empty();
         geometry[index].y = spill::MappedU32::empty();
-        timer.end(BuildStage::TilerSort, partitioned.rows());
+        timer.end(BuildStage::TilerSort, view_rows);
 
-        let assembled = {
-            // The declared render columns in schema order, then this view's scoped ones — the
-            // order `columns.arrow` carries them in, and the order every reader that resolves a
-            // tail column by name is indifferent to but the bytes are not.
-            let mut render: Vec<crate::assembly::RenderColumn<'_>> = Vec::new();
-            for (attribute, values) in args
-                .schema
-                .attributes
-                .iter()
-                .zip(attributes_by_entity.iter())
-            {
-                if attribute.render {
+        let mut parts: Vec<(crate::ShardSpan, u32)> = Vec::with_capacity(spans.len());
+        for (k, (span, view_dir, segment_dir, label, rows, boundaries, page_plan)) in
+            partitioned.into_iter().enumerate()
+        {
+            window_shard(&mut attributes_by_entity, &mut [], span);
+            for column in &mut scoped_render {
+                column.values.window(span.lo as usize, span.hi as usize);
+            }
+            let assembled = {
+                // The declared render columns in schema order, then this view's scoped ones — the
+                // order `columns.arrow` carries them in, and the order every reader that resolves
+                // a tail column by name is indifferent to but the bytes are not.
+                let mut render: Vec<crate::assembly::RenderColumn<'_>> = Vec::new();
+                for (attribute, values) in args
+                    .schema
+                    .attributes
+                    .iter()
+                    .zip(attributes_by_entity.iter())
+                {
+                    if attribute.render {
+                        render.push(crate::assembly::RenderColumn {
+                            name: attribute.name.clone(),
+                            ty: attribute.ty,
+                            values,
+                        });
+                    }
+                }
+                for &column in &scoped_render_targets[index] {
                     render.push(crate::assembly::RenderColumn {
-                        name: attribute.name.clone(),
-                        ty: attribute.ty,
-                        values,
+                        name: scoped_render[column].name.clone(),
+                        ty: scoped_render[column].ty,
+                        values: &scoped_render[column].values,
                     });
                 }
-            }
-            for &column in &scoped_render_targets[index] {
-                render.push(crate::assembly::RenderColumn {
-                    name: scoped_render[column].name.clone(),
-                    ty: scoped_render[column].ty,
-                    values: &scoped_render[column].values,
-                });
-            }
-            let indexed: Vec<crate::assembly::RenderColumn<'_>> =
-                crate::band_copied_columns(&args.schema)
-                    .map(|(at, attribute)| crate::assembly::RenderColumn {
-                        name: attribute.name.clone(),
-                        ty: attribute.ty,
-                        values: &attributes_by_entity[at],
-                    })
-                    .collect();
-            let job = crate::assembly::Assembly {
-                view_dir: &view_dir,
-                view: &view.view_id,
-                segment_dir: &segment_dir,
-                tmp: tmp.path(),
-                n,
-                identity_key: &args.identity_key,
-                shard: SHARD,
-                render,
-                indexed,
+                let indexed: Vec<crate::assembly::RenderColumn<'_>> =
+                    crate::band_copied_columns(&args.schema)
+                        .map(|(at, attribute)| crate::assembly::RenderColumn {
+                            name: attribute.name.clone(),
+                            ty: attribute.ty,
+                            values: &attributes_by_entity[at],
+                        })
+                        .collect();
+                let job = crate::assembly::Assembly {
+                    view_dir: &view_dir,
+                    view: &label,
+                    segment_dir: &segment_dir,
+                    tmp: tmp.path(),
+                    n: span.len(),
+                    identity_key: &args.identity_key,
+                    shard: span.id,
+                    render,
+                    indexed,
+                };
+                crate::assembly::write_segment(&job, rows, &boundaries, page_plan)?
             };
-            crate::assembly::write_segment(&job, partitioned, &boundaries, page_plan)?
-        };
-        eprintln!(
-            "  view '{}': {} rows, largest Morton bucket {} rows over {} buckets",
-            view.view_id,
-            assembled.rows_in_view,
-            assembled.largest_bucket,
-            boundaries.buckets()
-        );
-        let rows_in_view = assembled.rows_in_view;
-        occupancies.push(assembled.occupancy);
-        let presence_paths = assembled.presence_paths;
-        let row_entity_path = assembled.row_entity_path;
-        let permutation_path = assembled.permutation_path;
-        let segment_paths: Vec<std::path::PathBuf> = mosaica_store::SEGMENT_FILES
-            .iter()
-            .map(|name| segment_dir.join(name))
-            .collect();
-        fsync_file(&permutation_path)?;
-        fsync_file(&row_entity_path)?;
-        for path in &segment_paths {
-            fsync_file(path)?;
+            eprintln!(
+                "  view '{}'{}: {} rows, largest Morton bucket {} rows over {} buckets",
+                view.view_id,
+                match several {
+                    true => format!(" in shard {}", span.id),
+                    false => String::new(),
+                },
+                assembled.rows_in_view,
+                assembled.largest_bucket,
+                boundaries.buckets()
+            );
+            let rows_in_view = assembled.rows_in_view;
+            shards[k].occupancies.push(assembled.occupancy);
+            let segment_paths: Vec<std::path::PathBuf> = mosaica_store::SEGMENT_FILES
+                .iter()
+                .map(|name| segment_dir.join(name))
+                .collect();
+            fsync_file(&assembled.permutation_path)?;
+            fsync_file(&assembled.row_entity_path)?;
+            for path in &segment_paths {
+                fsync_file(path)?;
+            }
+            timer.end(BuildStage::SegmentWrite, rows_in_view as u64);
+            view_files.push(assembled.permutation_path);
+            view_files.push(assembled.row_entity_path);
+            view_files.extend(segment_paths);
+            view_files.extend(assembled.presence_paths);
+            parts.push((*span, rows_in_view));
         }
-        timer.end(BuildStage::SegmentWrite, rows_in_view as u64);
 
         // ---- 10b. the post-bundle artifact pass, per view (decision 0094's first half) ----
         //
         // **Here and not at step 8c**, where the layers were published: the pick reads where each
-        // membership landed in *row* space, and this view's row space did not exist until the
-        // permutation above.
+        // membership landed in *row* space, and this view's row spaces did not exist until the
+        // permutations above.
         let artifact_store = std::mem::take(&mut published_layers.store);
         let artifact_pass = crate::artifact_pass::run(
             &mut published_layers,
             &artifact_store,
             &prefix_dir,
-            layout,
+            &parts,
             &view.view_id,
-            rows_in_view,
             tmp.path(),
             &mut derived_index,
         );
@@ -2038,79 +2146,89 @@ fn build_bundle(
             artifact_pass.derived_extents.len() as u64,
         );
 
-        // ---- 10c. this view's term images (`crate::term_images_pass`) ----------------------
-        //
-        // Beside the artifact pass and after it, for the reason it sits here: the images are the
-        // view's permutation applied to every term's posting, and this view's row space did not
-        // exist until that permutation was written.
-        let images = crate::term_images_pass::run(
-            &postings,
-            &prefix_dir,
-            layout,
-            &view.view_id,
-            rows_in_view,
-            &mut derived_index,
-            plan.sizing.term_image_workers as usize,
-        )?;
-        artifact_paths.extend(images.iter().map(|images| images.path.clone()));
-        let kept = images.as_ref().map_or(0, |images| images.report.kept);
-        term_images.push(images);
-        timer.end(BuildStage::TermImages, u64::from(kept));
+        for (k, &(span, rows_in_view)) in parts.iter().enumerate() {
+            let layout = span.layout();
+            // ---- 10c. this view's term images (`crate::term_images_pass`) ------------------
+            //
+            // Beside the artifact pass and after it, for the reason it sits here: the images are
+            // the view's permutation applied to every term's posting, and this view's row space
+            // did not exist until that permutation was written.
+            let images = crate::term_images_pass::run(
+                &postings[k],
+                &prefix_dir,
+                layout,
+                &view.view_id,
+                rows_in_view,
+                &mut derived_index,
+                plan.sizing.term_image_workers as usize,
+            )?;
+            artifact_paths.extend(images.iter().map(|images| images.path.clone()));
+            let kept = images.as_ref().map_or(0, |images| images.report.kept);
+            shards[k].term_images.push(images);
+            timer.end(BuildStage::TermImages, u64::from(kept));
 
-        // ---- 10d. this view's field tallies (`mosaica_store::field_tallies`) ---------------
-        //
-        // After every file they read: the segment, the row-to-entity table, the entity terms and
-        // the value columns. The in-memory build calls the same function at the same point.
-        view_files.push(mosaica_store::field_tallies::derive_view(
-            &prefix_dir,
-            layout,
-            &view.view_id,
-            SEG_ID,
-            rows_in_view,
-            &crate::declared_scalars_of(&args.schema),
-            &|name| mosaica_filter::base_numbers(&prefix_dir.join(layout.column_rel(name))),
-        )?);
-
-        view_files.push(permutation_path);
-        view_files.push(row_entity_path);
-        view_files.extend(segment_paths);
-        view_files.extend(presence_paths);
-        segments.push(mosaica_store::manifest::SegmentDescriptor {
-            view: view.view_id.clone(),
-            // **The declared incarnation** (decision 0115): a build coins each key once.
-            incarnation: mosaica_store::manifest::DECLARED_INCARNATION,
-            seg_id: SEG_ID.to_string(),
-            row_count: rows_in_view,
-            entity_lo: 0,
-            entity_hi: n,
-        });
+            // ---- 10d. this view's field tallies (`mosaica_store::field_tallies`) -----------
+            //
+            // After every file they read: the segment, the row-to-entity table, the entity terms
+            // and the value columns. The in-memory build calls the same function at the same
+            // point.
+            view_files.push(mosaica_store::field_tallies::derive_view(
+                &prefix_dir,
+                layout,
+                &view.view_id,
+                SEG_ID,
+                rows_in_view,
+                &crate::declared_scalars_of(&args.schema),
+                &|name| mosaica_filter::base_numbers(&prefix_dir.join(layout.column_rel(name))),
+            )?);
+            shards[k]
+                .segments
+                .push(mosaica_store::manifest::SegmentDescriptor {
+                    view: view.view_id.clone(),
+                    // **The declared incarnation** (decision 0115): a build coins each key once.
+                    incarnation: mosaica_store::manifest::DECLARED_INCARNATION,
+                    seg_id: SEG_ID.to_string(),
+                    row_count: rows_in_view,
+                    entity_lo: 0,
+                    entity_hi: span.len(),
+                });
+        }
     }
-    // Every view has been through the term images, so the postings mapping is unbusy.
+    // Every view has been through the term images, so the postings mappings are unbusy.
     drop(postings);
 
-    // ---- 10e. the containment partitions, once for the prefix ----------------------------
+    // ---- 10e. the containment partitions, once a shard ------------------------------------
     //
     // **Outside the view loop**, because a partition is a function of the level's records and the
-    // prefix's postings and carries no view. Composing it inside the pass would write one identical
+    // shard's postings and carries no view. Composing it inside the pass would write one identical
     // file and one manifest entry per view.
     {
         let artifact_store = std::mem::take(&mut published_layers.store);
         let containment = crate::artifact_pass::containment(
             &artifact_store,
             &prefix_dir,
-            layout,
+            &spans,
             &mut derived_index,
         );
-        published_layers.store = artifact_store;
         eprintln!("  wrote {} containment partition(s)", containment.len());
         artifact_paths.extend(
             containment
                 .iter()
-                .map(|entry| args.out.join(crate::PREFIX).join(&entry.path)),
+                .map(|(_, entry)| args.out.join(crate::PREFIX).join(&entry.path)),
         );
         let composed = containment.len() as u64;
         published_layers.derived_extents.extend(containment);
         timer.end(BuildStage::ArtifactPass, composed);
+    }
+    // **Each shard's slice of every membership**, cut from the packs the publication wrote over
+    // every entity, which nothing reads past the pass above.
+    let (member_packs, member_paths) = crate::layers::split_member_packs(
+        &prefix_dir,
+        &published_layers.membership_extents,
+        &spans,
+    )?;
+    for (shard, extents) in shards.iter_mut().zip(member_packs) {
+        shard.membership_extents = extents;
     }
 
     drop(geometry);
@@ -2120,14 +2238,15 @@ fn build_bundle(
     tmp.close()?;
 
     // ---- 11. manifests ---------------------------------------------------------------
-    let mut other_paths = vec![postings_path];
+    let mut other_paths = postings_paths;
     other_paths.extend(entity_terms_paths);
     other_paths.extend(view_files);
     other_paths.extend(filter_paths);
     other_paths.extend(scoped_paths);
     other_paths.extend(record_paths);
-    other_paths.extend(pairs_path);
+    other_paths.extend(pairs_paths);
     other_paths.extend(published_layers.paths.iter().cloned());
+    other_paths.extend(member_paths);
     other_paths.extend(artifact_paths);
     let mut report = write_manifests(
         args,
@@ -2135,7 +2254,6 @@ fn build_bundle(
             dict_paths,
             dict_records: term_count,
             other_paths,
-            unique,
         },
         n,
         term_count,
@@ -2143,9 +2261,7 @@ fn build_bundle(
         plan.recorded_batch_items,
         &minters,
         &published_layers,
-        &segments,
-        &occupancies,
-        &term_images,
+        &shards,
     )?;
     // Reported in bytes, not rows: this stage re-reads and SHA-256s every byte the build wrote,
     // so it scales with bundle size rather than with item count.
@@ -2155,6 +2271,30 @@ fn build_bundle(
     report.artifact_levels = artifact_levels;
     report.spilled_columns = crate::spilled_column_names(&args.schema, &plan.routes);
     Ok(report)
+}
+
+/// The ordinals whose items a shard can hold. A signature batch's items take the entities of its
+/// own ordinal range, so a shard's are among the ordinals of the batches its range meets.
+fn batch_ordinals(span: &crate::ShardSpan, batch_items: u64, n: u64) -> std::ops::Range<usize> {
+    let batch = batch_items.max(1);
+    let lo = span.lo / batch * batch;
+    let hi = (span.hi.div_ceil(batch) * batch).min(n);
+    lo as usize..hi.max(lo) as usize
+}
+
+/// Show every pass after this one shard's entities of the attribute columns and the extents, each
+/// at its entity less the shard's first.
+fn window_shard(
+    columns: &mut [EntityColumn],
+    extents: &mut [crate::extents::OpenExtents],
+    span: &crate::ShardSpan,
+) {
+    for column in columns {
+        column.window(span.lo as usize, span.hi as usize);
+    }
+    for extents in extents {
+        extents.window(span.lo as u32, span.hi as u32);
+    }
 }
 
 /// Read the declared attribute columns into **entity-major** vectors, one per declared attribute,
@@ -2756,7 +2896,7 @@ fn read_one_attribute_scan(
 fn write_scoped_columns(
     args: &BuildArgs,
     prefix_dir: &Path,
-    layout: ShardLayout<'_>,
+    spans: &[crate::ShardSpan],
     n: u64,
     numbering: &crate::ids::Numbering,
     entity_of_ordinal: &[u32],
@@ -2806,7 +2946,7 @@ fn write_scoped_columns(
                     .expect("a scoped attribute's own file is numbered for each view"),
                 None => numbering.points(index),
             };
-            let column = read_scoped_column(
+            let mut column = read_scoped_column(
                 args,
                 family,
                 view,
@@ -2816,91 +2956,19 @@ fn write_scoped_columns(
                 minters,
                 scratch,
             )?;
-            let column_dir = prefix_dir.join(layout.scoped_column_rel(
-                &attribute.name,
-                &view.view_id,
-                mosaica_types::view::DECLARED_INCARNATION,
-            ));
-            std::fs::create_dir_all(&column_dir).map_err(|e| BuildError::io(&column_dir, e))?;
-            // **A text column has no value column**, per view exactly as bundle-wide: its
-            // entity-space artefacts are the token dictionary and the postings over it, and there
-            // is no per-entity slot for a scan to read. It leaves before the value column below is
-            // written rather than writing one nothing opens.
-            //
-            // Its prose is kept beside the postings, in a record blob of its own: the bundle-wide
-            // blob is addressed by a column's position in `declared_scalars`, which a family has
-            // none of, and an edit of the item carries the prose to its new entity.
-            if attribute.ty == ScalarType::Text {
-                // **And it therefore writes no row lane**, which is only sound because `render`
-                // on `text` is refused at the declaration (`config::compile_attributes`'s
-                // "`render` on `text` is refused" arm). A `BuildArgs` assembled programmatically
-                // could still carry one, and it would publish `render: true` on `/v1/meta` while
-                // no view's tail ever held the column — the one shape serving reads as ordinary
-                // absence and could not tell from a build that failed. Fenced here rather than
-                // trusted from the parser.
-                debug_assert!(
-                    !attribute.render,
-                    "attribute '{}': `render` on a scoped `text` family — refused at the \
-                     declaration, and this pass writes no row lane for it (views §5)",
-                    attribute.name
-                );
-                // `index = false` is refused at the declaration for exactly this reason — with no
-                // blob row and no index the prose would have no home at all — so the guard here is
-                // against a `Schema` built programmatically rather than parsed.
-                if attribute.index {
-                    let written = write_text_index(
-                        &column_dir,
-                        attribute,
-                        TextValues::Arena(&column.values),
-                        text_plan,
-                    )?;
-                    paths.extend(written.paths);
-                }
-                paths.extend(write_scoped_prose(&column_dir, &column.values)?);
-                report_scoped_coverage(attribute, view, column.present, n);
-                continue;
-            }
-            let values_path = column_dir.join("values.arrow");
-            let presence_path = column_dir.join("presence.roaring");
-            let written = write_column_values(
-                &column_dir,
-                &values_path,
-                &presence_path,
-                attribute,
-                &column.values,
-                // **A group-scoped family is not routed** ([`may_take_extents`]): its columns are
-                // this pass's own and there is no blob row for an extent to land in, so the
-                // characters are always the column's.
-                None,
-                keyword_plan,
-            )?;
-            fsync_file(&values_path)?;
-            paths.push(values_path);
-            if let Some(dict_path) = written.dict {
-                fsync_file(&dict_path)?;
-                paths.push(dict_path);
-            }
-            if written.presence {
-                fsync_file(&presence_path)?;
-                paths.push(presence_path);
-            }
-            // **A category's postings, per view** — the same keyed file the entity-scoped pass
-            // writes, in this view's own directory, and owed on the same predicate: an indexed
-            // category is answered from them, and a `derived` vocabulary's membership is derived
-            // from them whatever `index` says (`filter-index.md` §2.3). Written after the values,
-            // which are the artefact of record, so a build interrupted between the two leaves the
-            // record without its accelerator rather than the reverse.
-            if scoped_postings_are_owed(attribute) {
-                let path = column_dir.join("postings.arrow");
-                write_category_postings(
-                    &path,
-                    &attribute.name,
+            for span in spans {
+                column.values.window(span.lo as usize, span.hi as usize);
+                paths.extend(write_scoped_column(
+                    prefix_dir,
+                    span.layout(),
+                    attribute,
+                    view,
                     &column.values,
-                    POSTINGS_BAND_ROWS,
-                )?;
-                fsync_file(&path)?;
-                paths.push(path);
+                    text_plan,
+                    keyword_plan,
+                )?);
             }
+            column.values.window(0, n as usize);
             report_scoped_coverage(attribute, view, column.present, n);
             // **Retained for pass two, and only for a render family.** Everything else is on disc
             // and the values are dead — releasing here is what the entity-scoped pass does to its
@@ -2918,6 +2986,94 @@ fn write_scoped_columns(
         }
     }
     Ok((paths, render_columns))
+}
+
+/// One shard's files of one view's column of a group-scoped family, under that shard.
+fn write_scoped_column(
+    prefix_dir: &Path,
+    layout: ShardLayout<'_>,
+    attribute: &crate::config::Attribute,
+    view: &crate::ViewArgs,
+    values: &EntityColumn,
+    text_plan: TextIndexPlan,
+    keyword_plan: KeywordDictPlan,
+) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    let column_dir = prefix_dir.join(layout.scoped_column_rel(
+        &attribute.name,
+        &view.view_id,
+        mosaica_types::view::DECLARED_INCARNATION,
+    ));
+    std::fs::create_dir_all(&column_dir).map_err(|e| BuildError::io(&column_dir, e))?;
+    // **A text column has no value column**, per view exactly as bundle-wide: its entity-space
+    // artefacts are the token dictionary and the postings over it, and there is no per-entity
+    // slot for a scan to read. It leaves before the value column below is written rather than
+    // writing one nothing opens.
+    //
+    // Its prose is kept beside the postings, in a record blob of its own: the bundle-wide blob is
+    // addressed by a column's position in `declared_scalars`, which a family has none of, and an
+    // edit of the item carries the prose to its new entity.
+    if attribute.ty == ScalarType::Text {
+        // **And it therefore writes no row lane**, which is only sound because `render` on `text`
+        // is refused at the declaration (`config::compile_attributes`'s "`render` on `text` is
+        // refused" arm). A `BuildArgs` assembled programmatically could still carry one, and it
+        // would publish `render: true` on `/v1/meta` while no view's tail ever held the column —
+        // the one shape serving reads as ordinary absence and could not tell from a build that
+        // failed. Fenced here rather than trusted from the parser.
+        debug_assert!(
+            !attribute.render,
+            "attribute '{}': `render` on a scoped `text` family — refused at the declaration, \
+             and this pass writes no row lane for it (views §5)",
+            attribute.name
+        );
+        // `index = false` is refused at the declaration for exactly this reason — with no blob row
+        // and no index the prose would have no home at all — so the guard here is against a
+        // `Schema` built programmatically rather than parsed.
+        if attribute.index {
+            let written =
+                write_text_index(&column_dir, attribute, TextValues::Arena(values), text_plan)?;
+            paths.extend(written.paths);
+        }
+        paths.extend(write_scoped_prose(&column_dir, values)?);
+        return Ok(paths);
+    }
+    let values_path = column_dir.join("values.arrow");
+    let presence_path = column_dir.join("presence.roaring");
+    let written = write_column_values(
+        &column_dir,
+        &values_path,
+        &presence_path,
+        attribute,
+        values,
+        // **A group-scoped family is not routed** ([`may_take_extents`]): its columns are this
+        // pass's own and there is no blob row for an extent to land in, so the characters are
+        // always the column's.
+        None,
+        keyword_plan,
+    )?;
+    fsync_file(&values_path)?;
+    paths.push(values_path);
+    if let Some(dict_path) = written.dict {
+        fsync_file(&dict_path)?;
+        paths.push(dict_path);
+    }
+    if written.presence {
+        fsync_file(&presence_path)?;
+        paths.push(presence_path);
+    }
+    // **A category's postings, per view** — the same keyed file the entity-scoped pass writes, in
+    // this view's own directory, and owed on the same predicate: an indexed category is answered
+    // from them, and a `derived` vocabulary's membership is derived from them whatever `index`
+    // says (`filter-index.md` §2.3). Written after the values, which are the artefact of record,
+    // so a build interrupted between the two leaves the record without its accelerator rather than
+    // the reverse.
+    if scoped_postings_are_owed(attribute) {
+        let path = column_dir.join("postings.arrow");
+        write_category_postings(&path, &attribute.name, values, POSTINGS_BAND_ROWS)?;
+        fsync_file(&path)?;
+        paths.push(path);
+    }
+    Ok(paths)
 }
 
 /// One view's column of a group-scoped `text` family, its prose as a record blob under

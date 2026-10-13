@@ -963,7 +963,7 @@ impl SignatureIndex {
 /// the same structure reached two ways rather than two encodings that have to be kept in step.
 #[derive(Default)]
 struct Interner {
-    /// Every expression's canonical encoding, concatenated: `nclauses, (len, terms…)*`.
+    /// Every expression's canonical encoding, concatenated: `members, nclauses, (len, terms…)*`.
     words: Vec<u32>,
     /// `at[e]..at[e + 1]` is expression `e`'s words, with the trailing sentinel — so the last
     /// expression needs no special case, the case a reader gets wrong.
@@ -1113,11 +1113,16 @@ pub fn generating_entities(contents: ContentWalk<'_>) -> Bitmap {
 /// one clause per member — its whole signature, ascending — and the clauses are sorted and
 /// deduplicated so two generating sets with the same signature multiset intern to the same id.
 ///
+/// **The set's size is carried beside the clauses.** A shard's partition is over its slice of the
+/// set, and a slice with no member has no clause, so the size is what keeps it from answering for
+/// the set: a rank is contained only where the sizes over the shards sum to the record's.
+///
 /// A member no term reaches contributes an **empty** clause, which nothing satisfies: an artifact
 /// whose generating set includes an entity outside every term is contained by nobody, which is the
 /// fail-closed direction on the one test I3 exists to make conservative.
 fn canonicalise(generated_from: &Bitmap, signatures: &SignatureIndex) -> Vec<u32> {
     encode_expression(
+        generated_from.cardinality() as u32,
         generated_from
             .iter()
             .map(|entity| signatures.signature(entity))
@@ -1125,15 +1130,16 @@ fn canonicalise(generated_from: &Bitmap, signatures: &SignatureIndex) -> Vec<u32
     )
 }
 
-/// The canonical encoding of a clause list — sorted and deduplicated, then framed as
-/// `nclauses, (len, terms…)*`.
+/// The canonical encoding of a set of `members` members and its clause list — the clauses sorted
+/// and deduplicated, then framed as `members, nclauses, (len, terms…)*`.
 ///
 /// One function so the interning key and the stored expression cannot be produced by two different
 /// rules.
-pub fn encode_expression(mut clauses: Vec<&[u32]>) -> Vec<u32> {
+pub fn encode_expression(members: u32, mut clauses: Vec<&[u32]>) -> Vec<u32> {
     clauses.sort_unstable();
     clauses.dedup();
-    let mut words = Vec::with_capacity(1 + clauses.len() * 2);
+    let mut words = Vec::with_capacity(2 + clauses.len() * 2);
+    words.push(members);
     words.push(clauses.len() as u32);
     for clause in clauses {
         words.push(clause.len() as u32);

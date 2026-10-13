@@ -87,7 +87,6 @@ pub(super) fn number_with(
         limited: Limit::of(&args.schema, args.limit)?.map(Limited::new),
         zip_trial,
         next: 0,
-        shard_size: args.shard_size(),
         sequence: 0,
     };
     let mut numbering = Numbering {
@@ -263,8 +262,6 @@ struct Pass {
     /// [`ZIP_TRIAL`], lowered by tests.
     zip_trial: u64,
     next: u64,
-    /// The most items the files may create ([`check_cap`]).
-    shard_size: u64,
     sequence: u64,
 }
 
@@ -640,7 +637,7 @@ impl Pass {
             true => Some(KeySpill::create(&self.tmp, share).map_err(store)?),
             false => None,
         };
-        let mut numbering = FileNumbers::new(base, creates, self.shard_size);
+        let mut numbering = FileNumbers::new(base, creates);
         walk(
             &mut rows,
             &mut updates,
@@ -833,7 +830,7 @@ impl Pass {
 
     /// A file whose row `r` is item `base + r`, every row of it.
     fn offset(&mut self, base: u64, total: u64) -> Result<ReadRows> {
-        check_cap(base + total, self.shard_size)?;
+        check_cap(base + total)?;
         self.next = base + total;
         use rayon::prelude::*;
         let mixed = (base..base + total)
@@ -1175,18 +1172,16 @@ fn claim(
 struct FileNumbers {
     base: u64,
     creates: bool,
-    shard_size: u64,
     created: Created,
     /// How many rows name an item, and the mixed sum of their numbers.
     anchor: (u64, u64),
 }
 
 impl FileNumbers {
-    fn new(base: u64, creates: bool, shard_size: u64) -> FileNumbers {
+    fn new(base: u64, creates: bool) -> FileNumbers {
         FileNumbers {
             base,
             creates,
-            shard_size,
             created: Created::default(),
             anchor: (0, 0),
         }
@@ -1198,7 +1193,7 @@ impl FileNumbers {
     fn decide(&mut self, stored: &mut u32, row: u64, tally: &mut Tally) -> Result<()> {
         match *stored {
             PENDING if self.creates => {
-                check_cap(self.base + self.created.count + 1, self.shard_size)?;
+                check_cap(self.base + self.created.count + 1)?;
                 *stored = (self.base + self.created.count) as u32 + 1;
                 self.created.mark(row);
             }

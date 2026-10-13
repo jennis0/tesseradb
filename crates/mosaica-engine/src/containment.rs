@@ -70,9 +70,14 @@
 //!
 //! An **empty clause** is an entity in no posting at all: unsatisfiable, and it makes the whole
 //! expression unsatisfiable, which is the fail-closed reading and matches what the masked-count
-//! route does with a member no term reaches. An expression with **no clauses** is an empty
-//! generating set — `annotations.md`'s corpus-independent content — and is satisfied by everyone,
-//! which is what `ContentSet::generated_from` documents an empty set to mean.
+//! route does with a member no term reaches. An expression with **no clauses** over a set the
+//! record declares empty is corpus-independent content and is satisfied by everyone, which is what
+//! `ContentSet::generated_from` documents an empty set to mean.
+//!
+//! **Each expression carries the size of the set it was composed over**, and an answer holds only
+//! where that size is the record's. A shard's partition is composed over its slice of each set, so
+//! a slice with no member has no clause and would otherwise answer for the whole set: a rank is
+//! contained only where the slices' sizes sum to the record's and every slice is satisfied.
 
 use std::cell::RefCell;
 use std::io;
@@ -245,8 +250,8 @@ impl ContainmentPartition {
     /// shared by every principal that reaches it.
     fn satisfied_by(&self, id: u32, satisfied: &dyn SatisfiedKeys) -> bool {
         let lo = self.pack.expression_at(id as usize) as usize;
-        let clauses = self.pack.word(lo);
-        let mut at = lo + 1;
+        let clauses = self.pack.word(lo + 1);
+        let mut at = lo + 2;
         for _ in 0..clauses {
             let len = self.pack.word(at) as usize;
             let met =
@@ -257,6 +262,11 @@ impl ContainmentPartition {
             at += 1 + len;
         }
         true
+    }
+
+    /// How many members the set expression `id` was composed over.
+    fn members_of(&self, id: u32) -> u64 {
+        u64::from(self.pack.word(self.pack.expression_at(id as usize) as usize))
     }
 
     /// This principal's answers for a **single** artifact — always the lazy face.
@@ -304,9 +314,29 @@ impl ContainmentPartition {
     }
 }
 
+/// One set a test names: its member count and its clauses.
+#[cfg(test)]
+pub(crate) type SizedSet<'a> = (u32, &'a [&'a [u32]]);
+
 #[cfg(test)]
 impl ContainmentPartition {
-    /// A partition over clauses named directly: ordinals, then ranks, then clauses, then terms.
+    /// A partition over sets named by their sizes and clauses: ordinals, then ranks, each a set's
+    /// member count and clauses.
+    pub(crate) fn of_sets(ordinals: &[&[SizedSet<'_>]]) -> Self {
+        let mut builder = mosaica_store::derived::ContainmentBuilder::new();
+        for (ordinal, ranks) in ordinals.iter().enumerate() {
+            builder.push(
+                ordinal as u32,
+                ranks.iter().map(|(members, clauses)| {
+                    mosaica_store::derived::encode_expression(*members, clauses.to_vec())
+                }),
+            );
+        }
+        Self::of_bytes(builder.finish())
+    }
+
+    /// A partition over clauses named directly: ordinals, then ranks, then clauses, then terms,
+    /// each set of as many members as it has clauses.
     ///
     /// **Test-only, and it exists so a predicate case is about the predicate.** Composing from
     /// postings would put the signature inversion inside every assertion about which rank is
@@ -317,9 +347,12 @@ impl ContainmentPartition {
         for (ordinal, ranks) in ordinals.iter().enumerate() {
             builder.push(
                 ordinal as u32,
-                ranks
-                    .iter()
-                    .map(|clauses| mosaica_store::derived::encode_expression(clauses.to_vec())),
+                ranks.iter().map(|clauses| {
+                    mosaica_store::derived::encode_expression(
+                        clauses.len() as u32,
+                        clauses.to_vec(),
+                    )
+                }),
             );
         }
         Self::of_bytes(builder.finish())
@@ -357,12 +390,16 @@ pub struct ContainmentAnswers<'a> {
 }
 
 impl ContainmentAnswers<'_> {
-    /// Whether this principal satisfies the expression at `(ordinal, rank)`.
+    /// Whether this principal satisfies the expression at `(ordinal, rank)`, and the expression
+    /// is over the whole of a set the record declares `declared` members of.
     ///
     /// `None` where the partition has no entry there, which is what puts the caller back on the
     /// masked-count route rather than answering from a structure that does not cover the case.
-    pub fn satisfies(&self, ordinal: u32, rank: usize) -> Option<bool> {
+    pub fn satisfies(&self, ordinal: u32, rank: usize, declared: u64) -> Option<bool> {
         let id = self.partition.id_at(ordinal, rank)?;
+        if self.partition.members_of(id) != declared {
+            return Some(false);
+        }
         Some(match &self.memo {
             Memo::Dense(settled) => settled[id as usize],
             Memo::Sparse(memo) => {
@@ -404,11 +441,13 @@ mod tests {
         ContainmentPartition::of_clauses(&ordinals)
     }
 
+    /// Whether `terms` contain rank 0 of `ordinal`, whose set has as many members as clauses.
     fn holds(partition: &ContainmentPartition, ordinal: u32, terms: &[u32]) -> bool {
         let held = satisfied(terms);
+        let id = partition.id_at(ordinal, 0).expect("the fixture covers this ordinal");
         partition
             .answers(&held)
-            .satisfies(ordinal, 0)
+            .satisfies(ordinal, 0, partition.members_of(id))
             .expect("the fixture covers this ordinal")
     }
 
@@ -444,18 +483,42 @@ mod tests {
         assert!(holds(&partition, 0, &[]));
     }
 
-    /// Interning is by canonical form, so two generating sets drawn from the same signatures share
-    /// one identifier however differently they were written down — which is the whole of the
-    /// sharing the design counts on where a layer is authored per term.
+    /// **A slice of a set answers nothing on its own.** An expression over fewer members than the
+    /// record declares — a shard's part of a set, or no part at all — is not contained whatever
+    /// the viewer holds, so containment is concluded only where the slices sum to the set.
+    #[test]
+    fn an_expression_over_part_of_a_set_contains_nobody() {
+        let mut builder = mosaica_store::derived::ContainmentBuilder::new();
+        let clause: &[u32] = &[1];
+        builder.push(
+            0,
+            [
+                mosaica_store::derived::encode_expression(1, vec![clause]),
+                mosaica_store::derived::encode_expression(0, Vec::new()),
+            ],
+        );
+        let partition = ContainmentPartition::of_bytes(builder.finish());
+        let held = satisfied(&[1]);
+        let answers = partition.answers(&held);
+        assert_eq!(answers.satisfies(0, 0, 1), Some(true), "the slice is the whole set");
+        assert_eq!(answers.satisfies(0, 0, 3), Some(false), "a slice of three members");
+        assert_eq!(answers.satisfies(0, 1, 3), Some(false), "an empty slice of three members");
+        assert_eq!(answers.satisfies(0, 1, 0), Some(true), "an empty set");
+    }
+
+    /// Interning is by canonical form, so two generating sets of one size drawn from the same
+    /// signatures share one identifier however differently they were written down — which is the
+    /// whole of the sharing the design counts on where a layer is authored per term.
     #[test]
     fn the_same_expression_written_two_ways_interns_once() {
-        let partition = partition_of(&[&[&[1, 2], &[3]], &[&[3], &[1, 2]], &[&[3], &[3], &[1, 2]]]);
+        let partition = partition_of(&[&[&[1, 2], &[3]], &[&[3], &[1, 2]], &[&[1, 2], &[1, 2]]]);
         assert_eq!(
             partition.expressions(),
-            1,
+            2,
             "clause order and a repeated clause are not part of the identity"
         );
         assert_eq!(partition.pairs(), 3);
+        assert_eq!(partition.id_at(0, 0), partition.id_at(1, 0));
     }
 
     /// **A `u16` column that would truncate is promoted rather than wrapped.** The failure this
@@ -542,17 +605,17 @@ mod tests {
             satisfied: &held,
             memo: Memo::Sparse(RefCell::new(FxHashMap::default())),
         };
-        for ordinal in 0..3u32 {
+        for (ordinal, declared) in [(0u32, 1u64), (1, 1), (2, 2)] {
             assert_eq!(
-                dense.satisfies(ordinal, 0),
-                sparse.satisfies(ordinal, 0),
+                dense.satisfies(ordinal, 0, declared),
+                sparse.satisfies(ordinal, 0, declared),
                 "the two faces disagree at ordinal {ordinal}"
             );
         }
-        assert_eq!(dense.satisfies(0, 0), Some(true));
-        assert_eq!(dense.satisfies(1, 0), Some(false));
-        assert_eq!(dense.satisfies(2, 0), Some(false));
-        assert_eq!(dense.satisfies(0, 1), None, "no second rank to answer for");
-        assert_eq!(dense.satisfies(9, 0), None, "past the level");
+        assert_eq!(dense.satisfies(0, 0, 1), Some(true));
+        assert_eq!(dense.satisfies(1, 0, 1), Some(false));
+        assert_eq!(dense.satisfies(2, 0, 2), Some(false));
+        assert_eq!(dense.satisfies(0, 1, 1), None, "no second rank to answer for");
+        assert_eq!(dense.satisfies(9, 0, 1), None, "past the level");
     }
 }

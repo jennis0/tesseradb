@@ -943,7 +943,7 @@ impl ArtifactRows {
             if rows.cardinality() != *declared {
                 continue;
             }
-            if !answers.satisfies(ordinal, i)? {
+            if !answers.satisfies(ordinal, i, *declared)? {
                 continue;
             }
             // The acceptance test: a deletion or a suppression removes a member whatever the
@@ -984,10 +984,10 @@ mod tests {
 
     // ---- the containment partition's arm -----------------------------------------------------
 
-    /// A partition built from clauses a test names directly, for cases about the predicate's arm
-    /// rather than the signature inversion.
-    fn partition_of(clauses_per_rank: &[&[&[u32]]]) -> ContainmentPartition {
-        ContainmentPartition::of_clauses(&[clauses_per_rank])
+    /// A partition built from sets a test names directly, by size and clauses, for cases about the
+    /// predicate's arm rather than the signature inversion.
+    fn partition_of(ranks: &[crate::containment::SizedSet<'_>]) -> ContainmentPartition {
+        ContainmentPartition::of_sets(&[ranks])
     }
 
     fn satisfied_terms(terms: &[u32]) -> FxHashSet<TermId> {
@@ -1000,7 +1000,7 @@ mod tests {
     fn the_partition_and_the_mask_agree_on_the_served_rank() {
         // Rank 0 is generated from rows 1..=4, terms 7 and 8; rank 1 from rows 1..=2, term 7 alone.
         let rows = rows_with_contents(&[1, 2, 3, 4], &[(&[1, 2, 3, 4], 4), (&[1, 2], 2)])
-            .with_partition(Some(partition_of(&[&[&[7], &[8]], &[&[7]]])));
+            .with_partition(Some(partition_of(&[(4, &[&[7], &[8]]), (2, &[&[7]])])));
         let partition = rows.partition().expect("the fixture attached one");
 
         for (held, visible, expected) in [
@@ -1034,7 +1034,7 @@ mod tests {
     #[test]
     fn a_denied_member_of_the_generating_set_fails_containment_through_the_partition() {
         let rows = rows_with_contents(&[1, 2, 3, 4], &[(&[1, 2, 3, 4], 4), (&[1, 2], 2)])
-            .with_partition(Some(partition_of(&[&[&[7]], &[&[7]]])));
+            .with_partition(Some(partition_of(&[(4, &[&[7]]), (2, &[&[7]])])));
         let partition = rows.partition().unwrap();
         let held = satisfied_terms(&[7]);
         let answers = partition.answers(&held);
@@ -1072,7 +1072,7 @@ mod tests {
     #[test]
     fn the_partition_still_refuses_a_set_that_did_not_survive_projection() {
         let rows = rows_with_contents(&[1, 2, 3], &[(&[1, 2], 4)])
-            .with_partition(Some(partition_of(&[&[&[7]]])));
+            .with_partition(Some(partition_of(&[(4, &[&[7]])])));
         let partition = rows.partition().unwrap();
         let held = satisfied_terms(&[7]);
         let answers = partition.answers(&held);

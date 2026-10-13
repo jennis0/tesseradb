@@ -579,9 +579,9 @@ pub struct PublishedLayers {
     /// sample with 471,778,374 closed MeSH member rows, and ~47 GB extrapolated at 10⁸
     /// (`probes/2026-09-02-mapped-memberships/README.md`).
     pub store: ArtifactStore,
-    /// The derived structures the post-bundle pass wrote, for `SEGMENTS-0.json`. Empty until it
-    /// runs.
-    pub derived_extents: Vec<mosaica_store::manifest::DerivedExtent>,
+    /// The derived structures the post-bundle pass wrote, for `SEGMENTS-0.json`, each with the
+    /// shard it is filed on. Empty until it runs.
+    pub derived_extents: Vec<(mosaica_types::ShardId, mosaica_store::manifest::DerivedExtent)>,
 }
 
 impl Default for PublishedLayers {
@@ -3152,6 +3152,90 @@ fn write_membership_extents(
         );
     }
     Ok(())
+}
+
+/// Cut each member pack a build wrote over every entity into one pack per shard over the same
+/// ordinal range, each membership's and generating set's part in the shard at its entities less
+/// the shard's first. Shard 0's pack takes the place of the one it was cut from. Returns each
+/// shard's extents, in shard order, and the files written.
+///
+/// A hole stays a hole in every shard, and an artifact with no member in a shard has the empty
+/// membership there. A record's cardinalities are its slices' summed over the shards, never one
+/// slice's.
+pub(crate) fn split_member_packs(
+    prefix_dir: &Path,
+    extents: &[MembershipExtent],
+    shards: &[crate::ShardSpan],
+) -> Result<(Vec<Vec<MembershipExtent>>, Vec<PathBuf>)> {
+    if let [_] = shards {
+        return Ok((vec![extents.to_vec()], Vec::new()));
+    }
+    let mut split: Vec<Vec<MembershipExtent>> = vec![Vec::new(); shards.len()];
+    let mut written = Vec::new();
+    for extent in extents {
+        let whole_path = prefix_dir.join(&extent.path);
+        let whole = mosaica_store::membership::LevelPack::open(
+            &whole_path,
+            mosaica_store::membership::PackKind::Members,
+        )
+        .map_err(BuildError::Store)?;
+        let name = Path::new(&extent.path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                BuildError::Invalid(format!("member pack {} has no file name", extent.path))
+            })?;
+        let mut writers = Vec::with_capacity(shards.len());
+        for span in shards {
+            let dir = prefix_dir.join(span.layout().members_rel());
+            std::fs::create_dir_all(&dir).map_err(|e| BuildError::io(&dir, e))?;
+            let staged = dir.join(format!("{name}.split"));
+            let writer = mosaica_store::membership::PackWriter::create(
+                &staged,
+                mosaica_store::membership::PackKind::Members,
+                extent.ordinal_lo,
+                extent.count,
+            )
+            .map_err(BuildError::Store)?;
+            writers.push((dir, staged, writer));
+        }
+        for (ordinal, blob) in whole.iter() {
+            if blob.is_empty() {
+                for (_, _, writer) in &mut writers {
+                    writer.push(blob).map_err(BuildError::Store)?;
+                }
+                continue;
+            }
+            let (members, sets) = mosaica_lifecycle::membership::decode_members(blob)
+                .ok_or_else(|| {
+                    BuildError::Invalid(format!(
+                        "member pack {}: ordinal {ordinal}'s blob does not decode",
+                        extent.path
+                    ))
+                })?;
+            for (span, (_, _, writer)) in shards.iter().zip(&mut writers) {
+                let sets: Vec<_> = sets.iter().map(|set| span.members(set)).collect();
+                let part = mosaica_lifecycle::membership::frame_members(
+                    &span.members(&members),
+                    sets.iter().map(|set| set.as_ref()),
+                );
+                writer.push(&part).map_err(BuildError::Store)?;
+            }
+        }
+        for ((span, into), (dir, staged, writer)) in shards.iter().zip(&mut split).zip(writers) {
+            writer.finish().map_err(BuildError::Store)?;
+            let rel = format!("{}/{name}", span.layout().members_rel());
+            let path = prefix_dir.join(&rel);
+            std::fs::rename(&staged, &path).map_err(|e| BuildError::io(&path, e))?;
+            mosaica_store::fsync_dir(&dir).map_err(BuildError::Store)?;
+            written.push(path);
+            into.push(MembershipExtent {
+                path: rel,
+                ..extent.clone()
+            });
+        }
+    }
+    Ok((split, written))
 }
 
 /// One extent's memberships, read back through the mapped file and put into the store in place of

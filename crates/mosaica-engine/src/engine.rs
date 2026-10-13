@@ -1015,6 +1015,14 @@ impl Engine {
     ) -> Result<Engine> {
         config.check()?;
         let mut bundle = open_bundle(bundle_root).map_err(EngineError::Store)?;
+        if let Some(shards) = bundle
+            .partitions
+            .values()
+            .map(|partition| partition.shards.len())
+            .find(|&shards| shards > 1)
+        {
+            return Err(EngineError::SeveralShards { shards });
+        }
         let side = merge_side_declarations(&mut bundle);
 
         let readers = PrefixReaders::open(bundle_root, &bundle)?;

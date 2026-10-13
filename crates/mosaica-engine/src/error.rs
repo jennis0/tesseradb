@@ -52,6 +52,9 @@ pub enum EngineError {
     MultiPartitionView(String),
     /// A bundle-level file (`CURRENT`, a manifest) was not the shape this engine expects.
     Malformed(String),
+    /// The bundle holds several point shards, which a build writes past `[shards] size`; this
+    /// engine opens a bundle of one.
+    SeveralShards { shards: usize },
     /// `/v1/categories` was asked for a `visibility = "derived"` column whose per-`(column, code)`
     /// derived postings could not be read. Refused rather than served empty: an empty value set
     /// is what a principal who may see none of them is told, and serving it would let a blank
@@ -148,6 +151,11 @@ impl std::fmt::Display for EngineError {
                  EngineError::MultiPartitionView's doc)"
             ),
             EngineError::Malformed(detail) => write!(f, "malformed: {detail}"),
+            EngineError::SeveralShards { shards } => write!(
+                f,
+                "this bundle holds {shards} point shards and this server opens a bundle of one. \
+                 Rebuild it with a `[shards] size` of at least its item count"
+            ),
             EngineError::VocabularyVisibilityUnavailable { column, detail } => write!(
                 f,
                 "column '{column}' declares `visibility = \"derived\"`, and its per-viewer value \

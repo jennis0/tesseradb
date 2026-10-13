@@ -238,3 +238,20 @@ fn a_build_at_its_size_refuses_an_insert_and_an_edit_past_it() {
         .expect("the edit goes in");
     assert_eq!(engine.allocator_high_water(), N + 2);
 }
+
+/// A build past its size writes a bundle of several shards, and the engine does not open one.
+#[test]
+fn a_bundle_of_several_shards_is_refused_at_open() {
+    let tmp = built(Some(N / 2 - 1));
+    let opened = Engine::open(
+        &tmp.path().join("bundle"),
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        config(),
+    );
+    assert!(
+        matches!(opened, Err(mosaica_engine::EngineError::SeveralShards { shards: 3 })),
+        "{:?}",
+        opened.err()
+    );
+}

@@ -804,11 +804,13 @@ fn scratch_within_forecast(dir: &Path) {
     assert!(most <= forecast, "{most} bytes of scratch against a forecast of {forecast}");
 }
 
-/// The cap is the lower of the shard size and `ITEMS_MAX`.
+/// A build numbers up to `ITEMS_MAX` items whatever the shard size; the linear build holds one
+/// shard as well.
 #[test]
 fn numbering_past_the_item_cap_is_refused() {
-    assert!(super::check_cap(super::ITEMS_MAX, u64::MAX).is_ok());
-    assert!(super::check_cap(super::ITEMS_MAX + 1, u64::MAX).is_err());
-    assert!(super::check_cap(40, 40).is_ok());
-    assert!(super::check_cap(41, 40).is_err());
+    assert!(super::check_cap(super::ITEMS_MAX).is_ok());
+    assert!(super::check_cap(super::ITEMS_MAX + 1).is_err());
+    assert!(super::linear::check_one_shard(40, 40).is_ok());
+    assert!(super::linear::check_one_shard(41, 40).is_err());
+    assert!(super::linear::check_one_shard(super::ITEMS_MAX + 1, u64::MAX).is_err());
 }

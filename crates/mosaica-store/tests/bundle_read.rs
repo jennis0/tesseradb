@@ -546,23 +546,28 @@ fn a_manifest_with_no_unhonourable_state_opens_at_the_highest_n() {
     );
 }
 
-/// The valid SEGMENTS-0 below it is not served in its place.
+/// No shard, a shard named twice and shards out of order are each refused, and the valid
+/// SEGMENTS-0 below is not served in its place. A bundle of several shards opens
+/// (`mosaica-build/tests/several_shards.rs`).
 #[test]
-fn a_side_manifest_of_anything_but_shard_zero_alone_is_refused() {
+fn a_side_manifest_naming_no_shard_or_shards_out_of_order_is_refused() {
     let shapes: [fn(&mut serde_json::Value); 3] = [
         |records| *records = serde_json::json!([]),
         |records| {
-            let mut second = records[0].clone();
-            second["id"] = serde_json::json!(1);
+            let second = records[0].clone();
             records.as_array_mut().unwrap().push(second);
         },
-        |records| records[0]["id"] = serde_json::json!(1),
+        |records| {
+            let mut first = records[0].clone();
+            first["id"] = serde_json::json!(1);
+            records.as_array_mut().unwrap().insert(0, first);
+        },
     ];
     for shape in shapes {
         let dir = tempfile::tempdir().expect("tempdir");
         build_bundle(dir.path(), 50);
         add_segments_manifest(dir.path(), 1, |value| shape(&mut value["shards"]["records"]));
-        let err = open_bundle(dir.path()).expect_err("only shard 0 alone is served");
+        let err = open_bundle(dir.path()).expect_err("the shards are refused");
         assert!(matches!(err, StoreError::MalformedBundle { .. }), "{err:?}");
     }
 }

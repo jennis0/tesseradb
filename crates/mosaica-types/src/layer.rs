@@ -1066,6 +1066,36 @@ impl LevelShape {
             partitions: true,
         }
     }
+
+    /// One level's shape over several shards from its shape in each and the `artifacts` that hold
+    /// rows in any of them: each artifact counted once, the means weighted by the artifacts each
+    /// shard holds rows of, and partitioning where every shard's does. An entity is in one shard,
+    /// so the memberships partition exactly where they partition in every shard.
+    pub fn summed(artifacts: u64, shapes: impl IntoIterator<Item = LevelShape>) -> Self {
+        let held: Vec<LevelShape> = shapes
+            .into_iter()
+            .filter(|shape| shape.artifacts > 0)
+            .collect();
+        if let [one] = held.as_slice() {
+            return LevelShape { artifacts, ..*one };
+        }
+        let reached: u64 = held.iter().map(|shape| shape.artifacts).sum();
+        if reached == 0 {
+            return LevelShape::empty();
+        }
+        let weighted = |of: fn(&LevelShape) -> f64| {
+            held.iter()
+                .map(|shape| of(shape) * shape.artifacts as f64)
+                .sum::<f64>()
+                / reached as f64
+        };
+        LevelShape {
+            artifacts,
+            blocks_per_artifact: weighted(|shape| shape.blocks_per_artifact),
+            everywhere_fraction: weighted(|shape| shape.everywhere_fraction),
+            partitions: held.iter().all(|shape| shape.partitions),
+        }
+    }
 }
 
 /// **The one rule**, read by the build, by every fold, by a publication into a level that holds no
@@ -1716,6 +1746,28 @@ pub fn check_scoped_views<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A level's shape over shards is each shard's summed: each artifact counted once, the
+    /// fractions weighted by the artifacts each shard reaches, and partitioning only where every
+    /// shard partitions. One shard's shape, and an empty shard beside it, leave it as it is.
+    #[test]
+    fn a_level_shape_over_shards_is_each_shards_summed() {
+        let shape = |artifacts, everywhere_fraction, partitions| LevelShape {
+            artifacts,
+            blocks_per_artifact: 2.0,
+            everywhere_fraction,
+            partitions,
+        };
+        let one = shape(3, 1.0 / 3.0, true);
+        assert_eq!(LevelShape::summed(3, [one]), one);
+        assert_eq!(LevelShape::summed(3, [LevelShape::empty(), one]), one);
+        assert_eq!(LevelShape::summed(0, []), LevelShape::empty());
+        let summed = LevelShape::summed(3, [one, shape(1, 1.0, false)]);
+        assert_eq!(summed.artifacts, 3, "an artifact in two shards counts once");
+        assert_eq!(summed.blocks_per_artifact, 2.0);
+        assert_eq!(summed.everywhere_fraction, 0.5);
+        assert!(!summed.partitions);
+    }
 
     #[test]
     fn a_group_is_every_view_of_it_and_a_name_that_is_neither_is_refused() {

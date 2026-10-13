@@ -566,22 +566,14 @@ impl Limited {
 /// The most items a build numbers: the codes above it are the numbering's own.
 pub(crate) const ITEMS_MAX: u64 = u32::MAX as u64 - 4;
 
-/// Refuses a build whose files create `items` items, past a shard of `size` or [`ITEMS_MAX`];
-/// called before the item past the last is numbered.
-pub(crate) fn check_cap(items: u64, size: u64) -> Result<()> {
-    use mosaica_types::ShardLimit;
-    let Err(full) = mosaica_types::check_room(size, ITEMS_MAX, 0, items) else {
+/// Refuses a build whose files create `items` items, past [`ITEMS_MAX`]; called before the item
+/// past the last is numbered.
+pub(crate) fn check_cap(items: u64) -> Result<()> {
+    if items <= ITEMS_MAX {
         return Ok(());
-    };
-    Err(BuildError::Invalid(match full.limit {
-        ShardLimit::Size(size) => format!(
-            "this build's files create at least {items} items, more than the shard size {size}. \
-             Declare `[shards] size` of at least the number of items the files create, or build \
-             fewer rows, with --limit or smaller files"
-        ),
-        ShardLimit::End(end) => format!(
-            "this build's files create at least {items} items, more than the {end} one shard \
-             holds. Build fewer rows, with --limit or smaller files"
-        ),
-    }))
+    }
+    Err(BuildError::Invalid(format!(
+        "this build's files create at least {items} items, more than the {ITEMS_MAX} one build \
+         numbers. Build fewer rows, with --limit or smaller files"
+    )))
 }

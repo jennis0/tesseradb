@@ -831,8 +831,9 @@ fn the_composed_expression_is_the_members_own_signatures() {
             let satisfied: FxHashSet<TermId> = granted.iter().map(|t| TermId::new(*t)).collect();
             let answers = partition.answers(&satisfied);
             let lossy = set.iter().any(|e| *e >= UNIVERSE);
+            let declared = set.len() as u64;
             assert_eq!(
-                answers.satisfies(ordinal, rank),
+                answers.satisfies(ordinal, rank, declared),
                 Some(true),
                 "the expression at ({ordinal}, {rank}) is not the members' own signatures"
             );
@@ -845,7 +846,7 @@ fn the_composed_expression_is_the_members_own_signatures() {
                 .filter(|t| !fx.terms_of[entity].contains(&t.raw()))
                 .collect();
             let answers = partition.answers(&dropped);
-            assert_eq!(answers.satisfies(ordinal, rank), Some(false));
+            assert_eq!(answers.satisfies(ordinal, rank, declared), Some(false));
 
             // **And where the set is lossy the expression still says yes.** That is the whole
             // reason projection loss is checked on the row form rather than folded into the
@@ -854,7 +855,7 @@ fn the_composed_expression_is_the_members_own_signatures() {
             if lossy {
                 let (_mask, satisfied, denied) = fx.mask(&granted, &Overlay::new());
                 let answers = partition.answers(&satisfied);
-                assert_eq!(answers.satisfies(ordinal, rank), Some(true));
+                assert_eq!(answers.satisfies(ordinal, rank, declared), Some(true));
                 assert_ne!(
                     partitioned.satisfied_rank_via(ordinal, &answers, &denied, true),
                     Some(Containment::Satisfied(rank as u32)),

@@ -3181,12 +3181,16 @@ pub fn encode_record(record: &ArtifactRecord, shape: Option<&ArtifactShapes>) ->
 /// Every length is explicit, so a truncated blob refuses rather than decoding as a shorter
 /// membership.
 pub fn encode_members(record: &ArtifactRecord) -> Vec<u8> {
-    let members = serialise_members(&record.members.whole());
-    let sets: Vec<Vec<u8>> = record
-        .contents
-        .iter()
-        .map(|v| serialise_members(&v.generated_from))
-        .collect();
+    frame_members(
+        &record.members.whole(),
+        record.contents.iter().map(|v| &v.generated_from),
+    )
+}
+
+/// [`encode_members`]' framing, over the membership and the generating sets.
+pub fn frame_members<'a>(members: &Bitmap, sets: impl Iterator<Item = &'a Bitmap>) -> Vec<u8> {
+    let members = serialise_members(members);
+    let sets: Vec<Vec<u8>> = sets.map(serialise_members).collect();
     let mut out =
         Vec::with_capacity(6 + members.len() + sets.iter().map(|s| s.len() + 4).sum::<usize>());
     out.extend_from_slice(&(members.len() as u32).to_le_bytes());
@@ -3440,7 +3444,7 @@ impl<'b> Reader<'b> {
 }
 
 /// The inverse of [`encode_members`]: the membership and each content's generating set.
-fn decode_members(blob: &[u8]) -> Option<(Bitmap, Vec<Bitmap>)> {
+pub fn decode_members(blob: &[u8]) -> Option<(Bitmap, Vec<Bitmap>)> {
     let mut r = Reader::new(blob);
     let members_len = r.u32()? as usize;
     let members = deserialise_members(r.take(members_len)?)?;
