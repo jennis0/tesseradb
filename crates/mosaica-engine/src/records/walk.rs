@@ -925,7 +925,8 @@ impl Walk {
             .iter()
             .enumerate()
             .filter_map(|(place, rows)| {
-                Some(cx.leaf(place).count_intersection(rows.as_ref()?.rows()))
+                let rows = rows.as_ref()?;
+                Some(cx.leaf(place).count_intersection(rows.rows()))
             })
             .sum();
         self.stretch = Some(stretch);
@@ -1465,6 +1466,7 @@ mod tests {
         }
 
         fn leaf(&self, place: usize) -> &EffectiveMask {
+            assert!(self.reads.contains(&place), "a side the page reads");
             &self.sides[place].leaf
         }
 
@@ -1922,6 +1924,26 @@ mod tests {
             assert_eq!(walk.count(&cx, &None).unwrap(), (expected, None));
             assert_eq!(cx.driven.get(), 0);
         }
+    }
+
+    /// A driven read's count over a viewer who sees nothing in the first shard reads the second
+    /// shard alone, and never the leaf of the shard the page leaves out.
+    #[test]
+    fn a_driven_count_leaves_out_a_shard_the_viewer_sees_nothing_in() {
+        let corpus = Corpus::of(17, 600);
+        let visible = corpus.ids(|id| id % 4 != 0);
+        let few = corpus.ids(|id| id % 7 == 0);
+        let [two, _] = corpus.layouts(&visible, &few);
+        let mut cx = FakeCx::of(two, true);
+        cx.reads = vec![1];
+        let second = &cx.sides[1];
+        let expected = second.leaf.count_intersection(&second.matching);
+        assert!(expected > 0);
+        for order in [RecordsOrder::Map, RecordsOrder::Stored] {
+            let mut walk = Walk::new(Some(unique_eq()), false, 16, BYTES, start(order, 0).0);
+            assert_eq!(walk.count(&cx, &None).unwrap(), (expected, None));
+        }
+        assert!(cx.driven.get() > 0, "the count was driven");
     }
 
     /// A resumed read carries the stretch it grew to under the ceiling of the response that
