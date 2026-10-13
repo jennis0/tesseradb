@@ -424,3 +424,150 @@ fn counts_and_labels_written_to_disk_read_back_whole_or_not_at_all() {
         super::persist::read_denied(dir.path(), &stem, 7, [3; 32], column.identity()).is_none()
     );
 }
+
+/// What one shard's mask denies.
+#[derive(Debug, Clone, Copy)]
+enum Denying {
+    /// Rows anywhere, at this rate, as [`mask`] denies them.
+    Random(f64),
+    /// Artifact 0's this many lowest base rows by `x`, so the shard's box edge moves.
+    Extremes(usize),
+}
+
+/// Artifact 0's `edges` lowest base rows by `x`, denied, over a projection of every row.
+fn extremes_denied(column: &RowColumn, places: &[Placement<'_>], edges: usize) -> Mask {
+    let mut by_x: Vec<(u32, u32)> = (0..BASE)
+        .filter(|&row| {
+            let mut ours = false;
+            column.for_each_label(row, |o| ours |= o == 0);
+            ours
+        })
+        .filter_map(|row| place(places, row).map(|(x, _)| (x, row)))
+        .collect();
+    by_x.sort_unstable();
+    let denied: Bitmap = by_x[..edges].iter().map(|(_, row)| *row).collect();
+    Mask {
+        minus: denied.clone(),
+        projection: Bitmap::from_range(0..ROWS),
+        plus: Bitmap::new(),
+        denied,
+    }
+}
+
+/// One shard's figures and the walk of its visible rows: its own column, positions and mask.
+fn shard(rng: &mut StdRng, denying: Denying) -> (Figures, Oracle) {
+    let positions = Arc::new(Positions::random(rng));
+    let places = positions.places();
+    let column = column(rng, ServingLayout::RowMajorLabel);
+    let mask = match denying {
+        Denying::Random(rate) => mask(rng, rate),
+        Denying::Extremes(edges) => extremes_denied(&column, &places, edges),
+    };
+    let counters = Arc::new(Counters::default());
+    let filled = filled(&column, &mask.projection, &places, 1);
+    let labels = DeniedLabels::read([3; 32], &column, 1, &base_denied(&mask), &places);
+    let shared = Arc::new(column.clone());
+    let figures = assembled(filled, &shared, &mask, Some(&labels), &positions, &counters);
+    (figures, walk(&column, &mask.visible(), &places))
+}
+
+/// Per ordinal: count, placed, sums and box, over every shard.
+type Summed = Vec<(u64, u64, [u128; 2], Option<[u32; 4]>)>;
+
+/// The walks of two shards' visible rows as one walk of every visible row of both: what one shard
+/// holding both shards' rows would count.
+fn combined(a: &Oracle, b: &Oracle) -> Summed {
+    a.iter()
+        .zip(b)
+        .map(|(a, b)| {
+            let bbox = match (a.3, b.3) {
+                (Some(mut x), Some(y)) => {
+                    super::counts::widen(&mut x, y[0], y[1]);
+                    super::counts::widen(&mut x, y[2], y[3]);
+                    Some(x)
+                }
+                (x, y) => x.or(y),
+            };
+            let sums = [
+                u128::from(a.2[0]) + u128::from(b.2[0]),
+                u128::from(a.2[1]) + u128::from(b.2[1]),
+            ];
+            (a.0 + b.0, a.1 + b.1, sums, bbox)
+        })
+        .collect()
+}
+
+/// **Two shards' figures combined answer as one shard holding every row of both**: counts and
+/// position sums add, and each side of the box is the extreme across shards of each shard's own,
+/// over masks denying little and much and with each shard's extreme rows of one artifact denied.
+#[test]
+fn figures_over_two_shards_are_the_walk_of_every_visible_row_of_both() {
+    let cases = [
+        Denying::Random(0.0),
+        Denying::Random(0.2),
+        Denying::Random(0.6),
+        Denying::Extremes(1),
+        Denying::Extremes(9),
+    ];
+    for denying in cases {
+        for seed in 0..4u64 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let (a, walk_a) = shard(&mut rng, denying);
+            let (b, walk_b) = shard(&mut rng, denying);
+            let figures = super::LevelFigures::of(vec![Arc::new(a), Arc::new(b)]);
+            let what = format!("{denying:?}, seed {seed}");
+            let summed = combined(&walk_a, &walk_b);
+            for (ordinal, (count, placed, sums, bbox)) in summed.iter().enumerate() {
+                let o = ordinal as u32;
+                assert_eq!(figures.get(o), *count, "{what}: ordinal {o}'s count");
+                let centroid = (*placed > 0)
+                    .then(|| [sums[0] as f64 / *placed as f64, sums[1] as f64 / *placed as f64]);
+                assert_eq!(figures.centroid(o), centroid, "{what}: ordinal {o}'s centroid");
+                assert_eq!(figures.bbox(o), *bbox, "{what}: ordinal {o}'s box");
+            }
+            let expected: Vec<u32> = summed
+                .iter()
+                .enumerate()
+                .filter(|(_, (count, ..))| *count > 0)
+                .map(|(o, _)| o as u32)
+                .collect();
+            assert_eq!(figures.populated().iter().collect::<Vec<_>>(), expected, "{what}");
+        }
+    }
+}
+
+/// Position sums over several shards pass what a `u64` holds and are added in `u128`, and so are
+/// the shards' filtered counts past a `u32`.
+#[test]
+fn sums_over_shards_are_widened_before_they_are_added() {
+    let near_the_top = |placed: u32| {
+        let dense = Dense {
+            filled_at: 1,
+            counts: vec![placed],
+            placed: vec![placed],
+            sums: vec![[u64::MAX - 1, u64::MAX - 3]],
+            boxes: vec![[0, 0, u32::MAX, u32::MAX]],
+        };
+        Arc::new(Figures {
+            counts: Arc::new(CountsAt::of(dense)),
+            reserves: None,
+            deny: None,
+            tail: None,
+            len: 1,
+            geometry: Geometry::Centroid,
+            exact: None,
+        })
+    };
+    let figures = super::LevelFigures::of(vec![near_the_top(u32::MAX), near_the_top(u32::MAX)]);
+    let placed = 2.0 * f64::from(u32::MAX);
+    let sums = [2 * u128::from(u64::MAX - 1), 2 * u128::from(u64::MAX - 3)];
+    assert_eq!(figures.get(0), 2 * u64::from(u32::MAX));
+    assert_eq!(
+        figures.centroid(0),
+        Some([sums[0] as f64 / placed, sums[1] as f64 / placed])
+    );
+    assert_eq!(
+        super::LevelFigures::summed_counts(&[&[u32::MAX, 1], &[u32::MAX]]),
+        vec![2 * u64::from(u32::MAX), 1]
+    );
+}

@@ -59,6 +59,7 @@ use mosaica_store::derived::{resolve_segment, HeldEntry, HeldShape, ShapeIndex};
 use mosaica_store::manifest::{DerivedExtent, DerivedForm};
 use mosaica_store::read::{Bundle, SegmentData, ViewData};
 use mosaica_types::layer::{MembershipSource, RegisteredLayer};
+use mosaica_types::ShardId;
 
 use crate::row_column::RowColumn;
 
@@ -137,9 +138,13 @@ pub struct ShapeLevel {
     /// no persisted entry matched the shape.
     pub held_claimed: u64,
     pub held_decomposed: u64,
-    /// Pieces resolved or claimed ahead of the form's build, by segment id — see the module doc.
-    staged: Mutex<HashMap<String, Arc<Vec<Option<Bitmap>>>>>,
+    /// Pieces resolved or claimed ahead of the form's build, by shard and segment id — see the
+    /// module doc. Every shard's segments are numbered apart, so the shard is part of the name.
+    staged: Mutex<Staged>,
 }
+
+/// Each staged piece by shard and segment id: segment-local rows per ordinal.
+type Staged = HashMap<(ShardId, String), Arc<Vec<Option<Bitmap>>>>;
 
 /// One segment's resolution, for the traces and the build report.
 #[derive(Debug, Clone, Copy, Default)]
@@ -326,17 +331,19 @@ impl ShapeLevel {
     }
 
     /// Hold a segment's piece until the form's build takes it — open's and the fold's route.
-    pub fn stage(&self, seg_id: &str, piece: Arc<Vec<Option<Bitmap>>>) {
-        lock(&self.staged).insert(seg_id.to_string(), piece);
+    pub fn stage(&self, shard: ShardId, seg_id: &str, piece: Arc<Vec<Option<Bitmap>>>) {
+        lock(&self.staged).insert((shard, seg_id.to_string()), piece);
     }
 
     /// A staged piece, left staged — the fold's writers read it before the flip's build takes it.
-    pub fn staged(&self, seg_id: &str) -> Option<Arc<Vec<Option<Bitmap>>>> {
-        lock(&self.staged).get(seg_id).cloned()
+    pub fn staged(&self, shard: ShardId, seg_id: &str) -> Option<Arc<Vec<Option<Bitmap>>>> {
+        lock(&self.staged)
+            .get(&(shard, seg_id.to_string()))
+            .cloned()
     }
 
-    pub fn has_staged(&self, seg_id: &str) -> bool {
-        lock(&self.staged).contains_key(seg_id)
+    pub fn has_staged(&self, shard: ShardId, seg_id: &str) -> bool {
+        lock(&self.staged).contains_key(&(shard, seg_id.to_string()))
     }
 
     /// Drop every staged piece — after the build that was to take them has run, so a level no
@@ -345,12 +352,13 @@ impl ShapeLevel {
         lock(&self.staged).clear();
     }
 
-    /// **The level's membership over one generation's whole row space**, one bitmap per ordinal,
-    /// built from the segments: each segment's piece taken from what was staged for it or resolved
-    /// here, with the row base applied. What `crate::artifacts` builds a spatial level's row form
-    /// from, once; from then on the form is maintained.
+    /// **The level's membership over one generation's whole row space in `shard`**, one bitmap
+    /// per ordinal, built from the shard's segments: each segment's piece taken from what was
+    /// staged for it or resolved here, with the row base applied. What `crate::artifacts` builds a
+    /// spatial level's row form from, once; from then on the form is maintained.
     pub fn assemble(
         &self,
+        shard: ShardId,
         segments: &[(&SegmentData, u32)],
     ) -> (Vec<Option<Bitmap>>, AssemblyReport) {
         let started = Instant::now();
@@ -361,7 +369,8 @@ impl ShapeLevel {
             .map(|held| held.as_ref().map(|_| Bitmap::new()))
             .collect();
         for (segment, row_base) in segments {
-            let piece = match lock(&self.staged).remove(&segment.seg_id) {
+            let staged = lock(&self.staged).remove(&(shard, segment.seg_id.clone()));
+            let piece = match staged {
                 Some(piece) => {
                     report.staged += 1;
                     piece
@@ -493,34 +502,35 @@ impl ShapeStore {
         lock(&self.levels).len()
     }
 
-    /// Claim or resolve every segment of `view_data` that `level` has nothing staged for, and
-    /// stage it for the build that follows.
+    /// Claim or resolve every segment of `shard`'s `view_data` that `level` has nothing staged for,
+    /// and stage it for the build that follows.
     ///
     /// A segment `persisted` names is read rather than resolved, where the file's key equals this
     /// level version and this segment; otherwise it is resolved and the reason is said.
     pub fn stage_missing(
         level: &ShapeLevel,
+        shard: ShardId,
         view_data: &ViewData,
         persisted: &PersistedPieces<'_>,
         store: &ArtifactStore,
     ) -> WarmReport {
         let mut total = WarmReport::default();
         for (index, segment) in view_data.segments.iter().enumerate() {
-            if level.has_staged(&segment.seg_id) {
+            if level.has_staged(shard, &segment.seg_id) {
                 continue;
             }
             // The first segment is the base only where the row space has one; a view created at
             // a running service takes every segment as an extent.
             let base = index == 0 && view_data.row_space.base_rows() > 0;
             let started = Instant::now();
-            if let Some(piece) = persisted.claim(level, segment, base, store) {
-                level.stage(&segment.seg_id, Arc::new(piece));
+            if let Some(piece) = persisted.claim(level, shard, segment, base, store) {
+                level.stage(shard, &segment.seg_id, Arc::new(piece));
                 total.pieces_claimed += 1;
                 total.claim_ms += started.elapsed().as_millis() as u64;
                 continue;
             }
             let (piece, cost) = level.resolve(segment);
-            level.stage(&segment.seg_id, Arc::new(piece));
+            level.stage(shard, &segment.seg_id, Arc::new(piece));
             total.pieces_resolved += 1;
             total.rows_tested += cost.rows_tested;
             total.rows_interior += cost.rows_interior;
@@ -529,8 +539,8 @@ impl ShapeStore {
         total
     }
 
-    /// Build every spatial level's held structures and stage every segment the bundle serves —
-    /// what `Engine::open` does before it builds the row forms and serves anything
+    /// Build every spatial level's held structures and stage every segment of every shard the
+    /// bundle serves — what `Engine::open` does before it builds the row forms and serves anything
     /// (`polygon-membership.md` §6.3: built at open, never on a request). `persisted` is what the
     /// prefix holds already resolved, claimed before anything is resolved.
     pub fn warm(
@@ -547,13 +557,20 @@ impl ShapeStore {
             if declaration.membership != MembershipSource::Spatial || declaration.shape.is_none() {
                 continue;
             }
-            for view in &declaration.views {
-                let Some(view_data) = bundle.only_shard().views.get(view) else {
+            for (view, shard) in declaration.views.iter().flat_map(|view| {
+                bundle
+                    .partitions
+                    .values()
+                    .flat_map(|partition| partition.shards.iter())
+                    .map(move |shard| (view, shard))
+            }) {
+                let Some(view_data) = shard.views.get(view) else {
                     continue;
                 };
                 for level in 0..registered.runs.len() as u32 {
                     let held = self.level(view, &declaration.name, level, store, persisted);
-                    let cost = Self::stage_missing(&held, view_data, persisted, store);
+                    let cost =
+                        Self::stage_missing(&held, shard.record.id, view_data, persisted, store);
                     report.levels += 1;
                     report.artifacts += held.artifacts();
                     report.rows_tested += cost.rows_tested;
@@ -602,7 +619,9 @@ pub struct WarmReport {
     pub held_decomposed: u64,
 }
 
-/// The prefix's persisted, already-resolved shape memberships, as an open claims them.
+/// The prefix's persisted, already-resolved shape memberships, as an open claims them: each
+/// derived file beside the shard it was written for. A level's held decompositions are its layer
+/// space's, and read whichever shard they are listed beside.
 ///
 /// Two forms, both written by the build and by every fold and both keyed by the level version:
 /// the `shape-rows` row form, which also names its segment and the segment's row count; and the
@@ -613,7 +632,7 @@ pub struct WarmReport {
 #[derive(Clone, Copy, Default)]
 pub struct PersistedPieces<'a> {
     pub prefix_dir: Option<&'a std::path::Path>,
-    pub extents: &'a [DerivedExtent],
+    pub extents: &'a [(ShardId, DerivedExtent)],
 }
 
 impl PersistedPieces<'_> {
@@ -637,7 +656,7 @@ impl PersistedPieces<'_> {
         let Some(prefix_dir) = self.prefix_dir else {
             return Vec::new();
         };
-        let Some(extent) = self.extents.iter().find(|e| {
+        let Some((_, extent)) = self.extents.iter().find(|(_, e)| {
             e.form == DerivedForm::ShapeHeld
                 && e.view.as_deref() == Some(view)
                 && store.layer_in(e.space) == Some(layer)
@@ -674,24 +693,26 @@ impl PersistedPieces<'_> {
         }
     }
 
-    /// The piece for `segment` under `level`, if a persisted form supplies it. `base` says whether
-    /// `segment` is the view's base, the one segment a row-major column covers.
+    /// The piece for `shard`'s `segment` under `level`, if a persisted form supplies it. `base`
+    /// says whether `segment` is the view's base, the one segment a row-major column covers.
     fn claim(
         &self,
         level: &ShapeLevel,
+        shard: ShardId,
         segment: &SegmentData,
         base: bool,
         store: &ArtifactStore,
     ) -> Option<Vec<Option<Bitmap>>> {
         let prefix_dir = self.prefix_dir?;
-        let same_level = |e: &DerivedExtent| {
-            e.view.as_deref() == Some(level.view.as_str())
+        let same_level = |held: &ShardId, e: &DerivedExtent| {
+            *held == shard
+                && e.view.as_deref() == Some(level.view.as_str())
                 && store.layer_in(e.space) == Some(level.layer.as_str())
                 && e.level == level.level
         };
-        let shape_rows = self.extents.iter().find_map(|e| match &e.form {
+        let shape_rows = self.extents.iter().find_map(|(held, e)| match &e.form {
             DerivedForm::ShapeRows { seg_id, row_count }
-                if same_level(e) && *seg_id == segment.seg_id =>
+                if same_level(held, e) && *seg_id == segment.seg_id =>
             {
                 Some((e, *row_count))
             }
@@ -745,8 +766,8 @@ impl PersistedPieces<'_> {
         }
         // The column is the base's piece, addressed in the view's base row space, and no other
         // segment's, whatever its row count.
-        let column = self.extents.iter().find_map(|e| match &e.form {
-            DerivedForm::RowColumn { layout } if base && same_level(e) => Some((e, *layout)),
+        let column = self.extents.iter().find_map(|(held, e)| match &e.form {
+            DerivedForm::RowColumn { layout } if base && same_level(held, e) => Some((e, *layout)),
             _ => None,
         });
         if let Some((extent, layout)) = column {

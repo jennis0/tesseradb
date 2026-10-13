@@ -33,7 +33,7 @@
 //!    knows the signature of an entity the build read and not of one that arrived by ingest. A
 //!    generating set is projected over the whole row space, and an ordinal one of whose sets holds
 //!    a row at or above `base_rows` therefore **declines** here: the row form checks it before
-//!    asking an expression ([`crate::artifacts::ArtifactRows::satisfied_rank_via`]) and the exact
+//!    asking an expression ([`crate::artifacts::ArtifactRows::partition_answers`]) and the exact
 //!    masked-count route answers. Composing over the delta tiers would make the partition cover
 //!    those ordinals too; that is unmeasured and not built.
 //! 3. **The deny correction is the acceptance test, not a refinement** (`design/artifact-serving-at-scale.md`
@@ -71,13 +71,14 @@
 //! An **empty clause** is an entity in no posting at all: unsatisfiable, and it makes the whole
 //! expression unsatisfiable, which is the fail-closed reading and matches what the masked-count
 //! route does with a member no term reaches. An expression with **no clauses** over a set the
-//! record declares empty is corpus-independent content and is satisfied by everyone, which is what
-//! `ContentSet::generated_from` documents an empty set to mean.
+//! record declares empty — a cardinality of zero — is corpus-independent content and is satisfied
+//! by everyone, which is what `ContentSet::generated_from` documents such a set to mean.
 //!
 //! **Each expression carries the size of the set it was composed over**, and an answer holds only
-//! where that size is the record's. A shard's partition is composed over its slice of each set, so
-//! a slice with no member has no clause and would otherwise answer for the whole set: a rank is
-//! contained only where the slices' sizes sum to the record's and every slice is satisfied.
+//! where that size is the caller's slice's. A shard's partition is composed over its slice of each
+//! set, so a slice with no member has no clause and would otherwise answer for the whole set: a
+//! rank is contained only where the slices' sizes sum to the record's and every slice is
+//! satisfied.
 
 use std::cell::RefCell;
 use std::io;
@@ -391,13 +392,15 @@ pub struct ContainmentAnswers<'a> {
 
 impl ContainmentAnswers<'_> {
     /// Whether this principal satisfies the expression at `(ordinal, rank)`, and the expression
-    /// is over the whole of a set the record declares `declared` members of.
+    /// is over exactly `size` members: the caller's slice of the set. A shard's expression is over
+    /// its slice of the set, so a caller summing shards passes each shard's slice's size and
+    /// compares the sum with the record's cardinality itself.
     ///
     /// `None` where the partition has no entry there, which is what puts the caller back on the
     /// masked-count route rather than answering from a structure that does not cover the case.
-    pub fn satisfies(&self, ordinal: u32, rank: usize, declared: u64) -> Option<bool> {
+    pub fn satisfies(&self, ordinal: u32, rank: usize, size: u64) -> Option<bool> {
         let id = self.partition.id_at(ordinal, rank)?;
-        if self.partition.members_of(id) != declared {
+        if self.partition.members_of(id) != size {
             return Some(false);
         }
         Some(match &self.memo {

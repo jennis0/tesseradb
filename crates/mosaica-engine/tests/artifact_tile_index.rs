@@ -37,7 +37,7 @@ use tempfile::TempDir;
 
 use mosaica_authz::{write_postings, FragmentCache, PostingsReader};
 use mosaica_engine::artifacts::{
-    ArtifactProjections, ArtifactRows, ArtifactVerdict, ArtifactView, MembershipRows,
+    ArtifactProjections, ArtifactRows, ArtifactSide, ArtifactVerdict, ArtifactView, MembershipRows,
 };
 use mosaica_engine::compose::{compose, EffectiveMask};
 use mosaica_engine::projection::RowProjection;
@@ -53,7 +53,7 @@ use mosaica_types::layer::{
     ArtifactVisibility, ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource, ServingLayout,
 };
-use mosaica_types::{EntityId, TermId};
+use mosaica_types::{EntityId, ShardId, TermId};
 
 /// Rows in the view. Large enough that the hierarchy has four levels — a corpus that builds one
 /// level would settle everything at the root and prove nothing about the descent.
@@ -184,6 +184,7 @@ fn build_fixture(shape: Shape) -> Fixture {
                 view: None,
                 incarnation: 0,
                 members: members.into(),
+                declares_members: None,
                 contents,
                 attached_to: None,
                 parents: parent.iter().copied().collect(),
@@ -495,12 +496,14 @@ fn differential(fx: &Fixture, rows: &ArtifactRows) -> usize {
                 overlay,
                 labels: open_labels(),
                 layer_reachable: true,
-                rows,
                 dependency_served: &always_served,
-                mask: &mask,
-                denied: &denied,
-                containment: None,
-                counts: None,
+                sides: vec![ArtifactSide {
+                    rows,
+                    mask: Some(&mask),
+                    denied: &denied,
+                    containment: None,
+                    counts: None,
+                }],
             };
             for (name, ranges) in viewports() {
                 let tiles = rows_of(&ranges);
@@ -620,9 +623,11 @@ fn a_growth_between_two_reads_would_leave_the_extent_narrow() {
     let projections = ArtifactProjections::new(std::env::temp_dir());
     let (before, _) = projections.get_or_build(
         "v0",
+        ShardId::ZERO,
         "s0",
         LAYER,
         0,
+        &fx.store,
         &fx.store,
         &fx.row_space,
         None,
@@ -681,12 +686,14 @@ fn a_hole_is_absent_and_an_empty_projection_is_a_live_artifact() {
         overlay: &overlay,
         labels: open_labels(),
         layer_reachable: true,
-        rows: &rows,
         dependency_served: &always_served,
-        mask: &mask,
-        denied: &denied,
-        containment: None,
-        counts: None,
+        sides: vec![ArtifactSide {
+            rows: &rows,
+            mask: Some(&mask),
+            denied: &denied,
+            containment: None,
+            counts: None,
+        }],
     };
     let entity = fx.entity_of(empty).expect("the artifact is live");
     assert!(
@@ -733,12 +740,19 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
 
     // The coordinate holds: claimed, and the level's first request derives nothing.
     let projections = ArtifactProjections::new(std::env::temp_dir());
-    projections.adopt_indexes(tmp.path(), "v00000", &[entry("s0", projected_at)], &store);
+    projections.adopt_indexes(
+        tmp.path(),
+        "v00000",
+        &[(ShardId::ZERO, entry("s0", projected_at))],
+        &store,
+    );
     let (rows, _) = projections.get_or_build(
         "v00000",
+        ShardId::ZERO,
         "s0",
         LAYER,
         0,
+        &store,
         &store,
         &fx.row_space,
         None,
@@ -753,12 +767,19 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
     // The level has moved since, in either direction: dropped, and the index is derived.
     for moved in [projected_at + 1, projected_at - 1] {
         let projections = ArtifactProjections::new(std::env::temp_dir());
-        projections.adopt_indexes(tmp.path(), "v00000", &[entry("s0", moved)], &store);
+        projections.adopt_indexes(
+            tmp.path(),
+            "v00000",
+            &[(ShardId::ZERO, entry("s0", moved))],
+            &store,
+        );
         let _ = projections.get_or_build(
             "v00000",
+            ShardId::ZERO,
             "s0",
             LAYER,
             0,
+            &store,
             &store,
             &fx.row_space,
             None,
@@ -777,12 +798,19 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
     // Another prefix: row space renumbers wholesale at a fold, so an index held for one prefix must
     // not be claimed under another.
     let projections = ArtifactProjections::new(std::env::temp_dir());
-    projections.adopt_indexes(tmp.path(), "v00000", &[entry("s0", projected_at)], &store);
+    projections.adopt_indexes(
+        tmp.path(),
+        "v00000",
+        &[(ShardId::ZERO, entry("s0", projected_at))],
+        &store,
+    );
     let _ = projections.get_or_build(
         "v00001",
+        ShardId::ZERO,
         "s0",
         LAYER,
         0,
+        &store,
         &store,
         &fx.row_space,
         None,
@@ -796,12 +824,19 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
     // **Another view, which is the term a containment partition does not carry.** An extent is a
     // pair of rows, so a column belongs to exactly the row space it was projected through.
     let projections = ArtifactProjections::new(std::env::temp_dir());
-    projections.adopt_indexes(tmp.path(), "v00000", &[entry("s0", projected_at)], &store);
+    projections.adopt_indexes(
+        tmp.path(),
+        "v00000",
+        &[(ShardId::ZERO, entry("s0", projected_at))],
+        &store,
+    );
     let _ = projections.get_or_build(
         "v00000",
+        ShardId::ZERO,
         "s1",
         LAYER,
         0,
+        &store,
         &store,
         &fx.row_space,
         None,
@@ -817,12 +852,14 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
     let projections = ArtifactProjections::new(std::env::temp_dir());
     let mut missing = entry("s0", projected_at);
     missing.path = derived_file(tmp.path(), "tile-index", "gone.tsti");
-    projections.adopt_indexes(tmp.path(), "v00000", &[missing], &store);
+    projections.adopt_indexes(tmp.path(), "v00000", &[(ShardId::ZERO, missing)], &store);
     let _ = projections.get_or_build(
         "v00000",
+        ShardId::ZERO,
         "s0",
         LAYER,
         0,
+        &store,
         &store,
         &fx.row_space,
         None,
@@ -857,6 +894,7 @@ fn an_index_over_another_population_is_refused_and_the_level_derives_its_own() {
                     .into_iter()
                     .collect::<Bitmap>()
                     .into(),
+                declares_members: None,
                 contents: Vec::new(),
                 attached_to: None,
                 parents: Vec::new(),
@@ -986,9 +1024,11 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
         projections
             .get_or_build(
                 prefix,
+                ShardId::ZERO,
                 "s0",
                 LAYER,
                 0,
+                store,
                 store,
                 &fx.row_space,
                 None,
@@ -1003,8 +1043,8 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
     // The index, for an artifact-major level. The outgoing prefix held an entry of its own; the
     // fold's adoption replaces it.
     let projections = ArtifactProjections::new(std::env::temp_dir());
-    projections.adopt_indexes(tmp.path(), "v00000", &[index_entry(10)], &before);
-    projections.adopt_indexes(tmp.path(), "v00001", &[index_entry(11)], &store);
+    projections.adopt_indexes(tmp.path(), "v00000", &[(ShardId::ZERO, index_entry(10))], &before);
+    projections.adopt_indexes(tmp.path(), "v00001", &[(ShardId::ZERO, index_entry(11))], &store);
     // A request still on the outgoing generation: its prefix, the store's version. Nothing is
     // claimed and nothing is removed.
     let _ = build(&projections, "v00000", &store, ServingLayout::ArtifactMajor);
@@ -1023,13 +1063,13 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
     projections.adopt_columns(
         tmp.path(),
         "v00000",
-        &[column_entry(10), members_entry(10)],
+        &[(ShardId::ZERO, column_entry(10)), (ShardId::ZERO, members_entry(10))],
         &before,
     );
     projections.adopt_columns(
         tmp.path(),
         "v00001",
-        &[column_entry(11), members_entry(11)],
+        &[(ShardId::ZERO, column_entry(11)), (ShardId::ZERO, members_entry(11))],
         &store,
     );
     let _ = build(&projections, "v00000", &store, ServingLayout::RowMajorLabel);
@@ -1053,7 +1093,7 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
     // The retention rule stands: under the entry's own prefix, a version it does not carry drops
     // it, and a later claim at its version finds nothing.
     let projections = ArtifactProjections::new(std::env::temp_dir());
-    projections.adopt_indexes(tmp.path(), "v00001", &[index_entry(11)], &store);
+    projections.adopt_indexes(tmp.path(), "v00001", &[(ShardId::ZERO, index_entry(11))], &store);
     let _ = build(&projections, "v00001", &later, ServingLayout::ArtifactMajor);
     assert_eq!(projections.indexes_adopted(), 0);
     let _ = build(&projections, "v00001", &store, ServingLayout::ArtifactMajor);
@@ -1197,12 +1237,14 @@ fn a_narrow_viewport_walks_the_perimeter_rather_than_the_level() {
         overlay: &overlay,
         labels: open_labels(),
         layer_reachable: true,
-        rows: &rows,
         dependency_served: &always_served,
-        mask: &mask,
-        denied: &denied,
-        containment: None,
-        counts: None,
+        sides: vec![ArtifactSide {
+            rows: &rows,
+            mask: Some(&mask),
+            denied: &denied,
+            containment: None,
+            counts: None,
+        }],
     };
 
     let population = rows.len() as u64;

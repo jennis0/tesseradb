@@ -16,6 +16,7 @@ use crate::compose::MaskedSet;
 use crate::containment::ContainmentAnswers;
 use crate::figures::Figures;
 
+use super::rows::satisfied_rank_over;
 use super::*;
 
 /// Why an artifact is not served. Every variant gives a caller the same outcome, absence: a route
@@ -107,7 +108,13 @@ impl<'a> LabelGate<'a> {
     }
 }
 
-/// Everything the predicate needs about one viewer and one layer, gathered once.
+/// Everything the predicate needs about one viewer and one layer, gathered once: what is global
+/// to the layer, and one [`ArtifactSide`] per point shard of the view.
+///
+/// Every number the verdict reads is summed over the sides before anything is decided: the
+/// masked count, the proportional criterion's denominator, and per rank the generating set's
+/// size and the viewer's holding of it. No criterion or containment test is applied within one
+/// shard.
 pub struct ArtifactView<'a, M: MaskedSet> {
     pub declaration: &'a LayerDeclaration,
     pub overlay: &'a Overlay,
@@ -116,8 +123,6 @@ pub struct ArtifactView<'a, M: MaskedSet> {
     /// Whether the viewer reaches the layer at all, resolved once per session. The overlay half of
     /// the verdict is still asked live, never cached alongside this.
     pub layer_reachable: bool,
-    /// This view's row form of the layer's membership.
-    pub rows: &'a ArtifactRows,
     /// Is the artifact this one attaches to served to this viewer? A hook, not a resolved answer,
     /// because the target lives in another layer and answering means that layer's own
     /// reachability, suppression, row form and declaration.
@@ -127,49 +132,58 @@ pub struct ArtifactView<'a, M: MaskedSet> {
     /// applies is exactly the fact being withheld. Nothing about the target is cached across the
     /// call, so a suppression accepted since is still honoured here.
     pub dependency_served: &'a dyn Fn(&Attachment) -> bool,
-    /// The viewer's composed mask — see [`MaskedSet`] for why the type forbids anything else.
-    pub mask: &'a M,
-    /// `deleted ∪ suppressed`, in this view's row space. Read only by the containment partition's
-    /// fast arm, to correct an answer the partition derives from term signatures alone, which a
-    /// deletion or suppression does not touch; re-derived at every acknowledgement rather than
-    /// subtracted from, so `delete → suppress → unsuppress` leaves the entity deleted.
+    /// One per point shard holding the view, whether or not the viewer sees anything there: a
+    /// shard's slice counts towards every size the verdict compares against.
+    pub sides: Vec<ArtifactSide<'a, M>>,
+}
+
+/// One point shard's part of [`ArtifactView`]: its form of the level, and the viewer's mask, the
+/// deny set and the containment answers in that shard. Every side's form holds the same records
+/// and a slot for every ordinal, so whether the level has an artifact at an ordinal, and every
+/// fact of its record, read the same in each.
+pub struct ArtifactSide<'a, M: MaskedSet> {
+    /// This shard's row form of the layer's membership in the view.
+    pub rows: &'a ArtifactRows,
+    /// The viewer's composed mask in this shard — see [`MaskedSet`] for why the type forbids
+    /// anything else — or `None` where the request left the shard out, the viewer seeing nothing
+    /// there. A side left out holds nothing visible, and so adds to every size and to no count.
+    pub mask: Option<&'a M>,
+    /// `deleted ∪ suppressed`, in this shard's row space for the view. Read only by the
+    /// containment partition's fast arm, to correct an answer the partition derives from term
+    /// signatures alone, which a deletion or suppression does not touch; re-derived at every
+    /// acknowledgement rather than subtracted from, so `delete → suppress → unsuppress` leaves the
+    /// entity deleted.
     pub denied: &'a Bitmap,
-    /// This principal's answers over the level's containment partition, where the level has one. A
-    /// fast arm, never a second rule: `None` puts every artifact on the masked-count route; `Some`
-    /// answers from terms and asks the mask only for the deny correction. The two must agree rank
-    /// for rank.
+    /// This principal's answers over this shard's containment partition, where the level has one.
+    /// A fast arm, never a second rule: `None` puts every artifact on the masked-count route;
+    /// `Some` answers from terms and asks the mask only for the deny correction. The two must agree
+    /// rank for rank.
     pub containment: Option<ContainmentAnswers<'a>>,
-    /// This session's masked counts over the level, where it is served row-major, held per
-    /// `(session, layer)` and byte-budgeted. `None` on an artifact-major level, which answers
-    /// `|membership ∩ M_auth|` one artifact at a time and has no per-session structure to buy.
+    /// This session's masked counts over this shard's form of the level, where it is served
+    /// row-major, held per `(session, layer)` and byte-budgeted. `None` on an artifact-major level,
+    /// which answers `|membership ∩ M_auth|` one artifact at a time and has no per-session
+    /// structure to buy.
     pub counts: Option<Arc<Figures>>,
 }
 
 impl<'a, M: MaskedSet> ArtifactView<'a, M> {
-    /// The view over `layer` for `served`'s viewer, who reaches it: the layer's declaration, its
-    /// space's overlay and the view's deny set.
-    #[allow(clippy::too_many_arguments)]
+    /// The view over `layer` for `served`'s viewer, who reaches it: the layer's declaration and
+    /// its space's overlay, and `side`'s answer for each of the view's shards, so no shard can be
+    /// left out of a sum.
     pub(crate) fn of(
         served: &crate::viewport::ServedView<'a>,
         layer: &'a mosaica_types::layer::RegisteredLayer,
         labels: LabelGate<'a>,
-        rows: &'a ArtifactRows,
-        mask: &'a M,
         dependency_served: &'a dyn Fn(&Attachment) -> bool,
-        containment: Option<ContainmentAnswers<'a>>,
-        counts: Option<Arc<Figures>>,
+        side: impl FnMut(&crate::viewport::ServedSide<'a>) -> ArtifactSide<'a, M>,
     ) -> Self {
         ArtifactView {
             declaration: &layer.declaration,
             overlay: served.generation.space_overlay(layer.space),
             labels,
             layer_reachable: true,
-            rows,
-            mask,
             dependency_served,
-            containment,
-            denied: served.only_side().denied,
-            counts,
+            sides: served.sides.iter().map(side).collect(),
         }
     }
 }
@@ -214,12 +228,27 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
         self.rank(ordinal)
     }
 
+    /// The level's records, the same in every side.
+    fn records(&self) -> Option<&ArtifactRecords> {
+        self.sides.first().map(|side| side.rows.records())
+    }
+
+    /// Whether every side's form is of one version of the level: one set of records is what every
+    /// shard's form at a version shares. Sides of two versions could sum a set's slices from two
+    /// versions of it to its size.
+    fn one_version(&self) -> bool {
+        self.sides
+            .windows(2)
+            .all(|pair| Arc::ptr_eq(&pair[0].rows.records, &pair[1].rows.records))
+    }
+
     /// Every test the verdict makes before it reads the masked count, in its order.
     fn withheld_before_count(&self, artifact_entity: EntityId, ordinal: u32) -> Option<Withheld> {
         // Holes, ordinals past the level's end and another view's group-scoped artifact are absent.
-        if !self.rows.holds(ordinal) {
+        let Some(first) = self.sides.first().filter(|side| side.rows.holds(ordinal)) else {
             return Some(Withheld::NoArtifact);
-        }
+        };
+        let records = first.rows.records();
 
         // The overlay, first and unconditional, asked live so a suppression takes effect at once.
         if self.overlay.is_deleted(artifact_entity) || self.overlay.is_suppressed(artifact_entity) {
@@ -232,14 +261,14 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
         }
 
         // The artifact's own label, before anything reads its membership or its target.
-        if !self.admits_label(ordinal) {
+        if !self.labels.admits(records.access(ordinal)) {
             return Some(Withheld::OwnLabel);
         }
 
         // Before the criterion, so a withheld dependency makes this absent without its own
         // membership being touched, on every route: search, a held identifier and a filter reach
         // an attached artifact directly rather than by traversing the edge.
-        if let Some(attachment) = self.rows.attachment(ordinal) {
+        if let Some(attachment) = records.attachment(ordinal) {
             if !(self.dependency_served)(attachment) {
                 return Some(Withheld::Attachment);
             }
@@ -273,43 +302,95 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
     /// Whether the artifact's own label admits this viewer. Reads no membership, so a caller may
     /// ask it before any masked probe.
     pub fn admits_label(&self, ordinal: u32) -> bool {
-        self.labels.admits(self.rows.records().access(ordinal))
+        self.records()
+            .is_some_and(|records| self.labels.admits(records.access(ordinal)))
     }
 
-    /// Containment, by the partition where there is one and by the mask where there is not.
+    /// Containment over every side, each by its partition where that answers and by its mask where
+    /// it does not. A side whose partition cannot answer a rank is asked again from the mask,
+    /// every rank of the ordinal, as though it had no partition. Sides of more than one version of
+    /// the level contain nothing.
     fn containment(&self, ordinal: u32) -> Containment {
         let declares_content = !self.declaration.content.supplied.is_empty();
-        if let Some(answers) = &self.containment {
-            if let Some(containment) =
-                self.rows
-                    .satisfied_rank_via(ordinal, answers, self.denied, declares_content)
-            {
-                return containment;
+        if !self.one_version() {
+            return Containment::Unsatisfied;
+        }
+        let declared = self.records().map_or(&[][..], |r| r.declared_sizes(ordinal));
+        let mut via: Vec<bool> = self
+            .sides
+            .iter()
+            .map(|side| {
+                side.containment
+                    .as_ref()
+                    .is_some_and(|answers| side.rows.partition_answers(ordinal, answers))
+            })
+            .collect();
+        loop {
+            let mut declined = None;
+            let answer = satisfied_rank_over(
+                declared,
+                declares_content,
+                self.sides.len(),
+                |side, rank| self.sides[side].rows.generating_size(ordinal, rank),
+                |at, rank, size| {
+                    let side = &self.sides[at];
+                    // A side the request left out holds nothing the viewer sees.
+                    let Some(mask) = side.mask else {
+                        return Some(size == 0);
+                    };
+                    match side.containment.as_ref().filter(|_| via[at]) {
+                        Some(answers) => {
+                            let held =
+                                side.rows.generating_held_via(ordinal, rank, answers, side.denied);
+                            if held.is_none() {
+                                declined = Some(at);
+                            }
+                            held
+                        }
+                        None => Some(side.rows.generating_held(ordinal, rank, mask) == size),
+                    }
+                },
+            );
+            match (answer, declined) {
+                (Some(containment), _) => return containment,
+                (None, Some(at)) => via[at] = false,
+                (None, None) => return Containment::Unsatisfied,
             }
         }
-        self.rows
-            .satisfied_rank(ordinal, self.mask, declares_content)
     }
 
-    /// An artifact-major level intersects its own membership with the composed mask; a row-major
-    /// level has no per-artifact membership, and takes the count from the level's masked counts.
+    /// The masked count over every side. An artifact-major level intersects each side's own
+    /// membership with that side's mask; a row-major level has no per-artifact membership, and
+    /// takes each side's count from the level's masked counts there.
     fn masked_count(&self, ordinal: u32) -> u64 {
-        if self.rows.layout().is_row_major() {
-            if let Some(counts) = &self.counts {
-                return counts.get(ordinal);
-            }
-        }
-        self.rows.masked_count(ordinal, self.mask)
+        self.sides
+            .iter()
+            .map(|side| {
+                let Some(mask) = side.mask else {
+                    return 0;
+                };
+                if side.rows.layout().is_row_major() {
+                    if let Some(counts) = &side.counts {
+                        return counts.get(ordinal);
+                    }
+                }
+                side.rows.masked_count(ordinal, mask)
+            })
+            .sum()
     }
 
-    /// The proportional criterion's denominator, in row terms so numerator and denominator come
-    /// from the same projection: a member still in an unfolded flush extent contributes to
-    /// neither, understating rather than overstating the ratio.
+    /// The proportional criterion's denominator over every side, in row terms so numerator and
+    /// denominator come from the same projections: a member still in an unfolded flush extent
+    /// contributes to neither, understating rather than overstating the ratio. A side left out of
+    /// the request adds its members here and nothing to the count.
     fn declared_size(&self, ordinal: u32) -> u64 {
-        if let Some(column) = self.rows.column() {
-            return column.declared_size(ordinal);
-        }
-        self.rows.get(ordinal).map(Bitmap::cardinality).unwrap_or(0)
+        self.sides
+            .iter()
+            .map(|side| match side.rows.column() {
+                Some(column) => column.declared_size(ordinal),
+                None => side.rows.get(ordinal).map(Bitmap::cardinality).unwrap_or(0),
+            })
+            .sum()
     }
 }
 
@@ -318,39 +399,6 @@ mod tests {
     use super::*;
     use crate::artifacts::test_support::*;
     use mosaica_lifecycle::wal::ChangeOp;
-    use mosaica_types::layer::{
-        ArtifactVisibility, ContentDeclaration, Hierarchy, HierarchyKind, MembershipSource,
-    };
-
-    fn declaration(
-        carries_own_labels: bool,
-        criterion: Option<ExistenceCriterion>,
-    ) -> LayerDeclaration {
-        LayerDeclaration {
-            scope: Default::default(),
-            name: "clusters/a".into(),
-            title: Some("A".into()),
-            views: vec!["s0".into()],
-            membership: MembershipSource::Enumerated,
-            value_set: Default::default(),
-            visibility: None,
-            artifact_visibility: if carries_own_labels {
-                ArtifactVisibility::carried("visibility")
-            } else {
-                ArtifactVisibility::inherited()
-            },
-            require_member_visibility: criterion,
-            hierarchy: Hierarchy {
-                kind: HierarchyKind::Flat,
-                prune_children: false,
-            },
-            content: ContentDeclaration::default(),
-            depends_on: Vec::new(),
-            levels: Vec::new(),
-            layout: None,
-            shape: None,
-        }
-    }
 
     /// A dependency not served to this viewer, for whatever reason.
     fn dependency_absent(_attachment: &Attachment) -> bool {
@@ -513,12 +561,8 @@ mod tests {
                 overlay: &Overlay::new(),
                 labels: LabelGate::new(&held, true),
                 layer_reachable: true,
-                rows: &rows,
-                mask: &mask,
                 dependency_served: &never,
-                containment: None,
-                denied: &Bitmap::new(),
-                counts: None,
+                sides: one_side(&rows, &mask, no_denies()),
             }
             .verdict(LABEL_ENTITY, 0),
             ArtifactVerdict::Absent(Withheld::OwnLabel)
@@ -551,12 +595,8 @@ mod tests {
             overlay: &Overlay::new(),
             labels: open_labels(),
             layer_reachable: true,
-            rows: &rows,
-            mask: &all,
             dependency_served: &dependency_served,
-            containment: None,
-            denied: &Bitmap::new(),
-            counts: None,
+            sides: one_side(&rows, &all, no_denies()),
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0),
@@ -573,12 +613,8 @@ mod tests {
             overlay: &Overlay::new(),
             labels: open_labels(),
             layer_reachable: true,
-            rows: &rows,
-            mask: &nearly,
             dependency_served: &dependency_served,
-            containment: None,
-            denied: &Bitmap::new(),
-            counts: None,
+            sides: one_side(&rows, &nearly, no_denies()),
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0),
@@ -600,12 +636,8 @@ mod tests {
                 overlay: &Overlay::new(),
                 labels: open_labels(),
                 layer_reachable: true,
-                rows: &rows,
-                mask,
                 dependency_served: &dependency_served,
-                containment: None,
-                denied: &Bitmap::new(),
-                counts: None,
+                sides: one_side(&rows, mask, no_denies()),
             }
             .verdict(EntityId::new(999), 0)
         };
@@ -637,12 +669,8 @@ mod tests {
             overlay: &Overlay::new(),
             labels: open_labels(),
             layer_reachable: true,
-            rows: &rows,
-            mask: &everything,
             dependency_served: &dependency_served,
-            containment: None,
-            denied: &Bitmap::new(),
-            counts: None,
+            sides: one_side(&rows, &everything, no_denies()),
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0),
@@ -698,12 +726,8 @@ mod tests {
                 overlay: &overlay,
                 labels: open_labels(),
                 layer_reachable: true,
-                rows: &rows,
-                mask: &mask,
                 dependency_served: prerequisite,
-                containment: None,
-                denied: &Bitmap::new(),
-                counts: None,
+                sides: one_side(&rows, &mask, no_denies()),
             }
             .verdict(LABEL_ENTITY, 0)
         };
@@ -733,12 +757,8 @@ mod tests {
                 overlay: &overlay,
                 labels: open_labels(),
                 layer_reachable: true,
-                rows: &rows,
-                mask: &mask,
                 dependency_served: &dependency_served,
-                containment: None,
-                denied: &Bitmap::new(),
-                counts: None,
+                sides: one_side(&rows, &mask, no_denies()),
             }
             .verdict(LABEL_ENTITY, 0),
             ArtifactVerdict::Absent(Withheld::Verdict)
@@ -757,12 +777,8 @@ mod tests {
                 overlay: &Overlay::new(),
                 labels: open_labels(),
                 layer_reachable: true,
-                rows: &rows,
-                mask: &mask,
                 dependency_served: &dependency_absent,
-                containment: None,
-                denied: &Bitmap::new(),
-                counts: None,
+                sides: one_side(&rows, &mask, no_denies()),
             }
             .verdict(LABEL_ENTITY, 0),
             ArtifactVerdict::Absent(Withheld::Attachment)
@@ -782,12 +798,8 @@ mod tests {
             overlay: &Overlay::new(),
             labels: open_labels(),
             layer_reachable: true,
-            rows: &rows,
-            mask: &mask,
             dependency_served: &never,
-            containment: None,
-            denied: &Bitmap::new(),
-            counts: None,
+            sides: one_side(&rows, &mask, no_denies()),
         }
         .verdict(EntityId::new(999), 0)
         .is_served());
@@ -804,6 +816,189 @@ mod tests {
                 masked_count: 3,
                 rank: None
             }
+        );
+    }
+
+    // ---- several shards ---------------------------------------------------------------------
+
+    /// One artifact's forms in two shards: its generating set of four members is split two and
+    /// two, and each form holds its own slice of the membership.
+    fn split() -> (ArtifactRows, ArtifactRows) {
+        one_level(
+            rows_with_contents(&[1, 2, 3], &[(&[1, 2], 4)]),
+            rows_with_contents(&[7, 8], &[(&[7, 8], 4)]),
+        )
+    }
+
+    /// Two shards' forms of one version of a level, holding one set of records as every shard's
+    /// form at a version does.
+    fn one_level(a: ArtifactRows, mut b: ArtifactRows) -> (ArtifactRows, ArtifactRows) {
+        b.records = Arc::clone(&a.records);
+        (a, b)
+    }
+
+    fn view_of<'a>(
+        d: &'a LayerDeclaration,
+        sides: Vec<ArtifactSide<'a, Bitmap>>,
+    ) -> ArtifactView<'a, Bitmap> {
+        ArtifactView {
+            declaration: d,
+            overlay: open_overlay(),
+            labels: open_labels(),
+            layer_reachable: true,
+            dependency_served: &dependency_served,
+            sides,
+        }
+    }
+
+    fn side<'a>(rows: &'a ArtifactRows, mask: Option<&'a Bitmap>) -> ArtifactSide<'a, Bitmap> {
+        ArtifactSide {
+            rows,
+            mask,
+            denied: no_denies(),
+            containment: None,
+            counts: None,
+        }
+    }
+
+    fn open_overlay() -> &'static Overlay {
+        static EMPTY: std::sync::OnceLock<Overlay> = std::sync::OnceLock::new();
+        EMPTY.get_or_init(Overlay::new)
+    }
+
+    /// **A generating set split across shards is contained only where both sums meet the declared
+    /// size**: every side's slice and every slice's rows the viewer holds. A side left out of the
+    /// request adds its slice and nothing the viewer holds, so the test fails closed, and a slice
+    /// with no member of the set never contains it on its own.
+    #[test]
+    fn a_split_generating_set_is_contained_only_by_the_sums_over_every_side() {
+        let d = declaration(false, None);
+        let (a, b) = split();
+        let (all_a, all_b) = (Bitmap::of(&[1, 2, 3]), Bitmap::of(&[7, 8]));
+        assert_eq!(
+            view_of(&d, vec![side(&a, Some(&all_a)), side(&b, Some(&all_b))])
+                .verdict(EntityId::new(999), 0),
+            ArtifactVerdict::Serve {
+                masked_count: 5,
+                rank: Some(0)
+            },
+            "both slices whole: served, with the count summed over the sides"
+        );
+
+        let short = Bitmap::of(&[7]);
+        let left_out = [
+            vec![side(&a, Some(&all_a)), side(&b, Some(&short))],
+            vec![side(&a, Some(&all_a)), side(&b, None)],
+            vec![side(&a, Some(&all_a))],
+        ];
+        for sides in left_out {
+            assert_eq!(
+                view_of(&d, sides).verdict(EntityId::new(999), 0),
+                ArtifactVerdict::Absent(Withheld::Containment),
+                "a slice the viewer does not hold whole, or a side not asked, contains nothing"
+            );
+        }
+
+        // A shard holding none of a set of two, and one holding both.
+        let (empty, whole) = one_level(
+            rows_with_contents(&[1], &[(&[], 2)]),
+            rows_with_contents(&[7, 8], &[(&[7, 8], 2)]),
+        );
+        let everything = Bitmap::from_range(0..100);
+        assert_eq!(
+            view_of(&d, vec![side(&empty, Some(&everything))]).verdict(EntityId::new(999), 0),
+            ArtifactVerdict::Absent(Withheld::Containment),
+            "an empty slice is never the set"
+        );
+        assert!(view_of(
+            &d,
+            vec![side(&empty, Some(&everything)), side(&whole, Some(&everything))]
+        )
+        .verdict(EntityId::new(999), 0)
+        .is_served());
+    }
+
+    /// The partition's arm answers per side, over that side's slice, and the mask answers a side
+    /// with no partition: the two sides' answers are summed as the mask's would be.
+    #[test]
+    fn each_side_answers_containment_by_its_own_partition_or_its_own_mask() {
+        let d = declaration(false, None);
+        let (a, b) = split();
+        // Side a's partition, over its slice of two members, each reached by term 7.
+        let a = a.with_partition(Some(crate::containment::ContainmentPartition::of_sets(&[&[
+            (2, &[&[7], &[7]]),
+        ]])));
+        let partition = a.partition().expect("the fixture attached one");
+        let held = [mosaica_types::TermId::new(7)]
+            .into_iter()
+            .collect::<rustc_hash::FxHashSet<_>>();
+        let (all_a, all_b) = (Bitmap::of(&[1, 2, 3]), Bitmap::of(&[7, 8]));
+        let short = Bitmap::of(&[8]);
+        let by_terms = |b_mask: Option<&Bitmap>, denied: &Bitmap| {
+            let mut a_side = side(&a, Some(&all_a));
+            a_side.containment = Some(partition.answers(&held));
+            a_side.denied = denied;
+            view_of(&d, vec![a_side, side(&b, b_mask)]).verdict(EntityId::new(999), 0)
+        };
+        assert!(by_terms(Some(&all_b), no_denies()).is_served());
+        assert_eq!(
+            by_terms(Some(&short), no_denies()),
+            ArtifactVerdict::Absent(Withheld::Containment)
+        );
+        assert_eq!(
+            by_terms(None, no_denies()),
+            ArtifactVerdict::Absent(Withheld::Containment)
+        );
+        let denied = Bitmap::of(&[2]);
+        assert_eq!(
+            by_terms(Some(&all_b), &denied),
+            ArtifactVerdict::Absent(Withheld::Containment),
+            "a denied member of one side's slice fails the whole set"
+        );
+    }
+
+    /// **The proportional criterion divides by the sum of every side's members**, a side the
+    /// request left out included: leaving it out of the denominator would let a viewer who sees
+    /// nothing in one shard clear a fraction of the artifact's members there.
+    #[test]
+    fn the_fraction_is_against_every_sides_members() {
+        let (a, b) = one_level(
+            rows_of(&[&(1..=10).collect::<Vec<u32>>()]),
+            rows_of(&[&(20..=29).collect::<Vec<u32>>()]),
+        );
+        let (all_a, none) = (Bitmap::from_range(0..100), Bitmap::new());
+        for (p, served) in [(0.6, false), (0.5, true)] {
+            let d = declaration(false, Some(ExistenceCriterion::Fraction(p)));
+            for b_mask in [Some(&none), None] {
+                let verdict = view_of(&d, vec![side(&a, Some(&all_a)), side(&b, b_mask)])
+                    .verdict(EntityId::new(999), 0);
+                assert_eq!(verdict.is_served(), served, "{p} of twenty members, ten visible");
+                if served {
+                    assert_eq!(verdict.masked_count(), Some(10));
+                }
+            }
+        }
+        let d = declaration(false, Some(ExistenceCriterion::Fraction(0.6)));
+        assert!(
+            view_of(&d, vec![side(&a, Some(&all_a))])
+                .verdict(EntityId::new(999), 0)
+                .is_served(),
+            "the same ten of ten in one shard clear it"
+        );
+    }
+
+    /// Sides of two versions of a level contain nothing: a set's slices from two versions of it
+    /// could sum to its size without being any one version's set.
+    #[test]
+    fn sides_of_two_versions_of_a_level_contain_nothing() {
+        let d = declaration(false, None);
+        let (a, _) = split();
+        let b = rows_with_contents(&[7, 8], &[(&[7, 8], 4)]);
+        let (all_a, all_b) = (Bitmap::of(&[1, 2, 3]), Bitmap::of(&[7, 8]));
+        assert_eq!(
+            view_of(&d, vec![side(&a, Some(&all_a)), side(&b, Some(&all_b))])
+                .verdict(EntityId::new(999), 0),
+            ArtifactVerdict::Absent(Withheld::Containment)
         );
     }
 }

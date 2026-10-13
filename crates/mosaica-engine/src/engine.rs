@@ -616,11 +616,18 @@ fn reconstruct_writes(
         })
         .collect();
     // The union across partitions: an artifact's membership belongs to the deployment, not
-    // whichever partition's manifest happens to name the extent.
-    let manifest_membership_extents: Vec<mosaica_store::manifest::MembershipExtent> =
+    // whichever partition's manifest happens to name the extent. Each shard holds its own slice.
+    let manifest_membership_extents: Vec<(ShardId, mosaica_store::manifest::MembershipExtent)> =
         across_partitions(bundle, |p| {
-            p.only_shard().record.membership_extents.iter().cloned()
+            p.shards.iter().flat_map(|shard| {
+                let id = shard.record.id;
+                shard.record.membership_extents.iter().map(move |m| (id, m.clone()))
+            })
         });
+    let mut shards: Vec<ShardId> =
+        across_partitions(bundle, |p| p.shards.iter().map(|shard| shard.record.id));
+    shards.sort_unstable();
+    shards.dedup();
     let manifest_layer_spaces: Vec<mosaica_store::manifest::LayerSpaceRecord> =
         across_partitions(bundle, |p| p.layer_spaces.iter().cloned());
     let record = &bundle.only_shard().record;
@@ -648,6 +655,7 @@ fn reconstruct_writes(
             // So replay's `ViewDrop` arm prunes every id the key names, or a sharing group's
             // buffered rows would flush into whatever takes the key next.
             view_ids_of_key: &|group: &str, key: &str| bundle.manifest.view_ids_for_key(group, key),
+            shards,
             membership_extents: &manifest_membership_extents,
             layer_spaces: &manifest_layer_spaces,
             prefix_dir: readers.prefix_dir.clone(),
@@ -928,14 +936,17 @@ fn adopt_derived_structures(
     // again keeps its predecessor's structures listed until a fold, under the same view id and
     // level version, and they address rows the new view does not have.
     let incarnation_of = |view: &str| bundle.manifest.incarnation_of(view);
-    let manifest_derived_extents: Vec<mosaica_store::manifest::DerivedExtent> =
-        across_partitions(bundle, |p| p.derived_extents().cloned())
+    let manifest_derived_extents: Vec<(ShardId, mosaica_store::manifest::DerivedExtent)> =
+        across_partitions(bundle, |p| {
+            p.derived_by_shard()
+                .map(|(shard, extent)| (shard, extent.clone()))
+        })
         .into_iter()
-        .filter(|e| {
+        .filter(|(_, e)| {
             crate::filter::carries_live_view(&incarnation_of, e.view.as_deref(), e.incarnation)
         })
         // A dropped layer's structures stay listed until a fold.
-        .filter(|e| state.registry.in_space(e.space).is_some())
+        .filter(|(_, e)| state.registry.in_space(e.space).is_some())
         .collect();
 
     // The fold's containment partitions, adopted where their coordinate still holds; a

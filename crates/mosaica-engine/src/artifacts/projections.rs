@@ -7,6 +7,7 @@ use croaring::Bitmap;
 
 use mosaica_lifecycle::membership::ArtifactStore;
 use mosaica_types::layer::LayerDeclaration;
+use mosaica_types::ShardId;
 
 
 use crate::containment::ContainmentPartition;
@@ -51,19 +52,21 @@ impl ProjectionKey {
     }
 }
 
-/// `(view, layer, level)` — what one cached projection is *for*, as against the [`ProjectionKey`]
-/// that says when it stops being valid. Replace-on-mismatch, not an LRU, so the map is bounded by
-/// the number of live triples rather than a capacity.
+/// `(shard, view, layer, level)` — what one cached projection is *for*, as against the
+/// [`ProjectionKey`] that says when it stops being valid. Replace-on-mismatch, not an LRU, so the
+/// map is bounded by the number of live coordinates rather than a capacity. Each point shard holds
+/// its own slice of every artifact's membership, projected through its own row space.
 ///
 /// The view is here and not in [`PartitionAddress`]: a containment expression names entities'
 /// terms, so no row space is involved and one file answers for every view; an extent is a pair of
 /// rows, answering for exactly the view it was projected through.
-pub(super) type LevelAddress = (String, String, u32);
+pub(super) type LevelAddress = (ShardId, String, String, u32);
 
-/// This level, of this layer, in this view, under this prefix, at this version — the coordinate a
-/// level's derived structures are claimed, composed and filed at.
+/// This level, of this layer, in this view of this shard, under this prefix, at this version —
+/// the coordinate a level's derived structures are claimed, composed and filed at.
 pub(super) struct Coordinate<'a> {
     pub(super) prefix: &'a str,
+    pub(super) shard: ShardId,
     pub(super) view: &'a str,
     pub(super) layer: &'a str,
     pub(super) level: u32,
@@ -73,11 +76,15 @@ pub(super) struct Coordinate<'a> {
 impl Coordinate<'_> {
     /// Where this level's row form, tile index and row column are filed.
     pub(super) fn address(&self) -> LevelAddress {
+        (self.shard, self.view.to_string(), self.layer.to_string(), self.level)
+    }
+
+    pub(super) fn records_address(&self) -> RecordsAddress {
         (self.view.to_string(), self.layer.to_string(), self.level)
     }
 
     pub(super) fn partition_address(&self) -> PartitionAddress {
-        (self.layer.to_string(), self.level)
+        (self.shard, self.layer.to_string(), self.level)
     }
 
     pub(super) fn derived_key(&self) -> DerivedKey {
@@ -96,11 +103,16 @@ impl Coordinate<'_> {
     }
 }
 
-/// `(layer, level)` — what one cached partition is *for*. No view, because a containment
-/// expression is over terms and no row space is involved. No prefix, because the prefix is a
-/// validity term; putting it in the address would leave every fold's entries behind instead of
-/// replacing them.
-pub(super) type PartitionAddress = (String, u32);
+/// `(shard, layer, level)` — what one cached partition is *for*: one shard's partition is composed
+/// over its slice of each generating set, against its own postings. No view, because a
+/// containment expression is over terms and no row space is involved. No prefix, because the
+/// prefix is a validity term; putting it in the address would leave every fold's entries behind
+/// instead of replacing them.
+pub(super) type PartitionAddress = (ShardId, String, u32);
+
+/// `(view, layer, level)` — what one level's records are for. No shard: every shard's form of the
+/// level holds the same records, and its own slice of each membership beside them.
+pub(super) type RecordsAddress = (String, String, u32);
 
 /// What a cached [`ContainmentPartition`], an adopted [`TileIndex`] and an adopted [`RowColumn`]
 /// were composed or projected under — one key for all three. The prefix fixes the base row space
@@ -244,6 +256,11 @@ pub struct ArtifactProjections {
     /// written for. Opened on first use, since opening checks the file against that segment's
     /// bands.
     pub(super) band_labels_held: Mutex<BTreeMap<LevelAddress, (DerivedKey, Arc<HeldBandLabels>)>>,
+    /// Each level's records per view, at the version they describe: every shard's form of the
+    /// level takes the same ones rather than a copy each. Weak, so a write to one form's records
+    /// moves them rather than copying, and nothing here outlives the forms.
+    pub(super) records_held:
+        Mutex<BTreeMap<RecordsAddress, (DerivedKey, std::sync::Weak<ArtifactRecords>)>>,
     /// How many forms this has built since the engine opened. Read by the fold's own log line and
     /// by [`crate::Engine::artifact_cache_builds`].
     pub(super) builds: std::sync::atomic::AtomicU64,
@@ -325,13 +342,13 @@ impl ArtifactProjections {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Adopts every derived file of `extents` whose level is still at the version it was written
-    /// for.
+    /// Adopts every derived file of `extents`, each beside the shard it was written for, whose
+    /// level is still at the version it was written for.
     pub fn adopt_derived(
         &self,
         prefix_dir: &std::path::Path,
         prefix: &str,
-        extents: &[mosaica_store::manifest::DerivedExtent],
+        extents: &[(ShardId, mosaica_store::manifest::DerivedExtent)],
         store: &ArtifactStore,
     ) {
         self.adopt_all(prefix_dir, prefix, extents, store);
@@ -348,14 +365,14 @@ impl ArtifactProjections {
         &self,
         prefix_dir: &std::path::Path,
         prefix: &str,
-        extents: &[mosaica_store::manifest::DerivedExtent],
+        extents: &[(ShardId, mosaica_store::manifest::DerivedExtent)],
         store: &ArtifactStore,
     ) {
         let mut labels = self.labels_held.lock().unwrap_or_else(|e| e.into_inner());
         let mut copies = self.band_labels_held.lock().unwrap_or_else(|e| e.into_inner());
         labels.clear();
         copies.clear();
-        for extent in extents {
+        for (shard, extent) in extents {
             let Some(view) = extent.view.as_deref() else {
                 continue;
             };
@@ -365,7 +382,7 @@ impl ArtifactProjections {
             if store.level_version(layer, extent.level) != extent.level_version {
                 continue;
             }
-            let address = (view.to_string(), layer.to_string(), extent.level);
+            let address = (*shard, view.to_string(), layer.to_string(), extent.level);
             let key = DerivedKey::of(prefix, extent.level_version);
             let path = prefix_dir.join(&extent.path);
             match &extent.form {
@@ -403,27 +420,30 @@ impl ArtifactProjections {
         }
     }
 
-    /// The label column of `(view, layer, level)` where the prefix holds one written at
+    /// The label column of `(view, layer, level)` in `shard` where the prefix holds one written at
     /// `level_version`.
     pub(crate) fn level_labels(
         &self,
         prefix: &str,
+        shard: ShardId,
         view: &str,
         layer: &str,
         level: u32,
         level_version: u64,
     ) -> Option<Arc<LabelColumnPack>> {
         let held = self.labels_held.lock().unwrap_or_else(|e| e.into_inner());
-        let (key, pack) = held.get(&(view.to_string(), layer.to_string(), level))?;
+        let (key, pack) = held.get(&(shard, view.to_string(), layer.to_string(), level))?;
         (*key == DerivedKey::of(prefix, level_version)).then(|| Arc::clone(pack))
     }
 
-    /// The band-order copy of `(view, layer, level)`'s labels where the prefix holds one written
-    /// at `level_version`, with the `seg_id` of the segment whose bands it follows. `None` also
-    /// where the file will not open against that segment's bands.
+    /// The band-order copy of `(view, layer, level)`'s labels in `shard` where the prefix holds
+    /// one written at `level_version`, with the `seg_id` of the segment whose bands it follows.
+    /// `None` also where the file will not open against that segment's bands.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn band_labels(
         &self,
         prefix: &str,
+        shard: ShardId,
         view: &str,
         layer: &str,
         level: u32,
@@ -432,7 +452,7 @@ impl ArtifactProjections {
     ) -> Option<Arc<mosaica_store::bands::BandLabels>> {
         let held = {
             let held = self.band_labels_held.lock().unwrap_or_else(|e| e.into_inner());
-            let (key, copy) = held.get(&(view.to_string(), layer.to_string(), level))?;
+            let (key, copy) = held.get(&(shard, view.to_string(), layer.to_string(), level))?;
             if *key != DerivedKey::of(prefix, level_version) || copy.seg_id != segment.seg_id {
                 return None;
             }
@@ -470,7 +490,7 @@ impl ArtifactProjections {
         &self,
         prefix_dir: &std::path::Path,
         prefix: &str,
-        extents: &[mosaica_store::manifest::DerivedExtent],
+        extents: &[(ShardId, mosaica_store::manifest::DerivedExtent)],
         store: &ArtifactStore,
     ) {
         // Everything held for another prefix leaves here, so a request still building on the
@@ -479,9 +499,9 @@ impl ArtifactProjections {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|_, (key, _)| key.prefix == prefix);
-        for extent in extents
+        for (shard, extent) in extents
             .iter()
-            .filter(|e| e.form == mosaica_store::manifest::DerivedForm::Containment)
+            .filter(|(_, e)| e.form == mosaica_store::manifest::DerivedForm::Containment)
         {
             let Some(layer) = store.layer_in(extent.space) else {
                 continue;
@@ -519,7 +539,7 @@ impl ArtifactProjections {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(
-                    (layer.to_string(), extent.level),
+                    (*shard, layer.to_string(), extent.level),
                     (DerivedKey::of(prefix, level_version), partition),
                 );
         }
@@ -535,14 +555,14 @@ impl ArtifactProjections {
         &self,
         prefix_dir: &std::path::Path,
         prefix: &str,
-        extents: &[mosaica_store::manifest::DerivedExtent],
+        extents: &[(ShardId, mosaica_store::manifest::DerivedExtent)],
         store: &ArtifactStore,
     ) {
         self.indexes_held
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|_, (key, _)| key.prefix == prefix);
-        for extent in extents {
+        for (shard, extent) in extents {
             let (mosaica_store::manifest::DerivedForm::TileIndex, Some(view)) =
                 (&extent.form, extent.view.as_deref())
             else {
@@ -586,7 +606,7 @@ impl ArtifactProjections {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(
-                    (view.to_string(), layer.to_string(), extent.level),
+                    (*shard, view.to_string(), layer.to_string(), extent.level),
                     (DerivedKey::of(prefix, level_version), index),
                 );
         }
@@ -606,14 +626,14 @@ impl ArtifactProjections {
         &self,
         prefix_dir: &std::path::Path,
         prefix: &str,
-        extents: &[mosaica_store::manifest::DerivedExtent],
+        extents: &[(ShardId, mosaica_store::manifest::DerivedExtent)],
         store: &ArtifactStore,
     ) {
         self.columns_held
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|_, (key, _)| key.prefix == prefix);
-        for extent in extents {
+        for (shard, extent) in extents {
             let (mosaica_store::manifest::DerivedForm::RowColumn { layout }, Some(view)) =
                 (&extent.form, extent.view.as_deref())
             else {
@@ -637,8 +657,11 @@ impl ArtifactProjections {
                 continue;
             }
             let path = prefix_dir.join(&extent.path);
-            let members = extents.iter().find(|m| {
-                m.form == mosaica_store::manifest::DerivedForm::RowMembers && m.same_level(extent)
+            let members = extents.iter().find_map(|(held, m)| {
+                (held == shard
+                    && m.form == mosaica_store::manifest::DerivedForm::RowMembers
+                    && m.same_level(extent))
+                .then_some(m)
             });
             let Some(members) = members else {
                 tracing::error!(
@@ -673,24 +696,29 @@ impl ArtifactProjections {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(
-                    (view.to_string(), layer.to_string(), extent.level),
+                    (*shard, view.to_string(), layer.to_string(), extent.level),
                     (DerivedKey::of(prefix, extent.level_version), column),
                 );
         }
     }
 
-    /// The form held for one `(view, layer, level)`, or `None` where none is.
-    pub fn held_form(&self, view: &str, layer: &str, level: u32) -> Option<Arc<ArtifactRows>> {
-        self.cached
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&(view.to_string(), layer.to_string(), level))
-            .map(|held| Arc::clone(&held.rows))
+    /// The form held for one `(view, layer, level)` in `shard`, or `None` where none is.
+    pub fn held_form(
+        &self,
+        shard: ShardId,
+        view: &str,
+        layer: &str,
+        level: u32,
+    ) -> Option<Arc<ArtifactRows>> {
+        self.held_form_at(shard, view, layer, level)
+            .map(|(rows, _)| rows)
     }
 
-    /// The form held for one `(view, layer, level)` and the level version it is at, where one is.
+    /// The form held for one `(view, layer, level)` in `shard` and the level version it is at,
+    /// where one is.
     pub(crate) fn held_form_at(
         &self,
+        shard: ShardId,
         view: &str,
         layer: &str,
         level: u32,
@@ -698,7 +726,7 @@ impl ArtifactProjections {
         self.cached
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(&(view.to_string(), layer.to_string(), level))
+            .get(&(shard, view.to_string(), layer.to_string(), level))
             .map(|held| (Arc::clone(&held.rows), held.key.level_version))
     }
 
@@ -729,29 +757,33 @@ impl ArtifactProjections {
         self.cached
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|(_, held, _), _| held != layer);
+            .retain(|(_, _, held, _), _| held != layer);
         self.partitions_held
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|(held, _), _| held != layer);
+            .retain(|(_, held, _), _| held != layer);
         self.indexes_held
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|(_, held, _), _| held != layer);
+            .retain(|(_, _, held, _), _| held != layer);
         self.columns_held
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|(_, held, _), _| held != layer);
+            .retain(|(_, _, held, _), _| held != layer);
         // Held rather than claimed, so nothing else would ever remove it otherwise.
         self.predicate_bases
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|(_, held, _), _| held != layer);
+            .retain(|(_, _, held, _), _| held != layer);
         self.labels_held
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|(_, held, _), _| held != layer);
+            .retain(|(_, _, held, _), _| held != layer);
         self.band_labels_held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(_, _, held, _), _| held != layer);
+        self.records_held
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|(_, held, _), _| held != layer);
@@ -767,30 +799,235 @@ impl ArtifactProjections {
         self.cached
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|(_, held, held_level), _| held != layer || *held_level != level);
+            .retain(|(_, _, held, held_level), _| held != layer || *held_level != level);
         self.partitions_held
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|(held, held_level), _| held != layer || *held_level != level);
+            .retain(|(_, held, held_level), _| held != layer || *held_level != level);
         self.indexes_held
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|(_, held, held_level), _| held != layer || *held_level != level);
+            .retain(|(_, _, held, held_level), _| held != layer || *held_level != level);
         self.columns_held
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|(_, held, held_level), _| held != layer || *held_level != level);
+            .retain(|(_, _, held, held_level), _| held != layer || *held_level != level);
         self.predicate_bases
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|(_, held, held_level), _| held != layer || *held_level != level);
+            .retain(|(_, _, held, held_level), _| held != layer || *held_level != level);
         self.labels_held
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|(_, held, held_level), _| held != layer || *held_level != level);
+            .retain(|(_, _, held, held_level), _| held != layer || *held_level != level);
         self.band_labels_held
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .retain(|(_, _, held, held_level), _| held != layer || *held_level != level);
+        self.records_held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .retain(|(_, held, held_level), _| held != layer || *held_level != level);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mosaica_lifecycle::membership::{ArtifactRecord, Attachment, ContentSet, Members};
+    use mosaica_store::permutation::{Permutation, RowSpace};
+    use mosaica_types::layer::ServingLayout;
+    use mosaica_types::{EntityId, LayerSpace};
+
+    use super::*;
+    use crate::artifacts::test_support::declaration;
+
+    const CLUSTERS: &str = "clusters/a";
+    const LABELS: &str = "labels/a";
+
+    /// A shard's row space over its eight entities, each entity its own row.
+    fn row_space(dir: &std::path::Path, name: &str) -> RowSpace {
+        let path = dir.join(name);
+        let entities: Vec<EntityId> = (0..8).map(EntityId::new).collect();
+        mosaica_store::write::write_permutation(&path, &entities, 8).expect("permutation writes");
+        RowSpace::new(Arc::new(Permutation::load(&path).expect("loads")), 8)
+    }
+
+    /// One shard's slice of an artifact at `entity`: `members` and one content generated from
+    /// `generating` there, of `cardinality` members over every shard.
+    fn slice(entity: u64, members: &[u32], generating: &[u32], cardinality: u64) -> ArtifactRecord {
+        ArtifactRecord {
+            entity: EntityId::new(entity),
+            key: None,
+            view: None,
+            incarnation: 0,
+            members: Members::owned(Bitmap::of(members)),
+            declares_members: None,
+            contents: vec![ContentSet {
+                values: None,
+                digest: [0; 32],
+                generated_from: Bitmap::of(generating),
+                cardinality,
+            }],
+            attached_to: None,
+            parents: Vec::new(),
+            access: Vec::new(),
+        }
+    }
+
+    /// One layer's level 0: its name, its space, and its records by ordinal.
+    type Level<'a> = (&'a str, LayerSpace, Vec<(u32, ArtifactRecord)>);
+
+    /// A store holding each of `levels`, three ordinals long, at level version 7.
+    fn store_of(levels: Vec<Level<'_>>) -> ArtifactStore {
+        let mut store = ArtifactStore::new();
+        for (layer, space, records) in levels {
+            for (ordinal, record) in records {
+                store.seed(layer, space, 0, ordinal, record, None);
+            }
+            store.seed_extent_bound(layer, space, 0, 3);
+            store.seed_level_version(layer, 0, 7);
+        }
+        store
+    }
+
+    /// `layer`'s form in `shard`, of `store`'s slice, with `records`' whole records.
+    fn form(
+        projections: &ArtifactProjections,
+        dir: &std::path::Path,
+        shard: u32,
+        layer: &str,
+        (store, records): (&ArtifactStore, &ArtifactStore),
+    ) -> Arc<ArtifactRows> {
+        projections
+            .get_or_build(
+                "v0",
+                ShardId::new(shard).expect("in range"),
+                "s0",
+                layer,
+                0,
+                store,
+                records,
+                &row_space(dir, &format!("shard-{shard}.bin")),
+                None,
+                ServingLayout::ArtifactMajor,
+                None,
+                0,
+                &declaration(false, None),
+            )
+            .0
+    }
+
+    /// **Each shard's form of a level is its own and holds a slot for every ordinal**, an empty
+    /// one where the shard holds no member, so a hole and a live artifact read the same in every
+    /// shard; the records beside them are one value, the whole store's, shared by every shard's
+    /// form.
+    #[test]
+    fn every_shards_form_of_a_level_holds_every_ordinal_over_one_set_of_records() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let labelled = ArtifactRecord {
+            access: vec![b"t".to_vec()],
+            ..slice(1_000, &[0, 1], &[0, 1], 3)
+        };
+        let first = store_of(vec![(
+            CLUSTERS,
+            LayerSpace::ZERO,
+            vec![(0, labelled), (2, slice(1_002, &[], &[], 0))],
+        )]);
+        // The other shard's slice holds no label, as the open's slices do not.
+        let second = store_of(vec![(
+            CLUSTERS,
+            LayerSpace::ZERO,
+            vec![(0, slice(1_000, &[5], &[5], 3)), (2, slice(1_002, &[3, 4], &[], 0))],
+        )]);
+        let projections = ArtifactProjections::new(dir.path());
+        let a = form(&projections, dir.path(), 0, CLUSTERS, (&first, &first));
+        let b = form(&projections, dir.path(), 1, CLUSTERS, (&second, &first));
+
+        for ordinal in 0..4 {
+            assert_eq!(a.holds(ordinal), b.holds(ordinal), "ordinal {ordinal}");
+        }
+        assert!(!a.holds(1) && a.holds(2));
+        assert_eq!(a.get(2), Some(&Bitmap::new()), "a slot, empty, where the shard has none");
+        assert_eq!(b.get(2), Some(&Bitmap::of(&[3, 4])));
+        assert_eq!(a.get(0), Some(&Bitmap::of(&[0, 1])));
+        assert_eq!(b.get(0), Some(&Bitmap::of(&[5])));
+        assert_eq!(a.generating_size(0, 0) + b.generating_size(0, 0), 3);
+        assert!(Arc::ptr_eq(&a.records, &b.records), "one set of records for every shard");
+        assert_eq!(b.records().declared_sizes(0), &[3]);
+        assert!(!b.records().access(0).is_empty(), "the label is the whole record's");
+        assert!(!Arc::ptr_eq(&a, &b));
+        let held = |shard| projections.held_form(shard, "s0", CLUSTERS, 0);
+        assert!(held(ShardId::ZERO).is_some_and(|held| Arc::ptr_eq(&held, &a)));
+        assert!(held(ShardId::new(1).unwrap()).is_some_and(|held| Arc::ptr_eq(&held, &b)));
+
+        // Built in the other order, the slice's form still takes the whole records.
+        let projections = ArtifactProjections::new(dir.path());
+        let b = form(&projections, dir.path(), 1, CLUSTERS, (&second, &first));
+        assert!(!b.records().access(0).is_empty());
+        let a = form(&projections, dir.path(), 0, CLUSTERS, (&first, &first));
+        assert!(Arc::ptr_eq(&a.records, &b.records));
+    }
+
+    /// **An attached artifact declaring members of its own never borrows its target's in a shard
+    /// holding none of them.** A label whose members are all in shard 0 has an empty slice in
+    /// shard 1, and its form there holds that empty slice, not the cluster's members.
+    #[test]
+    fn an_artifact_with_members_in_another_shard_borrows_nothing_here() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cluster = |members: &[u32]| slice(1_000, members, &[], 0);
+        let label = |members: &[u32]| ArtifactRecord {
+            attached_to: Some(Attachment {
+                layer: CLUSTERS.into(),
+                space: LayerSpace::ZERO,
+                level: 0,
+                ordinal: 0,
+                entity: EntityId::new(1_000),
+            }),
+            declares_members: Some(true),
+            ..slice(2_000, members, &[], 0)
+        };
+        let labels = LayerSpace::new(1).expect("in range");
+        let first = store_of(vec![
+            (CLUSTERS, LayerSpace::ZERO, vec![(0, cluster(&[0, 1]))]),
+            (LABELS, labels, vec![(0, label(&[1]))]),
+        ]);
+        let second = store_of(vec![
+            (CLUSTERS, LayerSpace::ZERO, vec![(0, cluster(&[5, 6]))]),
+            (LABELS, labels, vec![(0, label(&[]))]),
+        ]);
+        let projections = ArtifactProjections::new(dir.path());
+        let a = form(&projections, dir.path(), 0, LABELS, (&first, &first));
+        let b = form(&projections, dir.path(), 1, LABELS, (&second, &first));
+        assert_eq!(a.get(0), Some(&Bitmap::of(&[1])));
+        assert_eq!(b.get(0), Some(&Bitmap::new()), "the label's own slice, empty here");
+        assert!(b.inherited.is_empty(), "nothing was borrowed");
+    }
+
+    /// A derived file adopted for one shard is claimed by that shard's form alone: another shard's
+    /// rows are not the ones it was written over.
+    #[test]
+    fn an_adopted_index_is_claimed_by_its_own_shard_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let only = |members: &[u32]| {
+            store_of(vec![(CLUSTERS, LayerSpace::ZERO, vec![(0, slice(1_000, members, &[], 0))])])
+        };
+        let (first, second) = (only(&[0]), only(&[5]));
+        let bytes = mosaica_store::membership::pack_tile_index(8, &[(0, 0)]);
+        std::fs::write(dir.path().join("index.tsti"), bytes).expect("written");
+        let extent = mosaica_store::manifest::DerivedExtent {
+            path: "index.tsti".into(),
+            space: LayerSpace::ZERO,
+            level: 0,
+            level_version: 7,
+            view: Some("s0".into()),
+            incarnation: None,
+            form: mosaica_store::manifest::DerivedForm::TileIndex,
+        };
+        let projections = ArtifactProjections::new(dir.path());
+        projections.adopt_indexes(dir.path(), "v0", &[(ShardId::ZERO, extent)], &first);
+        let _ = form(&projections, dir.path(), 1, CLUSTERS, (&second, &first));
+        assert_eq!(projections.indexes_adopted(), 0, "another shard's index is not claimed");
+        let _ = form(&projections, dir.path(), 0, CLUSTERS, (&first, &first));
+        assert_eq!(projections.indexes_adopted(), 1);
     }
 }

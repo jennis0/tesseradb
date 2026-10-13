@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use mosaica_lifecycle::membership::ArtifactStore;
 use mosaica_types::layer::{LayerDeclaration, ServingLayout};
+use mosaica_types::ShardId;
 
 use mosaica_store::permutation::RowSpace;
 
@@ -29,15 +30,18 @@ impl ArtifactProjections {
     //
     // Every argument is a thing a level's derived form is *of*: where it came from, what it is
     // built from, which form it is served in, and what the containment partition needs beside
-    // them.
+    // them. `store` is `shard`'s slice of the level's memberships; `records` holds the level's
+    // whole records, which every shard's form shares.
     #[allow(clippy::too_many_arguments)]
     pub fn get_or_build(
         &self,
         prefix: &str,
+        shard: ShardId,
         view: &str,
         layer: &str,
         level: u32,
         store: &ArtifactStore,
+        records: &ArtifactStore,
         space: &RowSpace,
         source: Option<&PartitionSource<'_>>,
         layout: ServingLayout,
@@ -47,6 +51,7 @@ impl ArtifactProjections {
     ) -> (Arc<ArtifactRows>, u64) {
         let at = Coordinate {
             prefix,
+            shard,
             view,
             layer,
             level,
@@ -86,7 +91,9 @@ impl ArtifactProjections {
             }
             None => self.claimed_or_projected(&at, store, space, layout, None, declaration),
         };
-        self.filed(&at, key, segments_version, built.with_partition(partition))
+        let mut built = built.with_partition(partition);
+        self.share_records(&at, &mut built, store, records);
+        self.filed(&at, key, segments_version, built)
     }
 
     /// The form held for this coordinate where it still answers for the caller's row space, and the
@@ -139,6 +146,37 @@ impl ArtifactProjections {
         (rows, version)
     }
 
+    /// Give `built` the level's records: those another shard's form took at the same version,
+    /// else the ones `built` holds where `store` is `records` itself, else `records`' own. A
+    /// shard's slice holds no key, label or parent, so a form of it never serves its own.
+    fn share_records(
+        &self,
+        at: &Coordinate<'_>,
+        built: &mut ArtifactRows,
+        store: &ArtifactStore,
+        records: &ArtifactStore,
+    ) {
+        let key = at.derived_key();
+        let mut held = self.records_held.lock().unwrap_or_else(|e| e.into_inner());
+        let shared = held
+            .get(&at.records_address())
+            .filter(|(held_key, _)| *held_key == key)
+            .and_then(|(_, records)| records.upgrade())
+            .filter(|records| records.len() == built.records.len());
+        if let Some(shared) = shared {
+            built.records = shared;
+            return;
+        }
+        if !std::ptr::eq(store, records) {
+            built.records = Arc::new(ArtifactRecords::build(records.level_in_view(
+                at.layer,
+                at.level,
+                view_key(at.view),
+            )));
+        }
+        held.insert(at.records_address(), (key, Arc::downgrade(&built.records)));
+    }
+
     /// A spatial level's membership is assembled from its segments' resolutions, once, over this
     /// generation's whole row space. From here the form is maintained as an enumerated level's is.
     ///
@@ -154,7 +192,7 @@ impl ArtifactProjections {
         layout: ServingLayout,
         lists: bool,
     ) -> ArtifactRows {
-        let (joined, assembly) = spatial.level.assemble(spatial.segments);
+        let (joined, assembly) = spatial.level.assemble(at.shard, spatial.segments);
         // Filtered by view: a shape belongs to one view of its group, and resolving it into every
         // view's row space would draw it on every view's map with a real masked count.
         let mut built = ArtifactRows::build_resolved(

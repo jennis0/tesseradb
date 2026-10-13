@@ -463,6 +463,7 @@ fn build_shard(fixture: &Fixture, sharding: &Sharding, shard: u32, scratch: &Pat
                     view: None,
                     incarnation: 0,
                     members: Members::owned(members),
+                    declares_members: None,
                     contents: Vec::new(),
                     attached_to: None,
                     parents: Vec::new(),

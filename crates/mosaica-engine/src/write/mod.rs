@@ -306,6 +306,8 @@ pub(crate) struct WritePathState {
     accepted_batches: AcceptedBatches,
     pub(crate) registry: LayerRegistry,
     pub(crate) artifacts: ArtifactStore,
+    /// Every other point shard's slice of every artifact's membership: see [`LiveState::slices`].
+    pub(crate) slices: Vec<(ShardId, Arc<ArtifactStore>)>,
     /// The view roster: which views of which groups exist, and which keys are burnt. Rebuilt
     /// exactly as the layer registry beside it is: seeded from the manifests, then the log
     /// replayed on top.
@@ -349,6 +351,7 @@ impl WritePath {
                 accepted_batches: Mutex::new(state.accepted_batches),
                 registry: Mutex::new(state.registry),
                 artifacts: Mutex::new(state.artifacts),
+                slices: state.slices,
                 roster: Mutex::new(state.roster),
                 attributes: Mutex::new(state.attributes),
                 vocabularies: Mutex::new(state.vocabularies),

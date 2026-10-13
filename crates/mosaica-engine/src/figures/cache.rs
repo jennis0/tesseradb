@@ -140,10 +140,11 @@ pub(crate) struct FragmentKey {
     pub geometry: Geometry,
 }
 
-/// One request's composed mask, named by every input to it: `shards` is
+/// One request's composed mask in one shard, named by every input to it: `shards` is
 /// [`MaskIdentity::shards`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ExactKey {
+    pub shard: mosaica_types::ShardId,
     pub terms: [u8; 32],
     pub view: String,
     pub space: LayerSpace,
@@ -169,10 +170,11 @@ pub(crate) struct DenyKey {
     pub failing: Option<u64>,
 }
 
-/// What one session's tail is a function of: its rows above the fragment's base rows and the
-/// labels the column gives them. `shards` is [`MaskIdentity::shards`].
+/// What one session's tail in one shard is a function of: its rows above the fragment's base rows
+/// and the labels the column gives them. `shards` is [`MaskIdentity::shards`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct TailKey {
+    pub shard: mosaica_types::ShardId,
     pub token_id: u64,
     pub view: String,
     pub space: LayerSpace,
@@ -240,9 +242,10 @@ impl MaskIdentity {
         }
     }
 
-    /// This mask's exact key for one level.
+    /// This mask's exact key for one level in `shard`.
     pub(crate) fn exact_key(
         &self,
+        shard: mosaica_types::ShardId,
         view: &str,
         space: LayerSpace,
         level: u32,
@@ -250,6 +253,7 @@ impl MaskIdentity {
         geometry: Geometry,
     ) -> ExactKey {
         ExactKey {
+            shard,
             terms: self.terms,
             view: view.to_string(),
             space,
@@ -369,8 +373,8 @@ impl CacheWeight for Tail {
     }
 }
 
-/// `(view, space, level)`.
-pub(crate) type LevelAddress = (String, LayerSpace, u32);
+/// `(shard, view, space, level)`.
+pub(crate) type LevelAddress = (mosaica_types::ShardId, String, LayerSpace, u32);
 
 /// The gauges an operator reads. Names no artifact and no principal.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -966,6 +970,7 @@ mod tests {
 
     fn key(terms: u8, mask: u8) -> FiguresKey {
         FiguresKey::Exact(ExactKey {
+            shard: mosaica_types::ShardId::ZERO,
             geometry: Geometry::None,
             terms: [terms; 32],
             view: "s0".into(),

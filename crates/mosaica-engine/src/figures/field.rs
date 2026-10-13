@@ -148,7 +148,7 @@ impl Engine {
             true => None,
             false => {
                 let (deny_version, failing) =
-                    super::deny_version(served, served.only_side().denied, &subtracted);
+                    super::deny_version(served, served.only_side(), &subtracted);
                 let deny_key = FieldDenyKey {
                     field: key.clone(),
                     deny_version,

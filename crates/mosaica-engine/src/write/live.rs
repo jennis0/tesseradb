@@ -113,8 +113,15 @@ pub(crate) struct LiveState {
     /// request path, which resolves a session's reachable set from it.
     pub(in crate::write) registry: Mutex<LayerRegistry>,
     /// Every artifact's entity-space membership, on the registry's contract: written only by the
-    /// executor, read by the request path.
+    /// executor, read by the request path. Of a bundle of several point shards it holds the write
+    /// shard's slice of each membership and generating set, and [`Self::slices`] the others'.
     pub(in crate::write) artifacts: Mutex<ArtifactStore>,
+    /// Every point shard's slice of every artifact's membership and generating sets but the one
+    /// [`Self::artifacts`] holds, read at open, each beside what a row form reads of the record:
+    /// its view, attachment and each set's cardinality. A record's key, labels and parents are
+    /// read from [`Self::artifacts`]. A bundle of several shards takes no write, so nothing writes
+    /// these.
+    pub(in crate::write) slices: Vec<(ShardId, Arc<ArtifactStore>)>,
     /// The view roster, on the registry's contract: written only by the executor, a create is a
     /// WAL append followed by an apply, on the one thread that also holds the allocator. Read by
     /// the request path, which resolves a view id against the manifest the roster made.
@@ -179,6 +186,24 @@ impl LiveState {
     /// Read the artifact store: the request path's route to a membership.
     pub(crate) fn with_artifacts<R>(&self, f: impl FnOnce(&ArtifactStore) -> R) -> R {
         f(&lock_recover(&self.artifacts))
+    }
+
+    /// `shard`'s slice of every membership, given `written`, the store [`Self::with_artifacts`]
+    /// lends, which is the write shard's. Panics on a shard the open read no slice of: answering
+    /// from another shard's slice would project its entities through this shard's row space.
+    pub(crate) fn slice_of<'a>(
+        &'a self,
+        shard: ShardId,
+        written: &'a ArtifactStore,
+    ) -> &'a ArtifactStore {
+        if shard == self.only_shard().id {
+            return written;
+        }
+        self.slices
+            .iter()
+            .find(|(held, _)| *held == shard)
+            .map(|(_, slice)| slice.as_ref())
+            .expect("every shard's slice is read at open")
     }
 
     /// Everything not yet in a manifest, packed and ready. See [`ArtifactStore::unpublished`].

@@ -244,6 +244,7 @@ impl Engine {
                 } else {
                     match self.artifact_projections.level_labels(
                         &generation.prefix,
+                        served.only_side().shard.id(),
                         served.name,
                         name,
                         level,
@@ -257,6 +258,7 @@ impl Engine {
                     self.artifact_projections
                         .band_labels(
                             &generation.prefix,
+                            served.only_side().shard.id(),
                             served.name,
                             name,
                             level,
@@ -277,6 +279,7 @@ impl Engine {
                 false => None,
                 true => self.figures(
                     served,
+                    served.only_side(),
                     registered.space,
                     level,
                     level_version,
@@ -289,11 +292,14 @@ impl Engine {
                 served,
                 registered,
                 self.label_gate(served.session, declaration),
-                rows,
-                mask,
                 dependency_served,
-                rows.partition().map(|p| p.answers(served.session.satisfied())),
-                counts,
+                |side| crate::artifacts::ArtifactSide {
+                    rows,
+                    mask: Some(mask),
+                    denied: side.denied,
+                    containment: rows.partition().map(|p| p.answers(served.session.satisfied())),
+                    counts: counts.clone(),
+                },
             );
             let contents = std::cell::OnceCell::new();
             let mut verdicts = Verdicts::over(rows.len());

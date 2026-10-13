@@ -877,6 +877,7 @@ impl Engine {
                     read.rows.column()?;
                     self.artifact_projections.band_labels(
                         &generation.prefix,
+                        served.only_side().shard.id(),
                         served.name,
                         &layer.declaration.name,
                         level,

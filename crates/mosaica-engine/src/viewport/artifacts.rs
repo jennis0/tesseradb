@@ -211,87 +211,97 @@ impl Engine {
         if layers.is_empty() {
             return warmed;
         }
-        let shard = generation.only_shard();
-        let source = shard.partition_source();
-        for (view, view_data) in &shard.data.views {
-            let Ok(segments) = segments_with_row_bases(view, view_data) else {
-                continue;
-            };
-            for layer in &layers {
-                if !layer.declaration.draws_on(view) {
+        let first = generation.shards().next().map(|shard| shard.id());
+        for shard in generation.shards() {
+            let source = shard.partition_source();
+            for (view, view_data) in &shard.data.views {
+                let Ok(segments) = segments_with_row_bases(view, view_data) else {
                     continue;
-                }
-                // Same order as `serve_artifacts`: a suppressed or deleted layer is served to
-                // nobody, so its form is not worth building.
-                if generation.layer_denied(layer.space) {
-                    continue;
-                }
-                let vocabulary = predicate_vocabulary(&generation, &layer.declaration);
-                let code_of_key = |key: &str| match vocabulary {
-                    Some(vocabulary) => vocabulary.code_of(key),
-                    None => key.parse::<u32>().ok(),
                 };
-                for level in 0..layer.runs.len() as u32 {
-                    let recorded = layer.layout_of(level);
-                    // The engine's own pool: the decode fans out, and running it outside
-                    // `install` would spill onto rayon's global pool instead of the one sized
-                    // for this deployment.
-                    let ((rows, level_version), lineage_version) = self.pool.install(|| {
-                        self.write.live().with_artifacts(|store| {
-                            let predicate = predicate_source(
-                                &layer.declaration,
-                                shard,
-                                view,
-                                view_data,
-                                &segments,
-                                &code_of_key,
-                                &self.shapes,
-                                store,
-                                level,
-                            );
-                            (
-                                self.artifact_projections.get_or_build(
-                                    &generation.prefix,
-                                    view,
-                                    &layer.declaration.name,
-                                    level,
-                                    store,
-                                    &view_data.row_space,
-                                    Some(&source),
-                                    recorded,
-                                    predicate.as_ref(),
-                                    generation.segments_version,
+                for layer in &layers {
+                    if !layer.declaration.draws_on(view) {
+                        continue;
+                    }
+                    // Same order as `serve_artifacts`: a suppressed or deleted layer is served to
+                    // nobody, so its form is not worth building.
+                    if generation.layer_denied(layer.space) {
+                        continue;
+                    }
+                    let vocabulary = predicate_vocabulary(&generation, &layer.declaration);
+                    let code_of_key = |key: &str| match vocabulary {
+                        Some(vocabulary) => vocabulary.code_of(key),
+                        None => key.parse::<u32>().ok(),
+                    };
+                    for level in 0..layer.runs.len() as u32 {
+                        let recorded = layer.layout_of(level);
+                        // The engine's own pool: the decode fans out, and running it outside
+                        // `install` would spill onto rayon's global pool instead of the one sized
+                        // for this deployment.
+                        let ((rows, level_version), lineage_version) = self.pool.install(|| {
+                            self.write.live().with_artifacts(|written| {
+                                let predicate = predicate_source(
                                     &layer.declaration,
-                                ),
-                                store.lineage_version(&layer.declaration.name, level),
-                            )
-                        })
-                    });
-                    warmed.levels += 1;
-                    // Warmed for the same reason as the row form: derived from the level's
-                    // records alone (~0.5s each at rung 3's largest), not from a mask or principal.
-                    self.lineages.get_or_build(
-                        &layer.declaration.name,
-                        level,
-                        lineage_version,
-                        || {
-                            let records = rows.records();
-                            let edges = (0..records.len() as u32).map(|ordinal| {
-                                let within = records
-                                    .parents(ordinal)
-                                    .iter()
-                                    .filter(move |parent| parent.level == level)
-                                    .map(|parent| parent.ordinal);
-                                (ordinal, within)
-                            });
-                            match lineage_kind(layer.declaration.hierarchy.kind) {
-                                Some(true) => crate::cut::Lineage::dag(edges),
-                                _ => crate::cut::Lineage::new(edges),
-                            }
-                        },
-                    );
-                    if let Some(runs) = layer.runs.get(level as usize) {
-                        self.level_content(&generation, layer, level, level_version, runs);
+                                    shard,
+                                    view,
+                                    view_data,
+                                    &segments,
+                                    &code_of_key,
+                                    &self.shapes,
+                                    written,
+                                    level,
+                                );
+                                let store = self.write.live().slice_of(shard.id(), written);
+                                (
+                                    self.artifact_projections.get_or_build(
+                                        &generation.prefix,
+                                        shard.id(),
+                                        view,
+                                        &layer.declaration.name,
+                                        level,
+                                        store,
+                                        written,
+                                        &view_data.row_space,
+                                        Some(&source),
+                                        recorded,
+                                        predicate.as_ref(),
+                                        generation.segments_version,
+                                        &layer.declaration,
+                                    ),
+                                    written.lineage_version(&layer.declaration.name, level),
+                                )
+                            })
+                        });
+                        warmed.levels += 1;
+                        // What follows is of the level's records, which every shard shares.
+                        if Some(shard.id()) != first {
+                            continue;
+                        }
+                        // Warmed for the same reason as the row form: derived from the level's
+                        // records alone (~0.5s each at rung 3's largest), not from a mask or
+                        // principal.
+                        self.lineages.get_or_build(
+                            &layer.declaration.name,
+                            level,
+                            lineage_version,
+                            || {
+                                let records = rows.records();
+                                let edges = (0..records.len() as u32).map(|ordinal| {
+                                    let within = records
+                                        .parents(ordinal)
+                                        .iter()
+                                        .filter(move |parent| parent.level == level)
+                                        .map(|parent| parent.ordinal);
+                                    (ordinal, within)
+                                });
+                                match lineage_kind(layer.declaration.hierarchy.kind) {
+                                    Some(true) => crate::cut::Lineage::dag(edges),
+                                    _ => crate::cut::Lineage::new(edges),
+                                }
+                            },
+                        );
+                        if let Some(runs) = layer.runs.get(level as usize) {
+                            self.level_content(&generation, layer, level, level_version, runs);
+                        }
                     }
                 }
             }
@@ -350,7 +360,7 @@ impl Engine {
             Some(vocabulary) => vocabulary.code_of(key),
             None => key.parse::<u32>().ok(),
         };
-        let (rows, level_version) = self.write.live().with_artifacts(|store| {
+        let (rows, level_version) = self.write.live().with_artifacts(|written| {
             let predicate = predicate_source(
                 &layer.declaration,
                 shard,
@@ -359,17 +369,20 @@ impl Engine {
                 segments,
                 &code_of_key,
                 &self.shapes,
-                store,
+                written,
                 level,
             );
+            let store = self.write.live().slice_of(shard.id(), written);
             // The version the form is of, not the store's: they differ between an accepted write
             // and the tick that publishes it.
             self.artifact_projections.get_or_build(
                 &generation.prefix,
+                shard.id(),
                 view,
                 &name,
                 level,
                 store,
+                written,
                 &view_data.row_space,
                 Some(&source),
                 recorded,
@@ -380,6 +393,7 @@ impl Engine {
         });
         let counts = self.figures(
             served,
+            served.only_side(),
             layer.space,
             level,
             level_version,
@@ -389,20 +403,22 @@ impl Engine {
         )?;
         let carried_counts = counts.clone();
         // The same containment the viewport builds, from the same partition.
-        let containment = rows
-            .partition()
-            .map(|p| p.answer_for_one(session.satisfied()));
         let ctx = DependencyContext::new(served, mask, &reachable);
         let dependency_served = self.dependency_gate(&ctx);
         let artifact_view = crate::artifacts::ArtifactView::of(
             served,
             &layer,
             self.label_gate(session, &layer.declaration),
-            &rows,
-            mask,
             &dependency_served,
-            containment,
-            counts,
+            |side| crate::artifacts::ArtifactSide {
+                rows: &rows,
+                mask: Some(mask),
+                denied: side.denied,
+                containment: rows
+                    .partition()
+                    .map(|p| p.answer_for_one(session.satisfied())),
+                counts: counts.clone(),
+            },
         );
         let verdict = artifact_view.verdict(entity, ordinal);
         ctx.finish()?;
@@ -781,7 +797,8 @@ impl Engine {
             Some(vocabulary) => vocabulary.code_of(key),
             None => key.parse::<u32>().ok(),
         };
-        let (rows, level_version) = self.write.live().with_artifacts(|store| {
+        let shard = ctx.served.only_side().shard.id();
+        let (rows, level_version) = self.write.live().with_artifacts(|written| {
             let predicate = predicate_source(
                 &layer.declaration,
                 ctx.served.only_side().shard,
@@ -790,15 +807,18 @@ impl Engine {
                 &ctx.served.only_side().segments,
                 &code_of_key,
                 &self.shapes,
-                store,
+                written,
                 attachment.level,
             );
+            let store = self.write.live().slice_of(shard, written);
             self.artifact_projections.get_or_build(
                 &ctx.served.generation.prefix,
+                shard,
                 ctx.served.name,
                 &attachment.layer,
                 attachment.level,
                 store,
+                written,
                 &ctx.served.only_side().data.row_space,
                 Some(&ctx.served.only_side().shard.partition_source()),
                 recorded,
@@ -810,6 +830,7 @@ impl Engine {
         // The target's own figures, under the same key the viewport would read.
         let counts = self.figures(
             ctx.served,
+            ctx.served.only_side(),
             layer.space,
             attachment.level,
             level_version,
@@ -824,11 +845,6 @@ impl Engine {
         let nested = |a: &mosaica_lifecycle::membership::Attachment| {
             self.dependency_served(ctx, a, depth - 1)
         };
-        // Lazily and load-bearing: runs once per candidate, so settling a whole expression table
-        // here would turn a per-artifact question into whole-population work.
-        let containment = rows
-            .partition()
-            .map(|p| p.answer_for_one(ctx.served.session.satisfied()));
         // A statement of its own, so the borrow ends before the verdict below follows a chain
         // back into this function.
         let labels = *ctx
@@ -840,11 +856,18 @@ impl Engine {
             ctx.served,
             &layer,
             labels,
-            &rows,
-            ctx.mask,
             &nested,
-            containment,
-            counts,
+            |side| crate::artifacts::ArtifactSide {
+                rows: &rows,
+                mask: Some(ctx.mask),
+                denied: side.denied,
+                // Lazily and load-bearing: runs once per candidate, so settling a whole expression
+                // table here would turn a per-artifact question into whole-population work.
+                containment: rows
+                    .partition()
+                    .map(|p| p.answer_for_one(ctx.served.session.satisfied())),
+                counts: counts.clone(),
+            },
         )
         .verdict(entity, attachment.ordinal)
         .is_served()
@@ -1033,7 +1056,8 @@ impl Engine {
         };
         let recorded = registered.layout_of(level);
         let name = &registered.declaration.name;
-        self.write.live().with_artifacts(|store| {
+        let shard = served.only_side().shard.id();
+        self.write.live().with_artifacts(|written| {
             let predicate = predicate_source(
                 &registered.declaration,
                 served.only_side().shard,
@@ -1042,16 +1066,19 @@ impl Engine {
                 &served.only_side().segments,
                 &code_of_key,
                 &self.shapes,
-                store,
+                written,
                 level,
             );
+            let store = self.write.live().slice_of(shard, written);
             (
                 self.artifact_projections.get_or_build(
                     &generation.prefix,
+                    shard,
                     served.name,
                     name,
                     level,
                     store,
+                    written,
                     &served.only_side().data.row_space,
                     Some(source),
                     recorded,
@@ -1059,7 +1086,7 @@ impl Engine {
                     generation.segments_version,
                     &registered.declaration,
                 ),
-                store.lineage_version(name, level),
+                written.lineage_version(name, level),
             )
         })
     }
@@ -1085,6 +1112,7 @@ impl Engine {
         // row-major reads the histogram.
         let counts = self.figures(
             served,
+            served.only_side(),
             layer.registered.space,
             level,
             level_version,
@@ -1129,12 +1157,15 @@ impl Engine {
             served,
             &layer.registered,
             self.label_gate(served.session, &layer.registered.declaration),
-            rows,
-            pass.mask,
             pass.dependency_served,
-            rows.partition().map(|p| p.answers(served.session.satisfied())),
-            // Kept on the level beside this, so derived geometry reads the same accumulation.
-            level.counts.clone(),
+            |side| crate::artifacts::ArtifactSide {
+                rows,
+                mask: Some(pass.mask),
+                denied: side.denied,
+                containment: rows.partition().map(|p| p.answers(served.session.satisfied())),
+                // Kept on the level beside this, so derived geometry reads the same accumulation.
+                counts: level.counts.clone(),
+            },
         )
     }
 

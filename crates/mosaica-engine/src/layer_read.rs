@@ -14,7 +14,7 @@ use mosaica_types::layer::{HierarchyKind, RegisteredLayer};
 use mosaica_types::EntityId;
 
 use crate::artifact_content::LevelContent;
-use crate::artifacts::{ArtifactRows, ArtifactView};
+use crate::artifacts::{ArtifactRows, ArtifactSide, ArtifactView};
 use crate::cancel::CancelToken;
 use crate::compose::{EffectiveMask, MaskedSet, WholeMask};
 use crate::error::Result;
@@ -132,7 +132,8 @@ impl Engine {
             None => key.parse::<u32>().ok(),
         };
         let source = served.only_side().shard.partition_source();
-        let (rows, level_version) = self.write.live().with_artifacts(|store| {
+        let shard = served.only_side().shard.id();
+        let (rows, level_version) = self.write.live().with_artifacts(|written| {
             let predicate = crate::viewport::predicate_source(
                 &layer.declaration,
                 served.only_side().shard,
@@ -141,17 +142,20 @@ impl Engine {
                 &served.only_side().segments,
                 &code_of_key,
                 &self.shapes,
-                store,
+                written,
                 level,
             );
+            let store = self.write.live().slice_of(shard, written);
             // The version the form is of, not the store's: the counts below are filed under it
             // and are the same entry a viewport reads.
             self.artifact_projections.get_or_build(
                 &generation.prefix,
+                shard,
                 served.name,
                 name,
                 level,
                 store,
+                written,
                 &served.only_side().data.row_space,
                 Some(&source),
                 layer.layout_of(level),
@@ -162,6 +166,7 @@ impl Engine {
         });
         let counts = self.figures(
             served,
+            served.only_side(),
             layer.space,
             level,
             level_version,
@@ -261,11 +266,14 @@ impl ReadLevel {
             served,
             layer,
             engine.label_gate(served.session, &layer.declaration),
-            &self.rows,
-            mask,
             dependency_served,
-            self.rows.partition().map(|p| p.answers(served.session.satisfied())),
-            self.counts.clone(),
+            |side| ArtifactSide {
+                rows: &self.rows,
+                mask: Some(mask),
+                denied: side.denied,
+                containment: self.rows.partition().map(|p| p.answers(served.session.satisfied())),
+                counts: self.counts.clone(),
+            },
         )
     }
 

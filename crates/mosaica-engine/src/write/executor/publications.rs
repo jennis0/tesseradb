@@ -781,6 +781,7 @@ impl Executor {
                 };
                 self.deps.artifact_projections.rebase_merged(
                     &live.prefix,
+                    self.live.only_shard().id,
                     &completed.plan.view,
                     store,
                     previous,
@@ -1560,6 +1561,7 @@ impl Executor {
                 if stored {
                     self.deps.artifact_projections.publish(
                         &generation.prefix,
+                        self.live.only_shard().id,
                         view,
                         layer,
                         level,
@@ -1632,6 +1634,7 @@ impl Executor {
                 };
                 self.deps.artifact_projections.publish(
                     &generation.prefix,
+                    self.live.only_shard().id,
                     view,
                     layer,
                     level,
@@ -2468,6 +2471,7 @@ impl Executor {
                 };
                 self.deps.artifact_projections.extend_flushed(
                     &live.prefix,
+                    self.live.only_shard().id,
                     &completed.view,
                     store,
                     previous,

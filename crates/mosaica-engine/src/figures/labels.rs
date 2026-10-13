@@ -1,5 +1,5 @@
-//! The denied-row labels held in memory, per `(view, space, level)`, under a byte bound: the two
-//! newest versions of each, the least recently used level's dropped first when the bound is
+//! The denied-row labels held in memory, per `(shard, view, space, level)`, under a byte bound: the
+//! two newest versions of each, the least recently used level's dropped first when the bound is
 //! passed, and each written to disk with at most one write under way per level.
 
 use std::collections::VecDeque;

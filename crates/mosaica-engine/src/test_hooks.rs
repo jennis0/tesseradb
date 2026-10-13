@@ -589,7 +589,8 @@ impl Engine {
         layer: &str,
         level: u32,
     ) -> Option<std::sync::Arc<crate::artifacts::ArtifactRows>> {
-        self.artifact_projections.held_form(view, layer, level)
+        let shard = self.generation.load().only_shard().id();
+        self.artifact_projections.held_form(shard, view, layer, level)
     }
 
     /// Drop every derived form this engine holds for one layer, so the next request builds them
