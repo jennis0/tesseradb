@@ -287,9 +287,10 @@ pub(super) fn filter_rows(
 ) -> Result<RoutedRows> {
     let engine = cx.engine;
     let served = &cx.open.served;
+    let side = served.only_side();
     let rows_in_ranges: u64 = domain.iter().map(|r| r.len() as u64).sum();
     let body = |route: &dyn Fn(&FilterExpr, bool) -> Result<crate::filter::RoutedFilter>| {
-        engine.rows_of_routed(served, route(expr, true)?, domain, rows_in_ranges, per_tile_only)
+        engine.rows_of_routed(side, route(expr, true)?, domain, rows_in_ranges, per_tile_only)
     };
     let whole;
     let candidate = match candidate {
@@ -305,6 +306,7 @@ pub(super) fn filter_rows(
     };
     engine.route_filters_under(
         served,
+        side,
         cx.open.mask.only_leaf(),
         candidate,
         &cx.resolved,
@@ -726,6 +728,7 @@ fn region_verdict(
                 .region_rows(
                     leaf,
                     &cx.open.served,
+                    cx.open.served.only_side(),
                     cx.open.mask.only_leaf(),
                     &cx.resolved,
                     cancel,

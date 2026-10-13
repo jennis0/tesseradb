@@ -178,7 +178,7 @@ impl Engine {
         &self,
         served: &ServedView<'_>,
         generation: &Arc<Generation>,
-        mask: &EffectiveMask,
+        mask: &ShardedMask,
         req: &ViewportRequest<'_>,
         probe: &mut Probe,
     ) -> Theta {
@@ -196,7 +196,7 @@ impl Engine {
                 self.occupied_tiles(
                     &served.mask_identity,
                     served.name,
-                    &served.only_side().segments,
+                    &served.sides,
                     mask,
                     req.zoom,
                 ),
@@ -212,7 +212,7 @@ impl Engine {
                 served.name,
                 served.session,
                 generation,
-                &served.only_side().geometry,
+                &served.sides,
             );
         }
         Theta { v_total, threshold }
@@ -428,7 +428,7 @@ impl Engine {
         view: &str,
         session: &Session,
         generation: &Arc<crate::Generation>,
-        geometry: &Arc<crate::cache::SessionGeometry>,
+        sides: &[ServedSide<'_>],
     ) {
         let depth = crate::stage::BACKGROUND_DEPTH;
         let deepest = crate::occupancy::OccupancyKey::of(identity, view, depth);
@@ -443,7 +443,10 @@ impl Engine {
             view: view.to_string(),
             satisfied: session.satisfied().clone(),
             generation: Arc::clone(generation),
-            geometry: Arc::clone(geometry),
+            geometries: sides
+                .iter()
+                .map(|side| (side.shard.id(), Arc::clone(&side.geometry)))
+                .collect(),
         });
     }
 
@@ -452,13 +455,14 @@ impl Engine {
     /// whole ladder eagerly costs an order of magnitude more than a request needs.
     ///
     /// The mask passed in must be the unfiltered composed one: `N_occ` is an anchor, and a
-    /// filtered mask reaching it would make θ move as the viewer types.
+    /// filtered mask reaching it would make θ move as the viewer types. Every segment of every
+    /// side is a part of the walk, and only the shards holding a leaf are walked.
     pub(crate) fn occupied_tiles(
         &self,
         identity: &crate::figures::MaskIdentity,
         view: &str,
-        segments: &[(&SegmentData, u32)],
-        mask: &crate::compose::EffectiveMask,
+        sides: &[ServedSide<'_>],
+        mask: &ShardedMask,
         depth: u8,
     ) -> u64 {
         let key = crate::occupancy::OccupancyKey::of(identity, view, depth);
@@ -469,7 +473,16 @@ impl Engine {
         // zooms out after reaching a depth pays nothing for the way back — a rung's value is the
         // same however it is reached.
         self.counters.occupancy_walks.fetch_add(1, Ordering::Relaxed);
-        let ladder = crate::occupancy::occupied_tiles_ladder(mask, segments, depth);
+        let parts: Vec<crate::occupancy::OccupancyPart<'_>> = sides
+            .iter()
+            .flat_map(|side| {
+                let leaf = mask.leaf(side.shard.id());
+                side.segments
+                    .iter()
+                    .map(move |&(segment, base)| (leaf, segment, base))
+            })
+            .collect();
+        let ladder = crate::occupancy::occupied_tiles_ladder(&parts, depth);
         for rung in 0..depth {
             let mut rung_key = key.clone();
             rung_key.depth = rung;
@@ -499,8 +512,8 @@ impl Engine {
         Ok(self.occupied_tiles(
             &served.mask_identity,
             view,
-            &served.only_side().segments,
-            open.mask.only_leaf(),
+            &served.sides,
+            &open.mask,
             depth,
         ))
     }

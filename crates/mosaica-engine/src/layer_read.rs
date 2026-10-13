@@ -90,20 +90,21 @@ impl Engine {
         expr: &FilterExpr,
         cancel: &Option<CancelToken>,
     ) -> Result<(Bitmap, Option<RegionVerdict>)> {
-        let total_rows = served.only_side().data.row_space.total_rows();
-        self.route_filters(served, mask, cancel, |route| {
+        let side = served.only_side();
+        let total_rows = side.data.row_space.total_rows();
+        self.route_filters(served, side, mask, cancel, |route| {
             // A column with both routes takes the entity route: there are no tile ranges here to
             // make the row route cheaper, so only a render-only column reaches the scan.
             Ok(match route(expr, false)? {
                 RoutedFilter::Entity(entities) => {
-                    (served.only_side().data.row_space.project(&entities), None)
+                    (side.data.row_space.project(&entities), None)
                 }
                 RoutedFilter::Row(tree) => {
                     let region = tree.region_verdict();
                     let whole = std::iter::once(0..u32::try_from(total_rows).unwrap_or(u32::MAX))
                         .collect::<Vec<_>>();
                     let rows = self
-                        .evaluate_row_route(&tree, served, &whole, total_rows, false)?
+                        .evaluate_row_route(&tree, side, &whole, total_rows, false)?
                         .rows()
                         .clone();
                     (rows, region)

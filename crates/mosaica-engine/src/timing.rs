@@ -30,11 +30,10 @@
 /// scaffolding itself). Counters are exact.
 ///
 /// **D-D/D-E: the per-tile fields stopped partitioning wall clock the moment the tile loop went
-/// parallel.** `count_ns`, `select_ns`, `underlay_ns` and the sweep's per-tile counters
-/// (`tiles_nonempty`, `sigma_visible`, `select_rows_visited`, `underlay_cells_evaluated`) are now
-/// **cross-worker sums**: each tile's own contribution
-/// ([`crate::viewport::TileResult`]'s [`TileStats`]) is measured locally inside that tile's own
-/// `tile_sweep` call, on whatever rayon worker ran it, and summed into these fields by
+/// parallel.** `count_ns`, `select_ns` and the sweep's per-tile counters (`tiles_nonempty`,
+/// `sigma_visible`, `select_rows_visited`) are now **cross-worker sums**: each tile's own
+/// contribution ([`crate::viewport::TileResult`]'s [`TileStats`]) is measured locally inside that
+/// tile's own `tile_sweep` call, on whatever rayon worker ran it, and summed into these fields by
 /// [`TileStats::fold_into`] in `Engine::viewport`'s serial in-order fold. At `compute_threads = 1`
 /// this sum coincides with the old wall-clock partition (one worker, one tile at a time — nothing
 /// changes). At `compute_threads > 1` these fields report *aggregate CPU time spent*, not *wall
@@ -141,16 +140,14 @@ pub struct StageTimings {
     /// touch, then each tile's point columns and their append to the pending chunk. Serial, on
     /// the request's thread; handing a chunk to the sink is not counted.
     pub gather_ns: u64,
-    /// Design §7.3's density underlay: the sub-cell `count_range` calls, summed over tiles. Zero
-    /// when the request did not ask for the underlay, which is the default.
+    /// Design §7.3's density underlay: finding every non-empty tile's occupied sub-cells and
+    /// counting them, one walk of each shard's leaf, after the sweep and on the request's thread.
+    /// Zero when the request did not ask for the underlay, which is the default.
     ///
     /// A cost centre with no other visibility, and one whose shape differs from every other stage
     /// here: it is `tiles × 4^offset` range-cardinality calls, so it grows with a *request
     /// parameter* rather than with the corpus or the viewer's coverage. That is why it is capped
     /// (`max_underlay_cells`) and why the cap needs a number behind it rather than a guess.
-    ///
-    /// **Cross-worker sum under `compute_threads > 1`, not a wall-clock partition** — see this
-    /// struct's doc.
     pub underlay_ns: u64,
     /// Whole-request wall time inside `Engine::viewport`.
     pub total_ns: u64,
@@ -209,9 +206,9 @@ pub struct StageTimings {
     /// Points actually returned.
     pub points_gathered: u64,
     /// Sub-cell row ranges counted for the underlay: one per occupied sub-cell per segment of its
-    /// tile. An empty sub-cell is skipped by the search and costs nothing here. Above
-    /// `ViewportOut::sub_cells.len()` where a sub-cell's rows are all hidden from the viewer, or
-    /// lie in more than one segment.
+    /// tile in a shard where the viewer sees anything. An empty sub-cell is skipped by the search
+    /// and costs nothing here. Above `ViewportOut::sub_cells.len()` where a sub-cell's rows are
+    /// all hidden from the viewer, or lie in more than one segment.
     pub underlay_cells_evaluated: u64,
     /// Tiles whose served rows were read from the identity bands rather than the identity column.
     pub tiles_from_bands: u64,
@@ -402,12 +399,10 @@ pub struct TileStats {
     pub count_ns: u64,
     pub select_ns: u64,
     pub gather_ns: u64,
-    pub underlay_ns: u64,
     pub tiles_nonempty: u64,
     pub sigma_visible: u64,
     pub select_rows_visited: u64,
     pub points_gathered: u64,
-    pub underlay_cells_evaluated: u64,
     pub tiles_from_bands: u64,
     pub tiles_bands_widened: u64,
     pub tiles_sparse_after_read: u64,
@@ -423,12 +418,10 @@ impl TileStats {
         t.count_ns += self.count_ns;
         t.select_ns += self.select_ns;
         t.gather_ns += self.gather_ns;
-        t.underlay_ns += self.underlay_ns;
         t.tiles_nonempty += self.tiles_nonempty;
         t.sigma_visible += self.sigma_visible;
         t.select_rows_visited += self.select_rows_visited;
         t.points_gathered += self.points_gathered;
-        t.underlay_cells_evaluated += self.underlay_cells_evaluated;
         t.tiles_from_bands += self.tiles_from_bands;
         t.tiles_bands_widened += self.tiles_bands_widened;
         t.tiles_sparse_after_read += self.tiles_sparse_after_read;

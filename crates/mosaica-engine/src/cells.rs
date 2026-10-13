@@ -91,7 +91,6 @@ pub fn count_by_ranges<'a>(
     cells: Range<u64>,
 ) -> RangeCounts {
     assert!(depth <= 16, "a cell deeper than 16 is not a row range");
-    let shift = 32 - 2 * u32::from(depth);
     let mut found: Vec<(u64, u64)> = Vec::new();
     let mut visited = 0u64;
     let mut several = false;
@@ -99,19 +98,9 @@ pub fn count_by_ranges<'a>(
     let mut rows: Vec<Range<u32>> = Vec::new();
     for (k, (segment, row_base, within)) in parts.into_iter().enumerate() {
         several |= k > 0;
-        let codes = segment.morton.u32();
-        let start = first_code_at_or_past(segment, cells.start << shift, within.clone());
-        let end = first_code_at_or_past(segment, cells.end << shift, start..within.end) as usize;
         occupied.clear();
         rows.clear();
-        let mut i = start as usize;
-        while i < end {
-            let cell = u64::from(codes[i]) >> shift;
-            let j = i + codes[i..end].partition_point(|&c| u64::from(c) >> shift <= cell);
-            occupied.push(cell);
-            rows.push(row_base + i as u32..row_base + j as u32);
-            i = j;
-        }
+        cell_ranges(segment, row_base, within, depth, cells.clone(), &mut occupied, &mut rows);
         visited += rows.len() as u64;
         if rows.is_empty() {
             continue;
@@ -131,8 +120,35 @@ pub fn count_by_ranges<'a>(
     }
 }
 
+/// Each occupied depth-`depth` cell in `cells` among `segment`'s rows `within`, ascending, pushed
+/// onto `occupied`, and its rows, offset by `row_base`, onto `rows`. Moves from one occupied cell
+/// to the next by binary search.
+pub(crate) fn cell_ranges(
+    segment: &SegmentData,
+    row_base: u32,
+    within: Range<u32>,
+    depth: u8,
+    cells: Range<u64>,
+    occupied: &mut Vec<u64>,
+    rows: &mut Vec<Range<u32>>,
+) {
+    debug_assert!(depth <= 16, "a cell deeper than 16 is not a row range");
+    let shift = 32 - 2 * u32::from(depth);
+    let codes = segment.morton.u32();
+    let start = first_code_at_or_past(segment, cells.start << shift, within.clone());
+    let end = first_code_at_or_past(segment, cells.end << shift, start..within.end) as usize;
+    let mut i = start as usize;
+    while i < end {
+        let cell = u64::from(codes[i]) >> shift;
+        let j = i + codes[i..end].partition_point(|&c| u64::from(c) >> shift <= cell);
+        occupied.push(cell);
+        rows.push(row_base + i as u32..row_base + j as u32);
+        i = j;
+    }
+}
+
 /// Sort `(key, count)` pairs and add the counts of equal keys.
-fn add_equal_keys<K: Ord + Copy>(mut pairs: Vec<(K, u64)>) -> Vec<(K, u64)> {
+pub(crate) fn add_equal_keys<K: Ord + Copy>(mut pairs: Vec<(K, u64)>) -> Vec<(K, u64)> {
     pairs.sort_unstable_by_key(|&(key, _)| key);
     let mut out: Vec<(K, u64)> = Vec::with_capacity(pairs.len());
     for (key, n) in pairs {

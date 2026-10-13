@@ -74,6 +74,7 @@
 
 use std::sync::Arc;
 
+use mosaica_types::ShardId;
 use rustc_hash::FxHashMap;
 
 use crate::cache::SessionGeometry;
@@ -99,15 +100,16 @@ pub(crate) const BACKGROUND_DEPTH: u8 = 12;
 /// **A value rather than a borrow**, because the fill outlives the request: the engine holds no
 /// session registry (`crate::refresh`'s module doc makes the same observation about the refresh
 /// pass, and solves it the same way — everything the background work needs travels with the work).
-/// The two `Arc`s are the request's own, so this clones a generation pointer and a geometry pointer
-/// and copies a term set, not a mask and not a projection.
+/// The `Arc`s are the request's own, so this clones a generation pointer and a geometry pointer per
+/// shard and copies a term set, not a mask and not a projection.
 pub(crate) struct LadderTask {
     /// The request's mask, which the rungs are filed under, and whose session it is.
     pub(crate) identity: crate::figures::MaskIdentity,
     pub(crate) view: String,
     pub(crate) satisfied: crate::session::Satisfied,
     pub(crate) generation: Arc<Generation>,
-    pub(crate) geometry: Arc<SessionGeometry>,
+    /// The geometry of every shard holding the view, ascending by shard.
+    pub(crate) geometries: Vec<(ShardId, Arc<SessionGeometry>)>,
 }
 
 /// The engine handles one fill runs against, taken once at [`crate::Engine::open`].
@@ -194,7 +196,6 @@ fn run(
     cancel: &CancelToken,
 ) {
     let generation = &task.generation;
-    let shard = generation.only_shard();
     let mut key = OccupancyKey::of(&task.identity, &task.view, BACKGROUND_DEPTH);
     // **The memo first, before anything is composed.** A session already served at this depth has
     // every rung below it too, so there is nothing here to do and no mask worth building.
@@ -204,33 +205,47 @@ fn run(
         return;
     }
 
-    let Some(view_data) = shard.data.views.get(&task.view) else {
-        return;
-    };
-    let Ok(denied) = shard.denied_in(&task.view) else {
-        return;
-    };
-    let Ok(segments) = crate::viewport::segments_with_row_bases(&task.view, view_data) else {
-        return;
-    };
     // **Composed here rather than carried from the request**, because a mask borrows the projection
     // and this runs after the request has returned. It is the same composition over the same
-    // inputs — the request's own generation and geometry travel with the task — so the rungs are
+    // inputs — the request's own generation and geometries travel with the task — so the rungs are
     // exactly what that session's next zoom would have computed for itself.
-    let mask = shard.compose(
-        &task.satisfied,
-        Arc::clone(&task.geometry.projection),
-        &task.view,
-        &view_data.row_space,
-        denied,
-    );
+    let mut leaves = Vec::with_capacity(task.geometries.len());
+    let mut segments = Vec::new();
+    for (id, geometry) in &task.geometries {
+        let Some(shard) = generation.shard(*id) else {
+            return;
+        };
+        let Some(view_data) = shard.data.views.get(&task.view) else {
+            return;
+        };
+        let Ok(denied) = shard.denied_in(&task.view) else {
+            return;
+        };
+        let Ok(held) = crate::viewport::segments_with_row_bases(&task.view, view_data) else {
+            return;
+        };
+        segments.extend(held.into_iter().map(|(segment, base)| (*id, segment, base)));
+        let leaf = shard.compose(
+            &task.satisfied,
+            Arc::clone(&geometry.projection),
+            &task.view,
+            &view_data.row_space,
+            denied,
+        );
+        leaves.push((*id, leaf));
+    }
+    let mask = crate::compose::ShardedMask::new(leaves);
     if cancel.is_cancelled() {
         return;
     }
     counters
         .occupancy_walks
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let ladder = crate::occupancy::occupied_tiles_ladder(&mask, &segments, BACKGROUND_DEPTH);
+    let parts: Vec<crate::occupancy::OccupancyPart<'_>> = segments
+        .iter()
+        .map(|&(id, segment, base)| (mask.leaf(id), segment, base))
+        .collect();
+    let ladder = crate::occupancy::occupied_tiles_ladder(&parts, BACKGROUND_DEPTH);
     for rung in 0..=BACKGROUND_DEPTH {
         key.depth = rung;
         let _ = occupancy.get_or_derive(key.clone(), None, |_| OccupiedTiles(ladder.at(rung)));

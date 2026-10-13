@@ -38,24 +38,32 @@ pub(super) enum Tagging {
     None,
 }
 
-/// One served point, as its tag is read: its row, the segment holding it and its entry in that
-/// segment's bands where the band route served it.
+/// One served point, as its tag is read: its row, the segment holding it, by its place in the
+/// view's segments, and its entry in that segment's bands where the band route served it.
 pub(super) struct TaggedPoint {
-    pub(super) row: u32,
+    row: ShardRow,
     segment: usize,
     entry: Option<u32>,
 }
 
+impl TaggedPoint {
+    /// The point's row in its own shard's row space.
+    pub(super) fn local_row(&self) -> u32 {
+        let shard = self.row.shard();
+        self.row.row_in(shard).expect("the row's own shard").raw()
+    }
+}
+
 /// Every point the emit pass will gather, in its order.
 pub(super) fn tagged_points(
-    served: &ServedView<'_>,
+    segments: &ViewSegments<'_>,
     swept: &[TileSweepOut<'_>],
 ) -> Vec<TaggedPoint> {
     let mut points = Vec::with_capacity(swept.iter().map(|ts| ts.rows.len()).sum());
-    let segments = &served.only_side().segments;
     for ts in swept {
         for (i, &row) in ts.rows.iter().enumerate() {
-            let (segment, _) = segment_holding(segments, row)
+            let (segment, _) = segments
+                .place(row)
                 .expect("a selected row lies in the view's row space");
             points.push(TaggedPoint {
                 row,
@@ -98,12 +106,12 @@ impl LevelLabels {
         match &self.rows {
             RowLabels::Column => {
                 if let Some(column) = column {
-                    column.for_each_label(point.row, |label| out.push(label));
+                    column.for_each_label(point.local_row(), |label| out.push(label));
                 }
                 true
             }
-            RowLabels::Pack(pack) if point.row < pack.rows() => {
-                let label = pack.label(point.row as usize);
+            RowLabels::Pack(pack) if point.local_row() < pack.rows() => {
+                let label = pack.label(point.local_row() as usize);
                 if label != ROW_COLUMN_HOLE {
                     out.push(label);
                 }
@@ -344,7 +352,7 @@ impl Engine {
             if !unread.is_empty() {
                 // Each unread point's row, ascending, beside the point it is.
                 let mut at: Vec<(u32, usize)> =
-                    unread.iter().map(|&i| (points[i].row, i)).collect();
+                    unread.iter().map(|&i| (points[i].local_row(), i)).collect();
                 at.sort_unstable();
                 let mut set = croaring::Bitmap::new();
                 set.add_many(&at.iter().map(|&(row, _)| row).collect::<Vec<u32>>());

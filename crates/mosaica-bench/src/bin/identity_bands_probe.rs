@@ -55,7 +55,7 @@ use croaring::Bitmap;
 use memmap2::Mmap;
 use serde_json::{json, Value};
 
-use mosaica_engine::occupancy::occupied_tiles_ladder;
+use mosaica_engine::occupancy::{occupied_tiles_ladder, OccupancyPart};
 use mosaica_engine::select::{served_count, SelectParams, Threshold};
 use mosaica_engine::viewport::{segments_with_row_bases, ViewportRequest};
 use mosaica_engine::{compose::EffectiveMask, Engine, EngineConfig};
@@ -1407,8 +1407,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .get(&view_id)
             .ok_or("the view vanished between open and compose")?;
         let segments = segments_with_row_bases(&view_id, view_data)?;
+        let parts: Vec<OccupancyPart<'_>> = segments
+            .iter()
+            .map(|&(segment, base)| (Some(&mask), segment, base))
+            .collect();
         let before = Counters::now();
-        let rungs = occupied_tiles_ladder(&mask, &segments, LADDER_DEPTH);
+        let rungs = occupied_tiles_ladder(&parts, LADDER_DEPTH);
         let ladder_cost = before.since(ticks);
         let ladder: Vec<u64> = (0..=LADDER_DEPTH).map(|d| rungs.at(d)).collect();
         // The depth whose expected mark count is nearest the client's budget: `16 · N_occ(d)`

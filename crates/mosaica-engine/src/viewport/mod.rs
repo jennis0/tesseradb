@@ -7,10 +7,10 @@
 //! [`Engine::viewport`] runs the same producer into a collecting sink and returns the batch
 //! [`ViewportOut`]. Selection itself — floor, threshold and cap over `mosaica_id`, evaluated
 //! inside the mask — lives in [`crate::select`]; this module resolves the per-request parameters
-//! and gathers what selection returns. The request is two phases: the **sweep**, which counts,
-//! selects and reads the underlay per tile with no gather, and the **emit**, a serial pass over
-//! the swept tiles in response order that gathers and hands off flush-sized [`PointColumns`]
-//! chunks.
+//! and gathers what selection returns. The request is two phases: the **sweep**, which counts
+//! every tile's parts in one walk of each shard's leaf, selects per tile across every shard's
+//! parts, and reads the underlay, with no gather, and the **emit**, a serial pass over the swept
+//! tiles in response order that gathers and hands off flush-sized [`PointColumns`] chunks.
 //!
 //! A request loads the generation pointer once, at the start, and every phase reads from that
 //! snapshot, so a concurrent publication cannot mix state from two generations into one answer.
@@ -45,7 +45,9 @@ use mosaica_store::read::{ScalarSlice, SegmentData, ViewData};
 use mosaica_store::vocabulary::Vocabularies;
 use mosaica_store::tile_ranges_all;
 use mosaica_types::layer::ComputedProperty;
-use mosaica_types::{EntityId, GenerationStamp, RowId, TermId, MosaicaId, API_VERSION};
+use mosaica_types::{
+    EntityId, GenerationStamp, RowId, ShardId, ShardRow, TermId, MosaicaId, API_VERSION,
+};
 
 use crate::cache::{CacheWaitEnded, Peek, RowProjectionKey, SessionGeometry};
 use crate::cancel::CancelToken;
@@ -53,7 +55,7 @@ use crate::compose::{visible_to, EffectiveMask, FilterRows, ShardedMask};
 use crate::figures::{MaskIdentity, SideVersions};
 use crate::filter::{Endpoint, Family, FilterOperand, Scalar};
 use crate::membership_column::{ServedLayer, ServedLevel};
-use crate::select::{SelectParams, Selection, SelectionPart, SelectionParts, Threshold};
+use crate::select::{SelectParams, SelectionPart, ShardParts, Threshold, TileSelection};
 use crate::engine::Engine;
 use crate::error::{EngineError, Result};
 use crate::session::Session;
@@ -107,7 +109,7 @@ use out::{emit_points, CollectSink, FilterBits, PointSchema};
 use tag::Tagging;
 use sweep::{
     resolve_scalars, scoped_render_scalars, tile_ranges, Gather, Swept, TileSweepOut, Tiling,
-    MAX_POINTS_FRAME_BYTES,
+    ViewSegments, MAX_POINTS_FRAME_BYTES,
 };
 
 /// `Err(EngineError::Cancelled)` once `cancel` has flipped, `Ok(())` otherwise (`None` never
@@ -221,7 +223,6 @@ impl Engine {
             coordinates,
             render_scalars,
         } = self.open_view(session, &generation, req.view, &req.cancel, &mut probe)?;
-        let mask = mask.into_only_leaf();
 
         // A presented stamp that differs from the one this response is answered from sets a flag,
         // and never selects, refuses or expires.
@@ -244,7 +245,7 @@ impl Engine {
             threshold: theta.threshold,
         };
 
-        let tiling = tile_ranges(tiles, &served.only_side().segments, &mut probe);
+        let tiling = tile_ranges(tiles, ViewSegments::of(&served), &mut probe);
 
         let (mask, region) =
             self.narrow_to_filters(&served, mask, &tiling, theta.v_total, &req, &mut probe)?;
@@ -252,8 +253,10 @@ impl Engine {
         // `point_rows` is a column projection only — the row set and tile split are unaffected —
         // so the gather reads exactly the render columns it names and no other. Under
         // `"highlight"` it reads none and builds no membership resolver: a client re-requesting
-        // only the highlight is not served the payload it already holds.
-        let highlight_only = req.point_rows == PointRows::Highlight && mask.has_highlight();
+        // only the highlight is not served the payload it already holds. Whether there is a
+        // highlight is the request's to say, whatever the viewer sees.
+        let highlighted = req.highlight.is_some();
+        let highlight_only = req.point_rows == PointRows::Highlight && highlighted;
         let render_scalars: Vec<DeclaredScalar> = match req.point_rows {
             PointRows::Highlight if highlight_only => Vec::new(),
             PointRows::Full | PointRows::Highlight => render_scalars,
@@ -285,7 +288,7 @@ impl Engine {
             stale,
             region,
             render_scalars: render_scalars.to_vec(),
-            highlighted: mask.has_highlight(),
+            highlighted,
         })
         .map_err(|SinkClosed| EngineError::Cancelled)?;
         // Reset the clock so the head's delivery is not charged to the stage that follows.
@@ -305,7 +308,7 @@ impl Engine {
             tile_counts,
             sub_cells,
             swept,
-        } = self.sweep_tiles(&served, &mask, &tiling, &params, &req, &mut probe)?;
+        } = self.sweep_tiles(&mask, &tiling, &params, &req, &mut probe)?;
 
         // The first flush: every count, before any point. `None`, not an empty slice, when the
         // underlay was not requested — the wire's frame-presence rule needs that distinction.
@@ -323,9 +326,12 @@ impl Engine {
         let names = artifacts::requested_layers(req.layers, &reachable);
         let taggings = self.taggings(&served, &names);
         let gathers = !highlight_only && swept.iter().any(|ts| !ts.rows.is_empty());
-        let membership = if gathers {
-            let points = tag::tagged_points(&served, &swept);
-            let ctx = DependencyContext::new(&served, &mask, &reachable);
+        // Tags read a layer's artifacts under one shard's leaf: `only_leaf` refuses a view over
+        // several.
+        let membership = if gathers && !names.is_empty() {
+            let mask = mask.only_leaf();
+            let points = tag::tagged_points(&tiling.segments, &swept);
+            let ctx = DependencyContext::new(&served, mask, &reachable);
             let dependency_served = self.dependency_gate(&ctx);
             let walked = match self.walk_set(&names, &taggings) {
                 walk if walk.is_empty() => None,
@@ -343,7 +349,7 @@ impl Engine {
                     };
                     Some(self.serve_artifacts(
                         &served,
-                        &mask,
+                        mask,
                         &tiling,
                         &ask,
                         walk,
@@ -357,7 +363,7 @@ impl Engine {
                 if let Tagging::Labels(registered) = tagging {
                     let tags = self.tag_layer(
                         &served,
-                        &mask,
+                        mask,
                         &req,
                         &dependency_served,
                         registered,
@@ -373,7 +379,7 @@ impl Engine {
                 .filter(|(_, tagging)| matches!(tagging, Tagging::Walk))
                 .map(|(name, _)| name.as_str())
                 .collect();
-            let rows: Vec<u32> = points.iter().map(|p| p.row).collect();
+            let rows: Vec<u32> = points.iter().map(|p| p.local_row()).collect();
             let mut columns = walked
                 .as_ref()
                 .map(|settled| {
@@ -405,8 +411,9 @@ impl Engine {
             &swept,
             &PointSchema {
                 render_scalars,
-                segments: &served.only_side().segments,
+                segments: &tiling.segments,
                 membership,
+                highlighted,
             },
             &mask,
             flush_bytes,

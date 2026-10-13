@@ -256,28 +256,6 @@ impl EffectiveMask {
         self
     }
 
-    /// Whether this request carried a highlight, which decides whether the points frame has a
-    /// `highlighted` column at all, and whether the artifacts frame's bit is `null`.
-    pub fn has_highlight(&self) -> bool {
-        self.highlight.is_some()
-    }
-
-    /// The rows in `r` that are visible, match the filter and satisfy the highlight:
-    /// `TileCount::highlighted`. `matched` is `r`'s [`Self::count_matched_range`], returned as is
-    /// without a highlight. `highlighted ≤ matched ≤ visible` always holds.
-    pub fn count_highlighted_range(&self, r: Range<u32>, matched: u64) -> u64 {
-        match &self.highlight {
-            None => matched,
-            Some(highlight) => {
-                debug_assert!(
-                    highlight.covers(&r),
-                    "a highlighted count over {r:?}, which the per-tile crossing never tested"
-                );
-                self.rows_in_range(r).and_cardinality(highlight.rows())
-            }
-        }
-    }
-
     /// Whether one served row satisfies the highlight — the points frame's bit. `false` with no
     /// highlight; no caller reads it then.
     pub fn is_highlighted(&self, row: u32) -> bool {
@@ -308,14 +286,67 @@ impl EffectiveMask {
     /// [`Self::count_range`] over each of `ranges`, each bitmap walked once
     /// ([`mosaica_roaring::RangeEnds`]).
     pub fn count_ranges(&self, ranges: &[Range<u32>]) -> Vec<u64> {
+        self.count_at(&mosaica_roaring::RangeEnds::of(ranges), None)
+    }
+
+    /// Each of `ranges`' visible, matched and highlighted rows: `TileCount`'s three counts for
+    /// every part of a request at once. The ends are sorted once, and each bitmap is walked once
+    /// per count. `ranges ∩ filter` is materialised once for the request, and narrowed in place
+    /// by the highlight: at most the filter's rows in the request, which the filter already holds.
+    pub fn count_parts(&self, ranges: &[Range<u32>]) -> RangeTallies {
         let ends = mosaica_roaring::RangeEnds::of(ranges);
-        let mut counts = ends.counts(self.base.bitmap());
+        let visible = self.count_at(&ends, None);
+        if self.filter.is_none() && self.highlight.is_none() {
+            return RangeTallies {
+                matched: visible.clone(),
+                highlighted: visible.clone(),
+                visible,
+            };
+        }
+        let mut within = Bitmap::new();
+        for r in ranges {
+            self.debug_assert_in_domain(r);
+            within.add_range(r.clone());
+        }
+        let matched = match &self.filter {
+            None => visible.clone(),
+            Some(filter) => {
+                within.and_inplace(filter.rows());
+                self.count_at(&ends, Some(&within))
+            }
+        };
+        let highlighted = match &self.highlight {
+            None => matched.clone(),
+            Some(highlight) => {
+                debug_assert!(
+                    ranges.iter().all(|r| highlight.covers(r)),
+                    "a highlighted count over a range the per-tile crossing never tested"
+                );
+                within.and_inplace(highlight.rows());
+                self.count_at(&ends, Some(&within))
+            }
+        };
+        RangeTallies {
+            visible,
+            matched,
+            highlighted,
+        }
+    }
+
+    /// The composed rows in each range of `ends`, within `within` where given: the term-by-term
+    /// arithmetic of [`Self::count_range`], each bitmap walked once.
+    fn count_at(&self, ends: &mosaica_roaring::RangeEnds, within: Option<&Bitmap>) -> Vec<u64> {
+        let count = |set: &Bitmap| match within {
+            Some(within) => ends.counts(&set.and(within)),
+            None => ends.counts(set),
+        };
+        let mut counts = count(self.base.bitmap());
         if !self.minus.is_empty() {
-            let minus = ends.counts(&self.minus);
+            let minus = count(&self.minus);
             counts.iter_mut().zip(minus).for_each(|(c, m)| *c -= m);
         }
         if !self.plus.is_empty() {
-            let plus = ends.counts(&self.plus);
+            let plus = count(&self.plus);
             counts.iter_mut().zip(plus).for_each(|(c, p)| *c += p);
         }
         counts
@@ -333,18 +364,6 @@ impl EffectiveMask {
     /// it.
     pub fn visible_total(&self) -> u64 {
         self.base.cardinality() - self.minus.cardinality() + self.plus.cardinality()
-    }
-
-    /// The rows in `r` that are visible and match the filter: `TileCount::matched`. `visible` is
-    /// `r`'s [`Self::count_range`], returned as is without a filter.
-    pub fn count_matched_range(&self, r: Range<u32>, visible: u64) -> u64 {
-        match &self.filter {
-            None => visible,
-            // With a filter present the term-by-term arithmetic does not hold — a row can be in
-            // `base` and out of the filter — so this materialises the intersection instead.
-            // O(containers in the range), not O(rows).
-            Some(_) => self.rows_in_range(r).cardinality(),
-        }
     }
 
     /// The rows of `here` this request's filter admits — `here ∩ M_sel` — or `None` with no
@@ -482,6 +501,32 @@ impl EffectiveMask {
     }
 }
 
+#[cfg(test)]
+impl EffectiveMask {
+    /// A mask seeing exactly `rows`, with no overlay or buffer effects.
+    pub(crate) fn of_rows(rows: Bitmap) -> EffectiveMask {
+        EffectiveMask {
+            base: Arc::new(RowProjection::from_rows(rows)),
+            minus: Bitmap::new(),
+            plus: Bitmap::new(),
+            filter: None,
+            highlight: None,
+            whole: std::sync::OnceLock::new(),
+        }
+    }
+}
+
+/// [`EffectiveMask::count_parts`]'s three counts, each aligned with the ranges asked about.
+/// `highlighted ≤ matched ≤ visible` in every range.
+pub struct RangeTallies {
+    /// The composed rows, blind to the filter.
+    pub visible: Vec<u64>,
+    /// Of `visible`, the rows the filter admits; `visible` without a filter.
+    pub matched: Vec<u64>,
+    /// Of `matched`, the rows the highlight admits; `matched` without a highlight.
+    pub highlighted: Vec<u64>,
+}
+
 /// See [`EffectiveMask::decode_source`]. Which variant a caller received is the diffs-empty
 /// route choice, observable in timing, not in output.
 pub enum DecodeSource<'a> {
@@ -505,12 +550,16 @@ impl DecodeSource<'_> {
 
 /// A viewer's composed mask over every shard of a view: one [`EffectiveMask`] per shard, each over
 /// that shard's row space, ascending by shard. A shard whose unfiltered leaf holds no visible row
-/// has no leaf, so a request reads nothing of it; which shards those are depends on where the
-/// viewer's items sit, so nothing keyed or served may depend on the list. Every operation names
-/// the shard it asks about, and answers for a shard without a leaf as for an empty one.
+/// has no leaf, so a request counts, walks and selects nothing in it; which shards those are
+/// depends on where the viewer's items sit, so nothing keyed or served may depend on the list.
+/// Every operation names the shard it asks about, and answers for a shard without a leaf as for an
+/// empty one. A viewer who sees nothing has the request's filter evaluated in the first shard's
+/// empty leaf ([`Self::filtered_leaves`]).
 pub struct ShardedMask {
     leaves: Vec<(ShardId, EffectiveMask)>,
-    /// The leaves left out, kept only for [`Self::only_leaf`].
+    /// The leaves left out, ascending by shard: the first is where a viewer who sees nothing has
+    /// the filter evaluated and narrowed ([`Self::filtered_leaves`]), and [`Self::only_leaf`]
+    /// answers with it on a view of one shard.
     left_out: Vec<(ShardId, EffectiveMask)>,
 }
 
@@ -559,6 +608,58 @@ impl ShardedMask {
             Some(leaf) => leaf.count_ranges(ranges),
             None => vec![0; ranges.len()],
         }
+    }
+
+    /// The leaves a request's filter is evaluated in: every leaf, or where the viewer sees nothing,
+    /// the first shard's, so a filter is refused, and a region's verdict reached, whatever the
+    /// viewer sees.
+    pub fn filtered_leaves(&self) -> impl Iterator<Item = (ShardId, &EffectiveMask)> {
+        let leaves = match self.leaves.is_empty() {
+            true => &self.left_out[..self.left_out.len().min(1)],
+            false => &self.leaves[..],
+        };
+        leaves.iter().map(|(shard, leaf)| (*shard, leaf))
+    }
+
+    /// Each of [`Self::filtered_leaves`] narrowed by its shard's filter rows.
+    pub fn with_filters(self, rows: Vec<(ShardId, FilterRows)>) -> ShardedMask {
+        self.narrowed(rows, EffectiveMask::with_filter)
+    }
+
+    /// Each of [`Self::filtered_leaves`] given its shard's highlight rows.
+    pub fn with_highlights(self, rows: Vec<(ShardId, FilterRows)>) -> ShardedMask {
+        self.narrowed(rows, EffectiveMask::with_highlight)
+    }
+
+    /// `rows` ascend by shard, as [`Self::filtered_leaves`] does.
+    fn narrowed(
+        mut self,
+        rows: Vec<(ShardId, FilterRows)>,
+        narrow: fn(EffectiveMask, FilterRows) -> EffectiveMask,
+    ) -> ShardedMask {
+        let leaves = match self.leaves.is_empty() {
+            true => &mut self.left_out,
+            false => &mut self.leaves,
+        };
+        let mut rows = rows.into_iter().peekable();
+        *leaves = std::mem::take(leaves)
+            .into_iter()
+            .map(|(shard, leaf)| match rows.next_if(|(held, _)| *held == shard) {
+                Some((_, rows)) => (shard, narrow(leaf, rows)),
+                None => (shard, leaf),
+            })
+            .collect();
+        debug_assert!(rows.next().is_none(), "filter rows for a shard with no leaf");
+        self
+    }
+
+    /// Whether `row` satisfies the request's highlight ([`EffectiveMask::is_highlighted`]).
+    pub fn is_highlighted(&self, row: ShardRow) -> bool {
+        let shard = row.shard();
+        self.leaf(shard).is_some_and(|leaf| {
+            let row = row.row_in(shard).expect("the row's own shard");
+            leaf.is_highlighted(row.raw())
+        })
     }
 
     /// [`EffectiveMask::rows_in_range`] in `shard`.
@@ -1210,6 +1311,59 @@ mod sharded_tests {
         }
     }
 
+    /// The matched and highlighted counts of many ranges at once equal each range's own
+    /// composition, filtered or not, with diffs and without.
+    #[test]
+    fn batched_matched_and_highlighted_counts_equal_each_range_composed() {
+        for seed in 0..16u64 {
+            // Diffs, a filter and a highlight each present or not, in every combination.
+            let (diffs, filtered, lit) = (seed % 2 == 1, seed / 2 % 2 == 1, seed / 4 % 2 == 1);
+            let mut rng = StdRng::seed_from_u64(seed);
+            let rows = SPACES[1];
+            let (base, minus, plus) = parts(&mut rng, rows);
+            let (minus, plus) = match diffs {
+                true => (minus, plus),
+                false => (Bitmap::new(), Bitmap::new()),
+            };
+            // Disjoint, in no order, as a request's tile parts are.
+            let mut ranges: Vec<Range<u32>> = Vec::new();
+            for k in 0..rows / 1_000 {
+                if rng.gen_bool(0.6) {
+                    let at = k * 1_000;
+                    ranges.push(at + rng.gen_range(0..300)..at + rng.gen_range(300..1_000));
+                }
+            }
+            ranges.reverse();
+            let mut domain = ranges.clone();
+            domain.sort_by_key(|r| r.start);
+            let admits = some_set(&mut rng, rows);
+            let highlight = some_set(&mut rng, rows);
+            let mut mask = leaf(base, minus, plus);
+            if filtered {
+                mask = mask.with_filter(FilterRows::Complete(admits));
+            }
+            if lit {
+                mask = mask.with_highlight(FilterRows::Viewport {
+                    rows: highlight.clone(),
+                    domain,
+                });
+            }
+            let tallies = mask.count_parts(&ranges);
+            assert_eq!(tallies.visible, mask.count_ranges(&ranges), "seed {seed}");
+            for (at, r) in ranges.iter().enumerate() {
+                let case = format!("seed {seed}, {r:?}");
+                assert_eq!(tallies.visible[at], mask.count_range(r.clone()), "{case}");
+                let composed = mask.rows_in_range(r.clone());
+                assert_eq!(tallies.matched[at], composed.cardinality(), "{case}: matched");
+                let highlighted = match lit {
+                    true => composed.and_cardinality(&highlight),
+                    false => composed.cardinality(),
+                };
+                assert_eq!(tallies.highlighted[at], highlighted, "{case}: highlighted");
+            }
+        }
+    }
+
     /// A shard where the viewer sees nothing has no leaf, however much its projection held, and
     /// every operation answers for it as for an empty one. A shard seen only through rows the
     /// buffer adds keeps its leaf.
@@ -1239,6 +1393,33 @@ mod sharded_tests {
         assert_eq!(mask.or(zero, &Bitmap::of(&[1])), Bitmap::of(&[1]));
         assert!(mask.andnot(zero, &Bitmap::new()).is_empty());
         assert_eq!(mask.count_ranges(one, &[0..5, 5..10]), vec![0, 2]);
+    }
+
+    /// A filter is evaluated in every leaf, or where the viewer sees nothing, in the first shard,
+    /// and narrows only the leaf it was evaluated in.
+    #[test]
+    fn a_filter_narrows_the_leaves_it_was_evaluated_in() {
+        let [zero, one, two] = [0, 1, 2].map(|raw| ShardId::new(raw).unwrap());
+        let some = || leaf(Bitmap::of(&[1, 2, 3]), Bitmap::new(), Bitmap::new());
+        let none = || leaf(Bitmap::new(), Bitmap::new(), Bitmap::new());
+        let admits = || FilterRows::Complete(Bitmap::of(&[2]));
+
+        let mask = ShardedMask::new([(zero, none()), (one, some()), (two, some())]);
+        let evaluated: Vec<ShardId> = mask.filtered_leaves().map(|(shard, _)| shard).collect();
+        assert_eq!(evaluated, vec![one, two]);
+        let mask = mask.with_filters(vec![(two, admits())]);
+        assert_eq!(mask.leaf(one).unwrap().rows_in_range(0..4).cardinality(), 3);
+        assert_eq!(mask.leaf(two).unwrap().rows_in_range(0..4).cardinality(), 1);
+        let mask = mask.with_highlights(vec![(one, admits()), (two, admits())]);
+        assert!(mask.is_highlighted(ShardRow::new(one, RowId::new(2))));
+        assert!(!mask.is_highlighted(ShardRow::new(one, RowId::new(3))));
+        assert!(!mask.is_highlighted(ShardRow::new(zero, RowId::new(2))));
+
+        let nothing = ShardedMask::new([(one, none()), (zero, none())]);
+        let evaluated: Vec<ShardId> = nothing.filtered_leaves().map(|(shard, _)| shard).collect();
+        assert_eq!(evaluated, vec![zero]);
+        let nothing = ShardedMask::new([(zero, none())]).with_highlights(vec![(zero, admits())]);
+        assert!(nothing.only_leaf().is_highlighted(2));
     }
 
     /// The shim answers with a one-shard mask's leaf whether or not it was left out.

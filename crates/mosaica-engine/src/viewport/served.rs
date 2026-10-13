@@ -52,6 +52,13 @@ impl ServedSide<'_> {
 }
 
 impl<'a> ServedView<'a> {
+    /// The place in [`Self::sides`] of `shard`'s side. Panics where the view has none there.
+    pub(crate) fn side_of(&self, shard: mosaica_types::ShardId) -> usize {
+        self.sides
+            .binary_search_by_key(&shard, |side| side.shard.id())
+            .expect("a shard holding the view")
+    }
+
     /// The one side of a view of one shard, for a route that does not yet read every shard.
     /// Panics where the view has a second shard.
     pub(crate) fn only_side(&self) -> &ServedSide<'a> {

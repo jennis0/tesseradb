@@ -361,7 +361,6 @@ impl Engine {
             coordinates,
             ..
         } = self.open_view(session, &generation, req.view, &req.cancel, &mut probe)?;
-        let mask = mask.into_only_leaf();
         let stale = req
             .stamp
             .as_ref()
@@ -379,6 +378,7 @@ impl Engine {
         let v_total = mask.visible_total();
         let (mask, region) =
             self.narrow_to_filters(&served, mask, &tiling, v_total, &tiles_req, &mut probe)?;
+        let mask = mask.into_only_leaf();
 
         sink.head(ViewportArtifactsHead {
             coordinates,

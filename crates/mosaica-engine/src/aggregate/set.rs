@@ -203,6 +203,7 @@ pub(super) fn compose(
     let whole = || Set::whole(open);
     let (set, reference) = engine.route_filters_under(
         served,
+        served.only_side(),
         open.mask.only_leaf(),
         &candidate,
         &resolved,
@@ -247,7 +248,7 @@ fn routed(engine: &Engine, open: &OpenView<'_>, routed: RoutedFilter) -> Result<
             let whole_view = 0..u32::try_from(total).unwrap_or(u32::MAX);
             let matched = engine.evaluate_row_route(
                 &tree,
-                served,
+                served.only_side(),
                 std::slice::from_ref(&whole_view),
                 total,
                 false,
@@ -272,7 +273,9 @@ pub(crate) fn entities_passing(
     check_cancelled(cancel)?;
     let resolved = ResolvedLeaves::default();
     let mask = open.mask.only_leaf();
-    engine.route_filters_under(&open.served, mask, candidate, &resolved, cancel, |route| {
+    let served = &open.served;
+    let side = served.only_side();
+    engine.route_filters_under(served, side, mask, candidate, &resolved, cancel, |route| {
         let set = routed(engine, open, route(expr, false)?)?;
         check_cancelled(cancel)?;
         let entities = match set.held {

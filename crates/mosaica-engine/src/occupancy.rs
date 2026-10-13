@@ -387,7 +387,8 @@ impl OccupancyLadder {
 ///
 /// # One segment counts; two or more estimate
 ///
-/// **The predicate is `segments.len() == 1` and it is the whole of the route choice.** At one
+/// **The predicate is `parts.len() == 1` and it is the whole of the route choice**: one segment
+/// across every shard holding the view, whether or not the viewer sees anything in it. At one
 /// segment the walk emits each tile once and ascending, so the descent's "the ancestor changed"
 /// test fires exactly `N_occ(d')` times at each depth and a **counter is the accumulator** — the
 /// exact answer costs an increment where the sketch costs a mix, an index and a compare. Measured
@@ -401,7 +402,8 @@ impl OccupancyLadder {
 /// tile once per segment that holds it. That is what the union, the sort and the direct-mapped
 /// bitset the three earlier arms carried all existed to do, and it is the case the sketch removes:
 /// adding a tile twice to a sketch is adding it once, so one sketch fed by every segment *is* the
-/// union with nothing to choose between.
+/// union with nothing to choose between. A view over several shards is the same case: one plane fed
+/// by every segment of every shard.
 ///
 /// **θ therefore changes character across a flush**, from a count to an estimate at the first
 /// publication that gives a view its second segment. That is accepted rather than tolerated: θ
@@ -414,19 +416,24 @@ impl OccupancyLadder {
 /// **Every conformance fixture and every demo corpus is single-segment**, so the route the
 /// differential exercises is the exact one; `reference/oracle/occupancy.py` says where that leaves
 /// the estimator's coverage.
-pub fn occupied_tiles_ladder(
-    mask: &EffectiveMask,
-    segments: &[(&SegmentData, u32)],
-    depth: u8,
-) -> OccupancyLadder {
-    if segments.len() == 1 {
-        occupied_tiles_ladder_exact(mask, segments, depth)
+pub fn occupied_tiles_ladder(parts: &[OccupancyPart<'_>], depth: u8) -> OccupancyLadder {
+    if parts.len() == 1 {
+        occupied_tiles_ladder_exact(parts, depth)
     } else {
-        occupied_tiles_ladder_with_precision(mask, segments, depth, SKETCH_PRECISION)
+        sketched_ladder(parts, depth, SKETCH_PRECISION)
     }
 }
 
-/// `N_occ(d)` for every `d` in `0..=depth`, **counted**, from one walk of a single segment.
+/// One segment of a view, as the occupancy walk reads it: the viewer's leaf over the shard holding
+/// it, or `None` where the viewer sees nothing in that shard, then the segment and where its rows
+/// begin in the shard's row space.
+///
+/// A view's parts are every segment of every shard holding the view, whatever the viewer sees: the
+/// count of them is what chooses the counted route, so the route, like the anchor, does not depend
+/// on where a viewer's items sit. A part without a leaf is not walked.
+pub type OccupancyPart<'a> = (Option<&'a EffectiveMask>, &'a SegmentData, u32);
+
+/// `N_occ(d)` for every `d` in `0..=depth`, **counted**, from one walk of a view's only segment.
 ///
 /// # Sound only at one segment, and the caller is what makes it so
 ///
@@ -440,21 +447,20 @@ pub fn occupied_tiles_ladder(
 /// **Public so a measurement prices the two accumulators over the identical walk**, exactly as
 /// [`for_each_occupied_tile`] is. It asserts its own precondition rather than trusting a caller,
 /// because the failure is a wrong number rather than a crash.
-pub fn occupied_tiles_ladder_exact(
-    mask: &EffectiveMask,
-    segments: &[(&SegmentData, u32)],
-    depth: u8,
-) -> OccupancyLadder {
+pub fn occupied_tiles_ladder_exact(parts: &[OccupancyPart<'_>], depth: u8) -> OccupancyLadder {
     debug_assert!(depth <= 16, "the grid is 2^16 x 2^16, so depth 16 is the deepest");
     assert_eq!(
-        segments.len(),
+        parts.len(),
         1,
         "the counted route is sound at one segment only; `occupied_tiles_ladder` owns the predicate"
     );
     let mut counted = [0u64; 17];
     // `u64::MAX` is not a tile index at any depth, so it is a sound "nothing seen yet".
     let mut last = [u64::MAX; 17];
-    let (segment, row_base) = segments[0];
+    let (mask, segment, row_base) = parts[0];
+    let Some(mask) = mask else {
+        return finish_ladder(counted, depth, true);
+    };
     for_each_occupied_tile(mask, segment, row_base, depth, |tile| {
         let mut d = depth;
         loop {
@@ -473,16 +479,26 @@ pub fn occupied_tiles_ladder_exact(
     finish_ladder(counted, depth, true)
 }
 
-/// [`occupied_tiles_ladder`]'s **sketch** route at an arbitrary precision, whatever the segment
-/// count. The engine takes [`SKETCH_PRECISION`] and only above one segment; `mosaica-bench`'s
-/// `occupancy_sketch` sweeps this to choose it, and prices it at one segment against the counted
-/// route above.
+/// [`occupied_tiles_ladder`]'s **sketch** route at an arbitrary precision over one mask, whatever
+/// the segment count. The engine takes [`SKETCH_PRECISION`] and only above one segment;
+/// `mosaica-bench`'s `occupancy_sketch` sweeps this to choose it, and prices it at one segment
+/// against the counted route above.
 pub fn occupied_tiles_ladder_with_precision(
     mask: &EffectiveMask,
     segments: &[(&SegmentData, u32)],
     depth: u8,
     precision: u32,
 ) -> OccupancyLadder {
+    let parts: Vec<OccupancyPart<'_>> = segments
+        .iter()
+        .map(|&(segment, row_base)| (Some(mask), segment, row_base))
+        .collect();
+    sketched_ladder(&parts, depth, precision)
+}
+
+/// The sketch route over `parts`: one register plane fed by every part walked, so a tile several
+/// segments or shards hold is added once.
+fn sketched_ladder(parts: &[OccupancyPart<'_>], depth: u8, precision: u32) -> OccupancyLadder {
     debug_assert!(depth <= 16, "the grid is 2^16 x 2^16, so depth 16 is the deepest");
     // **One flat plane, not a `Vec` of sketches.** The descent below is the hottest loop in the
     // walk — it runs `Σ_{d' <= d} N_occ_s(d')` times — and a vector of vectors would pay a second
@@ -494,8 +510,11 @@ pub fn occupied_tiles_ladder_with_precision(
     // `u64::MAX` is not a tile index at any depth, so it is a sound "nothing seen yet".
     let mut last = [u64::MAX; 17];
 
-    for (segment, row_base) in segments {
-        for_each_occupied_tile(mask, segment, *row_base, depth, |tile| {
+    for &(mask, segment, row_base) in parts {
+        let Some(mask) = mask else {
+            continue;
+        };
+        for_each_occupied_tile(mask, segment, row_base, depth, |tile| {
             let mut d = depth;
             loop {
                 let ancestor = tile >> (2 * u32::from(depth - d));
@@ -563,7 +582,11 @@ fn finish_ladder(raw_rungs: [u64; 17], depth: u8, exact: bool) -> OccupancyLadde
 /// This discards the shallower rungs [`occupied_tiles_ladder`] filled on the way. Callers that
 /// memoise — the request path does — should take the ladder and keep them.
 pub fn occupied_tiles(mask: &EffectiveMask, segments: &[(&SegmentData, u32)], depth: u8) -> u64 {
-    occupied_tiles_ladder(mask, segments, depth).at(depth)
+    let parts: Vec<OccupancyPart<'_>> = segments
+        .iter()
+        .map(|&(segment, row_base)| (Some(mask), segment, row_base))
+        .collect();
+    occupied_tiles_ladder(&parts, depth).at(depth)
 }
 
 // ------------------------------------------------------------------------------------------
@@ -1087,5 +1110,56 @@ mod tests {
                 assert_eq!(running, *expected, "{name}, depth {d}");
             }
         }
+    }
+
+    /// A view over two shards is one sketch fed by every segment of both: the plane one segment of
+    /// every row fills. A shard the viewer sees nothing in adds nothing to the plane, and still
+    /// counts toward the route, which counts only where the view has one segment in all.
+    #[test]
+    fn a_view_over_two_shards_sketches_the_union_of_their_tiles() {
+        use crate::select::fixture::{points, segment_of};
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+        use rustc_hash::FxHashSet;
+
+        let mut rng = StdRng::seed_from_u64(5);
+        let all = points(&mut rng, 2_000);
+        let visible: FxHashSet<u64> = all
+            .iter()
+            .filter(|_| rng.gen_bool(0.4))
+            .map(|p| p.2)
+            .collect();
+        let (left, right): (Vec<_>, Vec<_>) = all.iter().partition(|p| p.2 % 2 == 0);
+        let (whole, a, b) = (segment_of(&all), segment_of(&left), segment_of(&right));
+        let whole_mask = EffectiveMask::of_rows(whole.rows_of(&visible));
+        let mask_a = EffectiveMask::of_rows(a.rows_of(&visible));
+        let mask_b = EffectiveMask::of_rows(b.rows_of(&visible));
+        for depth in 0..=16u8 {
+            let one = occupied_tiles_ladder_with_precision(
+                &whole_mask,
+                &[(&whole.data, 0)],
+                depth,
+                SKETCH_PRECISION,
+            );
+            let both = [(Some(&mask_a), &a.data, 0), (Some(&mask_b), &b.data, 0)];
+            let two = occupied_tiles_ladder(&both, depth);
+            assert_eq!(one, two, "depth {depth}");
+            let left_out =
+                occupied_tiles_ladder(&[(Some(&mask_a), &a.data, 0), (None, &b.data, 0)], depth);
+            assert!(!left_out.is_exact(), "depth {depth}");
+            let alone = occupied_tiles_ladder_with_precision(
+                &mask_a,
+                &[(&a.data, 0)],
+                depth,
+                SKETCH_PRECISION,
+            );
+            assert_eq!(left_out, alone, "depth {depth}");
+        }
+        let only = occupied_tiles_ladder(&[(Some(&whole_mask), &whole.data, 0)], 16);
+        assert!(only.is_exact());
+        assert_eq!(only.at(16), occupied_tiles(&whole_mask, &[(&whole.data, 0)], 16));
+        let unseen = occupied_tiles_ladder(&[(None, &whole.data, 0)], 16);
+        assert!(unseen.is_exact());
+        assert_eq!(unseen.at(16), 0);
     }
 }
