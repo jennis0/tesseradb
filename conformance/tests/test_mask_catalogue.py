@@ -78,7 +78,7 @@ def test_each_case_reaches_exactly_the_entity_set_it_names(catalogue_bundle: Bun
     term_ids = {catalogue_bundle.term_id_of(g.encode("ascii")) for g in case.grants}
     assert None not in term_ids, f"{case.name}: a grant descriptor is not in the dictionary"
 
-    from_pairs = mask_mod.mask_of(term_ids, catalogue_bundle.pairs_path())
+    from_pairs = mask_mod.mask_of(term_ids, catalogue_bundle.pairs())
     assert from_pairs == set(case.entities), (
         f"{case.name} ({case.attacks}): the pairs-derived mask is not the entity set the case "
         f"names — got {len(from_pairs)} entities, expected {len(case.entities)}"

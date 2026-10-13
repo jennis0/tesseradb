@@ -11,19 +11,17 @@ sketch is adding it once. The two properties §7.2 actually needs — θ monoton
 factors computed inside the viewer's own composed mask — an estimate has as readily as a count.
 [`ladder`] owns that predicate, exactly as `crates/mosaica-engine/src/occupancy.rs` does.
 
-**Which route the differential exercises.** Every bundle this oracle opens has exactly one segment
-per view (`oracle/bundle.py` — phase 1), so `Selection.n_occ` takes the counted route and
-`conformance/tests/test_i7_selection.py` compares two exact counts. The estimator below is the
-second implementation of the route a *live* deployment takes from its second flush onward, and it
-is checked against the engine's vector for vector in `reference/tests/test_occupancy_sketch.py`
-rather than through the differential. That is a real limit on the suite's coverage of the sketch
-and is stated here rather than left to be discovered.
+**Which route the differential exercises.** `Selection.n_occ` hands [`ladder`] the number of
+segments the view has across every shard. A bundle built as one shard has one per view, so the
+counted route runs and `conformance/tests/test_i7_selection.py` compares two exact counts; a bundle
+built past `[shards] size` has one per shard, and the sketch runs. The estimator is also checked
+against the engine's vector for vector in `reference/tests/test_occupancy_sketch.py`.
 
 **Why the estimator is integer arithmetic throughout.** A `u64` per `(mask, view, generation,
 depth)` must not depend on the libm a process linked or the order a summation took: a fixed hash
 seed, an exact harmonic sum, α as an exact rational, and a fixed-point logarithm. No float appears,
-so there is nothing for two implementations to disagree over — which is what would let the
-differential stay exact if a fixture ever carried two segments.
+so there is nothing for two implementations to disagree over — which is what lets the differential
+stay exact over a view of several segments.
 
 **The independence this module has.** It was never in the sketch — reproducing a hash bit for bit
 is transcription, and this file says so rather than pretending otherwise. It is in *what is

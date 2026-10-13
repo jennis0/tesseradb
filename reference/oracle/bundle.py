@@ -12,6 +12,7 @@ for.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import struct
 import zlib
@@ -25,6 +26,7 @@ from pyroaring import BitMap
 
 from . import identity as identity_mod
 from . import morton as morton_mod
+from .identity import item_key, item_of_key, pack_item_high
 from .layout import live_prefix_dir, partition_dir, shard_dir, view_dir
 
 PERMUTATION_MAGIC = b"MSPM"
@@ -59,7 +61,8 @@ def _sha256_hex(data: bytes) -> str:
 
 @dataclass
 class Segment:
-    """One (partition, view, seg_id)'s row-space geometry.
+    """A view's row-space geometry: one segment's rows, or every segment of the view in every shard
+    with their rows laid end to end, shard by shard (`Bundle.segment`).
 
     Contracts r6 replaced the `entity_id` column in `columns.arrow` with `mosaica_id`
     (`docs/evidence/memos/2026-07-30-tessera-id-construction.md`): `mosaica_id` is now read
@@ -71,15 +74,18 @@ class Segment:
     `test_byte_scan.py`'s entity-ID sweep) do not need to know which.
     """
 
-    entity_id: np.ndarray  # uint64, row order (stored pre-r6, DERIVED post-r6)
+    entity_id: np.ndarray  # uint64, row order: item keys (`identity.item_key`), DERIVED post-r6
     residual: np.ndarray  # uint32, row order (the position's low half, from columns.arrow)
     morton: np.ndarray  # uint32, row order (raw sorted codes from morton.u32)
     row_count: int
     mosaica_id: np.ndarray | None = None  # uint64, row order (stored post-r6; absent pre-r6)
-    cuts: np.ndarray | None = None  # uint32, ascending (raw row starts from cuts.u32)
+    cuts: np.ndarray | None = None  # uint32: each segment's cuts.u32, offset to where it begins
+    #: `(shard, first row)` of each segment the rows come from, ascending.
+    parts: tuple[tuple[int, int], ...] = ((0, 0),)
 
     def cut_starts(self) -> np.ndarray:
-        """Where each occupied leaf Morton cell's rows begin, **recomputed from `morton`**.
+        """Where each occupied leaf Morton cell's rows begin within each segment, **recomputed from
+        `morton`**.
 
         Not a read of `cuts.u32`: that file is a pure function of the Morton column, so the second
         reader's job is to derive it and compare, exactly as it derives the position codes rather
@@ -87,10 +93,13 @@ class Segment:
         something other than the column it indexes is what this catches, and reading the index
         would catch nothing.
         """
-        if self.row_count == 0:
-            return np.empty(0, dtype=np.uint32)
-        changes = np.flatnonzero(self.morton[1:] != self.morton[:-1]) + 1
-        return np.concatenate(([0], changes)).astype(np.uint32)
+        bounds = [start for _, start in self.parts] + [self.row_count]
+        starts = []
+        for lo, hi in itertools.pairwise(bounds):
+            if hi > lo:
+                morton = self.morton[lo:hi]
+                starts += [[lo], np.flatnonzero(morton[1:] != morton[:-1]) + 1 + lo]
+        return np.concatenate(starts).astype(np.uint32) if starts else np.empty(0, dtype=np.uint32)
 
     def stored_code(self, row: int) -> int:
         """Row `row`'s position as the bundle stores it: the two words concatenated.
@@ -363,8 +372,9 @@ class Permutation:
 class Bundle:
     """A verified, opened bundle: `CURRENT` -> `MANIFEST.json` -> `SEGMENTS-0.json` -> segments.
 
-    Phase 1 has exactly one partition (`default`) and, per view, exactly one segment — matching
-    the build's own scope (mosaica-build's module doc).
+    One partition (`default`) and every shard its side-manifest records. Each item is keyed by
+    [`item_key`] over the shard holding it and its number there, so a bundle of one shard numbered
+    0 keys each item by its number. Every set of items this class answers is a set of those keys.
     """
 
     def __init__(self, root: Path | str):
@@ -410,12 +420,11 @@ class Bundle:
 
         segments_path = partition_dir(self.prefix_dir) / "SEGMENTS-0.json"
         self.side_manifest = json.loads(segments_path.read_bytes())
-        self._shard_record = shard_record(self.side_manifest)
+        #: Every shard's record in `SEGMENTS-0.json`, ascending by shard.
+        self.shards = shard_records(self.side_manifest)
         self._verify_files(self.side_manifest.get("files", {}))
 
-        self._shard_dir = shard_dir(self.prefix_dir)
         self._segment_cache: dict[str, Segment] = {}
-        self._permutation_cache: dict[str, Permutation] = {}
         # Derived per-view columns: pure functions of geometry and of the permutation, so they
         # never vary with a mask and can safely be held for the bundle's lifetime. See
         # `row_morton_codes` for why the Morton one is recomputed rather than read.
@@ -428,8 +437,6 @@ class Bundle:
             dict_path = self.prefix_dir / extent_entry["path"]
             self.dictionary.extend(_read_dictionary(dict_path))
         self.descriptor_to_term_id = {d: i for i, d in enumerate(self.dictionary)}
-
-        self._pairs_path_cache: Path | None = None
 
         # The source geometry a driver hands in (`attach_source_geometry`). `None` until then,
         # and every geometry re-derivation refuses rather than falling back to the stored
@@ -444,9 +451,8 @@ class Bundle:
         self._position_cache: dict[str, list[int]] = {}
         self._unique_cache: dict[str, dict[int, int]] = {}
 
-    def shard_record(self) -> dict:
-        """The shard's record in `SEGMENTS-0.json`."""
-        return self._shard_record
+    def _shard_dir(self, shard: int) -> Path:
+        return shard_dir(self.prefix_dir, shard=shard)
 
     def _verify_files(self, files: dict) -> None:
         for rel, info in files.items():
@@ -489,21 +495,22 @@ class Bundle:
             )
         return self.extent_of(next(iter(self.views)))
 
-    def view_dir(self, view_id: str) -> Path:
-        """`layout.view_dir` under the bundle's shard."""
-        return view_dir(self._shard_dir, view_id)
-
-    def segment_dir(self, view_id: str) -> Path:
-        for seg in self.shard_record()["segments"]:
-            if seg["view"] == view_id:
-                return self.view_dir(view_id) / "segments" / seg["seg_id"]
-        raise KeyError(f"no segment for view '{view_id}'")
-
     def segment(self, view_id: str) -> Segment:
+        """Every segment of `view_id` in every shard, rows laid end to end shard by shard, each
+        row's entity read as its [`item_key`]."""
         if view_id not in self._segment_cache:
-            seg_dir = self.segment_dir(view_id)
-            perm_path = seg_dir.parent.parent / "permutation.bin"
-            self._segment_cache[view_id] = _read_segment(seg_dir, perm_path)
+            parts = []
+            for record in self.shards:
+                for seg in record["segments"]:
+                    if seg["view"] == view_id:
+                        directory = view_dir(self._shard_dir(record["id"]), view_id)
+                        part = _read_segment(
+                            directory / "segments" / seg["seg_id"], directory / "permutation.bin"
+                        )
+                        parts.append((record["id"], part))
+            if not parts:
+                raise KeyError(f"no segment for view '{view_id}'")
+            self._segment_cache[view_id] = _concatenate(parts)
         return self._segment_cache[view_id]
 
     def attach_source_geometry(
@@ -591,7 +598,7 @@ class Bundle:
         return [code >> 32 for code in self.row_position_codes(view_id)]
 
     def row_entity_ids(self, view_id: str) -> list[int]:
-        """Every row's entity id as a plain Python list — the permutation-derived, key-independent
+        """Every row's item key as a plain Python list — the permutation-derived, key-independent
         direction (I4: permissions live in entity space, geometry in row space, and the two are
         related only by the explicit permutation).
 
@@ -606,9 +613,9 @@ class Bundle:
 
     def verify_identity_cross_check(self, view_id: str, sample: int = 200) -> None:
         """The only test that catches a key/column disagreement (Task 12 brief, Step 2): for
-        a sample of rows, `identity.forward(shard, entity_of_row[r]) == mosaica_id[r]`, where
-        `entity_of_row` came from the permutation (key-independent) and `mosaica_id` came
-        from the stored column. Requires a post-r6 bundle."""
+        a sample of rows, `mosaica_id_of(item_of_row[r]) == mosaica_id[r]`, where `item_of_row`
+        came from the shard's permutation (key-independent) and `mosaica_id` came from the stored
+        column. Requires a post-r6 bundle."""
         if self.identity_key is None:
             raise ValueError("bundle has no `identity` object in MANIFEST (pre-r6 bundle)")
         seg = self.segment(view_id)
@@ -618,25 +625,28 @@ class Bundle:
         n = min(sample, seg.row_count)
         rows = rng.choice(seg.row_count, size=n, replace=False) if seg.row_count else np.array([])
         for row in rows:
-            entity_id = int(seg.entity_id[row])
+            item = int(seg.entity_id[row])
             expected = int(seg.mosaica_id[row])
-            got = identity_mod.forward(self.identity_key, self.shard_record()["id"], entity_id)
+            got = self.mosaica_id_of(item)
             if got != expected:
+                shard, number = item_of_key(item)
                 raise ValueError(
-                    f"identity cross-check failed at row {row}: entity {entity_id} forwards to "
-                    f"{got:#x}, stored mosaica_id is {expected:#x}"
+                    f"identity cross-check failed at row {row}: number {number} of shard {shard} "
+                    f"forwards to {got:#x}, stored mosaica_id is {expected:#x}"
                 )
 
-    def mosaica_id_of(self, entity_id: int) -> int:
-        """The identifier of the item the build gave `entity_id`, in the bundle's shard at
-        tenancy 0."""
+    def mosaica_id_of(self, item: int) -> int:
+        """The identifier the build gave the item keyed `item`: its shard and number at tenancy
+        0."""
         if self.identity_key is None:
             raise ValueError("bundle has no `identity` object in MANIFEST (pre-r6 bundle)")
-        return identity_mod.forward_item(self.identity_key, self.shard_record()["id"], 0, entity_id)
+        shard, number = item_of_key(item)
+        return identity_mod.forward_item(self.identity_key, shard, 0, number)
 
     def derive_row_order(self, view_id: str) -> np.ndarray:
         """Row order re-derived as `(morton from source geometry, forward(key, shard, entity_id))`
-        ascending; `mosaica_id` is unique, so nothing else breaks ties.
+        ascending within each segment; `mosaica_id` is unique, so nothing else breaks ties. Each
+        segment's order is offset to where its rows begin.
 
         Delegates to `row_order_from_geometry`, the module-level, key-dependent
         re-derivation -- computed from the *source* geometry and the permutation-derived
@@ -653,30 +663,32 @@ class Bundle:
         if self.identity_key is None:
             raise ValueError("bundle has no `identity` object in MANIFEST (pre-r6 bundle)")
         seg = self.segment(view_id)
-        return row_order_from_geometry(
-            self.identity_key,
-            self.shard_record()["id"],
-            seg.entity_id,
-            self.row_morton_codes(view_id),
-        )
+        codes = self.row_morton_codes(view_id)
+        bounds = [start for _, start in seg.parts] + [seg.row_count]
+        orders = []
+        for (shard, lo), hi in zip(seg.parts, bounds[1:]):
+            numbers = seg.entity_id[lo:hi] & np.uint64(identity_mod.MASK32)
+            order = row_order_from_geometry(
+                self.identity_key, pack_item_high(shard, 0), numbers, codes[lo:hi]
+            )
+            orders.append(order + lo)
+        return np.concatenate(orders)
 
-    def permutation(self, view_id: str) -> Permutation:
-        if view_id not in self._permutation_cache:
-            path = self.view_dir(view_id) / "permutation.bin"
-            self._permutation_cache[view_id] = _read_permutation(path)
-        return self._permutation_cache[view_id]
-
-    def pairs_path(self, view_id: str = "default") -> Path:
-        # The shard's `terms/pairs.parquet`, whatever the view: pairs are entity-space.
-        return self._shard_dir / "terms" / "pairs.parquet"
+    def pairs(self) -> list[tuple[int, Path]]:
+        """Each shard's `terms/pairs.parquet`, with its shard. Pairs are entity-space, so one per
+        shard whatever the view."""
+        return [
+            (record["id"], self._shard_dir(record["id"]) / "terms" / "pairs.parquet")
+            for record in self.shards
+        ]
 
     def unique_entities(self, attribute: str) -> dict[int, int]:
-        """Every value of an integer unique attribute and the entity holding it, read from the
-        field's index runs (`unique_indexes` in `SEGMENTS-<n>.json`) by [`read_key_run`].
+        """Every value of an integer unique attribute and the item holding it, read from each
+        shard's index runs of the field (`unique_indexes` in its record) by [`read_key_run`].
 
-        A value held by two entities raises: a built bundle's index holds one entity per value,
-        and a second is either a defective index or a bundle written to since, whose deletions
-        this reader does not apply.
+        A value held by two items raises, in one shard or across two: a built bundle's indexes
+        hold one item per value, and a second is either a defective index or a bundle written to
+        since, whose deletions this reader does not apply.
         """
         if attribute not in self._unique_cache:
             declared = {d["name"]: d for d in self.manifest["declared_scalars"]}
@@ -692,36 +704,36 @@ class Bundle:
                     f"'{attribute}' is a {arrow_type}, whose index keys are hashes; only an "
                     "integer attribute's values can be read back from its index"
                 )
-            (index,) = [
-                i for i in self.shard_record()["unique_indexes"] if i["attribute"] == attribute
-            ]
-            runs = [run["path"] for run in index["base"]] + list(index["live"])
             entities: dict[int, int] = {}
-            for rel in runs:
-                for key, entity in read_key_run(self.prefix_dir / rel):
-                    value = key - (1 << 63) if signed else key
-                    if value in entities:
-                        raise ValueError(
-                            f"'{attribute}' = {value} is held by entities {entities[value]} and "
-                            f"{entity}"
-                        )
-                    entities[value] = entity
+            for record in self.shards:
+                (index,) = [i for i in record["unique_indexes"] if i["attribute"] == attribute]
+                runs = [run["path"] for run in index["base"]] + list(index["live"])
+                for rel in runs:
+                    for key, entity in read_key_run(self.prefix_dir / rel):
+                        value = key - (1 << 63) if signed else key
+                        item = item_key(record["id"], entity)
+                        if value in entities:
+                            raise ValueError(
+                                f"'{attribute}' = {value} is held by items {entities[value]} and "
+                                f"{item}"
+                            )
+                        entities[value] = item
             self._unique_cache[attribute] = entities
         return self._unique_cache[attribute]
 
     def postings(self, term_id: int) -> np.ndarray:
-        """Term `term_id`'s sorted entity-id array, decoded from `terms/postings.arrow`."""
-        if not hasattr(self, "_postings_array"):
-            self._postings_array = _read_postings_array(self._shard_dir / "terms" / "postings.arrow")
-        record = self._postings_array[term_id].as_py()
-        tag = record[0]
-        payload = record[1:]
-        if tag == 0:
-            return np.frombuffer(payload, dtype="<u4")
-        if tag == 1:
-            bm = BitMap.deserialize(payload)
-            return np.fromiter(bm, dtype=np.uint32, count=len(bm))
-        raise ValueError(f"postings.arrow: term {term_id} has unknown tag {tag}")
+        """Term `term_id`'s items, ascending: each shard's `terms/postings.arrow` decoded and keyed
+        by [`item_key`], shard by shard."""
+        if not hasattr(self, "_postings_arrays"):
+            self._postings_arrays = [
+                (shard, _read_postings_array(self._shard_dir(shard) / "terms" / "postings.arrow"))
+                for shard in (record["id"] for record in self.shards)
+            ]
+        held = [
+            _decode_posting(array, term_id).astype(np.uint64) | np.uint64(item_key(shard, 0))
+            for shard, array in self._postings_arrays
+        ]
+        return np.concatenate(held)
 
 
 KEY_RUN_MAGIC = b"MSKEYRUN"
@@ -737,15 +749,17 @@ def newest_side_manifest(root: Path | str, partition: str = "default") -> dict:
     return json.loads(newest.read_bytes())
 
 
-def shard_record(side_manifest: dict) -> dict:
-    """The record of a side-manifest's one shard, which must be numbered 0."""
+def shard_records(side_manifest: dict) -> list[dict]:
+    """A side-manifest's shard records, which must be at least one, ascending by shard and
+    distinct."""
     records = side_manifest.get("shards", {}).get("records")
     ids = None if records is None else [record.get("id") for record in records]
-    if ids != [0]:
+    if not ids or any(not isinstance(i, int) for i in ids) or ids != sorted(set(ids)):
         raise ValueError(
-            f"the side-manifest names shards {ids}; rebuild the bundle as one shard numbered 0"
+            f"the side-manifest names shards {ids}; a bundle holds one shard or more, each named "
+            "once, in ascending order"
         )
-    return records[0]
+    return records
 
 
 def registered_layer(side_manifest: dict, name: str) -> dict | None:
@@ -1010,3 +1024,42 @@ def _read_postings_array(path: Path) -> pa.Array:
     with ipc.open_file(path) as reader:
         table = reader.read_all()
     return table.column("posting").combine_chunks()
+
+
+def _decode_posting(array: pa.Array, term_id: int) -> np.ndarray:
+    """Term `term_id`'s sorted entity ids in one shard's `postings.arrow`."""
+    record = array[term_id].as_py()
+    tag = record[0]
+    payload = record[1:]
+    if tag == 0:
+        return np.frombuffer(payload, dtype="<u4")
+    if tag == 1:
+        bm = BitMap.deserialize(payload)
+        return np.fromiter(bm, dtype=np.uint32, count=len(bm))
+    raise ValueError(f"postings.arrow: term {term_id} has unknown tag {tag}")
+
+
+def _concatenate(parts: list[tuple[int, Segment]]) -> Segment:
+    """One view's segments, each `(shard, segment)` in shard order, as one row space: rows end to
+    end, each entity keyed by its shard, and each segment's cuts offset to where it begins."""
+    starts = np.cumsum([0] + [segment.row_count for _, segment in parts])
+    ids = [segment.mosaica_id for _, segment in parts]
+    cuts = [segment.cuts for _, segment in parts]
+    return Segment(
+        entity_id=np.concatenate(
+            [
+                segment.entity_id.astype(np.uint64) | np.uint64(item_key(shard, 0))
+                for shard, segment in parts
+            ]
+        ),
+        residual=np.concatenate([segment.residual for _, segment in parts]),
+        morton=np.concatenate([segment.morton for _, segment in parts]),
+        row_count=int(starts[-1]),
+        mosaica_id=None if any(i is None for i in ids) else np.concatenate(ids),
+        cuts=(
+            None
+            if any(c is None for c in cuts)
+            else np.concatenate([c.astype(np.uint32) + np.uint32(s) for c, s in zip(cuts, starts)])
+        ),
+        parts=tuple((shard, int(start)) for (shard, _), start in zip(parts, starts)),
+    )

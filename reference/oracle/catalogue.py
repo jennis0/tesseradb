@@ -133,6 +133,7 @@ from .harness import (
     write_deployment,
     write_recipe,
 )
+from .identity import item_of_key
 
 WORK_DIR_NAME = "catalogue"
 
@@ -810,7 +811,8 @@ def entity_of_fx_key(bundle) -> dict[int, int]:
 
 
 def entities_by_source(bundle) -> dict[int, int]:
-    """`source id -> entity id` for every planted item, from the bundle's index of `serial`.
+    """`source id -> item` (`identity.item_key`) for every planted item, from the bundle's index of
+    `serial`.
 
     The generation functions take a source id and every answer the engine gives is in entity space;
     the two are not equal (decision 0073), so every per-item join between them comes through here.
@@ -827,8 +829,17 @@ def entity_of_source(bundle, source_id: int) -> int:
 
 
 def source_of_entity(bundle) -> dict[int, int]:
-    """[`entities_by_source`] the other way: `entity id -> source id`."""
+    """[`entities_by_source`] the other way: `item -> source id`."""
     return {entity: source for source, entity in entities_by_source(bundle).items()}
+
+
+def items_of(bundle, entities) -> set[int]:
+    """The items the bundle made of a designed set of entity ids — a block's, or a case's —
+    resolved through its index of `serial`. A block's entity range is its source range, so each id
+    is carried as a source id; in a bundle of one shard numbered 0 the answer is `entities` itself,
+    which `verify` checks."""
+    entity_of = entities_by_source(bundle)
+    return {entity_of[source] for source in entities}
 
 
 def dict_terms(bundle, names) -> set[int]:
@@ -1423,14 +1434,15 @@ def verify(bundle: Bundle) -> VerificationReport:
        then the corpus's terms in first-appearance order, so the corpus's term `g` is the
        dictionary's `g + 1`. Checked against the rule rather than against an assumed equality,
        which is what this said before `public` moved;
-    3. each block's postings are **exactly** its intended contiguous entity range;
+    3. each block's postings are **exactly** its intended contiguous entity range, in the build's
+       numbering: shard by shard, each shard's numbers following the previous shard's high water;
     3b. every entity's **source id lands in the same block the entity does** — the per-item half
        of check 3, which a set comparison cannot make. A within-block permutation (which is what
        decision 0073's Morton tiebreak produces) passes it; a cross-block reassignment does not.
        Without this, the day `entity_id == source_id` stopped holding, nothing here noticed;
     4. `container_boundary` really spans more than one Roaring container — entities either side of
-       a multiple of 65,536, which is the only reason the case exists;
-    5. `full_100pct` spans every container the corpus reaches;
+       a multiple of 65,536 in one shard, which is the only reason the case exists;
+    5. `full_100pct` spans every container of every shard the corpus reaches;
     6. `all_in_one_tile`'s rows really share one depth-6 tile;
     7. the crossover cases really sit either side of 5%.
     """
@@ -1453,6 +1465,11 @@ def verify(bundle: Bundle) -> VerificationReport:
     expected_offset = 1 if public_term == 0 else 0
 
     source_of = source_of_entity(bundle)
+    first_number = {}
+    numbered = 0
+    for record in bundle.shards:
+        first_number[record["id"]] = numbered
+        numbered += int(record["high_water"])
     for block in BLOCKS.values():
         term_id = bundle.term_id_of(block.descriptor.encode("ascii"))
         if term_id is None:
@@ -1466,11 +1483,12 @@ def verify(bundle: Bundle) -> VerificationReport:
             )
         postings = set(int(e) for e in bundle.postings(term_id).tolist())
         report.blocks[block.name] = postings
-        if postings != block.entities:
+        built = {first_number[shard] + number for shard, number in map(item_of_key, postings)}
+        if built != block.entities:
             report.failures.append(
                 f"block {block.name}: postings are not the contiguous range "
-                f"[{block.start}, {block.stop}) — got {len(postings)} entities in "
-                f"[{min(postings, default=-1)}, {max(postings, default=-1)}]. The build's "
+                f"[{block.start}, {block.stop}) — got {len(built)} entities in "
+                f"[{min(built, default=-1)}, {max(built, default=-1)}]. The build's "
                 f"signature-sorted assignment (§11.1) no longer puts this block's items in the "
                 f"entity range the fixture chose, so no catalogue member straddles what it claims to."
             )
@@ -1494,32 +1512,43 @@ def verify(bundle: Bundle) -> VerificationReport:
                 "item's."
             )
 
-    # Both container claims are derived from `N_ITEMS` rather than written out, so that growing the
-    # corpus is one edit and not one edit plus two constants nobody remembers are here. The claims
-    # themselves are unchanged: `boundary` must span more than one container (any boundary, not
-    # container 0/1 in particular), and full coverage must span every container the corpus reaches.
-    boundary = report.blocks.get("boundary", set())
-    boundary_containers = {e >> 16 for e in boundary}
+    # Both container claims are derived from each shard's high water rather than written out, so
+    # that growing the corpus is one edit and not one edit plus two constants nobody remembers are
+    # here. A container is a shard's: `(shard, number >> 16)`. `boundary` must span more than one
+    # (any boundary, not container 0/1 in particular), and full coverage must span every container
+    # of every shard the corpus reaches.
+    def containers(items: set[int]) -> set[tuple[int, int]]:
+        return {(shard, number >> 16) for shard, number in map(item_of_key, items)}
+
+    boundary_containers = containers(report.blocks.get("boundary", set()))
     if len(boundary_containers) < 2:
         report.failures.append(
-            f"container_boundary touches containers {sorted(boundary_containers)} — fewer than "
-            "two, so the case exercises no container arithmetic at all"
+            f"container_boundary touches (shard, container) {sorted(boundary_containers)} — "
+            "fewer than two, so the case exercises no container arithmetic at all"
         )
     everything: set[int] = set()
     for postings in report.blocks.values():
         everything |= postings
-    expected_containers = set(range(((N_ITEMS - 1) >> 16) + 1)) if N_ITEMS else set()
-    if {e >> 16 for e in everything} != expected_containers:
+    expected_containers = {
+        (record["id"], container)
+        for record in bundle.shards
+        for container in range(((int(record["high_water"]) - 1) >> 16) + 1)
+    }
+    if containers(everything) != expected_containers:
         report.failures.append(
-            f"full coverage touches containers {sorted({e >> 16 for e in everything})}, not "
+            f"full coverage touches (shard, container) {sorted(containers(everything))}, not "
             f"{sorted(expected_containers)} — every container the corpus reaches"
         )
 
     # `high_tail`'s reason for existing, checked rather than described. The byte-scan needs a grant
-    # set whose admitted *and* denied entity ids both reach above `HIGH_ID_FLOOR`; that holds only
-    # while `high_tail` sits entirely above the floor and some other block still reaches above it
-    # too. Resizing `filler_tail` breaks the second half silently — the block boundaries move, no
-    # posting check notices, and the byte-scan's precondition assertion fires far from the cause.
+    # set whose admitted *and* denied entity ids — each item's number in its shard, which is what a
+    # leak would carry — both reach above `HIGH_ID_FLOOR`; that holds only while `high_tail` sits
+    # entirely above the floor and some other block still reaches above it too. Resizing
+    # `filler_tail` breaks the second half silently — the block boundaries move, no posting check
+    # notices, and the byte-scan's precondition assertion fires far from the cause.
+    def numbers(items: set[int]) -> set[int]:
+        return {number for _, number in map(item_of_key, items)}
+
     high_tail = report.blocks.get("high_tail", set())
     if not high_tail:
         # Checked rather than skipped. `blocks.get(..., set())` followed by `if high_tail` would
@@ -1530,12 +1559,13 @@ def verify(bundle: Bundle) -> VerificationReport:
             "high_tail is absent from the corpus, so no grant set can put entity ids above "
             f"{HIGH_ID_FLOOR} on both sides of it — see the layout note"
         )
-    if high_tail and min(high_tail) < HIGH_ID_FLOOR:
+    if high_tail and min(numbers(high_tail)) < HIGH_ID_FLOOR:
         report.failures.append(
-            f"high_tail starts at {min(high_tail)}, below the byte-scan floor {HIGH_ID_FLOOR} — "
-            "its members are no longer all separable from the small integers the harness emits"
+            f"high_tail starts at {min(numbers(high_tail))}, below the byte-scan floor "
+            f"{HIGH_ID_FLOOR} — its members are no longer all separable from the small integers "
+            "the harness emits"
         )
-    outside_above = {e for e in everything - high_tail if e >= HIGH_ID_FLOOR}
+    outside_above = {e for e in numbers(everything - high_tail) if e >= HIGH_ID_FLOOR}
     if not outside_above:
         report.failures.append(
             f"no block outside high_tail reaches above {HIGH_ID_FLOOR}, so a grant of high_tail "

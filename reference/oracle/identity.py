@@ -281,6 +281,17 @@ def forward_item(key: IdentityKey, shard: int, tenancy: int, number: int) -> int
     return forward(key, pack_item_high(shard, tenancy), number)
 
 
+def item_key(shard: int, number: int) -> int:
+    """The oracle's key for the item holding `number` in `shard`: the shard in the high 32 bits and
+    the number in the low. A bundle of one shard numbered 0 keys each item by its number."""
+    return (shard << 32) | number
+
+
+def item_of_key(item: int) -> tuple[int, int]:
+    """(shard, number) of an [`item_key`]."""
+    return item >> 32, item & MASK32
+
+
 def forward_artifact(key: IdentityKey, space: int, entity: int) -> int:
     """The `mosaica_id` of the artifact or layer at `entity` in layer space `space`."""
     return forward(key, pack_artifact_high(space), entity)

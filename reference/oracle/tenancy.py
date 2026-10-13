@@ -6,8 +6,9 @@ item's last entity frees its number, and a new item may then take it one tenancy
 `mosaica_id` never names another item.
 
 `HolderCount` derives the tenancy every identifier must carry from its own count. It never reads
-the stored identifiers or the server's tenancy index. A bundle as built holds each number below its
-high water once, at tenancy 0. Each new item an acknowledged ingest reports must carry a tenancy
+the stored identifiers or the server's tenancy index. A number belongs to its shard, so the count
+keys each by [`item_key`] over the two. A bundle as built holds each number below its shard's high
+water once, at tenancy 0. Each new item an acknowledged ingest reports must carry a tenancy
 above every earlier holder's: one above, unless a restart replayed the deletion after the
 compaction that freed the number, which frees it again one tenancy higher. The number's previous
 holder must have been seen deleted first. A row naming an item answers the
@@ -20,20 +21,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .identity import IdentityKey, forward_item, invert_item
+from .identity import IdentityKey, forward_item, invert_item, item_key, item_of_key
 
 
 @dataclass
 class HolderCount:
-    """Who has held each number of one shard.
+    """Who has held each number of each shard. A number here is an [`item_key`].
 
-    `built` is the high water of the bundle as built: every number below it was one item's, at
-    tenancy 0, before any write. `deleted` holds the identifiers of the items seen deleted.
+    `built` maps each shard of the bundle as built to its high water: every number below it was one
+    item's, at tenancy 0, before any write. `deleted` holds the identifiers of the items seen
+    deleted.
     """
 
     key: IdentityKey
-    shard: int
-    built: int
+    built: dict[int, int]
     deleted: set[int] = field(default_factory=set)
     _latest: dict[int, int] = field(default_factory=dict, init=False, repr=False)
 
@@ -42,32 +43,38 @@ class HolderCount:
         """The count for a `Bundle` opened as built, before a server has written to it."""
         if bundle.identity_key is None:
             raise ValueError("the bundle's MANIFEST carries no `identity`; rebuild it to read one")
-        record = bundle.shard_record()
-        return cls(key=bundle.identity_key, shard=record["id"], built=int(record["high_water"]))
+        built = {record["id"]: int(record["high_water"]) for record in bundle.shards}
+        return cls(key=bundle.identity_key, built=built)
 
     def latest(self, number: int) -> int | None:
         """The tenancy of the latest item to hold `number`, or `None` where none has."""
-        return self._latest.get(number, 0 if number < self.built else None)
+        shard, local = item_of_key(number)
+        return self._latest.get(number, 0 if local < self.built.get(shard, 0) else None)
 
     def holder(self, number: int) -> int | None:
         """The `mosaica_id` of the latest item to hold `number`, or `None` where none has."""
         latest = self.latest(number)
-        return None if latest is None else forward_item(self.key, self.shard, latest, number)
+        if latest is None:
+            return None
+        shard, local = item_of_key(number)
+        return forward_item(self.key, shard, latest, local)
 
     def _item(self, mosaica_id: int) -> tuple[int, int] | None:
-        """The tenancy and number `mosaica_id` inverts to, or `None` where it names no item of
-        this shard."""
+        """The tenancy and number `mosaica_id` inverts to, or `None` where it names no item of a
+        shard this count knows."""
         item = invert_item(self.key, mosaica_id)
-        if item is None or item[0] != self.shard:
+        if item is None or item[0] not in self.built:
             return None
-        return item[1], item[2]
+        return item[1], item_key(item[0], item[2])
 
     def number_of(self, mosaica_id: int) -> tuple[int, int]:
         """The tenancy and number an item's identifier inverts to. An identifier of another kind
-        or another shard names no item here and is refused."""
+        or of a shard this count does not know names no item here and is refused."""
         item = self._item(mosaica_id)
         if item is None:
-            raise AssertionError(f"mosaica_id {mosaica_id} names no item of shard {self.shard}")
+            raise AssertionError(
+                f"mosaica_id {mosaica_id} names no item of shards {sorted(self.built)}"
+            )
         return item
 
     def seen(self, mosaica_id: int) -> bool:

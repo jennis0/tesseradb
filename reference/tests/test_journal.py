@@ -71,9 +71,7 @@ class _StubBundle:
     identity_key = KEY
     dictionary = {0: b"term-zero", 1: b"term-one"}
 
-    @staticmethod
-    def shard_record() -> dict:
-        return {"id": 0, "high_water": 100}
+    shards = ({"id": 0, "high_water": 100},)
 
     @staticmethod
     def mosaica_id_of(entity_id: int) -> int:

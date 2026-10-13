@@ -37,6 +37,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from oracle import catalogue as cat
+from oracle.identity import item_key
 from oracle.wire import decode_viewport, decode_viewport_points
 
 VIEW = cat.VIEW_ID
@@ -47,17 +48,18 @@ VIEW = cat.VIEW_ID
 ITEM_SAMPLE = 40
 
 def _terms_by_entity(bundle) -> dict[int, set[int]]:
-    """`entity -> {term id}` from `terms/pairs.parquet`.
+    """`item -> {term id}` from each shard's `terms/pairs.parquet`.
 
     The flat relation, not the engine's transpose: `entities/terms/` is what the service reads, and
     an oracle that read it too would be checking a file against itself.
     """
-    table = pq.read_table(bundle.pairs_path(), columns=["entity_id", "term_id"])
     out: dict[int, set[int]] = {}
-    for entity, term in zip(
-        table.column("entity_id").to_pylist(), table.column("term_id").to_pylist()
-    ):
-        out.setdefault(int(entity), set()).add(int(term))
+    for shard, path in bundle.pairs():
+        table = pq.read_table(path, columns=["entity_id", "term_id"])
+        for entity, term in zip(
+            table.column("entity_id").to_pylist(), table.column("term_id").to_pylist()
+        ):
+            out.setdefault(item_key(shard, int(entity)), set()).add(int(term))
     return out
 
 

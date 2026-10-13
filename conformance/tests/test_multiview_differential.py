@@ -153,7 +153,7 @@ def masks(multiview_bundle: Bundle) -> dict[str, set[int]]:
             term_id = multiview_bundle.term_id_of(term.encode())
             assert term_id is not None, f"the dictionary holds no term '{term}'"
             term_ids.add(term_id)
-        out[name] = mask_of(term_ids, multiview_bundle.pairs_path())
+        out[name] = mask_of(term_ids, multiview_bundle.pairs())
     return out
 
 

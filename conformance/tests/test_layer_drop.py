@@ -26,7 +26,7 @@ from oracle.bundle import (
     layer_mosaica_id,
     newest_side_manifest,
     registered_layer,
-    shard_record,
+    shard_records,
 )
 from oracle.layout import layer_space_dir, live_prefix_dir
 
@@ -94,16 +94,16 @@ class Dropping(CatalogueServer):
 
 
 def spaces_named(side_manifest: dict) -> set[int]:
-    """Every layer space a side-manifest names: its layers' and layer spaces' records, and the
+    """Every layer space a side-manifest names: its layers' and layer spaces' records, and each
     shard's membership slices and row forms."""
-    shard = shard_record(side_manifest)
+    shards = shard_records(side_manifest)
     return {
         record["space"]
         for record in (
             *side_manifest["layers"],
             *side_manifest["layer_spaces"],
-            *shard["membership_extents"],
-            *shard["derived_extents"],
+            *(extent for shard in shards for extent in shard["membership_extents"]),
+            *(extent for shard in shards for extent in shard["derived_extents"]),
         )
     }
 

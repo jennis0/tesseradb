@@ -957,7 +957,7 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
     auth = server.authorise([d.decode("ascii") for d in granted_descriptors])
     token = auth["token"]
 
-    admitted = mask_mod.mask_of(granted_terms, oracle_bundle.pairs_path())
+    admitted = mask_mod.mask_of(granted_terms, oracle_bundle.pairs())
 
     seg = oracle_bundle.segment(VIEW)
     all_entities = {int(e) for e in seg.entity_id.tolist()}
@@ -1161,7 +1161,8 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
                 assert len(scan.serials) == len(scan.mosaica_ids)
                 # A row's label names the item its mosaica_id names.
                 for mosaica_id, serial in zip(scan.mosaica_ids, scan.serials):
-                    _shard, entity = identity_mod.invert(identity_key, mosaica_id)
+                    shard, _tenancy, number = identity_mod.invert_item(identity_key, mosaica_id)
+                    entity = identity_mod.item_key(shard, number)
                     assert entity_of_source[serial - catalogue.PLANTED_ID_BASE] == entity, (
                         f"the row for mosaica_id {mosaica_id} carries serial {serial}, which is "
                         "not its item's"
@@ -1201,7 +1202,6 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
     assert str(identity_key.k0) not in items_text_str and str(identity_key.k1) not in items_text_str
 
     # --- POST /v1/artifacts: a layer published over the catalogue, read whole, every frame swept -
-    shard = oracle_bundle.shard_record()["id"]
     # Each group holds admitted and denied items alike, so every count is a partial one.
     seen, unseen = sorted(admitted_high), sorted(denied_high)
     groups = [seen[i : i + 200] + unseen[i : i + 200] for i in range(0, 4_000, 200)]
@@ -1235,7 +1235,7 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
             {
                 "key": f"group-{g}",
                 "members": {
-                    "mosaica_id": [str(identity_mod.forward(identity_key, shard, e)) for e in group]
+                    "mosaica_id": [str(oracle_bundle.mosaica_id_of(e)) for e in group]
                 },
                 "content": [{"values": [f"group {g}"]}],
                 "parent": [] if g == 0 else ["group-0"],

@@ -1,13 +1,14 @@
 """The holder count (`oracle.tenancy`), against identifiers built by hand.
 
-The build holds numbers 0 to 9, one item each at tenancy 0, in shard 0.
+The build holds numbers 0 to 9, one item each at tenancy 0, in shard 0, unless a case says
+otherwise.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from oracle.identity import forward_artifact
+from oracle.identity import forward_artifact, item_key
 from oracle.tenancy import HolderCount
 
 from .conftest import KEY, item
@@ -15,7 +16,7 @@ from .conftest import KEY, item
 
 @pytest.fixture
 def count() -> HolderCount:
-    return HolderCount(key=KEY, shard=0, built=10)
+    return HolderCount(key=KEY, built={0: 10})
 
 
 def test_a_built_number_is_held_once_at_tenancy_zero_and_a_number_above_by_nobody(count):
@@ -93,3 +94,16 @@ def test_a_replay_answers_identifiers_already_seen_and_counts_nothing(count):
     assert count.latest(10) == 0
     with pytest.raises(AssertionError):
         count.receipt({**replay, "mosaica_ids": [str(item(11))]})
+
+
+def test_each_shards_numbers_are_counted_apart():
+    """Number 3 of shard 1 is not number 3 of shard 0: deleting one and reissuing its number leaves
+    the other held, and a shard the bundle does not hold names no item."""
+    count = HolderCount(key=KEY, built={0: 10, 1: 4})
+    assert count.holder(item_key(1, 3)) == item(3, shard=1)
+    assert count.latest(item_key(1, 4)) is None
+    count.delete(item(3, shard=1))
+    assert count.created(item(3, 1, shard=1)) == item_key(1, 3)
+    assert count.live(item(3)) and not count.live(item(3, shard=1))
+    with pytest.raises(AssertionError):
+        count.named(item(0, shard=2))
