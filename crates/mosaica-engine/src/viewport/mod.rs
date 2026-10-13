@@ -127,6 +127,10 @@ impl Engine {
     /// on the generation would let a later live response elide against a bound the client declared
     /// from the stale one.
     ///
+    /// The identity key hashes the session's credential digest: the geometry is shared by every
+    /// session with the grant, which may hold different credentials, and an artifact's own label
+    /// is tested against the credential.
+    ///
     /// The content key hashes the fragment's watermark, not `segments_version` — a merge or
     /// compaction can move `segments_version` without adding rows to the visible set, which is
     /// what would make an elision unsound — and the overlay versions of the shard and of every
@@ -134,13 +138,14 @@ impl Engine {
     /// restoration moves what a client must not keep presenting as current.
     fn view_coordinates(
         &self,
+        session: &Session,
         generation: &crate::Generation,
         geometry: &SessionGeometry,
         view: &str,
     ) -> ViewCoordinates {
         let mut hasher = Sha256::new();
         hasher.update(b"mosaica-identity-key-v1");
-        hasher.update(geometry.auth_data_hash);
+        hasher.update(session.auth_data_hash());
         hasher.update(geometry.fragment.identity);
         hasher.update((view.len() as u64).to_le_bytes());
         hasher.update(view.as_bytes());

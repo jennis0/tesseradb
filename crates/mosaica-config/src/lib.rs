@@ -219,8 +219,8 @@ struct RawServe {
     compute_threads: Option<usize>,
     /// Viewer and session requests computed at once. It admits `/v1/viewport`, the single-item and
     /// single-artifact reads, `/v1/artifacts/browse`, `/v1/aggregate`, a
-    /// `/v1/categories/{column}/suggest` with `view` and `counts=true`, and `/session/authorise`,
-    /// never the control plane.
+    /// `/v1/categories/{column}/suggest` with `view` and `counts=true`, never the control plane or
+    /// a request for a session.
     ///
     /// Default: four per compute thread.
     compute_admission: Option<usize>,
@@ -431,7 +431,8 @@ struct RawServe {
     ///
     /// Default: `30`.
     visible_wait_max_secs: Option<u64>,
-    /// Bytes of each viewer's projection of the rows they may see, kept between requests.
+    /// Bytes of the projections of the rows each grant may see, one per grant, view and shard,
+    /// kept between requests and shared by every session with the grant.
     ///
     /// Default: `2147483648` (2 GiB).
     row_projection_cache_bytes: Option<u64>,

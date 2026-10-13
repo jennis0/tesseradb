@@ -52,7 +52,7 @@ use croaring::{Bitmap, Portable};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct SuggestSetKey {
     /// The session's process-local identity, never the bearer token itself. Never reused within a
-    /// process, which is what makes `prune_token` sound.
+    /// process, which is what makes `prune_tokens` sound.
     pub token_id: u64,
     /// The **resolved** column — one view's, under a group-scoped family.
     pub column: String,
@@ -337,15 +337,8 @@ impl SuggestSets {
         self.declined.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Remove every entry belonging to one session, on `RowProjectionCache::prune_token`'s
-    /// argument: it only removes, so its worst failure is a needless sweep, and a `token_id` is
-    /// never reused within a process.
-    pub fn prune_token(&self, token_id: u64) {
-        self.prune_tokens(&std::iter::once(token_id).collect());
-    }
-
-    /// The same removal for a set of sessions, in one pass — the expiry sweep's form. See
-    /// `RowProjectionCache::prune_tokens` for why a batch is not a loop over single removals.
+    /// Remove every entry belonging to any of `token_ids`, in one pass. It only removes, so its
+    /// worst failure is a needless sweep, and a `token_id` is never reused within a process.
     pub fn prune_tokens(&self, token_ids: &rustc_hash::FxHashSet<u64>) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let doomed: Vec<SuggestSetKey> = inner
@@ -630,7 +623,7 @@ mod tests {
         let sets = SuggestSets::default();
         sets.finish(key(1, 7, 3), set(&[1, 2]));
         sets.finish(key(2, 7, 3), set(&[3]));
-        sets.prune_token(1);
+        sets.prune_tokens(&std::iter::once(1).collect());
         assert_eq!(sets.stats().entries, 1);
         assert!(sets.get(&key(2, 7, 3), 1_000).is_some());
     }

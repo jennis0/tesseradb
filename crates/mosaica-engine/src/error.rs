@@ -84,8 +84,8 @@ pub enum EngineError {
     /// A `/v1/viewport` request's `point_rows` named a column that is not one of the view's render
     /// columns. The detail names only what the caller sent and the view.
     PointRowsRefused(String),
-    /// This session's row projection was being built by a concurrent request, and this request
-    /// waited until the wait budget ran out. A racer parks on the build rather than being
+    /// This session's grant's row projection was being built by a concurrent request, and this
+    /// request waited until the wait budget ran out. A racer parks on the build rather than being
     /// refused, since refusing sheds no load while the work is already happening. Maps to 429
     /// `backpressure` with `Retry-After`.
     ProjectionBuilding,
@@ -184,7 +184,7 @@ impl std::fmt::Display for EngineError {
             ),
             EngineError::ProjectionBuilding => write!(
                 f,
-                "this session's row projection is being built by a concurrent request; retry \
+                "this grant's row projection is being built by a concurrent request; retry \
                  shortly"
             ),
             EngineError::FragmentBuilding => write!(

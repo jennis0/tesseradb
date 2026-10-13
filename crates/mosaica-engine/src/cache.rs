@@ -1,4 +1,4 @@
-//! The row-projection cache seam: the key, the byte bound's arithmetic, and the two pruners.
+//! The row-projection cache seam: the key, the byte bound's arithmetic, and the pruner.
 //!
 //! A named wrapper around the generic [`SingleFlightCache`], carrying the policy that is specific
 //! to projections: a byte bound, LRU eviction, and removal of entries whose key no request can
@@ -6,16 +6,16 @@
 //!
 //! The single-flight state machine, the eviction rules and the counted choke point live in
 //! `mosaica-cache` and are argued there. What lives here is specific to projections: the key, the
-//! weight function, the two pruners' safety argument, and the arithmetic an operator needs to size
-//! a box.
+//! weight function, the pruner's safety argument, and the arithmetic an operator needs to size a
+//! box.
 //!
 //! # What removal can and cannot do (I3's cache half)
 //!
 //! Nothing here modifies a cached value — lifecycle §7 requires entries to be immutable and
 //! "invalidation is key rotation, never mutation", and both eviction and pruning only ever
 //! *remove*. That is what makes a rebuilt projection identical to the evicted one: the miss path
-//! builds `RowProjection::new` over `ProjectionInputs` carrying the session's own frozen fragment,
-//! its satisfied terms and the *pinned* generation's postings, tiers, images and row space — all of
+//! builds `RowProjection::new` over `ProjectionInputs` carrying the grant's frozen fragment, the
+//! grant's keys and the *pinned* generation's postings, tiers, images and row space — all of
 //! which the key names or the request pins. The route that build takes is priced from those same
 //! inputs and every route returns the identical rows (`crate::projection::RowProjection::new`), so a
 //! miss that prices differently from the build before it still produces what was evicted.
@@ -25,68 +25,53 @@
 use std::sync::Arc;
 
 use croaring::Portable;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use mosaica_authz::FrozenFragment;
+use mosaica_types::ShardId;
 
 use crate::cancel::CancelToken;
 use crate::projection::RowProjection;
 use mosaica_cache::{CacheStats, CacheWeight, SingleFlightCache, WaitEnded};
 
-/// `(token_id, view, segments_version)` — the row-projection cache's key (shared-context
-/// constraint 8). `token_id` rather than the token string so the cache never has to hash or
-/// compare a full bearer token.
+/// The row-projection cache's key: one grant's projection of one view in one shard, at one
+/// geometry. Every session with the same grant reads the same entry.
 ///
-/// **Named fields, not a tuple, and the reason is a disclosure.** Two of the
-/// three components are `u64`, so as `(u64, String, u64)` a transposition at the construction site
-/// compiles, runs, and keys every session's projection on `(segments_version, view, token_id)` —
-/// at which point any two sessions whose `token_id` collides with the live `segments_version` share
-/// a row projection. That is cross-principal mask reuse: one viewer composing against another's
-/// `M_auth` — a principal's authorised set (I2/I3) — presenting as a cache-hit-rate improvement.
-/// The two pruners below must each pick the right `u64` out of this key, so the shape earns its
-/// keep twice over.
+/// **Named fields, not a tuple**: a transposition of two of the `u64`s or the two digests would
+/// still compile, and would hand one grant's projection to another.
 ///
-/// # Two facts this key's safety rests on, neither of which the type can enforce
+/// # What this key's safety rests on, which the type cannot enforce
 ///
-/// Both are load-bearing for the pruners and neither is asserted anywhere in the code, so they
-/// are written down here, at the type they constrain:
-///
-/// 1. **`token_id` is never reused.** `Engine::authorise` draws it from a monotonic `AtomicU64`
-///    that starts at zero on every `Engine::open`. That is safe *only because this cache is
-///    in-memory and dies with the process.* Persisting it across restarts would break that, and
-///    the day anyone does, token-id reuse becomes exactly the cross-principal mask reuse the
-///    paragraph above describes. Persisting this cache requires widening the key first.
-///
-///    **The reason to want it has largely gone.** This read "a 10.7 s miss makes persisting it an
-///    obvious future optimisation" when a miss cost that; a miss is now a measured 1 277 ms
-///    (`probes/2026-08-14-project-decomposition/`), which is an ordinary cold start rather than
-///    something worth carrying a disclosure hazard to avoid. The hazard did not shrink with the
-///    cost, so the trade moved decisively one way.
+/// 1. **`grant` is the grant whole.** It is `Session::terms_digest`, SHA-256 over the grant's
+///    sorted index keys or over a fixed input for `read-all`, and the projection is a function of
+///    those keys and the shard's state alone: the fragment unions them, and the route is priced
+///    from them. Nothing about the credential beyond the grant reaches the value, which is why
+///    sessions holding different credentials may share it; anything per credential is read from
+///    the session.
 /// 2. **`segments_version` is globally unique within a process**, which is why
 ///    [`RowProjectionCache::prune_generations_below`]'s depth test reads it alone.
-///    `crate::pins::check_publishable` refuses any publication that does not strictly increase it,
-///    and design §10.2 makes the prefix name *be* the segment-set version. Relax that guard and
-///    this pruner starts removing the wrong generation's entries.
-///
-/// 3. **`prefix` is carried, and is not redundant with `segments_version`.** Within one process
-///    `segments_version` is a sufficient discriminator (fact 2), and that is what the pruner keys
-///    on. `prefix` is here for the case fact 2 does not cover: a compaction publishes a new prefix,
-///    and if a future change ever let `n` restart within one — or let this cache outlive the
-///    process — a prefix-A projection would answer a prefix-B request, which is I11's *"selects
-///    arbitrary rows"*. It costs a string comparison on a path that already hashes one.
+///    `crate::pins::check_publishable` refuses any publication that does not strictly increase it.
+///    Relax that guard and this pruner starts removing the wrong generation's entries.
+/// 3. **`prefix` and `identity` are carried, and are not redundant with `segments_version`.**
+///    A compaction publishes a new prefix and a new shard identity, and an entry from before it
+///    must never answer a request after it, should `segments_version` ever restart within one or
+///    this cache outlive the process. The entries are in memory only.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RowProjectionKey {
-    /// The session's process-local identity (`Session::token_id`), never the bearer token itself.
-    pub token_id: u64,
+    /// The grant's digest (`Session::terms_digest`).
+    pub grant: [u8; 32],
     /// The view this projection addresses — its `Permutation` is what defines the row space.
     pub view: String,
-    /// The geometry generation the row space belongs to. A bundle swap changes it, and entries
-    /// more than [`KEEP_SUPERSEDED_GENERATIONS`] behind become
-    /// [`RowProjectionCache::prune_generations_below`]'s work at the next publication, which keeps
-    /// only a session's newest in the live prefix; an *overlay* swap must not (I11).
+    /// The shard whose row space the projection is in.
+    pub shard: ShardId,
+    /// The shard's identity (`ShardParts::identity`), which a compaction moves.
+    pub identity: [u8; 32],
+    /// The geometry generation the row space belongs to. Entries more than
+    /// [`KEEP_SUPERSEDED_GENERATIONS`] behind become
+    /// [`RowProjectionCache::prune_generations_below`]'s work at the next publication; an
+    /// *overlay* swap must not move it (I11).
     pub segments_version: u64,
-    /// The prefix that geometry belongs to — see fact 3 above for why this is here when
-    /// `segments_version` already discriminates within a process.
+    /// The prefix that geometry belongs to — see fact 3 above.
     pub prefix: String,
 }
 
@@ -117,32 +102,26 @@ pub(crate) enum Peek {
     Absent,
 }
 
-/// One session's geometry for one generation: the mask fragment **and** the projection taken over
-/// it, as a single value.
+/// One grant's geometry in one shard's view for one generation: the mask fragment **and** the
+/// projection taken over it, as a single value. Shared by every session with the grant.
 ///
-/// **They are one entry because stale-serve breaks the ordering that used to couple them**
-/// (decision 0044; review finding F5). Until stale-serve, `Engine::viewport` resolved the fragment
-/// first and always at the live watermark, so the projection it then built or derived was
-/// necessarily over that fragment — a coupling held by request ordering and by nothing in the
-/// types. Serving a one-generation-stale projection deliberately breaks that ordering: a
-/// projection derived from a stale fragment but inserted under the *new* `segments_version` key
-/// would pin the session's freshly flushed items invisible until the next publication — fail-closed,
-/// and a silent falsification of the ack→visibility bound. Carrying the pair makes the mismatch
-/// unexpressible instead of forbidden.
+/// **They are one entry because stale-serve would otherwise pair them wrongly.** A projection
+/// derived from a stale fragment but inserted under the *new* `segments_version` key would pin the
+/// grant's freshly flushed items invisible until the next publication. Carrying the pair makes the
+/// mismatch unexpressible instead of forbidden, and gives the next derivation the fragment the
+/// projection was taken over.
 ///
 /// **What the refresh needs to produce the next one**, so a background pass needs no session
 /// registry — the engine has none, sessions being values the server holds. `grant` is what the
-/// [`mosaica_authz::FragmentCache`] is asked with; `auth_data_hash` is a digest of the
-/// credential, never the credential.
+/// [`mosaica_authz::FragmentCache`] is asked with. Nothing here is per credential: what is, such
+/// as the identity key's credential digest, is read from the session.
 pub(crate) struct SessionGeometry {
     /// The fragment `projection` was taken over — never the live one, unless they coincide.
     pub(crate) fragment: Arc<FrozenFragment>,
     pub(crate) projection: Arc<RowProjection>,
     /// What the fragment is the union of, the fragment cache's key component. A `read-all`
-    /// session's is every key, so the refresh rebuilds it from the keys the generation carries.
+    /// grant's is every key, so the refresh rebuilds it from the keys the generation carries.
     pub(crate) grant: mosaica_authz::Grant,
-    /// `sha256(auth_data)`, part of the mask identity.
-    pub(crate) auth_data_hash: [u8; 32],
 }
 
 impl CacheWeight for SessionGeometry {
@@ -179,13 +158,14 @@ impl CacheWeight for RowProjection {
     }
 }
 
-/// Cached row-space projections, keyed `(token_id, view, segments_version)` — never recomputed on
+/// Cached row-space projections, one per (grant, view, shard, generation) — never recomputed on
 /// the per-viewport path (shared-context constraint 8; see `crate::projection::RowProjection`'s doc
 /// for the cost this avoids).
 ///
 /// # Sizing: what the bound bounds, and the number an operator actually needs
 ///
-/// `row_projection_cache_bytes` bounds the bytes **resident in this cache**. Peak process usage is
+/// `row_projection_cache_bytes` bounds the bytes **resident in this cache**, which holds a
+/// projection per grant in use rather than per session. Peak process usage is
 /// higher, and eviction is what creates the gap: every admitted request holds an
 /// `Arc<RowProjection>` for its whole duration whether or not the cache still contains it, so
 ///
@@ -245,16 +225,17 @@ impl RowProjectionCache {
     ///
     /// A flush **appends**: the new extent's rows begin exactly where row space ended, so they are
     /// disjoint from every row the previous projection contains. The new projection is therefore
-    /// the old bitmap unioned with the new extents' own contribution
-    /// (`RowSpace::project_extents_from`), and that is *equal to*, not merely close to, what
-    /// `RowSpace::project` would return over the whole space. Four premises hold it up, each a
-    /// thing this design must maintain rather than happen to have (write-path §4.6):
+    /// the old bitmap unioned with the new extents' own contribution and with the rows, in the
+    /// base and the covered extents, of the entities the new fragment holds and the old did not:
+    /// a join row can have been published, or folded into the base, before the entity's own row
+    /// flushed (`RowProjection::extend`). That is *equal to*, not merely close to, what
+    /// `RowSpace::project` would return over the whole space. Four premises hold it up:
     ///
-    /// 1. No entity a flush gives a row holds one in the row space the projection covers: a new id
-    ///    lies above it, and an id a fold freed lost its rows at that fold.
+    /// 1. An entity the old fragment held keeps every row it had, and the new fragment holds it
+    ///    too: a flush never removes a posting, and an id a fold freed lost its rows at that fold.
     /// 2. A flush never rewrites the base `permutation.bin` or any earlier extent.
-    /// 3. The session's `satisfied` set is fixed at authorise and never re-resolved, so the
-    ///    fragment the projection is taken over is the same one throughout.
+    /// 3. The key names the grant, whose keys never change, so the fragment the projection is
+    ///    taken over unions the same keys throughout.
     /// 4. `segments_version` strictly increases, so the source key names exactly one geometry
     ///    (`crate::geometry::check_publishable`).
     ///
@@ -314,43 +295,39 @@ impl RowProjectionCache {
         }
     }
 
-    /// The freshest fragment this token has a resident entry for, if any — **what keeps the
-    /// drill-down and the viewport from drifting apart under stale-serve.**
+    /// The freshest fragment `grant` has a resident entry for in `shard`, if any — **what keeps
+    /// the drill-down and the viewport from drifting apart under stale-serve.**
     ///
     /// `Engine::item` answers an entity-space question against a fragment, and `Engine::viewport`
-    /// answers the row-space one against a projection taken over one. Until stale-serve both
-    /// resolved the fragment at the live watermark, so they necessarily agreed. Serving a
-    /// one-generation-stale projection breaks that: a drill-down at the live watermark would call
-    /// an item visible while the viewport beside it drew no mark for it — the two enforcement
-    /// representations drifting, which write-path §14's obligation 27 forbids. Taking the fragment
-    /// from the same entry the viewport serves restores the agreement by construction, and takes
-    /// the drill-down off the per-publication fragment rebuild at the same time (a *measured*
-    /// ~200 ms per credential — `probes/2026-08-04-refresh-ladder/`).
+    /// answers the row-space one against a projection taken over one. Serving a
+    /// one-generation-stale projection means a drill-down at the live watermark could call an
+    /// item visible while the viewport beside it drew no mark for it — the two enforcement
+    /// representations drifting. Taking the fragment from the grant's freshest entry in the shard
+    /// keeps the card with the viewport of the view that entry is for, and takes the drill-down off
+    /// the per-publication fragment rebuild (a *measured* ~200 ms per grant). A session served
+    /// another view a generation stale, beside a newer entry of the grant's, may find an item on
+    /// its card that its viewport does not yet draw: an item its grant may see.
     ///
-    /// **The fragment is not view-scoped**, so any of this token's entries in `shard` answers:
-    /// the fragment cache keys on the shard's identity, the satisfied terms and the watermark, and
+    /// **The fragment is not view-scoped**, so any of the grant's entries in `shard` answers: the
+    /// fragment cache keys on the shard's identity, the satisfied terms and the watermark, and
     /// none is a view. Another shard's fragment is in another entity space and never answers. The
     /// freshest is taken because a later watermark is a strictly better answer to an entity-space
     /// question.
     ///
-    /// **Per token, never per entity** — the scan cost cannot depend on which identifier was
+    /// **Per grant, never per entity** — the scan cost cannot depend on which identifier was
     /// asked for, which is Critical C-5's constant-time property.
     ///
-    /// **Scoped to `prefix`, and taking the max by `segments_version` alone was a pre-fold fragment
-    /// holder** (compaction §4). Within one prefix the version is a sufficient discriminator and
-    /// the freshest entry is the best answer; across a fold it is not, because a fold rewrites the
-    /// term index and every entry from the superseded prefix carries a fragment built from it.
-    /// Both prunes miss those entries in the window that matters — `prune_generations_below` keeps
-    /// the generation immediately under the live one, which after a fold is a pre-fold entry — so
-    /// the scoping is here, at the read, rather than arranged for by eviction.
+    /// **Scoped to `prefix`**: across a fold a superseded entry carries a fragment built from the
+    /// term index the fold replaced, and `prune_generations_below` keeps the generation
+    /// immediately under the live one, which after a fold is a pre-fold entry.
     ///
     /// **And bounded below by `floor`**, the publication's retention floor, so the drill-down is
-    /// never staler than rung 2 of the viewport beside it. The prune keeps a session's newest
-    /// entry below the floor as the refresh's base; answering from it would call an item absent
-    /// that the viewport, finding neither rung, rebuilds and draws.
+    /// never staler than rung 2 of the viewport beside it. The prune keeps a grant's newest entry
+    /// below the floor as the refresh's base; answering from it would call an item absent that
+    /// the viewport, finding neither rung, rebuilds and draws.
     pub(crate) fn freshest_fragment(
         &self,
-        token_id: u64,
+        grant: &[u8; 32],
         shard: &crate::Shard,
         prefix: &str,
         floor: u64,
@@ -358,9 +335,10 @@ impl RowProjectionCache {
         self.inner
             .ready_entries()
             .into_iter()
-            .filter(|(key, geometry)| {
-                key.token_id == token_id
-                    && geometry.fragment.identity == shard.identity
+            .filter(|(key, _)| {
+                key.grant == *grant
+                    && key.shard == shard.id()
+                    && key.identity == shard.identity
                     && key.prefix == prefix
                     && key.segments_version >= floor
             })
@@ -368,27 +346,25 @@ impl RowProjectionCache {
             .map(|(_, geometry)| Arc::clone(&geometry.fragment))
     }
 
-    /// Each session's newest `Ready` entry per view, as `(key, value)` — what the background
-    /// refresh iterates.
+    /// Each grant's newest `Ready` entry per view and shard, as `(key, value)` — what the
+    /// background refresh iterates.
     ///
     /// **O(cache residency), never O(sessions)** (decision 0035's shape, and 0044's D1): the
     /// refresh's whole cost model is that it is bounded by what is resident rather than by how
-    /// many sessions exist, and this is where that becomes true. A session with no resident entry
+    /// many sessions exist, and this is where that becomes true. A grant with no resident entry
     /// is not refreshed and pays a build on its next request, which is establishment, not
     /// update-induced work.
     ///
-    /// **Only each session's newest entry per view.** Retention leaves an older entry beside a
-    /// newer one — the one-back entry beside the live one, or a kept base beside what a refresh
+    /// **Only the newest entry per grant, view and shard.** Retention leaves an older entry beside
+    /// a newer one — the one-back entry beside the live one, or a kept base beside what a refresh
     /// has since derived from it — and deriving from both would produce the same key twice and
     /// count it twice.
     pub(crate) fn resident(&self) -> Vec<(RowProjectionKey, Arc<SessionGeometry>)> {
         let ready = self.inner.ready_entries();
-        let newest = newest_per_view(&ready);
+        let newest = newest_per_lineage(&ready);
         let bases: Vec<bool> = ready
             .iter()
-            .map(|(key, _)| {
-                newest.get(&(key.token_id, key.view.as_str())) == Some(&key.segments_version)
-            })
+            .map(|(key, _)| newest.get(&lineage(key)) == Some(&key.segments_version))
             .collect();
         ready
             .into_iter()
@@ -397,66 +373,15 @@ impl RowProjectionCache {
             .collect()
     }
 
-    /// Remove every projection belonging to `token_id`. Called when a session is revoked.
-    ///
-    /// # Why this is safe, and what it is not
-    ///
-    /// **It only removes**, so it cannot widen a mask; its worst failure is a needless rebuild.
-    /// What makes the *keys* safe to drop is that `token_id` is never reused (see
-    /// [`RowProjectionKey`]'s fact 1), so no future session can produce a key this pass removes.
-    ///
-    /// **It is a memory-hygiene mechanism, not a disclosure control, and the two must not be
-    /// blurred.** A request that authenticated before the revoke already holds its
-    /// `Arc<SessionEntry>` and can re-insert this key *after* the prune has run; the entry it
-    /// publishes is that same session's own projection over the same geometry, reachable by nobody
-    /// else, and the byte bound reclaims it. The disclosure control for a revoked session is
-    /// `AppState::authenticated_session` returning `BadCredential`, not this.
-    ///
-    /// **Revoke is not the common retention path; expiry is.** Most sessions are never revoked —
-    /// they reach the 3600 s default lifetime and are refused. The registry sweeps those out on the
-    /// next authorisation and hands their token ids to [`Engine::prune_tokens`], which is this
-    /// removal in its batched form, so an expired session's entries go the same way a revoked
-    /// one's do (`mosaica_server::state::SessionRegistry`). What the byte bound is left to reclaim
-    /// is the residue between sweeps, bounded at `2 × live` sessions.
-    ///
-    /// # Cost, stated rather than argued
-    ///
-    /// This is an **O(n) pass under the request-path lock**, and `/session/revoke` is deliberately
-    /// outside the admission gate (D13). At the designed configuration n is small — 16 entries at
-    /// the 2 GiB default and the *measured* 125.12 MB per entry, a few thousand at fixture scale —
-    /// and the pass is microseconds. The adversarial n is `bound / PER_ENTRY_FLOOR_BYTES` ≈ 4.2 M,
-    /// where a pass is tens of milliseconds while every admitted request blocks on the same mutex.
-    /// **Reaching it requires a credential that mints sessions**: a login, an `authorise-as` key
-    /// or the operator credential, and each session it mints is held until it ends.
-    /// `CacheStats::prune_scanned` makes the real n observable rather than assumed.
-    ///
-    /// **The sweep's batch pays the pass once, and not on the reactor.** [`Self::prune_tokens`]
-    /// walks n for the whole batch rather than n per victim, and `/session/authorise` hands it to
-    /// `spawn_blocking`, so a batch of expired sessions costs one pass on a blocking thread rather
-    /// than `victims` passes on the thread answering requests. A
-    /// secondary `token_id → keys` index would make the pass O(victims); it is declined here
-    /// because a second index is a second bijection to keep in step — the failure `mosaica-cache`'s
-    /// rule 1 exists to prevent — and the exposure above does not justify it.
-    pub(crate) fn prune_token(&self, token_id: u64) -> usize {
-        self.inner.retain_keys(|key| key.token_id != token_id)
-    }
-
-    /// The same removal for a set of sessions, in **one** pass.
-    ///
-    /// The expiry sweep drops a batch — up to `2 × live` sessions at once
-    /// (`mosaica_server::state::SessionRegistry`) — and a loop over [`Self::prune_token`] would
-    /// take this cache's mutex once per session and walk every surviving key each time. One pass
-    /// with a set membership test is the same work for one session and O(n) rather than
-    /// O(n × victims) for a batch, which is what keeps the sweep's cost off the request path's
-    /// lock. Cost otherwise as [`Self::prune_token`] states it.
-    pub(crate) fn prune_tokens(&self, token_ids: &FxHashSet<u64>) -> usize {
-        self.inner
-            .retain_keys(|key| !token_ids.contains(&key.token_id))
+    /// Drop every projection.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn clear(&self) {
+        self.inner.retain_keys(|_| false);
     }
 
     /// Drop every projection built against a generation older than `floor`, keeping `floor` and
-    /// everything above it, **and keeping each session's newest projection of each view in the
-    /// live prefix whatever its generation**. Called by the publication, with
+    /// everything above it, **and keeping each grant's newest projection of each view and shard in
+    /// the live prefix whatever its generation**. Called by the publication, with
     /// `live - `[`KEEP_SUPERSEDED_GENERATIONS`] and the live generation's prefix.
     ///
     /// # Why a retention depth rather than a reclaim hook
@@ -468,23 +393,23 @@ impl RowProjectionCache {
     /// bounded**.
     ///
     /// **Pruning at the swap, with depth zero, would be wrong.** A flush *extends* row space: the
-    /// new generation's projection for a session is the old one plus the new extent's rows, so the
+    /// new generation's projection for a grant is the old one plus the new extent's rows, so the
     /// superseded entry is both the input the background refresh extends and the entry rung 2 of
     /// `Engine::session_geometry`'s ladder serves while the refresh runs. Deleting it at the
-    /// instant of the swap deletes both, and every session pays the full rebuild at every tick.
+    /// instant of the swap deletes both, and every grant pays the full rebuild at every tick.
     ///
     /// **The newest entry is kept because it is the refresh's only base.** Two publications can
     /// land before the refresh for the first has taken its snapshot, a flush and then a merge
     /// under load. The depth alone would then drop the entry both refreshes derive from, both
-    /// would find nothing, and every resident session would pay the full rebuild at its next
+    /// would find nothing, and every resident grant would pay the full rebuild at its next
     /// request. Keeping it lets a refresh derive across the gap: the rungs of `crate::refresh` are
     /// exact at any distance within a prefix. A kept entry survives until a newer `Ready` entry
-    /// for its session and view, an eviction, its token's prune or a fold's publication removes
-    /// it. Nothing reads it but the refresh — rung 2 and [`Self::freshest_fragment`] look no
-    /// further back than the floor — so it is the first thing the byte bound evicts.
+    /// for its grant, view and shard, an eviction or a fold's publication removes it. Nothing
+    /// reads it but the refresh — rung 2 and [`Self::freshest_fragment`] look no further back
+    /// than the floor — so it is the first thing the byte bound evicts.
     ///
     /// **Only the live prefix.** Across a fold a kept entry is only a rebuild's input, and a merge
-    /// landing while the fold's pass is still rebuilding would rebuild every session that pass has
+    /// landing while the fold's pass is still rebuilding would rebuild every grant that pass has
     /// not reached a second time, holding them at 429 behind a pass longer than the rebuild it
     /// saves. So across a fold the depth alone applies, as it did before.
     ///
@@ -498,27 +423,34 @@ impl RowProjectionCache {
     ///
     /// Two passes under the request path's lock: [`SingleFlightCache::ready_entries`] clones every
     /// ready key and its `Arc`, then the removal walks every key. At the designed configuration n
-    /// is small, as [`Self::prune_token`] states; at its adversarial n the clone costs more than
-    /// the removal, and both run on the publication path, not on a request handler.
+    /// is small (16 entries at the 2 GiB default and the *measured* 125.12 MB per entry); at its
+    /// adversarial n, `bound / PER_ENTRY_FLOOR_BYTES`, the clone costs more than the removal,
+    /// and both run on the publication path, not on a request handler.
     pub(crate) fn prune_generations_below(&self, floor: u64, live_prefix: &str) -> usize {
         let ready = self.inner.ready_entries();
-        let newest = newest_per_view(&ready);
+        let newest = newest_per_lineage(&ready);
         self.inner.retain_keys(|key| {
             key.segments_version >= floor
                 || (key.prefix == live_prefix
-                    && newest.get(&(key.token_id, key.view.as_str()))
-                        == Some(&key.segments_version))
+                    && newest.get(&lineage(key)) == Some(&key.segments_version))
         })
     }
 }
 
-/// Each session's newest generation per view among `entries`, keyed by token and view.
-fn newest_per_view(
+/// What a refresh carries an entry forward along: its grant, view and shard.
+type Lineage<'a> = (&'a [u8; 32], &'a str, ShardId);
+
+fn lineage(key: &RowProjectionKey) -> Lineage<'_> {
+    (&key.grant, key.view.as_str(), key.shard)
+}
+
+/// The newest generation of each lineage among `entries`.
+fn newest_per_lineage(
     entries: &[(RowProjectionKey, Arc<SessionGeometry>)],
-) -> FxHashMap<(u64, &str), u64> {
-    let mut newest: FxHashMap<(u64, &str), u64> = FxHashMap::default();
+) -> FxHashMap<Lineage<'_>, u64> {
+    let mut newest: FxHashMap<Lineage<'_>, u64> = FxHashMap::default();
     for (key, _) in entries {
-        let version = newest.entry((key.token_id, key.view.as_str())).or_insert(0);
+        let version = newest.entry(lineage(key)).or_insert(0);
         *version = (*version).max(key.segments_version);
     }
     newest
@@ -529,7 +461,7 @@ fn newest_per_view(
 /// **One, and the number is the patch's input rather than a margin.** A flush appends, so the
 /// generation immediately below the live one holds exactly the projection the next request's patch
 /// derives from; a second one back is derivable from the first and is kept only while it is its
-/// session's newest in the live prefix ([`RowProjectionCache::prune_generations_below`]). Raising
-/// this buys nothing and costs a *measured* 125.12 MB per entry per session at 10⁹; lowering it to
+/// grant's newest in the live prefix ([`RowProjectionCache::prune_generations_below`]). Raising
+/// this buys nothing and costs a *measured* 125.12 MB per entry per grant at 10⁹; lowering it to
 /// zero forfeits the patch and reinstates the full rebuild at every tick.
 pub(crate) const KEEP_SUPERSEDED_GENERATIONS: u64 = 1;

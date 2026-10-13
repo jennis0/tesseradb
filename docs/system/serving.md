@@ -7,12 +7,13 @@ it.
 
 ## Admission and load
 
-A request for a viewport, an item, or a new session needs a slot permit before the engine runs it,
-apart from whatever is happening on the write side. Admission checks two things in order. First,
-an overall limit on how many requests may be outstanding at once: a request that arrives once
-every slot is taken is refused immediately, with no wait. A request that clears that stage still
-needs a compute permit, a share of running capacity, and waits up to a configured timeout,
-`serve.admission_timeout_ms`, for one to open. A request that gets no compute permit within that
+A request for a viewport or an item needs a slot permit before the engine runs it, apart from
+whatever is happening on the write side. A request for a new session needs none: it builds nothing,
+and the session's first read builds its authorised set under that read's admission. Admission
+checks two things in order. First, an overall limit on how many requests may be outstanding at
+once: a request that arrives once every slot is taken is refused immediately, with no wait. A
+request that clears that stage still needs a compute permit, a share of running capacity, and
+waits up to a configured timeout, `serve.admission_timeout_ms`, for one to open. A request that gets no compute permit within that
 time is refused as well. A bulk read of items or artifacts is admitted under a limit of its own,
 described under [bulk reads](#bulk-reads), and so is a request for the artifacts of each tile,
 described under [the artifacts of each tile](#the-artifacts-of-each-tile).
@@ -24,17 +25,21 @@ session's own cached state than to the gate:
 | What happened | What to do |
 |---|---|
 | Every slot was taken, or no compute permit opened up within the timeout | Wait the interval given, then retry |
-| A concurrent request was already building this session's row projection, and the wait for it ran out | Wait the interval given, then retry; the build it was waiting on may have finished by then |
-| A background pass was already rebuilding this session's row projection after a merge, and this request would otherwise pay that rebuild itself | Wait the interval given, then retry |
+| A concurrent request was already building the row projection of this session's grant, and the wait for it ran out | Wait the interval given, then retry; the build it was waiting on may have finished by then |
+| A background pass was already rebuilding the row projection of this session's grant after a merge, this session has already been served the view, and this request would otherwise pay that rebuild itself | Wait the interval given, then retry |
 
-The last two rows share one status for different reasons. In the second, a matching request got
-to this session's row projection first. It is being built now, so a later request for the same
-session waits for that build, up to `serve.single_flight_wait_ms`, rather than starting a second
-one. It is served that build's result if the build finishes within the wait. In the third, no
-other request is building anything. A merge has moved this session's cached row projection out of
-date, and a background pass, not a request, is already rebuilding it for every resident session.
-Rebuilding it again on this request's own thread would cost far more than the fixed wait. The
-request is refused instead and asked to come back once that pass has caught up.
+The last two rows share one status for different reasons. A row projection is kept per grant,
+and every session with the grant reads the same one. In the second row, a matching request, from
+this session or another with its grant, got to the projection first. It is being built now, so a
+later request for it waits for that build, up to `serve.single_flight_wait_ms`, rather than
+starting a second one. It is served that build's result if the build finishes within the wait. In
+the third, no other request is building anything. A merge has moved the grant's cached row
+projection out of date, and a background pass, not a request, is already rebuilding it for every
+resident grant. Rebuilding it again on this request's own thread would cost far more than the
+fixed wait, so a session already served the view is refused instead and asked to come back once
+that pass has caught up. A session's first read in the view is answered at the live generation
+instead: it carries the grant's previous projection across the merge itself, or waits on the
+pass's build of it, and is refused only as in the second row.
 
 A streamed viewport response holds its slot permit for as long as the response is being sent, not
 only for as long as it takes to compute: the response occupies capacity for exactly as long as
@@ -44,15 +49,16 @@ reader cannot hold compute capacity a waiting request needs.
 
 ## What the server keeps warm
 
-A session's authorised set and its row projection, which [access control
+A grant's authorised set and its row projection, which [access control
 describes](access-control.md#what-a-request-answers-from), are built once, together, and then kept
-rather than rebuilt on every request. Rebuilding either from nothing is the most expensive step in
-the path a request takes. What [a flush, a merge and a compaction fold](write-path.md#flush) each
-do to that cached pair is described there; none of the three is applied on the thread answering a
-request. A background pass folds a flush or a merge into every resident session's cached pair as
-it reaches each one. Only a session the pass has not yet reached pays the cost inline, as an
-ordinary cache miss, on its own next request. After a compaction fold the cached pair is invalid
-outright for every session, and the same background pass rebuilds each one in turn.
+for every session with the grant rather than rebuilt on every request. Rebuilding either from
+nothing is the most expensive step in the path a request takes. What [a flush, a merge and a
+compaction fold](write-path.md#flush) each do to that cached pair is described there; none of the
+three is applied on the thread answering a request. A background pass folds a flush or a merge
+into every resident grant's cached pair as it reaches each one. Only a session whose grant the pass
+has not yet reached pays the cost inline, as an ordinary cache miss, on its own next request. After
+a compaction fold the cached pair is invalid outright for every grant, and the same background pass
+rebuilds each one in turn.
 
 Each annotation level's figures are kept as well, per grant, in memory and on disc, as [a level's
 figures](#a-levels-figures) describes.
@@ -119,8 +125,8 @@ stays held until delivery ends, whichever of the four exits reaches it first.*
 
 The bulk reads, `POST /v1/items` and `POST /v1/artifacts`
 ([queries](queries.md#reading-items-and-artifacts-in-bulk)), run under an admission limit of their
-own, `serve.bulk_admission`, so a long read takes no slot from the viewport, item and session
-routes, and those routes take none from it. A read past the limit is refused at once with the 429
+own, `serve.bulk_admission`, so a long read takes no slot from the viewport and item routes, and
+those routes take none from it. A read past the limit is refused at once with the 429
 and one-second interval above, and a limit of 0 refuses every bulk read. An admitted read holds its
 permit until its response ends, on a blocking thread of its own: the server allows one such thread
 for each read the limit admits. Bulk reads share the machine's CPU and the process's memory with

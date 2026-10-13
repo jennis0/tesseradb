@@ -52,9 +52,9 @@
 //! invisible to `crate::viewport::Engine::session_geometry`'s three-rung ladder and to
 //! `crate::refresh`.
 //!
-//! **It must not outlive its session.** [`crate::Engine::prune_token`] flips this session's token
-//! at a revoke and [`crate::Engine::prune_tokens`] flips a batch of them at the registry's expiry
-//! sweep, which is how a session that was never revoked stops filling. The deepest step neither
+//! **It must not outlive its session.** [`crate::Engine::prune_tokens`] flips the tokens of the
+//! sessions that end, at a revoke or at the registry's expiry sweep, which is how a session that
+//! was never revoked stops filling. The deepest step neither
 //! can interrupt is one walk.
 //!
 //! ## What it deliberately does not cover
@@ -120,7 +120,7 @@ pub(crate) struct StageDeps {
     /// `occupancy_stage_enabled`, whether the fill runs at all.
     pub(crate) switches: Arc<crate::switches::TestSwitches>,
     /// One cancellation token per session with a fill in flight, flipped and dropped by
-    /// [`crate::Engine::prune_token`]. Bounded by the number of fills running at once, not by the
+    /// [`crate::Engine::prune_tokens`]. Bounded by the number of fills running at once, not by the
     /// number of sessions: a fill removes its own entry when it ends.
     pub(crate) in_flight: Arc<std::sync::Mutex<FxHashMap<u64, CancelToken>>>,
 }

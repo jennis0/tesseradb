@@ -151,6 +151,33 @@ pub fn residual_fragment(
     Ok(residual)
 }
 
+/// The entities `fragment` holds that `previous` did not, where both are `grant`'s over one base
+/// postings file. Base postings do not change between the two, so every such entity has a posting
+/// in a tier of `deltas`, and only the tiers are read: what this costs follows the entities posted
+/// since the base was written, not the fragment's size.
+pub fn gained_by(
+    grant: &Grant,
+    deltas: &[Arc<DeltaTier>],
+    fragment: &Bitmap,
+    previous: &Bitmap,
+) -> io::Result<Bitmap> {
+    let mut sources = Vec::new();
+    match grant {
+        Grant::Keys(keys) => collect_postings(&mut sources, keys, None, deltas)?,
+        Grant::Every => {
+            for tier in deltas {
+                for ordinal in tier.ordinals() {
+                    sources.extend(tier.posting_at(ordinal)?);
+                }
+            }
+        }
+    }
+    let mut gained = union_postings(sources);
+    gained.and_inplace(fragment);
+    gained.andnot_inplace(previous);
+    Ok(gained)
+}
+
 /// The sum of `terms`' delta-posting cardinalities across every live tier, in entities. A sum
 /// rather than the cardinality of a union, so an entity carried by two tiers is counted twice,
 /// which biases the residual walk's costed route choice toward the walk.

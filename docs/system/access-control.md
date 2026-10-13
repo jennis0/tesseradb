@@ -231,16 +231,16 @@ Composing the visible set touches only the items a session's authorised set coul
 not the whole corpus, so the work stays cheap on every request even though the overlay itself can
 grow without bound. What is cached across requests is not the visible set, which changes with the
 overlay on every one, but the authorised set's projection from item identity into the row order a
-view stores its geometry in. That projection is cached per session and per view, and extended
-forward as new rows are written; a request applies the overlay to the cached projection as a
-difference rather than rebuilding either from scratch.
+view stores its geometry in. That projection is cached per grant, view and shard, shared by every
+session with the same grant, and extended forward as new rows are written; a request applies the
+overlay to the cached projection as a difference rather than rebuilding either from scratch.
 
 ## When the corpus changes under a live session
 
 | Change | Effect on an open session | How |
 |---|---|---|
 | An item is deleted, suppressed, or unsuppressed | Applies on the session's very next request | The overlay is read fresh at composition, every time |
-| A flush publishes new rows for a term the session already holds | The session sees them once the background refresh has reached it, usually by its next request; until then it is served the previous generation's answer, which is still correct | A background pass rebuilds the cached projection for every resident session at each geometry publication; a session with no resident entry rebuilds on its next request instead |
+| A flush publishes new rows for a term the session already holds | A session already served the view sees them once the background refresh has reached its grant, usually by its next request; until then it is served the previous generation's answer, which is still correct. A session's first read in a view is answered at the live generation | A background pass rebuilds the cached projection for every resident grant at each geometry publication; a session whose grant has no resident entry rebuilds on its next request instead |
 | A grant, membership, password, key or provider behind the session changes | The session ends, and its next request is answered `403 expired-token` | There is no partial update to the authorised set. The catalogue reports which principals, keys and providers a change affects, and the server ends their sessions; a new token picks up the change |
 
 **Not built yet:** adding to an open session a term it holds that the dictionary did not carry

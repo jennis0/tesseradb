@@ -156,13 +156,8 @@ impl DerivedCache {
         }
     }
 
-    /// Remove every entry belonging to one session. Its worst failure is a needless rebuild, and
-    /// a `token_id` is never reused within a process.
-    pub fn prune_token(&self, token_id: u64) {
-        self.inner.retain_keys(|key| key.token_id != token_id);
-    }
-
-    /// The same removal for a set of sessions, in one pass, for the expiry sweep.
+    /// Remove every entry belonging to any of `token_ids`, in one pass. Its worst failure is a
+    /// needless rebuild, and a `token_id` is never reused within a process.
     pub fn prune_tokens(&self, token_ids: &rustc_hash::FxHashSet<u64>) {
         self.inner
             .retain_keys(|key| !token_ids.contains(&key.token_id));
@@ -277,7 +272,7 @@ mod tests {
         let cache = DerivedCache::default();
         cache.get_or_derive(key(1, 4, 0), || shape(10));
         cache.get_or_derive(key(2, 4, 0), || shape(20));
-        cache.prune_token(1);
+        cache.prune_tokens(&std::iter::once(1).collect());
         let stats = cache.stats();
         assert_eq!(stats.entries, 1);
         assert_eq!(stats.resident_bytes, mosaica_cache::PER_ENTRY_FLOOR_BYTES);

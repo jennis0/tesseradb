@@ -511,9 +511,10 @@ flush consumed, and the mask is re-derived against the larger row space. The mom
 or deleted item acquires a row is the moment it must appear in that mask.
 
 A flush only ever appends rows and never rewrites an existing one, so nothing a session has cached
-about the map becomes wrong at a flush. A session picks up the new rows once the background
-refresh has reached it, usually by its next request. Until then its visible set is the previous
-generation's projection, so the flush's new rows are not yet visible to it. Deletions,
+about the map becomes wrong at a flush. A session already served a view picks up the new rows once
+the background refresh has reached its grant, usually by its next request. Until then its visible
+set is the previous generation's projection, so the flush's new rows are not yet visible to it. A
+session's first read in a view is answered at the live generation. Deletions,
 suppressions, segments and the overlay are always the current generation's. The response's
 `x-mosaica-pin` header names the generation of the visible set, and `x-mosaica-stale` for a pin
 held from before the flush changes when the refresh reaches the session, not at the flush. Every
@@ -642,7 +643,7 @@ is not bounded: nothing observes it directly, so the compaction is designed to d
 as little as possible rather than to finish quickly. The one moment a compaction is visible to a client
 is the flip. Because it rewrites row space globally, every session's cached view of the map is
 invalid the instant the new generation is swapped in. A session's first request after the flip
-reads a projection the background pass has already rebuilt or, if the pass has not reached that session yet, rebuilds it then, exactly as a newly opened session's request would. No
+reads a projection the background pass has already rebuilt or, if the pass has not reached that session's grant yet, rebuilds it then, exactly as a newly opened session's request would. No
 request is turned away to protect that rebuild.
 
 Nothing a client already holds stops resolving. A tile is a Morton prefix and an item is a
@@ -663,10 +664,10 @@ follow the same pattern.
 
 | | Flush | Merge | Compaction |
 |---|---|---|---|
-| A session's cached projection | Extended forward with the new rows; nothing already cached becomes wrong | Rebuilt for the rows inside the merged span; the rest is untouched, because only that span renumbers | Invalid everywhere at the flip. The next request reads a projection the background pass has already rebuilt or, if the pass has not reached that session yet, rebuilds it then, exactly as a newly opened session's request would |
+| A grant's cached projection | Extended forward with the new rows; nothing already cached becomes wrong | Rebuilt for the rows inside the merged span; the rest is untouched, because only that span renumbers | Invalid everywhere at the flip. The next request reads a projection the background pass has already rebuilt or, if the pass has not reached that grant yet, rebuilds it then, exactly as a newly opened session's request would |
 | An annotation level's rows | A level held in memory takes the labels of the flushed rows, so their items count from this flush. The stored column is not rewritten | A level held in memory is relabelled within the merged span when the merge is published | Each enumerated or shape level served from a column has its column, member bitmaps and coverings written again over the new rows, and every grant's [figures](serving.md#a-levels-figures) for the level are walked again on their next read |
 
-*What each stage of the write path does to a session's cached row-space projection and to an
+*What each stage of the write path does to a grant's cached row-space projection and to an
 annotation level's rows.*
 
 ## Restart and recovery

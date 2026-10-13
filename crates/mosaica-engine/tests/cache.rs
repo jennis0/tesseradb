@@ -1,4 +1,4 @@
-//! Cache eviction and the two pruners, driven through `Engine::viewport` over the same synthetic
+//! Cache eviction, sharing and retention, driven through `Engine::viewport` over the same synthetic
 //! bundle `tests/pins.rs` uses.
 //!
 //! **These cases go through the real request path on purpose.** The single-flight state machine,
@@ -22,8 +22,8 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 
-use mosaica_engine::viewport::ViewportRequest;
-use mosaica_engine::{Engine, EngineConfig, Session};
+use mosaica_engine::viewport::{ViewportOut, ViewportRequest};
+use mosaica_engine::{Engine, EngineConfig};
 use mosaica_store::read::open_bundle;
 use mosaica_store::Bundle;
 use mosaica_types::ShardId;
@@ -101,50 +101,114 @@ fn publish_second_geometry(engine: &Engine, tmp: &TempDir, prefix: &str, n: u64)
     next_version
 }
 
-/// Squeeze the bound to what **one** entry occupies, so any second distinct key evicts the first,
-/// and leave the cache empty so the caller populates it in the order its own assertion needs.
+/// Each credential's whole-extent answer, and the largest charge among their projections, taken
+/// on an engine of its own over `bundle_root` so the engine under test starts with an empty cache.
+/// A bound of that charge holds any one of these entries and never two.
 ///
-/// Derived from the cache's own accounting rather than hard-coded, which keeps it independent of
-/// the fixture's serialised size. Two things it has to get right, and both are silent when it does
-/// not: the bound is *one* entry's charge and not the resident total, and it is the **largest**
-/// charge among the principals the caller is about to round-robin. Coverage does not order the
-/// charges — a projection is run-optimised, so a broad grant covering a run of row space is charged
-/// less than a sparse grant scattered over the same space — so a bound taken from whichever
-/// principal happened to be resident can sit below another's entry, which is then served without
-/// being retained and evicts nothing. Either mistake ends at a "the eviction must have happened"
-/// guard rather than at the real assertion, which is why those guards are there.
-fn tighten_to_one_entry(engine: &Engine, sessions: &[&Session]) -> u64 {
+/// The largest rather than any one: a projection is run-optimised, so a broad grant covering a run
+/// of row space can be charged less than a sparse one scattered over it, and a bound below an
+/// entry's charge serves that entry without retaining it and evicts nothing.
+fn measure(tmp: &TempDir, bundle_root: &Path, credentials: &[&[u8]]) -> (u64, Vec<ViewportOut>) {
+    let engine = Engine::open(
+        bundle_root,
+        &tmp.path().join("measure-cache"),
+        &tmp.path().join("measure-wal.log"),
+        config(),
+    )
+    .expect("a second engine opens over the fixture");
     let mut largest = 0u64;
-    for session in sessions {
-        for resident in sessions {
-            engine.prune_token(resident.token_id());
-        }
-        engine
-            .viewport(session, whole_extent())
-            .expect("a viewport populates this principal's entry");
-        let stats = engine.row_projection_cache_stats();
-        assert_eq!(
-            stats.entries, 1,
-            "one principal resident at a time, so `bytes` is that principal's own charge"
-        );
-        largest = largest.max(stats.bytes);
+    let mut answers = Vec::new();
+    for credential in credentials {
+        let before = engine.row_projection_cache_stats().bytes;
+        let session = engine.authorise(credential).unwrap();
+        answers.push(engine.viewport(&session, whole_extent()).unwrap());
+        let charge = engine.row_projection_cache_stats().bytes - before;
+        assert!(charge > 0, "each credential's grant must be its own entry");
+        largest = largest.max(charge);
     }
-    for resident in sessions {
-        engine.prune_token(resident.token_id());
-    }
-    assert!(largest > 0, "an entry must be charged something");
-    engine.set_cache_bounds(largest, u64::MAX);
-    largest
+    (largest, answers)
 }
 
-/// A revoke drops that session's projections and nobody else's.
-///
-/// The *disclosure* control for a revoked session is the registry removal in `mosaica-server`,
-/// not this — see
-/// `RowProjectionCache::prune_token`; what this asserts is that the memory is actually released,
-/// and released selectively.
+/// Two sessions with one grant read one projection, whatever else their credentials hold: the
+/// second builds nothing and is served the first's answer, under an identity key of its own.
 #[test]
-fn revoke_prunes_the_token() {
+fn sessions_with_one_grant_share_one_projection() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = open_with(config(), &tmp, &bundle_root);
+
+    // A term no item carries resolves to no index key, so both credentials make one grant.
+    let first = engine.authorise(&full_coverage_credential()).unwrap();
+    let second = engine
+        .authorise(br#"{"terms": ["0", "carried-by-nothing"]}"#)
+        .unwrap();
+
+    let first_out = engine.viewport(&first, whole_extent()).unwrap();
+    let builds = engine.full_projection_builds();
+    assert_eq!(builds, 1);
+    let hits = engine.row_projection_cache_stats().hits;
+    let second_out = engine.viewport(&second, whole_extent()).unwrap();
+
+    let stats = engine.row_projection_cache_stats();
+    assert_eq!(stats.entries, 1, "one grant, one view, one shard: one entry");
+    assert_eq!(
+        engine.full_projection_builds(),
+        builds,
+        "the second session reads the first's projection"
+    );
+    assert_eq!(stats.hits, hits + 1);
+    assert_eq!(second_out, first_out);
+    assert_ne!(
+        second_out.coordinates.identity_key, first_out.coordinates.identity_key,
+        "the identity key is the session's credential's, not the grant's"
+    );
+}
+
+/// Sessions with different grants never read each other's projection, and each is served its own
+/// visible set.
+#[test]
+fn sessions_with_different_grants_never_share_a_projection() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = open_with(config(), &tmp, &bundle_root);
+
+    let broad = engine.authorise(&full_coverage_credential()).unwrap();
+    let sparse = engine.authorise(&subset_credential()).unwrap();
+    let none = engine.authorise(&zero_credential()).unwrap();
+    let broad_out = engine.viewport(&broad, whole_extent()).unwrap();
+    let sparse_out = engine.viewport(&sparse, whole_extent()).unwrap();
+    let none_out = engine.viewport(&none, whole_extent()).unwrap();
+
+    assert_eq!(engine.row_projection_cache_stats().entries, 3);
+    assert_eq!(engine.full_projection_builds(), 3);
+    assert_eq!(broad_out.tiles[0].visible, N_ITEMS);
+    assert_eq!(
+        sparse_out.tiles[0].visible,
+        (0..N_ITEMS).filter(|&e| subset_sees(e)).count() as u64
+    );
+    assert!(
+        none_out.tiles.iter().all(|tile| tile.visible == 0),
+        "a session holding no term sees nothing"
+    );
+}
+
+/// A revoke leaves the projection its session read: another session with the grant keeps being
+/// served from it, and the entry count does not move.
+///
+/// The *disclosure* control for a revoked session is the registry removal in `mosaica-server`;
+/// the entry is the grant's, so the byte bound and the publications' retention reclaim it.
+#[test]
+fn revoke_leaves_the_grants_projection() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
     build_fixture(
@@ -155,27 +219,24 @@ fn revoke_prunes_the_token() {
     let engine = open_with(config(), &tmp, &bundle_root);
 
     let doomed = engine.authorise(&full_coverage_credential()).unwrap();
-    let survivor = engine.authorise(&subset_credential()).unwrap();
-    engine.viewport(&doomed, whole_extent()).unwrap();
+    let survivor = engine.authorise(&full_coverage_credential()).unwrap();
+    let other = engine.authorise(&subset_credential()).unwrap();
+    let before = engine.viewport(&doomed, whole_extent()).unwrap();
     engine.viewport(&survivor, whole_extent()).unwrap();
+    engine.viewport(&other, whole_extent()).unwrap();
     assert_eq!(engine.row_projection_cache_stats().entries, 2);
 
-    assert_eq!(
-        engine.prune_token(doomed.token_id()),
-        1,
-        "exactly the revoked session's entry"
-    );
-    assert_eq!(engine.row_projection_cache_stats().entries, 1);
+    engine.prune_tokens(&rustc_hash::FxHashSet::from_iter([doomed.token_id()]));
+    assert_eq!(engine.row_projection_cache_stats().entries, 2);
 
-    // The survivor is still warm — a prune that removed both would pass an entries-count check
-    // that only looked at the total, so assert the survivor specifically by its hit count.
-    let hits_before = engine.row_projection_cache_stats().hits;
-    engine.viewport(&survivor, whole_extent()).unwrap();
+    let stats = engine.row_projection_cache_stats();
+    let after = engine.viewport(&survivor, whole_extent()).unwrap();
     assert_eq!(
         engine.row_projection_cache_stats().hits,
-        hits_before + 1,
+        stats.hits + 1,
         "the surviving session must still hit, not rebuild"
     );
+    assert_eq!(after, before);
 }
 
 /// **The retention depth, both sides.** One publication must *keep* the superseded generation's
@@ -239,7 +300,7 @@ fn a_publication_keeps_one_superseded_generation_and_drops_the_one_before_it() {
 /// from the live generation rather than the pinned one" a mutation it could catch. With pins gone
 /// there is no way to address a superseded generation at all — which is the point of deleting them
 /// — so the mutation the current shape catches is narrower: a miss path that composes against
-/// anything other than the session's own frozen fragment and the live row space.
+/// anything other than the grant's frozen fragment and the live row space.
 #[test]
 fn an_evicted_then_rebuilt_projection_is_byte_identical() {
     let tmp = TempDir::new().unwrap();
@@ -249,13 +310,18 @@ fn an_evicted_then_rebuilt_projection_is_byte_identical() {
         &tmp.path().join("points.parquet"),
         &tmp.path().join("pairs.parquet"),
     );
+    let (one_entry, _) = measure(
+        &tmp,
+        &bundle_root,
+        &[&full_coverage_credential(), &subset_credential()],
+    );
     let engine = open_with(config(), &tmp, &bundle_root);
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let other = engine.authorise(&subset_credential()).unwrap();
 
     // Force this session's entry out by round-robinning another principal through a bound that
     // holds the larger of the two entries and not both.
-    tighten_to_one_entry(&engine, &[&session, &other]);
+    engine.set_cache_bounds(one_entry, u64::MAX);
     let first = engine.viewport(&session, whole_extent()).unwrap();
     engine.viewport(&other, whole_extent()).unwrap();
     let evictions = engine.row_projection_cache_stats().evictions;
@@ -278,7 +344,8 @@ fn an_evicted_then_rebuilt_projection_is_byte_identical() {
 
 /// A cache whose miss path is more permissive than its hit path is a disclosure with a performance
 /// explanation (I3's cache half). A sparse principal's counts must not move across an eviction —
-/// in either direction, but the one that matters is upward.
+/// in either direction, but the one that matters is upward. A second session with the sparse grant
+/// builds the entry the first then reads, and that entry answers as the first's own did.
 #[test]
 fn eviction_never_widens_a_mask() {
     let tmp = TempDir::new().unwrap();
@@ -288,16 +355,22 @@ fn eviction_never_widens_a_mask() {
         &tmp.path().join("points.parquet"),
         &tmp.path().join("pairs.parquet"),
     );
+    let (one_entry, _) = measure(
+        &tmp,
+        &bundle_root,
+        &[&subset_credential(), &full_coverage_credential()],
+    );
     let engine = open_with(config(), &tmp, &bundle_root);
 
     let sparse = engine.authorise(&subset_credential()).unwrap();
+    let sparse_twin = engine
+        .authorise(br#"{"terms": ["1", "carried-by-nothing"]}"#)
+        .unwrap();
     let broad = engine.authorise(&full_coverage_credential()).unwrap();
 
-    // **Ordering here is load-bearing.** The bound is enforced at publish, so tightening while
-    // both principals are already resident would leave both there and every read below would be a
-    // hit. `tighten_to_one_entry` measures each principal alone and leaves the cache empty, which
-    // is what makes the two reads below a build each.
-    tighten_to_one_entry(&engine, &[&sparse, &broad]);
+    // The bound is enforced at publish, so it is set while the cache is empty, which is what makes
+    // the two reads below a build each.
+    engine.set_cache_bounds(one_entry, u64::MAX);
     let broad_out = engine.viewport(&broad, whole_extent()).unwrap();
     let sparse_before = engine.viewport(&sparse, whole_extent()).unwrap();
 
@@ -308,9 +381,11 @@ fn eviction_never_widens_a_mask() {
         "the sparse credential must see strictly fewer items than the broad one"
     );
 
-    // Round-robin the two sessions through a bound that holds one, so each request evicts the
-    // other's entry and every read below is a cold rebuild.
+    // Round-robin the two grants through a bound that holds one, so each grant's first read in a
+    // round evicts the other's entry and is a cold rebuild.
     for _ in 0..3 {
+        let twin_out = engine.viewport(&sparse_twin, whole_extent()).unwrap();
+        assert_eq!(twin_out, sparse_before);
         let sparse_out = engine.viewport(&sparse, whole_extent()).unwrap();
         assert_eq!(
             sparse_out, sparse_before,
@@ -347,14 +422,20 @@ fn an_undersized_bound_does_not_livelock() {
         &tmp.path().join("points.parquet"),
         &tmp.path().join("pairs.parquet"),
     );
+    let credentials: [&[u8]; 4] = [
+        &full_coverage_credential(),
+        &subset_credential(),
+        &zero_credential(),
+        br#"{"terms": ["0", "1"]}"#,
+    ];
+    let (one_entry, references) = measure(&tmp, &bundle_root, &credentials);
     let engine = open_with(config(), &tmp, &bundle_root);
 
-    let sessions: Vec<_> = (0..4)
-        .map(|_| engine.authorise(&full_coverage_credential()).unwrap())
+    let sessions: Vec<_> = credentials
+        .iter()
+        .map(|credential| engine.authorise(credential).unwrap())
         .collect();
-
-    let reference = engine.viewport(&sessions[0], whole_extent()).unwrap();
-    tighten_to_one_entry(&engine, &[&sessions[0]]);
+    engine.set_cache_bounds(one_entry, u64::MAX);
 
     for round in 0..4 {
         for (index, session) in sessions.iter().enumerate() {
@@ -362,7 +443,7 @@ fn an_undersized_bound_does_not_livelock() {
                 .viewport(session, whole_extent())
                 .unwrap_or_else(|e| panic!("round {round} session {index} was refused: {e:?}"));
             assert_eq!(
-                out.tiles, reference.tiles,
+                out.tiles, references[index].tiles,
                 "every session must be served correctly under a biting bound"
             );
         }
@@ -455,9 +536,9 @@ fn fragment_evict_drops_the_memory_tier_not_the_sidecar() {
 
 /// **Every authorise mints its own token, and the token is the bearer secret's whole shape.**
 ///
-/// Two sessions over one credential share a fragment — the case above is what proves that — and
-/// share nothing else: a token repeated across two authorises would let one viewer's bearer secret
-/// name another's session, and a `token_id` repeated would hand the second session every
+/// Two sessions over one grant share a fragment and a projection — the cases above prove that —
+/// and share nothing else: a token repeated across two authorises would let one viewer's bearer
+/// secret name another's session, and a `token_id` repeated would hand the second session every
 /// per-session cache entry the first one warmed. The lifetime is the bound `Session::is_stale`
 /// leans on for a session that ignores the hint, so it is asserted here rather than assumed.
 #[test]

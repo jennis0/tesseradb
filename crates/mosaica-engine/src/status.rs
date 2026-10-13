@@ -417,7 +417,7 @@ impl Engine {
     }
 
     /// Row projections built from the whole fragment, rather than derived from the preceding
-    /// generation's by unioning the new extents' rows. Rising once per session per tick after a
+    /// generation's by unioning the new extents' rows. Rising once per grant per tick after a
     /// flush means a full build, measured at 1 277 ms at 10⁹, is on the steady-state path.
     pub fn full_projection_builds(&self) -> u64 {
         self.counters.full_projection_builds.load(Ordering::Relaxed)

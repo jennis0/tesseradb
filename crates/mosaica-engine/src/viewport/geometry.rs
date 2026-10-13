@@ -68,7 +68,7 @@ impl Engine {
         // blocking on a build only the calling thread can drive would deadlock the pool.
         let (geometry, key) =
             self.session_geometry(session, generation, shard, view, cancel, probe)?;
-        let coordinates = self.view_coordinates(generation, &geometry, view);
+        let coordinates = self.view_coordinates(session, generation, &geometry, view);
         // Names the fragment this request composes against, which under stale-serve is the
         // entry's and not the newest one.
         let mask_identity =
@@ -183,10 +183,16 @@ impl Engine {
         Theta { v_total, threshold }
     }
 
-    /// This session's fragment and row projection, resolved through three rungs: a live entry, if
-    /// the background refresh produced one; failing that, the one-generation-stale entry, sound
-    /// only after a flush; failing that, this request builds the projection itself, or is shed
-    /// with `ProjectionBuilding` if a refresh for this generation is already building one.
+    /// This session's grant's fragment and row projection in `shard`, resolved through three
+    /// rungs: a live entry, if the background refresh or another session with the grant produced
+    /// one; failing that, the one-generation-stale entry, sound only after a flush, and only for a
+    /// session already served this view at no later generation; failing that, this request
+    /// produces the live entry itself, or is shed with `ProjectionBuilding` if it has been served
+    /// the view and a refresh for this generation is already building the entry.
+    ///
+    /// A session's first read in a view is therefore answered at the live generation: it extends
+    /// or rebases the grant's stale entry where a flush or a merge allows, and builds otherwise,
+    /// waiting on a build of the same entry already running.
     ///
     /// Returns the key the geometry is stored under, which names the previous generation when the
     /// second rung served it.
@@ -205,38 +211,48 @@ impl Engine {
             .get(view)
             .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
         let key = RowProjectionKey {
-            token_id: session.token_id(),
+            grant: session.terms_digest(),
             view: view.to_string(),
+            shard: shard.id(),
+            identity: shard.identity,
             segments_version: generation.segments_version,
             prefix: generation.prefix.clone(),
         };
+        let record_served = |key: &RowProjectionKey| {
+            session.record_served(view, shard.id(), key.segments_version);
+        };
         if let Peek::Ready(geometry) = self.row_projection_cache.peek(&key) {
+            record_served(&key);
             return Ok((geometry, key));
         }
 
         // Rung 2: the generation one below is the only one retention keeps.
         let space = &view_data.row_space;
-        // Set on a `Ready` predecessor whether or not rung 2 can serve it: a merge leaves an
-        // entry rung 2 must refuse but rung 3 still rebases from.
-        let mut predecessor_resident = false;
+        let served_at = session.served_at(view, shard.id());
+        // A `Ready` predecessor rung 2 does not serve: rung 3 sheds on it, or carries it forward.
+        let mut predecessor = None;
         if let Some(previous) = key.segments_version.checked_sub(1) {
             let stale_key = RowProjectionKey {
                 segments_version: previous,
                 ..key.clone()
             };
             if let Peek::Ready(geometry) = self.row_projection_cache.peek(&stale_key) {
-                predecessor_resident = true;
-                if geometry.projection.extends_to(space) {
+                if served_at.is_some_and(|at| at <= previous)
+                    && geometry.projection.extends_to(space)
+                {
                     self.counters.stale_serves.fetch_add(1, Ordering::Relaxed);
+                    record_served(&stale_key);
                     return Ok((geometry, stale_key));
                 }
+                predecessor = Some(stale_key);
             }
         }
 
-        // Rung 3: shed only if a refresh is building this request's own `segments_version`, and
-        // only if rung 2 found an entry to derive from. Errs towards a duplicate build over an
-        // unanswerable shed.
-        if predecessor_resident
+        // Rung 3: shed only a session already served this view, only if a refresh is building
+        // this request's own `segments_version`, and only if rung 2 found an entry to derive
+        // from. Errs towards a duplicate build over an unanswerable shed.
+        if served_at.is_some()
+            && predecessor.is_some()
             && self.refresh_in_flight.load(Ordering::SeqCst) == key.segments_version
         {
             return Err(EngineError::ProjectionBuilding);
@@ -255,31 +271,39 @@ impl Engine {
         let cancel = cancel.as_ref().unwrap_or(&never_cancelled);
         let geometry = self
             .row_projection_cache
-            .get_or_derive_waiting(key.clone(), None, cancel, |_source| {
-                // Crosses entity space into row space over the whole fragment, taking seconds at
-                // scale. This call supplies the same shared pool the tile sweep uses.
-                probe.mark_projection_built();
-                self.counters.full_projection_builds.fetch_add(1, Ordering::Relaxed);
-                #[cfg(feature = "fault-injection")]
-                self.switches.hold_projection_build_if_wanted();
-                // Chosen from this principal's own grant, before any route runs; every route
-                // returns the identical projection. Nothing is cached across sessions.
-                let inputs = crate::projection::ProjectionInputs {
-                    fragment: &fragment,
-                    satisfied: session.grant().keys(),
-                    postings: &shard.postings,
-                    deltas: &shard.delta_postings,
-                    images: view_data.term_images.as_deref(),
-                    force: self.projection_routes.forced(),
-                };
-                let projection = self
-                    .pool
-                    .install(|| self.projection_routes.build(&inputs, space));
+            .get_or_derive_waiting(key.clone(), predecessor.as_ref(), cancel, |source| {
+                // Carries the predecessor forward where a flush or a merge allows, and builds
+                // otherwise.
+                let carried = source.and_then(|source| {
+                    self.pool
+                        .install(|| {
+                            crate::refresh::carried(source, &fragment, &shard.delta_postings, space)
+                        })
+                });
+                let projection = carried.unwrap_or_else(|| {
+                    // Crosses entity space into row space over the whole fragment, taking seconds
+                    // at scale. This call supplies the same shared pool the tile sweep uses.
+                    probe.mark_projection_built();
+                    self.counters.full_projection_builds.fetch_add(1, Ordering::Relaxed);
+                    #[cfg(feature = "fault-injection")]
+                    self.switches.hold_projection_build_if_wanted();
+                    // Chosen from the grant, before any route runs; every route returns the
+                    // identical projection, which every session with the grant then reads.
+                    let inputs = crate::projection::ProjectionInputs {
+                        fragment: &fragment,
+                        satisfied: session.grant().keys(),
+                        postings: &shard.postings,
+                        deltas: &shard.delta_postings,
+                        images: view_data.term_images.as_deref(),
+                        force: self.projection_routes.forced(),
+                    };
+                    self.pool
+                        .install(|| self.projection_routes.build(&inputs, space))
+                });
                 SessionGeometry {
                     fragment: Arc::clone(&fragment),
                     projection: Arc::new(projection),
                     grant: session.grant().clone(),
-                    auth_data_hash: session.auth_data_hash(),
                 }
             })
             .map_err(|ended| match ended {
@@ -288,6 +312,7 @@ impl Engine {
                 CacheWaitEnded::Budget => EngineError::ProjectionBuilding,
                 CacheWaitEnded::Cancelled => EngineError::Cancelled,
             })?;
+        record_served(&key);
         Ok((geometry, key))
     }
 

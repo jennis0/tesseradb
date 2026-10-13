@@ -435,6 +435,13 @@ impl Engine {
         self.projection_routes.force(route);
     }
 
+    /// Drop every row projection, so the next read of each grant builds it again.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn drop_row_projections_for_test(&self) {
+        self.row_projection_cache.clear();
+    }
+
     /// The rows this session's row projection holds in `view`, built or served exactly as a
     /// viewport would reach it — read directly since a row projection reaches no public surface
     /// on its own, only the answers built from it, which could not tell a projection that lost

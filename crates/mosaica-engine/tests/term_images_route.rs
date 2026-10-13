@@ -418,8 +418,8 @@ fn route_taken(before: [u64; 4], after: [u64; 4]) -> ProjectionRoute {
 ///
 /// The `None` arm is the route the chooser picks, which is the one a deployment takes; the two
 /// forced arms are what make the equality a comparison between routes rather than between a route
-/// and itself. Each arm authorises its own session, because a row projection is cached per token
-/// and a second arm on one token would be served the first arm's answer.
+/// and itself. Each arm drops the row projections first, because every session with the grant
+/// reads one, and a second arm would be served the first arm's answer.
 ///
 /// Returns the route the chooser picked, for the report a case makes about its principals.
 fn routes_agree_for(engine: &Engine, principal: &Principal, at: &str) -> ProjectionRoute {
@@ -432,6 +432,7 @@ fn routes_agree_for(engine: &Engine, principal: &Principal, at: &str) -> Project
         Some(ProjectionRoute::Complement),
     ] {
         engine.force_projection_route_for_test(force);
+        engine.drop_row_projections_for_test();
         let session = authorise(engine, &principal.credential);
         let before = engine.projection_builds_by_route();
         let rows = engine
@@ -701,6 +702,7 @@ fn every_route_agrees_across_a_delete_and_a_suppression() {
         Some(ProjectionRoute::Complement),
     ] {
         engine.force_projection_route_for_test(force);
+        engine.drop_row_projections_for_test();
         let session = authorise(&engine, &credential(&[MOST, SCATTERED]));
         engine.viewport(&session, whole_extent()).expect("serves");
         for entity in [deleted, suppressed] {
@@ -836,6 +838,7 @@ fn a_principal_holding_no_kept_term_walks_and_a_forced_split_falls_back_to_the_w
 
     for force in [None, Some(ProjectionRoute::Split)] {
         engine.force_projection_route_for_test(force);
+        engine.drop_row_projections_for_test();
         let session = authorise(&engine, &credential);
         let before = engine.projection_builds_by_route();
         let rows = engine

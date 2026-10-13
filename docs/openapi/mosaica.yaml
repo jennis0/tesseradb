@@ -144,7 +144,10 @@ paths:
         membership changed, a principal disabled or deleted, a password set or cleared, a key
         revoked, or the target's provider or a group it maps to changed.
 
-        Subject to compute admission.
+        Authorising builds nothing and takes no compute admission: the session's first read builds
+        its authorised set, under that read's admission. It is `429 backpressure` only when the
+        catalogue changes each time the session is resolved or about to be registered, three
+        times running.
       security:
         - authoriseAsKey: []
       requestBody:
@@ -273,7 +276,9 @@ paths:
         Every reason a credential is not accepted answers the same `401`, so the answer does not
         show whether a principal exists. Password checks have their own admission limit, about one
         per core with as many waiting; past it the request is answered `429` with `Retry-After`,
-        whether or not the name exists. Subject to compute admission.
+        whether or not the name exists. A login takes no compute admission. It is also
+        `429 backpressure` when the catalogue changes each time the session is resolved or about
+        to be registered, three times running.
       security: []
       requestBody:
         required: true
@@ -476,8 +481,8 @@ paths:
         request is not. One suggest runs per session at a time: a second while one is running is
         `429 backpressure`, refused before any work, with `Retry-After`. A request with `view` and
         `counts=true` is also `429 backpressure` when the compute queue is full, when no permit
-        frees within `admission_timeout_ms`, and when another request is building this session's
-        view of the map and does not finish within `single_flight_wait_ms`.
+        frees within `admission_timeout_ms`, and when another request is building the view of the
+        map this session reads and does not finish within `single_flight_wait_ms`.
       security:
         - sessionToken: []
       parameters:
@@ -505,7 +510,7 @@ paths:
         - name: counts
           in: query
           required: false
-          description: "`true` serves `count` beside each value: how many items carrying it this principal may see, exact, computed per request. Without `view`, an item ingested and not yet flushed counts. With `view`, only the items `/v1/viewport` would show this session in that view count: an item holds a row there once it is flushed and the refresh after the flush reaches this session (`x-mosaica-pin` describes that window), and a value this principal can see only in other views counts `0`. Without `counts`, `count` is absent. It does not affect the order."
+          description: "`true` serves `count` beside each value: how many items carrying it this principal may see, exact, computed per request. Without `view`, an item ingested and not yet flushed counts. With `view`, only the items `/v1/viewport` would show this session in that view count: an item holds a row there once it is flushed and, for a session already served that view, the refresh after the flush reaches this session's grant (`x-mosaica-pin` describes that window), and a value this principal can see only in other views counts `0`. Without `counts`, `count` is absent. It does not affect the order."
           schema:
             type: boolean
         - name: view
@@ -682,12 +687,12 @@ paths:
               schema:
                 type: string
             x-mosaica-pin:
-              description: The generation this response was computed from, as JSON `{"prefix", "segments_version"}`. It names the generation of this session's visible set. Until the refresh that follows a flush reaches this session, that is the previous generation, and the flush's new rows are not yet visible; deletions, suppressions, segments and the overlay are always current. Send it back as `pin`; its only effect is `x-mosaica-stale`.
+              description: The generation this response was computed from, as JSON `{"prefix", "segments_version"}`. It names the generation of this session's visible set. A session's first read in a view is answered at the live generation. After that, until the refresh that follows a flush reaches this session's grant, it is the previous generation, and the flush's new rows are not yet visible; deletions, suppressions, segments and the overlay are always current. Send it back as `pin`; its only effect is `x-mosaica-stale`.
               required: true
               schema:
                 type: string
             x-mosaica-stale:
-              description: "`1` where the request's `pin` differs from this response's `x-mosaica-pin`, and `0` otherwise. It moves at every flush, merge and compaction, whether or not anything this principal can see changed, and after a flush it moves when the refresh reaches this session. Advisory."
+              description: "`1` where the request's `pin` differs from this response's `x-mosaica-pin`, and `0` otherwise. It moves at every flush, merge and compaction, whether or not anything this principal can see changed, and after a flush it moves when the refresh reaches this session's grant. Advisory."
               required: true
               schema:
                 type: string
@@ -7236,7 +7241,7 @@ components:
           type: object
           additionalProperties: false
           required: [admission, queue, in_flight, waiting, streaming, shed_total]
-          description: The compute admission limit the viewport, single-item and single-artifact reads, browse, `/v1/aggregate`, a suggest counting within a view, and `/session/authorise` share.
+          description: The compute admission limit the viewport, single-item and single-artifact reads, browse, `/v1/aggregate` and a suggest counting within a view share.
           properties:
             admission:
               type: integer
@@ -7502,7 +7507,7 @@ components:
           type: object
           additionalProperties: false
           required: [entries, bytes, bound_bytes, hits, misses, building_refusals, waits_satisfied, waiters_now, evictions, young_evictions, thrashing, oversized_admissions]
-          description: The sessions' row projections of their visible sets.
+          description: The row projections of authorised sets, one per grant, view and shard, each shared by every session with the grant.
           properties:
             entries: { type: integer, minimum: 0 }
             bytes: { type: integer, minimum: 0 }
@@ -7525,7 +7530,7 @@ components:
             young_evictions:
               type: integer
               minimum: 0
-              description: Entries evicted before they were read again, a sign the bound is smaller than what the sessions hold at once.
+              description: Entries evicted before they were read again, a sign the bound is smaller than what the grants in use hold at once.
             thrashing:
               type: boolean
               description: "`young_evictions` is above 0."
@@ -7838,7 +7843,7 @@ components:
             refreshes:
               type: integer
               minimum: 0
-              description: Session projections refreshed after a flush or merge. A session serves its old projection until its refresh.
+              description: Grants' projections refreshed after a flush or merge. A session already served a view is served its grant's old projection until the refresh.
             refresh_in_flight:
               type: boolean
               description: The refresh for the newest flush or merge is still running.

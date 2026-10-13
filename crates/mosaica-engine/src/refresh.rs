@@ -30,10 +30,11 @@
 //!
 //! ## What this pass does, and what bounds it
 //!
-//! One pool task per geometry publication, over **resident cache keys** — O(cache residency),
-//! never O(sessions) (decision 0035's shape). At the ~16 wide-grant entries a 2 GiB bound holds,
-//! one round is ~0.7 s of pool time. A session with no resident entry is not refreshed and builds
-//! on its next request, which is establishment rather than update-induced work.
+//! One pool task per geometry publication, over **resident cache keys**, one per (grant, view,
+//! shard) however many sessions hold the grant — O(cache residency), never O(sessions) (decision
+//! 0035's shape). At the ~16 wide-grant entries a 2 GiB bound holds, one round is ~0.7 s of pool
+//! time. A grant with no resident entry is not refreshed and builds on its next request, which is
+//! establishment rather than update-induced work.
 //!
 //! **It needs no session registry, and the engine has none** — a `Session` is a value the server
 //! holds. Everything a refresh needs is in the entry it is refreshing: the fragment cache's key
@@ -69,27 +70,24 @@ use crate::Generation;
 /// What a resident entry may contribute to its own replacement at `generation`.
 ///
 /// **Three answers rather than two, because a prefix change is neither "skip" nor "derive".** A
-/// compaction publishes into a new prefix and rewrites `permutation.bin`, so every row-space
-/// artefact in the process is invalid — but the *session* is not, and its entry still names the
-/// grant, the auth hash and the view a rebuild needs. Refusing to refresh it is the failure
-/// compaction §6.2 records: the pass produces nothing, clears `refresh_in_flight`, and every
-/// resident session takes an inline 1 277 ms rebuild instead of the bounded 429 the ladder's rung 3
-/// exists to give — the stampede decision 0043 forbids, arriving through the mechanism written to
-/// honour it.
+/// compaction publishes into a new prefix and a new shard identity and rewrites `permutation.bin`,
+/// so every row-space artefact in the process is invalid — but the *grant* is not, and its entry
+/// still names the grant, the shard and the view a rebuild needs. Refusing to refresh it would
+/// leave every resident grant's next request to an inline 1 277 ms rebuild instead of the bounded
+/// 429 the ladder's rung 3 exists to give.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Carry {
     /// Nothing to do: this entry already addresses `generation`'s geometry, or a later one.
     Skip,
-    /// Rebuild from the fragment alone. The entry's projection addresses another prefix's row
-    /// space and none of it transfers.
+    /// Rebuild from the fragment alone. The entry's projection addresses another prefix's or
+    /// another identity's row space and none of it transfers.
     Rebuild,
     /// The ordinary within-prefix case: the previous projection may be extended or rebased.
     Derive,
 }
 
-/// [`Carry`]'s rule, as a function so it has a test — the guard this replaced was one boolean
-/// expression at the head of the loop and its prefix half was silently a no-op pass.
-fn carry_for(key: &RowProjectionKey, generation: &Generation) -> Carry {
+/// [`Carry`]'s rule for `key` at `generation`, whose shard of `key` has identity `identity`.
+fn carry_for(key: &RowProjectionKey, generation: &Generation, identity: [u8; 32]) -> Carry {
     if key.segments_version >= generation.segments_version {
         // Includes the entry the live geometry already produced. `>=` rather than `==` because a
         // key from a *newer* generation means a publication raced this pass, and rebuilding
@@ -97,15 +95,15 @@ fn carry_for(key: &RowProjectionKey, generation: &Generation) -> Carry {
         // a row space that has already been superseded.
         return Carry::Skip;
     }
-    if key.prefix == generation.prefix {
+    if key.prefix == generation.prefix && key.identity == identity {
         Carry::Derive
     } else {
         Carry::Rebuild
     }
 }
 
-/// Refresh each session's newest resident entry per view to `generation`, returning how many
-/// were produced.
+/// Refresh each grant's newest resident entry per view and shard to `generation`, returning how
+/// many were produced.
 ///
 /// **Most-recently-used first** (`SingleFlightCache::ready_entries`). This is a serial loop over a
 /// rebuild that costs a *measured* 1 277 ms at 10⁹, so across a compaction it runs for minutes and
@@ -113,7 +111,7 @@ fn carry_for(key: &RowProjectionKey, generation: &Generation) -> Carry {
 /// tail of it on the sessions least likely to be asking.
 ///
 /// **Every failure is per key and silent-but-counted.** A fragment build that cannot run leaves
-/// that session's entry stale, and its next request takes rung 3 of the ladder — which, with the
+/// that grant's entry stale, and its next request takes rung 3 of the ladder — which, with the
 /// pass finished and `refresh_in_flight` cleared, is a build rather than a 429. That is the
 /// liveness floor under the whole mechanism: a refresh that never succeeds degrades to the
 /// pre-0044 behaviour rather than wedging a session at 429 for ever.
@@ -125,9 +123,11 @@ pub(crate) fn refresh_resident(
     projection_routes: &crate::projection::ProjectionRoutes,
 ) -> usize {
     let mut produced = 0usize;
-    let shard = generation.only_shard();
     for (key, previous) in cache.resident() {
-        let carry = carry_for(&key, generation);
+        let Some(shard) = generation.shard(key.shard) else {
+            continue;
+        };
+        let carry = carry_for(&key, generation, shard.identity);
         if carry == Carry::Skip {
             continue;
         }
@@ -150,7 +150,7 @@ pub(crate) fn refresh_resident(
             Err(FragmentCacheError::Io(e)) => {
                 tracing::warn!(
                     error = %e,
-                    "a background fragment refresh failed; that session rebuilds on its next \
+                    "a background fragment refresh failed; that grant rebuilds on its next \
                      request rather than being served stale for ever"
                 );
                 continue;
@@ -161,12 +161,12 @@ pub(crate) fn refresh_resident(
         // compaction's refresh under the superseded prefix, where no request will ever look for
         // it: the pass would report work it did and every session would still rebuild inline.
         let next_key = RowProjectionKey {
+            identity: shard.identity,
             segments_version: generation.segments_version,
             prefix: generation.prefix.clone(),
             ..key.clone()
         };
         let space = &view_data.row_space;
-        let previous_projection = Arc::clone(&previous.projection);
         // **Does not wait, and this is the one caller for which that is not a policy choice**
         // (decision 0058 gives the request path the waiting entry point). This pass runs on a
         // rayon worker — `RefreshHandle::spawn` submits it to the same pool — and the build it
@@ -194,13 +194,12 @@ pub(crate) fn refresh_resident(
             // prefix's `permutation.bin`. That is a mask over the wrong row space — served, not
             // refused.
             let projection = pool.install(|| {
-                if carry == Carry::Derive && previous_projection.extends_to(space) {
-                    previous_projection.extend(&fragment, space)
-                } else if carry == Carry::Derive && previous_projection.can_rebase_extents(space) {
-                    previous_projection.rebase_extents(&fragment, space)
-                } else {
+                let carried = (carry == Carry::Derive)
+                    .then(|| carried(&previous, &fragment, &shard.delta_postings, space))
+                    .flatten();
+                carried.unwrap_or_else(|| {
                     // Rung 3, the only rung that chooses a route: rungs 1 and 2 derive from the
-                    // projection this session already holds and read no image.
+                    // projection this grant already holds and read no image.
                     let inputs = crate::projection::ProjectionInputs {
                         fragment: &fragment,
                         satisfied: previous.grant.keys(),
@@ -210,13 +209,12 @@ pub(crate) fn refresh_resident(
                         force: projection_routes.forced(),
                     };
                     projection_routes.build(&inputs, space)
-                }
+                })
             });
             SessionGeometry {
                 fragment: Arc::clone(&fragment),
                 projection: Arc::new(projection),
                 grant: previous.grant.clone(),
-                auth_data_hash: previous.auth_data_hash,
             }
         });
         if built.is_ok() {
@@ -224,6 +222,34 @@ pub(crate) fn refresh_resident(
         }
     }
     produced
+}
+
+/// `previous`, an entry from the same prefix, carried to `space` over `fragment`: extended where
+/// `space` only appended to it, or rebased where its base is the same file. `None` where neither
+/// holds, or where `deltas`, the shard's live tiers, cannot be read, and the projection must be
+/// built.
+pub(crate) fn carried(
+    previous: &SessionGeometry,
+    fragment: &mosaica_authz::FrozenFragment,
+    deltas: &[Arc<mosaica_authz::DeltaTier>],
+    space: &mosaica_store::RowSpace,
+) -> Option<crate::projection::RowProjection> {
+    let projection = &previous.projection;
+    let extends = projection.extends_to(space);
+    if !extends && !projection.can_rebase_extents(space) {
+        return None;
+    }
+    let gained = mosaica_authz::gained_by(
+        &previous.grant,
+        deltas,
+        &fragment.view(),
+        &previous.fragment.view(),
+    )
+    .ok()?;
+    Some(match extends {
+        true => projection.extend(&gained, fragment, space),
+        false => projection.rebase_extents(&gained, fragment, space),
+    })
 }
 
 /// No refresh pass is in flight. `u64::MAX` rather than 0, because 0 is a real `segments_version`
@@ -354,11 +380,17 @@ mod tests {
 
     fn key_at(prefix: &str, segments_version: u64) -> RowProjectionKey {
         RowProjectionKey {
-            token_id: 1,
+            grant: [1; 32],
             view: "s0".to_string(),
+            shard: mosaica_types::ShardId::ZERO,
+            identity: [0; 32],
             segments_version,
             prefix: prefix.to_string(),
         }
+    }
+
+    fn carry_for_zero(key: &RowProjectionKey, generation: &Generation) -> Carry {
+        carry_for(key, generation, [0; 32])
     }
 
     /// **A resident entry from a superseded prefix is rebuilt, never skipped.**
@@ -384,16 +416,22 @@ mod tests {
         let generation = generation_at("v00001", 9);
 
         // 1. The ordinary case: same prefix, older geometry — the flush and merge path.
-        assert_eq!(carry_for(&key_at("v00001", 8), &generation), Carry::Derive);
+        assert_eq!(carry_for_zero(&key_at("v00001", 8), &generation), Carry::Derive);
 
         // 2. A compaction: the entry names the superseded prefix.
-        assert_eq!(carry_for(&key_at("v00000", 8), &generation), Carry::Rebuild);
+        assert_eq!(carry_for_zero(&key_at("v00000", 8), &generation), Carry::Rebuild);
+
+        // A shard whose identity moved within the prefix.
+        assert_eq!(
+            carry_for(&key_at("v00001", 8), &generation, [1; 32]),
+            Carry::Rebuild
+        );
 
         // 3. Nothing owed — the live geometry's own entry, and one from a publication that raced
         //    this pass. Rebuilding backwards onto older geometry is the direction that hands a
         //    session a mask over a row space already superseded.
-        assert_eq!(carry_for(&key_at("v00001", 9), &generation), Carry::Skip);
-        assert_eq!(carry_for(&key_at("v00001", 10), &generation), Carry::Skip);
-        assert_eq!(carry_for(&key_at("v00000", 9), &generation), Carry::Skip);
+        assert_eq!(carry_for_zero(&key_at("v00001", 9), &generation), Carry::Skip);
+        assert_eq!(carry_for_zero(&key_at("v00001", 10), &generation), Carry::Skip);
+        assert_eq!(carry_for_zero(&key_at("v00000", 9), &generation), Carry::Skip);
     }
 }

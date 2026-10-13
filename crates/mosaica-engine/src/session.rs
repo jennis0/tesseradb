@@ -76,8 +76,8 @@ struct HeldTerms {
 pub struct Session {
     /// Bearer token: 32 random bytes, hex-encoded.
     token: String,
-    /// A process-local identity for this session, distinct from `token`: part of the
-    /// row-projection cache key, so the cache never hashes or compares the full token string.
+    /// A process-local identity for this session, distinct from `token`: part of every
+    /// per-session cache key, so no cache hashes or compares the full token string.
     token_id: u64,
     /// The index keys the session satisfies. For a session authorised for terms, as
     /// bundle-relative `TermId`s: each term it holds that the dictionary carries, `public`, and
@@ -92,7 +92,7 @@ pub struct Session {
     /// The terms the session holds, or `None` for a `read-all` session.
     held: Option<HeldTerms>,
     /// `sha256` over `grant`: what a cache shared by every session with this grant is keyed on
-    /// ([`crate::figures::MaskIdentity::terms`]).
+    /// ([`crate::figures::MaskIdentity::terms`], the row projection's key).
     terms_digest: [u8; 32],
     /// Every view of every group this principal may reach, resolved once at authorise and fixed
     /// for the session's life. Every view is evaluated whatever the outcome, so a gate-failed name
@@ -107,6 +107,16 @@ pub struct Session {
     expires_at: u64,
     /// The dictionary's length at authorise: every key from here on was promoted since.
     dict_len_at_authorise: u32,
+    /// The newest generation this session has been served each view at, per shard: only a view it
+    /// has been served may be answered from its grant's previous generation.
+    served: std::sync::Mutex<Vec<Served>>,
+}
+
+/// A view of a shard a session has been served, and the newest generation it was served at.
+struct Served {
+    view: String,
+    shard: mosaica_types::ShardId,
+    segments_version: u64,
 }
 
 impl Session {
@@ -170,6 +180,48 @@ impl Session {
     /// Whether the session satisfies any of the stored `labels`.
     pub(crate) fn admits<S: AsRef<str>>(&self, labels: &[S]) -> bool {
         mosaica_access::admits(labels, &|term| self.holds(term))
+    }
+
+    fn served(&self) -> std::sync::MutexGuard<'_, Vec<Served>> {
+        self.served
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The newest generation this session has been served `view` of `shard` at.
+    pub(crate) fn served_at(&self, view: &str, shard: mosaica_types::ShardId) -> Option<u64> {
+        self.served()
+            .iter()
+            .find(|served| served.view == view && served.shard == shard)
+            .map(|served| served.segments_version)
+    }
+
+    /// Whether this session has been served any view of `shard`.
+    pub(crate) fn served_in(&self, shard: mosaica_types::ShardId) -> bool {
+        self.served().iter().any(|served| served.shard == shard)
+    }
+
+    /// Record that this session was served `view` of `shard` at `segments_version`.
+    pub(crate) fn record_served(
+        &self,
+        view: &str,
+        shard: mosaica_types::ShardId,
+        segments_version: u64,
+    ) {
+        let mut served = self.served();
+        match served
+            .iter_mut()
+            .find(|served| served.view == view && served.shard == shard)
+        {
+            Some(served) => {
+                served.segments_version = served.segments_version.max(segments_version)
+            }
+            None => served.push(Served {
+                view: view.to_string(),
+                shard,
+                segments_version,
+            }),
+        }
     }
 
     /// `sha256(auth_data)`.
@@ -343,29 +395,17 @@ impl Engine {
             auth_data_hash,
             expires_at,
             dict_len_at_authorise: generation.dict.len(),
+            served: Default::default(),
         })
     }
 
-    /// Drop every cached entry belonging to `token_id` — the revoke hook, memory hygiene rather
-    /// than a disclosure control. Returns how many row projections were removed.
-    pub fn prune_token(&self, token_id: u64) -> usize {
-        // Cancelled first: a ladder fill still running for this token would otherwise re-publish
-        // the occupancy entries this call is removing.
-        self.stage.cancel(token_id);
-        self.occupancy.retain_keys(|key| key.token_id != token_id);
-        self.derived_geometry.prune_token(token_id);
-        self.suggest_sets.prune_token(token_id);
-        self.figures
-            .prune_tokens(&std::iter::once(token_id).collect());
-        self.row_projection_cache.prune_token(token_id)
-    }
-
-    /// The expiry sweep's form of [`Self::prune_token`]: drops every entry belonging to any of
-    /// `token_ids`, each cache walked once with a set-membership test rather than once per victim.
-    /// Call it off the request path. Returns how many row projections were removed.
-    pub fn prune_tokens(&self, token_ids: &FxHashSet<u64>) -> usize {
+    /// Drop every cached entry belonging to any of `token_ids`, each cache walked once with a
+    /// set-membership test rather than once per victim: memory hygiene when sessions end, not a
+    /// disclosure control. Row projections are their grants', and stay until the byte bound or a
+    /// publication's retention removes them. Call it off the request path.
+    pub fn prune_tokens(&self, token_ids: &FxHashSet<u64>) {
         if token_ids.is_empty() {
-            return 0;
+            return;
         }
         self.slots.end(token_ids);
         for token_id in token_ids {
@@ -376,7 +416,6 @@ impl Engine {
         self.derived_geometry.prune_tokens(token_ids);
         self.suggest_sets.prune_tokens(token_ids);
         self.figures.prune_tokens(token_ids);
-        self.row_projection_cache.prune_tokens(token_ids)
     }
 
     /// `session`'s mask fragment in `shard`, at its watermark and under its identity, from the

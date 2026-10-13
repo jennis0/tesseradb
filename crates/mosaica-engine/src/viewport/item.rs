@@ -175,16 +175,21 @@ impl Engine {
         // the cost depend on which entity was asked for. The served fragment, not the live one:
         // rebuilding at the live watermark measures ~200 ms per credential per publication, and
         // would answer from a different watermark than the viewport beside it serves from. Falls
-        // back to a build only when this session has no entry at or above the retention floor,
+        // back to a build only when this grant has no entry at or above the retention floor,
         // scoped to the item's own shard, whose entity space `entity` is in, and to this
-        // generation's prefix so a fold's flip cannot answer from a replaced term index.
+        // generation's prefix so a fold's flip cannot answer from a replaced term index. The floor
+        // is the live generation for a session served nothing in the shard, since its viewport
+        // would answer there.
         let fragment = match self.row_projection_cache.freshest_fragment(
-            session.token_id(),
+            &session.terms_digest(),
             shard,
             &generation.prefix,
-            generation
-                .segments_version
-                .saturating_sub(crate::cache::KEEP_SUPERSEDED_GENERATIONS),
+            match session.served_in(shard.id()) {
+                true => generation
+                    .segments_version
+                    .saturating_sub(crate::cache::KEEP_SUPERSEDED_GENERATIONS),
+                false => generation.segments_version,
+            },
         ) {
             Some(fragment) => fragment,
             None => self.fragment_for(session, shard, None)?,

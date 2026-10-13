@@ -1187,31 +1187,18 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// Authorise a session for a principal holding `terms`, through [`INTEGRATOR`]'s
-/// `authorise-as`, retrying while the admission gate sheds under machine load. A test about
-/// shedding calls the route itself.
+/// `authorise-as`.
 pub async fn authorise(server: &TestServer, terms: &[&str]) -> serde_json::Value {
     let principal = principal_for(server, terms);
-    let resp = wait_for(
-        "authorise",
-        std::time::Duration::from_secs(60),
-        async || {
-            let resp = server
-                .client
-                .post(server.session_url("/session/authorise"))
-                .bearer_auth(&server.integrator_key)
-                .json(&serde_json::json!({ "principal": principal }))
-                .send()
-                .await
-                .unwrap();
-            if resp.status().as_u16() == 429 {
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                return None;
-            }
-            assert_eq!(resp.status(), 200, "authorise should succeed");
-            Some(resp)
-        },
-    )
-    .await;
+    let resp = server
+        .client
+        .post(server.session_url("/session/authorise"))
+        .bearer_auth(&server.integrator_key)
+        .json(&serde_json::json!({ "principal": principal }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "authorise should succeed");
     resp.json().await.unwrap()
 }
 

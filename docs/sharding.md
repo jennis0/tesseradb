@@ -538,7 +538,7 @@ the pass-2 merge.
 A shard's identity is a digest its compaction writes into the shard's record (§2.6). It changes at
 that shard's compaction and at no other. A compaction of one shard
 therefore invalidates only that shard's fragments, projections and figures. The background refresh
-runs per (session, view, shard), so a flush into one shard extends only that shard's projections.
+runs per (grant, view, shard), so a flush into one shard extends only that shard's projections.
 
 A level's figures summed across shards are also kept per grant. A change to one shard's figures
 updates the counts and position sums by that shard's difference, and takes each side of the box
