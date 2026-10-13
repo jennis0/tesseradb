@@ -22,7 +22,7 @@ use crate::error::{EngineError, Result};
 const KEY_DOMAIN: &[u8] = b"mosaica-records-cursor-key-v1";
 const AAD_DOMAIN: &[u8] = b"mosaica-records-cursor-v1";
 /// The sealed payload's layout. A cursor of another format does not open.
-const FORMAT: u8 = 5;
+const FORMAT: u8 = 6;
 const NONCE_LEN: usize = 24;
 
 /// The route a cursor was issued on, bound into its associated data.
@@ -55,10 +55,10 @@ pub(crate) struct LayerBinding<'a> {
 }
 
 impl Binding<'_> {
-    fn associated_data(&self) -> Vec<u8> {
+    fn associated_data(&self, format: u8) -> Vec<u8> {
         let mut aad = Vec::with_capacity(AAD_DOMAIN.len() + 2 + 8 + self.view.len() + 8 + 32 + 32);
         aad.extend_from_slice(AAD_DOMAIN);
-        aad.push(FORMAT);
+        aad.push(format);
         aad.push(self.route as u8);
         aad.extend_from_slice(&(self.view.len() as u64).to_le_bytes());
         aad.extend_from_slice(self.view.as_bytes());
@@ -113,9 +113,14 @@ impl CursorKey {
 
     /// `payload` sealed under `binding`, as base64url without padding.
     pub(crate) fn seal(&self, binding: &Binding<'_>, payload: &[u8]) -> String {
+        self.seal_as(FORMAT, binding, payload)
+    }
+
+    /// [`Self::seal`] for a cursor of payload format `format`.
+    fn seal_as(&self, format: u8, binding: &Binding<'_>, payload: &[u8]) -> String {
         let mut nonce = [0u8; NONCE_LEN];
         rand::thread_rng().fill_bytes(&mut nonce);
-        let aad = binding.associated_data();
+        let aad = binding.associated_data(format);
         let sealed = self
             .cipher()
             .encrypt(
@@ -143,7 +148,7 @@ impl CursorKey {
         }
         let (nonce, sealed) = raw.split_at(NONCE_LEN);
         let nonce: [u8; NONCE_LEN] = nonce.try_into().expect("split at the nonce length");
-        let aad = binding.associated_data();
+        let aad = binding.associated_data(FORMAT);
         self.cipher()
             .decrypt(
                 &XNonce::from(nonce),
@@ -156,10 +161,10 @@ impl CursorKey {
     }
 }
 
-/// A row's place in its order: `(cell, mosaica_id)` in map order, and `(item number, 0)` in
-/// stored order, where a scan position past a whole stretch is `(n, u64::MAX)` for `n` the number
-/// just before the next stretch's first item, which need not be an item. Item numbers are held
-/// only inside the seal.
+/// A row's place in its order: `(cell, mosaica_id)` in map order, and `(shard, item number)` in
+/// stored order, which walks the shards in number order. A scan position need not be a row's: the
+/// one just before a shard's first item is `(shard − 1, u64::MAX)`, past every item of the shard
+/// before it. Shards and item numbers are held only inside the seal.
 pub(super) type Key = (u32, u64);
 
 /// How far a read has gone: `scan` is the position every row at or before which has been
@@ -338,6 +343,29 @@ mod tests {
                 Err(EngineError::CursorRefused)
             ));
         }
+    }
+
+    /// A cursor of an earlier payload format is refused under the binding it was sealed for.
+    #[test]
+    fn a_cursor_of_an_earlier_format_does_not_open() {
+        let key = CursorKey::of(KEY);
+        let bound = binding("s0", 0, 1);
+        let payload = ItemsCursor {
+            position: Position {
+                order: RecordsOrder::Stored,
+                scan: Some((3, 0)),
+            },
+            stretch: 4096,
+        }
+        .encode();
+        for format in 0..FORMAT {
+            let earlier = key.seal_as(format, &bound, &payload);
+            assert!(matches!(
+                key.open(&bound, &earlier),
+                Err(EngineError::CursorRefused)
+            ));
+        }
+        assert!(key.open(&bound, &key.seal(&bound, &payload)).is_ok());
     }
 
     #[test]

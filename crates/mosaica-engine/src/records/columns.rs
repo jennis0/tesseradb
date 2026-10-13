@@ -28,6 +28,7 @@ use mosaica_types::MortonCode;
 use super::plan::{FieldPlan, Home, Named, SystemField};
 use super::walk::{PageCx, Taken};
 use crate::error::{EngineError, Result};
+use crate::filter::FilterColumns;
 use crate::viewport::{
     category_code, category_key, slice_value, stored_field_out, OpenView, RowPresence,
     ScalarOut,
@@ -148,19 +149,16 @@ pub(super) fn empty_page(plan: &FieldPlan, keep_unmatched: bool) -> Result<(Reco
 /// read, so the run holds at most one row past the budget however the rows' sizes are skewed.
 fn read_run(cx: &PageCx<'_>, plan: &FieldPlan, rows: &[Taken], budget: usize) -> Result<Run> {
     let (engine, generation, open) = (cx.engine, cx.generation, cx.open);
-    let segments = &open.served.only_side().segments;
+    let sides = &open.served.sides;
+    let columns: Vec<&FilterColumns> = sides.iter().map(|s| &*s.shard.filter_columns).collect();
+    let by_side = by_side(rows);
     let mut named: Vec<Vec<Option<RV>>> = Vec::with_capacity(plan.named.len());
     // Declaration position to the named field it fills, for the one record-store pass.
     let mut record_slot: FxHashMap<u16, usize> = FxHashMap::default();
     for (slot, field) in plan.named.iter().enumerate() {
         named.push(match &field.home {
-            Home::Rendered => rendered_values(segments, field, rows),
-            Home::ValueColumn(column) => open
-                .served
-                .only_side()
-                .shard
-                .filter_columns
-                .stored_values(column, rows.iter().map(|row| row.entity)),
+            Home::Rendered => rendered_values(cx, field, rows),
+            Home::ValueColumn(column) => stored_values(&columns, column, rows, &by_side),
             Home::Record(tag) => {
                 record_slot.insert(*tag, slot);
                 vec![None; rows.len()]
@@ -169,45 +167,45 @@ fn read_run(cx: &PageCx<'_>, plan: &FieldPlan, rows: &[Taken], budget: usize) ->
     }
     let mut complete = rows.len();
     if !record_slot.is_empty() {
-        let mut at: FxHashMap<u32, usize> = FxHashMap::default();
-        let mut entities: Vec<u32> = Vec::with_capacity(rows.len());
-        for (i, row) in rows.iter().enumerate() {
-            at.insert(row.entity, i);
-            entities.push(row.entity);
-        }
-        entities.sort_unstable();
         // The rows whose values are held, by run position, with their bytes.
         let mut kept: BinaryHeap<(usize, usize)> = BinaryHeap::new();
         let mut held = 0usize;
-        open.served
-            .only_side()
-            .shard
-            .filter_columns
-            .records()
-            .for_each_row_in(&croaring::Bitmap::of(&entities), &mut |entity, fields| {
-                let Some(&i) = at.get(&entity) else {
-                    return Ok(());
-                };
-                let mut bytes = 0;
-                for field in fields {
-                    if let Some(&slot) = record_slot.get(&field.tag) {
-                        bytes += value_bytes(&field.value);
-                        named[slot][i] = Some(field.value);
+        for held_rows in &by_side {
+            let side = rows[held_rows[0]].side;
+            let mut at: FxHashMap<u32, usize> = FxHashMap::default();
+            let mut entities: Vec<u32> = Vec::with_capacity(held_rows.len());
+            for &i in held_rows {
+                at.insert(rows[i].entity, i);
+                entities.push(rows[i].entity);
+            }
+            entities.sort_unstable();
+            columns[side]
+                .records()
+                .for_each_row_in(&croaring::Bitmap::of(&entities), &mut |entity, fields| {
+                    let Some(&i) = at.get(&entity) else {
+                        return Ok(());
+                    };
+                    let mut bytes = 0;
+                    for field in fields {
+                        if let Some(&slot) = record_slot.get(&field.tag) {
+                            bytes += value_bytes(&field.value);
+                            named[slot][i] = Some(field.value);
+                        }
                     }
-                }
-                kept.push((i, bytes));
-                held += bytes;
-                while held > budget && kept.len() > 1 {
-                    let (last, bytes) = kept.pop().expect("more than one row is held");
-                    held -= bytes;
-                    for &slot in record_slot.values() {
-                        named[slot][last] = None;
+                    kept.push((i, bytes));
+                    held += bytes;
+                    while held > budget && kept.len() > 1 {
+                        let (last, bytes) = kept.pop().expect("more than one row is held");
+                        held -= bytes;
+                        for &slot in record_slot.values() {
+                            named[slot][last] = None;
+                        }
+                        complete = complete.min(last);
                     }
-                    complete = complete.min(last);
-                }
-                Ok(())
-            })
-            .map_err(|e| EngineError::Malformed(e.to_string()))?;
+                    Ok(())
+                })
+                .map_err(|e| EngineError::Malformed(e.to_string()))?;
+        }
     }
 
     // The system fields are read only for the rows the page can take.
@@ -220,13 +218,12 @@ fn read_run(cx: &PageCx<'_>, plan: &FieldPlan, rows: &[Taken], budget: usize) ->
             }
             SystemField::Labels => {
                 let mut parsed = FxHashMap::default();
-                let shard = open.served.only_side().shard;
                 SystemValues::Labels(
                     rows.iter()
                         .map(|row| {
                             engine.labels_for(
                                 generation,
-                                shard,
+                                sides[row.side].shard,
                                 open.served.session,
                                 row.entity,
                                 &mut parsed,
@@ -254,30 +251,69 @@ fn value_bytes(value: &RV) -> usize {
         }
 }
 
-/// A rendered field's values: the slot in the row tail, where the segment holds the column and
-/// the row carries a value, read as [`RowPresence`] says. A category's absence is its code 0,
-/// which `slice_value` answers.
-fn rendered_values(
-    segments: &[(&mosaica_store::read::SegmentData, u32)],
-    field: &Named,
+/// The positions in a run of its rows in each side holding one, side by side in the order of the
+/// view's sides, each side's in run order.
+fn by_side(rows: &[Taken]) -> Vec<Vec<usize>> {
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by_key(|&i| rows[i].side);
+    order
+        .chunk_by(|&a, &b| rows[a].side == rows[b].side)
+        .map(<[usize]>::to_vec)
+        .collect()
+}
+
+/// A value column's values for `rows`, each read from its own side's columns, `columns` by the
+/// side's place among the view's sides, and `by_side` the rows of each side ([`by_side`]). A
+/// keyword's code is each shard's own, so every value comes out as the key its own shard's
+/// dictionary names.
+fn stored_values(
+    columns: &[&FilterColumns],
+    column: &str,
     rows: &[Taken],
+    by_side: &[Vec<usize>],
 ) -> Vec<Option<RV>> {
-    let slices: Vec<_> = segments
+    let mut out = vec![None; rows.len()];
+    for held in by_side {
+        let values =
+            columns[rows[held[0]].side].stored_values(column, held.iter().map(|&i| rows[i].entity));
+        for (&i, value) in held.iter().zip(values) {
+            out[i] = value;
+        }
+    }
+    out
+}
+
+/// A rendered field's values: the slot in the row tail of each row's own segment, where the
+/// segment holds the column and the row carries a value, read as [`RowPresence`] says. A
+/// category's absence is its code 0, which `slice_value` answers.
+fn rendered_values(cx: &PageCx<'_>, field: &Named, rows: &[Taken]) -> Vec<Option<RV>> {
+    let sides = &cx.open.served.sides;
+    let slices: Vec<Vec<_>> = sides
         .iter()
-        .map(|(segment, _)| segment.columns.scalar(&field.name))
+        .map(|side| {
+            side.segments
+                .iter()
+                .map(|(segment, _)| segment.columns.scalar(&field.name))
+                .collect()
+        })
         .collect();
-    let presences: Vec<_> = segments
+    let presences: Vec<Vec<_>> = sides
         .iter()
-        .map(|(segment, _)| {
-            RowPresence::of(segment, &field.name, field.vocabulary.is_some())
+        .map(|side| {
+            side.segments
+                .iter()
+                .map(|(segment, _)| {
+                    RowPresence::of(segment, &field.name, field.vocabulary.is_some())
+                })
+                .collect()
         })
         .collect();
     rows.iter()
         .map(|row| {
-            if !presences[row.seg].contains(row.local) {
+            if !presences[row.side][row.seg].contains(row.local) {
                 return None;
             }
-            slice_value(slices[row.seg].as_ref()?, row.local as usize)
+            slice_value(slices[row.side][row.seg].as_ref()?, row.local as usize)
         })
         .collect()
 }
@@ -323,18 +359,19 @@ impl ViewFrame {
     }
 }
 
-/// Each row's stored position converted back through the view's frame and projection.
+/// Each row's stored position, read from its own side's segment, converted back through the
+/// view's frame and projection.
 fn positions(
     generation: &Generation,
     open: &OpenView<'_>,
     rows: &[Taken],
 ) -> Result<Vec<(f64, f64)>> {
     let frame = ViewFrame::of(generation, open.served.name)?;
-    let segments = &open.served.only_side().segments;
+    let sides = &open.served.sides;
     Ok(rows
         .iter()
         .map(|row| {
-            let (segment, _) = segments[row.seg];
+            let (segment, _) = sides[row.side].segments[row.seg];
             let local = row.local as usize;
             let (qx, qy) = mosaica_spatial::unsplit32(
                 MortonCode::new(segment.morton.u32()[local]),
@@ -714,5 +751,33 @@ impl PageValues {
         }
         RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
             .map_err(|e| EngineError::Malformed(format!("a page did not assemble: {e}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::filter::test_support::{dict, keyword_column, universal};
+
+    /// A keyword's codes are each shard's own: here "beta" is code 1 in shard 0 and code 0 in
+    /// shard 1. Rows of both shards, interleaved, each read the key their own shard names.
+    #[test]
+    fn a_keyword_is_read_as_the_key_its_own_shard_names() {
+        let column = |keys| keyword_column("kw", vec![(None, universal(&[0, 1]), dict(keys))]);
+        let (first, second) = (column(&["alpha", "beta"]), column(&["beta", "gamma"]));
+        let row = |side, entity| Taken {
+            side,
+            seg: 0,
+            local: 0,
+            mosaica_id: 0,
+            entity,
+            matched: true,
+        };
+        let rows = [row(1, 0), row(0, 1), row(1, 1), row(0, 0), row(1, 0)];
+        let values = stored_values(&[&first, &second], "kw", &rows, &by_side(&rows));
+        let keys: Vec<Option<RV>> = ["beta", "beta", "gamma", "alpha", "beta"]
+            .map(|key| Some(RV::Utf8(key.to_string())))
+            .into();
+        assert_eq!(values, keys);
     }
 }

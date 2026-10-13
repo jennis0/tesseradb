@@ -8,7 +8,7 @@ use super::columns::{empty_record_stack, Column, FilterColumns, Layer, Route};
 use super::declared::{Family, Placement};
 
 /// A dictionary over already-sorted distinct keys, read back from memory.
-pub(super) fn dict(keys: &[&str]) -> Arc<SortedDict> {
+pub(crate) fn dict(keys: &[&str]) -> Arc<SortedDict> {
     let mut bytes = Vec::new();
     let mut writer = SortedDictWriter::new(&mut bytes).expect("a writer opens");
     for key in keys {
@@ -19,7 +19,7 @@ pub(super) fn dict(keys: &[&str]) -> Arc<SortedDict> {
 }
 
 /// An ordinal column every entity carries a value in: entity id is the slot.
-pub(super) fn universal(ordinals: &[u32]) -> Arc<ValueColumn> {
+pub(crate) fn universal(ordinals: &[u32]) -> Arc<ValueColumn> {
     Arc::new(ValueColumn::universal(Codes::U32(ordinals.to_vec().into())))
 }
 
@@ -65,7 +65,7 @@ pub(super) fn members(bitmap: &Bitmap) -> Vec<u32> {
 
 /// A keyword column of one or more layers, each with its own dictionary: the shape
 /// [`FilterColumns::open`] builds from a manifest, assembled here without one.
-pub(super) fn keyword_column(
+pub(crate) fn keyword_column(
     name: &str,
     layers: Vec<(Option<&str>, Arc<ValueColumn>, Arc<SortedDict>)>,
 ) -> FilterColumns {

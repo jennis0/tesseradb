@@ -110,9 +110,9 @@ pub enum EngineError {
     /// one of its paging arguments. Every arm names only what the caller sent and published
     /// schema.
     RecordsRefused(crate::records::RecordsRefused),
-    /// A records cursor that did not open: altered, forged, or issued to another credential,
-    /// route, view, view incarnation or order. One variant with one message for every reason, so
-    /// the refusal does not say which binding failed.
+    /// A records cursor that did not open: altered, forged, of an earlier format, or issued to
+    /// another credential, route, view, view incarnation or order. One variant with one message
+    /// for every reason, so the refusal does not say which binding failed.
     CursorRefused,
     /// A `POST /v1/aggregate` request the caller can correct. Every arm names only what the
     /// caller sent and published schema.

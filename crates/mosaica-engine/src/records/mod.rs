@@ -10,10 +10,11 @@
 //! rows alone. Rows are addressed by `mosaica_id`; an entity id or any other internal position
 //! reaches the caller only inside a sealed cursor.
 //!
-//! An items read's map order is `(cell, mosaica_id)` merged across the view's segments, and its
-//! stored order is ascending item number. Either resumes from a position that is a value, found
-//! again in whatever segments the next page's generation holds, so a flush, merge or fold between
-//! pages loses no row and repeats none.
+//! An items read's map order is `(cell, mosaica_id)` merged across the view's segments in every
+//! shard, and its stored order is shard by shard in shard number order, ascending item number
+//! within a shard. Either resumes from a position that is a value, found again in whatever
+//! segments the next page's generation holds, so a flush, merge or fold between pages loses no
+//! row and repeats none.
 
 mod artifacts;
 mod columns;
@@ -27,7 +28,6 @@ use std::time::{Duration, Instant};
 use arrow::record_batch::RecordBatch;
 
 use crate::cancel::CancelToken;
-use crate::compose::MaskedSet;
 use crate::engine::Engine;
 use crate::error::{EngineError, Result};
 use crate::filter::FilterExpr;
@@ -43,14 +43,14 @@ pub(crate) use walk::{same_publication, Clock};
 use cursor::{ItemsCursor, Position};
 use columns::{empty_page, read_page};
 use plan::FieldPlan;
-use walk::{filter_rows, Collected, PageCx, Walk, Walked};
+use walk::{Collected, PageCx, Walk, Walked};
 
 /// The order a read returns its rows in. Both return the same rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordsOrder {
     /// By map cell in the view, then `mosaica_id`.
     Map,
-    /// By the internal item numbering the record store holds rows in.
+    /// By shard, then by the internal item numbering each shard's record store holds rows in.
     Stored,
 }
 
@@ -611,11 +611,8 @@ impl Engine {
 }
 
 impl Pager for ItemsPager<'_> {
-    /// The view's visible items, and of them the ones the filter matches, under the first page's
-    /// mask. Where the read is driven from its matches, the count is taken from the first driven
-    /// stretch, which the first page then takes its rows from. Otherwise, and always under
-    /// `keep_unmatched`, whose read walks the view, it is one evaluation of the filter over the
-    /// whole view on the route every page takes.
+    /// The view's visible items, and of them the ones the filter matches ([`Walk::count`]), each
+    /// summed over every shard under the first page's mask.
     fn count(
         &mut self,
         engine: &Engine,
@@ -625,7 +622,7 @@ impl Pager for ItemsPager<'_> {
         let cx = PageCx::new(engine, open, generation);
         let req = &self.planned.req;
         let visible = open.mask.visible_total();
-        let Some(expr) = &req.filter else {
+        if req.filter.is_none() {
             return Ok((
                 RecordsCounts {
                     served: visible,
@@ -633,34 +630,14 @@ impl Pager for ItemsPager<'_> {
                 },
                 None,
             ));
-        };
-        if let Some(matched) = self.walk.count_driven(&cx, &req.cancel)? {
-            return Ok((
-                RecordsCounts {
-                    served: visible,
-                    matched,
-                },
-                None,
-            ));
         }
-        let total =
-            u32::try_from(open.served.only_side().data.row_space.total_rows()).unwrap_or(u32::MAX);
-        let whole_view = 0..total;
-        let routed = filter_rows(
-            &cx,
-            expr,
-            None,
-            std::slice::from_ref(&whole_view),
-            false,
-            &req.cancel,
-        )?;
-        let matched = open.mask.only_leaf().count_intersection(routed.rows.rows());
+        let (matched, region) = self.walk.count(&cx, &req.cancel)?;
         Ok((
             RecordsCounts {
                 served: visible,
                 matched,
             },
-            routed.region,
+            region,
         ))
     }
 

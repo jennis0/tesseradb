@@ -71,16 +71,4 @@ impl<'a> ServedView<'a> {
             .map(|side| crate::derived::RowLocator::new(side.segments.clone()))
             .collect()
     }
-
-    /// The one side of a view of one shard, for a route that does not yet read every shard.
-    /// Panics where the view has a second shard.
-    pub(crate) fn only_side(&self) -> &ServedSide<'a> {
-        assert!(
-            self.sides.len() == 1,
-            "a route read one side of view '{}' over {} shards",
-            self.name,
-            self.sides.len()
-        );
-        &self.sides[0]
-    }
 }
