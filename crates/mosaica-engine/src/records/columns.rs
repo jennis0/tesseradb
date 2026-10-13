@@ -148,7 +148,7 @@ pub(super) fn empty_page(plan: &FieldPlan, keep_unmatched: bool) -> Result<(Reco
 /// read, so the run holds at most one row past the budget however the rows' sizes are skewed.
 fn read_run(cx: &PageCx<'_>, plan: &FieldPlan, rows: &[Taken], budget: usize) -> Result<Run> {
     let (engine, generation, open) = (cx.engine, cx.generation, cx.open);
-    let segments = &open.served.segments;
+    let segments = &open.served.only_side().segments;
     let mut named: Vec<Vec<Option<RV>>> = Vec::with_capacity(plan.named.len());
     // Declaration position to the named field it fills, for the one record-store pass.
     let mut record_slot: FxHashMap<u16, usize> = FxHashMap::default();
@@ -157,6 +157,7 @@ fn read_run(cx: &PageCx<'_>, plan: &FieldPlan, rows: &[Taken], budget: usize) ->
             Home::Rendered => rendered_values(segments, field, rows),
             Home::ValueColumn(column) => open
                 .served
+                .only_side()
                 .shard
                 .filter_columns
                 .stored_values(column, rows.iter().map(|row| row.entity)),
@@ -179,6 +180,7 @@ fn read_run(cx: &PageCx<'_>, plan: &FieldPlan, rows: &[Taken], budget: usize) ->
         let mut kept: BinaryHeap<(usize, usize)> = BinaryHeap::new();
         let mut held = 0usize;
         open.served
+            .only_side()
             .shard
             .filter_columns
             .records()
@@ -218,12 +220,13 @@ fn read_run(cx: &PageCx<'_>, plan: &FieldPlan, rows: &[Taken], budget: usize) ->
             }
             SystemField::Labels => {
                 let mut parsed = FxHashMap::default();
+                let shard = open.served.only_side().shard;
                 SystemValues::Labels(
                     rows.iter()
                         .map(|row| {
                             engine.labels_for(
                                 generation,
-                                open.served.shard,
+                                shard,
                                 open.served.session,
                                 row.entity,
                                 &mut parsed,
@@ -327,7 +330,7 @@ fn positions(
     rows: &[Taken],
 ) -> Result<Vec<(f64, f64)>> {
     let frame = ViewFrame::of(generation, open.served.name)?;
-    let segments = &open.served.segments;
+    let segments = &open.served.only_side().segments;
     Ok(rows
         .iter()
         .map(|row| {

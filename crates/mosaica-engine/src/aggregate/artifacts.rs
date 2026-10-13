@@ -141,7 +141,7 @@ impl Layer {
         let counting = std::time::Instant::now();
         let engine = cx.engine;
         let served_view = &cx.open.served;
-        let mask = &cx.open.mask;
+        let mask = cx.open.mask.only_leaf();
         let registered = engine
             .readable_layer_at(
                 served_view.session,
@@ -490,7 +490,7 @@ impl Targets {
         ordinals: &[u32],
         dependency_served: &dyn Fn(&mosaica_lifecycle::membership::Attachment) -> bool,
     ) -> Result<Targets> {
-        let (engine, served, mask) = (cx.engine, &cx.open.served, &cx.open.mask);
+        let (engine, served, mask) = (cx.engine, &cx.open.served, cx.open.mask.only_leaf());
         let mut targets = Targets::default();
         let mut layers: FxHashMap<LayerSpace, Option<RegisteredLayer>> = FxHashMap::default();
         for &ordinal in ordinals {

@@ -52,9 +52,10 @@ pub(super) fn tagged_points(
     swept: &[TileSweepOut<'_>],
 ) -> Vec<TaggedPoint> {
     let mut points = Vec::with_capacity(swept.iter().map(|ts| ts.rows.len()).sum());
+    let segments = &served.only_side().segments;
     for ts in swept {
         for (i, &row) in ts.rows.iter().enumerate() {
-            let (segment, _) = segment_holding(&served.segments, row)
+            let (segment, _) = segment_holding(segments, row)
                 .expect("a selected row lies in the view's row space");
             points.push(TaggedPoint {
                 row,
@@ -208,8 +209,12 @@ impl Engine {
         let declaration = &registered.declaration;
         let name = &declaration.name;
         let vocabulary = predicate_vocabulary(generation, declaration);
-        let source = served.shard.partition_source();
-        let base = served.segments.first().map(|&(segment, _)| segment);
+        let source = served.only_side().shard.partition_source();
+        let base = served
+            .only_side()
+            .segments
+            .first()
+            .map(|&(segment, _)| segment);
 
         let mut tags: Vec<Option<u64>> = vec![None; points.len()];
         let mut open: Vec<usize> = (0..points.len()).collect();

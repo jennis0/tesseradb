@@ -111,9 +111,7 @@ pub(crate) struct FieldTailKey {
     pub view: String,
     pub column: String,
     pub kind: u8,
-    pub segments_version: u64,
-    pub projection_segments_version: u64,
-    pub overlay_version: u64,
+    pub shards: [u8; 32],
 }
 
 /// The fragment's counts: a function of the fragment's base rows and the column's base labels.
@@ -142,7 +140,8 @@ pub(crate) struct FragmentKey {
     pub geometry: Geometry,
 }
 
-/// One request's composed mask, named by every input to it.
+/// One request's composed mask, named by every input to it: `shards` is
+/// [`MaskIdentity::shards`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ExactKey {
     pub terms: [u8; 32],
@@ -151,11 +150,7 @@ pub(crate) struct ExactKey {
     pub level: u32,
     pub level_version: u64,
     pub geometry: Geometry,
-    pub segments_version: u64,
-    pub projection_segments_version: u64,
-    pub overlay_version: u64,
-    pub fragment_identity: [u8; 32],
-    pub fragment_watermark: u64,
+    pub shards: [u8; 32],
 }
 
 /// What a deny correction is a function of: the fragment, the level's labels at one version of
@@ -175,7 +170,7 @@ pub(crate) struct DenyKey {
 }
 
 /// What one session's tail is a function of: its rows above the fragment's base rows and the
-/// labels the column gives them.
+/// labels the column gives them. `shards` is [`MaskIdentity::shards`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct TailKey {
     pub token_id: u64,
@@ -184,9 +179,16 @@ pub(crate) struct TailKey {
     pub level: u32,
     pub column: u64,
     pub level_version: u64,
-    pub segments_version: u64,
-    pub projection_segments_version: u64,
+    pub shards: [u8; 32],
+}
+
+/// What a cache keyed on a request's mask reads of one shard the request resolves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct SideVersions {
+    pub shard: mosaica_types::ShardId,
     pub overlay_version: u64,
+    pub fragment_identity: [u8; 32],
+    pub fragment_watermark: u64,
 }
 
 /// Everything about one request's composed mask that a cache keyed on the mask is a function of,
@@ -199,15 +201,45 @@ pub(crate) struct MaskIdentity {
     /// session holding that term set shares.
     pub terms: [u8; 32],
     pub segments_version: u64,
-    /// The generation the session's row projection was built at, one behind `segments_version`
-    /// while a stale projection is served.
+    /// The generation every shard's row projection was taken at, one behind `segments_version`
+    /// while stale projections are served.
     pub projection_segments_version: u64,
-    pub overlay_version: u64,
-    pub fragment_identity: [u8; 32],
-    pub fragment_watermark: u64,
+    /// A digest of the two versions above and every shard's [`SideVersions`], from [`Self::of`]:
+    /// every shard the request resolves, whether or not the viewer sees anything there, so no key
+    /// depends on where a viewer's items sit.
+    pub shards: [u8; 32],
 }
 
 impl MaskIdentity {
+    /// The identity of a request's mask over `sides`, ascending by shard.
+    pub(crate) fn of(
+        token_id: u64,
+        terms: [u8; 32],
+        segments_version: u64,
+        projection_segments_version: u64,
+        sides: &[SideVersions],
+    ) -> MaskIdentity {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"mosaica-mask-identity-v1");
+        hasher.update(segments_version.to_le_bytes());
+        hasher.update(projection_segments_version.to_le_bytes());
+        hasher.update((sides.len() as u64).to_le_bytes());
+        for side in sides {
+            hasher.update(side.shard.raw().to_le_bytes());
+            hasher.update(side.overlay_version.to_le_bytes());
+            hasher.update(side.fragment_identity);
+            hasher.update(side.fragment_watermark.to_le_bytes());
+        }
+        MaskIdentity {
+            token_id,
+            terms,
+            segments_version,
+            projection_segments_version,
+            shards: hasher.finalize().into(),
+        }
+    }
+
     /// This mask's exact key for one level.
     pub(crate) fn exact_key(
         &self,
@@ -224,11 +256,7 @@ impl MaskIdentity {
             level,
             level_version,
             geometry,
-            segments_version: self.segments_version,
-            projection_segments_version: self.projection_segments_version,
-            overlay_version: self.overlay_version,
-            fragment_identity: self.fragment_identity,
-            fragment_watermark: self.fragment_watermark,
+            shards: self.shards,
         }
     }
 }
@@ -936,7 +964,7 @@ impl Drop for FiguresCache {
 mod tests {
     use super::*;
 
-    fn key(terms: u8, overlay: u64) -> FiguresKey {
+    fn key(terms: u8, mask: u8) -> FiguresKey {
         FiguresKey::Exact(ExactKey {
             geometry: Geometry::None,
             terms: [terms; 32],
@@ -944,11 +972,7 @@ mod tests {
             space: LayerSpace::ZERO,
             level: 0,
             level_version: 1,
-            segments_version: 1,
-            projection_segments_version: 1,
-            overlay_version: overlay,
-            fragment_identity: [7u8; 32],
-            fragment_watermark: 0,
+            shards: [mask; 32],
         })
     }
 
@@ -1353,5 +1377,42 @@ mod tests {
             CONCURRENT_BUILDS,
             "the stopped build holds nothing"
         );
+    }
+
+    /// Every version of every shard a mask is over moves its identity, and so every key built
+    /// from it.
+    #[test]
+    fn every_shards_versions_move_the_mask_identity() {
+        let side = |shard: u32| SideVersions {
+            shard: mosaica_types::ShardId::new(shard).unwrap(),
+            overlay_version: 5,
+            fragment_identity: [shard as u8; 32],
+            fragment_watermark: 100,
+        };
+        let sides = [side(0), side(1)];
+        let of = |sides: &[SideVersions]| MaskIdentity::of(1, [2; 32], 3, 3, sides).shards;
+        let held = of(&sides);
+        let moves: [fn(&mut SideVersions); 4] = [
+            |s| s.shard = mosaica_types::ShardId::new(7).unwrap(),
+            |s| s.overlay_version += 1,
+            |s| s.fragment_identity[0] ^= 1,
+            |s| s.fragment_watermark += 1,
+        ];
+        for at in 0..sides.len() {
+            for (which, change) in moves.iter().enumerate() {
+                let mut moved = sides;
+                change(&mut moved[at]);
+                assert_ne!(
+                    of(&moved),
+                    held,
+                    "shard {at}'s field {which} did not move it"
+                );
+            }
+        }
+        assert_ne!(of(&sides[..1]), held, "a shard fewer");
+        let at = |segments, projection| MaskIdentity::of(1, [2; 32], segments, projection, &sides);
+        assert_ne!(at(4, 3).shards, held, "the generation");
+        assert_ne!(at(3, 2).shards, held, "the projections' generation");
+        assert_eq!(of(&sides), held, "the same versions name the same mask");
     }
 }

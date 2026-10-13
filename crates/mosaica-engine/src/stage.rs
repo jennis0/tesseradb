@@ -49,7 +49,7 @@
 //!
 //! **It must not touch the row-projection cache.** It carries the [`SessionGeometry`] its request
 //! already resolved, so there is nothing to look up and nothing to publish — which is what keeps it
-//! invisible to `crate::viewport::Engine::session_geometry`'s three-rung ladder and to
+//! invisible to `crate::viewport::Engine::session_geometries`'s three-rung ladder and to
 //! `crate::refresh`.
 //!
 //! **It must not outlive its session.** [`crate::Engine::prune_tokens`] flips the tokens of the
@@ -102,7 +102,8 @@ pub(crate) const BACKGROUND_DEPTH: u8 = 12;
 /// The two `Arc`s are the request's own, so this clones a generation pointer and a geometry pointer
 /// and copies a term set, not a mask and not a projection.
 pub(crate) struct LadderTask {
-    pub(crate) token_id: u64,
+    /// The request's mask, which the rungs are filed under, and whose session it is.
+    pub(crate) identity: crate::figures::MaskIdentity,
     pub(crate) view: String,
     pub(crate) satisfied: crate::session::Satisfied,
     pub(crate) generation: Arc<Generation>,
@@ -153,7 +154,10 @@ impl StageDeps {
             in_flight.insert(token_id, cancel.clone());
         }
         let task = make();
-        debug_assert_eq!(task.token_id, token_id, "the task must be this session's");
+        debug_assert_eq!(
+            task.identity.token_id, token_id,
+            "the task must be this session's"
+        );
         let occupancy = Arc::clone(&self.occupancy);
         let in_flight = Arc::clone(&self.in_flight);
         let counters = Arc::clone(&self.counters);
@@ -191,15 +195,7 @@ fn run(
 ) {
     let generation = &task.generation;
     let shard = generation.only_shard();
-    let mut key = OccupancyKey {
-        token_id: task.token_id,
-        view: task.view.clone(),
-        depth: BACKGROUND_DEPTH,
-        segments_version: generation.segments_version,
-        overlay_version: shard.overlay_version,
-        fragment_identity: task.geometry.fragment.identity,
-        fragment_watermark: task.geometry.fragment.watermark,
-    };
+    let mut key = OccupancyKey::of(&task.identity, &task.view, BACKGROUND_DEPTH);
     // **The memo first, before anything is composed.** A session already served at this depth has
     // every rung below it too, so there is nothing here to do and no mask worth building.
     if cancel.is_cancelled()

@@ -361,6 +361,7 @@ impl Engine {
             coordinates,
             ..
         } = self.open_view(session, &generation, req.view, &req.cancel, &mut probe)?;
+        let mask = mask.into_only_leaf();
         let stale = req
             .stamp
             .as_ref()
@@ -461,7 +462,12 @@ impl Engine {
             })
             .collect();
 
-        let row_bases: Vec<u32> = served.segments.iter().map(|&(_, base)| base).collect();
+        let row_bases: Vec<u32> = served
+            .only_side()
+            .segments
+            .iter()
+            .map(|&(_, base)| base)
+            .collect();
         for (at, tile) in tiling.tiles.iter().enumerate() {
             check_cancelled(&req.cancel)?;
             let parts = std::slice::from_ref(&tiling.ranges[at]);

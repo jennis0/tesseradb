@@ -70,7 +70,7 @@ use crate::row_column::RowColumn;
 use crate::viewport::ServedView;
 use crate::Engine;
 
-pub(crate) use cache::{DrawingTurn, FiguresCache, MaskIdentity};
+pub(crate) use cache::{DrawingTurn, FiguresCache, MaskIdentity, SideVersions};
 pub use cache::{FiguresStats, DEFAULT_DISK_BYTES, DEFAULT_GIVE_WAY_MS};
 pub(crate) use field::{keep_extreme, ExactSum, FieldFigures, FieldRead, FieldTally, Number, Sum};
 
@@ -369,16 +369,16 @@ impl Engine {
             false => geometry,
         };
         let base_rows = column.base_rows();
-        if base_rows != served.data.row_space.base_rows() {
+        if base_rows != served.only_side().data.row_space.base_rows() {
             return self.exact_figures(served, space, level, level_version, column, mask, geometry);
         }
         let identity = served.mask_identity;
         let (fragment, minus, plus, _) = mask.parts();
-        let places = Placement::of_segments(&served.segments);
+        let places = Placement::of_segments(&served.only_side().segments);
 
         let key = FragmentKey {
             terms: identity.terms,
-            identity: identity.fragment_identity,
+            identity: served.only_side().fragment().identity,
             view: served.name.to_string(),
             space,
             level,
@@ -435,9 +435,7 @@ impl Engine {
                     level,
                     column: column.identity(),
                     level_version,
-                    segments_version: identity.segments_version,
-                    projection_segments_version: identity.projection_segments_version,
-                    overlay_version: identity.overlay_version,
+                    shards: identity.shards,
                 };
                 let cancel = served.cancel.clone().unwrap_or_default();
                 let tail = self
@@ -625,10 +623,11 @@ impl Engine {
         places: &[Placement<'_>],
     ) -> Result<Option<Arc<DenyCorrection>>> {
         let identity = served.mask_identity;
-        let (deny_version, failing) = deny_version(served, served.denied, &subtracted);
+        let fragment_identity = served.only_side().fragment().identity;
+        let (deny_version, failing) = deny_version(served, served.only_side().denied, &subtracted);
         let key = DenyKey {
             terms: identity.terms,
-            identity: identity.fragment_identity,
+            identity: fragment_identity,
             view: served.name.to_string(),
             space,
             level,
@@ -640,14 +639,14 @@ impl Engine {
         if let mosaica_cache::Peek::Ready(held) = self.figures.denies.peek(&key) {
             return Ok(Some(held));
         }
-        let mut denied = served.denied.clone();
+        let mut denied = served.only_side().denied.clone();
         denied.remove_range(column.base_rows()..);
         let labels = match subtracted.intersect(&denied) {
             false => None,
             true => {
                 let address = (served.name.to_string(), space, level);
                 let wanted = Wanted {
-                    identity: identity.fragment_identity,
+                    identity: fragment_identity,
                     column,
                     at: level_version,
                     denied: &denied,
@@ -663,7 +662,7 @@ impl Engine {
                             Arc::clone(column),
                             level_version,
                             denied.clone(),
-                            identity.fragment_identity,
+                            fragment_identity,
                             places_of_view(
                                 Arc::clone(&served.generation.bundle),
                                 served.name.to_string(),
@@ -717,8 +716,8 @@ impl Engine {
             .figures
             .get_or_build(key, &served.turn, served.cancel.as_ref(), |build| {
                 self.figures.counters.exact.fetch_add(1, Ordering::Relaxed);
-                let places =
-                    (geometry != Geometry::None).then(|| Placement::of_segments(&served.segments));
+                let places = (geometry != Geometry::None)
+                    .then(|| Placement::of_segments(&served.only_side().segments));
                 let walked = self.count_pool.install(|| {
                     #[cfg(feature = "fault-injection")]
                     self.switches.hold_masked_count_build_if_wanted();
@@ -972,8 +971,8 @@ fn deny_version(
 ) -> (u64, Option<u64>) {
     let failing = !subtracted.is_subset(denied);
     (
-        served.shard.deny_version(served.name),
-        failing.then_some(served.mask_identity.overlay_version),
+        served.only_side().shard.deny_version(served.name),
+        failing.then_some(served.only_side().shard.overlay_version),
     )
 }
 

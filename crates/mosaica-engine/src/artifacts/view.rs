@@ -168,7 +168,7 @@ impl<'a, M: MaskedSet> ArtifactView<'a, M> {
             mask,
             dependency_served,
             containment,
-            denied: served.denied,
+            denied: served.only_side().denied,
             counts,
         }
     }

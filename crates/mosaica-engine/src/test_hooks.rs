@@ -454,10 +454,9 @@ impl Engine {
         view: &str,
     ) -> Result<croaring::Bitmap> {
         let generation = self.generation.load_full();
-        let shard = generation.only_shard();
         let mut probe = crate::timing::Probe::new();
-        let (geometry, _) =
-            self.session_geometry(session, &generation, shard, view, &None, &mut probe)?;
+        let geometries = self.session_geometries(session, &generation, view, &None, &mut probe)?;
+        let (_, _, geometry) = mosaica_types::only(&geometries.sides);
         Ok(geometry.projection.bitmap().clone())
     }
 
@@ -513,10 +512,10 @@ impl Engine {
             &open.served,
             &registered,
             vocabulary,
-            &open.served.shard.partition_source(),
+            &open.served.only_side().shard.partition_source(),
             level,
         );
-        let places = crate::derived::Placement::of_segments(&open.served.segments);
+        let places = crate::derived::Placement::of_segments(&open.served.only_side().segments);
         let mut walked: std::collections::BTreeMap<u32, (u64, u64, [u64; 2], [u32; 4])> =
             Default::default();
         let mut add = |ordinal: u32, row: u32| {
@@ -536,7 +535,7 @@ impl Engine {
                 ];
             }
         };
-        let visible = open.mask.visible_all();
+        let visible = open.mask.only_leaf().visible_all();
         match rows.column() {
             Some(column) => {
                 for row in visible.iter() {

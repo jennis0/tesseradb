@@ -163,6 +163,7 @@ impl Field {
             true => Some(
                 cx.open
                     .served
+                    .only_side()
                     .shard
                     .filter_columns
                     .category_membership(&self.column, &cx.sets.candidate)
@@ -199,7 +200,7 @@ impl Field {
     }
 
     fn counts_by_entity(&self, cx: &Cx<'_>, entities: &croaring::Bitmap) -> Result<Counts> {
-        let (generation, shard) = (cx.generation, cx.open.served.shard);
+        let (generation, shard) = (cx.generation, cx.open.served.only_side().shard);
         let vocabulary = generation.vocabularies.get(&self.vocabulary);
         let each = |visit: &mut dyn FnMut(u32)| {
             if let Some(vocabulary) = vocabulary {
@@ -250,6 +251,7 @@ impl Field {
         let tables = cx
             .open
             .served
+            .only_side()
             .data
             .row_space
             .row_entities()

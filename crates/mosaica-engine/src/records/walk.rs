@@ -94,13 +94,17 @@ impl<'a> PageCx<'a> {
     }
 
     fn segments(&self) -> &[(&SegmentData, u32)] {
-        &self.open.served.segments
+        &self.open.served.only_side().segments
     }
 
     /// The entity `segment`'s row `local` belongs to.
     fn entity_of(&self, segment: &SegmentData, local: u32) -> u32 {
         let entity = segment
-            .entity_of(local, &self.engine.identity_key, self.open.served.shard.id())
+            .entity_of(
+                local,
+                &self.engine.identity_key,
+                self.open.served.only_side().shard.id(),
+            )
             .expect("an opened segment's rows invert to its own shard");
         u32::try_from(entity.raw()).expect("entity ids are capped at u32::MAX by I9")
     }
@@ -216,7 +220,10 @@ struct Stretch {
 pub(crate) fn same_publication(a: &Generation, b: &Generation) -> bool {
     a.prefix == b.prefix
         && a.segments_version == b.segments_version
-        && Arc::ptr_eq(&a.only_shard().overlay, &b.only_shard().overlay)
+        && a.shards().count() == b.shards().count()
+        && a.shards()
+            .zip(b.shards())
+            .all(|(x, y)| Arc::ptr_eq(&x.overlay, &y.overlay))
 }
 
 /// A taken row's key in `order`.
@@ -288,12 +295,22 @@ pub(super) fn filter_rows(
     let candidate = match candidate {
         Some(candidate) => candidate,
         None => {
-            whole =
-                engine.filter_candidate(served.session, served.shard, Some(&served.fragment))?;
+            whole = engine.filter_candidate(
+                served.session,
+                served.only_side().shard,
+                Some(served.only_side().fragment()),
+            )?;
             &whole
         }
     };
-    engine.route_filters_under(served, &cx.open.mask, candidate, &cx.resolved, cancel, body)
+    engine.route_filters_under(
+        served,
+        cx.open.mask.only_leaf(),
+        candidate,
+        &cx.resolved,
+        cancel,
+        body,
+    )
 }
 
 impl Walk {
@@ -470,9 +487,10 @@ impl Walk {
                 // scan costs the stretch and not the view. The stretch is held only while the
                 // mask is the one it was opened under.
                 let mut entities: Vec<u32> = Vec::new();
+                let mask = cx.open.mask.only_leaf();
                 for (s, range) in &parts {
                     let (segment, base) = segments[*s];
-                    let visible = cx.open.mask.rows_in_range(base + range.start..base + range.end);
+                    let visible = mask.rows_in_range(base + range.start..base + range.end);
                     entities.extend(
                         visible
                             .iter()
@@ -483,8 +501,8 @@ impl Walk {
                 let mut candidate = Bitmap::of(&entities);
                 candidate.and_inplace(&cx.engine.filter_candidate(
                     cx.open.served.session,
-                    cx.open.served.shard,
-                    Some(&cx.open.served.fragment),
+                    cx.open.served.only_side().shard,
+                    Some(cx.open.served.only_side().fragment()),
                 )?);
                 let row_bases: Vec<u32> = segments.iter().map(|&(_, base)| base).collect();
                 let domain = crossing_domain(&[parts], &row_bases);
@@ -513,8 +531,8 @@ impl Walk {
     ) -> Result<Option<Stretch>> {
         let candidate = cx.engine.filter_candidate(
             cx.open.served.session,
-            cx.open.served.shard,
-            Some(&cx.open.served.fragment),
+            cx.open.served.only_side().shard,
+            Some(cx.open.served.only_side().fragment()),
         )?;
         let from: u64 = scan.map_or(0, |(entity, _)| u64::from(entity) + 1);
         if from > u64::from(u32::MAX) {
@@ -540,7 +558,7 @@ impl Walk {
             None => range.add_range(from as u32..=last),
         }
         range.and_inplace(&candidate);
-        let row_space = &cx.open.served.data.row_space;
+        let row_space = &cx.open.served.only_side().data.row_space;
         let mut items: Vec<(u32, u32)> = Vec::with_capacity(range.cardinality() as usize);
         items.extend(range.iter().filter_map(|entity| {
             row_space
@@ -609,7 +627,7 @@ impl Walk {
             return Ok(Some(0));
         };
         let filter = stretch.filter.as_ref().expect("a driven stretch has a filter");
-        let matched = cx.open.mask.count_intersection(filter.rows());
+        let matched = cx.open.mask.only_leaf().count_intersection(filter.rows());
         self.stretch = Some(stretch);
         Ok(Some(matched))
     }
@@ -654,8 +672,8 @@ impl Walk {
         let entities: Bitmap = items.iter().map(|&(entity, _)| entity).collect();
         let candidate = cx.engine.filter_candidate_within(
             cx.open.served.session,
-            cx.open.served.shard,
-            Some(&cx.open.served.fragment),
+            cx.open.served.only_side().shard,
+            Some(cx.open.served.only_side().fragment()),
             &entities,
         )?;
         drop(entities);
@@ -669,7 +687,8 @@ impl Walk {
         if order == RecordsOrder::Map {
             items = Vec::new();
         }
-        let total = u32::try_from(cx.open.served.data.row_space.total_rows()).unwrap_or(u32::MAX);
+        let total = u32::try_from(cx.open.served.only_side().data.row_space.total_rows())
+            .unwrap_or(u32::MAX);
         let mut domain: Vec<Range<u32>> = Vec::new();
         for_each_run_in(&ahead, 0..total, &mut |run| domain.push(run));
         let expr = self.filter.as_ref().expect("only a filter drives a stretch");
@@ -704,7 +723,13 @@ fn region_verdict(
     Ok(match expr {
         FilterExpr::Region(leaf) => Some(
             cx.engine
-                .region_rows(leaf, &cx.open.served, &cx.open.mask, &cx.resolved, cancel)
+                .region_rows(
+                    leaf,
+                    &cx.open.served,
+                    cx.open.mask.only_leaf(),
+                    &cx.resolved,
+                    cancel,
+                )
                 .map_err(filter_refusal)?
                 .verdict,
         ),
@@ -740,7 +765,7 @@ fn driving_rows(cx: &PageCx<'_>, expr: &FilterExpr, most: u32) -> Result<Option<
 fn bounded_rows(cx: &PageCx<'_>, expr: &FilterExpr) -> Result<Option<Bitmap>> {
     Ok(match expr {
         FilterExpr::Leaf { column, operand } => {
-            let shard = cx.open.served.shard;
+            let shard = cx.open.served.only_side().shard;
             let Some(keys) = shard.filter_columns.unique_keys(column, operand) else {
                 return Ok(None);
             };
@@ -751,10 +776,10 @@ fn bounded_rows(cx: &PageCx<'_>, expr: &FilterExpr) -> Result<Option<Bitmap>> {
             let visible = cx.engine.filter_candidate_within(
                 cx.open.served.session,
                 shard,
-                Some(&cx.open.served.fragment),
+                Some(cx.open.served.only_side().fragment()),
                 &holders,
             )?;
-            let row_space = &cx.open.served.data.row_space;
+            let row_space = &cx.open.served.only_side().data.row_space;
             Some(
                 visible
                     .iter()
@@ -765,7 +790,12 @@ fn bounded_rows(cx: &PageCx<'_>, expr: &FilterExpr) -> Result<Option<Bitmap>> {
         }
         FilterExpr::MemberOf(leaf) => Some(
             cx.engine
-                .member_rows(leaf, &cx.open.served, &cx.open.mask, &cx.resolved)
+                .member_rows(
+                    leaf,
+                    &cx.open.served,
+                    cx.open.mask.only_leaf(),
+                    &cx.resolved,
+                )
                 .map_err(filter_refusal)?,
         ),
         FilterExpr::AllOf(kids) => {
@@ -822,15 +852,16 @@ impl SegmentRun<'_> {
         if let (true, Some(filter)) = (stretch.driven, &stretch.filter) {
             let base = self.base;
             let buffered = &mut self.buffered;
+            let mask = cx.open.mask.only_leaf();
             for_each_run_in(filter.rows(), range, &mut |run| {
                 buffered.extend(
-                    run.filter(|&row| cx.open.mask.contains_row(row))
+                    run.filter(|&row| mask.contains_row(row))
                         .map(|row| (row - base, true)),
                 );
             });
             return;
         }
-        let visible = cx.open.mask.rows_in_range(range);
+        let visible = cx.open.mask.only_leaf().rows_in_range(range);
         match &stretch.filter {
             None => self
                 .buffered
@@ -985,6 +1016,7 @@ impl Take<'_> {
                 .partition_point(|&(entity, _)| (entity, 0) <= scan),
         };
         let segments = self.cx.segments();
+        let mask = self.cx.open.mask.only_leaf();
         let &(began_at, _) = stretch.items.get(start)?;
         for (i, &(entity, row)) in stretch.items[start..].iter().enumerate() {
             if rows.len() == need {
@@ -995,7 +1027,7 @@ impl Take<'_> {
                     return Some(stop);
                 }
             }
-            if !self.cx.open.mask.contains_row(row) {
+            if !mask.contains_row(row) {
                 continue;
             }
             let matched = stretch

@@ -160,7 +160,7 @@ impl Engine {
         probe: &mut Probe,
     ) -> Result<Tiling> {
         let tiles = self.resolve_tiles(served, req, probe)?;
-        Ok(tile_ranges(tiles, &served.segments, probe))
+        Ok(tile_ranges(tiles, &served.only_side().segments, probe))
     }
 
     /// The request's tiles, counted and refused before they are allocated, and the underlay's three
@@ -500,12 +500,13 @@ impl Engine {
         // Every tile's parts counted together, each of the mask's bitmaps walked once: tiles next
         // to each other share containers, which a count per part popcounts again for each.
         probe.skip();
+        let segments = &served.only_side().segments;
         let part_ranges: Vec<Range<u32>> = tiling
             .ranges
             .iter()
             .flatten()
             .map(|(s, range)| {
-                let (_, row_base) = served.segments[*s];
+                let (_, row_base) = segments[*s];
                 row_base + range.start..row_base + range.end
             })
             .collect();
@@ -537,7 +538,7 @@ impl Engine {
                 tile_parts,
                 visible_by_part,
                 mask,
-                &served.segments,
+                &served.only_side().segments,
                 params,
                 req.zoom,
                 tiling.underlay_offset,

@@ -129,12 +129,12 @@ impl Engine {
         kind: u8,
         read: &dyn FieldRead,
     ) -> Result<FieldFigures> {
-        let base_rows = served.data.row_space.base_rows();
+        let base_rows = served.only_side().data.row_space.base_rows();
         let identity = served.mask_identity;
         let (fragment, minus, plus, _) = mask.parts();
         let key = FieldKey {
             terms: identity.terms,
-            identity: identity.fragment_identity,
+            identity: served.only_side().fragment().identity,
             view: served.name.to_string(),
             column: column.to_string(),
             kind,
@@ -148,7 +148,7 @@ impl Engine {
             true => None,
             false => {
                 let (deny_version, failing) =
-                    super::deny_version(served, served.denied, &subtracted);
+                    super::deny_version(served, served.only_side().denied, &subtracted);
                 let deny_key = FieldDenyKey {
                     field: key.clone(),
                     deny_version,
@@ -182,9 +182,7 @@ impl Engine {
                     view: served.name.to_string(),
                     column: column.to_string(),
                     kind,
-                    segments_version: identity.segments_version,
-                    projection_segments_version: identity.projection_segments_version,
-                    overlay_version: identity.overlay_version,
+                    shards: identity.shards,
                 };
                 let tail = self
                     .figures
@@ -273,7 +271,7 @@ impl Engine {
         base_rows: u32,
         read: &dyn FieldRead,
     ) -> Result<Arc<Held>> {
-        let stored = served.data.field_tallies.as_deref();
+        let stored = served.only_side().data.field_tallies.as_deref();
         let mut failed = None;
         let held = self.figures.get_or_build_in(
             &self.figures.fields,

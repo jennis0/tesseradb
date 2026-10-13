@@ -29,7 +29,7 @@ impl Engine {
         rows_in_ranges: u64,
         per_tile_only: bool,
     ) -> FilterRows {
-        let row_space = &served.data.row_space;
+        let row_space = &served.only_side().data.row_space;
         let per_tile_looks_cheaper = per_tile_only
             || entities.cardinality() > rows_in_ranges.saturating_mul(PER_TILE_CROSSING_RATIO);
         if per_tile_looks_cheaper && row_space.can_invert() {
@@ -109,8 +109,8 @@ impl Engine {
         rows_in_ranges: u64,
         per_tile_only: bool,
     ) -> Result<FilterRows> {
-        let row_space = &served.data.row_space;
-        let segments = &served.segments[..];
+        let row_space = &served.only_side().data.row_space;
+        let segments = &served.only_side().segments[..];
         let total_rows = row_space.total_rows();
         // Every entity-space verdict's row image, crossed together in one walk.
         let verdicts = tree.entity_verdicts();
@@ -936,7 +936,12 @@ impl Engine {
         }
         check_cancelled(&req.cancel)?;
         let rows_in_ranges = tiling.rows_in_ranges;
-        let row_bases: Vec<u32> = served.segments.iter().map(|&(_, base)| base).collect();
+        let row_bases: Vec<u32> = served
+            .only_side()
+            .segments
+            .iter()
+            .map(|&(_, base)| base)
+            .collect();
         let domain = crossing_domain(&tiling.ranges, &row_bases);
         let mut region_verdict: Option<crate::region::RegionVerdict> = None;
         let (filter_rows, highlight_rows) =
@@ -1014,8 +1019,11 @@ impl Engine {
             &dyn Fn(&crate::filter::FilterExpr, bool) -> Result<crate::filter::RoutedFilter>,
         ) -> Result<T>,
     ) -> Result<T> {
-        let candidate =
-            self.filter_candidate(served.session, served.shard, Some(&served.fragment))?;
+        let candidate = self.filter_candidate(
+            served.session,
+            served.only_side().shard,
+            Some(served.only_side().fragment()),
+        )?;
         let resolved = ResolvedLeaves::default();
         self.route_filters_under(served, mask, &candidate, &resolved, cancel, body)
     }
@@ -1079,7 +1087,7 @@ impl Engine {
             |leaf: &crate::filter::MemberOfLeaf| self.member_rows(leaf, served, mask, resolved);
         let layers = |layer: &str| self.reaches_layer(served.session, layer);
         let unique = |column: &str, keys: &[mosaica_store::unique::UniqueKey]| {
-            unique_holders(served.shard, column, keys)
+            unique_holders(served.only_side().shard, column, keys)
         };
         let resolvers = crate::filter::RowLeafResolvers {
             regions: &regions,
@@ -1089,6 +1097,7 @@ impl Engine {
         };
         body(&|expr: &crate::filter::FilterExpr, prefer_row: bool| {
             served
+                .only_side()
                 .shard
                 .filter_columns
                 .evaluate_routed(expr, candidate, prefer_row, &resolvers)
@@ -1162,7 +1171,7 @@ impl Engine {
         cancel: &Option<CancelToken>,
     ) -> std::result::Result<crate::region::RegionRows, crate::filter::FilterError> {
         use crate::filter::{FilterError, RegionLeaf};
-        let segments = &served.segments[..];
+        let segments = &served.only_side().segments[..];
         let never_cancelled = CancelToken::new();
         let cancel = cancel.as_ref().unwrap_or(&never_cancelled);
         use crate::region::{digest_of, RegionDecomposition, RegionKey, RegionRows, RegionVerdict};
@@ -1172,6 +1181,7 @@ impl Engine {
                 let canonical = shape.encode();
                 let key = RegionKey {
                     view: served.name.to_string(),
+                    shard: served.only_side().shard.id(),
                     prefix: served.generation.prefix.clone(),
                     segments_version: served.generation.segments_version,
                     digest: digest_of(&canonical),

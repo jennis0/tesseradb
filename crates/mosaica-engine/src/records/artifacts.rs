@@ -365,10 +365,10 @@ impl Scope<'_> {
         let filter_rows = self.filter_rows?;
         let read = self.level(level);
         let Some(attachment) = read.rows.attachment(ordinal) else {
-            return Some(read.matched_count(ordinal, &self.open.mask, filter_rows));
+            return Some(read.matched_count(ordinal, self.open.mask.only_leaf(), filter_rows));
         };
         Some(self.served_target(attachment).map_or(0, |target| {
-            target.matched_count(attachment.ordinal, &self.open.mask, filter_rows)
+            target.matched_count(attachment.ordinal, self.open.mask.only_leaf(), filter_rows)
         }))
     }
 }
@@ -541,8 +541,12 @@ impl ArtifactsPager<'_> {
                 !same_publication(&held.under, generation) || held.mask != served.mask_identity
             });
             if stale {
-                let (rows, region) =
-                    engine.whole_view_filter_rows(served, &open.mask, expr, &self.req.cancel)?;
+                let (rows, region) = engine.whole_view_filter_rows(
+                    served,
+                    open.mask.only_leaf(),
+                    expr,
+                    &self.req.cancel,
+                )?;
                 self.region = RegionVerdict::coarsest(self.region, region);
                 self.filter = Some(HeldFilter {
                     under: Arc::clone(generation),
@@ -568,9 +572,15 @@ impl ArtifactsPager<'_> {
             let Some(slot) = levels.get_mut(level as usize).filter(|slot| slot.is_none()) else {
                 return Ok(());
             };
-            let mut read = engine.read_level(served, &open.mask, layer, level, geometry)?;
+            let mut read =
+                engine.read_level(served, open.mask.only_leaf(), layer, level, geometry)?;
             if let Some(held) = filter {
-                held.count(engine, &open.mask, &layer.declaration.name, &mut read);
+                held.count(
+                    engine,
+                    open.mask.only_leaf(),
+                    &layer.declaration.name,
+                    &mut read,
+                );
             }
             *slot = Some(read);
             Ok(())
@@ -635,14 +645,20 @@ impl ArtifactsPager<'_> {
         }
         let filter_rows = self.filter.as_ref().map(|held| &held.rows);
         let reachable = engine.reachable_layers(served.session);
-        let ctx = DependencyContext::new(served, &open.mask, &reachable);
+        let ctx = DependencyContext::new(served, open.mask.only_leaf(), &reachable);
         let dependency_served = engine.dependency_gate(&ctx);
         let views: Vec<_> = levels
             .iter()
             .map(|level| {
-                level
-                    .as_ref()
-                    .map(|level| level.view(engine, served, &open.mask, &layer, &dependency_served))
+                level.as_ref().map(|level| {
+                    level.view(
+                        engine,
+                        served,
+                        open.mask.only_leaf(),
+                        &layer,
+                        &dependency_served,
+                    )
+                })
             })
             .collect();
         let targets: Vec<TargetLayer<'_>> = target_layers
@@ -654,7 +670,13 @@ impl ArtifactsPager<'_> {
                     .iter()
                     .map(|level| {
                         level.as_ref().map(|level| {
-                            level.view(engine, served, &open.mask, target, &dependency_served)
+                            level.view(
+                                engine,
+                                served,
+                                open.mask.only_leaf(),
+                                target,
+                                &dependency_served,
+                            )
                         })
                     })
                     .collect(),
@@ -667,7 +689,7 @@ impl ArtifactsPager<'_> {
                     slots.push(match read {
                         Some(_) => engine.cluster_slots(
                             served,
-                            &open.mask,
+                            open.mask.only_leaf(),
                             &layer,
                             level as u32,
                             palette,
@@ -990,8 +1012,8 @@ fn visible_geometry(
     if let Some(figures) = read.counts.as_ref().filter(|c| c.has_geometry()) {
         return crate::derived::accumulated(wanted, figures, ordinal);
     }
-    let locator = RowLocator::new(scope.open.served.segments.clone());
-    let visible = read.rows.visible_rows(ordinal, &scope.open.mask);
+    let locator = RowLocator::new(scope.open.served.only_side().segments.clone());
+    let visible = read.rows.visible_rows(ordinal, scope.open.mask.only_leaf());
     crate::derived::compute(wanted, &visible, &locator)
 }
 
@@ -1006,8 +1028,8 @@ fn drawn_shape(
     let declaration = &scope.layer.declaration;
     match declaration.drawn_shape()? {
         DrawnShape::Derived => {
-            let locator = RowLocator::new(scope.open.served.segments.clone());
-            let visible = read.rows.visible_rows(ordinal, &scope.open.mask);
+            let locator = RowLocator::new(scope.open.served.only_side().segments.clone());
+            let visible = read.rows.visible_rows(ordinal, scope.open.mask.only_leaf());
             crate::derived::compute(&[ComputedProperty::Hull], &visible, &locator).shape
         }
         DrawnShape::Authored => {

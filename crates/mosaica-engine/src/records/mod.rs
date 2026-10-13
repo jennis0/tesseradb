@@ -644,7 +644,8 @@ impl Pager for ItemsPager<'_> {
                 None,
             ));
         }
-        let total = u32::try_from(open.served.data.row_space.total_rows()).unwrap_or(u32::MAX);
+        let total =
+            u32::try_from(open.served.only_side().data.row_space.total_rows()).unwrap_or(u32::MAX);
         let whole_view = 0..total;
         let routed = filter_rows(
             &cx,
@@ -654,7 +655,7 @@ impl Pager for ItemsPager<'_> {
             false,
             &req.cancel,
         )?;
-        let matched = open.mask.count_intersection(routed.rows.rows());
+        let matched = open.mask.only_leaf().count_intersection(routed.rows.rows());
         Ok((
             RecordsCounts {
                 served: visible,

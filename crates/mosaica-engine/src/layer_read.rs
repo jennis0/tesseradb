@@ -90,12 +90,14 @@ impl Engine {
         expr: &FilterExpr,
         cancel: &Option<CancelToken>,
     ) -> Result<(Bitmap, Option<RegionVerdict>)> {
-        let total_rows = served.data.row_space.total_rows();
+        let total_rows = served.only_side().data.row_space.total_rows();
         self.route_filters(served, mask, cancel, |route| {
             // A column with both routes takes the entity route: there are no tile ranges here to
             // make the row route cheaper, so only a render-only column reaches the scan.
             Ok(match route(expr, false)? {
-                RoutedFilter::Entity(entities) => (served.data.row_space.project(&entities), None),
+                RoutedFilter::Entity(entities) => {
+                    (served.only_side().data.row_space.project(&entities), None)
+                }
                 RoutedFilter::Row(tree) => {
                     let region = tree.region_verdict();
                     let whole = std::iter::once(0..u32::try_from(total_rows).unwrap_or(u32::MAX))
@@ -128,14 +130,14 @@ impl Engine {
             Some(vocabulary) => vocabulary.code_of(key),
             None => key.parse::<u32>().ok(),
         };
-        let source = served.shard.partition_source();
+        let source = served.only_side().shard.partition_source();
         let (rows, level_version) = self.write.live().with_artifacts(|store| {
             let predicate = crate::viewport::predicate_source(
                 &layer.declaration,
-                served.shard,
+                served.only_side().shard,
                 served.name,
-                served.data,
-                &served.segments,
+                served.only_side().data,
+                &served.only_side().segments,
                 &code_of_key,
                 &self.shapes,
                 store,
@@ -149,7 +151,7 @@ impl Engine {
                 name,
                 level,
                 store,
-                &served.data.row_space,
+                &served.only_side().data.row_space,
                 Some(&source),
                 layer.layout_of(level),
                 predicate.as_ref(),

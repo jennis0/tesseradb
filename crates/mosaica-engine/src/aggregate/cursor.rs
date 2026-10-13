@@ -19,8 +19,8 @@ pub(super) struct Position {
     pub(super) group: u32,
     /// The last cell of `group` sent, on a table with cells.
     pub(super) after_cell: Option<u64>,
-    /// The segments version, [`crate::Generation::deny_state_version`] and the fragment watermark
-    /// the last page counted under.
+    /// The segments version, [`crate::Generation::deny_state_version`] and a hash of every shard's
+    /// fragment identity and watermark, that the last page counted under.
     pub(super) stamp: Option<(u64, u64, u64)>,
 }
 

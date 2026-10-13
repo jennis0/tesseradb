@@ -586,7 +586,10 @@ impl Engine {
                 token_id: session.token_id(),
                 column: column.to_string(),
                 segments_version: generation.segments_version,
-                overlay_version: shard.overlay_version,
+                overlay_versions: generation
+                    .shards()
+                    .map(|shard| shard.overlay_version)
+                    .collect(),
             };
             // **The index the set was swept against must still be the one the walk reads**, which
             // the value count is what says: a rebuild moves dense positions and moves neither

@@ -25,7 +25,7 @@ use mosaica_lifecycle::{BufferedItem, IngestBuffer, Overlay};
 use mosaica_roaring::for_each_run_in;
 use mosaica_store::read::ShardData;
 use mosaica_store::RowSpace;
-use mosaica_types::{EntityId, TermId};
+use mosaica_types::{EntityId, ShardId, ShardRow, TermId};
 
 use crate::projection::RowProjection;
 use crate::session::SatisfiedKeys;
@@ -503,6 +503,135 @@ impl DecodeSource<'_> {
     }
 }
 
+/// A viewer's composed mask over every shard of a view: one [`EffectiveMask`] per shard, each over
+/// that shard's row space, ascending by shard. A shard whose unfiltered leaf holds no visible row
+/// has no leaf, so a request reads nothing of it; which shards those are depends on where the
+/// viewer's items sit, so nothing keyed or served may depend on the list. Every operation names
+/// the shard it asks about, and answers for a shard without a leaf as for an empty one.
+pub struct ShardedMask {
+    leaves: Vec<(ShardId, EffectiveMask)>,
+    /// The leaves left out, kept only for [`Self::only_leaf`].
+    left_out: Vec<(ShardId, EffectiveMask)>,
+}
+
+impl ShardedMask {
+    /// The mask over `leaves`, one per shard, each composed and not yet filtered. A leaf with no
+    /// visible row is left out.
+    pub fn new(leaves: impl IntoIterator<Item = (ShardId, EffectiveMask)>) -> ShardedMask {
+        let (mut leaves, mut left_out): (Vec<_>, Vec<_>) = leaves
+            .into_iter()
+            .partition(|(_, leaf)| leaf.visible_total() > 0);
+        leaves.sort_by_key(|(shard, _)| *shard);
+        left_out.sort_by_key(|(shard, _)| *shard);
+        debug_assert!(
+            leaves.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            "a shard holds two leaves"
+        );
+        ShardedMask { leaves, left_out }
+    }
+
+    /// Every leaf, ascending by shard.
+    pub fn leaves(&self) -> impl Iterator<Item = (ShardId, &EffectiveMask)> {
+        self.leaves.iter().map(|(shard, leaf)| (*shard, leaf))
+    }
+
+    /// `shard`'s leaf, or `None` where the viewer sees nothing there.
+    pub fn leaf(&self, shard: ShardId) -> Option<&EffectiveMask> {
+        self.leaves
+            .binary_search_by_key(&shard, |(held, _)| *held)
+            .ok()
+            .map(|at| &self.leaves[at].1)
+    }
+
+    /// The visible rows over every shard: θ's anchor. Filter-blind, as
+    /// [`EffectiveMask::visible_total`] is.
+    pub fn visible_total(&self) -> u64 {
+        self.leaves
+            .iter()
+            .map(|(_, leaf)| leaf.visible_total())
+            .sum()
+    }
+
+    /// [`EffectiveMask::count_ranges`] over `shard`'s rows: one call per shard over a request's
+    /// ranges in that shard.
+    pub fn count_ranges(&self, shard: ShardId, ranges: &[Range<u32>]) -> Vec<u64> {
+        match self.leaf(shard) {
+            Some(leaf) => leaf.count_ranges(ranges),
+            None => vec![0; ranges.len()],
+        }
+    }
+
+    /// [`EffectiveMask::rows_in_range`] in `shard`.
+    pub fn rows_in_range(&self, shard: ShardId, r: Range<u32>) -> Bitmap {
+        self.leaf(shard)
+            .map_or_else(Bitmap::new, |leaf| leaf.rows_in_range(r))
+    }
+
+    /// [`EffectiveMask::for_each_visible_run`] in `shard`.
+    pub fn for_each_run(&self, shard: ShardId, r: Range<u32>, f: impl FnMut(Range<u32>)) {
+        if let Some(leaf) = self.leaf(shard) {
+            leaf.for_each_visible_run(r, f);
+        }
+    }
+
+    /// [`EffectiveMask::contains_row`] for a row of any shard.
+    pub fn contains(&self, row: ShardRow) -> bool {
+        let shard = row.shard();
+        self.leaf(shard).is_some_and(|leaf| {
+            let row = row.row_in(shard).expect("the row's own shard");
+            leaf.contains_row(row.raw())
+        })
+    }
+
+    /// `leaf ∩ set` in `shard`'s row space, filter-blind ([`MaskedSet::visible_rows`]).
+    pub fn and(&self, shard: ShardId, set: &Bitmap) -> Bitmap {
+        self.leaf(shard)
+            .map_or_else(Bitmap::new, |leaf| leaf.visible_rows(set))
+    }
+
+    /// `leaf ∪ set` in `shard`'s row space, filter-blind.
+    pub fn or(&self, shard: ShardId, set: &Bitmap) -> Bitmap {
+        match self.leaf(shard) {
+            Some(leaf) => leaf.visible_all().or(set),
+            None => set.clone(),
+        }
+    }
+
+    /// `leaf ∖ set` in `shard`'s row space, filter-blind.
+    pub fn andnot(&self, shard: ShardId, set: &Bitmap) -> Bitmap {
+        self.leaf(shard)
+            .map_or_else(Bitmap::new, |leaf| leaf.visible_all().andnot(set))
+    }
+
+    /// The one leaf of a mask over one shard, left out or not, for a route that does not yet read
+    /// every shard: a left-out leaf is returned so a viewer who sees nothing on one shard is
+    /// answered as today. Panics where the view has a second shard.
+    pub fn only_leaf(&self) -> &EffectiveMask {
+        self.assert_one_shard();
+        match self.leaves.first() {
+            Some((_, leaf)) => leaf,
+            None => &self.left_out[0].1,
+        }
+    }
+
+    /// [`Self::only_leaf`], taken.
+    pub fn into_only_leaf(mut self) -> EffectiveMask {
+        self.assert_one_shard();
+        match self.leaves.pop() {
+            Some((_, leaf)) => leaf,
+            None => self.left_out.remove(0).1,
+        }
+    }
+
+    fn assert_one_shard(&self) {
+        assert!(
+            self.leaves.len() + self.left_out.len() == 1,
+            "a route read one shard's leaf of a mask over {} shards",
+            self.leaves.len() + self.left_out.len()
+        );
+    }
+}
+
 /// The per-entity verdict, `deleted > suppressed > buffered`, or `None` when the overlay and the
 /// buffer have no opinion and the frozen fragment already carries the answer. The one expression
 /// of this precedence — [`compose`] turns it into row-space diffs, [`visible_to`] reads it
@@ -907,5 +1036,228 @@ mod walk_tests {
             "no state gave a buffered entity with a row in `base` whose terms fail: the `minus` \
              branch went untested"
         );
+    }
+}
+
+#[cfg(test)]
+mod sharded_tests {
+    //! [`ShardedMask`] over two shards against one [`EffectiveMask`] over the two row spaces laid
+    //! end to end, shard 1's rows after shard 0's: every operation in a shard must answer as the
+    //! one mask answers over that shard's stretch.
+
+    use super::*;
+
+    use mosaica_types::RowId;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+
+    /// The rows of each shard's space.
+    const SPACES: [u32; 2] = [3_000, 70_000];
+
+    /// A leaf over `base`, with `minus ⊆ base` and `plus ∩ base = ∅`, as composition leaves them.
+    fn leaf(base: Bitmap, minus: Bitmap, plus: Bitmap) -> EffectiveMask {
+        debug_assert!(minus.is_subset(&base) && plus.and(&base).is_empty());
+        EffectiveMask {
+            base: Arc::new(RowProjection::from_rows(base)),
+            minus,
+            plus,
+            filter: None,
+            highlight: None,
+            whole: std::sync::OnceLock::new(),
+        }
+    }
+
+    fn shifted(rows: &Bitmap, by: u32) -> Bitmap {
+        rows.iter().map(|row| row + by).collect()
+    }
+
+    fn back(rows: &Bitmap, by: u32) -> Bitmap {
+        rows.iter().map(|row| row - by).collect()
+    }
+
+    /// One shard's `(base, minus, plus)` over `rows` rows, at a density chosen per seed so some
+    /// containers are runs and some arrays.
+    fn parts(rng: &mut StdRng, rows: u32) -> (Bitmap, Bitmap, Bitmap) {
+        let density = rng.gen_range(0.01..0.9);
+        let (mut base, mut minus, mut plus) = (Bitmap::new(), Bitmap::new(), Bitmap::new());
+        for row in 0..rows {
+            if rng.gen_bool(density) {
+                base.add(row);
+                if rng.gen_bool(0.05) {
+                    minus.add(row);
+                }
+            } else if rng.gen_bool(0.02) {
+                plus.add(row);
+            }
+        }
+        base.run_optimize();
+        (base, minus, plus)
+    }
+
+    /// The two shards' leaves, and the one mask over both spaces end to end.
+    fn masks(seed: u64) -> (ShardedMask, EffectiveMask) {
+        let mut rng = StdRng::seed_from_u64(seed);
+        // Odd seeds filter every leaf, so the filtered operations are compared too.
+        let filtered = seed % 2 == 1;
+        let mut leaves = Vec::new();
+        let (mut base, mut minus, mut plus) = (Bitmap::new(), Bitmap::new(), Bitmap::new());
+        let mut filter = Bitmap::new();
+        let mut offset = 0;
+        for (shard, rows) in SPACES.into_iter().enumerate() {
+            let (b, m, p) = parts(&mut rng, rows);
+            base.or_inplace(&shifted(&b, offset));
+            minus.or_inplace(&shifted(&m, offset));
+            plus.or_inplace(&shifted(&p, offset));
+            let mut one = leaf(b, m, p);
+            if filtered {
+                let admits = some_set(&mut rng, rows);
+                filter.or_inplace(&shifted(&admits, offset));
+                one = one.with_filter(FilterRows::Complete(admits));
+            }
+            leaves.push((ShardId::new(shard as u32).unwrap(), one));
+            offset += rows;
+        }
+        // Handed over in descending order: the mask sorts them.
+        leaves.reverse();
+        let mut whole = leaf(base, minus, plus);
+        if filtered {
+            whole = whole.with_filter(FilterRows::Complete(filter));
+        }
+        (ShardedMask::new(leaves), whole)
+    }
+
+    fn offset(shard: usize) -> u32 {
+        SPACES[..shard].iter().sum()
+    }
+
+    fn some_ranges(rng: &mut StdRng, rows: u32) -> Vec<Range<u32>> {
+        let mut ranges: Vec<Range<u32>> = (0..40)
+            .map(|_| {
+                let start = rng.gen_range(0..rows);
+                start..rng.gen_range(start..=rows)
+            })
+            .collect();
+        ranges.sort_by_key(|r| r.start);
+        ranges
+    }
+
+    fn some_set(rng: &mut StdRng, rows: u32) -> Bitmap {
+        (0..rows).filter(|_| rng.gen_bool(0.3)).collect()
+    }
+
+    #[test]
+    fn every_operation_in_a_shard_answers_as_one_mask_over_both_spaces() {
+        for seed in 0..8u64 {
+            let (sharded, whole) = masks(seed);
+            let mut rng = StdRng::seed_from_u64(seed + 100);
+            assert_eq!(
+                sharded.visible_total(),
+                whole.visible_total(),
+                "seed {seed}"
+            );
+            for (index, rows) in SPACES.into_iter().enumerate() {
+                let shard = ShardId::new(index as u32).unwrap();
+                let at = offset(index);
+                let ranges = some_ranges(&mut rng, rows);
+                let moved: Vec<Range<u32>> =
+                    ranges.iter().map(|r| r.start + at..r.end + at).collect();
+                assert_eq!(
+                    sharded.count_ranges(shard, &ranges),
+                    whole.count_ranges(&moved),
+                    "seed {seed}, shard {index}: count_ranges"
+                );
+                for (r, m) in ranges.iter().zip(&moved) {
+                    assert_eq!(
+                        sharded.rows_in_range(shard, r.clone()),
+                        back(&whole.rows_in_range(m.clone()), at),
+                        "seed {seed}, shard {index}: rows_in_range {r:?}"
+                    );
+                    let mut runs = Vec::new();
+                    sharded.for_each_run(shard, r.clone(), |run| runs.push(run));
+                    let mut expected = Vec::new();
+                    whole.for_each_visible_run(m.clone(), |run| {
+                        expected.push(run.start - at..run.end - at)
+                    });
+                    assert_eq!(runs, expected, "seed {seed}, shard {index}: runs {r:?}");
+                }
+                for row in (0..rows).step_by(7) {
+                    assert_eq!(
+                        sharded.contains(ShardRow::new(shard, RowId::new(row))),
+                        whole.contains_row(row + at),
+                        "seed {seed}, shard {index}: contains {row}"
+                    );
+                }
+                let set = some_set(&mut rng, rows);
+                let moved_set = shifted(&set, at);
+                let stretch = Bitmap::from_range(at..at + rows);
+                let visible = whole.visible_all().and(&stretch);
+                assert_eq!(
+                    sharded.and(shard, &set),
+                    back(&whole.visible_rows(&moved_set), at),
+                    "seed {seed}, shard {index}: and"
+                );
+                assert_eq!(
+                    sharded.or(shard, &set),
+                    back(&visible.or(&moved_set), at),
+                    "seed {seed}, shard {index}: or"
+                );
+                assert_eq!(
+                    sharded.andnot(shard, &set),
+                    back(&visible.andnot(&moved_set), at),
+                    "seed {seed}, shard {index}: andnot"
+                );
+            }
+        }
+    }
+
+    /// A shard where the viewer sees nothing has no leaf, however much its projection held, and
+    /// every operation answers for it as for an empty one. A shard seen only through rows the
+    /// buffer adds keeps its leaf.
+    #[test]
+    fn a_shard_with_nothing_visible_has_no_leaf() {
+        let [zero, one, two] = [0, 1, 2].map(|raw| ShardId::new(raw).unwrap());
+        let held: Bitmap = (0..100).collect();
+        let denied_whole = leaf(held.clone(), held.clone(), Bitmap::new());
+        let buffered_only = leaf(Bitmap::new(), Bitmap::new(), Bitmap::of(&[5, 9]));
+        let never = leaf(Bitmap::new(), Bitmap::new(), Bitmap::new());
+        let mask = ShardedMask::new([(two, never), (zero, denied_whole), (one, buffered_only)]);
+
+        assert_eq!(
+            mask.leaves().map(|(shard, _)| shard).collect::<Vec<_>>(),
+            vec![one]
+        );
+        assert_eq!(mask.visible_total(), 2);
+        assert!(mask.leaf(zero).is_none() && mask.leaf(two).is_none());
+        assert_eq!(mask.count_ranges(zero, &[0..50, 50..100]), vec![0, 0]);
+        assert!(mask.rows_in_range(zero, 0..100).is_empty());
+        let mut runs = 0;
+        mask.for_each_run(zero, 0..100, |_| runs += 1);
+        assert_eq!(runs, 0);
+        assert!(!mask.contains(ShardRow::new(zero, RowId::new(3))));
+        assert!(mask.contains(ShardRow::new(one, RowId::new(9))));
+        assert!(mask.and(zero, &held).is_empty());
+        assert_eq!(mask.or(zero, &Bitmap::of(&[1])), Bitmap::of(&[1]));
+        assert!(mask.andnot(zero, &Bitmap::new()).is_empty());
+        assert_eq!(mask.count_ranges(one, &[0..5, 5..10]), vec![0, 2]);
+    }
+
+    /// The shim answers with a one-shard mask's leaf whether or not it was left out.
+    #[test]
+    fn a_one_shard_mask_has_its_only_leaf_even_when_left_out() {
+        let nothing = leaf(Bitmap::new(), Bitmap::new(), Bitmap::new());
+        let empty = ShardedMask::new([(ShardId::ZERO, nothing)]);
+        assert_eq!(empty.leaves().count(), 0);
+        assert_eq!(empty.only_leaf().visible_total(), 0);
+        let one = leaf(Bitmap::of(&[4]), Bitmap::new(), Bitmap::new());
+        let held = ShardedMask::new([(ShardId::ZERO, one)]);
+        assert_eq!(held.into_only_leaf().visible_total(), 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn the_shim_refuses_a_second_shard() {
+        let one = || leaf(Bitmap::of(&[1]), Bitmap::new(), Bitmap::new());
+        let mask = ShardedMask::new([(ShardId::ZERO, one()), (ShardId::new(1).unwrap(), one())]);
+        let _ = mask.only_leaf();
     }
 }

@@ -214,7 +214,7 @@ impl RowProjectionCache {
     /// calls this at every geometry publication, once per resident key, and must not wait — its
     /// call site carries the argument. The request path takes
     /// [`Self::get_or_derive_waiting`] (decision 0058) at the last rung of
-    /// `Engine::session_geometry`'s ladder; in steady state it reads through [`Self::peek`] and
+    /// `Engine::session_geometries`'s ladder; in steady state it reads through [`Self::peek`] and
     /// claims nothing.
     ///
     /// **Fallible on purpose, and `Err` does not mean failure.** `Err(CacheBusy)` means some other
@@ -395,7 +395,7 @@ impl RowProjectionCache {
     /// **Pruning at the swap, with depth zero, would be wrong.** A flush *extends* row space: the
     /// new generation's projection for a grant is the old one plus the new extent's rows, so the
     /// superseded entry is both the input the background refresh extends and the entry rung 2 of
-    /// `Engine::session_geometry`'s ladder serves while the refresh runs. Deleting it at the
+    /// `Engine::session_geometries`'s ladder serves while the refresh runs. Deleting it at the
     /// instant of the swap deletes both, and every grant pays the full rebuild at every tick.
     ///
     /// **The newest entry is kept because it is the refresh's only base.** Two publications can

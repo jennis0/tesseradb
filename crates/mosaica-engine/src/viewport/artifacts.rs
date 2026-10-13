@@ -312,9 +312,10 @@ impl Engine {
         mask: &EffectiveMask,
         id: MosaicaId,
     ) -> Result<Option<GatedArtifact>> {
-        let (session, generation, shard) = (served.session, served.generation, served.shard);
-        let (view, view_data) = (served.name, served.data);
-        let segments = &served.segments[..];
+        let (session, generation, shard) =
+            (served.session, served.generation, served.only_side().shard);
+        let (view, view_data) = (served.name, served.only_side().data);
+        let segments = &served.only_side().segments[..];
         let Some((space, entity)) = self.identity_key.invert_artifact(id) else {
             return Ok(None);
         };
@@ -442,45 +443,11 @@ impl Engine {
         zoom: Option<u8>,
     ) -> Result<Option<ArtifactOut>> {
         let generation = self.generation.load_full();
-        let carriers = generation
-            .bundle
-            .partitions
-            .values()
-            .filter(|partition| partition.only_shard().views.contains_key(view))
-            .count();
-        if carriers > 1 {
-            return Err(EngineError::MultiPartitionView(view.to_string()));
-        }
-        let shard = generation.only_shard();
-        let view_data = shard
-            .data
-            .views
-            .get(view)
-            .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
-
         let mut probe = Probe::new();
-        let (geometry, key) =
-            self.session_geometry(session, &generation, shard, view, &None, &mut probe)?;
-        let denied = shard.denied_in(view)?;
-        let projection = Arc::clone(&geometry.projection);
-        let mask =
-            shard.compose(session.satisfied(), projection, view, &view_data.row_space, denied);
-        let mask_identity =
-            self.mask_identity(session, &generation, shard, &geometry, key.segments_version);
-        let served = ServedView {
-            session,
-            generation: &generation,
-            shard,
-            name: view,
-            data: view_data,
-            segments: segments_with_row_bases(view, view_data)?,
-            denied,
-            mask_identity,
-            fragment: Arc::clone(&geometry.fragment),
-            cancel: None,
-            turn: Default::default(),
-        };
-        let Some(gated) = self.gated_artifact(&served, &mask, id)? else {
+        let open = self.open_view(session, &generation, view, &None, &mut probe)?;
+        let (served, mask) = (&open.served, open.mask.only_leaf());
+        let mask_identity = served.mask_identity;
+        let Some(gated) = self.gated_artifact(served, mask, id)? else {
             return Ok(None);
         };
         let GatedArtifact {
@@ -532,10 +499,7 @@ impl Engine {
                     .write
                     .live()
                     .with_artifacts(|store| store.level_version(&name, level)),
-                segments_version: mask_identity.segments_version,
-                overlay_version: mask_identity.overlay_version,
-                fragment_identity: mask_identity.fragment_identity,
-                fragment_watermark: mask_identity.fragment_watermark,
+                shards: mask_identity.shards,
                 properties: crate::derived::cache::properties_bits(&declared_derived),
             };
             match counts.as_ref().filter(|c| c.has_geometry()) {
@@ -543,12 +507,13 @@ impl Engine {
                 Some(figures) => crate::derived::accumulated(&declared_derived, figures, ordinal),
                 None => {
                     let content = self.derived_geometry.get_or_derive(key, || {
+                        let view_data = served.only_side().data;
                         let Ok(segments) = segments_with_row_bases(view, view_data) else {
                             // Unreachable in practice; fail closed with empty content otherwise.
                             return crate::derived::DerivedContent::default();
                         };
                         let locator = crate::derived::RowLocator::new(segments);
-                        let visible = rows.visible_rows(ordinal, &mask);
+                        let visible = rows.visible_rows(ordinal, mask);
                         crate::derived::compute(&declared_derived, &visible, &locator)
                     });
                     (*content).clone()
@@ -819,10 +784,10 @@ impl Engine {
         let (rows, level_version) = self.write.live().with_artifacts(|store| {
             let predicate = predicate_source(
                 &layer.declaration,
-                ctx.served.shard,
+                ctx.served.only_side().shard,
                 ctx.served.name,
-                ctx.served.data,
-                &ctx.served.segments,
+                ctx.served.only_side().data,
+                &ctx.served.only_side().segments,
                 &code_of_key,
                 &self.shapes,
                 store,
@@ -834,8 +799,8 @@ impl Engine {
                 &attachment.layer,
                 attachment.level,
                 store,
-                &ctx.served.data.row_space,
-                Some(&ctx.served.shard.partition_source()),
+                &ctx.served.only_side().data.row_space,
+                Some(&ctx.served.only_side().shard.partition_source()),
                 recorded,
                 predicate.as_ref(),
                 ctx.served.generation.segments_version,
@@ -1071,10 +1036,10 @@ impl Engine {
         self.write.live().with_artifacts(|store| {
             let predicate = predicate_source(
                 &registered.declaration,
-                served.shard,
+                served.only_side().shard,
                 served.name,
-                served.data,
-                &served.segments,
+                served.only_side().data,
+                &served.only_side().segments,
                 &code_of_key,
                 &self.shapes,
                 store,
@@ -1087,7 +1052,7 @@ impl Engine {
                     name,
                     level,
                     store,
-                    &served.data.row_space,
+                    &served.only_side().data.row_space,
                     Some(source),
                     recorded,
                     predicate.as_ref(),
@@ -1461,10 +1426,7 @@ impl Engine {
                 level: number,
                 ordinal,
                 level_version: level.level_version,
-                segments_version: served.mask_identity.segments_version,
-                overlay_version: served.mask_identity.overlay_version,
-                fragment_identity: served.mask_identity.fragment_identity,
-                fragment_watermark: served.mask_identity.fragment_watermark,
+                shards: served.mask_identity.shards,
                 properties: crate::derived::cache::properties_bits(&layer.declared_derived),
             };
             // The accumulation where the level has one; nothing here walks the mask again.
@@ -1579,8 +1541,8 @@ impl<'a> ArtifactPass<'a> {
             ask,
             mask,
             dependency_served,
-            locator: crate::derived::RowLocator::new(served.segments.clone()),
-            source: served.shard.partition_source(),
+            locator: crate::derived::RowLocator::new(served.only_side().segments.clone()),
+            source: served.only_side().shard.partition_source(),
         }
     }
 }
@@ -1634,7 +1596,12 @@ pub(super) fn tile_rows(
     served: &ServedView<'_>,
     ranges: &[Vec<(usize, Range<u32>)>],
 ) -> Option<croaring::Bitmap> {
-    let row_bases: Vec<u32> = served.segments.iter().map(|&(_, base)| base).collect();
+    let row_bases: Vec<u32> = served
+        .only_side()
+        .segments
+        .iter()
+        .map(|&(_, base)| base)
+        .collect();
     let mut tile_rows = croaring::Bitmap::new();
     for span in crossing_domain(ranges, &row_bases) {
         tile_rows.add_range(span);

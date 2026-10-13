@@ -212,7 +212,7 @@ impl Numbers {
     pub(super) fn figures(&self, cx: &Cx<'_>) -> Result<FieldFigures> {
         cx.engine.field_figures(
             &cx.open.served,
-            &cx.open.mask,
+            cx.open.mask.only_leaf(),
             &self.column,
             self.kind as u8,
             &Reader { field: self, cx },
@@ -590,6 +590,7 @@ impl Numbers {
         let layers = cx
             .open
             .served
+            .only_side()
             .shard
             .filter_columns
             .value_layers(&self.column)
@@ -624,7 +625,7 @@ impl Numbers {
             .reduce(|| (empty(), 0), |(a, m), (b, n)| (a.merge(b), m + n));
         crate::categories::buffered_values(
             &cx.generation.bundle.manifest,
-            &cx.open.served.shard.buffer,
+            &cx.open.served.only_side().shard.buffer,
             &self.column,
             &mut |entity, value| {
                 if !entities.contains(entity) || matches!(value, WalScalar::Null) {
@@ -975,7 +976,7 @@ impl Reader<'_> {
         let mut tally = summary.finish(none);
         // The kept values were read by entity, and a deny names rows: each is placed again by its
         // row.
-        let row_space = &cx.open.served.data.row_space;
+        let row_space = &cx.open.served.only_side().data.row_space;
         for (high, side) in [(false, &mut tally.low), (true, &mut tally.high)] {
             let mut placed = Vec::with_capacity(side.len());
             for mut kept in side.drain(..) {

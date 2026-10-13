@@ -772,12 +772,7 @@ fn ln_q32(v: u64) -> u64 {
 
 /// What `N_occ(d)` is a function of: the composed mask, the view's row space, and the depth.
 ///
-/// **Named fields rather than a tuple**, on [`crate::cache::RowProjectionKey`]'s argument: four of
-/// the terms are `u64`, so a transposition at the construction site would compile, run, and answer
-/// one principal's θ from another's occupancy.
-///
-/// Every term is a reason the composed mask or the row space moved, and the set is
-/// [`crate::figures::MaskIdentity`]'s plus the view and the depth:
+/// Every term is a reason the composed mask or the row space moved:
 ///
 /// - **`token_id`** — the count is inside one principal's mask, and is never shared across
 ///   principals. Never the bearer token, and never reused within a process
@@ -785,14 +780,12 @@ fn ln_q32(v: u64) -> u64 {
 /// - **`view`** — `N_occ` is counted over one view's rows, exactly as `V_total` is.
 /// - **`depth`** — the quantity is per depth. A session touches a handful of depths, which is why
 ///   this is evaluated per requested depth rather than for all 17 at once.
-/// - **`segments_version`** — row ids mean something only within one geometry, and a flush changes
-///   which tiles hold rows.
-/// - **`overlay_version`** — a suppression or a deletion removes rows from the composed mask and
-///   can empty a tile. The response to a deny is at accept, so the correction may not wait for a
-///   refresh.
-/// - **the fragment's identity and watermark** — a session may be served a one-generation-stale
-///   projection (decision 0044), so two requests at one `segments_version` can compose against
-///   different fragments.
+/// - **`shards`** — [`crate::figures::MaskIdentity::shards`], over every shard's versions: row
+///   ids mean something only within one geometry, and a flush changes which tiles hold rows; a
+///   suppression or a deletion removes rows from the composed mask and can empty a tile, and the
+///   response to a deny is at accept, so the correction may not wait for a refresh; and a session
+///   may be served one-generation-stale projections, so two requests at one generation can
+///   compose against different fragments.
 ///
 /// **The attribute filter is not a term and must not become one**: θ is anchored on the unfiltered
 /// composed mask (**I12**), so there is no filtered variant of this quantity to key.
@@ -801,10 +794,23 @@ pub(crate) struct OccupancyKey {
     pub token_id: u64,
     pub view: String,
     pub depth: u8,
-    pub segments_version: u64,
-    pub overlay_version: u64,
-    pub fragment_identity: [u8; 32],
-    pub fragment_watermark: u64,
+    pub shards: [u8; 32],
+}
+
+impl OccupancyKey {
+    /// The rung at `depth` of `view` under the mask `identity` names.
+    pub(crate) fn of(
+        identity: &crate::figures::MaskIdentity,
+        view: &str,
+        depth: u8,
+    ) -> OccupancyKey {
+        OccupancyKey {
+            token_id: identity.token_id,
+            view: view.to_string(),
+            depth,
+            shards: identity.shards,
+        }
+    }
 }
 
 /// The default byte bound on the memo, and the only one an embedder that never calls
@@ -849,15 +855,14 @@ mod tests {
     use super::*;
 
     /// One rung, for the memo's bound.
-    fn rung(token_id: u64, depth: u8, segments_version: u64) -> OccupancyKey {
+    fn rung(token_id: u64, depth: u8, mask: u64) -> OccupancyKey {
+        let mut shards = [0u8; 32];
+        shards[..8].copy_from_slice(&mask.to_le_bytes());
         OccupancyKey {
             token_id,
             view: "geo".to_string(),
             depth,
-            segments_version,
-            overlay_version: 0,
-            fragment_identity: [0u8; 32],
-            fragment_watermark: 0,
+            shards,
         }
     }
 

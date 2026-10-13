@@ -101,7 +101,7 @@ impl Set {
     /// The set's rows for a cell count.
     pub(super) fn cells<'s>(&'s self, cx: &'s Cx<'_>) -> CellSet<'s> {
         match &self.held {
-            Held::Whole => CellSet::Mask(&cx.open.mask),
+            Held::Whole => CellSet::Mask(cx.open.mask.only_leaf()),
             _ => CellSet::Rows(self.rows(cx)),
         }
     }
@@ -109,11 +109,11 @@ impl Set {
     /// The set's rows in the view.
     pub(super) fn rows<'s>(&'s self, cx: &'s Cx<'_>) -> &'s Bitmap {
         match &self.held {
-            Held::Whole => cx.open.mask.visible_all(),
+            Held::Whole => cx.open.mask.only_leaf().visible_all(),
             Held::Rows(rows) => rows,
             Held::Entities(entities) => self.rows.get_or_init(|| {
-                let projected = cx.open.served.data.row_space.project(entities);
-                cx.open.mask.visible_rows(&projected)
+                let projected = cx.open.served.only_side().data.row_space.project(entities);
+                cx.open.mask.only_leaf().visible_rows(&projected)
             }),
         }
     }
@@ -150,10 +150,10 @@ pub(crate) fn in_view(open: &OpenView<'_>, entities: &Bitmap) -> Result<Bitmap> 
 fn restrict_under(open: &OpenView<'_>, entities: &Bitmap) -> Result<Bitmap> {
     // The projection covers an extent of this generation's row space: a projection served from
     // the generation before is served only where this one extends it, which a merge does not.
-    open.served
-        .data
+    let side = open.served.only_side();
+    side.data
         .row_space
-        .restrict_to_view(entities, open.geometry.projection.covers_through())
+        .restrict_to_view(entities, side.geometry.projection.covers_through())
         .ok_or_else(|| {
             EngineError::Malformed(format!(
                 "view '{}' no longer holds the extent its projection was taken through",
@@ -172,7 +172,7 @@ fn cross(cx: &Cx<'_>, rows: &Bitmap) -> Result<Bitmap> {
 
 /// The entities of `rows`, on the engine's pool.
 pub(super) fn crossing(engine: &Engine, open: &OpenView<'_>, rows: &Bitmap) -> Result<Bitmap> {
-    let row_space = &open.served.data.row_space;
+    let row_space = &open.served.only_side().data.row_space;
     engine
         .pool
         .install(|| row_space.entities_of_rows(rows))
@@ -194,13 +194,16 @@ pub(super) fn compose(
 ) -> Result<Sets> {
     check_cancelled(&req.cancel)?;
     let served = &open.served;
-    let candidate =
-        engine.filter_candidate(served.session, served.shard, Some(&served.fragment))?;
+    let candidate = engine.filter_candidate(
+        served.session,
+        served.only_side().shard,
+        Some(served.only_side().fragment()),
+    )?;
     let resolved = ResolvedLeaves::default();
     let whole = || Set::whole(open);
     let (set, reference) = engine.route_filters_under(
         served,
-        &open.mask,
+        open.mask.only_leaf(),
         &candidate,
         &resolved,
         &req.cancel,
@@ -240,7 +243,7 @@ fn routed(engine: &Engine, open: &OpenView<'_>, routed: RoutedFilter) -> Result<
         RoutedFilter::Row(tree) => {
             let served = &open.served;
             let region = tree.region_verdict();
-            let total = served.data.row_space.total_rows();
+            let total = served.only_side().data.row_space.total_rows();
             let whole_view = 0..u32::try_from(total).unwrap_or(u32::MAX);
             let matched = engine.evaluate_row_route(
                 &tree,
@@ -249,7 +252,7 @@ fn routed(engine: &Engine, open: &OpenView<'_>, routed: RoutedFilter) -> Result<
                 total,
                 false,
             )?;
-            let rows = open.mask.visible_rows(matched.rows());
+            let rows = open.mask.only_leaf().visible_rows(matched.rows());
             let size = rows.cardinality();
             Set::of(Held::Rows(rows), size, region)
         }
@@ -268,7 +271,8 @@ pub(crate) fn entities_passing(
 ) -> Result<(Bitmap, Option<RegionVerdict>)> {
     check_cancelled(cancel)?;
     let resolved = ResolvedLeaves::default();
-    engine.route_filters_under(&open.served, &open.mask, candidate, &resolved, cancel, |route| {
+    let mask = open.mask.only_leaf();
+    engine.route_filters_under(&open.served, mask, candidate, &resolved, cancel, |route| {
         let set = routed(engine, open, route(expr, false)?)?;
         check_cancelled(cancel)?;
         let entities = match set.held {
@@ -315,12 +319,12 @@ impl<'a> Cx<'a> {
 
     /// Every segment of the view, with its first row.
     pub(super) fn segments(&self) -> &[(&'a mosaica_store::read::SegmentData, u32)] {
-        &self.open.served.segments
+        &self.open.served.only_side().segments
     }
 
     /// How many rows the view holds.
     pub(super) fn view_rows(&self) -> u64 {
-        self.open.served.data.row_space.total_rows()
+        self.open.served.only_side().data.row_space.total_rows()
     }
 
     pub(super) fn check_cancelled(&self) -> Result<()> {

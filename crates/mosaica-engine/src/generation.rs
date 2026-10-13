@@ -575,12 +575,14 @@ impl Generation {
         )
     }
 
-    /// One number that moves when the shard's overlay or any layer space's does: what a stamp
+    /// One number that moves when any shard's overlay or any layer space's does: what a stamp
     /// over every deny compares.
     pub(crate) fn deny_state_version(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = rustc_hash::FxHasher::default();
-        self.only_shard().overlay_version.hash(&mut hasher);
+        for shard in self.shards() {
+            shard.overlay_version.hash(&mut hasher);
+        }
         for (space, parts) in self.layer_spaces.iter() {
             (space.raw(), parts.overlay_version).hash(&mut hasher);
         }

@@ -3,15 +3,13 @@
 use super::*;
 
 /// What a request resolves before it counts anything: the view it is served from, this session's
-/// geometry over it, the composed mask and the columns the response renders.
+/// geometry over it in every shard, the composed mask and the columns the response renders.
 pub(crate) struct OpenView<'a> {
     pub(crate) served: ServedView<'a>,
     /// The composed mask, before any filter narrows it.
-    pub(crate) mask: EffectiveMask,
-    /// Kept beside the mask for the background ladder fill, which takes the whole entry.
-    pub(crate) geometry: Arc<SessionGeometry>,
-    /// The generation `geometry` was taken for: one behind `generation` while a refresh has not
-    /// yet replaced the session's projection.
+    pub(crate) mask: ShardedMask,
+    /// The generation every side's geometry was taken for: one behind `generation` while a
+    /// refresh has not yet replaced the grant's projections.
     pub(super) stamp: GenerationStamp,
     pub(crate) coordinates: ViewCoordinates,
     /// The bundle-wide render columns and then this view's scoped ones, in that order.
@@ -26,6 +24,36 @@ pub(super) struct Theta {
     pub(super) threshold: Threshold,
 }
 
+/// A session's geometry in every shard holding a view, from one generation.
+pub(crate) struct Geometries<'g> {
+    /// Each shard holding the view, its data for the view and the geometry, ascending by shard.
+    pub(crate) sides: Vec<(&'g crate::Shard, &'g ViewData, Arc<SessionGeometry>)>,
+    /// The generation every side's geometry was taken for.
+    pub(crate) segments_version: u64,
+}
+
+/// Refuses a view no shard holds, and one held in more than one partition: θ's anchor and every
+/// rank must be session-global. The second is unreachable while the build emits one partition;
+/// kept so a bundle spanning more is not served half-masked with no error.
+pub(crate) fn check_view(generation: &Generation, view: &str) -> Result<()> {
+    let carriers = generation
+        .bundle
+        .partitions
+        .values()
+        .filter(|partition| {
+            partition
+                .shards
+                .iter()
+                .any(|shard| shard.views.contains_key(view))
+        })
+        .count();
+    match carriers {
+        0 => Err(EngineError::UnknownView(view.to_string())),
+        1 => Ok(()),
+        _ => Err(EngineError::MultiPartitionView(view.to_string())),
+    }
+}
+
 impl Engine {
     /// Resolve the view this request is served from, and everything fixed by that resolution.
     pub(crate) fn open_view<'a>(
@@ -36,44 +64,18 @@ impl Engine {
         cancel: &Option<CancelToken>,
         probe: &mut Probe,
     ) -> Result<OpenView<'a>> {
-        // Refused rather than resolved to one partition: theta's anchor and every rank must be
-        // session-global. Unreachable while the build emits one partition; kept so a bundle
-        // spanning more is not served half-masked with no error.
-        let carriers = generation
-            .bundle
-            .partitions
-            .values()
-            .filter(|partition| partition.only_shard().views.contains_key(view))
-            .count();
-        if carriers > 1 {
-            return Err(EngineError::MultiPartitionView(view.to_string()));
-        }
-        let shard = generation.only_shard();
-        let view_data = shard
-            .data
-            .views
-            .get(view)
-            .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
-
-        // Every segment of the view, each with where its rows begin in the view's row space.
-        let segments = segments_with_row_bases(view, view_data)?;
+        check_view(generation, view)?;
         probe.lap(|t| &mut t.view_lookup_ns);
 
         // Every flush rotates this cache key for every live session; rebuilding it here would
         // cost on the order of a second, far above a request's budget. A background refresh
-        // builds it instead; `session_geometry`'s three-rung ladder finds what that produced.
+        // builds it instead; `session_geometries`'s three-rung ladder finds what that produced.
         //
         // Resolved once, before the parallel tile sweep begins, and only borrowed after by every
         // `tile_sweep` call. Nothing reachable from a rayon worker may touch this cache: a worker
         // blocking on a build only the calling thread can drive would deadlock the pool.
-        let (geometry, key) =
-            self.session_geometry(session, generation, shard, view, cancel, probe)?;
-        let coordinates = self.view_coordinates(session, generation, &geometry, view);
-        // Names the fragment this request composes against, which under stale-serve is the
-        // entry's and not the newest one.
-        let mask_identity =
-            self.mask_identity(session, generation, shard, &geometry, key.segments_version);
-        let base = Arc::clone(&geometry.projection);
+        let geometries = self.session_geometries(session, generation, view, cancel, probe)?;
+        let projection_segments_version = geometries.segments_version;
         probe.lap(|t| &mut t.row_projection_ns);
 
         // Render columns only: the full declared-scalar list includes filter-only and
@@ -98,34 +100,68 @@ impl Engine {
         // observed here never interrupts it — only the work this request would go on to do.
         check_cancelled(cancel)?;
 
-        let denied = shard.denied_in(view)?;
+        let mut sides = Vec::with_capacity(geometries.sides.len());
+        for (shard, data, geometry) in geometries.sides {
+            // Named from the geometry that actually resolved, never the live generation: a
+            // session may be served stale projections, and a key naming the wrong fragment would
+            // file one visible set's counts under another's.
+            let versions = SideVersions {
+                shard: shard.id(),
+                overlay_version: shard.overlay_version,
+                fragment_identity: geometry.fragment.identity,
+                fragment_watermark: geometry.fragment.watermark,
+            };
+            sides.push(ServedSide {
+                shard,
+                data,
+                // Every segment of the view in the shard, each with where its rows begin in the
+                // shard's row space for the view.
+                segments: segments_with_row_bases(view, data)?,
+                denied: shard.denied_in(view)?,
+                geometry,
+                versions,
+            });
+        }
+        let versions: Vec<SideVersions> = sides.iter().map(|side| side.versions).collect();
+        let coordinates = self.view_coordinates(session, generation, &versions, view);
+        let mask_identity = MaskIdentity::of(
+            session.token_id(),
+            session.terms_digest(),
+            generation.segments_version,
+            projection_segments_version,
+            &versions,
+        );
+
+        let mask = ShardedMask::new(sides.iter().map(|side| {
+            let leaf = side.shard.compose(
+                session.satisfied(),
+                Arc::clone(&side.geometry.projection),
+                view,
+                &side.data.row_space,
+                side.denied,
+            );
+            (side.shard.id(), leaf)
+        }));
+        probe.lap(|t| &mut t.compose_ns);
 
         // Everything this request's view fixes, named once. The composed mask is not part of it:
         // the filter phase below holds the pre-filter mask and the narrowed one at the same time.
         let served = ServedView {
             session,
             generation,
-            shard,
             name: view,
-            data: view_data,
-            segments,
-            denied,
+            sides,
             mask_identity,
-            fragment: Arc::clone(&geometry.fragment),
             cancel: cancel.clone(),
             turn: Default::default(),
         };
 
-        let mask = shard.compose(session.satisfied(), base, view, &view_data.row_space, denied);
-        probe.lap(|t| &mut t.compose_ns);
-
         Ok(OpenView {
             served,
             mask,
-            geometry,
             stamp: GenerationStamp {
-                prefix: key.prefix,
-                segments_version: key.segments_version,
+                prefix: generation.prefix.clone(),
+                segments_version: projection_segments_version,
             },
             coordinates,
             render_scalars,
@@ -142,7 +178,6 @@ impl Engine {
         &self,
         served: &ServedView<'_>,
         generation: &Arc<Generation>,
-        geometry: &Arc<SessionGeometry>,
         mask: &EffectiveMask,
         req: &ViewportRequest<'_>,
         probe: &mut Probe,
@@ -161,7 +196,7 @@ impl Engine {
                 self.occupied_tiles(
                     &served.mask_identity,
                     served.name,
-                    &served.segments,
+                    &served.only_side().segments,
                     mask,
                     req.zoom,
                 ),
@@ -177,101 +212,171 @@ impl Engine {
                 served.name,
                 served.session,
                 generation,
-                geometry,
+                &served.only_side().geometry,
             );
         }
         Theta { v_total, threshold }
     }
 
-    /// This session's grant's fragment and row projection in `shard`, resolved through three
-    /// rungs: a live entry, if the background refresh or another session with the grant produced
-    /// one; failing that, the one-generation-stale entry, sound only after a flush, and only for a
-    /// session already served this view at no later generation; failing that, this request
-    /// produces the live entry itself, or is shed with `ProjectionBuilding` if it has been served
-    /// the view and a refresh for this generation is already building the entry.
+    /// This session's grant's fragment and row projection in every shard holding `view`, all from
+    /// one generation, resolved through three rungs: the live entries, if the background refresh
+    /// or another session with the grant produced every one; failing that, the one-generation-stale
+    /// entries, sound only after a flush, only where every shard has one, and only for a session
+    /// already served this view at no later generation; failing that, this request produces the
+    /// live entries missing, or is shed with `ProjectionBuilding` if it has been served the view
+    /// and a refresh for this generation is already building them. A response never combines a
+    /// stale shard with a live one.
     ///
     /// A session's first read in a view is therefore answered at the live generation: it extends
-    /// or rebases the grant's stale entry where a flush or a merge allows, and builds otherwise,
+    /// or rebases the grant's stale entries where a flush or a merge allows, and builds otherwise,
     /// waiting on a build of the same entry already running.
-    ///
-    /// Returns the key the geometry is stored under, which names the previous generation when the
-    /// second rung served it.
-    pub(crate) fn session_geometry(
+    pub(crate) fn session_geometries<'g>(
         &self,
         session: &Session,
-        generation: &Generation,
-        shard: &crate::Shard,
+        generation: &'g Generation,
         view: &str,
         cancel: &Option<CancelToken>,
         probe: &mut Probe,
-    ) -> Result<(Arc<SessionGeometry>, RowProjectionKey)> {
-        let view_data = shard
-            .data
-            .views
-            .get(view)
-            .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
-        let key = RowProjectionKey {
-            grant: session.terms_digest(),
-            view: view.to_string(),
-            shard: shard.id(),
-            identity: shard.identity,
-            segments_version: generation.segments_version,
-            prefix: generation.prefix.clone(),
+    ) -> Result<Geometries<'g>> {
+        let shards: Vec<(&crate::Shard, &ViewData)> = generation
+            .shards()
+            .filter_map(|shard| Some((shard, shard.data.views.get(view)?)))
+            .collect();
+        if shards.is_empty() {
+            return Err(EngineError::UnknownView(view.to_string()));
+        }
+        let keys: Vec<RowProjectionKey> = shards
+            .iter()
+            .map(|(shard, _)| RowProjectionKey {
+                grant: session.terms_digest(),
+                view: view.to_string(),
+                shard: shard.id(),
+                identity: shard.identity,
+                segments_version: generation.segments_version,
+                prefix: generation.prefix.clone(),
+            })
+            .collect();
+        let served = |geometries: Vec<Arc<SessionGeometry>>, segments_version: u64| {
+            for (shard, _) in &shards {
+                session.record_served(view, shard.id(), segments_version);
+            }
+            Geometries {
+                sides: shards
+                    .iter()
+                    .zip(geometries)
+                    .map(|(&(shard, data), geometry)| (shard, data, geometry))
+                    .collect(),
+                segments_version,
+            }
         };
-        let record_served = |key: &RowProjectionKey| {
-            session.record_served(view, shard.id(), key.segments_version);
+        let ready = |key: &RowProjectionKey| match self.row_projection_cache.peek(key) {
+            Peek::Ready(geometry) => Some(geometry),
+            _ => None,
         };
-        if let Peek::Ready(geometry) = self.row_projection_cache.peek(&key) {
-            record_served(&key);
-            return Ok((geometry, key));
+        let live: Vec<Option<Arc<SessionGeometry>>> = keys.iter().map(ready).collect();
+        if live.iter().all(Option::is_some) {
+            return Ok(served(
+                live.into_iter().flatten().collect(),
+                generation.segments_version,
+            ));
         }
 
         // Rung 2: the generation one below is the only one retention keeps.
-        let space = &view_data.row_space;
-        let served_at = session.served_at(view, shard.id());
         // A `Ready` predecessor rung 2 does not serve: rung 3 sheds on it, or carries it forward.
-        let mut predecessor = None;
-        if let Some(previous) = key.segments_version.checked_sub(1) {
-            let stale_key = RowProjectionKey {
-                segments_version: previous,
-                ..key.clone()
-            };
-            if let Peek::Ready(geometry) = self.row_projection_cache.peek(&stale_key) {
-                if served_at.is_some_and(|at| at <= previous)
-                    && geometry.projection.extends_to(space)
+        let mut predecessors: Vec<Option<RowProjectionKey>> = vec![None; shards.len()];
+        if let Some(previous) = generation.segments_version.checked_sub(1) {
+            let mut stale = Vec::with_capacity(shards.len());
+            for (index, ((shard, view_data), key)) in shards.iter().zip(&keys).enumerate() {
+                let stale_key = RowProjectionKey {
+                    segments_version: previous,
+                    ..key.clone()
+                };
+                let Some(geometry) = ready(&stale_key) else {
+                    continue;
+                };
+                if session
+                    .served_at(view, shard.id())
+                    .is_some_and(|at| at <= previous)
+                    && geometry.projection.extends_to(&view_data.row_space)
                 {
-                    self.counters.stale_serves.fetch_add(1, Ordering::Relaxed);
-                    record_served(&stale_key);
-                    return Ok((geometry, stale_key));
+                    stale.push(geometry);
                 }
-                predecessor = Some(stale_key);
+                predecessors[index] = Some(stale_key);
+            }
+            if stale.len() == shards.len() {
+                self.counters.stale_serves.fetch_add(1, Ordering::Relaxed);
+                return Ok(served(stale, previous));
             }
         }
 
         // Rung 3: shed only a session already served this view, only if a refresh is building
         // this request's own `segments_version`, and only if rung 2 found an entry to derive
         // from. Errs towards a duplicate build over an unanswerable shed.
-        if served_at.is_some()
-            && predecessor.is_some()
-            && self.refresh_in_flight.load(Ordering::SeqCst) == key.segments_version
-        {
+        let sheds =
+            shards
+                .iter()
+                .zip(&live)
+                .zip(&predecessors)
+                .any(|(((shard, _), live), predecessor)| {
+                    live.is_none()
+                        && predecessor.is_some()
+                        && session.served_at(view, shard.id()).is_some()
+                });
+        if sheds && self.refresh_in_flight.load(Ordering::SeqCst) == generation.segments_version {
             return Err(EngineError::ProjectionBuilding);
         }
 
-        // A concurrent request racing the same key waits for that build and is served its result,
-        // bounded by `serve.single_flight_wait_ms` and this request's cancellation token, so a
-        // disconnected client releases its `ComputeGate` permit rather than holding it. Blocking
-        // is safe only because this resolves on the calling thread, never a rayon worker —
-        // `crate::refresh` is the caller for which that is not true, and it does not wait.
+        let mut geometries = Vec::with_capacity(shards.len());
+        for (((shard, view_data), key), (live, predecessor)) in shards
+            .iter()
+            .zip(keys)
+            .zip(live.into_iter().zip(predecessors))
+        {
+            let geometry = match live {
+                Some(geometry) => geometry,
+                None => self.derive_geometry(
+                    session,
+                    shard,
+                    view_data,
+                    key,
+                    predecessor.as_ref(),
+                    cancel,
+                    probe,
+                )?,
+            };
+            geometries.push(geometry);
+        }
+        Ok(served(geometries, generation.segments_version))
+    }
+
+    /// Rung 3 in one shard: the live entry under `key`, carried forward from `predecessor` where a
+    /// flush or a merge allows and built otherwise.
+    ///
+    /// A concurrent request racing the same key waits for that build and is served its result,
+    /// bounded by `serve.single_flight_wait_ms` and this request's cancellation token, so a
+    /// disconnected client releases its `ComputeGate` permit rather than holding it. Blocking is
+    /// safe only because this resolves on the calling thread, never a rayon worker —
+    /// `crate::refresh` is the caller for which that is not true, and it does not wait.
+    #[allow(clippy::too_many_arguments)]
+    fn derive_geometry(
+        &self,
+        session: &Session,
+        shard: &crate::Shard,
+        view_data: &ViewData,
+        key: RowProjectionKey,
+        predecessor: Option<&RowProjectionKey>,
+        cancel: &Option<CancelToken>,
+        probe: &mut Probe,
+    ) -> Result<Arc<SessionGeometry>> {
+        let space = &view_data.row_space;
         let fragment = self.fragment_for(session, shard, None)?;
         probe.lap(|t| &mut t.fragment_forward_ns);
         // Constructed here, not at the top, so the allocation lands only on the path that can
         // park: every warm request returns at rung 1.
         let never_cancelled = CancelToken::new();
         let cancel = cancel.as_ref().unwrap_or(&never_cancelled);
-        let geometry = self
-            .row_projection_cache
-            .get_or_derive_waiting(key.clone(), predecessor.as_ref(), cancel, |source| {
+        self.row_projection_cache
+            .get_or_derive_waiting(key, predecessor, cancel, |source| {
                 // Carries the predecessor forward where a flush or a merge allows, and builds
                 // otherwise.
                 let carried = source.and_then(|source| {
@@ -311,32 +416,7 @@ impl Engine {
                 // would tell an operator the server is shedding when a browser closed a tab.
                 CacheWaitEnded::Budget => EngineError::ProjectionBuilding,
                 CacheWaitEnded::Cancelled => EngineError::Cancelled,
-            })?;
-        record_served(&key);
-        Ok((geometry, key))
-    }
-
-    /// What this request's composed mask is, for the keys of the caches held over it. Taken from
-    /// the geometry that actually resolved, never the live generation: a session may be served a
-    /// stale projection, and a key naming the wrong fragment would file one visible set's counts
-    /// under another's.
-    pub(crate) fn mask_identity(
-        &self,
-        session: &Session,
-        generation: &crate::Generation,
-        shard: &crate::Shard,
-        geometry: &crate::cache::SessionGeometry,
-        projection_segments_version: u64,
-    ) -> crate::figures::MaskIdentity {
-        crate::figures::MaskIdentity {
-            token_id: session.token_id(),
-            terms: session.terms_digest(),
-            segments_version: generation.segments_version,
-            projection_segments_version,
-            overlay_version: shard.overlay_version,
-            fragment_identity: geometry.fragment.identity,
-            fragment_watermark: geometry.fragment.watermark,
-        }
+            })
     }
 
     /// Take this session's ladder the rest of the way to [`crate::stage::BACKGROUND_DEPTH`] on the
@@ -350,15 +430,8 @@ impl Engine {
         generation: &Arc<crate::Generation>,
         geometry: &Arc<crate::cache::SessionGeometry>,
     ) {
-        let deepest = crate::occupancy::OccupancyKey {
-            token_id: identity.token_id,
-            view: view.to_string(),
-            depth: crate::stage::BACKGROUND_DEPTH,
-            segments_version: identity.segments_version,
-            overlay_version: identity.overlay_version,
-            fragment_identity: identity.fragment_identity,
-            fragment_watermark: identity.fragment_watermark,
-        };
+        let depth = crate::stage::BACKGROUND_DEPTH;
+        let deepest = crate::occupancy::OccupancyKey::of(identity, view, depth);
         if matches!(
             self.occupancy.peek(&deepest),
             mosaica_cache::Peek::Ready(_)
@@ -366,7 +439,7 @@ impl Engine {
             return;
         }
         self.stage.spawn(session.token_id(), || crate::stage::LadderTask {
-            token_id: session.token_id(),
+            identity: *identity,
             view: view.to_string(),
             satisfied: session.satisfied().clone(),
             generation: Arc::clone(generation),
@@ -388,15 +461,7 @@ impl Engine {
         mask: &crate::compose::EffectiveMask,
         depth: u8,
     ) -> u64 {
-        let key = crate::occupancy::OccupancyKey {
-            token_id: identity.token_id,
-            view: view.to_string(),
-            depth,
-            segments_version: identity.segments_version,
-            overlay_version: identity.overlay_version,
-            fragment_identity: identity.fragment_identity,
-            fragment_watermark: identity.fragment_watermark,
-        };
+        let key = crate::occupancy::OccupancyKey::of(identity, view, depth);
         if let mosaica_cache::Peek::Ready(hit) = self.occupancy.peek(&key) {
             return hit.0;
         }
@@ -428,27 +493,20 @@ impl Engine {
     #[doc(hidden)]
     pub fn occupied_tiles_for_test(&self, session: &Session, view: &str, depth: u8) -> Result<u64> {
         let generation = self.generation.load_full();
-        let shard = generation.only_shard();
-        let view_data = shard
-            .data
-            .views
-            .get(view)
-            .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
         let mut probe = Probe::new();
-        let (geometry, key) =
-            self.session_geometry(session, &generation, shard, view, &None, &mut probe)?;
-        let denied = shard.denied_in(view)?;
-        let projection = Arc::clone(&geometry.projection);
-        let mask =
-            shard.compose(session.satisfied(), projection, view, &view_data.row_space, denied);
-        let segments = segments_with_row_bases(view, view_data)?;
-        let mask_identity =
-            self.mask_identity(session, &generation, shard, &geometry, key.segments_version);
-        Ok(self.occupied_tiles(&mask_identity, view, &segments, &mask, depth))
+        let open = self.open_view(session, &generation, view, &None, &mut probe)?;
+        let served = &open.served;
+        Ok(self.occupied_tiles(
+            &served.mask_identity,
+            view,
+            &served.only_side().segments,
+            open.mask.only_leaf(),
+            depth,
+        ))
     }
 
     /// The generation a request would be answered from, and this session's composed mask over one
-    /// of its views, composed by the same three calls [`Engine::viewport_stream`] makes. The
+    /// of its views of one shard, composed as [`Engine::viewport_stream`] composes it. The
     /// generation comes back beside the mask because the segments the mask addresses are its
     /// bundle's.
     // Public for `mosaica-bench`'s `identity_bands_probe`; not part of the engine's API.
@@ -460,19 +518,10 @@ impl Engine {
     ) -> Result<(Arc<Generation>, EffectiveMask)> {
         let generation = self.generation.load_full();
         let mut probe = Probe::new();
-        let mask = {
-            let shard = generation.only_shard();
-            let view_data = shard
-                .data
-                .views
-                .get(view)
-                .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
-            let (geometry, _) =
-                self.session_geometry(session, &generation, shard, view, &None, &mut probe)?;
-            let projection = Arc::clone(&geometry.projection);
-            let denied = shard.denied_in(view)?;
-            shard.compose(session.satisfied(), projection, view, &view_data.row_space, denied)
-        };
+        let mask = self
+            .open_view(session, &generation, view, &None, &mut probe)?
+            .mask
+            .into_only_leaf();
         Ok((generation, mask))
     }
 }

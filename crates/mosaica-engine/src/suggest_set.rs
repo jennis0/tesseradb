@@ -8,7 +8,7 @@
 //!
 //! # What the key is, and why every term of it is there
 //!
-//! `(token_id, resolved column, segments_version, overlay_version)` — the design's own four, and
+//! `(token_id, resolved column, segments_version, overlay_versions)` — the design's own four, and
 //! the first two are the ordinary ones: the set is a function of the principal's mask, and of the
 //! column whose values it is over (a group-scoped family is one column per view, so the *resolved*
 //! spelling is the address, exactly as it is on the two listing verbs).
@@ -17,9 +17,9 @@
 //! overlay version is never served** — it is not stale-but-usable, it is fail-open: a suppression
 //! accepted since the sweep removes the last visible member of a value, and a set taken before it
 //! would keep offering that value's *name*, which is exactly the C11 disclosure `derived` exists to
-//! withhold. `overlay_version` moves at a deny's publication and `segments_version` at every flush,
-//! so a key carrying both cannot name an entry taken before either. The cost is the one §6.3 names:
-//! an entry goes cold on every flush and every deny.
+//! withhold. A shard's overlay version moves at a deny's publication and `segments_version` at
+//! every flush, so a key carrying both cannot name an entry taken before either. The cost is the
+//! one §6.3 names: an entry goes cold on every flush and every deny.
 //!
 //! **A miss is never an error.** The probe route of §6.2 answers every request the set does not,
 //! and the two produce the same page under the same gate — so nothing here can withhold a value or
@@ -58,8 +58,9 @@ pub(crate) struct SuggestSetKey {
     pub column: String,
     /// The geometry this generation published; moved by every flush.
     pub segments_version: u64,
-    /// The overlay's own counter, bumped by every deny publication. See the module doc.
-    pub overlay_version: u64,
+    /// Every shard's overlay counter, ascending by shard, each bumped by every deny publication in
+    /// its shard. See the module doc.
+    pub overlay_versions: Vec<u64>,
 }
 
 /// One session's visible values, as dense positions in its vocabulary's index.
@@ -451,7 +452,7 @@ mod tests {
             token_id,
             column: "department".to_string(),
             segments_version,
-            overlay_version,
+            overlay_versions: vec![overlay_version],
         }
     }
 

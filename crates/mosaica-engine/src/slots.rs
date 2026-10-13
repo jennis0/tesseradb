@@ -246,7 +246,8 @@ pub(crate) struct WithheldKey {
     deny_epoch: u64,
     edit_epoch: u64,
     fold_epoch: u64,
-    fragment_identity: [u8; 32],
+    /// Each shard's fragment identity, ascending by shard.
+    fragment_identities: Vec<[u8; 32]>,
     /// The additions, on a layer declaring a fractional criterion or content with a generating
     /// set: an ingested member the viewer cannot see can withhold a cluster there.
     added: Option<AddedKey>,
@@ -262,8 +263,8 @@ pub(crate) struct AddedKey {
     levels: Vec<u64>,
     segments_version: u64,
     projection_segments_version: u64,
-    overlay_version: u64,
-    fragment_watermark: u64,
+    /// Each shard's overlay version and fragment watermark, ascending by shard.
+    shards: Vec<(mosaica_types::ShardId, u64, u64)>,
 }
 
 impl AddedKey {
@@ -273,8 +274,12 @@ impl AddedKey {
             && self.levels.iter().zip(&other.levels).all(|(a, b)| a >= b)
             && self.segments_version >= other.segments_version
             && self.projection_segments_version >= other.projection_segments_version
-            && self.overlay_version >= other.overlay_version
-            && self.fragment_watermark >= other.fragment_watermark
+            && self.shards.len() == other.shards.len()
+            && self
+                .shards
+                .iter()
+                .zip(&other.shards)
+                .all(|(a, b)| a.0 == b.0 && a.1 >= b.1 && a.2 >= b.2)
     }
 }
 
@@ -515,8 +520,18 @@ impl Engine {
             levels: own.iter().map(|&(record, _)| record).collect(),
             segments_version: id.segments_version,
             projection_segments_version: id.projection_segments_version,
-            overlay_version: id.overlay_version,
-            fragment_watermark: id.fragment_watermark,
+            shards: served
+                .sides
+                .iter()
+                .map(|side| {
+                    let versions = side.versions;
+                    (
+                        versions.shard,
+                        versions.overlay_version,
+                        versions.fragment_watermark,
+                    )
+                })
+                .collect(),
         };
         let declaration = &layer.declaration;
         let fractional = matches!(
@@ -542,7 +557,11 @@ impl Engine {
                 deny_epoch: generation.deny_epoch,
                 edit_epoch: generation.edit_epoch,
                 fold_epoch: generation.fold_epoch,
-                fragment_identity: id.fragment_identity,
+                fragment_identities: served
+                    .sides
+                    .iter()
+                    .map(|side| side.versions.fragment_identity)
+                    .collect(),
                 added: (fractional || contained).then(|| added.clone()),
             },
             added,
@@ -660,9 +679,18 @@ impl Engine {
             return Ok(T::default());
         };
         let reachable = self.reachable_layers(session);
-        let context = crate::viewport::DependencyContext::new(&open.served, &open.mask, &reachable);
+        let context = crate::viewport::DependencyContext::new(
+            &open.served,
+            open.mask.only_leaf(),
+            &reachable,
+        );
         let dependency_served = self.dependency_gate(&context);
-        let out = f(&open.served, &open.mask, &registered, &dependency_served)?;
+        let out = f(
+            &open.served,
+            open.mask.only_leaf(),
+            &registered,
+            &dependency_served,
+        )?;
         context.finish()?;
         Ok(out)
     }
@@ -845,7 +873,7 @@ impl Engine {
                 let cut = sample_cut(visible.cardinality(), size);
                 let sample = sample(served, visible, cut, &stop)?;
                 stats.sampled_items = sample.len() as u64;
-                let copy = served.segments.first().and_then(|&(first, _)| {
+                let copy = served.only_side().segments.first().and_then(|&(first, _)| {
                     read.rows.column()?;
                     self.artifact_projections.band_labels(
                         &generation.prefix,
@@ -1081,7 +1109,7 @@ fn sample(
 ) -> Result<Vec<Sampled>> {
     let band = mosaica_store::bands::band_below(cut);
     let mut out: Vec<Sampled> = Vec::new();
-    for (s, &(segment, row_base)) in served.segments.iter().enumerate() {
+    for (s, &(segment, row_base)) in served.only_side().segments.iter().enumerate() {
         if stop() {
             return Err(EngineError::Cancelled);
         }
