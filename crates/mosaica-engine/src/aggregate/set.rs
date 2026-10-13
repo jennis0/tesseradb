@@ -194,7 +194,8 @@ pub(super) fn compose(
 ) -> Result<Sets> {
     check_cancelled(&req.cancel)?;
     let served = &open.served;
-    let candidate = engine.filter_candidate(served.session, served.shard)?;
+    let candidate =
+        engine.filter_candidate(served.session, served.shard, Some(&served.fragment))?;
     let resolved = ResolvedLeaves::default();
     let whole = || Set::whole(open);
     let (set, reference) = engine.route_filters_under(

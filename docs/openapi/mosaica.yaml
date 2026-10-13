@@ -144,8 +144,7 @@ paths:
         membership changed, a principal disabled or deleted, a password set or cleared, a key
         revoked, or the target's provider or a group it maps to changed.
 
-        Subject to compute admission: a first authorise for a set of terms builds and writes a
-        mask fragment.
+        Subject to compute admission.
       security:
         - authoriseAsKey: []
       requestBody:
@@ -7545,7 +7544,7 @@ components:
           type: object
           additionalProperties: false
           required: [entries, bytes, bound_bytes, hits, misses, building_refusals, evictions, young_evictions, thrashing, oversized_admissions, rebuilds]
-          description: The mask fragments `POST /session/authorise` builds, one per credential.
+          description: The mask fragments, one per grant and shard, built on a session's first read of the shard and again at each publication that moves it.
           properties:
             entries: { type: integer, minimum: 0 }
             bytes: { type: integer, minimum: 0 }

@@ -342,9 +342,9 @@ fn mask_over(visible_rows: &[u32], row_count: u32) -> (TempDir, EffectiveMask) {
     write_postings(&postings_path, &[visible_rows.to_vec()], 32).unwrap();
     let postings = PostingsReader::open(&postings_path, false).unwrap();
 
-    let cache = FragmentCache::new(&temp.path().join("cache"), [1u8; 32], [2u8; 32]);
+    let cache = FragmentCache::new(&temp.path().join("cache"), [2u8; 32]);
     let fragment = cache
-        .get_or_build(&[TermId::new(0)], &postings, &[], bound)
+        .get_or_build([1u8; 32], &[TermId::new(0)], &postings, &[], bound)
         .unwrap();
 
     let perm_path = temp.path().join("permutation.bin");

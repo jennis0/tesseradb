@@ -147,9 +147,9 @@ pub(crate) struct SessionGeometry {
 
 impl CacheWeight for SessionGeometry {
     /// **The projection's bytes alone, and the omission is deliberate.** The fragment is an
-    /// `Arc` shared with the session that authorised it and with `FragmentCache`'s own bound, so
-    /// charging it here would bound the same bytes twice and shrink this cache to nothing at the
-    /// operating point it is sized for. What this cache owns is the projection.
+    /// `Arc` shared with `FragmentCache` and charged against its own bound, so charging it here
+    /// would bound the same bytes twice and shrink this cache to nothing at the operating point
+    /// it is sized for. What this cache owns is the projection.
     fn cache_weight_bytes(&self) -> u64 {
         self.projection.cache_weight_bytes()
     }
@@ -327,9 +327,11 @@ impl RowProjectionCache {
     /// the drill-down off the per-publication fragment rebuild at the same time (a *measured*
     /// ~200 ms per credential — `probes/2026-08-04-refresh-ladder/`).
     ///
-    /// **The fragment is not view-scoped**, so any of this token's entries answers: the fragment
-    /// cache keys on the satisfied terms and the watermark, and neither is a view. The freshest is
-    /// taken because a later watermark is a strictly better answer to an entity-space question.
+    /// **The fragment is not view-scoped**, so any of this token's entries in `shard` answers:
+    /// the fragment cache keys on the shard's identity, the satisfied terms and the watermark, and
+    /// none is a view. Another shard's fragment is in another entity space and never answers. The
+    /// freshest is taken because a later watermark is a strictly better answer to an entity-space
+    /// question.
     ///
     /// **Per token, never per entity** — the scan cost cannot depend on which identifier was
     /// asked for, which is Critical C-5's constant-time property.
@@ -349,14 +351,18 @@ impl RowProjectionCache {
     pub(crate) fn freshest_fragment(
         &self,
         token_id: u64,
+        shard: &crate::Shard,
         prefix: &str,
         floor: u64,
     ) -> Option<Arc<FrozenFragment>> {
         self.inner
             .ready_entries()
             .into_iter()
-            .filter(|(key, _)| {
-                key.token_id == token_id && key.prefix == prefix && key.segments_version >= floor
+            .filter(|(key, geometry)| {
+                key.token_id == token_id
+                    && geometry.fragment.identity == shard.identity
+                    && key.prefix == prefix
+                    && key.segments_version >= floor
             })
             .max_by_key(|(key, _)| key.segments_version)
             .map(|(_, geometry)| Arc::clone(&geometry.fragment))

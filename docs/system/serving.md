@@ -241,15 +241,15 @@ satisfied index keys, or every key for a session that reads every item. They are
 under `serve.masked_count_cache_bytes`, the least recently used leaving first. An eviction costs a
 refill and never changes an answer. A growth or a publication between compactions adds its rows to
 them in place. A flush adds none, since its rows are above the base, so an ingest window never
-refills them. A compaction rotates the bundle identity, which is part of their key, so the first
+refills them. A compaction rotates each shard's identity, which is part of their key, so the first
 read of each level after it walks again.
 
-They are also written to the cache directory, under `figures/` and then the bundle identity, in
+They are also written to the cache directory, under `figures/` and then the shard's identity, in
 files named by a digest of what they describe and checked against a SHA-256 when they are read, so
 a torn or altered file is read as a miss. A restart reads them back, and walks only a level it
 finds no file for. The
 directory is held under `serve.figures_disk_bytes`, the files least recently written or read
-removed first, and the directory of a bundle identity a compaction has replaced is removed.
+removed first, and the directory of a shard identity a compaction has replaced is removed.
 
 D's correction is computed at the request's start from the labels and positions of the view's denied
 base rows, which the server holds per view and level and writes beside the counts. It is cached per

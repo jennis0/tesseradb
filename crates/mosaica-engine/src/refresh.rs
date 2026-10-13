@@ -40,10 +40,11 @@
 //! halves ride on [`crate::cache::SessionGeometry`], and the projection comes from the previous
 //! entry by the same `extend` the request path used to do.
 //!
-//! **The fragment cache comes from the generation being refreshed, never from a handle taken at
-//! startup.** A fold rotates it (`Shard::fragments`), so a pass holding the cache it was
-//! constructed with would rebuild every entry's fragment under the *superseded* bundle identity —
-//! every folded-away entity back in every refreshed mask, published under the new geometry's key.
+//! **The identity a fragment is built under comes from the generation being refreshed, never
+//! from one taken earlier.** A fold moves each shard's identity (`ShardParts::identity`), so a pass
+//! holding the identity it was constructed with would rebuild every entry's fragment under the
+//! *superseded* one — every folded-away entity back in every refreshed mask, published under the
+//! new geometry's key.
 //!
 //! ## The two orderings that are load-bearing
 //!
@@ -60,7 +61,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use mosaica_authz::FragmentCacheError;
+use mosaica_authz::{FragmentCache, FragmentCacheError};
 
 use crate::cache::{RowProjectionCache, RowProjectionKey, SessionGeometry};
 use crate::Generation;
@@ -118,6 +119,7 @@ fn carry_for(key: &RowProjectionKey, generation: &Generation) -> Carry {
 /// pre-0044 behaviour rather than wedging a session at 429 for ever.
 pub(crate) fn refresh_resident(
     cache: &RowProjectionCache,
+    fragments: &FragmentCache,
     pool: &rayon::ThreadPool,
     generation: &Generation,
     projection_routes: &crate::projection::ProjectionRoutes,
@@ -136,7 +138,8 @@ pub(crate) fn refresh_resident(
         // **Built before the cache call, because `make` must be infallible** — the single-flight
         // state machine has no way to carry a failure out of a slot, and stuffing one into the
         // value would cache it (I13a).
-        let fragment = match shard.fragments.get_or_build_grant(
+        let fragment = match fragments.get_or_build_grant(
+            shard.identity,
             &previous.grant,
             &shard.postings,
             &shard.delta_postings,
@@ -240,6 +243,8 @@ fn clear_if_current(in_flight: &std::sync::atomic::AtomicU64, mine: u64) {
 /// exactly as a flush's context is.
 pub(crate) struct RefreshDeps {
     pub(crate) cache: Arc<RowProjectionCache>,
+    /// The engine's fragment cache, which the refresh builds each grant's next fragment in.
+    pub(crate) fragments: Arc<FragmentCache>,
     pub(crate) pool: Arc<rayon::ThreadPool>,
     /// The `segments_version` whose refresh pass is in flight, or [`NO_REFRESH`].
     ///
@@ -293,6 +298,7 @@ impl RefreshDeps {
     /// leave the window this exists to close — see the module doc.
     pub(crate) fn spawn(&self, generation: Arc<Generation>) {
         let cache = Arc::clone(&self.cache);
+        let fragments = Arc::clone(&self.fragments);
         let pool = Arc::clone(&self.pool);
         let in_flight = Arc::clone(&self.in_flight);
         let counters = Arc::clone(&self.counters);
@@ -312,7 +318,13 @@ impl RefreshDeps {
             while switches.refresh_paused.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(2));
             }
-            let produced = refresh_resident(&cache, &pool, &generation, &projection_routes);
+            let produced = refresh_resident(
+                &cache,
+                &fragments,
+                &pool,
+                &generation,
+                &projection_routes,
+            );
             counters.refreshes.fetch_add(produced as u64, Ordering::Relaxed);
             clear_if_current(&in_flight, mine);
         });

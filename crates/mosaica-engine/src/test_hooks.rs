@@ -2,9 +2,11 @@
 
 #[cfg(any(feature = "fault-injection", feature = "bench-timing"))]
 use std::sync::atomic::Ordering;
-#[cfg(feature = "fault-injection")]
+#[cfg(any(feature = "fault-injection", feature = "bench-timing"))]
 use std::sync::Arc;
 
+#[cfg(any(feature = "fault-injection", feature = "bench-timing"))]
+use mosaica_authz::FrozenFragment;
 #[cfg(feature = "fault-injection")]
 use mosaica_authz::{DeltaTier, Dict};
 #[cfg(feature = "fault-injection")]
@@ -14,15 +16,25 @@ use mosaica_types::EntityId;
 use crate::engine::open_rotation;
 use crate::engine::Engine;
 #[cfg(feature = "fault-injection")]
-use crate::error::{EngineError, Result};
+use crate::error::EngineError;
+#[cfg(any(feature = "fault-injection", feature = "bench-timing"))]
+use crate::error::Result;
 #[cfg(feature = "fault-injection")]
 use crate::geometry::GeometryPublication;
-#[cfg(feature = "fault-injection")]
+#[cfg(any(feature = "fault-injection", feature = "bench-timing"))]
 use crate::session::Session;
 #[cfg(feature = "fault-injection")]
 use crate::write::PublishGeometryError;
 
 impl Engine {
+    /// `session`'s mask fragment in the live generation's one shard, as a request would read it.
+    #[cfg(any(feature = "fault-injection", feature = "bench-timing"))]
+    #[doc(hidden)]
+    pub fn session_fragment_for_test(&self, session: &Session) -> Result<Arc<FrozenFragment>> {
+        let generation = self.generation.load();
+        self.fragment_for(session, generation.only_shard(), None)
+    }
+
     /// Turn the background refresh off, so a session stays in the stale-serve window instead of
     /// racing the publication and the pool.
     #[cfg(feature = "fault-injection")]
@@ -364,8 +376,8 @@ impl Engine {
             .store(enabled, Ordering::Relaxed);
     }
 
-    /// Publish a new prefix this process just wrote: open it, rotate the term index, the bundle
-    /// identity and the fragment cache onto it, retire `retired`, and swap.
+    /// Publish a new prefix this process just wrote: open it, rotate the term index and the
+    /// shard's identity onto it, retire `retired`, and swap.
     ///
     /// No production caller: a fold publishes from the executor thread instead, calling
     /// [`open_rotation`] directly and inline, since submitting to the executor from the executor
@@ -395,12 +407,7 @@ impl Engine {
                 "entity ids are capped at u32::MAX by the I9 allocator (contracts §2.6 r6)",
             ));
         }
-        let (bundle, rotation) = open_rotation(
-            &self.bundle_root,
-            prefix,
-            &self.generation.load().only_shard().fragments,
-            retired_bitmap,
-        )?;
+        let (bundle, rotation) = open_rotation(&self.bundle_root, prefix, retired_bitmap)?;
 
         self.write.publish_geometry(
             GeometryPublication::within_prefix(
@@ -465,7 +472,7 @@ impl Engine {
             .views
             .get(view)
             .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
-        let fragment = self.fragment_for(session, shard)?;
+        let fragment = self.fragment_for(session, shard, None)?;
         let mut rows = view_data.row_space.project(&fragment.view());
         rows.run_optimize();
         Ok(rows)

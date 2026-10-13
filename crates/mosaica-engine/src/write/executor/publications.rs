@@ -2200,9 +2200,9 @@ impl Executor {
         // `entity_hi + 1` of this view's flush is neither monotone nor sufficient once a bundle
         // has several views. Not monotone: views flush one per tick, so a view holding older
         // entities can publish after one holding newer ones and offer a lower number, which
-        // `check_manifest_publishable` refuses. Not sufficient: fragment freshness is
-        // `fragment.watermark >= generation.watermark` (`Engine::fragment_for`), so a publication
-        // that did not move it would leave a session's fragment stale with nothing to say so.
+        // `check_manifest_publishable` refuses. Not sufficient: a fragment is keyed by the
+        // watermark (`Engine::fragment_for`), so a publication that did not move it would be
+        // answered from a fragment built before it, with nothing to say so.
         //
         // A values-only publication has no segment and so no entity high-water of its own; it
         // still advances the watermark, since it publishes extents a resident fragment must be

@@ -111,6 +111,7 @@ impl Engine {
             segments,
             denied,
             mask_identity,
+            fragment: Arc::clone(&geometry.fragment),
             cancel: cancel.clone(),
             turn: Default::default(),
         };
@@ -246,7 +247,7 @@ impl Engine {
         // disconnected client releases its `ComputeGate` permit rather than holding it. Blocking
         // is safe only because this resolves on the calling thread, never a rayon worker —
         // `crate::refresh` is the caller for which that is not true, and it does not wait.
-        let fragment = self.fragment_for(session, shard)?;
+        let fragment = self.fragment_for(session, shard, None)?;
         probe.lap(|t| &mut t.fragment_forward_ns);
         // Constructed here, not at the top, so the allocation lands only on the path that can
         // park: every warm request returns at rung 1.

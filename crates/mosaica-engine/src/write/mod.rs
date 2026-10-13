@@ -40,7 +40,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use mosaica_authz::{DeltaTier, Dict, FragmentCache};
+use mosaica_authz::{DeltaTier, Dict};
 use mosaica_lifecycle::alloc::{high_water_from, Allocator};
 use mosaica_lifecycle::buffer::DescriptorResolver;
 use mosaica_lifecycle::command::{ExecError, SubmitError};
@@ -1234,8 +1234,10 @@ pub(crate) struct MaintenanceDeps {
     pub(crate) artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
     /// The figures, for the two things this thread asks of them: bringing the denied rows' labels
     /// forward after a deny is acknowledged, and sweeping the cache directory when a compaction
-    /// rotates the bundle identity.
+    /// rotates the shards' identities.
     pub(crate) figures: Arc<crate::figures::FiguresCache>,
+    /// The fragments, for the identities a compaction supersedes: kept one rotation, then swept.
+    pub(crate) fragments: Arc<mosaica_authz::FragmentCache>,
     /// The region decompositions (`crate::region`), pruned of superseded generations at every
     /// geometry swap exactly as the row-projection cache is: a row-space artefact keyed on a
     /// generation is unusable after it, and only retention is left to do.

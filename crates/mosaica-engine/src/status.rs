@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mosaica_types::TermId;
+use mosaica_types::{ShardId, TermId};
 
 use crate::engine::Engine;
 use crate::Generation;
@@ -241,11 +241,7 @@ impl Engine {
     pub fn set_cache_bounds(&self, row_projection_bytes: u64, fragment_bytes: u64) {
         self.row_projection_cache
             .set_bound_bytes(row_projection_bytes);
-        self.generation
-            .load()
-            .only_shard()
-            .fragments
-            .set_memory_bound(fragment_bytes);
+        self.fragments.set_memory_bound(fragment_bytes);
     }
 
     /// Bound the fragments' counts held in memory (`serve.masked_count_cache_bytes`). This key
@@ -298,11 +294,7 @@ impl Engine {
     /// before it is refused (`serve.single_flight_wait_ms`). Unset, an embedder gets [`crate::DEFAULT_SINGLE_FLIGHT_WAIT_MS`].
     pub fn set_single_flight_wait_ms(&self, wait_budget_ms: u64) {
         self.row_projection_cache.set_wait_budget_ms(wait_budget_ms);
-        self.generation
-            .load()
-            .only_shard()
-            .fragments
-            .set_wait_budget_ms(wait_budget_ms);
+        self.fragments.set_wait_budget_ms(wait_budget_ms);
     }
 
     /// The row count at which a commit window closes (`ingest.commit_window_max_items`, which
@@ -351,8 +343,8 @@ impl Engine {
                 depth,
                 retirable,
             },
-            fragment_cache: shard.fragments.stats(),
-            fragment_cache_rebuilds: shard.fragments.rebuild_count(),
+            fragment_cache: self.fragments.stats(),
+            fragment_cache_rebuilds: self.fragments.rebuild_count(),
         }
     }
 
@@ -386,36 +378,36 @@ impl Engine {
     /// `canonical_key_for` and `rebuild_count`, not the whole cache: `FragmentCache::set_memory_bound`
     /// would silently undo the bound [`Self::set_cache_bounds`]'s validated caller sets.
     pub fn fragment_cache_stats(&self) -> mosaica_authz::fragment::CacheStats {
-        self.generation.load().only_shard().fragments.stats()
+        self.fragments.stats()
     }
 
     /// Times the fragment cache has actually re-unioned postings, rather than reopening a
-    /// digest-verified `.frag` sidecar or hitting the in-memory tier. Read off the live
-    /// generation's cache, so this and [`Self::fragment_cache_stats`] both reset at a compaction.
+    /// digest-verified `.frag` sidecar or hitting the in-memory tier, since the engine opened.
     pub fn fragment_cache_rebuilds(&self) -> u64 {
-        self.generation
-            .load()
-            .only_shard()
-            .fragments
-            .rebuild_count()
+        self.fragments.rebuild_count()
     }
 
-    /// The canonical cache key for `satisfied`, at the live generation's watermark — the only way
-    /// to name a fragment entry from outside, and what [`Self::evict_fragment`] takes. Pure;
+    /// The canonical cache key for `satisfied` in the live generation's shard `shard`, at its
+    /// identity and watermark — the only way to name a fragment entry from outside, and what
+    /// [`Self::evict_fragment`] takes. `None` where the generation holds no such shard. Pure;
     /// reveals nothing the caller did not supply.
-    pub fn fragment_canonical_key(&self, satisfied: &[TermId]) -> [u8; 32] {
+    pub fn fragment_canonical_key(&self, shard: ShardId, satisfied: &[TermId]) -> Option<[u8; 32]> {
         let generation = self.generation.load();
-        let shard = generation.only_shard();
-        shard
-            .fragments
-            .canonical_key_for(satisfied, shard.watermark)
+        let shard = generation.shard(shard)?;
+        Some(
+            self.fragments
+                .canonical_key_for(shard.identity, satisfied, shard.watermark),
+        )
     }
 
-    /// Drop one entry from the fragment cache's in-memory tier; returns whether it was there. The
-    /// digest-verified `.frag`/`.meta` pair stays on disk, and a live `Session` holding the fragment
-    /// keeps its mapping alive regardless.
-    pub fn evict_fragment(&self, key: &[u8; 32]) -> bool {
-        self.generation.load().only_shard().fragments.evict(key)
+    /// Drop one of shard `shard`'s entries from the fragment cache's in-memory tier; returns
+    /// whether it was there. The digest-verified `.frag`/`.meta` pair stays on disc, and a request
+    /// holding the fragment keeps its mapping alive regardless.
+    pub fn evict_fragment(&self, shard: ShardId, key: &[u8; 32]) -> bool {
+        let generation = self.generation.load();
+        generation
+            .shard(shard)
+            .is_some_and(|shard| self.fragments.evict(shard.identity, key))
     }
 
     /// Cached row-space projection slots currently held (`Building` and `Ready` both counted).

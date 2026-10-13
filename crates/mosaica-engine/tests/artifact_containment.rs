@@ -256,9 +256,10 @@ impl Fixture {
         let satisfied: FxHashSet<TermId> = granted.iter().map(|t| TermId::new(*t)).collect();
         let mut sorted: Vec<TermId> = satisfied.iter().copied().collect();
         sorted.sort_unstable_by_key(|t| t.raw());
-        let cache = FragmentCache::new(&self._temp.path().join("frag"), [1u8; 32], [2u8; 32]);
+        let cache = FragmentCache::new(&self._temp.path().join("frag"), [2u8; 32]);
         let fragment = cache
             .get_or_build(
+                [1u8; 32],
                 &sorted,
                 &self.postings,
                 std::slice::from_ref(&self.tier),

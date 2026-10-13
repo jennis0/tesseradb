@@ -178,11 +178,11 @@ server; the terms it resolved to, and the authorised set they produced, stay on 
 matched to the token by a private table.
 
 Building the authorised set costs work proportional to how many terms it unions and how large they
-are, so it happens once per session and is kept. A live session holds it directly, and an on-disk
-cache lets a repeat session skip the union. The cache key is the set of index keys the session
-satisfies, together with the bundle's identity, the identity of the rule that turns terms into
-keys and a watermark on the corpus, so two principals whose terms satisfy the same keys share one
-cache entry.
+are, so it is built for each shard when a session first reads it and kept in a cache, in memory
+and on disc, so a later session skips the union. The cache key is the set of index keys the
+session satisfies, together with the shard's identity, the identity of the rule that turns terms
+into keys and a watermark on the shard, so two principals whose terms satisfy the same keys share
+one cache entry.
 
 One token covers every view a deployment serves: a session's terms are resolved once, and every
 view a later request names is answered against the same authorised set.

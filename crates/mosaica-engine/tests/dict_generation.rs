@@ -229,7 +229,7 @@ fn a_credential_re_presented_after_a_promoting_flush_sees_the_promoted_descripto
     let credential = br#"{"terms": ["0", "novel"]}"#.to_vec();
     let stale = engine.authorise(&credential).unwrap();
     assert_eq!(resolved(&stale), 1, "the fixture must not know `novel`");
-    let before = stale.fragment_at_authorise_for_test().view().cardinality();
+    let before = visible(&engine, &stale);
 
     // Ingest under the novel descriptor and flush, which promotes it and mints its term. The rows
     // are the entities the promoted term will carry — without them the promotion adds an empty
@@ -276,13 +276,13 @@ fn a_credential_re_presented_after_a_promoting_flush_sees_the_promoted_descripto
     assert_eq!(control.satisfied_for_test(), fresh.satisfied_for_test(), "the control's premise");
 
     assert_eq!(
-        fresh.fragment_at_authorise_for_test().view().cardinality(),
-        control.fragment_at_authorise_for_test().view().cardinality(),
+        visible(&engine, &fresh),
+        visible(&engine, &control),
         "two credentials with the same satisfied term set were served different visible sets; the \
          one whose bytes were seen before the promotion took a stale memo hit"
     );
     assert!(
-        fresh.fragment_at_authorise_for_test().view().cardinality() > before,
+        visible(&engine, &fresh) > before,
         "the re-presented credential must gain the promoted descriptor's entities"
     );
 }
@@ -376,10 +376,19 @@ fn a_background_refresh_does_not_poison_a_later_authorise_of_the_same_credential
         .unwrap();
     assert_eq!(fresh.satisfied_for_test(), control.satisfied_for_test(), "the control's premise");
     assert_eq!(
-        fresh.fragment_at_authorise_for_test().view().cardinality(),
-        control.fragment_at_authorise_for_test().view().cardinality(),
+        visible(&engine, &fresh),
+        visible(&engine, &control),
         "the background refresh poisoned the canonical-key memo for this credential"
     );
+}
+
+/// How many entities the session's fragment holds.
+fn visible(engine: &mosaica_engine::Engine, session: &mosaica_engine::Session) -> u64 {
+    engine
+        .session_fragment_for_test(session)
+        .expect("the session's fragment")
+        .view()
+        .cardinality()
 }
 
 /// The credential's own resolved descriptors: `satisfied` minus the reserved `public` term.

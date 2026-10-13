@@ -3229,8 +3229,8 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             "rebuilds": live.fragment_cache_rebuilds,
         },
         // Expired sessions are swept when `retained` reaches `sweep_at`, under the lock viewer
-        // requests take. Each retained session pins its fragment. Sweeping only frees memory: an
-        // expired session is refused whether or not it has been swept.
+        // requests take. Sweeping only frees memory: an expired session is refused whether or not
+        // it has been swept.
         "sessions": {
             "retained": sessions.retained,
             "sweeps": sessions.sweeps,

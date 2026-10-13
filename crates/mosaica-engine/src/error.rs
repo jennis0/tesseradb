@@ -86,9 +86,10 @@ pub enum EngineError {
     /// refused, since refusing sheds no load while the work is already happening. Maps to 429
     /// `backpressure` with `Retry-After`.
     ProjectionBuilding,
-    /// This credential's mask fragment is being built by a concurrent `authorise` call. Same
-    /// non-blocking-waiters rule and 429 mapping as [`Self::ProjectionBuilding`]: this call does
-    /// not wait, and the caller is told to retry rather than handed a fail-closed 500.
+    /// This grant's mask fragment in a shard was being built by a concurrent request, and this
+    /// request waited until the wait budget ran out. Same 429 mapping as
+    /// [`Self::ProjectionBuilding`]: the caller is told to retry rather than handed a fail-closed
+    /// 500.
     FragmentBuilding,
     /// A level's masked counts were being built by a concurrent request, and this request waited
     /// past the bound on such a wait. Same 429 as [`Self::ProjectionBuilding`].

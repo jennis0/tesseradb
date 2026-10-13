@@ -896,10 +896,10 @@ fn the_refusals_are_about_schema_and_an_artifact_is_an_empty_page() {
 /// **A session established before a fold counts none of the entity the fold retired** — the same
 /// session object, never re-authorised, over a filtered browse.
 ///
-/// A fold retires the deletion's tombstone and rotates the bundle identity without moving the
-/// watermark, so this session's frozen fragment still names the retired entity and the overlay no
-/// longer denies it. A filtered browse composes that fragment into an entity-space candidate, and
-/// a row's `matched_count` is what a retired entity would reappear in.
+/// A fold retires the deletion's tombstone and rotates the shard's identity without moving the
+/// watermark, so a fragment this session read before it still names the retired entity and the
+/// overlay no longer denies it. A filtered browse composes a fragment into an entity-space
+/// candidate, and a row's `matched_count` is what a retired entity would reappear in.
 #[test]
 fn a_session_from_before_a_fold_counts_none_of_the_entity_the_fold_retired() {
     let fx = fixture(None);
@@ -947,6 +947,10 @@ fn a_session_from_before_a_fold_counts_none_of_the_entity_the_fold_retired() {
     let charlie_before = counted("charlie");
     assert!(alpha_before > 1, "the count must have room to fall by one");
 
+    let held = fx
+        .engine
+        .session_fragment_for_test(&session)
+        .expect("the session's fragment");
     fx.engine
         .accept_change(doomed, mosaica_lifecycle::wal::ChangeOp::Delete)
         .expect("a delete is accepted");
@@ -973,10 +977,11 @@ fn a_session_from_before_a_fold_counts_none_of_the_entity_the_fold_retired() {
         0,
         "the tombstone retired, so nothing but the folded corpus hides the entity now"
     );
-    // The premise, without which the assertions below hold for the wrong reason.
+    // The premise, without which the assertions below hold for the wrong reason: a fragment
+    // held across the fold would still name the entity.
     assert!(
-        session.fragment_at_authorise_for_test().view().contains(doomed.raw() as u32),
-        "the frozen fragment must still name the retired entity"
+        held.view().contains(doomed.raw() as u32),
+        "the fragment read before the fold must name the retired entity"
     );
 
     assert_eq!(

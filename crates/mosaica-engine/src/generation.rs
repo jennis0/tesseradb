@@ -9,6 +9,7 @@ use mosaica_lifecycle::{IngestBuffer, Overlay};
 use mosaica_store::read::{Bundle, ShardData};
 use mosaica_store::vocabulary::Vocabularies;
 use mosaica_types::{EntityId, LayerSpace, ShardId};
+use sha2::{Digest, Sha256};
 
 use crate::DenyMask;
 
@@ -107,9 +108,10 @@ pub struct ShardParts {
     pub watermark: u64,
     /// The base postings — the build's `terms/postings.arrow`, unchanged by any flush.
     pub postings: Arc<PostingsReader>,
-    /// The mask-fragment cache, keyed by the MANIFEST digest of the prefix `postings` was read
-    /// from, so a fold's new prefix is never answered from the old one's fragments.
-    pub(crate) fragments: Arc<FragmentCache>,
+    /// This shard's identity, from [`shard_identity`] over the MANIFEST digest of the prefix
+    /// `postings` was read from: what its fragments and figures are filed under, so a fold's new
+    /// prefix and another shard are never answered from this one's.
+    pub(crate) identity: [u8; 32],
     /// Every unique column's index runs, as the shard's record lists them.
     pub(crate) unique: Arc<mosaica_store::unique::UniqueIndexes>,
     /// The unique index entries of the rows the buffer holds, published with the buffer.
@@ -160,6 +162,16 @@ pub struct Generation {
     parts: GenerationParts,
     /// Ascending by id.
     shards: Vec<Arc<Shard>>,
+}
+
+/// Shard `shard`'s identity in the prefix whose `MANIFEST.json` digest is `bundle`: what its
+/// fragments and figures are keyed and filed under. Moves at every compaction, since the digest
+/// does, and differs between two shards of one prefix.
+pub(crate) fn shard_identity(bundle: &[u8; 32], shard: ShardId) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(bundle);
+    hasher.update(shard.raw().to_le_bytes());
+    hasher.finalize().into()
 }
 
 /// Per view, the version of its denied base rows: see [`Shard::deny_version`].
@@ -377,12 +389,15 @@ impl Shard {
         )
     }
 
-    /// The fragment for `grant` at this shard's watermark, waiting on a build already running.
+    /// The fragment for `grant` at this shard's watermark, from `fragments`, waiting on a build
+    /// already running.
     pub(crate) fn fragment(
         &self,
+        fragments: &FragmentCache,
         grant: &Grant,
     ) -> Result<Arc<FrozenFragment>, FragmentCacheError> {
-        self.fragments.get_or_build_grant_waiting(
+        fragments.get_or_build_grant_waiting(
+            self.identity,
             grant,
             &self.postings,
             &self.delta_postings,
@@ -401,11 +416,6 @@ impl Shard {
     /// buffer instead.
     pub fn buffered_rows(&self, view: &str) -> Option<&[EntityId]> {
         self.buffered_rows.get(view).map(Vec::as_slice)
-    }
-
-    /// The MANIFEST digest of the prefix this shard's postings were read from.
-    pub(crate) fn bundle_identity(&self) -> [u8; 32] {
-        self.fragments.bundle_identity()
     }
 
     /// What a containment partition is composed from, in this shard: its base postings.
@@ -442,6 +452,11 @@ impl Generation {
     /// The generation's one shard; panics if it holds any other number.
     pub fn only_shard(&self) -> &Shard {
         mosaica_types::only(&self.shards)
+    }
+
+    /// Every shard, ascending by id.
+    pub(crate) fn shards(&self) -> impl Iterator<Item = &Shard> {
+        self.shards.iter().map(Arc::as_ref)
     }
 
     /// The successor holding `parts`: the shard `changed` answers for is replaced, and every other
@@ -631,11 +646,7 @@ impl Generation {
                     postings: Arc::new(
                         PostingsReader::open(&postings_path, false).expect("it opens"),
                     ),
-                    fragments: Arc::new(FragmentCache::new(
-                        std::path::Path::new("fixture-fragment-cache-never-written"),
-                        [0u8; 32],
-                        [0u8; 32],
-                    )),
+                    identity: [0u8; 32],
                     unique: Arc::default(),
                     unique_live: Arc::default(),
                     edited: Arc::default(),
@@ -674,5 +685,24 @@ pub(crate) fn partition_of(
             })
             .collect(),
         layer_spaces: manifest.layer_spaces,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two shards of one prefix are two identities, and a new prefix moves a shard's.
+    #[test]
+    fn two_shards_of_one_prefix_have_two_identities() {
+        let bundle = [7u8; 32];
+        let zero = shard_identity(&bundle, ShardId::ZERO);
+        let one = shard_identity(&bundle, ShardId::new(1).expect("in range"));
+        assert_ne!(zero, one);
+        assert_ne!(
+            zero,
+            shard_identity(&[8u8; 32], ShardId::ZERO),
+            "a new prefix moves it"
+        );
     }
 }

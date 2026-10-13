@@ -762,7 +762,7 @@ fn measure(
 ) -> Result<Value, String> {
     eprintln!("principal {name}: {} terms", ids.len());
     let fragment = cache
-        .get_or_build(ids, subject.postings, &[], 0)
+        .get_or_build([0u8; 32], ids, subject.postings, &[], 0)
         .map_err(|e| format!("principal '{name}': building the fragment: {e}"))?;
     let base = subject.row_space.base();
     let bound = base.bound();
@@ -929,7 +929,7 @@ fn run(args: Args) -> Result<(), String> {
 
     // ---- The fragment cache the engine uses, in a directory this run cleans up.
     let cache_dir = tempfile::tempdir().map_err(|e| format!("making a cache directory: {e}"))?;
-    let cache = FragmentCache::new(cache_dir.path(), [0u8; 32], [0u8; 32]);
+    let cache = FragmentCache::new(cache_dir.path(), [0u8; 32]);
     let subject = Subject {
         postings: &postings,
         images,

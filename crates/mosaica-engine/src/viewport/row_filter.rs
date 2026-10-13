@@ -996,12 +996,12 @@ impl Engine {
         Ok((mask, region_verdict))
     }
 
-    /// Route this request's filter expressions against its pre-filter mask: bring the fragment
-    /// forward, build the entity-space candidate, close the region and `member_of` resolvers over
-    /// `mask`, and hand `body` a `route` that puts one expression through them. The fragment is
-    /// brought forward rather than read off the session, whose own fragment is fixed at
-    /// authorise: composing against the stale one would silently omit every entity flushed since,
-    /// under-reporting in a way indistinguishable from a correct answer. `mask` is the pre-filter
+    /// Route this request's filter expressions against its pre-filter mask: build the
+    /// entity-space candidate over the session's fragment at the shard's watermark, close the
+    /// region and `member_of` resolvers over `mask`, and hand `body` a `route` that puts one
+    /// expression through them. A fragment of an earlier watermark, such as a stale-served
+    /// projection's, would silently omit every entity flushed since, under-reporting in a way
+    /// indistinguishable from a correct answer. `mask` is the pre-filter
     /// mask and both resolvers close over it, so a highlight routed against an already-filtered
     /// mask would make the two positions of one clause mean different things. What `body` does
     /// with a [`crate::filter::RoutedFilter`] is the caller's.
@@ -1014,20 +1014,22 @@ impl Engine {
             &dyn Fn(&crate::filter::FilterExpr, bool) -> Result<crate::filter::RoutedFilter>,
         ) -> Result<T>,
     ) -> Result<T> {
-        let candidate = self.filter_candidate(served.session, served.shard)?;
+        let candidate =
+            self.filter_candidate(served.session, served.shard, Some(&served.fragment))?;
         let resolved = ResolvedLeaves::default();
         self.route_filters_under(served, mask, &candidate, &resolved, cancel, body)
     }
 
     /// The entity-space set a request's filter is evaluated under in `shard`: the session's
-    /// fragment brought forward to it, with the deny state and the passing buffered entities
-    /// composed in.
+    /// fragment there ([`Self::fragment_for`], given what the request holds as `held`), with the
+    /// deny state and the passing buffered entities composed in.
     pub(crate) fn filter_candidate(
         &self,
         session: &Session,
         shard: &crate::Shard,
+        held: Option<&Arc<FrozenFragment>>,
     ) -> Result<croaring::Bitmap> {
-        let fragment = self.fragment_for(session, shard)?;
+        let fragment = self.fragment_for(session, shard, held)?;
         Ok(crate::filter::candidate(
             &fragment,
             session.satisfied(),
@@ -1041,9 +1043,10 @@ impl Engine {
         &self,
         session: &Session,
         shard: &crate::Shard,
+        held: Option<&Arc<FrozenFragment>>,
         within: &croaring::Bitmap,
     ) -> Result<croaring::Bitmap> {
-        let fragment = self.fragment_for(session, shard)?;
+        let fragment = self.fragment_for(session, shard, held)?;
         Ok(crate::filter::candidate_within(
             &fragment,
             session.satisfied(),

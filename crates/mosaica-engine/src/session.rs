@@ -1,8 +1,8 @@
 //! Session authorisation.
 //!
 //! [`Engine::authorise`] turns a credential into a [`Session`]: granted descriptors are resolved
-//! against the bundle dictionary and the resulting term set is unioned into a mask fragment via
-//! [`FragmentCache`]. That union is the authorisation decision.
+//! against the bundle dictionary, and the resulting term set is what each shard's mask fragment
+//! unions in the [`FragmentCache`]. That union is the authorisation decision.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -67,9 +67,9 @@ struct HeldTerms {
     credentials: FxHashSet<Vec<u8>>,
 }
 
-/// One authorised viewer session: the index keys it satisfies and the mask fragment they union
-/// to, computed once here and brought forward by the background refresh rather than recomputed
-/// per viewport.
+/// One authorised viewer session: the index keys it satisfies, resolved once here. The mask
+/// fragment they union to is built per shard on first use and brought forward by the background
+/// refresh rather than recomputed per viewport.
 ///
 /// Holds no entity-id → wire-handle table: that state lives in `mosaica-server`, alongside this
 /// struct rather than inside it, so this crate never depends on `mosaica-wire`'s handle type.
@@ -89,12 +89,6 @@ pub struct Session {
     /// `satisfied`'s keys sorted, or every key. A `read-all` session's fragment is keyed by the
     /// watermark alone, so every such session at one watermark shares it.
     grant: Grant,
-    /// The materialised mask fragment: the union of `grant`'s postings, over the base and every
-    /// delta tier live when this session authorised. Goes stale as flushes publish delta tiers and
-    /// move the watermark: a flushed entity is invisible to a viewer served this fragment until it
-    /// is rebuilt. [`Engine::fragment_for`] is what brings it forward, and is the only reader of
-    /// this field outside a test hook.
-    fragment: Arc<FrozenFragment>,
     /// The terms the session holds, or `None` for a `read-all` session.
     held: Option<HeldTerms>,
     /// `sha256` over `grant`: what a cache shared by every session with this grant is keyed on
@@ -215,17 +209,16 @@ const AUTH_DATA_EVERY_ITEM: &[u8] = b"\0every item";
 
 impl Engine {
     /// Authorise a credential: its terms → dictionary lookup (an unknown term drops out, never an
-    /// error), and the conjunctions that those terms satisfy, from the DAG → the
-    /// union of every satisfied key's postings, through `FragmentCache::get_or_build`. A zero-term
-    /// credential, or one whose every term is unknown, is a valid, zero-visibility session, not an
-    /// error. A concurrent in-flight build on the same key surfaces here as
-    /// `Err(EngineError::FragmentBuilding)` rather than blocking.
+    /// error), and the conjunctions that those terms satisfy, from the DAG. The union of every
+    /// satisfied key's postings is built per shard when the session first reads it
+    /// ([`Engine::fragment_for`]). A zero-term credential, or one whose every term is unknown, is a
+    /// valid, zero-visibility session, not an error.
     pub fn authorise(&self, auth_data: &[u8]) -> Result<Session> {
         let auth_terms = credential_terms(auth_data)?;
 
-        // Loaded once and used for both the dictionary and the watermark below: resolving them
-        // against different generations could pair `satisfied` with a dictionary a later flush
-        // published while building a fragment against the watermark that preceded it.
+        // Loaded once, so `satisfied`, the views resolved and the dictionary length recorded all
+        // describe one generation: a dictionary a later flush published could otherwise be
+        // recorded as seen while `satisfied` was resolved against the one before it.
         let generation = self.generation.load();
 
         let mut credentials: FxHashSet<Vec<u8>> =
@@ -295,7 +288,7 @@ impl Engine {
         )
     }
 
-    /// A session for `satisfied`, whose fragment is `grant`'s union at `generation`'s watermark.
+    /// A session for `satisfied`, whose fragment in each shard is `grant`'s union.
     fn mint(
         &self,
         generation: &Generation,
@@ -327,11 +320,6 @@ impl Engine {
         // Must be a function of the exact `auth_data` that produced `satisfied`.
         let auth_data_hash: [u8; 32] = Sha256::digest(auth_data).into();
 
-        let fragment = generation
-            .only_shard()
-            .fragment(&grant)
-            .map_err(fragment_error)?;
-
         let mut token_bytes = [0u8; 32];
         OsRng.fill_bytes(&mut token_bytes);
         let token = hex_encode(&token_bytes);
@@ -349,7 +337,6 @@ impl Engine {
             token_id,
             satisfied,
             grant,
-            fragment,
             held,
             terms_digest,
             visible_views,
@@ -392,38 +379,38 @@ impl Engine {
         self.row_projection_cache.prune_tokens(token_ids)
     }
 
-    /// `session`'s mask fragment at `shard`'s watermark — what the request path uses in place of
-    /// the frozen `Session::fragment`.
+    /// `session`'s mask fragment in `shard`, at its watermark and under its identity, from the
+    /// fragment cache, built there on a miss. A flush moves the watermark and a fold the identity,
+    /// so neither is answered from a fragment of the term index or tiers before it. That is not
+    /// the only protection for a retired entity against a session authorised before a fold: the
+    /// folded row space and the folded value columns no longer hold the entity either.
     ///
-    /// A fragment is frozen at authorise. A flush advances the watermark, which the watermark test
-    /// alone catches. A fold advances no watermark; it rewrites the term index and rotates the
-    /// bundle identity instead, so the identity comparison is what makes a session authorised
-    /// before a fold rebuild its fragment against the new term index. That comparison is not the
-    /// only protection for a retired entity against such a session: the folded row space and the
-    /// folded value columns no longer hold the entity either.
+    /// `satisfied` is fixed at authorise and never re-resolved, so the terms unioned here are
+    /// exactly the terms any build for this session consults. A build is measured at ~200 ms at
+    /// 10⁹, which is why the background refresh (`crate::refresh`) makes the next one at each
+    /// publication; a request reaches a build directly only on a session's first use of a shard.
     ///
-    /// Rebuilds the union at the current watermark rather than patching the frozen fragment
-    /// forward: `satisfied` is fixed at authorise and never re-resolved, so the terms unioned here
-    /// are exactly the terms a rebuild would consult. Measured at ~200 ms at 10⁹, which is why this
-    /// runs from the background refresh (`crate::refresh`) at each publication rather than per
-    /// request; a request reaches it directly only at session establishment.
+    /// `held` is a fragment of this session's the request already holds, the one its projection
+    /// was taken over. Where it is at the shard's identity and watermark it is the answer, so a
+    /// fragment evicted from the cache's memory tier is not opened and hashed again while a
+    /// projection still maps it.
     ///
-    /// A concurrent build of the same key yields [`EngineError::FragmentBuilding`] rather than
-    /// falling back to the stale fragment.
+    /// Waits on a concurrent build of the same key for the wait budget, then yields
+    /// [`EngineError::FragmentBuilding`].
     pub(crate) fn fragment_for(
         &self,
         session: &Session,
         shard: &crate::Shard,
+        held: Option<&Arc<FrozenFragment>>,
     ) -> Result<Arc<FrozenFragment>> {
-        // The identity test catches what the watermark test cannot: a fold rotates the bundle
-        // identity without moving the watermark, and this fragment lives outside `FragmentCache`,
-        // so rotating the cache does not reach it.
-        if session.fragment.identity == shard.bundle_identity()
-            && session.fragment.watermark >= shard.watermark
+        if let Some(held) =
+            held.filter(|held| held.identity == shard.identity && held.watermark == shard.watermark)
         {
-            return Ok(Arc::clone(&session.fragment));
+            return Ok(Arc::clone(held));
         }
-        shard.fragment(&session.grant).map_err(fragment_error)
+        shard
+            .fragment(&self.fragments, &session.grant)
+            .map_err(fragment_error)
     }
 
     /// Which layers this principal may know exist. A layer's label is evaluated against the
@@ -506,16 +493,9 @@ fn credential_terms(auth_data: &[u8]) -> Result<Vec<String>> {
     Ok(held)
 }
 
-/// The two fields a test may read directly. They live here rather than in `crate::test_hooks`
-/// because the fields are private to this module.
+/// The field a test may read directly. It lives here rather than in `crate::test_hooks` because
+/// the field is private to this module.
 impl Session {
-    /// The fragment frozen at authorise, stale by construction after any flush or fold.
-    #[cfg(any(feature = "fault-injection", feature = "bench-timing"))]
-    #[doc(hidden)]
-    pub fn fragment_at_authorise_for_test(&self) -> &Arc<FrozenFragment> {
-        &self.fragment
-    }
-
     /// The keys resolved at authorise, and an empty set for a `read-all` session.
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]

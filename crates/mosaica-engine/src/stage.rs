@@ -23,13 +23,11 @@
 //!
 //! **Filling it at authorise instead was measured and is not landed.** It works — a cold first
 //! request at depth 3 falls from 840 ms to 285 ms at 2.33 × 10⁸ rows, because staging the ladder
-//! stages the row projection with it — and it changes three things that are not this change's to
+//! stages the row projection with it — and it changes two things that are not this change's to
 //! decide: a session acquires a resident row-projection entry before its first request, so decision
-//! 0044's rung-2 stale serve reaches that first request where it previously could not;
-//! `Engine::authorise` can be refused `FragmentBuilding` by a background task rather than by real
-//! demand; and a session that authorises and never views pays a full `Permutation::project` per
-//! visible view. The figures and the three consequences are in
-//! `probes/2026-09-09-nocc-stage/README.md`; the ruling is the owner's.
+//! 0044's rung-2 stale serve reaches that first request where it previously could not; and a
+//! session that authorises and never views pays a full `Permutation::project` per visible view.
+//! The figures are in `probes/2026-09-09-nocc-stage/README.md`; the ruling is the owner's.
 //!
 //! ## Why the ceiling is 12
 //!

@@ -288,7 +288,8 @@ pub(super) fn filter_rows(
     let candidate = match candidate {
         Some(candidate) => candidate,
         None => {
-            whole = engine.filter_candidate(served.session, served.shard)?;
+            whole =
+                engine.filter_candidate(served.session, served.shard, Some(&served.fragment))?;
             &whole
         }
     };
@@ -480,10 +481,11 @@ impl Walk {
                 }
                 entities.sort_unstable();
                 let mut candidate = Bitmap::of(&entities);
-                candidate.and_inplace(
-                    &cx.engine
-                        .filter_candidate(cx.open.served.session, cx.open.served.shard)?,
-                );
+                candidate.and_inplace(&cx.engine.filter_candidate(
+                    cx.open.served.session,
+                    cx.open.served.shard,
+                    Some(&cx.open.served.fragment),
+                )?);
                 let row_bases: Vec<u32> = segments.iter().map(|&(_, base)| base).collect();
                 let domain = crossing_domain(&[parts], &row_bases);
                 Some(filter_rows(cx, expr, Some(&candidate), &domain, true, cancel)?.rows)
@@ -509,9 +511,11 @@ impl Walk {
         scan: Option<Key>,
         cancel: &Option<CancelToken>,
     ) -> Result<Option<Stretch>> {
-        let candidate = cx
-            .engine
-            .filter_candidate(cx.open.served.session, cx.open.served.shard)?;
+        let candidate = cx.engine.filter_candidate(
+            cx.open.served.session,
+            cx.open.served.shard,
+            Some(&cx.open.served.fragment),
+        )?;
         let from: u64 = scan.map_or(0, |(entity, _)| u64::from(entity) + 1);
         if from > u64::from(u32::MAX) {
             return Ok(None);
@@ -651,6 +655,7 @@ impl Walk {
         let candidate = cx.engine.filter_candidate_within(
             cx.open.served.session,
             cx.open.served.shard,
+            Some(&cx.open.served.fragment),
             &entities,
         )?;
         drop(entities);
@@ -743,9 +748,12 @@ fn bounded_rows(cx: &PageCx<'_>, expr: &FilterExpr) -> Result<Option<Bitmap>> {
                 .map_err(filter_refusal)?
                 .into_iter()
                 .collect();
-            let visible =
-                cx.engine
-                    .filter_candidate_within(cx.open.served.session, shard, &holders)?;
+            let visible = cx.engine.filter_candidate_within(
+                cx.open.served.session,
+                shard,
+                Some(&cx.open.served.fragment),
+                &holders,
+            )?;
             let row_space = &cx.open.served.data.row_space;
             Some(
                 visible

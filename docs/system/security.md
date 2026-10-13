@@ -73,7 +73,7 @@ grant's base rows. A view's base is the rows the last build or compaction wrote;
 above it.
 
 The per-artifact counts, position sums and boxes of an annotation level served from a column are
-counted once per grant over the grant's base rows, keyed by the grant, the bundle identity, which a
+counted once per grant over the grant's base rows, keyed by the grant, the shard's identity, which a
 compaction rotates, and the level's column. A growth between compactions adds to them in place. They
 are written to the server's cache directory and read back after a restart. Beside them the server
 holds the labels of every deleted and suppressed base row in each view, per view and level, whoever
@@ -83,7 +83,7 @@ The figures of a number or timestamp field (the count of its finite values, thei
 with none, and its eight smallest and eight largest values with their rows) are stored in the bundle
 by a build and a compaction, per view and per list of index keys the base rows' items carry. A
 grant's are the merge of the lists it satisfies, by the same rule that builds its authorised set,
-and the merge is held per grant, bundle identity, view and field.
+and the merge is held per grant, shard identity, view and field.
 
 Both kinds of shared count include rows that are deleted or suppressed, so no request is served them
 alone. Every request subtracts the base rows its own composed visible set removes, read from the

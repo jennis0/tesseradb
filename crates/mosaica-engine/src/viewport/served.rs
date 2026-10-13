@@ -8,7 +8,7 @@ use super::*;
 /// otherwise take four or more of them takes this instead.
 ///
 /// A struct of borrows: it owns only the segment list, which is the one `segments_with_row_bases`
-/// already built for the request; nothing here is cloned or reference-counted a second time.
+/// already built for the request, and a count on the fragment its projection was taken over.
 ///
 /// The composed mask is not a field. A filtered request holds two at once — the pre-filter mask
 /// the region and `member_of` resolvers close over, and the narrowed one the sweep reads — so
@@ -24,6 +24,9 @@ pub(crate) struct ServedView<'a> {
     /// This view's `deleted ∪ suppressed` in row space.
     pub(crate) denied: &'a croaring::Bitmap,
     pub(crate) mask_identity: crate::figures::MaskIdentity,
+    /// The fragment the request's projection was taken over, which answers for the session's
+    /// fragment in `shard` where it is at the shard's identity and watermark.
+    pub(crate) fragment: Arc<FrozenFragment>,
     /// The request's cancellation, which a wait on another request's build observes.
     pub(crate) cancel: Option<crate::CancelToken>,
     /// Whether the request is drawing points, which a masked-count build gives way to.

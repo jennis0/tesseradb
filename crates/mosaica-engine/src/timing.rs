@@ -72,9 +72,9 @@ pub struct StageTimings {
     /// though it is nanoseconds, because it is what the multi-second pin resolve became and a
     /// stage that vanishes from the breakdown looks like a stage that was forgotten.
     pub stamp_compare_ns: u64,
-    /// Bringing the session's fragment forward to the live watermark (`Engine::fragment_for`).
-    /// Zero on the common path — the session's own fragment is already current — and one
-    /// `build_fragment_with_deltas` on the first request of each credential after a flush.
+    /// Reading the session's fragment at the live watermark (`Engine::fragment_for`): a fragment
+    /// cache lookup on the common path, and one `build_fragment_with_deltas` on the first request
+    /// of each grant after a flush that the background refresh has not reached.
     pub fragment_forward_ns: u64,
     /// View lookup, and resolving each segment's `row_base`.
     pub view_lookup_ns: u64,

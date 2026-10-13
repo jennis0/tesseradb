@@ -26,6 +26,7 @@ use mosaica_engine::viewport::ViewportRequest;
 use mosaica_engine::{Engine, EngineConfig, Session};
 use mosaica_store::read::open_bundle;
 use mosaica_store::Bundle;
+use mosaica_types::ShardId;
 
 use common::*;
 use mosaica_engine::GeometryPublication;
@@ -386,7 +387,7 @@ fn an_undersized_bound_does_not_livelock() {
 /// postings, and never correctness.
 ///
 /// `rebuild_count` is the observable that separates the two: it counts calls to `build_fragment`,
-/// so a re-authorise that re-opens the sidecar leaves it unchanged while a genuinely cold rebuild
+/// so a read that re-opens the sidecar leaves it unchanged while a genuinely cold rebuild
 /// increments it. An `evict` that deleted the pair too — the plausible over-implementation — fails
 /// here, and fails loudly rather than merely being slower.
 #[test]
@@ -403,30 +404,42 @@ fn fragment_evict_drops_the_memory_tier_not_the_sidecar() {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     assert_eq!(
         engine.fragment_cache_rebuilds(),
+        0,
+        "authorise builds no fragment"
+    );
+    let built = engine.session_fragment_for_test(&session).unwrap();
+    assert_eq!(
+        engine.fragment_cache_rebuilds(),
         1,
-        "the first authorise unions postings"
+        "the session's first read unions postings"
     );
     assert_eq!(engine.fragment_cache_stats().entries, 1);
 
     // No sort: `canonical_key_for` sorts and dedups internally (see `canonical_key`'s doc — the key
     // must not depend on the caller's term order), and a sort here reads as if it did.
     let satisfied: Vec<_> = session.satisfied_for_test().iter().copied().collect();
-    let key = engine.fragment_canonical_key(&satisfied);
+    let key = engine
+        .fragment_canonical_key(ShardId::ZERO, &satisfied)
+        .expect("the bundle has shard 0");
 
-    assert!(engine.evict_fragment(&key), "the entry was resident");
+    assert!(
+        engine.evict_fragment(ShardId::ZERO, &key),
+        "the entry was resident"
+    );
     assert_eq!(
         engine.fragment_cache_stats().entries,
         0,
         "the in-memory tier is dropped"
     );
     assert!(
-        !engine.evict_fragment(&key),
+        !engine.evict_fragment(ShardId::ZERO, &key),
         "a second evict of the same key removes nothing"
     );
 
-    // Re-authorising the same credential repopulates the tier from the sidecar: an entry again,
-    // but NOT a rebuild.
+    // Another session of the same credential repopulates the tier from the sidecar: an entry
+    // again, but NOT a rebuild.
     let again = engine.authorise(&full_coverage_credential()).unwrap();
+    let reopened = engine.session_fragment_for_test(&again).unwrap();
     assert_eq!(engine.fragment_cache_stats().entries, 1);
     assert_eq!(
         engine.fragment_cache_rebuilds(),
@@ -435,8 +448,7 @@ fn fragment_evict_drops_the_memory_tier_not_the_sidecar() {
          re-union of postings"
     );
     assert_eq!(
-        again.fragment_at_authorise_for_test().watermark,
-        session.fragment_at_authorise_for_test().watermark,
+        reopened.watermark, built.watermark,
         "and the reopened fragment is the one that was built, not a fresh one"
     );
 }

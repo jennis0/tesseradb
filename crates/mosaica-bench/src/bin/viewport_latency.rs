@@ -186,8 +186,9 @@ fn measure(args: &Args) -> Result<Vec<Duration>, String> {
 
     let descriptor = first_dictionary_descriptor(&args.bundle);
     let auth = format!(r#"{{"terms": ["{descriptor}"]}}"#);
-    // Warm token: authorise once, outside the timing loop — a session's fragment is built once at
-    // authorise time (I2) and reused across every viewport, exactly as a real client would.
+    // Authorise once, outside the timing loop, and reuse the session across every viewport, as a
+    // real client would. The session's fragment is built by its first viewport, so the first
+    // timed sample pays it: `max`, and p99 at a small `--samples`, include that build.
     let session = engine
         .authorise(auth.as_bytes())
         .map_err(|e| format!("authorise failed: {e}"))?;

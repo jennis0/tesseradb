@@ -378,7 +378,7 @@ impl Executor {
             if let Some(r) = &rotation {
                 s.filter_columns = Arc::clone(&r.filter_columns);
                 s.postings = Arc::clone(&r.postings);
-                s.fragments = Arc::clone(&r.fragments);
+                s.identity = r.identity;
                 s.unique = Arc::clone(&r.unique);
                 s.edited = Arc::clone(&r.edited);
                 s.tenancy = Arc::clone(&r.tenancy);
@@ -403,12 +403,6 @@ impl Executor {
                 g.layer_spaces = Arc::new(rotated_spaces(&previous.layer_spaces, r));
             }
         });
-        // Listed before the swap and deleted after it, so nothing is lost if the swap never lands.
-        let superseded = rotation
-            .as_ref()
-            .map(|_| shard.fragments.superseded_entries())
-            .unwrap_or_default();
-
         let next = Arc::new(next);
         self.publish_arc(Arc::clone(&next), started);
         // Pruned before the refresh starts, so its snapshot holds what retention keeps and no more.
@@ -417,20 +411,26 @@ impl Executor {
             &next.prefix,
         );
 
-        // After the swap, so a missing projection after a fold is an ordinary cache miss.
+        // After the swap, so a missing projection after a fold is an ordinary cache miss, and
+        // nothing is lost if the swap never lands. The identities this swap superseded keep their
+        // fragments until the next rotation: a request still on the previous generation reads
+        // them, and may be writing one.
         if rotation.is_some() {
-            self.deps.figures.sweep(next.only_shard().bundle_identity());
-            self.deps.refresh.spawn(next);
-        }
-
-        if !superseded.is_empty() {
-            let swept = FragmentCache::sweep(&superseded);
+            self.deps
+                .figures
+                .sweep(next.shards().map(|shard| shard.identity));
+            let kept: Vec<[u8; 32]> = next
+                .shards()
+                .chain(previous.shards())
+                .map(|shard| shard.identity)
+                .collect();
+            let swept = self.deps.fragments.sweep(&kept);
             tracing::info!(
                 swept,
-                named = superseded.len(),
-                "the fold's identity rotated; the persisted fragments under the superseded one are \
-                 unreachable and have been reclaimed"
+                "a shard's identity rotated; the fragments of identities older than the one it \
+                 superseded are unreachable and have been reclaimed"
             );
+            self.deps.refresh.spawn(next);
         }
 
         self.prune_region_cache(segments_version);

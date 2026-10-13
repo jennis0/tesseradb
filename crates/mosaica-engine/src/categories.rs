@@ -215,14 +215,7 @@ impl Engine {
         // consult. A `derived` set is derived from inside `M_auth` per request, per §3.3.
         let candidate = match vocabulary.visibility() {
             Visibility::Public => None,
-            Visibility::Derived => {
-                // **The session's own fragment is not enough.** It is a snapshot taken at
-                // authorise, and composition treats entities below the live watermark as
-                // fragment-resident — so a value carried only by entities a flush has published
-                // since would be derived as invisible from the stale one, and a viewer would be
-                // told a value they can see does not exist.
-                Some(self.filter_candidate(session, shard)?)
-            }
+            Visibility::Derived => Some(self.filter_candidate(session, shard, None)?),
         };
         let membership = match &candidate {
             None => None,
@@ -568,7 +561,7 @@ impl Engine {
         // values served, which the visibility alone still decides.
         let derived = vocabulary.visibility() == Visibility::Derived;
         let candidate = if derived || counts {
-            Some(self.filter_candidate(session, shard)?)
+            Some(self.filter_candidate(session, shard, None)?)
         } else {
             None
         };

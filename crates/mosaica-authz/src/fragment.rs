@@ -7,7 +7,7 @@
 //! [`FragmentCache`] persists the result as a CRoaring `Frozen`-format bitmap in an engine-local
 //! cache directory, never in the bundle, so a repeated grant set reuses the on-disk fragment
 //! across process restarts. The cache key is wider than the set of granted terms; see
-//! [`FragmentCache::new`]. Entries are content-addressed with a stored SHA-256 digest verified on
+//! [`FragmentCache`]. Entries are content-addressed with a stored SHA-256 digest verified on
 //! every reopen, before the unsafe `Frozen` view is constructed; writes are fsynced before the
 //! rename that makes them visible; the directory and its files are owner-only on unix.
 
@@ -166,12 +166,13 @@ pub fn delta_entities(terms: &[TermId], deltas: &[Arc<DeltaTier>]) -> io::Result
     Ok(entities)
 }
 
-/// The canonical cache key: SHA-256 over `bundle_identity ‖ rule_hash ‖ watermark ‖ sorted,
-/// deduplicated term_id u32 LEs`. Term ids are bundle-relative ordinals, so a persistent cache
-/// directory reused across bundle rebuilds, or across a change to the authorisation rule, would
-/// otherwise serve a frozen fragment naming a different entity set.
+/// The canonical cache key: SHA-256 over `identity ‖ rule_hash ‖ watermark ‖ sorted,
+/// deduplicated term_id u32 LEs`. Term ids are bundle-relative ordinals and entity ids are a
+/// shard's own, so a persistent cache directory reused across bundle rebuilds, across shards, or
+/// across a change to the authorisation rule, would otherwise serve a frozen fragment naming a
+/// different entity set.
 fn canonical_key(
-    bundle_identity: &[u8; 32],
+    identity: &[u8; 32],
     rule_hash: &[u8; 32],
     terms: &[TermId],
     watermark: u64,
@@ -180,7 +181,7 @@ fn canonical_key(
     sorted.sort_unstable();
     sorted.dedup();
 
-    let mut hasher = key_prefix(bundle_identity, rule_hash, watermark);
+    let mut hasher = key_prefix(identity, rule_hash, watermark);
     for term in &sorted {
         hasher.update(term.to_le_bytes());
     }
@@ -192,27 +193,22 @@ fn canonical_key(
 const EVERY_KEY: &[u8] = b"every key";
 
 /// The canonical cache key for `grant`: [`canonical_key`] for a list of keys, and for
-/// [`Grant::Every`] the bundle, the rule and the watermark followed by [`EVERY_KEY`], so every
+/// [`Grant::Every`] the identity, the rule and the watermark followed by [`EVERY_KEY`], so every
 /// such session at one watermark shares one entry.
-fn grant_key(
-    bundle_identity: &[u8; 32],
-    rule_hash: &[u8; 32],
-    grant: &Grant,
-    watermark: u64,
-) -> [u8; 32] {
+fn grant_key(identity: &[u8; 32], rule_hash: &[u8; 32], grant: &Grant, watermark: u64) -> [u8; 32] {
     match grant {
-        Grant::Keys(keys) => canonical_key(bundle_identity, rule_hash, keys, watermark),
+        Grant::Keys(keys) => canonical_key(identity, rule_hash, keys, watermark),
         Grant::Every => {
-            let mut hasher = key_prefix(bundle_identity, rule_hash, watermark);
+            let mut hasher = key_prefix(identity, rule_hash, watermark);
             hasher.update(EVERY_KEY);
             hasher.finalize().into()
         }
     }
 }
 
-fn key_prefix(bundle_identity: &[u8; 32], rule_hash: &[u8; 32], watermark: u64) -> Sha256 {
+fn key_prefix(identity: &[u8; 32], rule_hash: &[u8; 32], watermark: u64) -> Sha256 {
     let mut hasher = Sha256::new();
-    hasher.update(bundle_identity);
+    hasher.update(identity);
     hasher.update(rule_hash);
     hasher.update(watermark.to_le_bytes());
     hasher
@@ -314,14 +310,9 @@ pub struct FrozenFragment {
     /// The generation's watermark at build time, as passed to [`FragmentCache::get_or_build`].
     /// Persisted alongside the frozen bytes so a reopened fragment restores it.
     pub watermark: u64,
-    /// The bundle identity of the [`FragmentCache`] that produced this fragment: the digest of
-    /// the prefix whose postings it was unioned from. Not persisted: [`canonical_key`] already
-    /// hashes the identity, so this field just records which one produced the file found.
-    ///
-    /// A compaction rewrites the term index and publishes a new prefix. A holder that kept a
-    /// fragment across a fold, such as a `Session`, would go on composing against a mask that
-    /// still contains every folded-away entity, re-exposing what the fold retired. The
-    /// comparison against this field is made where the fragment is composed.
+    /// The identity this fragment was built under: the shard's, which names the shard and the
+    /// prefix whose postings it was unioned from. Not persisted: [`canonical_key`] already hashes
+    /// the identity, so this field just records which one produced the file found.
     pub identity: [u8; 32],
 }
 
@@ -420,33 +411,39 @@ const META_LEN: usize = 48;
 
 impl CacheWeight for FrozenFragment {
     /// The mapped file's length. Bounds address space, not resident memory: a fragment is
-    /// resident only in the pages actually touched, and evicting one frees nothing while any
-    /// live `Session` still holds its own `Arc<FrozenFragment>`.
+    /// resident only in the pages actually touched, and evicting one frees nothing while a
+    /// request or a cached projection still holds its `Arc<FrozenFragment>`.
     fn cache_weight_bytes(&self) -> u64 {
         self.mmap.len() as u64
     }
 }
 
-/// Frozen fragments, held in memory and persisted under a directory.
+/// Frozen fragments, held in memory and persisted under a directory, for every shard of a bundle.
 ///
-/// An entry is named by its canonical key: SHA-256 over the bundle identity, the authorisation
+/// An entry is named by its canonical key: SHA-256 over the shard's identity, the authorisation
 /// rule's hash, the watermark and the sorted, deduplicated granted terms. Term ids are ordinals of
-/// one bundle, so a key narrower than that would serve one bundle's entity set under another's.
+/// one bundle and entity ids are one shard's, so a key narrower than that would serve one shard's
+/// entity set under another's.
 ///
-/// On disk an entry is `<hex key>.frag`, the `Frozen` bitmap bytes, and `<hex key>.meta`, which
-/// holds `watermark: u64 LE ‖ frozen_len: u64 LE ‖ sha256(frozen_bytes)`. Each file is written to
-/// a temporary sibling, synced and renamed, and [`FrozenFragment::open`] checks the length and
-/// the digest before it views the bytes, so a truncated, corrupt or altered entry is a miss.
+/// On disc an entry is `<hex identity>/<hex key>.frag`, the `Frozen` bitmap bytes, and
+/// `<hex identity>/<hex key>.meta`, which holds `watermark: u64 LE ‖ frozen_len: u64 LE ‖
+/// sha256(frozen_bytes)`, so a sweep can drop a superseded identity's entries and keep every live
+/// one's. Each file is written to a temporary sibling, synced and renamed, and
+/// [`FrozenFragment::open`] checks the length and the digest before it views the bytes, so a
+/// truncated, corrupt or altered entry is a miss.
 ///
-/// In memory, a slot per canonical key is either building or ready. A ready hit does no file IO.
-/// An arrival on a key that is building does not wait; it gets [`FragmentCacheError::Building`].
+/// In memory, a slot per (identity, canonical key) is either building or ready, under one bound
+/// for every shard. A ready hit does no file IO. An arrival on a key that is building does not
+/// wait; it gets [`FragmentCacheError::Building`].
 pub struct FragmentCache {
     dir: PathBuf,
-    bundle_identity: [u8; 32],
     rule_hash: [u8; 32],
-    slots: SingleFlightCache<[u8; 32], FrozenFragment>,
+    slots: SingleFlightCache<SlotKey, FrozenFragment>,
     rebuilds: AtomicU64,
 }
+
+/// An in-memory slot's name: the identity the entry is filed under, and its canonical key.
+type SlotKey = ([u8; 32], [u8; 32]);
 
 /// [`FragmentCache::get_or_build`]'s failure modes. Neither variant is ever cached.
 #[derive(Debug)]
@@ -492,84 +489,48 @@ impl From<io::Error> for FragmentCacheError {
 }
 
 impl FragmentCache {
-    /// `dir` is the engine's local cache directory for this bundle and authorisation rule, never a
-    /// path inside the bundle itself. Does not touch the filesystem; `get_or_build` creates
-    /// `dir` and any missing ancestors on first write.
+    /// `dir` is the engine's local cache directory, never a path inside the bundle itself. Does
+    /// not touch the filesystem; `get_or_build` creates `dir` and any missing ancestors on first
+    /// write.
     ///
     /// The in-memory tier's byte bound is not a constructor argument; it arrives through
     /// [`Self::set_memory_bound`]. A cache built this way is unbounded, which is correct for
     /// tests and benches; `mosaica_server::prepare` makes sure a server never gets one.
-    pub fn new(dir: &Path, bundle_identity: [u8; 32], rule_hash: [u8; 32]) -> Self {
+    pub fn new(dir: &Path, rule_hash: [u8; 32]) -> Self {
         FragmentCache {
             dir: dir.to_path_buf(),
-            bundle_identity,
             rule_hash,
             slots: SingleFlightCache::new(u64::MAX),
             rebuilds: AtomicU64::new(0),
         }
     }
 
-    /// An empty cache over the same directory and authorisation rule under a new bundle identity,
-    /// which is what a compaction's publication installs. Every slot is keyed under the old
-    /// identity, so none carries over; the persisted pairs become unreachable and are left to
-    /// [`Self::sweep`]. The byte bound and the wait budget carry over.
-    pub fn rotate(&self, bundle_identity: [u8; 32]) -> Self {
-        FragmentCache {
-            dir: self.dir.clone(),
-            bundle_identity,
-            rule_hash: self.rule_hash,
-            slots: {
-                let slots = SingleFlightCache::new(self.slots.stats().bound_bytes);
-                slots.set_wait_budget_ms(self.slots.wait_budget_ms());
-                slots
-            },
-            rebuilds: AtomicU64::new(0),
-        }
-    }
-
-    /// Every persisted entry present now, the set a rotation supersedes. An entry is not
-    /// selectable by name, since the key is a SHA-256 and a hash does not invert, but at the
-    /// instant the identity rotates every existing entry is under the superseded one, so
-    /// everything present now is exactly the set to sweep.
+    /// Drop every entry filed under an identity outside `live`, in memory and on disc: at open,
+    /// and after a compaction has replaced a shard's identity. Only directories named by 64 hex
+    /// digits are touched, so the cache directory may hold anything named otherwise. Returns how
+    /// many identities' directories were removed.
     ///
-    /// Separate from [`Self::sweep`] so callers list before the swap and delete after it:
-    /// deleting before the swap would discard a cache still live if the publication then fails,
-    /// and deleting after it by re-listing would race a request that authorised in between.
-    ///
-    /// A directory that cannot be read yields an empty list rather than an error.
-    pub fn superseded_entries(&self) -> Vec<PathBuf> {
+    /// Unlinking an entry a live request still holds is safe on POSIX: a mapping outlives the
+    /// directory entry, so a holder keeps reading the same bytes, and the unlink removes only the
+    /// name. A directory that cannot be removed is counted out rather than reported.
+    pub fn sweep(&self, live: &[[u8; 32]]) -> usize {
+        self.slots
+            .retain_keys(|(identity, _)| live.contains(identity));
+        let live: Vec<String> = live.iter().map(hex_encode).collect();
         let Ok(entries) = std::fs::read_dir(&self.dir) else {
-            return Vec::new();
+            return 0;
         };
         entries
             .filter_map(|entry| entry.ok())
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.extension()
-                    .is_some_and(|ext| ext == "frag" || ext == "meta")
+            .filter(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                name.len() == 64
+                    && name.bytes().all(|b| b.is_ascii_hexdigit())
+                    && !live.contains(&name)
+                    && entry.path().is_dir()
             })
-            .collect()
-    }
-
-    /// Delete the entries [`Self::superseded_entries`] named. Returns how many were removed. An
-    /// associated function, not a method: by the time it runs, the cache it belongs to has been
-    /// replaced by the rotated cache.
-    ///
-    /// Unlinking an entry a live request still holds is safe on POSIX: a mapping outlives the
-    /// directory entry, so a `Session` or an in-memory slot holding one keeps reading the same
-    /// bytes, and the unlink removes only the name. Failures are counted out rather than
-    /// propagated.
-    pub fn sweep(entries: &[PathBuf]) -> usize {
-        entries
-            .iter()
-            .filter(|path| std::fs::remove_file(path).is_ok())
+            .filter(|entry| std::fs::remove_dir_all(entry.path()).is_ok())
             .count()
-    }
-
-    /// The bundle identity every key in this cache is computed under. Compared against
-    /// [`FrozenFragment::identity`] wherever a fragment a caller already holds is composed.
-    pub fn bundle_identity(&self) -> [u8; 32] {
-        self.bundle_identity
     }
 
     /// Bound the in-memory tier at `bytes`. The digest-verified `.frag` sidecar tier is untouched
@@ -583,23 +544,23 @@ impl FragmentCache {
         self.slots.set_wait_budget_ms(wait_budget_ms);
     }
 
-    /// The canonical cache key for `satisfied` under this cache's bundle and rule identity, the
-    /// only way to name an entry from outside and so what [`Self::evict`] takes.
-    pub fn canonical_key_for(&self, satisfied: &[TermId], watermark: u64) -> [u8; 32] {
-        canonical_key(
-            &self.bundle_identity,
-            &self.rule_hash,
-            satisfied,
-            watermark,
-        )
+    /// The canonical cache key for `satisfied` under `identity` and this cache's rule, the only
+    /// way to name an entry from outside and so what [`Self::evict`] takes.
+    pub fn canonical_key_for(
+        &self,
+        identity: [u8; 32],
+        satisfied: &[TermId],
+        watermark: u64,
+    ) -> [u8; 32] {
+        canonical_key(&identity, &self.rule_hash, satisfied, watermark)
     }
 
     /// Drop one entry from the in-memory tier. Returns whether anything was there. Frees only
     /// the in-memory slot: the `.frag`/`.meta` sidecar pair is left on disk, digest-verified on
     /// every reopen, so eviction costs the next caller a re-open plus a SHA-256, never
     /// correctness.
-    pub fn evict(&self, key: &[u8; 32]) -> bool {
-        self.slots.evict(key)
+    pub fn evict(&self, identity: [u8; 32], key: &[u8; 32]) -> bool {
+        self.slots.evict(&(identity, *key))
     }
 
     /// The operator gauges for the in-memory tier; see [`CacheStats`]. Lock-free.
@@ -619,29 +580,34 @@ impl FragmentCache {
         self.slots.len()
     }
 
-    /// Entries live flat in `dir`, named by their canonical key. A cache an upgraded binary
-    /// cannot read is reclaimed by deleting the cache directory; it is a derived artefact and
-    /// rebuilds itself.
-    fn frag_path(&self, key: &[u8; 32]) -> PathBuf {
-        self.dir.join(format!("{}.frag", hex_encode(key)))
+    /// The directory `identity`'s entries are filed in. A cache an upgraded binary cannot read
+    /// is reclaimed by deleting the cache directory; it is a derived artefact and rebuilds itself.
+    fn identity_dir(&self, identity: [u8; 32]) -> PathBuf {
+        self.dir.join(hex_encode(&identity))
     }
 
-    fn meta_path(&self, key: &[u8; 32]) -> PathBuf {
-        self.dir.join(format!("{}.meta", hex_encode(key)))
+    fn frag_path(&self, identity: [u8; 32], key: &[u8; 32]) -> PathBuf {
+        self.identity_dir(identity)
+            .join(format!("{}.frag", hex_encode(key)))
     }
 
-    /// The `.frag` path an entry for `satisfied` at `watermark` occupies. Exposed so that two
-    /// watermarks being two entries is assertable on the paths themselves.
-    pub fn path_of(&self, satisfied: &[TermId], watermark: u64) -> PathBuf {
-        self.frag_path(&canonical_key(
-            &self.bundle_identity,
-            &self.rule_hash,
-            satisfied,
-            watermark,
-        ))
+    fn meta_path(&self, identity: [u8; 32], key: &[u8; 32]) -> PathBuf {
+        self.identity_dir(identity)
+            .join(format!("{}.meta", hex_encode(key)))
     }
 
-    /// The frozen fragment for `satisfied`, the terms a credential grants, at `watermark`.
+    /// The `.frag` path an entry for `satisfied` at `watermark` under `identity` occupies.
+    /// Exposed so that two watermarks or two identities being two entries is assertable on the
+    /// paths themselves.
+    pub fn path_of(&self, identity: [u8; 32], satisfied: &[TermId], watermark: u64) -> PathBuf {
+        self.frag_path(
+            identity,
+            &canonical_key(&identity, &self.rule_hash, satisfied, watermark),
+        )
+    }
+
+    /// The frozen fragment for `satisfied`, the terms a credential grants, at `watermark` in the
+    /// shard `identity` names.
     ///
     /// A ready slot answers from memory. Otherwise the persisted pair is opened if it verifies,
     /// whichever process wrote it, and failing that the fragment is built from `postings` and
@@ -653,12 +619,14 @@ impl FragmentCache {
     /// the one already cached.
     pub fn get_or_build(
         &self,
+        identity: [u8; 32],
         satisfied: &[TermId],
         postings: &PostingsReader,
         deltas: &[Arc<DeltaTier>],
         watermark: u64,
     ) -> Result<Arc<FrozenFragment>, FragmentCacheError> {
         self.get_or_build_grant(
+            identity,
             &Grant::Keys(Arc::new(satisfied.to_vec())),
             postings,
             deltas,
@@ -669,14 +637,17 @@ impl FragmentCache {
     /// [`Self::get_or_build`] for `grant`.
     pub fn get_or_build_grant(
         &self,
+        identity: [u8; 32],
         grant: &Grant,
         postings: &PostingsReader,
         deltas: &[Arc<DeltaTier>],
         watermark: u64,
     ) -> Result<Arc<FrozenFragment>, FragmentCacheError> {
-        let key = grant_key(&self.bundle_identity, &self.rule_hash, grant, watermark);
+        let key = grant_key(&identity, &self.rule_hash, grant, watermark);
         self.slots
-            .get_or_try_build(key, || self.open_or_build(&key, grant, postings, deltas, watermark))
+            .get_or_try_build((identity, key), || {
+                self.open_or_build(identity, &key, grant, postings, deltas, watermark)
+            })
             .map_err(|e| match e {
                 SingleFlightError::Building => FragmentCacheError::Building,
                 SingleFlightError::Build(io_err) => FragmentCacheError::Io(io_err),
@@ -687,6 +658,7 @@ impl FragmentCache {
     /// same fragment. [`FragmentCacheError::Building`] then means the budget ran out.
     pub fn get_or_build_waiting(
         &self,
+        identity: [u8; 32],
         satisfied: &[TermId],
         postings: &PostingsReader,
         deltas: &[Arc<DeltaTier>],
@@ -694,6 +666,7 @@ impl FragmentCache {
         cancel: &dyn Cancel,
     ) -> Result<Arc<FrozenFragment>, FragmentCacheError> {
         self.get_or_build_grant_waiting(
+            identity,
             &Grant::Keys(Arc::new(satisfied.to_vec())),
             postings,
             deltas,
@@ -705,16 +678,17 @@ impl FragmentCache {
     /// [`Self::get_or_build_waiting`] for `grant`.
     pub fn get_or_build_grant_waiting(
         &self,
+        identity: [u8; 32],
         grant: &Grant,
         postings: &PostingsReader,
         deltas: &[Arc<DeltaTier>],
         watermark: u64,
         cancel: &dyn Cancel,
     ) -> Result<Arc<FrozenFragment>, FragmentCacheError> {
-        let key = grant_key(&self.bundle_identity, &self.rule_hash, grant, watermark);
+        let key = grant_key(&identity, &self.rule_hash, grant, watermark);
         self.slots
-            .get_or_try_build_waiting(key, cancel, || {
-                self.open_or_build(&key, grant, postings, deltas, watermark)
+            .get_or_try_build_waiting((identity, key), cancel, || {
+                self.open_or_build(identity, &key, grant, postings, deltas, watermark)
             })
             .map_err(|e| match e {
                 WaitingBuildError::Wait(WaitEnded::Budget) => FragmentCacheError::Building,
@@ -727,29 +701,24 @@ impl FragmentCache {
     /// persisted.
     fn open_or_build(
         &self,
+        identity: [u8; 32],
         key: &[u8; 32],
         grant: &Grant,
         postings: &PostingsReader,
         deltas: &[Arc<DeltaTier>],
         watermark: u64,
     ) -> io::Result<FrozenFragment> {
-        let frag_path = self.frag_path(key);
-        let meta_path = self.meta_path(key);
+        let frag_path = self.frag_path(identity, key);
+        let meta_path = self.meta_path(identity, key);
         // `open` refuses anything short of a valid, digest-matching pair, so a missing file and
         // a corrupt one are both a miss.
-        if let Ok(frozen) = FrozenFragment::open(&frag_path, &meta_path, self.bundle_identity) {
+        if let Ok(frozen) = FrozenFragment::open(&frag_path, &meta_path, identity) {
             return Ok(frozen);
         }
-        create_private_dir_all(&self.dir)?;
+        create_private_dir_all(&self.identity_dir(identity))?;
         let bitmap = build_grant_with_deltas(grant, postings, deltas)?;
         self.rebuilds.fetch_add(1, Ordering::Relaxed);
-        FrozenFragment::build_and_persist(
-            &frag_path,
-            &meta_path,
-            &bitmap,
-            watermark,
-            self.bundle_identity,
-        )
+        FrozenFragment::build_and_persist(&frag_path, &meta_path, &bitmap, watermark, identity)
     }
 }
 
@@ -873,13 +842,13 @@ mod tests {
         let every: Vec<TermId> = (0..=40).map(TermId::new).collect();
         assert_eq!(built.to_vec(), expected_union(&every, &base, &tiers).to_vec());
 
-        let cache = FragmentCache::new(&temp.path().join("cache"), [1; 32], [2; 32]);
-        let first = cache.get_or_build_grant(&Grant::Every, &reader, &opened, 7).unwrap();
-        let second = cache.get_or_build_grant(&Grant::Every, &reader, &[], 7).unwrap();
+        let cache = FragmentCache::new(&temp.path().join("cache"), [2; 32]);
+        let first = cache.get_or_build_grant([1; 32], &Grant::Every, &reader, &opened, 7).unwrap();
+        let second = cache.get_or_build_grant([1; 32], &Grant::Every, &reader, &[], 7).unwrap();
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(cache.rebuild_count(), 1);
         let keys = Grant::Keys(Arc::new(every));
-        cache.get_or_build_grant(&keys, &reader, &opened, 7).unwrap();
+        cache.get_or_build_grant([1; 32], &keys, &reader, &opened, 7).unwrap();
         assert_eq!(cache.rebuild_count(), 2, "a list of every key is a different entry");
     }
 

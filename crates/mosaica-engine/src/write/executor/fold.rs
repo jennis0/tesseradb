@@ -1836,7 +1836,7 @@ impl Executor {
         let shard = live.only_shard();
         let live_tiers = &shard.data.record.deltas;
         let (bundle, mut rotation) =
-            crate::engine::open_rotation(&self.deps.bundle_root, prefix, &shard.fragments, retired)
+            crate::engine::open_rotation(&self.deps.bundle_root, prefix, retired)
                 .map_err(|e| format!("the folded prefix would not open ({e})"))?;
         rotation.frees = frees;
         rotation.retired_artifacts = retired_artifacts;

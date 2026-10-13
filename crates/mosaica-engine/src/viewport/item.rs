@@ -72,9 +72,9 @@ impl Engine {
     /// Is `entity` visible to `session` in `shard` — the one bit `/v1/items` needs. An
     /// entity-space question: three constant-time probes, no `RowProjection` constructed or
     /// consulted, so this costs the same whether `entity` exists and is visible, exists and is
-    /// not, or does not exist at all. Takes the fragment as an argument: a session's own fragment
-    /// goes stale at every flush, and answering from a stale one would report a flushed item as
-    /// invisible while the viewport beside it drew the mark.
+    /// not, or does not exist at all. Takes the fragment as an argument, so the caller chooses the
+    /// watermark: answering from an earlier one than the viewport beside it serves would report a
+    /// flushed item as invisible while the viewport drew the mark.
     pub fn visible_to(
         &self,
         fragment: &FrozenFragment,
@@ -176,17 +176,18 @@ impl Engine {
         // rebuilding at the live watermark measures ~200 ms per credential per publication, and
         // would answer from a different watermark than the viewport beside it serves from. Falls
         // back to a build only when this session has no entry at or above the retention floor,
-        // scoped to this generation's prefix so a fold's flip cannot answer from a replaced term
-        // index.
+        // scoped to the item's own shard, whose entity space `entity` is in, and to this
+        // generation's prefix so a fold's flip cannot answer from a replaced term index.
         let fragment = match self.row_projection_cache.freshest_fragment(
             session.token_id(),
+            shard,
             &generation.prefix,
             generation
                 .segments_version
                 .saturating_sub(crate::cache::KEEP_SUPERSEDED_GENERATIONS),
         ) {
             Some(fragment) => fragment,
-            None => self.fragment_for(session, shard)?,
+            None => self.fragment_for(session, shard, None)?,
         };
 
         // ONE BIT, in entity space, O(1), before anything is looked up in row space.

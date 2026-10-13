@@ -326,6 +326,7 @@ impl crate::Engine {
                 &geometry,
                 key.segments_version,
             ),
+            fragment: Arc::clone(&geometry.fragment),
             cancel: None,
             turn: Default::default(),
         };

@@ -1,6 +1,7 @@
-//! Mask fragment build and the frozen cache, tested against a brute-force `HashSet<u32>` union.
-//! `FragmentCache` is keyed on `bundle_identity ‖ rule_hash ‖ sorted term ids`, so a cache
-//! dir reused across bundle rebuilds cannot serve a fragment naming a different entity set.
+//! Mask fragment build and the frozen cache, tested against a brute-force `HashSet<u32>`
+//! union. `FragmentCache` is keyed on `identity ‖ rule_hash ‖ watermark ‖ sorted term ids`, so a
+//! cache dir reused across bundle rebuilds or shards cannot serve a fragment naming a different
+//! entity set.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -14,10 +15,15 @@ use mosaica_types::TermId;
 
 const UNIVERSE: u32 = 100_000;
 
-/// The single `.frag` file a cache has written, found by scanning its directory.
+/// The identity every test files its entries under unless it is testing identities.
+const IDENTITY: [u8; 32] = [9u8; 32];
+
+/// The single `.frag` file a cache has written, found by scanning its identities' directories.
 fn the_frag_file(cache_dir: &std::path::Path) -> std::path::PathBuf {
     std::fs::read_dir(cache_dir)
         .unwrap_or_else(|e| panic!("no cache dir at {}: {e}", cache_dir.display()))
+        .filter_map(|e| e.ok())
+        .flat_map(|identity| std::fs::read_dir(identity.path()).into_iter().flatten())
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .find(|p| p.extension().and_then(|e| e.to_str()) == Some("frag"))
@@ -89,7 +95,6 @@ fn frozen_round_trip_second_call_does_not_rebuild() {
     let reader = mosaica_authz::PostingsReader::open(&path, false).unwrap();
 
     let cache_dir = TempDir::new().unwrap();
-    let bundle_identity = [9u8; 32];
     let rule_hash = [7u8; 32];
 
     let terms: Vec<TermId> = (0..10u32).map(TermId::new).collect();
@@ -100,11 +105,11 @@ fn frozen_round_trip_second_call_does_not_rebuild() {
     }
 
     {
-        let cache = FragmentCache::new(cache_dir.path(), bundle_identity, rule_hash);
+        let cache = FragmentCache::new(cache_dir.path(), rule_hash);
         assert_eq!(cache.rebuild_count(), 0);
 
         let frozen = cache
-            .get_or_build(&terms, &reader, &[], 42)
+            .get_or_build(IDENTITY, &terms, &reader, &[], 42)
             .unwrap();
         assert_eq!(cache.rebuild_count(), 1);
         assert_eq!(frozen.watermark, 42);
@@ -112,7 +117,7 @@ fn frozen_round_trip_second_call_does_not_rebuild() {
         assert_eq!(got, expected);
 
         let frozen2 = cache
-            .get_or_build(&terms, &reader, &[], 42)
+            .get_or_build(IDENTITY, &terms, &reader, &[], 42)
             .unwrap();
         assert_eq!(
             cache.rebuild_count(),
@@ -123,11 +128,11 @@ fn frozen_round_trip_second_call_does_not_rebuild() {
     }
 
     {
-        let cache = FragmentCache::new(cache_dir.path(), bundle_identity, rule_hash);
+        let cache = FragmentCache::new(cache_dir.path(), rule_hash);
         assert_eq!(cache.rebuild_count(), 0);
 
         let frozen = cache
-            .get_or_build(&terms, &reader, &[], 42)
+            .get_or_build(IDENTITY, &terms, &reader, &[], 42)
             .unwrap();
         assert_eq!(
             cache.rebuild_count(),
@@ -151,7 +156,7 @@ fn frozen_round_trip_second_call_does_not_rebuild() {
 }
 
 #[test]
-fn stale_bundle_identity_misses_the_cache() {
+fn another_identity_misses_the_cache() {
     let corpus_dir = TempDir::new().unwrap();
     let (path, _per_term) = write_random_postings(corpus_dir.path(), 11, 5);
     let reader = mosaica_authz::PostingsReader::open(&path, false).unwrap();
@@ -160,25 +165,23 @@ fn stale_bundle_identity_misses_the_cache() {
     let rule_hash = [7u8; 32];
     let terms: Vec<TermId> = (0..5u32).map(TermId::new).collect();
 
-    {
-        let cache = FragmentCache::new(cache_dir.path(), [9u8; 32], rule_hash);
-        cache
-            .get_or_build(&terms, &reader, &[], 1)
-            .unwrap();
-        assert_eq!(cache.rebuild_count(), 1);
-    }
+    let cache = FragmentCache::new(cache_dir.path(), rule_hash);
+    cache.get_or_build([9u8; 32], &terms, &reader, &[], 1).unwrap();
+    assert_eq!(cache.rebuild_count(), 1);
+    cache.get_or_build([10u8; 32], &terms, &reader, &[], 1).unwrap();
+    assert_eq!(
+        cache.rebuild_count(),
+        2,
+        "another identity must not hit a fragment keyed under the first"
+    );
 
-    {
-        let cache = FragmentCache::new(cache_dir.path(), [10u8; 32], rule_hash);
-        cache
-            .get_or_build(&terms, &reader, &[], 1)
-            .unwrap();
-        assert_eq!(
-            cache.rebuild_count(),
-            1,
-            "different bundle_identity must not hit a fragment keyed under the old identity"
-        );
-    }
+    let reopened = FragmentCache::new(cache_dir.path(), rule_hash);
+    reopened.get_or_build([11u8; 32], &terms, &reader, &[], 1).unwrap();
+    assert_eq!(
+        reopened.rebuild_count(),
+        1,
+        "nor may a persisted entry of another identity answer after a restart"
+    );
 }
 
 #[test]
@@ -188,21 +191,20 @@ fn stale_rule_hash_misses_the_cache() {
     let reader = mosaica_authz::PostingsReader::open(&path, false).unwrap();
 
     let cache_dir = TempDir::new().unwrap();
-    let bundle_identity = [9u8; 32];
     let terms: Vec<TermId> = (0..5u32).map(TermId::new).collect();
 
     {
-        let cache = FragmentCache::new(cache_dir.path(), bundle_identity, [7u8; 32]);
+        let cache = FragmentCache::new(cache_dir.path(), [7u8; 32]);
         cache
-            .get_or_build(&terms, &reader, &[], 1)
+            .get_or_build(IDENTITY, &terms, &reader, &[], 1)
             .unwrap();
         assert_eq!(cache.rebuild_count(), 1);
     }
 
     {
-        let cache = FragmentCache::new(cache_dir.path(), bundle_identity, [8u8; 32]);
+        let cache = FragmentCache::new(cache_dir.path(), [8u8; 32]);
         cache
-            .get_or_build(&terms, &reader, &[], 1)
+            .get_or_build(IDENTITY, &terms, &reader, &[], 1)
             .unwrap();
         assert_eq!(
             cache.rebuild_count(),
@@ -220,7 +222,6 @@ fn bit_flipped_frag_file_is_treated_as_a_cache_miss_and_rebuilds() {
     let reader = mosaica_authz::PostingsReader::open(&path, false).unwrap();
 
     let cache_dir = TempDir::new().unwrap();
-    let bundle_identity = [3u8; 32];
     let rule_hash = [4u8; 32];
     let terms: Vec<TermId> = (0..8u32).map(TermId::new).collect();
 
@@ -230,9 +231,9 @@ fn bit_flipped_frag_file_is_treated_as_a_cache_miss_and_rebuilds() {
     }
 
     {
-        let cache = FragmentCache::new(cache_dir.path(), bundle_identity, rule_hash);
+        let cache = FragmentCache::new(cache_dir.path(), rule_hash);
         cache
-            .get_or_build(&terms, &reader, &[], 5)
+            .get_or_build(IDENTITY, &terms, &reader, &[], 5)
             .unwrap();
         assert_eq!(cache.rebuild_count(), 1);
     }
@@ -249,9 +250,9 @@ fn bit_flipped_frag_file_is_treated_as_a_cache_miss_and_rebuilds() {
     }
 
     {
-        let cache = FragmentCache::new(cache_dir.path(), bundle_identity, rule_hash);
+        let cache = FragmentCache::new(cache_dir.path(), rule_hash);
         let frozen = cache
-            .get_or_build(&terms, &reader, &[], 5)
+            .get_or_build(IDENTITY, &terms, &reader, &[], 5)
             .expect("a corrupted cache entry must fail closed to a rebuild, not an error");
         assert_eq!(
             cache.rebuild_count(),
@@ -275,7 +276,7 @@ fn concurrent_cold_builds_single_flight_to_one_real_build() {
     let reader = Arc::new(mosaica_authz::PostingsReader::open(&path, false).unwrap());
 
     let cache_dir = TempDir::new().unwrap();
-    let cache = Arc::new(FragmentCache::new(cache_dir.path(), [1u8; 32], [2u8; 32]));
+    let cache = Arc::new(FragmentCache::new(cache_dir.path(), [2u8; 32]));
     let terms: Vec<TermId> = (0..20u32).map(TermId::new).collect();
 
     const THREADS: usize = 8;
@@ -296,7 +297,7 @@ fn concurrent_cold_builds_single_flight_to_one_real_build() {
                         "get_or_build never converged out of Building -- looks like a D-G \
                          regression (a stuck waiter), not an ordinary race"
                     );
-                    match cache.get_or_build(&terms, &reader, &[], 7) {
+                    match cache.get_or_build(IDENTITY, &terms, &reader, &[], 7) {
                         Ok(frozen) => return frozen,
                         Err(FragmentCacheError::Building) => {
                             std::thread::yield_now();
@@ -333,7 +334,7 @@ fn warm_hit_does_no_file_io_after_backing_files_are_removed() {
     let reader = mosaica_authz::PostingsReader::open(&path, false).unwrap();
 
     let cache_dir = TempDir::new().unwrap();
-    let cache = FragmentCache::new(cache_dir.path(), [3u8; 32], [4u8; 32]);
+    let cache = FragmentCache::new(cache_dir.path(), [4u8; 32]);
     let terms: Vec<TermId> = (0..6u32).map(TermId::new).collect();
 
     let mut expected: HashSet<u32> = HashSet::new();
@@ -342,16 +343,16 @@ fn warm_hit_does_no_file_io_after_backing_files_are_removed() {
     }
 
     let first = cache
-        .get_or_build(&terms, &reader, &[], 11)
+        .get_or_build(IDENTITY, &terms, &reader, &[], 11)
         .unwrap();
     assert_eq!(cache.rebuild_count(), 1);
 
     for entry in std::fs::read_dir(cache_dir.path()).unwrap() {
-        std::fs::remove_file(entry.unwrap().path()).unwrap();
+        std::fs::remove_dir_all(entry.unwrap().path()).unwrap();
     }
 
     let second = cache
-        .get_or_build(&terms, &reader, &[], 11)
+        .get_or_build(IDENTITY, &terms, &reader, &[], 11)
         .expect("a warm in-memory hit must succeed even with the backing files gone");
     assert!(
         Arc::ptr_eq(&first, &second),
@@ -379,10 +380,10 @@ fn failed_build_leaves_no_wedge_and_retry_after_repair_succeeds() {
     std::fs::write(&blocker_path, b"not a directory").unwrap();
     let cache_dir = blocker_path.join("cache");
 
-    let cache = FragmentCache::new(&cache_dir, [6u8; 32], [7u8; 32]);
+    let cache = FragmentCache::new(&cache_dir, [7u8; 32]);
     let terms: Vec<TermId> = (0..4u32).map(TermId::new).collect();
 
-    let result = cache.get_or_build(&terms, &reader, &[], 1);
+    let result = cache.get_or_build(IDENTITY, &terms, &reader, &[], 1);
     assert!(
         matches!(result, Err(FragmentCacheError::Io(_))),
         "expected an Io error from a cache dir whose parent is a plain file, got {:?}",
@@ -403,52 +404,58 @@ fn failed_build_leaves_no_wedge_and_retry_after_repair_succeeds() {
         expected.extend(per_term[t.raw() as usize].iter().copied());
     }
     let frozen = cache
-        .get_or_build(&terms, &reader, &[], 1)
+        .get_or_build(IDENTITY, &terms, &reader, &[], 1)
         .expect("retry after repair must succeed");
     assert_eq!(cache.rebuild_count(), 1);
     let got: HashSet<u32> = frozen.view().iter().collect();
     assert_eq!(got, expected);
 }
 
-/// A rotation starts empty and carries the byte bound.
+/// A sweep drops the entries of every identity but the live ones, in memory and on disc, and
+/// leaves whatever else the directory holds.
 #[test]
-fn a_rotation_starts_empty_and_keeps_the_byte_bound() {
+fn a_sweep_leaves_the_live_identities() {
     let corpus_dir = TempDir::new().unwrap();
     let (path, _per_term) = write_random_postings(corpus_dir.path(), 17, 5);
     let reader = mosaica_authz::PostingsReader::open(&path, false).unwrap();
 
     let cache_dir = TempDir::new().unwrap();
     let terms: Vec<TermId> = (0..5u32).map(TermId::new).collect();
+    let (retired, kept) = ([9u8; 32], [10u8; 32]);
 
-    let cache = FragmentCache::new(cache_dir.path(), [9u8; 32], [7u8; 32]);
+    let cache = FragmentCache::new(cache_dir.path(), [7u8; 32]);
     cache.set_memory_bound(64 * 1024 * 1024);
-    cache
-        .get_or_build(&terms, &reader, &[], 1)
-        .unwrap();
-    assert_eq!(cache.rebuild_count(), 1);
-    assert_eq!(cache.slot_count(), 1);
-    let key_before = cache.canonical_key_for(&terms, 1);
-
-    let rotated = cache.rotate([10u8; 32]);
-    assert_eq!(rotated.slot_count(), 0, "no slot survives the identity");
-    assert_eq!(
-        rotated.stats().bound_bytes,
-        64 * 1024 * 1024,
-        "the validated bound is carried, or a rotation quietly unbounds the cache"
+    cache.get_or_build(retired, &terms, &reader, &[], 1).unwrap();
+    cache.get_or_build(kept, &terms, &reader, &[], 1).unwrap();
+    assert_eq!(cache.slot_count(), 2);
+    assert_ne!(
+        cache.path_of(retired, &terms, 1),
+        cache.path_of(kept, &terms, 1)
     );
-    assert_ne!(rotated.canonical_key_for(&terms, 1), key_before);
 
-    rotated
-        .get_or_build(&terms, &reader, &[], 1)
-        .unwrap();
+    let other = cache_dir.path().join("figures");
+    std::fs::create_dir_all(&other).unwrap();
+    assert_eq!(cache.sweep(&[kept]), 1, "the retired identity's directory");
+    assert!(
+        other.exists(),
+        "a directory the cache does not file entries in is left alone"
+    );
+    assert_eq!(cache.slot_count(), 1, "the other identity's slot survives");
+    assert!(!cache.path_of(retired, &terms, 1).exists());
+    assert!(cache.path_of(kept, &terms, 1).exists());
+    assert_eq!(cache.stats().bound_bytes, 64 * 1024 * 1024);
+
+    cache.get_or_build(kept, &terms, &reader, &[], 1).unwrap();
+    assert_eq!(cache.rebuild_count(), 2, "the kept identity answers from memory");
+    cache.get_or_build(retired, &terms, &reader, &[], 1).unwrap();
     assert_eq!(
-        rotated.rebuild_count(),
-        1,
-        "the rotated cache re-unioned the postings rather than reaching the pre-rotation entry"
+        cache.rebuild_count(),
+        3,
+        "the retired identity re-unions the postings rather than reaching its old entry"
     );
 }
 
-/// The identity a fragment reports is the one whose cache produced it.
+/// The identity a fragment reports is the one it was built or reopened under.
 #[test]
 fn a_fragment_carries_the_identity_it_was_built_under() {
     let corpus_dir = TempDir::new().unwrap();
@@ -458,23 +465,17 @@ fn a_fragment_carries_the_identity_it_was_built_under() {
     let cache_dir = TempDir::new().unwrap();
     let terms: Vec<TermId> = (0..5u32).map(TermId::new).collect();
 
-    let cache = FragmentCache::new(cache_dir.path(), [9u8; 32], [7u8; 32]);
-    let built = cache
-        .get_or_build(&terms, &reader, &[], 1)
-        .unwrap();
+    let cache = FragmentCache::new(cache_dir.path(), [7u8; 32]);
+    let built = cache.get_or_build([9u8; 32], &terms, &reader, &[], 1).unwrap();
     assert_eq!(built.identity, [9u8; 32]);
-    assert_eq!(cache.bundle_identity(), [9u8; 32]);
 
-    let reopened = FragmentCache::new(cache_dir.path(), [9u8; 32], [7u8; 32])
-        .get_or_build(&terms, &reader, &[], 1)
+    let reopened = FragmentCache::new(cache_dir.path(), [7u8; 32])
+        .get_or_build([9u8; 32], &terms, &reader, &[], 1)
         .unwrap();
     assert_eq!(reopened.identity, [9u8; 32]);
 
-    let rotated = cache.rotate([10u8; 32]);
-    let rebuilt = rotated
-        .get_or_build(&terms, &reader, &[], 1)
-        .unwrap();
-    assert_eq!(rebuilt.identity, [10u8; 32]);
+    let other = cache.get_or_build([10u8; 32], &terms, &reader, &[], 1).unwrap();
+    assert_eq!(other.identity, [10u8; 32]);
 }
 
 /// Every waiting caller is served the one build; none is refused and none retries.
@@ -485,7 +486,7 @@ fn concurrent_waiting_callers_are_all_served_the_one_build() {
     let reader = Arc::new(mosaica_authz::PostingsReader::open(&path, false).unwrap());
 
     let cache_dir = TempDir::new().unwrap();
-    let cache = Arc::new(FragmentCache::new(cache_dir.path(), [1u8; 32], [2u8; 32]));
+    let cache = Arc::new(FragmentCache::new(cache_dir.path(), [2u8; 32]));
     let terms: Vec<TermId> = (0..20u32).map(TermId::new).collect();
 
     const THREADS: usize = 8;
@@ -501,7 +502,14 @@ fn concurrent_waiting_callers_are_all_served_the_one_build() {
             std::thread::spawn(move || {
                 barrier.wait();
                 cache
-                    .get_or_build_waiting(&terms, &reader, &[], 7, &mosaica_cache::NeverCancelled)
+                    .get_or_build_waiting(
+                        IDENTITY,
+                        &terms,
+                        &reader,
+                        &[],
+                        7,
+                        &mosaica_cache::NeverCancelled,
+                    )
                     .expect("a waiting caller is served, not refused")
             })
         })

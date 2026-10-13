@@ -476,6 +476,7 @@ impl Engine {
             segments: segments_with_row_bases(view, view_data)?,
             denied,
             mask_identity,
+            fragment: Arc::clone(&geometry.fragment),
             cancel: None,
             turn: Default::default(),
         };

@@ -11,6 +11,7 @@ use mosaica_authz::{
 use mosaica_types::TermId;
 
 const THRESHOLD: u32 = 32;
+const IDENTITY: [u8; 32] = [1u8; 32];
 
 fn base(dir: &std::path::Path) -> PostingsReader {
     let path = dir.join("postings.arrow");
@@ -29,7 +30,7 @@ fn tier(dir: &std::path::Path, name: &str, entities: &[u32]) -> Arc<DeltaTier> {
 }
 
 fn cache_at(dir: &TempDir, name: &str) -> FragmentCache {
-    FragmentCache::new(&dir.path().join(name), [1u8; 32], [2u8; 32])
+    FragmentCache::new(&dir.path().join(name), [2u8; 32])
 }
 
 fn cache(dir: &TempDir) -> FragmentCache {
@@ -46,9 +47,10 @@ fn the_watermark_is_part_of_the_disk_key() {
     let base = base(dir.path());
     let terms = [TermId::new(0)];
 
-    let early = cache.get_or_build(&terms, &base, &[], 10).unwrap();
+    let early = cache.get_or_build(IDENTITY, &terms, &base, &[], 10).unwrap();
     let late = cache
         .get_or_build(
+            IDENTITY,
             &terms,
             &base,
             &[tier(dir.path(), "t.arrow", &[9])],
@@ -57,8 +59,8 @@ fn the_watermark_is_part_of_the_disk_key() {
         .unwrap();
 
     assert_ne!(
-        cache.path_of(&terms, 10),
-        cache.path_of(&terms, 20),
+        cache.path_of(IDENTITY, &terms, 10),
+        cache.path_of(IDENTITY, &terms, 20),
         "one path for two contents is the collision"
     );
     assert_eq!(early.watermark, 10);
@@ -92,14 +94,15 @@ fn coalescing_tiers_leaves_the_fragment_unchanged() {
     let separate_cache = cache_at(&dir, "separate");
     let coalesced_cache = cache_at(&dir, "coalesced");
     assert_ne!(
-        separate_cache.path_of(&terms, 20),
-        coalesced_cache.path_of(&terms, 20),
+        separate_cache.path_of(IDENTITY, &terms, 20),
+        coalesced_cache.path_of(IDENTITY, &terms, 20),
         "the two builds must land in different cache entries, or the second is a Ready hit on \
          the first and this test compares a value with itself"
     );
 
     let separate = separate_cache
         .get_or_build(
+            IDENTITY,
             &terms,
             &base,
             &[
@@ -111,6 +114,7 @@ fn coalescing_tiers_leaves_the_fragment_unchanged() {
         .unwrap();
     let coalesced = coalesced_cache
         .get_or_build(
+            IDENTITY,
             &terms,
             &base,
             &[Arc::new(DeltaTier::open(&merged).unwrap())],
@@ -135,13 +139,13 @@ fn an_entry_survives_a_reopen_of_the_cache() {
     let terms = [TermId::new(0)];
 
     let built = cache(&dir)
-        .get_or_build(&terms, &base, &[], 10)
+        .get_or_build(IDENTITY, &terms, &base, &[], 10)
         .unwrap()
         .view()
         .to_vec();
 
     let reopened = cache(&dir)
-        .get_or_build(&terms, &base, &[], 10)
+        .get_or_build(IDENTITY, &terms, &base, &[], 10)
         .unwrap();
     assert_eq!(reopened.view().to_vec(), built);
     assert_eq!(reopened.watermark, 10);

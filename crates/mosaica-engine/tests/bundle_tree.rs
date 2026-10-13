@@ -172,6 +172,18 @@ fn every_file_is_global_or_its_partitions_or_in_its_shard() {
             now.merges > stats.merges && now.coalesces > stats.coalesces
         },
     );
+    // A tick can dispatch one more merge or coalesce, whose commit prunes side-manifests while
+    // the tree is read.
+    engine.set_merge_for_test(false);
+    engine.set_coalesce_for_test(false);
+    wait_until(
+        "no merge or coalesce in flight",
+        Duration::from_secs(60),
+        || {
+            let now = engine.write_executor_stats();
+            !now.merge_in_flight && !now.coalesce_in_flight
+        },
+    );
     assert_tree(
         &root,
         "a layer's publication, flushes, a merge and a coalesce",

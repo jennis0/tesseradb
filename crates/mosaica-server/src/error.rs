@@ -259,7 +259,7 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
             retry_after_s: RETRY_AFTER_SECS,
             cause: ShedCause::SingleFlight,
         },
-        // Another `authorise` call is building this credential's mask fragment.
+        // Another request is building this grant's mask fragment, past the wait budget.
         EngineError::FragmentBuilding => ApiError::Backpressure {
             retry_after_s: RETRY_AFTER_SECS,
             cause: ShedCause::SingleFlight,

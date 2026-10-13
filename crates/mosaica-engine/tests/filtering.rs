@@ -370,7 +370,9 @@ fn candidate_for(fx: &Fixture, credential: &[u8]) -> (mosaica_engine::Engine, Bi
         .expect("the credential resolves");
     let generation = engine.generation();
     let cand = candidate(
-        session.fragment_at_authorise_for_test(),
+        &engine
+            .session_fragment_for_test(&session)
+            .expect("the session's fragment"),
         session.satisfied_for_test(),
         &generation.only_shard().overlay,
         &generation.only_shard().buffer,
@@ -666,7 +668,9 @@ fn live_candidate(engine: &mosaica_engine::Engine) -> (Arc<mosaica_engine::Gener
         .expect("credential resolves");
     let generation = engine.generation();
     let cand = candidate(
-        session.fragment_at_authorise_for_test(),
+        &engine
+            .session_fragment_for_test(&session)
+            .expect("the session's fragment"),
         session.satisfied_for_test(),
         &generation.only_shard().overlay,
         &generation.only_shard().buffer,
@@ -3136,9 +3140,9 @@ fn a_deleted_entitys_value_leaves_the_column_and_every_predicate() {
 /// carried**, on any of the three surfaces that derive it: the legend, the suggestion page and a
 /// filtered viewport.
 ///
-/// A fold retires the deletion's tombstone and rotates the bundle identity without moving the
-/// watermark, so the session's own fragment — frozen at authorise — still names the retired entity
-/// and the overlay no longer denies it. `/v1/categories` and its suggest form derive a `derived`
+/// A fold retires the deletion's tombstone and rotates the shard's identity without moving the
+/// watermark, so a fragment the session read before it still names the retired entity and the
+/// overlay no longer denies it. `/v1/categories` and its suggest form derive a `derived`
 /// column's visible values from that fragment **in entity space**, with no row projection between
 /// them and the answer; a filtered viewport crosses into row space. `ops` is declared and carried
 /// by nothing in the build, so the ingested entity is its only member and the value is exactly as
@@ -3210,6 +3214,9 @@ fn a_session_from_before_a_fold_is_never_offered_the_retired_entitys_only_value(
         1,
         "the ingested entity is the value's only member, or the assertions below hold vacuously"
     );
+    let held = engine
+        .session_fragment_for_test(&session)
+        .expect("the session's fragment");
 
     engine
         .accept_change(
@@ -3231,11 +3238,11 @@ fn a_session_from_before_a_fold_is_never_offered_the_retired_entitys_only_value(
     );
 
     // The premise, without which every assertion below holds for the wrong reason: the fragment
-    // this session authorised with still names the retired entity, and the overlay no longer
-    // does, so an answer derived from that fragment alone would carry the value.
+    // this session read before the fold names the retired entity, and the overlay no longer
+    // does, so an answer derived from a fragment held across the fold would carry the value.
     assert!(
-        session.fragment_at_authorise_for_test().view().contains(doomed as u32),
-        "the frozen fragment must still name the retired entity"
+        held.view().contains(doomed as u32),
+        "the fragment read before the fold must name the retired entity"
     );
 
     // The same session, never re-authorised.

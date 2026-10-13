@@ -294,9 +294,9 @@ impl Fixture {
         let satisfied: FxHashSet<TermId> = granted.iter().map(|t| TermId::new(*t)).collect();
         let mut sorted: Vec<TermId> = satisfied.iter().copied().collect();
         sorted.sort_unstable_by_key(|t| t.raw());
-        let cache = FragmentCache::new(&self._temp.path().join("frag"), [1u8; 32], [2u8; 32]);
+        let cache = FragmentCache::new(&self._temp.path().join("frag"), [2u8; 32]);
         let fragment = cache
-            .get_or_build(&sorted, &self.postings, &[], UNIVERSE as u64)
+            .get_or_build([1u8; 32], &sorted, &self.postings, &[], UNIVERSE as u64)
             .unwrap();
         let base = Arc::new(RowProjection::walk(&fragment, &self.row_space));
         let buffer = IngestBuffer::new();

@@ -889,7 +889,7 @@ impl FiguresCache {
                 Arc::clone(column),
                 at,
                 denied,
-                shard.bundle_identity(),
+                shard.identity,
                 places_of_view(Arc::clone(&generation.bundle), view.clone()),
             );
         }

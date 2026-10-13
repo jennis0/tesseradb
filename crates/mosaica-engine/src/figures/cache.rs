@@ -119,7 +119,7 @@ pub(crate) struct FieldTailKey {
 /// The fragment's counts: a function of the fragment's base rows and the column's base labels.
 ///
 /// - `terms`: the session's grant ([`crate::Session::terms_digest`]).
-/// - `identity`: the bundle identity the fragment was unioned against. A fold rotates it, and
+/// - `identity`: the shard identity the fragment was unioned against. A fold rotates it, and
 ///   nothing else renumbers the base rows or rewrites the postings below them.
 /// - `view`, `space`, `level`: what the column is of. The layer is named by its space, never by its
 ///   name, which a layer registered after a drop takes again.
@@ -524,7 +524,7 @@ pub struct FiguresCache {
     pub(super) field_tails: SingleFlightCache<FieldTailKey, Held>,
     /// Per `(view, space, level)`, the labels of the view's denied base rows.
     pub(super) labels: LabelStore,
-    /// Where entries are persisted: one directory per bundle identity beneath it. `None` holds
+    /// Where entries are persisted: one directory per shard identity beneath it. `None` holds
     /// nothing on disk.
     pub(super) dir: Option<std::path::PathBuf>,
     /// The bytes `dir` may hold.
@@ -663,13 +663,15 @@ impl FiguresCache {
         }
     }
 
-    /// Remove from the cache directory every bundle identity's entries but `identity`'s: at open,
-    /// and whenever a compaction rotates the identity.
-    pub(crate) fn sweep(&self, identity: [u8; 32]) {
-        self.field_left.retain_keys(|key| key.identity == identity);
+    /// Remove every entry filed under an identity outside `live`, the identities of the shards
+    /// served: at open, and whenever a compaction rotates them.
+    pub(crate) fn sweep(&self, live: impl IntoIterator<Item = [u8; 32]>) {
+        let live: Vec<[u8; 32]> = live.into_iter().collect();
+        self.field_left
+            .retain_keys(|key| live.contains(&key.identity));
         if let Some(root) = self.dir.clone() {
             self.worker
-                .submit(move || super::persist::sweep_other_identities(&root, &identity));
+                .submit(move || super::persist::sweep_other_identities(&root, &live));
         }
     }
 

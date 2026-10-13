@@ -44,7 +44,7 @@ use std::sync::Arc;
 
 use croaring::Bitmap;
 
-use mosaica_authz::{DeltaTier, Dict, FragmentCache, PostingsReader};
+use mosaica_authz::{DeltaTier, Dict, PostingsReader};
 use mosaica_store::Bundle;
 
 use crate::Generation;
@@ -102,8 +102,9 @@ pub struct GeometryPublication {
 pub(crate) struct PrefixRotation {
     /// The new prefix's base postings.
     pub(crate) postings: Arc<PostingsReader>,
-    /// The fragment cache under the new prefix's MANIFEST digest — [`FragmentCache::rotate`].
-    pub(crate) fragments: Arc<FragmentCache>,
+    /// The shard's identity in the new prefix ([`crate::shard_identity`]), which files its
+    /// fragments and figures apart from the superseded prefix's.
+    pub(crate) identity: [u8; 32],
     /// The new prefix's filter columns — **opened over it, never cloned from the live
     /// generation**, whose mappings are of the superseded prefix's files. A fold rewrites this
     /// artefact: it blanks the deleted entities' slots, folds every snapshot extent into the base
