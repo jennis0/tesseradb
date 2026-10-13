@@ -486,8 +486,7 @@ impl Engine {
             _ => None,
         }) {
             generation
-                .only_shard()
-                .filter_columns
+                .declared_columns()
                 .admit(expr, true, &reaches)
                 .map_err(filter_refusal)?;
         }

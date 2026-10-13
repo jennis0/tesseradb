@@ -438,17 +438,6 @@ impl LevelForms {
         self.versions[at]
     }
 
-    /// The one side's form of a view over one shard, for a route that does not yet read every
-    /// shard. Panics where the view has a second.
-    pub(crate) fn only(&self) -> &Arc<ArtifactRows> {
-        assert!(
-            self.rows.len() == 1,
-            "a route read one side of a level over {} shards",
-            self.rows.len()
-        );
-        &self.rows[0]
-    }
-
     /// The one verdict over this level for `served`'s viewer under `mask`, labels tested by
     /// `labels` and an attached artifact's target answered by `dependency_served`. `one` settles
     /// containment an artifact at a time, for a caller that asks about one.
@@ -483,14 +472,14 @@ impl LevelForms {
     fn filtered_inputs<'a>(
         &'a self,
         mask: &ShardedMask,
-        filter_rows: &[Bitmap],
+        filter_rows: &[impl std::borrow::Borrow<Bitmap>],
     ) -> Option<Vec<(&'a crate::row_column::RowColumn, Bitmap)>> {
         let mut sides = Vec::new();
         for ((rows, shard), filter_rows) in self.rows.iter().zip(&self.shards).zip(filter_rows) {
             let Some(leaf) = mask.read_leaf(*shard) else {
                 continue;
             };
-            sides.push((rows.column()?, leaf.visible_all().and(filter_rows)));
+            sides.push((rows.column()?, leaf.visible_all().and(filter_rows.borrow())));
         }
         Some(sides)
     }
@@ -581,7 +570,7 @@ impl ReadLevel {
         &self,
         engine: &Engine,
         mask: &ShardedMask,
-        filter_rows: &[Bitmap],
+        filter_rows: &[impl std::borrow::Borrow<Bitmap>],
     ) -> Option<Arc<Vec<u64>>> {
         let sides: Vec<Vec<u32>> = self
             .forms

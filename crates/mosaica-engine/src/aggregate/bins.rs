@@ -28,9 +28,10 @@
 //! With a sample size `s` and a set of `N > s` items, the counts are taken over the set's items
 //! whose `mosaica_id` is below the cut `⌊s · 2⁶⁴ / N⌋`, about `s` of them, and each count is scaled
 //! by `N` over the items counted, rounded to the nearest whole number with a half rounded up. The
-//! cut is one for the whole set, so no tile, segment or group has a floor or a cap. `N` is the
-//! set's composed size and the sample is drawn from the set's own rows, which are inside the
-//! visible set, so an item the viewer may not see neither enters the sample nor moves `N`. Where
+//! cut is one for the whole set, so no tile, segment, shard or group has a floor or a cap. `N` is
+//! the set's composed size in every shard, and each shard's tallies are added before the one
+//! scaling. The sample is drawn from the set's own rows, which are inside the visible set, so an
+//! item the viewer may not see neither enters the sample nor moves `N`. Where
 //! `N <= s` every item is counted and nothing is scaled. The reference is sampled the same way,
 //! at its own cut.
 //!
@@ -184,11 +185,7 @@ impl Numbers {
             return Err(refused(AggregateRefused::BinsOnBool(column.to_string())));
         }
         let kind = Kind::of(ty).filter(|_| !vocabulary).ok_or_else(unfit)?;
-        let held = generation
-            .only_shard()
-            .filter_columns
-            .value_layers(column)
-            .is_some();
+        let held = generation.declared_columns().value_layers(column).is_some();
         let drawn = manifest
             .render_scalars()
             .any(|scalar| scalar.name == column);
@@ -212,7 +209,7 @@ impl Numbers {
     pub(super) fn figures(&self, cx: &Cx<'_>) -> Result<FieldFigures> {
         cx.engine.field_figures(
             &cx.open.served,
-            cx.open.mask.only_leaf(),
+            &cx.open.mask,
             &self.column,
             self.kind as u8,
             &Reader { field: self, cx },
@@ -255,12 +252,6 @@ impl Bins {
             range,
             sample,
         })
-    }
-
-    /// The cut a set of `n` items is sampled below, or `None` where every item is counted.
-    fn cut(&self, n: u64) -> Option<u64> {
-        let s = self.sample.filter(|&s| n > s)?;
-        Some(((u128::from(s) << 64) / u128::from(n)) as u64)
     }
 
     pub(super) fn kind(&self) -> Kind {
@@ -365,82 +356,117 @@ impl Bins {
         timings: &mut AggregateTimings,
     ) -> Result<(Counts, Counted)> {
         let bins = edges.bins();
-        let n = set.size();
-        fn counts<K>(
-            (hist, none, counted): (Histogram<'_, K>, u64, Counted),
-            n: u64,
-        ) -> (Counts, Counted) {
-            let items = counted.items;
-            // Each count times `n / items`, to the nearest whole number with a half rounded up.
-            let scale = |c: u64| match items {
-                0 => 0,
-                _ if items == n => c,
-                _ => ((u128::from(c) * u128::from(n) * 2 + u128::from(items))
-                    / (2 * u128::from(items))) as u64,
-            };
-            let counts = Counts {
-                bins: hist.bins.into_iter().map(scale).collect(),
-                rest: scale(hist.rest),
-                none: scale(none),
-            };
-            (counts, counted)
-        }
         // With no bin, every value is in `rest`.
-        Ok(match edges {
-            Edges::Floats(edges) if bins > 0 => counts(
-                self.tally(cx, set, || Histogram::new(&edges[..bins], edges[bins]), timings)?,
-                n,
-            ),
-            Edges::Ints(edges) if bins > 0 => counts(
-                self.tally(cx, set, || Histogram::new(&edges[..bins], edges[bins]), timings)?,
-                n,
-            ),
-            Edges::Floats(_) => counts(
-                self.tally(cx, set, || Histogram::<f64>::new(&[], 0.0), timings)?,
-                n,
-            ),
-            Edges::Ints(_) => counts(
-                self.tally(cx, set, || Histogram::<i128>::new(&[], 0), timings)?,
-                n,
-            ),
-        })
+        let (sides, sampled) = match edges {
+            Edges::Floats(edges) if bins > 0 => self.tally(
+                cx,
+                set,
+                || Histogram::new(&edges[..bins], edges[bins]),
+                timings,
+            )?,
+            Edges::Ints(edges) if bins > 0 => self.tally(
+                cx,
+                set,
+                || Histogram::new(&edges[..bins], edges[bins]),
+                timings,
+            )?,
+            Edges::Floats(_) => self.tally(cx, set, || Histogram::<f64>::new(&[], 0.0), timings)?,
+            Edges::Ints(_) => self.tally(cx, set, || Histogram::<i128>::new(&[], 0), timings)?,
+        };
+        let items = sides.iter().map(|side| side.items).sum();
+        Ok((
+            scaled_sum(sides, bins, set.size()),
+            Counted { items, sampled },
+        ))
     }
 
-    /// A tally of `set`'s values, how many of its counted items have no value, and how the set was
-    /// counted: the sample below the set's cut where it holds more items than the sample size and a
-    /// band holds the cut, and otherwise every item.
-    fn tally<K: Num, T: Tally<K>>(
+    /// Each shard's tallies of `set`'s values, and whether the set was sampled: below the cut set
+    /// from the set's size in every shard ([`sample_cut`]), and otherwise every item. Whether it is
+    /// sampled depends on the cut alone, the same in every shard.
+    fn tally<'e, K: Num + 'e>(
         &self,
         cx: &Cx<'_>,
         set: &Set,
-        empty: impl Fn() -> T + Sync + Send,
+        empty: impl Fn() -> Histogram<'e, K> + Sync + Send,
         timings: &mut AggregateTimings,
-    ) -> Result<(T, u64, Counted)> {
-        let members = set.cells(cx);
-        if let Some(plan) = self
-            .cut(set.size())
-            .and_then(|cut| SamplePlan::of(cx, &members, cut))
-        {
-            let (tally, none, items) = self.field.pass_sample(cx, &members, &plan, empty)?;
-            timings.band_entries += plan.entries_read();
-            return Ok((
-                tally,
+    ) -> Result<(Vec<Tallied>, bool)> {
+        let cut = sample_cut(self.sample, cx.reads().map(|at| set.size_in(at)));
+        let mut sides = Vec::new();
+        for at in cx.reads() {
+            let members = set.cells(cx, at);
+            let plan = cut.and_then(|cut| SamplePlan::of(cx, at, &members, cut));
+            let (hist, none, items) = match plan {
+                Some(plan) => {
+                    let side = self.field.pass_sample(cx, at, &members, &plan, &empty)?;
+                    timings.band_entries += plan.entries_read();
+                    side
+                }
+                None => {
+                    let (tally, none) = self.field.pass(cx, set, at, &empty)?;
+                    (tally, none, set.size_in(at))
+                }
+            };
+            sides.push(Tallied {
+                bins: hist.bins,
+                rest: hist.rest,
                 none,
-                Counted {
-                    items,
-                    sampled: true,
-                },
-            ));
+                items,
+            });
         }
-        let (tally, none) = self.field.pass(cx, set, empty)?;
-        Ok((
-            tally,
-            none,
-            Counted {
-                items: set.size(),
-                sampled: false,
-            },
-        ))
+        Ok((sides, cut.is_some()))
+    }
+}
+
+/// The cut a set is sampled below, from its size in every shard, `sizes`, and the sample size: a
+/// set holding more items than the sample is cut at `⌊s · 2⁶⁴ / N⌋`, and counted whole, `None`,
+/// where it holds no more or no band holds every identity below the cut.
+fn sample_cut(sample: Option<u64>, sizes: impl IntoIterator<Item = u64>) -> Option<u64> {
+    let n: u64 = sizes.into_iter().sum();
+    let s = sample.filter(|&s| n > s)?;
+    Some(((u128::from(s) << 64) / u128::from(n)) as u64)
+        .filter(|&cut| mosaica_store::bands::band_below(cut).is_some())
+}
+
+/// One shard's tallies of a set before any scaling: each bin's, the rest's and none's, over the
+/// items it counted.
+struct Tallied {
+    bins: Vec<u64>,
+    rest: u64,
+    none: u64,
+    items: u64,
+}
+
+/// Every shard's tallies of a set of `n` items, `bins` bins each, added, then scaled once to the
+/// set from the items counted in every shard: each count times `n` over those items, to the
+/// nearest whole number with a half rounded up.
+fn scaled_sum(sides: Vec<Tallied>, bins: usize, n: u64) -> Counts {
+    let mut sum = Tallied {
+        bins: vec![0; bins],
+        rest: 0,
+        none: 0,
+        items: 0,
+    };
+    for side in sides {
+        for (a, b) in sum.bins.iter_mut().zip(&side.bins) {
+            *a += b;
+        }
+        sum.rest += side.rest;
+        sum.none += side.none;
+        sum.items += side.items;
+    }
+    let items = sum.items;
+    let scale = |c: u64| match items {
+        0 => 0,
+        _ if items == n => c,
+        _ => {
+            ((u128::from(c) * u128::from(n) * 2 + u128::from(items)) / (2 * u128::from(items)))
+                as u64
+        }
+    };
+    Counts {
+        bins: sum.bins.into_iter().map(scale).collect(),
+        rest: scale(sum.rest),
+        none: scale(sum.none),
     }
 }
 
@@ -450,6 +476,7 @@ impl Numbers {
     fn pass_sample<K: Num, T: Tally<K>>(
         &self,
         cx: &Cx<'_>,
+        at: usize,
         members: &CellSet<'_>,
         plan: &SamplePlan,
         empty: impl Fn() -> T + Sync + Send,
@@ -457,7 +484,7 @@ impl Numbers {
         cx.check_cancelled()?;
         let SamplePlan { band, cut, .. } = *plan;
         let column = self.column.as_str();
-        let segments = cx.segments();
+        let segments = cx.segments(at);
         // What one piece found: its tally, its items with no value, its items, and the view rows
         // whose value is read through their entity.
         let found = cx.engine.pool.install(|| {
@@ -545,52 +572,53 @@ impl Numbers {
         let (mut tally, mut none, items, through) = found;
         if !through.is_empty() {
             let rows = croaring::Bitmap::of(&through);
-            let entities = super::set::crossing(cx.engine, cx.open, &rows)?;
+            let entities = super::set::crossing(cx.engine, cx.open, at, &rows)?;
             let (more, without) = cx
                 .engine
                 .pool
-                .install(|| self.pass_entities(cx, &entities, &empty));
+                .install(|| self.pass_entities(cx, at, &entities, &empty));
             tally = tally.merge(more);
             none += without;
         }
         Ok((tally, none, items))
     }
 
-    /// One pass over the values of `set`'s items into a tally, and how many items have no value:
-    /// through the field's per-entity values where the field is not drawn or the set is held as
-    /// entities, and otherwise over the set's rows, which the whole visible set always is.
+    /// One pass over the values of `set`'s items in the side at `at` into a tally, and how many
+    /// items have no value: through the field's per-entity values where the field is not drawn or
+    /// the set is held as entities, and otherwise over the set's rows, which the whole visible set
+    /// always is.
     fn pass<K: Num, T: Tally<K>>(
         &self,
         cx: &Cx<'_>,
         set: &Set,
+        at: usize,
         empty: impl Fn() -> T + Sync + Send,
     ) -> Result<(T, u64)> {
         cx.check_cancelled()?;
-        if self.held && (!self.drawn || (set.has_entities() && !set.is_whole())) {
-            let entities = set.entities(cx)?;
+        if self.held && (!self.drawn || (set.has_entities(at) && !set.is_whole())) {
+            let entities = set.entities(cx, at)?;
             return Ok(cx
                 .engine
                 .pool
-                .install(|| self.pass_entities(cx, entities, empty)));
+                .install(|| self.pass_entities(cx, at, entities, empty)));
         }
         Ok(cx
             .engine
             .pool
-            .install(|| self.pass_rows(set.cells(cx), cx.segments(), empty)))
+            .install(|| self.pass_rows(set.cells(cx, at), cx.segments(at), empty)))
     }
 
-    /// The field's per-entity values of `entities`, in parallel pieces of entity space, each
-    /// piece's entities walked through every layer, then the buffered rows.
+    /// The field's per-entity values of `entities` in the side at `at`'s shard, in parallel pieces
+    /// of entity space, each piece's entities walked through every layer, then the buffered rows.
     fn pass_entities<K: Num, T: Tally<K>>(
         &self,
         cx: &Cx<'_>,
+        at: usize,
         entities: &croaring::Bitmap,
         empty: impl Fn() -> T + Sync + Send,
     ) -> (T, u64) {
         let layers = cx
-            .open
-            .served
-            .only_side()
+            .side(at)
             .shard
             .filter_columns
             .value_layers(&self.column)
@@ -625,7 +653,7 @@ impl Numbers {
             .reduce(|| (empty(), 0), |(a, m), (b, n)| (a.merge(b), m + n));
         crate::categories::buffered_values(
             &cx.generation.bundle.manifest,
-            &cx.open.served.only_side().shard.buffer,
+            &cx.side(at).shard.buffer,
             &self.column,
             &mut |entity, value| {
                 if !entities.contains(entity) || matches!(value, WalScalar::Null) {
@@ -720,14 +748,14 @@ struct SamplePiece {
 }
 
 impl SamplePlan {
-    /// The plan for `members` sampled below `cut`, or `None` where no band holds every identity
-    /// below the cut and the set is counted exactly. Whether a set is sampled depends on its size
-    /// and the sample size alone, both inside the visible set. Each piece is then read from the
-    /// band or by scanning, whichever its band entries times [`BAND_ENTRY_ROWS`] and its members
-    /// say costs less; the two read the same items.
-    fn of(cx: &Cx<'_>, members: &CellSet<'_>, cut: u64) -> Option<SamplePlan> {
+    /// The plan for `members`, a set's rows in the side at `at`, sampled below `cut`, or `None`
+    /// where no band holds every identity below the cut and the set is counted exactly. Whether a
+    /// set is sampled depends on its size and the sample size alone, both inside the visible set.
+    /// Each piece is then read from the band or by scanning, whichever its band entries times
+    /// [`BAND_ENTRY_ROWS`] and its members say costs less; the two read the same items.
+    fn of(cx: &Cx<'_>, at: usize, members: &CellSet<'_>, cut: u64) -> Option<SamplePlan> {
         let band = mosaica_store::bands::band_below(cut)?;
-        let segments = cx.segments();
+        let segments = cx.segments(at);
         let pieces = pieces(segments)
             .into_par_iter()
             .map(|(s, rows)| {
@@ -945,16 +973,16 @@ struct Reader<'a> {
 }
 
 impl FieldRead for Reader<'_> {
-    fn tally(&self, rows: &croaring::Bitmap, keep: usize) -> Result<FieldTally> {
+    fn tally(&self, at: usize, rows: &croaring::Bitmap, keep: usize) -> Result<FieldTally> {
         match self.field.kind == Kind::Float {
-            true => self.read::<f64>(rows, keep),
-            false => self.read::<i128>(rows, keep),
+            true => self.read::<f64>(at, rows, keep),
+            false => self.read::<i128>(at, rows, keep),
         }
     }
 }
 
 impl Reader<'_> {
-    fn read<K: Num>(&self, rows: &croaring::Bitmap, keep: usize) -> Result<FieldTally> {
+    fn read<K: Num>(&self, at: usize, rows: &croaring::Bitmap, keep: usize) -> Result<FieldTally> {
         let cx = self.cx;
         cx.check_cancelled()?;
         if rows.is_empty() {
@@ -964,19 +992,19 @@ impl Reader<'_> {
         if self.field.drawn {
             let (summary, none) = cx.engine.pool.install(|| {
                 self.field
-                    .pass_rows(CellSet::Rows(rows), cx.segments(), empty)
+                    .pass_rows(CellSet::Rows(rows), cx.segments(at), empty)
             });
             return Ok(summary.finish(none));
         }
-        let entities = super::set::crossing(cx.engine, cx.open, rows)?;
+        let entities = super::set::crossing(cx.engine, cx.open, at, rows)?;
         let (summary, none) = cx
             .engine
             .pool
-            .install(|| self.field.pass_entities(cx, &entities, empty));
+            .install(|| self.field.pass_entities(cx, at, &entities, empty));
         let mut tally = summary.finish(none);
         // The kept values were read by entity, and a deny names rows: each is placed again by its
         // row.
-        let row_space = &cx.open.served.only_side().data.row_space;
+        let row_space = &cx.side(at).data.row_space;
         for (high, side) in [(false, &mut tally.low), (true, &mut tally.high)] {
             let mut placed = Vec::with_capacity(side.len());
             for mut kept in side.drain(..) {
@@ -1638,5 +1666,58 @@ mod tests {
             ints.add(x, 0);
         }
         assert_eq!((ints.bins.clone(), ints.rest), (vec![3, 1, 0, 1], 2));
+    }
+
+    /// A sampled histogram over two shards against one shard holding both: each shard's raw
+    /// tallies are added, then scaled once by the set's size over every item counted. Each shard
+    /// scaled on its own would round twice, to 6 and 14 here.
+    #[test]
+    fn sampled_bins_over_two_shards_are_summed_then_scaled_once() {
+        let side = |bins: &[u64], rest: u64, none: u64, items: u64| Tallied {
+            bins: bins.to_vec(),
+            rest,
+            none,
+            items,
+        };
+        // A set of 20 items, 10 in each shard, 3 of each sampled.
+        let two = scaled_sum(vec![side(&[1, 2], 0, 0, 3), side(&[1, 2], 0, 0, 3)], 2, 20);
+        let one = scaled_sum(vec![side(&[2, 4], 0, 0, 6)], 2, 20);
+        assert_eq!(two.bins, one.bins);
+        assert_eq!(two.bins, vec![7, 13]);
+        assert_eq!((two.rest, two.none), (one.rest, one.none));
+
+        let two = scaled_sum(vec![side(&[1, 0], 1, 2, 4), side(&[0, 3], 0, 1, 4)], 2, 13);
+        let one = scaled_sum(vec![side(&[1, 3], 1, 3, 8)], 2, 13);
+        assert_eq!(
+            (two.bins, two.rest, two.none),
+            (one.bins, one.rest, one.none)
+        );
+
+        // Counted whole, nothing is scaled.
+        let whole = scaled_sum(vec![side(&[4, 1], 2, 3, 10), side(&[0, 5], 0, 0, 5)], 2, 15);
+        assert_eq!((whole.bins, whole.rest, whole.none), (vec![4, 6], 2, 3));
+    }
+
+    /// A set's cut is set from its size in every shard: two shards of 4,000 items are cut as one
+    /// of 8,000, and a hundred shards each holding no more than the sample are sampled together.
+    #[test]
+    fn a_sets_cut_is_set_from_its_size_in_every_shard() {
+        assert_eq!(
+            sample_cut(Some(100), [4_000, 4_000]),
+            sample_cut(Some(100), [8_000])
+        );
+        assert_eq!(
+            sample_cut(Some(100), [4_000, 4_000]),
+            Some(((100u128 << 64) / 8_000) as u64)
+        );
+        let cut = sample_cut(Some(10), [10; 100]);
+        assert!(cut.is_some(), "1,000 items over a sample of 10 are sampled");
+        assert_eq!(cut, sample_cut(Some(10), [1_000]));
+        assert_eq!(
+            sample_cut(Some(100), [60, 40]),
+            None,
+            "no more items than the sample"
+        );
+        assert_eq!(sample_cut(None, [8_000]), None);
     }
 }

@@ -459,6 +459,16 @@ impl Generation {
         self.shards.iter().map(Arc::as_ref)
     }
 
+    /// The first shard's filter columns, which a filter is admitted by and a field's routes are
+    /// read from. Which columns are filterable, where each is placed, which are unique and which
+    /// hold per-entity values come from the declarations, the same in every shard. Whether a
+    /// column holds a value layer, which admission asks of a `none_of` in entity space, is the
+    /// first shard's data, the same in every shard only while every shard's columns come from
+    /// one build.
+    pub(crate) fn declared_columns(&self) -> &crate::filter::FilterColumns {
+        &self.shards[0].filter_columns
+    }
+
     /// The successor holding `parts`: the shard `changed` answers for is replaced, and every other
     /// is carried, re-derived where its data changed.
     fn succeeded_by(

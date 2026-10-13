@@ -407,12 +407,27 @@ pub fn sweep<'a>(
     candidate: &Bitmap,
     index: &crate::suggest::SuggestIndex,
 ) -> Option<SuggestSet> {
+    sweep_shards(std::iter::once((columns, candidate)), index)
+}
+
+/// [`sweep`] over every shard: each shard's layers under that shard's candidate. A category's
+/// codes are its vocabulary's, the same in every shard, so the codes found in every shard are one
+/// set. `None` where any shard's layers are not a category's, or no shard has a layer.
+pub(crate) fn sweep_shards<'a, 'c, L>(
+    shards: impl IntoIterator<Item = (L, &'c Bitmap)>,
+    index: &crate::suggest::SuggestIndex,
+) -> Option<SuggestSet>
+where
+    L: Iterator<Item = &'a mosaica_filter::ValueColumn>,
+{
     let mut codes: Vec<u32> = Vec::new();
     let mut swept = false;
-    for column in columns {
-        swept = true;
-        if !column.visit_codes(candidate, |code| codes.push(code)) {
-            return None;
+    for (columns, candidate) in shards {
+        for column in columns {
+            swept = true;
+            if !column.visit_codes(candidate, |code| codes.push(code)) {
+                return None;
+            }
         }
     }
     if !swept {
@@ -627,5 +642,56 @@ mod tests {
         sets.prune_tokens(&std::iter::once(1).collect());
         assert_eq!(sets.stats().entries, 1);
         assert!(sets.get(&key(2, 7, 3), 1_000).is_some());
+    }
+
+    /// Two shards' columns, each under its own candidate, against one shard holding both: the set
+    /// is the positions of the values the candidates' entities carry in either shard, a value
+    /// carried only by entities outside both candidates is not in it, and a shard whose candidate
+    /// is empty adds nothing.
+    #[test]
+    fn a_sweep_over_two_shards_is_one_shards_holding_both() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let pool = rayon::ThreadPoolBuilder::new().build().unwrap();
+        let values: Vec<crate::suggest::SuggestValue> = ["alpha", "beta", "delta", "gamma"]
+            .iter()
+            .enumerate()
+            .map(|(at, key)| crate::suggest::SuggestValue {
+                key: (*key).to_string(),
+                title: None,
+                code: 700_000_000 - (at as u32) * 101_000_000,
+            })
+            .collect();
+        let index =
+            crate::suggest::SuggestIndex::build(dir.path(), 0, &values, &pool).expect("an index");
+        // Each shard's entities carry the values at these positions.
+        let column = |positions: &[usize]| {
+            let codes: Vec<u32> = positions.iter().map(|&p| values[p].code).collect();
+            mosaica_filter::ValueColumn::universal(mosaica_filter::Codes::U32(codes.into()))
+        };
+        let (first, second) = (column(&[0, 1, 2, 3]), column(&[3, 2, 1, 0]));
+        let one = column(&[0, 1, 2, 3, 3, 2, 1, 0]);
+        let positions = |set: &SuggestSet| (0..4).filter(|&p| set.contains(p)).collect::<Vec<_>>();
+
+        let two = sweep_shards(
+            [
+                (std::iter::once(&first), &Bitmap::of(&[0])),
+                (std::iter::once(&second), &Bitmap::of(&[0, 1])),
+            ],
+            &index,
+        )
+        .expect("a category sweeps");
+        let whole = sweep(std::iter::once(&one), &Bitmap::of(&[0, 4, 5]), &index).unwrap();
+        assert_eq!(positions(&two), vec![0, 2, 3]);
+        assert_eq!(positions(&two), positions(&whole));
+
+        let left_out = sweep_shards(
+            [
+                (std::iter::once(&first), &Bitmap::of(&[0, 3])),
+                (std::iter::once(&second), &Bitmap::new()),
+            ],
+            &index,
+        )
+        .unwrap();
+        assert_eq!(positions(&left_out), vec![0, 3]);
     }
 }

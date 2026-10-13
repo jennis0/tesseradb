@@ -54,9 +54,14 @@ impl ServedSide<'_> {
 impl<'a> ServedView<'a> {
     /// The place in [`Self::sides`] of `shard`'s side. Panics where the view has none there.
     pub(crate) fn side_of(&self, shard: mosaica_types::ShardId) -> usize {
+        self.place_of(shard).expect("a shard holding the view")
+    }
+
+    /// The place in [`Self::sides`] of `shard`'s side, or `None` where the view has none there.
+    pub(crate) fn place_of(&self, shard: mosaica_types::ShardId) -> Option<usize> {
         self.sides
             .binary_search_by_key(&shard, |side| side.shard.id())
-            .expect("a shard holding the view")
+            .ok()
     }
 
     /// Each side's locator of its segments' positions, in the order of [`Self::sides`].

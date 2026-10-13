@@ -56,7 +56,7 @@ mod expr;
 mod membership;
 mod scan;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 use croaring::Bitmap;
 

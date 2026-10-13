@@ -5,10 +5,12 @@
 //! existence criterion and, for an attached artifact, its target's verdict, and content that reads
 //! back. On a treed layer it is the cut the map draws ([`Cut`]), taken over the artifacts with a
 //! visible member in the cut's tiles; where the layer draws ancestors beside their descendants,
-//! only those with nothing drawn beneath them. The filtered set never decides it. An artifact's count is its visible members in the set.
-//! The rest are the set's items in a served artifact and in no listed one, and none the items in
-//! no served artifact, so an item held only by a withheld artifact counts in none. Artifacts can
-//! overlap, so a table's rows can add to more than the set's size.
+//! only those with nothing drawn beneath them. The filtered set never decides it. An artifact's
+//! count is its visible members in the set, in every shard the page reads, added before any
+//! artifact is chosen. The rest are the set's items in a served artifact and in no listed one, and
+//! none the items in no served artifact, so an item held only by a withheld artifact counts in
+//! none. Artifacts can overlap, so a table's rows can add to more than the set's size. A shard's
+//! items are its own, so a group's items are the sum of each shard's.
 
 use croaring::Bitmap;
 use mosaica_types::layer::{HierarchyKind, RegisteredLayer, ServingLayout};
@@ -23,6 +25,7 @@ use crate::engine::Engine;
 use crate::error::{EngineError, Result};
 use crate::layer_read::{check_level, LayerRefusal, ReadLevel};
 use crate::records::RecordsRefused;
+use crate::row_column::RowColumn;
 use crate::session::Session;
 use crate::viewport::DependencyContext;
 use crate::Generation;
@@ -48,10 +51,14 @@ pub(super) struct Served {
     ordinals: Vec<u32>,
     /// Listed ordinals, in table order.
     listed: Vec<u32>,
-    /// On a level counted artifact by artifact, each group's items as a set of their own: in the
-    /// set, and in the reference. `None` on a level read through its row-addressed column.
-    parts: Option<(Vec<Bitmap>, Option<Vec<Bitmap>>)>,
+    /// On a level counted artifact by artifact, each group's items as a set of their own, in the
+    /// set and in the reference, in each side by its place among the view's sides: `None` for a
+    /// side the page does not read. `None` on a level read through its row-addressed columns.
+    parts: Option<Vec<Option<GroupParts>>>,
 }
+
+/// Each group's items in one side: in the set, and in the reference.
+pub(super) type GroupParts = (Vec<Bitmap>, Option<Vec<Bitmap>>);
 
 impl Layer {
     /// The level `layer` and `level` name, where this viewer may read it in `view`.
@@ -141,7 +148,6 @@ impl Layer {
         let counting = std::time::Instant::now();
         let engine = cx.engine;
         let served_view = &cx.open.served;
-        let mask = cx.open.mask.only_leaf();
         let registered = engine
             .readable_layer_at(
                 served_view.session,
@@ -207,7 +213,7 @@ impl Layer {
                             &dependency_served,
                         );
                         let runs = &layer.runs[self.level as usize];
-                        for ordinal in 0..read.forms.only().len() as u32 {
+                        for ordinal in 0..read.forms.first().len() as u32 {
                             if ordinal % CHUNK == 0 {
                                 cx.check_cancelled()?;
                             }
@@ -243,35 +249,45 @@ impl Layer {
         let attached = registered
             .as_ref()
             .is_some_and(|layer| !layer.declaration.depends_on.is_empty());
-        let row_major =
-            !attached && read.as_ref().is_some_and(|r| r.forms.only().column().is_some());
+        let row_major = !attached && read.as_ref().is_some_and(|r| columns(r, cx).is_some());
         // Over the whole visible set, each artifact's count is its figure, already held.
         let figures = read
             .as_ref()
             .filter(|_| row_major && cx.sets.set.is_whole())
             .and_then(|read| read.forms.figures.as_ref());
-        // And where the column is a label column, a row is in at most one artifact, so the groups'
-        // sizes are sums of those figures.
+        // And where every column is a label column, a row is in at most one artifact, so the
+        // groups' sizes are sums of those figures.
         let summed = figures.is_some()
             && read
                 .as_ref()
-                .and_then(|read| read.forms.only().column())
-                .is_some_and(|column| column.layout() == ServingLayout::RowMajorLabel);
-        let set_rows = cx.sets.set.rows(cx);
-        let reference_rows = cx.sets.reference.as_ref().map(|r| r.rows(cx));
+                .and_then(|read| columns(read, cx))
+                .is_some_and(|columns| {
+                    columns
+                        .iter()
+                        .all(|(_, column)| column.layout() == ServingLayout::RowMajorLabel)
+                });
         let (counts, members) = match &read {
-            None => (
-                Vec::new(),
-                Some((Vec::new(), reference_rows.map(|_| Vec::new()))),
-            ),
+            None => {
+                let mut sides: Vec<Option<GroupParts>> =
+                    served_view.sides.iter().map(|_| None).collect();
+                for at in cx.reads() {
+                    sides[at] = Some((Vec::new(), cx.sets.reference.as_ref().map(|_| Vec::new())));
+                }
+                (Vec::new(), Some(sides))
+            }
             Some(read) if row_major => {
                 // A narrower set is counted by scanning its rows.
                 let counts = match figures {
                     Some(figures) => ordinals.iter().map(|&o| figures.get(o)).collect(),
                     None => {
+                        let empty = Bitmap::new();
+                        let mut set_rows: Vec<&Bitmap> = vec![&empty; served_view.sides.len()];
+                        for at in cx.reads() {
+                            set_rows[at] = cx.sets.set.rows(cx, at);
+                        }
                         let histogram = read
-                            .filtered_counts(engine, &cx.open.mask, std::slice::from_ref(set_rows))
-                            .expect("a level with a column counts through it");
+                            .filtered_counts(engine, &cx.open.mask, &set_rows)
+                            .expect("a level with a column in every shard counts through them");
                         ordinals
                             .iter()
                             .map(|&o| histogram.get(o as usize).copied().unwrap_or(0))
@@ -281,18 +297,28 @@ impl Layer {
                 (counts, None)
             }
             Some(read) => {
-                let of = |rows: &Bitmap| -> Vec<Bitmap> {
+                let of = |at: usize, rows: &Bitmap| -> Vec<Bitmap> {
+                    let leaf = cx.leaf(at);
                     engine.pool.install(|| {
                         use rayon::prelude::*;
                         ordinals
                             .par_iter()
-                            .map(|&o| members(read, &targets, mask, o, rows))
+                            .map(|&o| members(read, &targets, leaf, at, o, rows))
                             .collect()
                     })
                 };
-                let in_set = of(set_rows);
-                let counts = in_set.iter().map(Bitmap::cardinality).collect();
-                (counts, Some((in_set, reference_rows.map(of))))
+                let mut counts = vec![0u64; ordinals.len()];
+                let mut sides: Vec<Option<GroupParts>> =
+                    served_view.sides.iter().map(|_| None).collect();
+                for at in cx.reads() {
+                    let in_set = of(at, cx.sets.set.rows(cx, at));
+                    for (count, members) in counts.iter_mut().zip(&in_set) {
+                        *count += members.cardinality();
+                    }
+                    let in_reference = cx.sets.reference.as_ref().map(|r| of(at, r.rows(cx, at)));
+                    sides[at] = Some((in_set, in_reference));
+                }
+                (counts, Some(sides))
             }
         };
         // A resumed table's artifacts are carried by entity: an ordinal that holds another entity
@@ -362,31 +388,38 @@ impl Layer {
             parts: None,
         };
         let sizes: Vec<(u64, u64)> = match members {
-            Some((in_set, in_reference)) => {
-                let set_parts = served.split(&in_set, set_rows);
-                let reference_parts = match (in_reference, reference_rows) {
-                    (Some(members), Some(rows)) => Some(served.split(&members, rows)),
-                    _ => None,
-                };
-                let sizes = set_parts
-                    .iter()
-                    .enumerate()
-                    .map(|(g, part)| {
-                        let reference = reference_parts.as_ref().map_or(0, |r| r[g].cardinality());
-                        (part.cardinality(), reference)
-                    })
-                    .collect();
-                served.parts = Some((set_parts, reference_parts));
+            Some(sides) => {
+                let mut sizes = vec![(0u64, 0u64); served.listed.len() + 2];
+                let mut parts: Vec<Option<GroupParts>> =
+                    served_view.sides.iter().map(|_| None).collect();
+                for (at, side) in sides.into_iter().enumerate() {
+                    let Some((in_set, in_reference)) = side else {
+                        continue;
+                    };
+                    let set_parts = served.split(&in_set, cx.sets.set.rows(cx, at));
+                    let reference_parts = match (in_reference, &cx.sets.reference) {
+                        (Some(members), Some(reference)) => {
+                            Some(served.split(&members, reference.rows(cx, at)))
+                        }
+                        _ => None,
+                    };
+                    for (g, (set, reference)) in sizes.iter_mut().enumerate() {
+                        *set += set_parts[g].cardinality();
+                        *reference += reference_parts.as_ref().map_or(0, |r| r[g].cardinality());
+                    }
+                    parts[at] = Some((set_parts, reference_parts));
+                }
+                served.parts = Some(parts);
                 sizes
             }
             None => {
                 let in_set = match summed {
                     true => served.summed_sizes(&counts, cx.sets.set.size()),
-                    false => served.pass_sizes(cx, cx.sets.set.cells(cx))?,
+                    false => served.pass_sizes(cx, |at| cx.sets.set.cells(cx, at))?,
                 };
                 let in_reference = match &cx.sets.reference {
                     Some(reference) if summed && reference.is_whole() => Some(in_set.clone()),
-                    Some(reference) => Some(served.pass_sizes(cx, reference.cells(cx))?),
+                    Some(reference) => Some(served.pass_sizes(cx, |at| reference.cells(cx, at))?),
                     None => None,
                 };
                 in_set
@@ -506,7 +539,7 @@ impl Targets {
         let mut targets = Targets::default();
         let mut layers: FxHashMap<LayerSpace, Option<RegisteredLayer>> = FxHashMap::default();
         for &ordinal in ordinals {
-            let Some(attachment) = read.forms.only().attachment(ordinal) else {
+            let Some(attachment) = read.forms.first().attachment(ordinal) else {
                 continue;
             };
             let Some(layer) = layers
@@ -549,16 +582,18 @@ impl Targets {
     }
 }
 
-/// The members of the artifact at `ordinal` among `rows`, which lie inside the mask: its target's
-/// where it hangs from one, and none where that target is not counted.
+/// The members of the artifact at `ordinal` among `rows` of the side at `at`, which lie inside
+/// that side's leaf `mask`: its target's where it hangs from one, and none where that target is
+/// not counted.
 fn members(
     read: &ReadLevel,
     targets: &Targets,
     mask: &crate::compose::EffectiveMask,
+    at: usize,
     ordinal: u32,
     rows: &Bitmap,
 ) -> Bitmap {
-    let (level, ordinal) = match read.forms.only().attachment(ordinal) {
+    let (level, ordinal) = match read.forms.first().attachment(ordinal) {
         None => (read, ordinal),
         Some(attachment) => {
             let key = (attachment.layer.clone(), attachment.level);
@@ -568,7 +603,7 @@ fn members(
             }
         }
     };
-    let form = level.forms.only();
+    let form = &level.forms.rows[at];
     match form.get(ordinal) {
         Some(members) => members.and(rows),
         None => form.visible_rows(ordinal, mask).and(rows),
@@ -594,43 +629,50 @@ impl Served {
             .map(|&o| if self.serves(o) { o } else { u32::MAX })
             .collect();
         Some(LabelTable::new(
-            read.forms.only().len(),
+            read.forms.first().len(),
             self.ordinals.iter().copied(),
             &listed,
         ))
     }
 
-    /// Where a pass over a level read through its column reads each row's groups, by `table`.
-    pub(super) fn row_groups<'s>(&'s self, table: &'s LabelTable) -> RowGroups<'s> {
+    /// Where a pass over a level read through its columns reads each row's groups in the side
+    /// at `at`, by `table`.
+    pub(super) fn row_groups<'s>(&'s self, table: &'s LabelTable, at: usize) -> RowGroups<'s> {
         let column = self
             .read
             .as_ref()
-            .and_then(|read| read.forms.only().column())
-            .expect("a level read through its column has one");
+            .and_then(|read| read.forms.rows[at].column())
+            .expect("a level read through its columns has one in every side the page reads");
         RowGroups::Labels { column, table }
     }
 
-    /// Each group's items in the set and in the reference, on a level counted artifact by
-    /// artifact.
-    pub(super) fn parts(&self) -> Option<&(Vec<Bitmap>, Option<Vec<Bitmap>>)> {
-        self.parts.as_ref()
+    /// Each group's items in the set and in the reference in each side, on a level counted
+    /// artifact by artifact.
+    pub(super) fn parts(&self) -> Option<&[Option<GroupParts>]> {
+        self.parts.as_deref()
     }
 
-    /// Each group's items among `cells`, by one pass through the level's column: the listed
-    /// artifacts, the rest, and none.
-    fn pass_sizes(&self, cx: &Cx<'_>, cells: CellSet<'_>) -> Result<Vec<u64>> {
+    /// Each group's items among each side's `cells`, by one pass through the side's column: the
+    /// listed artifacts, the rest, and none.
+    fn pass_sizes<'c>(
+        &self,
+        cx: &'c Cx<'_>,
+        cells: impl Fn(usize) -> CellSet<'c>,
+    ) -> Result<Vec<u64>> {
         cx.check_cancelled()?;
         let mut sizes = vec![0u64; self.listed.len() + 2];
         let Some(table) = self.label_table() else {
             return Ok(sizes);
         };
-        let groups = self.row_groups(&table);
-        let counted = cx
-            .engine
-            .pool
-            .install(|| pass(cells, cx.segments(), 0, &groups));
-        for entry in counted {
-            sizes[entry.group as usize] += entry.count;
+        for at in cx.reads() {
+            let (groups, cells) = (self.row_groups(&table, at), cells(at));
+            let counted = cx
+                .engine
+                .pool
+                .install(|| pass(cells, cx.segments(at), 0, &groups));
+            for entry in counted {
+                sizes[entry.group as usize] += entry.count;
+            }
         }
         Ok(sizes)
     }
@@ -670,4 +712,11 @@ impl Served {
         let none = rows.andnot(&in_served);
         listed.into_iter().chain([rest, none]).collect()
     }
+}
+
+/// Each side the page reads and its form's row-addressed column, or `None` where one has none.
+fn columns<'r>(read: &'r ReadLevel, cx: &Cx<'_>) -> Option<Vec<(usize, &'r RowColumn)>> {
+    cx.reads()
+        .map(|at| Some((at, read.forms.rows[at].column()?)))
+        .collect()
 }

@@ -1,11 +1,15 @@
 //! A grouping by the values of a category field: which values a table lists, and how many items of
 //! a set carry each value.
 //!
-//! A set's values are counted by whichever route it affords: through the field's per-value
-//! records where the set's entities are at hand, by one pass over the set's rows where the field
-//! is drawn in the view, and otherwise through the entities of the set's rows. The three give the
-//! same counts. A value is counted only where an item of the set carries it, so a `derived` value
-//! no visible item carries has no count to show, in its own row or in the rest.
+//! A set's values are counted in each shard by whichever route its part there affords: through
+//! the field's per-value records where the part's entities are at hand, by one pass over the
+//! part's rows where the field is drawn in the view, and otherwise through the entities of the
+//! part's rows. The three give the same counts. A category's codes are its vocabulary's, the same
+//! in every shard, so the shards' counts are added by code before any value is chosen. A value is
+//! counted only where an item of the set carries it, so a `derived` value no visible item carries
+//! has no count to show, in its own row or in the rest.
+
+use std::borrow::Cow;
 
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -48,11 +52,7 @@ impl Field {
             .vocabularies
             .get(&vocabulary)
             .ok_or_else(not_countable)?;
-        let held = generation
-            .only_shard()
-            .filter_columns
-            .value_layers(column)
-            .is_some();
+        let held = generation.declared_columns().value_layers(column).is_some();
         let drawn = manifest
             .render_scalars()
             .any(|scalar| scalar.name == column);
@@ -98,15 +98,6 @@ impl Field {
             .ok_or_else(|| {
                 EngineError::AggregateRefused(AggregateRefused::NotCountable(self.column.clone()))
             })?;
-        let listable = match self.pick {
-            Pick::Named(_) => Some(self.listable(cx)?),
-            Pick::Top(_) => None,
-        };
-        let listable = |code: u32| {
-            listable
-                .as_ref()
-                .map_or(Ok(false), |listable| listable(code))
-        };
         let codes: Vec<u32> = match chosen {
             Some(chosen) => chosen.iter().map(|&code| code as u32).collect(),
             None => match &self.pick {
@@ -114,10 +105,7 @@ impl Field {
                 Pick::Named(keys) => {
                     let mut codes: Vec<u32> = Vec::with_capacity(keys.len());
                     for key in keys {
-                        let Some(code) = vocabulary.code_of(key) else {
-                            continue;
-                        };
-                        if !codes.contains(&code) && listable(code)? {
+                        if let Some(code) = vocabulary.code_of(key).filter(|c| !codes.contains(c)) {
                             codes.push(code);
                         }
                     }
@@ -125,10 +113,15 @@ impl Field {
                 }
             },
         };
-        let mut always = Vec::with_capacity(codes.len());
-        for &code in &codes {
-            always.push(listable(code)?);
-        }
+        let always = match self.pick {
+            Pick::Named(_) => self.listable(cx, &codes)?,
+            Pick::Top(_) => vec![false; codes.len()],
+        };
+        // A named value this viewer may not be told of is not listed.
+        let (codes, always): (Vec<u32>, Vec<bool>) = match (chosen, &self.pick) {
+            (None, Pick::Named(_)) => codes.into_iter().zip(always).filter(|&(_, a)| a).unzip(),
+            _ => (codes, always),
+        };
         let sizes = sizes(&codes, &set, reference.as_ref());
         let keys = codes
             .iter()
@@ -155,52 +148,64 @@ impl Field {
         })
     }
 
-    /// Whether `/v1/categories` would list a value to this viewer: every value of a `public`
-    /// vocabulary, and a `derived` value only where an item this viewer may see carries it.
-    fn listable<'c>(&self, cx: &'c Cx<'_>) -> Result<impl Fn(u32) -> Result<bool> + 'c> {
-        let membership = match self.derived {
-            false => None,
-            true => Some(
-                cx.open
-                    .served
-                    .only_side()
-                    .shard
-                    .filter_columns
-                    .category_membership(&self.column, &cx.sets.candidate)
-                    .map_err(|e| EngineError::VocabularyVisibilityUnavailable {
-                        column: self.column.clone(),
-                        detail: e.to_string(),
-                    })?,
-            ),
-        };
-        let column = self.column.clone();
-        Ok(move |code: u32| match &membership {
-            None => Ok(true),
-            Some(membership) => {
-                membership
-                    .carries(code)
-                    .map_err(|e| EngineError::VocabularyVisibilityUnavailable {
-                        column: column.clone(),
-                        detail: e.to_string(),
-                    })
-            }
-        })
-    }
-
-    /// How many items of `set` carry each value, and how many carry none.
-    pub(super) fn counts(&self, cx: &Cx<'_>, set: &Set) -> Result<Counts> {
-        cx.check_cancelled()?;
-        if self.held && (set.has_entities() || !self.drawn) {
-            return self.counts_by_entity(cx, set.entities(cx)?);
+    /// Whether `/v1/categories` would list each of `codes` to this viewer: every value of a
+    /// `public` vocabulary, and a `derived` value only where an item this viewer may see carries
+    /// it, in any shard.
+    fn listable(&self, cx: &Cx<'_>, codes: &[u32]) -> Result<Vec<bool>> {
+        if !self.derived {
+            return Ok(vec![true; codes.len()]);
         }
-        Ok(cx
-            .engine
-            .pool
-            .install(|| tally_rows(set.cells(cx), cx.segments(), &self.column)))
+        let served = &cx.open.served;
+        // A shard the page reads has its candidate; any other, every item the viewer may see in
+        // that shard.
+        let mut candidates: Vec<(&crate::Shard, Cow<'_, croaring::Bitmap>)> = Vec::new();
+        for shard in cx.generation.shards() {
+            let at = served.place_of(shard.id());
+            let candidate = match at.and_then(|at| cx.sets.candidate(at)) {
+                Some(candidate) => Cow::Borrowed(candidate),
+                None => {
+                    let fragment = at.map(|at| served.sides[at].fragment());
+                    Cow::Owned(
+                        cx.engine
+                            .filter_candidate(served.session, shard, fragment)?,
+                    )
+                }
+            };
+            candidates.push((shard, candidate));
+        }
+        let carried = crate::categories::Carried::of(
+            &self.column,
+            candidates
+                .iter()
+                .map(|(shard, candidate)| (&*shard.filter_columns, candidate.as_ref())),
+        )?;
+        codes.iter().map(|&code| carried.carries(code)).collect()
     }
 
-    fn counts_by_entity(&self, cx: &Cx<'_>, entities: &croaring::Bitmap) -> Result<Counts> {
-        let (generation, shard) = (cx.generation, cx.open.served.only_side().shard);
+    /// How many items of `set` carry each value, and how many carry none, in every shard the page
+    /// reads.
+    pub(super) fn counts(&self, cx: &Cx<'_>, set: &Set) -> Result<Counts> {
+        let mut sides = Vec::new();
+        for at in cx.reads() {
+            cx.check_cancelled()?;
+            sides.push(match self.held && (set.has_entities(at) || !self.drawn) {
+                true => self.counts_by_entity(cx, at, set.entities(cx, at)?)?,
+                false => cx
+                    .engine
+                    .pool
+                    .install(|| tally_rows(set.cells(cx, at), cx.segments(at), &self.column)),
+            });
+        }
+        Ok(Counts::summed(sides))
+    }
+
+    fn counts_by_entity(
+        &self,
+        cx: &Cx<'_>,
+        at: usize,
+        entities: &croaring::Bitmap,
+    ) -> Result<Counts> {
+        let (generation, shard) = (cx.generation, cx.side(at).shard);
         let vocabulary = generation.vocabularies.get(&self.vocabulary);
         let each = |visit: &mut dyn FnMut(u32)| {
             if let Some(vocabulary) = vocabulary {
@@ -238,26 +243,20 @@ impl Field {
         })
     }
 
-    /// Where the pass reads each row's value, grouped by `table`.
+    /// Where the pass reads each row's value in the side at `at`, grouped by `table`.
     pub(super) fn row_groups<'s>(
         &self,
         cx: &'s Cx<'_>,
+        at: usize,
         table: &'s GroupTable,
         codes: &'s Option<EntityCodes<'s>>,
     ) -> Result<RowGroups<'s>> {
         if self.drawn {
-            return Ok(RowGroups::drawn(cx.segments(), &self.column, table));
+            return Ok(RowGroups::drawn(cx.segments(at), &self.column, table));
         }
-        let tables = cx
-            .open
-            .served
-            .only_side()
-            .data
-            .row_space
-            .row_entities()
-            .ok_or_else(|| {
-                EngineError::Malformed(format!(
-                    "view '{}' has no row-to-entity table, so '{}' cannot be counted by cell; \
+        let tables = cx.side(at).data.row_space.row_entities().ok_or_else(|| {
+            EngineError::Malformed(format!(
+                "view '{}' has no row-to-entity table, so '{}' cannot be counted by cell; \
                  rebuild the bundle",
                     cx.open.served.name, self.column
                 ))
@@ -266,7 +265,7 @@ impl Field {
         Ok(RowGroups::entity(tables, codes, table))
     }
 
-    /// The per-entity codes [`Self::row_groups`] reads where the field is not drawn.
+    /// The per-entity codes [`Self::row_groups`] reads in `shard` where the field is not drawn.
     pub(super) fn entity_codes<'g>(
         &self,
         shard: &'g crate::Shard,
@@ -291,6 +290,19 @@ pub(super) struct Counts {
 }
 
 impl Counts {
+    /// Every shard's counts added by code: a code is one value in every shard.
+    fn summed(sides: Vec<Counts>) -> Counts {
+        if sides.len() == 1 {
+            return sides.into_iter().next().expect("one side");
+        }
+        let none = sides.iter().map(|side| side.none).sum();
+        let every = sides.into_iter().flat_map(|side| side.by_code).collect();
+        Counts {
+            by_code: crate::cells::add_equal_keys(every),
+            none,
+        }
+    }
+
     fn get(&self, code: u32) -> u64 {
         self.by_code
             .binary_search_by_key(&code, |&(c, _)| c)
@@ -454,5 +466,44 @@ impl Tally {
             by_code.remove(0);
         }
         Counts { by_code, none }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{sizes, top, Counts};
+
+    fn counts(by_code: &[(u32, u64)], none: u64) -> Counts {
+        Counts {
+            by_code: by_code.to_vec(),
+            none,
+        }
+    }
+
+    /// Two shards' counts against one shard holding both: a value carried in both is one value,
+    /// counted once in `distinct`, with its two counts added, and `top` is chosen after the sum, so
+    /// a value that leads neither shard leads both.
+    #[test]
+    fn values_over_two_shards_are_those_of_one_shard_holding_both() {
+        let key = |code: u32| Some(["", "alpha", "beta", "gamma"][code as usize]);
+        let first = counts(&[(1, 3), (2, 2)], 4);
+        let second = counts(&[(2, 2), (3, 3)], 1);
+        let one = counts(&[(1, 3), (2, 4), (3, 3)], 5);
+        let summed = Counts::summed(vec![first, second]);
+        assert_eq!(summed.by_code, one.by_code);
+        assert_eq!(summed.none, one.none);
+        assert_eq!(
+            summed.by_code.len(),
+            3,
+            "a value carried in both shards is one value"
+        );
+        assert_eq!(top(&summed, 1, &key), vec![2]);
+        assert_eq!(top(&summed, 2, &key), top(&one, 2, &key));
+        assert_eq!(sizes(&[2], &summed, None), sizes(&[2], &one, None));
+        assert_eq!(
+            sizes(&[2], &summed, None)[1],
+            (6, 0),
+            "the rest is the other values' items"
+        );
     }
 }

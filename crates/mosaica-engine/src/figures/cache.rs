@@ -103,10 +103,11 @@ pub(crate) struct FieldDenyKey {
     pub failing: Option<u64>,
 }
 
-/// What one session's tail of a field is a function of: its rows above the fragment's base rows,
-/// as [`TailKey`] names them, and their values.
+/// What one session's tail of a field in one shard is a function of: its rows above the
+/// fragment's base rows, as [`TailKey`] names them, and their values.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct FieldTailKey {
+    pub shard: mosaica_types::ShardId,
     pub token_id: u64,
     pub view: String,
     pub column: String,
