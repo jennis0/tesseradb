@@ -108,9 +108,7 @@ pub struct ShardParts {
     pub watermark: u64,
     /// The base postings — the build's `terms/postings.arrow`, unchanged by any flush.
     pub postings: Arc<PostingsReader>,
-    /// This shard's identity, from [`shard_identity`] over the MANIFEST digest of the prefix
-    /// `postings` was read from: what its fragments and figures are filed under, so a fold's new
-    /// prefix and another shard are never answered from this one's.
+    /// This shard's identity ([`shard_identity`]) in the prefix `postings` was read from.
     pub(crate) identity: [u8; 32],
     /// Every unique column's index runs, as the shard's record lists them.
     pub(crate) unique: Arc<mosaica_store::unique::UniqueIndexes>,
@@ -459,12 +457,9 @@ impl Generation {
         self.shards.iter().map(Arc::as_ref)
     }
 
-    /// The first shard's filter columns, which a filter is admitted by and a field's routes are
-    /// read from. Which columns are filterable, where each is placed, which are unique and which
-    /// hold per-entity values come from the declarations, the same in every shard. Whether a
-    /// column holds a value layer, which admission asks of a `none_of` in entity space, is the
-    /// first shard's data, the same in every shard only while every shard's columns come from
-    /// one build.
+    /// The first shard's filter columns, which admit a filter and route a field's reads.
+    /// Placement, uniqueness and filterability are declared, so the same in every shard; whether
+    /// a column holds a value layer is the first shard's data.
     pub(crate) fn declared_columns(&self) -> &crate::filter::FilterColumns {
         &self.shards[0].filter_columns
     }
@@ -704,7 +699,6 @@ pub(crate) fn partition_of(
 mod tests {
     use super::*;
 
-    /// Two shards of one prefix are two identities, and a new prefix moves a shard's.
     #[test]
     fn two_shards_of_one_prefix_have_two_identities() {
         let bundle = [7u8; 32];

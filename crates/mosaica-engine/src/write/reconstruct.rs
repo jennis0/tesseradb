@@ -8,8 +8,8 @@ use super::*;
 /// A struct rather than four arguments: the fields travel together and are all read from the same
 /// manifests, and a fifth stays a compile error here rather than a defaulted argument.
 pub(crate) struct ManifestSeed<'a> {
-    /// Every point shard's allocator seed, ascending by shard. The first is the write shard: the
-    /// one the log's records name, and whose slice of every membership the artifact store holds.
+    /// Every point shard's allocator seed, ascending by shard; the first is the write shard
+    /// ([`LiveState::shards`]).
     pub shards: Vec<ShardSeed>,
     /// The served side-manifest's `shards.size`.
     pub size: u64,
@@ -57,7 +57,7 @@ pub(crate) struct ManifestSeed<'a> {
 
 /// One point shard's allocator, as its record leaves it.
 pub(crate) struct ShardSeed {
-    pub shard: ShardId,
+    pub id: ShardId,
     /// The shard record's `high_water`.
     pub high_water: u64,
     /// The newest served side-manifest's freed ids of this shard, and the sets it holds back with
@@ -82,13 +82,12 @@ impl WritePath {
         has_row: impl Fn(EntityId, &str) -> bool,
     ) -> Result<(Overlays, IngestBuffer, WritePathState), EngineError> {
         let wal = Wal::open(wal_path).map_err(EngineError::Wal)?;
-        // A bundle of several shards takes no write, so no record of its log can be its own.
         if seed.shards.len() > 1 && wal.records().next().is_some() {
             return Err(EngineError::SeveralShardsLogged {
                 shards: seed.shards.len(),
             });
         }
-        let shard_ids: Vec<ShardId> = seed.shards.iter().map(|shard| shard.shard).collect();
+        let shard_ids: Vec<ShardId> = seed.shards.iter().map(|shard| shard.id).collect();
 
         // Two walks over the log, each holding one record at a time. The first rebuilds what the
         // second is read against: the declarations, the registry an extent's ordinals resolve
@@ -310,7 +309,6 @@ impl WritePath {
             seed.layer_spaces,
             seed.membership_extents,
             &shard_ids,
-            shard_ids[0],
             &seed.prefix_dir,
         )?;
 
@@ -415,7 +413,7 @@ impl WritePath {
         let unnamed = croaring::Bitmap::new();
         let mut shards = Vec::with_capacity(seed.shards.len());
         for (at, shard) in seed.shards.into_iter().enumerate() {
-            // The log names the write shard alone, and the open refuses a log over several.
+            // The log and `named` are the write shard's alone.
             let (wal_high_water, named) = match at {
                 0 => (wal_high_water, &named),
                 _ => (0, &unnamed),
@@ -428,7 +426,7 @@ impl WritePath {
                         "the high water durable state leaves for shard {} (manifest {}, log \
                          {wal_high_water}) is past {}, where a shard's ids end. Restore the \
                          side-manifest and log this bundle was written with",
-                        shard.shard,
+                        shard.id,
                         shard.high_water,
                         mosaica_types::ENTITY_END,
                     ))
@@ -441,7 +439,7 @@ impl WritePath {
             })?;
             allocator.set_size(size);
             allocator.seed_freed(shard.free, shard.held, wal.retained_from(), named);
-            shards.push(ShardWrite::new(shard.shard, allocator));
+            shards.push(ShardWrite::new(shard.id, allocator));
         }
 
         let edited_live = crate::edited::EditedLive::derive(&edits, &buffer, &overlay.items);
@@ -474,42 +472,35 @@ impl WritePath {
 }
 
 /// What the manifests' record and member packs seed, before the log is replayed over them.
-pub(super) struct SeededArtifacts {
+struct SeededArtifacts {
     /// Every artifact's whole record, with the write shard's slice of its membership and
     /// generating sets.
-    pub(super) artifacts: ArtifactStore,
-    /// Every other point shard's slice: per artifact, its members and generating sets in that
-    /// shard and what a row form reads beside them, its view, attachment and each set's
-    /// cardinality. A key, a label, parents and a shape are read from [`Self::artifacts`] alone.
-    pub(super) slices: Vec<(ShardId, ArtifactStore)>,
+    artifacts: ArtifactStore,
+    /// Every other point shard's slice: see [`LiveState::slices`].
+    slices: Vec<(ShardId, ArtifactStore)>,
     /// Artifacts a pack held that did not decode, or whose slices did not hold their sets.
-    pub(super) undecodable: usize,
+    undecodable: usize,
     /// Memberships held on the heap because the pack's mapping would not take.
-    pub(super) on_heap: usize,
+    on_heap: usize,
 }
 
 /// Every artifact the packs of `layer_spaces` hold, read through `registry`'s runs, each record
-/// paired with every one of `shards`' member packs over the same ordinals.
-pub(super) fn seed_artifacts(
+/// paired with every one of `shards`' member packs over the same ordinals. `shards` is ascending,
+/// so the first is the write shard.
+fn seed_artifacts(
     registry: &LayerRegistry,
     layer_spaces: &[mosaica_store::manifest::LayerSpaceRecord],
     membership_extents: &[(ShardId, mosaica_store::manifest::MembershipExtent)],
     shards: &[ShardId],
-    write_shard: ShardId,
     prefix_dir: &Path,
 ) -> Result<SeededArtifacts, EngineError> {
     use mosaica_lifecycle::membership::{decode_members, decode_slice, slices_hold_their_sets};
-    let Some(written) = shards.iter().position(|shard| *shard == write_shard) else {
-        return Err(EngineError::Malformed(format!(
-            "the write shard {write_shard} is not among the bundle's shards"
-        )));
-    };
     let several = shards.len() > 1;
     let mut seeded = SeededArtifacts {
         artifacts: ArtifactStore::new(),
         slices: shards
             .iter()
-            .filter(|shard| **shard != write_shard)
+            .skip(1)
             .map(|shard| (*shard, ArtifactStore::new()))
             .collect(),
         undecodable: 0,
@@ -591,16 +582,15 @@ pub(super) fn seed_artifacts(
                 // The record decodes once, with the write shard's slice; every other slice is its
                 // members and sets. Together they hold every generating set whole, or the
                 // artifact is damage and refused in every shard.
-                let Some((mut record, shape)) = decode_slice(entity, record_blob, blobs[written])
-                else {
+                let Some((mut record, shape)) = decode_slice(entity, record_blob, blobs[0]) else {
                     seeded.undecodable += 1;
                     continue;
                 };
                 let mut others = Vec::with_capacity(shards.len() - 1);
-                for (at, blob) in blobs.iter().enumerate().filter(|(at, _)| *at != written) {
+                for (at, blob) in blobs.iter().enumerate().skip(1) {
                     match decode_members(blob) {
                         Some((members, sets)) if sets.len() == record.contents.len() => {
-                            others.push((at, slice_of(&record, members, sets)));
+                            others.push((at, slice_record(&record, members, sets)));
                         }
                         _ => break,
                     }
@@ -641,15 +631,11 @@ pub(super) fn seed_artifacts(
                         _ => *on_heap += 1,
                     }
                 };
-                mapped(&mut record, written);
+                mapped(&mut record, 0);
                 for (at, mut slice) in others {
                     mapped(&mut slice, at);
-                    let shard = shards[at];
-                    if let Some((_, store)) =
-                        seeded.slices.iter_mut().find(|(held, _)| *held == shard)
-                    {
-                        store.seed(&name, space.space, extent.level, ordinal, slice, None);
-                    }
+                    let (_, store) = &mut seeded.slices[at - 1];
+                    store.seed(&name, space.space, extent.level, ordinal, slice, None);
                 }
                 seeded
                     .artifacts
@@ -683,7 +669,7 @@ impl SeededArtifacts {
 
 /// One point shard's slice of `record`: `members` and `sets` in that shard, and of the record only
 /// what a row form reads beside them.
-fn slice_of(
+fn slice_record(
     record: &ArtifactRecord,
     members: croaring::Bitmap,
     sets: Vec<croaring::Bitmap>,
@@ -823,14 +809,13 @@ mod tests {
         }];
         space.level_versions = vec![LevelVersion { level: 0, version: 9 }];
         let shards = [ShardId::ZERO, ShardId::new(1).expect("in range")];
-        seed_artifacts(&registry(), &[space], &extents, &shards, ShardId::ZERO, dir)
+        seed_artifacts(&registry(), &[space], &extents, &shards, dir)
     }
 
-    /// **Every shard's slice of every artifact is read at open**: the write store holds each
-    /// whole record with its shard's slice and the shape, the other shard's store its slice
-    /// beside the record's attachment and cardinalities alone, and both reach the level's bound
-    /// and version. A record whose slices sum short of a set is refused in every shard, and an
-    /// artifact whose members are all in one shard declares members in each.
+    /// The write store holds each whole record with its shard's slice and the shape, the other
+    /// shard's store its slice beside the record's attachment and cardinalities alone, and both
+    /// reach the level's bound and version. A record whose slices sum short of a set is refused in
+    /// every shard, and an artifact whose members are all in one shard declares members in each.
     #[test]
     fn every_shards_slice_of_every_artifact_is_read_at_open() {
         let dir = tempfile::tempdir().expect("tempdir");

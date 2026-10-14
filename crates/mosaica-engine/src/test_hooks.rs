@@ -461,6 +461,7 @@ impl Engine {
         shard: ShardId,
     ) -> Result<croaring::Bitmap> {
         let generation = self.generation.load_full();
+        shard_for_test(&generation, shard)?;
         let mut probe = crate::timing::Probe::new();
         let geometries = self.session_geometries(session, &generation, view, &None, &mut probe)?;
         let (_, _, geometry) = geometries
@@ -522,13 +523,13 @@ impl Engine {
         let mut walked: std::collections::BTreeMap<u32, (u64, u64, [u64; 2], [u32; 4])> =
             Default::default();
         for (place, side, leaf) in open.served.filtered_sides(&open.mask) {
-            let places = crate::derived::Placement::of_segments(&side.segments);
+            let placement = crate::derived::Placement::of_segments(&side.segments);
             let mut add = |ordinal: u32, row: u32| {
                 let entry = walked
                     .entry(ordinal)
                     .or_insert((0, 0, [0; 2], [u32::MAX, u32::MAX, 0, 0]));
                 entry.0 += 1;
-                if let Some((x, y)) = crate::derived::place(&places, row) {
+                if let Some((x, y)) = crate::derived::place(&placement, row) {
                     entry.1 += 1;
                     entry.2[0] += u64::from(x);
                     entry.2[1] += u64::from(y);

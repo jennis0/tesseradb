@@ -206,8 +206,7 @@ pub enum AcceptError {
     /// The batch cannot be taken as sent: a row creates an item with no position or no label, or
     /// carries coordinates in a batch naming no view. Nothing was submitted.
     Contract(String),
-    /// The bundle holds several point shards, which a running service serves for reads only until
-    /// writes over several shards land. Nothing was submitted.
+    /// The bundle holds several point shards and takes no write. Nothing was submitted.
     SeveralShards {
         shards: usize,
     },
@@ -256,9 +255,9 @@ impl std::fmt::Display for AcceptError {
             }
             AcceptError::SeveralShards { shards } => write!(
                 f,
-                "this bundle holds {shards} point shards and takes no write until writes over \
-                 several shards land (stage 5 of the sharding plan); to write, serve a bundle of \
-                 one shard, built with a `[shards] size` of at least its item count"
+                "this bundle holds {shards} point shards, which take no write until stage 5 of \
+                 the sharding plan; to write, serve a bundle of one shard, built with a \
+                 `[shards] size` of at least its item count"
             ),
         }
     }
@@ -410,10 +409,8 @@ impl WritePath {
             })?;
         tracing::debug!(root = %bundle_lock.path().display(), "bundle write lock taken");
         let wal = self.wal.take().expect("checked immediately above");
-        // A bundle of several shards takes no write, so no thread runs over it: nothing is
-        // logged, flushed, merged, folded or rotated, and the lock keeps every other writer out.
+        // No thread runs over a bundle that takes no write; the lock still keeps other writers out.
         if self.writable().is_err() {
-            drop(wal);
             self.bundle_lock = Some(bundle_lock);
             self.health.advance(ExecutorPosture::Running);
             return Ok(());
@@ -1270,7 +1267,7 @@ pub(crate) struct MaintenanceDeps {
     /// forward after a deny is acknowledged, and sweeping the cache directory when a compaction
     /// rotates the shards' identities.
     pub(crate) figures: Arc<crate::figures::FiguresCache>,
-    /// The fragments, for the identities a compaction supersedes: kept one rotation, then swept.
+    /// The fragments, swept when a compaction rotates a shard's identity.
     pub(crate) fragments: Arc<mosaica_authz::FragmentCache>,
     /// The region decompositions (`crate::region`), pruned of superseded generations at every
     /// geometry swap exactly as the row-projection cache is: a row-space artefact keyed on a

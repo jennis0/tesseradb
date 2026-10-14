@@ -155,9 +155,9 @@ impl std::fmt::Display for EngineError {
             EngineError::Malformed(detail) => write!(f, "malformed: {detail}"),
             EngineError::SeveralShardsLogged { shards } => write!(
                 f,
-                "this bundle holds {shards} point shards and the write-ahead log beside it holds \
-                 records, which no write to a bundle of several shards can have left; open it \
-                 with an empty log, or open the log with the bundle it was written for"
+                "this bundle holds {shards} point shards, which take no write, yet the \
+                 write-ahead log beside it holds records; open it with an empty log, or open the \
+                 log with the bundle it was written for"
             ),
             EngineError::VocabularyVisibilityUnavailable { column, detail } => write!(
                 f,

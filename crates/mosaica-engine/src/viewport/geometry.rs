@@ -360,7 +360,7 @@ impl Engine {
     ) -> Result<Arc<SessionGeometry>> {
         let space = &view_data.row_space;
         let fragment = self.fragment_for(session, shard, None)?;
-        probe.lap(|t| &mut t.fragment_forward_ns);
+        probe.lap(|t| &mut t.fragment_ns);
         // Constructed here, not at the top, so the allocation lands only on the path that can
         // park: every warm request returns at rung 1.
         let never_cancelled = CancelToken::new();

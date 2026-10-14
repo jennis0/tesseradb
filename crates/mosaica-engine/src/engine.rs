@@ -192,7 +192,7 @@ pub struct Engine {
 /// A field whose bytes did not decode never reaches here — the reader refuses such a manifest
 /// rather than opening it — and the `Malformed` arm below is what keeps "did not decode" from
 /// becoming "nothing is denied" if it ever does.
-fn initial_deny_of(bundle: &Bundle) -> Result<InitialDeny> {
+fn initial_deny_of(bundle: &Bundle) -> Result<DenyOverlays> {
     // `(deleted, suppressed)` for one target, unioned across the partitions.
     type Sets = (croaring::Bitmap, croaring::Bitmap);
     let union = |key: &str,
@@ -226,14 +226,14 @@ fn initial_deny_of(bundle: &Bundle) -> Result<InitialDeny> {
         }
     }
     let seeded = |(deleted, suppressed): Sets| Overlay::seeded(&deleted, &suppressed);
-    Ok(InitialDeny {
+    Ok(DenyOverlays {
         shards: shards.into_iter().map(|(shard, sets)| (shard, seeded(sets))).collect(),
         spaces: spaces.into_iter().map(|(space, sets)| (space, seeded(sets))).collect(),
     })
 }
 
-/// What [`initial_deny_of`] reads: one overlay per shard and one per layer space holding a deny.
-struct InitialDeny {
+/// One overlay per shard and one per layer space holding a deny.
+struct DenyOverlays {
     shards: std::collections::BTreeMap<ShardId, Overlay>,
     spaces: std::collections::BTreeMap<mosaica_types::LayerSpace, Overlay>,
 }
@@ -482,8 +482,6 @@ pub(crate) struct PrefixReaders {
 /// What [`PrefixReaders`] reads one point shard through.
 pub(crate) struct ShardReaders {
     pub(crate) id: ShardId,
-    pub(crate) watermark: u64,
-    pub(crate) high_water: u64,
     pub(crate) postings: Arc<PostingsReader>,
     pub(crate) delta_postings: Vec<Arc<DeltaTier>>,
     /// The shard's tenancy index, which the first generation serves and the allocator's freed ids
@@ -554,8 +552,6 @@ impl PrefixReaders {
             .map_err(EngineError::Store)?;
             shards.push(ShardReaders {
                 id: shard.record.id,
-                watermark: shard.record.watermark,
-                high_water: shard.record.high_water,
                 postings,
                 delta_postings,
                 tenancy: Arc::new(tenancy),
@@ -581,13 +577,10 @@ impl PrefixReaders {
     }
 }
 
-/// What a reconstruction of the write path leaves behind: the first generation's overlay and
+/// What a reconstruction of the write path leaves behind: the first generation's overlays and
 /// buffer, the write-side state the engine keeps, and the category bindings replay minted into.
 struct ReconstructedWrites {
-    /// The write shard's overlay and every layer space's.
-    overlay: Overlays,
-    /// Every other point shard's overlay, as its record's deny state leaves it.
-    other_overlays: std::collections::BTreeMap<ShardId, Overlay>,
+    deny: DenyOverlays,
     buffer: mosaica_lifecycle::IngestBuffer,
     state: crate::write::WritePathState,
     vocabularies: Vocabularies,
@@ -603,29 +596,27 @@ fn reconstruct_writes(
     readers: &PrefixReaders,
     side: SideDeclarations,
 ) -> Result<ReconstructedWrites> {
-    let InitialDeny {
+    let DenyOverlays {
         shards: mut shard_deny,
         spaces: space_deny,
     } = initial_deny_of(bundle)?;
     let mut vocabularies = initial_vocabularies_of(bundle)?;
+    let served = &bundle.partitions[&readers.phash].shards;
     let seeds: Vec<crate::write::ShardSeed> = readers
         .shards
         .iter()
-        .map(|shard| {
+        .zip(served)
+        .map(|(shard, data)| {
             let (free, held) = freed_of(bundle, shard.id, &shard.tenancy);
             crate::write::ShardSeed {
-                shard: shard.id,
-                high_water: shard.high_water,
+                id: shard.id,
+                high_water: data.record.high_water,
                 free,
                 held,
             }
         })
         .collect();
-    let write_shard = readers
-        .shards
-        .first()
-        .expect("a served side-manifest lists a shard")
-        .id;
+    let write_shard = served[0].record.id;
     // One partition today, so this concatenation is the whole registry; at more than one it is
     // the union.
     let manifest_layers: Vec<mosaica_types::layer::RegisteredLayer> =
@@ -669,10 +660,7 @@ fn reconstruct_writes(
         items: shard_deny.remove(&write_shard).unwrap_or_default(),
         spaces: space_deny,
     };
-    let write_views = &bundle
-        .shard(write_shard)
-        .expect("the readers opened every shard of the bundle")
-        .views;
+    let write_views = &served[0].views;
     let (overlay, buffer, state) = WritePath::reconstruct(
         wal_path,
         crate::write::ManifestSeed {
@@ -716,9 +704,12 @@ fn reconstruct_writes(
                 .is_some_and(|data| data.row_space.row_of(entity).is_some())
         },
     )?;
+    shard_deny.insert(write_shard, overlay.items);
     Ok(ReconstructedWrites {
-        overlay,
-        other_overlays: shard_deny,
+        deny: DenyOverlays {
+            shards: shard_deny,
+            spaces: overlay.spaces,
+        },
         buffer,
         state,
         vocabularies,
@@ -862,15 +853,14 @@ fn first_generation(
     bundle: &Arc<Bundle>,
     state: &crate::write::WritePathState,
     vocabularies: Vocabularies,
-    overlays: Overlays,
-    mut other_overlays: std::collections::BTreeMap<ShardId, Overlay>,
+    deny: DenyOverlays,
     buffer: mosaica_lifecycle::IngestBuffer,
     pool: &rayon::ThreadPool,
 ) -> Result<Arc<GenerationHandle>> {
-    let Overlays {
-        items: overlay,
+    let DenyOverlays {
+        shards: mut shard_deny,
         spaces,
-    } = overlays;
+    } = deny;
     let contents = crate::artifact_content::open_space_contents(&readers.prefix_dir, bundle)
         .map_err(|e| EngineError::Malformed(e.to_string()))?;
     let mut layer_spaces = crate::LayerSpaces::new();
@@ -884,15 +874,13 @@ fn first_generation(
     // The filter columns are carried forward by every generation successor: a restart composes
     // what the flushes before it published, not the build's coverage alone.
     let unfolded_attributes = state.attributes.entity_names();
-    // The first shard is the write shard: the log names it alone, so it alone holds a buffer and
-    // edits no run holds yet.
-    let mut written = Some((overlay, buffer, state.edited_live.clone()));
+    // The write shard alone holds a buffer and edits no run holds yet.
+    let written = std::iter::once((buffer, state.edited_live.clone()))
+        .chain(std::iter::repeat_with(Default::default));
+    let served = &bundle.partitions[&readers.phash].shards;
     let mut shards = Vec::with_capacity(readers.shards.len());
-    for shard in &readers.shards {
-        let record = &bundle
-            .shard(shard.id)
-            .expect("the readers opened every shard of the bundle")
-            .record;
+    for ((shard, data), (buffer, edited_live)) in readers.shards.iter().zip(served).zip(written) {
+        let record = &data.record;
         let indexes = open_shard_indexes(
             &readers.prefix_dir,
             bundle,
@@ -901,17 +889,11 @@ fn first_generation(
             &unfolded_attributes,
         )
         .map_err(EngineError::Store)?;
-        let (overlay, buffer, edited_live) = written.take().unwrap_or_else(|| {
-            (
-                other_overlays.remove(&shard.id).unwrap_or_default(),
-                mosaica_lifecycle::IngestBuffer::default(),
-                crate::edited::EditedLive::default(),
-            )
-        });
+        let overlay = shard_deny.remove(&shard.id).unwrap_or_default();
         shards.push((
             shard.id,
             crate::ShardParts {
-                watermark: shard.watermark,
+                watermark: record.watermark,
                 postings: Arc::clone(&shard.postings),
                 identity: crate::shard_identity(&readers.bundle_identity, shard.id),
                 unique: indexes.unique,
@@ -1082,8 +1064,7 @@ impl Engine {
 
         let readers = PrefixReaders::open(bundle_root, &bundle)?;
         let ReconstructedWrites {
-            overlay,
-            other_overlays,
+            deny,
             buffer,
             mut state,
             vocabularies,
@@ -1121,8 +1102,7 @@ impl Engine {
             &bundle,
             &state,
             vocabularies,
-            overlay,
-            other_overlays,
+            deny,
             buffer,
             &pool,
         )?;

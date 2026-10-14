@@ -217,10 +217,10 @@ struct RawServe {
     ///
     /// Default: the number of CPUs the process may use.
     compute_threads: Option<usize>,
-    /// Viewer and session requests computed at once. It admits `/v1/viewport`, the single-item and
-    /// single-artifact reads, `/v1/artifacts/browse`, `/v1/aggregate`, a
-    /// `/v1/categories/{column}/suggest` with `view` and `counts=true`, never the control plane or
-    /// a request for a session.
+    /// Viewer requests computed at once. It admits `/v1/viewport`, the single-item and
+    /// single-artifact reads, `/v1/artifacts/browse`, `/v1/aggregate` and a
+    /// `/v1/categories/{column}/suggest` with `view` and `counts=true`, and never a control-plane
+    /// or session-plane request.
     ///
     /// Default: four per compute thread.
     compute_admission: Option<usize>,

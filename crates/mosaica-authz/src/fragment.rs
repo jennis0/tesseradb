@@ -92,11 +92,7 @@ pub fn build_grant_with_deltas(
     for ordinal in 0..postings.term_count() {
         sources.extend(postings.posting_at(ordinal)?);
     }
-    for tier in deltas {
-        for ordinal in tier.ordinals() {
-            sources.extend(tier.posting_at(ordinal)?);
-        }
-    }
+    collect_every_tier(&mut sources, deltas)?;
     let mut fragment = union_postings(sources);
     fragment.run_optimize();
     Ok(fragment)
@@ -116,6 +112,19 @@ fn collect_postings<'a>(
         }
         for tier in deltas {
             sources.extend(tier.posting(term)?);
+        }
+    }
+    Ok(())
+}
+
+/// Append every posting of every tier of `deltas` to `sources`.
+fn collect_every_tier<'a>(
+    sources: &mut Vec<PostingRef<'a>>,
+    deltas: &'a [Arc<DeltaTier>],
+) -> io::Result<()> {
+    for tier in deltas {
+        for ordinal in tier.ordinals() {
+            sources.extend(tier.posting_at(ordinal)?);
         }
     }
     Ok(())
@@ -164,13 +173,7 @@ pub fn gained_by(
     let mut sources = Vec::new();
     match grant {
         Grant::Keys(keys) => collect_postings(&mut sources, keys, None, deltas)?,
-        Grant::Every => {
-            for tier in deltas {
-                for ordinal in tier.ordinals() {
-                    sources.extend(tier.posting_at(ordinal)?);
-                }
-            }
-        }
+        Grant::Every => collect_every_tier(&mut sources, deltas)?,
     }
     let mut gained = union_postings(sources);
     gained.and_inplace(fragment);
@@ -193,11 +196,8 @@ pub fn delta_entities(terms: &[TermId], deltas: &[Arc<DeltaTier>]) -> io::Result
     Ok(entities)
 }
 
-/// The canonical cache key: SHA-256 over `identity ‖ rule_hash ‖ watermark ‖ sorted,
-/// deduplicated term_id u32 LEs`. Term ids are bundle-relative ordinals and entity ids are a
-/// shard's own, so a persistent cache directory reused across bundle rebuilds, across shards, or
-/// across a change to the authorisation rule, would otherwise serve a frozen fragment naming a
-/// different entity set.
+/// SHA-256 over `identity ‖ rule_hash ‖ watermark ‖ sorted, deduplicated term_id u32 LEs`; see
+/// [`FragmentCache`].
 fn canonical_key(
     identity: &[u8; 32],
     rule_hash: &[u8; 32],
@@ -337,9 +337,8 @@ pub struct FrozenFragment {
     /// The generation's watermark at build time, as passed to [`FragmentCache::get_or_build`].
     /// Persisted alongside the frozen bytes so a reopened fragment restores it.
     pub watermark: u64,
-    /// The identity this fragment was built under: the shard's, which names the shard and the
-    /// prefix whose postings it was unioned from. Not persisted: [`canonical_key`] already hashes
-    /// the identity, so this field just records which one produced the file found.
+    /// The shard identity this fragment was built under. Not persisted: the entry's key and
+    /// directory already name it.
     pub identity: [u8; 32],
 }
 
@@ -450,7 +449,7 @@ impl CacheWeight for FrozenFragment {
 /// An entry is named by its canonical key: SHA-256 over the shard's identity, the authorisation
 /// rule's hash, the watermark and the sorted, deduplicated granted terms. Term ids are ordinals of
 /// one bundle and entity ids are one shard's, so a key narrower than that would serve one shard's
-/// entity set under another's.
+/// entity set under another's, or under another rule.
 ///
 /// On disc an entry is `<hex identity>/<hex key>.frag`, the `Frozen` bitmap bytes, and
 /// `<hex identity>/<hex key>.meta`, which holds `watermark: u64 LE ‖ frozen_len: u64 LE ‖
@@ -566,7 +565,7 @@ impl FragmentCache {
         self.slots.set_bound_bytes(bytes);
     }
 
-    /// How long [`Self::get_or_build_waiting`] waits for another caller's build.
+    /// How long [`Self::get_or_build_grant_waiting`] waits for another caller's build.
     pub fn set_wait_budget_ms(&self, wait_budget_ms: u64) {
         self.slots.set_wait_budget_ms(wait_budget_ms);
     }
@@ -681,28 +680,8 @@ impl FragmentCache {
             })
     }
 
-    /// [`Self::get_or_build`], waiting up to the wait budget for another caller's build of the
-    /// same fragment. [`FragmentCacheError::Building`] then means the budget ran out.
-    pub fn get_or_build_waiting(
-        &self,
-        identity: [u8; 32],
-        satisfied: &[TermId],
-        postings: &PostingsReader,
-        deltas: &[Arc<DeltaTier>],
-        watermark: u64,
-        cancel: &dyn Cancel,
-    ) -> Result<Arc<FrozenFragment>, FragmentCacheError> {
-        self.get_or_build_grant_waiting(
-            identity,
-            &Grant::Keys(Arc::new(satisfied.to_vec())),
-            postings,
-            deltas,
-            watermark,
-            cancel,
-        )
-    }
-
-    /// [`Self::get_or_build_waiting`] for `grant`.
+    /// [`Self::get_or_build_grant`], waiting up to the wait budget for another caller's build of
+    /// the same fragment. [`FragmentCacheError::Building`] then means the budget ran out.
     pub fn get_or_build_grant_waiting(
         &self,
         identity: [u8; 32],

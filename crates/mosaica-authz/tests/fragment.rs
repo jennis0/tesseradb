@@ -10,7 +10,7 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 use tempfile::TempDir;
 
-use mosaica_authz::{build_fragment, write_postings, FragmentCache, FragmentCacheError};
+use mosaica_authz::{build_fragment, write_postings, FragmentCache, FragmentCacheError, Grant};
 use mosaica_types::TermId;
 
 const UNIVERSE: u32 = 100_000;
@@ -487,24 +487,24 @@ fn concurrent_waiting_callers_are_all_served_the_one_build() {
 
     let cache_dir = TempDir::new().unwrap();
     let cache = Arc::new(FragmentCache::new(cache_dir.path(), [2u8; 32]));
-    let terms: Vec<TermId> = (0..20u32).map(TermId::new).collect();
+    let grant = Grant::Keys(Arc::new((0..20u32).map(TermId::new).collect()));
 
     const THREADS: usize = 8;
     let barrier = Arc::new(std::sync::Barrier::new(THREADS));
     let handles: Vec<_> = (0..THREADS)
         .map(|_| {
-            let (cache, reader, terms, barrier) = (
+            let (cache, reader, grant, barrier) = (
                 Arc::clone(&cache),
                 Arc::clone(&reader),
-                terms.clone(),
+                grant.clone(),
                 Arc::clone(&barrier),
             );
             std::thread::spawn(move || {
                 barrier.wait();
                 cache
-                    .get_or_build_waiting(
+                    .get_or_build_grant_waiting(
                         IDENTITY,
-                        &terms,
+                        &grant,
                         &reader,
                         &[],
                         7,

@@ -31,7 +31,7 @@
 ///
 /// **D-D/D-E: the per-tile fields stopped partitioning wall clock the moment the tile loop went
 /// parallel.** `count_ns`, `select_ns` and the sweep's per-tile counters (`tiles_nonempty`,
-/// `sigma_visible`, `select_rows_visited`) are now **cross-worker sums**: each tile's own
+/// `sigma_visible`, `select_rows_visited`) are **cross-worker sums**: each tile's own
 /// contribution ([`crate::viewport::TileResult`]'s [`TileStats`]) is measured locally inside that
 /// tile's own `tile_sweep` call, on whatever rayon worker ran it, and summed into these fields by
 /// [`TileStats::fold_into`] in `Engine::viewport`'s serial in-order fold. At `compute_threads = 1`
@@ -74,7 +74,7 @@ pub struct StageTimings {
     /// Reading the session's fragment at the live watermark (`Engine::fragment_for`): a fragment
     /// cache lookup on the common path, and one `build_fragment_with_deltas` on the first request
     /// of each grant after a flush that the background refresh has not reached.
-    pub fragment_forward_ns: u64,
+    pub fragment_ns: u64,
     /// View lookup, and resolving each segment's `row_base`.
     pub view_lookup_ns: u64,
     /// Row-projection cache lookup — **including the `RowProjection::new` build on a miss**, which
@@ -140,8 +140,8 @@ pub struct StageTimings {
     /// touch, then each tile's point columns and their append to the pending chunk. Serial, on
     /// the request's thread; handing a chunk to the sink is not counted.
     pub gather_ns: u64,
-    /// Design §7.3's density underlay: finding every non-empty tile's occupied sub-cells and
-    /// counting them, one walk of each shard's leaf, after the sweep and on the request's thread.
+    /// The density underlay: finding every non-empty tile's occupied sub-cells and counting them,
+    /// one walk of each shard's leaf, after the sweep and on the request's thread.
     /// Zero when the request did not ask for the underlay, which is the default.
     ///
     /// A cost centre with no other visibility, and one whose shape differs from every other stage
@@ -238,7 +238,7 @@ impl StageTimings {
     pub fn unattributed_ns(&self) -> u64 {
         let named = self.generation_resolve_ns
             + self.stamp_compare_ns
-            + self.fragment_forward_ns
+            + self.fragment_ns
             + self.view_lookup_ns
             + self.row_projection_ns
             + self.compose_ns

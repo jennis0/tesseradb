@@ -101,8 +101,7 @@ impl ShardWrite {
 /// the executor (`/control/ingest`'s replay check, `/control/status`'s high-water). The generation pointer is not held here: it is
 /// swapped by `Executor::publish_arc`, the crate's one non-atomic store.
 pub(crate) struct LiveState {
-    /// Each point shard's write state, ascending by id. The first is the write shard, whose slice
-    /// of every membership [`Self::artifacts`] holds.
+    /// Each point shard's write state, ascending by id; the first is the write shard.
     pub(in crate::write) shards: Vec<ShardWrite>,
     /// The descriptor resolver's extension state. Resolved in the handler before submitting, not
     /// on the executor: signature-sorted assignment needs the term set to compute a sort key
@@ -114,14 +113,12 @@ pub(crate) struct LiveState {
     /// request path, which resolves a session's reachable set from it.
     pub(in crate::write) registry: Mutex<LayerRegistry>,
     /// Every artifact's entity-space membership, on the registry's contract: written only by the
-    /// executor, read by the request path. Of a bundle of several point shards it holds the write
-    /// shard's slice of each membership and generating set, and [`Self::slices`] the others'.
+    /// executor, read by the request path. Holds the write shard's slice of each membership;
+    /// [`Self::slices`] the others'.
     pub(in crate::write) artifacts: Mutex<ArtifactStore>,
-    /// Every point shard's slice of every artifact's membership and generating sets but the one
-    /// [`Self::artifacts`] holds, read at open, each beside what a row form reads of the record:
-    /// its view, attachment and each set's cardinality. A record's key, labels and parents are
-    /// read from [`Self::artifacts`]. A bundle of several shards takes no write, so nothing writes
-    /// these.
+    /// Every other point shard's slice of each artifact's membership and generating sets, read at
+    /// open, with only what a row form reads of the record: view, attachment, each set's
+    /// cardinality. Never written.
     pub(in crate::write) slices: Vec<(ShardId, Arc<ArtifactStore>)>,
     /// The view roster, on the registry's contract: written only by the executor, a create is a
     /// WAL append followed by an apply, on the one thread that also holds the allocator. Read by
@@ -200,14 +197,13 @@ impl LiveState {
     }
 
     /// `shard`'s slice of every membership, given `written`, the store [`Self::with_artifacts`]
-    /// lends, which is the write shard's. Panics on a shard the open read no slice of: answering
-    /// from another shard's slice would project its entities through this shard's row space.
+    /// lends. Panics on a shard the open read no slice of: answering from another shard's slice
+    /// would project its entities through this shard's row space.
     pub(crate) fn slice_of<'a>(
         &'a self,
         shard: ShardId,
         written: &'a ArtifactStore,
     ) -> &'a ArtifactStore {
-        // The first shard is the write shard.
         if shard == self.shards[0].id {
             return written;
         }

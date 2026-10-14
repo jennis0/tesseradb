@@ -433,9 +433,8 @@ impl Engine {
         self.write.wake();
     }
 
-    /// Refuses every write to a bundle of several shards, which a running service serves for
-    /// reads only until writes over several shards land. A caller asks it to refuse a write
-    /// before reading the write's body.
+    /// Refuses every write to a bundle of several shards
+    /// ([`crate::write::WritePath::writable`]). A caller asks it before reading a write's body.
     pub fn writable(&self) -> std::result::Result<(), crate::write::AcceptError> {
         self.write.writable()
     }
