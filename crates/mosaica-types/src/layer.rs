@@ -1747,9 +1747,6 @@ pub fn check_scoped_views<'a>(
 mod tests {
     use super::*;
 
-    /// A level's shape over shards is each shard's summed: each artifact counted once, the
-    /// fractions weighted by the artifacts each shard reaches, and partitioning only where every
-    /// shard partitions. One shard's shape, and an empty shard beside it, leave it as it is.
     #[test]
     fn a_level_shape_over_shards_is_each_shards_summed() {
         let shape = |artifacts, everywhere_fraction, partitions| LevelShape {

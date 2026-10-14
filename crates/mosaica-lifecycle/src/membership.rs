@@ -941,9 +941,9 @@ pub struct ArtifactRecord {
     /// mapping of the bytes that carry it (see [`Members`]). In a store holding one point shard's
     /// slice of each membership, that shard's slice alone.
     pub members: Members,
-    /// Whether this artifact declares members of its own, where [`Self::members`] is one point
-    /// shard's slice and an empty slice cannot say: set when the shards' slices are read together.
-    /// `None` where `members` is the whole membership, which then says. Not stored.
+    /// Whether the artifact declares members of its own, set where [`Self::members`] is one
+    /// shard's slice and an empty slice cannot say. `None` where `members` is the whole
+    /// membership. Not stored.
     pub declares_members: Option<bool>,
     /// The ranked contents of this artifact's supplied content, most specific first.
     ///
@@ -3263,10 +3263,8 @@ pub fn decode_record(
     slices_hold_their_sets(&[&decoded.0]).then_some(decoded)
 }
 
-/// [`decode_record`] over one point shard's member blob: the record with that shard's slice of
-/// its membership and of each generating set, and each content's cardinality the record's own,
-/// over every shard. A slice is not checked against the cardinality, which no one slice holds;
-/// [`slices_hold_their_sets`] checks every shard's slices together.
+/// [`decode_record`] over one shard's member blob, unchecked against the record's cardinalities:
+/// [`slices_hold_their_sets`] checks the shards' slices together.
 pub fn decode_slice(
     entity: EntityId,
     blob: &[u8],
@@ -4636,9 +4634,6 @@ mod tests {
         }
     }
 
-    /// A record whose generating set is split over two shards' member blobs decodes slice by
-    /// slice, and holds its set only where the slices sum to the record's cardinality: one slice,
-    /// or an empty one, is never the set.
     #[test]
     fn a_records_slices_hold_its_sets_only_together() {
         let mut r = record(100, &[1, 2, 3, 4]);

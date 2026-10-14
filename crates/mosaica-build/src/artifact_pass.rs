@@ -112,9 +112,8 @@ pub struct ArtifactPass {
     /// cannot be attributed to.
     pub paths: Vec<std::path::PathBuf>,
     pub levels: Vec<LevelLayoutReport>,
-    /// Per spatial level and shard, what resolving the shard's segment against its shapes cost
-    /// (`polygon-membership.md` §9's per-flush row, measured here over the one segment a build
-    /// writes a shard — decision 0091: the build does what the flush does).
+    /// Per spatial level and shard, what resolving the shard's segment against the level's shapes
+    /// cost.
     pub resolutions: Vec<(String, u32, ShardId, crate::shapes::ResolutionReport)>,
     /// The pass's own wall time. Reported because it is new work at the end of every build and an
     /// operator should not have to infer it from the total.
@@ -402,7 +401,6 @@ pub(crate) fn run(
     }
 
     for part in &parts {
-        let shard = part.span.id;
         // ---- the tile indexes: every level that is not row-major -------------------------------
         //
         // **A row-major level has nothing to index** (selection memo §1): its candidacy is a scan
@@ -430,11 +428,8 @@ pub(crate) fn run(
                 )),
             });
         }
-        pass.derived_extents.extend(
-            derived::file_derived(prefix_dir, part.layout, MANIFEST_N, index, tile_indexes)
-                .into_iter()
-                .map(|extent| (shard, extent)),
-        );
+        pass.derived_extents
+            .extend(file_on(prefix_dir, part.span, index, tile_indexes));
 
         // ---- the columns: a row-major level's, and every other level's labels ------------------
         //
@@ -588,15 +583,12 @@ pub(crate) fn run(
             }
         }
         pass.derived_extents
-            .extend(columns.into_iter().map(|extent| (shard, extent)));
-        pass.derived_extents.extend(
-            derived::file_derived(prefix_dir, part.layout, MANIFEST_N, index, shape_rows)
-                .into_iter()
-                .map(|extent| (shard, extent)),
-        );
+            .extend(columns.into_iter().map(|extent| (part.span.id, extent)));
+        pass.derived_extents
+            .extend(file_on(prefix_dir, part.span, index, shape_rows));
     }
 
-    // ---- the decompositions, per spatial level, held by the layer space once ------------------
+    // ---- the decompositions, per spatial level ------------------------------------------------
     let held: Vec<Filed> = decomposed
         .iter()
         .map(|((layer, level), shapes)| {
@@ -625,12 +617,8 @@ pub(crate) fn run(
             }
         })
         .collect();
-    let first = &parts[0];
-    pass.derived_extents.extend(
-        derived::file_derived(prefix_dir, first.layout, MANIFEST_N, index, held)
-            .into_iter()
-            .map(|extent| (first.span.id, extent)),
-    );
+    pass.derived_extents
+        .extend(file_on(prefix_dir, parts[0].span, index, held));
 
     for (_, entry) in &pass.derived_extents {
         pass.paths.push(prefix_dir.join(&entry.path));
@@ -677,41 +665,29 @@ const EMPTY_KEYS_REPORTED: usize = 10;
 /// generation it is about to publish; a build writes `SEGMENTS-0.json` and has exactly one.
 const MANIFEST_N: u64 = 0;
 
-/// Compose and file this prefix's containment partitions, one per `(layer, level)` and shard.
+/// Compose and file this prefix's containment partitions, one per `(layer, level)` and shard, each
+/// over the shard's slice of every generating set.
 ///
-/// **Once a shard, not per view.** A partition is a function of the level's records and the
-/// shard's postings, so it is the same bytes whichever view is being written and its manifest
-/// entry carries no view. Composing it inside [`run`], which runs per view, would write every
-/// level one identical file and one entry per view. The fold composes for every level in one call
-/// (`Executor::write_containment_partitions`) and this does the same, which is why the level list
-/// here is the store's rather than one view's drawn layers. Each shard's is over its slice of
-/// every generating set.
+/// **Not per view**: a partition is a function of the level's records and the shard's postings, so
+/// composing it inside [`run`] would write one identical file per view. The level list is the
+/// store's, as the fold's is (`Executor::write_containment_partitions`).
 pub(crate) fn containment(
     store: &ArtifactStore,
     prefix_dir: &Path,
     shards: &[ShardSpan],
     index: &mut DerivedIndex,
 ) -> Vec<(ShardId, mosaica_store::manifest::DerivedExtent)> {
-    let mut out = Vec::new();
-    for span in shards {
-        out.extend(
-            shard_containment(store, prefix_dir, *span, index)
-                .into_iter()
-                .map(|extent| (span.id, extent)),
-        );
-    }
-    out
+    shards
+        .iter()
+        .flat_map(|&span| {
+            let composed = shard_containment(store, prefix_dir, span);
+            file_on(prefix_dir, span, index, composed)
+        })
+        .collect()
 }
 
-/// [`containment`] in one shard. Each expression carries the size of its slice, so a slice with no
-/// member contains nothing on its own: a rank is contained only where the slices' sizes sum to the
-/// record's.
-fn shard_containment(
-    store: &ArtifactStore,
-    prefix_dir: &Path,
-    span: ShardSpan,
-    index: &mut DerivedIndex,
-) -> Vec<mosaica_store::manifest::DerivedExtent> {
+/// The partitions [`containment`] files in one shard.
+fn shard_containment(store: &ArtifactStore, prefix_dir: &Path, span: ShardSpan) -> Vec<Filed> {
     let layout = span.layout();
     let postings_path = prefix_dir.join(layout.postings_rel());
     let postings = match PostingsReader::open(&postings_path, true) {
@@ -783,7 +759,19 @@ fn shard_containment(
             )),
         });
     }
-    derived::file_derived(prefix_dir, layout, MANIFEST_N, index, composed)
+    composed
+}
+
+/// File `filed` in `span`'s shard, each extent with the shard's id.
+fn file_on(
+    prefix_dir: &Path,
+    span: ShardSpan,
+    index: &mut DerivedIndex,
+    filed: Vec<Filed>,
+) -> impl Iterator<Item = (ShardId, mosaica_store::manifest::DerivedExtent)> {
+    derived::file_derived(prefix_dir, span.layout(), MANIFEST_N, index, filed)
+        .into_iter()
+        .map(move |extent| (span.id, extent))
 }
 
 /// The pass's own report, printed where `report_attribute_coverage` prints — so both entry points

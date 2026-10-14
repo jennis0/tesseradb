@@ -517,7 +517,8 @@ fn id_across(shards: &[TileShard<'_>], row: ShardRow) -> u64 {
         .iter()
         .find(|held| held.shard == row.shard())
         .expect("a row of one of the tile's shards");
-    SelectionParts::new(held.parts).id_at(row.row().raw())
+    let row = row.row_in(held.shard).expect("the row's own shard");
+    SelectionParts::new(held.parts).id_at(row.raw())
 }
 
 /// Where the leaf Morton cell being walked ends, and what is already settled about it.

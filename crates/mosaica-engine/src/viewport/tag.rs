@@ -60,7 +60,7 @@ pub(super) fn tagged_points(
                 .segment_of(row)
                 .expect("a selected row lies in the view's row space");
             points.push(TaggedPoint {
-                row: row.row().raw(),
+                row: row.row_in(row.shard()).expect("the row's own shard").raw(),
                 segment,
                 place: segments.segments[segment].place,
                 entry: ts.entries.as_ref().map(|entries| entries[i]),

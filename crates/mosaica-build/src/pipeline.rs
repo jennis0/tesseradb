@@ -907,6 +907,17 @@ pub(crate) fn build(
     outcome
 }
 
+/// One shard's part of a view, its rows partitioned and its segment not yet written.
+struct ShardRows<'a> {
+    span: &'a crate::ShardSpan,
+    view_dir: PathBuf,
+    segment_dir: PathBuf,
+    label: String,
+    rows: crate::assembly::PartitionedRows,
+    boundaries: crate::assembly::MortonBoundaries,
+    page_plan: mosaica_store::write::PagePlan,
+}
+
 fn build_bundle(
     args: &BuildArgs,
     frames: &[crate::Framing],
@@ -1311,9 +1322,10 @@ fn build_bundle(
     // the bands costs no second pass and no second relation in memory.
     //
     // One transpose per shard, each opened as the walk reaches the shard's first entity.
+    let transpose = |e| BuildError::Invalid(format!("entity-terms transpose: {e}"));
     let entity_terms_writer = |span: &crate::ShardSpan| {
         mosaica_store::EntityTermsWriter::create(&prefix_dir.join(span.layout().entity_terms_rel()))
-            .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))
+            .map_err(transpose)
     };
     let mut entity_terms_paths: Vec<PathBuf> = Vec::new();
     let mut entity_terms_shard = 0usize;
@@ -1477,15 +1489,12 @@ fn build_bundle(
                 entity_terms_paths.extend(
                     std::mem::replace(&mut entity_terms, next)
                         .finish()
-                        .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?,
+                        .map_err(transpose)?,
                 );
             }
             entity_terms
-                .push(
-                    entity - spans[entity_terms_shard].lo as u32,
-                    &sig_terms,
-                )
-                .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?;
+                .push(entity - spans[entity_terms_shard].lo as u32, &sig_terms)
+                .map_err(transpose)?;
         }
         entities[ordinal_lo as usize..ordinal_lo as usize + batch_len].copy_from_slice(&assigned);
         entity_base += recs.len() as u64;
@@ -1525,11 +1534,7 @@ fn build_bundle(
         );
     }
 
-    entity_terms_paths.extend(
-        entity_terms
-            .finish()
-            .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?,
-    );
+    entity_terms_paths.extend(entity_terms.finish().map_err(transpose)?);
     for path in &entity_terms_paths {
         fsync_file(path)?;
     }
@@ -1939,9 +1944,7 @@ fn build_bundle(
     // frame (decision 0040), Morton-sorts and writes its segment, its permutation and its
     // row→entity file.
     //
-    // **Each shard's part of a view is sorted on its own**: its rows are the view's
-    // rows whose items it holds, and its permutation, segment and every structure derived from
-    // them are over its own ids.
+    // **Each shard's part of a view is sorted on its own**, over its own ids.
     //
     // A view holds a **subset** of entity space — its `present` bits — so its permutation is
     // sentinel wherever it does not, and `row_count` is the view's population rather than `n`.
@@ -2016,7 +2019,15 @@ fn build_bundle(
                 crate::assembly::partition_rows(&source)?
             };
             view_rows += rows.rows();
-            partitioned.push((span, view_dir, segment_dir, label, rows, boundaries, page_plan));
+            partitioned.push(ShardRows {
+                span,
+                view_dir,
+                segment_dir,
+                label,
+                rows,
+                boundaries,
+                page_plan,
+            });
         }
         if view_rows != geometry[index].rows {
             return Err(input_changed(&format!(
@@ -2032,9 +2043,16 @@ fn build_bundle(
         timer.end(BuildStage::TilerSort, view_rows);
 
         let mut parts: Vec<(crate::ShardSpan, u32)> = Vec::with_capacity(spans.len());
-        for (k, (span, view_dir, segment_dir, label, rows, boundaries, page_plan)) in
-            partitioned.into_iter().enumerate()
-        {
+        for (k, part) in partitioned.into_iter().enumerate() {
+            let ShardRows {
+                span,
+                view_dir,
+                segment_dir,
+                label,
+                rows,
+                boundaries,
+                page_plan,
+            } = part;
             window_shard(&mut attributes_by_entity, &mut [], span);
             for column in &mut scoped_render {
                 column.values.window(span.lo as usize, span.hi as usize);
@@ -2220,8 +2238,6 @@ fn build_bundle(
         published_layers.derived_extents.extend(containment);
         timer.end(BuildStage::ArtifactPass, composed);
     }
-    // **Each shard's slice of every membership**, cut from the packs the publication wrote over
-    // every entity, which nothing reads past the pass above.
     let (member_packs, member_paths) = crate::layers::split_member_packs(
         &prefix_dir,
         &published_layers.membership_extents,
@@ -2282,8 +2298,8 @@ fn batch_ordinals(span: &crate::ShardSpan, batch_items: u64, n: u64) -> std::ops
     lo as usize..hi.max(lo) as usize
 }
 
-/// Show every pass after this one shard's entities of the attribute columns and the extents, each
-/// at its entity less the shard's first.
+/// Narrow the attribute columns and the extents to one shard's entities, each at its entity less
+/// the shard's first.
 fn window_shard(
     columns: &mut [EntityColumn],
     extents: &mut [crate::extents::OpenExtents],

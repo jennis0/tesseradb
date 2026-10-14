@@ -204,21 +204,26 @@ pub(crate) fn report_keyword_cardinalities(columns: &[KeywordCardinality], bundl
     }
 }
 
-/// `(distinct, present)` from the dictionary's key count and the value column's presence. Both are
-/// mapped, and only the dictionary's footer and the presence bitmap are read.
+/// `(distinct, present)` from the dictionary's key count and the value column's presence.
 fn read_column(dir: &Path) -> Result<(u64, u64)> {
-    let dict = SortedDict::open_dir(dir, Access::Mapped).map_err(|e| {
-        BuildError::io(
-            &dir.join(mosaica_filter::DICT_FILE),
-            std::io::Error::from(e),
-        )
-    })?;
-    let values = ValueColumn::open_dir(dir, Access::Mapped).map_err(|e| BuildError::io(dir, e))?;
-    Ok((dict.len() as u64, values.present().cardinality()))
+    let (dict, present) = open_column(dir)?;
+    Ok((dict.len() as u64, present))
 }
 
-/// [`read_column`] over one column's directory in each shard: the present rows summed, and the
-/// distinct keys counted once across the dictionaries, which are each sorted, by a merge.
+/// The column's dictionary and its present rows. Both are mapped, and only the dictionary's footer
+/// and the presence bitmap are read.
+fn open_column(dir: &Path) -> Result<(SortedDict, u64)> {
+    let dict = SortedDict::open_dir(dir, Access::Mapped).map_err(|e| dict_error(dir, e))?;
+    let values = ValueColumn::open_dir(dir, Access::Mapped).map_err(|e| BuildError::io(dir, e))?;
+    Ok((dict, values.present().cardinality()))
+}
+
+fn dict_error(dir: &Path, e: mosaica_filter::DictError) -> BuildError {
+    BuildError::io(&dir.join(mosaica_filter::DICT_FILE), std::io::Error::from(e))
+}
+
+/// [`read_column`] over one column's directory in each shard, the keys merged across the sorted
+/// dictionaries.
 fn read_columns(prefix_dir: &Path, dirs_rel: &[String]) -> Result<(u64, u64)> {
     if let [dir_rel] = dirs_rel {
         return read_column(&prefix_dir.join(dir_rel));
@@ -227,13 +232,8 @@ fn read_columns(prefix_dir: &Path, dirs_rel: &[String]) -> Result<(u64, u64)> {
     let mut dicts = Vec::with_capacity(dirs_rel.len());
     for dir_rel in dirs_rel {
         let dir = prefix_dir.join(dir_rel);
-        let dict_error = |e: mosaica_filter::DictError| {
-            BuildError::io(&dir.join(mosaica_filter::DICT_FILE), std::io::Error::from(e))
-        };
-        let dict = SortedDict::open_dir(&dir, Access::Mapped).map_err(dict_error)?;
-        let values =
-            ValueColumn::open_dir(&dir, Access::Mapped).map_err(|e| BuildError::io(&dir, e))?;
-        present += values.present().cardinality();
+        let (dict, held) = open_column(&dir)?;
+        present += held;
         dicts.push((dict, dir));
     }
     let key = |at: usize, ordinal: u32| -> Result<Option<String>> {
@@ -244,9 +244,7 @@ fn read_columns(prefix_dir: &Path, dirs_rel: &[String]) -> Result<(u64, u64)> {
         let mut scratch = Vec::new();
         dict.key_of(ordinal, &mut scratch)
             .map(|key| Some(key.to_string()))
-            .map_err(|e| {
-                BuildError::io(&dir.join(mosaica_filter::DICT_FILE), std::io::Error::from(e))
-            })
+            .map_err(|e| dict_error(dir, e))
     };
     let mut heads: std::collections::BinaryHeap<std::cmp::Reverse<(String, usize, u32)>> =
         std::collections::BinaryHeap::new();

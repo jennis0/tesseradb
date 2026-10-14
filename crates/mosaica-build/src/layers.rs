@@ -3157,11 +3157,10 @@ fn write_membership_extents(
 /// Cut each member pack a build wrote over every entity into one pack per shard over the same
 /// ordinal range, each membership's and generating set's part in the shard at its entities less
 /// the shard's first. Shard 0's pack takes the place of the one it was cut from. Returns each
-/// shard's extents, in shard order, and the files written.
+/// shard's extents, in shard order, and the other shards' files.
 ///
 /// A hole stays a hole in every shard, and an artifact with no member in a shard has the empty
-/// membership there. A record's cardinalities are its slices' summed over the shards, never one
-/// slice's.
+/// membership there.
 pub(crate) fn split_member_packs(
     prefix_dir: &Path,
     extents: &[MembershipExtent],
@@ -3222,13 +3221,16 @@ pub(crate) fn split_member_packs(
                 writer.push(&part).map_err(BuildError::Store)?;
             }
         }
-        for ((span, into), (dir, staged, writer)) in shards.iter().zip(&mut split).zip(writers) {
+        let parts = shards.iter().zip(&mut split).zip(writers);
+        for (k, ((span, into), (dir, staged, writer))) in parts.enumerate() {
             writer.finish().map_err(BuildError::Store)?;
             let rel = format!("{}/{name}", span.layout().members_rel());
             let path = prefix_dir.join(&rel);
             std::fs::rename(&staged, &path).map_err(|e| BuildError::io(&path, e))?;
             mosaica_store::fsync_dir(&dir).map_err(BuildError::Store)?;
-            written.push(path);
+            if k > 0 {
+                written.push(path);
+            }
             into.push(MembershipExtent {
                 path: rel,
                 ..extent.clone()

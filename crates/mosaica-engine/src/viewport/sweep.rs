@@ -232,7 +232,7 @@ impl<'a> ViewSegments<'a> {
         let at = self.sides.binary_search_by_key(&shard, |&(held, _)| held).ok()?;
         let start = self.sides[at].1;
         let end = self.sides.get(at + 1).map_or(self.segments.len(), |&(_, end)| end);
-        let row = row.row().raw();
+        let row = row.row_in(shard).expect("the row's own shard").raw();
         let within = &self.segments[start..end];
         let i = within.partition_point(|s| s.row_base <= row).checked_sub(1)?;
         Some((start + i, row - within[i].row_base))

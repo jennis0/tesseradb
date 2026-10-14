@@ -1113,9 +1113,8 @@ pub fn generating_entities(contents: ContentWalk<'_>) -> Bitmap {
 /// one clause per member — its whole signature, ascending — and the clauses are sorted and
 /// deduplicated so two generating sets with the same signature multiset intern to the same id.
 ///
-/// **The set's size is carried beside the clauses.** A shard's partition is over its slice of the
-/// set, and a slice with no member has no clause, so the size is what keeps it from answering for
-/// the set: a rank is contained only where the sizes over the shards sum to the record's.
+/// **The set's size leads the clauses**: a shard's slice with no member has no clause, so only the
+/// size says how much of the set the slice holds.
 ///
 /// A member no term reaches contributes an **empty** clause, which nothing satisfies: an artifact
 /// whose generating set includes an entity outside every term is contained by nobody, which is the

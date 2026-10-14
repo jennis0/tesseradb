@@ -240,104 +240,94 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
     Ok(report)
 }
 
-/// **Every artifact's members and generating sets are its shards' slices, summed.** For each record
-/// pack of each layer space, every shard holds the member pack over the same ordinals; each slice
-/// lies below its shard's high water, a hole is a hole in every shard, and the slices put back at
-/// their shards' first entities are the sets the record declares the cardinalities of. A refusal
-/// names the record pack and the ordinal.
+/// **Every artifact's slices lie in their shards and hold its sets** ([`slices_hold_their_sets`]):
+/// each shard holds a member pack over the record pack's ordinals, a hole is a hole in every shard,
+/// and no slice reaches its shard's high water. A refusal names the record pack and the ordinal.
+///
+/// [`slices_hold_their_sets`]: mosaica_lifecycle::membership::slices_hold_their_sets
 fn check_member_slices(
     prefix_dir: &Path,
     partition: &PartitionData,
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
-    use mosaica_lifecycle::membership::{decode_members, decode_record, frame_members};
     use mosaica_store::membership::{LevelPack, PackKind};
-    let mut first = 0u64;
-    let shards: Vec<(u64, &ShardData)> = partition
-        .shards
-        .iter()
-        .map(|shard| {
-            let lo = first;
-            first += shard.record.high_water;
-            (lo, &**shard)
-        })
-        .collect();
     for space in &partition.layer_spaces {
         for records in &space.record_packs {
             let records_path = join_rel(prefix_dir, &records.path)?;
             let records_pack =
                 LevelPack::open(&records_path, PackKind::Records).map_err(BuildError::Store)?;
-            let mut slices = Vec::with_capacity(shards.len());
-            for (lo, shard) in &shards {
+            let refuse = |what: String| disagrees(prefix_dir.join(&records.path), what);
+            let mut packs = Vec::with_capacity(partition.shards.len());
+            for shard in &partition.shards {
                 let Some(extent) = shard
                     .record
                     .membership_extents
                     .iter()
                     .find(|extent| extent.pairs(space.space, records))
                 else {
-                    return Err(disagrees(
-                        prefix_dir.join(&records.path),
-                        format!("shard {} holds no member pack for it", shard.record.id),
-                    ));
+                    return Err(refuse(format!(
+                        "shard {} holds no member pack for it",
+                        shard.record.id
+                    )));
                 };
                 let pack = LevelPack::open(&join_rel(prefix_dir, &extent.path)?, PackKind::Members)
                     .map_err(BuildError::Store)?;
-                slices.push((*lo, shard.record.high_water, pack));
+                packs.push((shard.record.high_water, pack));
             }
             for (ordinal, record) in records_pack.iter() {
-                let at = |what: String| disagrees(prefix_dir.join(&records.path), what);
-                let mut members = croaring::Bitmap::new();
-                let mut sets: Vec<croaring::Bitmap> = Vec::new();
-                let mut held = 0usize;
-                for (lo, high_water, pack) in &slices {
-                    let blob = pack.blob(ordinal).unwrap_or_default();
-                    if blob.is_empty() {
-                        continue;
-                    }
-                    held += 1;
-                    let Some((part, part_sets)) = decode_members(blob) else {
-                        return Err(at(format!("ordinal {ordinal}'s slice does not decode")));
-                    };
-                    if sets.is_empty() {
-                        sets = vec![croaring::Bitmap::new(); part_sets.len()];
-                    }
-                    if part_sets.len() != sets.len() {
-                        return Err(at(format!(
-                            "ordinal {ordinal}'s slices carry different numbers of generating sets"
-                        )));
-                    }
-                    let parts = std::iter::once((&mut members, &part))
-                        .chain(sets.iter_mut().zip(&part_sets));
-                    for (into, part) in parts {
-                        if part.maximum().is_some_and(|max| u64::from(max) >= *high_water) {
-                            return Err(at(format!(
-                                "ordinal {ordinal}'s slice names an entity at or past its shard's \
-                                 high water {high_water}"
-                            )));
-                        }
-                        into.or_inplace(&part.add_offset(*lo as i64));
-                    }
+                let slices: Vec<(u64, &[u8])> = packs
+                    .iter()
+                    .map(|(high_water, pack)| (*high_water, pack.blob(ordinal).unwrap_or_default()))
+                    .collect();
+                if artifact_slices(ordinal, record, &slices).map_err(refuse)? {
+                    report.artifact_slices += 1;
                 }
-                match (record.is_empty(), held) {
-                    (true, 0) => continue,
-                    (true, _) => return Err(at(format!("hole {ordinal} has members in a shard"))),
-                    (false, held) if held != slices.len() => {
-                        return Err(at(format!("ordinal {ordinal} has no slice in some shard")))
-                    }
-                    _ => {}
-                }
-                let whole = frame_members(&members, sets.iter());
-                if decode_record(mosaica_types::EntityId::new(0), record, &whole).is_none() {
-                    return Err(at(format!(
-                        "ordinal {ordinal}'s slices do not sum to the cardinalities its record \
-                         declares"
-                    )));
-                }
-                report.artifact_slices += 1;
             }
         }
     }
     Ok(())
+}
+
+/// [`check_member_slices`] over one ordinal: its record blob, and each shard's high water and
+/// member blob. `Ok(false)` for a hole, `Err` saying what is wrong.
+fn artifact_slices(
+    ordinal: u32,
+    record: &[u8],
+    slices: &[(u64, &[u8])],
+) -> std::result::Result<bool, String> {
+    use mosaica_lifecycle::membership::{decode_slice, slices_hold_their_sets};
+    let held = slices.iter().filter(|(_, blob)| !blob.is_empty()).count();
+    match (record.is_empty(), held) {
+        (true, 0) => return Ok(false),
+        (true, _) => return Err(format!("hole {ordinal} has members in a shard")),
+        (false, held) if held != slices.len() => {
+            return Err(format!("ordinal {ordinal} has no slice in some shard"))
+        }
+        _ => {}
+    }
+    let mut decoded = Vec::with_capacity(slices.len());
+    for &(high_water, blob) in slices {
+        let Some((slice, _)) = decode_slice(mosaica_types::EntityId::new(0), record, blob) else {
+            return Err(format!("ordinal {ordinal}'s slice does not decode"));
+        };
+        let past = |set: &croaring::Bitmap| {
+            set.maximum()
+                .is_some_and(|max| u64::from(max) >= high_water)
+        };
+        if past(&slice.members.whole()) || slice.contents.iter().any(|c| past(&c.generated_from)) {
+            return Err(format!(
+                "ordinal {ordinal}'s slice names an entity at or past its shard's high water \
+                 {high_water}"
+            ));
+        }
+        decoded.push(slice);
+    }
+    if !slices_hold_their_sets(&decoded.iter().collect::<Vec<_>>()) {
+        return Err(format!(
+            "ordinal {ordinal}'s slices do not sum to the cardinalities its record declares"
+        ));
+    }
+    Ok(true)
 }
 
 /// **The tenancy index and the retired numbers agree with the allocator.** Every number the index
@@ -1689,4 +1679,59 @@ fn check_dict_extents(
         report.dict_records += records;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use croaring::Bitmap;
+    use mosaica_lifecycle::membership::{
+        encode_record, frame_members, ArtifactRecord, ContentSet, Members,
+    };
+
+    use super::artifact_slices;
+
+    /// An artifact generated from three entities, over two shards of high water 2, each slice at
+    /// its entities less its shard's first.
+    #[test]
+    fn an_artifacts_slices_verify_only_where_they_sum_to_its_record() {
+        let record = ArtifactRecord {
+            entity: mosaica_types::EntityId::new(0),
+            key: None,
+            view: None,
+            incarnation: 0,
+            members: Members::owned(Bitmap::of(&[0, 1, 2, 3])),
+            declares_members: None,
+            contents: vec![ContentSet {
+                values: None,
+                digest: [0; 32],
+                generated_from: Bitmap::of(&[0, 1, 2]),
+                cardinality: 3,
+            }],
+            attached_to: None,
+            parents: Vec::new(),
+            access: Vec::new(),
+        };
+        let blob = encode_record(&record, None);
+        let slice = |members: &[u32], set: &[u32]| {
+            frame_members(&Bitmap::of(members), [Bitmap::of(set)].iter())
+        };
+        let (low, high) = (slice(&[0, 1], &[0, 1]), slice(&[0, 1], &[0]));
+        let check = |record: &[u8], slices: &[&[u8]]| {
+            let slices: Vec<(u64, &[u8])> = slices.iter().map(|blob| (2, *blob)).collect();
+            artifact_slices(0, record, &slices)
+        };
+        assert_eq!(check(&blob, &[&low, &high]), Ok(true));
+        let refused = [
+            ("a slice short of the set", slice(&[0, 1], &[])),
+            ("slices summing past the set", slice(&[0, 1], &[0, 1])),
+            ("a slice past its high water", slice(&[0, 2], &[0])),
+            ("a shard with no slice", Vec::new()),
+            ("a slice that does not decode", high[..high.len() - 1].to_vec()),
+        ];
+        for (what, second) in refused {
+            assert!(check(&blob, &[&low, &second]).is_err(), "{what}");
+        }
+        assert_eq!(check(&[], &[&[], &[]]), Ok(false), "a hole");
+        assert!(check(&[], &[&[], &high]).is_err(), "a hole with members in a shard");
+    }
 }

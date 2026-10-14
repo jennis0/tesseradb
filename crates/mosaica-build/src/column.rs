@@ -489,7 +489,7 @@ impl EntityColumn {
     /// items, for the passes that write a shard's files. The writers address the whole column
     /// whatever the window, and a released column stays empty.
     pub(crate) fn window(&mut self, lo: usize, hi: usize) {
-        if matches!(self.storage, ColumnStorage::Empty) && self.full == 0 {
+        if self.full == 0 {
             return;
         }
         assert!(

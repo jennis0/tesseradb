@@ -425,8 +425,13 @@ fn bit_get(bits: &[u64], i: usize) -> bool {
 /// entity in the shard.
 fn walk(job: &RowSource<'_>, mut each: impl FnMut(u32, u32, u32)) {
     for ordinal in job.ordinals.clone() {
-        let entity = job.entity_of_ordinal[ordinal].wrapping_sub(job.entity_lo);
-        if u64::from(entity) >= job.n || !bit_get(job.present, ordinal) {
+        let Some(entity) = job.entity_of_ordinal[ordinal]
+            .checked_sub(job.entity_lo)
+            .filter(|&entity| u64::from(entity) < job.n)
+        else {
+            continue;
+        };
+        if !bit_get(job.present, ordinal) {
             continue;
         }
         let (code, residual) = split32(job.x[ordinal], job.y[ordinal]);

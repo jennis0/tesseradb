@@ -650,8 +650,11 @@ impl ShardedMask {
 
     /// Whether `row` satisfies the request's highlight ([`EffectiveMask::is_highlighted`]).
     pub fn is_highlighted(&self, row: ShardRow) -> bool {
-        self.leaf(row.shard())
-            .is_some_and(|leaf| leaf.is_highlighted(row.row().raw()))
+        let shard = row.shard();
+        let Some(row) = row.row_in(shard) else {
+            return false;
+        };
+        self.leaf(shard).is_some_and(|leaf| leaf.is_highlighted(row.raw()))
     }
 
     /// `shard`'s leaf, left out or not, for the bench and test hook
