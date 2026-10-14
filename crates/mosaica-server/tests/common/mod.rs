@@ -526,7 +526,7 @@ impl TestServer {
     pub async fn shutdown(mut self) {
         // A fresh client in place of this one: dropping the old pool closes its keep-alive
         // connections, and with them the per-connection tasks holding the state.
-        self.client = reqwest::Client::new();
+        self.client = test_client();
         let tasks = std::mem::take(&mut self.serve_tasks);
         for task in &tasks {
             task.abort();
@@ -1131,6 +1131,15 @@ pub fn test_identity() -> (Catalogue, String, TempDir) {
     (catalogue, key, dir)
 }
 
+/// The client a [`TestServer`] sends with. A request that has not finished in two minutes fails
+/// naming its URL: a streamed response has been seen to stall with its last bytes unsent.
+pub fn test_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .expect("the test client builds")
+}
+
 /// Binds the three listeners on loopback ports and serves `state` on them.
 pub async fn serve_state(
     state: Arc<AppState>,
@@ -1164,7 +1173,7 @@ pub async fn serve_state(
         viewer_addr,
         session_addr,
         control_addr,
-        client: reqwest::Client::new(),
+        client: test_client(),
         state,
         serve_tasks,
         integrator_key,

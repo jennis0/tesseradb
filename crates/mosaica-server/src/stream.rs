@@ -363,6 +363,9 @@ impl futures_core::Stream for StreamBody {
             }
             Poll::Ready(None) => {
                 this.done = true;
+                // hyper can take a body's end into its write buffer and return without flushing
+                // it; polling the connection once more sends it.
+                cx.waker().wake_by_ref();
                 if this.state.load(Ordering::SeqCst) == COMPLETE {
                     // Clean end: the trailer was the last frame, so disarm; see `CancelGuard`.
                     this.cancel_guard.disarm();
@@ -412,5 +415,60 @@ impl Drop for AfterSent {
         if let Some(then) = self.then.take() {
             then();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_core::Stream;
+    use std::sync::atomic::AtomicUsize;
+    use std::task::Wake;
+
+    struct Wakes(AtomicUsize);
+
+    impl Wake for Wakes {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Polls `body` once with a waker that counts, and returns what it yielded and whether the
+    /// poll woke its own task.
+    fn poll_once(body: &mut StreamBody) -> (Poll<Option<Result<Bytes, std::io::Error>>>, bool) {
+        let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
+        let waker = std::task::Waker::from(Arc::clone(&wakes));
+        let polled = Pin::new(body).poll_next(&mut Context::from_waker(&waker));
+        (polled, wakes.0.load(Ordering::SeqCst) > 0)
+    }
+
+    fn opened_stream() -> (Producer<()>, StreamBody) {
+        let guard = CancelGuard::new(CancelToken::new());
+        let (mut producer, pending) = channel::<()>(guard, Duration::from_secs(1), None);
+        producer.open(()).expect("the opening is received");
+        (producer, pending.body)
+    }
+
+    /// A body's end wakes the connection polling it, so a server that buffers the end and
+    /// returns without flushing is polled again and sends it.
+    #[test]
+    fn the_end_of_a_body_asks_to_be_polled_again() {
+        let (mut producer, mut body) = opened_stream();
+        producer.finish(b"trailer".to_vec());
+        drop(producer);
+        let (frame, _) = poll_once(&mut body);
+        assert!(
+            matches!(frame, Poll::Ready(Some(Ok(_)))),
+            "the trailer is sent"
+        );
+        let (end, woke) = poll_once(&mut body);
+        assert!(matches!(end, Poll::Ready(None)), "the body ends cleanly");
+        assert!(woke, "a clean end asks to be polled again");
+
+        let (producer, mut body) = opened_stream();
+        drop(producer);
+        let (end, woke) = poll_once(&mut body);
+        assert!(matches!(end, Poll::Ready(Some(Err(_)))), "the body is cut");
+        assert!(woke, "a cut end asks to be polled again");
     }
 }
