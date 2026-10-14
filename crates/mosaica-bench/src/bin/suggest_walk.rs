@@ -777,8 +777,7 @@ fn set_route(
 
             let started = Instant::now();
             let set = mosaica_engine::suggest_set::sweep(
-                std::iter::once(&column),
-                &cand,
+                std::iter::once((std::iter::once(&column), &cand)),
                 live.base().as_ref(),
             )
             .expect("a category sweeps");

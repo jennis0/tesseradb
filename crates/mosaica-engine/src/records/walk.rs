@@ -4,9 +4,8 @@
 //! across every shard in map order, a range of item numbers within one shard in stored order,
 //! which never spans two. It starts at the scan position and spans a target number of rows, and
 //! when a page empties one that spanned its target before filling, the next is four times longer,
-//! so a sparse filter costs a few evaluations per read rather than one per page. A stored stretch
-//! cut short by its shard's end does not grow the next. The size reached travels in the cursor, so
-//! a resumed read continues at it.
+//! so a sparse filter costs a few evaluations per read rather than one per page. The size reached
+//! travels in the cursor, so a resumed read continues at it.
 //!
 //! A stretch's filter is evaluated under the viewer's candidate set, brought forward to the
 //! page's generation. In map order that set is narrowed to the items of the stretch's rows the
@@ -71,20 +70,17 @@ const STRETCH_BYTES_PER_ROW: usize = 17;
 /// candidate among them and the filter's rows, up to four bytes each.
 const DRIVEN_BYTES_PER_ROW: usize = 40;
 
-/// What a walk reads a page through: the sides the page reads, each by its place among the view's
-/// sides, with its segments and leaf, and what the engine answers in each. [`PageCx`] answers from
-/// the engine.
+/// What a walk reads a page through, side by side, each side named by its place in
+/// [`crate::viewport::ServedView::sides`]. [`PageCx`] answers from the engine.
 pub(super) trait WalkCx {
-    /// The places of the sides the page reads, ascending: every side where the viewer sees
-    /// something, or where they see nothing, the first.
+    /// The places of the sides the page reads, ascending
+    /// ([`crate::compose::ShardedMask::filtered_leaves`]).
     fn reads(&self) -> &[usize];
-    /// The shard of the side at `place`.
     fn shard(&self, place: usize) -> ShardId;
     /// Every segment of the view in the side at `place`, with its first row.
     fn segments(&self, place: usize) -> &[(&SegmentData, u32)];
-    /// The leaf the side at `place`, which the page reads, is read through.
+    /// Panics for a side the page does not read.
     fn leaf(&self, place: usize) -> &EffectiveMask;
-    /// How many rows the view holds in the side at `place`.
     fn total_rows(&self, place: usize) -> u32;
     /// The row `entity` holds in the view in the side at `place`, where it holds one.
     fn row_of(&self, place: usize, entity: u32) -> Option<u32>;
@@ -137,7 +133,6 @@ pub(super) struct PageCx<'a> {
     pub(super) generation: &'a Arc<Generation>,
     /// The region and `member_of` leaves answered under this page's mask.
     resolved: ResolvedLeaves<'a>,
-    /// The places among the view's sides of the sides the page reads ([`WalkCx::reads`]).
     reads: Vec<usize>,
 }
 
@@ -161,7 +156,6 @@ impl<'a> PageCx<'a> {
         }
     }
 
-    /// The side at `place` among the view's sides.
     fn side(&self, place: usize) -> &'a ServedSide<'a> {
         &self.open.served.sides[place]
     }
@@ -324,7 +318,7 @@ fn take_sides<'s>(cx: &'s impl WalkCx, stretch: Option<&'s Stretch>) -> Vec<Take
         .collect()
 }
 
-/// The entity row `local` of `segment`, a segment of `shard`, belongs to.
+/// [`WalkCx::entity_of`] for a side's shard.
 fn entity_in(segment: &SegmentData, local: u32, key: &IdentityKey, shard: ShardId) -> u32 {
     let entity = segment
         .entity_of(local, key, shard)
@@ -337,8 +331,7 @@ fn stored_key(shard: ShardId, entity: u32) -> Key {
     (shard.raw(), u64::from(entity))
 }
 
-/// One side a take reads: its place among the view's sides, its shard, its segments, the leaf it
-/// is read through and the stretch's filter rows there, where there is a filter.
+/// One side a take reads, with the stretch's filter rows there.
 pub(super) struct TakeSide<'a> {
     place: usize,
     shard: ShardId,
@@ -349,8 +342,8 @@ pub(super) struct TakeSide<'a> {
 
 /// One row a page takes, located in the generation the page was walked in.
 pub(super) struct Taken {
-    /// The place among the view's sides of the side holding it.
-    pub(super) side: usize,
+    /// The place of the side holding it.
+    pub(super) place: usize,
     /// Index into that side's segments, ascending by row base.
     pub(super) seg: usize,
     pub(super) local: u32,
@@ -444,9 +437,8 @@ struct Stretch {
     from: Option<Key>,
     /// The first key past the stretch; `None` where the stretch runs to the end.
     until: Option<Key>,
-    /// The rows the filter admits over the stretch's rows in each side, by the side's place among
-    /// the view's sides: `None` in a side the stretch does not reach, and empty where there is no
-    /// filter.
+    /// The rows the filter admits over the stretch's rows in each side: `None` in a side the
+    /// stretch does not reach, and empty where there is no filter.
     filter: Vec<Option<FilterRows>>,
     /// In stored order, the candidate items of the stretch that hold a row in the view, ascending,
     /// each with that row, under the place of the side holding them, ascending. Empty in map
@@ -475,10 +467,10 @@ pub(crate) fn same_publication(a: &Generation, b: &Generation) -> bool {
 fn key_of(cx: &impl WalkCx, order: RecordsOrder, row: &Taken) -> Key {
     match order {
         RecordsOrder::Map => {
-            let (segment, _) = cx.segments(row.side)[row.seg];
+            let (segment, _) = cx.segments(row.place)[row.seg];
             (segment.morton.u32()[row.local as usize], row.mosaica_id)
         }
-        RecordsOrder::Stored => stored_key(cx.shard(row.side), row.entity),
+        RecordsOrder::Stored => stored_key(cx.shard(row.place), row.entity),
     }
 }
 
@@ -550,19 +542,19 @@ fn map_until(sides: &[TakeSide<'_>], scan: Option<Key>, target: u32) -> Option<O
     )
 }
 
-/// The stored stretch past `scan` over `sides`, each a side's place among the view's sides and
-/// its shard, ascending by shard: the next `target` items of the viewer's candidate set in the
-/// first side holding one past `scan`, with that side's place and the first key past them.
-/// `candidate` is asked only of the sides the stretch reaches. A stretch never spans two shards:
-/// one that takes the last of its side's candidate ends at the next side's first key, or runs to
-/// the end after the last side. `None` where no side holds an item past `scan`.
+/// The stored stretch past `scan` over `sides`, each a side's place and shard, ascending by
+/// shard: the next `target` items of the viewer's candidate set in the first side holding one
+/// past `scan`, with that side's place and the first key past them. `candidate` is asked only of
+/// the sides the stretch reaches. A stretch never spans two shards: one that takes the last of
+/// its side's candidate ends at the next side's first key, or runs to the end after the last
+/// side. `None` where no side holds an item past `scan`.
 fn stored_stretch(
     sides: &[(usize, ShardId)],
     scan: Option<Key>,
     target: u32,
     mut candidate: impl FnMut(usize) -> Result<Bitmap>,
 ) -> Result<Option<(usize, Bitmap, Option<Key>)>> {
-    for (i, &(at, shard)) in sides.iter().enumerate() {
+    for (i, &(place, shard)) in sides.iter().enumerate() {
         let from: u64 = match scan {
             Some((held, _)) if held > shard.raw() => continue,
             Some((held, number)) if held == shard.raw() => match number.checked_add(1) {
@@ -574,7 +566,7 @@ fn stored_stretch(
         if from > u64::from(u32::MAX) {
             continue;
         }
-        let candidate = candidate(at)?;
+        let candidate = candidate(place)?;
         let before = if from == 0 {
             0
         } else {
@@ -599,7 +591,7 @@ fn stored_stretch(
             Some(until) => Some(stored_key(shard, until)),
             None => sides.get(i + 1).map(|&(_, next)| stored_key(next, 0)),
         };
-        return Ok(Some((at, range, until)));
+        return Ok(Some((place, range, until)));
     }
     Ok(None)
 }
@@ -684,7 +676,7 @@ impl Walk {
                 driven: stretch.driven,
                 keep_unmatched: self.keep_unmatched,
                 moved: scan > self.origin,
-                entity_of: &|side, segment, local| cx.entity_of(side.place, segment, local),
+                cx,
             };
             let stopped = match order {
                 RecordsOrder::Map => take.map(scan, need, clock, &mut rows),
@@ -933,12 +925,12 @@ impl Walk {
         Ok(Some(matched))
     }
 
-    /// The driven stretch past `scan`: the rows of `rows`, each side's under its place among the
-    /// view's sides, whose key lies past `scan`, running to the end of the view, with the filter
-    /// evaluated in each side over those rows alone under the viewer's candidate set among their
-    /// items. In stored order only items in that set are taken, as the stored walk takes them; in
-    /// map order every row is, and the mask tests it, as the map walk does. The filter's rows are
-    /// held to the stretch's rows. `None` where no row lies past `scan`.
+    /// The driven stretch past `scan`: the rows of `rows` whose key lies past `scan`, running to
+    /// the end of the view, with the filter evaluated in each side over those rows alone under the
+    /// viewer's candidate set among their items. In stored order only items in that set are taken,
+    /// as the stored walk takes them; in map order every row is, and the mask tests it, as the map
+    /// walk does. The filter's rows are held to the stretch's rows. `None` where no row lies past
+    /// `scan`.
     fn open_driven_stretch(
         &mut self,
         cx: &impl WalkCx,
@@ -1045,7 +1037,7 @@ fn region_verdict(
 /// rows returned here, so a read is driven wherever an index bounds its matches to what one
 /// driven stretch may hold, summed over every side the page reads. Each bound is taken inside
 /// the viewer's visible set before it is counted, so which route answers depends only on what the
-/// viewer can see. Each side's rows come under its place among the view's sides.
+/// viewer can see.
 fn driving_rows(
     cx: &impl WalkCx,
     expr: &FilterExpr,
@@ -1191,8 +1183,8 @@ const CHUNK_MIN: u32 = 1024;
 const CHUNK_FLOOR: u32 = 64;
 
 /// One stretch's rows being taken into a page, from every side the page reads.
-struct Take<'a> {
-    /// Ascending by place among the view's sides.
+struct Take<'a, C: WalkCx> {
+    /// Ascending by place.
     sides: &'a [TakeSide<'a>],
     /// The first key past the stretch; `None` where it runs to the end.
     until: Option<Key>,
@@ -1202,11 +1194,10 @@ struct Take<'a> {
     keep_unmatched: bool,
     /// Whether the scan has already passed the position the response started from.
     moved: bool,
-    /// The entity a side's segment's local row belongs to.
-    entity_of: &'a dyn Fn(&TakeSide<'_>, &SegmentData, u32) -> u32,
+    cx: &'a C,
 }
 
-impl Take<'_> {
+impl<C: WalkCx> Take<'_, C> {
     /// The stop the clock asks for, where honouring it moves the position: a row is held, the
     /// scan had passed the response's start before this take, or the first key the scan has not
     /// reached lies past the first row the take began at.
@@ -1256,7 +1247,7 @@ impl Take<'_> {
             })
             .collect();
         // The page's need is shared among the runs with rows ahead, so a page over many runs
-        // gathers about what one over a single run does; each chunk after a run's first doubles.
+        // gathers about what one over a single run does.
         let ahead = runs.iter().filter(|run| run.next < run.end).count();
         let chunk = u32::try_from(need - rows.len())
             .unwrap_or(u32::MAX)
@@ -1280,11 +1271,11 @@ impl Take<'_> {
                 let (local, matched) = run.buffered[run.at];
                 let mosaica_id = run.segment.columns.mosaica_id()[local as usize];
                 rows.push(Taken {
-                    side: run.side.place,
+                    place: run.side.place,
                     seg: run.seg,
                     local,
                     mosaica_id,
-                    entity: (self.entity_of)(run.side, run.segment, local),
+                    entity: self.cx.entity_of(run.side.place, run.segment, local),
                     matched,
                 });
                 run.at += 1;
@@ -1314,9 +1305,9 @@ impl Take<'_> {
     ) -> Option<(ResponseEndedBy, Key)> {
         let mut began_at: Option<Key> = None;
         let mut tested = 0usize;
-        for (at, items) in self.items {
-            let place = self.sides.binary_search_by_key(at, |side| side.place);
-            let side = &self.sides[place.expect("a stored stretch's side is read")];
+        for (place, items) in self.items {
+            let i = self.sides.binary_search_by_key(place, |side| side.place);
+            let side = &self.sides[i.expect("a stored stretch's side is read")];
             let start = match scan {
                 None => 0,
                 Some(scan) => {
@@ -1345,7 +1336,7 @@ impl Take<'_> {
                 let (seg, local) = segment_holding(side.segments, row)
                     .expect("the first segment's rows begin at 0");
                 rows.push(Taken {
-                    side: *at,
+                    place: *place,
                     seg,
                     local,
                     mosaica_id: side.segments[seg].0.columns.mosaica_id()[local as usize],
@@ -1711,8 +1702,8 @@ mod tests {
     /// Over two shards a read in either order returns what one shard holding every row returns,
     /// page for page, with no filter, a filter in each shard and unmatched rows kept. Map order
     /// merges by `(cell, mosaica_id)`, so its positions are the same values; stored order takes
-    /// the shards in turn. A read resumed from any page's position reads the rest, including one
-    /// resumed past the first shard's last row.
+    /// the shards in turn. A read resumed from any page's position reads the rest, including past
+    /// the first shard's last row.
     #[test]
     fn a_read_over_two_shards_is_one_shards_holding_every_row() {
         let corpus = Corpus::of(11, 900);
@@ -1835,7 +1826,7 @@ mod tests {
     }
 
     /// A stored stretch cut short by its shard's end has not found the filter sparse, so a read
-    /// across many small shards carries the stretch it began with; one that spans its target and
+    /// across many small shards carries the stretch it began with. One that spans its target and
     /// fills no page grows the next.
     #[test]
     fn a_stored_stretch_cut_at_its_shards_end_does_not_grow_the_next() {
@@ -1866,11 +1857,9 @@ mod tests {
         assert_eq!(carried, 16 * 4 * 4);
     }
 
-    /// A read driven from an index's bound over two shards: the bound is summed over the
-    /// shards, so two shards whose bounds each fit one driven stretch but together do not walk
-    /// the view, as one shard holding both does. A driven read returns what the walk returns,
-    /// resumed from every page, including where one shard's rows all lie behind the position, and
-    /// counts its matches over both shards.
+    /// Two shards whose bounds each fit one driven stretch but together do not walk the view, as
+    /// one shard holding both does; a driven read returns what the walk returns, resumed from
+    /// every page.
     #[test]
     fn a_driven_read_over_two_shards_is_bounded_and_counted_over_both() {
         let corpus = Corpus::of(17, 600);
@@ -1926,8 +1915,6 @@ mod tests {
         }
     }
 
-    /// A driven read's count over a viewer who sees nothing in the first shard reads the second
-    /// shard alone, and never the leaf of the shard the page leaves out.
     #[test]
     fn a_driven_count_leaves_out_a_shard_the_viewer_sees_nothing_in() {
         let corpus = Corpus::of(17, 600);

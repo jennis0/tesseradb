@@ -4,12 +4,9 @@
 //! A set's values are counted in each shard by whichever route its part there affords: through
 //! the field's per-value records where the part's entities are at hand, by one pass over the
 //! part's rows where the field is drawn in the view, and otherwise through the entities of the
-//! part's rows. The three give the same counts. A category's codes are its vocabulary's, the same
-//! in every shard, so the shards' counts are added by code before any value is chosen. A value is
-//! counted only where an item of the set carries it, so a `derived` value no visible item carries
-//! has no count to show, in its own row or in the rest.
-
-use std::borrow::Cow;
+//! part's rows. The three give the same counts. The shards' counts are added by code before any
+//! value is chosen. A value is counted only where an item of the set carries it, so a `derived`
+//! value no visible item carries has no count to show, in its own row or in the rest.
 
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -156,23 +153,9 @@ impl Field {
             return Ok(vec![true; codes.len()]);
         }
         let served = &cx.open.served;
-        // A shard the page reads has its candidate; any other, every item the viewer may see in
-        // that shard.
-        let mut candidates: Vec<(&crate::Shard, Cow<'_, croaring::Bitmap>)> = Vec::new();
-        for shard in cx.generation.shards() {
-            let at = served.find_place(shard.id());
-            let candidate = match at.and_then(|at| cx.sets.candidate(at)) {
-                Some(candidate) => Cow::Borrowed(candidate),
-                None => {
-                    let fragment = at.map(|at| &served.sides[at].geometry.fragment);
-                    Cow::Owned(
-                        cx.engine
-                            .filter_candidate(served.session, shard, fragment)?,
-                    )
-                }
-            };
-            candidates.push((shard, candidate));
-        }
+        let candidates = cx.engine.candidates(served.session, cx.generation, |shard| {
+            cx.sets.candidate(served.find_place(shard)?)
+        })?;
         let carried = crate::categories::Carried::of(
             &self.column,
             candidates
@@ -186,14 +169,14 @@ impl Field {
     /// reads.
     pub(super) fn counts(&self, cx: &Cx<'_>, set: &Set) -> Result<Counts> {
         let mut sides = Vec::new();
-        for at in cx.reads() {
+        for place in cx.reads() {
             cx.check_cancelled()?;
-            sides.push(match self.held && (set.has_entities(at) || !self.drawn) {
-                true => self.counts_by_entity(cx, at, set.entities(cx, at)?)?,
+            sides.push(match self.held && (set.has_entities(place) || !self.drawn) {
+                true => self.counts_by_entity(cx, place, set.entities(cx, place)?)?,
                 false => cx
                     .engine
                     .pool
-                    .install(|| tally_rows(set.cells(cx, at), cx.segments(at), &self.column)),
+                    .install(|| tally_rows(set.cells(cx, place), cx.segments(place), &self.column)),
             });
         }
         Ok(Counts::summed(sides))
@@ -202,10 +185,10 @@ impl Field {
     fn counts_by_entity(
         &self,
         cx: &Cx<'_>,
-        at: usize,
+        place: usize,
         entities: &croaring::Bitmap,
     ) -> Result<Counts> {
-        let (generation, shard) = (cx.generation, cx.side(at).shard);
+        let (generation, shard) = (cx.generation, cx.side(place).shard);
         let vocabulary = generation.vocabularies.get(&self.vocabulary);
         let each = |visit: &mut dyn FnMut(u32)| {
             if let Some(vocabulary) = vocabulary {
@@ -243,18 +226,18 @@ impl Field {
         })
     }
 
-    /// Where the pass reads each row's value in the side at `at`, grouped by `table`.
+    /// Where the pass reads each row's value in the side at `place`, grouped by `table`.
     pub(super) fn row_groups<'s>(
         &self,
         cx: &'s Cx<'_>,
-        at: usize,
+        place: usize,
         table: &'s GroupTable,
         codes: &'s Option<EntityCodes<'s>>,
     ) -> Result<RowGroups<'s>> {
         if self.drawn {
-            return Ok(RowGroups::drawn(cx.segments(at), &self.column, table));
+            return Ok(RowGroups::drawn(cx.segments(place), &self.column, table));
         }
-        let tables = cx.side(at).data.row_space.row_entities().ok_or_else(|| {
+        let tables = cx.side(place).data.row_space.row_entities().ok_or_else(|| {
             EngineError::Malformed(format!(
                 "view '{}' has no row-to-entity table, so '{}' cannot be counted by cell; \
                  rebuild the bundle",
@@ -290,7 +273,7 @@ pub(super) struct Counts {
 }
 
 impl Counts {
-    /// Every shard's counts added by code: a code is one value in every shard.
+    /// Every shard's counts added by code.
     fn summed(sides: Vec<Counts>) -> Counts {
         if sides.len() == 1 {
             return sides.into_iter().next().expect("one side");

@@ -31,10 +31,10 @@
 //! ## What this pass does, and what bounds it
 //!
 //! One pool task per geometry publication, over **resident cache keys**, one per (grant, view,
-//! shard) however many sessions hold the grant — O(cache residency), never O(sessions) (decision
-//! 0035's shape). At the ~16 wide-grant entries a 2 GiB bound holds, one round is ~0.7 s of pool
-//! time. A grant with no resident entry is not refreshed and builds on its next request, which is
-//! establishment rather than update-induced work.
+//! shard) however many sessions hold the grant — O(cache residency), never O(sessions). At the
+//! ~16 wide-grant entries a 2 GiB bound holds, one round is ~0.7 s of pool time. A grant with no
+//! resident entry is not refreshed and builds on its next request, which is establishment rather
+//! than update-induced work.
 //!
 //! **It needs no session registry, and the engine has none** — a `Session` is a value the server
 //! holds. Everything a refresh needs is in the entry it is refreshing: the fragment cache's key

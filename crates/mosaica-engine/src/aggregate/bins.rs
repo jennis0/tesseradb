@@ -380,9 +380,8 @@ impl Bins {
         ))
     }
 
-    /// Each shard's tallies of `set`'s values, and whether the set was sampled: below the cut set
-    /// from the set's size in every shard ([`sample_cut`]), and otherwise every item. Whether it is
-    /// sampled depends on the cut alone, the same in every shard.
+    /// Each shard's tallies of `set`'s values, sampled below [`sample_cut`]'s cut where there is
+    /// one, and whether there is.
     fn tally<'e, K: Num + 'e>(
         &self,
         cx: &Cx<'_>,
@@ -390,20 +389,20 @@ impl Bins {
         empty: impl Fn() -> Histogram<'e, K> + Sync + Send,
         timings: &mut AggregateTimings,
     ) -> Result<(Vec<Tallied>, bool)> {
-        let cut = sample_cut(self.sample, cx.reads().map(|at| set.size_in(at)));
+        let cut = sample_cut(self.sample, cx.reads().map(|place| set.size_in(place)));
         let mut sides = Vec::new();
-        for at in cx.reads() {
-            let members = set.cells(cx, at);
-            let plan = cut.and_then(|cut| SamplePlan::of(cx, at, &members, cut));
-            let (hist, none, items) = match plan {
-                Some(plan) => {
-                    let side = self.field.pass_sample(cx, at, &members, &plan, &empty)?;
+        for place in cx.reads() {
+            let members = set.cells(cx, place);
+            let (hist, none, items) = match cut {
+                Some(cut) => {
+                    let plan = SamplePlan::of(cx, place, &members, cut);
+                    let side = self.field.pass_sample(cx, place, &members, &plan, &empty)?;
                     timings.band_entries += plan.entries_read();
                     side
                 }
                 None => {
-                    let (tally, none) = self.field.pass(cx, set, at, &empty)?;
-                    (tally, none, set.size_in(at))
+                    let (tally, none) = self.field.pass(cx, set, place, &empty)?;
+                    (tally, none, set.size_in(place))
                 }
             };
             sides.push(Tallied {
@@ -419,7 +418,8 @@ impl Bins {
 
 /// The cut a set is sampled below, from its size in every shard, `sizes`, and the sample size: a
 /// set holding more items than the sample is cut at `⌊s · 2⁶⁴ / N⌋`, and counted whole, `None`,
-/// where it holds no more or no band holds every identity below the cut.
+/// where it holds no more or no band holds every identity below the cut. Whether a set is sampled
+/// depends on its size and the sample size alone, both inside the visible set.
 fn sample_cut(sample: Option<u64>, sizes: impl IntoIterator<Item = u64>) -> Option<u64> {
     let n: u64 = sizes.into_iter().sum();
     let s = sample.filter(|&s| n > s)?;
@@ -476,7 +476,7 @@ impl Numbers {
     fn pass_sample<K: Num, T: Tally<K>>(
         &self,
         cx: &Cx<'_>,
-        at: usize,
+        place: usize,
         members: &CellSet<'_>,
         plan: &SamplePlan,
         empty: impl Fn() -> T + Sync + Send,
@@ -484,7 +484,7 @@ impl Numbers {
         cx.check_cancelled()?;
         let SamplePlan { band, cut, .. } = *plan;
         let column = self.column.as_str();
-        let segments = cx.segments(at);
+        let segments = cx.segments(place);
         // What one piece found: its tally, its items with no value, its items, and the view rows
         // whose value is read through their entity.
         let found = cx.engine.pool.install(|| {
@@ -572,18 +572,18 @@ impl Numbers {
         let (mut tally, mut none, items, through) = found;
         if !through.is_empty() {
             let rows = croaring::Bitmap::of(&through);
-            let entities = super::set::crossing(cx.engine, cx.open, at, &rows)?;
+            let entities = super::set::crossing(cx.engine, cx.open, place, &rows)?;
             let (more, without) = cx
                 .engine
                 .pool
-                .install(|| self.pass_entities(cx, at, &entities, &empty));
+                .install(|| self.pass_entities(cx, place, &entities, &empty));
             tally = tally.merge(more);
             none += without;
         }
         Ok((tally, none, items))
     }
 
-    /// One pass over the values of `set`'s items in the side at `at` into a tally, and how many
+    /// One pass over the values of `set`'s items in the side at `place` into a tally, and how many
     /// items have no value: through the field's per-entity values where the field is not drawn or
     /// the set is held as entities, and otherwise over the set's rows, which the whole visible set
     /// always is.
@@ -591,34 +591,35 @@ impl Numbers {
         &self,
         cx: &Cx<'_>,
         set: &Set,
-        at: usize,
+        place: usize,
         empty: impl Fn() -> T + Sync + Send,
     ) -> Result<(T, u64)> {
         cx.check_cancelled()?;
-        if self.held && (!self.drawn || (set.has_entities(at) && !set.is_whole())) {
-            let entities = set.entities(cx, at)?;
+        if self.held && (!self.drawn || (set.has_entities(place) && !set.is_whole())) {
+            let entities = set.entities(cx, place)?;
             return Ok(cx
                 .engine
                 .pool
-                .install(|| self.pass_entities(cx, at, entities, empty)));
+                .install(|| self.pass_entities(cx, place, entities, empty)));
         }
         Ok(cx
             .engine
             .pool
-            .install(|| self.pass_rows(set.cells(cx, at), cx.segments(at), empty)))
+            .install(|| self.pass_rows(set.cells(cx, place), cx.segments(place), empty)))
     }
 
-    /// The field's per-entity values of `entities` in the side at `at`'s shard, in parallel pieces
-    /// of entity space, each piece's entities walked through every layer, then the buffered rows.
+    /// The field's per-entity values of `entities` in the side at `place`'s shard, in parallel
+    /// pieces of entity space, each piece's entities walked through every layer, then the buffered
+    /// rows.
     fn pass_entities<K: Num, T: Tally<K>>(
         &self,
         cx: &Cx<'_>,
-        at: usize,
+        place: usize,
         entities: &croaring::Bitmap,
         empty: impl Fn() -> T + Sync + Send,
     ) -> (T, u64) {
         let layers = cx
-            .side(at)
+            .side(place)
             .shard
             .filter_columns
             .value_layers(&self.column)
@@ -653,7 +654,7 @@ impl Numbers {
             .reduce(|| (empty(), 0), |(a, m), (b, n)| (a.merge(b), m + n));
         crate::categories::buffered_values(
             &cx.generation.bundle.manifest,
-            &cx.side(at).shard.buffer,
+            &cx.side(place).shard.buffer,
             &self.column,
             &mut |entity, value| {
                 if !entities.contains(entity) || matches!(value, WalScalar::Null) {
@@ -748,14 +749,13 @@ struct SamplePiece {
 }
 
 impl SamplePlan {
-    /// The plan for `members`, a set's rows in the side at `at`, sampled below `cut`, or `None`
-    /// where no band holds every identity below the cut and the set is counted exactly. Whether a
-    /// set is sampled depends on its size and the sample size alone, both inside the visible set.
-    /// Each piece is then read from the band or by scanning, whichever its band entries times
+    /// The plan for `members`, a set's rows in the side at `place`, sampled below `cut`. Each
+    /// piece is read from the band or by scanning, whichever its band entries times
     /// [`BAND_ENTRY_ROWS`] and its members say costs less; the two read the same items.
-    fn of(cx: &Cx<'_>, at: usize, members: &CellSet<'_>, cut: u64) -> Option<SamplePlan> {
-        let band = mosaica_store::bands::band_below(cut)?;
-        let segments = cx.segments(at);
+    fn of(cx: &Cx<'_>, place: usize, members: &CellSet<'_>, cut: u64) -> SamplePlan {
+        let band =
+            mosaica_store::bands::band_below(cut).expect("sample_cut admits only a banded cut");
+        let segments = cx.segments(place);
         let pieces = pieces(segments)
             .into_par_iter()
             .map(|(s, rows)| {
@@ -773,7 +773,7 @@ impl SamplePlan {
                 }
             })
             .collect();
-        Some(SamplePlan { cut, band, pieces })
+        SamplePlan { cut, band, pieces }
     }
 
     /// The band entries the banded pieces read.
@@ -973,16 +973,21 @@ struct Reader<'a> {
 }
 
 impl FieldRead for Reader<'_> {
-    fn tally(&self, at: usize, rows: &croaring::Bitmap, keep: usize) -> Result<FieldTally> {
+    fn tally(&self, place: usize, rows: &croaring::Bitmap, keep: usize) -> Result<FieldTally> {
         match self.field.kind == Kind::Float {
-            true => self.read::<f64>(at, rows, keep),
-            false => self.read::<i128>(at, rows, keep),
+            true => self.read::<f64>(place, rows, keep),
+            false => self.read::<i128>(place, rows, keep),
         }
     }
 }
 
 impl Reader<'_> {
-    fn read<K: Num>(&self, at: usize, rows: &croaring::Bitmap, keep: usize) -> Result<FieldTally> {
+    fn read<K: Num>(
+        &self,
+        place: usize,
+        rows: &croaring::Bitmap,
+        keep: usize,
+    ) -> Result<FieldTally> {
         let cx = self.cx;
         cx.check_cancelled()?;
         if rows.is_empty() {
@@ -992,19 +997,19 @@ impl Reader<'_> {
         if self.field.drawn {
             let (summary, none) = cx.engine.pool.install(|| {
                 self.field
-                    .pass_rows(CellSet::Rows(rows), cx.segments(at), empty)
+                    .pass_rows(CellSet::Rows(rows), cx.segments(place), empty)
             });
             return Ok(summary.finish(none));
         }
-        let entities = super::set::crossing(cx.engine, cx.open, at, rows)?;
+        let entities = super::set::crossing(cx.engine, cx.open, place, rows)?;
         let (summary, none) = cx
             .engine
             .pool
-            .install(|| self.field.pass_entities(cx, at, &entities, empty));
+            .install(|| self.field.pass_entities(cx, place, &entities, empty));
         let mut tally = summary.finish(none);
         // The kept values were read by entity, and a deny names rows: each is placed again by its
         // row.
-        let row_space = &cx.side(at).data.row_space;
+        let row_space = &cx.side(place).data.row_space;
         for (high, side) in [(false, &mut tally.low), (true, &mut tally.high)] {
             let mut placed = Vec::with_capacity(side.len());
             for mut kept in side.drain(..) {

@@ -138,7 +138,7 @@ enum Ended {
 struct HeldFilter {
     under: Arc<Generation>,
     mask: MaskIdentity,
-    /// By the side's place among the view's sides.
+    /// By place.
     rows: Vec<Bitmap>,
     /// By layer and level.
     levels: std::collections::HashMap<(String, u32), HeldCounts>,
@@ -244,7 +244,7 @@ struct Scope<'a> {
     levels: &'a [Option<ReadLevel>],
     views: &'a [Option<crate::artifacts::ArtifactView<'a, crate::compose::EffectiveMask>>],
     targets: &'a [TargetLayer<'a>],
-    /// The filter's rows in each side, by the side's place among the view's sides.
+    /// The filter's rows in each side, by place.
     filter_rows: Option<&'a [Bitmap]>,
     /// Under `parent`: the parent's position where this viewer is served it, and `None` where no
     /// artifact is its child.

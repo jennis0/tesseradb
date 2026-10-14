@@ -171,7 +171,7 @@ fn read_run(cx: &PageCx<'_>, plan: &FieldPlan, rows: &[Taken], budget: usize) ->
         let mut kept: BinaryHeap<(usize, usize)> = BinaryHeap::new();
         let mut held = 0usize;
         for held_rows in &by_side {
-            let side = rows[held_rows[0]].side;
+            let place = rows[held_rows[0]].place;
             let mut at: FxHashMap<u32, usize> = FxHashMap::default();
             let mut entities: Vec<u32> = Vec::with_capacity(held_rows.len());
             for &i in held_rows {
@@ -179,7 +179,7 @@ fn read_run(cx: &PageCx<'_>, plan: &FieldPlan, rows: &[Taken], budget: usize) ->
                 entities.push(rows[i].entity);
             }
             entities.sort_unstable();
-            columns[side]
+            columns[place]
                 .records()
                 .for_each_row_in(&croaring::Bitmap::of(&entities), &mut |entity, fields| {
                     let Some(&i) = at.get(&entity) else {
@@ -223,7 +223,7 @@ fn read_run(cx: &PageCx<'_>, plan: &FieldPlan, rows: &[Taken], budget: usize) ->
                         .map(|row| {
                             engine.labels_for(
                                 generation,
-                                sides[row.side].shard,
+                                sides[row.place].shard,
                                 open.served.session,
                                 row.entity,
                                 &mut parsed,
@@ -255,17 +255,16 @@ fn value_bytes(value: &RV) -> usize {
 /// view's sides, each side's in run order.
 fn by_side(rows: &[Taken]) -> Vec<Vec<usize>> {
     let mut order: Vec<usize> = (0..rows.len()).collect();
-    order.sort_by_key(|&i| rows[i].side);
+    order.sort_by_key(|&i| rows[i].place);
     order
-        .chunk_by(|&a, &b| rows[a].side == rows[b].side)
+        .chunk_by(|&a, &b| rows[a].place == rows[b].place)
         .map(<[usize]>::to_vec)
         .collect()
 }
 
-/// A value column's values for `rows`, each read from its own side's columns, `columns` by the
-/// side's place among the view's sides, and `by_side` the rows of each side ([`by_side`]). A
-/// keyword's code is each shard's own, so every value comes out as the key its own shard's
-/// dictionary names.
+/// A value column's values for `rows`, each read from its own side's columns, `by_side` grouping
+/// them ([`by_side`]). A keyword's code is each shard's own, so each value is named by its own
+/// shard's dictionary.
 fn stored_values(
     columns: &[&FilterColumns],
     column: &str,
@@ -274,8 +273,8 @@ fn stored_values(
 ) -> Vec<Option<RV>> {
     let mut out = vec![None; rows.len()];
     for held in by_side {
-        let values =
-            columns[rows[held[0]].side].stored_values(column, held.iter().map(|&i| rows[i].entity));
+        let entities = held.iter().map(|&i| rows[i].entity);
+        let values = columns[rows[held[0]].place].stored_values(column, entities);
         for (&i, value) in held.iter().zip(values) {
             out[i] = value;
         }
@@ -288,32 +287,26 @@ fn stored_values(
 /// category's absence is its code 0, which `slice_value` answers.
 fn rendered_values(cx: &PageCx<'_>, field: &Named, rows: &[Taken]) -> Vec<Option<RV>> {
     let sides = &cx.open.served.sides;
-    let slices: Vec<Vec<_>> = sides
-        .iter()
-        .map(|side| {
-            side.segments
-                .iter()
-                .map(|(segment, _)| segment.columns.scalar(&field.name))
-                .collect()
-        })
-        .collect();
-    let presences: Vec<Vec<_>> = sides
+    let read: Vec<Vec<_>> = sides
         .iter()
         .map(|side| {
             side.segments
                 .iter()
                 .map(|(segment, _)| {
-                    RowPresence::of(segment, &field.name, field.vocabulary.is_some())
+                    let presence =
+                        RowPresence::of(segment, &field.name, field.vocabulary.is_some());
+                    (segment.columns.scalar(&field.name), presence)
                 })
                 .collect()
         })
         .collect();
     rows.iter()
         .map(|row| {
-            if !presences[row.side][row.seg].contains(row.local) {
+            let (slice, presence) = &read[row.place][row.seg];
+            if !presence.contains(row.local) {
                 return None;
             }
-            slice_value(slices[row.side][row.seg].as_ref()?, row.local as usize)
+            slice_value(slice.as_ref()?, row.local as usize)
         })
         .collect()
 }
@@ -371,7 +364,7 @@ fn positions(
     Ok(rows
         .iter()
         .map(|row| {
-            let (segment, _) = sides[row.side].segments[row.seg];
+            let (segment, _) = sides[row.place].segments[row.seg];
             let local = row.local as usize;
             let (qx, qy) = mosaica_spatial::unsplit32(
                 MortonCode::new(segment.morton.u32()[local]),
@@ -765,8 +758,8 @@ mod tests {
     fn a_keyword_is_read_as_the_key_its_own_shard_names() {
         let column = |keys| keyword_column("kw", vec![(None, universal(&[0, 1]), dict(keys))]);
         let (first, second) = (column(&["alpha", "beta"]), column(&["beta", "gamma"]));
-        let row = |side, entity| Taken {
-            side,
+        let row = |place, entity| Taken {
+            place,
             seg: 0,
             local: 0,
             mosaica_id: 0,

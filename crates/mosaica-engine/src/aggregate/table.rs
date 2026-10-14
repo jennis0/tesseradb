@@ -479,11 +479,11 @@ impl Plan {
                 let sources: Vec<(usize, Source<'_>)> = match &self.outer {
                     Outer::None => cx
                         .reads()
-                        .map(|at| {
-                            let reference = cx.sets.reference.as_ref().map(|r| r.cells(cx, at));
+                        .map(|place| {
+                            let reference = cx.sets.reference.as_ref().map(|r| r.cells(cx, place));
                             (
-                                at,
-                                Source::Split(vec![(cx.sets.set.cells(cx, at), reference)]),
+                                place,
+                                Source::Split(vec![(cx.sets.set.cells(cx, place), reference)]),
                             )
                         })
                         .collect(),
@@ -492,14 +492,14 @@ impl Plan {
                         table = GroupTable::new(&listed);
                         codes = cx
                             .reads()
-                            .map(|at| field.entity_codes(cx.side(at).shard))
+                            .map(|place| field.entity_codes(cx.side(place).shard))
                             .collect::<Result<Vec<_>>>()?;
                         cx.reads()
                             .zip(&codes)
-                            .map(|(at, codes)| {
+                            .map(|(place, codes)| {
                                 Ok((
-                                    at,
-                                    Source::Grouped(field.row_groups(cx, at, &table, codes)?),
+                                    place,
+                                    Source::Grouped(field.row_groups(cx, place, &table, codes)?),
                                 ))
                             })
                             .collect::<Result<_>>()?
@@ -510,14 +510,14 @@ impl Plan {
                         let served = served.as_ref().expect("a layer's groups were read");
                         labels = served.label_table();
                         cx.reads()
-                            .map(|at| {
+                            .map(|place| {
                                 let source = match (&labels, served.parts()) {
                                     (Some(labels), _) => {
-                                        Source::Grouped(served.row_groups(labels, at))
+                                        Source::Grouped(served.row_groups(labels, place))
                                     }
                                     (None, Some(parts)) => {
                                         let (set, reference) =
-                                            parts[at].as_ref().expect("a side the page reads");
+                                            parts[place].as_ref().expect("a side the page reads");
                                         Source::Split(
                                             set.iter()
                                                 .enumerate()
@@ -534,17 +534,17 @@ impl Plan {
                                     }
                                     (None, None) => Source::Split(Vec::new()),
                                 };
-                                (at, source)
+                                (place, source)
                             })
                             .collect()
                     }
                 };
                 let sides: Vec<WalkSide<'_>> = sources
                     .into_iter()
-                    .map(|(at, source)| WalkSide {
-                        segments: cx.segments(at),
-                        set: cx.sets.set.cells(cx, at),
-                        reference: cx.sets.reference.as_ref().map(|r| r.cells(cx, at)),
+                    .map(|(place, source)| WalkSide {
+                        segments: cx.segments(place),
+                        set: cx.sets.set.cells(cx, place),
+                        reference: cx.sets.reference.as_ref().map(|r| r.cells(cx, place)),
                         source,
                     })
                     .collect();
@@ -1207,7 +1207,17 @@ impl Walk<'_> {
             let parts: Vec<Vec<Columns>> = self.cx.engine.pool.install(|| {
                 chunks[at..end]
                     .par_iter()
-                    .map(|prefixes| self.chunk(groups.clone(), prefixes.clone()))
+                    .map(|prefixes| {
+                        chunk_of(
+                            self.sides,
+                            self.depth,
+                            self.methods,
+                            self.reference,
+                            self.area,
+                            groups.clone(),
+                            prefixes.clone(),
+                        )
+                    })
                     .collect()
             });
             timings.pass_ns += walking.elapsed().as_nanos() as u64;
@@ -1230,24 +1240,10 @@ impl Walk<'_> {
         }
         Ok(Some((out, at == chunks.len())))
     }
-
-    /// One chunk's rows of each of `groups`.
-    fn chunk(&self, groups: std::ops::Range<u32>, prefixes: std::ops::Range<u64>) -> Vec<Columns> {
-        chunk_of(
-            self.sides,
-            self.depth,
-            self.methods,
-            self.reference,
-            self.area,
-            groups,
-            prefixes,
-        )
-    }
 }
 
-/// One chunk's rows of each of `groups`: each side's counted, then every side's added by cell in
-/// one sort. `methods` says for each group whether its set and its reference are counted by range,
-/// and `reference` whether the request names one.
+/// One chunk's rows of each of `groups`. `methods` says for each group whether its set and its
+/// reference are counted by range, and `reference` whether the request names one.
 fn chunk_of(
     sides: &[WalkSide<'_>],
     depth: u8,
@@ -1627,9 +1623,8 @@ mod tests {
         counted(&sides, depth, &methods, 200)
     }
 
-    /// Two shards, the second of two segments, against one segment of every row: each chunk is
-    /// cut over every shard's segments and each shard's counts are added by cell, so the cells
-    /// served are the same, by range and by the pass, split into groups or not, at every depth.
+    /// Two shards, the second of two segments, against one segment of every row: by range and by
+    /// the pass, split into groups or not, at every depth.
     #[test]
     fn cells_over_two_shards_are_those_of_one_shard_holding_every_row() {
         for seed in 0..4u64 {

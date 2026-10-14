@@ -380,8 +380,9 @@ impl SuggestSets {
     }
 }
 
-/// **The sweep** — one pass over a column's entity-space value layers under `candidate`, turned
-/// into the dense positions of the values it found (§6.3).
+/// **The sweep** — one pass over a column's entity-space value layers in every shard, each
+/// shard's under that shard's candidate, turned into the dense positions of the values it found
+/// (§6.3).
 ///
 /// `None` where the column cannot take the set at all: **rule 4**, a column with no entity-space
 /// value column to sweep — a blob-resident `derived` category, which has postings and nothing else
@@ -402,18 +403,7 @@ impl SuggestSets {
 /// **A code with no dense position is skipped**, which is the fail-closed direction: a value minted
 /// since the index was built has none, is therefore not in the set, and is answered by the probe
 /// route at the walk's side-map arm.
-pub fn sweep<'a>(
-    columns: impl Iterator<Item = &'a mosaica_filter::ValueColumn>,
-    candidate: &Bitmap,
-    index: &crate::suggest::SuggestIndex,
-) -> Option<SuggestSet> {
-    sweep_shards(std::iter::once((columns, candidate)), index)
-}
-
-/// [`sweep`] over every shard: each shard's layers under that shard's candidate. A category's
-/// codes are its vocabulary's, the same in every shard, so the codes found in every shard are one
-/// set. `None` where any shard's layers are not a category's, or no shard has a layer.
-pub(crate) fn sweep_shards<'a, 'c, L>(
+pub fn sweep<'a, 'c, L>(
     shards: impl IntoIterator<Item = (L, &'c Bitmap)>,
     index: &crate::suggest::SuggestIndex,
 ) -> Option<SuggestSet>
@@ -577,7 +567,8 @@ mod tests {
 
         let mut candidate = Bitmap::new();
         candidate.add_many(&[1, 4, 6]);
-        let set = sweep(std::iter::once(&column), &candidate, &index).expect("a category sweeps");
+        let set = sweep(std::iter::once((std::iter::once(&column), &candidate)), &index)
+            .expect("a category sweeps");
         // Entities 1 and 6 carry positions 1 and 2; entity 4 carries the sentinel, which is bound
         // to no key and so contributes nothing.
         assert!(set.contains(1));
@@ -605,12 +596,13 @@ mod tests {
             .expect("the index builds");
         let candidate = Bitmap::from_range(0..4);
 
-        assert!(sweep(std::iter::empty(), &candidate, &index).is_none());
+        assert!(sweep(std::iter::once((std::iter::empty(), &candidate)), &index).is_none());
 
         let numbers = mosaica_filter::ValueColumn::universal(mosaica_filter::Codes::F64(
             vec![1.0f64, 2.0, 3.0, 4.0].into(),
         ));
-        assert!(sweep(std::iter::once(&numbers), &candidate, &index).is_none());
+        let numbers = std::iter::once(&numbers);
+        assert!(sweep(std::iter::once((numbers, &candidate)), &index).is_none());
     }
 
     /// **A set swept against a superseded index is rejected *and dropped*.** Rejecting without
@@ -644,10 +636,8 @@ mod tests {
         assert!(sets.get(&key(2, 7, 3), 1_000).is_some());
     }
 
-    /// Two shards' columns, each under its own candidate, against one shard holding both: the set
-    /// is the positions of the values the candidates' entities carry in either shard, a value
-    /// carried only by entities outside both candidates is not in it, and a shard whose candidate
-    /// is empty adds nothing.
+    /// A value carried only by entities outside both candidates is not in the set, and a shard
+    /// whose candidate is empty adds nothing.
     #[test]
     fn a_sweep_over_two_shards_is_one_shards_holding_both() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -672,7 +662,7 @@ mod tests {
         let one = column(&[0, 1, 2, 3, 3, 2, 1, 0]);
         let positions = |set: &SuggestSet| (0..4).filter(|&p| set.contains(p)).collect::<Vec<_>>();
 
-        let two = sweep_shards(
+        let two = sweep(
             [
                 (std::iter::once(&first), &Bitmap::of(&[0])),
                 (std::iter::once(&second), &Bitmap::of(&[0, 1])),
@@ -680,11 +670,15 @@ mod tests {
             &index,
         )
         .expect("a category sweeps");
-        let whole = sweep(std::iter::once(&one), &Bitmap::of(&[0, 4, 5]), &index).unwrap();
+        let whole = sweep(
+            std::iter::once((std::iter::once(&one), &Bitmap::of(&[0, 4, 5]))),
+            &index,
+        )
+        .unwrap();
         assert_eq!(positions(&two), vec![0, 2, 3]);
         assert_eq!(positions(&two), positions(&whole));
 
-        let left_out = sweep_shards(
+        let left_out = sweep(
             [
                 (std::iter::once(&first), &Bitmap::of(&[0, 3])),
                 (std::iter::once(&second), &Bitmap::new()),

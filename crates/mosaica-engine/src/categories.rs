@@ -63,6 +63,8 @@
 //! filter naming an invisible value, and the same precedent contracts §3.2 sets for an unmatched
 //! token.
 
+use std::borrow::Cow;
+
 use mosaica_analyse::SuggestionField;
 use mosaica_store::manifest::{Visibility, VocabularyKind};
 use mosaica_store::vocabulary::ABSENT_CODE;
@@ -204,16 +206,15 @@ fn unavailable(column: &str, e: crate::filter::FilterError) -> EngineError {
 
 /// Each shard's columns and its candidate, borrowed.
 fn borrowed<'a>(
-    candidates: &'a [(&'a crate::Shard, croaring::Bitmap)],
+    candidates: &'a [(&'a crate::Shard, Cow<'_, croaring::Bitmap>)],
 ) -> impl Iterator<Item = (&'a FilterColumns, &'a croaring::Bitmap)> {
     candidates
         .iter()
-        .map(|(shard, candidate)| (&*shard.filter_columns, candidate))
+        .map(|(shard, candidate)| (&*shard.filter_columns, candidate.as_ref()))
 }
 
 /// How many items of each shard's set carry each of `codes` in `column`, added across shards:
-/// each part is a shard's columns, its set and its buffered rows. A category's codes are its
-/// vocabulary's, the same in every shard.
+/// each part is a shard's columns, its set and its buffered rows.
 fn summed_counts<'a>(
     column: &str,
     codes: &[u32],
@@ -304,7 +305,7 @@ impl Engine {
         // shard.
         let candidates = match vocabulary.visibility() {
             Visibility::Public => None,
-            Visibility::Derived => Some(self.candidates(session, &generation)?),
+            Visibility::Derived => Some(self.candidates(session, &generation, |_| None)?),
         };
         let carried = match &candidates {
             None => None,
@@ -420,7 +421,7 @@ impl Engine {
         generation: &std::sync::Arc<crate::Generation>,
         vocabulary_name: &str,
         column: &str,
-        candidates: &[(&crate::Shard, croaring::Bitmap)],
+        candidates: &[(&crate::Shard, Cow<'_, croaring::Bitmap>)],
     ) {
         if !self.suggest_sets.claim(&key) {
             return;
@@ -437,7 +438,7 @@ impl Engine {
         let generation = std::sync::Arc::clone(generation);
         let candidates: Vec<(mosaica_types::ShardId, croaring::Bitmap)> = candidates
             .iter()
-            .map(|(shard, candidate)| (shard.id(), candidate.clone()))
+            .map(|(shard, candidate)| (shard.id(), candidate.clone().into_owned()))
             .collect();
         let column = column.to_string();
         self.pool.spawn(move || {
@@ -448,7 +449,7 @@ impl Engine {
                     .value_layers(&column)?;
                 Some((layers.base().into_iter().chain(layers.extents()), candidate))
             });
-            match crate::suggest_set::sweep_shards(shards, &index) {
+            match crate::suggest_set::sweep(shards, &index) {
                 Some(set) => sets.finish(key, std::sync::Arc::new(set)),
                 None => sets.abandon(&key),
             }
@@ -457,15 +458,23 @@ impl Engine {
 
     /// Every shard's entity-space candidate ([`Self::filter_candidate`] over the session's
     /// freshest fragment there), ascending by shard: what a value's visibility and its counts are
-    /// taken from where no view names the rows.
-    fn candidates<'g>(
+    /// taken from where no view names the rows. `held` answers for a shard whose candidate the
+    /// caller already holds.
+    pub(crate) fn candidates<'g, 'h>(
         &self,
         session: &Session,
         generation: &'g crate::Generation,
-    ) -> Result<Vec<(&'g crate::Shard, croaring::Bitmap)>> {
+        held: impl Fn(mosaica_types::ShardId) -> Option<&'h croaring::Bitmap>,
+    ) -> Result<Vec<(&'g crate::Shard, Cow<'h, croaring::Bitmap>)>> {
         generation
             .shards()
-            .map(|shard| Ok((shard, self.filter_candidate(session, shard, None)?)))
+            .map(|shard| {
+                let candidate = match held(shard.id()) {
+                    Some(candidate) => Cow::Borrowed(candidate),
+                    None => Cow::Owned(self.filter_candidate(session, shard, None)?),
+                };
+                Ok((shard, candidate))
+            })
             .collect()
     }
 
@@ -654,7 +663,7 @@ impl Engine {
         // values served, which the visibility alone still decides.
         let derived = vocabulary.visibility() == Visibility::Derived;
         let candidates = if derived || counts {
-            Some(self.candidates(session, &generation)?)
+            Some(self.candidates(session, &generation, |_| None)?)
         } else {
             None
         };
@@ -719,14 +728,10 @@ impl Engine {
                 // Either no mask was composed at all, or one was composed only to count with —
                 // both are `public`, and a `public` value set is served as authored.
                 (_, false) => Ok(true),
-                // **Unreachable, and fail-closed rather than trusted to stay so.** A `derived`
-                // column composes its candidates above and builds a membership from them or
-                // refuses, so this pair cannot arise today. It is an error and not `Ok(true)`
-                // because the two wrong answers are not symmetric: `true` here publishes every
-                // value name of a `derived` vocabulary to a principal whose predicate was never
-                // evaluated, and nothing would show it: the page would look like a wide
-                // principal's. A future edit that reorders the composition above turns that into a
-                // refusal instead.
+                // **Unreachable, and fail-closed.** A `derived` column builds its membership above
+                // or refuses; `Ok(true)` here would publish every value name of a `derived`
+                // vocabulary to a principal whose predicate was never evaluated, and nothing would
+                // show it.
                 (None, true) => Err(EngineError::VocabularyVisibilityUnavailable {
                     column: column.to_string(),
                     detail: "a derived column reached the walk with no composed membership"
@@ -761,14 +766,13 @@ impl Engine {
                 let codes: Vec<u32> = found.iter().map(|found| found.code).collect();
                 // Each shard's set: its candidate, or under a view, its members holding a row in
                 // the view's rows the map shows, and passing the filter where there is one.
-                let mut sets: Vec<(&crate::Shard, std::borrow::Cow<'_, croaring::Bitmap>)> =
-                    Vec::new();
+                let mut sets: Vec<(&crate::Shard, Cow<'_, croaring::Bitmap>)> = Vec::new();
                 match view {
-                    None => {
-                        sets.extend(candidates.iter().map(|(shard, candidate)| {
-                            (*shard, std::borrow::Cow::Borrowed(candidate))
-                        }))
-                    }
+                    None => sets.extend(
+                        candidates
+                            .iter()
+                            .map(|(shard, candidate)| (*shard, Cow::Borrowed(candidate.as_ref()))),
+                    ),
                     Some(view) => {
                         let open = self.open_view(
                             session,
@@ -778,23 +782,23 @@ impl Engine {
                             &mut crate::timing::Probe::new(),
                         )?;
                         let resolved = crate::viewport::ResolvedLeaves::new(&open.mask);
-                        for (at, side, _) in open.served.filtered_sides(&open.mask) {
+                        for (place, side, _) in open.served.filtered_sides(&open.mask) {
                             let (shard, candidate) = candidates
                                 .iter()
                                 .find(|(own, _)| own.id() == side.shard.id())
                                 .expect("every shard has a candidate");
                             let within = match filter {
-                                None => crate::aggregate::set::in_view(&open, at, candidate)?,
+                                None => crate::aggregate::set::in_view(&open, place, candidate)?,
                                 Some(expr) => {
                                     let (entities, verdict) =
                                         crate::aggregate::set::entities_passing(
-                                            self, &open, at, candidate, expr, &resolved, cancel,
+                                            self, &open, place, candidate, expr, &resolved, cancel,
                                         )?;
                                     region = crate::RegionVerdict::coarsest(region, verdict);
                                     entities
                                 }
                             };
-                            sets.push((*shard, std::borrow::Cow::Owned(within)));
+                            sets.push((*shard, Cow::Owned(within)));
                         }
                     }
                 }
@@ -803,18 +807,21 @@ impl Engine {
                 let summed = self
                     .pool
                     .install(|| {
-                        let buffered: Vec<Box<crate::filter::VisitBuffered<'_>>> = sets
+                        let buffered: Vec<_> = sets
                             .iter()
                             .map(|(shard, _)| {
                                 let buffer = &shard.buffer;
-                                Box::new(move |visit: &mut dyn FnMut(u32, u32)| {
+                                move |visit: &mut dyn FnMut(u32, u32)| {
                                     buffered_codes(manifest, buffer, column, visit)
-                                })
-                                    as Box<crate::filter::VisitBuffered<'_>>
+                                }
                             })
                             .collect();
-                        let parts = sets.iter().zip(&buffered).map(|((shard, set), buffered)| {
-                            (&*shard.filter_columns, set.as_ref(), buffered.as_ref())
+                        let parts = sets.iter().zip(&buffered).map(|((shard, set), b)| {
+                            (
+                                &*shard.filter_columns,
+                                set.as_ref(),
+                                b as &crate::filter::VisitBuffered<'_>,
+                            )
                         });
                         summed_counts(column, &codes, parts)
                     })
@@ -829,7 +836,7 @@ impl Engine {
         let values: Vec<Suggestion> = found
             .into_iter()
             .enumerate()
-            .map(|(at, found)| Suggestion {
+            .map(|(i, found)| Suggestion {
                 code: found.code,
                 key: found.key,
                 title: found.title,
@@ -838,7 +845,7 @@ impl Engine {
                     start: found.start,
                     len: found.len,
                 },
-                count: counted.as_ref().map(|counted| counted[at]),
+                count: counted.as_ref().map(|counted| counted[i]),
             })
             .collect();
 
@@ -926,11 +933,9 @@ mod tests {
     use crate::filter::test_support::category_column;
     use crate::filter::VisitBuffered;
 
-    /// Two shards' columns, each under its own candidate, against one shard holding both: a value
-    /// is listed where an item the viewer may see carries it in either shard, through the base's
-    /// postings or an extent, and never where only items outside both candidates carry it; a
-    /// shard whose candidate is empty adds nothing; and each value's count is the two shards'
-    /// added.
+    /// A value is listed where an item the viewer may see carries it in either shard, through the
+    /// base's postings or an extent; a shard whose candidate is empty adds nothing; each value's
+    /// count is the two shards' added.
     #[test]
     fn values_over_two_shards_are_carried_and_counted_as_in_one_shard_holding_both() {
         let none: &VisitBuffered<'_> = &|_| {};

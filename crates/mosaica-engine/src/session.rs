@@ -419,23 +419,12 @@ impl Engine {
     }
 
     /// `session`'s mask fragment in `shard`, at its watermark and under its identity, from the
-    /// fragment cache, built there on a miss. A flush moves the watermark and a fold the identity,
-    /// so neither is answered from a fragment of the term index or tiers before it. That is not
-    /// the only protection for a retired entity against a session authorised before a fold: the
-    /// folded row space and the folded value columns no longer hold the entity either.
-    ///
-    /// `satisfied` is fixed at authorise and never re-resolved, so the terms unioned here are
-    /// exactly the terms any build for this session consults. A build is measured at ~200 ms at
-    /// 10⁹, which is why the background refresh (`crate::refresh`) makes the next one at each
-    /// publication; a request reaches a build directly only on a session's first use of a shard.
-    ///
-    /// `held` is a fragment of this session's the request already holds, the one its projection
-    /// was taken over. Where it is at the shard's identity and watermark it is the answer, so a
-    /// fragment evicted from the cache's memory tier is not opened and hashed again while a
-    /// projection still maps it.
-    ///
-    /// Waits on a concurrent build of the same key for the wait budget, then yields
-    /// [`EngineError::FragmentBuilding`].
+    /// fragment cache, built there on a miss: a flush moves the watermark and a fold the identity.
+    /// `held`, the fragment the request's projection was taken over, answers where it is at both,
+    /// so an evicted fragment is not opened and hashed again while a projection maps it. A build
+    /// costs ~200 ms at 10⁹, so a request reaches one only on a session's first read of a shard;
+    /// the refresh makes the rest. Waits on a concurrent build of the same key for the wait
+    /// budget, then yields [`EngineError::FragmentBuilding`].
     pub(crate) fn fragment_for(
         &self,
         session: &Session,

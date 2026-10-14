@@ -42,20 +42,16 @@ use mosaica_cache::{CacheStats, CacheWeight, SingleFlightCache, WaitEnded};
 ///
 /// # What this key's safety rests on, which the type cannot enforce
 ///
-/// 1. **`grant` is the grant whole.** It is `Session::terms_digest`, SHA-256 over the grant's
-///    sorted index keys or over a fixed input for `read-all`, and the projection is a function of
-///    those keys and the shard's state alone: the fragment unions them, and the route is priced
-///    from them. Nothing about the credential beyond the grant reaches the value, which is why
-///    sessions holding different credentials may share it; anything per credential is read from
-///    the session.
+/// 1. **`grant` is the grant whole**: `Session::terms_digest`, and the projection is a function of
+///    the grant's keys and the shard's state alone, so sessions holding different credentials
+///    share it. Anything per credential is read from the session.
 /// 2. **`segments_version` is globally unique within a process**, which is why
 ///    [`RowProjectionCache::prune_generations_below`]'s depth test reads it alone.
 ///    `crate::pins::check_publishable` refuses any publication that does not strictly increase it.
 ///    Relax that guard and this pruner starts removing the wrong generation's entries.
-/// 3. **`prefix` and `identity` are carried, and are not redundant with `segments_version`.**
-///    A compaction publishes a new prefix and a new shard identity, and an entry from before it
-///    must never answer a request after it, should `segments_version` ever restart within one or
-///    this cache outlive the process. The entries are in memory only.
+/// 3. **`prefix` and `identity` are carried although `segments_version` discriminates within a
+///    process**: a compaction publishes a new prefix and shard identity, and no entry from before
+///    it may answer a request after it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RowProjectionKey {
     /// The grant's digest (`Session::terms_digest`).
@@ -69,7 +65,7 @@ pub(crate) struct RowProjectionKey {
     /// The geometry generation the row space belongs to. Entries more than
     /// [`KEEP_SUPERSEDED_GENERATIONS`] behind become
     /// [`RowProjectionCache::prune_generations_below`]'s work at the next publication; an
-    /// *overlay* swap must not move it (I11).
+    /// *overlay* swap must not move it.
     pub segments_version: u64,
     /// The prefix that geometry belongs to — see fact 3 above.
     pub prefix: String,
@@ -113,8 +109,7 @@ pub(crate) enum Peek {
 ///
 /// **What the refresh needs to produce the next one**, so a background pass needs no session
 /// registry — the engine has none, sessions being values the server holds. `grant` is what the
-/// [`mosaica_authz::FragmentCache`] is asked with. Nothing here is per credential: what is, such
-/// as the identity key's credential digest, is read from the session.
+/// [`mosaica_authz::FragmentCache`] is asked with.
 pub(crate) struct SessionGeometry {
     /// The fragment `projection` was taken over — never the live one, unless they coincide.
     pub(crate) fragment: Arc<FrozenFragment>,
@@ -159,8 +154,7 @@ impl CacheWeight for RowProjection {
 }
 
 /// Cached row-space projections, one per (grant, view, shard, generation) — never recomputed on
-/// the per-viewport path (shared-context constraint 8; see `crate::projection::RowProjection`'s doc
-/// for the cost this avoids).
+/// the per-viewport path (see `crate::projection::RowProjection`'s doc for the cost this avoids).
 ///
 /// # Sizing: what the bound bounds, and the number an operator actually needs
 ///
@@ -304,9 +298,8 @@ impl RowProjectionCache {
     /// item visible while the viewport beside it drew no mark for it — the two enforcement
     /// representations drifting. Taking the fragment from the grant's freshest entry in the shard
     /// keeps the card with the viewport of the view that entry is for, and takes the drill-down off
-    /// the per-publication fragment rebuild (a *measured* ~200 ms per grant). A session served
-    /// another view a generation stale, beside a newer entry of the grant's, may find an item on
-    /// its card that its viewport does not yet draw: an item its grant may see.
+    /// the per-publication fragment rebuild. A session served another view a generation stale may
+    /// find on its card an item its viewport does not yet draw, which its grant may see.
     ///
     /// **The fragment is not view-scoped**, so any of the grant's entries in `shard` answers: the
     /// fragment cache keys on the shard's identity, the satisfied terms and the watermark, and
@@ -314,8 +307,8 @@ impl RowProjectionCache {
     /// freshest is taken because a later watermark is a strictly better answer to an entity-space
     /// question.
     ///
-    /// **Per grant, never per entity** — the scan cost cannot depend on which identifier was
-    /// asked for, which is Critical C-5's constant-time property.
+    /// **Per grant, never per entity**: the scan cost cannot depend on which identifier was asked
+    /// for.
     ///
     /// **Scoped to `prefix`**: across a fold a superseded entry carries a fragment built from the
     /// term index the fold replaced, and `prune_generations_below` keeps the generation
