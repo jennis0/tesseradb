@@ -230,9 +230,8 @@ def test_the_catalogues_principals_reach_the_split_route(tmp_path, private_catal
     to tens of thousands of entities over three Roaring containers of row space, far above the keep
     rule's thirty rows per container.
 
-    Its own server, because a projection is shared by every session with the same grant: on a
-    server that earlier tests served the same cases over, every projection here is already built
-    and the counter does not move.
+    Its own server: projections are shared by grant, so on the shared server earlier tests have
+    built them all and the counter would not move.
     """
     server, proc = spawn_server(private_catalogue_bundle("split-route"), tmp_path)
     try:

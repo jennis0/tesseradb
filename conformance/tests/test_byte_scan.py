@@ -311,6 +311,7 @@ from oracle.catalogue import open_catalogue_bundle
 from oracle.harness import Server, many_shards, spawn_server, stop_server
 from oracle import wire
 from oracle.wire import decode_viewport_with_subcells, split_frames
+from suite.scan import cursor_windows, le_windows, value_buffer
 
 VIEW = "s0"
 GRID_MAX = 65536.0
@@ -342,25 +343,6 @@ ARTIFACTS_FIELDS = [
     "key", "level", "parents", "target", "masked_count", "content", "centroid", "box", "shape",
 ]
 CARD_SAMPLE_SIZE = 5  # admitted entities whose cards are compared across two sessions
-
-
-def _le_windows(data: bytes, width: int, *, stride: int = 1) -> set[int]:
-    """Every `width`-byte little-endian window's integer value at every offset that is a multiple
-    of `stride`, as a set (dedup — we only care about membership, not position or count).
-
-    `stride` matters a great deal for this fixture. `stride=1` (used for arbitrary unstructured
-    bytes such as a text log) is a genuine sliding window: correct when nothing is known about
-    alignment. But for a *column buffer* known to be a native fixed-width array, `stride=1` would
-    be actively wrong — it would manufacture byte-straddled values out of two adjacent, harmless
-    array elements. Every column scan below uses `stride` equal to that column's own native
-    element width — 8 for `mosaica_id`; 4, deliberately, for `code`, whose own width is 8 but
-    whose half-offset windows are the only ones that see a value straddling two adjacent positions
-    (`_points_value_buffer_windows`). So only offsets that could carry a stored value, or a value
-    smuggled across two of them, are considered."""
-    n = len(data)
-    if n < width:
-        return set()
-    return {int.from_bytes(data[i : i + width], "little") for i in range(0, n - width + 1, stride)}
 
 
 def _decimal_windows(data: bytes, floor: int) -> set[int]:
@@ -464,7 +446,7 @@ def _points_value_buffer_windows(points_bytes: bytes) -> tuple[set[int], set[int
                 buf = data_bufs[-1]  # last buffer is always the value buffer (validity, if any, first)
                 trimmed = buf.to_pybytes()[: len(col) * width]
                 if name == "mosaica_id":
-                    mosaica_windows |= _le_windows(trimmed, 8, stride=8)
+                    mosaica_windows |= le_windows(trimmed, 8, stride=8)
                 else:
                     # `code` at stride 4, not at its own width: the extra half-offset windows are
                     # what see a value straddling two adjacent codes. Kept separate from
@@ -476,7 +458,7 @@ def _points_value_buffer_windows(points_bytes: bytes) -> tuple[set[int], set[int
                     # real position rather than log noise) — so `code` windows are checked
                     # against the FLOOR-FILTERED target set, same as the log/decimal scans, not
                     # the full one.
-                    code_windows |= _le_windows(trimmed, 8, stride=4)
+                    code_windows |= le_windows(trimmed, 8, stride=4)
     return mosaica_windows, code_windows
 
 
@@ -525,13 +507,6 @@ class RecordsScan(NamedTuple):
     labels: list[str]
 
 
-def _value_buffer(column, width: int) -> bytes:
-    """A fixed-width column's value buffer, trimmed of Arrow's alignment padding, which would
-    otherwise read as windows of zero."""
-    buf = [b for b in column.buffers() if b is not None][-1]
-    return buf.to_pybytes()[: len(column) * width]
-
-
 def _records_scan(payload: bytes) -> RecordsScan:
     """One records frame's swept columns, decoded from the Arrow stream rather than read from the
     framed bytes, for the reason the points sweep gives."""
@@ -540,14 +515,14 @@ def _records_scan(payload: bytes) -> RecordsScan:
         for batch in reader:
             names = batch.schema.names
             ids = batch.column("mosaica_id")
-            scan.mosaica_windows.update(_le_windows(_value_buffer(ids, 8), 8, stride=8))
+            scan.mosaica_windows.update(le_windows(value_buffer(ids, 8), 8, stride=8))
             scan.mosaica_ids.extend(ids.to_pylist())
             if "serial" in names:
                 scan.serials.extend(batch.column("serial").to_pylist())
             for name in ("mosaica:x", "mosaica:y"):
                 if name in names:
                     scan.position_windows.update(
-                        _le_windows(_value_buffer(batch.column(name), 8), 8, stride=8)
+                        le_windows(value_buffer(batch.column(name), 8), 8, stride=8)
                     )
             if "mosaica:labels" in names:
                 for row in batch.column("mosaica:labels").to_pylist():
@@ -596,7 +571,7 @@ def _artifacts_scan(payload: bytes) -> ArtifactsScan:
             if "shape" in names:
                 for wkb in batch.column("shape").to_pylist():
                     if wkb is not None:
-                        scan.shape_windows.update(_le_windows(wkb, 8))
+                        scan.shape_windows.update(le_windows(wkb, 8))
             if "key" in names:
                 scan.text.extend(k for k in batch.column("key").to_pylist() if k is not None)
             if "content" in names:
@@ -610,12 +585,6 @@ def artifact_entity(key, mosaica_id: int) -> int:
     inverted = identity_mod.invert_artifact(key, mosaica_id)
     assert inverted is not None, f"{mosaica_id} was served as an artifact and names an item"
     return inverted[1]
-
-
-def _cursor_windows(cursor: str) -> set[int]:
-    """Every 8-byte little-endian window of a cursor's decoded bytes, at every offset: the cursor
-    is opaque, so no alignment can be assumed."""
-    return _le_windows(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)), 8)
 
 
 def _json_frames_without_elapsed(body: wire.ItemsBody) -> bytes:
@@ -716,7 +685,7 @@ def test_every_scan_mechanism_catches_a_planted_entity_id():
     id**, which is the value it exists to catch and the one that never legitimately appears.
 
     **The gap between the two controls is not hypothetical, and was measured rather than argued.**
-    Filtering `_le_windows` to values `>= 2^32` — the shape of a plausible "suppress obviously
+    Filtering `le_windows` to values `>= 2^32` — the shape of a plausible "suppress obviously
     spurious small windows" change, offered as noise reduction — leaves the scan above **passing**,
     because every real `mosaica_id` is a uniform 64-bit value and sails over the filter. The plant
     below fails immediately, because an entity id is exactly the small value such a filter discards
@@ -795,8 +764,8 @@ def test_every_scan_mechanism_catches_a_planted_entity_id():
     assert _decimal_windows(log_bytes, SAFE_ID_FLOOR) & targets, (
         "the decimal-text sweep did not catch an entity id written into a log line"
     )
-    assert _le_windows(log_bytes, 8) & targets, "the 8-byte binary log sweep did not catch a plant"
-    assert _le_windows(log_bytes, 4) & targets, "the 4-byte binary log sweep did not catch a plant"
+    assert le_windows(log_bytes, 8) & targets, "the 8-byte binary log sweep did not catch a plant"
+    assert le_windows(log_bytes, 4) & targets, "the 4-byte binary log sweep did not catch a plant"
 
     # 6. The drill-down's **positional trim** (contracts §3.2 r68): `views[*].x` and `views[*].y`
     #    are removed before the decimal sweep, and the plant is what proves the trim removes those
@@ -898,17 +867,17 @@ def test_every_scan_mechanism_catches_a_planted_entity_id():
     cursor = base64.urlsafe_b64encode(
         bytes(range(1, 20)) + planted.to_bytes(8, "little") + bytes(range(40, 60))
     ).decode().rstrip("=")
-    assert _cursor_windows(cursor) & targets, (
+    assert cursor_windows(cursor) & targets, (
         "the cursor sweep did not catch an entity id in a cursor's bytes"
     )
     clean_cursor = base64.urlsafe_b64encode(bytes(range(200, 256))).decode().rstrip("=")
-    assert not (_cursor_windows(clean_cursor) & targets), "the cursor sweep flagged a clean cursor"
+    assert not (cursor_windows(clean_cursor) & targets), "the cursor sweep flagged a clean cursor"
 
     clean_log = b"2026-08-01T00:00:00Z INFO mosaica_server: served zoom=4 k=20 status=200\n"
     assert not (_decimal_windows(clean_log, SAFE_ID_FLOOR) & targets), (
         "the decimal-text sweep flagged a clean log line"
     )
-    assert not (_le_windows(clean_log, 8) & targets), "the binary log sweep flagged a clean line"
+    assert not (le_windows(clean_log, 8) & targets), "the binary log sweep flagged a clean line"
 
     # The floor is what keeps the text sweeps from flagging the harness's own small integers. An
     # id below it is invisible to them by construction, which is a real and stated limit of the
@@ -937,11 +906,13 @@ def byte_scan_server(tmp_path_factory, private_catalogue_bundle):
 class Grant(NamedTuple):
     """The scan's session and the entity ids its sweeps look for. `admitted` and `denied` are
     oracle item keys; the two target sets hold each item's number in its shard, which is what a
-    leak would carry."""
+    leak would carry. `key_hex` and `key_raw` are the bundle's identity key as text and bytes."""
 
     server: Server
     log_path: Path
     bundle: Bundle
+    key_hex: str
+    key_raw: bytes
     descriptors: list[bytes]
     token: str
     admitted: set[int]
@@ -984,17 +955,16 @@ def grant(byte_scan_server, catalogue_bundle_root: Path) -> Grant:
     # Unfiltered target set — used ONLY for the mosaica_id column's own scan (module doc: no
     # floor needed there; `code` and the log/item text scans below use the floor-filtered set).
     # Two items of different shards may share a number, which is then one target.
-    target_ids = _numbers(admitted | denied)
+    target_ids = identity_mod.numbers_of(admitted | denied)
     assert admitted, "fixture/grant choice must admit >= 1 entity for this test to mean anything"
     assert denied, "fixture/grant choice must deny >= 1 entity for this test to mean anything"
 
     # Floor-filtered target set — used for `code`'s windows, the log (binary + decimal) and the
     # /v1/items decimal scan (module doc).
-    admitted_high = {e for e in _numbers(admitted) if e >= SAFE_ID_FLOOR}
-    denied_high = {e for e in _numbers(denied) if e >= SAFE_ID_FLOOR}
-    # In the many-shard mode `high_tail` lies in the catalogue's second shard, whose every number is
-    # below the floor (`catalogue.SHARD_SIZE_MANY`), so no admitted id is above it and the floored
-    # sweeps there look for denied ids only.
+    admitted_high = {e for e in identity_mod.numbers_of(admitted) if e >= SAFE_ID_FLOOR}
+    denied_high = {e for e in identity_mod.numbers_of(denied) if e >= SAFE_ID_FLOOR}
+    # In the many-shard mode `high_tail` is in shard 1, below the floor
+    # (`catalogue.SHARD_SIZE_MANY`), so the floored sweeps look for denied ids only.
     if not many_shards():
         assert admitted_high, "fixture/grant choice must admit >= SAFE_ID_FLOOR entities"
     assert denied_high, "fixture/grant choice must deny >= SAFE_ID_FLOOR entities"
@@ -1002,10 +972,13 @@ def grant(byte_scan_server, catalogue_bundle_root: Path) -> Grant:
     # `high_tail` block and checked by `catalogue.verify()`. This equality is what stops the two
     # from drifting apart — the layout would go on satisfying a floor this scan no longer uses.
     assert SAFE_ID_FLOOR == catalogue.HIGH_ID_FLOOR
+    key_hex = oracle_bundle.manifest["identity"]["key"]
     return Grant(
         server,
         log_path,
         oracle_bundle,
+        key_hex,
+        bytes.fromhex(key_hex),
         granted_descriptors,
         token,
         admitted,
@@ -1015,20 +988,13 @@ def grant(byte_scan_server, catalogue_bundle_root: Path) -> Grant:
     )
 
 
-def _numbers(items: set[int]) -> set[int]:
-    """Each item's number in its shard."""
-    return {number for _shard, number in map(identity_mod.item_of_key, items)}
-
-
 @pytest.mark.writes_nothing
 def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(grant: Grant):
-    server, log_path, oracle_bundle, token = grant.server, grant.log_path, grant.bundle, grant.token
+    server, oracle_bundle, token = grant.server, grant.bundle, grant.token
     admitted, target_ids, target_ids_high = grant.admitted, grant.target_ids, grant.target_ids_high
     granted_descriptors = grant.descriptors
 
     identity_key = oracle_bundle.identity_key
-    identity_key_hex = oracle_bundle.manifest["identity"]["key"]
-    identity_key_raw = bytes.fromhex(identity_key_hex)
 
     mosaica_id_windows: set[int] = set()
     code_windows: set[int] = set()
@@ -1115,7 +1081,7 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(grant:
         identity_key.k1 not in all_windows_including_underlay
     ), "identity key half k1 found on the wire"
     for raw in all_raw_responses:
-        assert identity_key_raw not in raw, "identity key's raw 16 bytes found in a viewport response"
+        assert grant.key_raw not in raw, "identity key's raw 16 bytes found in a viewport response"
 
     card_sample = sorted(admitted)[:CARD_SAMPLE_SIZE]
     assert card_sample, "must have at least one admitted entity to open its card"
@@ -1190,14 +1156,14 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(grant:
         while True:
             resp = server.items(token, **body)
             assert resp.status_code == 200, resp.text
-            assert resp.headers["x-mosaica-identity-key"] != identity_key_hex
+            assert resp.headers["x-mosaica-identity-key"] != grant.key_hex
             raw = resp.content
-            assert identity_key_raw not in raw, "identity key's raw 16 bytes found in an items body"
+            assert grant.key_raw not in raw, "identity key's raw 16 bytes found in an items body"
             responses += 1
             decoded = wire.split_items_frames(raw)
             items_json += _json_frames_without_elapsed(decoded)
             for cursor in _items_cursors(decoded):
-                items_cursor_windows |= _cursor_windows(cursor)
+                items_cursor_windows |= cursor_windows(cursor)
             for records, _end in decoded.pages:
                 scan = _records_scan(records)
                 items_mosaica_windows |= scan.mosaica_windows
@@ -1206,8 +1172,7 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(grant:
                 assert len(scan.serials) == len(scan.mosaica_ids)
                 # A row's label names the item its mosaica_id names.
                 for mosaica_id, serial in zip(scan.mosaica_ids, scan.serials):
-                    shard, _tenancy, number = identity_mod.invert_item(identity_key, mosaica_id)
-                    entity = identity_mod.item_key(shard, number)
+                    entity = identity_mod.item_of(identity_key, mosaica_id)
                     assert entity_of_source[serial - catalogue.PLANTED_ID_BASE] == entity, (
                         f"the row for mosaica_id {mosaica_id} carries serial {serial}, which is "
                         "not its item's"
@@ -1243,19 +1208,17 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(grant:
     leaked = _decimal_windows(items_text, SAFE_ID_FLOOR) & target_ids_high
     assert not leaked, f"entity id(s) as decimal text in an items JSON frame or label: {sorted(leaked)[:20]}"
     items_text_str = items_text.decode("utf-8", errors="replace")
-    assert identity_key_hex not in items_text_str
+    assert grant.key_hex not in items_text_str
     assert str(identity_key.k0) not in items_text_str and str(identity_key.k1) not in items_text_str
 
-    _assert_the_log_holds_no_target(log_path, target_ids_high, oracle_bundle)
+    _assert_the_log_holds_no_target(grant)
 
 
 def test_no_entity_id_crosses_the_artifacts_routes(grant: Grant):
     """The artifacts routes, over a layer this test publishes, and the log again after them."""
-    server, log_path, oracle_bundle, token = grant.server, grant.log_path, grant.bundle, grant.token
+    server, oracle_bundle, token = grant.server, grant.bundle, grant.token
     target_ids, target_ids_high = grant.target_ids, grant.target_ids_high
     identity_key = oracle_bundle.identity_key
-    identity_key_hex = oracle_bundle.manifest["identity"]["key"]
-    identity_key_raw = bytes.fromhex(identity_key_hex)
 
     # --- POST /v1/artifacts: a layer published over the catalogue, read whole, every frame swept -
     # Each group holds admitted and denied items alike, so every count is a partial one.
@@ -1339,12 +1302,12 @@ def test_no_entity_id_crosses_the_artifacts_routes(grant: Grant):
         resp = server.artifacts(token, **body)
         assert resp.status_code == 200, resp.text
         raw = resp.content
-        assert identity_key_raw not in raw, "identity key's raw 16 bytes found in an artifacts body"
+        assert grant.key_raw not in raw, "identity key's raw 16 bytes found in an artifacts body"
         responses += 1
         decoded = wire.split_items_frames(raw)
         artifact_text += _json_frames_without_elapsed(decoded)
         for cursor in _items_cursors(decoded):
-            artifact_cursor_windows |= _cursor_windows(cursor)
+            artifact_cursor_windows |= cursor_windows(cursor)
         for records, _end in decoded.pages:
             scan = _artifacts_scan(records)
             artifact_ids.update(scan.mosaica_ids)
@@ -1374,7 +1337,7 @@ def test_no_entity_id_crosses_the_artifacts_routes(grant: Grant):
         assert half not in artifact_id_values | artifact_number_values | artifact_cursor_windows
     leaked = _decimal_windows(artifact_text, SAFE_ID_FLOOR) & target_ids_high
     assert not leaked, f"entity id(s) as decimal text in an artifacts body: {sorted(leaked)[:20]}"
-    assert identity_key_hex not in artifact_text.decode("utf-8", errors="replace")
+    assert grant.key_hex not in artifact_text.decode("utf-8", errors="replace")
 
     # --- POST /v1/artifacts/viewport: the same layer, tile by tile, every frame swept ----------
     tile_ids: set[int] = set()
@@ -1390,7 +1353,7 @@ def test_no_entity_id_crosses_the_artifacts_routes(grant: Grant):
             layers=[ARTIFACTS_LAYER],
             filters={"region": {"bbox": [0.0, 0.0, GRID_MAX / 2, GRID_MAX]}},
         )
-        assert identity_key_raw not in raw, "identity key's raw 16 bytes in an artifacts viewport"
+        assert grant.key_raw not in raw, "identity key's raw 16 bytes in an artifacts viewport"
         frames, trailer = wire.decode_artifact_frames(raw)
         # Its two elapsed times are microseconds and nanoseconds, any of which can equal an entity
         # id by chance; the counts are swept.
@@ -1421,20 +1384,19 @@ def test_no_entity_id_crosses_the_artifacts_routes(grant: Grant):
     for half in (identity_key.k0, identity_key.k1):
         assert half not in tile_id_values | tile_number_values
 
-    _assert_the_log_holds_no_target(log_path, target_ids_high, oracle_bundle)
+    _assert_the_log_holds_no_target(grant)
 
 
-def _assert_the_log_holds_no_target(log_path: Path, target_ids_high: set[int], oracle_bundle):
+def _assert_the_log_holds_no_target(grant: Grant):
     """The server's whole log so far holds no target id and no form of the identity key."""
-    identity_key = oracle_bundle.identity_key
-    identity_key_hex = oracle_bundle.manifest["identity"]["key"]
-    identity_key_raw = bytes.fromhex(identity_key_hex)
+    identity_key = grant.bundle.identity_key
+    target_ids_high = grant.target_ids_high
 
     # --- server log: text, so scan for decimal substrings, not just raw LE bytes -----------------
-    log_bytes = log_path.read_bytes()
+    log_bytes = grant.log_path.read_bytes()
     log_text_for_substrings = log_bytes.decode("utf-8", errors="replace")
 
-    log_binary_windows = _le_windows(log_bytes, 8) | _le_windows(log_bytes, 4)
+    log_binary_windows = le_windows(log_bytes, 8) | le_windows(log_bytes, 4)
     leaked_in_logs_binary = log_binary_windows & target_ids_high
     assert not leaked_in_logs_binary, (
         f"found {len(leaked_in_logs_binary)} entity id(s) encoded as a raw LE integer in the "
@@ -1456,5 +1418,5 @@ def _assert_the_log_holds_no_target(log_path: Path, target_ids_high: set[int], o
     assert identity_key.k1 not in log_binary_windows, "identity key half k1 found in the log"
     assert str(identity_key.k0) not in log_text_for_substrings, "identity key half k0 found as decimal text in the log"
     assert str(identity_key.k1) not in log_text_for_substrings, "identity key half k1 found as decimal text in the log"
-    assert identity_key_hex not in log_text_for_substrings, "identity key hex form found in the log"
-    assert identity_key_raw not in log_bytes, "identity key raw bytes found in the log"
+    assert grant.key_hex not in log_text_for_substrings, "identity key hex form found in the log"
+    assert grant.key_raw not in log_bytes, "identity key raw bytes found in the log"

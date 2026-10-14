@@ -361,7 +361,7 @@ class Database:
         - `size`: a positive integer.
 
         Before the first commit the size is written into `schema.toml`, and a first commit whose
-        tables create more items than it builds them in several shards. A database of several
+        tables create more items than that is built in several shards. A database of several
         shards is served for reads only: every write a later commit sends is refused with `409`.
         After a first commit of one shard, the next `commit()` sends the size where the server
         holds another; a page of rows that would take the shard past it is refused with `409`

@@ -310,6 +310,17 @@ def build_bundle(work: Path, points) -> Path:
     return bundle
 
 
+def build_with_layers(work: Path, name: str, layers_toml: str) -> Path:
+    """[`build_bundle`] over [`fixture_points`], then a second bundle, `bundle-{name}`, from the
+    same sources with `layers_toml` declared after [`config_toml`]."""
+    build_bundle(work, fixture_points())
+    schema = work / f"{name}.toml"
+    schema.write_text(config_toml() + layers_toml)
+    bundle = work / f"bundle-{name}"
+    cli_build(write_deployment(work / f"mosaica-{name}.toml", bundle=bundle, schema=schema), bundle)
+    return bundle
+
+
 def ingest_body(points) -> bytes:
     schema = pa.schema(
         [

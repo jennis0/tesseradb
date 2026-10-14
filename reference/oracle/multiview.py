@@ -114,7 +114,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .bundle import Bundle
+from .bundle import Bundle, read_source_geometry
 from .harness import (
     build_argv,
     cli_build,
@@ -783,6 +783,22 @@ def verify(bundle: Bundle) -> VerificationReport:
     return VerificationReport(
         views=views, compartment_entities=compartments, decorrelation=decorrelation
     )
+
+
+def attach_geometry(bundle: Bundle, work_dir: Path | None = None) -> Bundle:
+    """`bundle` with every view's source geometry attached, the gated group's included, each read
+    against its own view's declared extent (`points_path`, `extent_of`)."""
+    for view_id in ALL_VIEW_IDS:
+        bundle.attach_source_geometry(
+            read_source_geometry(
+                points_path(view_id, work_dir),
+                extent_of(view_id),
+                field=JOIN_FIELD,
+                column=JOIN_COLUMN,
+            ),
+            view_id=view_id,
+        )
+    return bundle
 
 
 def entities_by_source(bundle: Bundle) -> dict[int, int]:

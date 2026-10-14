@@ -33,7 +33,6 @@ from oracle.filters import MemberOfColumn, NumericColumn, evaluate
 from oracle.harness import (
     CLI_BIN,
     REPO_ROOT,
-    cli_build,
     spawn_server,
     stop_server,
     write_deployment,
@@ -48,6 +47,7 @@ from test_shape_membership import (
     VIEW_ID,
     WHOLE_MAP,
     build_bundle,
+    build_with_layers,
     config_toml,
     containing,
     fixture_points,
@@ -84,11 +84,7 @@ def member_column(points, served, terms: list[str]) -> MemberOfColumn:
 def member_server(tmp_path_factory):
     points = fixture_points()
     work = tmp_path_factory.mktemp("member-of-fixture")
-    build_bundle(work, points)
-    (work / "gated.toml").write_text(config_toml() + gated_layer_toml())
-    bundle = work / "bundle-gated"
-    deployment = write_deployment(work / "mosaica-gated.toml", bundle=bundle, schema=work / "gated.toml")
-    cli_build(deployment, bundle)
+    bundle = build_with_layers(work, "gated", gated_layer_toml())
     server, proc = spawn_server(
         bundle,
         tmp_path_factory.mktemp("member-of-server"),

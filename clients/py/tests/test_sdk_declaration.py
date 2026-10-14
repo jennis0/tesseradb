@@ -314,7 +314,7 @@ def test_a_shard_size_of_zero_is_refused_by_the_check(db, checked):
     assert not checked(db).ok
 
 
-def test_a_first_commit_creating_more_items_than_the_size_builds_a_shard_past_it(tmp_path):
+def test_a_first_commit_creating_more_items_than_the_size_builds_several_shards(tmp_path):
     db, _ = small(tmp_path / "db", size=1)
     try:
         assert db.commit().ok

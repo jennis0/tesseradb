@@ -22,11 +22,6 @@ sys.path.insert(0, str(REPO_ROOT / "reference"))
 # `suite.canonical` — correctness-suite §12.2 — rather than keeping its own copy).
 sys.path.insert(0, str(REPO_ROOT / "conformance"))
 
-# **Two modes.** `MOSAICA_CONFORMANCE_SHARDS=many` builds every corpus over several shards
-# (`oracle.harness.shards_toml`). A bundle of several shards takes no write until stage 5 of the
-# sharding plan, so that mode runs only the tests marked `writes_nothing`. A test so marked that
-# writes, itself or through a fixture, is answered 409 there and fails.
-
 
 def pytest_configure(config):
     config.addinivalue_line(
@@ -47,9 +42,8 @@ def pytest_report_header(config):
 
     if many_shards():
         return (
-            f"{SHARDS_ENV}=many: every corpus is built over several shards, and tests not marked "
-            "writes_nothing are deselected, since such a bundle takes no write until stage 5, as "
-            "are tests marked two_modes, which build both modes themselves"
+            f"{SHARDS_ENV}=many: every corpus over several shards; only tests marked "
+            "writes_nothing and not two_modes run"
         )
     return None
 
@@ -263,24 +257,13 @@ def multiview_bundle(multiview_bundle_root: Path):
     answer three views against the fourth's layout. Each file is read against its own view's
     declared extent, which is the frame the build quantised it with.
     """
-    from oracle.bundle import Bundle, read_source_geometry  # noqa: PLC0415
+    from oracle.bundle import Bundle  # noqa: PLC0415
     from oracle import multiview as mv  # noqa: PLC0415
 
-    bundle = Bundle(multiview_bundle_root)
     # **Every view, the gated group's included.** A gate decides which principal may reach a view
     # and nothing about what the view holds, so the oracle needs each one's source geometry to
     # answer for the principal who passes it.
-    for view_id in mv.ALL_VIEW_IDS:
-        bundle.attach_source_geometry(
-            read_source_geometry(
-                mv.points_path(view_id),
-                mv.extent_of(view_id),
-                field=mv.JOIN_FIELD,
-                column=mv.JOIN_COLUMN,
-            ),
-            view_id=view_id,
-        )
-    return bundle
+    return mv.attach_geometry(Bundle(multiview_bundle_root))
 
 
 @pytest.fixture(scope="session")

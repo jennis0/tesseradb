@@ -29,7 +29,7 @@ from __future__ import annotations
 import pytest
 from oracle import catalogue as cat
 from oracle import record_blob as rb
-from oracle.identity import item_key, item_of_key
+from oracle.identity import by_shard, item_key
 
 pytestmark = pytest.mark.writes_nothing
 
@@ -80,13 +80,12 @@ def test_the_blob_addressing_is_self_consistent(catalogue_bundle):
     are blob-resident columns only — and has-row's membership is what the generation functions
     planted, which is the fixture-input half of the relation."""
     expected = cat.blob_entities_expected(catalogue_bundle)
+    held = by_shard(expected)
     failures = []
     for shard, record_dir in rb.record_dirs_of(catalogue_bundle).items():
         failures += rb.self_check(
             record_dir,
-            expected_entities={
-                number for in_shard, number in map(item_of_key, expected) if in_shard == shard
-            },
+            expected_entities=held.get(shard, set()),
             allowed_tags=_blob_tags(catalogue_bundle.manifest),
         )
     assert not failures, "the blob's addressing has drifted:\n" + "\n".join(failures)

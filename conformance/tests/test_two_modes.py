@@ -1,29 +1,11 @@
-"""**Two modes: a corpus built as one shard and as several answers every viewer the same**
-(`docs/sharding.md` §7, the two-modes fixture), black-box, over the real binary.
+"""**Two modes: a corpus built as one shard and as several answers every viewer the same**,
+black-box, over the real binary.
 
 Each corpus is built twice in this run, at the default shard size and at the size the many-shard
 mode gives it (`oracle.harness.shards_mode`), and both builds are served. The same requests go to
 both, as the same principals, and every field of every answer is compared. A shard number, a
 layer-space number or a figure taken over one shard would make some field differ from the
 one-shard answer, which is how this module looks for them.
-
-The corpora:
-
-- the mask catalogue: 150,000 items over two shards, with categories, keyword, text and record
-  fields, read by principals who see everything, a tenth, fifteen items, nothing, and the
-  10,000 items of the second shard alone;
-- the shape fixture with the gated strip, a `nested` tree, and a clustering with an attached
-  label: 5,596 items over four shards, read by the principals holding `1`, `2` and both;
-- the own-label fixture's five layers, whose artifacts carry labels, a default label, a layer
-  gate and dependents: 200 items over four shards, read by its six principals, two of whom see
-  the items of two shards and none of the others.
-
-What is read: viewports at several depths and over part of the map, with and without a filter
-and a highlight, and the artifacts of the same requests; bulk items in map and stored order, paged
-across responses, with and without a filter; item cards, found by a stable key; bulk artifacts
-and browse, whole, by parent, by search, under a filter and a row at a time; artifact cards; the
-aggregate's groupings by category, by layer, by a tree's cut, by bins, sampled bins and a summary,
-with cells; categories and suggest; `/v1/meta`; and `/control/status` after every read.
 
 **What is not compared, and why.** Every other field is compared exactly.
 
@@ -52,14 +34,14 @@ with cells; categories and suggest; `/v1/meta`; and `/control/status` after ever
 6. *Status figures of the process and of the layout:* the caches, the heap and the sessions,
    which the control plane keeps per shard and per process; `segments[].count`, since each shard
    has its base segment; `shards.size`; and the write executor's counters, its log and
-   `publication`, since a bundle of several shards takes no write until writes over shards land
-   and its executor idles. The corpus figures, summed over shards, are compared.
+   `publication`, since a bundle of several shards takes no write and its executor idles. The
+   corpus figures, summed over shards, are compared.
 
 **The byte scanner.** Every many-shard answer is swept as `test_byte_scan.py` sweeps the
 catalogue: the identifier columns, the identifiers in JSON and the bytes of every cursor hold no
 item's number in its shard and no artifact's entity in its layer space, and no body holds the
-identity key. Every number is below `SAFE_ID_FLOOR` in this mode, so the floored sweeps have
-nothing to look for.
+identity key. Counts, coordinates and text are not swept here; `test_byte_scan.py` sweeps them in
+the one-shard mode.
 
 A difference fails with each request, the path of each differing field and both values, and both
 answers are written to a file the message names.
@@ -86,24 +68,20 @@ from oracle.bundle import Bundle
 from oracle.harness import (
     JOIN_FIELD,
     Server,
-    cli_build,
     shards_mode,
     spawn_server,
     stop_server,
-    write_deployment,
 )
 
+from suite.scan import cursor_windows, le_windows, value_buffer
 from test_browse import TREE, tree_layer_toml
-from test_byte_scan import _cursor_windows, _le_windows, _value_buffer
 from test_highlight import CLUSTERS, LABELS, dependent_layers_toml
 from test_region_leaf import GATED, gated_layer_toml
 from test_shape_membership import (
     BOXES,
     N_POINTS,
     SHAPES,
-    build_bundle,
-    config_toml,
-    fixture_points,
+    build_with_layers,
 )
 
 pytestmark = pytest.mark.two_modes
@@ -263,10 +241,9 @@ class Side:
     def numbers(self) -> set[int]:
         """Each item's number in its shard, and each artifact's entity in its layer space: what an
         identifier must never carry."""
-        items = {
-            identity_mod.item_of_key(item)[1]
-            for item in self.bundle.unique_entities(self.corpus.key_field).values()
-        }
+        items = identity_mod.numbers_of(
+            self.bundle.unique_entities(self.corpus.key_field).values()
+        )
         artifacts = {
             identity_mod.invert_artifact(self.bundle.identity_key, raw)[1]
             for raw, name in self.stable.items()
@@ -296,7 +273,7 @@ class Side:
                     continue
                 if cursors and k in CURSORS:
                     if v is not None:
-                        self.scan.cursor_windows |= _cursor_windows(v)
+                        self.scan.cursor_windows |= cursor_windows(v)
                     out[k] = None if v is None else "a cursor"
                     continue
                 out[k] = self.rekey(v, k, cursors=cursors)
@@ -354,7 +331,7 @@ def id_column_values(payload: bytes) -> set[int]:
             for name in batch.schema.names:
                 column = batch.column(name)
                 if name == "mosaica_id":
-                    values |= _le_windows(_value_buffer(column, 8), 8, stride=8)
+                    values |= le_windows(value_buffer(column, 8), 8, stride=8)
                 elif (
                     name in ID_NAMES
                     or name.startswith("membership:")
@@ -513,13 +490,16 @@ def send_artifacts_viewport(side, server, token, body, request):
         return {"status": resp.status_code, "body": resp.json()}
     raw = side.body_scanned(request.describe(), resp.content)
     wire.decode_artifact_frames(raw)
+
+    def tie(r):
+        return r["layer"], r["rung"], r["masked_count"]
+
     frames = []
     payloads = wire.split_frames(raw)
     for kind, payload in payloads[:-1]:
         side.scan.id_windows |= id_column_values(payload)
         schema, rows = decode_rows(payload)
         rows = [sort_parents(side.rekey_row(row)) for row in rows]
-        tie = lambda r: (r["layer"], r["rung"], r["masked_count"])  # noqa: E731
         frames.append({"schema": schema, "rows": ties_in_place(rows, tie)})
     return {"frames": frames, "trailer": side.rekey(json.loads(payloads[-1][1]))}
 
@@ -634,9 +614,12 @@ def send_browse(side, server, token, body, request):
         if cursor is None:
             break
         body["cursor"] = cursor
+
     # Under a filter the rows are ordered by `matched_count` alone, and otherwise by
     # `masked_count`.
-    tie = lambda r: r["matched_count"] if "matched_count" in r else r["masked_count"]  # noqa: E731
+    def tie(r):
+        return r["matched_count"] if "matched_count" in r else r["masked_count"]
+
     return {"pages": pages, "artifacts": ties_in_place(rows, tie), "parents": parents}
 
 
@@ -863,7 +846,7 @@ CATALOGUE_PRINCIPALS = {
     "a tenth": list(next(c for c in cat.catalogue() if c.name == "crossover_above").grants),
     "fifteen items": list(next(c for c in cat.catalogue() if c.name == "sparse_0_01pct").grants),
     "nothing": [],
-    "the second shard's items": [cat.BLOCKS["high_tail"].descriptor],
+    "high_tail": [cat.BLOCKS["high_tail"].descriptor],
 }
 CATALOGUE_FIELDS = [
     "serial",
@@ -1001,14 +984,9 @@ SHAPE_LAYERS = [SHAPES, BOXES, GATED, TREE, CLUSTERS, LABELS]
 
 
 def shapes_build(work: Path) -> Path:
-    build_bundle(work, fixture_points())
-    schema = work / "layers.toml"
-    schema.write_text(
-        config_toml() + gated_layer_toml() + tree_layer_toml() + dependent_layers_toml()
+    return build_with_layers(
+        work, "layers", gated_layer_toml() + tree_layer_toml() + dependent_layers_toml()
     )
-    bundle = work / "bundle-layers"
-    cli_build(write_deployment(work / "mosaica-layers.toml", bundle=bundle, schema=schema), bundle)
-    return bundle
 
 
 def layer_reads(

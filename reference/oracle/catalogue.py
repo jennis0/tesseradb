@@ -134,7 +134,7 @@ from .harness import (
     write_deployment,
     write_recipe,
 )
-from .identity import item_of_key
+from .identity import item_of_key, numbers_of
 
 WORK_DIR_NAME = "catalogue"
 
@@ -835,10 +835,8 @@ def source_of_entity(bundle) -> dict[int, int]:
 
 
 def items_of(bundle, entities) -> set[int]:
-    """The items the bundle made of a designed set of entity ids — a block's, or a case's —
-    resolved through its index of `serial`. A block's entity range is its source range, so each id
-    is carried as a source id; in a bundle of one shard numbered 0 the answer is `entities` itself,
-    which `verify` checks."""
+    """The items (`identity.item_key`) a block's or a case's designed ids name. Those ids are
+    source ids, resolved through the bundle's index of `serial`."""
     entity_of = entities_by_source(bundle)
     return {entity_of[source] for source in entities}
 
@@ -919,8 +917,8 @@ CONTAINER_SIZE = 1 << 16
 # The entity id above which `conformance/tests/test_byte_scan.py` can tell a leaked id from a
 # legitimate small integer the harness itself emits — ports, `k`, zoom, status codes, none of which
 # exceed 65,535. It lives here, not with the scan, because it is a constraint on **this layout**:
-# `high_tail` is placed to satisfy it and `verify()` refuses a corpus that stops doing so. The scan
-# asserts its own floor matches this one, so the two cannot drift apart.
+# `high_tail` is placed to satisfy it and `verify()` reports a corpus that stops doing so in
+# `floor_failures`. The scan asserts its own floor matches this one, so the two cannot drift apart.
 HIGH_ID_FLOOR = 100_000
 
 # The shard size of the many-shard mode. The smallest that keeps `filler_tail` astride 131,072
@@ -941,9 +939,10 @@ class MaskCase:
     """One catalogue member: the property it attacks, the grant that reaches it, and the entity
     set that grant must produce.
 
-    `grants` are descriptors as `POST /session/authorise` takes them. `entities` is what the
-    engine's mask must come out as — checked against the bundle's own postings by `verify()`, so a
-    case can never silently drift into testing a different shape from the one it is named for.
+    `grants` are descriptors as `POST /session/authorise` takes them. `entities` is the case's set
+    in the build's numbering; `items_of` gives the items the engine's mask must come out as —
+    checked against the bundle's own postings by `verify()`, so a case can never silently drift
+    into testing a different shape from the one it is named for.
     """
 
     name: str
@@ -1451,7 +1450,7 @@ def verify(bundle: Bundle) -> VerificationReport:
        dictionary's `g + 1`. Checked against the rule rather than against an assumed equality,
        which is what this said before `public` moved;
     3. each block's postings are **exactly** its intended contiguous entity range, in the build's
-       numbering: shard by shard, each shard's numbers following the previous shard's high water;
+       numbering (`Bundle.build_number`);
     3b. every entity's **source id lands in the same block the entity does** — the per-item half
        of check 3, which a set comparison cannot make. A within-block permutation (which is what
        decision 0073's Morton tiebreak produces) passes it; a cross-block reassignment does not.
@@ -1525,10 +1524,8 @@ def verify(bundle: Bundle) -> VerificationReport:
                 "item's."
             )
 
-    # Both container claims are derived from each shard's high water rather than written out, so
-    # that growing the corpus is one edit and not one edit plus two constants nobody remembers are
-    # here. A container is a shard's: `(shard, number >> 16)`. `boundary` must span more than one
-    # (any boundary, not container 0/1 in particular), and full coverage must span every container
+    # Both container claims are derived from each shard's high water. A container is
+    # `(shard, number >> 16)`. `boundary` must span more than one, and full coverage every container
     # of every shard the corpus reaches.
     def containers(items: set[int]) -> set[tuple[int, int]]:
         return {(shard, number >> 16) for shard, number in map(item_of_key, items)}
@@ -1559,9 +1556,6 @@ def verify(bundle: Bundle) -> VerificationReport:
     # entirely above the floor and some other block still reaches above it too. Resizing
     # `filler_tail` breaks the second half silently — the block boundaries move, no posting check
     # notices, and the byte-scan's precondition assertion fires far from the cause.
-    def numbers(items: set[int]) -> set[int]:
-        return {number for _, number in map(item_of_key, items)}
-
     high_tail = report.blocks.get("high_tail", set())
     if not high_tail:
         # Checked rather than skipped. `blocks.get(..., set())` followed by `if high_tail` would
@@ -1572,13 +1566,13 @@ def verify(bundle: Bundle) -> VerificationReport:
             "high_tail is absent from the corpus, so no grant set can put entity ids above "
             f"{HIGH_ID_FLOOR} on both sides of it — see the layout note"
         )
-    if high_tail and min(numbers(high_tail)) < HIGH_ID_FLOOR:
+    if high_tail and min(numbers_of(high_tail)) < HIGH_ID_FLOOR:
         report.floor_failures.append(
-            f"high_tail starts at {min(numbers(high_tail))}, below the byte-scan floor "
+            f"high_tail starts at {min(numbers_of(high_tail))}, below the byte-scan floor "
             f"{HIGH_ID_FLOOR} — its members are no longer all separable from the small integers "
             "the harness emits"
         )
-    outside_above = {e for e in numbers(everything - high_tail) if e >= HIGH_ID_FLOOR}
+    outside_above = {e for e in numbers_of(everything - high_tail) if e >= HIGH_ID_FLOOR}
     if not outside_above:
         report.floor_failures.append(
             f"no block outside high_tail reaches above {HIGH_ID_FLOOR}, so a grant of high_tail "

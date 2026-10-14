@@ -12,10 +12,10 @@ for.
 from __future__ import annotations
 
 import hashlib
-import itertools
 import json
 import struct
 import zlib
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,7 +26,7 @@ from pyroaring import BitMap
 
 from . import identity as identity_mod
 from . import morton as morton_mod
-from .identity import item_key, item_of_key, pack_item_high
+from .identity import item_key, item_keys, item_of_key, pack_item_high
 from .layout import live_prefix_dir, partition_dir, shard_dir, view_dir
 
 PERMUTATION_MAGIC = b"MSPM"
@@ -74,7 +74,8 @@ class Segment:
     `test_byte_scan.py`'s entity-ID sweep) do not need to know which.
     """
 
-    entity_id: np.ndarray  # uint64, row order: item keys (`identity.item_key`), DERIVED post-r6
+    #: uint64, row order: item keys (`identity.item_key`), derived from each shard's permutation
+    entity_id: np.ndarray
     residual: np.ndarray  # uint32, row order (the position's low half, from columns.arrow)
     morton: np.ndarray  # uint32, row order (raw sorted codes from morton.u32)
     row_count: int
@@ -93,9 +94,8 @@ class Segment:
         something other than the column it indexes is what this catches, and reading the index
         would catch nothing.
         """
-        bounds = [start for _, start in self.parts] + [self.row_count]
         starts = []
-        for lo, hi in itertools.pairwise(bounds):
+        for _shard, lo, hi in self.part_ranges():
             if hi > lo:
                 morton = self.morton[lo:hi]
                 starts += [[lo], np.flatnonzero(morton[1:] != morton[:-1]) + 1 + lo]
@@ -111,6 +111,12 @@ class Segment:
         `Bundle.row_position_codes` answers, and it does not read this.
         """
         return (int(self.morton[row]) << 32) | int(self.residual[row])
+
+    def part_ranges(self) -> Iterator[tuple[int, int, int]]:
+        """`(shard, first row, end row)` of each part, ascending."""
+        bounds = [start for _, start in self.parts] + [self.row_count]
+        for (shard, lo), hi in zip(self.parts, bounds[1:]):
+            yield shard, lo, hi
 
 
 @dataclass
@@ -372,9 +378,8 @@ class Permutation:
 class Bundle:
     """A verified, opened bundle: `CURRENT` -> `MANIFEST.json` -> `SEGMENTS-0.json` -> segments.
 
-    One partition (`default`) and every shard its side-manifest records. Each item is keyed by
-    [`item_key`] over the shard holding it and its number there, so a bundle of one shard numbered
-    0 keys each item by its number. Every set of items this class answers is a set of those keys.
+    One partition (`default`) and every shard its side-manifest records. Every item this class
+    answers is an [`item_key`].
     """
 
     def __init__(self, root: Path | str):
@@ -619,10 +624,10 @@ class Bundle:
         return self._entity_list_cache[view_id]
 
     def verify_identity_cross_check(self, view_id: str, sample: int = 200) -> None:
-        """The only test that catches a key/column disagreement (Task 12 brief, Step 2): for
-        a sample of rows, `mosaica_id_of(item_of_row[r]) == mosaica_id[r]`, where `item_of_row`
-        came from the shard's permutation (key-independent) and `mosaica_id` came from the stored
-        column. Requires a post-r6 bundle."""
+        """The only test that catches a key/column disagreement: for a sample of rows,
+        `mosaica_id_of(item_of_row[r]) == mosaica_id[r]`, where `item_of_row` came from the
+        shard's permutation (key-independent) and `mosaica_id` came from the stored column.
+        Requires a post-r6 bundle."""
         if self.identity_key is None:
             raise ValueError("bundle has no `identity` object in MANIFEST (pre-r6 bundle)")
         seg = self.segment(view_id)
@@ -671,9 +676,8 @@ class Bundle:
             raise ValueError("bundle has no `identity` object in MANIFEST (pre-r6 bundle)")
         seg = self.segment(view_id)
         codes = self.row_morton_codes(view_id)
-        bounds = [start for _, start in seg.parts] + [seg.row_count]
         orders = []
-        for (shard, lo), hi in zip(seg.parts, bounds[1:]):
+        for shard, lo, hi in seg.part_ranges():
             numbers = seg.entity_id[lo:hi] & np.uint64(identity_mod.MASK32)
             order = row_order_from_geometry(
                 self.identity_key, pack_item_high(shard, 0), numbers, codes[lo:hi]
@@ -737,7 +741,7 @@ class Bundle:
                 for shard in (record["id"] for record in self.shards)
             ]
         held = [
-            _decode_posting(array, term_id).astype(np.uint64) | np.uint64(item_key(shard, 0))
+            item_keys(shard, _decode_posting(array, term_id))
             for shard, array in self._postings_arrays
         ]
         return np.concatenate(held)
@@ -1054,10 +1058,7 @@ def _concatenate(parts: list[tuple[int, Segment]]) -> Segment:
     cuts = [segment.cuts for _, segment in parts]
     return Segment(
         entity_id=np.concatenate(
-            [
-                segment.entity_id.astype(np.uint64) | np.uint64(item_key(shard, 0))
-                for shard, segment in parts
-            ]
+            [item_keys(shard, segment.entity_id) for shard, segment in parts]
         ),
         residual=np.concatenate([segment.residual for _, segment in parts]),
         morton=np.concatenate([segment.morton for _, segment in parts]),

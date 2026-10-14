@@ -132,9 +132,8 @@ SHA-256 over the bundle's `MANIFEST.json` digest and the shard's number, under w
 what they hold of that shard. A size below the high water is refused.
 [Admission](write-path.md#admission) says how an ingest batch is counted against it.
 
-**Not built yet:** writes to a bundle of several shards. A running service opens one for reads
-only, combining every route's answer over the shards, and refuses every write with `409`
-([write path](write-path.md#what-is-not-built)). A bundle of one shard takes every write.
+**Not built yet:** writes to a bundle of several shards, which a running service serves for reads
+only ([write path](write-path.md#what-is-not-built)).
 
 The `mosaica_id` is what a client receives and holds instead of the entity id. The key of the
 permutation is drawn at random by `mosaica build` each time it creates a bundle and is stored in

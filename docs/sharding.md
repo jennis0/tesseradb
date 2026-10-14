@@ -826,7 +826,7 @@ Fixtures beyond that:
 | artifact delete | an artifact deleted while a sealed shard still names it is served on no route, and its deny holds until that shard's compaction removes it |
 | layer drop | its space is removed at the next publication; its artifacts' identifiers answer as naming nothing; its number is not reused, and its name, registered again, names a new layer that answers to none of its identifiers |
 | kind routing | an artifact's `mosaica_id` sent to the item card, and an item's to the artifact card, names nothing |
-| two modes | every response field in the many-shard mode equals the default mode's, so no shard number, layer-space number or per-shard figure appears; the byte scanner finds no entity id. Left out of the comparison: identifiers, each mapped to a key both modes share; cursors and elapsed times, checked for presence; the samples drawn by rank; and, where θ's occupied tiles come from the sketch, the served counts and the points. Rows ordered or chosen by `mosaica_id` among equals, such as a tile's points, ties in a tile's artifacts or a browse page, and stored order, are compared as multisets. `/control/status` is compared on its corpus-wide figures only (`conformance/tests/test_two_modes.py`) |
+| two modes | every response field in the many-shard mode equals the default mode's but those `conformance/tests/test_two_modes.py` leaves out; the byte scanner finds no entity id |
 
 ## 8. Measuring what sharding costs
 

@@ -26,7 +26,7 @@ from .identity import IdentityKey, forward_item, invert_item, item_key, item_of_
 
 @dataclass
 class HolderCount:
-    """Who has held each number of each shard. A number here is an [`item_key`].
+    """Who has held each number of each shard.
 
     `built` maps each shard of the bundle as built to its high water: every number below it was one
     item's, at tenancy 0, before any write. `deleted` holds the identifiers of the items seen
@@ -46,30 +46,30 @@ class HolderCount:
         built = {record["id"]: int(record["high_water"]) for record in bundle.shards}
         return cls(key=bundle.identity_key, built=built)
 
-    def latest(self, number: int) -> int | None:
-        """The tenancy of the latest item to hold `number`, or `None` where none has."""
-        shard, local = item_of_key(number)
-        return self._latest.get(number, 0 if local < self.built.get(shard, 0) else None)
+    def latest(self, item: int) -> int | None:
+        """The tenancy of the latest item to hold `item`'s number, or `None` where none has."""
+        shard, number = item_of_key(item)
+        return self._latest.get(item, 0 if number < self.built.get(shard, 0) else None)
 
-    def holder(self, number: int) -> int | None:
-        """The `mosaica_id` of the latest item to hold `number`, or `None` where none has."""
-        latest = self.latest(number)
+    def holder(self, item: int) -> int | None:
+        """The `mosaica_id` of the latest item to hold `item`'s number, or `None` where none has."""
+        latest = self.latest(item)
         if latest is None:
             return None
-        shard, local = item_of_key(number)
-        return forward_item(self.key, shard, latest, local)
+        shard, number = item_of_key(item)
+        return forward_item(self.key, shard, latest, number)
 
     def _item(self, mosaica_id: int) -> tuple[int, int] | None:
-        """The tenancy and number `mosaica_id` inverts to, or `None` where it names no item of a
-        shard this count knows."""
+        """The tenancy and [`item_key`] `mosaica_id` inverts to, or `None` where it names no item
+        of a shard this count knows."""
         item = invert_item(self.key, mosaica_id)
         if item is None or item[0] not in self.built:
             return None
         return item[1], item_key(item[0], item[2])
 
-    def number_of(self, mosaica_id: int) -> tuple[int, int]:
-        """The tenancy and number an item's identifier inverts to. An identifier of another kind
-        or of a shard this count does not know names no item here and is refused."""
+    def item_of(self, mosaica_id: int) -> tuple[int, int]:
+        """The tenancy and [`item_key`] an item's identifier inverts to. An identifier of another
+        kind or of a shard this count does not know names no item here and is refused."""
         item = self._item(mosaica_id)
         if item is None:
             raise AssertionError(
@@ -82,8 +82,8 @@ class HolderCount:
         item = self._item(mosaica_id)
         if item is None:
             return False
-        tenancy, number = item
-        latest = self.latest(number)
+        tenancy, key = item
+        latest = self.latest(key)
         return latest is not None and tenancy <= latest
 
     def live(self, mosaica_id: int) -> bool:
@@ -91,42 +91,42 @@ class HolderCount:
         item = self._item(mosaica_id)
         if item is None:
             return False
-        tenancy, number = item
-        return tenancy == self.latest(number) and mosaica_id not in self.deleted
+        tenancy, key = item
+        return tenancy == self.latest(key) and mosaica_id not in self.deleted
 
     def named(self, mosaica_id: int) -> int:
-        """Check the identifier answered for a row naming an item, and answer its number."""
-        tenancy, number = self.number_of(mosaica_id)
+        """Check the identifier answered for a row naming an item, and answer its item."""
+        tenancy, item = self.item_of(mosaica_id)
         if not self.live(mosaica_id):
             raise AssertionError(
-                f"mosaica_id {mosaica_id} was answered for a held item, and it is number {number} "
+                f"mosaica_id {mosaica_id} was answered for a held item, and it is item {item} "
                 f"at tenancy {tenancy}, which is not the number's latest holder or was deleted "
-                f"(its latest holder is at tenancy {self.latest(number)})"
+                f"(its latest holder is at tenancy {self.latest(item)})"
             )
-        return number
+        return item
 
     def created(self, mosaica_id: int) -> int:
-        """Check and count the identifier issued to a new item, and answer its number."""
-        tenancy, number = self.number_of(mosaica_id)
-        latest = self.latest(number)
+        """Check and count the identifier issued to a new item, and answer its item."""
+        tenancy, item = self.item_of(mosaica_id)
+        latest = self.latest(item)
         if latest is None and tenancy != 0:
             raise AssertionError(
-                f"mosaica_id {mosaica_id} was issued to a new item at tenancy {tenancy} of number "
-                f"{number}, which nobody has held"
+                f"mosaica_id {mosaica_id} was issued to a new item at tenancy {tenancy} of item "
+                f"{item}, whose number nobody has held"
             )
         if latest is not None and tenancy <= latest:
             raise AssertionError(
-                f"mosaica_id {mosaica_id} was issued to a new item at tenancy {tenancy} of number "
-                f"{number}, whose latest holder was at tenancy {latest}"
+                f"mosaica_id {mosaica_id} was issued to a new item at tenancy {tenancy} of item "
+                f"{item}, whose number's latest holder was at tenancy {latest}"
             )
-        previous = self.holder(number)
+        previous = self.holder(item)
         if previous is not None and previous not in self.deleted:
             raise AssertionError(
-                f"number {number} was issued to a new item while its holder {previous} is not "
-                "deleted"
+                f"item {item}'s number was issued to a new item while its holder {previous} is "
+                "not deleted"
             )
-        self._latest[number] = tenancy
-        return number
+        self._latest[item] = tenancy
+        return item
 
     def delete(self, mosaica_id: int) -> None:
         """Record an accepted deletion. An item deleted twice in one request is deleted once."""
@@ -135,7 +135,7 @@ class HolderCount:
             self.deleted.add(mosaica_id)
 
     def receipt(self, receipt: dict) -> list[int]:
-        """Check an accepted ingest receipt, count its new items, and answer their numbers.
+        """Check an accepted ingest receipt, count its new items, and answer their items.
 
         The receipt counts the rows that created an item without saying which they are. A row
         naming an item answers an identifier this count holds live; a row creating one answers an
@@ -149,10 +149,10 @@ class HolderCount:
             if unseen:
                 raise AssertionError(f"a replay answered identifiers never issued: {unseen}")
             return []
-        numbers = [self.created(t) for t in answered if not self.live(t)]
-        if len(numbers) != receipt["created"]:
+        items = [self.created(t) for t in answered if not self.live(t)]
+        if len(items) != receipt["created"]:
             raise AssertionError(
                 f"the receipt says {receipt['created']} rows created an item, and "
-                f"{len(numbers)} of its identifiers are new"
+                f"{len(items)} of its identifiers are new"
             )
-        return numbers
+        return items

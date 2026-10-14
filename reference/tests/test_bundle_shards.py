@@ -21,9 +21,9 @@ from oracle import aggregate as agg
 from oracle import filters as filt
 from oracle import multiview as mv
 from oracle import occupancy, viewport
-from oracle.bundle import Bundle, read_source_geometry
+from oracle.bundle import Bundle
 from oracle.harness import cli_build, ensure_cli_built, write_deployment
-from oracle.identity import ROUNDS, invert_item, item_of_key
+from oracle.identity import ROUNDS, by_shard, invert_item, item_of_key
 from oracle.layout import partition_dir
 from oracle.mask import mask_of
 from oracle.tenancy import HolderCount
@@ -100,16 +100,7 @@ def _build(work: Path, size: int | None) -> Bundle:
         work / mv.DEPLOYMENT_NAME, bundle=work / "bundle", schema=work / mv.SCHEMA_NAME
     )
     cli_build(work / mv.DEPLOYMENT_NAME, work / "bundle", capture_output=True)
-    bundle = Bundle(work / "bundle")
-    for view_id in mv.ALL_VIEW_IDS:
-        source = read_source_geometry(
-            mv.points_path(view_id, work),
-            mv.extent_of(view_id),
-            field=mv.JOIN_FIELD,
-            column=mv.JOIN_COLUMN,
-        )
-        bundle.attach_source_geometry(source, view_id=view_id)
-    return bundle
+    return mv.attach_geometry(Bundle(work / "bundle"), work)
 
 
 @pytest.fixture(scope="module")
@@ -139,11 +130,8 @@ def test_a_build_past_the_size_is_read_shard_by_shard(built):
         assert [shard for shard, _ in one.segment(view_id).parts] == [0]
         assert [shard for shard, _ in many.segment(view_id).parts] == list(range(7))
     # Every item is read from the shard holding it, under the number it holds there.
-    held = {shard: set() for shard in range(7)}
-    for item in mv.entities_by_source(many).values():
-        shard, number = item_of_key(item)
-        held[shard].add(number)
-    assert all(held[r["id"]] == set(range(r["high_water"])) for r in many.shards)
+    held = by_shard(mv.entities_by_source(many).values())
+    assert all(held.get(r["id"]) == set(range(r["high_water"])) for r in many.shards)
 
 
 @pytest.mark.parametrize("which", ["one", "many"])
@@ -152,8 +140,7 @@ def test_every_identifier_inverts_to_the_shard_and_number_its_row_is_read_from(b
     numbers = HolderCount.of_bundle(bundle)
     for view_id in mv.ALL_VIEW_IDS:
         segment = bundle.segment(view_id)
-        bounds = [start for _, start in segment.parts] + [segment.row_count]
-        for (shard, lo), hi in zip(segment.parts, bounds[1:]):
+        for shard, lo, hi in segment.part_ranges():
             for row in range(lo, hi):
                 item = int(segment.entity_id[row])
                 stored = int(segment.mosaica_id[row])

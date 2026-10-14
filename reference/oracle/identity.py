@@ -30,7 +30,10 @@ warns.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
+
+import numpy as np
 
 MASK64 = 0xFFFF_FFFF_FFFF_FFFF
 MASK32 = 0xFFFF_FFFF
@@ -292,6 +295,24 @@ def item_of_key(item: int) -> tuple[int, int]:
     return item >> 32, item & MASK32
 
 
+def item_keys(shard: int, numbers: np.ndarray) -> np.ndarray:
+    """[`item_key`] of each of `numbers` in `shard`, as `uint64`."""
+    return numbers.astype(np.uint64) | np.uint64(item_key(shard, 0))
+
+
+def numbers_of(items: Iterable[int]) -> set[int]:
+    """Each item's number in its shard."""
+    return {number for _shard, number in map(item_of_key, items)}
+
+
+def by_shard(items: Iterable[int]) -> dict[int, set[int]]:
+    """The numbers of `items` in each shard holding one of them."""
+    held: dict[int, set[int]] = {}
+    for shard, number in map(item_of_key, items):
+        held.setdefault(shard, set()).add(number)
+    return held
+
+
 def forward_artifact(key: IdentityKey, space: int, entity: int) -> int:
     """The `mosaica_id` of the artifact or layer at `entity` in layer space `space`."""
     return forward(key, pack_artifact_high(space), entity)
@@ -302,6 +323,16 @@ def invert_item(key: IdentityKey, mosaica_id: int) -> tuple[int, int, int] | Non
     high, number = invert(key, mosaica_id)
     item = unpack_item_high(high)
     return None if item is None else (*item, number)
+
+
+def item_of(key: IdentityKey, mosaica_id: int) -> int:
+    """The [`item_key`] an item's `mosaica_id` names, at whatever tenancy it carries. Refuses an
+    identifier that names no item."""
+    item = invert_item(key, mosaica_id)
+    if item is None:
+        raise ValueError(f"mosaica_id {mosaica_id} names no item")
+    shard, _tenancy, number = item
+    return item_key(shard, number)
 
 
 def invert_artifact(key: IdentityKey, mosaica_id: int) -> tuple[int, int] | None:

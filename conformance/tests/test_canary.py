@@ -223,13 +223,7 @@ def _points_by_entity(raw: bytes, key: identity_mod.IdentityKey, zoom: int) -> b
         )
     at = points.schema.get_field_index("mosaica_id")
     entities = pa.array(
-        [
-            identity_mod.item_key(shard, number)
-            for shard, _tenancy, number in (
-                identity_mod.invert_item(key, t) for t in points.column(at).to_pylist()
-            )
-        ],
-        pa.uint64(),
+        [identity_mod.item_of(key, t) for t in points.column(at).to_pylist()], pa.uint64()
     )
     points = points.set_column(at, pa.field("entity", pa.uint64()), entities)
     points = points.sort_by([("entity", "ascending")]).combine_chunks()

@@ -13,10 +13,11 @@ and the session's first read builds its authorised set under that read's admissi
 checks two things in order. First, an overall limit on how many requests may be outstanding at
 once: a request that arrives once every slot is taken is refused immediately, with no wait. A
 request that clears that stage still needs a compute permit, a share of running capacity, and
-waits up to a configured timeout, `serve.admission_timeout_ms`, for one to open. A request that gets no compute permit within that
-time is refused as well. A bulk read of items or artifacts is admitted under a limit of its own,
-described under [bulk reads](#bulk-reads), and so is a request for the artifacts of each tile,
-described under [the artifacts of each tile](#the-artifacts-of-each-tile).
+waits up to a configured timeout, `serve.admission_timeout_ms`, for one to open. A request that
+gets no compute permit within that time is refused as well. A bulk read of items or artifacts is
+admitted under a limit of its own, described under [bulk reads](#bulk-reads), and so is a request
+for the artifacts of each tile, described under
+[the artifacts of each tile](#the-artifacts-of-each-tile).
 
 Both refusals answer with the same 429 status, carrying a fixed one-second interval to wait before
 retrying. Two further cases carry the same status and the same interval, for reasons closer to a
