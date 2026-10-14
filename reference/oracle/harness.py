@@ -14,6 +14,7 @@ build is via the CLI subprocess, same as before).
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import hashlib
 import json
@@ -98,12 +99,34 @@ MANY_SHARDS = 4
 
 
 @functools.cache
-def many_shards() -> bool:
-    """Whether this run builds every fixture over several shards ([`SHARDS_ENV`])."""
+def _run_mode() -> bool:
     mode = os.environ.get(SHARDS_ENV, "one")
     if mode not in ("one", "many"):
         raise ValueError(f"{SHARDS_ENV}={mode!r} names no mode; set it to `one` or `many`")
     return mode == "many"
+
+
+#: The mode [`shards_mode`] sets for the fixtures built inside it, or None for the run's.
+_mode_override: bool | None = None
+
+
+def many_shards() -> bool:
+    """Whether fixtures built now are built over several shards: the run's mode ([`SHARDS_ENV`]),
+    or the one [`shards_mode`] sets."""
+    return _run_mode() if _mode_override is None else _mode_override
+
+
+@contextlib.contextmanager
+def shards_mode(many: bool):
+    """Build the fixtures inside in the many-shard mode if `many`, else in the one-shard mode,
+    whatever the run's mode is: for a test that compares the two."""
+    global _mode_override
+    before = _mode_override
+    _mode_override = many
+    try:
+        yield
+    finally:
+        _mode_override = before
 
 
 def shards_toml(items: int, *, size: int | None = None) -> str:

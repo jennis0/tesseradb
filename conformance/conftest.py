@@ -35,6 +35,11 @@ def pytest_configure(config):
         "declaration, publication, drop, flush or compaction. Only these run in the many-shard "
         "mode.",
     )
+    config.addinivalue_line(
+        "markers",
+        "two_modes: the test builds its corpora in both modes itself, so the many-shard mode does "
+        "not run it again.",
+    )
 
 
 def pytest_report_header(config):
@@ -43,7 +48,8 @@ def pytest_report_header(config):
     if many_shards():
         return (
             f"{SHARDS_ENV}=many: every corpus is built over several shards, and tests not marked "
-            "writes_nothing are deselected, since such a bundle takes no write until stage 5"
+            "writes_nothing are deselected, since such a bundle takes no write until stage 5, as "
+            "are tests marked two_modes, which build both modes themselves"
         )
     return None
 
@@ -53,10 +59,17 @@ def pytest_collection_modifyitems(config, items):
 
     if not many_shards():
         return
-    writes = [item for item in items if item.get_closest_marker("writes_nothing") is None]
-    if writes:
-        config.hook.pytest_deselected(items=writes)
-        items[:] = [item for item in items if item.get_closest_marker("writes_nothing")]
+
+    def runs(item) -> bool:
+        return (
+            item.get_closest_marker("writes_nothing") is not None
+            and item.get_closest_marker("two_modes") is None
+        )
+
+    left_out = [item for item in items if not runs(item)]
+    if left_out:
+        config.hook.pytest_deselected(items=left_out)
+        items[:] = [item for item in items if runs(item)]
 
 
 # **Every fixture in this suite is synthesised from a seed.** Nothing here reads the Phase 0
