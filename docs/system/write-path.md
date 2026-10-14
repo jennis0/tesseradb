@@ -514,7 +514,9 @@ A flush only ever appends rows and never rewrites an existing one, so nothing a 
 about the map becomes wrong at a flush. A session already served a view picks up the new rows once
 the background refresh has reached its grant, usually by its next request. Until then its visible
 set is the previous generation's projection, so the flush's new rows are not yet visible to it. A
-session's first read in a view is answered at the live generation. Deletions,
+session's first read in a view is answered at the live generation. A response's visible set is one
+generation's in every shard it reads, and never the previous generation's in one shard beside the
+live generation's in another. Deletions,
 suppressions, segments and the overlay are always the current generation's. The response's
 `x-mosaica-pin` header names the generation of the visible set, and `x-mosaica-stale` for a pin
 held from before the flush changes when the refresh reaches the session, not at the flush. Every
@@ -707,6 +709,14 @@ how flush and allocation order have diverged from each other.
 
 ## What is not built
 
+- **Writes to a bundle of several point shards.** A build writes several shards, each its own
+  entity space, when its files hold more items than `[shards] size`
+  ([data model](data-model.md#identifiers)). A running service opens such a bundle for reads only.
+  Every write, a deletion and a suppression included, is answered `409` before its body is read,
+  and the detail says to serve a bundle of one shard to write. The write executor runs no thread,
+  so nothing is logged, flushed, merged or compacted. Such a bundle is refused at open beside a
+  write-ahead log that holds records, since no write to it can have left one. A bundle of one shard
+  takes every write. `docs/sharding.md` designs the write path over several shards.
 - **The label invalidation feed.** A deletion invalidates every label whose generating set held
   the deleted item, for every viewer who could see it. The deny queue is the event that should
   trigger a notification, but neither the notification mechanism nor a consumer for it exists.

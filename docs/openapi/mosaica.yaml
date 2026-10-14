@@ -682,12 +682,12 @@ paths:
               schema:
                 type: string
             x-mosaica-identity-key:
-              description: The identity key, derived from the credential, its mask fragment and the view. The mask fragment's identity is keyed by the bundle, so a rebuilt bundle, whose `mosaica_id`s are all new, gives a new identity key. A held band may be drawn only under the same key, so a client partitions its cache by it.
+              description: The identity key, derived from the credential, its mask fragment in each shard of the view, and the view. A fragment's identity is keyed by its shard's identity, which is derived from the bundle's, so a rebuilt bundle, whose `mosaica_id`s are all new, gives a new identity key. A held band may be drawn only under the same key, so a client partitions its cache by it.
               required: true
               schema:
                 type: string
             x-mosaica-pin:
-              description: The generation this response was computed from, as JSON `{"prefix", "segments_version"}`. It names the generation of this session's visible set. A session's first read in a view is answered at the live generation. After that, until the refresh that follows a flush reaches this session's grant, it is the previous generation, and the flush's new rows are not yet visible; deletions, suppressions, segments and the overlay are always current. Send it back as `pin`; its only effect is `x-mosaica-stale`.
+              description: The generation this response was computed from, as JSON `{"prefix", "segments_version"}`. It names the generation of this session's visible set, one generation for every shard the response reads. A session's first read in a view is answered at the live generation. After that, until the refresh that follows a flush reaches this session's grant, it is the previous generation, and the flush's new rows are not yet visible; deletions, suppressions, segments and the overlay are always current. Send it back as `pin`; its only effect is `x-mosaica-stale`.
               required: true
               schema:
                 type: string
@@ -799,8 +799,9 @@ paths:
         pinned as `<field>@<key>`.
 
         **Order.** `map` returns rows by map cell in `view`, then by `mosaica_id`. `stored` returns
-        them in the order the record store holds items, which groups items by their full set of
-        access labels. The two orders return the same rows. With neither `order` nor `cursor`, the
+        them shard by shard, in shard number order, and within a shard in the order its record
+        store holds items, which groups a shard's items by their full set of access labels. The
+        two orders return the same rows. With neither `order` nor `cursor`, the
         server takes `stored` when any named field's `homes` in `/v1/meta` is `["record"]`, and
         `map` otherwise; that choice may change. Reading a field held only in the record store in
         map order was measured 1.3 to 1.8 times slower than in stored order at 100,000-row pages,
@@ -7759,7 +7760,7 @@ components:
         posture:
           type: string
           enum: [not-started, running, wal-poisoned, dead]
-          description: "`running` is ready. `wal-poisoned` is not ready, and still applies deletions and suppressions."
+          description: "`running` is ready. Over a bundle of several point shards, which takes no write, `running` has no thread behind it, and nothing is logged, flushed, merged or folded. `wal-poisoned` is not ready, and still applies deletions and suppressions."
         ready:
           type: boolean
           description: Whether `posture` is `running`. `/readyz` answers `200` only when this is `true` and no partition serves a stepped-down manifest.

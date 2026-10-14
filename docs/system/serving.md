@@ -221,7 +221,10 @@ are computed from the request's visible set in three parts:
 
 The visible set is F less D, together with T, and the three never overlap, so an artifact's count
 is its count over F, less its count over D, plus its count over T. The same holds for the number
-of its rows with a position and for the sums of their positions, which give the centroid.
+of its rows with a position and for the sums of their positions, which give the centroid. A bundle
+whose items are numbered in several point shards ([data model](data-model.md#identifiers)) keeps
+F, D and T per shard. An artifact's counts and position sums are added across the shards, and each
+side of its box is the extreme across them, before the artifact is tested or served.
 
 ```mermaid
 flowchart LR
@@ -321,9 +324,12 @@ whatever the client already has.
 A third value, the generation a response was answered from, travels as a header,
 `x-mosaica-pin`, and a request may echo it back. While the background refresh after a
 [flush](write-path.md#flush) has not reached a session, the header names the previous generation,
-because the session's visible set is still that generation's projection. Deletions, suppressions
-and segments are current either way. An echoed pin buys one comparison against the
-generation the response was answered from, reported as a flag on the response, `x-mosaica-stale`.
+because the session's visible set is still that generation's projection. A response's visible set
+is one generation's in every point shard it reads: the previous generation's projections serve only
+where every shard has one, and a response never combines one shard's previous projection with
+another's current one. Deletions, suppressions and segments are current either way. An echoed pin
+buys one comparison against the generation the response was answered from, reported as a flag on
+the response, `x-mosaica-stale`.
 
 ## Serving other map stacks
 

@@ -210,7 +210,7 @@ struct ConfigFile {
     /// Default: not set.
     #[serde(default)]
     defaults: Option<DefaultsBlock>,
-    /// The shard the items are stored in.
+    /// The size of the shards the items are stored in.
     ///
     /// Default: not set.
     #[serde(default)]
@@ -254,14 +254,15 @@ struct DefaultsBlock {
     allocation_view: Option<String>,
 }
 
-/// The shard the items are stored in. Without this table the size is 4,026,531,840.
+/// The size of the shards the items are stored in. Without this table the size is 4,026,531,840.
 /// `PUT /control/shards` declares the same table at a running service.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ShardsBlock {
-    /// The high water the shard may not pass. A positive integer. A build whose files create more
-    /// items than this is refused, and so is an insert that would take the shard's high water
-    /// past it.
+    /// The high water a shard may not pass. A positive integer. A build whose files create more
+    /// items than this writes them in several shards, each of this many items but the last, and a
+    /// running service serves such a bundle for reads only, refusing every write with `409`. An
+    /// insert that would take a shard's high water past it is refused.
     size: u64,
 }
 

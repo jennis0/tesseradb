@@ -10,7 +10,7 @@ Every table refuses a key it does not know. Where a key is refused beside anothe
 | --- | --- | --- | --- |
 | `sources` | table of strings | not set | The files the declaration reads, as `name = "path"`, each path relative to the directory the declaration is in. Every `source` key elsewhere names one of these. An empty name, an empty path and an absolute path are refused; `--file NAME=PATH` replaces a path from the command line. |
 | `defaults` | table | not set | The source a block takes when it names none, and the view that orders internal ids. |
-| `shards` | table | not set | The shard the items are stored in. |
+| `shards` | table | not set | The size of the shards the items are stored in. |
 | `view` | array of tables | `[]` | Coordinate systems, each giving the items it holds a position on a map. |
 | `view_group` | array of tables | `[]` | Sets of views that share every setting and differ by a key. |
 | `vocabulary` | array of tables | `[]` | Named value sets, which `category` attributes draw on. |
@@ -28,11 +28,11 @@ What a block takes when it names no source of its own. `source` reaches a `[[vie
 
 ## `[shards]`
 
-The shard the items are stored in. Without this table the size is 4,026,531,840. `PUT /control/shards` declares the same table at a running service.
+The size of the shards the items are stored in. Without this table the size is 4,026,531,840. `PUT /control/shards` declares the same table at a running service.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `size` | integer | required | The high water the shard may not pass. A positive integer. A build whose files create more items than this is refused, and so is an insert that would take the shard's high water past it. |
+| `size` | integer | required | The high water a shard may not pass. A positive integer. A build whose files create more items than this writes them in several shards, each of this many items but the last, and a running service serves such a bundle for reads only, refusing every write with `409`. An insert that would take a shard's high water past it is refused. |
 
 ## `[[view]]`
 

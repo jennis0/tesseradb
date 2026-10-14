@@ -385,17 +385,20 @@ outside its group. An item joined into a second view before its own ingest is fl
 record fields until that flush.
 
 The rows come in one of two orders, which return the same rows. Map order is by map cell in the
-view, then by `mosaica_id`, merged across the view's segments, which is the order rendered fields
-are stored in. Stored order is by the server's internal item numbering, which is the order the
-record store holds items in. In map order a page's items are scattered through the record store,
-so each page decompresses blocks it uses only a few rows of, and the smaller the pages, the more
-often each block is decompressed over a read. Each field's `homes` in `/v1/meta` says where its
-value is read from: the view's rendered columns, a per-item value column, or the record store. A
-request with neither `order` nor a cursor is served in stored order if any named field's only home
-is the record store, and in map order otherwise. That choice may change.
+view, then by `mosaica_id`, merged across the view's segments in every shard, which is the order
+rendered fields are stored in. Stored order walks the bundle's point shards, the spaces its items
+are numbered in ([data model](data-model.md#identifiers)), in shard number order, and within a shard
+follows the server's internal item numbering, which is the order the shard's record store holds
+items in. In map order a page's items are scattered through the record store, so each page
+decompresses blocks it uses only a few rows of, and the smaller the pages, the more often each block
+is decompressed over a read. Each field's `homes` in `/v1/meta` says where its value is read from:
+the view's rendered columns, a per-item value column, or the record store. A request with neither
+`order` nor a cursor is served in stored order if any named field's only home is the record store,
+and in map order otherwise. That choice may change.
 
-Stored order groups a viewer's items by their full set of index keys, including keys the viewer
-does not satisfy. [Security](security.md#reading-in-bulk) states what that discloses.
+Within each shard, stored order groups a viewer's items by their full set of index keys,
+including keys the viewer does not satisfy. [Security](security.md#reading-in-bulk) states what
+that discloses.
 
 ### What a read of artifacts returns
 
@@ -469,12 +472,13 @@ takes the count from its first stretch instead, at no cost beyond what its first
 ### Filters across pages
 
 An items response evaluates its filter over a stretch: the part of the view ahead of the cursor, a
-range of map cells in map order or of item numbers in stored order. A read's first stretch spans a
-page's rows, held to a ceiling that `max_page_bytes` sets. Each time a stretch is used up, the next
-is four times longer, up to that ceiling, and a response stopped inside a stretch passes on one a
-quarter the size. Only the size travels in the cursor. Every response begins a fresh stretch, so a
-read evaluates its filter at least once per response. A sparse filter's stretches reach the ceiling
-in a few steps, and from then on the number of evaluations grows in proportion to the rows scanned.
+range of map cells in map order or of item numbers in one shard in stored order. A read's first
+stretch spans a page's rows, held to a ceiling that `max_page_bytes` sets. Each time a stretch is
+used up, the next is four times longer, up to that ceiling, and a response stopped inside a stretch
+passes on one a quarter the size. Only the size travels in the cursor. Every response begins a fresh
+stretch, so a read evaluates its filter at least once per response. A sparse filter's stretches
+reach the ceiling in a few steps, and from then on the number of evaluations grows in proportion to
+the rows scanned.
 
 A stretch's result is held in the row positions and the visible set it was evaluated under. A
 flush, merge or compaction renumbers the rows, and a deletion, a suppression or a refreshed

@@ -12,10 +12,10 @@
 //! §3.2 makes that normative, so the gate is applied per column even where the values behind it
 //! are shared.
 //!
-//! **View is not part of the address for an entity-scoped column**, and deliberately. Membership
-//! is an *entity-space* question and entity ids are bundle-global, so a column rendered in several
-//! views has one member set and one correct answer; adding view to the key would invent a
-//! distinction the predicate does not have.
+//! **View is not part of the address for an entity-scoped column.** Membership is an
+//! *entity-space* question, and an entity id names one item in every view of its shard, so a
+//! column rendered in several views has one member set and one correct answer; adding view to the
+//! key would invent a distinction the predicate does not have.
 //!
 //! **A group-scoped category is the one column where it is** (`views.md` §5), and for the opposite
 //! reason: the family is one column *per view*, so two views have two value sets and two member
