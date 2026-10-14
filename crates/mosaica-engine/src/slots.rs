@@ -524,11 +524,10 @@ impl Engine {
                 .sides
                 .iter()
                 .map(|side| {
-                    let versions = side.versions;
                     (
-                        versions.shard,
-                        versions.overlay_version,
-                        versions.fragment_watermark,
+                        side.versions.shard,
+                        side.versions.overlay_version,
+                        side.versions.fragment_watermark,
                     )
                 })
                 .collect(),
@@ -861,7 +860,7 @@ impl Engine {
             None => {
                 let leaves: Vec<(usize, &Bitmap)> = served
                     .filtered_sides(mask)
-                    .map(|(at, _, leaf)| (at, leaf.visible_all()))
+                    .map(|(place, _, leaf)| (place, leaf.visible_all()))
                     .collect();
                 let visible: Vec<u64> =
                     leaves.iter().map(|(_, visible)| visible.cardinality()).collect();
@@ -871,10 +870,10 @@ impl Engine {
                     .load(std::sync::atomic::Ordering::Relaxed);
                 let (centres, sampled) =
                     sampled_centres(&visible, size, ordinals.len(), |i, cut, sums| {
-                        let (at, visible) = leaves[i];
-                        let side = &served.sides[at];
+                        let (place, visible) = leaves[i];
+                        let side = &served.sides[place];
                         let sample = sample(side, visible, cut, &stop)?;
-                        let rows: &ArtifactRows = &read.forms.rows[at];
+                        let rows: &ArtifactRows = &read.forms.rows[place];
                         let copy = side.segments.first().and_then(|&(first, _)| {
                             rows.column()?;
                             self.artifact_projections.band_labels(
@@ -883,7 +882,7 @@ impl Engine {
                                 served.name,
                                 &layer.declaration.name,
                                 level,
-                                read.forms.version(at),
+                                read.forms.version(place),
                                 first,
                             )
                         });
@@ -943,11 +942,9 @@ impl Engine {
     }
 }
 
-/// Each of `clusters` clusters' centre over a sample of every side below one cut, set from the
-/// visible count over every side, `visible` holding each side's: `sample(side, cut, sums)` adds
-/// that side's sampled members below `cut` to each cluster's sum of positions and number, and
-/// answers how many items it sampled. The sums are divided once. Also answers how many items were
-/// sampled in all.
+/// Each of `clusters` clusters' centre over a sample of every side below one cut, taken from the
+/// summed `visible` counts. `sample(i, cut, sums)` adds the `i`th side's sampled members to `sums`
+/// and answers how many items it sampled; the second output is the total.
 fn sampled_centres(
     visible: &[u64],
     size: u64,
@@ -957,8 +954,8 @@ fn sampled_centres(
     let cut = sample_cut(visible.iter().sum(), size);
     let mut sums: Vec<([f64; 2], u32)> = vec![([0.0; 2], 0); clusters];
     let mut sampled = 0;
-    for side in 0..visible.len() {
-        sampled += sample(side, cut, &mut sums)?;
+    for i in 0..visible.len() {
+        sampled += sample(i, cut, &mut sums)?;
     }
     let centres = sums
         .iter()
@@ -1548,9 +1545,8 @@ fn neighbours(points: &[[f64; 2]]) -> Neighbours {
 mod tests {
     use super::*;
 
-    /// The sample over two shards is cut once, from the visible count over both: a shard with
-    /// fewer visible items than the sample takes is still sampled below the cut both set, so each
-    /// cluster's centre is the one a shard holding both shards' items gives.
+    /// A shard with fewer visible items than the sample takes is still sampled below the one cut
+    /// both set.
     #[test]
     fn a_sample_over_two_shards_is_cut_once_from_both_shards_visible_count() {
         // `(mosaica_id, position, cluster)`: a small shard whose items all sit high in the id
@@ -1563,9 +1559,9 @@ mod tests {
             .collect();
         let centres = |sides: &[&[(u64, [f64; 2], usize)]]| {
             let visible: Vec<u64> = sides.iter().map(|side| side.len() as u64).collect();
-            sampled_centres(&visible, 4, 2, |at, cut, sums| {
+            sampled_centres(&visible, 4, 2, |i, cut, sums| {
                 let mut sampled = 0;
-                for &(id, position, cluster) in sides[at] {
+                for &(id, position, cluster) in sides[i] {
                     if cut == u64::MAX || id < cut {
                         add(&mut sums[cluster], position);
                         sampled += 1;
@@ -1584,9 +1580,6 @@ mod tests {
         assert_eq!(whole, vec![Some([2.0, 4.0]), Some([3.0, 6.0])]);
     }
 
-    /// Each cluster's centre from a sample over two shards, each shard's sums added and divided
-    /// once, is the centre one shard holding both shards' members gives: the mean of every sampled
-    /// member's position, however the members are split.
     #[test]
     fn centres_sampled_over_two_shards_are_one_shards_holding_both() {
         // Three clusters over twelve rows, each row at a position of its own.

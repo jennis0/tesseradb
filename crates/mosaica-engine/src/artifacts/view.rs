@@ -132,21 +132,17 @@ pub struct ArtifactView<'a, M: MaskedSet> {
     /// applies is exactly the fact being withheld. Nothing about the target is cached across the
     /// call, so a suppression accepted since is still honoured here.
     pub dependency_served: &'a dyn Fn(&Attachment) -> bool,
-    /// One per point shard holding the view, whether or not the viewer sees anything there: a
-    /// shard's slice counts towards every size the verdict compares against.
+    /// One per point shard holding the view, seen or not.
     pub sides: Vec<ArtifactSide<'a, M>>,
 }
 
 /// One point shard's part of [`ArtifactView`]: its form of the level, and the viewer's mask, the
-/// deny set and the containment answers in that shard. Every side's form holds the same records
-/// and a slot for every ordinal, so whether the level has an artifact at an ordinal, and every
-/// fact of its record, read the same in each.
+/// deny set and the containment answers in that shard.
 pub struct ArtifactSide<'a, M: MaskedSet> {
     /// This shard's row form of the layer's membership in the view.
     pub rows: &'a ArtifactRows,
     /// The viewer's composed mask in this shard — see [`MaskedSet`] for why the type forbids
-    /// anything else — or `None` where the request left the shard out, the viewer seeing nothing
-    /// there. A side left out holds nothing visible, and so adds to every size and to no count.
+    /// anything else — or `None` where the request left the shard out.
     pub mask: Option<&'a M>,
     /// `deleted ∪ suppressed`, in this shard's row space for the view. Read only by the
     /// containment partition's fast arm, to correct an answer the partition derives from term
@@ -168,14 +164,14 @@ pub struct ArtifactSide<'a, M: MaskedSet> {
 
 impl<'a, M: MaskedSet> ArtifactView<'a, M> {
     /// The view over `layer` for `served`'s viewer, who reaches it: the layer's declaration and
-    /// its space's overlay, and `side`'s answer for each of the view's shards, given its place
-    /// among them, so no shard can be left out of a sum.
+    /// its space's overlay, and `answer` for each of the view's sides, given its place, so no
+    /// shard can be left out of a sum.
     pub(crate) fn of(
         served: &crate::viewport::ServedView<'a>,
         layer: &'a mosaica_types::layer::RegisteredLayer,
         labels: LabelGate<'a>,
         dependency_served: &'a dyn Fn(&Attachment) -> bool,
-        mut side: impl FnMut(usize, &crate::viewport::ServedSide<'a>) -> ArtifactSide<'a, M>,
+        mut answer: impl FnMut(usize, &crate::viewport::ServedSide<'a>) -> ArtifactSide<'a, M>,
     ) -> Self {
         ArtifactView {
             declaration: &layer.declaration,
@@ -187,7 +183,7 @@ impl<'a, M: MaskedSet> ArtifactView<'a, M> {
                 .sides
                 .iter()
                 .enumerate()
-                .map(|(at, served)| side(at, served))
+                .map(|(place, side)| answer(place, side))
                 .collect(),
         }
     }
@@ -321,34 +317,37 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
             return Containment::Unsatisfied;
         }
         let declared = self.records().map_or(&[][..], |r| r.declared_sizes(ordinal));
-        let mut via: Vec<bool> = self
-            .sides
-            .iter()
-            .map(|side| {
-                side.containment
-                    .as_ref()
-                    .is_some_and(|answers| side.rows.partition_answers(ordinal, answers))
-            })
-            .collect();
+        // Empty where no side has a partition: only a side with one reads it.
+        let mut via: Vec<bool> = match self.sides.iter().any(|side| side.containment.is_some()) {
+            true => self
+                .sides
+                .iter()
+                .map(|side| {
+                    side.containment
+                        .as_ref()
+                        .is_some_and(|answers| side.rows.partition_answers(ordinal, answers))
+                })
+                .collect(),
+            false => Vec::new(),
+        };
         loop {
             let mut declined = None;
             let answer = satisfied_rank_over(
                 declared,
                 declares_content,
                 self.sides.len(),
-                |side, rank| self.sides[side].rows.generating_size(ordinal, rank),
-                |at, rank, size| {
-                    let side = &self.sides[at];
-                    // A side the request left out holds nothing the viewer sees.
+                |place, rank| self.sides[place].rows.generating_size(ordinal, rank),
+                |place, rank, size| {
+                    let side = &self.sides[place];
                     let Some(mask) = side.mask else {
                         return Some(size == 0);
                     };
-                    match side.containment.as_ref().filter(|_| via[at]) {
+                    match side.containment.as_ref().filter(|_| via[place]) {
                         Some(answers) => {
                             let held =
                                 side.rows.generating_held_via(ordinal, rank, answers, side.denied);
                             if held.is_none() {
-                                declined = Some(at);
+                                declined = Some(place);
                             }
                             held
                         }
@@ -358,7 +357,7 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
             );
             match (answer, declined) {
                 (Some(containment), _) => return containment,
-                (None, Some(at)) => via[at] = false,
+                (None, Some(place)) => via[place] = false,
                 (None, None) => return Containment::Unsatisfied,
             }
         }
@@ -386,8 +385,7 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
 
     /// The proportional criterion's denominator over every side, in row terms so numerator and
     /// denominator come from the same projections: a member still in an unfolded flush extent
-    /// contributes to neither, understating rather than overstating the ratio. A side left out of
-    /// the request adds its members here and nothing to the count.
+    /// contributes to neither, understating rather than overstating the ratio.
     fn declared_size(&self, ordinal: u32) -> u64 {
         self.sides
             .iter()
@@ -871,10 +869,8 @@ mod tests {
         EMPTY.get_or_init(Overlay::new)
     }
 
-    /// **A generating set split across shards is contained only where both sums meet the declared
-    /// size**: every side's slice and every slice's rows the viewer holds. A side left out of the
-    /// request adds its slice and nothing the viewer holds, so the test fails closed, and a slice
-    /// with no member of the set never contains it on its own.
+    /// A side left out adds its slice and nothing held, so the test fails closed; an empty slice
+    /// never contains the set alone.
     #[test]
     fn a_split_generating_set_is_contained_only_by_the_sums_over_every_side() {
         let d = declaration(false, None);
@@ -923,9 +919,6 @@ mod tests {
         .is_served());
     }
 
-    /// An artifact split across two shards is served only on both shards' counts: the verdict
-    /// counts the viewer's members in both against the criterion, which neither shard's alone
-    /// clears, and each shard's visible rows are its own slice of the members the viewer sees.
     #[test]
     fn a_split_artifact_is_served_only_on_both_shards_counts() {
         let d = declaration(false, Some(ExistenceCriterion::Count(4)));
@@ -992,9 +985,8 @@ mod tests {
         );
     }
 
-    /// **The proportional criterion divides by the sum of every side's members**, a side the
-    /// request left out included: leaving it out of the denominator would let a viewer who sees
-    /// nothing in one shard clear a fraction of the artifact's members there.
+    /// Leaving a left-out side out of the denominator would let a viewer who sees nothing in one
+    /// shard clear a fraction of the members there.
     #[test]
     fn the_fraction_is_against_every_sides_members() {
         let (a, b) = one_level(

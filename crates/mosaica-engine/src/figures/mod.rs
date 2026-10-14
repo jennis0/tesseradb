@@ -356,10 +356,9 @@ impl Figures {
     }
 }
 
-/// A level's figures over every side of a request: each shard's [`Figures`], answering as one
-/// shard holding every side's rows would. Counts and position sums add, the sums in `u128`, past
-/// what one shard's `u64` holds. Each side of the box is the extreme across shards of each shard's
-/// own, which is that shard's first extreme row its deny does not hold, or a walk of that shard.
+/// A level's figures over every side of a request, answering as one shard holding every side's
+/// rows would: counts and position sums add, and each side of the box is the extreme of the
+/// shards' own.
 pub struct LevelFigures {
     sides: Vec<Arc<Figures>>,
 }
@@ -433,18 +432,6 @@ impl LevelFigures {
                 out
             })
     }
-
-    /// Per ordinal, the sum of each shard's count in `sides`: a filtered histogram over every
-    /// shard, in `u64`, past what one shard's `u32` holds.
-    pub fn summed_counts(sides: &[&[u32]]) -> Vec<u64> {
-        let mut out = vec![0u64; sides.iter().map(|side| side.len()).max().unwrap_or(0)];
-        for side in sides {
-            for (sum, count) in out.iter_mut().zip(side.iter()) {
-                *sum += u64::from(*count);
-            }
-        }
-        out
-    }
 }
 
 impl Engine {
@@ -477,18 +464,12 @@ impl Engine {
             true => Geometry::None,
             false => geometry,
         };
+        let exact = || {
+            self.exact_figures(served, side, space, level, level_version, column, mask, geometry)
+        };
         let base_rows = column.base_rows();
         if base_rows != side.data.row_space.base_rows() {
-            return self.exact_figures(
-                served,
-                side,
-                space,
-                level,
-                level_version,
-                column,
-                mask,
-                geometry,
-            );
+            return exact();
         }
         let identity = served.mask_identity;
         let (fragment, minus, plus, _) = mask.parts();
@@ -506,16 +487,7 @@ impl Engine {
         let Some(counts) =
             self.fragment_counts(served, &key, level_version, column, fragment, &places)?
         else {
-            return self.exact_figures(
-                served,
-                side,
-                space,
-                level,
-                level_version,
-                column,
-                mask,
-                geometry,
-            );
+            return exact();
         };
 
         let mut subtracted = minus.clone();
@@ -533,18 +505,7 @@ impl Engine {
                 &places,
             )? {
                 Some(deny) => Some(deny),
-                None => {
-                    return self.exact_figures(
-                        served,
-                        side,
-                        space,
-                        level,
-                        level_version,
-                        column,
-                        mask,
-                        geometry,
-                    )
-                }
+                None => return exact(),
             },
         };
 
@@ -1003,7 +964,7 @@ impl FiguresCache {
     ) {
         for address in self.labels.held.addresses() {
             let (shard, view, space, level) = &address;
-            let Some(shard) = generation.shards().find(|held| held.id() == *shard) else {
+            let Some(shard) = generation.shard(*shard) else {
                 continue;
             };
             let Some(layer) = registered.iter().find(|layer| layer.space == *space) else {

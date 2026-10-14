@@ -54,8 +54,7 @@ impl ProjectionKey {
 
 /// `(shard, view, layer, level)` — what one cached projection is *for*, as against the
 /// [`ProjectionKey`] that says when it stops being valid. Replace-on-mismatch, not an LRU, so the
-/// map is bounded by the number of live coordinates rather than a capacity. Each point shard holds
-/// its own slice of every artifact's membership, projected through its own row space.
+/// map is bounded by the number of live coordinates rather than a capacity.
 ///
 /// The view is here and not in [`PartitionAddress`]: a containment expression names entities'
 /// terms, so no row space is involved and one file answers for every view; an extent is a pair of
@@ -110,8 +109,8 @@ impl Coordinate<'_> {
 /// instead of replacing them.
 pub(super) type PartitionAddress = (ShardId, String, u32);
 
-/// `(view, layer, level)` — what one level's records are for. No shard: every shard's form of the
-/// level holds the same records, and its own slice of each membership beside them.
+/// `(view, layer, level)` — what one level's records are for. No shard: every shard's form shares
+/// them.
 pub(super) type RecordsAddress = (String, String, u32);
 
 /// What a cached [`ContainmentPartition`], an adopted [`TileIndex`] and an adopted [`RowColumn`]
@@ -256,9 +255,8 @@ pub struct ArtifactProjections {
     /// written for. Opened on first use, since opening checks the file against that segment's
     /// bands.
     pub(super) band_labels_held: Mutex<BTreeMap<LevelAddress, (DerivedKey, Arc<HeldBandLabels>)>>,
-    /// Each level's records per view, at the version they describe: every shard's form of the
-    /// level takes the same ones rather than a copy each. Weak, so a write to one form's records
-    /// moves them rather than copying, and nothing here outlives the forms.
+    /// Each level's records per view, at the version they describe, shared by every shard's form.
+    /// Weak, so a write moves them rather than copying, and nothing here outlives the forms.
     pub(super) records_held:
         Mutex<BTreeMap<RecordsAddress, (DerivedKey, std::sync::Weak<ArtifactRecords>)>>,
     /// How many forms this has built since the engine opened. Read by the fold's own log line and
@@ -917,10 +915,8 @@ mod tests {
             .0
     }
 
-    /// **Each shard's form of a level is its own and holds a slot for every ordinal**, an empty
-    /// one where the shard holds no member, so a hole and a live artifact read the same in every
-    /// shard; the records beside them are one value, the whole store's, shared by every shard's
-    /// form.
+    /// A slot, empty, where the shard holds no member; the records beside them are one value,
+    /// shared by every shard's form.
     #[test]
     fn every_shards_form_of_a_level_holds_every_ordinal_over_one_set_of_records() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -968,9 +964,8 @@ mod tests {
         assert!(Arc::ptr_eq(&a.records, &b.records));
     }
 
-    /// **An attached artifact declaring members of its own never borrows its target's in a shard
-    /// holding none of them.** A label whose members are all in shard 0 has an empty slice in
-    /// shard 1, and its form there holds that empty slice, not the cluster's members.
+    /// A label whose members are all in shard 0 has an empty slice in shard 1, and its form there
+    /// holds that slice, not the cluster's members.
     #[test]
     fn an_artifact_with_members_in_another_shard_borrows_nothing_here() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -497,9 +497,7 @@ fn combined(a: &Oracle, b: &Oracle) -> Summed {
         .collect()
 }
 
-/// **Two shards' figures combined answer as one shard holding every row of both**: counts and
-/// position sums add, and each side of the box is the extreme across shards of each shard's own,
-/// over masks denying little and much and with each shard's extreme rows of one artifact denied.
+/// Over masks denying little and much, and with each shard's extreme rows of one artifact denied.
 #[test]
 fn figures_over_two_shards_are_the_walk_of_every_visible_row_of_both() {
     let cases = [
@@ -536,8 +534,7 @@ fn figures_over_two_shards_are_the_walk_of_every_visible_row_of_both() {
     }
 }
 
-/// Position sums over several shards pass what a `u64` holds and are added in `u128`, and so are
-/// the shards' filtered counts past a `u32`.
+/// Position sums over several shards pass what a `u64` holds and are added in `u128`.
 #[test]
 fn sums_over_shards_are_widened_before_they_are_added() {
     let near_the_top = |placed: u32| {
@@ -565,10 +562,6 @@ fn sums_over_shards_are_widened_before_they_are_added() {
     assert_eq!(
         figures.centroid(0),
         Some([sums[0] as f64 / placed, sums[1] as f64 / placed])
-    );
-    assert_eq!(
-        super::LevelFigures::summed_counts(&[&[u32::MAX, 1], &[u32::MAX]]),
-        vec![2 * u64::from(u32::MAX), 1]
     );
 }
 

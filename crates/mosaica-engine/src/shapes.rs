@@ -138,8 +138,8 @@ pub struct ShapeLevel {
     /// no persisted entry matched the shape.
     pub held_claimed: u64,
     pub held_decomposed: u64,
-    /// Pieces resolved or claimed ahead of the form's build, by shard and segment id — see the
-    /// module doc. Every shard's segments are numbered apart, so the shard is part of the name.
+    /// Pieces resolved or claimed ahead of the form's build, by shard and segment id, since segment
+    /// ids repeat across shards — see the module doc.
     staged: Mutex<Staged>,
 }
 
@@ -557,32 +557,37 @@ impl ShapeStore {
             if declaration.membership != MembershipSource::Spatial || declaration.shape.is_none() {
                 continue;
             }
-            for (view, shard) in declaration.views.iter().flat_map(|view| {
-                bundle
-                    .partitions
-                    .values()
-                    .flat_map(|partition| partition.shards.iter())
-                    .map(move |shard| (view, shard))
-            }) {
-                let Some(view_data) = shard.views.get(view) else {
-                    continue;
-                };
-                for level in 0..registered.runs.len() as u32 {
-                    let held = self.level(view, &declaration.name, level, store, persisted);
-                    let cost =
-                        Self::stage_missing(&held, shard.record.id, view_data, persisted, store);
-                    report.levels += 1;
-                    report.artifacts += held.artifacts();
-                    report.rows_tested += cost.rows_tested;
-                    report.rows_interior += cost.rows_interior;
-                    report.resolve_ms += cost.resolve_ms;
-                    report.pieces_claimed += cost.pieces_claimed;
-                    report.pieces_resolved += cost.pieces_resolved;
-                    report.claim_ms += cost.claim_ms;
-                    report.build_ms += held.build_ms;
-                    report.held_claimed += held.held_claimed;
-                    report.held_decomposed += held.held_decomposed;
-                    report.held_bytes += held.held_bytes();
+            for shard in bundle
+                .partitions
+                .values()
+                .flat_map(|partition| &partition.shards)
+            {
+                for view in &declaration.views {
+                    let Some(view_data) = shard.views.get(view) else {
+                        continue;
+                    };
+                    for level in 0..registered.runs.len() as u32 {
+                        let held = self.level(view, &declaration.name, level, store, persisted);
+                        let cost = Self::stage_missing(
+                            &held,
+                            shard.record.id,
+                            view_data,
+                            persisted,
+                            store,
+                        );
+                        report.levels += 1;
+                        report.artifacts += held.artifacts();
+                        report.rows_tested += cost.rows_tested;
+                        report.rows_interior += cost.rows_interior;
+                        report.resolve_ms += cost.resolve_ms;
+                        report.pieces_claimed += cost.pieces_claimed;
+                        report.pieces_resolved += cost.pieces_resolved;
+                        report.claim_ms += cost.claim_ms;
+                        report.build_ms += held.build_ms;
+                        report.held_claimed += held.held_claimed;
+                        report.held_decomposed += held.held_decomposed;
+                        report.held_bytes += held.held_bytes();
+                    }
                 }
             }
         }

@@ -298,8 +298,7 @@ fn labelled_above(column: &RowColumn, set: &Bitmap, base: u32) -> Bitmap {
 struct TileAsk<'a> {
     /// The tile's sets in each side the request reads and the tile spans a row of.
     sets: &'a [ViewportSets<'a>],
-    /// The rows the tile spans in each side holding a part of it, by the side's place among the
-    /// view's sides, ascending.
+    /// The rows the tile spans in each side holding a part of it, ascending by place.
     spans: &'a [(usize, Vec<Range<u32>>)],
     per_tile: usize,
     /// The layers the request names: a dependent whose target's layer is among them is served only
@@ -325,7 +324,7 @@ fn admitted_in<'a>(
         .iter()
         .filter_map(|set| {
             let rows = admitted(set)?;
-            let (column, members) = columns[set.side];
+            let (column, members) = columns[set.place];
             Some((members, rows, labelled_above(column, rows, members.base_rows())))
         })
         .collect();
@@ -333,17 +332,16 @@ fn admitted_in<'a>(
 }
 
 impl TileAsk<'_> {
-    /// The rows the tile spans in the side at `side`.
-    fn spans_in(&self, side: usize) -> &[Range<u32>] {
+    /// The rows the tile spans in the side at `place`.
+    fn spans_in(&self, place: usize) -> &[Range<u32>] {
         self.spans
-            .binary_search_by_key(&side, |(held, _)| *held)
+            .binary_search_by_key(&place, |(held, _)| *held)
             .map_or(&[][..], |at| self.spans[at].1.as_slice())
     }
 }
 
-/// Each side's column and members, by the side's place among the view's sides, and the level's
-/// figures over every shard: what a tile of a level stored by row with its members is answered
-/// from.
+/// Each side's column and members, indexed like `served.sides`, and the level's figures over
+/// every shard: what a tile of a level stored by row with its members is answered from.
 type Stored<'a> = (Vec<(&'a RowColumn, &'a LevelMembers)>, &'a LevelFigures);
 
 /// [`Stored`] for a level where every side's form has a column holding its members and the
@@ -376,8 +374,8 @@ fn chosen_stored<A>(
     let mut presences: Vec<Presence<'_>> = Vec::with_capacity(tile.sets.len());
     let mut candidates = Bitmap::new();
     for set in tile.sets {
-        let (column, members) = columns[set.side];
-        let spans = tile.spans_in(set.side);
+        let (column, members) = columns[set.place];
+        let spans = tile.spans_in(set.place);
         let here = set.viewport.here();
         let base = members.base_rows();
         let chunks: u64 = spans
@@ -630,16 +628,15 @@ impl Engine {
 
         for (at, tile) in tiling.tiles.iter().enumerate() {
             check_cancelled(&req.cancel)?;
-            // The tile's rows in each side holding a part of it that the request reads: the
-            // sides it leaves out are not visited.
+            // Only the sides the request reads.
             let spans: Vec<(usize, Vec<Range<u32>>)> = tiling
                 .tile_domains(at)
                 .into_iter()
-                .filter(|(side, _)| served.leaf(&mask, *side).is_some())
+                .filter(|(place, _)| served.leaf(&mask, *place).is_some())
                 .collect();
             let rows: Vec<(usize, Bitmap)> = spans
                 .iter()
-                .map(|(side, spans)| (*side, spans_rows(spans)))
+                .map(|(place, spans)| (*place, spans_rows(spans)))
                 .filter(|(_, rows)| !rows.is_empty())
                 .collect();
             let mut walked = Walked::default();
@@ -669,8 +666,7 @@ impl Engine {
     /// One level's artifacts in one tile: the first `per_tile` of those served and present there,
     /// by whole visible count and then `mosaica_id`, assembled into `walked` with their filter
     /// bits taken inside the tile. A dependent whose target the frame does not hold takes no place
-    /// in the quota, since the frame would drop it. Each side proposes its candidates and is asked
-    /// whether an artifact holds a visible member there; the quota is filled once over them all.
+    /// in the quota, since the frame would drop it.
     fn serve_tile_level(
         &self,
         level: &LevelPass<'_>,
@@ -702,8 +698,8 @@ impl Engine {
                 // rows above the base carry.
                 let matched = admitted_in(sets, columns, |set| set.matched_here.as_ref());
                 let highlighted = admitted_in(sets, columns, |set| set.highlighted_here.as_ref());
-                let holds = |ordinal: u32, sides: &Option<Vec<Admitting<'_>>>| {
-                    sides.as_ref().map(|sides| {
+                let holds = |ordinal: u32, sides: Option<&[Admitting<'_>]>| {
+                    sides.map(|sides| {
                         sides.iter().any(|(members, rows, above)| {
                             above.contains(ordinal) || members.members(ordinal).intersects(rows)
                         })
@@ -713,7 +709,10 @@ impl Engine {
                     .into_iter()
                     .map(|admitted| {
                         let ordinal = admitted.passing.0;
-                        let bits = (holds(ordinal, &matched), holds(ordinal, &highlighted));
+                        let bits = (
+                            holds(ordinal, matched.as_deref()),
+                            holds(ordinal, highlighted.as_deref()),
+                        );
                         (admitted, bits)
                     })
                     .collect()
@@ -727,8 +726,8 @@ impl Engine {
                     .map(|admitted| {
                         let ordinal = admitted.passing.0;
                         let bits = (
-                            matches_any(forms, &matched, ordinal),
-                            matches_any(forms, &highlighted, ordinal),
+                            matches_any(forms, matched.as_deref(), ordinal),
+                            matches_any(forms, highlighted.as_deref(), ordinal),
                         );
                         (admitted, bits)
                     })
@@ -751,7 +750,6 @@ impl Engine {
 
     /// The first `per_tile` artifacts the tile index proposes in the tile that hold a visible
     /// member there and are served and `targeted`, by whole visible count and then `mosaica_id`.
-    /// Each side proposes the candidates of its own form, probed against its own leaf.
     fn by_index(
         &self,
         level: &LevelPass<'_>,
@@ -869,10 +867,10 @@ mod tests {
             .collect();
         let rows: Vec<Bitmap> = shards.iter().map(|held| spans_rows(&held.spans)).collect();
         let sets: Vec<ViewportSets<'_>> = (0..shards.len())
-            .map(|side| ViewportSets {
-                side,
-                mask: &leaves[side],
-                viewport: crate::tile_index::Viewport::compose(&rows[side], &leaves[side]),
+            .map(|place| ViewportSets {
+                place,
+                mask: &leaves[place],
+                viewport: crate::tile_index::Viewport::compose(&rows[place], &leaves[place]),
                 matched_here: None,
                 highlighted_here: None,
             })
@@ -880,7 +878,7 @@ mod tests {
         let spans: Vec<(usize, Vec<Range<u32>>)> = shards
             .iter()
             .enumerate()
-            .map(|(side, held)| (side, held.spans.clone()))
+            .map(|(place, held)| (place, held.spans.clone()))
             .collect();
         let counts = LevelFigures::of(
             shards
@@ -907,9 +905,6 @@ mod tests {
         chosen_stored(&tile, &columns, &counts, |o| Some((ids[o as usize], o)), &|_| true)
     }
 
-    /// A tile of a stored level over two shards: each shard proposes the artifacts its members
-    /// cover in its spans and finds the ones it sees there, the quota is filled once over both by
-    /// the count over both, and the answer is that of one shard holding both shards' rows.
     #[test]
     fn a_stored_levels_tile_is_proposed_and_found_in_every_shard() {
         let a = Held {
@@ -944,10 +939,8 @@ mod tests {
         }
     }
 
-    /// A tile's artifacts over two shards are those of one shard holding both: candidates from
-    /// either, ranked by the count over both, then by `mosaica_id`, present where either holds a
-    /// visible member in the tile, each once, and a dependent whose target the frame does not
-    /// hold taking no place in the quota.
+    /// Ranked by the count over both shards, then `mosaica_id`; a dependent whose target the frame
+    /// does not hold takes no place.
     #[test]
     fn a_tiles_artifacts_over_two_shards_are_those_of_one_shard_holding_both() {
         let counts: [Vec<u32>; 2] = [vec![5, 0, 3, 2, 0, 4, 1, 0], vec![0, 6, 3, 2, 1, 0, 0, 2]];

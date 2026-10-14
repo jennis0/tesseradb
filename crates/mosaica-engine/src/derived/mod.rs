@@ -114,14 +114,10 @@ pub fn compute(
     }
 
     // One pass over the visible rows: reading a position twice per property would double the cost.
-    let mut sides = sides.iter();
-    let Some((locator, visible)) = sides.next() else {
-        return out;
-    };
-    let mut positions = locator.positions(visible);
-    for (locator, visible) in sides {
-        positions.extend(locator.positions(visible));
-    }
+    let positions: Vec<[u32; 2]> = sides
+        .iter()
+        .flat_map(|(locator, visible)| locator.positions(visible))
+        .collect();
     if positions.is_empty() {
         return out;
     }
@@ -136,9 +132,8 @@ pub fn compute(
         }
     }
 
-    // Summed as `u128`: a coordinate is a `u32` and every shard holds at most `2^32` members, so
-    // a per-axis sum over every shard cannot overflow. The division is the only floating-point
-    // step.
+    // `u128`: sums of `u32` coordinates over several shards pass a `u64`. The division is the
+    // only floating-point step.
     let (mut sx, mut sy) = (0u128, 0u128);
     let mut b = [u32::MAX, u32::MAX, 0u32, 0u32];
     for p in &positions {
@@ -184,9 +179,8 @@ mod tests {
             .unzip()
     }
 
-    /// The members one shard holds, gathered from two that split them between them, give the same
-    /// centroid, box and hull: above the reduction's floor, where the hull is dug over each cell's
-    /// representative, and below it.
+    /// Above the reduction's floor, where the hull is dug over each cell's representative, and
+    /// below it.
     #[test]
     fn positions_gathered_from_two_shards_derive_what_one_shard_holding_them_does() {
         let every = [

@@ -935,18 +935,13 @@ impl ArtifactRows {
 }
 
 /// The containment test over every side of a request: the rank of the first content whose
-/// generating set the viewer holds entirely, or why there is none. Containment is
-/// `|G ∩ M| == |G|`, not a coverage fraction: what decides is which documents, never how many.
-///
-/// `declared` is each rank's `|G|` in entity space, from the durable record. Each side is one
-/// shard's form: `size(side, rank)` is how many of the set's rows it holds, and
-/// `holds(side, rank, size)` whether the viewer holds every one of them, or `None` where that
-/// side cannot answer, which ends the test with `None`. A rank is served only where the sides'
-/// sizes sum to the declared size and every side's slice is held whole, so the viewer's holdings
-/// sum to it too: a set that lost members in projection, or whose members lie in a side the
-/// request left out, is contained by nobody, and a slice with no member of the set adds nothing
-/// to either sum. Every side is asked, held or not, so a rank costs the same whichever side fails
-/// it.
+/// generating set the viewer holds entirely. Containment is `|G ∩ M| == |G|`, not a coverage
+/// fraction. `declared` is each rank's `|G|` from the durable record; `size(side, rank)` is how
+/// many of the set's rows a side holds, and `holds(side, rank, size)` whether the viewer holds them
+/// all, or `None` where that side cannot answer, which ends the test with `None`. A rank is served
+/// only where the sizes sum to `declared` and every side is held whole, so a set that lost members
+/// in projection, or lies partly in a side left out, is contained by nobody. Every side is asked,
+/// so a rank costs the same whichever side fails it.
 pub fn satisfied_rank_over(
     declared: &[u64],
     layer_declares_content: bool,
@@ -963,16 +958,13 @@ pub fn satisfied_rank_over(
             Containment::NothingToContain
         });
     }
-    let mut sizes = Vec::with_capacity(sides);
     for (rank, declared) in declared.iter().enumerate() {
-        sizes.clear();
-        sizes.extend((0..sides).map(|side| size(side, rank)));
-        if sizes.iter().sum::<u64>() != *declared {
+        if (0..sides).map(|side| size(side, rank)).sum::<u64>() != *declared {
             continue;
         }
         let mut whole = true;
-        for (side, size) in sizes.iter().enumerate() {
-            whole &= holds(side, rank, *size)?;
+        for side in 0..sides {
+            whole &= holds(side, rank, size(side, rank))?;
         }
         if whole {
             return Some(Containment::Satisfied(rank as u32));
@@ -1127,8 +1119,6 @@ mod tests {
         );
     }
 
-    /// **A partition with no entry at a rank sends its side back to the mask**, every rank of the
-    /// ordinal, and the answer is the mask's.
     #[test]
     fn a_partition_with_no_entry_at_a_rank_is_answered_from_the_mask() {
         // Rank 0 lost a member in projection, so the test reaches rank 1, which the partition

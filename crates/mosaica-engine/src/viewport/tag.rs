@@ -39,21 +39,13 @@ pub(super) enum Tagging {
     None,
 }
 
-/// One served point, as its tag is read: its row, the segment holding it, by its place in the
-/// view's segments, its shard's side, by its place among the view's sides, and its entry in that
-/// segment's bands where the band route served it.
+/// One served point, as its tag is read: its row in its shard, the segment and the side holding
+/// it, and its entry in that segment's bands where the band route served it.
 pub(super) struct TaggedPoint {
-    row: ShardRow,
+    row: u32,
     segment: usize,
-    side: usize,
+    place: usize,
     entry: Option<u32>,
-}
-
-impl TaggedPoint {
-    /// The point's row in its own shard's row space.
-    pub(super) fn local_row(&self) -> u32 {
-        self.row.row().raw()
-    }
 }
 
 /// Every point the emit pass will gather, in its order.
@@ -68,9 +60,9 @@ pub(super) fn tagged_points(
                 .segment_of(row)
                 .expect("a selected row lies in the view's row space");
             points.push(TaggedPoint {
-                row,
+                row: row.row().raw(),
                 segment,
-                side: segments.segments[segment].place,
+                place: segments.segments[segment].place,
                 entry: ts.entries.as_ref().map(|entries| entries[i]),
             });
         }
@@ -88,12 +80,12 @@ pub(super) fn membership_columns(
 ) -> Vec<MembershipColumn> {
     let mut by_side: Vec<Vec<usize>> = vec![Vec::new(); sides];
     for (i, point) in points.iter().enumerate() {
-        by_side[point.side].push(i);
+        by_side[point.place].push(i);
     }
     let mut columns: Vec<MembershipColumn> = Vec::new();
-    for (side, at) in by_side.iter().enumerate().filter(|(_, at)| !at.is_empty()) {
-        let rows: Vec<u32> = at.iter().map(|&i| points[i].local_row()).collect();
-        let resolved = Resolved::new(rows.clone(), layers.iter().copied(), side);
+    for (place, at) in by_side.iter().enumerate().filter(|(_, at)| !at.is_empty()) {
+        let rows: Vec<u32> = at.iter().map(|&i| points[i].row).collect();
+        let resolved = Resolved::new(rows.clone(), layers.iter().copied(), place);
         for column in resolved.columns_for(&rows) {
             let held = match columns.iter().position(|held| held.layer == column.layer) {
                 Some(held) => held,
@@ -144,12 +136,12 @@ impl LevelLabels {
         match &self.rows {
             RowLabels::Column => {
                 if let Some(column) = column {
-                    column.for_each_label(point.local_row(), |label| out.push(label));
+                    column.for_each_label(point.row, |label| out.push(label));
                 }
                 true
             }
-            RowLabels::Pack(pack) if point.local_row() < pack.rows() => {
-                let label = pack.label(point.local_row() as usize);
+            RowLabels::Pack(pack) if point.row < pack.rows() => {
+                let label = pack.label(point.row as usize);
                 if label != ROW_COLUMN_HOLE {
                     out.push(label);
                 }
@@ -294,11 +286,11 @@ impl Engine {
                 .sides
                 .iter()
                 .enumerate()
-                .map(|(at, side)| {
+                .map(|(place, side)| {
                     mask.read_leaf(side.shard.id())?;
-                    let (shard, version) = (side.shard.id(), forms.version(at));
+                    let (shard, version) = (side.shard.id(), forms.version(place));
                     Some(LevelLabels {
-                        rows: if forms.rows[at].column().is_some() {
+                        rows: if forms.rows[place].column().is_some() {
                             RowLabels::Column
                         } else {
                             match self.artifact_projections.level_labels(
@@ -324,7 +316,7 @@ impl Engine {
                                     version,
                                     base,
                                 )
-                                .map(|copy| (segments.start_of(at), copy))
+                                .map(|copy| (segments.start_of(place), copy))
                         }),
                     })
                 })
@@ -383,8 +375,8 @@ impl Engine {
             for &i in &open {
                 held.clear();
                 let point = &points[i];
-                let read = labels[point.side].as_ref().is_some_and(|labels| {
-                    labels.read(forms.rows[point.side].column(), point, &mut held)
+                let read = labels[point.place].as_ref().is_some_and(|labels| {
+                    labels.read(forms.rows[point.place].column(), point, &mut held)
                 });
                 if !read {
                     unread.push(i);
@@ -399,12 +391,12 @@ impl Engine {
                 // `(point, label)` for every membership an unread point's row holds, found in its
                 // own side.
                 let mut found: Vec<(usize, u32)> = Vec::new();
-                for (side, rows) in forms.rows.iter().enumerate() {
+                for (place, rows) in forms.rows.iter().enumerate() {
                     // Each unread point's row in this side, ascending, beside the point it is.
                     let mut at: Vec<(u32, usize)> = unread
                         .iter()
-                        .filter(|&&i| points[i].side == side)
-                        .map(|&i| (points[i].local_row(), i))
+                        .filter(|&&i| points[i].place == place)
+                        .map(|&i| (points[i].row, i))
                         .collect();
                     if at.is_empty() {
                         continue;

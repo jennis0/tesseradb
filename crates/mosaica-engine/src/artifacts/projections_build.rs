@@ -30,8 +30,7 @@ impl ArtifactProjections {
     //
     // Every argument is a thing a level's derived form is *of*: where it came from, what it is
     // built from, which form it is served in, and what the containment partition needs beside
-    // them. `store` is `shard`'s slice of the level's memberships; `records` holds the level's
-    // whole records, which every shard's form shares.
+    // them. `store` is `shard`'s slice; `records` holds the level's whole records.
     #[allow(clippy::too_many_arguments)]
     pub fn get_or_build(
         &self,

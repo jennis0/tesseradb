@@ -46,9 +46,8 @@ pub(crate) fn sweep_other_identities(root: &Path, keep: &[[u8; 32]]) {
     }
 }
 
-/// What one fragment's counts are a function of, as a file stem. The layer is named by its space,
-/// not its name: a layer registered again under a dropped one's name can reach, after a restart, a
-/// level version the dropped one wrote.
+/// What one fragment's counts are a function of, as a file stem, the layer named by its space as
+/// [`super::cache::FragmentKey`] names it.
 pub(crate) fn counts_stem(
     terms: &[u8; 32],
     view: &str,

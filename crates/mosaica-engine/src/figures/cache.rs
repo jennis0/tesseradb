@@ -112,6 +112,7 @@ pub(crate) struct FieldTailKey {
     pub view: String,
     pub column: String,
     pub kind: u8,
+    /// [`MaskIdentity::shards`].
     pub shards: [u8; 32],
 }
 
@@ -141,8 +142,7 @@ pub(crate) struct FragmentKey {
     pub geometry: Geometry,
 }
 
-/// One request's composed mask in one shard, named by every input to it: `shards` is
-/// [`MaskIdentity::shards`].
+/// One request's composed mask in one shard, named by every input to it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ExactKey {
     pub shard: mosaica_types::ShardId,
@@ -152,6 +152,7 @@ pub(crate) struct ExactKey {
     pub level: u32,
     pub level_version: u64,
     pub geometry: Geometry,
+    /// [`MaskIdentity::shards`].
     pub shards: [u8; 32],
 }
 
@@ -172,7 +173,7 @@ pub(crate) struct DenyKey {
 }
 
 /// What one session's tail in one shard is a function of: its rows above the fragment's base rows
-/// and the labels the column gives them. `shards` is [`MaskIdentity::shards`].
+/// and the labels the column gives them.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct TailKey {
     pub shard: mosaica_types::ShardId,
@@ -182,6 +183,7 @@ pub(crate) struct TailKey {
     pub level: u32,
     pub column: u64,
     pub level_version: u64,
+    /// [`MaskIdentity::shards`].
     pub shards: [u8; 32],
 }
 

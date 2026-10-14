@@ -74,11 +74,9 @@
 //! record declares empty — a cardinality of zero — is corpus-independent content and is satisfied
 //! by everyone, which is what `ContentSet::generated_from` documents such a set to mean.
 //!
-//! **Each expression carries the size of the set it was composed over**, and an answer holds only
-//! where that size is the caller's slice's. A shard's partition is composed over its slice of each
-//! set, so a slice with no member has no clause and would otherwise answer for the whole set: a
-//! rank is contained only where the slices' sizes sum to the record's and every slice is
-//! satisfied.
+//! **Each expression carries the size of the set it was composed over**, and answers only where
+//! that size is the caller's. A shard's partition is composed over its slice of each set, so a
+//! slice with no member has no clause and would otherwise answer for the whole set.
 
 use std::cell::RefCell;
 use std::io;
@@ -344,19 +342,12 @@ impl ContainmentPartition {
     /// served; the inversion has its own cases, and `tests/artifact_containment.rs` drives both
     /// together against the masked-count route.
     pub(crate) fn of_clauses(ordinals: &[&[&[&[u32]]]]) -> Self {
-        let mut builder = mosaica_store::derived::ContainmentBuilder::new();
-        for (ordinal, ranks) in ordinals.iter().enumerate() {
-            builder.push(
-                ordinal as u32,
-                ranks.iter().map(|clauses| {
-                    mosaica_store::derived::encode_expression(
-                        clauses.len() as u32,
-                        clauses.to_vec(),
-                    )
-                }),
-            );
-        }
-        Self::of_bytes(builder.finish())
+        let sized: Vec<Vec<SizedSet<'_>>> = ordinals
+            .iter()
+            .map(|ranks| ranks.iter().map(|clauses| (clauses.len() as u32, *clauses)).collect())
+            .collect();
+        let sized: Vec<&[SizedSet<'_>]> = sized.iter().map(Vec::as_slice).collect();
+        Self::of_sets(&sized)
     }
 }
 
@@ -391,10 +382,8 @@ pub struct ContainmentAnswers<'a> {
 }
 
 impl ContainmentAnswers<'_> {
-    /// Whether this principal satisfies the expression at `(ordinal, rank)`, and the expression
-    /// is over exactly `size` members: the caller's slice of the set. A shard's expression is over
-    /// its slice of the set, so a caller summing shards passes each shard's slice's size and
-    /// compares the sum with the record's cardinality itself.
+    /// Whether this principal satisfies the expression at `(ordinal, rank)` and the expression is
+    /// over exactly `size` members, the caller's slice of the set.
     ///
     /// `None` where the partition has no entry there, which is what puts the caller back on the
     /// masked-count route rather than answering from a structure that does not cover the case.
@@ -486,9 +475,8 @@ mod tests {
         assert!(holds(&partition, 0, &[]));
     }
 
-    /// **A slice of a set answers nothing on its own.** An expression over fewer members than the
-    /// record declares — a shard's part of a set, or no part at all — is not contained whatever
-    /// the viewer holds, so containment is concluded only where the slices sum to the set.
+    /// An expression over fewer members than the record declares — a shard's part of a set, or
+    /// none of it — is not contained, whatever the viewer holds.
     #[test]
     fn an_expression_over_part_of_a_set_contains_nobody() {
         let mut builder = mosaica_store::derived::ContainmentBuilder::new();

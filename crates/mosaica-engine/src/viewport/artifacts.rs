@@ -338,7 +338,6 @@ impl Engine {
             level,
             crate::figures::Geometry::declared(&layer.declaration),
         )?;
-        // The same containment the viewport builds, from the same partitions.
         let ctx = DependencyContext::new(served, mask, &reachable);
         let dependency_served = self.dependency_gate(&ctx);
         let labels = self.label_gate(session, &layer.declaration);
@@ -707,12 +706,10 @@ impl Engine {
         let Some(entity) = record.filter(|entity| *entity == attachment.entity) else {
             return false;
         };
-        // The target's own membership and each side's figures, evaluated the same way its
-        // serving route would, under the same keys the viewport reads. A prerequisite asks only
-        // whether the target is *served*: never for its geometry, and never for the sum of the
-        // sides' figures, which the verdict does not read.
+        // The target's own membership and figures, as its serving route reads them; a
+        // prerequisite never asks for geometry.
         let mut forms = self.level_forms(ctx.served, &layer, attachment.level);
-        let counted = self.count_sides(
+        let counted = self.count_level(
             ctx.served,
             ctx.mask,
             layer.space,
@@ -843,8 +840,8 @@ impl Engine {
                     matched_sides(&level.forms, sets, |set| set.highlighted_here.as_ref());
                 let bits = |ordinal: u32| -> FilterBits {
                     (
-                        matches_any(&level.forms, &matched, ordinal),
-                        matches_any(&level.forms, &highlighted, ordinal),
+                        matches_any(&level.forms, matched.as_deref(), ordinal),
+                        matches_any(&level.forms, highlighted.as_deref(), ordinal),
                     )
                 };
                 self.assemble_level(&level, passing, &cut, &bits, &mut walked)?;
@@ -947,8 +944,6 @@ impl Engine {
     ) -> crate::artifacts::ArtifactView<'a, crate::compose::EffectiveMask> {
         let (layer, pass) = (level.layer, level.layer.pass);
         let served = pass.served;
-        // The counts are kept on the level beside this, so derived geometry reads the same
-        // accumulation.
         level.forms.view(
             served,
             pass.mask,
@@ -1014,9 +1009,7 @@ impl Engine {
     }
 
     /// **Stage two: the verdict, for every candidate the viewport touches** — the ordinals that
-    /// pass, ascending, with the two outputs their verdict carried. Each side proposes the
-    /// candidates its form holds a visible member of in the tiles; each is then given the verdict
-    /// over every side.
+    /// pass, ascending, with the two outputs their verdict carried.
     fn gate_candidates(&self, level: &LevelPass<'_>, sets: &[ViewportSets<'_>]) -> Vec<Passing> {
         let view = self.level_view(level);
         // Every candidate is tested before any is cut: a loop that decided and pruned in one
@@ -1381,8 +1374,8 @@ pub(super) struct LevelPass<'a> {
 /// The row-space sets one response, or one tile of it, is answered over in one side, composed
 /// once for every layer in it.
 pub(super) struct ViewportSets<'a> {
-    /// The side's place among the view's sides.
-    pub(super) side: usize,
+    /// Index into `served.sides`.
+    pub(super) place: usize,
     /// The viewer's leaf in the side.
     pub(super) mask: &'a crate::compose::EffectiveMask,
     /// The tiles as one masked set — the candidate generator every level walks.
@@ -1391,9 +1384,9 @@ pub(super) struct ViewportSets<'a> {
     pub(super) highlighted_here: Option<croaring::Bitmap>,
 }
 
-/// The rows the request's tiles span in each side the request reads, by the side's place among
-/// the view's sides: the spans [`Tiling::domain_in`] gives the side's filter, so the two cannot
-/// disagree about which rows a request covers. A side where the tiles span no row is not here.
+/// The rows the request's tiles span in each side the request reads: the spans
+/// [`Tiling::domain_in`] gives the side's filter, so the two cannot disagree about which rows a
+/// request covers. A side where the tiles span no row is not here.
 pub(super) fn tile_rows(
     served: &ServedView<'_>,
     mask: &ShardedMask,
@@ -1423,12 +1416,12 @@ pub(super) fn viewport_sets<'a>(
     mask: &'a ShardedMask,
 ) -> Vec<ViewportSets<'a>> {
     rows.iter()
-        .filter_map(|(at, rows)| {
-            let mask = served.leaf(mask, *at)?;
+        .filter_map(|(place, rows)| {
+            let mask = served.leaf(mask, *place)?;
             // Hoisted out of every layer and every artifact, built once per request.
             let viewport = crate::tile_index::Viewport::compose(rows, mask);
             Some(ViewportSets {
-                side: *at,
+                place: *place,
                 mask,
                 // `None` is an unfiltered request — no column on the wire.
                 matched_here: mask.matched_rows(viewport.here()),
@@ -1451,12 +1444,12 @@ pub(super) fn present_in(
 ) -> croaring::Bitmap {
     let mut present = croaring::Bitmap::new();
     for set in sets {
-        let rows: &crate::artifacts::ArtifactRows = &forms.rows[set.side];
+        let rows: &crate::artifacts::ArtifactRows = &forms.rows[set.place];
         // Replaces a sweep over every ordinal: an artifact in no node the viewport touches has no
         // visible member, so skipping it withholds nothing. Holes and artifacts with no projected
         // membership stay live on the identifier route, which walks no index. Or, on a row-major
         // level, a scan over the viewport intersected with the mask.
-        let candidates = rows.candidacy(&set.viewport, forms.counts[set.side].as_deref());
+        let candidates = rows.candidacy(&set.viewport, forms.side_figures[set.place].as_deref());
         for ordinal in candidates.iter() {
             if present.contains(ordinal) || !admits_label(ordinal) {
                 continue;
@@ -1480,7 +1473,7 @@ pub(super) fn matched_sides<'s>(
 ) -> Option<Vec<(usize, crate::artifacts::Matched<'s>)>> {
     let sides: Vec<_> = sets
         .iter()
-        .filter_map(|set| Some((set.side, forms.rows[set.side].matched(admitted(set)?))))
+        .filter_map(|set| Some((set.place, forms.rows[set.place].matched(admitted(set)?))))
         .collect();
     (!sides.is_empty()).then_some(sides)
 }
@@ -1488,13 +1481,13 @@ pub(super) fn matched_sides<'s>(
 /// Whether the artifact at `ordinal` holds a member [`matched_sides`] admits in any side.
 pub(super) fn matches_any(
     forms: &crate::layer_read::LevelForms,
-    matched: &Option<Vec<(usize, crate::artifacts::Matched<'_>)>>,
+    matched: Option<&[(usize, crate::artifacts::Matched<'_>)]>,
     ordinal: u32,
 ) -> Option<bool> {
-    matched.as_ref().map(|sides| {
+    matched.map(|sides| {
         sides
             .iter()
-            .any(|(at, matched)| forms.rows[*at].matches(matched, ordinal))
+            .any(|(place, matched)| forms.rows[*place].matches(matched, ordinal))
     })
 }
 
@@ -1820,10 +1813,10 @@ mod tests {
         let rows: Vec<croaring::Bitmap> =
             shards.iter().map(|(.., spans)| spans_rows(spans)).collect();
         let sets: Vec<ViewportSets<'_>> = (0..shards.len())
-            .map(|side| ViewportSets {
-                side,
-                mask: &leaves[side],
-                viewport: crate::tile_index::Viewport::compose(&rows[side], &leaves[side]),
+            .map(|place| ViewportSets {
+                place,
+                mask: &leaves[place],
+                viewport: crate::tile_index::Viewport::compose(&rows[place], &leaves[place]),
                 matched_here: None,
                 highlighted_here: None,
             })
@@ -1833,9 +1826,6 @@ mod tests {
             .collect()
     }
 
-    /// The candidates a cut is taken over, over two shards: each shard proposes from its own
-    /// form and probes against its own leaf, and an artifact is present where either finds a
-    /// visible member in the tiles, as in one shard holding both shards' rows.
     #[test]
     fn a_levels_candidates_over_two_shards_are_the_union_of_each_shards() {
         // Ordinal 0 is seen in the tiles only in the first shard, 1 only in the second, 2 in

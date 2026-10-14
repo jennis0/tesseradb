@@ -68,9 +68,9 @@ impl CacheWeight for Held {
 
 /// Reads one field's values in one request's view.
 pub(crate) trait FieldRead: Sync {
-    /// The tally of `rows`' values in the side at `at` among the view's sides, keeping the `keep`
-    /// most extreme on each side with their rows.
-    fn tally(&self, at: usize, rows: &Bitmap, keep: usize) -> Result<FieldTally>;
+    /// The tally of `rows`' values in the side at `place`, keeping the `keep` most extreme on each
+    /// side with their rows.
+    fn tally(&self, place: usize, rows: &Bitmap, keep: usize) -> Result<FieldTally>;
 }
 
 /// What a request subtracts from a fragment's tally: the tally of its denied base rows.
@@ -102,7 +102,7 @@ impl CacheWeight for FieldLeft {
 }
 
 /// A field's figures over one request's visible set in one view.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct FieldFigures {
     /// The rows of the visible set.
     pub(crate) items: u64,
@@ -117,26 +117,18 @@ pub(crate) struct FieldFigures {
 }
 
 impl FieldFigures {
-    /// Every shard's figures together: the rows, those with no value, the count and the sum add,
-    /// and the smallest and largest are the extremes across shards.
+    /// Every shard's figures together.
     fn combined(sides: impl IntoIterator<Item = FieldFigures>) -> FieldFigures {
-        let mut sides = sides.into_iter();
-        let first = sides.next().unwrap_or(FieldFigures {
-            items: 0,
-            none: 0,
-            count: 0,
-            sum: Sum::default(),
-            min: None,
-            max: None,
-        });
-        sides.fold(first, |a, b| FieldFigures {
-            items: a.items + b.items,
-            none: a.none + b.none,
-            count: a.count + b.count,
-            sum: a.sum.plus(&b.sum),
-            min: extreme(a.min, b.min, true),
-            max: extreme(a.max, b.max, false),
-        })
+        sides
+            .into_iter()
+            .fold(FieldFigures::default(), |a, b| FieldFigures {
+                items: a.items + b.items,
+                none: a.none + b.none,
+                count: a.count + b.count,
+                sum: a.sum.plus(&b.sum),
+                min: extreme(a.min, b.min, true),
+                max: extreme(a.max, b.max, false),
+            })
     }
 }
 
@@ -228,24 +220,26 @@ impl Engine {
         kind: u8,
         read: &dyn FieldRead,
     ) -> Result<FieldFigures> {
-        let mut sides = Vec::new();
-        for (at, _, leaf) in served.filtered_sides(mask) {
-            sides.push(self.side_field_figures(served, at, leaf, column, kind, read)?);
-        }
+        let sides = served
+            .filtered_sides(mask)
+            .map(|(place, _, leaf)| {
+                self.side_field_figures(served, place, leaf, column, kind, read)
+            })
+            .collect::<Result<Vec<_>>>()?;
         Ok(FieldFigures::combined(sides))
     }
 
-    /// The figures of `column` over the visible set of the side at `at`, composed as `mask`.
+    /// The figures of `column` over the visible set of the side at `place`, composed as `mask`.
     fn side_field_figures(
         &self,
         served: &ServedView<'_>,
-        at: usize,
+        place: usize,
         mask: &EffectiveMask,
         column: &str,
         kind: u8,
         read: &dyn FieldRead,
     ) -> Result<FieldFigures> {
-        let side = &served.sides[at];
+        let side = &served.sides[place];
         let base_rows = side.data.row_space.base_rows();
         let identity = served.mask_identity;
         let (fragment, minus, plus, _) = mask.parts();
@@ -256,7 +250,7 @@ impl Engine {
             column: column.to_string(),
             kind,
         };
-        let base = self.field_base(served, at, &key, fragment, base_rows, read)?;
+        let base = self.field_base(served, place, &key, fragment, base_rows, read)?;
 
         let mut subtracted = minus.clone();
         subtracted.remove_range(base_rows..);
@@ -275,7 +269,7 @@ impl Engine {
                     .field_denies
                     .get_or_try_build_waiting(deny_key.clone(), &cancel, || {
                         Ok::<_, EngineError>(FieldDeny {
-                            tally: read.tally(at, &subtracted, 0)?,
+                            tally: read.tally(place, &subtracted, 0)?,
                             rows: subtracted,
                         })
                     })
@@ -304,7 +298,9 @@ impl Engine {
                 let tail = self
                     .figures
                     .field_tails
-                    .get_or_try_build_waiting(key, &cancel, || read.tally(at, &above, 1).map(Held))
+                    .get_or_try_build_waiting(key, &cancel, || {
+                        read.tally(place, &above, 1).map(Held)
+                    })
                     .map_err(super::waited)?;
                 Some(tail)
             }
@@ -326,7 +322,7 @@ impl Engine {
                         .fetch_add(1, Ordering::Relaxed);
                 }
                 self.field_left(
-                    served, at, deny_key, deny, fragment, base_rows, read, extremes,
+                    served, place, deny_key, deny, fragment, base_rows, read, extremes,
                 )
             },
         )
@@ -337,13 +333,13 @@ impl Engine {
     fn field_base(
         &self,
         served: &ServedView<'_>,
-        at: usize,
+        place: usize,
         key: &FieldKey,
         fragment: &Bitmap,
         base_rows: u32,
         read: &dyn FieldRead,
     ) -> Result<Arc<Held>> {
-        let stored = served.sides[at].data.field_tallies.as_deref();
+        let stored = served.sides[place].data.field_tallies.as_deref();
         let mut failed = None;
         let held = self.figures.get_or_build_in(
             &self.figures.fields,
@@ -377,7 +373,7 @@ impl Engine {
                     .counters
                     .field_fills
                     .fetch_add(1, Ordering::Relaxed);
-                walk(fragment, None, base_rows, at, read, build, &mut failed).map(Held)
+                walk(fragment, None, base_rows, place, read, build, &mut failed).map(Held)
             },
         );
         match (held, failed) {
@@ -394,7 +390,7 @@ impl Engine {
     fn field_left(
         &self,
         served: &ServedView<'_>,
-        at: usize,
+        place: usize,
         deny_key: &FieldDenyKey,
         deny: &Arc<FieldDeny>,
         fragment: &Bitmap,
@@ -426,7 +422,7 @@ impl Engine {
                     fragment,
                     Some(&deny.rows),
                     base_rows,
-                    at,
+                    place,
                     read,
                     build,
                     &mut failed,
@@ -450,14 +446,14 @@ impl Engine {
     }
 }
 
-/// The tally of the fragment's base rows less `less` in the side at `at`, keeping [`RESERVE`]
+/// The tally of the fragment's base rows less `less` in the side at `place`, keeping [`RESERVE`]
 /// values on each side, read a piece at a time with `build` giving way between pieces. `None`
 /// where every caller has gone, or where a read failed, which `failed` then holds.
 fn walk(
     fragment: &Bitmap,
     less: Option<&Bitmap>,
     base_rows: u32,
-    at: usize,
+    place: usize,
     read: &dyn FieldRead,
     build: &Build<'_>,
     failed: &mut Option<EngineError>,
@@ -474,7 +470,7 @@ fn walk(
         if rows.is_empty() {
             continue;
         }
-        match read.tally(at, &rows, RESERVE) {
+        match read.tally(place, &rows, RESERVE) {
             Ok(piece) => tally.add(&piece),
             Err(e) => {
                 *failed = Some(e);
@@ -531,10 +527,8 @@ mod tests {
         .unwrap()
     }
 
-    /// Two shards against one shard holding both rows, under the same deny. Each shard's extremes
-    /// are its first kept value the deny does not hold, or a walk's where the deny holds its whole
-    /// reserve, taken against its own rows: the second shard's row 2, or 5, is not denied though
-    /// the first's is. The smallest and largest are the extremes across the shards' own.
+    /// Each shard's extremes are taken against its own rows and deny: the second shard's row 2, or
+    /// 5, is not denied though the first's is.
     #[test]
     fn field_figures_over_two_shards_are_one_shards_holding_both() {
         let shifted = |values: &[(i128, u32)], by: u32| -> Vec<(i128, u32)> {

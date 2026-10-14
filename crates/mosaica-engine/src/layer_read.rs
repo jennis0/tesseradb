@@ -82,11 +82,10 @@ impl Engine {
         Ok(layer)
     }
 
-    /// A filter's rows over the whole view in each side, before the mask, by the side's place
-    /// among the view's sides, and the coarsest verdict its region leaves reached. Evaluated in
-    /// each side the viewer sees anything in, or where they see nothing, in the first: a side not
-    /// evaluated holds no row. A leaf with an entity-space route is projected whole; one over a
-    /// render-only column is scanned over every row of the view.
+    /// A filter's rows over the whole view in each side, indexed like `served.sides`, before the
+    /// mask, and the coarsest verdict its region leaves reached. A side outside
+    /// [`ShardedMask::filtered_leaves`] holds no row. A leaf with an entity-space route is
+    /// projected whole; one over a render-only column is scanned over every row of the view.
     pub(crate) fn whole_view_filter_rows(
         &self,
         served: &ServedView<'_>,
@@ -97,7 +96,7 @@ impl Engine {
         let resolved = ResolvedLeaves::new(mask);
         let mut rows = vec![Bitmap::new(); served.sides.len()];
         let mut region = None;
-        for (at, side, _) in served.filtered_sides(mask) {
+        for (place, side, _) in served.filtered_sides(mask) {
             let total_rows = side.data.row_space.total_rows();
             let (side_rows, verdict) =
                 self.route_filters(served, side, &resolved, cancel, |route| {
@@ -122,7 +121,7 @@ impl Engine {
                         }
                     })
                 })?;
-            rows[at] = side_rows;
+            rows[place] = side_rows;
             region = RegionVerdict::coarsest(region, verdict);
         }
         Ok((rows, region))
@@ -166,7 +165,7 @@ impl Engine {
         let (rows, versions): (Vec<_>, Vec<_>) = built.into_iter().unzip();
         LevelForms {
             shards: served.sides.iter().map(|side| side.shard.id()).collect(),
-            counts: vec![None; rows.len()],
+            side_figures: vec![None; rows.len()],
             rows,
             versions,
             lineage_version,
@@ -174,10 +173,10 @@ impl Engine {
         }
     }
 
-    /// `level` of `layer` in `shard`'s rows for `view`: its row form, built from the shard's slice
-    /// of the level's memberships, and the version of the level the form is of, not the store's:
-    /// they differ between an accepted write and the tick that publishes it, and counts are filed
-    /// under the form's. `written` is the store the live state lends.
+    /// `level` of `layer` in `shard`'s rows for `view`: its row form, built from the shard's slice,
+    /// and the version of the level the form is of, which counts are filed under. That version lags
+    /// the store's between an accepted write and the tick that publishes it. `written` is the store
+    /// the live state lends.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn form_in(
         &self,
@@ -221,36 +220,11 @@ impl Engine {
     }
 
     /// Count `forms` under `mask` in each side the request reads ([`ShardedMask::read_leaf`]),
-    /// each side's figures for that side's masked counts, and nothing combined. Decided by the
-    /// level's layout, never the request: a form with no row column counts one artifact at a time
-    /// and has no figures. `geometry` also accumulates the visible members' positions on a level
-    /// served from its column alone.
-    pub(crate) fn count_sides(
-        &self,
-        served: &ServedView<'_>,
-        mask: &ShardedMask,
-        space: mosaica_types::LayerSpace,
-        level: u32,
-        forms: &mut LevelForms,
-        geometry: Geometry,
-    ) -> Result<()> {
-        for (at, side, leaf) in served.filtered_sides(mask) {
-            forms.counts[at] = self.figures(
-                served,
-                side,
-                space,
-                level,
-                forms.versions[at],
-                &forms.rows[at],
-                leaf,
-                geometry,
-            )?;
-        }
-        Ok(())
-    }
-
-    /// [`Self::count_sides`], and the sides' figures summed where every side the request reads
-    /// has them ([`combined`]).
+    /// each side's figures for that side's masked counts, and the sides' figures summed where
+    /// every side the request reads has them ([`combined`]). Decided by the level's layout, never
+    /// the request: a form with no row column counts one artifact at a time and has no figures.
+    /// `geometry` also accumulates the visible members' positions on a level served from its
+    /// column alone.
     pub(crate) fn count_level(
         &self,
         served: &ServedView<'_>,
@@ -260,13 +234,24 @@ impl Engine {
         forms: &mut LevelForms,
         geometry: Geometry,
     ) -> Result<()> {
-        self.count_sides(served, mask, space, level, forms, geometry)?;
+        for (place, side, leaf) in served.filtered_sides(mask) {
+            forms.side_figures[place] = self.figures(
+                served,
+                side,
+                space,
+                level,
+                forms.versions[place],
+                &forms.rows[place],
+                leaf,
+                geometry,
+            )?;
+        }
         let read: Vec<bool> = forms
             .shards
             .iter()
             .map(|shard| mask.read_leaf(*shard).is_some())
             .collect();
-        forms.figures = combined(&forms.counts, &read);
+        forms.figures = combined(&forms.side_figures, &read);
         Ok(())
     }
 
@@ -365,7 +350,7 @@ pub(crate) fn check_level(
 /// Every side's figures summed, `read` saying which sides the request reads, or `None` where a side
 /// it reads has none: each shard's form is built from its own slice and takes its own layout, so a
 /// shard whose form has no column, which counts one artifact at a time, would otherwise drop out of
-/// every sum. A side left out adds nothing.
+/// every sum.
 fn combined(counts: &[Option<Arc<Figures>>], read: &[bool]) -> Option<LevelFigures> {
     let mut sides = Vec::with_capacity(counts.len());
     for (counts, read) in counts.iter().zip(read) {
@@ -378,13 +363,24 @@ fn combined(counts: &[Option<Arc<Figures>>], read: &[bool]) -> Option<LevelFigur
     (!sides.is_empty()).then(|| LevelFigures::of(sides))
 }
 
+/// Per ordinal, the sum of each side's count in `sides`: a filtered histogram over every shard, in
+/// `u64`, past what one shard's `u32` holds.
+fn summed_counts(sides: &[Vec<u32>]) -> Vec<u64> {
+    let mut out = vec![0u64; sides.iter().map(Vec::len).max().unwrap_or(0)];
+    for side in sides {
+        for (sum, count) in out.iter_mut().zip(side) {
+            *sum += u64::from(*count);
+        }
+    }
+    out
+}
+
 /// One level of a layer in every side of a request's view: each side's row form, and the masked
 /// counts the request took in the sides it reads.
 pub(crate) struct LevelForms {
     /// Each side's shard, in the order of the view's sides.
     shards: Vec<mosaica_types::ShardId>,
-    /// Each side's form: its shard's slice of the level's memberships, over the level's records,
-    /// which every side's form shares.
+    /// Each side's form of the level.
     pub(crate) rows: Vec<Arc<ArtifactRows>>,
     /// The version of the level each side's form is of.
     versions: Vec<u64>,
@@ -392,7 +388,7 @@ pub(crate) struct LevelForms {
     pub(crate) lineage_version: u64,
     /// Each side's masked counts, where the level is served from a column and the request reads
     /// the side; `None` elsewhere, and everywhere until [`Engine::count_level`].
-    pub(crate) counts: Vec<Option<Arc<Figures>>>,
+    pub(crate) side_figures: Vec<Option<Arc<Figures>>>,
     /// Every side's counts together, where every side the request reads has some
     /// ([`Engine::count_level`]).
     pub(crate) figures: Option<LevelFigures>,
@@ -406,7 +402,7 @@ impl LevelForms {
             .map(|raw| mosaica_types::ShardId::new(raw).expect("a shard id"))
             .collect();
         LevelForms {
-            counts: vec![None; rows.len()],
+            side_figures: vec![None; rows.len()],
             versions: vec![0; rows.len()],
             rows: rows.into_iter().map(Arc::new).collect(),
             shards,
@@ -415,9 +411,8 @@ impl LevelForms {
         }
     }
 
-    /// The first side's form, which answers for what every side's form holds alike: the level's
-    /// length and slots, and each artifact's record, attachment, parents and labels. Not for its
-    /// layout: each side's form takes its own, with or without a column, holding its rows or not.
+    /// The first side's form, which answers for what every side's form shares: the level's length,
+    /// slots and records. Not for its layout, which is each side's own.
     pub(crate) fn first(&self) -> &Arc<ArtifactRows> {
         &self.rows[0]
     }
@@ -428,9 +423,9 @@ impl LevelForms {
         self.versions[0]
     }
 
-    /// The version of the level the form of the side at `at` is of.
-    pub(crate) fn version(&self, at: usize) -> u64 {
-        self.versions[at]
+    /// The version of the level the form of the side at `place` is of.
+    pub(crate) fn version(&self, place: usize) -> u64 {
+        self.versions[place]
     }
 
     /// The one verdict over this level for `served`'s viewer under `mask`, labels tested by
@@ -446,8 +441,8 @@ impl LevelForms {
         one: bool,
     ) -> ArtifactView<'a, EffectiveMask> {
         let satisfied = served.session.satisfied();
-        ArtifactView::of(served, layer, labels, dependency_served, |at, side| {
-            let rows: &ArtifactRows = &self.rows[at];
+        ArtifactView::of(served, layer, labels, dependency_served, |place, side| {
+            let rows: &ArtifactRows = &self.rows[place];
             ArtifactSide {
                 rows,
                 mask: mask.read_leaf(side.shard.id()),
@@ -456,14 +451,14 @@ impl LevelForms {
                     true => partition.answer_for_one(satisfied),
                     false => partition.answers(satisfied),
                 }),
-                counts: self.counts[at].clone(),
+                counts: self.side_figures[place].clone(),
             }
         })
     }
 
-    /// Each side the request reads, its column and its visible rows in `filter_rows`, which holds
-    /// each side's by its place among the view's sides: what [`ReadLevel::filtered_counts`] walks.
-    /// `None` unless every side the request reads has a column.
+    /// Each side the request reads, its column and its visible rows in `filter_rows`, indexed like
+    /// `served.sides`: what [`ReadLevel::filtered_counts`] walks. `None` unless every side the
+    /// request reads has a column.
     fn filtered_inputs<'a>(
         &'a self,
         mask: &ShardedMask,
@@ -557,10 +552,10 @@ impl ReadLevel {
         )
     }
 
-    /// Every artifact's visible members in `filter_rows` over every side, `filter_rows` holding
-    /// each side's by its place among the view's sides: in each side the request reads, one walk
-    /// of `visible ∩ filter` through the side's column, which needs no per-artifact membership,
-    /// summed. `None` unless every side the request reads has a column.
+    /// Every artifact's visible members in `filter_rows` (indexed like `served.sides`) over every
+    /// side: in each side the request reads, one walk of `visible ∩ filter` through the side's
+    /// column, which needs no per-artifact membership, summed. `None` unless every side the request
+    /// reads has a column.
     pub(crate) fn filtered_counts(
         &self,
         engine: &Engine,
@@ -573,8 +568,7 @@ impl ReadLevel {
             .into_iter()
             .map(|(column, visible)| engine.pool.install(|| column.histogram_over(&visible)))
             .collect();
-        let sides: Vec<&[u32]> = sides.iter().map(Vec::as_slice).collect();
-        Some(Arc::new(LevelFigures::summed_counts(&sides)))
+        Some(Arc::new(summed_counts(&sides)))
     }
 
     /// How many of the artifact's visible members are in `filter_rows` over every side, from
@@ -618,8 +612,7 @@ mod tests {
         }))
     }
 
-    /// A shard the request reads whose form has no figures, because it counts one artifact at a
-    /// time, withholds the sum rather than dropping out of it; a shard left out adds nothing.
+    /// A shard left out adds nothing.
     #[test]
     fn a_read_shard_without_figures_withholds_the_sum() {
         let counted = |counts: Vec<u32>| Some(Arc::new(Figures::of_counts(counts)));
@@ -666,7 +659,15 @@ mod tests {
             .iter()
             .map(|(column, visible)| column.histogram_over(visible))
             .collect();
-        let sides: Vec<&[u32]> = histograms.iter().map(Vec::as_slice).collect();
-        assert_eq!(LevelFigures::summed_counts(&sides), vec![2, 2]);
+        assert_eq!(summed_counts(&histograms), vec![2, 2]);
+    }
+
+    /// The shards' filtered counts are added past what a `u32` holds.
+    #[test]
+    fn filtered_counts_are_widened_before_they_are_added() {
+        assert_eq!(
+            summed_counts(&[vec![u32::MAX, 1], vec![u32::MAX]]),
+            vec![2 * u64::from(u32::MAX), 1]
+        );
     }
 }
