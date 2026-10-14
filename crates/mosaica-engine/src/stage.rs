@@ -14,20 +14,12 @@
 //! **One walk fills every rung at or below it** ([`crate::occupancy::occupied_tiles_ladder`]), so
 //! this is one walk per `(session, view, generation)` and not one per depth.
 //!
-//! ## Where it is triggered, and why not at authorise
+//! ## Where it is triggered
 //!
 //! **A request that took θ's anchor spawns this**, carrying the geometry that request already
 //! resolved. That is the earliest point at which the ladder can be filled at all: `N_occ` must be
 //! counted over the **composed** `EffectiveMask` (**I2**), which needs the session's row
 //! projection, and a session has no row projection until its first request builds one.
-//!
-//! **Filling it at authorise instead was measured and is not landed.** It works — a cold first
-//! request at depth 3 falls from 840 ms to 285 ms at 2.33 × 10⁸ rows, because staging the ladder
-//! stages the row projection with it — and it changes two things that are not this change's to
-//! decide: a session acquires a resident row-projection entry before its first request, so decision
-//! 0044's rung-2 stale serve reaches that first request where it previously could not; and a
-//! session that authorises and never views pays a full `Permutation::project` per visible view.
-//! The figures are in `probes/2026-09-09-nocc-stage/README.md`; the ruling is the owner's.
 //!
 //! ## Why the ceiling is 12
 //!
@@ -52,10 +44,9 @@
 //! invisible to `crate::viewport::Engine::session_geometries`'s three-rung ladder and to
 //! `crate::refresh`.
 //!
-//! **It must not outlive its session.** [`crate::Engine::prune_tokens`] flips the tokens of the
-//! sessions that end, at a revoke or at the registry's expiry sweep, which is how a session that
-//! was never revoked stops filling. The deepest step neither
-//! can interrupt is one walk.
+//! **It must not outlive its session.** [`crate::Engine::prune_tokens`] flips the token of each
+//! session that ends, at a revoke or at the registry's expiry sweep. The deepest step it cannot
+//! interrupt is one walk.
 //!
 //! ## What it deliberately does not cover
 //!

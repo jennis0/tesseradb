@@ -114,8 +114,6 @@ impl Engine {
             sides.push(ServedSide {
                 shard,
                 data,
-                // Every segment of the view in the shard, each with where its rows begin in the
-                // shard's row space for the view.
                 segments: segments_with_row_bases(view, data)?,
                 denied: shard.denied_in(view)?,
                 geometry,
@@ -219,17 +217,11 @@ impl Engine {
     }
 
     /// This session's grant's fragment and row projection in every shard holding `view`, all from
-    /// one generation, resolved through three rungs: the live entries, if the background refresh
-    /// or another session with the grant produced every one; failing that, the one-generation-stale
-    /// entries, sound only after a flush, only where every shard has one, and only for a session
-    /// already served this view at no later generation; failing that, this request produces the
-    /// live entries missing, or is shed with `ProjectionBuilding` if it has been served the view
-    /// and a refresh for this generation is already building them. A response never combines a
-    /// stale shard with a live one.
-    ///
-    /// A session's first read in a view is therefore answered at the live generation: it extends
-    /// or rebases the grant's stale entries where a flush or a merge allows, and builds otherwise,
-    /// waiting on a build of the same entry already running.
+    /// one generation, by three rungs: every live entry; else every shard's one-generation-stale
+    /// entry, after a flush and only for a session already served this view at no later
+    /// generation; else the missing live entries from [`Self::derive_geometry`], or
+    /// `ProjectionBuilding` where the session was served the view and a refresh is building them.
+    /// A response never combines a stale shard with a live one.
     pub(crate) fn session_geometries<'g>(
         &self,
         session: &Session,
@@ -309,9 +301,7 @@ impl Engine {
             }
         }
 
-        // Rung 3: shed only a session already served this view, only if a refresh is building
-        // this request's own `segments_version`, and only if rung 2 found an entry to derive
-        // from. Errs towards a duplicate build over an unanswerable shed.
+        // Rung 3. Errs towards a duplicate build over an unanswerable shed.
         let sheds =
             shards
                 .iter()
@@ -377,8 +367,6 @@ impl Engine {
         let cancel = cancel.as_ref().unwrap_or(&never_cancelled);
         self.row_projection_cache
             .get_or_derive_waiting(key, predecessor, cancel, |source| {
-                // Carries the predecessor forward where a flush or a merge allows, and builds
-                // otherwise.
                 let carried = source.and_then(|source| {
                     self.pool
                         .install(|| {
@@ -455,8 +443,7 @@ impl Engine {
     /// whole ladder eagerly costs an order of magnitude more than a request needs.
     ///
     /// The mask passed in must be the unfiltered composed one: `N_occ` is an anchor, and a
-    /// filtered mask reaching it would make θ move as the viewer types. Every segment of every
-    /// side is a part of the walk, and only the shards holding a leaf are walked.
+    /// filtered mask reaching it would make θ move as the viewer types.
     pub(crate) fn occupied_tiles(
         &self,
         identity: &crate::figures::MaskIdentity,
@@ -473,15 +460,10 @@ impl Engine {
         // zooms out after reaching a depth pays nothing for the way back — a rung's value is the
         // same however it is reached.
         self.counters.occupancy_walks.fetch_add(1, Ordering::Relaxed);
-        let parts: Vec<crate::occupancy::OccupancyPart<'_>> = sides
-            .iter()
-            .flat_map(|side| {
-                let leaf = mask.leaf(side.shard.id());
-                side.segments
-                    .iter()
-                    .map(move |&(segment, base)| (leaf, segment, base))
-            })
-            .collect();
+        let parts = crate::occupancy::occupancy_parts(
+            mask,
+            sides.iter().map(|side| (side.shard.id(), &side.segments[..])),
+        );
         let ladder = crate::occupancy::occupied_tiles_ladder(&parts, depth);
         for rung in 0..depth {
             let mut rung_key = key.clone();

@@ -229,8 +229,7 @@ impl Engine {
         read: &dyn FieldRead,
     ) -> Result<FieldFigures> {
         let mut sides = Vec::new();
-        for (shard, leaf) in mask.filtered_leaves() {
-            let at = served.side_of(shard);
+        for (at, _, leaf) in served.filtered_sides(mask) {
             sides.push(self.side_field_figures(served, at, leaf, column, kind, read)?);
         }
         Ok(FieldFigures::combined(sides))
@@ -252,7 +251,7 @@ impl Engine {
         let (fragment, minus, plus, _) = mask.parts();
         let key = FieldKey {
             terms: identity.terms,
-            identity: side.fragment().identity,
+            identity: side.geometry.fragment.identity,
             view: served.name.to_string(),
             column: column.to_string(),
             kind,

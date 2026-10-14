@@ -148,9 +148,9 @@ impl<'a> PageCx<'a> {
         generation: &'a Arc<Generation>,
     ) -> PageCx<'a> {
         let reads = open
-            .mask
-            .filtered_leaves()
-            .map(|(shard, _)| open.served.side_of(shard))
+            .served
+            .filtered_sides(&open.mask)
+            .map(|(place, ..)| place)
             .collect();
         PageCx {
             engine,
@@ -182,8 +182,8 @@ impl WalkCx for PageCx<'_> {
 
     fn leaf(&self, place: usize) -> &EffectiveMask {
         self.open
-            .mask
-            .read_leaf(self.shard(place))
+            .served
+            .leaf(&self.open.mask, place)
             .expect("a side the page reads")
     }
 
@@ -205,7 +205,7 @@ impl WalkCx for PageCx<'_> {
     fn candidate(&self, place: usize) -> Result<Bitmap> {
         let side = self.side(place);
         self.engine
-            .filter_candidate(self.open.served.session, side.shard, Some(side.fragment()))
+            .filter_candidate(self.open.served.session, side.shard, Some(&side.geometry.fragment))
     }
 
     fn candidate_within(&self, place: usize, within: &Bitmap) -> Result<Bitmap> {
@@ -213,7 +213,7 @@ impl WalkCx for PageCx<'_> {
         self.engine.filter_candidate_within(
             self.open.served.session,
             side.shard,
-            Some(side.fragment()),
+            Some(&side.geometry.fragment),
             within,
         )
     }

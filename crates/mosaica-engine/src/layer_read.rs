@@ -97,9 +97,7 @@ impl Engine {
         let resolved = ResolvedLeaves::new(mask);
         let mut rows = vec![Bitmap::new(); served.sides.len()];
         let mut region = None;
-        for (shard, _) in mask.filtered_leaves() {
-            let at = served.side_of(shard);
-            let side = &served.sides[at];
+        for (at, side, _) in served.filtered_sides(mask) {
             let total_rows = side.data.row_space.total_rows();
             let (side_rows, verdict) =
                 self.route_filters(served, side, &resolved, cancel, |route| {
@@ -236,10 +234,7 @@ impl Engine {
         forms: &mut LevelForms,
         geometry: Geometry,
     ) -> Result<()> {
-        for (at, side) in served.sides.iter().enumerate() {
-            let Some(leaf) = mask.read_leaf(side.shard.id()) else {
-                continue;
-            };
+        for (at, side, leaf) in served.filtered_sides(mask) {
             forms.counts[at] = self.figures(
                 served,
                 side,

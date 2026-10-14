@@ -474,7 +474,6 @@ impl<'a> SelectionParts<'a> {
         SelectionParts { parts }
     }
 
-    /// The parts themselves.
     pub fn as_slice(&self) -> &'a [SelectionPart<'a>] {
         self.parts
     }
@@ -505,25 +504,20 @@ impl<'a> SelectionParts<'a> {
 
 /// One shard's share of a tile: the viewer's leaf over the shard, and the tile's parts in the
 /// shard's row space, ascending by `row_base`.
-///
-/// A tile over several shards is the union of every shard's parts, as a tile over several
-/// segments is: one `C_θ`, one heap and one served set across all of them ([`SelectionParts`]).
 #[derive(Clone, Copy)]
-pub struct ShardParts<'a> {
+pub struct TileShard<'a> {
     pub shard: ShardId,
     pub mask: &'a EffectiveMask,
     pub parts: &'a [SelectionPart<'a>],
 }
 
 /// The `mosaica_id` of `row`, which lies in one of `shards`' parts.
-fn id_across(shards: &[ShardParts<'_>], row: ShardRow) -> u64 {
-    let shard = row.shard();
+fn id_across(shards: &[TileShard<'_>], row: ShardRow) -> u64 {
     let held = shards
         .iter()
-        .find(|held| held.shard == shard)
+        .find(|held| held.shard == row.shard())
         .expect("a row of one of the tile's shards");
-    let row = row.row_in(shard).expect("the row's own shard").raw();
-    SelectionParts::new(held.parts).id_at(row)
+    SelectionParts::new(held.parts).id_at(row.row().raw())
 }
 
 /// Where the leaf Morton cell being walked ends, and what is already settled about it.
@@ -791,7 +785,7 @@ impl Selection {
         visible: u64,
         route: CellRoute,
     ) -> Self {
-        let shards = [ShardParts {
+        let shards = [TileShard {
             shard: ShardId::ZERO,
             mask,
             parts: parts.as_slice(),
@@ -808,8 +802,7 @@ impl Selection {
     }
 }
 
-/// One tile's selected rows across every shard holding a part of it, ascending by `mosaica_id`:
-/// [`Selection`] over a tile whose parts lie in several row spaces.
+/// [`Selection`] over a tile whose parts lie in several shards.
 pub struct TileSelection {
     /// Each row named with its shard, ascending by the row's `mosaica_id`.
     pub rows: Vec<ShardRow>,
@@ -822,14 +815,14 @@ impl TileSelection {
     /// one `C_θ`, one heap and one served set over the union, so the floor and the cap are the
     /// tile's whatever shards its rows lie in. `visible` is `Σ part.visible` over every shard.
     /// A part with no visible row is not read.
-    pub fn of(shards: &[ShardParts<'_>], params: &SelectParams, visible: u64) -> Self {
+    pub fn of(shards: &[TileShard<'_>], params: &SelectParams, visible: u64) -> Self {
         TileSelection::routed(shards, params, visible, CellRoute::Gated)
     }
 
     /// [`TileSelection::of`] with the dense tiers' mechanism named rather than gated; see
     /// [`Selection::routed`] for why that is reachable.
     pub fn routed(
-        shards: &[ShardParts<'_>],
+        shards: &[TileShard<'_>],
         params: &SelectParams,
         visible: u64,
         route: CellRoute,
@@ -1110,8 +1103,8 @@ impl TileSelection {
 }
 
 /// Every part of `shards` holding a visible row, with its shard and the shard's leaf.
-fn visible_parts<'s, 'a>(
-    shards: &'s [ShardParts<'a>],
+pub(crate) fn visible_parts<'s, 'a>(
+    shards: &'s [TileShard<'a>],
 ) -> impl Iterator<Item = (ShardId, &'a EffectiveMask, &'a SelectionPart<'a>)> + 's {
     shards.iter().flat_map(|held| {
         held.parts
@@ -1597,10 +1590,10 @@ mod across_tests {
                     let visible_here: u64 = one.iter().map(|p| p.visible).sum();
                     let held: Vec<Vec<SelectionPart<'_>>> =
                         sides.iter().map(|side| side.parts(&tile)).collect();
-                    let shards: Vec<ShardParts<'_>> = sides
+                    let shards: Vec<TileShard<'_>> = sides
                         .iter()
                         .zip(&held)
-                        .map(|(side, parts)| ShardParts {
+                        .map(|(side, parts)| TileShard {
                             shard: side.shard,
                             mask: &side.mask,
                             parts,
@@ -1630,7 +1623,7 @@ mod across_tests {
                             let got = TileSelection::of(&shards, &p, visible_here);
                             assert_eq!(ids_across(&sides, &got.rows), want, "{case}: scan");
 
-                            let one_shard = [ShardParts {
+                            let one_shard = [TileShard {
                                 shard: whole.shard,
                                 mask: &whole.mask,
                                 parts: &one,

@@ -21,11 +21,10 @@
 //! [`crate::select::SelectionParts`] requires.
 
 use mosaica_store::bands::{band_below, FIRST_BAND};
-
 use mosaica_types::{RowId, ShardRow};
 
 use crate::error::{EngineError, Result};
-use crate::select::{served_count, SelectParams, ShardParts, Threshold};
+use crate::select::{served_count, SelectParams, Threshold, TileShard};
 
 /// The band route answers requests at zooms below this; the scan answers the rest. Where the
 /// threshold is wider than the widest band the route declines each tile, at any zoom.
@@ -35,8 +34,8 @@ pub const BANDS_BELOW_ZOOM: u8 = 10;
 #[derive(Debug, PartialEq, Eq)]
 pub enum BandAnswer {
     /// The tile's served rows, ascending by `mosaica_id`, and each one's entry in its segment's
-    /// bands. `widened` where the band first read held fewer than `m`
-    /// visible entries and a wider one answered.
+    /// bands. `widened` where the band first read held fewer than `m` visible entries and a wider
+    /// one answered.
     Served {
         rows: Vec<ShardRow>,
         entries: Vec<u32>,
@@ -56,11 +55,7 @@ pub enum BandAnswer {
 /// they can answer it, all at the one band the tile's `matched` chooses. `matched` is the tile's
 /// count in the set selection draws from, `Σ part.visible` over every shard, and each part's
 /// `visible` its own count, as [`crate::select::TileSelection::of`] takes them.
-pub fn select(
-    shards: &[ShardParts<'_>],
-    params: &SelectParams,
-    matched: u64,
-) -> Result<BandAnswer> {
+pub fn select(shards: &[TileShard<'_>], params: &SelectParams, matched: u64) -> Result<BandAnswer> {
     let Threshold::Cut(cut) = params.threshold else {
         return Ok(BandAnswer::Declined);
     };

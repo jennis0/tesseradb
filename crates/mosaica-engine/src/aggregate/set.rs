@@ -95,7 +95,11 @@ impl Set {
     fn whole(open: &OpenView<'_>, reads: &[usize]) -> Set {
         let mut parts: Vec<Option<Part>> = open.served.sides.iter().map(|_| None).collect();
         for &at in reads {
-            let size = read_leaf(open, at).visible_total();
+            let size = open
+                .served
+                .leaf(&open.mask, at)
+                .expect("a side the page reads")
+                .visible_total();
             parts[at] = Some(Part::of(Held::Whole, size));
         }
         Set {
@@ -268,10 +272,9 @@ pub(super) fn compose(
     check_cancelled(&req.cancel)?;
     let served = &open.served;
     let sides = served.sides.len();
-    let reads: Vec<usize> = open
-        .mask
-        .filtered_leaves()
-        .map(|(shard, _)| served.side_of(shard))
+    let reads: Vec<usize> = served
+        .filtered_sides(&open.mask)
+        .map(|(place, ..)| place)
         .collect();
     let reference_expr = match &req.reference {
         Some(Reference::Filter(expr)) => Some(expr),
@@ -283,7 +286,7 @@ pub(super) fn compose(
     for &at in &reads {
         let side = &served.sides[at];
         let candidate =
-            engine.filter_candidate(served.session, side.shard, Some(side.fragment()))?;
+            engine.filter_candidate(served.session, side.shard, Some(&side.geometry.fragment))?;
         engine.route_filters_under(served, side, &candidate, &resolved, &req.cancel, |route| {
             let route_one = |expr: &FilterExpr, into: &mut Parts| -> Result<()> {
                 check_cancelled(&req.cancel)?;
@@ -338,18 +341,15 @@ fn routed(engine: &Engine, open: &OpenView<'_>, at: usize, routed: RoutedFilter)
                 total,
                 false,
             )?;
-            let rows = read_leaf(open, at).visible_rows(matched.rows());
+            let rows = open
+                .served
+                .leaf(&open.mask, at)
+                .expect("a side the page reads")
+                .visible_rows(matched.rows());
             let size = rows.cardinality();
             (Part::of(Held::Rows(rows), size), region)
         }
     })
-}
-
-/// The leaf the side at `at` is read through.
-fn read_leaf<'o>(open: &'o OpenView<'_>, at: usize) -> &'o EffectiveMask {
-    open.mask
-        .read_leaf(open.served.sides[at].shard.id())
-        .expect("a side the page reads")
 }
 
 /// The members of `candidate`, of the side at `at`'s shard, holding a row in `open`'s view that
@@ -425,7 +425,10 @@ impl<'a> Cx<'a> {
 
     /// The leaf the side at `at`, which the page reads, is read through.
     pub(super) fn leaf(&self, at: usize) -> &'a EffectiveMask {
-        read_leaf(self.open, at)
+        self.open
+            .served
+            .leaf(&self.open.mask, at)
+            .expect("a side the page reads")
     }
 
     /// Every segment of the view in the side at `at`, with its first row.

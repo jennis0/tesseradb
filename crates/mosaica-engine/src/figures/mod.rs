@@ -496,7 +496,7 @@ impl Engine {
 
         let key = FragmentKey {
             terms: identity.terms,
-            identity: side.fragment().identity,
+            identity: side.geometry.fragment.identity,
             view: served.name.to_string(),
             space,
             level,
@@ -755,7 +755,7 @@ impl Engine {
         places: &[Placement<'_>],
     ) -> Result<Option<Arc<DenyCorrection>>> {
         let identity = served.mask_identity;
-        let fragment_identity = side.fragment().identity;
+        let fragment_identity = side.geometry.fragment.identity;
         let (deny_version, failing) = deny_version(served, side, &subtracted);
         let key = DenyKey {
             terms: identity.terms,

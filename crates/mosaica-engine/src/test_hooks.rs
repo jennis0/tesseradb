@@ -521,10 +521,7 @@ impl Engine {
         let forms = self.level_forms(&open.served, &registered, level);
         let mut walked: std::collections::BTreeMap<u32, (u64, u64, [u64; 2], [u32; 4])> =
             Default::default();
-        for (at, side) in open.served.sides.iter().enumerate() {
-            let Some(leaf) = open.mask.read_leaf(side.shard.id()) else {
-                continue;
-            };
+        for (place, side, leaf) in open.served.filtered_sides(&open.mask) {
             let places = crate::derived::Placement::of_segments(&side.segments);
             let mut add = |ordinal: u32, row: u32| {
                 let entry = walked
@@ -544,7 +541,7 @@ impl Engine {
                 }
             };
             let visible = leaf.visible_all();
-            let rows = &forms.rows[at];
+            let rows = &forms.rows[place];
             match rows.column() {
                 Some(column) => {
                     for row in visible.iter() {

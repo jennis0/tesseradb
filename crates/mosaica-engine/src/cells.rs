@@ -82,8 +82,7 @@ pub struct RangeCounts {
 /// Count `set` in every depth-`depth` cell in `cells` over the segment-local row ranges `parts`,
 /// each given with its segment and the segment's first row in view row space. One segment's
 /// occupied cells are counted together ([`CellSet::count_ranges`]), so the set is walked once per
-/// segment. Moves from one occupied cell to the next by binary search, so an empty cell costs
-/// nothing.
+/// segment.
 pub fn count_by_ranges<'a>(
     set: CellSet<'_>,
     parts: impl IntoIterator<Item = (&'a SegmentData, u32, Range<u32>)>,

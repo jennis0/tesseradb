@@ -51,11 +51,11 @@ use mosaica_types::{
 
 use crate::cache::{CacheWaitEnded, Peek, RowProjectionKey, SessionGeometry};
 use crate::cancel::CancelToken;
-use crate::compose::{visible_to, EffectiveMask, FilterRows, ShardedMask};
+use crate::compose::{visible_to, EffectiveMask, FilterRows, RangeTallies, ShardedMask};
 use crate::figures::{MaskIdentity, SideVersions};
 use crate::filter::{Endpoint, Family, FilterOperand, Scalar};
 use crate::membership_column::{ServedLayer, ServedLevel};
-use crate::select::{SelectParams, SelectionPart, ShardParts, Threshold, TileSelection};
+use crate::select::{SelectParams, SelectionPart, Threshold, TileSelection, TileShard};
 use crate::engine::Engine;
 use crate::error::{EngineError, Result};
 use crate::session::Session;
@@ -133,9 +133,6 @@ impl Engine {
     /// The identity key hashes the session's credential digest: the geometry is shared by every
     /// session with the grant, which may hold different credentials, and an artifact's own label
     /// is tested against the credential.
-    ///
-    /// Both keys hash every shard holding the view, whether or not the viewer sees anything there,
-    /// so neither depends on where a viewer's items sit.
     fn view_coordinates(
         &self,
         session: &Session,
@@ -501,8 +498,6 @@ impl ViewportSink for Sending<'_> {
 mod tests {
     use super::*;
 
-    use mosaica_types::ShardId;
-
     fn side(shard: u32) -> SideVersions {
         SideVersions {
             shard: ShardId::new(shard).unwrap(),
@@ -517,7 +512,7 @@ mod tests {
     }
 
     /// Each shard's fragment moves the identity key, and each shard's watermark and overlay move
-    /// the content key, wherever the viewer's items sit.
+    /// the content key.
     #[test]
     fn both_keys_cover_every_shard() {
         let sides = [side(0), side(1)];

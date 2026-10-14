@@ -778,11 +778,10 @@ impl Engine {
                             &mut crate::timing::Probe::new(),
                         )?;
                         let resolved = crate::viewport::ResolvedLeaves::new(&open.mask);
-                        for (shard, _) in open.mask.filtered_leaves() {
-                            let at = open.served.side_of(shard);
+                        for (at, side, _) in open.served.filtered_sides(&open.mask) {
                             let (shard, candidate) = candidates
                                 .iter()
-                                .find(|(own, _)| own.id() == shard)
+                                .find(|(own, _)| own.id() == side.shard.id())
                                 .expect("every shard has a candidate");
                             let within = match filter {
                                 None => crate::aggregate::set::in_view(&open, at, candidate)?,

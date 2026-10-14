@@ -160,11 +160,11 @@ impl Field {
         // that shard.
         let mut candidates: Vec<(&crate::Shard, Cow<'_, croaring::Bitmap>)> = Vec::new();
         for shard in cx.generation.shards() {
-            let at = served.place_of(shard.id());
+            let at = served.find_place(shard.id());
             let candidate = match at.and_then(|at| cx.sets.candidate(at)) {
                 Some(candidate) => Cow::Borrowed(candidate),
                 None => {
-                    let fragment = at.map(|at| served.sides[at].fragment());
+                    let fragment = at.map(|at| &served.sides[at].geometry.fragment);
                     Cow::Owned(
                         cx.engine
                             .filter_candidate(served.session, shard, fragment)?,

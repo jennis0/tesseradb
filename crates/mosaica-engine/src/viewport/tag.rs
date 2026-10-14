@@ -52,8 +52,7 @@ pub(super) struct TaggedPoint {
 impl TaggedPoint {
     /// The point's row in its own shard's row space.
     pub(super) fn local_row(&self) -> u32 {
-        let shard = self.row.shard();
-        self.row.row_in(shard).expect("the row's own shard").raw()
+        self.row.row().raw()
     }
 }
 
@@ -66,12 +65,12 @@ pub(super) fn tagged_points(
     for ts in swept {
         for (i, &row) in ts.rows.iter().enumerate() {
             let (segment, _) = segments
-                .place(row)
+                .segment_of(row)
                 .expect("a selected row lies in the view's row space");
             points.push(TaggedPoint {
                 row,
                 segment,
-                side: segments.segments[segment].side,
+                side: segments.segments[segment].place,
                 entry: ts.entries.as_ref().map(|entries| entries[i]),
             });
         }

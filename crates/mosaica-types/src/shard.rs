@@ -258,10 +258,16 @@ impl ShardRow {
         ShardId((self.0 >> 32) as u32)
     }
 
+    /// The row in its own shard's row space.
+    #[inline]
+    pub fn row(self) -> RowId {
+        RowId::new(self.0 as u32)
+    }
+
     /// The row, or `None` when it is in a shard other than `shard`.
     #[inline]
     pub fn row_in(self, shard: ShardId) -> Option<RowId> {
-        (self.shard() == shard).then_some(RowId::new(self.0 as u32))
+        (self.shard() == shard).then_some(self.row())
     }
 }
 

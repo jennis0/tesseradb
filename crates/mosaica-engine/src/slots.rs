@@ -860,12 +860,8 @@ impl Engine {
             }
             None => {
                 let leaves: Vec<(usize, &Bitmap)> = served
-                    .sides
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(at, side)| {
-                        Some((at, mask.read_leaf(side.shard.id())?.visible_all()))
-                    })
+                    .filtered_sides(mask)
+                    .map(|(at, _, leaf)| (at, leaf.visible_all()))
                     .collect();
                 let visible: Vec<u64> =
                     leaves.iter().map(|(_, visible)| visible.cardinality()).collect();

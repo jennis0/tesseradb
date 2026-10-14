@@ -172,8 +172,9 @@
 use std::ops::Range;
 
 use mosaica_store::read::SegmentData;
+use mosaica_types::ShardId;
 
-use crate::compose::EffectiveMask;
+use crate::compose::{EffectiveMask, ShardedMask};
 
 /// How many rows one [`EffectiveMask::for_each_visible_run`] call covers.
 ///
@@ -424,14 +425,36 @@ pub fn occupied_tiles_ladder(parts: &[OccupancyPart<'_>], depth: u8) -> Occupanc
     }
 }
 
-/// One segment of a view, as the occupancy walk reads it: the viewer's leaf over the shard holding
-/// it, or `None` where the viewer sees nothing in that shard, then the segment and where its rows
-/// begin in the shard's row space.
-///
-/// A view's parts are every segment of every shard holding the view, whatever the viewer sees: the
-/// count of them is what chooses the counted route, so the route, like the anchor, does not depend
-/// on where a viewer's items sit. A part without a leaf is not walked.
+/// One segment of a view as the occupancy walk reads it: the viewer's leaf over its shard (`None`
+/// where the viewer sees nothing there, and the part is not walked), the segment, and its row base
+/// in the shard's row space.
 pub type OccupancyPart<'a> = (Option<&'a EffectiveMask>, &'a SegmentData, u32);
+
+/// Every segment of every side in `sides`, each under its shard's leaf in `mask`.
+pub(crate) fn occupancy_parts<'a>(
+    mask: &'a ShardedMask,
+    sides: impl Iterator<Item = (ShardId, &'a [(&'a SegmentData, u32)])>,
+) -> Vec<OccupancyPart<'a>> {
+    sides
+        .flat_map(|(shard, segments)| {
+            let leaf = mask.leaf(shard);
+            segments
+                .iter()
+                .map(move |&(segment, base)| (leaf, segment, base))
+        })
+        .collect()
+}
+
+/// Every segment of `segments` under the one `mask`.
+fn one_mask<'a>(
+    mask: &'a EffectiveMask,
+    segments: &[(&'a SegmentData, u32)],
+) -> Vec<OccupancyPart<'a>> {
+    segments
+        .iter()
+        .map(|&(segment, row_base)| (Some(mask), segment, row_base))
+        .collect()
+}
 
 /// `N_occ(d)` for every `d` in `0..=depth`, **counted**, from one walk of a view's only segment.
 ///
@@ -489,15 +512,10 @@ pub fn occupied_tiles_ladder_with_precision(
     depth: u8,
     precision: u32,
 ) -> OccupancyLadder {
-    let parts: Vec<OccupancyPart<'_>> = segments
-        .iter()
-        .map(|&(segment, row_base)| (Some(mask), segment, row_base))
-        .collect();
-    sketched_ladder(&parts, depth, precision)
+    sketched_ladder(&one_mask(mask, segments), depth, precision)
 }
 
-/// The sketch route over `parts`: one register plane fed by every part walked, so a tile several
-/// segments or shards hold is added once.
+/// The sketch route over `parts`.
 fn sketched_ladder(parts: &[OccupancyPart<'_>], depth: u8, precision: u32) -> OccupancyLadder {
     debug_assert!(depth <= 16, "the grid is 2^16 x 2^16, so depth 16 is the deepest");
     // **One flat plane, not a `Vec` of sketches.** The descent below is the hottest loop in the
@@ -582,11 +600,7 @@ fn finish_ladder(raw_rungs: [u64; 17], depth: u8, exact: bool) -> OccupancyLadde
 /// This discards the shallower rungs [`occupied_tiles_ladder`] filled on the way. Callers that
 /// memoise — the request path does — should take the ladder and keep them.
 pub fn occupied_tiles(mask: &EffectiveMask, segments: &[(&SegmentData, u32)], depth: u8) -> u64 {
-    let parts: Vec<OccupancyPart<'_>> = segments
-        .iter()
-        .map(|&(segment, row_base)| (Some(mask), segment, row_base))
-        .collect();
-    occupied_tiles_ladder(&parts, depth).at(depth)
+    occupied_tiles_ladder(&one_mask(mask, segments), depth).at(depth)
 }
 
 // ------------------------------------------------------------------------------------------
@@ -803,12 +817,9 @@ fn ln_q32(v: u64) -> u64 {
 /// - **`view`** — `N_occ` is counted over one view's rows, exactly as `V_total` is.
 /// - **`depth`** — the quantity is per depth. A session touches a handful of depths, which is why
 ///   this is evaluated per requested depth rather than for all 17 at once.
-/// - **`shards`** — [`crate::figures::MaskIdentity::shards`], over every shard's versions: row
-///   ids mean something only within one geometry, and a flush changes which tiles hold rows; a
-///   suppression or a deletion removes rows from the composed mask and can empty a tile, and the
-///   response to a deny is at accept, so the correction may not wait for a refresh; and a session
-///   may be served one-generation-stale projections, so two requests at one generation can
-///   compose against different fragments.
+/// - **`shards`** — [`crate::figures::MaskIdentity::shards`]: each shard's geometry (a flush
+///   moves which tiles hold rows), overlay (a deny can empty a tile, and is answered at accept) and
+///   fragment (a stale-served projection composes against an older one).
 ///
 /// **The attribute filter is not a term and must not become one**: θ is anchored on the unfiltered
 /// composed mask (**I12**), so there is no filtered variant of this quantity to key.

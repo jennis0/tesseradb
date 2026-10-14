@@ -635,7 +635,7 @@ impl Engine {
             let spans: Vec<(usize, Vec<Range<u32>>)> = tiling
                 .tile_domains(at)
                 .into_iter()
-                .filter(|(side, _)| mask.read_leaf(served.sides[*side].shard.id()).is_some())
+                .filter(|(side, _)| served.leaf(&mask, *side).is_some())
                 .collect();
             let rows: Vec<(usize, Bitmap)> = spans
                 .iter()

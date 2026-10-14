@@ -108,7 +108,7 @@ pub(crate) struct Resolved {
 }
 
 impl Resolved {
-    /// Resolve the response's rows in the side at `side` against its served layers.
+    /// Resolve the response's rows in the side at `place` against its served layers.
     ///
     /// `rows` is every row of that side the emit pass will gather, in any order; it is sorted here
     /// once. Layers with no served level contribute no column — the wire's rule that an absent
@@ -116,7 +116,7 @@ impl Resolved {
     pub fn new<'a>(
         mut rows: Vec<u32>,
         layers: impl IntoIterator<Item = &'a ServedLayer>,
-        side: usize,
+        place: usize,
     ) -> Self {
         rows.sort_unstable();
         rows.dedup();
@@ -125,7 +125,7 @@ impl Resolved {
         let columns = layers
             .into_iter()
             .filter(|layer| layer.levels.iter().any(|l| !l.served.is_empty()))
-            .map(|layer| (layer.name.clone(), resolve_layer(&rows, &bitmap, layer, side)))
+            .map(|layer| (layer.name.clone(), resolve_layer(&rows, &bitmap, layer, place)))
             .collect();
         Resolved { rows, columns }
     }
@@ -158,7 +158,7 @@ fn resolve_layer(
     rows: &[u32],
     bitmap: &Bitmap,
     layer: &ServedLayer,
-    side: usize,
+    place: usize,
 ) -> Vec<Option<u64>> {
     let mut best: Vec<Option<Rank>> = vec![None; rows.len()];
     let mut consider = |i: usize, rank: Rank| {
@@ -177,7 +177,7 @@ fn resolve_layer(
                 .get(&ordinal)
                 .map(|&(id, rung)| (level.level, rung, Reverse(id.raw())))
         };
-        let form = &level.rows[side];
+        let form = &level.rows[place];
         match form.column() {
             // Row-major: the point's leaf, then the best-ranked served ancestor-or-self of it
             // over every path. The stored lineage is climbed only to *find* the served

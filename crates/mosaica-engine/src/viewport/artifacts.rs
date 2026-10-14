@@ -1400,11 +1400,8 @@ pub(super) fn tile_rows(
     tiling: &Tiling,
 ) -> Vec<(usize, croaring::Bitmap)> {
     served
-        .sides
-        .iter()
-        .enumerate()
-        .filter(|(_, side)| mask.read_leaf(side.shard.id()).is_some())
-        .map(|(at, _)| (at, spans_rows(&tiling.domain_in(at).0)))
+        .filtered_sides(mask)
+        .map(|(place, ..)| (place, spans_rows(&tiling.domain_in(place).0)))
         .filter(|(_, rows)| !rows.is_empty())
         .collect()
 }
@@ -1427,7 +1424,7 @@ pub(super) fn viewport_sets<'a>(
 ) -> Vec<ViewportSets<'a>> {
     rows.iter()
         .filter_map(|(at, rows)| {
-            let mask = mask.read_leaf(served.sides[*at].shard.id())?;
+            let mask = served.leaf(mask, *at)?;
             // Hoisted out of every layer and every artifact, built once per request.
             let viewport = crate::tile_index::Viewport::compose(rows, mask);
             Some(ViewportSets {

@@ -25,7 +25,7 @@ use mosaica_engine::occupancy::{
 use mosaica_engine::projection::RowProjection;
 use mosaica_engine::select::{
     cell_route_pays, decode_tier, CellRoute, DecodeTier, SelectParams, Selection, SelectionPart,
-    SelectionParts, ShardParts, Threshold,
+    SelectionParts, Threshold, TileShard,
 };
 use mosaica_lifecycle::{ChangeOp, IngestBuffer, Overlay};
 use mosaica_spatial::{fixed32, morton_of, tiler::sort_batch, Bounds, Tile, TilerItem};
@@ -1973,7 +1973,7 @@ fn the_band_route_widens_and_falls_through_as_the_definition_requires() {
             .collect();
         assert_eq!(scan, reference, "{expect}: the scan is the definition");
 
-        let shards = [ShardParts {
+        let shards = [TileShard {
             shard: ShardId::ZERO,
             mask: &mask,
             parts: &parts,

@@ -927,12 +927,11 @@ impl Engine {
     /// together against the same candidate and the same pre-filter mask — a highlight is a
     /// conjunction with the filter's candidate by construction, and evaluating its leaves against
     /// an already-filtered mask would make the two positions of one clause mean different things.
-    /// Only `with_filter`'s result narrows what is drawn.
+    /// Only the filter's rows narrow what is drawn.
     ///
-    /// Evaluated in each shard the viewer sees anything in, inside that shard's leaf, over the
-    /// rows the request's tiles span there: a filter only narrows a shard's visible rows, so no
-    /// shard's answer depends on another's. A viewer who sees nothing has it evaluated in the
-    /// first shard, so the request is refused, and a region's verdict reached, as for any other.
+    /// Evaluated in each of [`ShardedMask::filtered_leaves`], over the rows the request's tiles
+    /// span in that shard: a filter only narrows a shard's visible rows, so no shard's answer
+    /// depends on another's.
     pub(super) fn narrow_to_filters(
         &self,
         served: &ServedView<'_>,
@@ -953,10 +952,8 @@ impl Engine {
         let mut filters = Vec::new();
         let mut highlights = Vec::new();
         let resolved = ResolvedLeaves::new(&mask);
-        for (shard, _) in mask.filtered_leaves() {
-            let at = served.side_of(shard);
-            let side = &served.sides[at];
-            let (domain, rows_in_ranges) = tiling.domain_in(at);
+        for (place, side, _) in served.filtered_sides(&mask) {
+            let (domain, rows_in_ranges) = tiling.domain_in(place);
             let (filter_rows, highlight_rows) =
                 self.route_filters(served, side, &resolved, &req.cancel, |route| {
                     // `count_matched` excludes the highlight from the `filter_matched` probe: its
@@ -1005,8 +1002,8 @@ impl Engine {
                     };
                     Ok((filter_rows, highlight_rows))
                 })?;
-            filters.extend(filter_rows.map(|rows| (shard, rows)));
-            highlights.extend(highlight_rows.map(|rows| (shard, rows)));
+            filters.extend(filter_rows.map(|rows| (side.shard.id(), rows)));
+            highlights.extend(highlight_rows.map(|rows| (side.shard.id(), rows)));
         }
         Ok((
             mask.with_filters(filters).with_highlights(highlights),
@@ -1014,15 +1011,11 @@ impl Engine {
         ))
     }
 
-    /// Route this request's filter expressions in one side: build the entity-space candidate over
-    /// the session's fragment at the shard's watermark, close the region and `member_of` resolvers
-    /// over `resolved`, and hand `body` a `route` that puts one expression through them. A
-    /// fragment of an earlier watermark, such as a stale-served projection's, would silently omit
-    /// every entity flushed since, under-reporting in a way indistinguishable from a correct
-    /// answer. Both resolvers read the side through `resolved`'s mask, the request's before any
-    /// filter narrows it, so a highlight routed against an already-filtered mask would make the
-    /// two positions of one clause mean different things. What `body` does with a
-    /// [`crate::filter::RoutedFilter`] is the caller's.
+    /// Route this request's filter expressions in one side: the entity-space candidate over the
+    /// session's fragment at the shard's watermark (an earlier one, such as a stale-served
+    /// projection's, would silently omit every entity flushed since), the region and `member_of`
+    /// resolvers over `resolved`'s pre-filter mask, and a `route` handed to `body` that puts one
+    /// expression through them.
     pub(crate) fn route_filters<T>(
         &self,
         served: &ServedView<'_>,
@@ -1033,7 +1026,8 @@ impl Engine {
             &dyn Fn(&crate::filter::FilterExpr, bool) -> Result<crate::filter::RoutedFilter>,
         ) -> Result<T>,
     ) -> Result<T> {
-        let candidate = self.filter_candidate(served.session, side.shard, Some(side.fragment()))?;
+        let candidate =
+            self.filter_candidate(served.session, side.shard, Some(&side.geometry.fragment))?;
         self.route_filters_under(served, side, &candidate, resolved, cancel, body)
     }
 
@@ -1123,21 +1117,12 @@ impl Engine {
         cancel: &Option<CancelToken>,
     ) -> std::result::Result<crate::region::RegionRows, crate::filter::FilterError> {
         let shard = side.shard.id();
-        let held = resolved
-            .regions
-            .borrow()
-            .iter()
-            .find(|(at, held, _)| *at == shard && held == leaf)
-            .map(|(_, _, rows)| rows.clone());
-        if let Some(rows) = held {
-            return Ok(rows);
-        }
-        let rows = self.resolve_region(leaf, served, side, resolved, cancel)?;
-        resolved
-            .regions
-            .borrow_mut()
-            .push((shard, leaf.clone(), rows.clone()));
-        Ok(rows)
+        memo(
+            &resolved.regions,
+            |(at, held)| *at == shard && held == leaf,
+            || (shard, leaf.clone()),
+            || self.resolve_region(leaf, served, side, resolved, cancel),
+        )
     }
 
     /// A `member_of` leaf's rows in `side`, from `resolved` where it holds them, and resolved and
@@ -1150,46 +1135,31 @@ impl Engine {
         resolved: &ResolvedLeaves<'_>,
     ) -> std::result::Result<croaring::Bitmap, crate::filter::FilterError> {
         let shard = side.shard.id();
-        let held = resolved
-            .members
-            .borrow()
-            .iter()
-            .find(|(at, held, _)| *at == shard && held == leaf)
-            .map(|(_, _, rows)| rows.clone());
-        if let Some(rows) = held {
-            return Ok(rows);
-        }
-        let rows = self.resolve_member_of(leaf, served, side, resolved)?;
-        resolved
-            .members
-            .borrow_mut()
-            .push((shard, leaf.clone(), rows.clone()));
-        Ok(rows)
+        memo(
+            &resolved.members,
+            |(at, held)| *at == shard && held == leaf,
+            || (shard, leaf.clone()),
+            || self.resolve_member_of(leaf, served, side, resolved),
+        )
     }
 
-    /// The artifact `id` names, gated for this request over every shard under `resolved`'s mask:
-    /// the verdict, its count and its containment are each shard's summed, decided once before
-    /// any shard reads the artifact's members. Held in `resolved` for the request's other sides.
+    /// [`Engine::gated_artifact`] for `id` under `resolved`'s mask, once per request.
     fn gated_once(
         &self,
         served: &ServedView<'_>,
         resolved: &ResolvedLeaves<'_>,
         id: MosaicaId,
     ) -> Result<Option<std::rc::Rc<super::artifacts::GatedArtifact>>> {
-        let held = resolved
-            .gates
-            .borrow()
-            .iter()
-            .find(|(held, _)| *held == id)
-            .map(|(_, gated)| gated.clone());
-        if let Some(gated) = held {
-            return Ok(gated);
-        }
-        let gated = self
-            .gated_artifact(served, resolved.mask, id)?
-            .map(std::rc::Rc::new);
-        resolved.gates.borrow_mut().push((id, gated.clone()));
-        Ok(gated)
+        memo(
+            &resolved.gates,
+            |held| *held == id,
+            || id,
+            || {
+                Ok(self
+                    .gated_artifact(served, resolved.mask, id)?
+                    .map(std::rc::Rc::new))
+            },
+        )
     }
 
     /// Whether `session` reaches `layer`: whether a `member_of` may name it.
@@ -1266,8 +1236,8 @@ impl Engine {
                     {
                         // `membership ∩ M_auth` in this side, from whichever half of its form
                         // holds it — see [`crate::artifacts::ArtifactRows::visible_rows`].
-                        let at = served.side_of(side.shard.id());
-                        gated.forms.rows[at].visible_rows(gated.ordinal, mask)
+                        let place = served.place_of(side.shard.id());
+                        gated.forms.rows[place].visible_rows(gated.ordinal, mask)
                     }
                     _ => croaring::Bitmap::new(),
                 };
@@ -1304,7 +1274,7 @@ impl Engine {
         let (Some(gated), Some(mask)) = (gated, resolved.leaf(side)) else {
             return Ok(croaring::Bitmap::new());
         };
-        let rows = &gated.forms.rows[served.side_of(side.shard.id())];
+        let rows = &gated.forms.rows[served.place_of(side.shard.id())];
         // The counter says which levels answer `member_of` at the column's cost rather than the
         // bitmap's.
         if !rows.membership().rows_held() {
@@ -1324,9 +1294,9 @@ pub(crate) struct ResolvedLeaves<'m> {
         Vec<(MosaicaId, Option<std::rc::Rc<super::artifacts::GatedArtifact>>)>,
     >,
     regions: std::cell::RefCell<
-        Vec<(ShardId, crate::filter::RegionLeaf, crate::region::RegionRows)>,
+        Vec<((ShardId, crate::filter::RegionLeaf), crate::region::RegionRows)>,
     >,
-    members: std::cell::RefCell<Vec<(ShardId, crate::filter::MemberOfLeaf, croaring::Bitmap)>>,
+    members: std::cell::RefCell<Vec<((ShardId, crate::filter::MemberOfLeaf), croaring::Bitmap)>>,
 }
 
 impl<'m> ResolvedLeaves<'m> {
@@ -1345,6 +1315,27 @@ impl<'m> ResolvedLeaves<'m> {
     fn leaf(&self, side: &ServedSide<'_>) -> Option<&'m EffectiveMask> {
         self.mask.read_leaf(side.shard.id())
     }
+}
+
+/// The value in `cell` whose key `matches`, else `f`'s, kept there under `key()`. The key is built
+/// only on a miss.
+fn memo<K, V: Clone, E>(
+    cell: &std::cell::RefCell<Vec<(K, V)>>,
+    matches: impl Fn(&K) -> bool,
+    key: impl FnOnce() -> K,
+    f: impl FnOnce() -> std::result::Result<V, E>,
+) -> std::result::Result<V, E> {
+    let held = cell
+        .borrow()
+        .iter()
+        .find(|(held, _)| matches(held))
+        .map(|(_, value)| value.clone());
+    if let Some(value) = held {
+        return Ok(value);
+    }
+    let value = f()?;
+    cell.borrow_mut().push((key(), value.clone()));
+    Ok(value)
 }
 
 /// The entities holding `keys` in a unique column, by the column's index and the live entries
