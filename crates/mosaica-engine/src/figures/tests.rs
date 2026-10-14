@@ -545,15 +545,7 @@ fn sums_over_shards_are_widened_before_they_are_added() {
             sums: vec![[u64::MAX - 1, u64::MAX - 3]],
             boxes: vec![[0, 0, u32::MAX, u32::MAX]],
         };
-        Arc::new(Figures {
-            counts: Arc::new(CountsAt::of(dense)),
-            reserves: None,
-            deny: None,
-            tail: None,
-            len: 1,
-            geometry: Geometry::Centroid,
-            exact: None,
-        })
+        Arc::new(Figures::of_dense(dense))
     };
     let figures = super::LevelFigures::of(vec![near_the_top(u32::MAX), near_the_top(u32::MAX)]);
     let placed = 2.0 * f64::from(u32::MAX);
@@ -577,15 +569,7 @@ fn figures_carry_positions_only_where_every_shards_do() {
             sums: vec![[10, 20]],
             boxes: vec![[1, 2, 9, 18]],
         };
-        Arc::new(Figures {
-            counts: Arc::new(CountsAt::of(dense)),
-            reserves: None,
-            deny: None,
-            tail: None,
-            len: 1,
-            geometry: Geometry::Centroid,
-            exact: None,
-        })
+        Arc::new(Figures::of_dense(dense))
     };
     let counted = || Arc::new(Figures::of_counts(vec![3]));
     assert!(super::LevelFigures::of(vec![placed(), placed()]).has_geometry());

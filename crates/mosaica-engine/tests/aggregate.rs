@@ -26,10 +26,9 @@ use mosaica_build::config::Config;
 use mosaica_build::{build, BuildArgs};
 use mosaica_engine::filter::{FilterExpr, FilterOperand, RegionLeaf};
 use mosaica_engine::{
-    AggregateCaps, AggregateHead, AggregateRequest, AggregateSink, AggregateTrailer, By,
-    CancelToken, CategoryQuery, Cut, Engine, EngineError, Grouping, ItemsRequest, PageEnd, Pick,
-    RecordsHead, RecordsLimits, RecordsSink, Reference, ResponseEndedBy, Session, SinkResult,
-    TableHead, ViewportRequest,
+    AggregateHead, AggregateRequest, AggregateSink, AggregateTrailer, By, CancelToken,
+    CategoryQuery, Cut, Engine, EngineError, Grouping, ItemsRequest, PageEnd, Pick, RecordsHead,
+    RecordsSink, Reference, ResponseEndedBy, Session, SinkResult, TableHead, ViewportRequest,
 };
 use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
 use mosaica_lifecycle::UnallocatedRow;
@@ -346,25 +345,6 @@ impl AggregateSink for Collect {
         );
         self.pages.push((grouping, batch.clone(), end.clone()));
         Ok(())
-    }
-}
-
-fn limits() -> RecordsLimits {
-    RecordsLimits {
-        max_page_rows: 100_000,
-        max_page_bytes: 64 << 20,
-        response_bytes: 256 << 20,
-        response_time: Duration::from_secs(60),
-    }
-}
-
-fn caps() -> AggregateCaps {
-    AggregateCaps {
-        groupings: 8,
-        top: 100,
-        named: 100,
-        bins: 100,
-        cells: u64::MAX,
     }
 }
 

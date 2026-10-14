@@ -1785,43 +1785,105 @@ fn orphaned_dependents(
 }
 
 #[cfg(test)]
+pub(super) mod fixture {
+    //! One shard's rows of a level, and the sets a tile is answered over in each side.
+
+    use std::ops::Range;
+
+    use croaring::Bitmap;
+
+    use super::{spans_rows, ViewportSets};
+    use crate::compose::EffectiveMask;
+    use crate::tile_index::Viewport;
+
+    /// One shard's rows of a level: each ordinal's members, the rows, what the viewer sees and
+    /// the tile's spans there.
+    pub(crate) struct Held {
+        pub(crate) sets: Vec<Vec<u32>>,
+        pub(crate) rows: u32,
+        pub(crate) visible: Vec<u32>,
+        pub(crate) spans: Vec<Range<u32>>,
+    }
+
+    impl Held {
+        /// One shard holding `a`'s rows and then `b`'s from `offset`, which is past `a`'s.
+        pub(crate) fn joined(a: &Held, b: &Held, offset: u32) -> Held {
+            assert!(offset >= a.rows, "the second shard's rows follow the first's");
+            fn shifted(rows: &[u32], offset: u32) -> impl Iterator<Item = u32> + '_ {
+                rows.iter().map(move |row| row + offset)
+            }
+            Held {
+                sets: a
+                    .sets
+                    .iter()
+                    .zip(&b.sets)
+                    .map(|(first, second)| {
+                        first.iter().copied().chain(shifted(second, offset)).collect()
+                    })
+                    .collect(),
+                rows: offset + b.rows,
+                visible: a.visible.iter().copied().chain(shifted(&b.visible, offset)).collect(),
+                spans: a
+                    .spans
+                    .iter()
+                    .cloned()
+                    .chain(b.spans.iter().map(|span| span.start + offset..span.end + offset))
+                    .collect(),
+            }
+        }
+
+        pub(crate) fn leaf(&self) -> EffectiveMask {
+            EffectiveMask::of_rows(Bitmap::of(&self.visible))
+        }
+
+        pub(crate) fn tile_rows(&self) -> Bitmap {
+            spans_rows(&self.spans)
+        }
+    }
+
+    /// The sets of each side at its index in `leaves`, the tile spanning that side's `rows`.
+    pub(crate) fn sets_over<'a>(
+        leaves: &'a [EffectiveMask],
+        rows: &'a [Bitmap],
+    ) -> Vec<ViewportSets<'a>> {
+        leaves
+            .iter()
+            .zip(rows)
+            .enumerate()
+            .map(|(place, (mask, rows))| ViewportSets {
+                place,
+                mask,
+                viewport: Viewport::compose(rows, mask),
+                matched_here: None,
+                highlighted_here: None,
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use super::fixture::{sets_over, Held};
     use super::*;
     use crate::artifacts::ArtifactRows;
     use crate::layer_read::LevelForms;
 
-    /// One shard's rows of a level: each ordinal's members, what the viewer sees, and the tile's
-    /// spans there.
-    type Held<'a> = (&'a [&'a [u32]], &'a [u32], &'a [Range<u32>]);
-
     /// The artifacts of a level each of `shards` proposes in its tile rows and holds a visible
     /// member of there, the one at `withheld` withheld by its label.
-    fn present_over(shards: &[Held<'_>], withheld: u32) -> Vec<u32> {
+    fn present_over(shards: &[&Held], withheld: u32) -> Vec<u32> {
         let forms = LevelForms::synthetic(
             shards
                 .iter()
-                .map(|(sets, ..)| {
-                    let sets: Vec<Option<&[u32]>> = sets.iter().map(|set| Some(*set)).collect();
+                .map(|held| {
+                    let sets: Vec<Option<&[u32]>> =
+                        held.sets.iter().map(|set| Some(set.as_slice())).collect();
                     ArtifactRows::synthetic(&sets, None)
                 })
                 .collect(),
         );
-        let leaves: Vec<EffectiveMask> = shards
-            .iter()
-            .map(|(_, visible, _)| EffectiveMask::of_rows(croaring::Bitmap::of(visible)))
-            .collect();
-        let rows: Vec<croaring::Bitmap> =
-            shards.iter().map(|(.., spans)| spans_rows(spans)).collect();
-        let sets: Vec<ViewportSets<'_>> = (0..shards.len())
-            .map(|place| ViewportSets {
-                place,
-                mask: &leaves[place],
-                viewport: crate::tile_index::Viewport::compose(&rows[place], &leaves[place]),
-                matched_here: None,
-                highlighted_here: None,
-            })
-            .collect();
-        present_in(&forms, &sets, |ordinal| ordinal != withheld)
+        let leaves: Vec<EffectiveMask> = shards.iter().map(|held| held.leaf()).collect();
+        let rows: Vec<croaring::Bitmap> = shards.iter().map(|held| held.tile_rows()).collect();
+        present_in(&forms, &sets_over(&leaves, &rows), |ordinal| ordinal != withheld)
             .iter()
             .collect()
     }
@@ -1830,20 +1892,21 @@ mod tests {
     fn a_levels_candidates_over_two_shards_are_the_union_of_each_shards() {
         // Ordinal 0 is seen in the tiles only in the first shard, 1 only in the second, 2 in
         // neither, 3 in both, and 4 is withheld by its label.
-        let (tile_a, tile_b) = ([Range { start: 0, end: 6 }], [Range { start: 1, end: 6 }]);
-        let a: Held<'_> = (&[&[1, 2], &[7], &[9], &[4, 5], &[1]], &[1, 3, 4, 9], &tile_a);
-        let b: Held<'_> = (&[&[7], &[2, 3], &[0], &[5], &[2]], &[2, 5], &tile_b);
-        assert_eq!(present_over(&[a, b], 4), vec![0, 1, 3]);
-        assert_eq!(present_over(&[a], 4), vec![0, 3]);
-        assert_eq!(present_over(&[b], 4), vec![1, 3]);
-        // One shard holding both: the second shard's rows from 10.
-        let shifted = |rows: &[u32]| rows.iter().map(|row| row + 10).collect::<Vec<u32>>();
-        let sets: Vec<Vec<u32>> = (0..5)
-            .map(|o| [a.0[o].to_vec(), shifted(b.0[o])].concat())
-            .collect();
-        let sets: Vec<&[u32]> = sets.iter().map(Vec::as_slice).collect();
-        let visible = [a.1.to_vec(), shifted(b.1)].concat();
-        let one: Held<'_> = (&sets, &visible, &[0..6, 11..16]);
-        assert_eq!(present_over(&[one], 4), vec![0, 1, 3]);
+        let a = Held {
+            sets: vec![vec![1, 2], vec![7], vec![9], vec![4, 5], vec![1]],
+            rows: 10,
+            visible: vec![1, 3, 4, 9],
+            spans: vec![Range { start: 0, end: 6 }],
+        };
+        let b = Held {
+            sets: vec![vec![7], vec![2, 3], vec![0], vec![5], vec![2]],
+            rows: 8,
+            visible: vec![2, 5],
+            spans: vec![Range { start: 1, end: 6 }],
+        };
+        assert_eq!(present_over(&[&a, &b], 4), vec![0, 1, 3]);
+        assert_eq!(present_over(&[&a], 4), vec![0, 3]);
+        assert_eq!(present_over(&[&b], 4), vec![1, 3]);
+        assert_eq!(present_over(&[&Held::joined(&a, &b, 10)], 4), vec![0, 1, 3]);
     }
 }

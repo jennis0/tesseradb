@@ -4,7 +4,7 @@
 
 mod common;
 
-use std::fs::File;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -12,13 +12,10 @@ use arrow::array::{
     ArrayRef, Float32Array, Float64Array, ListBuilder, StringArray, StringBuilder, UInt32Array,
     UInt64Array,
 };
-use arrow::datatypes::{Field, Schema as ArrowSchema};
-use arrow::record_batch::RecordBatch;
-use parquet::arrow::ArrowWriter;
 
+use common::write;
 use croaring::Bitmap;
 use mosaica_authz::{PostingRef, PostingsReader};
-use mosaica_build::config::Config;
 use mosaica_build::{build, build_routed, BuildArgs, ExtentRoute};
 use mosaica_filter::{Access, RecordBlob, RecordValue, SortedDict, ValueColumn};
 use mosaica_spatial::Bounds;
@@ -29,20 +26,6 @@ use mosaica_types::{EntityId, ItemHigh, ShardId, Tenancy};
 
 /// Items in the corpus.
 const ITEMS: u64 = 300;
-
-fn write(path: &Path, columns: Vec<(&str, ArrayRef)>) {
-    let fields: Vec<Field> = columns
-        .iter()
-        .map(|(name, array)| Field::new(*name, array.data_type().clone(), true))
-        .collect();
-    let schema = Arc::new(ArrowSchema::new(fields));
-    let batch =
-        RecordBatch::try_new(schema.clone(), columns.into_iter().map(|(_, a)| a).collect())
-            .unwrap();
-    let mut writer = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
-    writer.write(&batch).unwrap();
-    writer.close().unwrap();
-}
 
 fn strings<S: AsRef<str>>(values: &[Option<S>]) -> ArrayRef {
     Arc::new(StringArray::from(
@@ -350,65 +333,17 @@ fn corpus(dir: &Path, size: Option<u64>, c: &[u64]) -> PathBuf {
     path
 }
 
-/// The build arguments the CLI derives from the declaration at `path`, under the tests' key.
+/// The build arguments the CLI derives from the declaration at `path`, writing oracle pairs.
 fn args(path: &Path, out: &Path) -> BuildArgs {
-    let config = Config::parse(path, &Default::default()).expect("the declaration parses");
-    let registry = config.build_views().expect("the views compile");
-    let anchor = config.anchor_view(&registry).expect("an anchor");
-    let acquired = config.acquire().expect("the files acquire");
-    let views: Vec<mosaica_build::ViewArgs> = registry
-        .iter()
-        .map(|view| {
-            let acquired = mosaica_build::config::acquire_view(view).expect("the view acquires");
-            mosaica_build::ViewArgs {
-                visibility: view.visibility.clone(),
-                view_id: view.id.clone(),
-                projection: view.projection,
-                extent: Bounds {
-                    x_min: 0.0,
-                    x_max: 1000.0,
-                    y_min: 0.0,
-                    y_max: 1000.0,
-                },
-                points: acquired.points,
-                point_fields: acquired.point_fields,
-                select: acquired.select,
-                access: acquired.access,
-            }
-        })
-        .collect();
-    let scoped_attributes = config
-        .scoped_attributes
-        .iter()
-        .map(|scoped| mosaica_build::ScopedColumnFamily {
-            attribute: scoped.attribute.clone(),
-            group: scoped.group.clone(),
-            views: registry
-                .iter()
-                .enumerate()
-                .filter(|(_, view)| view.group.as_ref().is_some_and(|g| g.group == scoped.group))
-                .map(|(index, _)| index)
-                .collect(),
-            source: scoped.source.clone(),
-        })
-        .collect();
-    let mut layers = config.layers.clone();
-    for layer in &mut layers {
-        layer.views = Config::expand_layer_views(&registry, &layer.views);
-    }
-    let groups = config.group_registry(&registry, &views);
+    let extent = Bounds {
+        x_min: 0.0,
+        x_max: 1000.0,
+        y_min: 0.0,
+        y_max: 1000.0,
+    };
     BuildArgs {
-        views,
-        anchor,
-        groups,
-        scoped_attributes,
-        attribute_sources: acquired.attribute_sources,
-        shard_size: config.shard_size,
-        layers,
-        layer_inputs: acquired.layers,
         emit_oracle_pairs: true,
-        schema: config.schema.clone(),
-        ..common::build_args(out)
+        ..common::args_from_declaration(path, out, extent)
     }
 }
 
@@ -473,7 +408,7 @@ impl Shard<'_> {
     }
 
     /// The entity holding each `id`, where this shard holds it.
-    fn ids(&self) -> std::collections::BTreeMap<u64, u32> {
+    fn ids(&self) -> BTreeMap<u64, u32> {
         let partition = &self.bundle.partitions["default"];
         let indexes = UniqueIndexes::open(
             &self.bundle.manifest,
@@ -519,7 +454,7 @@ impl Shard<'_> {
     }
 
     /// A text index as each token's posting.
-    fn tokens(&self, rel: String) -> std::collections::BTreeMap<String, Vec<u32>> {
+    fn tokens(&self, rel: String) -> BTreeMap<String, Vec<u32>> {
         let dir = self.dir(rel.clone());
         let dict = SortedDict::open_dir(&dir, Access::Read).unwrap();
         let postings = self.postings(&format!("{rel}/postings.arrow"));
@@ -588,7 +523,7 @@ fn cut(whole: &[u32], lo: u32, hi: u32) -> Vec<u32> {
 type Slices = Vec<Option<(Bitmap, Vec<Bitmap>)>>;
 
 /// Every member pack of a shard, by `(space, level, ordinal_lo)`.
-fn packs(shard: &Shard<'_>) -> std::collections::BTreeMap<(u32, u32, u32), Slices> {
+fn packs(shard: &Shard<'_>) -> BTreeMap<(u32, u32, u32), Slices> {
     shard
         .record()
         .membership_extents
@@ -612,7 +547,7 @@ fn packs(shard: &Shard<'_>) -> std::collections::BTreeMap<(u32, u32, u32), Slice
 }
 
 /// Every containment partition of a shard, by `(space, level)`: each `(ordinal, rank)`'s set size.
-fn containment(shard: &Shard<'_>) -> std::collections::BTreeMap<(u32, u32), Vec<Vec<u32>>> {
+fn containment(shard: &Shard<'_>) -> BTreeMap<(u32, u32), Vec<Vec<u32>>> {
     shard
         .record()
         .derived_extents
@@ -638,7 +573,7 @@ fn containment(shard: &Shard<'_>) -> std::collections::BTreeMap<(u32, u32), Vec<
 }
 
 /// Each derived file a shard holds, by its view, space, level and kind.
-fn derived(shard: &Shard<'_>) -> std::collections::BTreeSet<(Option<String>, u32, u32, String)> {
+fn derived(shard: &Shard<'_>) -> BTreeSet<(Option<String>, u32, u32, String)> {
     shard
         .record()
         .derived_extents
@@ -662,17 +597,9 @@ fn cut_set(whole: &Bitmap, lo: u32, hi: u32) -> Bitmap {
     Bitmap::of(&cut(&whole.iter().collect::<Vec<_>>(), lo, hi))
 }
 
-/// **A build at size `s` is the one-shard build of the same corpus split at multiples of `s`.**
-/// Shard `k` holds the items the one-shard build numbers `[k·s, (k+1)·s)`, each at its number less
-/// `k·s`, and every per-entity file of shard `k` — the unique index, the postings, the
-/// entity-to-term transpose, the record blob, the value columns and dictionaries, the text indexes,
-/// the scoped columns and the member packs with their generating sets — is the one-shard file's
-/// slice. Each shard's containment partition covers the one-shard partition's artifacts and ranks,
-/// its sets' sizes summing to the one-shard sizes, and each shard derives the files the one-shard
-/// build does, in the layouts it records. Each view's rows in a shard are that shard's items' rows,
-/// positions and render columns included, in `(Morton, mosaica_id)` order under the shard's own
-/// identifiers; a view whose items are all in shard 0 has no row elsewhere. Both bundles verify,
-/// deep included.
+/// Each shard of a build at `SIZE` against the one-shard build: every per-entity file, member
+/// pack and view row is the one-shard one's slice, renumbered; containment sizes sum to the
+/// one-shard sizes; both bundles verify.
 fn split_property(route: ExtentRoute) {
     const SIZE: u64 = 64;
     let tmp = tempfile::tempdir().unwrap();
@@ -756,7 +683,7 @@ fn split_property(route: ExtentRoute) {
     let spans_shards = |set: &Bitmap| {
         set.iter()
             .map(|entity| u64::from(entity) / SIZE)
-            .collect::<std::collections::BTreeSet<_>>()
+            .collect::<BTreeSet<_>>()
             .len()
             > 1
     };
@@ -770,7 +697,7 @@ fn split_property(route: ExtentRoute) {
     );
     let one_containment = containment(&one);
     assert!(!one_containment.is_empty(), "a level composes its containment partition");
-    let mut sizes: std::collections::BTreeMap<(u32, u32), Vec<Vec<u32>>> = one_containment
+    let mut sizes: BTreeMap<(u32, u32), Vec<Vec<u32>>> = one_containment
         .iter()
         .map(|(level, ranks)| (*level, ranks.iter().map(|r| vec![0; r.len()]).collect()))
         .collect();
@@ -819,12 +746,12 @@ fn split_property(route: ExtentRoute) {
             assert_eq!(kw[local], one_kw[at(local as u32)]);
             assert_eq!(dept[local], one_dept[at(local as u32)]);
         }
-        let tokens_cut = |whole: &std::collections::BTreeMap<String, Vec<u32>>| {
+        let tokens_cut = |whole: &BTreeMap<String, Vec<u32>>| {
             whole
                 .iter()
                 .map(|(token, posting)| (token.clone(), cut(posting, lo, hi)))
                 .filter(|(_, posting)| !posting.is_empty())
-                .collect::<std::collections::BTreeMap<_, _>>()
+                .collect::<BTreeMap<_, _>>()
         };
         assert_eq!(
             split.tokens(split.layout.column_rel("note")),

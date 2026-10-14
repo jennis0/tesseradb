@@ -547,8 +547,7 @@ fn a_manifest_with_no_unhonourable_state_opens_at_the_highest_n() {
 }
 
 /// No shard, a shard named twice and shards out of order are each refused, and the valid
-/// SEGMENTS-0 below is not served in its place. A bundle of several shards opens
-/// (`mosaica-build/tests/several_shards.rs`).
+/// SEGMENTS-0 below is not served in its place.
 #[test]
 fn a_side_manifest_naming_no_shard_or_shards_out_of_order_is_refused() {
     let shapes: [fn(&mut serde_json::Value); 3] = [

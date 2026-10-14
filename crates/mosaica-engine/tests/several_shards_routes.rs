@@ -1,30 +1,17 @@
-//! The routes a bundle of several shards answers by combining what its shards hold, each asked of
-//! a corpus built as three shards and of the same corpus built as one, through the engine's public
-//! surface.
-//!
-//! The corpus is laid out from where a build puts each item, so that each combination arises: an
-//! artifact only the sum of its shards' visible members clears, a label generated from a set the
-//! boundary cuts, a tile whose top artifacts lie in different shards, a pinned label column whose
-//! memberships overlap in one shard alone, and category values carried in one shard alone. Three
-//! viewers ask: one who sees everything, one who sees items of two shards and none of the first,
-//! and one whose items all lie in the last.
-//!
-//! The two builds give the same items different identifiers, so every answer is compared by the
-//! fixture's own `id` and by each artifact's layer and key, and an order that depends on
-//! `mosaica_id` is compared as a set.
+//! Every read route over a corpus built as three shards against the same corpus built as one,
+//! for three viewers. Answers are compared by the fixture's `id` and each artifact's layer and
+//! key, since the two builds number items differently.
 
 mod common;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
 
 use arrow::array::{
-    Array, ArrayRef, Float64Array, Int64Array, ListBuilder, StringArray, StringBuilder,
-    UInt32Array, UInt64Array,
+    ArrayRef, Float64Array, Int64Array, ListBuilder, StringArray, StringBuilder, UInt32Array,
+    UInt64Array,
 };
-use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
@@ -36,10 +23,9 @@ use mosaica_engine::filter::{
     Endpoint, FilterExpr, FilterOperand, MemberOfLeaf, RegionLeaf, Scalar,
 };
 use mosaica_engine::{
-    AggregateCaps, AggregateHead, AggregateRequest, AggregateSink, ArtifactOut, ArtifactsRequest,
-    By, CategoryQuery, Engine, Grouping, ItemsRequest, PageEnd, Pick, RecordsCounts, RecordsHead,
-    RecordsLimits, RecordsOrder, RecordsSink, Reference, Session, SinkResult, SuggestRequest,
-    TableHead, ViewportArtifactsRequest, ViewportRequest,
+    AggregateHead, AggregateRequest, AggregateSink, ArtifactOut, ArtifactsRequest, By,
+    CategoryQuery, Engine, Grouping, PageEnd, Pick, RecordsCounts, RecordsOrder, Reference,
+    Session, SinkResult, SuggestRequest, TableHead, ViewportArtifactsRequest, ViewportRequest,
 };
 use mosaica_types::{AttrLocalId, MosaicaId, ShardId};
 
@@ -51,20 +37,16 @@ const SIZE: u64 = 50;
 /// last and the build numbers them into the last shard.
 const NARROW: [u64; 10] = [1, 2, 4, 5, 7, 8, 10, 11, 13, 14];
 
-fn full() -> Vec<u8> {
-    full_coverage_credential()
-}
-
-fn subset() -> Vec<u8> {
-    subset_credential()
-}
-
 fn narrow() -> Vec<u8> {
     br#"{"terms": ["2"]}"#.to_vec()
 }
 
 fn viewers() -> [(&'static str, Vec<u8>); 3] {
-    [("full", full()), ("subset", subset()), ("narrow", narrow())]
+    [
+        ("full", full_coverage_credential()),
+        ("subset", subset_credential()),
+        ("narrow", narrow()),
+    ]
 }
 
 fn terms(e: u64) -> Vec<u32> {
@@ -92,13 +74,15 @@ fn score(e: u64) -> i64 {
 
 /// The items of each shard of a build at [`SIZE`], by the terms they carry, ascending.
 struct Shards {
-    /// Shard 0: items carrying term 0 alone.
+    /// Shard 0: term 0 alone.
     z0: Vec<u64>,
-    /// Shard 1: items carrying term 0 alone, and items carrying term 1.
+    /// Shard 1: term 0 alone.
     z1a: Vec<u64>,
+    /// Shard 1: term 1.
     z1s: Vec<u64>,
-    /// Shard 2: items carrying term 1, and the narrow viewer's.
+    /// Shard 2: term 1.
     z2s: Vec<u64>,
+    /// Shard 2: the narrow viewer's.
     z2n: Vec<u64>,
     /// Every item's shard.
     of: BTreeMap<u64, u32>,
@@ -106,7 +90,7 @@ struct Shards {
 
 /// Where a build at [`SIZE`] puts each item. The numbering follows the points and the access
 /// relation alone, so a build of those answers it for the corpus built with its attributes and
-/// layers; [`Pair::new`] checks that it does.
+/// layers; [`Pair::sized`] checks that it does.
 fn shards() -> &'static Shards {
     static SHARDS: OnceLock<Shards> = OnceLock::new();
     SHARDS.get_or_init(|| {
@@ -162,7 +146,7 @@ fn shards() -> &'static Shards {
 
 /// Each item's shard, read from the `mosaica_id` a bulk read serves the full viewer.
 fn shard_map(engine: &Engine) -> BTreeMap<u64, u32> {
-    let session = engine.authorise(&full()).unwrap();
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
     let read = read_items(engine, &session, &Items::new(RecordsOrder::Stored));
     read.rows_with_ids
         .iter()
@@ -655,7 +639,7 @@ struct Names {
 
 impl Names {
     fn of(engine: &Engine) -> Names {
-        let session = engine.authorise(&full()).unwrap();
+        let session = engine.authorise(&full_coverage_credential()).unwrap();
         let items = read_items(engine, &session, &Items::new(RecordsOrder::Stored))
             .rows_with_ids
             .into_iter()
@@ -704,159 +688,11 @@ impl Names {
 // Reading each route, with identifiers replaced by names
 // ---------------------------------------------------------------------------------------------
 
-fn limits() -> RecordsLimits {
-    RecordsLimits {
-        max_page_rows: 100_000,
-        max_page_bytes: 64 << 20,
-        response_bytes: 256 << 20,
-        response_time: Duration::from_secs(60),
-    }
-}
-
-/// Each row's values as text, but those of the columns `skip` names. With `names`, a `key` that is
-/// an artifact's identifier, as an aggregate's layer grouping serves it, is replaced by its name.
-fn rows_of(batch: &RecordBatch, skip: &[&str], names: Option<&Names>) -> Vec<Vec<String>> {
-    let schema = batch.schema();
-    (0..batch.num_rows())
-        .map(|row| {
-            schema
-                .fields()
-                .iter()
-                .zip(batch.columns())
-                .filter(|(field, _)| !skip.contains(&field.name().as_str()))
-                .map(|(field, column)| match (field.name().as_str(), names) {
-                    ("key", Some(names))
-                        if column.is_valid(row) && column.data_type() == &DataType::UInt64 =>
-                    {
-                        let id = column.as_any().downcast_ref::<UInt64Array>().unwrap();
-                        names.artifact(MosaicaId::new(id.value(row)))
-                    }
-                    _ => format!(
-                        "{}={}",
-                        field.name(),
-                        arrow::util::display::array_value_to_string(column, row).unwrap()
-                    ),
-                })
-                .collect()
-        })
-        .collect()
-}
-
-#[derive(Default)]
-struct Pages {
-    head: Option<RecordsHead>,
-    batches: Vec<RecordBatch>,
-}
-
-impl RecordsSink for Pages {
-    fn head(&mut self, head: &RecordsHead) -> SinkResult {
-        self.head = Some(head.clone());
-        Ok(())
-    }
-
-    fn page(&mut self, batch: &RecordBatch, _: &PageEnd) -> SinkResult {
-        self.batches.push(batch.clone());
-        Ok(())
-    }
-}
-
-/// An items read, resumed from each response's cursor to the end.
-#[derive(Clone)]
-struct Items {
-    order: RecordsOrder,
-    /// Declared fields; `id` first.
-    fields: Vec<String>,
-    filter: Option<FilterExpr>,
-    keep_unmatched: bool,
-    page_rows: u32,
-}
-
-impl Items {
-    /// `id` alone, in `order`.
-    fn new(order: RecordsOrder) -> Items {
-        Items {
-            order,
-            fields: vec!["id".to_string()],
-            filter: None,
-            keep_unmatched: false,
-            page_rows: 7,
-        }
-    }
-
-    /// Every declared field: rendered, and the record store's `note`.
-    fn every_field(order: RecordsOrder) -> Items {
-        Items {
-            fields: ["id", "cat", "score", "note"].map(String::from).to_vec(),
-            ..Items::new(order)
-        }
-    }
-
-    fn filter(mut self, filter: FilterExpr) -> Items {
-        self.filter = Some(filter);
-        self
-    }
-}
-
-/// What an items read served.
-struct ItemsRead {
-    /// Each page's rows, in order, without `mosaica_id`.
-    pages: Vec<Vec<Vec<String>>>,
-    /// The first response's counts.
-    counts: Option<RecordsCounts>,
-    /// Every row's `(mosaica_id, id)`.
-    rows_with_ids: Vec<(u64, u64)>,
-}
-
-fn read_items(engine: &Engine, session: &Session, read: &Items) -> ItemsRead {
-    let system = ["position".to_string(), "labels".to_string()];
-    let mut out = ItemsRead {
-        pages: Vec::new(),
-        counts: None,
-        rows_with_ids: Vec::new(),
-    };
-    let mut cursor: Option<String> = None;
-    loop {
-        let mut pages = Pages::default();
-        let trailer = engine
-            .items_stream(
-                session,
-                ItemsRequest {
-                    view: "s0",
-                    fields: &read.fields,
-                    system_fields: &system,
-                    filter: read.filter.clone(),
-                    keep_unmatched: read.keep_unmatched,
-                    count: cursor.is_none(),
-                    order: Some(read.order),
-                    page_rows: Some(read.page_rows),
-                    pages: Some(1),
-                    cursor: cursor.as_deref(),
-                    limits: limits(),
-                    cancel: None,
-                },
-                &mut pages,
-            )
-            .expect("the items read answers");
-        if cursor.is_none() {
-            out.counts = pages.head.and_then(|head| head.counts);
-        }
-        for batch in &pages.batches {
-            out.pages.push(rows_of(batch, &["mosaica_id"], None));
-            let ids = batch.column_by_name("mosaica_id").unwrap();
-            let ids = ids.as_any().downcast_ref::<UInt64Array>().unwrap();
-            let own = batch.column_by_name("id").unwrap();
-            let own = own.as_any().downcast_ref::<UInt64Array>().unwrap();
-            out.rows_with_ids.extend(
-                ids.values()
-                    .iter()
-                    .copied()
-                    .zip(own.values().iter().copied()),
-            );
-        }
-        cursor = trailer.next;
-        if cursor.is_none() {
-            return out;
-        }
+/// Every declared field: rendered, and the record store's `note`.
+fn every_field(order: RecordsOrder) -> Items {
+    Items {
+        fields: ["id", "cat", "score", "note"].map(String::from).to_vec(),
+        ..Items::new(order)
     }
 }
 
@@ -1093,10 +929,8 @@ fn bulk_artifacts(
     keep_unmatched: bool,
 ) -> (Vec<Vec<String>>, Option<RecordsCounts>) {
     let fields = ["key", "masked_count", "content", "centroid", "box"].map(String::from);
-    let (mut rows, mut counts, mut cursor) = (Vec::new(), None, None::<String>);
-    loop {
-        let mut pages = Pages::default();
-        let trailer = built
+    let mut responses = drain(|cursor, pages| {
+        built
             .engine
             .artifacts_stream(
                 session,
@@ -1114,25 +948,23 @@ fn bulk_artifacts(
                     palette_size: None,
                     page_rows: Some(2),
                     pages: Some(1),
-                    cursor: cursor.as_deref(),
+                    cursor,
                     limits: limits(),
                     cancel: None,
                 },
-                &mut pages,
+                pages,
             )
-            .expect("the artifacts read answers");
-        if cursor.is_none() {
-            counts = pages.head.and_then(|head| head.counts);
-        }
-        for batch in &pages.batches {
-            rows.extend(rows_of(batch, &["mosaica_id"], None));
-        }
-        cursor = trailer.next;
-        if cursor.is_none() {
-            rows.sort();
-            return (rows, counts);
-        }
-    }
+            .expect("the artifacts read answers")
+            .next
+    });
+    let counts = responses[0].head.take().and_then(|head| head.counts);
+    let mut rows: Vec<Vec<String>> = responses
+        .iter()
+        .flat_map(|response| &response.batches)
+        .flat_map(|batch| rows_of(batch, &["mosaica_id"], None))
+        .collect();
+    rows.sort();
+    (rows, counts)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1160,10 +992,13 @@ fn a_tiles_top_artifacts_are_ranked_over_every_shard() {
         names(&frames(built, &session, request))
     };
     assert_eq!(
-        top(&pair.several, &full(), 2),
+        top(&pair.several, &full_coverage_credential(), 2),
         ["clusters/big0", "clusters/big1"]
     );
-    assert_eq!(top(&pair.several, &subset(), 1), ["clusters/split"]);
+    assert_eq!(
+        top(&pair.several, &subset_credential(), 1),
+        ["clusters/split"]
+    );
     assert_eq!(top(&pair.several, &narrow(), 2), ["clusters/n2"]);
 
     for zoom in 0..=2 {
@@ -1195,8 +1030,14 @@ fn a_label_generated_from_a_set_the_boundary_cuts_is_contained_over_every_shard(
             .as_ref()
             .map(|label| label.content.clone())
     };
-    assert_eq!(content(&full()), Some(vec!["all of split".to_string()]));
-    assert_eq!(content(&subset()), Some(vec!["split's subset".to_string()]));
+    assert_eq!(
+        content(&full_coverage_credential()),
+        Some(vec!["all of split".to_string()])
+    );
+    assert_eq!(
+        content(&subset_credential()),
+        Some(vec!["split's subset".to_string()])
+    );
     pair.same("every card", cards);
 }
 
@@ -1210,7 +1051,11 @@ fn a_nested_cut_is_taken_over_every_shard() {
             .budget(Some(budget));
         frames(built, session, request)
     };
-    let session = pair.several.engine.authorise(&full()).unwrap();
+    let session = pair
+        .several
+        .engine
+        .authorise(&full_coverage_credential())
+        .unwrap();
     let served = |budget| -> Vec<String> {
         let frames = cut(&pair.several, &session, budget);
         frames
@@ -1267,8 +1112,8 @@ fn member_of_and_a_published_region_gate_a_split_artifact_over_every_shard() {
             .sum()
     };
     for filter in [member_of, region_of] {
-        assert_eq!(matched(&full(), filter), 15);
-        assert_eq!(matched(&subset(), filter), 9);
+        assert_eq!(matched(&full_coverage_credential(), filter), 15);
+        assert_eq!(matched(&subset_credential(), filter), 9);
     }
 
     for filter in [member_of, region_of] {
@@ -1279,8 +1124,7 @@ fn member_of_and_a_published_region_gate_a_split_artifact_over_every_shard() {
             viewport(built, session, request)
         });
         pair.same("the items filtered by `split`", |built, session| {
-            let read =
-                Items::every_field(RecordsOrder::Map).filter(filter(built, "clusters/split"));
+            let read = every_field(RecordsOrder::Map).filter(filter(built, "clusters/split"));
             let read = read_items(&built.engine, session, &read);
             (read.pages, read.counts)
         });
@@ -1320,7 +1164,7 @@ fn bulk_artifacts_and_browse_count_matches_over_every_shard() {
         }
     }
     let split = |built: &Built| {
-        let session = built.engine.authorise(&subset()).unwrap();
+        let session = built.engine.authorise(&subset_credential()).unwrap();
         browse(
             built,
             &session,
@@ -1443,7 +1287,11 @@ fn points_of_every_shard_are_tagged_from_the_labels_and_from_the_walk() {
             );
         }
     }
-    let session = pair.several.engine.authorise(&full()).unwrap();
+    let session = pair
+        .several
+        .engine
+        .authorise(&full_coverage_credential())
+        .unwrap();
     let tagged = viewport(
         &pair.several,
         &session,
@@ -1509,7 +1357,7 @@ fn a_level_whose_shards_disagree_on_its_column_reads_every_shard() {
         );
     }
     pair.same("the items in p1", |built, session| {
-        let read = Items::every_field(RecordsOrder::Stored).filter(member_of(built, "pinned/p1"));
+        let read = every_field(RecordsOrder::Stored).filter(member_of(built, "pinned/p1"));
         let read = read_items(&built.engine, session, &read);
         (read.pages, read.counts)
     });
@@ -1532,17 +1380,14 @@ fn ids_in() -> FilterExpr {
     }
 }
 
-/// An items read in map order and in stored order, a page of seven at a time, each response
-/// resumed from the last one's cursor across every shard boundary, serves the rows, the pages and
-/// the counts one shard serves: with every kind of field, unfiltered, under a filter, a unique
-/// `in` naming items of every shard, which drives the read from its matches, a `member_of` naming
-/// `split`, and with the unmatched rows kept.
+/// An items read in either order, resumed page by page across every shard boundary, serves the
+/// rows, pages and counts one shard serves, unfiltered and under every kind of filter.
 #[test]
 fn an_items_read_resumed_across_every_shard_equals_one_shards() {
     let pair = Pair::new();
     for order in [RecordsOrder::Map, RecordsOrder::Stored] {
         let reads = |built: &Built| {
-            let every = Items::every_field(order);
+            let every = every_field(order);
             vec![
                 ("unfiltered", every.clone()),
                 ("scored", every.clone().filter(scored())),
@@ -1580,7 +1425,11 @@ fn an_items_read_resumed_across_every_shard_equals_one_shards() {
     }
 
     let before = pair.several.engine.driven_stretches();
-    let session = pair.several.engine.authorise(&full()).unwrap();
+    let session = pair
+        .several
+        .engine
+        .authorise(&full_coverage_credential())
+        .unwrap();
     let read = read_items(
         &pair.several.engine,
         &session,
@@ -1614,7 +1463,7 @@ fn a_stored_read_across_many_small_shards_equals_one_shards() {
             |built, session| {
                 let mut read = Items {
                     page_rows: 3,
-                    ..Items::every_field(RecordsOrder::Stored)
+                    ..every_field(RecordsOrder::Stored)
                 };
                 read.filter = filter.clone();
                 let read = read_items(&built.engine, session, &read);
@@ -1688,11 +1537,11 @@ fn categories_and_suggest_answer_over_every_shard() {
         )
     };
     assert_eq!(
-        listed_to(&full()),
+        listed_to(&full_coverage_credential()),
         ["alpha", "bravo", "charlie", "delta", "echo"]
     );
-    assert!(listed_to(&subset()).contains(&"delta".to_string()));
-    assert!(!listed_to(&subset()).contains(&"echo".to_string()));
+    assert!(listed_to(&subset_credential()).contains(&"delta".to_string()));
+    assert!(!listed_to(&subset_credential()).contains(&"echo".to_string()));
     pair.same("the listing", listed);
     pair.same("the codes", |built, session| {
         built
@@ -1857,13 +1706,7 @@ fn aggregate_groupings_sum_over_every_shard() {
                         pages: None,
                         cursor: None,
                         limits: limits(),
-                        caps: AggregateCaps {
-                            groupings: 8,
-                            top: 100,
-                            named: 100,
-                            bins: 100,
-                            cells: u64::MAX,
-                        },
+                        caps: caps(),
                         cancel: None,
                     },
                     &mut tables,
@@ -1873,7 +1716,8 @@ fn aggregate_groupings_sum_over_every_shard() {
                 .pages
                 .iter()
                 .map(|(table, batch)| {
-                    let mut rows = rows_of(batch, &["slot"], Some(&built.names));
+                    let name = |id| built.names.artifact(id);
+                    let mut rows = rows_of(batch, &["slot"], Some(&name));
                     rows.sort();
                     (*table, rows)
                 })

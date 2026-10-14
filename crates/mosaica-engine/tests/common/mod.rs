@@ -101,14 +101,20 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
-use arrow::array::{Float64Array, UInt32Array, UInt64Array};
+use arrow::array::{Array, Float64Array, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use mosaica_build::{build, BuildArgs};
-use mosaica_engine::{default_compute_threads, ArtifactOut, Engine, EngineConfig};
+use mosaica_engine::filter::FilterExpr;
+use mosaica_engine::{
+    default_compute_threads, AggregateCaps, AggregateHead, AggregateSink, ArtifactOut, Engine,
+    EngineConfig, ItemsRequest, PageEnd, RecordsCounts, RecordsHead, RecordsLimits, RecordsOrder,
+    RecordsSink, Session, SinkResult, TableHead,
+};
 use mosaica_lifecycle::UnallocatedRow;
 use mosaica_spatial::Bounds;
 use mosaica_store::manifest::SegmentsManifest;
@@ -460,12 +466,19 @@ impl Fixture {
 
 /// The `N_ITEMS` fixture, built into a temporary directory of its own.
 pub fn fixture() -> Fixture {
+    fixture_sized(N_ITEMS, None)
+}
+
+/// [`fixture`] over `n` items, declaring `[shards] size` where `shard_size` is given.
+pub fn fixture_sized(n: u64, shard_size: Option<u64>) -> Fixture {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
-    build_fixture(
+    build_fixture_sized(
         &root,
         &tmp.path().join("points.parquet"),
         &tmp.path().join("pairs.parquet"),
+        n,
+        shard_size,
     );
     Fixture {
         root,
@@ -1070,4 +1083,186 @@ pub fn wait_for_content_extents(root: &Path, want: usize) {
         std::time::Duration::from_secs(10),
         || published() >= want,
     );
+}
+
+pub fn limits() -> RecordsLimits {
+    RecordsLimits {
+        max_page_rows: 100_000,
+        max_page_bytes: 64 << 20,
+        response_bytes: 256 << 20,
+        response_time: Duration::from_secs(60),
+    }
+}
+
+pub fn caps() -> AggregateCaps {
+    AggregateCaps {
+        groupings: 8,
+        top: 100,
+        named: 100,
+        bins: 100,
+        cells: u64::MAX,
+    }
+}
+
+/// What one records or aggregate response served: a records response's head, and every page.
+#[derive(Default)]
+pub struct Pages {
+    pub head: Option<RecordsHead>,
+    pub batches: Vec<RecordBatch>,
+}
+
+impl RecordsSink for Pages {
+    fn head(&mut self, head: &RecordsHead) -> SinkResult {
+        self.head = Some(head.clone());
+        Ok(())
+    }
+
+    fn page(&mut self, batch: &RecordBatch, _: &PageEnd) -> SinkResult {
+        self.batches.push(batch.clone());
+        Ok(())
+    }
+}
+
+impl AggregateSink for Pages {
+    fn head(&mut self, _: &AggregateHead) -> SinkResult {
+        Ok(())
+    }
+
+    fn table(&mut self, _: &TableHead) -> SinkResult {
+        Ok(())
+    }
+
+    fn page(&mut self, _: u32, batch: &RecordBatch, _: &PageEnd) -> SinkResult {
+        self.batches.push(batch.clone());
+        Ok(())
+    }
+}
+
+/// A read resumed from each response's cursor to the end: `read(cursor, pages)` serves one
+/// response into `pages` and answers its cursor. Every response, in order.
+pub fn drain(mut read: impl FnMut(Option<&str>, &mut Pages) -> Option<String>) -> Vec<Pages> {
+    let mut responses = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let mut pages = Pages::default();
+        cursor = read(cursor.as_deref(), &mut pages);
+        responses.push(pages);
+        if cursor.is_none() {
+            return responses;
+        }
+    }
+}
+
+/// Each row's values as `name=value`, but those of the columns `skip` names. `key`, where given,
+/// names a `UInt64` `key` column's identifier in place of its value.
+pub fn rows_of(
+    batch: &RecordBatch,
+    skip: &[&str],
+    key: Option<&dyn Fn(MosaicaId) -> String>,
+) -> Vec<Vec<String>> {
+    let schema = batch.schema();
+    (0..batch.num_rows())
+        .map(|row| {
+            schema
+                .fields()
+                .iter()
+                .zip(batch.columns())
+                .filter(|(field, _)| !skip.contains(&field.name().as_str()))
+                .map(|(field, column)| match (field.name().as_str(), key) {
+                    ("key", Some(key))
+                        if column.is_valid(row) && column.data_type() == &DataType::UInt64 =>
+                    {
+                        let id = column.as_any().downcast_ref::<UInt64Array>().unwrap();
+                        key(MosaicaId::new(id.value(row)))
+                    }
+                    _ => format!(
+                        "{}={}",
+                        field.name(),
+                        arrow::util::display::array_value_to_string(column, row).unwrap()
+                    ),
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// An items read of view `s0`, resumed from each response's cursor to the end.
+#[derive(Clone)]
+pub struct Items {
+    pub order: RecordsOrder,
+    /// Declared fields; `id` first.
+    pub fields: Vec<String>,
+    pub filter: Option<FilterExpr>,
+    pub keep_unmatched: bool,
+    pub page_rows: u32,
+}
+
+impl Items {
+    /// `id` alone, in `order`.
+    pub fn new(order: RecordsOrder) -> Items {
+        Items {
+            order,
+            fields: vec!["id".to_string()],
+            filter: None,
+            keep_unmatched: false,
+            page_rows: 7,
+        }
+    }
+
+    pub fn filter(mut self, filter: FilterExpr) -> Items {
+        self.filter = Some(filter);
+        self
+    }
+}
+
+/// What an items read served.
+pub struct ItemsRead {
+    /// Each page's rows, in order, without `mosaica_id`.
+    pub pages: Vec<Vec<Vec<String>>>,
+    /// The first response's counts.
+    pub counts: Option<RecordsCounts>,
+    /// Every row's `(mosaica_id, id)`.
+    pub rows_with_ids: Vec<(u64, u64)>,
+}
+
+pub fn read_items(engine: &Engine, session: &Session, read: &Items) -> ItemsRead {
+    let system = ["position".to_string(), "labels".to_string()];
+    let mut responses = drain(|cursor, pages| {
+        engine
+            .items_stream(
+                session,
+                ItemsRequest {
+                    view: "s0",
+                    fields: &read.fields,
+                    system_fields: &system,
+                    filter: read.filter.clone(),
+                    keep_unmatched: read.keep_unmatched,
+                    count: cursor.is_none(),
+                    order: Some(read.order),
+                    page_rows: Some(read.page_rows),
+                    pages: Some(1),
+                    cursor,
+                    limits: limits(),
+                    cancel: None,
+                },
+                pages,
+            )
+            .expect("the items read answers")
+            .next
+    });
+    let mut out = ItemsRead {
+        pages: Vec::new(),
+        counts: responses[0].head.take().and_then(|head| head.counts),
+        rows_with_ids: Vec::new(),
+    };
+    for batch in responses.iter().flat_map(|response| &response.batches) {
+        out.pages.push(rows_of(batch, &["mosaica_id"], None));
+        let column = |name: &str| -> Vec<u64> {
+            let values = batch.column_by_name(name).unwrap();
+            values.as_any().downcast_ref::<UInt64Array>().unwrap().values().to_vec()
+        };
+        out.rows_with_ids
+            .extend(column("mosaica_id").into_iter().zip(column("id")));
+    }
+    out
 }

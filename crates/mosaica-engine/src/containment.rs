@@ -479,16 +479,7 @@ mod tests {
     /// none of it — is not contained, whatever the viewer holds.
     #[test]
     fn an_expression_over_part_of_a_set_contains_nobody() {
-        let mut builder = mosaica_store::derived::ContainmentBuilder::new();
-        let clause: &[u32] = &[1];
-        builder.push(
-            0,
-            [
-                mosaica_store::derived::encode_expression(1, vec![clause]),
-                mosaica_store::derived::encode_expression(0, Vec::new()),
-            ],
-        );
-        let partition = ContainmentPartition::of_bytes(builder.finish());
+        let partition = ContainmentPartition::of_sets(&[&[(1, &[&[1]]), (0, &[])]]);
         let held = satisfied(&[1]);
         let answers = partition.answers(&held);
         assert_eq!(answers.satisfies(0, 0, 1), Some(true), "the slice is the whole set");
@@ -498,15 +489,14 @@ mod tests {
     }
 
     /// Interning is by canonical form, so two generating sets of one size drawn from the same
-    /// signatures share one identifier however differently they were written down — which is the
-    /// whole of the sharing the design counts on where a layer is authored per term.
+    /// signatures share one identifier however differently they were written down.
     #[test]
     fn the_same_expression_written_two_ways_interns_once() {
         let partition = partition_of(&[&[&[1, 2], &[3]], &[&[3], &[1, 2]], &[&[1, 2], &[1, 2]]]);
         assert_eq!(
             partition.expressions(),
             2,
-            "clause order and a repeated clause are not part of the identity"
+            "clause order is not part of the identity"
         );
         assert_eq!(partition.pairs(), 3);
         assert_eq!(partition.id_at(0, 0), partition.id_at(1, 0));

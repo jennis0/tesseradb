@@ -1373,11 +1373,13 @@ mod tests {
 pub(crate) mod fixture {
     //! Segments written from `(x, y, mosaica_id)` triples, for the tests of a rule that reads one.
 
+    use std::borrow::Borrow;
+
     use croaring::Bitmap;
     use mosaica_spatial::tiler::{sort_batch, TilerItem};
     use mosaica_spatial::{fixed32, morton_of, Bounds, Tile};
     use mosaica_store::read::SegmentData;
-    use mosaica_types::{EntityId, MosaicaId};
+    use mosaica_types::{EntityId, MosaicaId, ShardId, ShardRow};
     use rand::rngs::StdRng;
     use rand::Rng;
     use rustc_hash::FxHashSet;
@@ -1405,6 +1407,75 @@ pub(crate) mod fixture {
                 .filter(|&row| visible.contains(&self.ids[row as usize]))
                 .collect()
         }
+    }
+
+    /// One shard's segments, ascending by row base, each segment's rows after the rows of the
+    /// ones before it.
+    pub(crate) struct Stacked {
+        pub(crate) shard: ShardId,
+        pub(crate) segments: Vec<(Written, u32)>,
+    }
+
+    impl Stacked {
+        pub(crate) fn of(shard: u32, written: Vec<Written>) -> Stacked {
+            let mut base = 0;
+            let segments = written
+                .into_iter()
+                .map(|segment| {
+                    let at = base;
+                    base += segment.ids.len() as u32;
+                    (segment, at)
+                })
+                .collect();
+            Stacked {
+                shard: ShardId::new(shard).unwrap(),
+                segments,
+            }
+        }
+
+        pub(crate) fn segments(&self) -> Vec<(&SegmentData, u32)> {
+            self.segments
+                .iter()
+                .map(|(segment, base)| (&segment.data, *base))
+                .collect()
+        }
+
+        /// The rows whose `mosaica_id` `keep` admits.
+        pub(crate) fn rows(&self, keep: impl Fn(u64) -> bool) -> Bitmap {
+            let mut rows = Bitmap::new();
+            for (segment, base) in &self.segments {
+                for (row, &id) in (0u32..).zip(&segment.ids) {
+                    if keep(id) {
+                        rows.add(base + row);
+                    }
+                }
+            }
+            rows
+        }
+
+        pub(crate) fn id_of(&self, row: u32) -> u64 {
+            let (segment, base) = self
+                .segments
+                .iter()
+                .rev()
+                .find(|(_, base)| *base <= row)
+                .unwrap();
+            segment.ids[(row - base) as usize]
+        }
+    }
+
+    /// The `mosaica_id` of each of `rows`, read in its own shard among `sides`.
+    pub(crate) fn ids_of<S: Borrow<Stacked>>(sides: &[S], rows: &[ShardRow]) -> Vec<u64> {
+        rows.iter()
+            .map(|row| {
+                let side = sides
+                    .iter()
+                    .map(Borrow::borrow)
+                    .find(|side: &&Stacked| side.shard == row.shard())
+                    .unwrap();
+                side.id_of(row.row_in(side.shard).unwrap().raw())
+            })
+            .collect()
     }
 
     /// The segment of `points`, sorted into row order.
@@ -1472,10 +1543,9 @@ mod across_tests {
     //! A tile over several shards against one segment holding the same rows: the served set is a
     //! function of the visible identities alone, so where the rows lie must not move it.
 
-    use super::fixture::{points, segment_of, tile_of, Written};
+    use super::fixture::{ids_of, points, segment_of, tile_of, Stacked, Written};
     use super::*;
 
-    use croaring::Bitmap;
     use mosaica_spatial::Tile;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
@@ -1483,33 +1553,22 @@ mod across_tests {
 
     use crate::bands::{select, BandAnswer};
 
-    /// One shard: its segments, ascending by row base, and its leaf.
+    /// One shard and its leaf.
     struct Side {
-        shard: ShardId,
-        segments: Vec<(Written, u32)>,
+        stacked: Stacked,
         mask: EffectiveMask,
     }
 
     impl Side {
         fn of(shard: u32, segments: Vec<Written>, visible: &FxHashSet<u64>) -> Side {
-            let mut rows = Bitmap::new();
-            let mut base = 0;
-            let mut placed = Vec::new();
-            for segment in segments {
-                rows.or_inplace(&segment.rows_of(visible).add_offset(i64::from(base)));
-                let count = segment.ids.len() as u32;
-                placed.push((segment, base));
-                base += count;
-            }
-            Side {
-                shard: ShardId::new(shard).unwrap(),
-                segments: placed,
-                mask: EffectiveMask::of_rows(rows),
-            }
+            let stacked = Stacked::of(shard, segments);
+            let mask = EffectiveMask::of_rows(stacked.rows(|id| visible.contains(&id)));
+            Side { stacked, mask }
         }
 
         fn parts(&self, tile: &Tile) -> Vec<SelectionPart<'_>> {
-            self.segments
+            self.stacked
+                .segments
                 .iter()
                 .map(|(segment, row_base)| {
                     let range = mosaica_store::tile_ranges(&segment.data, tile);
@@ -1525,25 +1584,6 @@ mod across_tests {
                 })
                 .collect()
         }
-
-        fn id_of(&self, row: u32) -> u64 {
-            let (segment, base) = self
-                .segments
-                .iter()
-                .rev()
-                .find(|(_, base)| *base <= row)
-                .unwrap();
-            segment.ids[(row - base) as usize]
-        }
-    }
-
-    fn ids_across(sides: &[Side], rows: &[ShardRow]) -> Vec<u64> {
-        rows.iter()
-            .map(|row| {
-                let side = sides.iter().find(|side| side.shard == row.shard()).unwrap();
-                side.id_of(row.row_in(side.shard).unwrap().raw())
-            })
-            .collect()
     }
 
     /// Every tile a point of `points` lies in, at a few depths, with a few parameter sets: the
@@ -1595,7 +1635,7 @@ mod across_tests {
                         .iter()
                         .zip(&held)
                         .map(|(side, parts)| TileShard {
-                            shard: side.shard,
+                            shard: side.stacked.shard,
                             mask: &side.mask,
                             parts,
                         })
@@ -1619,13 +1659,14 @@ mod across_tests {
                             )
                             .rows
                             .iter()
-                            .map(|&row| whole.id_of(row))
+                            .map(|&row| whole.stacked.id_of(row))
                             .collect();
                             let got = TileSelection::of(&shards, &p, visible_here);
-                            assert_eq!(ids_across(&sides, &got.rows), want, "{case}: scan");
+                            let stacked = sides.each_ref().map(|side| &side.stacked);
+                            assert_eq!(ids_of(&stacked, &got.rows), want, "{case}: scan");
 
                             let one_shard = [TileShard {
-                                shard: whole.shard,
+                                shard: whole.stacked.shard,
                                 mask: &whole.mask,
                                 parts: &one,
                             }];
@@ -1647,9 +1688,9 @@ mod across_tests {
                                     },
                                 ) => {
                                     served_from_bands += 1;
-                                    let ids = ids_across(std::slice::from_ref(&whole), &rows);
+                                    let ids = ids_of(&[&whole.stacked], &rows);
                                     assert_eq!(ids, want, "{case}: the bands serve the scan's");
-                                    assert_eq!(ids_across(&sides, &rows_across), want, "{case}");
+                                    assert_eq!(ids_of(&stacked, &rows_across), want, "{case}");
                                     assert_eq!(
                                         (entries_read, widened),
                                         (read_across, widened_across),

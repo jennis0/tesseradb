@@ -36,8 +36,8 @@ use mosaica_engine::filter::{
 use mosaica_engine::shapes::ShapeF64;
 use mosaica_engine::{
     ColumnBuf, Engine, EngineError, ItemsRequest, LayerSelection, PageEnd, PageEndedBy,
-    RecordsHead, RecordsLimits, RecordsOrder, RecordsRefused, RecordsSink, RecordsTrailer,
-    RegionVerdict, ResponseEndedBy, Session, SinkResult, ViewportRequest,
+    RecordsHead, RecordsOrder, RecordsRefused, RecordsSink, RecordsTrailer, RegionVerdict,
+    ResponseEndedBy, Session, SinkResult, ViewportRequest,
 };
 use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
 use mosaica_lifecycle::{IncomingArtifact, UnallocatedRow};
@@ -616,15 +616,6 @@ fn scalars_of(s: u64) -> Vec<WalScalar> {
 
 fn both_credential() -> Vec<u8> {
     br#"{"terms": ["0", "1"]}"#.to_vec()
-}
-
-fn limits() -> RecordsLimits {
-    RecordsLimits {
-        max_page_rows: 100_000,
-        max_page_bytes: 64 << 20,
-        response_bytes: 256 << 20,
-        response_time: Duration::from_secs(60),
-    }
 }
 
 fn request<'a>(view: &'a str, fields: &'a [String]) -> ItemsRequest<'a> {

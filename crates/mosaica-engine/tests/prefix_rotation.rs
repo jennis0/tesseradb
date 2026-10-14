@@ -160,8 +160,8 @@ fn engine_over_fixture(tmp: &tempfile::TempDir, root: &Path, cache: &str, wal: &
     engine
 }
 
-/// **Gaps 1 and 3: one swap carries the prefix, the base postings, the shard's identity and the
-/// unique indexes.**
+/// **One swap carries the prefix, the base postings, the shard's identity and the unique
+/// indexes.**
 ///
 /// Each of the four is asserted through an observable a caller has, because none of the fields is
 /// public: the prefix and `segments_version` off the generation; the identity through
@@ -222,8 +222,7 @@ fn a_rotation_moves_the_prefix_the_postings_the_identity_and_the_unique_indexes_
     assert_eq!(visible(&engine, &fresh), baseline);
 }
 
-/// **Gap 2: a session's fragment is rebuilt across a rotation, not reused** — compaction §12's
-/// obligation 3.
+/// **A session's fragment is rebuilt across a rotation, not reused.**
 ///
 /// A fold advances no watermark, so a fragment keyed by the watermark alone would answer for
 /// ever with the pre-fold one: a mask still containing every entity the fold retired, composed

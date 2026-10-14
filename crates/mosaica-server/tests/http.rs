@@ -798,8 +798,8 @@ async fn saturated_gate_sheds_a_second_viewport_with_429_and_retry_after() {
 
 /// `/healthz`, `/v1/meta`, `/session/authorise`, `/session/revoke`, and a `/control/changes`
 /// suppress must all succeed while the viewer gate is fully saturated by a slow viewport. None of
-/// them is a gated path: authorising builds nothing, and the deny priority lane (lifecycle §1.3)
-/// must never be blocked by compute-admission pressure on an unrelated plane.
+/// them is a gated path: authorising builds nothing, and the deny priority lane must never be
+/// blocked by compute-admission pressure on an unrelated plane.
 #[tokio::test]
 async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
     let tmp = TempDir::new().unwrap();

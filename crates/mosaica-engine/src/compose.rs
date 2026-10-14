@@ -505,10 +505,16 @@ impl EffectiveMask {
 impl EffectiveMask {
     /// A mask seeing exactly `rows`, with no overlay or buffer effects.
     pub(crate) fn of_rows(rows: Bitmap) -> EffectiveMask {
+        EffectiveMask::of_parts(rows, Bitmap::new(), Bitmap::new())
+    }
+
+    /// A mask over `base`, with `minus ⊆ base` and `plus ∩ base = ∅`, as composition leaves them.
+    pub(crate) fn of_parts(base: Bitmap, minus: Bitmap, plus: Bitmap) -> EffectiveMask {
+        debug_assert!(minus.is_subset(&base) && plus.and(&base).is_empty());
         EffectiveMask {
-            base: Arc::new(RowProjection::from_rows(rows)),
-            minus: Bitmap::new(),
-            plus: Bitmap::new(),
+            base: Arc::new(RowProjection::from_rows(base)),
+            minus,
+            plus,
             filter: None,
             highlight: None,
             whole: std::sync::OnceLock::new(),
@@ -1088,19 +1094,6 @@ mod sharded_tests {
     /// The rows of each shard's space.
     const SPACES: [u32; 2] = [3_000, 70_000];
 
-    /// A leaf over `base`, with `minus ⊆ base` and `plus ∩ base = ∅`, as composition leaves them.
-    fn leaf(base: Bitmap, minus: Bitmap, plus: Bitmap) -> EffectiveMask {
-        debug_assert!(minus.is_subset(&base) && plus.and(&base).is_empty());
-        EffectiveMask {
-            base: Arc::new(RowProjection::from_rows(base)),
-            minus,
-            plus,
-            filter: None,
-            highlight: None,
-            whole: std::sync::OnceLock::new(),
-        }
-    }
-
     /// One shard's `(base, minus, plus)` over `rows` rows, at a density chosen per seed so some
     /// containers are runs and some arrays.
     fn parts(rng: &mut StdRng, rows: u32) -> (Bitmap, Bitmap, Bitmap) {
@@ -1149,7 +1142,7 @@ mod sharded_tests {
             domain.sort_by_key(|r| r.start);
             let admits = some_set(&mut rng, rows);
             let highlight = some_set(&mut rng, rows);
-            let mut mask = leaf(base, minus, plus);
+            let mut mask = EffectiveMask::of_parts(base, minus, plus);
             if filtered {
                 mask = mask.with_filter(FilterRows::Complete(admits));
             }
@@ -1181,9 +1174,10 @@ mod sharded_tests {
     fn a_shard_with_nothing_visible_has_no_leaf() {
         let [zero, one, two] = [0, 1, 2].map(|raw| ShardId::new(raw).unwrap());
         let held: Bitmap = (0..100).collect();
-        let denied_whole = leaf(held.clone(), held, Bitmap::new());
-        let buffered_only = leaf(Bitmap::new(), Bitmap::new(), Bitmap::of(&[5, 9]));
-        let never = leaf(Bitmap::new(), Bitmap::new(), Bitmap::new());
+        let denied_whole = EffectiveMask::of_parts(held.clone(), held, Bitmap::new());
+        let buffered_only =
+            EffectiveMask::of_parts(Bitmap::new(), Bitmap::new(), Bitmap::of(&[5, 9]));
+        let never = EffectiveMask::of_rows(Bitmap::new());
         let mask = ShardedMask::new([(two, never), (zero, denied_whole), (one, buffered_only)]);
 
         assert_eq!(mask.visible_total(), 2);
@@ -1196,8 +1190,8 @@ mod sharded_tests {
     #[test]
     fn a_filter_narrows_the_leaves_it_was_evaluated_in() {
         let [zero, one, two] = [0, 1, 2].map(|raw| ShardId::new(raw).unwrap());
-        let some = || leaf(Bitmap::of(&[1, 2, 3]), Bitmap::new(), Bitmap::new());
-        let none = || leaf(Bitmap::new(), Bitmap::new(), Bitmap::new());
+        let some = || EffectiveMask::of_rows(Bitmap::of(&[1, 2, 3]));
+        let none = || EffectiveMask::of_rows(Bitmap::new());
         let admits = || FilterRows::Complete(Bitmap::of(&[2]));
 
         let mask = ShardedMask::new([(zero, none()), (one, some()), (two, some())]);
@@ -1228,8 +1222,8 @@ mod sharded_tests {
     #[test]
     fn a_shard_has_its_leaf_even_when_left_out() {
         let one = ShardId::new(1).unwrap();
-        let nothing = || leaf(Bitmap::new(), Bitmap::new(), Bitmap::new());
-        let held = || leaf(Bitmap::of(&[4]), Bitmap::new(), Bitmap::new());
+        let nothing = || EffectiveMask::of_rows(Bitmap::new());
+        let held = || EffectiveMask::of_rows(Bitmap::of(&[4]));
         let mask = || ShardedMask::new([(ShardId::ZERO, nothing()), (one, held())]);
         assert!(mask().leaf(ShardId::ZERO).is_none() && mask().leaf(one).is_some());
         assert_eq!(mask().into_leaf(ShardId::ZERO).unwrap().visible_total(), 0);

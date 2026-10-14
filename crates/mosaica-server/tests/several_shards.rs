@@ -3,37 +3,19 @@
 
 mod common;
 
-use std::path::Path;
-
 use common::*;
-use mosaica_build::{build, BuildArgs};
 use reqwest::Method;
 use tempfile::TempDir;
 
 /// Items the fixture builds.
 const N: u64 = 40;
-
-/// The standard fixture of [`N`] items, built into `dir/bundle` at a size that writes two shards.
-fn build_two_shards(dir: &Path) {
-    let points = dir.join("points.parquet");
-    write_points_n(&points, N);
-    write_pairs_n(&dir.join("pairs.parquet"), N);
-    let view = view_args(
-        "s0",
-        &points,
-        mosaica_build::config::AccessInput::relation(dir.join("pairs.parquet")),
-    );
-    let args = BuildArgs {
-        shard_size: Some(N - 15),
-        ..build_args(&dir.join("bundle"), vec![view])
-    };
-    build(&with_id(args, &points)).expect("the build writes two shards");
-}
+/// The size the fixture is built at: shards of 25 and 15 items.
+const SIZE: u64 = 25;
 
 #[tokio::test]
 async fn a_server_over_several_shards_is_ready_and_refuses_every_write() {
     let dir = TempDir::new().unwrap();
-    build_two_shards(dir.path());
+    build_fixture_sized(dir.path(), N, Some(SIZE));
     let server = open(dir.path()).await;
 
     for url in [server.viewer_url("/readyz"), server.session_url("/readyz")] {
@@ -112,7 +94,6 @@ async fn a_server_over_several_shards_is_ready_and_refuses_every_write() {
         .unwrap();
     assert_eq!(principal.status(), 200);
 
-    // Reads answer.
     let token = token_for(&server, &["0"]).await;
     let resp = server
         .client

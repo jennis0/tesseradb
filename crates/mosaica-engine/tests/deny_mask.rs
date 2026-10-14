@@ -458,8 +458,6 @@ fn a_join_published_before_the_entitys_own_row_is_drawn_from_the_buffer() {
 }
 
 const JOINED_VIEW: &str = "s1";
-const WHOLE: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
-
 /// What one credential is served in `view`: the summed visible count, and the marks drawn.
 /// A fresh session per call, as a viewer arriving now would have.
 fn served_in(
@@ -468,16 +466,7 @@ fn served_in(
     view: &str,
 ) -> (u64, std::collections::HashSet<u64>) {
     let session = engine.authorise(credential).expect("the credential authorises");
-    let response = engine
-        .viewport(
-            &session,
-            ViewportRequest::new(view, 4, WHOLE, N_ITEMS as usize),
-        )
-        .expect("a viewport");
-    (
-        response.tiles.iter().map(|t| t.visible).sum(),
-        response.points.iter().map(|(id, _)| id.raw()).collect(),
-    )
+    served_to(engine, &session, view)
 }
 
 fn row_in_view(engine: &Engine, view: &str, entity: EntityId) -> Option<u32> {
@@ -709,7 +698,7 @@ fn served_to(
     view: &str,
 ) -> (u64, std::collections::HashSet<u64>) {
     let response = engine
-        .viewport(session, ViewportRequest::new(view, 4, WHOLE, N_ITEMS as usize))
+        .viewport(session, ViewportRequest::new(view, 4, WHOLE_MAP, N_ITEMS as usize))
         .expect("a viewport");
     (
         response.tiles.iter().map(|t| t.visible).sum(),

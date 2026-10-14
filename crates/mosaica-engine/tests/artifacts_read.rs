@@ -22,8 +22,8 @@ use arrow::record_batch::RecordBatch;
 use common::*;
 use mosaica_engine::filter::{FilterExpr, RegionLeaf};
 use mosaica_engine::{
-    ArtifactsRequest, Engine, EngineError, ItemsRequest, PageEnd, RecordsHead, RecordsLimits,
-    RecordsRefused, RecordsSink, RecordsTrailer, Session, SinkResult,
+    ArtifactsRequest, Engine, EngineError, ItemsRequest, PageEnd, RecordsHead, RecordsRefused,
+    RecordsSink, RecordsTrailer, Session, SinkResult,
 };
 use mosaica_lifecycle::membership::{IncomingAttachment, IncomingContent};
 use mosaica_lifecycle::wal::ChangeOp;
@@ -364,15 +364,6 @@ fn fixture() -> Fx {
 // ---------------------------------------------------------------------------------------------
 // Reading
 // ---------------------------------------------------------------------------------------------
-
-fn limits() -> RecordsLimits {
-    RecordsLimits {
-        max_page_rows: 100_000,
-        max_page_bytes: 64 << 20,
-        response_bytes: 256 << 20,
-        response_time: Duration::from_secs(60),
-    }
-}
 
 fn request<'a>(layer: &'a str, fields: &'a [String]) -> ArtifactsRequest<'a> {
     ArtifactsRequest {

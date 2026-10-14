@@ -1623,47 +1623,7 @@ mod across_tests {
     use rand::{Rng, SeedableRng};
     use rustc_hash::FxHashSet;
 
-    use crate::select::fixture::{points, segment_of, tile_of, Written};
-
-    /// One shard: its segments, ascending by row base.
-    struct Side {
-        shard: ShardId,
-        segments: Vec<(Written, u32)>,
-    }
-
-    impl Side {
-        fn of(shard: u32, segments: Vec<Written>) -> Side {
-            let mut base = 0;
-            let mut placed = Vec::new();
-            for segment in segments {
-                let count = segment.ids.len() as u32;
-                placed.push((segment, base));
-                base += count;
-            }
-            Side {
-                shard: ShardId::new(shard).unwrap(),
-                segments: placed,
-            }
-        }
-
-        /// The rows of this shard whose identity `admits` holds.
-        fn rows(&self, admits: impl Fn(u64) -> bool) -> Bitmap {
-            let mut rows = Bitmap::new();
-            for (segment, base) in &self.segments {
-                for (row, &id) in segment.ids.iter().enumerate() {
-                    if admits(id) {
-                        rows.add(base + row as u32);
-                    }
-                }
-            }
-            rows
-        }
-
-        fn id_of(&self, row: u32) -> u64 {
-            let (segment, base) = self.segments.iter().rev().find(|(_, b)| *b <= row).unwrap();
-            segment.ids[(row - base) as usize]
-        }
-    }
+    use crate::select::fixture::{ids_of, points, segment_of, tile_of, Stacked};
 
     /// What one view answers for `tiles`: each tile's counts and served identities, and the
     /// underlay.
@@ -1676,18 +1636,14 @@ mod across_tests {
     /// The sweep over `sides`, each seeing the identities `visible` holds, filtered and
     /// highlighted by identity where asked.
     fn answer(
-        sides: &[Side],
+        sides: &[Stacked],
         visible: &FxHashSet<u64>,
         tiles: &[Tile],
         filtered: bool,
         params: &SelectParams,
         bands: bool,
     ) -> Answer {
-        let segments = ViewSegments::new(sides.iter().map(|side| {
-            let held: Vec<(&SegmentData, u32)> =
-                side.segments.iter().map(|(s, base)| (&s.data, *base)).collect();
-            (side.shard, held)
-        }));
+        let segments = ViewSegments::new(sides.iter().map(|side| (side.shard, side.segments())));
         let set = TileSet {
             tiles: tiles.to_vec(),
             underlay_offset: Some(2),
@@ -1729,15 +1685,7 @@ mod across_tests {
             match tile_sweep(&tiling, t, &counts, &mask, params, bands, &None).unwrap() {
                 None => out.push(None),
                 Some(ts) => {
-                    let ids = ts
-                        .rows
-                        .iter()
-                        .map(|row| {
-                            let side = sides.iter().find(|s| s.shard == row.shard()).unwrap();
-                            side.id_of(row.row_in(side.shard).unwrap().raw())
-                        })
-                        .collect();
-                    out.push(Some((ts.count.clone(), ids)));
+                    out.push(Some((ts.count.clone(), ids_of(sides, &ts.rows))));
                     swept.push(ts);
                 }
             }
@@ -1770,10 +1718,10 @@ mod across_tests {
                 .filter(|p| !unseen.contains(&p.2) && rng.gen_bool(0.5))
                 .map(|p| p.2)
                 .collect();
-            let whole = [Side::of(0, vec![segment_of(&all)])];
+            let whole = [Stacked::of(0, vec![segment_of(&all)])];
             let sides = [
-                Side::of(0, vec![segment_of(&first)]),
-                Side::of(1, vec![segment_of(&second), segment_of(&third)]),
+                Stacked::of(0, vec![segment_of(&first)]),
+                Stacked::of(1, vec![segment_of(&second), segment_of(&third)]),
             ];
             for depth in [2u8, 4] {
                 let mut tiles: Vec<Tile> = all

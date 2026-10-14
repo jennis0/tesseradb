@@ -565,7 +565,7 @@ mod tests {
                 labels: LabelGate::new(&held, true),
                 layer_reachable: true,
                 dependency_served: &never,
-                sides: one_side(&rows, &mask, no_denies()),
+                sides: vec![side(&rows, Some(&mask))],
             }
             .verdict(LABEL_ENTITY, 0),
             ArtifactVerdict::Absent(Withheld::OwnLabel)
@@ -599,7 +599,7 @@ mod tests {
             labels: open_labels(),
             layer_reachable: true,
             dependency_served: &dependency_served,
-            sides: one_side(&rows, &all, no_denies()),
+            sides: vec![side(&rows, Some(&all))],
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0),
@@ -617,7 +617,7 @@ mod tests {
             labels: open_labels(),
             layer_reachable: true,
             dependency_served: &dependency_served,
-            sides: one_side(&rows, &nearly, no_denies()),
+            sides: vec![side(&rows, Some(&nearly))],
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0),
@@ -640,7 +640,7 @@ mod tests {
                 labels: open_labels(),
                 layer_reachable: true,
                 dependency_served: &dependency_served,
-                sides: one_side(&rows, mask, no_denies()),
+                sides: vec![side(&rows, Some(mask))],
             }
             .verdict(EntityId::new(999), 0)
         };
@@ -673,7 +673,7 @@ mod tests {
             labels: open_labels(),
             layer_reachable: true,
             dependency_served: &dependency_served,
-            sides: one_side(&rows, &everything, no_denies()),
+            sides: vec![side(&rows, Some(&everything))],
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0),
@@ -730,7 +730,7 @@ mod tests {
                 labels: open_labels(),
                 layer_reachable: true,
                 dependency_served: prerequisite,
-                sides: one_side(&rows, &mask, no_denies()),
+                sides: vec![side(&rows, Some(&mask))],
             }
             .verdict(LABEL_ENTITY, 0)
         };
@@ -761,7 +761,7 @@ mod tests {
                 labels: open_labels(),
                 layer_reachable: true,
                 dependency_served: &dependency_served,
-                sides: one_side(&rows, &mask, no_denies()),
+                sides: vec![side(&rows, Some(&mask))],
             }
             .verdict(LABEL_ENTITY, 0),
             ArtifactVerdict::Absent(Withheld::Verdict)
@@ -781,7 +781,7 @@ mod tests {
                 labels: open_labels(),
                 layer_reachable: true,
                 dependency_served: &dependency_absent,
-                sides: one_side(&rows, &mask, no_denies()),
+                sides: vec![side(&rows, Some(&mask))],
             }
             .verdict(LABEL_ENTITY, 0),
             ArtifactVerdict::Absent(Withheld::Attachment)
@@ -802,7 +802,7 @@ mod tests {
             labels: open_labels(),
             layer_reachable: true,
             dependency_served: &never,
-            sides: one_side(&rows, &mask, no_denies()),
+            sides: vec![side(&rows, Some(&mask))],
         }
         .verdict(EntityId::new(999), 0)
         .is_served());
@@ -838,35 +838,6 @@ mod tests {
     fn one_level(a: ArtifactRows, mut b: ArtifactRows) -> (ArtifactRows, ArtifactRows) {
         b.records = Arc::clone(&a.records);
         (a, b)
-    }
-
-    fn view_of<'a>(
-        d: &'a LayerDeclaration,
-        sides: Vec<ArtifactSide<'a, Bitmap>>,
-    ) -> ArtifactView<'a, Bitmap> {
-        ArtifactView {
-            declaration: d,
-            overlay: open_overlay(),
-            labels: open_labels(),
-            layer_reachable: true,
-            dependency_served: &dependency_served,
-            sides,
-        }
-    }
-
-    fn side<'a>(rows: &'a ArtifactRows, mask: Option<&'a Bitmap>) -> ArtifactSide<'a, Bitmap> {
-        ArtifactSide {
-            rows,
-            mask,
-            denied: no_denies(),
-            containment: None,
-            counts: None,
-        }
-    }
-
-    fn open_overlay() -> &'static Overlay {
-        static EMPTY: std::sync::OnceLock<Overlay> = std::sync::OnceLock::new();
-        EMPTY.get_or_init(Overlay::new)
     }
 
     /// A side left out adds its slice and nothing held, so the test fails closed; an empty slice

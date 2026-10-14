@@ -3,18 +3,13 @@
 
 mod common;
 
-use std::path::PathBuf;
-use std::time::Duration;
-
 use arrow::array::UInt64Array;
 use arrow::record_batch::RecordBatch;
-use tempfile::TempDir;
 
 use common::*;
 use mosaica_engine::{
-    AcceptError, AggregateCaps, AggregateHead, AggregateRequest, AggregateSink, Engine,
-    EngineError, ExecutorPosture, Grouping, ItemsRequest, PageEnd, RecordsHead, RecordsLimits,
-    RecordsSink, ScalarOut, Session, SinkResult, TableHead, ViewportRequest,
+    AcceptError, AggregateRequest, Engine, EngineError, ExecutorPosture, Grouping, RecordsOrder,
+    ScalarOut, Session, ViewportRequest,
 };
 use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_lifecycle::{DeclaredValue, IncomingArtifact, IncomingGrowth, VocabularyRequest};
@@ -26,76 +21,6 @@ const N: u64 = 40;
 /// The size the several-shard build is declared at: shards of 25 and 15 items.
 const SIZE: u64 = 25;
 
-/// The fixture built at `size`, and the paths an engine opens it with.
-struct Built {
-    _tmp: TempDir,
-    root: PathBuf,
-    cache: PathBuf,
-    wal: PathBuf,
-}
-
-impl Built {
-    fn new(size: Option<u64>) -> Built {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path().join("bundle");
-        build_fixture_sized(
-            &root,
-            &tmp.path().join("points.parquet"),
-            &tmp.path().join("pairs.parquet"),
-            N,
-            size,
-        );
-        Built {
-            root,
-            cache: tmp.path().join("cache"),
-            wal: tmp.path().join("wal.log"),
-            _tmp: tmp,
-        }
-    }
-
-    fn open(&self) -> Engine {
-        open_engine_publishing(&self.root, &self.cache, &self.wal)
-    }
-}
-
-fn limits() -> RecordsLimits {
-    RecordsLimits {
-        max_page_rows: 100_000,
-        max_page_bytes: 64 << 20,
-        response_bytes: 256 << 20,
-        response_time: Duration::from_secs(60),
-    }
-}
-
-#[derive(Default)]
-struct Pages(Vec<RecordBatch>);
-
-impl RecordsSink for Pages {
-    fn head(&mut self, _: &RecordsHead) -> SinkResult {
-        Ok(())
-    }
-
-    fn page(&mut self, batch: &RecordBatch, _: &PageEnd) -> SinkResult {
-        self.0.push(batch.clone());
-        Ok(())
-    }
-}
-
-impl AggregateSink for Pages {
-    fn head(&mut self, _: &AggregateHead) -> SinkResult {
-        Ok(())
-    }
-
-    fn table(&mut self, _: &TableHead) -> SinkResult {
-        Ok(())
-    }
-
-    fn page(&mut self, _: u32, batch: &RecordBatch, _: &PageEnd) -> SinkResult {
-        self.0.push(batch.clone());
-        Ok(())
-    }
-}
-
 fn u64s(batch: &RecordBatch, name: &str) -> Vec<u64> {
     batch
         .column_by_name(name)
@@ -105,43 +30,6 @@ fn u64s(batch: &RecordBatch, name: &str) -> Vec<u64> {
         .unwrap()
         .values()
         .to_vec()
-}
-
-/// Every item a bulk read answers, as `(mosaica_id, id)`, read to the end of its cursor.
-fn bulk_read(engine: &Engine, session: &Session) -> Vec<(u64, u64)> {
-    let fields = ["id".to_string()];
-    let mut read = Vec::new();
-    let mut cursor: Option<String> = None;
-    loop {
-        let mut pages = Pages::default();
-        let trailer = engine
-            .items_stream(
-                session,
-                ItemsRequest {
-                    view: "s0",
-                    fields: &fields,
-                    system_fields: &[],
-                    filter: None,
-                    keep_unmatched: false,
-                    count: false,
-                    order: None,
-                    page_rows: Some(7),
-                    pages: Some(2),
-                    cursor: cursor.as_deref(),
-                    limits: limits(),
-                    cancel: None,
-                },
-                &mut pages,
-            )
-            .expect("the bulk read answers");
-        for batch in &pages.0 {
-            read.extend(u64s(batch, "mosaica_id").into_iter().zip(u64s(batch, "id")));
-        }
-        cursor = trailer.next;
-        if cursor.is_none() {
-            return read;
-        }
-    }
 }
 
 /// Each tile's visible count at `depth` over the whole map.
@@ -177,20 +65,14 @@ fn cell_counts(engine: &Engine, session: &Session, depth: u8) -> Vec<(u64, u64)>
                 pages: None,
                 cursor: None,
                 limits: limits(),
-                caps: AggregateCaps {
-                    groupings: 8,
-                    top: 100,
-                    named: 100,
-                    bins: 100,
-                    cells: u64::MAX,
-                },
+                caps: caps(),
                 cancel: None,
             },
             &mut pages,
         )
         .expect("the aggregate answers");
     let mut counts: Vec<(u64, u64)> = pages
-        .0
+        .batches
         .iter()
         .flat_map(|batch| u64s(batch, "cell").into_iter().zip(u64s(batch, "count")))
         .collect();
@@ -225,7 +107,7 @@ struct Served {
 
 fn served(engine: &Engine, credential: &[u8]) -> Served {
     let session = engine.authorise(credential).unwrap();
-    let read = bulk_read(engine, &session);
+    let read = read_items(engine, &session, &Items::new(RecordsOrder::Stored)).rows_with_ids;
     for &(mosaica_id, id) in &read {
         assert_eq!(
             card_id(engine, &session, mosaica_id),
@@ -244,8 +126,8 @@ fn served(engine: &Engine, credential: &[u8]) -> Served {
 
 #[test]
 fn a_bundle_of_several_shards_answers_every_read_as_one_shard_does() {
-    let one = Built::new(None);
-    let several = Built::new(Some(SIZE));
+    let one = fixture_sized(N, None);
+    let several = fixture_sized(N, Some(SIZE));
     assert_eq!(
         shards_of(&several.root).1.len(),
         2,
@@ -266,7 +148,8 @@ fn a_bundle_of_several_shards_answers_every_read_as_one_shard_does() {
     // A card the viewer may not see is not served, from either shard.
     let full = several.authorise(&full_coverage_credential()).unwrap();
     let subset = several.authorise(&subset_credential()).unwrap();
-    for (mosaica_id, id) in bulk_read(&several, &full) {
+    let read = read_items(&several, &full, &Items::new(RecordsOrder::Stored));
+    for (mosaica_id, id) in read.rows_with_ids {
         let card = card_id(&several, &subset, mosaica_id);
         assert_eq!(
             card,
@@ -285,12 +168,12 @@ fn entities(ids: &[u32]) -> EntitySet {
 /// served in a bundle of one shard, every shard's counted in the overlay figures.
 #[test]
 fn each_shard_opens_with_its_own_denies() {
-    let one = Built::new(None);
-    let several = Built::new(Some(SIZE));
+    let one = fixture_sized(N, None);
+    let several = fixture_sized(N, Some(SIZE));
     let before = {
         let engine = several.open();
         let session = engine.authorise(&full_coverage_credential()).unwrap();
-        bulk_read(&engine, &session)
+        read_items(&engine, &session, &Items::new(RecordsOrder::Stored)).rows_with_ids
     };
     // Shard 0 suppresses its entity 2; shard 1 suppresses its entity 3 and deletes its entity 4,
     // which are entities 25 + 3 and 25 + 4 of the bundle of one shard.
@@ -334,8 +217,8 @@ fn each_shard_opens_with_its_own_denies() {
 
 #[test]
 fn status_sums_the_shards() {
-    let one = Built::new(None);
-    let several = Built::new(Some(SIZE));
+    let one = fixture_sized(N, None);
+    let several = fixture_sized(N, Some(SIZE));
     let (one_engine, engine) = (one.open(), several.open());
     assert_eq!(engine.write_executor_posture(), ExecutorPosture::Running);
 
@@ -518,7 +401,7 @@ fn writes(engine: &Engine) -> Vec<(&'static str, Result<(), AcceptError>)> {
 
 #[test]
 fn every_write_is_refused_and_a_restart_reopens_the_bundle() {
-    let built = Built::new(Some(SIZE));
+    let built = fixture_sized(N, Some(SIZE));
     let engine = built.open();
     let before = served(&engine, &full_coverage_credential());
 
@@ -545,8 +428,8 @@ fn every_write_is_refused_and_a_restart_reopens_the_bundle() {
 }
 
 #[test]
-fn a_bundle_of_one_shard_still_takes_every_write() {
-    let built = Built::new(None);
+fn a_bundle_of_one_shard_takes_every_write() {
+    let built = fixture_sized(N, None);
     let engine = built.open();
     assert!(engine.writable().is_ok());
     let refused: Vec<&str> = writes(&engine)
@@ -561,12 +444,12 @@ fn a_bundle_of_one_shard_still_takes_every_write() {
 /// record is another bundle's, and the open refuses it.
 #[test]
 fn a_log_holding_records_is_refused_beside_several_shards() {
-    let one = Built::new(None);
+    let one = fixture_sized(N, None);
     let engine = one.open();
     ingest(&engine, "a");
     drop(engine);
 
-    let several = Built::new(Some(SIZE));
+    let several = fixture_sized(N, Some(SIZE));
     let opened = Engine::open(&several.root, &several.cache, &one.wal, config());
     assert!(
         matches!(opened, Err(EngineError::SeveralShardsLogged { shards: 2 })),

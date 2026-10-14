@@ -327,8 +327,6 @@ impl Fixture {
     }
 }
 
-/// Six principals of very different breadths, including one holding nothing and one holding
-/// everything — the grid the cost inversion is measured over, used here for correctness.
 /// What the one predicate serves of `rows`' artifact at `ordinal`, as a containment answer, to a
 /// viewer seeing `mask` with `denied` denied, and the partition's `answers` where given.
 fn served(
@@ -360,6 +358,36 @@ fn served(
     }
 }
 
+/// The level's form in shard 0 of `prefix` for `view`, built from `store` over the fixture's row
+/// space with `source`'s partition.
+fn form(
+    projections: &ArtifactProjections,
+    fx: &Fixture,
+    prefix: &str,
+    view: &str,
+    store: &ArtifactStore,
+    source: &PartitionSource<'_>,
+) -> Arc<ArtifactRows> {
+    let (rows, _) = projections.get_or_build(
+        prefix,
+        ShardId::ZERO,
+        view,
+        LAYER,
+        0,
+        store,
+        store,
+        &fx.row_space,
+        Some(source),
+        mosaica_types::layer::ServingLayout::ArtifactMajor,
+        None,
+        0,
+        &held_rows_declaration(LAYER),
+    );
+    rows
+}
+
+/// Six principals of very different breadths, including one holding nothing and one holding
+/// everything — the grid the cost inversion is measured over, used here for correctness.
 fn principals() -> Vec<Vec<u32>> {
     vec![
         (0..TERMS).collect(),
@@ -640,21 +668,7 @@ fn a_level_composes_its_partition_once_for_every_view() {
     let native = PartitionSource {
         postings: &fx.postings,
     };
-    let (rows, _) = projections.get_or_build(
-        "v00000",
-        ShardId::ZERO,
-        "s0",
-        LAYER,
-        0,
-        &fx.store,
-        &fx.store,
-        &fx.row_space,
-        Some(&native),
-        mosaica_types::layer::ServingLayout::ArtifactMajor,
-        None,
-        0,
-        &held_rows_declaration(LAYER),
-    );
+    let rows = form(&projections, &fx, "v00000", "s0", &fx.store, &native);
     assert!(rows.partition().is_some());
     assert_eq!(projections.partitions(), 1);
 
@@ -662,21 +676,7 @@ fn a_level_composes_its_partition_once_for_every_view() {
     // signatures, which no row space is involved in, so the dear half of a level's build — one
     // pass over every term's posting — is paid once however many views carry the layer. What is
     // per view is the projection-loss test, and that stays on the row form.
-    let (second, _) = projections.get_or_build(
-        "v00000",
-        ShardId::ZERO,
-        "s1",
-        LAYER,
-        0,
-        &fx.store,
-        &fx.store,
-        &fx.row_space,
-        Some(&native),
-        mosaica_types::layer::ServingLayout::ArtifactMajor,
-        None,
-        0,
-        &held_rows_declaration(LAYER),
-    );
+    let second = form(&projections, &fx, "v00000", "s1", &fx.store, &native);
     assert!(second.partition().is_some());
     assert_eq!(projections.builds(), 2, "two views, two row forms");
     assert_eq!(
@@ -742,21 +742,7 @@ fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
     let projections = ArtifactProjections::new(std::env::temp_dir());
     projections.adopt_all(tmp.path(), "v00000", &[(ShardId::ZERO, entry(composed_at))], &store);
     assert_eq!(projections.adopted(), 1);
-    let (rows, _) = projections.get_or_build(
-        "v00000",
-        ShardId::ZERO,
-        "s0",
-        LAYER,
-        0,
-        &store,
-        &store,
-        &fx.row_space,
-        Some(&source),
-        mosaica_types::layer::ServingLayout::ArtifactMajor,
-        None,
-        0,
-        &held_rows_declaration(LAYER),
-    );
+    let rows = form(&projections, &fx, "v00000", "s0", &store, &source);
     assert!(rows.partition().is_some());
     assert_eq!(
         projections.partitions(),
@@ -773,21 +759,7 @@ fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
             0,
             "a partition composed at {moved} must not answer for a level at {composed_at}"
         );
-        let (rows, _) = projections.get_or_build(
-            "v00000",
-            ShardId::ZERO,
-            "s0",
-            LAYER,
-            0,
-            &store,
-            &store,
-            &fx.row_space,
-            Some(&source),
-            mosaica_types::layer::ServingLayout::ArtifactMajor,
-            None,
-            0,
-            &held_rows_declaration(LAYER),
-        );
+        let rows = form(&projections, &fx, "v00000", "s0", &store, &source);
         assert!(rows.partition().is_some());
         assert_eq!(projections.partitions(), 1, "the level recomposed instead");
     }
@@ -833,21 +805,7 @@ fn an_adopted_partition_does_not_answer_under_another_prefix() {
     let source = PartitionSource {
         postings: &fx.postings,
     };
-    let _ = projections.get_or_build(
-        "v00001",
-        ShardId::ZERO,
-        "s0",
-        LAYER,
-        0,
-        &fx.store,
-        &fx.store,
-        &fx.row_space,
-        Some(&source),
-        mosaica_types::layer::ServingLayout::ArtifactMajor,
-        None,
-        0,
-        &held_rows_declaration(LAYER),
-    );
+    let _ = form(&projections, &fx, "v00001", "s0", &fx.store, &source);
     assert_eq!(
         projections.partitions(),
         1,

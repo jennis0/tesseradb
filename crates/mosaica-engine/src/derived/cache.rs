@@ -166,7 +166,7 @@ impl DerivedCache {
 mod tests {
     use super::*;
 
-    fn key(token: u64, ordinal: u32, mask: u8) -> DerivedKey {
+    fn key(token: u64, ordinal: u32, shards: u8) -> DerivedKey {
         DerivedKey {
             token_id: token,
             view: "s0".into(),
@@ -174,7 +174,7 @@ mod tests {
             level: 0,
             ordinal,
             level_version: 1,
-            shards: [mask; 32],
+            shards: [shards; 32],
             properties: properties_bits(&[ComputedProperty::Hull]),
         }
     }

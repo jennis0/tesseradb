@@ -889,14 +889,14 @@ mod tests {
     use super::*;
 
     /// One rung, for the memo's bound.
-    fn rung(token_id: u64, depth: u8, mask: u64) -> OccupancyKey {
-        let mut shards = [0u8; 32];
-        shards[..8].copy_from_slice(&mask.to_le_bytes());
+    fn rung(token_id: u64, depth: u8, shards: u64) -> OccupancyKey {
+        let mut digest = [0u8; 32];
+        digest[..8].copy_from_slice(&shards.to_le_bytes());
         OccupancyKey {
             token_id,
             view: "geo".to_string(),
             depth,
-            shards,
+            shards: digest,
         }
     }
 

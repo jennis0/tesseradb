@@ -343,6 +343,49 @@ fn always_served(_attachment: &Attachment) -> bool {
     true
 }
 
+/// The one side of a view of `rows`, seen through `mask` with `denied` denied.
+fn sides<'a>(
+    rows: &'a ArtifactRows,
+    mask: &'a EffectiveMask,
+    denied: &'a Bitmap,
+) -> Vec<ArtifactSide<'a, EffectiveMask>> {
+    vec![ArtifactSide {
+        rows,
+        mask: Some(mask),
+        denied,
+        containment: None,
+        counts: None,
+    }]
+}
+
+/// The level's form in shard 0 of `prefix` for `view`, built from `store` over the fixture's row
+/// space in `layout`.
+fn form(
+    projections: &ArtifactProjections,
+    fx: &Fixture,
+    prefix: &str,
+    view: &str,
+    store: &ArtifactStore,
+    layout: ServingLayout,
+) -> Arc<ArtifactRows> {
+    let (rows, _) = projections.get_or_build(
+        prefix,
+        ShardId::ZERO,
+        view,
+        LAYER,
+        0,
+        store,
+        store,
+        &fx.row_space,
+        None,
+        layout,
+        None,
+        0,
+        &held_rows_declaration(LAYER),
+    );
+    rows
+}
+
 /// Six principals of very different breadths, including one holding nothing and one holding
 /// everything.
 fn principals() -> Vec<Vec<u32>> {
@@ -497,13 +540,7 @@ fn differential(fx: &Fixture, rows: &ArtifactRows) -> usize {
                 labels: open_labels(),
                 layer_reachable: true,
                 dependency_served: &always_served,
-                sides: vec![ArtifactSide {
-                    rows,
-                    mask: Some(&mask),
-                    denied: &denied,
-                    containment: None,
-                    counts: None,
-                }],
+                sides: sides(rows, &mask, &denied),
             };
             for (name, ranges) in viewports() {
                 let tiles = rows_of(&ranges);
@@ -621,21 +658,7 @@ fn a_growth_between_two_reads_would_leave_the_extent_narrow() {
     // And what a request gets is the second arm, because the growth moved the level's version and
     // the whole family is rebuilt under one key.
     let projections = ArtifactProjections::new(std::env::temp_dir());
-    let (before, _) = projections.get_or_build(
-        "v0",
-        ShardId::ZERO,
-        "s0",
-        LAYER,
-        0,
-        &fx.store,
-        &fx.store,
-        &fx.row_space,
-        None,
-        mosaica_types::layer::ServingLayout::ArtifactMajor,
-        None,
-        0,
-        &held_rows_declaration(LAYER),
-    );
+    let before = form(&projections, &fx, "v0", "s0", &fx.store, ServingLayout::ArtifactMajor);
     assert!(before
         .index()
         .candidates(&tiles)
@@ -687,13 +710,7 @@ fn a_hole_is_absent_and_an_empty_projection_is_a_live_artifact() {
         labels: open_labels(),
         layer_reachable: true,
         dependency_served: &always_served,
-        sides: vec![ArtifactSide {
-            rows: &rows,
-            mask: Some(&mask),
-            denied: &denied,
-            containment: None,
-            counts: None,
-        }],
+        sides: sides(&rows, &mask, &denied),
     };
     let entity = fx.entity_of(empty).expect("the artifact is live");
     assert!(
@@ -746,21 +763,7 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
         &[(ShardId::ZERO, entry("s0", projected_at))],
         &store,
     );
-    let (rows, _) = projections.get_or_build(
-        "v00000",
-        ShardId::ZERO,
-        "s0",
-        LAYER,
-        0,
-        &store,
-        &store,
-        &fx.row_space,
-        None,
-        mosaica_types::layer::ServingLayout::ArtifactMajor,
-        None,
-        0,
-        &held_rows_declaration(LAYER),
-    );
+    let rows = form(&projections, &fx, "v00000", "s0", &store, ServingLayout::ArtifactMajor);
     assert_eq!(projections.indexes_adopted(), 1);
     assert_eq!(rows.index().len(), fx.ordinals as usize);
 
@@ -773,21 +776,7 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
             &[(ShardId::ZERO, entry("s0", moved))],
             &store,
         );
-        let _ = projections.get_or_build(
-            "v00000",
-            ShardId::ZERO,
-            "s0",
-            LAYER,
-            0,
-            &store,
-            &store,
-            &fx.row_space,
-            None,
-            mosaica_types::layer::ServingLayout::ArtifactMajor,
-            None,
-            0,
-            &held_rows_declaration(LAYER),
-        );
+        let _ = form(&projections, &fx, "v00000", "s0", &store, ServingLayout::ArtifactMajor);
         assert_eq!(
             projections.indexes_adopted(),
             0,
@@ -804,21 +793,7 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
         &[(ShardId::ZERO, entry("s0", projected_at))],
         &store,
     );
-    let _ = projections.get_or_build(
-        "v00001",
-        ShardId::ZERO,
-        "s0",
-        LAYER,
-        0,
-        &store,
-        &store,
-        &fx.row_space,
-        None,
-        mosaica_types::layer::ServingLayout::ArtifactMajor,
-        None,
-        0,
-        &held_rows_declaration(LAYER),
-    );
+    let _ = form(&projections, &fx, "v00001", "s0", &store, ServingLayout::ArtifactMajor);
     assert_eq!(projections.indexes_adopted(), 0);
 
     // **Another view, which is the term a containment partition does not carry.** An extent is a
@@ -830,21 +805,7 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
         &[(ShardId::ZERO, entry("s0", projected_at))],
         &store,
     );
-    let _ = projections.get_or_build(
-        "v00000",
-        ShardId::ZERO,
-        "s1",
-        LAYER,
-        0,
-        &store,
-        &store,
-        &fx.row_space,
-        None,
-        mosaica_types::layer::ServingLayout::ArtifactMajor,
-        None,
-        0,
-        &held_rows_declaration(LAYER),
-    );
+    let _ = form(&projections, &fx, "v00000", "s1", &store, ServingLayout::ArtifactMajor);
     assert_eq!(projections.indexes_adopted(), 0);
 
     // A file the manifest names that is not there is an absence, not a refusal: the level derives
@@ -853,21 +814,7 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
     let mut missing = entry("s0", projected_at);
     missing.path = derived_file(tmp.path(), "tile-index", "gone.tsti");
     projections.adopt_indexes(tmp.path(), "v00000", &[(ShardId::ZERO, missing)], &store);
-    let _ = projections.get_or_build(
-        "v00000",
-        ShardId::ZERO,
-        "s0",
-        LAYER,
-        0,
-        &store,
-        &store,
-        &fx.row_space,
-        None,
-        mosaica_types::layer::ServingLayout::ArtifactMajor,
-        None,
-        0,
-        &held_rows_declaration(LAYER),
-    );
+    let _ = form(&projections, &fx, "v00000", "s0", &store, ServingLayout::ArtifactMajor);
     assert_eq!(projections.indexes_adopted(), 0);
 }
 
@@ -1017,28 +964,6 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
         level_version: version,
         form: mosaica_store::manifest::DerivedForm::RowMembers,
     };
-    let build = |projections: &ArtifactProjections,
-                 prefix: &str,
-                 store: &mosaica_lifecycle::membership::ArtifactStore,
-                 layout: ServingLayout| {
-        projections
-            .get_or_build(
-                prefix,
-                ShardId::ZERO,
-                "s0",
-                LAYER,
-                0,
-                store,
-                store,
-                &fx.row_space,
-                None,
-                layout,
-                None,
-                0,
-                &held_rows_declaration(LAYER),
-            )
-            .0
-    };
 
     // The index, for an artifact-major level. The outgoing prefix held an entry of its own; the
     // fold's adoption replaces it.
@@ -1047,10 +972,10 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
     projections.adopt_indexes(tmp.path(), "v00001", &[(ShardId::ZERO, index_entry(11))], &store);
     // A request still on the outgoing generation: its prefix, the store's version. Nothing is
     // claimed and nothing is removed.
-    let _ = build(&projections, "v00000", &store, ServingLayout::ArtifactMajor);
+    let _ = form(&projections, &fx, "v00000", "s0", &store, ServingLayout::ArtifactMajor);
     assert_eq!(projections.indexes_adopted(), 0);
     // The warm, under the published prefix, claims it.
-    let rows = build(&projections, "v00001", &store, ServingLayout::ArtifactMajor);
+    let rows = form(&projections, &fx, "v00001", "s0", &store, ServingLayout::ArtifactMajor);
     assert_eq!(
         projections.indexes_adopted(),
         1,
@@ -1072,12 +997,12 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
         &[(ShardId::ZERO, column_entry(11)), (ShardId::ZERO, members_entry(11))],
         &store,
     );
-    let _ = build(&projections, "v00000", &store, ServingLayout::RowMajorLabel);
+    let _ = form(&projections, &fx, "v00000", "s0", &store, ServingLayout::RowMajorLabel);
     assert_eq!(projections.columns_adopted(), 0);
     // The outgoing generation's request composed a column of its own, having nothing to claim;
     // the warm composes none.
     let composed_by_outgoing = projections.columns_composed();
-    let rows = build(&projections, "v00001", &store, ServingLayout::RowMajorLabel);
+    let rows = form(&projections, &fx, "v00001", "s0", &store, ServingLayout::RowMajorLabel);
     assert_eq!(
         projections.columns_adopted(),
         1,
@@ -1094,9 +1019,9 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
     // it, and a later claim at its version finds nothing.
     let projections = ArtifactProjections::new(std::env::temp_dir());
     projections.adopt_indexes(tmp.path(), "v00001", &[(ShardId::ZERO, index_entry(11))], &store);
-    let _ = build(&projections, "v00001", &later, ServingLayout::ArtifactMajor);
+    let _ = form(&projections, &fx, "v00001", "s0", &later, ServingLayout::ArtifactMajor);
     assert_eq!(projections.indexes_adopted(), 0);
-    let _ = build(&projections, "v00001", &store, ServingLayout::ArtifactMajor);
+    let _ = form(&projections, &fx, "v00001", "s0", &store, ServingLayout::ArtifactMajor);
     assert_eq!(
         projections.indexes_adopted(),
         0,
@@ -1238,13 +1163,7 @@ fn a_narrow_viewport_walks_the_perimeter_rather_than_the_level() {
         labels: open_labels(),
         layer_reachable: true,
         dependency_served: &always_served,
-        sides: vec![ArtifactSide {
-            rows: &rows,
-            mask: Some(&mask),
-            denied: &denied,
-            containment: None,
-            counts: None,
-        }],
+        sides: sides(&rows, &mask, &denied),
     };
 
     let population = rows.len() as u64;

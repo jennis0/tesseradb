@@ -1,9 +1,18 @@
 //! What several build tests share.
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use arrow::array::ArrayRef;
+use arrow::datatypes::{Field, Schema as ArrowSchema};
+use arrow::record_batch::RecordBatch;
+use parquet::arrow::ArrowWriter;
+
+use mosaica_build::config::Config;
 use mosaica_build::BuildArgs;
+use mosaica_spatial::Bounds;
 use mosaica_store::unique::{UniqueIndexes, UniqueKey};
 use mosaica_store::ShardLayout;
 use mosaica_types::{IdentityKey, ShardId};
@@ -41,6 +50,82 @@ pub fn build_args(out: &Path) -> BuildArgs {
         memory_budget: None,
         band_rows: None,
         schema: Default::default(),
+    }
+}
+
+/// A Parquet file of the named columns.
+#[allow(dead_code)]
+pub fn write(path: &Path, columns: Vec<(&str, ArrayRef)>) {
+    let fields: Vec<Field> = columns
+        .iter()
+        .map(|(name, array)| Field::new(*name, array.data_type().clone(), true))
+        .collect();
+    let schema = Arc::new(ArrowSchema::new(fields));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        columns.into_iter().map(|(_, a)| a).collect(),
+    )
+    .unwrap();
+    let mut writer = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+}
+
+/// The build arguments the CLI derives from the declaration at `path`, every view's frame
+/// `extent`, building into `out` under [`test_key`].
+#[allow(dead_code)]
+pub fn args_from_declaration(path: &Path, out: &Path, extent: Bounds) -> BuildArgs {
+    let config = Config::parse(path, &Default::default()).expect("the declaration parses");
+    let registry = config.build_views().expect("the views compile");
+    let anchor = config.anchor_view(&registry).expect("an anchor");
+    let acquired = config.acquire().expect("the files acquire");
+    let views: Vec<mosaica_build::ViewArgs> = registry
+        .iter()
+        .map(|view| {
+            let acquired = mosaica_build::config::acquire_view(view).expect("the view acquires");
+            mosaica_build::ViewArgs {
+                visibility: view.visibility.clone(),
+                view_id: view.id.clone(),
+                projection: view.projection,
+                extent,
+                points: acquired.points,
+                point_fields: acquired.point_fields,
+                select: acquired.select,
+                access: acquired.access,
+            }
+        })
+        .collect();
+    let scoped_attributes = config
+        .scoped_attributes
+        .iter()
+        .map(|scoped| mosaica_build::ScopedColumnFamily {
+            attribute: scoped.attribute.clone(),
+            group: scoped.group.clone(),
+            views: registry
+                .iter()
+                .enumerate()
+                .filter(|(_, view)| view.group.as_ref().is_some_and(|g| g.group == scoped.group))
+                .map(|(index, _)| index)
+                .collect(),
+            source: scoped.source.clone(),
+        })
+        .collect();
+    let mut layers = config.layers.clone();
+    for layer in &mut layers {
+        layer.views = Config::expand_layer_views(&registry, &layer.views);
+    }
+    let groups = config.group_registry(&registry, &views);
+    BuildArgs {
+        views,
+        anchor,
+        groups,
+        scoped_attributes,
+        attribute_sources: acquired.attribute_sources,
+        shard_size: config.shard_size,
+        layers,
+        layer_inputs: acquired.layers,
+        schema: config.schema,
+        ..build_args(out)
     }
 }
 

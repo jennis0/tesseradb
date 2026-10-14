@@ -196,6 +196,19 @@ pub(crate) struct SideVersions {
     pub fragment_watermark: u64,
 }
 
+#[cfg(test)]
+impl SideVersions {
+    /// Shard `shard`'s versions: overlay 5, identity `shard` in every byte, watermark 100.
+    pub(crate) fn fixture(shard: u32) -> SideVersions {
+        SideVersions {
+            shard: mosaica_types::ShardId::new(shard).unwrap(),
+            overlay_version: 5,
+            fragment_identity: [shard as u8; 32],
+            fragment_watermark: 100,
+        }
+    }
+}
+
 /// Everything about one request's composed mask that a cache keyed on the mask is a function of,
 /// gathered once per request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -971,7 +984,7 @@ impl Drop for FiguresCache {
 mod tests {
     use super::*;
 
-    fn key(terms: u8, mask: u8) -> FiguresKey {
+    fn key(terms: u8, shards: u8) -> FiguresKey {
         FiguresKey::Exact(ExactKey {
             shard: mosaica_types::ShardId::ZERO,
             geometry: Geometry::None,
@@ -980,7 +993,7 @@ mod tests {
             space: LayerSpace::ZERO,
             level: 0,
             level_version: 1,
-            shards: [mask; 32],
+            shards: [shards; 32],
         })
     }
 
@@ -1391,13 +1404,7 @@ mod tests {
     /// from it.
     #[test]
     fn every_shards_versions_move_the_mask_identity() {
-        let side = |shard: u32| SideVersions {
-            shard: mosaica_types::ShardId::new(shard).unwrap(),
-            overlay_version: 5,
-            fragment_identity: [shard as u8; 32],
-            fragment_watermark: 100,
-        };
-        let sides = [side(0), side(1)];
+        let sides = [SideVersions::fixture(0), SideVersions::fixture(1)];
         let of = |sides: &[SideVersions]| MaskIdentity::of(1, [2; 32], 3, 3, sides).shards;
         let held = of(&sides);
         let moves: [fn(&mut SideVersions); 4] = [

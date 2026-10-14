@@ -187,6 +187,20 @@ impl Figures {
         }
     }
 
+    /// Figures over `dense`'s counts and positions, for tests of what reads them.
+    #[cfg(test)]
+    pub(crate) fn of_dense(dense: Dense) -> Self {
+        Figures {
+            len: dense.counts.len(),
+            counts: Arc::new(CountsAt::of(dense)),
+            reserves: None,
+            deny: None,
+            tail: None,
+            geometry: Geometry::Centroid,
+            exact: None,
+        }
+    }
+
     fn deny_delta(&self, ordinal: u32) -> Option<&Delta> {
         self.deny.as_ref().and_then(|d| d.deltas.get(&ordinal))
     }
@@ -371,6 +385,17 @@ impl LevelFigures {
             "every shard's form of a level holds a slot for every ordinal"
         );
         LevelFigures { sides }
+    }
+
+    /// Figures holding each side's `counts` and nothing else, for tests of what reads them.
+    #[cfg(test)]
+    pub(crate) fn of_counts(sides: &[Vec<u32>]) -> Self {
+        LevelFigures::of(
+            sides
+                .iter()
+                .map(|counts| Arc::new(Figures::of_counts(counts.clone())))
+                .collect(),
+        )
     }
 
     /// `|M_a ∩ S|` over every shard.

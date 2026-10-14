@@ -823,17 +823,8 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::artifacts::MembershipRows;
-    use crate::figures::Figures;
+    use crate::viewport::artifacts::fixture::{sets_over, Held};
     use mosaica_types::layer::ServingLayout;
-
-    /// One shard's rows of a stored level: each ordinal's members, the rows, what the viewer sees
-    /// and the tile's spans there.
-    struct Held {
-        sets: Vec<Vec<u32>>,
-        rows: u32,
-        visible: Vec<u32>,
-        spans: Vec<Range<u32>>,
-    }
 
     /// [`chosen_stored`] over `shards`, each a side of the tile, by `ids` with every candidate
     /// served.
@@ -843,15 +834,7 @@ mod tests {
             .map(|held| {
                 let sets: Vec<Option<&[u32]>> =
                     held.sets.iter().map(|set| Some(set.as_slice())).collect();
-                let rows = crate::artifacts::ArtifactRows::synthetic(&sets, None);
-                let column = RowColumn::compose(
-                    rows.membership(),
-                    held.rows,
-                    ServingLayout::RowMajorLabel,
-                    &std::env::temp_dir(),
-                )
-                .expect("the memberships partition");
-                crate::artifacts::ArtifactRows::synthetic(&sets, Some(Arc::new(column)))
+                crate::artifacts::ArtifactRows::synthetic_column_only(&sets, held.rows)
             })
             .collect();
         let columns: Vec<(&RowColumn, &LevelMembers)> = forms
@@ -861,39 +844,23 @@ mod tests {
                 (column, column.members().expect("a composed column holds its members"))
             })
             .collect();
-        let leaves: Vec<EffectiveMask> = shards
-            .iter()
-            .map(|held| EffectiveMask::of_rows(Bitmap::of(&held.visible)))
-            .collect();
-        let rows: Vec<Bitmap> = shards.iter().map(|held| spans_rows(&held.spans)).collect();
-        let sets: Vec<ViewportSets<'_>> = (0..shards.len())
-            .map(|place| ViewportSets {
-                place,
-                mask: &leaves[place],
-                viewport: crate::tile_index::Viewport::compose(&rows[place], &leaves[place]),
-                matched_here: None,
-                highlighted_here: None,
-            })
-            .collect();
+        let leaves: Vec<EffectiveMask> = shards.iter().map(|held| held.leaf()).collect();
+        let rows: Vec<Bitmap> = shards.iter().map(|held| held.tile_rows()).collect();
+        let sets = sets_over(&leaves, &rows);
         let spans: Vec<(usize, Vec<Range<u32>>)> = shards
             .iter()
             .enumerate()
             .map(|(place, held)| (place, held.spans.clone()))
             .collect();
-        let counts = LevelFigures::of(
-            shards
-                .iter()
-                .map(|held| {
-                    let counts = held
-                        .sets
-                        .iter()
-                        .map(|set| set.iter().filter(|row| held.visible.contains(row)).count())
-                        .map(|count| count as u32)
-                        .collect();
-                    Arc::new(Figures::of_counts(counts))
-                })
-                .collect(),
-        );
+        let counts: Vec<Vec<u32>> = shards
+            .iter()
+            .map(|held| {
+                held.sets
+                    .iter()
+                    .map(|set| set.iter().filter(|row| held.visible.contains(row)).count() as u32)
+                    .collect()
+            })
+            .collect();
         let (in_request, outside) = (std::collections::BTreeSet::new(), Outside::default());
         let tile = TileAsk {
             sets: &sets,
@@ -902,6 +869,7 @@ mod tests {
             in_request: &in_request,
             outside: &outside,
         };
+        let counts = LevelFigures::of_counts(&counts);
         chosen_stored(&tile, &columns, &counts, |o| Some((ids[o as usize], o)), &|_| true)
     }
 
@@ -919,15 +887,7 @@ mod tests {
             visible: vec![0, 1, 3, 4, 5],
             spans: vec![Range { start: 2, end: 6 }],
         };
-        let shifted = |rows: &[u32]| rows.iter().map(|row| row + 8).collect::<Vec<u32>>();
-        let one = Held {
-            sets: (0..5)
-                .map(|o| [a.sets[o].clone(), shifted(&b.sets[o])].concat())
-                .collect(),
-            rows: 14,
-            visible: [a.visible.clone(), shifted(&b.visible)].concat(),
-            spans: vec![0..4, 10..14],
-        };
+        let one = Held::joined(&a, &b, 8);
         let ids = [50, 40, 30, 20, 10];
         // Ordinal 2, the most visible over both shards, has no visible member in the tile. By
         // count over both shards, then identifier: 4, 3 and 1 (2 each; ids 10, 20, 40), then 0.
@@ -945,15 +905,8 @@ mod tests {
     fn a_tiles_artifacts_over_two_shards_are_those_of_one_shard_holding_both() {
         let counts: [Vec<u32>; 2] = [vec![5, 0, 3, 2, 0, 4, 1, 0], vec![0, 6, 3, 2, 1, 0, 0, 2]];
         let summed: Vec<u32> = (0..8).map(|o| counts[0][o] + counts[1][o]).collect();
-        let figures = |sides: &[Vec<u32>]| {
-            LevelFigures::of(
-                sides
-                    .iter()
-                    .map(|side| Arc::new(Figures::of_counts(side.clone())))
-                    .collect(),
-            )
-        };
-        let (two, one) = (figures(&counts), figures(std::slice::from_ref(&summed)));
+        let two = LevelFigures::of_counts(&counts);
+        let one = LevelFigures::of_counts(std::slice::from_ref(&summed));
         let candidates = [Bitmap::of(&[0, 2, 3, 5, 6]), Bitmap::of(&[1, 2, 3, 4, 7])];
         let present = [Bitmap::of(&[0, 3, 5]), Bitmap::of(&[1, 2, 3, 4, 7])];
         let union = |sets: &[Bitmap; 2]| sets[0].or(&sets[1]);

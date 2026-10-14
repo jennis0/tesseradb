@@ -1356,7 +1356,7 @@ mod tests {
 
     use super::*;
     use crate::filter::FilterOperand;
-    use crate::select::fixture::{points, segment_of, Written};
+    use crate::select::fixture::{points, segment_of, Stacked, Written};
     use mosaica_lifecycle::{IngestBuffer, Overlay};
 
     use rand::rngs::StdRng;
@@ -1373,43 +1373,26 @@ mod tests {
         shard: ShardId,
         segments: Vec<(&'w SegmentData, u32)>,
         leaf: EffectiveMask,
-        /// The rows the filter matches, and an index bounds a leaf to where the view is indexed.
+        /// The rows the filter matches.
         matching: Bitmap,
+        /// The rows an index bounds the leaf to.
         candidate: Bitmap,
     }
 
     impl<'w> FakeSide<'w> {
-        /// `written`, each segment's rows after the ones before it, seeing the rows whose
-        /// identity `visible` holds and matching the ones `matching` holds, every item a
-        /// candidate.
+        /// `stacked`, seeing the rows whose identity `visible` holds and matching the ones
+        /// `matching` holds, every item a candidate.
         fn of(
-            shard: u32,
-            written: &[&'w Written],
+            stacked: &'w Stacked,
             visible: &FxHashSet<u64>,
             matching: &FxHashSet<u64>,
         ) -> FakeSide<'w> {
-            let mut base = 0u32;
-            let segments: Vec<(&SegmentData, u32)> = written
-                .iter()
-                .map(|w| {
-                    let at = base;
-                    base += w.ids.len() as u32;
-                    (&w.data, at)
-                })
-                .collect();
-            let rows_in = |ids: &FxHashSet<u64>| {
-                let mut rows = Bitmap::new();
-                for (w, &(_, base)) in written.iter().zip(&segments) {
-                    rows.add_many(&w.rows_of(ids).iter().map(|r| r + base).collect::<Vec<_>>());
-                }
-                rows
-            };
             FakeSide {
-                shard: ShardId::new(shard).unwrap(),
-                leaf: EffectiveMask::of_rows(rows_in(visible)),
-                matching: rows_in(matching),
-                candidate: Bitmap::from_range(0..base),
-                segments,
+                shard: stacked.shard,
+                segments: stacked.segments(),
+                leaf: EffectiveMask::of_rows(stacked.rows(|id| visible.contains(&id))),
+                matching: stacked.rows(|id| matching.contains(&id)),
+                candidate: stacked.rows(|_| true),
             }
         }
 
@@ -1644,11 +1627,11 @@ mod tests {
     }
 
     /// A third of some points split over two segments, and the rest with 40 points in the last
-    /// cell in a third segment.
+    /// cell in a third segment: over two shards, the first holding the first two segments, and
+    /// over one shard holding all three.
     struct Corpus {
-        a: Written,
-        b: Written,
-        c: Written,
+        two: [Stacked; 2],
+        one: Stacked,
         ids: Vec<u64>,
     }
 
@@ -1664,33 +1647,29 @@ mod tests {
             let corner: Vec<_> = (1..=40u64).map(|k| (1023.9, 1023.9, k << 40)).collect();
             second.extend(&corner);
             all.extend(&corner);
-            let half = first.len() / 2;
+            let (a, b) = first.split_at(first.len() / 2);
             Corpus {
-                a: segment_of(&first[..half]),
-                b: segment_of(&first[half..]),
-                c: segment_of(&second),
+                two: [
+                    Stacked::of(0, vec![segment_of(a), segment_of(b)]),
+                    Stacked::of(1, vec![segment_of(&second)]),
+                ],
+                one: Stacked::of(0, vec![segment_of(a), segment_of(b), segment_of(&second)]),
                 ids: all.iter().map(|&(_, _, id)| id).collect(),
             }
         }
 
-        /// The corpus over two shards, the first holding the first two segments, and over one
-        /// shard holding all three.
+        /// The two layouts, two shards then one, seeing `visible` and matching `matching`.
         fn layouts(
             &self,
             visible: &FxHashSet<u64>,
             matching: &FxHashSet<u64>,
         ) -> [Vec<FakeSide<'_>>; 2] {
             [
-                vec![
-                    FakeSide::of(0, &[&self.a, &self.b], visible, matching),
-                    FakeSide::of(1, &[&self.c], visible, matching),
-                ],
-                vec![FakeSide::of(
-                    0,
-                    &[&self.a, &self.b, &self.c],
-                    visible,
-                    matching,
-                )],
+                self.two
+                    .iter()
+                    .map(|stacked| FakeSide::of(stacked, visible, matching))
+                    .collect(),
+                vec![FakeSide::of(&self.one, visible, matching)],
             ]
         }
 
@@ -1763,15 +1742,14 @@ mod tests {
     #[test]
     fn a_stored_read_walks_shard_after_shard_and_resumes_at_the_boundary() {
         let mut rng = StdRng::seed_from_u64(5);
-        let written: Vec<Written> = [10usize, 14]
+        let stacked: Vec<Stacked> = [(0u32, 10usize), (3, 14)]
             .iter()
-            .map(|&n| segment_of(&points(&mut rng, n)))
+            .map(|&(shard, n)| Stacked::of(shard, vec![segment_of(&points(&mut rng, n))]))
             .collect();
         let none = FxHashSet::default();
-        let mut sides: Vec<FakeSide<'_>> = written
+        let mut sides: Vec<FakeSide<'_>> = stacked
             .iter()
-            .zip([0u32, 3])
-            .map(|(w, shard)| FakeSide::of(shard, &[w], &none, &none))
+            .map(|stacked| FakeSide::of(stacked, &none, &none))
             .collect();
         sides[0].candidate = Bitmap::of(&[0, 1, 3, 4, 5, 6, 7, 8, 9]);
         sides[1].candidate.remove(5);
@@ -1810,11 +1788,11 @@ mod tests {
         let (pages, _) = read(&cx, None, false, in_first, start(RecordsOrder::Stored, 2));
         let (_, position, carried) = pages[0];
         assert_eq!(position.scan, Some((0, 9)));
-        let sealed = super::super::cursor::ItemsCursor {
+        let sealed = crate::records::cursor::ItemsCursor {
             position,
             stretch: carried,
         };
-        let resumed = super::super::cursor::ItemsCursor::decode(&sealed.encode()).unwrap();
+        let resumed = crate::records::cursor::ItemsCursor::decode(&sealed.encode()).unwrap();
         let (rest, _) = read(&cx, None, false, in_first, (resumed.position, carried));
         assert_eq!(rows_of(&rest), expected[in_first..]);
         let boundary = Position {
@@ -1833,17 +1811,21 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(3);
         let written: Vec<Written> = (0..6).map(|_| segment_of(&points(&mut rng, 10))).collect();
         let every: FxHashSet<u64> = written.iter().flat_map(|w| w.ids.iter().copied()).collect();
-        let sides: Vec<FakeSide<'_>> = (0u32..)
-            .zip(&written)
-            .map(|(shard, w)| FakeSide::of(shard, &[w], &every, &every))
+        let stacked: Vec<Stacked> = (0u32..)
+            .zip(written)
+            .map(|(shard, w)| Stacked::of(shard, vec![w]))
+            .collect();
+        let sides: Vec<FakeSide<'_>> = stacked
+            .iter()
+            .map(|stacked| FakeSide::of(stacked, &every, &every))
             .collect();
         let cx = FakeCx::of(sides, false);
         let (pages, carried) = read(&cx, None, false, 1000, start(RecordsOrder::Stored, 32));
         assert_eq!(rows_of(&pages).len(), 60);
         assert_eq!(carried, 32);
 
-        let one = segment_of(&points(&mut rng, 100));
-        let sides = vec![FakeSide::of(0, &[&one], &every, &FxHashSet::default())];
+        let one = Stacked::of(0, vec![segment_of(&points(&mut rng, 100))]);
+        let sides = vec![FakeSide::of(&one, &every, &FxHashSet::default())];
         let cx = FakeCx::of(sides, false);
         let filter = unique_eq();
         let (pages, carried) = read(

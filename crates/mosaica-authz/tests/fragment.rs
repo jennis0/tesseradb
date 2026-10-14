@@ -166,7 +166,7 @@ fn another_identity_misses_the_cache() {
     let terms: Vec<TermId> = (0..5u32).map(TermId::new).collect();
 
     let cache = FragmentCache::new(cache_dir.path(), rule_hash);
-    cache.get_or_build([9u8; 32], &terms, &reader, &[], 1).unwrap();
+    cache.get_or_build(IDENTITY, &terms, &reader, &[], 1).unwrap();
     assert_eq!(cache.rebuild_count(), 1);
     cache.get_or_build([10u8; 32], &terms, &reader, &[], 1).unwrap();
     assert_eq!(
@@ -421,7 +421,7 @@ fn a_sweep_leaves_the_live_identities() {
 
     let cache_dir = TempDir::new().unwrap();
     let terms: Vec<TermId> = (0..5u32).map(TermId::new).collect();
-    let (retired, kept) = ([9u8; 32], [10u8; 32]);
+    let (retired, kept) = (IDENTITY, [10u8; 32]);
 
     let cache = FragmentCache::new(cache_dir.path(), [7u8; 32]);
     cache.set_memory_bound(64 * 1024 * 1024);
@@ -466,13 +466,13 @@ fn a_fragment_carries_the_identity_it_was_built_under() {
     let terms: Vec<TermId> = (0..5u32).map(TermId::new).collect();
 
     let cache = FragmentCache::new(cache_dir.path(), [7u8; 32]);
-    let built = cache.get_or_build([9u8; 32], &terms, &reader, &[], 1).unwrap();
-    assert_eq!(built.identity, [9u8; 32]);
+    let built = cache.get_or_build(IDENTITY, &terms, &reader, &[], 1).unwrap();
+    assert_eq!(built.identity, IDENTITY);
 
     let reopened = FragmentCache::new(cache_dir.path(), [7u8; 32])
-        .get_or_build([9u8; 32], &terms, &reader, &[], 1)
+        .get_or_build(IDENTITY, &terms, &reader, &[], 1)
         .unwrap();
-    assert_eq!(reopened.identity, [9u8; 32]);
+    assert_eq!(reopened.identity, IDENTITY);
 
     let other = cache.get_or_build([10u8; 32], &terms, &reader, &[], 1).unwrap();
     assert_eq!(other.identity, [10u8; 32]);

@@ -1508,7 +1508,7 @@ mod tests {
     //! Cells counted over several shards against one segment holding every row.
 
     use super::*;
-    use crate::select::fixture::{points, segment_of, Written};
+    use crate::select::fixture::{points, segment_of, Stacked};
 
     use croaring::Bitmap;
     use rand::rngs::StdRng;
@@ -1517,34 +1517,6 @@ mod tests {
 
     /// One group's rows: cells, counts and reference counts.
     type Table = Vec<(Vec<u64>, Vec<u64>, Option<Vec<u64>>)>;
-
-    /// `written`'s segments, each with its first row after the ones before it.
-    fn segments_of<'w>(written: &[&'w Written]) -> Vec<(&'w SegmentData, u32)> {
-        let mut base = 0u32;
-        written
-            .iter()
-            .map(|w| {
-                let at = base;
-                base += w.ids.len() as u32;
-                (&w.data, at)
-            })
-            .collect()
-    }
-
-    /// The rows of `written`, numbered as [`segments_of`] numbers them, whose identity `ids`
-    /// holds.
-    fn rows_in(written: &[&Written], ids: &FxHashSet<u64>) -> Bitmap {
-        let mut rows = Bitmap::new();
-        for (w, (_, base)) in written.iter().zip(segments_of(written)) {
-            rows.add_many(
-                &w.rows_of(ids)
-                    .iter()
-                    .map(|row| row + base)
-                    .collect::<Vec<_>>(),
-            );
-        }
-        rows
-    }
 
     /// Every group's cells, chunk by chunk over every side's segments.
     fn counted(
@@ -1585,16 +1557,17 @@ mod tests {
 
     impl<'w> Side<'w> {
         fn of(
-            written: &[&'w Written],
+            stacked: &'w Stacked,
             set: &FxHashSet<u64>,
             reference: &FxHashSet<u64>,
             groups: &[FxHashSet<u64>],
         ) -> Side<'w> {
+            let rows_in = |ids: &FxHashSet<u64>| stacked.rows(|id| ids.contains(&id));
             Side {
-                segments: segments_of(written),
-                set: rows_in(written, set),
-                reference: rows_in(written, reference),
-                groups: groups.iter().map(|ids| rows_in(written, ids)).collect(),
+                segments: stacked.segments(),
+                set: rows_in(set),
+                reference: rows_in(reference),
+                groups: groups.iter().map(rows_in).collect(),
             }
         }
     }
@@ -1630,12 +1603,14 @@ mod tests {
         for seed in 0..4u64 {
             let mut rng = StdRng::seed_from_u64(seed);
             let all = points(&mut rng, 3_000);
-            let (first, second, third) = (
-                segment_of(&all[..1_200]),
-                segment_of(&all[1_200..2_000]),
-                segment_of(&all[2_000..]),
-            );
-            let one = segment_of(&all);
+            let shards = [
+                Stacked::of(0, vec![segment_of(&all[..1_200])]),
+                Stacked::of(
+                    1,
+                    vec![segment_of(&all[1_200..2_000]), segment_of(&all[2_000..])],
+                ),
+            ];
+            let one = Stacked::of(0, vec![segment_of(&all)]);
             let visible: FxHashSet<u64> = all
                 .iter()
                 .map(|p| p.2)
@@ -1646,11 +1621,10 @@ mod tests {
             };
             let groups = [of(|id| id % 3 != 0), of(|id| id % 2 == 0)];
             let reference = of(|id| id % 5 != 0);
-            let two = [
-                Side::of(&[&first], &visible, &reference, &groups),
-                Side::of(&[&second, &third], &visible, &reference, &groups),
-            ];
-            let single = [Side::of(&[&one], &visible, &reference, &groups)];
+            let two = shards
+                .each_ref()
+                .map(|s| Side::of(s, &visible, &reference, &groups));
+            let single = [Side::of(&one, &visible, &reference, &groups)];
             for depth in [0u8, 3, 7, 12, 16, 18] {
                 for ranges in [false, true].into_iter().filter(|&r| !r || depth <= 16) {
                     for split in [false, true] {

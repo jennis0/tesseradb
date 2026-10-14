@@ -168,19 +168,34 @@ pub fn write_lon_lat(path: &Path, places: &[(f64, f64)]) {
 /// and the unique `id` [`id_schema`] declares, built into `dir/bundle` from points and pairs files
 /// written beside it in `dir`.
 pub fn build_fixture(dir: &Path, n: u64) -> std::path::PathBuf {
-    build_fixture_with_access(dir, n, AccessInput::relation(dir.join("pairs.parquet")))
+    build_fixture_sized(dir, n, None)
 }
 
-/// [`build_fixture`] under the `point_visibility` given, whose default is what an ingested row
-/// with an empty `access` list takes.
-pub fn build_fixture_with_access(dir: &Path, n: u64, access: AccessInput) -> std::path::PathBuf {
+/// [`build_fixture`], declaring `[shards] size` where `shard_size` is given.
+pub fn build_fixture_sized(dir: &Path, n: u64, shard_size: Option<u64>) -> std::path::PathBuf {
+    let access = AccessInput::relation(dir.join("pairs.parquet"));
+    build_fixture_with_access(dir, n, access, shard_size)
+}
+
+/// [`build_fixture_sized`] under the `point_visibility` given, whose default is what an ingested
+/// row with an empty `access` list takes.
+pub fn build_fixture_with_access(
+    dir: &Path,
+    n: u64,
+    access: AccessInput,
+    shard_size: Option<u64>,
+) -> std::path::PathBuf {
     std::fs::create_dir_all(dir).unwrap();
     let points = dir.join("points.parquet");
     write_points_n(&points, n);
     write_pairs_n(&dir.join("pairs.parquet"), n);
     let out = dir.join("bundle");
     let view = view_args("s0", &points, access);
-    build(&with_id(build_args(&out, vec![view]), &points)).expect("fixture build should succeed");
+    let args = BuildArgs {
+        shard_size,
+        ..build_args(&out, vec![view])
+    };
+    build(&with_id(args, &points)).expect("fixture build should succeed");
     out
 }
 
@@ -629,7 +644,7 @@ pub async fn serve_with_default(default: Option<&str>) -> (TempDir, TestServer) 
         source: mosaica_build::config::AccessSource::Relation(tmp.path().join("pairs.parquet")),
         default: default.map(str::to_string),
     };
-    build_fixture_with_access(tmp.path(), N_ITEMS, access);
+    build_fixture_with_access(tmp.path(), N_ITEMS, access, None);
     let server = open(&tmp).await;
     (tmp, server)
 }

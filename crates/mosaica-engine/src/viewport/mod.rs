@@ -498,15 +498,6 @@ impl ViewportSink for Sending<'_> {
 mod tests {
     use super::*;
 
-    fn side(shard: u32) -> SideVersions {
-        SideVersions {
-            shard: ShardId::new(shard).unwrap(),
-            overlay_version: 5,
-            fragment_identity: [shard as u8; 32],
-            fragment_watermark: 100,
-        }
-    }
-
     fn keys(sides: &[SideVersions]) -> ViewCoordinates {
         coordinates_of([9; 32], "s0", sides, [(0, 1)].into_iter(), 7)
     }
@@ -515,7 +506,7 @@ mod tests {
     /// the content key.
     #[test]
     fn both_keys_cover_every_shard() {
-        let sides = [side(0), side(1)];
+        let sides = [SideVersions::fixture(0), SideVersions::fixture(1)];
         let held = keys(&sides);
         for at in 0..sides.len() {
             let mut moved = sides;

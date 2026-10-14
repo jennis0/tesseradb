@@ -11,7 +11,6 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use arrow::array::{Array, Float64Array, UInt64Array, UInt8Array};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -21,9 +20,8 @@ use parquet::arrow::ArrowWriter;
 use common::*;
 use mosaica_engine::filter::{FilterExpr, RegionLeaf};
 use mosaica_engine::{
-    AggregateCaps, AggregateHead, AggregateRequest, AggregateSink, ArtifactsRequest, By,
-    CancelToken, Cut, Engine, EngineError, Grouping, LayerSelection, PageEnd, Pick, RecordsHead,
-    RecordsLimits, RecordsSink, Session, SinkResult, TableHead, ViewportArtifactsRequest,
+    AggregateCaps, AggregateRequest, ArtifactsRequest, By, CancelToken, Cut, Engine, EngineError,
+    Grouping, LayerSelection, Pick, Session, ViewportArtifactsRequest,
 };
 use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_lifecycle::IncomingArtifact;
@@ -334,54 +332,12 @@ fn read_slots(
             &mut pages,
         )
         .unwrap();
-    id_slots(&pages.pages, "mosaica_id").into_iter().collect()
+    id_slots(&pages.batches, "mosaica_id").into_iter().collect()
 }
 
 /// Every served tree node's slot for a palette of ten.
 fn slots_of(engine: &Engine, session: &Session) -> BTreeMap<u64, Option<u8>> {
     read_slots(engine, session, TREE, 10)
-}
-
-#[derive(Default)]
-struct Tables {
-    pages: Vec<RecordBatch>,
-}
-
-impl AggregateSink for Tables {
-    fn head(&mut self, _: &AggregateHead) -> SinkResult {
-        Ok(())
-    }
-    fn table(&mut self, _: &TableHead) -> SinkResult {
-        Ok(())
-    }
-    fn page(&mut self, _: u32, batch: &RecordBatch, _: &PageEnd) -> SinkResult {
-        self.pages.push(batch.clone());
-        Ok(())
-    }
-}
-
-#[derive(Default)]
-struct Pages {
-    pages: Vec<RecordBatch>,
-}
-
-impl RecordsSink for Pages {
-    fn head(&mut self, _: &RecordsHead) -> SinkResult {
-        Ok(())
-    }
-    fn page(&mut self, batch: &RecordBatch, _: &PageEnd) -> SinkResult {
-        self.pages.push(batch.clone());
-        Ok(())
-    }
-}
-
-fn limits() -> RecordsLimits {
-    RecordsLimits {
-        max_page_rows: 100_000,
-        max_page_bytes: 64 << 20,
-        response_bytes: 256 << 20,
-        response_time: Duration::from_secs(60),
-    }
 }
 
 /// `(id, slot)` per row of `batches`, from the `id_column` and `slot` columns.
@@ -420,7 +376,7 @@ fn aggregate_slots(
         cells: None,
         area: None,
     }];
-    let mut sink = Tables::default();
+    let mut sink = Pages::default();
     engine
         .aggregate_stream(
             session,
@@ -445,7 +401,7 @@ fn aggregate_slots(
             &mut sink,
         )
         .unwrap();
-    id_slots(&sink.pages, "key")
+    id_slots(&sink.batches, "key")
 }
 
 fn box_filter(min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> FilterExpr {
@@ -1165,7 +1121,7 @@ fn colouring_a_tiered_level_fills_no_deeper_level() {
                 &mut pages,
             )
             .unwrap();
-        let rows = id_slots(&pages.pages, "mosaica_id");
+        let rows = id_slots(&pages.batches, "mosaica_id");
         assert!(rows.iter().all(|(_, slot)| slot.is_some()), "{level:?}");
         engine.figures_stats().misses - before
     };
@@ -1323,7 +1279,7 @@ fn a_tiered_level_is_rebuilt_over_rebuilt_coarser_levels() {
                 &mut pages,
             )
             .unwrap();
-        id_slots(&pages.pages, "mosaica_id").into_iter().collect()
+        id_slots(&pages.batches, "mosaica_id").into_iter().collect()
     };
     let before = level_slots(&session, 2);
 

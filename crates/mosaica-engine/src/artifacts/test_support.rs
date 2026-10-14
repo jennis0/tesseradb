@@ -149,7 +149,10 @@ impl Fixture {
             labels: LabelGate::new(&self.held, self.unlabelled),
             layer_reachable: reachable,
             dependency_served: &dependency_served,
-            sides: one_side(&self.rows, &self.mask, &self.denied),
+            sides: vec![ArtifactSide {
+                denied: &self.denied,
+                ..side(&self.rows, Some(&self.mask))
+            }],
         }
     }
 }
@@ -167,20 +170,35 @@ impl Fixture {
     }
 }
 
-/// The sides of a view of one shard: `rows`, seen through `mask`, with `denied` denied and no
+/// A view of `sides` on a reachable layer under `d`, with no deny, every label open and every
+/// dependency served.
+pub(super) fn view_of<'a>(
+    d: &'a LayerDeclaration,
+    sides: Vec<ArtifactSide<'a, Bitmap>>,
+) -> ArtifactView<'a, Bitmap> {
+    ArtifactView {
+        declaration: d,
+        overlay: open_overlay(),
+        labels: open_labels(),
+        layer_reachable: true,
+        dependency_served: &dependency_served,
+        sides,
+    }
+}
+
+/// One side: `rows`, seen through `mask` where the request reads it, with nothing denied and no
 /// containment partition or masked counts.
-pub(super) fn one_side<'a>(
+pub(super) fn side<'a>(
     rows: &'a ArtifactRows,
-    mask: &'a Bitmap,
-    denied: &'a Bitmap,
-) -> Vec<ArtifactSide<'a, Bitmap>> {
-    vec![ArtifactSide {
+    mask: Option<&'a Bitmap>,
+) -> ArtifactSide<'a, Bitmap> {
+    ArtifactSide {
         rows,
-        mask: Some(mask),
-        denied,
+        mask,
+        denied: no_denies(),
         containment: None,
         counts: None,
-    }]
+    }
 }
 
 /// What the one predicate serves of `rows`' artifact at `ordinal`, as a containment answer, to a
@@ -204,21 +222,12 @@ pub(super) fn contained(
         },
         ..declaration(false, None)
     };
-    let view = ArtifactView {
-        declaration: &declaration,
-        overlay: &Overlay::new(),
-        labels: open_labels(),
-        layer_reachable: true,
-        dependency_served: &dependency_served,
-        sides: vec![ArtifactSide {
-            rows,
-            mask: Some(mask),
-            denied,
-            containment: answers,
-            counts: None,
-        }],
+    let side = ArtifactSide {
+        denied,
+        containment: answers,
+        ..side(rows, Some(mask))
     };
-    match view.verdict(mosaica_types::EntityId::new(999), ordinal) {
+    match view_of(&declaration, vec![side]).verdict(mosaica_types::EntityId::new(999), ordinal) {
         ArtifactVerdict::Serve { rank: Some(rank), .. } => Containment::Satisfied(rank),
         ArtifactVerdict::Serve { rank: None, .. } => Containment::NothingToContain,
         ArtifactVerdict::Absent(Withheld::Containment) => Containment::Unsatisfied,
@@ -230,6 +239,12 @@ pub(super) fn contained(
 pub(super) fn no_denies() -> &'static Bitmap {
     static EMPTY: std::sync::OnceLock<Bitmap> = std::sync::OnceLock::new();
     EMPTY.get_or_init(Bitmap::new)
+}
+
+/// An overlay that denies nothing.
+pub(super) fn open_overlay() -> &'static Overlay {
+    static EMPTY: std::sync::OnceLock<Overlay> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(Overlay::new)
 }
 
 /// A label test that admits every artifact with no label and holds no descriptor.

@@ -389,10 +389,6 @@ mod tests {
         }
     }
 
-    fn carry_for_zero(key: &RowProjectionKey, generation: &Generation) -> Carry {
-        carry_for(key, generation, [0; 32])
-    }
-
     /// **A resident entry from a superseded prefix is rebuilt, never skipped.**
     ///
     /// This is the guard compaction §6.2 names: as it stood, `refresh_resident` skipped every key
@@ -409,29 +405,29 @@ mod tests {
     /// served rather than refused.
     ///
     /// **Mutations this kills:** restoring the prefix skip (leg 2 answers `Skip`); collapsing
-    /// `Rebuild` into `Derive` (leg 2 answers `Derive`); relaxing the version test to `>` (leg 3
+    /// `Rebuild` into `Derive` (leg 2 answers `Derive`); relaxing the version test to `>` (leg 4
     /// answers `Rebuild`).
     #[test]
     fn a_superseded_prefix_is_rebuilt_rather_than_skipped_or_derived() {
         let generation = generation_at("v00001", 9);
 
         // 1. The ordinary case: same prefix, older geometry — the flush and merge path.
-        assert_eq!(carry_for_zero(&key_at("v00001", 8), &generation), Carry::Derive);
+        assert_eq!(carry_for(&key_at("v00001", 8), &generation, [0; 32]), Carry::Derive);
 
         // 2. A compaction: the entry names the superseded prefix.
-        assert_eq!(carry_for_zero(&key_at("v00000", 8), &generation), Carry::Rebuild);
+        assert_eq!(carry_for(&key_at("v00000", 8), &generation, [0; 32]), Carry::Rebuild);
 
-        // A shard whose identity moved within the prefix.
+        // 3. A shard whose identity moved within the prefix.
         assert_eq!(
             carry_for(&key_at("v00001", 8), &generation, [1; 32]),
             Carry::Rebuild
         );
 
-        // 3. Nothing owed — the live geometry's own entry, and one from a publication that raced
+        // 4. Nothing owed — the live geometry's own entry, and one from a publication that raced
         //    this pass. Rebuilding backwards onto older geometry is the direction that hands a
         //    session a mask over a row space already superseded.
-        assert_eq!(carry_for_zero(&key_at("v00001", 9), &generation), Carry::Skip);
-        assert_eq!(carry_for_zero(&key_at("v00001", 10), &generation), Carry::Skip);
-        assert_eq!(carry_for_zero(&key_at("v00000", 9), &generation), Carry::Skip);
+        assert_eq!(carry_for(&key_at("v00001", 9), &generation, [0; 32]), Carry::Skip);
+        assert_eq!(carry_for(&key_at("v00001", 10), &generation, [0; 32]), Carry::Skip);
+        assert_eq!(carry_for(&key_at("v00000", 9), &generation, [0; 32]), Carry::Skip);
     }
 }
