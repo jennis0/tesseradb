@@ -33,7 +33,7 @@ use sha2::{Digest, Sha256};
 use mosaica_engine::viewport::ViewportRequest;
 use mosaica_engine::Engine;
 use mosaica_lifecycle::wal::ChangeOp;
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, ShardId};
 
 /// Copy `root/from` to `root/to`, give the copy a `MANIFEST.json` that differs, and flip `CURRENT`
 /// onto it — the state a fold leaves behind at compaction §4 step 4.
@@ -160,19 +160,19 @@ fn engine_over_fixture(tmp: &tempfile::TempDir, root: &Path, cache: &str, wal: &
     engine
 }
 
-/// **Gaps 1 and 3: one swap carries the prefix, the base postings, the bundle identity, the
-/// fragment cache and the unique indexes.**
+/// **One swap carries the prefix, the base postings, the shard's identity and the unique
+/// indexes.**
 ///
-/// Each of the five is asserted through an observable a caller has, because none of the fields is
+/// Each of the four is asserted through an observable a caller has, because none of the fields is
 /// public: the prefix and `segments_version` off the generation; the identity through
 /// `fragment_canonical_key`, which hashes it; the unique indexes by looking up a value, which after
 /// the flip can only be answered by runs opened against the *new* prefix's manifest; and the
-/// postings and cache by the rows a session still sees, which would be empty had the term index
-/// been dropped rather than rotated.
+/// postings by the rows a session still sees, which would be empty had the term index been
+/// dropped rather than rotated.
 ///
 /// **Mutations this kills:** carrying the live postings forward on a rotation (the counts go to
 /// zero only if the new prefix's postings differ — so instead the identity assertion carries it:
-/// a rotation that left `fragments` alone leaves the canonical key unchanged).
+/// a rotation that left the shard's identity alone leaves the canonical key unchanged).
 #[test]
 fn a_rotation_moves_the_prefix_the_postings_the_identity_and_the_unique_indexes_together() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -182,7 +182,7 @@ fn a_rotation_moves_the_prefix_the_postings_the_identity_and_the_unique_indexes_
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let satisfied: Vec<_> = session.satisfied_for_test().iter().copied().collect();
     let before = engine.generation();
-    let key_before = engine.fragment_canonical_key(&satisfied);
+    let key_before = engine.fragment_canonical_key(ShardId::ZERO, &satisfied);
     let baseline = visible(&engine, &session);
     let probe_entity = entity_of_source(&root, 7);
 
@@ -202,9 +202,9 @@ fn a_rotation_moves_the_prefix_the_postings_the_identity_and_the_unique_indexes_
     assert_eq!(after.prefix, "v00001");
     assert_eq!(after.segments_version, before.segments_version + 1);
     assert_ne!(
-        engine.fragment_canonical_key(&satisfied),
+        engine.fragment_canonical_key(ShardId::ZERO, &satisfied),
         key_before,
-        "the bundle identity must rotate with the prefix, or every fragment key survives a fold"
+        "the shard's identity must rotate with the prefix, or every fragment key survives a fold"
     );
     assert_eq!(
         after.dict.len(),
@@ -222,19 +222,14 @@ fn a_rotation_moves_the_prefix_the_postings_the_identity_and_the_unique_indexes_
     assert_eq!(visible(&engine, &fresh), baseline);
 }
 
-/// **Gap 2: a session's own fragment is rebuilt across a rotation, not reused** — compaction §12's
-/// obligation 3, and the half `Session` holds outside `FragmentCache` altogether.
+/// **A session's fragment is rebuilt across a rotation, not reused.**
 ///
-/// A fold advances no watermark, so `Engine::fragment_for`'s watermark test alone returns the
-/// session's pre-fold fragment for ever: a mask still containing every entity the fold retired,
-/// composed against post-fold geometry. The identity comparison is what refuses it, and it has to
-/// be made here — at composition — because rotating the cache does not reach an `Arc` a session is
-/// already holding.
+/// A fold advances no watermark, so a fragment keyed by the watermark alone would answer for
+/// ever with the pre-fold one: a mask still containing every entity the fold retired, composed
+/// against post-fold geometry. The shard's identity in the key is what refuses it.
 ///
-/// **Mutations this kills:** dropping the `identity ==` conjunct from `fragment_for` (the rebuild
-/// count stays 0); rotating `FragmentCache` by mutating `bundle_identity` in place rather than
-/// starting fresh, which would leave the pre-rotation entry `Ready` under the memo's key and serve
-/// it without a build (also 0).
+/// **Mutations this kills:** keying a fragment on anything that a fold leaves alone, such as the
+/// watermark or a shard identity not derived from the new prefix (no rebuild after the flip).
 #[test]
 fn a_session_fragment_is_rebuilt_across_a_rotation_not_reused() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -244,6 +239,7 @@ fn a_session_fragment_is_rebuilt_across_a_rotation_not_reused() {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let baseline = visible(&engine, &session);
     let before = engine.generation();
+    let built = engine.fragment_cache_rebuilds();
 
     clone_prefix_and_flip(&root, "v00000", "v00001");
     engine
@@ -257,11 +253,9 @@ fn a_session_fragment_is_rebuilt_across_a_rotation_not_reused() {
         )
         .expect("a committed prefix publishes");
 
-    // The rotated cache starts its own count at zero, so this is a count of rebuilds *since* the
-    // flip and not a delta against a number the pre-flip engine ran up.
     assert_eq!(
         engine.fragment_cache_rebuilds(),
-        0,
+        built,
         "the rotation itself builds nothing"
     );
 
@@ -272,7 +266,7 @@ fn a_session_fragment_is_rebuilt_across_a_rotation_not_reused() {
     );
     assert_eq!(
         engine.fragment_cache_rebuilds(),
-        1,
+        built + 1,
         "and it saw them through a fragment rebuilt under the new identity, not the one it \
          authorised with — the watermark test alone cannot see a fold"
     );
@@ -281,11 +275,15 @@ fn a_session_fragment_is_rebuilt_across_a_rotation_not_reused() {
 /// **The pre-rotation fragment is unreachable: in the memo, in the persisted `.frag` files, and
 /// across a restart.**
 ///
-/// The three are one property reached three ways. `canonical_key` hashes the bundle identity, so a
-/// rotated cache computes a different key for the same credential; the key *is* the filename, so
-/// the pre-rotation `.frag` is never named again; and a restart derives the identity from `CURRENT`,
-/// so it lands on the post-rotation key rather than the pre-rotation one even though the old file
-/// is still sitting in the cache directory.
+/// The three are one property reached three ways. `canonical_key` hashes the shard's identity,
+/// which a rotation moves, so the same credential has a different key; the key *is* the filename,
+/// so the pre-rotation `.frag` is never named again; and a restart derives the identity from
+/// `CURRENT`, so it lands on the post-rotation key rather than the pre-rotation one.
+///
+/// The superseded entry is kept, in memory and on disc, until the next rotation, so a request
+/// still on the previous generation reads it rather than building it again and no directory is
+/// removed under a build writing into it. No public surface runs a request on a superseded
+/// generation, so what is asserted is that the entry stays one rotation and goes at the second.
 ///
 /// **The rebuild count is the memo assertion, and it is the one that matters.** `key_memo` maps
 /// `(auth_data_hash, dict_len, watermark)` to a canonical key, and a fold moves none of those three
@@ -300,13 +298,17 @@ fn a_pre_rotation_fragment_is_unreachable_by_key_on_disc_and_across_a_restart() 
     let engine = engine_over_fixture(&tmp, &root, "cache", "wal.log");
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
+    engine
+        .session_fragment_for_test(&session, ShardId::ZERO)
+        .unwrap();
     let satisfied: Vec<_> = session.satisfied_for_test().iter().copied().collect();
-    let key_before = engine.fragment_canonical_key(&satisfied);
-    let frag_before = cache_dir.join(format!("{}.frag", hex(&key_before)));
-    assert!(
-        frag_before.exists(),
-        "the pre-rotation fragment is persisted, which is what makes this test's premise real"
-    );
+    let key_before = engine
+        .fragment_canonical_key(ShardId::ZERO, &satisfied)
+        .unwrap();
+    let frag_before = frag_named(&cache_dir, &key_before)
+        .expect("the pre-rotation fragment is persisted, which makes this test's premise real");
+    let built = engine.fragment_cache_rebuilds();
+    let resident = engine.fragment_cache_stats().entries;
 
     let before = engine.generation();
     clone_prefix_and_flip(&root, "v00000", "v00001");
@@ -320,32 +322,62 @@ fn a_pre_rotation_fragment_is_unreachable_by_key_on_disc_and_across_a_restart() 
             &[],
         )
         .expect("a committed prefix publishes");
+    assert!(
+        frag_before.exists(),
+        "the superseded entry stays on disc for a request still on the previous generation"
+    );
+    assert_eq!(
+        engine.fragment_cache_stats().entries,
+        resident,
+        "and in memory, so that request is answered without building"
+    );
 
-    let key_after = engine.fragment_canonical_key(&satisfied);
+    let key_after = engine
+        .fragment_canonical_key(ShardId::ZERO, &satisfied)
+        .unwrap();
     assert_ne!(key_after, key_before);
 
-    engine.authorise(&full_coverage_credential()).unwrap();
+    let after = engine.authorise(&full_coverage_credential()).unwrap();
+    engine
+        .session_fragment_for_test(&after, ShardId::ZERO)
+        .unwrap();
     assert_eq!(
         engine.fragment_cache_rebuilds(),
-        1,
-        "an authorise after the rotation must re-union the postings, not find the pre-rotation \
-         entry — which is exactly what a carried-over `key_memo` would make it do"
+        built + 1,
+        "a session's read after the rotation must re-union the postings, not find the \
+         pre-rotation entry — which is exactly what a carried-over `key_memo` would make it do"
     );
     assert!(
-        cache_dir.join(format!("{}.frag", hex(&key_after))).exists(),
+        frag_named(&cache_dir, &key_after).is_some(),
         "and it persists under the new identity's key"
     );
+
+    let middle = engine.generation();
+    clone_prefix_and_flip(&root, "v00001", "v00002");
+    engine
+        .publish_rotated_prefix_for_test(
+            "v00002",
+            middle.segments_version + 1,
+            middle.only_shard().watermark,
+            std::sync::Arc::clone(&middle.dict),
+            Vec::new(),
+            &[],
+        )
+        .expect("a second committed prefix publishes");
     assert!(
         !frag_before.exists(),
-        "the pre-rotation entry is swept at the flip (compaction §8): at that instant every \
-         persisted entry is under the superseded identity, which is what makes 'everything \
-         present' the exact set — a cache entry is a SHA-256 over the identity, so the set is not \
-         selectable by name"
+        "the second rotation sweeps the entry two identities back"
     );
+    assert!(
+        frag_named(&cache_dir, &key_after).is_some(),
+        "and keeps the one it superseded"
+    );
+    let key_last = engine
+        .fragment_canonical_key(ShardId::ZERO, &satisfied)
+        .unwrap();
 
     // Across a restart: the identity comes from `CURRENT`, so a fresh process over the same cache
-    // directory lands on the post-rotation key. Nothing names the old file, and the `.frag` sitting
-    // beside it is inert.
+    // directory lands on the newest key, and nothing names an older file.
     drop(engine);
     let restarted = Engine::open(
         &root,
@@ -358,8 +390,10 @@ fn a_pre_rotation_fragment_is_unreachable_by_key_on_disc_and_across_a_restart() 
     let restarted_satisfied: Vec<_> =
         restarted_session.satisfied_for_test().iter().copied().collect();
     assert_eq!(
-        restarted.fragment_canonical_key(&restarted_satisfied),
-        key_after,
+        restarted
+            .fragment_canonical_key(ShardId::ZERO, &restarted_satisfied)
+            .unwrap(),
+        key_last,
         "a restart keys on the prefix CURRENT names, so the pre-rotation entry stays unreachable"
     );
 }
@@ -432,8 +466,8 @@ fn a_deny_published_after_a_flip_writes_into_the_new_prefix() {
 /// fragment. Taking the max by `segments_version` alone would find it. The scoping is at the read,
 /// in `RowProjectionCache::freshest_fragment`.
 ///
-/// **Mutation this kills:** dropping the `key.prefix == prefix` filter — the resident pre-rotation
-/// entry is then returned and no rebuild happens.
+/// **Mutation this kills:** dropping both the prefix and the shard identity filters — the
+/// resident pre-rotation entry is then returned and no rebuild happens.
 #[test]
 fn a_drill_down_after_a_rotation_does_not_reuse_the_superseded_prefixs_fragment() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -461,14 +495,14 @@ fn a_drill_down_after_a_rotation_does_not_reuse_the_superseded_prefixs_fragment(
         )
         .expect("a committed prefix publishes");
 
-    assert_eq!(engine.fragment_cache_rebuilds(), 0);
+    let built = engine.fragment_cache_rebuilds();
     assert!(
         engine.item(&session, id).unwrap().is_some(),
         "the item is still there — the rotation preserved the data"
     );
     assert_eq!(
         engine.fragment_cache_rebuilds(),
-        1,
+        built + 1,
         "but the answer came from a fragment built under the new identity: the resident \
          pre-rotation entry is still in the projection cache and must not have been consulted"
     );
@@ -625,6 +659,16 @@ fn publishing_a_prefix_current_does_not_name_is_refused() {
 /// would make the fixture depend on the thing under test.
 fn entity_of_source(root: &Path, source_id: u64) -> EntityId {
     EntityId::new(source_to_new_map(root, "v00000")[&source_id])
+}
+
+/// The persisted `.frag` file named by `key`, under whichever identity's directory it is filed.
+fn frag_named(cache_dir: &Path, key: &[u8; 32]) -> Option<std::path::PathBuf> {
+    let name = format!("{}.frag", hex(key));
+    std::fs::read_dir(cache_dir)
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path().join(&name))
+        .find(|path| path.exists())
 }
 
 fn hex(bytes: &[u8; 32]) -> String {

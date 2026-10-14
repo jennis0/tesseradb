@@ -486,8 +486,7 @@ impl Engine {
             _ => None,
         }) {
             generation
-                .only_shard()
-                .filter_columns
+                .declared_columns()
                 .admit(expr, true, &reaches)
                 .map_err(filter_refusal)?;
         }
@@ -577,7 +576,7 @@ impl Engine {
             let stamp = (
                 generation.segments_version,
                 generation.deny_state_version(),
-                open.geometry.fragment.watermark,
+                fragments_stamp(&open.served),
             );
             if position.stamp.is_some_and(|held| held != stamp) {
                 recomposed = true;
@@ -647,6 +646,18 @@ impl Engine {
         self.cursor_key
             .seal(binding, &AggregateCursor::encode(position))
     }
+}
+
+/// One number that moves when any shard's fragment does: what a page's stamp compares beside the
+/// generation and the deny state, since a session may be served stale projections.
+fn fragments_stamp(served: &crate::viewport::ServedView<'_>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = rustc_hash::FxHasher::default();
+    for side in &served.sides {
+        side.versions.fragment_identity.hash(&mut hasher);
+        side.versions.fragment_watermark.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// The refusals a request's groupings decide from their shape alone.

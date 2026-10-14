@@ -259,6 +259,7 @@ fn report(
 
         // The whole derivation as a request pays for it — gather, mean, extremes and shape in the
         // order `compute` runs them, which is the number the stage rows have to add up to.
+        let sides = [(locator, cloud.visible.clone())];
         let t = Instant::now();
         let derived = compute(
             &[
@@ -266,8 +267,7 @@ fn report(
                 ComputedProperty::Box,
                 ComputedProperty::Hull,
             ],
-            &cloud.visible,
-            locator,
+            &sides,
         );
         let derive_ms = t.elapsed().as_secs_f64() * 1e3;
         // Every α-group is its own part on the wire; the shape is measured over the rings.

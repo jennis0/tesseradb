@@ -353,18 +353,19 @@ class Database:
         return self._declared(self.blocks.add("attribute", block))
 
     def declare_shards(self, size: int) -> dict:
-        """Declare the size of the shard the items are stored in, and return the `[shards]` table.
+        """Declare the size of the shards the items are stored in, and return the `[shards]` table.
 
-        The size is the high water the shard may not pass. Without this declaration it is
+        The size is the high water a shard may not pass. Without this declaration it is
         4,026,531,840.
 
         - `size`: a positive integer.
 
         Before the first commit the size is written into `schema.toml`, and a first commit whose
-        tables create more items than it is refused. After it, the next `commit()` sends the size
-        where the server holds another; a page of rows that would take the shard past it is refused
-        with `409` while the other pages are sent, and a size below the database's high water is
-        refused.
+        tables create more items than that is built in several shards. A database of several
+        shards is served for reads only: every write a later commit sends is refused with `409`.
+        After a first commit of one shard, the next `commit()` sends the size where the server
+        holds another; a page of rows that would take the shard past it is refused with `409`
+        while the other pages are sent, and a size below the database's high water is refused.
 
             db.declare_shards(50_000_000)
         """

@@ -103,14 +103,140 @@ pub(super) struct TileSet {
 /// A [`TileSet`] with every tile's row range resolved: what the sweep, the filter's crossing and
 /// the artifact pass all read the request's extent from. It cannot be built before the tile set is,
 /// which is the order the response needs.
-pub(super) struct Tiling {
+pub(super) struct Tiling<'a> {
     pub(super) tiles: Vec<Tile>,
     pub(super) underlay_offset: Option<u8>,
     pub(super) underlay_cells_demanded: u64,
-    /// Positionally aligned with `tiles`, each entry the tile's `(segment, range)` parts.
+    /// Every segment of the view in every shard, which a part names by its index.
+    pub(super) segments: ViewSegments<'a>,
+    /// Positionally aligned with `tiles`, each entry the tile's `(segment, range)` parts, ascending
+    /// by the segment's index in `segments`.
     pub(super) ranges: Vec<Vec<(usize, Range<u32>)>>,
+    /// Where each tile's parts begin among every tile's parts in turn.
+    pub(super) starts: Vec<usize>,
+    /// Each side's parts, as `(tile, index among every part)`, in tile order.
+    pub(super) by_side: Vec<Vec<(usize, usize)>>,
     /// `Σ range.len()` — the rows every resolved tile spans, pre-mask and pre-select.
     pub(super) rows_in_ranges: u64,
+}
+
+impl Tiling<'_> {
+    /// One part of `side`, from [`Self::by_side`]: its segment and its range in the shard's rows.
+    pub(super) fn part(&self, (tile, at): (usize, usize)) -> (&ViewSegment<'_>, Range<u32>) {
+        let (s, range) = &self.ranges[tile][at - self.starts[tile]];
+        let segment = &self.segments.segments[*s];
+        (segment, segment.row_base + range.start..segment.row_base + range.end)
+    }
+
+    /// The rows the parts in the side at `place` span, in its shard's row space, sorted and merged
+    /// as [`crossing_domain`] merges them, and how many rows that is.
+    pub(super) fn domain_in(&self, place: usize) -> (Vec<Range<u32>>, u64) {
+        let spans: Vec<Range<u32>> = self.by_side[place]
+            .iter()
+            .map(|&part| self.part(part).1)
+            .collect();
+        let rows = spans.iter().map(|r| r.len() as u64).sum();
+        (super::row_filter::merged_spans(spans), rows)
+    }
+
+    /// The rows tile `tile`'s parts span in each side holding one of them, as
+    /// [`Self::domain_in`] spans a side's, ascending by place.
+    pub(super) fn tile_domains(&self, tile: usize) -> Vec<(usize, Vec<Range<u32>>)> {
+        let first = self.starts[tile];
+        self.tile_sides(tile)
+            .map(|(place, run)| {
+                let spans = run.map(|k| self.part((tile, first + k)).1).collect();
+                (place, super::row_filter::merged_spans(spans))
+            })
+            .collect()
+    }
+
+    /// Each side holding one of tile `t`'s parts, ascending by place, with its run of `ranges[t]`.
+    /// A tile's parts ascend by their segment's index, and a side's segments are contiguous.
+    pub(super) fn tile_sides(&self, t: usize) -> impl Iterator<Item = (usize, Range<usize>)> + '_ {
+        let (segments, parts) = (&self.segments.segments, &self.ranges[t]);
+        let mut start = 0;
+        std::iter::from_fn(move || {
+            let place = segments[parts.get(start)?.0].place;
+            let end = start + parts[start..].partition_point(|&(s, _)| segments[s].place == place);
+            let run = start..end;
+            start = end;
+            Some((place, run))
+        })
+    }
+}
+
+/// One segment of a view in one shard.
+#[derive(Clone, Copy)]
+pub(super) struct ViewSegment<'a> {
+    /// Its shard's side's place in [`ServedView::sides`].
+    pub(super) place: usize,
+    pub(super) shard: ShardId,
+    pub(super) segment: &'a SegmentData,
+    /// Where its rows begin in the shard's row space for the view.
+    pub(super) row_base: u32,
+}
+
+/// Every segment of a view, side by side in shard order and each side's ascending by row base.
+pub(super) struct ViewSegments<'a> {
+    pub(super) segments: Vec<ViewSegment<'a>>,
+    /// Each side's shard and where its segments begin in `segments`, ascending by shard.
+    sides: Vec<(ShardId, usize)>,
+}
+
+impl<'a> ViewSegments<'a> {
+    pub(super) fn of(served: &ServedView<'a>) -> Self {
+        ViewSegments::new(
+            served
+                .sides
+                .iter()
+                .map(|side| (side.shard.id(), side.segments.iter().copied())),
+        )
+    }
+
+    /// Each side's shard and its segments with their row bases, ascending by shard.
+    fn new<S>(sides: impl IntoIterator<Item = (ShardId, S)>) -> Self
+    where
+        S: IntoIterator<Item = (&'a SegmentData, u32)>,
+    {
+        let mut segments = Vec::new();
+        let mut held = Vec::new();
+        for (place, (shard, side)) in sides.into_iter().enumerate() {
+            held.push((shard, segments.len()));
+            segments.extend(side.into_iter().map(|(segment, row_base)| ViewSegment {
+                place,
+                shard,
+                segment,
+                row_base,
+            }));
+        }
+        ViewSegments {
+            segments,
+            sides: held,
+        }
+    }
+
+    /// The index among the view's segments of the first segment of the side at `place`.
+    pub(super) fn start_of(&self, place: usize) -> usize {
+        self.sides[place].1
+    }
+
+    /// The shard of the side at `place`.
+    pub(super) fn shard_of(&self, place: usize) -> ShardId {
+        self.sides[place].0
+    }
+
+    /// The segment holding `row`, by its index in the list, and the row's index within it.
+    pub(super) fn segment_of(&self, row: ShardRow) -> Option<(usize, u32)> {
+        let shard = row.shard();
+        let at = self.sides.binary_search_by_key(&shard, |&(held, _)| held).ok()?;
+        let start = self.sides[at].1;
+        let end = self.sides.get(at + 1).map_or(self.segments.len(), |&(_, end)| end);
+        let row = row.row_in(shard).expect("the row's own shard").raw();
+        let within = &self.segments[start..end];
+        let i = within.partition_point(|s| s.row_base <= row).checked_sub(1)?;
+        Some((start + i, row - within[i].row_base))
+    }
 }
 
 impl Engine {
@@ -153,14 +279,14 @@ impl Engine {
     }
 
     /// The request's tiles with every tile's row range resolved.
-    pub(super) fn tiling(
+    pub(super) fn tiling<'a>(
         &self,
-        served: &ServedView<'_>,
+        served: &ServedView<'a>,
         req: &ViewportRequest<'_>,
         probe: &mut Probe,
-    ) -> Result<Tiling> {
+    ) -> Result<Tiling<'a>> {
         let tiles = self.resolve_tiles(served, req, probe)?;
-        Ok(tile_ranges(tiles, &served.segments, probe))
+        Ok(tile_ranges(tiles, ViewSegments::of(served), probe))
     }
 
     /// The request's tiles, counted and refused before they are allocated, and the underlay's three
@@ -245,26 +371,27 @@ impl Engine {
 ///
 /// `tile_ranges_all` returns ranges positionally aligned with `tiles`, preserving the response's
 /// tile order, which the wire payload's points are a flat concatenation in; the sweep's own Morton
-/// order stays inside `tile_ranges_all`. One sweep per segment, transposed below into per-tile
-/// part lists, because a tile is the union of its parts across segments.
+/// order stays inside `tile_ranges_all`. One sweep per segment of every shard, transposed below
+/// into per-tile part lists, because a tile is the union of its parts across segments and shards.
 ///
 /// `rows_in_ranges` is summed here, before any mask is consulted, so the figure is mask-free by
 /// construction: summing it inside [`tile_sweep`] instead let a tile that failed its
 /// `visible == 0` check return `Ok(None)` and be discarded by the caller's fold, silently dropping
 /// that tile's rows from a total documented as mask-independent.
-pub(super) fn tile_ranges(
+pub(super) fn tile_ranges<'a>(
     set: TileSet,
-    segments: &[(&SegmentData, u32)],
+    segments: ViewSegments<'a>,
     probe: &mut Probe,
-) -> Tiling {
+) -> Tiling<'a> {
     let TileSet {
         tiles,
         underlay_offset,
         underlay_cells_demanded,
     } = set;
     let per_segment: Vec<Vec<Range<u32>>> = segments
+        .segments
         .iter()
-        .map(|&(segment, _)| tile_ranges_all(segment, &tiles))
+        .map(|held| tile_ranges_all(held.segment, &tiles))
         .collect();
     let ranges: Vec<Vec<(usize, Range<u32>)>> = (0..tiles.len())
         .map(|t| {
@@ -278,6 +405,16 @@ pub(super) fn tile_ranges(
                 .collect()
         })
         .collect();
+    let mut starts = Vec::with_capacity(tiles.len());
+    let mut by_side: Vec<Vec<(usize, usize)>> = vec![Vec::new(); segments.sides.len()];
+    let mut at = 0;
+    for (t, parts) in ranges.iter().enumerate() {
+        starts.push(at);
+        for (s, _) in parts {
+            by_side[segments.segments[*s].place].push((t, at));
+            at += 1;
+        }
+    }
     probe.lap(|t| &mut t.tile_ranges_ns);
 
     let rows_in_ranges: u64 = ranges
@@ -291,15 +428,43 @@ pub(super) fn tile_ranges(
         tiles,
         underlay_offset,
         underlay_cells_demanded,
+        segments,
         ranges,
+        starts,
+        by_side,
         rows_in_ranges,
     }
 }
 
-/// One tile's sweep contribution: count, select and underlay, with no gather — the emit pass
-/// gathers later from the `rows`/`tile_parts` returned here. Safe to call concurrently from any
-/// rayon worker: every parameter is `&`-borrowed or `Copy`, nothing here reaches back into
-/// `Engine` or any state shared across tiles, and the return value is owned outright by the caller.
+/// Every part of every tile counted under `mask`, positionally aligned with the parts of every
+/// tile in turn: one walk of each shard's leaf over that shard's parts. A part in a shard with no
+/// leaf counts zero and is not read.
+fn part_counts(mask: &ShardedMask, tiling: &Tiling<'_>) -> RangeTallies {
+    let parts: usize = tiling.ranges.iter().map(Vec::len).sum();
+    let mut counts = RangeTallies {
+        visible: vec![0; parts],
+        matched: vec![0; parts],
+        highlighted: vec![0; parts],
+    };
+    for (place, held) in tiling.by_side.iter().enumerate() {
+        let Some(leaf) = mask.leaf(tiling.segments.shard_of(place)) else {
+            continue;
+        };
+        let ranges: Vec<Range<u32>> = held.iter().map(|&part| tiling.part(part).1).collect();
+        let tallies = leaf.count_parts(&ranges);
+        for (k, &(_, at)) in held.iter().enumerate() {
+            counts.visible[at] = tallies.visible[k];
+            counts.matched[at] = tallies.matched[k];
+            counts.highlighted[at] = tallies.highlighted[k];
+        }
+    }
+    counts
+}
+
+/// One tile's sweep contribution: count and select, with no gather — the emit pass gathers later
+/// from the `rows`/`tile_parts` returned here. Safe to call concurrently from any rayon worker:
+/// every parameter is `&`-borrowed or `Copy`, nothing here reaches back into `Engine` or any state
+/// shared across tiles, and the return value is owned outright by the caller.
 ///
 /// `Ok(None)` for an empty tile: no segment for this view, or nothing visible in `range` — no
 /// count row, no selection work. `Err` carries [`EngineError::Cancelled`] from the cancellation
@@ -309,22 +474,19 @@ pub(super) fn tile_ranges(
 /// `bands` says whether the request is answered from the identity bands ([`crate::bands`]) where
 /// they can answer a tile; the rest are read as the shipped scan reads them.
 ///
-/// `visible_by_part` is each of `tile_parts`' composed count, in the same order, which the sweep
-/// takes for every tile at once.
-#[allow(clippy::too_many_arguments)]
+/// `t` is the tile's index in `tiling`, and `counts` is [`part_counts`].
 pub(super) fn tile_sweep<'a>(
-    tile: &Tile,
-    tile_parts: &'a [(usize, Range<u32>)],
-    visible_by_part: &[u64],
-    mask: &EffectiveMask,
-    segments: &[(&'a SegmentData, u32)],
+    tiling: &'a Tiling<'a>,
+    t: usize,
+    counts: &RangeTallies,
+    mask: &ShardedMask,
     params: &SelectParams,
-    zoom: u8,
-    underlay_offset: Option<u8>,
     bands: bool,
     cancel: &Option<CancelToken>,
 ) -> Result<Option<TileSweepOut<'a>>> {
     check_cancelled(cancel)?;
+    let (tile, tile_parts, at) = (&tiling.tiles[t], &tiling.ranges[t][..], tiling.starts[t]);
+    let segments = &tiling.segments;
 
     if tile_parts.is_empty() {
         return Ok(None);
@@ -333,33 +495,17 @@ pub(super) fn tile_sweep<'a>(
     // `rows_in_ranges` is summed in `tile_ranges`, not here — see its doc.
     let mut stats = TileProbe::new();
 
-    // Summed over every segment the tile touches, each shifted into view row space by its
-    // `row_base`: a tile straddling a build segment and a fresh flush segment must report their
-    // union, not just one segment's share.
-    let part_list: Vec<SelectionPart<'_>> = tile_parts
-        .iter()
-        .zip(visible_by_part)
-        .map(|((s, range), &visible)| {
-            let (segment, row_base) = segments[*s];
-            // The count selection draws from, `M_sel`'s: a fully-visible range takes the
-            // `FullRange` decode tier, which extends every row without consulting the mask, so an
-            // unfiltered count here would serve every row under a filter that had narrowed the
-            // counts correctly. `TileCount::visible` below stays unfiltered.
-            let matched =
-                mask.count_matched_range(row_base + range.start..row_base + range.end, visible);
-            SelectionPart {
-                segment,
-                range: range.clone(),
-                row_base,
-                visible: matched,
-            }
-        })
-        .collect();
-    // What selection draws from: `M_sel`'s count, equal to the composed count when unfiltered.
-    let matched: u64 = part_list.iter().map(|p| p.visible).sum();
+    // Summed over every segment of every shard the tile touches: a tile straddling a build segment
+    // and a fresh flush segment, or two shards, must report their union, not one part's share.
+    let here = at..at + tile_parts.len();
     // The composed count: how many of this tile's items the principal may see, unaffected by a
-    // filter, summed over the same segment ranges as `matched`.
-    let visible: u64 = visible_by_part.iter().sum();
+    // filter.
+    let visible: u64 = counts.visible[here.clone()].iter().sum();
+    // What selection draws from: `M_sel`'s count, equal to the composed count when unfiltered. A
+    // fully-visible range takes the `FullRange` decode tier, which extends every row without
+    // consulting the mask, so an unfiltered count there would serve every row under a filter that
+    // had narrowed the counts correctly.
+    let matched: u64 = counts.matched[here.clone()].iter().sum();
     stats.lap(|t| &mut t.count_ns);
 
     if visible == 0 {
@@ -369,12 +515,41 @@ pub(super) fn tile_sweep<'a>(
     stats.count(|t| &mut t.tiles_nonempty, 1);
     stats.count(|t| &mut t.sigma_visible, matched);
 
-    let parts = SelectionParts::new(&part_list);
+    // Each side's parts, read under its shard's leaf. A shard with no leaf has nothing here.
+    let mut part_list: Vec<SelectionPart<'_>> = Vec::with_capacity(tile_parts.len());
+    let mut held = Vec::new();
+    for (place, run) in tiling.tile_sides(t) {
+        let shard = segments.shard_of(place);
+        let Some(leaf) = mask.leaf(shard) else {
+            continue;
+        };
+        let start = part_list.len();
+        part_list.extend(run.map(|k| {
+            let (s, range) = &tile_parts[k];
+            let segment = segments.segments[*s];
+            SelectionPart {
+                segment: segment.segment,
+                range: range.clone(),
+                row_base: segment.row_base,
+                visible: counts.matched[at + k],
+            }
+        }));
+        held.push((shard, leaf, start..part_list.len()));
+    }
+    let shards: Vec<TileShard<'_>> = held
+        .into_iter()
+        .map(|(shard, mask, run)| TileShard {
+            shard,
+            mask,
+            parts: &part_list[run],
+        })
+        .collect();
+
     // Anchored on `matched`, not `visible`: selection's cap and tier decisions are about the set
     // it draws from. θ's threshold anchor stays unfiltered and, on a filtered request, arrives
     // saturated, so `served = min(matched, cap)` there.
     let answer = if bands {
-        crate::bands::select(mask, &part_list, params, matched)?
+        crate::bands::select(&shards, params, matched)?
     } else {
         crate::bands::BandAnswer::Declined
     };
@@ -393,10 +568,10 @@ pub(super) fn tile_sweep<'a>(
         declined => {
             if let crate::bands::BandAnswer::Sparse { read } = declined {
                 stats.count(|t| &mut t.tiles_sparse_after_read, u64::from(read));
-                will_need_visible_identities(mask, &part_list);
+                will_need_visible_identities(&shards);
             }
-            let selected = Selection::of(mask, &parts, params, matched);
-            // Counted by `Selection::of` itself, inside the loops that do the reading — not from
+            let selected = TileSelection::of(&shards, params, matched);
+            // Counted by the selection itself, inside the loops that do the reading — not from
             // `visible`, which would make the `visited == sigma_visible` cross-check a tautology.
             stats.count(|t| &mut t.select_rows_visited, selected.rows_visited);
             (selected.rows, None)
@@ -412,64 +587,37 @@ pub(super) fn tile_sweep<'a>(
         // How many of those the filter admits. Equal to `visible` on an unfiltered request.
         matched,
         served: rows.len() as u64,
-        // Of `matched`, how many also satisfy the highlight — one `and_cardinality` per segment
-        // range, the operation `matched` already is. Equal to `matched` with no highlight.
-        highlighted: part_list
-            .iter()
-            .map(|p| mask.count_highlighted_range(p.view_range(), p.visible))
-            .sum(),
+        // Of `matched`, how many also satisfy the highlight. Equal to `matched` with no highlight.
+        highlighted: counts.highlighted[here].iter().sum(),
     };
 
-    // The tile's sub-cells, each an exact masked count over a contiguous Morton range, summed
-    // across the tile's segments. Only non-empty cells are emitted, as empty tiles are skipped
-    // above.
-    let mut sub_cells = Vec::new();
-    if let Some(offset) = underlay_offset {
-        let first = tile.prefix << (2 * offset as u32);
-        let counted = crate::cells::count_by_ranges(
-            crate::cells::CellSet::Mask(mask),
-            parts
-                .as_slice()
-                .iter()
-                .map(|part| (part.segment, part.row_base, part.range.clone())),
-            zoom + offset,
-            first..first + (1u64 << (2 * offset as u32)),
-        );
-        sub_cells = counted
-            .cells
-            .into_iter()
-            .map(|(cell, count)| SubCellCount { cell, count })
-            .collect();
-        stats.lap(|t| &mut t.underlay_ns);
-        stats.count(|t| &mut t.underlay_cells_evaluated, counted.visited);
-    }
-
     Ok(Some(TileSweepOut {
+        tile: t,
         count,
         rows,
         entries,
         tile_parts,
-        sub_cells,
         stats: stats.t,
     }))
 }
 
 /// [`tile_sweep`]'s return payload, folded serially and in-order into the request's counts and
-/// sub-cells and then consumed by the emit pass, which gathers `rows`. Not part of this crate's
+/// then consumed by the underlay and the emit pass, which gathers `rows`. Not part of this crate's
 /// public API.
 ///
-/// `rows` are view-space rows ascending by `mosaica_id` — the order the wire requires within a
-/// tile, and the property every mid-stream cut's validity rests on.
+/// `rows` ascend by `mosaica_id` — the order the wire requires within a tile, and the property
+/// every mid-stream cut's validity rests on.
 pub(super) struct TileSweepOut<'a> {
+    /// The tile's index in the request's tiling.
+    pub(super) tile: usize,
     pub(super) count: TileCount,
-    pub(super) rows: Vec<u32>,
+    pub(super) rows: Vec<ShardRow>,
     /// Where the tile was answered from the bands, each row's entry in its segment's bands, which
     /// the gather reads its position and copies from.
     pub(super) entries: Option<Vec<u32>>,
-    /// The tiling's entry for this tile: each segment the tile spans, by its position in the
-    /// view's segment list, and the tile's rows in it.
+    /// The tiling's entry for this tile: each segment the tile spans, by its index in the view's
+    /// segments, and the tile's rows in it.
     pub(super) tile_parts: &'a [(usize, Range<u32>)],
-    pub(super) sub_cells: Vec<SubCellCount>,
     pub(super) stats: TileStats,
 }
 
@@ -481,13 +629,76 @@ pub(super) struct Swept<'a> {
     pub(super) swept: Vec<TileSweepOut<'a>>,
 }
 
+/// The sub-cells of every swept tile, each an exact masked count over a contiguous Morton range,
+/// summed across the tile's segments and shards; only non-empty cells, in tile order and ascending
+/// within a tile. Every shard's occupied cells are counted in one walk of its leaf, on the
+/// request's thread: `max_underlay_cells` bounds the cells a request may ask for.
+fn underlay(
+    mask: &ShardedMask,
+    tiling: &Tiling<'_>,
+    swept: &[TileSweepOut<'_>],
+    depth: u8,
+    offset: u8,
+) -> (Vec<SubCellCount>, u64) {
+    let per_tile = 1u64 << (2 * u32::from(offset));
+    let mut swept_at: Vec<Option<usize>> = vec![None; tiling.tiles.len()];
+    for (w, ts) in swept.iter().enumerate() {
+        swept_at[ts.tile] = Some(w);
+    }
+    let mut found: Vec<Vec<(u64, u64)>> = vec![Vec::new(); swept.len()];
+    let mut parts_read = vec![0usize; swept.len()];
+    let mut visited = 0u64;
+    for (place, held) in tiling.by_side.iter().enumerate() {
+        let Some(leaf) = mask.leaf(tiling.segments.shard_of(place)) else {
+            continue;
+        };
+        let (mut cells, mut rows, mut owner) = (Vec::new(), Vec::new(), Vec::new());
+        for &part in held {
+            let Some(w) = swept_at[part.0] else {
+                continue;
+            };
+            let (segment, range) = tiling.part(part);
+            let first = swept[w].count.tile << (2 * u32::from(offset));
+            crate::cells::cell_ranges(
+                segment.segment,
+                segment.row_base,
+                range.start - segment.row_base..range.end - segment.row_base,
+                depth,
+                first..first + per_tile,
+                &mut cells,
+                &mut rows,
+            );
+            owner.resize(rows.len(), w);
+            parts_read[w] += 1;
+        }
+        visited += rows.len() as u64;
+        if rows.is_empty() {
+            continue;
+        }
+        let counted = leaf.count_ranges(&rows);
+        for ((&cell, n), &w) in cells.iter().zip(counted).zip(&owner) {
+            if n > 0 {
+                found[w].push((cell, n));
+            }
+        }
+    }
+    let mut sub_cells = Vec::new();
+    for (cells, parts) in found.into_iter().zip(parts_read) {
+        let cells = match parts > 1 {
+            true => crate::cells::add_equal_keys(cells),
+            false => cells,
+        };
+        sub_cells.extend(cells.into_iter().map(|(cell, count)| SubCellCount { cell, count }));
+    }
+    (sub_cells, visited)
+}
+
 impl Engine {
     /// Sweep every tile — serially or on the pool — and fold the outcomes in tile order.
     pub(super) fn sweep_tiles<'a>(
         &self,
-        served: &ServedView<'a>,
-        mask: &EffectiveMask,
-        tiling: &'a Tiling,
+        mask: &ShardedMask,
+        tiling: &'a Tiling<'a>,
         params: &SelectParams,
         req: &ViewportRequest<'_>,
         probe: &mut Probe,
@@ -497,28 +708,10 @@ impl Engine {
         // `count_range` performs per row-range, so the two combine into one predictor.
         let total_rows_in_ranges = tiling.rows_in_ranges + tiling.underlay_cells_demanded;
 
-        // Every tile's parts counted together, each of the mask's bitmaps walked once: tiles next
-        // to each other share containers, which a count per part popcounts again for each.
+        // Every tile's parts counted together, each of a leaf's bitmaps walked once: tiles next to
+        // each other share containers, which a count per part popcounts again for each.
         probe.skip();
-        let part_ranges: Vec<Range<u32>> = tiling
-            .ranges
-            .iter()
-            .flatten()
-            .map(|(s, range)| {
-                let (_, row_base) = served.segments[*s];
-                row_base + range.start..row_base + range.end
-            })
-            .collect();
-        let visible_by_part = mask.count_ranges(&part_ranges);
-        let mut at = 0;
-        let visible_by_tile: Vec<&[u64]> = tiling
-            .ranges
-            .iter()
-            .map(|parts| {
-                at += parts.len();
-                &visible_by_part[at - parts.len()..at]
-            })
-            .collect();
+        let counts = part_counts(mask, tiling);
         probe.lap(|t| &mut t.count_ns);
 
         // Below `SERIAL_FALLBACK_MAX_ROWS`, fold `tile_sweep` in place, since the fan-out's own
@@ -531,20 +724,7 @@ impl Engine {
         // fan-out has at most `compute_threads` tiles, since every tile already past the
         // checkpoint runs to completion.
         let bands = req.zoom < self.switches.bands_below_zoom.load(Ordering::Relaxed);
-        let run = |tile: &Tile, tile_parts: &'a [(usize, Range<u32>)], visible_by_part: &[u64]| {
-            tile_sweep(
-                tile,
-                tile_parts,
-                visible_by_part,
-                mask,
-                &served.segments,
-                params,
-                req.zoom,
-                tiling.underlay_offset,
-                bands,
-                &req.cancel,
-            )
-        };
+        let run = |t: usize| tile_sweep(tiling, t, &counts, mask, params, bands, &req.cancel);
 
         // Read from `self`, not the constant, so a test can override it per-`Engine` via
         // `Engine::set_serial_fallback_max_rows_for_test`; a shipped binary always reads
@@ -558,22 +738,15 @@ impl Engine {
             serial_fallback_max_rows,
             tiling.tiles.len(),
         ) {
-            tiling
-                .tiles
-                .iter()
-                .zip(&tiling.ranges)
-                .zip(&visible_by_tile)
-                .map(|((tile, tile_parts), visible)| run(tile, tile_parts, visible))
+            (0..tiling.tiles.len())
+                .map(run)
                 .collect::<Vec<Result<Option<TileSweepOut>>>>()
         } else {
             self.pool.install(|| {
-                tiling
-                    .tiles
-                    .par_iter()
-                    .zip(tiling.ranges.par_iter())
-                    .zip(visible_by_tile.par_iter())
+                (0..tiling.tiles.len())
+                    .into_par_iter()
                     .with_min_len(TILE_PAR_MIN_LEN)
-                    .map(|((tile, tile_parts), visible)| run(tile, tile_parts, visible))
+                    .map(run)
                     .collect::<Vec<Result<Option<TileSweepOut>>>>()
             })
         };
@@ -584,16 +757,23 @@ impl Engine {
         // The serial, in-order fold: `tile_outcomes`' order equals `tiles`' order by construction.
         // Short-circuits on the first `Err`; every tile's own work is already done by this point.
         let mut tile_counts = Vec::new();
-        let mut sub_cells = Vec::new();
         let mut swept: Vec<TileSweepOut> = Vec::new();
         for outcome in tile_outcomes {
-            let Some(mut ts) = outcome? else {
+            let Some(ts) = outcome? else {
                 continue;
             };
             ts.stats.fold_into(&mut probe.t);
             tile_counts.push(ts.count.clone());
-            sub_cells.append(&mut ts.sub_cells);
             swept.push(ts);
+        }
+
+        let mut sub_cells = Vec::new();
+        if let Some(offset) = tiling.underlay_offset {
+            probe.skip();
+            let (cells, visited) = underlay(mask, tiling, &swept, req.zoom + offset, offset);
+            sub_cells = cells;
+            probe.lap(|t| &mut t.underlay_ns);
+            probe.count(|t| &mut t.underlay_cells_evaluated, visited);
         }
         Ok(Swept {
             tile_counts,
@@ -942,8 +1122,8 @@ fn band_copies<'a, T: CopyValue>(
 
 /// The emit pass's reader. Every segment a swept tile touches has its identity and position
 /// columns, its band entries, and each declared render column's typed values, band copy and
-/// presence resolved once for the request, indexed by the segment's position in the view's segment
-/// list. A tile then narrows presence to its rows in each segment and runs the row loops.
+/// presence resolved once for the request, indexed like the view's segments. A tile then narrows
+/// presence to its rows in each segment and runs the row loops.
 ///
 /// A tile answered from the bands reads each point's identity, position and render values from its
 /// band entry, and a string, or a column the segment's bands hold no copy of, from the column at
@@ -954,8 +1134,11 @@ fn band_copies<'a, T: CopyValue>(
 /// written before the family existed. An absent value is the type's zero in the buffer and false
 /// in the column's `present`, except a category's, which is code 0 in the buffer.
 pub(super) struct Gather<'a> {
-    /// The view's segments with their row bases, ascending: where a selected row is placed.
-    view: &'a [(&'a SegmentData, u32)],
+    /// The view's segments in every shard: where a selected row is placed.
+    view: &'a ViewSegments<'a>,
+    /// Per segment, whether a swept tile reads it: a segment of a shard with no leaf holds no
+    /// served row.
+    touched: Vec<bool>,
     segments: Vec<SegmentRows<'a>>,
     /// One per declared render column, in declaration order.
     columns: Vec<RenderColumn<'a>>,
@@ -996,13 +1179,14 @@ fn is_scattered(ts: &TileSweepOut<'_>) -> bool {
 /// Ask for the identity column's pages under a tile's visible rows, before the scan reads them:
 /// a tile the bands could not answer holds few visible rows, scattered over its range, and one
 /// request for all of their pages costs less than a fault for each.
-fn will_need_visible_identities(mask: &EffectiveMask, parts: &[SelectionPart<'_>]) {
+fn will_need_visible_identities(shards: &[TileShard<'_>]) {
     let page = page_size();
     let mut pages = Vec::new();
-    for part in parts {
+    for (_, mask, part) in crate::select::visible_parts(shards) {
         let ids = part.segment.columns.mosaica_id();
         let base = part.row_base;
-        mask.for_each_run_holding_visible(base + part.range.start..base + part.range.end, |run| {
+        let rows = base + part.range.start..base + part.range.end;
+        mask.for_each_run_holding_visible(rows, |run| {
             let last = element(ids, (run.end - 1 - base) as usize);
             let mut at = element(ids, (run.start - base) as usize) & !(page - 1);
             while at <= last {
@@ -1015,15 +1199,21 @@ fn will_need_visible_identities(mask: &EffectiveMask, parts: &[SelectionPart<'_>
 }
 
 impl<'a> Gather<'a> {
+    /// The reader of `swept`'s rows. A segment in a shard where `mask` has no leaf holds none of
+    /// them and is not resolved.
     pub(super) fn new(
-        view: &'a [(&'a SegmentData, u32)],
+        view: &'a ViewSegments<'a>,
         swept: &[TileSweepOut<'_>],
         declared: &[DeclaredScalar],
+        mask: &ShardedMask,
     ) -> Result<Self> {
-        let mut touched: Vec<Option<&'a SegmentData>> = vec![None; view.len()];
+        let mut touched: Vec<Option<&'a SegmentData>> = vec![None; view.segments.len()];
         for ts in swept {
             for &(s, _) in ts.tile_parts {
-                touched[s] = Some(view[s].0);
+                let held = view.segments[s];
+                if mask.leaf(held.shard).is_some() {
+                    touched[s] = Some(held.segment);
+                }
             }
         }
         let resolved: Vec<Option<ResolvedScalars<'a>>> = touched
@@ -1076,6 +1266,7 @@ impl<'a> Gather<'a> {
 
         Ok(Gather {
             view,
+            touched: touched.iter().map(Option::is_some).collect(),
             segments: touched
                 .iter()
                 .map(|segment| {
@@ -1091,7 +1282,7 @@ impl<'a> Gather<'a> {
                 .collect(),
             columns,
             placed: Vec::new(),
-            presence: vec![RowPresence::NoRow; view.len()],
+            presence: vec![RowPresence::NoRow; view.segments.len()],
             ahead: 0,
             ahead_points: 0,
             pages: Vec::new(),
@@ -1110,7 +1301,9 @@ impl<'a> Gather<'a> {
             }
             self.pages.clear();
             for (point, &row) in ts.rows.iter().enumerate() {
-                let (segment, local) = segment_holding(self.view, row)
+                let (segment, local) = self
+                    .view
+                    .segment_of(row)
                     .expect("a selected row lies in the view's row space");
                 let rows = &self.segments[segment];
                 let local = local as usize;
@@ -1162,10 +1355,10 @@ impl<'a> Gather<'a> {
         }
     }
 
-    /// Gather one tile's selected rows column-major. `rows` are view-space, ascending by
-    /// `mosaica_id` and not by segment, so consecutive rows can land in different segments; they
-    /// are placed as `(segment, local)` once, and every column then walks that placement, leaving
-    /// the inner loop a bounds-checked index into a typed slice.
+    /// Gather one tile's selected rows column-major. `rows` ascend by `mosaica_id` and not by
+    /// segment or shard, so consecutive rows can land in different segments; they are placed as
+    /// `(segment, local)` once, and every column then walks that placement, leaving the inner loop
+    /// a bounds-checked index into a typed slice.
     ///
     /// `swept[at]` is the tile; the tiles are gathered in order, and the pages of scattered tiles
     /// ahead are asked for first.
@@ -1177,7 +1370,7 @@ impl<'a> Gather<'a> {
         self.placed.clear();
         self.placed.extend(ts.rows.iter().map(|&row| {
             let (segment, local) =
-                segment_holding(view, row).expect("a selected row lies in the view's row space");
+                view.segment_of(row).expect("a selected row lies in the view's row space");
             (segment as u32, local)
         }));
         let placed = &self.placed;
@@ -1208,6 +1401,9 @@ impl<'a> Gather<'a> {
         for column in &self.columns {
             let mut every = true;
             for (s, range) in ts.tile_parts {
+                if !self.touched[*s] {
+                    continue;
+                }
                 let within = column.presence[*s].within(range.clone());
                 every &= matches!(within, RowPresence::Every);
                 self.presence[*s] = within;
@@ -1411,5 +1607,149 @@ mod tests {
                 "collect order diverged from input order at threads={threads} min_len={min_len}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod across_tests {
+    //! The sweep over two shards against one segment holding every row: the counts, the leave-out
+    //! and grouping of a tile's parts, the selection, the underlay's merge across shards, where a
+    //! row is placed and each shard's crossing domain must all answer as the one segment does.
+
+    use super::*;
+
+    use croaring::Bitmap;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+    use rustc_hash::FxHashSet;
+
+    use crate::select::fixture::{ids_of, points, segment_of, tile_of, Stacked};
+
+    /// What one view answers for `tiles`: each tile's counts and served identities, and the
+    /// underlay.
+    #[derive(Debug, PartialEq)]
+    struct Answer {
+        tiles: Vec<Option<(TileCount, Vec<u64>)>>,
+        sub_cells: Vec<SubCellCount>,
+    }
+
+    /// The sweep over `sides`, each seeing the identities `visible` holds, filtered and
+    /// highlighted by identity where asked.
+    fn answer(
+        sides: &[Stacked],
+        visible: &FxHashSet<u64>,
+        tiles: &[Tile],
+        filtered: bool,
+        params: &SelectParams,
+        bands: bool,
+    ) -> Answer {
+        let segments = ViewSegments::new(sides.iter().map(|side| (side.shard, side.segments())));
+        let set = TileSet {
+            tiles: tiles.to_vec(),
+            underlay_offset: Some(2),
+            underlay_cells_demanded: 0,
+        };
+        let tiling = tile_ranges(set, segments, &mut Probe::new());
+        for (at, side) in sides.iter().enumerate() {
+            for &(t, part) in &tiling.by_side[at] {
+                let (segment, rows) = tiling.part((t, part));
+                assert_eq!(segment.shard, side.shard);
+                for row in [rows.start, rows.end - 1] {
+                    let placed = ShardRow::new(side.shard, RowId::new(row));
+                    let (s, local) = tiling.segments.segment_of(placed).unwrap();
+                    let ids = tiling.segments.segments[s].segment.columns.mosaica_id();
+                    assert_eq!(ids[local as usize], side.id_of(row));
+                }
+            }
+        }
+        let leaves = sides.iter().enumerate().map(|(at, side)| {
+            let mut leaf = EffectiveMask::of_rows(side.rows(|id| visible.contains(&id)));
+            if filtered {
+                leaf = leaf.with_filter(FilterRows::Complete(side.rows(|id| id % 3 != 0)));
+                let (domain, rows) = tiling.domain_in(at);
+                let lit = side.rows(|id| id % 5 == 0);
+                let domain_rows: Bitmap = domain.iter().flat_map(|r| r.clone()).collect();
+                assert_eq!(domain_rows.cardinality(), rows);
+                leaf = leaf.with_highlight(FilterRows::Viewport {
+                    rows: lit.and(&domain_rows),
+                    domain,
+                });
+            }
+            (side.shard, leaf)
+        });
+        let mask = ShardedMask::new(leaves.collect::<Vec<_>>());
+        let counts = part_counts(&mask, &tiling);
+        let mut swept = Vec::new();
+        let mut out = Vec::new();
+        for t in 0..tiling.tiles.len() {
+            match tile_sweep(&tiling, t, &counts, &mask, params, bands, &None).unwrap() {
+                None => out.push(None),
+                Some(ts) => {
+                    out.push(Some((ts.count.clone(), ids_of(sides, &ts.rows))));
+                    swept.push(ts);
+                }
+            }
+        }
+        let (sub_cells, _) = underlay(&mask, &tiling, &swept, tiles[0].depth + 2, 2);
+        Answer {
+            tiles: out,
+            sub_cells,
+        }
+    }
+
+    #[test]
+    fn a_sweep_over_two_shards_answers_as_one_segment_of_every_row() {
+        let mut checked = 0;
+        for seed in 0..6u64 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let all = points(&mut rng, 2_500);
+            let mut split: [Vec<(f32, f32, u64)>; 3] = Default::default();
+            for &p in &all {
+                split[rng.gen_range(0..3)].push(p);
+            }
+            let [first, second, third] = split;
+            // Every other seed, the viewer sees nothing in the first shard, which has no leaf.
+            let unseen: FxHashSet<u64> = match seed % 2 {
+                0 => first.iter().map(|p| p.2).collect(),
+                _ => FxHashSet::default(),
+            };
+            let visible: FxHashSet<u64> = all
+                .iter()
+                .filter(|p| !unseen.contains(&p.2) && rng.gen_bool(0.5))
+                .map(|p| p.2)
+                .collect();
+            let whole = [Stacked::of(0, vec![segment_of(&all)])];
+            let sides = [
+                Stacked::of(0, vec![segment_of(&first)]),
+                Stacked::of(1, vec![segment_of(&second), segment_of(&third)]),
+            ];
+            for depth in [2u8, 4] {
+                let mut tiles: Vec<Tile> = all
+                    .iter()
+                    .step_by(41)
+                    .map(|&(x, y, _)| tile_of(x, y, depth))
+                    .collect();
+                tiles.sort_by_key(|tile| tile.prefix);
+                tiles.dedup_by_key(|tile| tile.prefix);
+                for threshold in [Threshold::Saturated, Threshold::Cut(1 << 56)] {
+                    for (filtered, bands) in [(false, false), (true, false), (false, true)] {
+                        let p = SelectParams {
+                            k_min: 2,
+                            cap: 30,
+                            threshold,
+                        };
+                        let want = answer(&whole, &visible, &tiles, filtered, &p, bands);
+                        let got = answer(&sides, &visible, &tiles, filtered, &p, bands);
+                        assert_eq!(
+                            got, want,
+                            "seed {seed} depth {depth} {threshold:?} filtered {filtered}"
+                        );
+                        assert!(!want.sub_cells.is_empty());
+                        checked += want.tiles.iter().flatten().count();
+                    }
+                }
+            }
+        }
+        assert!(checked > 100, "only {checked} tiles held anything");
     }
 }

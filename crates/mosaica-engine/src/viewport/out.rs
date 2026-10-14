@@ -483,9 +483,11 @@ pub trait ViewportSink {
 /// has a tag. `point_rows` narrows the first, and `"highlight"` empties both.
 pub(super) struct PointSchema<'a> {
     pub(super) render_scalars: &'a [DeclaredScalar],
-    pub(super) segments: &'a [(&'a SegmentData, u32)],
+    pub(super) segments: &'a ViewSegments<'a>,
     /// Each membership column over every point the pass gathers, in the order it gathers them.
     pub(super) membership: Vec<crate::membership_column::MembershipColumn>,
+    /// Whether the request carried a highlight, and so the chunks a `highlighted` column.
+    pub(super) highlighted: bool,
 }
 
 /// The emit pass: gather and hand off, serial, in response order. A chunk is delivered once its
@@ -493,7 +495,7 @@ pub(super) struct PointSchema<'a> {
 pub(super) fn emit_points<'a>(
     swept: &[TileSweepOut<'a>],
     schema: &PointSchema<'a>,
-    mask: &EffectiveMask,
+    mask: &ShardedMask,
     flush_bytes: usize,
     cancel: &Option<CancelToken>,
     probe: &mut Probe,
@@ -517,11 +519,11 @@ pub(super) fn emit_points<'a>(
                 ids: Vec::new(),
             })
             .collect(),
-        highlighted: mask.has_highlight().then(Vec::new),
+        highlighted: schema.highlighted.then(Vec::new),
     };
     let mut buf = seed();
     let mut buf_bytes = 0usize;
-    let mut gather = Gather::new(schema.segments, swept, schema.render_scalars)?;
+    let mut gather = Gather::new(schema.segments, swept, schema.render_scalars, mask)?;
     probe.lap(|t| &mut t.gather_ns);
     let mut gathered = 0usize;
     for (at, ts) in swept.iter().enumerate() {
@@ -541,7 +543,7 @@ pub(super) fn emit_points<'a>(
             .collect();
         // One `contains` per served point against the crossed highlight set — at most
         // `k_max_marks` lookups for the whole response.
-        if mask.has_highlight() {
+        if schema.highlighted {
             tile_points.highlighted =
                 Some(ts.rows.iter().map(|&row| mask.is_highlighted(row)).collect());
         }

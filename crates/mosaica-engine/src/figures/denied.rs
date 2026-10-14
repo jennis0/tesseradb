@@ -22,7 +22,7 @@ pub(crate) type Position = Option<(u32, u32)>;
 /// The labels of one view's denied base rows for one level, as flat arrays.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct DeniedLabels {
-    /// The bundle identity the rows are numbered under.
+    /// The shard identity the rows are numbered under.
     pub(crate) identity: [u8; 32],
     /// [`RowColumn::identity`] of the column the labels were read from.
     pub(crate) column: u64,

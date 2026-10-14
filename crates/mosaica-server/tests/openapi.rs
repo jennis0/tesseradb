@@ -1312,12 +1312,13 @@ async fn every_control_route_needs_its_permission() {
     );
 }
 
+/// Authorising builds nothing, so it takes no compute admission: a gate with no slots at all still
+/// mints the session, as described.
 #[tokio::test]
-async fn a_saturated_gate_sheds_authorise_with_the_described_429() {
+async fn authorise_answers_while_the_gate_has_no_slot() {
     let doc = description();
     let tmp = TempDir::new().unwrap();
     let bundle_root = copy_bundle(&tmp);
-    // No slots at all: every admission is shed before any wait.
     let server = spawn_server_with_config_and_gate(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -1335,12 +1336,8 @@ async fn a_saturated_gate_sheds_authorise_with_the_described_429() {
         .send()
         .await
         .unwrap();
-    let body = assert_refusal(&doc, resp, 429, "backpressure").await;
-    assert_eq!(
-        body["retry_after_s"],
-        json!(1),
-        "the compute gate's figure is 1, fixed"
-    );
+    let body = assert_answer(&doc, &reqwest::Method::POST, resp, 200).await;
+    assert!(body["token"].is_string(), "{body}");
 }
 
 #[tokio::test]

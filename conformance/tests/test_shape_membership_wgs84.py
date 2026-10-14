@@ -41,11 +41,14 @@ from oracle.harness import (
     cli_build,
     ensure_cli_built,
     join_attribute_toml,
+    shards_toml,
     spawn_server,
     stop_server,
     write_deployment,
 )
 from oracle.wire import decode_viewport_artifacts, decode_viewport_points
+
+pytestmark = pytest.mark.writes_nothing
 
 VIEW_ID = "s0"
 SCALE = 4294967296.0
@@ -303,7 +306,7 @@ def build_bundle(work: Path, points) -> Path:
         work / "pairs.parquet",
     )
     config = work / "wgs84-shapes.toml"
-    config.write_text(config_toml())
+    config.write_text(config_toml() + shards_toml(len(points)))
     bundle = work / "bundle"
     deployment = write_deployment(work / "mosaica.toml", bundle=bundle, schema=config)
     cli_build(deployment, bundle)

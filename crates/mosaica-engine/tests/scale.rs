@@ -878,13 +878,21 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
 /// |---|---|---|
 /// | `MOSAICA_P2_BASE` | 1,000,000 | items in the base build |
 /// | `MOSAICA_P2_BATCH` | 250,000 | items ingested to force a publication |
-/// | `MOSAICA_P2_SESSIONS` | 16 | resident sessions — the count a 2 GiB projection bound holds at 10⁹ |
+///
+/// Entries are per grant, and the fixture's two terms make four grants, so the population is four
+/// entries; the projected flip scales `cold` to any other count.
 #[test]
 #[ignore = "minutes, and wants a release build — see the module doc"]
 fn the_flip_costs_what_the_resident_population_costs() {
     let base = env_usize("MOSAICA_P2_BASE", 1_000_000) as u64;
     let batch = env_usize("MOSAICA_P2_BATCH", 250_000);
-    let sessions = env_usize("MOSAICA_P2_SESSIONS", 16);
+    let credentials = [
+        full_coverage_credential(),
+        br#"{"terms": ["0", "1"]}"#.to_vec(),
+        subset_credential(),
+        zero_credential(),
+    ];
+    let sessions = credentials.len();
     // Sized for the retry loop below rather than for one round: this figure only sets θ's target
     // high enough to saturate it, so over-provisioning it costs nothing and under-provisioning it
     // would turn the assertions into statements about selection.
@@ -905,11 +913,12 @@ fn the_flip_costs_what_the_resident_population_costs() {
 
     // **A resident population, not merely a session population.** The refresh is O(cache
     // residency) by construction (decision 0035's shape), so a session that has never asked for a
-    // viewport contributes nothing to the flip. Each of these is authorised separately — a token
-    // id is per-session, so each gets its own projection key — and then warmed with one
-    // whole-extent request, which is what puts an entry in the cache.
-    let resident: Vec<Session> = (0..sessions)
-        .map(|_| engine.authorise(&full_coverage_credential()).unwrap())
+    // viewport contributes nothing to the flip. Each holds its own grant — sessions sharing one
+    // share its projection — and is warmed with one whole-extent request, which is what puts an
+    // entry in the cache.
+    let resident: Vec<Session> = credentials
+        .iter()
+        .map(|credential| engine.authorise(credential).unwrap())
         .collect();
     for session in &resident {
         viewport_k(&engine, session, [0.0, 0.0, 1000.0, 1000.0], 2, SWEEP_K);
@@ -985,16 +994,17 @@ fn the_flip_costs_what_the_resident_population_costs() {
 
     // ---- `cold`: what a fold makes every entry pay ------------------------------------------
     //
-    // A fresh session's first whole-extent viewport is a fragment build plus `RowProjection::new`
-    // over the live row space — exactly the work a fold's refresh does per resident entry, since a
-    // prefix change refuses both of the cheaper rungs. Sampled rather than taken once: the first
-    // one warms mapped pages the rest reuse, which is also true inside a real refresh pass.
-    let cold_samples = 4.min(sessions).max(1);
+    // The widest grant's whole-extent viewport with every projection dropped is a
+    // `RowProjection::new` over the live row space each time — the work a fold's refresh does per
+    // resident entry, since a prefix change refuses both of the cheaper rungs. Sampled rather
+    // than taken once: the first one warms mapped pages the rest reuse, which is also true inside
+    // a real refresh pass.
+    let cold_samples = 4;
     let mut cold_total = Duration::ZERO;
     for _ in 0..cold_samples {
-        let fresh = engine.authorise(&full_coverage_credential()).unwrap();
+        engine.drop_row_projections_for_test();
         let t = Instant::now();
-        viewport_k(&engine, &fresh, [0.0, 0.0, 1000.0, 1000.0], 2, SWEEP_K);
+        viewport_k(&engine, &resident[0], [0.0, 0.0, 1000.0, 1000.0], 2, SWEEP_K);
         cold_total += t.elapsed();
     }
     let cold = cold_total / cold_samples as u32;

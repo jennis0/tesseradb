@@ -49,7 +49,7 @@ use common::*;
 use mosaica_build::{build, BuildArgs};
 use mosaica_engine::{Engine, EngineConfig, ProjectionRoute, ViewportRequest};
 use mosaica_lifecycle::{ChangeOp, UnallocatedRow};
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, ShardId};
 
 const WAIT: Duration = Duration::from_secs(60);
 
@@ -418,8 +418,8 @@ fn route_taken(before: [u64; 4], after: [u64; 4]) -> ProjectionRoute {
 ///
 /// The `None` arm is the route the chooser picks, which is the one a deployment takes; the two
 /// forced arms are what make the equality a comparison between routes rather than between a route
-/// and itself. Each arm authorises its own session, because a row projection is cached per token
-/// and a second arm on one token would be served the first arm's answer.
+/// and itself. Each arm drops the row projections first, because every session with the grant
+/// reads one, and a second arm would be served the first arm's answer.
 ///
 /// Returns the route the chooser picked, for the report a case makes about its principals.
 fn routes_agree_for(engine: &Engine, principal: &Principal, at: &str) -> ProjectionRoute {
@@ -432,16 +432,17 @@ fn routes_agree_for(engine: &Engine, principal: &Principal, at: &str) -> Project
         Some(ProjectionRoute::Complement),
     ] {
         engine.force_projection_route_for_test(force);
+        engine.drop_row_projections_for_test();
         let session = authorise(engine, &principal.credential);
         let before = engine.projection_builds_by_route();
         let rows = engine
-            .session_projection_rows_for_test(&session, VIEW)
+            .session_projection_rows_for_test(&session, VIEW, ShardId::ZERO)
             .expect("the projection builds");
         let after = engine.projection_builds_by_route();
         let took = route_taken(before, after);
 
         let walked = engine
-            .session_walk_rows_for_test(&session, VIEW)
+            .session_walk_rows_for_test(&session, VIEW, ShardId::ZERO)
             .expect("the reference walk runs");
         assert_eq!(
             rows.cardinality(),
@@ -701,6 +702,7 @@ fn every_route_agrees_across_a_delete_and_a_suppression() {
         Some(ProjectionRoute::Complement),
     ] {
         engine.force_projection_route_for_test(force);
+        engine.drop_row_projections_for_test();
         let session = authorise(&engine, &credential(&[MOST, SCATTERED]));
         engine.viewport(&session, whole_extent()).expect("serves");
         for entity in [deleted, suppressed] {
@@ -758,10 +760,10 @@ fn the_background_refresh_builds_by_a_chosen_route_and_equals_the_walk() {
     // chosen. What must hold is that whatever it produced is still the walk's set.
     for (principal, session) in &sessions {
         let rows = engine
-            .session_projection_rows_for_test(session, VIEW)
+            .session_projection_rows_for_test(session, VIEW, ShardId::ZERO)
             .expect("the refreshed entry is served");
         let walked = engine
-            .session_walk_rows_for_test(session, VIEW)
+            .session_walk_rows_for_test(session, VIEW, ShardId::ZERO)
             .expect("the reference walk runs");
         assert!(
             rows == walked,
@@ -806,10 +808,10 @@ fn the_background_refresh_builds_by_a_chosen_route_and_equals_the_walk() {
     // gauge was compared above rather than after this loop.
     for (principal, session) in &sessions {
         let rows = engine
-            .session_projection_rows_for_test(session, VIEW)
+            .session_projection_rows_for_test(session, VIEW, ShardId::ZERO)
             .expect("the refreshed post-fold entry is served");
         let walked = engine
-            .session_walk_rows_for_test(session, VIEW)
+            .session_walk_rows_for_test(session, VIEW, ShardId::ZERO)
             .expect("the reference walk runs");
         assert!(
             rows == walked,
@@ -836,10 +838,11 @@ fn a_principal_holding_no_kept_term_walks_and_a_forced_split_falls_back_to_the_w
 
     for force in [None, Some(ProjectionRoute::Split)] {
         engine.force_projection_route_for_test(force);
+        engine.drop_row_projections_for_test();
         let session = authorise(&engine, &credential);
         let before = engine.projection_builds_by_route();
         let rows = engine
-            .session_projection_rows_for_test(&session, VIEW)
+            .session_projection_rows_for_test(&session, VIEW, ShardId::ZERO)
             .expect("the projection builds");
         let after = engine.projection_builds_by_route();
         assert_eq!(
@@ -848,7 +851,7 @@ fn a_principal_holding_no_kept_term_walks_and_a_forced_split_falls_back_to_the_w
             "a session with no kept term has no split to take, forced or chosen"
         );
         let walked = engine
-            .session_walk_rows_for_test(&session, VIEW)
+            .session_walk_rows_for_test(&session, VIEW, ShardId::ZERO)
             .expect("the reference walk runs");
         assert!(rows == walked, "the fallback walk lost rows");
         assert!(
@@ -889,7 +892,7 @@ fn a_view_with_no_image_table_is_still_priced_against_the_complement() {
     let session = authorise(&engine, &credential(&[ALMOST_ALL, SCATTERED]));
     let before = engine.projection_builds_by_route();
     let rows = engine
-        .session_projection_rows_for_test(&session, VIEW)
+        .session_projection_rows_for_test(&session, VIEW, ShardId::ZERO)
         .expect("the projection builds");
     let after = engine.projection_builds_by_route();
     assert_eq!(
@@ -898,7 +901,7 @@ fn a_view_with_no_image_table_is_still_priced_against_the_complement() {
         "a near-total grant over a view with no images must still price the complement"
     );
     let walked = engine
-        .session_walk_rows_for_test(&session, VIEW)
+        .session_walk_rows_for_test(&session, VIEW, ShardId::ZERO)
         .expect("the reference walk runs");
     assert!(
         rows == walked,
@@ -909,7 +912,7 @@ fn a_view_with_no_image_table_is_still_priced_against_the_complement() {
     let narrow = authorise(&engine, &credential(&[THOUSANDTH]));
     let before = engine.projection_builds_by_route();
     let rows = engine
-        .session_projection_rows_for_test(&narrow, VIEW)
+        .session_projection_rows_for_test(&narrow, VIEW, ShardId::ZERO)
         .expect("the projection builds");
     let after = engine.projection_builds_by_route();
     assert_eq!(
@@ -918,7 +921,7 @@ fn a_view_with_no_image_table_is_still_priced_against_the_complement() {
         "two hundred entities are walked, not two hundred thousand"
     );
     let walked = engine
-        .session_walk_rows_for_test(&narrow, VIEW)
+        .session_walk_rows_for_test(&narrow, VIEW, ShardId::ZERO)
         .expect("the reference walk runs");
     assert!(rows == walked, "the walk over a narrow grant lost rows");
     assert!(
@@ -994,7 +997,7 @@ fn a_view_created_while_running_has_no_images_and_is_served_by_the_walk() {
     let session = authorise(&engine, &credential(&[MOST, SCATTERED]));
     let before = engine.projection_builds_by_route();
     let rows = engine
-        .session_projection_rows_for_test(&session, runtime_view)
+        .session_projection_rows_for_test(&session, runtime_view, ShardId::ZERO)
         .expect("the projection builds");
     let after = engine.projection_builds_by_route();
     assert_eq!(
@@ -1003,7 +1006,7 @@ fn a_view_created_while_running_has_no_images_and_is_served_by_the_walk() {
         "a view with no images has no route but the walk"
     );
     let walked = engine
-        .session_walk_rows_for_test(&session, runtime_view)
+        .session_walk_rows_for_test(&session, runtime_view, ShardId::ZERO)
         .expect("the reference walk runs");
     assert!(rows == walked, "the walk over a runtime view lost rows");
 }
@@ -1154,7 +1157,7 @@ fn a_view_created_while_running_gains_images_at_its_first_fold() {
     engine.force_projection_route_for_test(Some(ProjectionRoute::Split));
     let before_routes = engine.projection_builds_by_route();
     let rows = engine
-        .session_projection_rows_for_test(&session, runtime_view)
+        .session_projection_rows_for_test(&session, runtime_view, ShardId::ZERO)
         .expect("the projection builds");
     let after_routes = engine.projection_builds_by_route();
     assert_eq!(
@@ -1163,7 +1166,7 @@ fn a_view_created_while_running_gains_images_at_its_first_fold() {
         "the folded runtime view holds a kept term, so a forced split must union it"
     );
     let walked = engine
-        .session_walk_rows_for_test(&session, runtime_view)
+        .session_walk_rows_for_test(&session, runtime_view, ShardId::ZERO)
         .expect("the reference walk runs");
     assert!(
         rows == walked,

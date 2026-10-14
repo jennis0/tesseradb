@@ -72,9 +72,9 @@ impl Engine {
     /// Is `entity` visible to `session` in `shard` — the one bit `/v1/items` needs. An
     /// entity-space question: three constant-time probes, no `RowProjection` constructed or
     /// consulted, so this costs the same whether `entity` exists and is visible, exists and is
-    /// not, or does not exist at all. Takes the fragment as an argument: a session's own fragment
-    /// goes stale at every flush, and answering from a stale one would report a flushed item as
-    /// invisible while the viewport beside it drew the mark.
+    /// not, or does not exist at all. Takes the fragment as an argument, so the caller chooses the
+    /// watermark: answering from an earlier one than the viewport beside it serves would report a
+    /// flushed item as invisible while the viewport drew the mark.
     pub fn visible_to(
         &self,
         fragment: &FrozenFragment,
@@ -173,20 +173,26 @@ impl Engine {
 
         // Brought forward before the visibility test: a fragment resolved per-entity would make
         // the cost depend on which entity was asked for. The served fragment, not the live one:
-        // rebuilding at the live watermark measures ~200 ms per credential per publication, and
+        // rebuilding at the live watermark measures ~200 ms per grant per publication, and
         // would answer from a different watermark than the viewport beside it serves from. Falls
-        // back to a build only when this session has no entry at or above the retention floor,
-        // scoped to this generation's prefix so a fold's flip cannot answer from a replaced term
-        // index.
+        // back to a build only when this grant has no entry at or above the retention floor,
+        // scoped to the item's own shard, whose entity space `entity` is in, and to this
+        // generation's prefix so a fold's flip cannot answer from a replaced term index. The floor
+        // is the live generation for a session served nothing in the shard, since its viewport
+        // would answer there.
         let fragment = match self.row_projection_cache.freshest_fragment(
-            session.token_id(),
+            &session.terms_digest(),
+            shard,
             &generation.prefix,
-            generation
-                .segments_version
-                .saturating_sub(crate::cache::KEEP_SUPERSEDED_GENERATIONS),
+            match session.served_in(shard.id()) {
+                true => generation
+                    .segments_version
+                    .saturating_sub(crate::cache::KEEP_SUPERSEDED_GENERATIONS),
+                false => generation.segments_version,
+            },
         ) {
             Some(fragment) => fragment,
-            None => self.fragment_for(session, shard)?,
+            None => self.fragment_for(session, shard, None)?,
         };
 
         // ONE BIT, in entity space, O(1), before anything is looked up in row space.
@@ -403,17 +409,18 @@ fn row_field_out(
     Some(flat_families!(out))
 }
 
-/// The hot-column value one already-flushed entity carries for `declared_index`, or `None` where
-/// no view holds a row for it, the column is not in the render tail, or the row's presence bitmap
-/// says the slot is empty. This home exists because `render = true, index = false` over a
-/// non-`derived` vocabulary owes no value column and is not blob-resident, so the hot column is
-/// the value's only store. Every view is scanned, and one holding no value is skipped rather than
-/// answering, because views can hold different tails lawfully and absence must never pre-empt a
-/// view that holds something. `None` means no view holds a present value. A malformed segment set
+/// The hot-column value one already-flushed entity of `shard` carries for `declared_index`, or
+/// `None` where no view holds a row for it, the column is not in the render tail, or the row's
+/// presence bitmap says the slot is empty. This home exists because `render = true, index = false`
+/// over a non-`derived` vocabulary owes no value column and is not blob-resident, so the hot column
+/// is the value's only store. Every view is scanned, and one holding no value is skipped rather
+/// than answering, because views can hold different tails lawfully and absence must never pre-empt
+/// a view that holds something. `None` means no view holds a present value. A malformed segment set
 /// is skipped too; where no view answers, the join is accepted unchecked. The warning names the
 /// view and never the entity.
 pub(crate) fn flushed_row_scalar(
     generation: &Generation,
+    shard: &crate::Shard,
     entity: EntityId,
     declared_index: usize,
 ) -> Option<mosaica_filter::RecordValue> {
@@ -425,7 +432,7 @@ pub(crate) fn flushed_row_scalar(
     let d = manifest.declared_scalars.get(declared_index)?;
     let render_scalars: Vec<_> = manifest.render_scalars().cloned().collect();
 
-    for (view, view_data) in &generation.only_shard().data.views {
+    for (view, view_data) in &shard.data.views {
         let resolved_row = match segment_row_of(view, view_data, entity) {
             Ok(resolved) => resolved,
             Err(e) => {

@@ -27,7 +27,7 @@ use mosaica_store::manifest::{DerivedForm, SegmentsManifest};
 use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource, ServingLayout,
 };
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, ShardId};
 
 const N: u64 = 3_000;
 /// Sources at or past this are in no artifact of the built layers, so a growth can take them
@@ -362,7 +362,7 @@ fn touch(engine: &Engine, layers: &[&str]) {
 
 fn held_column(engine: &Engine, layer: &str) -> Option<RowColumn> {
     engine
-        .held_artifact_form_for_test("s0", layer, 0)
+        .held_artifact_form_for_test(ShardId::ZERO, "s0", layer, 0)
         .expect("the level's form is held")
         .column()
         .cloned()
@@ -627,7 +627,9 @@ fn a_column_recomposed_as_a_list_holds_its_new_members_and_a_dropped_one_takes_t
         "the shared row is a member of both artifacts"
     );
 
-    let dropped = engine.held_artifact_form_for_test("s0", HULL, 0).unwrap();
+    let dropped = engine
+        .held_artifact_form_for_test(ShardId::ZERO, "s0", HULL, 0)
+        .unwrap();
     assert!(
         dropped.column().is_none(),
         "the hull level lost its column and its members with it"

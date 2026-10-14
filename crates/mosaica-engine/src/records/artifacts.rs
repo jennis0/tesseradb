@@ -35,8 +35,8 @@ use super::{
     RecordsRefused, RecordsSink, RecordsTrailer, Response, ResponseEndedBy,
 };
 use crate::cancel::CancelToken;
-use crate::compose::EffectiveMask;
-use crate::derived::{ComputedProperty, DerivedContent, RowLocator};
+use crate::compose::ShardedMask;
+use crate::derived::{ComputedProperty, DerivedContent};
 use crate::engine::Engine;
 use crate::error::{EngineError, Result};
 use crate::figures::MaskIdentity;
@@ -133,25 +133,30 @@ enum Ended {
     End,
 }
 
-/// The filter's rows over the whole view, and the publication and mask they are held under,
-/// with each level's filtered counts beside the row form they were counted over.
+/// The filter's rows over the whole view in each side, and the publication and mask they are held
+/// under, with each level's filtered counts beside the row forms they were counted over.
 struct HeldFilter {
     under: Arc<Generation>,
     mask: MaskIdentity,
-    rows: Bitmap,
+    /// By place.
+    rows: Vec<Bitmap>,
     /// By layer and level.
     levels: std::collections::HashMap<(String, u32), HeldCounts>,
 }
 
 impl HeldFilter {
-    /// Set `level`'s filtered counts, from those held while its row form is the one they were
+    /// Set `level`'s filtered counts, from those held while its row forms are the ones they were
     /// counted over, and counted and held otherwise.
-    fn count(&mut self, engine: &Engine, mask: &EffectiveMask, layer: &str, level: &mut ReadLevel) {
+    fn count(&mut self, engine: &Engine, mask: &ShardedMask, layer: &str, level: &mut ReadLevel) {
         let key = (layer.to_string(), level.level);
-        let held = self
-            .levels
-            .get(&key)
-            .filter(|counts| Arc::ptr_eq(&counts.rows, &level.rows));
+        let held = self.levels.get(&key).filter(|counts| {
+            counts.rows.len() == level.forms.rows.len()
+                && counts
+                    .rows
+                    .iter()
+                    .zip(&level.forms.rows)
+                    .all(|(held, rows)| Arc::ptr_eq(held, rows))
+        });
         level.filtered = match held {
             Some(counts) => counts.counts.clone(),
             None => {
@@ -159,7 +164,7 @@ impl HeldFilter {
                 self.levels.insert(
                     key,
                     HeldCounts {
-                        rows: Arc::clone(&level.rows),
+                        rows: level.forms.rows.clone(),
                         counts: counts.clone(),
                     },
                 );
@@ -169,10 +174,10 @@ impl HeldFilter {
     }
 }
 
-/// One level's filtered counts, and the row form they count over.
+/// One level's filtered counts, and the row forms they count over.
 struct HeldCounts {
-    rows: Arc<crate::artifacts::ArtifactRows>,
-    counts: Option<Arc<Vec<u32>>>,
+    rows: Vec<Arc<crate::artifacts::ArtifactRows>>,
+    counts: Option<Arc<Vec<u64>>>,
 }
 
 /// The artifacts route's pager.
@@ -239,7 +244,8 @@ struct Scope<'a> {
     levels: &'a [Option<ReadLevel>],
     views: &'a [Option<crate::artifacts::ArtifactView<'a, crate::compose::EffectiveMask>>],
     targets: &'a [TargetLayer<'a>],
-    filter_rows: Option<&'a Bitmap>,
+    /// The filter's rows in each side, by place.
+    filter_rows: Option<&'a [Bitmap]>,
     /// Under `parent`: the parent's position where this viewer is served it, and `None` where no
     /// artifact is its child.
     parent: Option<Option<(u32, u32)>>,
@@ -327,7 +333,8 @@ impl Scope<'_> {
             };
             let names_it = self
                 .level(level)
-                .rows
+                .forms
+                .first()
                 .parents(ordinal)
                 .iter()
                 .any(|p| p.level == p_level && p.ordinal == p_ordinal);
@@ -364,7 +371,7 @@ impl Scope<'_> {
     fn matched(&self, level: u32, ordinal: u32) -> Option<u64> {
         let filter_rows = self.filter_rows?;
         let read = self.level(level);
-        let Some(attachment) = read.rows.attachment(ordinal) else {
+        let Some(attachment) = read.forms.first().attachment(ordinal) else {
             return Some(read.matched_count(ordinal, &self.open.mask, filter_rows));
         };
         Some(self.served_target(attachment).map_or(0, |target| {
@@ -451,8 +458,7 @@ impl Engine {
         }
         if let Some(expr) = &req.filter {
             generation
-                .only_shard()
-                .filter_columns
+                .declared_columns()
                 .admit(expr, true, &|layer| self.reaches_layer(session, layer))
                 .map_err(filter_refusal)?;
         }
@@ -590,7 +596,7 @@ impl ArtifactsPager<'_> {
             let mut above: Vec<u32> = Vec::new();
             for (level, ordinal) in walked_positions(self.named.as_deref(), &walked, &levels) {
                 if let Some(read) = &levels[level as usize] {
-                    above.extend(read.rows.parents(ordinal).iter().map(|p| p.level));
+                    above.extend(read.forms.first().parents(ordinal).iter().map(|p| p.level));
                 }
             }
             above.sort_unstable();
@@ -614,7 +620,7 @@ impl ArtifactsPager<'_> {
             for (level, ordinal) in walked_positions(self.named.as_deref(), &walked, &levels) {
                 if let Some(a) = levels[level as usize]
                     .as_ref()
-                    .and_then(|read| read.rows.attachment(ordinal))
+                    .and_then(|read| read.forms.first().attachment(ordinal))
                 {
                     if !wanted.contains(&(a.space, a.level)) {
                         wanted.push((a.space, a.level));
@@ -633,16 +639,16 @@ impl ArtifactsPager<'_> {
                 target_layers.push((target, target_levels));
             }
         }
-        let filter_rows = self.filter.as_ref().map(|held| &held.rows);
+        let filter_rows = self.filter.as_ref().map(|held| held.rows.as_slice());
         let reachable = engine.reachable_layers(served.session);
         let ctx = DependencyContext::new(served, &open.mask, &reachable);
         let dependency_served = engine.dependency_gate(&ctx);
         let views: Vec<_> = levels
             .iter()
             .map(|level| {
-                level
-                    .as_ref()
-                    .map(|level| level.view(engine, served, &open.mask, &layer, &dependency_served))
+                level.as_ref().map(|level| {
+                    level.view(engine, served, &open.mask, &layer, &dependency_served)
+                })
             })
             .collect();
         let targets: Vec<TargetLayer<'_>> = target_layers
@@ -725,7 +731,7 @@ impl ArtifactsPager<'_> {
                     .map(|&(level, ordinal, entity)| (level, ordinal, Some(entity))),
             ),
             None => Box::new(self.levels(scope.layer).flat_map(move |level| {
-                let len = scope.level(level).rows.len() as u32;
+                let len = scope.level(level).forms.first().len() as u32;
                 (0..len)
                     .filter(move |&ordinal| past((level, ordinal)))
                     .map(move |ordinal| (level, ordinal, None))
@@ -757,7 +763,8 @@ impl ArtifactsPager<'_> {
                 }
                 Property::Parents => {
                     let mut ids: Vec<u64> = read
-                        .rows
+                        .forms
+                        .first()
                         .parents(ordinal)
                         .iter()
                         .filter_map(|p| Some(scope.served(p.level, p.ordinal)?.mosaica_id))
@@ -767,7 +774,11 @@ impl ArtifactsPager<'_> {
                     row.parents = ids;
                 }
                 Property::Target => {
-                    row.target = read.rows.attachment(ordinal).and_then(|a| scope.target(a));
+                    row.target = read
+                        .forms
+                        .first()
+                        .attachment(ordinal)
+                        .and_then(|a| scope.target(a));
                 }
                 Property::Content => row.content = served.supplied.values.clone(),
                 Property::Centroid | Property::Box => {
@@ -973,7 +984,7 @@ fn walked_positions<'s>(
         None => Box::new(walked.iter().flat_map(move |&level| {
             let len = levels[level as usize]
                 .as_ref()
-                .map_or(0, |read| read.rows.len() as u32);
+                .map_or(0, |read| read.forms.first().len() as u32);
             (0..len).map(move |ordinal| (level, ordinal))
         })),
     }
@@ -987,12 +998,12 @@ fn visible_geometry(
     ordinal: u32,
     wanted: &[ComputedProperty],
 ) -> DerivedContent {
-    if let Some(figures) = read.counts.as_ref().filter(|c| c.has_geometry()) {
+    if let Some(figures) = read.forms.figures.as_ref().filter(|f| f.has_geometry()) {
         return crate::derived::accumulated(wanted, figures, ordinal);
     }
-    let locator = RowLocator::new(scope.open.served.segments.clone());
-    let visible = read.rows.visible_rows(ordinal, &scope.open.mask);
-    crate::derived::compute(wanted, &visible, &locator)
+    let locators = scope.open.served.locators();
+    let visible = read.forms.visible(ordinal, &scope.open.mask, &locators);
+    crate::derived::compute(wanted, &visible)
 }
 
 /// The layer's drawn geometry for one artifact, in grid units: a derived hull over the members
@@ -1006,9 +1017,9 @@ fn drawn_shape(
     let declaration = &scope.layer.declaration;
     match declaration.drawn_shape()? {
         DrawnShape::Derived => {
-            let locator = RowLocator::new(scope.open.served.segments.clone());
-            let visible = read.rows.visible_rows(ordinal, &scope.open.mask);
-            crate::derived::compute(&[ComputedProperty::Hull], &visible, &locator).shape
+            let locators = scope.open.served.locators();
+            let visible = read.forms.visible(ordinal, &scope.open.mask, &locators);
+            crate::derived::compute(&[ComputedProperty::Hull], &visible).shape
         }
         DrawnShape::Authored => {
             let shapes = served.supplied.authored.as_ref()?;

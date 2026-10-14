@@ -188,7 +188,12 @@ impl ColumnScratch {
 pub(crate) struct EntityColumn {
     ty: ScalarType,
     storage: ColumnStorage,
+    /// The entities the readers see, from `lo`: the whole column until [`Self::window`] narrows
+    /// it to one shard's.
     len: usize,
+    lo: usize,
+    /// Every entity the column holds.
+    full: usize,
 }
 
 /// What a column holds: its values in entity order with a presence bit beside each, or nothing.
@@ -417,6 +422,8 @@ impl EntityColumn {
                 )?,
             },
             len: n,
+            lo: 0,
+            full: n,
         })
     }
 
@@ -439,6 +446,8 @@ impl EntityColumn {
             ty,
             storage: ColumnStorage::Empty,
             len: n,
+            lo: 0,
+            full: n,
         })
     }
 
@@ -472,6 +481,24 @@ impl EntityColumn {
     pub(crate) fn release(&mut self) {
         self.storage = ColumnStorage::Empty;
         self.len = 0;
+        self.lo = 0;
+        self.full = 0;
+    }
+
+    /// Show the readers entities `[lo, hi)` alone, each at its entity less `lo`: one shard's
+    /// items, for the passes that write a shard's files. The writers address the whole column
+    /// whatever the window, and a released column stays empty.
+    pub(crate) fn window(&mut self, lo: usize, hi: usize) {
+        if self.full == 0 {
+            return;
+        }
+        assert!(
+            lo <= hi && hi <= self.full,
+            "a window [{lo}, {hi}) over a column of {} entities",
+            self.full
+        );
+        self.lo = lo;
+        self.len = hi - lo;
     }
 
     pub(crate) fn set(&mut self, entity: usize, value: ScalarValue, name: &str) -> Result<()> {
@@ -543,6 +570,7 @@ impl EntityColumn {
         let ColumnStorage::ByEntity { data, .. } = &self.storage else {
             return None;
         };
+        let pos = self.lo + pos;
         data.as_bytes().get(pos * width..(pos + 1) * width)
     }
 
@@ -626,14 +654,18 @@ impl EntityColumn {
 
     pub(crate) fn is_present(&self, entity: usize) -> bool {
         match &self.storage {
-            ColumnStorage::ByEntity { present, .. } => present_bit(present.as_slice(), entity),
+            ColumnStorage::ByEntity { present, .. } => {
+                present_bit(present.as_slice(), self.lo + entity)
+            }
             ColumnStorage::Empty => false,
         }
     }
 
     pub(crate) fn value_at(&self, entity: usize) -> ScalarValue {
         match &self.storage {
-            ColumnStorage::ByEntity { data, .. } if self.is_present(entity) => data.get(entity),
+            ColumnStorage::ByEntity { data, .. } if self.is_present(entity) => {
+                data.get(self.lo + entity)
+            }
             _ => ScalarValue::Null,
         }
     }
@@ -657,10 +689,18 @@ impl EntityColumn {
     /// nothing, against one test per 64 here. The yielded order is ascending, which every caller
     /// relies on: the postings each builds are sorted by construction, not by a later sort.
     pub(crate) fn present_entities(&self) -> impl Iterator<Item = usize> + '_ {
-        present_entities_of(match &self.storage {
+        let words = match &self.storage {
             ColumnStorage::ByEntity { present, .. } => present.as_slice(),
             ColumnStorage::Empty => &[],
-        })
+        };
+        let (lo, hi) = (self.lo, self.lo + self.len);
+        let first = (lo / 64).min(words.len());
+        let words = &words[first..hi.div_ceil(64).clamp(first, words.len())];
+        present_entities_of(words)
+            .map(move |entity| entity + first * 64)
+            .skip_while(move |&entity| entity < lo)
+            .take_while(move |&entity| entity < hi)
+            .map(move |entity| entity - lo)
     }
 
     /// Borrow a string value, or `None` where the entity has none. For the readers that only scan
@@ -668,7 +708,9 @@ impl EntityColumn {
     /// be a second copy of every string in the corpus.
     pub(crate) fn str_at(&self, entity: usize) -> Option<&str> {
         match &self.storage {
-            ColumnStorage::ByEntity { data, .. } if self.is_present(entity) => data.str_at(entity),
+            ColumnStorage::ByEntity { data, .. } if self.is_present(entity) => {
+                data.str_at(self.lo + entity)
+            }
             _ => None,
         }
     }
@@ -692,11 +734,11 @@ impl EntityColumn {
 
     /// Every live record in one arena window, **in arena order**, as `(entity, value)`.
     ///
-    /// A record is live when its entity is still present and `at` still names this record: a
-    /// second value written for one entity leaves the first behind, with nothing pointing at it,
-    /// and indexing that stale prose would give the entity terms it does not carry. So the yielded
-    /// pairs are exactly the `(entity, str_at(entity))` of the entities whose records fall in the
-    /// window — the same set the entity walk yielded, in another order.
+    /// A record is live when its entity is in the window, still present, and `at` still names this
+    /// record: a second value written for one entity leaves the first behind, with nothing pointing
+    /// at it, and indexing that stale prose would give the entity terms it does not carry. So the
+    /// yielded pairs are exactly the `(entity, str_at(entity))` of the entities whose records fall
+    /// in the window — the same set the entity walk yielded, in another order.
     pub(crate) fn for_each_record_in(
         &self,
         lo: u64,
@@ -735,8 +777,8 @@ impl EntityColumn {
                     "arena window [{lo}, {hi}) ends inside the {len}-byte value at {offset}"
                 )));
             }
-            let live = entity < self.len
-                && self.is_present(entity)
+            let live = (self.lo..self.lo + self.len).contains(&entity)
+                && self.is_present(entity - self.lo)
                 && col.at.as_slice()[entity] == offset;
             if live {
                 let value = std::str::from_utf8(&body[..len]).map_err(|e| {
@@ -745,7 +787,7 @@ impl EntityColumn {
                          written from a &str, so this is a torn file rather than a corpus value"
                     ))
                 })?;
-                visit(entity, value)?;
+                visit(entity - self.lo, value)?;
             }
             window.consume(len);
         }

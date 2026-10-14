@@ -1197,9 +1197,9 @@ fn the_background_fill_takes_the_ladder_to_twelve_in_one_walk_off_the_request() 
         "depth 13 is above the ceiling, so it is walked on demand as it always was"
     );
 
-    // Revoking takes any fill still running with it: `prune_token` cancels first and drops the
+    // Revoking takes any fill still running with it: `prune_tokens` cancels first and drops the
     // entry, so nothing is left working on behalf of a session that no longer exists.
-    filled.prune_token(session.token_id());
+    filled.prune_tokens(&rustc_hash::FxHashSet::from_iter([session.token_id()]));
     assert_eq!(filled.occupancy_stages_in_flight(), 0);
 }
 
@@ -1317,7 +1317,7 @@ fn a_restricted_tile_range_search_agrees_with_the_full_column_search() {
 // thread-wake jitter.
 
 /// D-G / decision 0058: every concurrent arrival on the same
-/// `(token_id, view, segments_version)` key is served, off **one** build.
+/// (grant, view, shard, generation) key is served, off **one** build.
 ///
 /// **This test asserted the opposite until 0058**, and the shape of the change is the point. It
 /// used to require that losers received `EngineError::ProjectionBuilding`, and it could not assert
@@ -1350,8 +1350,7 @@ fn concurrent_same_key_viewports_are_all_served_off_one_build() {
         &tmp.path().join("wal.log"),
     ));
 
-    // A fresh session -> a fresh `token_id` -> a cache key this engine has never built
-    // (`Session::token_id` is a process-lifetime monotone counter — see `Engine::authorise`).
+    // A fresh engine has built no grant's key.
     let session = Arc::new(engine.authorise(&full_coverage_credential()).unwrap());
     let barrier = Arc::new(std::sync::Barrier::new(THREADS));
 
@@ -1390,8 +1389,8 @@ fn concurrent_same_key_viewports_are_all_served_off_one_build() {
     );
 }
 
-/// One session's row-projection build does not block another session's first viewport. The first
-/// session's build is held open inside the build, and the second session's first viewport must
+/// One grant's row-projection build does not block another grant's first viewport. The first
+/// grant's build is held open inside the build, and the second grant's first viewport must
 /// finish while it is held. A lock held across the build, in the cache or in the request path
 /// around it, leaves the second viewport waiting. `mosaica-bench`'s load arm measures the
 /// throughput this protects.
@@ -1411,8 +1410,8 @@ fn a_first_viewport_finishes_while_another_sessions_build_is_held() {
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
     ));
-    let first_viewport = |engine: &Engine| {
-        let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let first_viewport = |engine: &Engine, credential: &[u8]| {
+        let session = engine.authorise(credential).unwrap();
         engine
             .viewport(
                 &session,
@@ -1424,7 +1423,7 @@ fn a_first_viewport_finishes_while_another_sessions_build_is_held() {
     engine.hold_next_projection_build_for_test();
     let held = {
         let engine = Arc::clone(&engine);
-        std::thread::spawn(move || first_viewport(&engine))
+        std::thread::spawn(move || first_viewport(&engine, &full_coverage_credential()))
     };
     let deadline = std::time::Instant::now() + WAIT;
     while engine.full_projection_builds() == 0 {
@@ -1439,7 +1438,7 @@ fn a_first_viewport_finishes_while_another_sessions_build_is_held() {
     let other = {
         let engine = Arc::clone(&engine);
         std::thread::spawn(move || {
-            first_viewport(&engine);
+            first_viewport(&engine, &subset_credential());
             let _ = finished_tx.send(());
         })
     };
@@ -1451,11 +1450,11 @@ fn a_first_viewport_finishes_while_another_sessions_build_is_held() {
     other.join().unwrap();
     assert!(
         finished.is_ok(),
-        "a second session's first viewport waited for the first session's build"
+        "a second grant's first viewport waited for the first grant's build"
     );
     assert_eq!(
         builds_while_held, 2,
-        "each session builds its own projection"
+        "each grant builds its own projection"
     );
 }
 

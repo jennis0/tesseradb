@@ -156,8 +156,8 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         heap: crate::memory::HeapWatch::default(),
         limits: state::ServeLimits::from_config(&config),
         suggest_admission: state::SuggestAdmission::new(),
-        // Admits the viewport, item and artifact routes and `/session/authorise`; never the
-        // control plane or the health probes.
+        // Admits the viewport, item and artifact routes; never the session routes, the control
+        // plane or the health probes.
         compute_gate: ComputeGate::new(
             config.compute_admission,
             config.compute_queue,

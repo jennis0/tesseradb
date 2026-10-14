@@ -168,19 +168,34 @@ pub fn write_lon_lat(path: &Path, places: &[(f64, f64)]) {
 /// and the unique `id` [`id_schema`] declares, built into `dir/bundle` from points and pairs files
 /// written beside it in `dir`.
 pub fn build_fixture(dir: &Path, n: u64) -> std::path::PathBuf {
-    build_fixture_with_access(dir, n, AccessInput::relation(dir.join("pairs.parquet")))
+    build_fixture_sized(dir, n, None)
 }
 
-/// [`build_fixture`] under the `point_visibility` given, whose default is what an ingested row
-/// with an empty `access` list takes.
-pub fn build_fixture_with_access(dir: &Path, n: u64, access: AccessInput) -> std::path::PathBuf {
+/// [`build_fixture`], declaring `[shards] size` where `shard_size` is given.
+pub fn build_fixture_sized(dir: &Path, n: u64, shard_size: Option<u64>) -> std::path::PathBuf {
+    let access = AccessInput::relation(dir.join("pairs.parquet"));
+    build_fixture_with_access(dir, n, access, shard_size)
+}
+
+/// [`build_fixture_sized`] under the `point_visibility` given, whose default is what an ingested
+/// row with an empty `access` list takes.
+pub fn build_fixture_with_access(
+    dir: &Path,
+    n: u64,
+    access: AccessInput,
+    shard_size: Option<u64>,
+) -> std::path::PathBuf {
     std::fs::create_dir_all(dir).unwrap();
     let points = dir.join("points.parquet");
     write_points_n(&points, n);
     write_pairs_n(&dir.join("pairs.parquet"), n);
     let out = dir.join("bundle");
     let view = view_args("s0", &points, access);
-    build(&with_id(build_args(&out, vec![view]), &points)).expect("fixture build should succeed");
+    let args = BuildArgs {
+        shard_size,
+        ..build_args(&out, vec![view])
+    };
+    build(&with_id(args, &points)).expect("fixture build should succeed");
     out
 }
 
@@ -511,7 +526,7 @@ impl TestServer {
     pub async fn shutdown(mut self) {
         // A fresh client in place of this one: dropping the old pool closes its keep-alive
         // connections, and with them the per-connection tasks holding the state.
-        self.client = reqwest::Client::new();
+        self.client = test_client();
         let tasks = std::mem::take(&mut self.serve_tasks);
         for task in &tasks {
             task.abort();
@@ -629,7 +644,7 @@ pub async fn serve_with_default(default: Option<&str>) -> (TempDir, TestServer) 
         source: mosaica_build::config::AccessSource::Relation(tmp.path().join("pairs.parquet")),
         default: default.map(str::to_string),
     };
-    build_fixture_with_access(tmp.path(), N_ITEMS, access);
+    build_fixture_with_access(tmp.path(), N_ITEMS, access, None);
     let server = open(&tmp).await;
     (tmp, server)
 }
@@ -1116,6 +1131,15 @@ pub fn test_identity() -> (Catalogue, String, TempDir) {
     (catalogue, key, dir)
 }
 
+/// The client a [`TestServer`] sends with. A request that has not finished in two minutes fails
+/// naming its URL: a streamed response has been seen to stall with its last bytes unsent.
+pub fn test_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .expect("the test client builds")
+}
+
 /// Binds the three listeners on loopback ports and serves `state` on them.
 pub async fn serve_state(
     state: Arc<AppState>,
@@ -1149,7 +1173,7 @@ pub async fn serve_state(
         viewer_addr,
         session_addr,
         control_addr,
-        client: reqwest::Client::new(),
+        client: test_client(),
         state,
         serve_tasks,
         integrator_key,
@@ -1187,31 +1211,18 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// Authorise a session for a principal holding `terms`, through [`INTEGRATOR`]'s
-/// `authorise-as`, retrying while the admission gate sheds under machine load. A test about
-/// shedding calls the route itself.
+/// `authorise-as`.
 pub async fn authorise(server: &TestServer, terms: &[&str]) -> serde_json::Value {
     let principal = principal_for(server, terms);
-    let resp = wait_for(
-        "authorise",
-        std::time::Duration::from_secs(60),
-        async || {
-            let resp = server
-                .client
-                .post(server.session_url("/session/authorise"))
-                .bearer_auth(&server.integrator_key)
-                .json(&serde_json::json!({ "principal": principal }))
-                .send()
-                .await
-                .unwrap();
-            if resp.status().as_u16() == 429 {
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                return None;
-            }
-            assert_eq!(resp.status(), 200, "authorise should succeed");
-            Some(resp)
-        },
-    )
-    .await;
+    let resp = server
+        .client
+        .post(server.session_url("/session/authorise"))
+        .bearer_auth(&server.integrator_key)
+        .json(&serde_json::json!({ "principal": principal }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "authorise should succeed");
     resp.json().await.unwrap()
 }
 

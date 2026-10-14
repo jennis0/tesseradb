@@ -1,7 +1,7 @@
 //! A fragment's counts and a level's denied-row labels on disk, in the engine's cache directory,
 //! so a restart reads them back rather than walking again.
 //!
-//! One directory per bundle identity, and a file per entry named by a digest of what it is a
+//! One directory per shard identity, and a file per entry named by a digest of what it is a
 //! function of and the level version it describes. A file is a magic, the payload's length and
 //! its SHA-256, then the payload; a file whose length or digest does not match is not read, so a
 //! torn or altered entry is a miss. Writes go through [`mosaica_authz::write_private_atomically`],
@@ -12,6 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
+use mosaica_types::LayerSpace;
 use rustc_hash::FxHashMap;
 use sha2::{Digest, Sha256};
 
@@ -26,55 +27,56 @@ const COUNTS_MAGIC: &[u8; 8] = b"MSFCNT03";
 const DENIED_MAGIC: &[u8; 8] = b"MSFDNY03";
 const HEADER: usize = 8 + 8 + 32;
 
-/// The directory a bundle identity's entries live in.
+/// The directory a shard identity's entries live in.
 pub(crate) fn identity_dir(root: &Path, identity: &[u8; 32]) -> PathBuf {
     root.join(hex(identity))
 }
 
-/// Remove every identity's directory but `identity`'s: the entries of a superseded bundle can never
-/// be read again.
-pub(crate) fn sweep_other_identities(root: &Path, identity: &[u8; 32]) {
-    let keep = hex(identity);
+/// Remove every identity's directory but those of `keep`: the entries of a superseded prefix can
+/// never be read again.
+pub(crate) fn sweep_other_identities(root: &Path, keep: &[[u8; 32]]) {
+    let keep: Vec<String> = keep.iter().map(|identity| hex(identity)).collect();
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
     for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy() != keep {
+        if !keep.contains(&entry.file_name().to_string_lossy().into_owned()) {
             let _ = std::fs::remove_dir_all(entry.path());
         }
     }
 }
 
-/// What one fragment's counts are a function of, as a file stem.
+/// What one fragment's counts are a function of, as a file stem, the layer named by its space as
+/// [`super::cache::FragmentKey`] names it.
 pub(crate) fn counts_stem(
     terms: &[u8; 32],
     view: &str,
-    layer: &str,
+    space: LayerSpace,
     level: u32,
     geometry: Geometry,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"counts");
     hasher.update(terms);
-    for text in [view, layer] {
-        hasher.update((text.len() as u64).to_le_bytes());
-        hasher.update(text.as_bytes());
-    }
-    hasher.update(level.to_le_bytes());
+    level_of(&mut hasher, view, space, level);
     hasher.update([geometry as u8]);
     hex(&hasher.finalize())
 }
 
-/// What one level's denied-row labels in one view are a function of, as a file stem.
-pub(crate) fn denied_stem(view: &str, layer: &str, level: u32) -> String {
+/// What one level's denied-row labels in one view are a function of, as a file stem, the level
+/// named as [`counts_stem`] names it.
+pub(crate) fn denied_stem(view: &str, space: LayerSpace, level: u32) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"denied");
-    for text in [view, layer] {
-        hasher.update((text.len() as u64).to_le_bytes());
-        hasher.update(text.as_bytes());
-    }
-    hasher.update(level.to_le_bytes());
+    level_of(&mut hasher, view, space, level);
     hex(&hasher.finalize())
+}
+
+fn level_of(hasher: &mut Sha256, view: &str, space: LayerSpace, level: u32) {
+    hasher.update((view.len() as u64).to_le_bytes());
+    hasher.update(view.as_bytes());
+    hasher.update(space.raw().to_le_bytes());
+    hasher.update(level.to_le_bytes());
 }
 
 fn path_of(dir: &Path, stem: &str, at: u64, extension: &str) -> PathBuf {

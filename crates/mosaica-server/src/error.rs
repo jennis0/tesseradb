@@ -101,7 +101,7 @@ impl ShedCause {
                 format!("the server is at its ingest-admission bound; retry after {retry_after_s}s")
             }
             ShedCause::SingleFlight => "a concurrent request is already building this session's \
-                 row projection or mask fragment; retry shortly"
+                 grant's row projection or mask fragment; retry shortly"
                 .to_string(),
             ShedCause::SuggestInFlight => "a suggestion request for this session is already in \
                  flight; retry shortly"
@@ -248,7 +248,7 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
         too_many @ EngineError::TooManyTiles { .. } => ApiError::Contract(too_many.to_string()),
         // Their text names filesystem paths, so they go through the store sanitiser.
         store_or_io @ (EngineError::Store(_) | EngineError::Io(_)) => map_store_error(store_or_io),
-        // Another request is building this session's row projection. Not `ComputeGate`: that gate
+        // Another request is building this grant's row projection. Not `ComputeGate`: that gate
         // admitted this request and may be idle.
         EngineError::ProjectionBuilding => ApiError::Backpressure {
             retry_after_s: RETRY_AFTER_SECS,
@@ -259,7 +259,7 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
             retry_after_s: RETRY_AFTER_SECS,
             cause: ShedCause::SingleFlight,
         },
-        // Another `authorise` call is building this credential's mask fragment.
+        // Another request is building this grant's mask fragment, past the wait budget.
         EngineError::FragmentBuilding => ApiError::Backpressure {
             retry_after_s: RETRY_AFTER_SECS,
             cause: ShedCause::SingleFlight,
@@ -404,6 +404,8 @@ pub fn map_accept_error(e: mosaica_engine::AcceptError) -> ApiError {
         // The detail names rows by position, values as sent and items by `mosaica_id`.
         AcceptError::Conflict(detail) => ApiError::Conflict(detail),
         AcceptError::Contract(detail) => ApiError::Contract(detail),
+        // The detail names the shard count and what to serve to write.
+        e @ AcceptError::SeveralShards { .. } => ApiError::Conflict(e.to_string()),
         // 404, as an unknown view is on every plane.
         AcceptError::UnknownView { view, .. } => {
             ApiError::Unknown(format!("unknown view '{view}'"))

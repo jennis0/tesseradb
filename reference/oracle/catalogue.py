@@ -130,9 +130,11 @@ from .harness import (
     fixture_dir,
     open_bundle_with_source,
     recipe_matches,
+    shards_toml,
     write_deployment,
     write_recipe,
 )
+from .identity import item_of_key, numbers_of
 
 WORK_DIR_NAME = "catalogue"
 
@@ -810,7 +812,8 @@ def entity_of_fx_key(bundle) -> dict[int, int]:
 
 
 def entities_by_source(bundle) -> dict[int, int]:
-    """`source id -> entity id` for every planted item, from the bundle's index of `serial`.
+    """`source id -> item` (`identity.item_key`) for every planted item, from the bundle's index of
+    `serial`.
 
     The generation functions take a source id and every answer the engine gives is in entity space;
     the two are not equal (decision 0073), so every per-item join between them comes through here.
@@ -827,8 +830,15 @@ def entity_of_source(bundle, source_id: int) -> int:
 
 
 def source_of_entity(bundle) -> dict[int, int]:
-    """[`entities_by_source`] the other way: `entity id -> source id`."""
+    """[`entities_by_source`] the other way: `item -> source id`."""
     return {entity: source for source, entity in entities_by_source(bundle).items()}
+
+
+def items_of(bundle, entities) -> set[int]:
+    """The items (`identity.item_key`) a block's or a case's designed ids name. Those ids are
+    source ids, resolved through the bundle's index of `serial`."""
+    entity_of = entities_by_source(bundle)
+    return {entity_of[source] for source in entities}
 
 
 def dict_terms(bundle, names) -> set[int]:
@@ -907,9 +917,21 @@ CONTAINER_SIZE = 1 << 16
 # The entity id above which `conformance/tests/test_byte_scan.py` can tell a leaked id from a
 # legitimate small integer the harness itself emits — ports, `k`, zoom, status codes, none of which
 # exceed 65,535. It lives here, not with the scan, because it is a constraint on **this layout**:
-# `high_tail` is placed to satisfy it and `verify()` refuses a corpus that stops doing so. The scan
-# asserts its own floor matches this one, so the two cannot drift apart.
+# `high_tail` is placed to satisfy it and `verify()` reports a corpus that stops doing so in
+# `floor_failures`. The scan asserts its own floor matches this one, so the two cannot drift apart.
 HIGH_ID_FLOOR = 100_000
+
+# The shard size of the many-shard mode. The smallest that keeps `filler_tail` astride 131,072
+# inside shard 0, so both container claims still hold there; the remaining 18,927 items, the tail
+# of `filler_tail` and all of `high_tail`, form shard 1. Every number in shard 1 is below
+# `HIGH_ID_FLOOR`, and no size that splits the corpus keeps `high_tail` above it, so the claims
+# `verify()` makes for the byte scan's floor hold in the one-shard mode only.
+SHARD_SIZE_MANY = 131_073
+
+
+def schema_toml() -> str:
+    """The declaration the build reads: [`SCHEMA_TOML`] and the mode's `[shards]` table."""
+    return SCHEMA_TOML + shards_toml(N_ITEMS, size=SHARD_SIZE_MANY)
 
 
 @dataclass(frozen=True)
@@ -917,9 +939,10 @@ class MaskCase:
     """One catalogue member: the property it attacks, the grant that reaches it, and the entity
     set that grant must produce.
 
-    `grants` are descriptors as `POST /session/authorise` takes them. `entities` is what the
-    engine's mask must come out as — checked against the bundle's own postings by `verify()`, so a
-    case can never silently drift into testing a different shape from the one it is named for.
+    `grants` are descriptors as `POST /session/authorise` takes them. `entities` is the case's set
+    in the build's numbering; `items_of` gives the items the engine's mask must come out as —
+    checked against the bundle's own postings by `verify()`, so a case can never silently drift
+    into testing a different shape from the one it is named for.
     """
 
     name: str
@@ -1307,7 +1330,7 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
         # The declaration's *content*, not just its filename. `build_argv` below reduces paths to
         # basenames, so an edited `SCHEMA_TOML` under an unchanged name would leave the receipt
         # identical and reuse a bundle whose columns no longer match the declaration.
-        "schema": SCHEMA_TOML,
+        "schema": schema_toml(),
         "build_argv": [Path(a).name if a.startswith("/") else a for a in argv],
     }
 
@@ -1353,7 +1376,7 @@ def build_catalogue_bundle(work_dir: Path | None = None) -> tuple[Path, list[int
     write_corpus(work_dir)
     # Written on the build path only, beside the corpus and for the same reason: writing it
     # unconditionally is what let bundle and corpus diverge before.
-    (work_dir / SCHEMA_NAME).write_text(SCHEMA_TOML)
+    (work_dir / SCHEMA_NAME).write_text(schema_toml())
     write_deployment(
         work_dir / DEPLOYMENT_NAME, bundle=bundle_root, schema=work_dir / SCHEMA_NAME
     )
@@ -1410,6 +1433,9 @@ class VerificationReport:
     row_count: int = 0
     blocks: dict[str, set[int]] = field(default_factory=dict)
     failures: list[str] = field(default_factory=list)
+    #: The claims made for the byte scan's floor (check 8), which a bundle of several shards
+    #: cannot meet ([`SHARD_SIZE_MANY`]).
+    floor_failures: list[str] = field(default_factory=list)
 
 
 def verify(bundle: Bundle) -> VerificationReport:
@@ -1423,16 +1449,19 @@ def verify(bundle: Bundle) -> VerificationReport:
        then the corpus's terms in first-appearance order, so the corpus's term `g` is the
        dictionary's `g + 1`. Checked against the rule rather than against an assumed equality,
        which is what this said before `public` moved;
-    3. each block's postings are **exactly** its intended contiguous entity range;
+    3. each block's postings are **exactly** its intended contiguous entity range, in the build's
+       numbering (`Bundle.build_number`);
     3b. every entity's **source id lands in the same block the entity does** — the per-item half
        of check 3, which a set comparison cannot make. A within-block permutation (which is what
        decision 0073's Morton tiebreak produces) passes it; a cross-block reassignment does not.
        Without this, the day `entity_id == source_id` stopped holding, nothing here noticed;
     4. `container_boundary` really spans more than one Roaring container — entities either side of
-       a multiple of 65,536, which is the only reason the case exists;
-    5. `full_100pct` spans every container the corpus reaches;
+       a multiple of 65,536 in one shard, which is the only reason the case exists;
+    5. `full_100pct` spans every container of every shard the corpus reaches;
     6. `all_in_one_tile`'s rows really share one depth-6 tile;
-    7. the crossover cases really sit either side of 5%.
+    7. the crossover cases really sit either side of 5%;
+    8. `high_tail` lies wholly above `HIGH_ID_FLOOR` and another block reaches above it, reported
+       in `floor_failures`.
     """
     report = VerificationReport()
     seg = bundle.segment(VIEW_ID)
@@ -1466,11 +1495,12 @@ def verify(bundle: Bundle) -> VerificationReport:
             )
         postings = set(int(e) for e in bundle.postings(term_id).tolist())
         report.blocks[block.name] = postings
-        if postings != block.entities:
+        built = {bundle.build_number(item) for item in postings}
+        if built != block.entities:
             report.failures.append(
                 f"block {block.name}: postings are not the contiguous range "
-                f"[{block.start}, {block.stop}) — got {len(postings)} entities in "
-                f"[{min(postings, default=-1)}, {max(postings, default=-1)}]. The build's "
+                f"[{block.start}, {block.stop}) — got {len(built)} entities in "
+                f"[{min(built, default=-1)}, {max(built, default=-1)}]. The build's "
                 f"signature-sorted assignment (§11.1) no longer puts this block's items in the "
                 f"entity range the fixture chose, so no catalogue member straddles what it claims to."
             )
@@ -1494,50 +1524,57 @@ def verify(bundle: Bundle) -> VerificationReport:
                 "item's."
             )
 
-    # Both container claims are derived from `N_ITEMS` rather than written out, so that growing the
-    # corpus is one edit and not one edit plus two constants nobody remembers are here. The claims
-    # themselves are unchanged: `boundary` must span more than one container (any boundary, not
-    # container 0/1 in particular), and full coverage must span every container the corpus reaches.
-    boundary = report.blocks.get("boundary", set())
-    boundary_containers = {e >> 16 for e in boundary}
+    # Both container claims are derived from each shard's high water. A container is
+    # `(shard, number >> 16)`. `boundary` must span more than one, and full coverage every container
+    # of every shard the corpus reaches.
+    def containers(items: set[int]) -> set[tuple[int, int]]:
+        return {(shard, number >> 16) for shard, number in map(item_of_key, items)}
+
+    boundary_containers = containers(report.blocks.get("boundary", set()))
     if len(boundary_containers) < 2:
         report.failures.append(
-            f"container_boundary touches containers {sorted(boundary_containers)} — fewer than "
-            "two, so the case exercises no container arithmetic at all"
+            f"container_boundary touches (shard, container) {sorted(boundary_containers)} — "
+            "fewer than two, so the case exercises no container arithmetic at all"
         )
     everything: set[int] = set()
     for postings in report.blocks.values():
         everything |= postings
-    expected_containers = set(range(((N_ITEMS - 1) >> 16) + 1)) if N_ITEMS else set()
-    if {e >> 16 for e in everything} != expected_containers:
+    expected_containers = {
+        (record["id"], container)
+        for record in bundle.shards
+        for container in range(((int(record["high_water"]) - 1) >> 16) + 1)
+    }
+    if containers(everything) != expected_containers:
         report.failures.append(
-            f"full coverage touches containers {sorted({e >> 16 for e in everything})}, not "
+            f"full coverage touches (shard, container) {sorted(containers(everything))}, not "
             f"{sorted(expected_containers)} — every container the corpus reaches"
         )
 
     # `high_tail`'s reason for existing, checked rather than described. The byte-scan needs a grant
-    # set whose admitted *and* denied entity ids both reach above `HIGH_ID_FLOOR`; that holds only
-    # while `high_tail` sits entirely above the floor and some other block still reaches above it
-    # too. Resizing `filler_tail` breaks the second half silently — the block boundaries move, no
-    # posting check notices, and the byte-scan's precondition assertion fires far from the cause.
+    # set whose admitted *and* denied entity ids — each item's number in its shard, which is what a
+    # leak would carry — both reach above `HIGH_ID_FLOOR`; that holds only while `high_tail` sits
+    # entirely above the floor and some other block still reaches above it too. Resizing
+    # `filler_tail` breaks the second half silently — the block boundaries move, no posting check
+    # notices, and the byte-scan's precondition assertion fires far from the cause.
     high_tail = report.blocks.get("high_tail", set())
     if not high_tail:
         # Checked rather than skipped. `blocks.get(..., set())` followed by `if high_tail` would
         # make deleting or renaming the block a silent pass — and `outside_above` below would still
         # be satisfied by `filler_tail`, so `verify()` would report green on a corpus that cannot
         # supply the byte-scan's grant set at all.
-        report.failures.append(
+        report.floor_failures.append(
             "high_tail is absent from the corpus, so no grant set can put entity ids above "
             f"{HIGH_ID_FLOOR} on both sides of it — see the layout note"
         )
-    if high_tail and min(high_tail) < HIGH_ID_FLOOR:
-        report.failures.append(
-            f"high_tail starts at {min(high_tail)}, below the byte-scan floor {HIGH_ID_FLOOR} — "
-            "its members are no longer all separable from the small integers the harness emits"
+    if high_tail and min(numbers_of(high_tail)) < HIGH_ID_FLOOR:
+        report.floor_failures.append(
+            f"high_tail starts at {min(numbers_of(high_tail))}, below the byte-scan floor "
+            f"{HIGH_ID_FLOOR} — its members are no longer all separable from the small integers "
+            "the harness emits"
         )
-    outside_above = {e for e in everything - high_tail if e >= HIGH_ID_FLOOR}
+    outside_above = {e for e in numbers_of(everything - high_tail) if e >= HIGH_ID_FLOOR}
     if not outside_above:
-        report.failures.append(
+        report.floor_failures.append(
             f"no block outside high_tail reaches above {HIGH_ID_FLOOR}, so a grant of high_tail "
             "leaves nothing denied above the floor and the byte-scan can only check one direction"
         )

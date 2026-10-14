@@ -25,14 +25,14 @@ use mosaica_engine::occupancy::{
 use mosaica_engine::projection::RowProjection;
 use mosaica_engine::select::{
     cell_route_pays, decode_tier, CellRoute, DecodeTier, SelectParams, Selection, SelectionPart,
-    SelectionParts, Threshold,
+    SelectionParts, Threshold, TileShard,
 };
 use mosaica_lifecycle::{ChangeOp, IngestBuffer, Overlay};
 use mosaica_spatial::{fixed32, morton_of, tiler::sort_batch, Bounds, Tile, TilerItem};
 use mosaica_store::read::SegmentData;
 use mosaica_store::write::{write_permutation, write_segment};
 use mosaica_store::{tile_ranges, Permutation, RowSpace};
-use mosaica_types::{EntityId, TermId, MosaicaId};
+use mosaica_types::{EntityId, ShardId, TermId, MosaicaId};
 
 const EXTENT: Bounds = Bounds {
     x_min: 0.0,
@@ -121,9 +121,9 @@ fn mask_over_with(
     write_postings(&postings_path, &[visible_rows.to_vec()], 32).unwrap();
     let postings = PostingsReader::open(&postings_path, false).unwrap();
 
-    let cache = FragmentCache::new(&temp.path().join("cache"), [1u8; 32], [2u8; 32]);
+    let cache = FragmentCache::new(&temp.path().join("cache"), [2u8; 32]);
     let fragment = cache
-        .get_or_build(&[TermId::new(0)], &postings, &[], bound)
+        .get_or_build([1u8; 32], &[TermId::new(0)], &postings, &[], bound)
         .unwrap();
 
     let perm_path = temp.path().join("permutation.bin");
@@ -1973,7 +1973,12 @@ fn the_band_route_widens_and_falls_through_as_the_definition_requires() {
             .collect();
         assert_eq!(scan, reference, "{expect}: the scan is the definition");
 
-        match (select(&mask, &parts, &p, matched).unwrap(), expect) {
+        let shards = [TileShard {
+            shard: ShardId::ZERO,
+            mask: &mask,
+            parts: &parts,
+        }];
+        match (select(&shards, &p, matched).unwrap(), expect) {
             (
                 BandAnswer::Served {
                     rows,
@@ -1984,6 +1989,10 @@ fn the_band_route_widens_and_falls_through_as_the_definition_requires() {
                 "exact" | "widened",
             ) => {
                 assert_eq!(widened, expect == "widened", "{expect}");
+                let rows: Vec<u32> = rows
+                    .iter()
+                    .map(|row| row.row_in(ShardId::ZERO).unwrap().raw())
+                    .collect();
                 let ids: Vec<u64> = rows.iter().map(|&row| seg.id_at(row)).collect();
                 assert_eq!(ids, reference, "{expect}: the bands serve the m smallest");
                 for (&row, &e) in rows.iter().zip(&entries) {

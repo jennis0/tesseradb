@@ -149,6 +149,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         // flushing and compaction need `write` as a write does.
         .route("/control/flush", post(flush))
         .route("/control/compact", post(compact))
+        .route_layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            require_writable,
+        ))
         .route_layer(axum::middleware::from_fn(require_write));
     let admin_routes = Router::new().route("/control/status", get(status));
     // Fault arming exists only in a fault-injection build, behind the credential like every route.
@@ -225,6 +229,17 @@ async fn require_write(
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, ApiError> {
     caller(&request).require(mosaica_catalogue::Permission::Write)?;
+    Ok(next.run(request).await)
+}
+
+/// The engine's write rule, asked before a write's body is read, so a bundle that takes no write
+/// refuses every write the same way whatever the body holds.
+async fn require_writable(
+    State(state): State<Arc<AppState>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, ApiError> {
+    state.engine.writable().map_err(map_accept_error)?;
     Ok(next.run(request).await)
 }
 
@@ -2926,8 +2941,9 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         // Cycles completed since the executor started, one per cycle whatever it published: the
         // number a write acknowledgement's `publication` is compared against.
         "publication": state.engine.publication(),
-        // A version bump shows a flush, merge or fold published; the watermark is which entities
-        // the published geometry covers. Both come from one generation load.
+        // A version bump shows a flush, merge or fold published; the watermark, summed over the
+        // bundle's shards, is the entities the published geometry covers. Both come from one
+        // generation load.
         "partitions": partitions
             .iter()
             .map(|p| serde_json::json!({
@@ -3009,8 +3025,9 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
                 "in_flight": executor.flush_in_flight,
                 "buffered_items": executor.buffered_items,
                 "overlay_publications": executor.overlay_publications,
-                // Session projections refreshed after a flush or merge. A live session serves
-                // its old projection until then, so a version bump alone does not show the rows.
+                // Grants' projections refreshed after a flush or merge. A session already served a
+                // view is served its grant's old projection until then, so a version bump alone
+                // does not show the rows.
                 "refreshes": state.engine.refreshes(),
                 // Whether the refresh for the newest flush or merge is still running. Until it
                 // ends, a resident session may be served the previous generation or refused with
@@ -3188,8 +3205,9 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
                 "windows": executor.fragmentation_windows,
             },
         },
-        // A young eviction is an entry evicted before it was read again: the bound is smaller
-        // than what the sessions hold at once.
+        // One entry per grant, view and shard, shared by every session with the grant. A young
+        // eviction is an entry evicted before it was read again: the bound is smaller than what
+        // the grants in use hold at once.
         "row_projection_cache": {
             "entries": projection_cache.entries,
             "bytes": projection_cache.bytes,
@@ -3206,7 +3224,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             "thrashing": projection_cache.young_evictions > 0,
             "oversized_admissions": projection_cache.oversized_admissions,
         },
-        // How session row projections were built, request path and refresh together. Every route
+        // How grants' row projections were built, request path and refresh together. Every route
         // gives the same rows; the shares show whether the route chooser's cost model fits.
         "projection_builds_by_route": {
             "whole_domain": projection_routes[0],
@@ -3229,8 +3247,8 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             "rebuilds": live.fragment_cache_rebuilds,
         },
         // Expired sessions are swept when `retained` reaches `sweep_at`, under the lock viewer
-        // requests take. Each retained session pins its fragment. Sweeping only frees memory: an
-        // expired session is refused whether or not it has been swept.
+        // requests take. Sweeping only frees memory: an expired session is refused whether or not
+        // it has been swept.
         "sessions": {
             "retained": sessions.retained,
             "sweeps": sessions.sweeps,

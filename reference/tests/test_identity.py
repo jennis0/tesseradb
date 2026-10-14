@@ -471,7 +471,7 @@ def test_fixture_bundle_rows_are_stored_in_morton_then_mosaica_id_order(fixture_
     wrong values must fail this, not pass it."""
     import numpy as np
 
-    view_id = fixture_bundle.shard_record()["segments"][0]["view"]
+    view_id = fixture_bundle.shards[0]["segments"][0]["view"]
     order = fixture_bundle.derive_row_order(view_id)
     expected = np.arange(len(order), dtype=order.dtype)
     assert np.array_equal(order, expected), (
@@ -484,5 +484,5 @@ def test_fixture_bundle_identity_column_agrees_with_the_key(fixture_bundle):
     """`forward(key, shard, entity_of_row[r]) == mosaica_id[r]`, where `entity_of_row` comes from
     the permutation (key-independent) and `mosaica_id` from the stored column. The only check
     that catches a key/column disagreement — and the one `test_byte_scan.py` cites."""
-    view_id = fixture_bundle.shard_record()["segments"][0]["view"]
+    view_id = fixture_bundle.shards[0]["segments"][0]["view"]
     fixture_bundle.verify_identity_cross_check(view_id)

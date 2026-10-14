@@ -81,7 +81,7 @@ def _pair_backed_descriptor(bundle: Bundle) -> bytes:
     one descriptor, so their disjoint-ends reservation still holds.
     """
     for descriptor in bundle.dictionary:
-        if mask_mod.mask_of({bundle.term_id_of(descriptor)}, bundle.pairs_path()):
+        if mask_mod.mask_of({bundle.term_id_of(descriptor)}, bundle.pairs()):
             return descriptor
     raise AssertionError("no dictionary descriptor is granted to any entity through pairs")
 
@@ -193,7 +193,7 @@ def _grid_differential(server, oracle_bundle: Bundle, *, require_partial: bool =
         auth = server.authorise(terms_str)
         token = auth["token"]
 
-        base_mask = mask_mod.mask_of(term_ids, oracle_bundle.pairs_path())
+        base_mask = mask_mod.mask_of(term_ids, oracle_bundle.pairs())
 
         # Cross-check (b)'s other half in miniature: postings-derived union for these terms must
         # equal the pairs-derived one.
@@ -298,7 +298,7 @@ def test_suppress_over_control_plane_drops_the_count(server, oracle_bundle: Bund
     """(d) suppress over the control plane -> oracle told to drop it -> counts re-agree."""
     descriptor = _pair_backed_descriptor(oracle_bundle)
     term_id = oracle_bundle.term_id_of(descriptor)
-    base_mask = mask_mod.mask_of({term_id}, oracle_bundle.pairs_path())
+    base_mask = mask_mod.mask_of({term_id}, oracle_bundle.pairs())
     assert len(base_mask) > 1, "need at least two visible entities to suppress one meaningfully"
 
     auth = server.authorise([_descriptor_str(descriptor)])
@@ -349,7 +349,7 @@ def test_mixed_change_composition_stress(server, oracle_bundle: Bundle):
     term_a = oracle_bundle.term_id_of(descriptor_a)
     session_terms = {term_a}
 
-    base_mask = mask_mod.mask_of(session_terms, oracle_bundle.pairs_path())
+    base_mask = mask_mod.mask_of(session_terms, oracle_bundle.pairs())
     assert len(base_mask) >= 2, "fixture must have enough members of this term for the stress test"
 
     auth = server.authorise([_descriptor_str(descriptor_a)])
@@ -413,7 +413,7 @@ def test_items_drilldown_returns_the_items_own_record(server, oracle_bundle: Bun
 
     descriptor = _pair_backed_descriptor(oracle_bundle)
     term_id = oracle_bundle.term_id_of(descriptor)
-    base_mask = mask_mod.mask_of({term_id}, oracle_bundle.pairs_path())
+    base_mask = mask_mod.mask_of({term_id}, oracle_bundle.pairs())
     assert base_mask, "need at least one visible entity"
 
     auth = server.authorise([_descriptor_str(descriptor)])

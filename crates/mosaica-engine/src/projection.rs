@@ -1,7 +1,8 @@
-//! The cached row-space projection of one session's frozen fragment.
+//! The cached row-space projection of one grant's frozen fragment.
 //!
-//! [`RowProjection`] is the `Permutation::project` output for one `(token, view, pin)`, built once
-//! and reused for the session's life: never rebuild it per viewport, it costs seconds at 10⁹ rows.
+//! [`RowProjection`] is the `Permutation::project` output for one (grant, view, shard,
+//! generation), built once and shared by every session with the grant: never rebuild it per
+//! viewport, it costs seconds at 10⁹ rows.
 //! A publication patches a resident projection instead, where it can: [`RowProjection::extend`]
 //! after a flush, which only appends extents; [`RowProjection::rebase_extents`] after a merge,
 //! which rewrites row space within its span but never the base; a full [`RowProjection::new`]
@@ -281,13 +282,22 @@ impl RowProjection {
         Self::over(rows.project(&fragment.view()), rows)
     }
 
-    /// This projection extended to `rows`, adding only the extents it does not already cover.
-    /// Exact: an extent's rows begin exactly where row space ended, so projecting the whole is
-    /// projecting the disjoint parts unioned. Callers must check [`Self::extends_to`] first; this
-    /// does not check it.
-    pub fn extend(&self, fragment: &FrozenFragment, rows: &RowSpace) -> Self {
+    /// This projection extended to `rows` over `fragment`: the extents it does not already cover,
+    /// and the rows already covered of `gained`, the entities `fragment` holds and the fragment
+    /// this was taken over did not ([`mosaica_authz::gained_by`]). Exact: an extent's rows begin
+    /// exactly where row space ended, so projecting the whole is projecting the disjoint parts
+    /// unioned; and an entity a flush posts can already hold a row in the base or a covered
+    /// extent, where a join row was published, or folded, before the entity's own. Callers must
+    /// check [`Self::extends_to`] first; this does not check it.
+    pub fn extend(&self, gained: &Bitmap, fragment: &FrozenFragment, rows: &RowSpace) -> Self {
         let mut extended = self.rows.clone();
         extended.or_inplace(&rows.project_extents_from(&fragment.view(), self.extents_covered));
+        if !gained.is_empty() {
+            extended.or_inplace(&base_rows_of(gained, rows));
+            for extent in 0..self.extents_covered {
+                extended.or_inplace(&rows.project_extent(gained, extent));
+            }
+        }
         Self::over(extended, rows)
     }
 
@@ -316,12 +326,19 @@ impl RowProjection {
     /// needs, since it permutes row space within its span and [`Self::extend`] cannot be used
     /// there; exact because a merge never rewrites the base. A full rebuild measured 1,277 ms at
     /// 10⁹ rows, almost all of it the base projection; this measured 0.24 ms per extent instead.
-    /// Callers must check [`Self::can_rebase_extents`] first; this does not check it.
-    pub fn rebase_extents(&self, fragment: &FrozenFragment, rows: &RowSpace) -> Self {
+    /// The base rows of `gained` are added, as [`Self::extend`] adds them. Callers must check
+    /// [`Self::can_rebase_extents`] first; this does not check it.
+    pub fn rebase_extents(
+        &self,
+        gained: &Bitmap,
+        fragment: &FrozenFragment,
+        rows: &RowSpace,
+    ) -> Self {
         let mut rebased = self.rows.clone();
         rebased.remove_range(self.base_rows..u32::MAX);
         rebased.remove(u32::MAX);
         rebased.or_inplace(&rows.project_extents_from(&fragment.view(), 0));
+        rebased.or_inplace(&base_rows_of(gained, rows));
         Self::over(rebased, rows)
     }
 
@@ -388,4 +405,16 @@ impl RowProjection {
     pub fn range_cardinality(&self, r: Range<u32>) -> u64 {
         self.rows.range_cardinality(r)
     }
+}
+
+/// The base rows of `entities`, one lookup each: what a fold gave an entity a later flush posts.
+fn base_rows_of(entities: &Bitmap, rows: &RowSpace) -> Bitmap {
+    let base = rows.base();
+    let rows: Vec<u32> = entities
+        .iter()
+        .take_while(|&entity| u64::from(entity) < base.bound())
+        .filter_map(|entity| base.row_of(mosaica_types::EntityId::new(u64::from(entity))))
+        .map(|row| row.raw())
+        .collect();
+    Bitmap::of(&rows)
 }

@@ -796,11 +796,10 @@ async fn saturated_gate_sheds_a_second_viewport_with_429_and_retry_after() {
     );
 }
 
-/// `/healthz`, `/v1/meta`, `/session/revoke`, and a `/control/changes` suppress must all succeed
-/// while the viewer/session gate is fully saturated by a slow viewport. None of them is a gated
-/// path — the gate's list is exactly `/v1/viewport`, `/v1/items` and `/session/authorise` — and the
-/// deny priority lane (lifecycle §1.3) must never be blocked by compute-admission pressure on an
-/// unrelated plane.
+/// `/healthz`, `/v1/meta`, `/session/authorise`, `/session/revoke`, and a `/control/changes`
+/// suppress must all succeed while the viewer gate is fully saturated by a slow viewport. None of
+/// them is a gated path: authorising builds nothing, and the deny priority lane must never be
+/// blocked by compute-admission pressure on an unrelated plane.
 #[tokio::test]
 async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
     let tmp = TempDir::new().unwrap();
@@ -814,13 +813,7 @@ async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
     )
     .await;
 
-    // Both sessions are minted BEFORE the gate is saturated below: `/session/authorise` IS a gated
-    // path (it shares the viewer/session compute budget), so acquiring a *second*
-    // session token during saturation would itself race the gate rather than testing the
-    // never-gated routes this test is actually about.
     let token = token_for(&server, &["0"]).await;
-    let second_auth = authorise(&server, &["0"]).await;
-    let second_token_id = second_auth["token_id"].as_u64().unwrap();
 
     let viewer_url = server.viewer_url("/v1/viewport");
     let client = server.client.clone();
@@ -856,9 +849,12 @@ async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
         .unwrap();
     assert_eq!(meta_resp.status(), 200, "/v1/meta must never be gated");
 
-    // `/session/revoke`: an `authorise-as` key, never gated. Revokes the SECOND session
-    // (minted before saturation, above) so the slow request's own `Arc<Session>` — cloned
-    // into its `spawn_blocking` closure before this point — is unaffected either way; this
+    // `/session/authorise`: minting a session builds nothing, so it takes no permit.
+    let second_auth = authorise(&server, &["0"]).await;
+    let second_token_id = second_auth["token_id"].as_u64().unwrap();
+
+    // `/session/revoke`: an `authorise-as` key, never gated. Revokes the second session, minted
+    // during saturation just above, so the slow request's own `Arc<Session>` is unaffected; this
     // assertion is purely about the revoke endpoint's own responsiveness under a saturated gate.
     let revoke_resp = server
         .client

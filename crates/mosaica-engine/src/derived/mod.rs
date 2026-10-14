@@ -77,13 +77,13 @@ impl DerivedContent {
 }
 
 /// [`compute`]'s answer for a level served from its column alone, read off the level's figures
-/// ([`crate::figures::Figures`]). Both sum in `u64`, exact and unable to overflow, so this and the
-/// row-major route agree bit for bit. A hull is not here: it is a function of the positions, not
-/// an accumulation over them, so a layer deriving one keeps the artifact-major form
+/// over every shard ([`crate::figures::LevelFigures`]). Both sum exactly and cannot overflow, so
+/// this and the row-major route agree bit for bit. A hull is not here: it is a function of the
+/// positions, not an accumulation over them, so a layer deriving one keeps the artifact-major form
 /// ([`crate::artifacts::serves_column_only`]).
 pub fn accumulated(
     declared: &[ComputedProperty],
-    geometry: &crate::figures::Figures,
+    geometry: &crate::figures::LevelFigures,
     ordinal: u32,
 ) -> DerivedContent {
     let mut out = DerivedContent::default();
@@ -98,14 +98,15 @@ pub fn accumulated(
     out
 }
 
-/// Compute the declared properties over the rows a viewer may see.
+/// Compute the declared properties over the rows a viewer may see in every shard: each shard's
+/// visible rows beside the locator of its segments. The positions are gathered and every
+/// property computed once over them, the hull's reduction and dig budget included.
 ///
-/// `visible` comes from the composed mask and nothing else. `declared` is the layer's parsed
-/// vocabulary; an empty one costs one branch and no position read.
+/// Every visible set comes from the composed mask and nothing else. `declared` is the layer's
+/// parsed vocabulary; an empty one costs one branch and no position read.
 pub fn compute(
     declared: &[ComputedProperty],
-    visible: &Bitmap,
-    locator: &RowLocator<'_>,
+    sides: &[(&RowLocator<'_>, Bitmap)],
 ) -> DerivedContent {
     let mut out = DerivedContent::default();
     if declared.is_empty() {
@@ -113,7 +114,10 @@ pub fn compute(
     }
 
     // One pass over the visible rows: reading a position twice per property would double the cost.
-    let positions = locator.positions(visible);
+    let positions: Vec<[u32; 2]> = sides
+        .iter()
+        .flat_map(|(locator, visible)| locator.positions(visible))
+        .collect();
     if positions.is_empty() {
         return out;
     }
@@ -128,13 +132,13 @@ pub fn compute(
         }
     }
 
-    // Summed as `u64`: a coordinate is a `u32`, so a per-axis sum is at most `(2^32 - 1)^2` and
-    // cannot overflow. The division is the only floating-point step.
-    let (mut sx, mut sy) = (0u64, 0u64);
+    // `u128`: sums of `u32` coordinates over several shards pass a `u64`. The division is the
+    // only floating-point step.
+    let (mut sx, mut sy) = (0u128, 0u128);
     let mut b = [u32::MAX, u32::MAX, 0u32, 0u32];
     for p in &positions {
-        sx += u64::from(p[0]);
-        sy += u64::from(p[1]);
+        sx += u128::from(p[0]);
+        sy += u128::from(p[1]);
         b[0] = b[0].min(p[0]);
         b[1] = b[1].min(p[1]);
         b[2] = b[2].max(p[0]);
@@ -158,4 +162,60 @@ pub fn compute(
         );
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A shard's segment over `points`, in their order from row 0: its two position columns.
+    fn columns(points: &[[u32; 2]]) -> (Vec<u32>, Vec<u32>) {
+        points
+            .iter()
+            .map(|&[x, y]| {
+                let (cell, residual) = mosaica_spatial::split32(x, y);
+                (cell.raw(), residual)
+            })
+            .unzip()
+    }
+
+    /// Above the reduction's floor, where the hull is dug over each cell's representative, and
+    /// below it.
+    #[test]
+    fn positions_gathered_from_two_shards_derive_what_one_shard_holding_them_does() {
+        let every = [
+            ComputedProperty::Centroid,
+            ComputedProperty::Box,
+            ComputedProperty::Hull,
+        ];
+        for count in [2_000, 90_000] {
+            let points = test_support::sample(count, 3_000, |x, y| {
+                let r = ((x * x + y * y) as f64).sqrt();
+                r <= 1_500.0 + 900.0 * (5.0 * (y as f64).atan2(x as f64)).cos()
+            });
+            assert_eq!(points.len() > reduce::REDUCTION_FLOOR, count > 75_000);
+            let one = columns(&points);
+            let one = RowLocator::of_columns(&[(0, &one.0, &one.1)]);
+            let whole = compute(&every, &[(&one, (0..points.len() as u32).collect())]);
+
+            let (even, odd): (Vec<_>, Vec<_>) =
+                points.iter().enumerate().partition(|(at, _)| at % 3 != 1);
+            let [even, odd]: [Vec<[u32; 2]>; 2] =
+                [even, odd].map(|side| side.into_iter().map(|(_, p)| *p).collect());
+            let (a, b) = (columns(&even), columns(&odd));
+            let (a, b) = (
+                RowLocator::of_columns(&[(0, &a.0, &a.1)]),
+                RowLocator::of_columns(&[(0, &b.0, &b.1)]),
+            );
+            let split = compute(
+                &every,
+                &[
+                    (&a, (0..even.len() as u32).collect()),
+                    (&b, (0..odd.len() as u32).collect()),
+                ],
+            );
+            assert!(whole.shape.is_some() && whole.centroid.is_some());
+            assert_eq!(split, whole, "{count} members");
+        }
+    }
 }

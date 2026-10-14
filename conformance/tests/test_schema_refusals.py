@@ -14,8 +14,11 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from oracle.harness import run_build, write_deployment
-from oracle.record_blob import record_dir_of
+from oracle.bundle import Bundle
+from oracle.harness import run_build, shards_toml, write_deployment
+from oracle.record_blob import record_dirs_of
+
+pytestmark = pytest.mark.writes_nothing
 
 N = 8
 
@@ -63,7 +66,7 @@ def _build(corpus_dir: Path, schema_text: str, out: Path):
     # Written into the corpus directory, because a `source` is a path relative to the document
     # that declares it and these two files are what it names.
     schema_path = corpus_dir / f"{out.name}.config.toml"
-    schema_path.write_text(SCHEMA_HEAD + schema_text)
+    schema_path.write_text(SCHEMA_HEAD + schema_text + shards_toml(N))
     deployment = write_deployment(
         corpus_dir / f"{out.name}.mosaica.toml", bundle=out, schema=schema_path
     )
@@ -129,9 +132,9 @@ type = "u32"
         f"the control build failed, so every refusal above may be the corpus's rather than the "
         f"schema's\nstderr: {result.stderr}"
     )
-    record_dir = record_dir_of(out)
-    for filename in ("blocks.bin", "hasrow.roaring", "directory.arrow"):
-        assert (record_dir / filename).is_file(), (
-            f"the build succeeded but wrote no {filename} — the neither-key column was "
-            "tolerated, not stored (records §3: the record always exists)"
-        )
+    for record_dir in record_dirs_of(Bundle(out)).values():
+        for filename in ("blocks.bin", "hasrow.roaring", "directory.arrow"):
+            assert (record_dir / filename).is_file(), (
+                f"the build succeeded but wrote no {filename} — the neither-key column was "
+                "tolerated, not stored (records §3: the record always exists)"
+            )

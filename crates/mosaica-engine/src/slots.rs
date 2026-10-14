@@ -104,11 +104,11 @@ use mosaica_types::layer::{HierarchyKind, RegisteredLayer};
 use mosaica_types::{EntityId, MortonCode};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::artifacts::ArtifactVerdict;
-use crate::compose::{EffectiveMask, WholeMask};
+use crate::artifacts::{ArtifactRows, ArtifactVerdict};
+use crate::compose::{ShardedMask, WholeMask};
 use crate::error::{EngineError, Result};
 use crate::layer_read::ReadLevel;
-use crate::viewport::ServedView;
+use crate::viewport::{ServedSide, ServedView};
 use crate::Engine;
 
 /// The palette sizes a request may name.
@@ -143,11 +143,11 @@ pub fn check_palette_size(size: u32) -> Result<u8> {
 }
 
 /// Whether a level's centres are the centroids its figures carry: the layer declares a centroid
-/// or a box and the level is served from its column alone, so a route that draws it fills them.
+/// or a box and the level is served from its column alone in every shard, so a route that draws it
+/// fills them.
 fn centred_by_figures(layer: &RegisteredLayer, read: &ReadLevel) -> bool {
     crate::figures::Geometry::declared(&layer.declaration) != crate::figures::Geometry::None
-        && read.rows.column().is_some()
-        && !read.rows.membership().rows_held()
+        && read.forms.column_only()
 }
 
 /// One level's slots for one viewer and one palette size, and the centre each cluster was placed
@@ -246,7 +246,8 @@ pub(crate) struct WithheldKey {
     deny_epoch: u64,
     edit_epoch: u64,
     fold_epoch: u64,
-    fragment_identity: [u8; 32],
+    /// Each shard's fragment identity, ascending by shard.
+    fragment_identities: Vec<[u8; 32]>,
     /// The additions, on a layer declaring a fractional criterion or content with a generating
     /// set: an ingested member the viewer cannot see can withhold a cluster there.
     added: Option<AddedKey>,
@@ -262,8 +263,8 @@ pub(crate) struct AddedKey {
     levels: Vec<u64>,
     segments_version: u64,
     projection_segments_version: u64,
-    overlay_version: u64,
-    fragment_watermark: u64,
+    /// Each shard's overlay version and fragment watermark, ascending by shard.
+    shards: Vec<(mosaica_types::ShardId, u64, u64)>,
 }
 
 impl AddedKey {
@@ -273,8 +274,12 @@ impl AddedKey {
             && self.levels.iter().zip(&other.levels).all(|(a, b)| a >= b)
             && self.segments_version >= other.segments_version
             && self.projection_segments_version >= other.projection_segments_version
-            && self.overlay_version >= other.overlay_version
-            && self.fragment_watermark >= other.fragment_watermark
+            && self.shards.len() == other.shards.len()
+            && self
+                .shards
+                .iter()
+                .zip(&other.shards)
+                .all(|(a, b)| a.0 == b.0 && a.1 >= b.1 && a.2 >= b.2)
     }
 }
 
@@ -380,7 +385,7 @@ impl Engine {
     pub(crate) fn cluster_slots(
         &self,
         served: &ServedView<'_>,
-        mask: &EffectiveMask,
+        mask: &ShardedMask,
         layer: &RegisteredLayer,
         level: u32,
         palette: u8,
@@ -429,7 +434,7 @@ impl Engine {
     fn build_and_hold(
         &self,
         served: &ServedView<'_>,
-        mask: &EffectiveMask,
+        mask: &ShardedMask,
         layer: &RegisteredLayer,
         level: u32,
         palette: u8,
@@ -515,8 +520,17 @@ impl Engine {
             levels: own.iter().map(|&(record, _)| record).collect(),
             segments_version: id.segments_version,
             projection_segments_version: id.projection_segments_version,
-            overlay_version: id.overlay_version,
-            fragment_watermark: id.fragment_watermark,
+            shards: served
+                .sides
+                .iter()
+                .map(|side| {
+                    (
+                        side.versions.shard,
+                        side.versions.overlay_version,
+                        side.versions.fragment_watermark,
+                    )
+                })
+                .collect(),
         };
         let declaration = &layer.declaration;
         let fractional = matches!(
@@ -542,7 +556,11 @@ impl Engine {
                 deny_epoch: generation.deny_epoch,
                 edit_epoch: generation.edit_epoch,
                 fold_epoch: generation.fold_epoch,
-                fragment_identity: id.fragment_identity,
+                fragment_identities: served
+                    .sides
+                    .iter()
+                    .map(|side| side.versions.fragment_identity)
+                    .collect(),
                 added: (fractional || contained).then(|| added.clone()),
             },
             added,
@@ -641,7 +659,7 @@ impl Engine {
         cancel: &Option<crate::CancelToken>,
         f: impl FnOnce(
             &ServedView<'_>,
-            &EffectiveMask,
+            &ShardedMask,
             &RegisteredLayer,
             &dyn Fn(&Attachment) -> bool,
         ) -> Result<T>,
@@ -660,7 +678,8 @@ impl Engine {
             return Ok(T::default());
         };
         let reachable = self.reachable_layers(session);
-        let context = crate::viewport::DependencyContext::new(&open.served, &open.mask, &reachable);
+        let context =
+            crate::viewport::DependencyContext::new(&open.served, &open.mask, &reachable);
         let dependency_served = self.dependency_gate(&context);
         let out = f(&open.served, &open.mask, &registered, &dependency_served)?;
         context.finish()?;
@@ -701,7 +720,7 @@ impl Engine {
     fn build_level(
         &self,
         served: &ServedView<'_>,
-        mask: &EffectiveMask,
+        mask: &ShardedMask,
         layer: &RegisteredLayer,
         level: u32,
         palette: u8,
@@ -739,8 +758,9 @@ impl Engine {
             if at_level == level {
                 first = clusters.len();
             }
-            let mut at = vec![u32::MAX; read.rows.len()];
-            for ordinal in 0..read.rows.len() as u32 {
+            let len = read.forms.first().len();
+            let mut at = vec![u32::MAX; len];
+            for ordinal in 0..len as u32 {
                 if ordinal.is_multiple_of(CHUNK) && stop() {
                     return Err(EngineError::Cancelled);
                 }
@@ -806,7 +826,7 @@ impl Engine {
                 .write
                 .live()
                 .with_artifacts(|store| store.lineage_version(&layer.declaration.name, level));
-            let lineage = self.level_lineage(layer, level, lineage_version, &read.rows);
+            let lineage = self.level_lineage(layer, level, lineage_version, read.forms.first());
             let of = |served: Vec<u32>| -> Vec<u32> {
                 served.into_iter().map(|o| here[o as usize]).collect()
             };
@@ -826,7 +846,8 @@ impl Engine {
 
         let mut stats = SlotStats::default();
         let figures = read
-            .counts
+            .forms
+            .figures
             .as_ref()
             .filter(|figures| centred_by_figures(layer, read) && figures.has_geometry());
         let own: Vec<Option<[f64; 2]>> = match figures {
@@ -837,26 +858,39 @@ impl Engine {
                 own
             }
             None => {
-                let visible = mask.visible_all();
+                let leaves: Vec<(usize, &Bitmap)> = served
+                    .filtered_sides(mask)
+                    .map(|(place, _, leaf)| (place, leaf.visible_all()))
+                    .collect();
+                let visible: Vec<u64> =
+                    leaves.iter().map(|(_, visible)| visible.cardinality()).collect();
                 let size = self
                     .switches
                     .slot_sample
                     .load(std::sync::atomic::Ordering::Relaxed);
-                let cut = sample_cut(visible.cardinality(), size);
-                let sample = sample(served, visible, cut, &stop)?;
-                stats.sampled_items = sample.len() as u64;
-                let copy = served.segments.first().and_then(|&(first, _)| {
-                    read.rows.column()?;
-                    self.artifact_projections.band_labels(
-                        &generation.prefix,
-                        served.name,
-                        &layer.declaration.name,
-                        level,
-                        read.level_version,
-                        first,
-                    )
-                });
-                sample_centres(read, here, first, &sample, copy, &stop)?
+                let (centres, sampled) =
+                    sampled_centres(&visible, size, ordinals.len(), |i, cut, sums| {
+                        let (place, visible) = leaves[i];
+                        let side = &served.sides[place];
+                        let sample = sample(side, visible, cut, &stop)?;
+                        let rows: &ArtifactRows = &read.forms.rows[place];
+                        let copy = side.segments.first().and_then(|&(first, _)| {
+                            rows.column()?;
+                            self.artifact_projections.band_labels(
+                                &generation.prefix,
+                                side.shard.id(),
+                                served.name,
+                                &layer.declaration.name,
+                                level,
+                                read.forms.version(place),
+                                first,
+                            )
+                        });
+                        sample_sums(rows, here, first, &sample, copy, &stop, sums)?;
+                        Ok(sample.len() as u64)
+                    })?;
+                stats.sampled_items = sampled;
+                centres
             }
         };
         for (i, centre) in own.iter().enumerate() {
@@ -908,27 +942,49 @@ impl Engine {
     }
 }
 
-/// Each of a level's served clusters' centre over its members in `sample`, in the order of the
-/// clusters, which begin at index `first`; `None` for one with no member there. On a level served
-/// from its column the labels are read from the band-order `copy` where the sample came from the
-/// first segment's bands, and from the column otherwise.
-fn sample_centres(
-    read: &ReadLevel,
+/// Each of `clusters` clusters' centre over a sample of every side below one cut, taken from the
+/// summed `visible` counts. `sample(i, cut, sums)` adds the `i`th side's sampled members to `sums`
+/// and answers how many items it sampled; the second output is the total.
+fn sampled_centres(
+    visible: &[u64],
+    size: u64,
+    clusters: usize,
+    mut sample: impl FnMut(usize, u64, &mut [([f64; 2], u32)]) -> Result<u64>,
+) -> Result<(Vec<Option<[f64; 2]>>, u64)> {
+    let cut = sample_cut(visible.iter().sum(), size);
+    let mut sums: Vec<([f64; 2], u32)> = vec![([0.0; 2], 0); clusters];
+    let mut sampled = 0;
+    for i in 0..visible.len() {
+        sampled += sample(i, cut, &mut sums)?;
+    }
+    let centres = sums
+        .iter()
+        .map(|&(sum, n)| (n > 0).then(|| [sum[0] / f64::from(n), sum[1] / f64::from(n)]))
+        .collect();
+    Ok((centres, sampled))
+}
+
+/// Add each of a level's served clusters' members in one side's `sample` to `sums`, the sum of
+/// their positions and their number, in the order of the clusters, which begin at index `first`.
+/// `rows` is the side's form. On a level served from its column the labels are read from the
+/// band-order `copy` where the sample came from the side's first segment's bands, and from the
+/// column otherwise.
+fn sample_sums(
+    rows: &ArtifactRows,
     at: &[u32],
     first: usize,
     sample: &[Sampled],
     copy: Option<Arc<BandLabels>>,
     stop: &dyn Fn() -> bool,
-) -> Result<Vec<Option<[f64; 2]>>> {
-    let count = at.iter().filter(|&&c| c != u32::MAX).count();
-    let mut sums: Vec<([f64; 2], u32)> = vec![([0.0; 2], 0); count];
+    sums: &mut [([f64; 2], u32)],
+) -> Result<()> {
     let cluster = |ordinal: u32| {
         at.get(ordinal as usize)
             .copied()
             .filter(|&c| c != u32::MAX)
             .map(|c| c as usize - first)
     };
-    match read.rows.column() {
+    match rows.column() {
         Some(column) => {
             for (step, item) in sample.iter().enumerate() {
                 if (step as u32).is_multiple_of(CHUNK) && stop() {
@@ -949,20 +1005,19 @@ fn sample_centres(
             }
         }
         None => {
-            let rows = Bitmap::of(&sample.iter().map(|s| s.row).collect::<Vec<_>>());
+            let sampled = Bitmap::of(&sample.iter().map(|s| s.row).collect::<Vec<_>>());
             for (ordinal, _) in at.iter().enumerate().filter(|(_, &c)| c != u32::MAX) {
                 if (ordinal as u32).is_multiple_of(CHUNK) && stop() {
                     return Err(EngineError::Cancelled);
                 }
-                if read.rows.attachment(ordinal as u32).is_some() {
+                if rows.attachment(ordinal as u32).is_some() {
                     continue;
                 }
-                let (Some(members), Some(c)) =
-                    (read.rows.get(ordinal as u32), cluster(ordinal as u32))
+                let (Some(members), Some(c)) = (rows.get(ordinal as u32), cluster(ordinal as u32))
                 else {
                     continue;
                 };
-                for row in members.and(&rows).iter() {
+                for row in members.and(&sampled).iter() {
                     if let Ok(i) = sample.binary_search_by_key(&row, |s| s.row) {
                         add(&mut sums[c], sample[i].position);
                     }
@@ -970,10 +1025,7 @@ fn sample_centres(
             }
         }
     }
-    Ok(sums
-        .iter()
-        .map(|&(sum, n)| (n > 0).then(|| [sum[0] / f64::from(n), sum[1] / f64::from(n)]))
-        .collect())
+    Ok(())
 }
 
 /// Add `position` to a running sum of positions and their number.
@@ -995,7 +1047,8 @@ fn nearest_served(
 ) -> Vec<u32> {
     let up = |level: u32, ordinal: u32| -> Vec<(u32, u32)> {
         reads[level as usize]
-            .rows
+            .forms
+            .first()
             .parents(ordinal)
             .iter()
             .filter(|p| match within {
@@ -1062,8 +1115,8 @@ fn position(code: u32, residual: u32) -> [f64; 2] {
     [f64::from(x), f64::from(y)]
 }
 
-/// One item of the sample: its view row, its position, and its entry in the first segment's bands
-/// where it was read from them.
+/// One item of the sample: its row in its shard's rows for the view, its position, and its entry
+/// in the first segment's bands where it was read from them.
 #[derive(Clone, Copy)]
 struct Sampled {
     row: u32,
@@ -1071,17 +1124,18 @@ struct Sampled {
     entry: Option<usize>,
 }
 
-/// The visible items whose `mosaica_id` is below `cut`, ascending by row: read from the narrowest
-/// band holding the cut, or from each segment's columns where no band does.
+/// The items of `side` visible in `visible` whose `mosaica_id` is below `cut`, ascending by row:
+/// read from the narrowest band holding the cut, or from each segment's columns where no band
+/// does.
 fn sample(
-    served: &ServedView<'_>,
+    side: &ServedSide<'_>,
     visible: &Bitmap,
     cut: u64,
     stop: &dyn Fn() -> bool,
 ) -> Result<Vec<Sampled>> {
     let band = mosaica_store::bands::band_below(cut);
     let mut out: Vec<Sampled> = Vec::new();
-    for (s, &(segment, row_base)) in served.segments.iter().enumerate() {
+    for (s, &(segment, row_base)) in side.segments.iter().enumerate() {
         if stop() {
             return Err(EngineError::Cancelled);
         }
@@ -1490,6 +1544,87 @@ fn neighbours(points: &[[f64; 2]]) -> Neighbours {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A shard with fewer visible items than the sample takes is still sampled below the one cut
+    /// both set.
+    #[test]
+    fn a_sample_over_two_shards_is_cut_once_from_both_shards_visible_count() {
+        // `(mosaica_id, position, cluster)`: a small shard whose items all sit high in the id
+        // space, and a larger one spread across it.
+        let step = u64::MAX / 16;
+        let small: Vec<(u64, [f64; 2], usize)> =
+            vec![(15 * step, [900.0, 900.0], 0), (14 * step, [800.0, 0.0], 1)];
+        let large: Vec<(u64, [f64; 2], usize)> = (0..10u64)
+            .map(|k| (k * step, [k as f64, 2.0 * k as f64], (k % 2) as usize))
+            .collect();
+        let centres = |sides: &[&[(u64, [f64; 2], usize)]]| {
+            let visible: Vec<u64> = sides.iter().map(|side| side.len() as u64).collect();
+            sampled_centres(&visible, 4, 2, |i, cut, sums| {
+                let mut sampled = 0;
+                for &(id, position, cluster) in sides[i] {
+                    if cut == u64::MAX || id < cut {
+                        add(&mut sums[cluster], position);
+                        sampled += 1;
+                    }
+                }
+                Ok(sampled)
+            })
+            .unwrap()
+        };
+        let both: Vec<_> = small.iter().chain(&large).copied().collect();
+        let (whole, sampled) = centres(&[&both]);
+        assert_eq!(centres(&[&small, &large]), (whole.clone(), sampled));
+        // A cut of 4 in 12 takes the large shard's first six items and none of the small one's,
+        // which a cut from its own count of 2 would take whole.
+        assert_eq!(sampled, 6);
+        assert_eq!(whole, vec![Some([2.0, 4.0]), Some([3.0, 6.0])]);
+    }
+
+    #[test]
+    fn centres_sampled_over_two_shards_are_one_shards_holding_both() {
+        // Three clusters over twelve rows, each row at a position of its own.
+        let members: [&[u32]; 3] = [&[0, 1, 2, 3], &[4, 5, 6, 7, 8], &[9, 10, 11]];
+        let position = |row: u32| [f64::from(row * 7 % 12) * 3.0, f64::from(row * row % 17)];
+        let at: Vec<u32> = vec![0, 1, 2];
+        let centres = |sides: &[(ArtifactRows, Vec<Sampled>)]| -> Vec<Option<[f64; 2]>> {
+            let mut sums = vec![([0.0; 2], 0); at.len()];
+            for (rows, sample) in sides {
+                sample_sums(rows, &at, 0, sample, None, &|| false, &mut sums).unwrap();
+            }
+            sums.iter()
+                .map(|&(sum, n)| (n > 0).then(|| [sum[0] / f64::from(n), sum[1] / f64::from(n)]))
+                .collect()
+        };
+        // `rows` in a shard of their own, numbered from 0 there, with the members they hold.
+        let shard = |rows: &[u32]| -> (ArtifactRows, Vec<Sampled>) {
+            let local = |row: u32| rows.iter().position(|&held| held == row).map(|at| at as u32);
+            let sets: Vec<Vec<u32>> = members
+                .iter()
+                .map(|set| set.iter().filter_map(|&row| local(row)).collect())
+                .collect();
+            let sets: Vec<Option<&[u32]>> = sets.iter().map(|set| Some(set.as_slice())).collect();
+            let sample = rows
+                .iter()
+                .enumerate()
+                .map(|(at, &row)| Sampled {
+                    row: at as u32,
+                    position: position(row),
+                    entry: None,
+                })
+                .collect();
+            (ArtifactRows::synthetic(&sets, None), sample)
+        };
+        let every: Vec<u32> = (0..12).collect();
+        let whole = centres(&[shard(&every)]);
+        let (even, odd): (Vec<u32>, Vec<u32>) = every.iter().partition(|&&row| row % 3 != 2);
+        let split = centres(&[shard(&even), shard(&odd)]);
+        assert_eq!(split, whole);
+        for (set, centre) in members.iter().zip(&whole) {
+            let n = set.len() as f64;
+            let mean = [0, 1].map(|k| set.iter().map(|&row| position(row)[k]).sum::<f64>() / n);
+            assert_eq!(*centre, Some(mean));
+        }
+    }
 
     /// A random tree of `depth` levels below one root, each node with up to `fan` children placed
     /// near it, and the passes a nested layer colours it in: the nodes at each depth, drawn with

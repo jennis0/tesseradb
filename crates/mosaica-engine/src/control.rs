@@ -325,7 +325,7 @@ impl Engine {
         generation: &Generation,
         ids: &[MosaicaId],
     ) -> std::result::Result<Vec<Option<EntityId>>, StoreError> {
-        let high_water = self.allocator_high_water();
+        let high_water = self.write.live().only_shard().high_water();
         let shard = generation.only_shard();
         let named: Vec<Option<EntityId>> = ids
             .iter()
@@ -433,6 +433,12 @@ impl Engine {
         self.write.wake();
     }
 
+    /// Refuses every write to a bundle of several shards
+    /// ([`crate::write::WritePath::writable`]). A caller asks it before reading a write's body.
+    pub fn writable(&self) -> std::result::Result<(), crate::write::AcceptError> {
+        self.write.writable()
+    }
+
     /// The stamp of the generation served now: what a write naming entities taken from it, rather
     /// than from [`Engine::name_items`], carries.
     fn stamp_now(&self) -> Stamp {
@@ -445,6 +451,7 @@ impl Engine {
         entity: EntityId,
         op: ChangeOp,
     ) -> std::result::Result<(), crate::write::AcceptError> {
+        self.write.writable()?;
         let shard = self.generation.load().only_shard().id();
         self.accept_changes(vec![(Target::Item(shard, entity), op)])
     }

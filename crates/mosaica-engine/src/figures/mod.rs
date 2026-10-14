@@ -34,7 +34,10 @@
 //!   ([`denied`]). It is loaded at the request's start like the mask it corrects, so a request that
 //!   starts after a suppression is accepted subtracts it. A cached count over F is never served
 //!   without it.
-//! - **T's correction** is held per session and generation.
+//! - **T's correction** is held per session, shard and generation.
+//!
+//! Each of these is one point shard's, over that shard's rows: a fragment is a shard's, and
+//! [`LevelFigures`] adds a request's shards' figures together.
 //!
 //! The box of `F − D` is the cached box unless a subtracted row reaches one of its edges. Each
 //! artifact with more than sixteen placed rows keeps its eight most extreme rows on each side as a
@@ -61,15 +64,16 @@ use std::sync::Arc;
 
 use croaring::Bitmap;
 
-use mosaica_types::layer::LayerDeclaration;
+use mosaica_types::layer::{LayerDeclaration, RegisteredLayer};
+use mosaica_types::{LayerSpace, ShardId};
 
 use crate::derived::{place, Placement};
 use crate::error::{EngineError, Result};
 use crate::row_column::RowColumn;
-use crate::viewport::ServedView;
+use crate::viewport::{ServedSide, ServedView};
 use crate::Engine;
 
-pub(crate) use cache::{DrawingTurn, FiguresCache, MaskIdentity};
+pub(crate) use cache::{DrawingTurn, FiguresCache, MaskIdentity, SideVersions};
 pub use cache::{FiguresStats, DEFAULT_DISK_BYTES, DEFAULT_GIVE_WAY_MS};
 pub(crate) use field::{keep_extreme, ExactSum, FieldFigures, FieldRead, FieldTally, Number, Sum};
 
@@ -125,7 +129,7 @@ impl Geometry {
     }
 }
 
-/// One level's figures for one request: see the module doc.
+/// One level's figures for one request in one shard: see the module doc.
 pub struct Figures {
     counts: Arc<CountsAt>,
     /// The reserve walked with `counts`, where it is held.
@@ -139,7 +143,8 @@ pub struct Figures {
     exact: Option<BoxSource>,
 }
 
-/// One request's column, fragment and segments, held for working out a box after a deny.
+/// One request's column, fragment and segments in one shard, held for working out a box after a
+/// deny.
 struct BoxSource {
     column: Arc<RowColumn>,
     projection: Arc<crate::projection::RowProjection>,
@@ -151,10 +156,14 @@ struct BoxSource {
 /// Hands the view's segments' positions to a caller, for as long as it reads them.
 type WithPlaces = Arc<dyn Fn(&mut dyn FnMut(&[Placement<'_>])) + Send + Sync>;
 
-/// [`WithPlaces`] over one view of `bundle`.
-fn places_of_view(bundle: Arc<mosaica_store::read::Bundle>, view: String) -> WithPlaces {
+/// [`WithPlaces`] over one view of `shard` in `bundle`.
+fn places_of_view(
+    bundle: Arc<mosaica_store::read::Bundle>,
+    shard: ShardId,
+    view: String,
+) -> WithPlaces {
     Arc::new(move |read: &mut dyn FnMut(&[Placement<'_>])| {
-        let Some(view_data) = bundle.only_shard().views.get(&view) else {
+        let Some(view_data) = bundle.shard(shard).and_then(|data| data.views.get(&view)) else {
             return;
         };
         if let Ok(segments) = crate::viewport::segments_with_row_bases(&view, view_data) {
@@ -174,6 +183,20 @@ impl Figures {
             deny: None,
             tail: None,
             geometry: Geometry::None,
+            exact: None,
+        }
+    }
+
+    /// Figures over `dense`'s counts and positions, for tests of what reads them.
+    #[cfg(test)]
+    pub(crate) fn of_dense(dense: Dense) -> Self {
+        Figures {
+            len: dense.counts.len(),
+            counts: Arc::new(CountsAt::of(dense)),
+            reserves: None,
+            deny: None,
+            tail: None,
+            geometry: Geometry::Centroid,
             exact: None,
         }
     }
@@ -258,11 +281,17 @@ impl Figures {
         if n == 0 {
             return None;
         }
+        let sums = self.sums(ordinal);
+        Some([sums[0] as f64 / n as f64, sums[1] as f64 / n as f64])
+    }
+
+    /// The position sums of the members this viewer may see. A shard holds at most 2³² members,
+    /// so one shard's sums of 32-bit positions fit a `u64`; sums over several shards do not.
+    fn sums(&self, ordinal: u32) -> [u64; 2] {
         let f = self.counts.sums(ordinal);
         let d = self.deny_delta(ordinal).map_or([0; 2], |d| d.sums);
         let t = self.tail_delta(ordinal).map_or([0; 2], |t| t.sums);
-        let sum = |axis: usize| (f[axis] - d[axis] + t[axis]) as f64;
-        Some([sum(0) / n as f64, sum(1) / n as f64])
+        [f[0] - d[0] + t[0], f[1] - d[1] + t[1]]
     }
 
     /// `[x_min, y_min, x_max, y_max]` over the members this viewer may see, or `None` where they
@@ -341,6 +370,95 @@ impl Figures {
     }
 }
 
+/// A level's figures over every side of a request, answering as one shard holding every side's
+/// rows would: counts and position sums add, and each side of the box is the extreme of the
+/// shards' own.
+pub struct LevelFigures {
+    sides: Vec<Arc<Figures>>,
+}
+
+impl LevelFigures {
+    /// The figures of `sides`, one per shard the request reads, every one over the same ordinals.
+    pub fn of(sides: Vec<Arc<Figures>>) -> Self {
+        debug_assert!(
+            sides.windows(2).all(|pair| pair[0].len() == pair[1].len()),
+            "every shard's form of a level holds a slot for every ordinal"
+        );
+        LevelFigures { sides }
+    }
+
+    /// Figures holding each side's `counts` and nothing else, for tests of what reads them.
+    #[cfg(test)]
+    pub(crate) fn of_counts(sides: &[Vec<u32>]) -> Self {
+        LevelFigures::of(
+            sides
+                .iter()
+                .map(|counts| Arc::new(Figures::of_counts(counts.clone())))
+                .collect(),
+        )
+    }
+
+    /// `|M_a ∩ S|` over every shard.
+    pub fn get(&self, ordinal: u32) -> u64 {
+        self.sides.iter().map(|side| side.get(ordinal)).sum()
+    }
+
+    /// Every ordinal whose count is non-zero in any shard, ascending.
+    pub fn populated(&self) -> Bitmap {
+        let mut sides = self.sides.iter().map(|side| side.populated());
+        let mut out = sides.next().unwrap_or_default();
+        for side in sides {
+            out.or_inplace(&side);
+        }
+        out
+    }
+
+    /// How many ordinals these cover.
+    pub fn len(&self) -> usize {
+        self.sides.first().map_or(0, |side| side.len())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Whether these figures carry positions in every shard: a centroid or box summed over the
+    /// shards that carry them alone would be some shards' figure.
+    pub fn has_geometry(&self) -> bool {
+        !self.sides.is_empty() && self.sides.iter().all(|side| side.has_geometry())
+    }
+
+    /// The mean position of the members this viewer may see in every shard, or `None` where they
+    /// see none placed.
+    pub fn centroid(&self, ordinal: u32) -> Option<[f64; 2]> {
+        let mut placed = 0u64;
+        let mut sums = [0u128; 2];
+        for side in &self.sides {
+            placed += side.placed(ordinal);
+            let side = side.sums(ordinal);
+            sums[0] += u128::from(side[0]);
+            sums[1] += u128::from(side[1]);
+        }
+        if placed == 0 {
+            return None;
+        }
+        Some([sums[0] as f64 / placed as f64, sums[1] as f64 / placed as f64])
+    }
+
+    /// `[x_min, y_min, x_max, y_max]` over the members this viewer may see in every shard, or
+    /// `None` where they see none placed.
+    pub fn bbox(&self, ordinal: u32) -> Option<[u32; 4]> {
+        self.sides
+            .iter()
+            .filter_map(|side| side.bbox(ordinal))
+            .reduce(|mut out, side| {
+                counts::widen(&mut out, side[0], side[1]);
+                counts::widen(&mut out, side[2], side[3]);
+                out
+            })
+    }
+}
+
 impl Engine {
     /// This level's figures for `served`'s request, computed from the composed mask and never from
     /// the whole population. `None` on a level with no row column, which counts one artifact at a
@@ -348,11 +466,15 @@ impl Engine {
     ///
     /// A request waiting on another's walk stops when its client goes away, and is refused
     /// [`EngineError::CountsBuilding`] past [`cache`]'s wait bound.
+    ///
+    /// Figures are one shard's: `side` is the shard of `served`'s view they are taken in, `rows`
+    /// that shard's form of the level and `mask` its leaf. [`LevelFigures`] combines the sides'.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn figures(
         &self,
         served: &ServedView<'_>,
-        layer: &str,
+        side: &ServedSide<'_>,
+        space: LayerSpace,
         level: u32,
         level_version: u64,
         rows: &crate::artifacts::ArtifactRows,
@@ -367,19 +489,22 @@ impl Engine {
             true => Geometry::None,
             false => geometry,
         };
+        let exact = || {
+            self.exact_figures(served, side, space, level, level_version, column, mask, geometry)
+        };
         let base_rows = column.base_rows();
-        if base_rows != served.data.row_space.base_rows() {
-            return self.exact_figures(served, layer, level, level_version, column, mask, geometry);
+        if base_rows != side.data.row_space.base_rows() {
+            return exact();
         }
         let identity = served.mask_identity;
         let (fragment, minus, plus, _) = mask.parts();
-        let places = Placement::of_segments(&served.segments);
+        let places = Placement::of_segments(&side.segments);
 
         let key = FragmentKey {
             terms: identity.terms,
-            identity: identity.fragment_identity,
+            identity: side.geometry.fragment.identity,
             view: served.name.to_string(),
-            layer: layer.to_string(),
+            space,
             level,
             column: column.identity(),
             geometry,
@@ -387,7 +512,7 @@ impl Engine {
         let Some(counts) =
             self.fragment_counts(served, &key, level_version, column, fragment, &places)?
         else {
-            return self.exact_figures(served, layer, level, level_version, column, mask, geometry);
+            return exact();
         };
 
         let mut subtracted = minus.clone();
@@ -396,7 +521,8 @@ impl Engine {
             true => None,
             false => match self.deny_correction(
                 served,
-                layer,
+                side,
+                space,
                 level,
                 level_version,
                 column,
@@ -404,17 +530,7 @@ impl Engine {
                 &places,
             )? {
                 Some(deny) => Some(deny),
-                None => {
-                    return self.exact_figures(
-                        served,
-                        layer,
-                        level,
-                        level_version,
-                        column,
-                        mask,
-                        geometry,
-                    )
-                }
+                None => return exact(),
             },
         };
 
@@ -428,15 +544,14 @@ impl Engine {
             true => None,
             false => {
                 let key = TailKey {
+                    shard: side.shard.id(),
                     token_id: identity.token_id,
                     view: served.name.to_string(),
-                    layer: layer.to_string(),
+                    space,
                     level,
                     column: column.identity(),
                     level_version,
-                    segments_version: identity.segments_version,
-                    projection_segments_version: identity.projection_segments_version,
-                    overlay_version: identity.overlay_version,
+                    shards: identity.shards,
                 };
                 let cancel = served.cancel.clone().unwrap_or_default();
                 let tail = self
@@ -477,6 +592,7 @@ impl Engine {
                 base_rows,
                 places: places_of_view(
                     Arc::clone(&served.generation.bundle),
+                    side.shard.id(),
                     served.name.to_string(),
                 ),
                 counters: Arc::clone(&self.figures.counters),
@@ -503,7 +619,7 @@ impl Engine {
             .dir
             .as_ref()
             .map(|root| persist::identity_dir(root, &key.identity));
-        let stem = persist::counts_stem(&key.terms, &key.view, &key.layer, key.level, geometry);
+        let stem = persist::counts_stem(&key.terms, &key.view, key.space, key.level, geometry);
         let written = dir.clone().map(|dir| (dir, stem.clone()));
         let held = self
             .figures
@@ -616,7 +732,8 @@ impl Engine {
     fn deny_correction(
         &self,
         served: &ServedView<'_>,
-        layer: &str,
+        side: &ServedSide<'_>,
+        space: LayerSpace,
         level: u32,
         level_version: u64,
         column: &Arc<RowColumn>,
@@ -624,12 +741,13 @@ impl Engine {
         places: &[Placement<'_>],
     ) -> Result<Option<Arc<DenyCorrection>>> {
         let identity = served.mask_identity;
-        let (deny_version, failing) = deny_version(served, served.denied, &subtracted);
+        let fragment_identity = side.geometry.fragment.identity;
+        let (deny_version, failing) = deny_version(served, side, &subtracted);
         let key = DenyKey {
             terms: identity.terms,
-            identity: identity.fragment_identity,
+            identity: fragment_identity,
             view: served.name.to_string(),
-            layer: layer.to_string(),
+            space,
             level,
             column: column.identity(),
             level_version,
@@ -639,14 +757,14 @@ impl Engine {
         if let mosaica_cache::Peek::Ready(held) = self.figures.denies.peek(&key) {
             return Ok(Some(held));
         }
-        let mut denied = served.denied.clone();
+        let mut denied = side.denied.clone();
         denied.remove_range(column.base_rows()..);
         let labels = match subtracted.intersect(&denied) {
             false => None,
             true => {
-                let address = (served.name.to_string(), layer.to_string(), level);
+                let address = (side.shard.id(), served.name.to_string(), space, level);
                 let wanted = Wanted {
-                    identity: identity.fragment_identity,
+                    identity: fragment_identity,
                     column,
                     at: level_version,
                     denied: &denied,
@@ -662,9 +780,10 @@ impl Engine {
                             Arc::clone(column),
                             level_version,
                             denied.clone(),
-                            identity.fragment_identity,
+                            fragment_identity,
                             places_of_view(
                                 Arc::clone(&served.generation.bundle),
+                                side.shard.id(),
                                 served.name.to_string(),
                             ),
                         );
@@ -697,7 +816,8 @@ impl Engine {
     fn exact_figures(
         &self,
         served: &ServedView<'_>,
-        layer: &str,
+        side: &ServedSide<'_>,
+        space: LayerSpace,
         level: u32,
         level_version: u64,
         column: &Arc<RowColumn>,
@@ -706,8 +826,9 @@ impl Engine {
     ) -> Result<Option<Arc<Figures>>> {
         use crate::compose::WholeMask;
         let key = FiguresKey::Exact(served.mask_identity.exact_key(
+            side.shard.id(),
             served.name,
-            layer,
+            space,
             level,
             level_version,
             geometry,
@@ -717,7 +838,7 @@ impl Engine {
             .get_or_build(key, &served.turn, served.cancel.as_ref(), |build| {
                 self.figures.counters.exact.fetch_add(1, Ordering::Relaxed);
                 let places =
-                    (geometry != Geometry::None).then(|| Placement::of_segments(&served.segments));
+                    (geometry != Geometry::None).then(|| Placement::of_segments(&side.segments));
                 let walked = self.count_pool.install(|| {
                     #[cfg(feature = "fault-injection")]
                     self.switches.hold_masked_count_build_if_wanted();
@@ -772,12 +893,12 @@ impl LabelStore {
         }) {
             return Some((Arc::clone(exact), None));
         }
-        let (view, layer, level) = address;
+        let (_, view, space, level) = address;
         let dir = self
             .dir
             .as_ref()
             .map(|root| persist::identity_dir(root, &wanted.identity));
-        let stem = persist::denied_stem(view, layer, *level);
+        let stem = persist::denied_stem(view, *space, *level);
         let on_disk = || {
             dir.as_deref().and_then(|dir| {
                 persist::read_denied(
@@ -857,17 +978,25 @@ impl FiguresCache {
         });
     }
 
-    /// Queue every held level's labels to be brought to `generation`'s denied rows, at the version
-    /// of the form `projections` holds for it: what a deny does once it is acknowledged.
+    /// Queue every held level of a layer in `registered` to have its labels brought to
+    /// `generation`'s denied rows, at the version of the form `projections` holds for it: what a
+    /// deny does once it is acknowledged.
     pub(crate) fn refresh_denied(
         &self,
         generation: &crate::Generation,
         projections: &crate::artifacts::ArtifactProjections,
+        registered: &[RegisteredLayer],
     ) {
-        let shard = generation.only_shard();
         for address in self.labels.held.addresses() {
-            let (view, layer, level) = &address;
-            let Some((rows, at)) = projections.held_form_at(view, layer, *level) else {
+            let (shard, view, space, level) = &address;
+            let Some(shard) = generation.shard(*shard) else {
+                continue;
+            };
+            let Some(layer) = registered.iter().find(|layer| layer.space == *space) else {
+                continue;
+            };
+            let name = &layer.declaration.name;
+            let Some((rows, at)) = projections.held_form_at(shard.id(), view, name, *level) else {
                 continue;
             };
             let Some(column) = rows.column_shared() else {
@@ -882,8 +1011,8 @@ impl FiguresCache {
                 Arc::clone(column),
                 at,
                 denied,
-                shard.bundle_identity(),
-                places_of_view(Arc::clone(&generation.bundle), view.clone()),
+                shard.identity,
+                places_of_view(Arc::clone(&generation.bundle), shard.id(), view.clone()),
             );
         }
     }
@@ -945,8 +1074,8 @@ fn write_labels(
     address: &LevelAddress,
     bound: &AtomicU64,
 ) {
-    let (view, layer, level) = address;
-    let stem = persist::denied_stem(view, layer, *level);
+    let (_, view, space, level) = address;
+    let stem = persist::denied_stem(view, *space, *level);
     while let Some(newest) = held.to_write(address) {
         persist::write_denied(&persist::identity_dir(root, identity), &stem, &newest);
         held.wrote(address, newest.at);
@@ -956,17 +1085,17 @@ fn write_labels(
 
 /// What a correction for `subtracted`, the mask's `minus` below the base, is a function of beside
 /// its fragment: the view's deny version, and the overlay's version where the mask also subtracts
-/// buffered rows the viewer fails below the base, which no deny version follows. `denied` is the
-/// view's denied rows, whole or below the base: `subtracted` lies below it either way.
+/// buffered rows the viewer fails below the base, which no deny version follows: rows of
+/// `subtracted` outside `side`'s denied rows.
 fn deny_version(
     served: &ServedView<'_>,
-    denied: &Bitmap,
+    side: &ServedSide<'_>,
     subtracted: &Bitmap,
 ) -> (u64, Option<u64>) {
-    let failing = !subtracted.is_subset(denied);
+    let failing = !subtracted.is_subset(side.denied);
     (
-        served.shard.deny_version(served.name),
-        failing.then_some(served.mask_identity.overlay_version),
+        side.shard.deny_version(served.name),
+        failing.then_some(side.shard.overlay_version),
     )
 }
 

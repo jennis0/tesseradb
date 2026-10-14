@@ -1644,11 +1644,18 @@ impl Executor {
         generations.push(Arc::downgrade(&live));
         stairs.record("13 open");
 
+        let shard = self.live.only_shard().id;
+        let derived: Vec<_> = self
+            .side_manifests
+            .derived_extents
+            .iter()
+            .map(|extent| (shard, extent.clone()))
+            .collect();
         self.live.with_artifacts(|store| {
             self.deps.artifact_projections.adopt_derived(
                 &to_prefix_dir,
                 &completed.prefix,
-                &self.side_manifests.derived_extents,
+                &derived,
                 store,
             )
         });
@@ -1836,7 +1843,7 @@ impl Executor {
         let shard = live.only_shard();
         let live_tiers = &shard.data.record.deltas;
         let (bundle, mut rotation) =
-            crate::engine::open_rotation(&self.deps.bundle_root, prefix, &shard.fragments, retired)
+            crate::engine::open_rotation(&self.deps.bundle_root, prefix, retired)
                 .map_err(|e| format!("the folded prefix would not open ({e})"))?;
         rotation.frees = frees;
         rotation.retired_artifacts = retired_artifacts;
@@ -2140,7 +2147,8 @@ impl Executor {
                         );
                         let (piece, cost) = held.resolve(segment);
                         let piece = Arc::new(piece);
-                        held.stage(&segment.seg_id, Arc::clone(&piece));
+                        let shard = self.live.only_shard().id;
+                        held.stage(shard, &segment.seg_id, Arc::clone(&piece));
                         tracing::info!(
                             layer = %layer,
                             level,
@@ -2292,7 +2300,9 @@ impl Executor {
                         // The fold's segment is the whole base at row base 0, so the piece staged
                         // in `choose_layouts` is the level's membership in this view.
                         let piece = self.deps.shapes.get(view, layer, *level).and_then(|held| {
-                            segment.and_then(|segment| held.staged(&segment.seg_id))
+                            segment.and_then(|segment| {
+                                held.staged(self.live.only_shard().id, &segment.seg_id)
+                            })
                         });
                         match piece {
                             Some(piece) => {
@@ -2512,7 +2522,7 @@ impl Executor {
                     .deps
                     .shapes
                     .get(view, layer, *level)
-                    .and_then(|held| held.staged(&segment.seg_id))
+                    .and_then(|held| held.staged(self.live.only_shard().id, &segment.seg_id))
                 else {
                     tracing::warn!(
                         layer = %layer,
@@ -2770,9 +2780,11 @@ impl Executor {
                         });
                         self.deps.artifact_projections.get_or_build(
                             &generation.prefix,
+                            generation.only_shard().id(),
                             view,
                             layer,
                             *level,
+                            store,
                             store,
                             &view_data.row_space,
                             Some(&generation.only_shard().partition_source()),

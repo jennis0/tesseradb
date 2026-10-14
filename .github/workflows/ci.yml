@@ -242,6 +242,12 @@ jobs:
       # Fixtures are built once and cached in /tmp by a stamped recipe; on a fresh runner every one
       # of them is built from scratch, which is most of this job's wall-clock.
       - run: reference/.venv/bin/pytest conformance/tests conformance/suite -v
+      # The same suite with every corpus over several shards: only the tests marked
+      # `writes_nothing` run (conformance/README.md).
+      - name: the conformance tests that write nothing, every corpus over several shards
+        env:
+          MOSAICA_CONFORMANCE_SHARDS: many
+        run: reference/.venv/bin/pytest conformance/tests conformance/suite -v
       # The oracle's own tests — everything in `reference/tests` that does not build from the Phase
       # 0 corpus. Run from `reference/` because that is where `pyproject.toml`'s `testpaths` and the
       # node ids below are rooted; a `--deselect` given a repo-relative path matches nothing and is

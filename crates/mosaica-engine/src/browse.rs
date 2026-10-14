@@ -53,11 +53,11 @@ use mosaica_types::layer::{HierarchyKind, RegisteredLayer};
 use mosaica_types::{EntityId, MosaicaId};
 
 use crate::artifacts::{ArtifactVerdict, ArtifactView};
-use crate::compose::EffectiveMask;
+use crate::compose::{EffectiveMask, ShardedMask};
 use crate::error::Result;
 use crate::filter::FilterExpr;
 use crate::layer_read::{check_level, LayerRefusal, ReadLevel};
-use crate::viewport::{response_rungs, segments_with_row_bases, DependencyContext, ServedView};
+use crate::viewport::{response_rungs, DependencyContext, ServedView};
 use crate::Engine;
 use crate::EngineError;
 use mosaica_lifecycle::membership::Attachment;
@@ -242,21 +242,7 @@ impl crate::Engine {
         }
         let generation = self.generation.load_full();
         let view = req.view;
-        let carriers = generation
-            .bundle
-            .partitions
-            .values()
-            .filter(|partition| partition.only_shard().views.contains_key(view))
-            .count();
-        if carriers > 1 {
-            return Err(EngineError::MultiPartitionView(view.to_string()));
-        }
-        let shard = generation.only_shard();
-        let view_data = shard
-            .data
-            .views
-            .get(view)
-            .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
+        crate::viewport::check_view(&generation, view)?;
 
         // **The layer, resolved through the principal's own reachable set** — one probe for a
         // gate-failed name and a never-registered one alike, so a `422` here confirms nothing this
@@ -301,34 +287,15 @@ impl crate::Engine {
             HierarchyKind::Flat | HierarchyKind::Stacked
         );
 
-        // `session_geometry` laps into a probe; this verb publishes no per-stage timings, so it
-        // is given one and its laps are dropped. Named `_probe` rather than silenced afterwards,
-        // so that a stage field arriving here is a change to this line and not to a discard.
+        // `open_view` laps into a probe; this verb publishes no per-stage timings, so it is given
+        // one and its laps are dropped. Named `_probe` rather than silenced afterwards, so that a
+        // stage field arriving here is a change to this line and not to a discard.
         let mut _probe = crate::timing::Probe::new();
-        let (geometry, key) =
-            self.session_geometry(session, &generation, shard, view, &None, &mut _probe)?;
-        let denied = shard.denied_in(view)?;
-        let projection = Arc::clone(&geometry.projection);
-        let mask =
-            shard.compose(session.satisfied(), projection, view, &view_data.row_space, denied);
-        let served_view = crate::viewport::ServedView {
-            session,
-            generation: &generation,
-            shard,
-            name: view,
-            data: view_data,
-            segments: segments_with_row_bases(view, view_data)?,
-            denied,
-            mask_identity: self.mask_identity(
-                session,
-                &generation,
-                shard,
-                &geometry,
-                key.segments_version,
-            ),
-            cancel: None,
-            turn: Default::default(),
-        };
+        let crate::viewport::OpenView {
+            served: served_view,
+            mask,
+            ..
+        } = self.open_view(session, &generation, view, &None, &mut _probe)?;
 
         // **The filter, evaluated once for the request and over the whole view.** Every route it
         // may take is asked for its whole-view answer: an entity-space verdict is projected whole,
@@ -358,7 +325,7 @@ impl crate::Engine {
             if let Some(filter_rows) = &filter_rows {
                 level_read.filtered = level_read.filtered_counts(self, &mask, filter_rows);
             }
-            let rows = &level_read.rows;
+            let rows = level_read.forms.first();
             let view_of = level_read.view(self, &served_view, &mask, &layer, &|_| false);
             for ordinal in 0..rows.len() as u32 {
                 let Some(entity) = runs.entity_of(ordinal as u64).map(EntityId::new) else {
@@ -672,7 +639,7 @@ pub(crate) type AttachedLevels = OnceCell<Vec<(RegisteredLayer, Vec<ReadLevel>)>
 pub(crate) struct Namer<'a, 'c> {
     engine: &'a Engine,
     served: &'a ServedView<'a>,
-    mask: &'a EffectiveMask,
+    mask: &'a ShardedMask,
     layer: &'a RegisteredLayer,
     reachable: &'a mosaica_lifecycle::ResolvedLayers,
     ctx: &'a DependencyContext<'c>,
@@ -686,7 +653,7 @@ impl<'a, 'c> Namer<'a, 'c> {
     pub(crate) fn new(
         engine: &'a Engine,
         served: &'a ServedView<'a>,
-        mask: &'a EffectiveMask,
+        mask: &'a ShardedMask,
         layer: &'a RegisteredLayer,
         reachable: &'a mosaica_lifecycle::ResolvedLayers,
         ctx: &'a DependencyContext<'c>,
@@ -762,11 +729,11 @@ impl<'a, 'c> Namer<'a, 'c> {
                 levels.iter().zip(views).find_map(|(read, view)| {
                     // An edge naming an entity the target slot no longer holds is into an
                     // artifact since republished over.
-                    let mut attached: Vec<u32> = read
-                        .rows
+                    let rows = read.forms.first();
+                    let mut attached: Vec<u32> = rows
                         .records()
                         .attached_to(self.layer.space, level, ordinal)
-                        .filter(|&at| read.rows.attachment(at).is_some_and(|a| a.entity == target))
+                        .filter(|&at| rows.attachment(at).is_some_and(|a| a.entity == target))
                         .collect();
                     if attached.len() > 1 {
                         let name = label.declaration.name.as_str();

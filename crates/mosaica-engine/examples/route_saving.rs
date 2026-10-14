@@ -230,9 +230,9 @@ fn fixture(v_per_tile: usize) -> (TempDir, SegmentData, EffectiveMask) {
     let postings_path = temp.path().join("postings.arrow");
     write_postings(&postings_path, &[all], 32).unwrap();
     let postings = PostingsReader::open(&postings_path, false).unwrap();
-    let cache = FragmentCache::new(&temp.path().join("cache"), [1u8; 32], [2u8; 32]);
+    let cache = FragmentCache::new(&temp.path().join("cache"), [2u8; 32]);
     let fragment = cache
-        .get_or_build(&[TermId::new(0)], &postings, &[], bound)
+        .get_or_build([1u8; 32], &[TermId::new(0)], &postings, &[], bound)
         .unwrap();
     let perm_path = temp.path().join("permutation.bin");
     let identity: Vec<EntityId> = (0..bound).map(EntityId::new).collect();

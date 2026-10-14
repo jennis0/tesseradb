@@ -121,12 +121,19 @@ once the item is deleted and a compaction has removed its last entity, and the i
 next has a different `mosaica_id` ([freed entity ids](write-path.md#freed-entity-ids) has the
 rules).
 
-The entity ids come from one shard, the space the items are numbered in. Its size bounds its high
-water, the id past the highest it has issued. The size is `[shards] size` in the declaration a
-build reads, or what `PUT /control/shards` declares at a running service, and 4,026,531,840 where
-neither declares one. A size below the high water is refused, and so is a build whose files create
-more items than the size. [Admission](write-path.md#admission) says how an ingest batch is counted
-against it.
+The entity ids come from a point shard, a space the items are numbered in, and an entity id names
+an item only together with its shard. A shard's size bounds its high water, the id past the highest
+it has issued. The size is `[shards] size` in the declaration a build reads, or what
+`PUT /control/shards` declares at a running service, and 4,026,531,840 where neither declares one.
+A build numbers its items in one sequence and cuts it into shards at the size: shard k holds the
+items numbered from k × size, each at its number less k × size, so every shard but the last holds
+`size` items, and a corpus no larger than the size is one shard. Each shard has an identity,
+SHA-256 over the bundle's `MANIFEST.json` digest and the shard's number, under which caches key
+what they hold of that shard. A size below the high water is refused.
+[Admission](write-path.md#admission) says how an ingest batch is counted against it.
+
+**Not built yet:** writes to a bundle of several shards, which a running service serves for reads
+only ([write path](write-path.md#what-is-not-built)).
 
 The `mosaica_id` is what a client receives and holds instead of the entity id. The key of the
 permutation is drawn at random by `mosaica build` each time it creates a bundle and is stored in

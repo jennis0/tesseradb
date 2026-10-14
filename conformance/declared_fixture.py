@@ -38,7 +38,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import requests
 
-from oracle.harness import OPERATOR_CREDENTIAL, cli_build, write_deployment
+from oracle.harness import OPERATOR_CREDENTIAL, cli_build, shards_toml, write_deployment
 from suite.battery import (
     ArtifactCard,
     Browse,
@@ -241,6 +241,9 @@ class Corpus:
         text += f'allocation_view = "{WORLD}"\n\n'
         text += "\n".join(v.toml() for v in self.vocabularies) + "\n"
         text += "\n".join(self.blocks)
+        if not any("[shards]" in block for block in self.blocks):
+            built = set().union(*(ids for ids, _columns, _seed, _extent in self.points.values()))
+            text += shards_toml(len(built))
         schema = work / "declaration.toml"
         schema.write_text(text)
         return schema

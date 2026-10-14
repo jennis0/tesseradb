@@ -35,6 +35,7 @@ from oracle.bundle import Bundle
 from oracle.harness import (
     cli_build,
     ensure_cli_built,
+    shards_toml,
     spawn_server,
     stop_server,
     write_deployment,
@@ -125,7 +126,7 @@ def pristine_bundle(tmp_path_factory) -> Path:
         ),
         work / "points.parquet",
     )
-    (work / "identity.toml").write_text(CONFIG)
+    (work / "identity.toml").write_text(CONFIG + shards_toml(N_ITEMS))
     bundle = work / "bundle"
     deployment = write_deployment(work / "mosaica.toml", bundle=bundle, schema=work / "identity.toml")
     cli_build(deployment, bundle)
@@ -1014,7 +1015,7 @@ def test_a_deleted_items_number_is_issued_again_and_its_old_identifier_names_not
     dep = deployment
     numbers = dep.holdings.numbers
     deleted = sorted(t for t, v in dep.holdings.items.items() if "code" in v and "num" in v)[:3]
-    freed = {numbers.number_of(t)[1] for t in deleted}
+    freed = {numbers.item_of(t)[1] for t in deleted}
     check_changes(dep, [{"op": "suppress", "match": {"mosaica_id": str(deleted[0])}}])
     check_changes(dep, [{"op": "delete", "match": {"mosaica_id": str(t)}} for t in deleted])
     dep.server.compact()
@@ -1029,7 +1030,7 @@ def test_a_deleted_items_number_is_issued_again_and_its_old_identifier_names_not
     )
     at = {(v["x"], v["y"]): t for t, v in dep.holdings.items.items() if t not in before}
     made = [at[(row["x"], row["y"])] for row in rows]
-    assert numbers.number_of(made[0]) == (1, min(freed)), "the first takes the lowest freed number"
+    assert numbers.item_of(made[0]) == (1, min(freed)), "the first takes the lowest freed number"
 
     for t in deleted:
         assert dep.server.item(dep.token, t).status_code == 404

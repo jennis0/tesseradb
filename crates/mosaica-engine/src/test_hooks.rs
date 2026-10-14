@@ -2,27 +2,45 @@
 
 #[cfg(any(feature = "fault-injection", feature = "bench-timing"))]
 use std::sync::atomic::Ordering;
-#[cfg(feature = "fault-injection")]
+#[cfg(any(feature = "fault-injection", feature = "bench-timing"))]
 use std::sync::Arc;
 
+#[cfg(any(feature = "fault-injection", feature = "bench-timing"))]
+use mosaica_authz::FrozenFragment;
 #[cfg(feature = "fault-injection")]
 use mosaica_authz::{DeltaTier, Dict};
 #[cfg(feature = "fault-injection")]
 use mosaica_types::EntityId;
+#[cfg(any(feature = "fault-injection", feature = "bench-timing"))]
+use mosaica_types::ShardId;
 
 #[cfg(feature = "fault-injection")]
 use crate::engine::open_rotation;
 use crate::engine::Engine;
 #[cfg(feature = "fault-injection")]
-use crate::error::{EngineError, Result};
+use crate::error::EngineError;
+#[cfg(any(feature = "fault-injection", feature = "bench-timing"))]
+use crate::error::Result;
 #[cfg(feature = "fault-injection")]
 use crate::geometry::GeometryPublication;
-#[cfg(feature = "fault-injection")]
+#[cfg(any(feature = "fault-injection", feature = "bench-timing"))]
 use crate::session::Session;
 #[cfg(feature = "fault-injection")]
 use crate::write::PublishGeometryError;
 
 impl Engine {
+    /// `session`'s mask fragment in the live generation's `shard`, as a request would read it.
+    #[cfg(any(feature = "fault-injection", feature = "bench-timing"))]
+    #[doc(hidden)]
+    pub fn session_fragment_for_test(
+        &self,
+        session: &Session,
+        shard: ShardId,
+    ) -> Result<Arc<FrozenFragment>> {
+        let generation = self.generation.load();
+        self.fragment_for(session, shard_for_test(&generation, shard)?, None)
+    }
+
     /// Turn the background refresh off, so a session stays in the stale-serve window instead of
     /// racing the publication and the pool.
     #[cfg(feature = "fault-injection")]
@@ -364,8 +382,8 @@ impl Engine {
             .store(enabled, Ordering::Relaxed);
     }
 
-    /// Publish a new prefix this process just wrote: open it, rotate the term index, the bundle
-    /// identity and the fragment cache onto it, retire `retired`, and swap.
+    /// Publish a new prefix this process just wrote: open it, rotate the term index and the
+    /// shard's identity onto it, retire `retired`, and swap.
     ///
     /// No production caller: a fold publishes from the executor thread instead, calling
     /// [`open_rotation`] directly and inline, since submitting to the executor from the executor
@@ -395,12 +413,7 @@ impl Engine {
                 "entity ids are capped at u32::MAX by the I9 allocator (contracts §2.6 r6)",
             ));
         }
-        let (bundle, rotation) = open_rotation(
-            &self.bundle_root,
-            prefix,
-            &self.generation.load().only_shard().fragments,
-            retired_bitmap,
-        )?;
+        let (bundle, rotation) = open_rotation(&self.bundle_root, prefix, retired_bitmap)?;
 
         self.write.publish_geometry(
             GeometryPublication::within_prefix(
@@ -428,6 +441,13 @@ impl Engine {
         self.projection_routes.force(route);
     }
 
+    /// Drop every row projection, so the next read of each grant builds it again.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn drop_row_projections_for_test(&self) {
+        self.row_projection_cache.clear();
+    }
+
     /// The rows this session's row projection holds in `view`, built or served exactly as a
     /// viewport would reach it — read directly since a row projection reaches no public surface
     /// on its own, only the answers built from it, which could not tell a projection that lost
@@ -438,12 +458,17 @@ impl Engine {
         &self,
         session: &Session,
         view: &str,
+        shard: ShardId,
     ) -> Result<croaring::Bitmap> {
         let generation = self.generation.load_full();
-        let shard = generation.only_shard();
+        shard_for_test(&generation, shard)?;
         let mut probe = crate::timing::Probe::new();
-        let (geometry, _) =
-            self.session_geometry(session, &generation, shard, view, &None, &mut probe)?;
+        let geometries = self.session_geometries(session, &generation, view, &None, &mut probe)?;
+        let (_, _, geometry) = geometries
+            .sides
+            .iter()
+            .find(|(side, ..)| side.id() == shard)
+            .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
         Ok(geometry.projection.bitmap().clone())
     }
 
@@ -457,15 +482,16 @@ impl Engine {
         &self,
         session: &Session,
         view: &str,
+        shard: ShardId,
     ) -> Result<croaring::Bitmap> {
         let generation = self.generation.load_full();
-        let shard = generation.only_shard();
+        let shard = shard_for_test(&generation, shard)?;
         let view_data = shard
             .data
             .views
             .get(view)
             .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
-        let fragment = self.fragment_for(session, shard)?;
+        let fragment = self.fragment_for(session, shard, None)?;
         let mut rows = view_data.row_space.project(&fragment.view());
         rows.run_optimize();
         Ok(rows)
@@ -493,47 +519,42 @@ impl Engine {
             .live()
             .registered_layer(layer)
             .ok_or_else(|| EngineError::UnknownView(layer.to_string()))?;
-        let vocabulary =
-            crate::viewport::predicate_vocabulary(&generation, &registered.declaration);
-        let ((rows, _), _) = self.level_form(
-            &open.served,
-            &registered,
-            vocabulary,
-            &open.served.shard.partition_source(),
-            level,
-        );
-        let places = crate::derived::Placement::of_segments(&open.served.segments);
+        let forms = self.level_forms(&open.served, &registered, level);
         let mut walked: std::collections::BTreeMap<u32, (u64, u64, [u64; 2], [u32; 4])> =
             Default::default();
-        let mut add = |ordinal: u32, row: u32| {
-            let entry = walked
-                .entry(ordinal)
-                .or_insert((0, 0, [0; 2], [u32::MAX, u32::MAX, 0, 0]));
-            entry.0 += 1;
-            if let Some((x, y)) = crate::derived::place(&places, row) {
-                entry.1 += 1;
-                entry.2[0] += u64::from(x);
-                entry.2[1] += u64::from(y);
-                entry.3 = [
-                    entry.3[0].min(x),
-                    entry.3[1].min(y),
-                    entry.3[2].max(x),
-                    entry.3[3].max(y),
-                ];
-            }
-        };
-        let visible = open.mask.visible_all();
-        match rows.column() {
-            Some(column) => {
-                for row in visible.iter() {
-                    column.for_each_label(row, |ordinal| add(ordinal, row));
+        for (place, side, leaf) in open.served.filtered_sides(&open.mask) {
+            let placement = crate::derived::Placement::of_segments(&side.segments);
+            let mut add = |ordinal: u32, row: u32| {
+                let entry = walked
+                    .entry(ordinal)
+                    .or_insert((0, 0, [0; 2], [u32::MAX, u32::MAX, 0, 0]));
+                entry.0 += 1;
+                if let Some((x, y)) = crate::derived::place(&placement, row) {
+                    entry.1 += 1;
+                    entry.2[0] += u64::from(x);
+                    entry.2[1] += u64::from(y);
+                    entry.3 = [
+                        entry.3[0].min(x),
+                        entry.3[1].min(y),
+                        entry.3[2].max(x),
+                        entry.3[3].max(y),
+                    ];
                 }
-            }
-            None => {
-                for ordinal in 0..rows.len() as u32 {
-                    if let Some(members) = rows.get(ordinal) {
-                        for row in members.and(visible).iter() {
-                            add(ordinal, row);
+            };
+            let visible = leaf.visible_all();
+            let rows = &forms.rows[place];
+            match rows.column() {
+                Some(column) => {
+                    for row in visible.iter() {
+                        column.for_each_label(row, |ordinal| add(ordinal, row));
+                    }
+                }
+                None => {
+                    for ordinal in 0..rows.len() as u32 {
+                        if let Some(members) = rows.get(ordinal) {
+                            for row in members.and(visible).iter() {
+                                add(ordinal, row);
+                            }
                         }
                     }
                 }
@@ -564,19 +585,20 @@ impl Engine {
         self.figures.settle();
     }
 
-    /// The row form this engine is holding for one `(view, layer, level)`, without building one —
-    /// for a differential that asserts it equals a form built from scratch. On a request path
-    /// this would serve whatever was last cached rather than the generation being served, which
-    /// is why no non-test caller reads it this way.
+    /// The row form this engine is holding for one `(shard, view, layer, level)`, without building
+    /// one — for a differential that asserts it equals a form built from scratch. On a request
+    /// path this would serve whatever was last cached rather than the generation being served,
+    /// which is why no non-test caller reads it this way.
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     pub fn held_artifact_form_for_test(
         &self,
+        shard: ShardId,
         view: &str,
         layer: &str,
         level: u32,
     ) -> Option<std::sync::Arc<crate::artifacts::ArtifactRows>> {
-        self.artifact_projections.held_form(view, layer, level)
+        self.artifact_projections.held_form(shard, view, layer, level)
     }
 
     /// Drop every derived form this engine holds for one layer, so the next request builds them
@@ -719,4 +741,12 @@ impl Engine {
     ) -> Result<crate::NamedItems> {
         crate::control::name_items_in(self, generation, table)
     }
+}
+
+/// `generation`'s shard `id`, or an error naming it.
+#[cfg(any(feature = "fault-injection", feature = "bench-timing"))]
+fn shard_for_test(generation: &crate::Generation, id: ShardId) -> Result<&crate::Shard> {
+    generation
+        .shard(id)
+        .ok_or_else(|| crate::error::EngineError::Malformed(format!("no shard {id} is served")))
 }

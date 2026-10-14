@@ -234,7 +234,7 @@ fn decide(
             }
             Verdict::Names(entity) => entity.raw() as u32,
             Verdict::Creates => {
-                check_cap(*next + 1, shard_size)?;
+                check_one_shard(*next + 1, shard_size)?;
                 let item = *next as u32;
                 *next += 1;
                 item
@@ -269,4 +269,17 @@ fn decide(
         },
         tally,
     ))
+}
+
+/// [`check_cap`], and past one shard of `size`: the linear build writes one shard.
+pub(super) fn check_one_shard(items: u64, size: u64) -> Result<()> {
+    check_cap(items)?;
+    if items <= size {
+        return Ok(());
+    }
+    Err(BuildError::Invalid(format!(
+        "this build's files create at least {items} items, more than the shard size {size}, and \
+         the linear build writes one shard. Build with `mosaica_build::build`, or declare \
+         `[shards] size` of at least the number of items the files create"
+    )))
 }

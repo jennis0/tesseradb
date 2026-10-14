@@ -7,10 +7,10 @@
 //! [`Engine::viewport`] runs the same producer into a collecting sink and returns the batch
 //! [`ViewportOut`]. Selection itself — floor, threshold and cap over `mosaica_id`, evaluated
 //! inside the mask — lives in [`crate::select`]; this module resolves the per-request parameters
-//! and gathers what selection returns. The request is two phases: the **sweep**, which counts,
-//! selects and reads the underlay per tile with no gather, and the **emit**, a serial pass over
-//! the swept tiles in response order that gathers and hands off flush-sized [`PointColumns`]
-//! chunks.
+//! and gathers what selection returns. The request is two phases: the **sweep**, which counts
+//! every tile's parts in one walk of each shard's leaf, selects per tile across every shard's
+//! parts, and reads the underlay, with no gather, and the **emit**, a serial pass over the swept
+//! tiles in response order that gathers and hands off flush-sized [`PointColumns`] chunks.
 //!
 //! A request loads the generation pointer once, at the start, and every phase reads from that
 //! snapshot, so a concurrent publication cannot mix state from two generations into one answer.
@@ -41,18 +41,21 @@ use mosaica_spatial::projection::Projection;
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_spatial::{tiles_for_bbox, tiles_for_bbox_count, Bounds, Tile};
 use mosaica_store::manifest::{DeclaredScalar, Quantisation, ViewMetadataValue};
-use mosaica_store::read::{ScalarSlice, SegmentData};
+use mosaica_store::read::{ScalarSlice, SegmentData, ViewData};
 use mosaica_store::vocabulary::Vocabularies;
 use mosaica_store::tile_ranges_all;
 use mosaica_types::layer::ComputedProperty;
-use mosaica_types::{EntityId, GenerationStamp, RowId, TermId, MosaicaId, API_VERSION};
+use mosaica_types::{
+    EntityId, GenerationStamp, RowId, ShardId, ShardRow, TermId, MosaicaId, API_VERSION,
+};
 
 use crate::cache::{CacheWaitEnded, Peek, RowProjectionKey, SessionGeometry};
 use crate::cancel::CancelToken;
-use crate::compose::{visible_to, EffectiveMask, FilterRows};
+use crate::compose::{visible_to, EffectiveMask, FilterRows, RangeTallies, ShardedMask};
+use crate::figures::{MaskIdentity, SideVersions};
 use crate::filter::{Endpoint, Family, FilterOperand, Scalar};
 use crate::membership_column::{ServedLayer, ServedLevel};
-use crate::select::{SelectParams, Selection, SelectionPart, SelectionParts, Threshold};
+use crate::select::{SelectParams, SelectionPart, Threshold, TileSelection, TileShard};
 use crate::engine::Engine;
 use crate::error::{EngineError, Result};
 use crate::session::Session;
@@ -96,17 +99,17 @@ pub(crate) use row_filter::{
     crossing_domain, filter_refusal, predicate_source, predicate_vocabulary, unique_holders,
     ResolvedLeaves, RoutedRows,
 };
-pub(crate) use served::ServedView;
+pub(crate) use served::{ServedSide, ServedView};
 pub(crate) use sweep::{
     scoped_family_views, scoped_render_families, segment_holding, segment_row_of, RowPresence,
 };
 
-pub(crate) use geometry::OpenView;
+pub(crate) use geometry::{check_view, OpenView};
 use out::{emit_points, CollectSink, FilterBits, PointSchema};
 use tag::Tagging;
 use sweep::{
     resolve_scalars, scoped_render_scalars, tile_ranges, Gather, Swept, TileSweepOut, Tiling,
-    MAX_POINTS_FRAME_BYTES,
+    ViewSegments, MAX_POINTS_FRAME_BYTES,
 };
 
 /// `Err(EngineError::Cancelled)` once `cancel` has flipped, `Ok(())` otherwise (`None` never
@@ -122,50 +125,32 @@ fn check_cancelled(cancel: &Option<CancelToken>) -> Result<()> {
 
 impl Engine {
     /// Mint this response's identity and content keys from the geometry actually served, not the
-    /// generation: [`Engine::session_geometry`] can answer from a one-generation-stale projection,
-    /// so two responses under one generation snapshot can cover different visible sets, and keying
-    /// on the generation would let a later live response elide against a bound the client declared
-    /// from the stale one.
+    /// generation: [`Engine::session_geometries`] can answer from one-generation-stale
+    /// projections, so two responses under one generation snapshot can cover different visible
+    /// sets, and keying on the generation would let a later live response elide against a bound
+    /// the client declared from the stale one.
     ///
-    /// The content key hashes the fragment's watermark, not `segments_version` — a merge or
-    /// compaction can move `segments_version` without adding rows to the visible set, which is
-    /// what would make an elision unsound — and the overlay versions of the shard and of every
-    /// layer space, exactly rather than through a 64-bit hash, because a suppression or
-    /// restoration moves what a client must not keep presenting as current.
+    /// The identity key hashes the session's credential digest: the geometry is shared by every
+    /// session with the grant, which may hold different credentials, and an artifact's own label
+    /// is tested against the credential.
     fn view_coordinates(
         &self,
+        session: &Session,
         generation: &crate::Generation,
-        geometry: &SessionGeometry,
+        sides: &[SideVersions],
         view: &str,
     ) -> ViewCoordinates {
-        let mut hasher = Sha256::new();
-        hasher.update(b"mosaica-identity-key-v1");
-        hasher.update(geometry.auth_data_hash);
-        hasher.update(geometry.fragment.identity);
-        hasher.update((view.len() as u64).to_le_bytes());
-        hasher.update(view.as_bytes());
-        let identity_digest: [u8; 32] = hasher.finalize().into();
-        let mut identity_key = [0u8; 16];
-        identity_key.copy_from_slice(&identity_digest[..16]);
-
-        let mut hasher = Sha256::new();
-        hasher.update(b"mosaica-content-key-v1");
-        hasher.update(identity_key);
-        hasher.update(geometry.fragment.watermark.to_le_bytes());
-        hasher.update(generation.only_shard().overlay_version.to_le_bytes());
-        for (space, parts) in generation.layer_spaces.iter() {
-            hasher.update(space.raw().to_le_bytes());
-            hasher.update(parts.overlay_version.to_le_bytes());
-        }
-        hasher.update(self.boot_nonce.to_le_bytes());
-        let content_digest: [u8; 32] = hasher.finalize().into();
-        let mut content_key = [0u8; 16];
-        content_key.copy_from_slice(&content_digest[..16]);
-
-        ViewCoordinates {
-            identity_key,
-            content_key,
-        }
+        let spaces = generation
+            .layer_spaces
+            .iter()
+            .map(|(space, parts)| (space.raw(), parts.overlay_version));
+        coordinates_of(
+            session.auth_data_hash(),
+            view,
+            sides,
+            spaces,
+            self.boot_nonce,
+        )
     }
 
     /// The masked viewport query, batch form: [`Self::viewport_stream`] run into a collecting
@@ -231,7 +216,6 @@ impl Engine {
         let OpenView {
             served,
             mask,
-            geometry,
             stamp: answered_from,
             coordinates,
             render_scalars,
@@ -249,7 +233,7 @@ impl Engine {
 
         // Checkpoint before θ's anchor.
         check_cancelled(&req.cancel)?;
-        let theta = self.theta(&served, &generation, &geometry, &mask, &req, &mut probe);
+        let theta = self.theta(&served, &generation, &mask, &req, &mut probe);
         let params = SelectParams {
             k_min: self.config.k_min,
             // The client may ask for less than the overplot ceiling, never more. Applying it here
@@ -258,7 +242,7 @@ impl Engine {
             threshold: theta.threshold,
         };
 
-        let tiling = tile_ranges(tiles, &served.segments, &mut probe);
+        let tiling = tile_ranges(tiles, ViewSegments::of(&served), &mut probe);
 
         let (mask, region) =
             self.narrow_to_filters(&served, mask, &tiling, theta.v_total, &req, &mut probe)?;
@@ -266,8 +250,10 @@ impl Engine {
         // `point_rows` is a column projection only — the row set and tile split are unaffected —
         // so the gather reads exactly the render columns it names and no other. Under
         // `"highlight"` it reads none and builds no membership resolver: a client re-requesting
-        // only the highlight is not served the payload it already holds.
-        let highlight_only = req.point_rows == PointRows::Highlight && mask.has_highlight();
+        // only the highlight is not served the payload it already holds. Whether there is a
+        // highlight is the request's to say, whatever the viewer sees.
+        let highlighted = req.highlight.is_some();
+        let highlight_only = req.point_rows == PointRows::Highlight && highlighted;
         let render_scalars: Vec<DeclaredScalar> = match req.point_rows {
             PointRows::Highlight if highlight_only => Vec::new(),
             PointRows::Full | PointRows::Highlight => render_scalars,
@@ -299,7 +285,7 @@ impl Engine {
             stale,
             region,
             render_scalars: render_scalars.to_vec(),
-            highlighted: mask.has_highlight(),
+            highlighted,
         })
         .map_err(|SinkClosed| EngineError::Cancelled)?;
         // Reset the clock so the head's delivery is not charged to the stage that follows.
@@ -319,7 +305,7 @@ impl Engine {
             tile_counts,
             sub_cells,
             swept,
-        } = self.sweep_tiles(&served, &mask, &tiling, &params, &req, &mut probe)?;
+        } = self.sweep_tiles(&mask, &tiling, &params, &req, &mut probe)?;
 
         // The first flush: every count, before any point. `None`, not an empty slice, when the
         // underlay was not requested — the wire's frame-presence rule needs that distinction.
@@ -337,8 +323,8 @@ impl Engine {
         let names = artifacts::requested_layers(req.layers, &reachable);
         let taggings = self.taggings(&served, &names);
         let gathers = !highlight_only && swept.iter().any(|ts| !ts.rows.is_empty());
-        let membership = if gathers {
-            let points = tag::tagged_points(&served, &swept);
+        let membership = if gathers && !names.is_empty() {
+            let points = tag::tagged_points(&tiling.segments, &swept);
             let ctx = DependencyContext::new(&served, &mask, &reachable);
             let dependency_served = self.dependency_gate(&ctx);
             let walked = match self.walk_set(&names, &taggings) {
@@ -371,6 +357,7 @@ impl Engine {
                 if let Tagging::Labels(registered) = tagging {
                     let tags = self.tag_layer(
                         &served,
+                        &tiling.segments,
                         &mask,
                         &req,
                         &dependency_served,
@@ -387,18 +374,15 @@ impl Engine {
                 .filter(|(_, tagging)| matches!(tagging, Tagging::Walk))
                 .map(|(name, _)| name.as_str())
                 .collect();
-            let rows: Vec<u32> = points.iter().map(|p| p.row).collect();
             let mut columns = walked
                 .as_ref()
                 .map(|settled| {
-                    crate::membership_column::Resolved::new(
-                        rows.clone(),
-                        settled
-                            .served_layers
-                            .iter()
-                            .filter(|layer| walk_names.contains(&layer.name.as_str())),
-                    )
-                    .columns_for(&rows)
+                    let layers: Vec<&ServedLayer> = settled
+                        .served_layers
+                        .iter()
+                        .filter(|layer| walk_names.contains(&layer.name.as_str()))
+                        .collect();
+                    tag::membership_columns(&points, served.sides.len(), &layers)
                 })
                 .unwrap_or_default();
             // A layer tagging no point has no column, as a walked layer serving nothing has none.
@@ -419,8 +403,9 @@ impl Engine {
             &swept,
             &PointSchema {
                 render_scalars,
-                segments: &served.segments,
+                segments: &tiling.segments,
                 membership,
+                highlighted,
             },
             &mask,
             flush_bytes,
@@ -433,6 +418,54 @@ impl Engine {
         // `total_ns` is this call's wall clock, which under streaming includes the sink's sends —
         // consumer-paced time, not compute.
         Ok(probe.finish())
+    }
+}
+
+/// A view's identity and content keys over `sides`, ascending by shard.
+///
+/// The content key hashes each shard's fragment watermark, not `segments_version` — a merge or
+/// compaction can move `segments_version` without adding rows to the visible set, which is what
+/// would make an elision unsound — and the overlay versions of each shard and of every layer
+/// space in `spaces`, exactly rather than through a 64-bit hash, because a suppression or
+/// restoration moves what a client must not keep presenting as current.
+fn coordinates_of(
+    auth_data_hash: [u8; 32],
+    view: &str,
+    sides: &[SideVersions],
+    spaces: impl Iterator<Item = (u32, u64)>,
+    boot_nonce: u64,
+) -> ViewCoordinates {
+    let mut hasher = Sha256::new();
+    hasher.update(b"mosaica-identity-key-v1");
+    hasher.update(auth_data_hash);
+    for side in sides {
+        hasher.update(side.fragment_identity);
+    }
+    hasher.update((view.len() as u64).to_le_bytes());
+    hasher.update(view.as_bytes());
+    let identity_digest: [u8; 32] = hasher.finalize().into();
+    let mut identity_key = [0u8; 16];
+    identity_key.copy_from_slice(&identity_digest[..16]);
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"mosaica-content-key-v1");
+    hasher.update(identity_key);
+    for side in sides {
+        hasher.update(side.fragment_watermark.to_le_bytes());
+        hasher.update(side.overlay_version.to_le_bytes());
+    }
+    for (space, overlay_version) in spaces {
+        hasher.update(space.to_le_bytes());
+        hasher.update(overlay_version.to_le_bytes());
+    }
+    hasher.update(boot_nonce.to_le_bytes());
+    let content_digest: [u8; 32] = hasher.finalize().into();
+    let mut content_key = [0u8; 16];
+    content_key.copy_from_slice(&content_digest[..16]);
+
+    ViewCoordinates {
+        identity_key,
+        content_key,
     }
 }
 
@@ -458,5 +491,40 @@ impl ViewportSink for Sending<'_> {
     fn points(&mut self, chunk: PointColumns) -> SinkResult {
         let _sending = self.cache.sending(self.turn);
         self.sink.points(chunk)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keys(sides: &[SideVersions]) -> ViewCoordinates {
+        coordinates_of([9; 32], "s0", sides, [(0, 1)].into_iter(), 7)
+    }
+
+    /// Each shard's fragment moves the identity key, and each shard's watermark and overlay move
+    /// the content key.
+    #[test]
+    fn both_keys_cover_every_shard() {
+        let sides = [SideVersions::fixture(0), SideVersions::fixture(1)];
+        let held = keys(&sides);
+        for at in 0..sides.len() {
+            let mut moved = sides;
+            moved[at].fragment_identity[0] ^= 1;
+            let now = keys(&moved);
+            assert_ne!(now.identity_key, held.identity_key, "shard {at}'s fragment");
+            assert_ne!(now.content_key, held.content_key, "shard {at}'s fragment");
+            for change in [
+                |s: &mut SideVersions| s.fragment_watermark += 1,
+                |s: &mut SideVersions| s.overlay_version += 1,
+            ] {
+                let mut moved = sides;
+                change(&mut moved[at]);
+                let now = keys(&moved);
+                assert_eq!(now.identity_key, held.identity_key, "shard {at}");
+                assert_ne!(now.content_key, held.content_key, "shard {at}");
+            }
+        }
+        assert_eq!(keys(&sides).content_key, held.content_key);
     }
 }

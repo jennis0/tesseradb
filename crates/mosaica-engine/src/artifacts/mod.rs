@@ -3,8 +3,10 @@
 //!
 //! `rows*.rs` defines [`ArtifactRows`], one level's membership as row-space bitmaps plus the small
 //! per-ordinal facts (attachment, parent, declared size) a verdict needs. `projections*.rs` defines
-//! [`ArtifactProjections`], the cache of these forms keyed by view and level, and how a growth, a
-//! flush, a merge or a publication brings a held form forward rather than rebuilding it.
+//! [`ArtifactProjections`], the cache of these forms keyed by shard, view and level, and how a
+//! growth, a flush, a merge or a publication brings a held form forward rather than rebuilding it.
+//! Each point shard's form holds that shard's slice of every membership and generating set, and a
+//! slot for every ordinal of the level.
 //! `sources.rs` is where a predicate level's membership is resolved from when it has no stored one.
 //! `view.rs` defines [`ArtifactView`] and its `verdict`: the one predicate for whether an artifact
 //! is served to a principal, and the masked count beside it.
@@ -24,7 +26,7 @@ mod rows_build;
 mod rows_forward;
 mod sources;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 mod view;
 
 pub use projections::{
@@ -35,7 +37,7 @@ pub use rows::{
     ArtifactRecords, ArtifactRows, Candidacy, Containment, Matched, MembershipRows,
 };
 pub use sources::{AttributeSource, PredicateSource, SpatialSource};
-pub use view::{ArtifactVerdict, ArtifactView, LabelGate, Withheld};
+pub use view::{ArtifactSide, ArtifactVerdict, ArtifactView, LabelGate, Withheld};
 
 pub(crate) use rows::view_key;
 

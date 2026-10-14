@@ -314,11 +314,12 @@ def test_a_shard_size_of_zero_is_refused_by_the_check(db, checked):
     assert not checked(db).ok
 
 
-def test_a_first_commit_creating_more_items_than_the_size_is_refused(tmp_path):
+def test_a_first_commit_creating_more_items_than_the_size_builds_several_shards(tmp_path):
     db, _ = small(tmp_path / "db", size=1)
     try:
-        with pytest.raises(Refusal):
-            db.commit()
+        assert db.commit().ok
+        status = db.status()
+        assert (status["shards"], status["entity_id_high_water"]) == ({"size": 1}, 2)
     finally:
         db.close()
 

@@ -27,6 +27,7 @@ use mosaica_engine::viewport::segments_with_row_bases;
 use mosaica_engine::Engine;
 use mosaica_lifecycle::{UnallocatedRow, WalScalar};
 use mosaica_store::read::{ScalarSlice, SegmentData};
+use mosaica_types::ShardId;
 use parquet::arrow::ArrowWriter;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -225,7 +226,7 @@ fn every_table_of_the_pass_is_the_one_counted_row_by_row() {
 
     let session = engine.authorise(&subset_credential()).unwrap();
     let (generation, mask) = engine
-        .composed_mask(&session, "s0")
+        .composed_mask(&session, "s0", ShardId::ZERO)
         .expect("the mask composes");
     let view_data = &generation.bundle.only_shard().views["s0"];
     let segments = segments_with_row_bases("s0", view_data).expect("the segments resolve");

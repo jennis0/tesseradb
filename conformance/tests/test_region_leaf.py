@@ -36,7 +36,6 @@ from oracle.filters import NumericColumn, RegionColumn, evaluate
 from oracle.harness import (
     CLI_BIN,
     REPO_ROOT,
-    cli_build,
     spawn_server,
     stop_server,
     write_deployment,
@@ -50,6 +49,7 @@ from test_shape_membership import (
     VIEW_ID,
     WHOLE_MAP,
     build_bundle,
+    build_with_layers,
     config_toml,
     fixture_points,
     q,
@@ -116,13 +116,9 @@ def visible_sum(server, token: str) -> int:
 def region_server(tmp_path_factory):
     points = fixture_points()
     work = tmp_path_factory.mktemp("region-fixture")
-    build_bundle(work, points)
     # The gated layer joins the two the shape fixture declares: built beside it, over the same
     # sources, so the withheld-by-criterion case has an artifact to be withheld.
-    (work / "gated.toml").write_text(config_toml() + gated_layer_toml())
-    bundle = work / "bundle-gated"
-    deployment = write_deployment(work / "mosaica-gated.toml", bundle=bundle, schema=work / "gated.toml")
-    cli_build(deployment, bundle)
+    bundle = build_with_layers(work, "gated", gated_layer_toml())
     server, proc = spawn_server(
         bundle,
         tmp_path_factory.mktemp("region-server"),
@@ -151,6 +147,7 @@ def cover_server(tmp_path_factory):
     stop_server(proc)
 
 
+@pytest.mark.writes_nothing
 def test_a_lasso_counts_the_oracles_inside_exactly_under_three_principals(region_server):
     server, points = region_server
     column = region_column(points)
@@ -173,6 +170,7 @@ def test_a_lasso_counts_the_oracles_inside_exactly_under_three_principals(region
         assert verdict == "exact"
 
 
+@pytest.mark.writes_nothing
 def test_the_meta_publishes_the_two_bounds_and_no_region_header_without_a_leaf(region_server):
     server, _ = region_server
     token = server.authorise(["1", "2"])["token"]
@@ -192,6 +190,7 @@ def test_the_meta_publishes_the_two_bounds_and_no_region_header_without_a_leaf(r
     assert refused.status_code == 422 and "projections.md" in refused.text
 
 
+@pytest.mark.writes_nothing
 def test_past_the_cell_budget_the_answer_is_a_cover_and_the_verdict_is_the_shapes_alone(cover_server):
     server, points = cover_server
     column = region_column(points)
@@ -209,6 +208,7 @@ def test_past_the_cell_budget_the_answer_is_a_cover_and_the_verdict_is_the_shape
     assert len(verdicts) == 1, f"one verdict for every principal, not {verdicts}"
 
 
+@pytest.mark.writes_nothing
 def test_the_leaf_by_artifact_is_its_masked_count_and_composes_with_a_category(region_server):
     server, points = region_server
     for terms in PRINCIPALS:
@@ -241,6 +241,7 @@ def _members_of(points, artifact, terms) -> set[int]:
     return {p[0] for p in visible(points, terms) if artifact.key in containing(p[1], p[2])[artifact.layer]}
 
 
+@pytest.mark.writes_nothing
 def test_none_of_over_a_region_is_the_complement_within_the_visible_set(region_server):
     server, points = region_server
     leaf = {"region": {"polygon": LASSO}}
@@ -298,6 +299,7 @@ def test_an_unknown_a_suppressed_and_a_withheld_artifact_are_one_response(region
     assert after == before
 
 
+@pytest.mark.writes_nothing
 def test_region_is_a_reserved_column_name(tmp_path):
     points = fixture_points()
     work = tmp_path / "reserved"

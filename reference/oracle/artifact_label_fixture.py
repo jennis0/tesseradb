@@ -49,6 +49,7 @@ from .harness import (
     cli_build,
     ensure_cli_built,
     join_attribute_toml,
+    shards_toml,
     write_deployment,
 )
 
@@ -326,7 +327,7 @@ def build_bundle(work_dir: Path, *, with_layers: bool) -> Path:
     if with_layers:
         _write_teams(work_dir / "teams.parquet")
     config = work_dir / "labels.toml"
-    config.write_text(_config(with_layers))
+    config.write_text(_config(with_layers) + shards_toml(N_ITEMS))
     bundle = work_dir / "bundle"
     deployment = write_deployment(work_dir / "mosaica.toml", bundle=bundle, schema=config)
     cli_build(deployment, bundle)

@@ -34,7 +34,7 @@ use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource, ServingLayout,
 };
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, ShardId};
 
 const FLAT: &str = "clusters/flat";
 const TREED: &str = "clusters/treed";
@@ -745,7 +745,7 @@ fn a_fold_over_a_row_major_level_writes_its_column_and_changes_no_answer() {
     // artifact, each of which is a function of `membership ∩ M_auth` alone, so this assertion is
     // claiming the accumulated route produced them.
     let form = reopened
-        .held_artifact_form_for_test("s0", FLAT, 0)
+        .held_artifact_form_for_test(ShardId::ZERO, "s0", FLAT, 0)
         .expect("the sweep left the level's form held");
     assert!(
         !form.membership().rows_held(),
@@ -1049,7 +1049,7 @@ fn own_entity_retired(key: &str, retired: std::ops::Range<u64>, survivor: std::o
     );
 
     let form = engine
-        .held_artifact_form_for_test("s0", FLAT, 0)
+        .held_artifact_form_for_test(ShardId::ZERO, "s0", FLAT, 0)
         .expect("the level's form is held");
     let column = form.column().expect("the level is served row-major");
     let labels_at = |row: u32| {
@@ -1171,7 +1171,7 @@ fn a_column_the_level_has_moved_past_is_completed_rather_than_recomposed() {
         "and completed, so nothing is composed"
     );
     let form = reopened
-        .held_artifact_form_for_test("s0", FLAT, 0)
+        .held_artifact_form_for_test(ShardId::ZERO, "s0", FLAT, 0)
         .expect("the sweep left the level's form held");
     assert!(
         !form.membership().rows_held(),
@@ -1227,7 +1227,7 @@ fn a_level_that_holds_no_rows_takes_every_write_through_its_column() {
     let holds_no_rows = |engine: &Engine, what: &str| {
         for layer in [FLAT, TREED] {
             let form = engine
-                .held_artifact_form_for_test("s0", layer, 0)
+                .held_artifact_form_for_test(ShardId::ZERO, "s0", layer, 0)
                 .unwrap_or_else(|| panic!("{what}: {layer}'s form is held"));
             assert!(
                 !form.membership().rows_held(),
@@ -1377,7 +1377,7 @@ fn a_publication_that_costs_a_label_column_its_partition_recomposes_it_as_a_list
     assert_same(&sweep(&major), &sweep(&minor), "after a fold and a restart");
     assert!(
         !minor
-            .held_artifact_form_for_test("s0", FLAT, 0)
+            .held_artifact_form_for_test(ShardId::ZERO, "s0", FLAT, 0)
             .expect("the sweep left the level's form held")
             .membership()
             .rows_held(),
@@ -1397,7 +1397,7 @@ fn a_publication_that_costs_a_label_column_its_partition_recomposes_it_as_a_list
     }
     assert_same(&sweep(&major), &sweep(&minor), "after the overlap");
     let form = minor
-        .held_artifact_form_for_test("s0", FLAT, 0)
+        .held_artifact_form_for_test(ShardId::ZERO, "s0", FLAT, 0)
         .expect("the level's form is still held");
     assert!(
         !form.membership().rows_held(),
@@ -1430,7 +1430,7 @@ fn a_publication_that_costs_a_label_column_its_partition_recomposes_it_as_a_list
     }
     assert_same(&sweep(&major), &sweep(&minor), "after a second overlap");
     let form = minor
-        .held_artifact_form_for_test("s0", FLAT, 0)
+        .held_artifact_form_for_test(ShardId::ZERO, "s0", FLAT, 0)
         .expect("the level's form is still held");
     assert!(!form.membership().rows_held());
     assert_eq!(form.layout(), ServingLayout::RowMajorList);
@@ -1466,7 +1466,7 @@ fn a_growth_in_the_tick_that_recomposes_the_column_counts_each_row_once() {
     assert_same(&sweep(&major), &sweep(&minor), "after a fold and a restart");
     assert!(
         !minor
-            .held_artifact_form_for_test("s0", FLAT, 0)
+            .held_artifact_form_for_test(ShardId::ZERO, "s0", FLAT, 0)
             .expect("the sweep left the level's form held")
             .membership()
             .rows_held(),
@@ -1503,7 +1503,7 @@ fn a_growth_in_the_tick_that_recomposes_the_column_counts_each_row_once() {
         "after a growth and an overlap in one tick",
     );
     let form = minor
-        .held_artifact_form_for_test("s0", FLAT, 0)
+        .held_artifact_form_for_test(ShardId::ZERO, "s0", FLAT, 0)
         .expect("the level's form is still held");
     assert!(
         !form.membership().rows_held(),
@@ -1514,7 +1514,7 @@ fn a_growth_in_the_tick_that_recomposes_the_column_counts_each_row_once() {
     // up as a number rather than as a set: it must be what the twin's membership cardinality is.
     let column = form.column().expect("served from a column");
     let twin = major
-        .held_artifact_form_for_test("s0", FLAT, 0)
+        .held_artifact_form_for_test(ShardId::ZERO, "s0", FLAT, 0)
         .expect("the twin's form is held");
     for ordinal in 0..form.len() as u32 {
         assert_eq!(
@@ -1561,7 +1561,7 @@ fn sessions_with_one_term_set_share_the_counts_and_a_suppression_reaches_the_nex
     assert!(seen.values().any(|a| a.centroid.is_some() && a.bbox.is_some()));
     assert!(
         !engine
-            .held_artifact_form_for_test("s0", FLAT, 0)
+            .held_artifact_form_for_test(ShardId::ZERO, "s0", FLAT, 0)
             .expect("the level's form is held")
             .membership()
             .rows_held(),

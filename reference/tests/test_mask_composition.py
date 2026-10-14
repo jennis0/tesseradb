@@ -19,6 +19,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from oracle.identity import item_key
 from oracle.mask import ChangeSet, mask_of
 
 
@@ -39,20 +40,24 @@ PAIRS = [
 ]
 
 
-@pytest.fixture
-def pairs_path(tmp_path):
+def _write_pairs(path, rows):
     table = pa.table(
         {
-            "entity_id": pa.array([e for e, _ in PAIRS], type=pa.uint64()),
-            "term_id": pa.array([t for _, t in PAIRS], type=pa.uint32()),
+            "entity_id": pa.array([e for e, _ in rows], type=pa.uint64()),
+            "term_id": pa.array([t for _, t in rows], type=pa.uint32()),
         }
     )
-    path = tmp_path / "pairs.parquet"
     pq.write_table(table, path)
     return path
 
 
-def test_mask_of_is_the_union_over_the_granted_terms(pairs_path):
+@pytest.fixture
+def pairs(tmp_path):
+    """The relation as one shard numbered 0 holds it."""
+    return [(0, _write_pairs(tmp_path / "pairs.parquet", PAIRS))]
+
+
+def test_mask_of_is_the_union_over_the_granted_terms(pairs):
     """A viewer sees an entity granted **at least one** of its terms (§6.3's union, I1's base).
 
     Working, straight off the fixture table: term 10 alone reaches entities 1 and 4; term 11
@@ -62,13 +67,13 @@ def test_mask_of_is_the_union_over_the_granted_terms(pairs_path):
     Kills: a semi-join written as an intersection (the {1} answer); an `and` where the scan needs
     an `or`.
     """
-    assert mask_of({10}, pairs_path) == {1, 4}
-    assert mask_of({11}, pairs_path) == {1, 2}
-    assert mask_of({10, 11}, pairs_path) == {1, 2, 4}
-    assert mask_of({12}, pairs_path) == {3}
+    assert mask_of({10}, pairs) == {1, 4}
+    assert mask_of({11}, pairs) == {1, 2}
+    assert mask_of({10, 11}, pairs) == {1, 2, 4}
+    assert mask_of({12}, pairs) == {3}
 
 
-def test_mask_of_counts_a_repeated_grant_once(pairs_path):
+def test_mask_of_counts_a_repeated_grant_once(pairs):
     """The mask is a *set* of entities, so a duplicated pair adds nothing.
 
     Working: entity 4 holds two rows for term 10 and appears once in the result, which is what
@@ -77,16 +82,16 @@ def test_mask_of_counts_a_repeated_grant_once(pairs_path):
     Kills: a list or a multiset in place of the set — invisible to a membership test and visible
     to every count derived from it.
     """
-    assert mask_of({10}, pairs_path) == {1, 4}
-    assert len(mask_of({10}, pairs_path)) == 2
+    assert mask_of({10}, pairs) == {1, 4}
+    assert len(mask_of({10}, pairs)) == 2
 
 
-def test_an_unheld_term_grants_nothing(pairs_path):
+def test_an_unheld_term_grants_nothing(pairs):
     """A term no entity is granted names an empty operand, not an error and not everything."""
-    assert mask_of({99}, pairs_path) == set()
+    assert mask_of({99}, pairs) == set()
 
 
-def test_no_granted_terms_is_the_empty_mask(pairs_path):
+def test_no_granted_terms_is_the_empty_mask(pairs):
     """A session granted nothing sees nothing — fail-closed (I1; §4).
 
     The empty case is the one an implementation is most likely to get backwards, because "no
@@ -94,7 +99,17 @@ def test_no_granted_terms_is_the_empty_mask(pairs_path):
 
     Kills: returning every entity in the relation for an empty term set.
     """
-    assert mask_of(set(), pairs_path) == set()
+    assert mask_of(set(), pairs) == set()
+
+
+def test_each_shards_entities_are_keyed_by_their_shard(tmp_path, pairs):
+    """Shard 1 holding entities 1 and 3 under term 10 grants items of its own: entity 1 of shard 1
+    is not entity 1 of shard 0, so the union holds both.
+
+    Kills: reading a second shard's entity ids as the first's, which merges two items into one.
+    """
+    second = _write_pairs(tmp_path / "pairs-1.parquet", [(1, 10), (3, 10)])
+    assert mask_of({10}, [*pairs, (1, second)]) == {1, 4, item_key(1, 1), item_key(1, 3)}
 
 
 # -- ChangeSet: composition in entity space ------------------------------------------------------

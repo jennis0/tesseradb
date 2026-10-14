@@ -893,7 +893,8 @@ export class Control {
   /**
    * `PUT /control/shards`: declares the shard's size, `{size}`, the high water an ingest may not
    * take it past. `201` when the size changed, `200` when the shard already had it, `409` for a
-   * size below the shard's high water, `422` for a size of zero.
+   * size below the shard's high water or a bundle of several shards, which takes no write, `422`
+   * for a size of zero.
    */
   declareShards(body: object, options: WriteOptions = {}): Promise<Answer> {
     return this.sendJson('PUT', withQuery('/control/shards', waiting(options)), body, options);

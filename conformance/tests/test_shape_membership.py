@@ -43,6 +43,7 @@ from oracle.harness import (
     cli_build,
     ensure_cli_built,
     join_attribute_toml,
+    shards_toml,
     spawn_server,
     stop_server,
     write_deployment,
@@ -56,6 +57,8 @@ SEED = 20260829
 
 LATTICE_STEP = 1024
 N_RANDOM = 1500
+#: The lattice's points and the scatter's: what [`fixture_points`] builds.
+N_POINTS = (int(EXTENT_MAX) // LATTICE_STEP) ** 2 + N_RANDOM
 N_INGEST = 200
 WHOLE_MAP = [0.0, 0.0, EXTENT_MAX, EXTENT_MAX]
 
@@ -273,7 +276,7 @@ artifacts = [
 
   [layer.shape]
   kind = "bbox"
-"""
+""" + shards_toml(N_POINTS)
 
 
 def build_bundle(work: Path, points) -> Path:
@@ -304,6 +307,17 @@ def build_bundle(work: Path, points) -> Path:
     bundle = work / "bundle"
     deployment = write_deployment(work / "mosaica.toml", bundle=bundle, schema=config)
     cli_build(deployment, bundle)
+    return bundle
+
+
+def build_with_layers(work: Path, name: str, layers_toml: str) -> Path:
+    """[`build_bundle`] over [`fixture_points`], then a second bundle, `bundle-{name}`, from the
+    same sources with `layers_toml` declared after [`config_toml`]."""
+    build_bundle(work, fixture_points())
+    schema = work / f"{name}.toml"
+    schema.write_text(config_toml() + layers_toml)
+    bundle = work / f"bundle-{name}"
+    cli_build(write_deployment(work / f"mosaica-{name}.toml", bundle=bundle, schema=schema), bundle)
     return bundle
 
 

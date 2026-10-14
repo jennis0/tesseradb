@@ -52,6 +52,11 @@ pub enum EngineError {
     MultiPartitionView(String),
     /// A bundle-level file (`CURRENT`, a manifest) was not the shape this engine expects.
     Malformed(String),
+    /// The bundle holds several point shards and its write-ahead log holds records. Such a
+    /// bundle takes no write, so no record of the log can be its own.
+    SeveralShardsLogged {
+        shards: usize,
+    },
     /// `/v1/categories` was asked for a `visibility = "derived"` column whose per-`(column, code)`
     /// derived postings could not be read. Refused rather than served empty: an empty value set
     /// is what a principal who may see none of them is told, and serving it would let a blank
@@ -81,14 +86,15 @@ pub enum EngineError {
     /// A `/v1/viewport` request's `point_rows` named a column that is not one of the view's render
     /// columns. The detail names only what the caller sent and the view.
     PointRowsRefused(String),
-    /// This session's row projection was being built by a concurrent request, and this request
-    /// waited until the wait budget ran out. A racer parks on the build rather than being
+    /// This session's grant's row projection was being built by a concurrent request, and this
+    /// request waited until the wait budget ran out. A racer parks on the build rather than being
     /// refused, since refusing sheds no load while the work is already happening. Maps to 429
     /// `backpressure` with `Retry-After`.
     ProjectionBuilding,
-    /// This credential's mask fragment is being built by a concurrent `authorise` call. Same
-    /// non-blocking-waiters rule and 429 mapping as [`Self::ProjectionBuilding`]: this call does
-    /// not wait, and the caller is told to retry rather than handed a fail-closed 500.
+    /// This grant's mask fragment in a shard was being built by a concurrent request, and this
+    /// request waited until the wait budget ran out. Same 429 mapping as
+    /// [`Self::ProjectionBuilding`]: the caller is told to retry rather than handed a fail-closed
+    /// 500.
     FragmentBuilding,
     /// A level's masked counts were being built by a concurrent request, and this request waited
     /// past the bound on such a wait. Same 429 as [`Self::ProjectionBuilding`].
@@ -106,9 +112,9 @@ pub enum EngineError {
     /// one of its paging arguments. Every arm names only what the caller sent and published
     /// schema.
     RecordsRefused(crate::records::RecordsRefused),
-    /// A records cursor that did not open: altered, forged, or issued to another credential,
-    /// route, view, view incarnation or order. One variant with one message for every reason, so
-    /// the refusal does not say which binding failed.
+    /// A records cursor that did not open: altered, forged, of an earlier format, or issued to
+    /// another credential, route, view, view incarnation or order. One variant with one message
+    /// for every reason, so the refusal does not say which binding failed.
     CursorRefused,
     /// A `POST /v1/aggregate` request the caller can correct. Every arm names only what the
     /// caller sent and published schema.
@@ -147,6 +153,12 @@ impl std::fmt::Display for EngineError {
                  EngineError::MultiPartitionView's doc)"
             ),
             EngineError::Malformed(detail) => write!(f, "malformed: {detail}"),
+            EngineError::SeveralShardsLogged { shards } => write!(
+                f,
+                "this bundle holds {shards} point shards, which take no write, yet the \
+                 write-ahead log beside it holds records; open it with an empty log, or open the \
+                 log with the bundle it was written for"
+            ),
             EngineError::VocabularyVisibilityUnavailable { column, detail } => write!(
                 f,
                 "column '{column}' declares `visibility = \"derived\"`, and its per-viewer value \
@@ -175,7 +187,7 @@ impl std::fmt::Display for EngineError {
             ),
             EngineError::ProjectionBuilding => write!(
                 f,
-                "this session's row projection is being built by a concurrent request; retry \
+                "this grant's row projection is being built by a concurrent request; retry \
                  shortly"
             ),
             EngineError::FragmentBuilding => write!(

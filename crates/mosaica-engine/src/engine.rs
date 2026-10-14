@@ -11,7 +11,7 @@ use mosaica_store::manifest::{CurrentPointer, Declarations};
 use mosaica_store::read::open_bundle;
 use mosaica_store::vocabulary::Vocabularies;
 use mosaica_store::Bundle;
-use mosaica_types::IdentityKey;
+use mosaica_types::{IdentityKey, ShardId};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use rustc_hash::FxHashMap;
@@ -84,9 +84,9 @@ fn describe_pool_panic(payload: &(dyn std::any::Any + Send)) -> String {
 
 /// The request-serving engine: one immutable [`Generation`] behind an atomically-swappable
 /// pointer, plus the state that is genuinely process-lifetime — the compute pool, the
-/// `mosaica_id` key, the row-projection cache and the bundle root. The dictionary, postings
-/// reader and fragment cache live in [`Generation`] instead, since each changes on its own
-/// publication.
+/// `mosaica_id` key, the row-projection and fragment caches and the bundle root. The dictionary,
+/// postings reader and each shard's identity live in [`Generation`] instead, since each changes on
+/// its own publication.
 pub struct Engine {
     /// The live generation pointer, shared with [`WritePath`]: the write path publishes every
     /// swap through this exact pointer and read paths load it, so a copy elsewhere would hide a
@@ -94,6 +94,8 @@ pub struct Engine {
     pub(crate) generation: Arc<GenerationHandle>,
     /// The row-projection cache — see [`RowProjectionCache`]'s own doc.
     pub(crate) row_projection_cache: Arc<RowProjectionCache>,
+    /// Every shard's mask fragments, under one bound, each filed under its shard's identity.
+    pub(crate) fragments: Arc<FragmentCache>,
     /// A region leaf's decomposition per `(view, generation, canonical shape, stop depth)`. Not
     /// keyed on principal: rows inside the shape are tested under each request's own mask instead.
     pub(crate) region_cache: Arc<
@@ -182,15 +184,15 @@ pub struct Engine {
 }
 
 /// Every deny disposition the bundle's side-manifests carry, as the overlays a replay starts from:
-/// the shard's items, and each layer space's artifacts. `deny` is the current suppression set and
-/// `tombstones` names entities already deleted, unioned across every partition since the overlays
-/// are engine-wide. The two stay apart: a seed that unioned them would let an unsuppress retire a
-/// deletion.
+/// each shard's items, and each layer space's artifacts. `deny` is the current suppression set and
+/// `tombstones` names entities already deleted, unioned across every partition into the overlay
+/// of the shard or space that names them. The two stay apart: a seed that unioned them would let
+/// an unsuppress retire a deletion.
 ///
 /// A field whose bytes did not decode never reaches here — the reader refuses such a manifest
 /// rather than opening it — and the `Malformed` arm below is what keeps "did not decode" from
 /// becoming "nothing is denied" if it ever does.
-fn initial_deny_of(bundle: &Bundle) -> Result<Overlays> {
+fn initial_deny_of(bundle: &Bundle) -> Result<DenyOverlays> {
     // `(deleted, suppressed)` for one target, unioned across the partitions.
     type Sets = (croaring::Bitmap, croaring::Bitmap);
     let union = |key: &str,
@@ -210,21 +212,30 @@ fn initial_deny_of(bundle: &Bundle) -> Result<Overlays> {
         }
         Ok(())
     };
-    let mut items = Sets::default();
+    let mut shards = std::collections::BTreeMap::<ShardId, Sets>::new();
     let mut spaces = std::collections::BTreeMap::<mosaica_types::LayerSpace, Sets>::new();
     for (key, partition) in &bundle.partitions {
-        let record = &partition.only_shard().record;
-        union(key, &record.deny, &record.tombstones, &mut items)?;
+        for shard in &partition.shards {
+            let record = &shard.record;
+            let into = shards.entry(record.id).or_default();
+            union(key, &record.deny, &record.tombstones, into)?;
+        }
         for space in &partition.layer_spaces {
             let into = spaces.entry(space.space).or_default();
             union(key, &space.deny, &space.tombstones, into)?;
         }
     }
     let seeded = |(deleted, suppressed): Sets| Overlay::seeded(&deleted, &suppressed);
-    Ok(Overlays {
-        items: seeded(items),
+    Ok(DenyOverlays {
+        shards: shards.into_iter().map(|(shard, sets)| (shard, seeded(sets))).collect(),
         spaces: spaces.into_iter().map(|(space, sets)| (space, seeded(sets))).collect(),
     })
+}
+
+/// One overlay per shard and one per layer space holding a deny.
+struct DenyOverlays {
+    shards: std::collections::BTreeMap<ShardId, Overlay>,
+    spaces: std::collections::BTreeMap<mosaica_types::LayerSpace, Overlay>,
 }
 
 /// One of the side manifests' lists, concatenated: the partitions by key ascending, an item whose
@@ -319,24 +330,27 @@ fn shard_size_of(bundle: &Bundle) -> u64 {
         .shard_size
 }
 
-/// The freed entity ids the newest served side-manifest records, and the sets it holds back, each
-/// split by `tenancy`. "Newest" is the partition whose served manifest has the highest number,
-/// which is meaningful while a bundle has one partition, as every bundle has.
+/// The freed entity ids of `shard` the newest served side-manifest records, and the sets it holds
+/// back, each split by `tenancy`. "Newest" is the partition whose served manifest has the highest
+/// number, which is meaningful while a bundle has one partition, as every bundle has.
 ///
 /// Every publication records the allocator's sets, which shrink as ids are issued and grow only at
 /// a fold, so an older manifest can list an id issued since. A stepped-down partition serves a
 /// manifest older than one it wrote, so nothing is taken where one is: the ids stay unissued.
 fn freed_of(
     bundle: &Bundle,
+    shard: ShardId,
     tenancy: &mosaica_store::tenancy::TenancyIndex,
 ) -> (ByTenancy, Vec<(u64, ByTenancy)>) {
     if bundle.partitions.values().any(|p| p.stepped_down()) {
         return (ByTenancy::new(), Vec::new());
     }
-    let Some(newest) = newest_partition(bundle) else {
+    let Some(record) = newest_partition(bundle)
+        .and_then(|newest| newest.shard(shard))
+        .map(|data| &data.record)
+    else {
         return (ByTenancy::new(), Vec::new());
     };
-    let record = &newest.only_shard().record;
     let free = record
         .free_entities
         .entities()
@@ -357,17 +371,17 @@ struct ShardIndexes {
     edited: Arc<mosaica_store::edited::EditedIndex>,
 }
 
-/// Partition `phash`'s shard's indexes under `prefix_dir`: the build's filter columns plus every
-/// extent its record names, and the unique and edited-items runs it lists. `unfolded_attributes`
-/// are the columns whose base no fold has written yet.
+/// The indexes of partition `phash`'s shard `record` under `prefix_dir`: the build's filter
+/// columns plus every extent the record names, and the unique and edited-items runs it lists.
+/// `unfolded_attributes` are the columns whose base no fold has written yet.
 fn open_shard_indexes(
     prefix_dir: &Path,
     bundle: &Bundle,
     phash: &str,
+    record: &mosaica_store::manifest::ShardRecord,
     unfolded_attributes: &[String],
 ) -> std::result::Result<ShardIndexes, mosaica_store::StoreError> {
     let partition = &bundle.partitions[phash];
-    let record = &partition.only_shard().record;
     let layout = mosaica_store::ShardLayout::new(phash, record.id);
     let filter_columns = crate::filter::FilterColumns::open(
         prefix_dir,
@@ -455,15 +469,21 @@ pub(crate) struct PrefixReaders {
     /// The geometry version, seeded from the served filename and process-local thereafter: bumped
     /// only by a geometry publication, never by a manifest written for deny state alone.
     pub(crate) segments_version: u64,
-    pub(crate) watermark: u64,
     pub(crate) dict: Arc<Dict>,
-    pub(crate) postings: Arc<PostingsReader>,
-    pub(crate) delta_postings: Vec<Arc<DeltaTier>>,
+    /// Every point shard's readers, ascending by shard.
+    pub(crate) shards: Vec<ShardReaders>,
     /// The deployment's `mosaica_id` key. `IdentityKey::from_hex` rejects a degenerate key,
     /// refusing a bundle rather than blinding identities with a collapsed round schedule.
     pub(crate) identity_key: IdentityKey,
     /// The key records cursors are sealed under, derived from the same identity key.
     pub(crate) cursor_key: crate::records::CursorKey,
+}
+
+/// What [`PrefixReaders`] reads one point shard through.
+pub(crate) struct ShardReaders {
+    pub(crate) id: ShardId,
+    pub(crate) postings: Arc<PostingsReader>,
+    pub(crate) delta_postings: Vec<Arc<DeltaTier>>,
     /// The shard's tenancy index, which the first generation serves and the allocator's freed ids
     /// are split by.
     pub(crate) tenancy: Arc<mosaica_store::tenancy::TenancyIndex>,
@@ -498,41 +518,50 @@ impl PrefixReaders {
             .collect();
         let dict = Arc::new(Dict::load(&dict_paths).map_err(EngineError::Io)?);
 
-        let shard = partition.only_shard();
-        let layout = mosaica_store::ShardLayout::new(&phash, shard.record.id);
-        let postings = open_postings(&prefix_dir, layout).map_err(EngineError::Io)?;
+        let mut shards = Vec::with_capacity(partition.shards.len());
+        for shard in &partition.shards {
+            let layout = mosaica_store::ShardLayout::new(&phash, shard.record.id);
+            let postings = open_postings(&prefix_dir, layout).map_err(EngineError::Io)?;
 
-        // Every live delta postings tier, reopened; without this, every item flushed since the
-        // last compaction would silently vanish from every principal's map after a restart. Every
-        // path must be digest-named in one of the two `files` maps, since `open_bundle` verifies
-        // only what those maps carry.
-        let mut delta_postings: Vec<Arc<DeltaTier>> = Vec::new();
-        for rel in &shard.record.deltas {
-            if !partition.manifest.files.contains_key(rel)
-                && !bundle.manifest.files.contains_key(rel)
-            {
-                return Err(EngineError::Malformed(format!(
-                    "the side-manifest lists delta tier '{rel}' which no files map digests, so \
-                     opening it would serve unverified postings"
-                )));
+            // Every live delta postings tier, reopened; without this, every item flushed since the
+            // last compaction would silently vanish from every principal's map after a restart.
+            // Every path must be digest-named in one of the two `files` maps, since `open_bundle`
+            // verifies only what those maps carry.
+            let mut delta_postings: Vec<Arc<DeltaTier>> = Vec::new();
+            for rel in &shard.record.deltas {
+                if !partition.manifest.files.contains_key(rel)
+                    && !bundle.manifest.files.contains_key(rel)
+                {
+                    return Err(EngineError::Malformed(format!(
+                        "the side-manifest lists delta tier '{rel}' which no files map digests, \
+                         so opening it would serve unverified postings"
+                    )));
+                }
+                delta_postings.push(Arc::new(
+                    DeltaTier::open(&prefix_dir.join(rel)).map_err(EngineError::Io)?,
+                ));
             }
-            delta_postings.push(Arc::new(
-                DeltaTier::open(&prefix_dir.join(rel)).map_err(EngineError::Io)?,
-            ));
+            let tenancy = mosaica_store::read::open_tenancy_index(
+                &prefix_dir,
+                &shard.record,
+                mosaica_store::read::Digests {
+                    side: &partition.manifest.files,
+                    bundle: &bundle.manifest.files,
+                },
+            )
+            .map_err(EngineError::Store)?;
+            shards.push(ShardReaders {
+                id: shard.record.id,
+                postings,
+                delta_postings,
+                tenancy: Arc::new(tenancy),
+            });
         }
+        shards.sort_by_key(|shard| shard.id);
 
         let identity_key = IdentityKey::from_hex(&bundle.manifest.identity.key)
             .map_err(|e| EngineError::Malformed(format!("MANIFEST identity.key: {e}")))?;
         let cursor_key = crate::records::CursorKey::of(&bundle.manifest.identity.key);
-        let tenancy = mosaica_store::read::open_tenancy_index(
-            &prefix_dir,
-            &shard.record,
-            mosaica_store::read::Digests {
-                side: &partition.manifest.files,
-                bundle: &bundle.manifest.files,
-            },
-        )
-        .map_err(EngineError::Store)?;
 
         Ok(PrefixReaders {
             prefix,
@@ -540,21 +569,18 @@ impl PrefixReaders {
             phash,
             bundle_identity,
             segments_version: partition.segments_n,
-            watermark: shard.record.watermark,
             dict,
-            postings,
-            delta_postings,
+            shards,
             identity_key,
             cursor_key,
-            tenancy: Arc::new(tenancy),
         })
     }
 }
 
-/// What a reconstruction of the write path leaves behind: the first generation's overlay and
+/// What a reconstruction of the write path leaves behind: the first generation's overlays and
 /// buffer, the write-side state the engine keeps, and the category bindings replay minted into.
 struct ReconstructedWrites {
-    overlay: Overlays,
+    deny: DenyOverlays,
     buffer: mosaica_lifecycle::IngestBuffer,
     state: crate::write::WritePathState,
     vocabularies: Vocabularies,
@@ -570,9 +596,27 @@ fn reconstruct_writes(
     readers: &PrefixReaders,
     side: SideDeclarations,
 ) -> Result<ReconstructedWrites> {
-    let initial_deny = initial_deny_of(bundle)?;
+    let DenyOverlays {
+        shards: mut shard_deny,
+        spaces: space_deny,
+    } = initial_deny_of(bundle)?;
     let mut vocabularies = initial_vocabularies_of(bundle)?;
-    let (free, held) = freed_of(bundle, &readers.tenancy);
+    let served = &bundle.partitions[&readers.phash].shards;
+    let seeds: Vec<crate::write::ShardSeed> = readers
+        .shards
+        .iter()
+        .zip(served)
+        .map(|(shard, data)| {
+            let (free, held) = freed_of(bundle, shard.id, &shard.tenancy);
+            crate::write::ShardSeed {
+                id: shard.id,
+                high_water: data.record.high_water,
+                free,
+                held,
+            }
+        })
+        .collect();
+    let write_shard = served[0].record.id;
     // One partition today, so this concatenation is the whole registry; at more than one it is
     // the union.
     let manifest_layers: Vec<mosaica_types::layer::RegisteredLayer> =
@@ -602,22 +646,26 @@ fn reconstruct_writes(
         })
         .collect();
     // The union across partitions: an artifact's membership belongs to the deployment, not
-    // whichever partition's manifest happens to name the extent.
-    let manifest_membership_extents: Vec<mosaica_store::manifest::MembershipExtent> =
+    // whichever partition's manifest happens to name the extent. Each shard holds its own slice.
+    let manifest_membership_extents: Vec<(ShardId, mosaica_store::manifest::MembershipExtent)> =
         across_partitions(bundle, |p| {
-            p.only_shard().record.membership_extents.iter().cloned()
+            p.shards.iter().flat_map(|shard| {
+                let id = shard.record.id;
+                shard.record.membership_extents.iter().map(move |m| (id, m.clone()))
+            })
         });
     let manifest_layer_spaces: Vec<mosaica_store::manifest::LayerSpaceRecord> =
         across_partitions(bundle, |p| p.layer_spaces.iter().cloned());
-    let record = &bundle.only_shard().record;
+    let initial_deny = Overlays {
+        items: shard_deny.remove(&write_shard).unwrap_or_default(),
+        spaces: space_deny,
+    };
+    let write_views = &served[0].views;
     let (overlay, buffer, state) = WritePath::reconstruct(
         wal_path,
         crate::write::ManifestSeed {
-            shard: record.id,
-            high_water: record.high_water,
+            shards: seeds,
             size: shard_size_of(bundle),
-            free,
-            held,
             layers: &manifest_layers,
             next_layer_space,
             registry_version: across_partitions(bundle, |p| [p.manifest.layer_registry_version])
@@ -651,15 +699,17 @@ fn reconstruct_writes(
         // several views at once, and a predicate over the entity alone would discard a
         // pending row of a second view already flushed for the first.
         |entity, view| {
-            bundle
-                .only_shard()
-                .views
+            write_views
                 .get(view)
                 .is_some_and(|data| data.row_space.row_of(entity).is_some())
         },
     )?;
+    shard_deny.insert(write_shard, overlay.items);
     Ok(ReconstructedWrites {
-        overlay,
+        deny: DenyOverlays {
+            shards: shard_deny,
+            spaces: overlay.spaces,
+        },
         buffer,
         state,
         vocabularies,
@@ -803,15 +853,14 @@ fn first_generation(
     bundle: &Arc<Bundle>,
     state: &crate::write::WritePathState,
     vocabularies: Vocabularies,
-    overlays: Overlays,
+    deny: DenyOverlays,
     buffer: mosaica_lifecycle::IngestBuffer,
-    fragments: Arc<FragmentCache>,
     pool: &rayon::ThreadPool,
 ) -> Result<Arc<GenerationHandle>> {
-    let Overlays {
-        items: overlay,
+    let DenyOverlays {
+        shards: mut shard_deny,
         spaces,
-    } = overlays;
+    } = deny;
     let contents = crate::artifact_content::open_space_contents(&readers.prefix_dir, bundle)
         .map_err(|e| EngineError::Malformed(e.to_string()))?;
     let mut layer_spaces = crate::LayerSpaces::new();
@@ -821,15 +870,45 @@ fn first_generation(
     for (space, content) in contents {
         layer_spaces.entry(space).or_default().content = Some(content);
     }
+
     // The filter columns are carried forward by every generation successor: a restart composes
     // what the flushes before it published, not the build's coverage alone.
-    let indexes = open_shard_indexes(
-        &readers.prefix_dir,
-        bundle,
-        &readers.phash,
-        &state.attributes.entity_names(),
-    )
-    .map_err(EngineError::Store)?;
+    let unfolded_attributes = state.attributes.entity_names();
+    // The write shard alone holds a buffer and edits no run holds yet.
+    let written = std::iter::once((buffer, state.edited_live.clone()))
+        .chain(std::iter::repeat_with(Default::default));
+    let served = &bundle.partitions[&readers.phash].shards;
+    let mut shards = Vec::with_capacity(readers.shards.len());
+    for ((shard, data), (buffer, edited_live)) in readers.shards.iter().zip(served).zip(written) {
+        let record = &data.record;
+        let indexes = open_shard_indexes(
+            &readers.prefix_dir,
+            bundle,
+            &readers.phash,
+            record,
+            &unfolded_attributes,
+        )
+        .map_err(EngineError::Store)?;
+        let overlay = shard_deny.remove(&shard.id).unwrap_or_default();
+        shards.push((
+            shard.id,
+            crate::ShardParts {
+                watermark: record.watermark,
+                postings: Arc::clone(&shard.postings),
+                identity: crate::shard_identity(&readers.bundle_identity, shard.id),
+                unique: indexes.unique,
+                unique_live: Arc::new(crate::unique::UniqueLive::derive(&bundle.manifest, &buffer)),
+                edited: indexes.edited,
+                edited_live: Arc::new(edited_live),
+                tenancy: Arc::clone(&shard.tenancy),
+                delta_postings: shard.delta_postings.clone(),
+                overlay_version: 0,
+                overlay: Arc::new(overlay),
+                buffer: Arc::new(buffer),
+                filter_columns: indexes.filter_columns,
+            },
+        ));
+    }
 
     // Built synchronously at open, not lazily, so a first keystroke never pays the sort as a
     // cold start; only for the vocabularies a declared category column draws on.
@@ -870,24 +949,7 @@ fn first_generation(
             vocabularies: Arc::new(vocabularies),
             layer_spaces: Arc::new(layer_spaces),
         },
-        vec![(
-            bundle.only_shard().record.id,
-            crate::ShardParts {
-                watermark: readers.watermark,
-                postings: Arc::clone(&readers.postings),
-                fragments,
-                unique: indexes.unique,
-                unique_live: Arc::new(crate::unique::UniqueLive::derive(&bundle.manifest, &buffer)),
-                edited: indexes.edited,
-                edited_live: Arc::new(state.edited_live.clone()),
-                tenancy: Arc::clone(&readers.tenancy),
-                delta_postings: readers.delta_postings.clone(),
-                overlay_version: 0,
-                overlay: Arc::new(overlay),
-                buffer: Arc::new(buffer),
-                filter_columns: indexes.filter_columns,
-            },
-        )],
+        shards,
     )))))
 }
 
@@ -908,14 +970,17 @@ fn adopt_derived_structures(
     // again keeps its predecessor's structures listed until a fold, under the same view id and
     // level version, and they address rows the new view does not have.
     let incarnation_of = |view: &str| bundle.manifest.incarnation_of(view);
-    let manifest_derived_extents: Vec<mosaica_store::manifest::DerivedExtent> =
-        across_partitions(bundle, |p| p.derived_extents().cloned())
+    let manifest_derived_extents: Vec<(ShardId, mosaica_store::manifest::DerivedExtent)> =
+        across_partitions(bundle, |p| {
+            p.derived_by_shard()
+                .map(|(shard, extent)| (shard, extent.clone()))
+        })
         .into_iter()
-        .filter(|e| {
+        .filter(|(_, e)| {
             crate::filter::carries_live_view(&incarnation_of, e.view.as_deref(), e.incarnation)
         })
         // A dropped layer's structures stay listed until a fold.
-        .filter(|e| state.registry.in_space(e.space).is_some())
+        .filter(|(_, e)| state.registry.in_space(e.space).is_some())
         .collect();
 
     // The fold's containment partitions, adopted where their coordinate still holds; a
@@ -999,17 +1064,13 @@ impl Engine {
 
         let readers = PrefixReaders::open(bundle_root, &bundle)?;
         let ReconstructedWrites {
-            overlay,
+            deny,
             buffer,
             mut state,
             vocabularies,
         } = reconstruct_writes(wal_path, &bundle, &readers, side)?;
 
-        let fragment_cache = Arc::new(FragmentCache::new(
-            cache_dir,
-            readers.bundle_identity,
-            authorisation_rule_hash(),
-        ));
+        let fragments = Arc::new(FragmentCache::new(cache_dir, authorisation_rule_hash()));
         // Built now, not lazily on first request: a pool that cannot be built is a fact about this
         // engine's open-time health, not one to discover on whichever request happens to be first.
         let pool = Arc::new(
@@ -1041,9 +1102,8 @@ impl Engine {
             &bundle,
             &state,
             vocabularies,
-            overlay,
+            deny,
             buffer,
-            fragment_cache,
             &pool,
         )?;
         let (artifact_projections, shapes) =
@@ -1071,6 +1131,7 @@ impl Engine {
             generation: Arc::clone(&generation),
             // Unbounded until `set_cache_bounds` is called.
             row_projection_cache: Arc::clone(&row_projection_cache),
+            fragments,
             region_cache: Arc::clone(&region_cache),
             max_region_cells: AtomicU64::new(crate::region::DEFAULT_MAX_REGION_CELLS as u64),
             artifact_projections: Arc::clone(&artifact_projections),
@@ -1102,10 +1163,18 @@ impl Engine {
             stage,
         };
 
-        // Only the bundle being served can ever read its figures back.
-        engine
-            .figures
-            .sweep(engine.generation.load().only_shard().bundle_identity());
+        // Only the shards being served can ever read their figures and fragments back.
+        let live: Vec<[u8; 32]> = engine
+            .generation
+            .load()
+            .shards()
+            .map(|shard| shard.identity)
+            .collect();
+        engine.figures.sweep(live.iter().copied());
+        let fragments = Arc::clone(&engine.fragments);
+        engine.pool.spawn(move || {
+            fragments.sweep(&live);
+        });
 
         // Every level's row form, built before this engine serves a request: left lazy, the cost
         // lands on whichever request of a fresh process arrives first.
@@ -1123,7 +1192,11 @@ impl Engine {
         engine.shapes.clear_staged();
         // The rows the log held and no flush wrote, which the occupancy bound and the row trigger
         // count from the first request, not from the first write.
-        let buffered = engine.generation().only_shard().buffer.len();
+        let buffered = engine
+            .generation()
+            .shards()
+            .map(|shard| shard.buffer.len())
+            .sum();
         engine
             .write
             .health()
@@ -1142,9 +1215,8 @@ impl Engine {
     /// read it see every real security-state change and no false ones.
     ///
     /// Swaps everything a [`GeometryPublication`] names, plus, with a `PrefixRotation`, the base
-    /// postings, bundle identity and fragment cache; without one those three
-    /// carry forward unchanged. Runs on the write executor, so there is one publisher, and blocks
-    /// until the swap is done.
+    /// postings and the shard's identity; without one those carry forward unchanged. Runs on the
+    /// write executor, so there is one publisher, and blocks until the swap is done.
     pub fn publish_geometry(
         &self,
         publication: GeometryPublication,
@@ -1204,6 +1276,7 @@ impl Engine {
             merge_policy: merge_policy(&self.config),
             artifact_projections: Arc::clone(&self.artifact_projections),
             figures: Arc::clone(&self.figures),
+            fragments: Arc::clone(&self.fragments),
             region_cache: Arc::clone(&self.region_cache),
             shapes: Arc::clone(&self.shapes),
             lineages: Arc::clone(&self.lineages),
@@ -1213,6 +1286,7 @@ impl Engine {
             switches: Arc::clone(&self.switches),
             refresh: crate::refresh::RefreshDeps {
                 cache: Arc::clone(&self.row_projection_cache),
+                fragments: Arc::clone(&self.fragments),
                 pool: Arc::clone(&self.pool),
                 in_flight: Arc::clone(&self.refresh_in_flight),
                 counters: Arc::clone(&self.counters),
@@ -1254,7 +1328,6 @@ impl Engine {
 pub(crate) fn open_rotation(
     bundle_root: &Path,
     prefix: &str,
-    live_fragments: &FragmentCache,
     retired: croaring::Bitmap,
 ) -> std::result::Result<(Arc<Bundle>, crate::geometry::PrefixRotation), PublishGeometryError> {
     let current = read_current(bundle_root)
@@ -1302,11 +1375,9 @@ pub(crate) fn open_rotation(
         })?;
 
     let record = &partition.only_shard().record;
+    let identity = crate::shard_identity(&bundle_identity, record.id);
     let postings = open_postings(&prefix_dir, mosaica_store::ShardLayout::new(&phash, record.id))
         .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;
-    // Rotated from the live one, never freshly constructed: `FragmentCache::rotate` carries the
-    // configured byte bound across, and `FragmentCache::new` here would silently unbound it.
-    let fragments = Arc::new(live_fragments.rotate(bundle_identity));
 
     // Opened over the new prefix, from its own manifests: cloning the live generation's would
     // serve the superseded prefix's pre-fold files, missing the blanking and the folded extents. A
@@ -1315,7 +1386,7 @@ pub(crate) fn open_rotation(
         filter_columns,
         unique,
         edited,
-    } = open_shard_indexes(&prefix_dir, &bundle, &phash, &unfolded_attributes)
+    } = open_shard_indexes(&prefix_dir, &bundle, &phash, record, &unfolded_attributes)
         .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;
     let space_contents = crate::artifact_content::open_space_contents(&prefix_dir, &bundle)
         .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;
@@ -1335,7 +1406,7 @@ pub(crate) fn open_rotation(
         bundle,
         crate::geometry::PrefixRotation {
             postings,
-            fragments,
+            identity,
             filter_columns,
             unique,
             edited,
@@ -1354,7 +1425,7 @@ fn read_current(root: &Path) -> Result<CurrentPointer> {
         .map_err(|e| EngineError::Malformed(format!("CURRENT is not valid JSON: {e}")))
 }
 
-/// The second half of the fragment cache's key beside the bundle identity: the rule that turns a
+/// The second half of the fragment cache's key beside the shard's identity: the rule that turns a
 /// credential's terms into the set of index keys a fragment unions. A change to that rule changes
 /// this text, so a cache directory kept across the change misses rather than serving a fragment
 /// built under the old rule.

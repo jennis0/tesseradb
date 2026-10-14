@@ -376,7 +376,13 @@ pub(crate) struct RowSource<'a> {
     /// Which ordinals this view holds a row for.
     pub(crate) present: &'a [u64],
     pub(crate) entity_of_ordinal: &'a [u32],
-    /// Entity space's bound — the permutation's, not the view's population.
+    /// The ordinals whose entities can be in the shard: those of the signature batches its
+    /// entities were assigned in.
+    pub(crate) ordinals: std::ops::Range<usize>,
+    /// The shard's first entity: its rows are the items at `[entity_lo, entity_lo + n)`, each at
+    /// its entity less this.
+    pub(crate) entity_lo: u32,
+    /// The shard's entity space's bound — the permutation's, not the view's population.
     pub(crate) n: u64,
     pub(crate) identity_key: &'a IdentityKey,
     pub(crate) shard: ShardId,
@@ -415,9 +421,16 @@ fn bit_get(bits: &[u64], i: usize) -> bool {
     bits[i / 64] & (1u64 << (i % 64)) != 0
 }
 
-/// Walk the view's present ordinals, handing each one its Morton code, residual and entity.
+/// Walk the view's present ordinals in the shard, handing each one its Morton code, residual and
+/// entity in the shard.
 fn walk(job: &RowSource<'_>, mut each: impl FnMut(u32, u32, u32)) {
-    for (ordinal, &entity) in job.entity_of_ordinal.iter().enumerate() {
+    for ordinal in job.ordinals.clone() {
+        let Some(entity) = job.entity_of_ordinal[ordinal]
+            .checked_sub(job.entity_lo)
+            .filter(|&entity| u64::from(entity) < job.n)
+        else {
+            continue;
+        };
         if !bit_get(job.present, ordinal) {
             continue;
         }

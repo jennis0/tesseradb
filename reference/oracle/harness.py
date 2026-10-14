@@ -14,6 +14,7 @@ build is via the CLI subprocess, same as before).
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import hashlib
 import json
@@ -85,9 +86,64 @@ def builder_identity() -> str:
     return _binary_digest()
 
 
+# ---------------------------------------------------------------------------------------------
+# The suite's two modes
+# ---------------------------------------------------------------------------------------------
+
+#: Names the mode a run builds its fixtures in: `one`, the default, builds each corpus at the
+#: default shard size, so as one shard; `many` builds each past a `[shards] size` that splits it.
+SHARDS_ENV = "MOSAICA_CONFORMANCE_SHARDS"
+
+#: The shards a corpus is split into in the many-shard mode where its fixture names no size.
+MANY_SHARDS = 4
+
+
+@functools.cache
+def _run_mode() -> bool:
+    mode = os.environ.get(SHARDS_ENV, "one")
+    if mode not in ("one", "many"):
+        raise ValueError(f"{SHARDS_ENV}={mode!r} names no mode; set it to `one` or `many`")
+    return mode == "many"
+
+
+#: The mode [`shards_mode`] sets for the fixtures built inside it, or None for the run's.
+_mode_override: bool | None = None
+
+
+def many_shards() -> bool:
+    """Whether fixtures built now are built over several shards: the run's mode ([`SHARDS_ENV`]),
+    or the one [`shards_mode`] sets."""
+    return _run_mode() if _mode_override is None else _mode_override
+
+
+@contextlib.contextmanager
+def shards_mode(many: bool):
+    """Build the fixtures inside in the many-shard mode if `many`, else in the one-shard mode,
+    whatever the run's mode is: for a test that compares the two."""
+    global _mode_override
+    before = _mode_override
+    _mode_override = many
+    try:
+        yield
+    finally:
+        _mode_override = before
+
+
+def shards_toml(items: int, *, size: int | None = None) -> str:
+    """The `[shards]` table a fixture's declaration ends with: nothing in the one-shard mode, and
+    in the many-shard mode `size`, or a size that splits `items` built items into [`MANY_SHARDS`]
+    shards."""
+    if not many_shards():
+        return ""
+    if size is None:
+        size = max(1, -(-items // MANY_SHARDS))
+    return f"\n[shards]\nsize = {size}\n"
+
+
 def fixture_dir(name: str) -> Path:
     """Where the fixture `name` lives between runs: `/tmp/mosaica-<name>-<digest>`, with the first
-    12 hex digits of [`builder_identity`].
+    12 hex digits of [`builder_identity`]. The many-shard mode's fixtures are named `<name>-many`,
+    so the two modes never share a bundle.
 
     The binary includes the commit it was built from, so each commit has its own directory, and a
     rebuild in one checkout never replaces a bundle another checkout is reading. Checkouts with
@@ -96,6 +152,8 @@ def fixture_dir(name: str) -> Path:
     Each call marks this directory as used, and deletes the directories of `name` for other
     binaries that have gone unused for 7 days. Only names of exactly that form are deleted.
     """
+    if many_shards():
+        name = f"{name}-many"
     path = FIXTURE_ROOT / f"mosaica-{name}-{builder_identity()[:12]}"
     keyed = re.compile(rf"mosaica-{re.escape(name)}-[0-9a-f]{{12}}")
     idle_since = time.time() - FIXTURE_MAX_IDLE_SECONDS

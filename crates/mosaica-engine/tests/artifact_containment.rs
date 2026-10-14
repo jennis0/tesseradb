@@ -28,16 +28,19 @@ use rustc_hash::FxHashSet;
 use tempfile::TempDir;
 
 use mosaica_authz::{write_postings, FragmentCache, PostingsReader};
-use mosaica_engine::artifacts::{ArtifactProjections, ArtifactRows, Containment};
+use mosaica_engine::artifacts::{
+    ArtifactProjections, ArtifactRows, ArtifactSide, ArtifactVerdict, ArtifactView, Containment,
+    LabelGate, Withheld,
+};
 use mosaica_engine::compose::{compose, EffectiveMask};
 use mosaica_engine::projection::RowProjection;
-use mosaica_engine::containment::{ContainmentPartition, PartitionSource};
+use mosaica_engine::containment::{ContainmentAnswers, ContainmentPartition, PartitionSource};
 use mosaica_engine::denied_rows_of;
 use mosaica_lifecycle::membership::{ArtifactRecord, ArtifactStore, ContentSet};
 use mosaica_lifecycle::{ChangeOp, IngestBuffer, Overlay};
 use mosaica_store::write::write_permutation;
 use mosaica_store::{Permutation, RowSpace};
-use mosaica_types::{EntityId, TermId};
+use mosaica_types::{EntityId, ShardId, TermId};
 
 const UNIVERSE: u32 = 4_000;
 const TERMS: u32 = 40;
@@ -205,6 +208,7 @@ fn build_fixture_n(artifacts: u32) -> Fixture {
                 view: None,
                 incarnation: 0,
                 members: members.into(),
+                declares_members: None,
                 contents: sets
                     .into_iter()
                     .map(|set| ContentSet {
@@ -256,9 +260,10 @@ impl Fixture {
         let satisfied: FxHashSet<TermId> = granted.iter().map(|t| TermId::new(*t)).collect();
         let mut sorted: Vec<TermId> = satisfied.iter().copied().collect();
         sorted.sort_unstable_by_key(|t| t.raw());
-        let cache = FragmentCache::new(&self._temp.path().join("frag"), [1u8; 32], [2u8; 32]);
+        let cache = FragmentCache::new(&self._temp.path().join("frag"), [2u8; 32]);
         let fragment = cache
             .get_or_build(
+                [1u8; 32],
                 &sorted,
                 &self.postings,
                 std::slice::from_ref(&self.tier),
@@ -322,6 +327,65 @@ impl Fixture {
     }
 }
 
+/// What the one predicate serves of `rows`' artifact at `ordinal`, as a containment answer, to a
+/// viewer seeing `mask` with `denied` denied, and the partition's `answers` where given.
+fn served(
+    rows: &ArtifactRows,
+    ordinal: u32,
+    mask: &EffectiveMask,
+    denied: &Bitmap,
+    answers: Option<ContainmentAnswers<'_>>,
+) -> Containment {
+    let declaration = held_rows_declaration(LAYER);
+    let view = ArtifactView {
+        declaration: &declaration,
+        overlay: &Overlay::new(),
+        labels: LabelGate::every_term(true),
+        layer_reachable: true,
+        dependency_served: &|_| true,
+        sides: vec![ArtifactSide {
+            rows,
+            mask: Some(mask),
+            denied,
+            containment: answers,
+            counts: None,
+        }],
+    };
+    match view.verdict(EntityId::new(999), ordinal) {
+        ArtifactVerdict::Serve { rank: Some(rank), .. } => Containment::Satisfied(rank),
+        ArtifactVerdict::Absent(Withheld::Containment) => Containment::Unsatisfied,
+        other => panic!("ordinal {ordinal} was answered before containment: {other:?}"),
+    }
+}
+
+/// The level's form in shard 0 of `prefix` for `view`, built from `store` over the fixture's row
+/// space with `source`'s partition.
+fn form(
+    projections: &ArtifactProjections,
+    fx: &Fixture,
+    prefix: &str,
+    view: &str,
+    store: &ArtifactStore,
+    source: &PartitionSource<'_>,
+) -> Arc<ArtifactRows> {
+    let (rows, _) = projections.get_or_build(
+        prefix,
+        ShardId::ZERO,
+        view,
+        LAYER,
+        0,
+        store,
+        store,
+        &fx.row_space,
+        Some(source),
+        mosaica_types::layer::ServingLayout::ArtifactMajor,
+        None,
+        0,
+        &held_rows_declaration(LAYER),
+    );
+    rows
+}
+
 /// Six principals of very different breadths, including one holding nothing and one holding
 /// everything — the grid the cost inversion is measured over, used here for correctness.
 fn principals() -> Vec<Vec<u32>> {
@@ -379,9 +443,10 @@ fn differential(fx: &Fixture) -> bool {
         overlay.apply(entity, ChangeOp::Unsuppress);
     }
 
-    let mut served = 0usize;
+    let mut contained = 0usize;
     let mut declined = 0usize;
     let mut settled_eagerly = None;
+    let (nothing, _, _) = fx.mask(&[], &Overlay::new());
     for overlay in [&Overlay::new(), &overlay] {
         for granted in principals() {
             let (mask, satisfied, denied) = fx.mask(&granted, overlay);
@@ -395,27 +460,29 @@ fn differential(fx: &Fixture) -> bool {
                     "the masked-count route disagrees with the fixture's own answer at \
                      ordinal {ordinal} for terms {granted:?}"
                 );
-                let via = partitioned.satisfied_rank_via(ordinal, &answers, &denied, true);
                 if fx.reaches_flushed(ordinal) {
                     // **The partition declines and the caller falls back.** Its expression was
                     // composed without the flushed member's terms, so an answer from it would be
                     // `Unsatisfied` for every principal — which is exactly issue #150.
-                    assert_eq!(
-                        via, None,
+                    assert!(
+                        !partitioned.partition_answers(ordinal, &answers),
                         "an ordinal whose generating set reaches above the base rows was answered \
                          from the partition at ordinal {ordinal} for terms {granted:?}"
                     );
                     declined += 1;
                 } else {
+                    // Over a mask holding nothing, so the answer is the partition's alone.
+                    assert!(partitioned.partition_answers(ordinal, &answers));
+                    let answers = Some(partitioned.partition().unwrap().answers(&satisfied));
                     assert_eq!(
-                        via,
-                        Some(expected),
+                        served(&partitioned, ordinal, &nothing, &denied, answers),
+                        expected,
                         "the containment partition disagrees at ordinal {ordinal} for terms \
                          {granted:?}"
                     );
                 }
                 if matches!(expected, Containment::Satisfied(_)) {
-                    served += 1;
+                    contained += 1;
                 }
             }
         }
@@ -426,9 +493,9 @@ fn differential(fx: &Fixture) -> bool {
     );
     // A run where nothing was ever contained would agree trivially.
     assert!(
-        served > fx.artifacts as usize,
-        "only {served} contained answers across the whole grid — the fixture is not exercising \
-         the satisfied path"
+        contained > fx.artifacts as usize,
+        "only {contained} contained answers across the whole grid — the fixture is not \
+         exercising the satisfied path"
     );
     settled_eagerly.expect("the grid ran at least one principal")
 }
@@ -563,12 +630,13 @@ fn an_unsuppress_does_not_restore_a_deleted_member_through_the_partition() {
     });
     let member = EntityId::new(u64::from(fx.published[ordinal as usize][0][0]));
 
+    // Over a mask holding nothing, so the answer is the partition's alone.
+    let (nothing, _, _) = fx.mask(&[], &Overlay::new());
     let contained_via = |overlay: &Overlay| {
         let (_mask, satisfied, denied) = fx.mask(&granted, overlay);
         let answers = partitioned.partition().unwrap().answers(&satisfied);
-        partitioned
-            .satisfied_rank_via(ordinal, &answers, &denied, true)
-            .expect("the partition covers this ordinal")
+        assert!(partitioned.partition_answers(ordinal, &answers));
+        served(&partitioned, ordinal, &nothing, &denied, Some(answers))
     };
 
     assert_eq!(contained_via(&Overlay::new()), Containment::Satisfied(0));
@@ -600,19 +668,7 @@ fn a_level_composes_its_partition_once_for_every_view() {
     let native = PartitionSource {
         postings: &fx.postings,
     };
-    let (rows, _) = projections.get_or_build(
-        "v00000",
-        "s0",
-        LAYER,
-        0,
-        &fx.store,
-        &fx.row_space,
-        Some(&native),
-        mosaica_types::layer::ServingLayout::ArtifactMajor,
-        None,
-        0,
-        &held_rows_declaration(LAYER),
-    );
+    let rows = form(&projections, &fx, "v00000", "s0", &fx.store, &native);
     assert!(rows.partition().is_some());
     assert_eq!(projections.partitions(), 1);
 
@@ -620,19 +676,7 @@ fn a_level_composes_its_partition_once_for_every_view() {
     // signatures, which no row space is involved in, so the dear half of a level's build — one
     // pass over every term's posting — is paid once however many views carry the layer. What is
     // per view is the projection-loss test, and that stays on the row form.
-    let (second, _) = projections.get_or_build(
-        "v00000",
-        "s1",
-        LAYER,
-        0,
-        &fx.store,
-        &fx.row_space,
-        Some(&native),
-        mosaica_types::layer::ServingLayout::ArtifactMajor,
-        None,
-        0,
-        &held_rows_declaration(LAYER),
-    );
+    let second = form(&projections, &fx, "v00000", "s1", &fx.store, &native);
     assert!(second.partition().is_some());
     assert_eq!(projections.builds(), 2, "two views, two row forms");
     assert_eq!(
@@ -647,12 +691,11 @@ fn a_level_composes_its_partition_once_for_every_view() {
     let granted: Vec<u32> = (0..TERMS).filter(|t| t % 2 == 0).collect();
     let overlay = Overlay::new();
     let (mask, satisfied, denied) = fx.mask(&granted, &overlay);
-    let answers = rows.partition().unwrap().answers(&satisfied);
+    let partition = rows.partition().unwrap();
     for ordinal in (0..fx.artifacts).filter(|o| !fx.reaches_flushed(*o)) {
         assert_eq!(
             plain.satisfied_rank(ordinal, &mask, true),
-            rows.satisfied_rank_via(ordinal, &answers, &denied, true)
-                .unwrap(),
+            served(&rows, ordinal, &mask, &denied, Some(partition.answers(&satisfied))),
             "the gate changed an answer at ordinal {ordinal}"
         );
     }
@@ -697,21 +740,9 @@ fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
 
     // The coordinate holds: mapped, and the level's first request composes nothing.
     let projections = ArtifactProjections::new(std::env::temp_dir());
-    projections.adopt_all(tmp.path(), "v00000", &[entry(composed_at)], &store);
+    projections.adopt_all(tmp.path(), "v00000", &[(ShardId::ZERO, entry(composed_at))], &store);
     assert_eq!(projections.adopted(), 1);
-    let (rows, _) = projections.get_or_build(
-        "v00000",
-        "s0",
-        LAYER,
-        0,
-        &store,
-        &fx.row_space,
-        Some(&source),
-        mosaica_types::layer::ServingLayout::ArtifactMajor,
-        None,
-        0,
-        &held_rows_declaration(LAYER),
-    );
+    let rows = form(&projections, &fx, "v00000", "s0", &store, &source);
     assert!(rows.partition().is_some());
     assert_eq!(
         projections.partitions(),
@@ -722,25 +753,13 @@ fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
     // The level has moved since: dropped, and the level recomposes on first use.
     for moved in [composed_at + 1, composed_at.saturating_sub(1)] {
         let projections = ArtifactProjections::new(std::env::temp_dir());
-        projections.adopt_all(tmp.path(), "v00000", &[entry(moved)], &store);
+        projections.adopt_all(tmp.path(), "v00000", &[(ShardId::ZERO, entry(moved))], &store);
         assert_eq!(
             projections.adopted(),
             0,
             "a partition composed at {moved} must not answer for a level at {composed_at}"
         );
-        let (rows, _) = projections.get_or_build(
-            "v00000",
-            "s0",
-            LAYER,
-            0,
-            &store,
-            &fx.row_space,
-            Some(&source),
-            mosaica_types::layer::ServingLayout::ArtifactMajor,
-            None,
-            0,
-            &held_rows_declaration(LAYER),
-        );
+        let rows = form(&projections, &fx, "v00000", "s0", &store, &source);
         assert!(rows.partition().is_some());
         assert_eq!(projections.partitions(), 1, "the level recomposed instead");
     }
@@ -750,7 +769,7 @@ fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
     let projections = ArtifactProjections::new(std::env::temp_dir());
     let mut missing = entry(composed_at);
     missing.path = derived_file(tmp.path(), "containment", "gone.tscp");
-    projections.adopt_all(tmp.path(), "v00000", &[missing], &store);
+    projections.adopt_all(tmp.path(), "v00000", &[(ShardId::ZERO, missing)], &store);
     assert_eq!(projections.adopted(), 0);
 }
 
@@ -768,34 +787,25 @@ fn an_adopted_partition_does_not_answer_under_another_prefix() {
     projections.adopt_all(
         tmp.path(),
         "v00000",
-        &[mosaica_store::manifest::DerivedExtent {
-            path: rel,
-            space: mosaica_types::LayerSpace::ZERO,
-            level: 0,
-            level_version: fx.store.level_version(LAYER, 0),
-            view: None,
-            incarnation: None,
-            form: mosaica_store::manifest::DerivedForm::Containment,
-        }],
+        &[(
+            ShardId::ZERO,
+            mosaica_store::manifest::DerivedExtent {
+                path: rel,
+                space: mosaica_types::LayerSpace::ZERO,
+                level: 0,
+                level_version: fx.store.level_version(LAYER, 0),
+                view: None,
+                incarnation: None,
+                form: mosaica_store::manifest::DerivedForm::Containment,
+            },
+        )],
         &fx.store,
     );
     assert_eq!(projections.adopted(), 1);
     let source = PartitionSource {
         postings: &fx.postings,
     };
-    let _ = projections.get_or_build(
-        "v00001",
-        "s0",
-        LAYER,
-        0,
-        &fx.store,
-        &fx.row_space,
-        Some(&source),
-        mosaica_types::layer::ServingLayout::ArtifactMajor,
-        None,
-        0,
-        &held_rows_declaration(LAYER),
-    );
+    let _ = form(&projections, &fx, "v00001", "s0", &fx.store, &source);
     assert_eq!(
         projections.partitions(),
         1,
@@ -830,8 +840,9 @@ fn the_composed_expression_is_the_members_own_signatures() {
             let satisfied: FxHashSet<TermId> = granted.iter().map(|t| TermId::new(*t)).collect();
             let answers = partition.answers(&satisfied);
             let lossy = set.iter().any(|e| *e >= UNIVERSE);
+            let declared = set.len() as u64;
             assert_eq!(
-                answers.satisfies(ordinal, rank),
+                answers.satisfies(ordinal, rank, declared),
                 Some(true),
                 "the expression at ({ordinal}, {rank}) is not the members' own signatures"
             );
@@ -844,19 +855,19 @@ fn the_composed_expression_is_the_members_own_signatures() {
                 .filter(|t| !fx.terms_of[entity].contains(&t.raw()))
                 .collect();
             let answers = partition.answers(&dropped);
-            assert_eq!(answers.satisfies(ordinal, rank), Some(false));
+            assert_eq!(answers.satisfies(ordinal, rank, declared), Some(false));
 
             // **And where the set is lossy the expression still says yes.** That is the whole
             // reason projection loss is checked on the row form rather than folded into the
             // terms: the members' signatures are satisfied and the artifact is still not
             // contained, because one member has no row in this view at all.
             if lossy {
-                let (_mask, satisfied, denied) = fx.mask(&granted, &Overlay::new());
+                let (mask, satisfied, denied) = fx.mask(&granted, &Overlay::new());
                 let answers = partition.answers(&satisfied);
-                assert_eq!(answers.satisfies(ordinal, rank), Some(true));
+                assert_eq!(answers.satisfies(ordinal, rank, declared), Some(true));
                 assert_ne!(
-                    partitioned.satisfied_rank_via(ordinal, &answers, &denied, true),
-                    Some(Containment::Satisfied(rank as u32)),
+                    served(&partitioned, ordinal, &mask, &denied, Some(answers)),
+                    Containment::Satisfied(rank as u32),
                     "a set that lost a member in projection was served on a satisfied expression"
                 );
             }

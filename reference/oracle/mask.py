@@ -2,8 +2,8 @@
 
 `mask_of` is the union-vs-semi-join differential's other side: the Rust engine derives a viewer's
 authorised set from `postings.arrow` (per-term entity lists, possibly Roaring-compressed); this
-module derives the same set from `terms/pairs.parquet` (the flat `(entity_id, term_id)` relation)
-by direct scan. Agreement between the two is what the differential test proves.
+module derives the same set from each shard's `terms/pairs.parquet` (the flat `(entity_id,
+term_id)` relation) by direct scan. Agreement between the two is what the differential test proves.
 
 `ChangeSet` composes changes in entity space. I1's formula is
 
@@ -28,25 +28,30 @@ nothing from it.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pyarrow.parquet as pq
 
+from .identity import item_key
 
-def mask_of(term_ids: set[int], pairs_path) -> set[int]:
-    """Entity ids granted access to at least one of `term_ids`, scanned from `pairs.parquet`.
+
+def mask_of(term_ids: set[int], pairs: list[tuple[int, Path]]) -> set[int]:
+    """Items granted access to at least one of `term_ids`, scanned from each shard's
+    `pairs.parquet` (`Bundle.pairs`) and keyed by [`item_key`].
 
     Independent derivation from postings: this reads the flat (entity_id, term_id) relation, not
     the per-term postings arrays the server serves queries from.
     """
-    if not term_ids:
-        return set()
-    table = pq.read_table(pairs_path, columns=["entity_id", "term_id"])
-    entities = table.column("entity_id").to_pylist()
-    terms = table.column("term_id").to_pylist()
     granted = set()
-    for entity, term in zip(entities, terms):
-        if term in term_ids:
-            granted.add(entity)
+    if not term_ids:
+        return granted
+    for shard, path in pairs:
+        table = pq.read_table(path, columns=["entity_id", "term_id"])
+        entities = table.column("entity_id").to_pylist()
+        terms = table.column("term_id").to_pylist()
+        for entity, term in zip(entities, terms):
+            if term in term_ids:
+                granted.add(item_key(shard, entity))
     return granted
 
 

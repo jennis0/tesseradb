@@ -92,6 +92,14 @@ impl<'a> RowLocator<'a> {
         }
     }
 
+    /// [`Self::new`] over each segment's base and its two position columns.
+    #[cfg(test)]
+    pub(crate) fn of_columns(columns: &[(u32, &'a [u32], &'a [u32])]) -> Self {
+        RowLocator {
+            places: Placement::of_columns(columns),
+        }
+    }
+
     /// The position of one view row, in grid units, or `None` for a row no segment places.
     pub fn position(&self, row: u32) -> Option<(u32, u32)> {
         place(&self.places, row)

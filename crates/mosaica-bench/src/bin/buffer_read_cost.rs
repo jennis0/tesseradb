@@ -49,7 +49,7 @@ use mosaica_engine::{Engine, EngineConfig};
 use mosaica_lifecycle::wal::{ChangeOp, WalRow};
 use mosaica_lifecycle::{IngestBuffer, Overlay, UnallocatedRow};
 use mosaica_store::read::open_bundle;
-use mosaica_types::{EntityId, TermId};
+use mosaica_types::{EntityId, ShardId, TermId};
 
 /// Live heap bytes: every allocation this process makes, less every free. Read either side of a
 /// structure's construction, the difference is what that structure holds.
@@ -650,7 +650,9 @@ fn experiment_e1(
             }
             latencies.sort();
             // The session's composed mask: the `compose` walk of the buffer, on its own.
-            let compose = best(5, || engine.composed_mask(&session, &fx.view));
+            let compose = best(5, || {
+                engine.composed_mask(&session, &fx.view, ShardId::ZERO)
+            });
             // One filtered viewport, which takes `filter::candidate`'s walk beside `compose`'s.
             let filtered = match &fx.filter_column {
                 None => 0,

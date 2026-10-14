@@ -295,6 +295,7 @@ def test_negative_control_a_landing_between_the_endpoints_is_refused(manifest_se
         check(forged)
 
 
+@pytest.mark.writes_nothing
 def test_negative_control_a_kill_lands_only_on_a_publication_seam():
     """The two ack-contract sites take no kill from this driver: their crash story is the WAL's
     (truncate to the sync sidecar), and §12.3's discard table has no row for them — a kill armed

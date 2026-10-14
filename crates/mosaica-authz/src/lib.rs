@@ -10,7 +10,7 @@ pub use dict::{
     MAX_KEYS_PER_ITEM, PUBLIC_LABEL, PUBLIC_TERM,
 };
 pub use fragment::{
-    build_fragment, build_fragment_with_deltas, build_grant_with_deltas, delta_entities,
+    build_fragment, build_fragment_with_deltas, build_grant_with_deltas, delta_entities, gained_by,
     residual_fragment, write_private_atomically, FragmentCache, FragmentCacheError, FrozenFragment,
     Grant,
 };

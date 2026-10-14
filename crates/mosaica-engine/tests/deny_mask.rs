@@ -16,7 +16,7 @@ use common::*;
 use mosaica_engine::{Engine, EngineConfig, ViewportRequest};
 use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_lifecycle::UnallocatedRow;
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, ShardId};
 
 fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -457,6 +457,103 @@ fn a_join_published_before_the_entitys_own_row_is_drawn_from_the_buffer() {
     faults.release();
 }
 
+const JOINED_VIEW: &str = "s1";
+/// What one credential is served in `view`: the summed visible count, and the marks drawn.
+/// A fresh session per call, as a viewer arriving now would have.
+fn served_in(
+    engine: &Engine,
+    credential: &[u8],
+    view: &str,
+) -> (u64, std::collections::HashSet<u64>) {
+    let session = engine.authorise(credential).expect("the credential authorises");
+    served_to(engine, &session, view)
+}
+
+fn row_in_view(engine: &Engine, view: &str, entity: EntityId) -> Option<u32> {
+    engine
+        .generation()
+        .bundle
+        .only_shard()
+        .views
+        .get(view)
+        .expect("the view is in the generation")
+        .row_space
+        .row_of(entity)
+        .map(|row| row.raw())
+}
+
+/// One row into each view in one window, the joined view's flush published and the entity's
+/// own view's killed at its manifest seam: the entity has a join row in `JOINED_VIEW` and its
+/// own row is buffered. The engine is dropped; a restart replays into that state.
+fn joined_before_its_own_row(tmp: &Path, root: &Path) -> EntityId {
+    use mosaica_lifecycle::faults::{PauseAction, PauseSite};
+    // One row into each view, in one window, so both views have a plan at the same tick. The
+    // anchor holds the older entity id — ids are assigned by signature then batch name, and
+    // "anchor" sorts below "joiner" — so `s1`'s plan is the one the dispatch sends first.
+    let (engine, faults) = engine_flushing_only_on_request(tmp, root);
+    engine
+        .create_plain_view(mosaica_engine::PlainViewDeclaration {
+            name: JOINED_VIEW.to_string(),
+            title: None,
+            projection: "none".to_string(),
+            frame: mosaica_engine::DeclaredFrame {
+                x_min: 0.0,
+                x_max: 1000.0,
+                y_min: 0.0,
+                y_max: 1000.0,
+            },
+            visibility: None,
+            point_default: None,
+        })
+        .expect("the view is created");
+    tick(&engine);
+
+    let ingest_into =
+        |batch: &str, view: &str, join: Option<EntityId>, descriptors: Vec<Vec<u8>>| {
+            let row = UnallocatedRow {
+                view: view.to_string(),
+                join,
+                x: 5.0,
+                y: 5.0,
+                scalars: Vec::new(),
+                terms: engine.resolve_terms(&descriptors),
+                descriptors,
+                scoped: Vec::new(),
+            };
+            engine
+                .ingest_rows(vec![row], batch.to_string(), [0u8; 32])
+                .expect("ingest is accepted")[0]
+        };
+    ingest_into(
+        "b-anchor",
+        JOINED_VIEW,
+        None,
+        vec![b"0".to_vec(), b"1".to_vec()],
+    );
+    let joiner = ingest_into("b-own", "s0", None, vec![b"0".to_vec()]);
+    ingest_into("b-join", JOINED_VIEW, Some(joiner), vec![b"0".to_vec()]);
+
+    // `s1` publishes; `s0`'s publication dies at the seam with its files on disc and nothing
+    // durable naming them.
+    faults.arm_pause_after(PauseSite::BeforeManifestPublish, PauseAction::Panic, 1);
+    engine.request_flush();
+    faults.await_arrivals(PauseSite::BeforeManifestPublish, 2, Duration::from_secs(30));
+    wait_until("the executor's death is reported", || {
+        engine.write_executor_posture() == mosaica_engine::ExecutorPosture::Dead
+    });
+
+    assert!(
+        row_in_view(&engine, JOINED_VIEW, joiner).is_some(),
+        "the join row published, so the entity has a row in the joined view"
+    );
+    assert!(
+        row_in_view(&engine, "s0", joiner).is_none(),
+        "its own row is still buffered: `s0` is the publication that died"
+    );
+    faults.release();
+    joiner
+}
+
 /// **The whole life of one entry whose join publishes before its own row**, asserted by what two
 /// viewers are served at every step.
 ///
@@ -471,44 +568,6 @@ fn a_join_published_before_the_entitys_own_row_is_drawn_from_the_buffer() {
 /// into exactly the state a park would have held.
 #[test]
 fn an_entrys_whole_life_serves_the_same_answer_at_every_step() {
-    use mosaica_lifecycle::faults::{PauseAction, PauseSite};
-
-    const JOINED_VIEW: &str = "s1";
-    const WHOLE: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
-
-    /// What one credential is served in `view`: the summed visible count, and the marks drawn.
-    /// A fresh session per call, as a viewer arriving now would have.
-    fn served(
-        engine: &Engine,
-        credential: &[u8],
-        view: &str,
-    ) -> (u64, std::collections::HashSet<u64>) {
-        let session = engine.authorise(credential).expect("the credential authorises");
-        let response = engine
-            .viewport(
-                &session,
-                ViewportRequest::new(view, 4, WHOLE, N_ITEMS as usize),
-            )
-            .expect("a viewport");
-        (
-            response.tiles.iter().map(|t| t.visible).sum(),
-            response.points.iter().map(|(id, _)| id.raw()).collect(),
-        )
-    }
-
-    fn row_in_view(engine: &Engine, view: &str, entity: EntityId) -> Option<u32> {
-        engine
-            .generation()
-            .bundle
-            .only_shard()
-            .views
-            .get(view)
-            .expect("the view is in the generation")
-            .row_space
-            .row_of(entity)
-            .map(|row| row.raw())
-    }
-
     /// **The premise the `minus` side leans on**: no fragment covers an entity whose own row is
     /// unflushed, so the row a join published for it is outside the base projection and only the
     /// walk's `plus` can draw it. Asserted of the composed mask's own parts, at each step where the
@@ -520,7 +579,9 @@ fn an_entrys_whole_life_serves_the_same_answer_at_every_step() {
         entity: EntityId,
     ) {
         let session = engine.authorise(credential).expect("the credential authorises");
-        let (_, mask) = engine.composed_mask(&session, view).expect("a composed mask");
+        let (_, mask) = engine
+            .composed_mask(&session, view, ShardId::ZERO)
+            .expect("a composed mask");
         let row = row_in_view(engine, view, entity).expect("the join row published");
         let (base, _, plus, _) = mask.parts();
         assert!(
@@ -535,73 +596,7 @@ fn an_entrys_whole_life_serves_the_same_answer_at_every_step() {
     let entitled = full_coverage_credential();
     let unentitled = subset_credential();
 
-    // One row into each view, in one window, so both views have a plan at the same tick. The
-    // anchor holds the older entity id — ids are assigned by signature then batch name, and
-    // "anchor" sorts below "joiner" — so `s1`'s plan is the one the dispatch sends first.
-    let joiner = {
-        let (engine, faults) = engine_flushing_only_on_request(tmp.path(), &root);
-        engine
-            .create_plain_view(mosaica_engine::PlainViewDeclaration {
-                name: JOINED_VIEW.to_string(),
-                title: None,
-                projection: "none".to_string(),
-                frame: mosaica_engine::DeclaredFrame {
-                    x_min: 0.0,
-                    x_max: 1000.0,
-                    y_min: 0.0,
-                    y_max: 1000.0,
-                },
-                visibility: None,
-                point_default: None,
-            })
-            .expect("the view is created");
-        tick(&engine);
-
-        let ingest_into =
-            |batch: &str, view: &str, join: Option<EntityId>, descriptors: Vec<Vec<u8>>| {
-                let row = UnallocatedRow {
-                    view: view.to_string(),
-                    join,
-                    x: 5.0,
-                    y: 5.0,
-                    scalars: Vec::new(),
-                    terms: engine.resolve_terms(&descriptors),
-                    descriptors,
-                    scoped: Vec::new(),
-                };
-                engine
-                    .ingest_rows(vec![row], batch.to_string(), [0u8; 32])
-                    .expect("ingest is accepted")[0]
-            };
-        ingest_into(
-            "b-anchor",
-            JOINED_VIEW,
-            None,
-            vec![b"0".to_vec(), b"1".to_vec()],
-        );
-        let joiner = ingest_into("b-own", "s0", None, vec![b"0".to_vec()]);
-        ingest_into("b-join", JOINED_VIEW, Some(joiner), vec![b"0".to_vec()]);
-
-        // `s1` publishes; `s0`'s publication dies at the seam with its files on disc and nothing
-        // durable naming them.
-        faults.arm_pause_after(PauseSite::BeforeManifestPublish, PauseAction::Panic, 1);
-        engine.request_flush();
-        faults.await_arrivals(PauseSite::BeforeManifestPublish, 2, Duration::from_secs(30));
-        wait_until("the executor's death is reported", || {
-            engine.write_executor_posture() == mosaica_engine::ExecutorPosture::Dead
-        });
-
-        assert!(
-            row_in_view(&engine, JOINED_VIEW, joiner).is_some(),
-            "the join row published, so the entity has a row in the joined view"
-        );
-        assert!(
-            row_in_view(&engine, "s0", joiner).is_none(),
-            "its own row is still buffered: `s0` is the publication that died"
-        );
-        faults.release();
-        joiner
-    };
+    let joiner = joined_before_its_own_row(tmp.path(), &root);
 
     let mark = {
         let (engine, _faults) = engine_flushing_only_on_request(tmp.path(), &root);
@@ -614,10 +609,10 @@ fn an_entrys_whole_life_serves_the_same_answer_at_every_step() {
                 && row_in_view(&engine, "s0", joiner).is_none(),
             "the restart replayed into the state the death left"
         );
-        let (counted, drawn) = served(&engine, &entitled, JOINED_VIEW);
+        let (counted, drawn) = served_in(&engine, &entitled, JOINED_VIEW);
         assert!(drawn.contains(&mark), "drawn from the buffer after a restart");
         assert_eq!(counted, 2, "and counted beside the anchor");
-        let (counted, drawn) = served(&engine, &unentitled, JOINED_VIEW);
+        let (counted, drawn) = served_in(&engine, &unentitled, JOINED_VIEW);
         assert!(!drawn.contains(&mark), "and served to nobody who holds none of its terms");
         assert_eq!(counted, 1);
         assert_drawn_only_by_the_diff(&engine, &entitled, JOINED_VIEW, joiner);
@@ -641,24 +636,24 @@ fn an_entrys_whole_life_serves_the_same_answer_at_every_step() {
                     .expect("ingest is accepted"),
             );
         }
-        let (counted, drawn) = served(&engine, &entitled, JOINED_VIEW);
+        let (counted, drawn) = served_in(&engine, &entitled, JOINED_VIEW);
         assert!(drawn.contains(&mark), "still drawn with three more rows buffered");
         assert_eq!(counted, 2, "and the unflushed rows are drawn for nobody");
         assert_drawn_only_by_the_diff(&engine, &entitled, JOINED_VIEW, joiner);
 
         // Suppressed: gone for everyone, from the moment it is accepted.
         change(&engine, joiner, ChangeOp::Suppress);
-        let (counted, drawn) = served(&engine, &entitled, JOINED_VIEW);
+        let (counted, drawn) = served_in(&engine, &entitled, JOINED_VIEW);
         assert!(!drawn.contains(&mark), "a suppression takes the mark off the map");
         assert_eq!(counted, 1);
-        assert_eq!(served(&engine, &unentitled, JOINED_VIEW).0, 1);
+        assert_eq!(served_in(&engine, &unentitled, JOINED_VIEW).0, 1);
 
         // Lifted: its own terms decide again.
         change(&engine, joiner, ChangeOp::Unsuppress);
-        let (counted, drawn) = served(&engine, &entitled, JOINED_VIEW);
+        let (counted, drawn) = served_in(&engine, &entitled, JOINED_VIEW);
         assert!(drawn.contains(&mark), "the lift restores the buffered verdict");
         assert_eq!(counted, 2);
-        assert!(!served(&engine, &unentitled, JOINED_VIEW).1.contains(&mark));
+        assert!(!served_in(&engine, &unentitled, JOINED_VIEW).1.contains(&mark));
         assert_drawn_only_by_the_diff(&engine, &entitled, JOINED_VIEW, joiner);
 
         // Its own row flushes: the same answer, now from the fragment rather than the diff. One
@@ -676,10 +671,10 @@ fn an_entrys_whole_life_serves_the_same_answer_at_every_step() {
             publish_buffered(&engine);
         }
         assert!(published(&engine), "every buffered row reached a segment");
-        let (counted, drawn) = served(&engine, &entitled, JOINED_VIEW);
+        let (counted, drawn) = served_in(&engine, &entitled, JOINED_VIEW);
         assert!(drawn.contains(&mark), "drawn from the fragment after its own flush");
         assert_eq!(counted, 5, "with the three unrelated rows now published too");
-        let (counted, drawn) = served(&engine, &unentitled, JOINED_VIEW);
+        let (counted, drawn) = served_in(&engine, &unentitled, JOINED_VIEW);
         assert!(!drawn.contains(&mark), "and still served to nobody who holds none of its terms");
         assert_eq!(counted, 1);
         mark
@@ -687,10 +682,91 @@ fn an_entrys_whole_life_serves_the_same_answer_at_every_step() {
 
     // Restart two, after the flush: the same answers again, now out of the fragment.
     let (engine, _faults) = engine_flushing_only_on_request(tmp.path(), &root);
-    let (counted, drawn) = served(&engine, &entitled, JOINED_VIEW);
+    let (counted, drawn) = served_in(&engine, &entitled, JOINED_VIEW);
     assert!(drawn.contains(&mark), "the restart serves what the flush left");
     assert_eq!(counted, 5);
-    let (counted, drawn) = served(&engine, &unentitled, JOINED_VIEW);
+    let (counted, drawn) = served_in(&engine, &unentitled, JOINED_VIEW);
     assert!(!drawn.contains(&mark));
     assert_eq!(counted, 1);
+}
+
+/// What a session already served `view` is served there now: its summed visible count and the
+/// marks drawn.
+fn served_to(
+    engine: &Engine,
+    session: &mosaica_engine::Session,
+    view: &str,
+) -> (u64, std::collections::HashSet<u64>) {
+    let response = engine
+        .viewport(session, ViewportRequest::new(view, 4, WHOLE_MAP, N_ITEMS as usize))
+        .expect("a viewport");
+    (
+        response.tiles.iter().map(|t| t.visible).sum(),
+        response.points.iter().map(|(id, _)| id.raw()).collect(),
+    )
+}
+
+/// A session that read the joined view while the entity's own row was buffered, and reads it
+/// again once that row has flushed and the refresh has carried its grant's projection forward: the
+/// mark is drawn and counted, though the join row was published, or folded, before the entity's
+/// own row and the buffer no longer draws it.
+fn a_held_session_draws_the_entity_after_its_own_flush(fold_first: bool) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = fixture(tmp.path());
+    let joiner = joined_before_its_own_row(tmp.path(), &root);
+
+    let (engine, _faults) = engine_flushing_only_on_request(tmp.path(), &root);
+    let mark = engine.mosaica_id_of(joiner).expect("identity is computable").raw();
+    if fold_first {
+        // The flush is held so the fold runs first, writing the join row into the base while the
+        // entity's own row stays buffered.
+        engine.set_flush_paused_for_test(true);
+        fold(&engine);
+        assert!(
+            row_in_view(&engine, JOINED_VIEW, joiner).is_some_and(|row| {
+                engine
+                    .generation()
+                    .bundle
+                    .only_shard()
+                    .views
+                    .get(JOINED_VIEW)
+                    .is_some_and(|view| row < view.row_space.base_rows())
+            }),
+            "the fold wrote the join row into the base"
+        );
+        assert!(
+            row_in_view(&engine, "s0", joiner).is_none(),
+            "and the entity's own row is still buffered"
+        );
+    }
+    let held = engine
+        .authorise(&full_coverage_credential())
+        .expect("the credential authorises");
+    let (counted, drawn) = served_to(&engine, &held, JOINED_VIEW);
+    assert!(drawn.contains(&mark), "drawn from the buffer before its own flush");
+    assert_eq!(counted, 2);
+    engine.set_flush_paused_for_test(false);
+
+    for _ in 0..4 {
+        if row_in_view(&engine, "s0", joiner).is_some() {
+            break;
+        }
+        publish_buffered(&engine);
+    }
+    assert!(row_in_view(&engine, "s0", joiner).is_some(), "its own row flushed");
+    wait_until("the refresh after the flush", || engine.maintenance_idle_for_test());
+
+    let (counted, drawn) = served_to(&engine, &held, JOINED_VIEW);
+    assert!(drawn.contains(&mark), "drawn from the refreshed projection after its own flush");
+    assert_eq!(counted, 2, "and counted beside the anchor");
+}
+
+#[test]
+fn a_held_session_draws_an_entity_whose_join_row_flushed_first() {
+    a_held_session_draws_the_entity_after_its_own_flush(false);
+}
+
+#[test]
+fn a_held_session_draws_an_entity_whose_join_row_was_folded_first() {
+    a_held_session_draws_the_entity_after_its_own_flush(true);
 }

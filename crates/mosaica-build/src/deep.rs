@@ -120,6 +120,9 @@ pub struct VerifyDeepReport {
     pub edited_pairs: u64,
     /// Segment rows whose entity is not their number, each confirmed to be a pair of the map.
     pub edited_rows: u64,
+    /// Artifacts whose shards' member and generating slices were confirmed to lie in their shards
+    /// and to sum to their records' cardinalities ([`check_member_slices`]).
+    pub artifact_slices: u64,
     /// Numbers the tenancy index holds above tenancy 0, each confirmed to have been issued
     /// ([`check_tenancy`]); 0 where no number has been freed.
     pub raised_numbers: u64,
@@ -161,65 +164,170 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
         edited_rows: 0,
         raised_numbers: 0,
         retired_numbers: 0,
+        artifact_slices: 0,
     };
 
     // Sorted so two runs over the same defective bundle refuse with the same message.
     let mut partitions: Vec<_> = bundle.partitions.iter().collect();
     partitions.sort_by(|a, b| a.0.cmp(b.0));
     for (phash, partition) in partitions {
-        let shard = partition.only_shard();
-        let layout = ShardLayout::new(phash, shard.record.id);
-        check_postings_and_pairs(
-            &prefix_dir,
-            layout,
-            &bundle.manifest,
-            &partition.manifest,
-            shard,
-            &mut report,
-        )?;
         check_dict_extents(&prefix_dir, &partition.manifest, &mut report)?;
-        check_record_blobs(
-            &prefix_dir,
-            layout,
-            &bundle.manifest,
-            shard,
-            &partition.layer_spaces,
-            &mut report,
-        )?;
-        check_scoped_render_lanes(&bundle.manifest, layout, shard, &mut report)?;
-        check_cut_index(phash, shard, &mut report)?;
-        check_bands(
-            &prefix_dir,
-            layout,
-            &bundle.manifest,
-            &partition.manifest,
-            shard,
-            &mut report,
-        )?;
-        check_band_labels(&prefix_dir, partition, &mut report)?;
-        check_row_members(root, &prefix_dir, partition, &mut report)?;
-        check_unique_indexes(
-            root,
-            &prefix_dir,
-            layout,
-            &bundle.manifest,
-            &partition.manifest,
-            shard,
-            &mut report,
-        )?;
-        let tenancy = mosaica_store::read::open_tenancy_index(
-            &prefix_dir,
-            &shard.record,
-            mosaica_store::read::Digests {
-                side: &partition.manifest.files,
-                bundle: &bundle.manifest.files,
-            },
-        )?;
-        check_edited_items(&prefix_dir, phash, &bundle.manifest, shard, &tenancy, &mut report)?;
-        check_tenancy(phash, shard, &tenancy, &mut report)?;
+        check_member_slices(&prefix_dir, partition, &mut report)?;
+        for (at, shard) in partition.shards.iter().enumerate() {
+            let layout = ShardLayout::new(phash, shard.record.id);
+            check_postings_and_pairs(
+                &prefix_dir,
+                layout,
+                &bundle.manifest,
+                &partition.manifest,
+                shard,
+                &mut report,
+            )?;
+            // A layer space's content is checked once, beside the first shard's blob.
+            let layer_spaces = match at {
+                0 => partition.layer_spaces.as_slice(),
+                _ => &[],
+            };
+            check_record_blobs(
+                &prefix_dir,
+                layout,
+                &bundle.manifest,
+                shard,
+                layer_spaces,
+                &mut report,
+            )?;
+            check_scoped_render_lanes(&bundle.manifest, layout, shard, &mut report)?;
+            check_cut_index(phash, shard, &mut report)?;
+            check_bands(
+                &prefix_dir,
+                layout,
+                &bundle.manifest,
+                &partition.manifest,
+                shard,
+                &mut report,
+            )?;
+            check_band_labels(&prefix_dir, partition, shard, &mut report)?;
+            check_row_members(root, &prefix_dir, partition, shard, &mut report)?;
+            check_unique_indexes(
+                root,
+                &prefix_dir,
+                layout,
+                &bundle.manifest,
+                &partition.manifest,
+                shard,
+                &mut report,
+            )?;
+            let tenancy = mosaica_store::read::open_tenancy_index(
+                &prefix_dir,
+                &shard.record,
+                mosaica_store::read::Digests {
+                    side: &partition.manifest.files,
+                    bundle: &bundle.manifest.files,
+                },
+            )?;
+            check_edited_items(
+                &prefix_dir,
+                phash,
+                &bundle.manifest,
+                shard,
+                &tenancy,
+                &mut report,
+            )?;
+            check_tenancy(phash, shard, &tenancy, &mut report)?;
+        }
     }
 
     Ok(report)
+}
+
+/// **Every artifact's slices lie in their shards and hold its sets** ([`slices_hold_their_sets`]):
+/// each shard holds a member pack over the record pack's ordinals, a hole is a hole in every shard,
+/// and no slice reaches its shard's high water. A refusal names the record pack and the ordinal.
+///
+/// [`slices_hold_their_sets`]: mosaica_lifecycle::membership::slices_hold_their_sets
+fn check_member_slices(
+    prefix_dir: &Path,
+    partition: &PartitionData,
+    report: &mut VerifyDeepReport,
+) -> Result<()> {
+    use mosaica_store::membership::{LevelPack, PackKind};
+    for space in &partition.layer_spaces {
+        for records in &space.record_packs {
+            let records_path = join_rel(prefix_dir, &records.path)?;
+            let records_pack =
+                LevelPack::open(&records_path, PackKind::Records).map_err(BuildError::Store)?;
+            let refuse = |what: String| disagrees(prefix_dir.join(&records.path), what);
+            let mut packs = Vec::with_capacity(partition.shards.len());
+            for shard in &partition.shards {
+                let Some(extent) = shard
+                    .record
+                    .membership_extents
+                    .iter()
+                    .find(|extent| extent.pairs(space.space, records))
+                else {
+                    return Err(refuse(format!(
+                        "shard {} holds no member pack for it",
+                        shard.record.id
+                    )));
+                };
+                let pack = LevelPack::open(&join_rel(prefix_dir, &extent.path)?, PackKind::Members)
+                    .map_err(BuildError::Store)?;
+                packs.push((shard.record.high_water, pack));
+            }
+            for (ordinal, record) in records_pack.iter() {
+                let slices: Vec<(u64, &[u8])> = packs
+                    .iter()
+                    .map(|(high_water, pack)| (*high_water, pack.blob(ordinal).unwrap_or_default()))
+                    .collect();
+                if artifact_slices(ordinal, record, &slices).map_err(refuse)? {
+                    report.artifact_slices += 1;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// [`check_member_slices`] over one ordinal: its record blob, and each shard's high water and
+/// member blob. `Ok(false)` for a hole, `Err` saying what is wrong.
+fn artifact_slices(
+    ordinal: u32,
+    record: &[u8],
+    slices: &[(u64, &[u8])],
+) -> std::result::Result<bool, String> {
+    use mosaica_lifecycle::membership::{decode_slice, slices_hold_their_sets};
+    let held = slices.iter().filter(|(_, blob)| !blob.is_empty()).count();
+    match (record.is_empty(), held) {
+        (true, 0) => return Ok(false),
+        (true, _) => return Err(format!("hole {ordinal} has members in a shard")),
+        (false, held) if held != slices.len() => {
+            return Err(format!("ordinal {ordinal} has no slice in some shard"))
+        }
+        _ => {}
+    }
+    let mut decoded = Vec::with_capacity(slices.len());
+    for &(high_water, blob) in slices {
+        let Some((slice, _)) = decode_slice(mosaica_types::EntityId::new(0), record, blob) else {
+            return Err(format!("ordinal {ordinal}'s slice does not decode"));
+        };
+        let past = |set: &croaring::Bitmap| {
+            set.maximum()
+                .is_some_and(|max| u64::from(max) >= high_water)
+        };
+        if past(&slice.members.whole()) || slice.contents.iter().any(|c| past(&c.generated_from)) {
+            return Err(format!(
+                "ordinal {ordinal}'s slice names an entity at or past its shard's high water \
+                 {high_water}"
+            ));
+        }
+        decoded.push(slice);
+    }
+    if !slices_hold_their_sets(&decoded.iter().collect::<Vec<_>>()) {
+        return Err(format!(
+            "ordinal {ordinal}'s slices do not sum to the cardinalities its record declares"
+        ));
+    }
+    Ok(true)
 }
 
 /// **The tenancy index and the retired numbers agree with the allocator.** Every number the index
@@ -946,11 +1054,11 @@ fn layer_named(partition: &PartitionData, space: mosaica_types::LayerSpace) -> S
 fn check_band_labels(
     prefix_dir: &Path,
     partition: &PartitionData,
+    shard: &ShardData,
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
     use mosaica_store::manifest::{DerivedExtent, DerivedForm};
     use mosaica_types::layer::ServingLayout;
-    let shard = partition.only_shard();
     let extents = &shard.record.derived_extents;
     let current = |e: &DerivedExtent| {
         mosaica_store::manifest::layer_space(&partition.layer_spaces, e.space)
@@ -1031,11 +1139,11 @@ fn check_row_members(
     root: &Path,
     prefix_dir: &Path,
     partition: &PartitionData,
+    shard: &ShardData,
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
     use mosaica_store::manifest::DerivedForm;
     use mosaica_store::row_members::RowMembersPack;
-    let shard = partition.only_shard();
     let extents = &shard.record.derived_extents;
     for members in extents.iter().filter(|e| e.form == DerivedForm::RowMembers) {
         if !extents
@@ -1571,4 +1679,59 @@ fn check_dict_extents(
         report.dict_records += records;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use croaring::Bitmap;
+    use mosaica_lifecycle::membership::{
+        encode_record, frame_members, ArtifactRecord, ContentSet, Members,
+    };
+
+    use super::artifact_slices;
+
+    /// An artifact generated from three entities, over two shards of high water 2, each slice at
+    /// its entities less its shard's first.
+    #[test]
+    fn an_artifacts_slices_verify_only_where_they_sum_to_its_record() {
+        let record = ArtifactRecord {
+            entity: mosaica_types::EntityId::new(0),
+            key: None,
+            view: None,
+            incarnation: 0,
+            members: Members::owned(Bitmap::of(&[0, 1, 2, 3])),
+            declares_members: None,
+            contents: vec![ContentSet {
+                values: None,
+                digest: [0; 32],
+                generated_from: Bitmap::of(&[0, 1, 2]),
+                cardinality: 3,
+            }],
+            attached_to: None,
+            parents: Vec::new(),
+            access: Vec::new(),
+        };
+        let blob = encode_record(&record, None);
+        let slice = |members: &[u32], set: &[u32]| {
+            frame_members(&Bitmap::of(members), [Bitmap::of(set)].iter())
+        };
+        let (low, high) = (slice(&[0, 1], &[0, 1]), slice(&[0, 1], &[0]));
+        let check = |record: &[u8], slices: &[&[u8]]| {
+            let slices: Vec<(u64, &[u8])> = slices.iter().map(|blob| (2, *blob)).collect();
+            artifact_slices(0, record, &slices)
+        };
+        assert_eq!(check(&blob, &[&low, &high]), Ok(true));
+        let refused = [
+            ("a slice short of the set", slice(&[0, 1], &[])),
+            ("slices summing past the set", slice(&[0, 1], &[0, 1])),
+            ("a slice past its high water", slice(&[0, 2], &[0])),
+            ("a shard with no slice", Vec::new()),
+            ("a slice that does not decode", high[..high.len() - 1].to_vec()),
+        ];
+        for (what, second) in refused {
+            assert!(check(&blob, &[&low, &second]).is_err(), "{what}");
+        }
+        assert_eq!(check(&[], &[&[], &[]]), Ok(false), "a hole");
+        assert!(check(&[], &[&[], &high]).is_err(), "a hole with members in a shard");
+    }
 }

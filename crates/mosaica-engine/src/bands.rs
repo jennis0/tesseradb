@@ -15,15 +15,16 @@
 //!
 //! The mask is applied to every entry before it is counted or kept, so the bands decide only how
 //! far the read goes, never which rows are visible: a tile with one visible row is answered by the
-//! column when the bands do not hold it, and serves it. A tile is the union of its segments'
-//! parts, and every part is read at the same band, so the count and the `m` smallest are taken over
-//! the union, as [`crate::select::SelectionParts`] requires.
+//! column when the bands do not hold it, and serves it. A tile is the union of its parts in every
+//! segment of every shard, and every part is read at the same band, chosen from the tile's whole
+//! count, so the count and the `m` smallest are taken over the union, as
+//! [`crate::select::SelectionParts`] requires.
 
 use mosaica_store::bands::{band_below, FIRST_BAND};
+use mosaica_types::{RowId, ShardRow};
 
-use crate::compose::EffectiveMask;
 use crate::error::{EngineError, Result};
-use crate::select::{served_count, SelectParams, SelectionPart, Threshold};
+use crate::select::{served_count, SelectParams, Threshold, TileShard};
 
 /// The band route answers requests at zooms below this; the scan answers the rest. Where the
 /// threshold is wider than the widest band the route declines each tile, at any zoom.
@@ -32,11 +33,11 @@ pub const BANDS_BELOW_ZOOM: u8 = 10;
 /// What the bands answer for one tile.
 #[derive(Debug, PartialEq, Eq)]
 pub enum BandAnswer {
-    /// The tile's served rows, in view row space and ascending by `mosaica_id`, and each one's
-    /// entry in its segment's bands. `widened` where the band first read held fewer than `m`
-    /// visible entries and a wider one answered.
+    /// The tile's served rows, ascending by `mosaica_id`, and each one's entry in its segment's
+    /// bands. `widened` where the band first read held fewer than `m` visible entries and a wider
+    /// one answered.
     Served {
-        rows: Vec<u32>,
+        rows: Vec<ShardRow>,
         entries: Vec<u32>,
         entries_read: u64,
         widened: bool,
@@ -50,15 +51,11 @@ pub enum BandAnswer {
     Declined,
 }
 
-/// The tile `parts` under `mask`, answered from the bands where they can answer it. `matched` is
-/// the tile's count in the set selection draws from, `Σ part.visible`, and each part's `visible`
-/// its own count, as [`crate::select::Selection::of`] takes them.
-pub fn select(
-    mask: &EffectiveMask,
-    parts: &[SelectionPart<'_>],
-    params: &SelectParams,
-    matched: u64,
-) -> Result<BandAnswer> {
+/// A tile over every shard's parts, each read under its shard's leaf, answered from the bands where
+/// they can answer it, all at the one band the tile's `matched` chooses. `matched` is the tile's
+/// count in the set selection draws from, `Σ part.visible` over every shard, and each part's
+/// `visible` its own count, as [`crate::select::TileSelection::of`] takes them.
+pub fn select(shards: &[TileShard<'_>], params: &SelectParams, matched: u64) -> Result<BandAnswer> {
     let Threshold::Cut(cut) = params.threshold else {
         return Ok(BandAnswer::Declined);
     };
@@ -82,24 +79,27 @@ pub fn select(
         return Ok(BandAnswer::Sparse { read: false });
     }
 
-    let mut candidates: Vec<(u64, u32, u32)> = Vec::new();
+    let mut candidates: Vec<(u64, ShardRow, u32)> = Vec::new();
     let mut entries_read = 0u64;
     for band in (FIRST_BAND..=start).rev() {
         candidates.clear();
         let mut below = 0u64;
-        for part in parts {
-            let whole = part.visible == u64::from(part.range.end - part.range.start);
-            entries_read += admitted_entries(
-                part.segment,
-                part.row_base,
-                band,
-                part.range.clone(),
-                |view_row| whole || mask.contains_row(view_row),
-                |e, view_row, id| {
-                    below += u64::from(id < cut);
-                    candidates.push((id, view_row, e as u32));
-                },
-            )?;
+        for held in shards {
+            for part in held.parts {
+                let whole = part.visible == u64::from(part.range.end - part.range.start);
+                entries_read += admitted_entries(
+                    part.segment,
+                    part.row_base,
+                    band,
+                    part.range.clone(),
+                    |row| whole || held.mask.contains_row(row),
+                    |e, row, id| {
+                        below += u64::from(id < cut);
+                        let row = ShardRow::new(held.shard, RowId::new(row));
+                        candidates.push((id, row, e as u32));
+                    },
+                )?;
+            }
         }
         let m = served_count(below, params, matched);
         if candidates.len() >= m {

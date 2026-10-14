@@ -2234,6 +2234,7 @@ fn main() {
                 view: None,
                 incarnation: 0,
                 members: to_entities(&in_rows, &space).into(),
+                declares_members: None,
                 contents,
                 attached_to: None,
                 parents: Vec::new(),

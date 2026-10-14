@@ -40,7 +40,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use mosaica_authz::{DeltaTier, Dict, FragmentCache};
+use mosaica_authz::{DeltaTier, Dict};
 use mosaica_lifecycle::alloc::{high_water_from, Allocator};
 use mosaica_lifecycle::buffer::DescriptorResolver;
 use mosaica_lifecycle::command::{ExecError, SubmitError};
@@ -206,6 +206,10 @@ pub enum AcceptError {
     /// The batch cannot be taken as sent: a row creates an item with no position or no label, or
     /// carries coordinates in a batch naming no view. Nothing was submitted.
     Contract(String),
+    /// The bundle holds several point shards and takes no write. Nothing was submitted.
+    SeveralShards {
+        shards: usize,
+    },
 }
 
 impl std::fmt::Display for AcceptError {
@@ -249,6 +253,12 @@ impl std::fmt::Display for AcceptError {
             AcceptError::Conflict(detail) | AcceptError::Contract(detail) => {
                 write!(f, "{detail}")
             }
+            AcceptError::SeveralShards { shards } => write!(
+                f,
+                "this bundle holds {shards} point shards, which take no write until stage 5 of \
+                 the sharding plan; to write, serve a bundle of one shard, built with a \
+                 `[shards] size` of at least its item count"
+            ),
         }
     }
 }
@@ -306,6 +316,8 @@ pub(crate) struct WritePathState {
     accepted_batches: AcceptedBatches,
     pub(crate) registry: LayerRegistry,
     pub(crate) artifacts: ArtifactStore,
+    /// Every other point shard's slice of every artifact's membership: see [`LiveState::slices`].
+    pub(crate) slices: Vec<(ShardId, Arc<ArtifactStore>)>,
     /// The view roster: which views of which groups exist, and which keys are burnt. Rebuilt
     /// exactly as the layer registry beside it is: seeded from the manifests, then the log
     /// replayed on top.
@@ -349,6 +361,7 @@ impl WritePath {
                 accepted_batches: Mutex::new(state.accepted_batches),
                 registry: Mutex::new(state.registry),
                 artifacts: Mutex::new(state.artifacts),
+                slices: state.slices,
                 roster: Mutex::new(state.roster),
                 attributes: Mutex::new(state.attributes),
                 vocabularies: Mutex::new(state.vocabularies),
@@ -396,6 +409,12 @@ impl WritePath {
             })?;
         tracing::debug!(root = %bundle_lock.path().display(), "bundle write lock taken");
         let wal = self.wal.take().expect("checked immediately above");
+        // No thread runs over a bundle that takes no write; the lock still keeps other writers out.
+        if self.writable().is_err() {
+            self.bundle_lock = Some(bundle_lock);
+            self.health.advance(ExecutorPosture::Running);
+            return Ok(());
+        }
         let wal_position_at_start = wal.position();
 
         // The startup sweep runs before anything else and before the thread. `AlreadyStarted` is
@@ -597,6 +616,16 @@ impl WritePath {
         &self.health
     }
 
+    /// [`crate::Engine::writable`]'s rule. [`Self::submit`] and [`Self::submit_changes`], where
+    /// every write reaches the executor, ask it; so do the entries that read the write shard
+    /// before submitting.
+    pub(crate) fn writable(&self) -> Result<(), AcceptError> {
+        match self.live.shards.len() {
+            1 => Ok(()),
+            shards => Err(AcceptError::SeveralShards { shards }),
+        }
+    }
+
     fn handle(&self) -> Result<&LifecycleHandle, SubmitError> {
         // "Never started" and "died" get the same answer, and `SubmitError::ExecutorDead`'s own
         // doc already states the reason: there is no honest 200 to give when there is nothing left
@@ -643,6 +672,7 @@ impl WritePath {
     /// Open a reply channel, enqueue the command built around it, and wait for the answer that
     /// command's reply is typed to carry.
     fn submit<T>(&self, command: impl FnOnce(Reply<T>) -> Command) -> Result<T, AcceptError> {
+        self.writable()?;
         let (reply, pending) = Reply::channel(
             Some(Arc::clone(&self.health)),
             #[cfg(feature = "fault-injection")]
@@ -849,6 +879,7 @@ impl WritePath {
         changes: Vec<(Target, ChangeOp)>,
         stamp: crate::edited::Stamp,
     ) -> Result<PendingChange, AcceptError> {
+        self.writable()?;
         let (reply, pending) = Reply::channel(
             None,
             #[cfg(feature = "fault-injection")]
@@ -1234,8 +1265,10 @@ pub(crate) struct MaintenanceDeps {
     pub(crate) artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
     /// The figures, for the two things this thread asks of them: bringing the denied rows' labels
     /// forward after a deny is acknowledged, and sweeping the cache directory when a compaction
-    /// rotates the bundle identity.
+    /// rotates the shards' identities.
     pub(crate) figures: Arc<crate::figures::FiguresCache>,
+    /// The fragments, swept when a compaction rotates a shard's identity.
+    pub(crate) fragments: Arc<mosaica_authz::FragmentCache>,
     /// The region decompositions (`crate::region`), pruned of superseded generations at every
     /// geometry swap exactly as the row-projection cache is: a row-space artefact keyed on a
     /// generation is unusable after it, and only retention is left to do.

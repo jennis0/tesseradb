@@ -872,89 +872,105 @@ impl ArtifactRows {
         }
     }
 
-    /// The rank of the first content this viewer is served — the containment test. The artifact is
-    /// absent, not served without its content, where it carries contents and the viewer satisfies
-    /// none. Containment is `|G ∩ M| == |G|`, not a coverage fraction: what decides is which
-    /// documents, never how many. Pass and fail cost the same, deliberately: both take one
-    /// `count_intersection` over the whole set, with no early exit that would make response time a
-    /// function of how close a viewer came.
+    /// The rank of the first content this viewer is served — the containment test — over this one
+    /// form, by the viewer's mask: [`satisfied_rank_over`] with this form as the only side.
     pub fn satisfied_rank(
         &self,
         ordinal: u32,
         mask: &impl MaskedSet,
         layer_declares_content: bool,
     ) -> Containment {
-        let declared = self.records.declared(ordinal);
-        let generating = self.membership.generating(ordinal);
-        if declared.is_empty() {
-            // An artifact here with none has had its last content withdrawn by a fold, so it is
-            // absent until the caller republishes rather than served with the description missing.
-            return if layer_declares_content {
-                Containment::Unsatisfied
-            } else {
-                Containment::NothingToContain
-            };
-        }
-        for (i, (rows, declared)) in generating.iter().zip(declared).enumerate() {
-            // A set that lost members in projection can never be contained.
-            if rows.cardinality() != *declared {
-                continue;
-            }
-            if mask.count_intersection(rows) == *declared {
-                return Containment::Satisfied(i as u32);
-            }
-        }
-        Containment::Unsatisfied
+        satisfied_rank_over(
+            self.records.declared(ordinal),
+            layer_declares_content,
+            1,
+            |_, rank| self.generating_size(ordinal, rank),
+            |_, rank, size| Some(self.generating_held(ordinal, rank, mask) == size),
+        )
+        .unwrap_or(Containment::Unsatisfied)
     }
 
-    /// [`Self::satisfied_rank`] answered from the containment partition instead of from the mask —
-    /// the fast arm, and `None` where the partition cannot answer and the caller must fall back.
-    /// The middle test — does this viewer hold every member — moves from a mask intersection to a
-    /// lookup, and the deny correction is asked live against the generation's own deny mask. `None`
-    /// is not an answer: a partition that does not cover this ordinal, or whose ranks disagree with
-    /// the row form's, sends the caller to the route that asks `M_auth` itself.
-    ///
-    /// An ordinal whose generating sets reach above the base rows declines here: an entity arriving
-    /// by ingest is not part of the prefix's postings the partition is composed from, so its clause
-    /// would be empty and unsatisfiable for everyone. The masked-count route answers instead.
-    pub fn satisfied_rank_via(
+    /// How many rows this form's generating set at `rank` holds: the members of the set this
+    /// shard holds that survived projection into its row space. Zero past the artifact's ranks.
+    pub fn generating_size(&self, ordinal: u32, rank: usize) -> u64 {
+        self.membership
+            .generating(ordinal)
+            .get(rank)
+            .map_or(0, Bitmap::cardinality)
+    }
+
+    /// How many of this form's generating rows at `rank` the viewer holds: one
+    /// `count_intersection` over the whole set, with no early exit, so pass and fail cost the same
+    /// and response time is not a function of how close a viewer came.
+    pub fn generating_held(&self, ordinal: u32, rank: usize, mask: &impl MaskedSet) -> u64 {
+        self.membership
+            .generating(ordinal)
+            .get(rank)
+            .map_or(0, |rows| mask.count_intersection(rows))
+    }
+
+    /// Whether this form's containment partition answers for `ordinal`: it covers the ordinal, and
+    /// no generating set reaches above the base rows. An entity arriving by ingest is not part of
+    /// the prefix's postings the partition is composed from, so its clause would be empty and
+    /// unsatisfiable for everyone; the mask answers such an ordinal instead.
+    pub fn partition_answers(&self, ordinal: u32, answers: &ContainmentAnswers<'_>) -> bool {
+        answers.covers(ordinal) && !self.membership.generating_above(ordinal, self.base_rows)
+    }
+
+    /// Whether the viewer holds every one of this form's generating rows at `rank`, by the
+    /// partition: the viewer's terms satisfy the expression composed over exactly these rows'
+    /// members, and no row is denied, asked live against `denied`, since a deletion or a
+    /// suppression removes a member whatever the viewer's terms say. `None` where the partition
+    /// has no entry there.
+    pub fn generating_held_via(
         &self,
         ordinal: u32,
+        rank: usize,
         answers: &ContainmentAnswers<'_>,
         denied: &Bitmap,
-        layer_declares_content: bool,
-    ) -> Option<Containment> {
-        if !answers.covers(ordinal) {
-            return None;
-        }
-        if self.membership.generating_above(ordinal, self.base_rows) {
-            return None;
-        }
-        let declared = self.records.declared(ordinal);
-        let generating = self.membership.generating(ordinal);
-        if declared.is_empty() {
-            return Some(if layer_declares_content {
-                Containment::Unsatisfied
-            } else {
-                Containment::NothingToContain
-            });
-        }
-        for (i, (rows, declared)) in generating.iter().zip(declared).enumerate() {
-            if rows.cardinality() != *declared {
-                continue;
-            }
-            if !answers.satisfies(ordinal, i)? {
-                continue;
-            }
-            // The acceptance test: a deletion or a suppression removes a member whatever the
-            // viewer's terms say, asked here live against the deny mask.
-            if denied.intersect(rows) {
-                continue;
-            }
-            return Some(Containment::Satisfied(i as u32));
-        }
-        Some(Containment::Unsatisfied)
+    ) -> Option<bool> {
+        let rows = self.membership.generating(ordinal).get(rank)?;
+        Some(answers.satisfies(ordinal, rank, rows.cardinality())? && !denied.intersect(rows))
     }
+}
+
+/// The containment test over every side of a request: the rank of the first content whose
+/// generating set the viewer holds entirely. Containment is `|G ∩ M| == |G|`, not a coverage
+/// fraction. `declared` is each rank's `|G|` from the durable record; `size(side, rank)` is how
+/// many of the set's rows a side holds, and `holds(side, rank, size)` whether the viewer holds them
+/// all, or `None` where that side cannot answer, which ends the test with `None`. A rank is served
+/// only where the sizes sum to `declared` and every side is held whole, so a set that lost members
+/// in projection, or lies partly in a side left out, is contained by nobody. Every side is asked,
+/// so a rank costs the same whichever side fails it.
+pub fn satisfied_rank_over(
+    declared: &[u64],
+    layer_declares_content: bool,
+    sides: usize,
+    size: impl Fn(usize, usize) -> u64,
+    mut holds: impl FnMut(usize, usize, u64) -> Option<bool>,
+) -> Option<Containment> {
+    if declared.is_empty() {
+        // An artifact here with none has had its last content withdrawn by a fold, so it is
+        // absent until the caller republishes rather than served with the description missing.
+        return Some(if layer_declares_content {
+            Containment::Unsatisfied
+        } else {
+            Containment::NothingToContain
+        });
+    }
+    for (rank, declared) in declared.iter().enumerate() {
+        if (0..sides).map(|side| size(side, rank)).sum::<u64>() != *declared {
+            continue;
+        }
+        let mut whole = true;
+        for side in 0..sides {
+            whole &= holds(side, rank, size(side, rank))?;
+        }
+        if whole {
+            return Some(Containment::Satisfied(rank as u32));
+        }
+    }
+    Some(Containment::Unsatisfied)
 }
 
 #[cfg(test)]
@@ -984,10 +1000,10 @@ mod tests {
 
     // ---- the containment partition's arm -----------------------------------------------------
 
-    /// A partition built from clauses a test names directly, for cases about the predicate's arm
-    /// rather than the signature inversion.
-    fn partition_of(clauses_per_rank: &[&[&[u32]]]) -> ContainmentPartition {
-        ContainmentPartition::of_clauses(&[clauses_per_rank])
+    /// A partition built from sets a test names directly, by size and clauses, for cases about the
+    /// predicate's arm rather than the signature inversion.
+    fn partition_of(ranks: &[crate::containment::SizedSet<'_>]) -> ContainmentPartition {
+        ContainmentPartition::of_sets(&[ranks])
     }
 
     fn satisfied_terms(terms: &[u32]) -> FxHashSet<TermId> {
@@ -1000,7 +1016,7 @@ mod tests {
     fn the_partition_and_the_mask_agree_on_the_served_rank() {
         // Rank 0 is generated from rows 1..=4, terms 7 and 8; rank 1 from rows 1..=2, term 7 alone.
         let rows = rows_with_contents(&[1, 2, 3, 4], &[(&[1, 2, 3, 4], 4), (&[1, 2], 2)])
-            .with_partition(Some(partition_of(&[&[&[7], &[8]], &[&[7]]])));
+            .with_partition(Some(partition_of(&[(4, &[&[7], &[8]]), (2, &[&[7]])])));
         let partition = rows.partition().expect("the fixture attached one");
 
         for (held, visible, expected) in [
@@ -1020,9 +1036,10 @@ mod tests {
                 expected,
                 "the masked-count route disagrees with the case's own arithmetic"
             );
+            assert!(rows.partition_answers(0, &answers));
             assert_eq!(
-                rows.satisfied_rank_via(0, &answers, &Bitmap::new(), true),
-                Some(expected),
+                contained(&rows, 0, &Bitmap::new(), &Bitmap::new(), Some(answers)),
+                expected,
                 "the partition's arm disagrees with the masked-count route"
             );
         }
@@ -1034,20 +1051,20 @@ mod tests {
     #[test]
     fn a_denied_member_of_the_generating_set_fails_containment_through_the_partition() {
         let rows = rows_with_contents(&[1, 2, 3, 4], &[(&[1, 2, 3, 4], 4), (&[1, 2], 2)])
-            .with_partition(Some(partition_of(&[&[&[7]], &[&[7]]])));
+            .with_partition(Some(partition_of(&[(4, &[&[7]]), (2, &[&[7]])])));
         let partition = rows.partition().unwrap();
         let held = satisfied_terms(&[7]);
-        let answers = partition.answers(&held);
+        // An empty mask, so every answer below is the partition's.
+        let via = |denied: &[u32]| {
+            contained(&rows, 0, &Bitmap::new(), &Bitmap::of(denied), Some(partition.answers(&held)))
+        };
 
-        assert_eq!(
-            rows.satisfied_rank_via(0, &answers, &Bitmap::new(), true),
-            Some(Containment::Satisfied(0))
-        );
+        assert_eq!(via(&[]), Containment::Satisfied(0));
 
         // Row 4 suppressed — a member of rank 0's set and of nothing else.
         assert_eq!(
-            rows.satisfied_rank_via(0, &answers, &Bitmap::of(&[4]), true),
-            Some(Containment::Satisfied(1)),
+            via(&[4]),
+            Containment::Satisfied(1),
             "the expression still holds and the member is gone, so the next rank answers"
         );
         assert_eq!(
@@ -1057,10 +1074,7 @@ mod tests {
              rather than a second rule"
         );
 
-        assert_eq!(
-            rows.satisfied_rank_via(0, &answers, &Bitmap::of(&[1, 4]), true),
-            Some(Containment::Unsatisfied)
-        );
+        assert_eq!(via(&[1, 4]), Containment::Unsatisfied);
         assert_eq!(
             rows.satisfied_rank(0, &Bitmap::of(&[2, 3]), true),
             Containment::Unsatisfied
@@ -1072,33 +1086,56 @@ mod tests {
     #[test]
     fn the_partition_still_refuses_a_set_that_did_not_survive_projection() {
         let rows = rows_with_contents(&[1, 2, 3], &[(&[1, 2], 4)])
-            .with_partition(Some(partition_of(&[&[&[7]]])));
+            .with_partition(Some(partition_of(&[(4, &[&[7]])])));
         let partition = rows.partition().unwrap();
         let held = satisfied_terms(&[7]);
-        let answers = partition.answers(&held);
+        let everything = Bitmap::from_range(0..1000);
         assert_eq!(
-            rows.satisfied_rank_via(0, &answers, &Bitmap::new(), true),
-            Some(Containment::Unsatisfied),
+            contained(&rows, 0, &everything, &Bitmap::new(), Some(partition.answers(&held))),
+            Containment::Unsatisfied,
             "a viewer who can see every row there is must still not be served a set that lost \
              members on the way into row space"
         );
     }
 
-    /// A partition that does not cover the ordinal declines rather than answering. `None` is not a
-    /// verdict: collapsing it to `Unsatisfied` would withhold every artifact past a short partition.
+    /// A partition that does not cover the ordinal declines rather than answering, and the mask
+    /// answers: collapsing the decline to `Unsatisfied` would withhold every artifact past a short
+    /// partition.
     #[test]
     fn a_partition_that_does_not_cover_the_ordinal_declines() {
-        let rows = rows_of(&[&[1, 2], &[3, 4]])
-            .with_partition(Some(ContainmentPartition::of_clauses(&[&[]])));
+        let rows = rows_with_contents(&[1, 2], &[(&[1, 2], 2)])
+            .with_partition(Some(ContainmentPartition::of_clauses(&[])));
         let partition = rows.partition().unwrap();
         let held = satisfied_terms(&[7]);
         let answers = partition.answers(&held);
-        assert!(answers.covers(0));
-        assert_eq!(
-            rows.satisfied_rank_via(1, &answers, &Bitmap::new(), true),
-            None,
-            "the second ordinal is past the partition, so it has no answer to give"
+        assert!(
+            !rows.partition_answers(0, &answers),
+            "the ordinal is past the partition, so it has no answer to give"
         );
+        let mask = Bitmap::of(&[1, 2]);
+        assert_eq!(
+            contained(&rows, 0, &mask, &Bitmap::new(), Some(answers)),
+            Containment::Satisfied(0)
+        );
+    }
+
+    #[test]
+    fn a_partition_with_no_entry_at_a_rank_is_answered_from_the_mask() {
+        // Rank 0 lost a member in projection, so the test reaches rank 1, which the partition
+        // lacks.
+        let rows = rows_with_contents(&[1, 2, 3], &[(&[1, 2], 3), (&[1, 2], 2)])
+            .with_partition(Some(partition_of(&[(3, &[&[8]])])));
+        let partition = rows.partition().unwrap();
+        let held = satisfied_terms(&[8]);
+        assert!(rows.partition_answers(0, &partition.answers(&held)));
+        for visible in [&[1u32, 2][..], &[1]] {
+            let mask = Bitmap::of(visible);
+            assert_eq!(
+                contained(&rows, 0, &mask, &Bitmap::new(), Some(partition.answers(&held))),
+                rows.satisfied_rank(0, &mask, true),
+                "{visible:?} visible"
+            );
+        }
     }
 
     // ---- candidacy on a row-major level ---------------------------------------------------

@@ -316,8 +316,7 @@ fn session_permissions(p: PermissionSet, minted: bool) -> PermissionSet {
 
 /// Mints a session for `target`, or for `target` through `minter`'s `authorise-as`. The target
 /// must hold `read`. Each attempt resolves both again, so a change that commits while the
-/// engine builds the authorised set is either applied to the registered session or seen by the
-/// next attempt.
+/// session is minted is either applied to the registered session or seen by the next attempt.
 pub async fn mint(
     state: &Arc<AppState>,
     target: Caller,
@@ -354,8 +353,10 @@ pub async fn mint(
         let every_item = permissions.contains(Permission::ReadAll);
         let auth_data = serde_json::to_vec(&serde_json::json!({ "terms": resolution.terms }))
             .expect("a list of strings serialises");
+        // Off compute admission: authorising builds nothing, and a session's first read builds
+        // its authorised set under that read's admission.
         let session = state
-            .gated(move |state| {
+            .blocking(move |state| {
                 let session = if every_item {
                     state.engine.authorise_all()
                 } else {

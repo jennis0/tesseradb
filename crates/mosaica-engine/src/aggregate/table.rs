@@ -4,6 +4,10 @@
 //! group its cells ascending. A row appears where the set or the reference holds an item of it,
 //! and a named value this viewer may be told of appears with no item. A page takes the rows after
 //! its position up to the page's rows and bytes, and the position moves to its last row.
+//!
+//! Cells are counted in chunks of cell prefixes cut over every segment of every shard the page
+//! reads. A chunk counts each shard's rows of its prefixes and adds the shards' counts by cell, so
+//! a page, its position and its cursor are those of one shard holding every row.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -34,6 +38,7 @@ use crate::records::same_publication;
 use crate::session::Session;
 use crate::Generation;
 use mosaica_spatial::{cells_for_bbox, Bounds, CellRect};
+use mosaica_store::read::SegmentData;
 
 /// A grouping resolved against the request's generation.
 pub(super) struct Plan {
@@ -210,6 +215,42 @@ impl Columns {
             counts: pick(self.counts),
             references: self.references.map(pick),
         }
+    }
+
+    /// Every shard's rows of one group as one, ascending by cell, the counts of a cell several
+    /// hold added. Each part ascends by cell, and holds reference counts where `reference` says.
+    fn summed(parts: Vec<Columns>, reference: bool) -> Columns {
+        if parts.len() == 1 {
+            return parts.into_iter().next().expect("one part");
+        }
+        let mut rows: Vec<(u64, u64, u64)> = Vec::new();
+        for part in parts {
+            let references = part.references.unwrap_or_default();
+            rows.extend(part.cells.iter().zip(&part.counts).enumerate().map(
+                |(k, (&cell, &count))| (cell, count, references.get(k).copied().unwrap_or(0)),
+            ));
+        }
+        rows.sort_unstable_by_key(|&(cell, ..)| cell);
+        let mut out = Columns {
+            cells: Vec::with_capacity(rows.len()),
+            counts: Vec::with_capacity(rows.len()),
+            references: reference.then(|| Vec::with_capacity(rows.len())),
+        };
+        for (cell, count, in_reference) in rows {
+            if out.cells.last() == Some(&cell) {
+                *out.counts.last_mut().expect("a count beside each cell") += count;
+                if let Some(references) = &mut out.references {
+                    *references.last_mut().expect("a reference beside each cell") += in_reference;
+                }
+                continue;
+            }
+            out.cells.push(cell);
+            out.counts.push(count);
+            if let Some(references) = &mut out.references {
+                references.push(in_reference);
+            }
+        }
+        out
     }
 
     /// The rows from `from` on: a chunk's cells ascend, so those before it are a prefix.
@@ -435,46 +476,90 @@ impl Plan {
                 let table;
                 let codes;
                 let labels;
-                let source = match &self.outer {
-                    Outer::None => Source::Split(vec![(
-                        cx.sets.set.cells(cx),
-                        cx.sets.reference.as_ref().map(|r| r.cells(cx)),
-                    )]),
+                let sources: Vec<(usize, Source<'_>)> = match &self.outer {
+                    Outer::None => cx
+                        .reads()
+                        .map(|place| {
+                            let reference = cx.sets.reference.as_ref().map(|r| r.cells(cx, place));
+                            (
+                                place,
+                                Source::Split(vec![(cx.sets.set.cells(cx, place), reference)]),
+                            )
+                        })
+                        .collect(),
                     Outer::Field(field) => {
                         let listed: Vec<u32> = groups.chosen.iter().map(|&c| c as u32).collect();
                         table = GroupTable::new(&listed);
-                        codes = field.entity_codes(cx.open.served.shard)?;
-                        Source::Grouped(field.row_groups(cx, &table, &codes)?)
+                        codes = cx
+                            .reads()
+                            .map(|place| field.entity_codes(cx.side(place).shard))
+                            .collect::<Result<Vec<_>>>()?;
+                        cx.reads()
+                            .zip(&codes)
+                            .map(|(place, codes)| {
+                                Ok((
+                                    place,
+                                    Source::Grouped(field.row_groups(cx, place, &table, codes)?),
+                                ))
+                            })
+                            .collect::<Result<_>>()?
                     }
                     Outer::Bins(_) => unreachable!("a grouping by bins with cells is refused"),
                     Outer::Summary(_) => unreachable!("a summary with cells is refused"),
                     Outer::Layer(_) => {
                         let served = served.as_ref().expect("a layer's groups were read");
                         labels = served.label_table();
-                        match (&labels, served.parts()) {
-                            (Some(labels), _) => Source::Grouped(served.row_groups(labels)),
-                            (None, Some((set, reference))) => Source::Split(
-                                set.iter()
-                                    .enumerate()
-                                    .map(|(g, rows)| {
-                                        (
-                                            CellSet::Rows(rows),
-                                            reference.as_ref().map(|r| CellSet::Rows(&r[g])),
+                        cx.reads()
+                            .map(|place| {
+                                let source = match (&labels, served.parts()) {
+                                    (Some(labels), _) => {
+                                        Source::Grouped(served.row_groups(labels, place))
+                                    }
+                                    (None, Some(parts)) => {
+                                        let (set, reference) =
+                                            parts[place].as_ref().expect("a side the page reads");
+                                        Source::Split(
+                                            set.iter()
+                                                .enumerate()
+                                                .map(|(g, rows)| {
+                                                    (
+                                                        CellSet::Rows(rows),
+                                                        reference
+                                                            .as_ref()
+                                                            .map(|r| CellSet::Rows(&r[g])),
+                                                    )
+                                                })
+                                                .collect(),
                                         )
-                                    })
-                                    .collect(),
-                            ),
-                            (None, None) => Source::Split(Vec::new()),
-                        }
+                                    }
+                                    (None, None) => Source::Split(Vec::new()),
+                                };
+                                (place, source)
+                            })
+                            .collect()
                     }
                 };
+                let sides: Vec<WalkSide<'_>> = sources
+                    .into_iter()
+                    .map(|(place, source)| WalkSide {
+                        segments: cx.segments(place),
+                        set: cx.sets.set.cells(cx, place),
+                        reference: cx.sets.reference.as_ref().map(|r| r.cells(cx, place)),
+                        source,
+                    })
+                    .collect();
+                let segments: Vec<(&SegmentData, u32)> = sides
+                    .iter()
+                    .flat_map(|side| side.segments.iter().copied())
+                    .collect();
                 let rows_left = response_bytes_left
                     .saturating_sub(dictionary as u64)
                     .saturating_mul(8)
                     / row_bits as u64;
                 let walk = Walk {
                     cx,
-                    source: &source,
+                    sides: &sides,
+                    segments: &segments,
                     depth,
                     area: self.area.as_ref(),
                     methods: &[],
@@ -946,9 +1031,13 @@ impl Plan {
             .iter()
             .map(|&(set, reference)| (ranges(set), ranges(reference)))
             .collect();
-        let method = match walk.source {
-            Source::Split(_) if methods.iter().all(|&(s, _)| s) => "ranges",
-            _ => "pass",
+        let split = walk
+            .sides
+            .iter()
+            .all(|side| matches!(side.source, Source::Split(_)));
+        let method = match split && methods.iter().all(|&(s, _)| s) {
+            true => "ranges",
+            false => "pass",
         };
         if !timings.methods.contains(&(self.grouping, method)) {
             timings.methods.push((self.grouping, method));
@@ -1023,7 +1112,7 @@ const CHUNKS_PER_THREAD: u64 = 4;
 /// that could hold them: a range count costs about as much as reading this many rows.
 pub(crate) const RANGE_FACTOR: u64 = 64;
 
-/// Where each group's rows are read for a cell count.
+/// Where each group's rows are read for a cell count in one side.
 enum Source<'s> {
     /// One pass over the set reads each row's groups.
     Grouped(RowGroups<'s>),
@@ -1031,10 +1120,22 @@ enum Source<'s> {
     Split(Vec<(CellSet<'s>, Option<CellSet<'s>>)>),
 }
 
+/// One side's part of a cell count: its segments, the set's and the reference's rows there, and
+/// where each group's rows are read.
+struct WalkSide<'s> {
+    segments: &'s [(&'s SegmentData, u32)],
+    set: CellSet<'s>,
+    reference: Option<CellSet<'s>>,
+    source: Source<'s>,
+}
+
 /// One page's walk over the view's chunks.
 struct Walk<'w> {
     cx: &'w Cx<'w>,
-    source: &'w Source<'w>,
+    /// Each side the page reads.
+    sides: &'w [WalkSide<'w>],
+    /// Every side's segments, which the chunks are cut over.
+    segments: &'w [(&'w SegmentData, u32)],
     depth: u8,
     /// The cells listed, where not every cell at the depth is.
     area: Option<&'w Area>,
@@ -1078,7 +1179,7 @@ impl Walk<'_> {
                 .div_ceil(chunk_rows)
                 .clamp(threads, threads * 64),
         };
-        let chunks = crate::cells::chunks(self.cx.segments(), self.depth, chunk_rows);
+        let chunks = crate::cells::chunks(self.segments, self.depth, chunk_rows);
         let chunks = match self.area {
             None => chunks,
             Some(area) => clip(&chunks, &area.ranges),
@@ -1106,7 +1207,17 @@ impl Walk<'_> {
             let parts: Vec<Vec<Columns>> = self.cx.engine.pool.install(|| {
                 chunks[at..end]
                     .par_iter()
-                    .map(|prefixes| self.chunk(groups.clone(), prefixes.clone()))
+                    .map(|prefixes| {
+                        chunk_of(
+                            self.sides,
+                            self.depth,
+                            self.methods,
+                            self.reference,
+                            self.area,
+                            groups.clone(),
+                            prefixes.clone(),
+                        )
+                    })
                     .collect()
             });
             timings.pass_ns += walking.elapsed().as_nanos() as u64;
@@ -1129,107 +1240,138 @@ impl Walk<'_> {
         }
         Ok(Some((out, at == chunks.len())))
     }
+}
 
-    /// One chunk's rows of each of `groups`.
-    fn chunk(&self, groups: std::ops::Range<u32>, prefixes: std::ops::Range<u64>) -> Vec<Columns> {
-        let segments = self.cx.segments();
-        let depth = self.depth;
-        // A single group's count of a chunk holds at most an entry for each of its rows there.
-        let room = |cells: CellSet<'_>| match groups.len() {
-            1 => rows_in_chunk(cells, segments, depth, prefixes.clone()) as usize,
-            _ => 0,
-        };
-        let sets = &self.cx.sets;
-        let mut set = ByGroup::new(&groups, room(sets.set.cells(self.cx)));
-        let mut reference = ByGroup::new(
-            &groups,
-            sets.reference
-                .as_ref()
-                .map_or(0, |r| room(r.cells(self.cx))),
-        );
-        match self.source {
-            Source::Grouped(row_groups) => {
-                let only = (groups.len() == 1).then_some(groups.start);
-                let cells = self.cx.sets.set.cells(self.cx);
+/// One chunk's rows of each of `groups`. `methods` says for each group whether its set and its
+/// reference are counted by range, and `reference` whether the request names one.
+fn chunk_of(
+    sides: &[WalkSide<'_>],
+    depth: u8,
+    methods: &[(bool, bool)],
+    reference: bool,
+    area: Option<&Area>,
+    groups: std::ops::Range<u32>,
+    prefixes: std::ops::Range<u64>,
+) -> Vec<Columns> {
+    let mut sides: Vec<std::vec::IntoIter<Columns>> = sides
+        .iter()
+        .map(|side| {
+            side_chunk(
+                side,
+                depth,
+                methods,
+                reference,
+                groups.clone(),
+                prefixes.clone(),
+            )
+            .into_iter()
+        })
+        .collect();
+    groups
+        .map(|_| {
+            let parts = sides
+                .iter_mut()
+                .map(|side| side.next().expect("a side's columns for every group"))
+                .collect();
+            match (Columns::summed(parts, reference), area) {
+                // At depth 16 or less the chunks hold only the area's cells.
+                (columns, Some(area)) if depth > 16 => columns.within(&area.rect),
+                (columns, _) => columns,
+            }
+        })
+        .collect()
+}
+
+/// One side's rows of a chunk of each of `groups`.
+fn side_chunk(
+    side: &WalkSide<'_>,
+    depth: u8,
+    methods: &[(bool, bool)],
+    reference: bool,
+    groups: std::ops::Range<u32>,
+    prefixes: std::ops::Range<u64>,
+) -> Vec<Columns> {
+    let segments = side.segments;
+    // A single group's count of a chunk holds at most an entry for each of its rows there.
+    let room = |cells: CellSet<'_>| match groups.len() {
+        1 => rows_in_chunk(cells, segments, depth, prefixes.clone()) as usize,
+        _ => 0,
+    };
+    let mut set = ByGroup::new(&groups, room(side.set));
+    let mut in_reference = ByGroup::new(&groups, side.reference.map_or(0, room));
+    match &side.source {
+        Source::Grouped(row_groups) => {
+            let only = (groups.len() == 1).then_some(groups.start);
+            count_chunk_into(
+                side.set,
+                segments,
+                depth,
+                row_groups,
+                only,
+                prefixes.clone(),
+                &mut set,
+            );
+            if let Some(cells) = side.reference {
                 count_chunk_into(
                     cells,
                     segments,
                     depth,
                     row_groups,
                     only,
-                    prefixes.clone(),
-                    &mut set,
+                    prefixes,
+                    &mut in_reference,
                 );
-                if let Some(r) = &self.cx.sets.reference {
-                    let cells = r.cells(self.cx);
+            }
+        }
+        Source::Split(sets) => {
+            let one = |cells: CellSet<'_>, ranges: bool, out: &mut As<'_, ByGroup>| {
+                if ranges {
+                    for (cell, count) in
+                        count_chunk_by_ranges(cells, segments, depth, prefixes.clone()).cells
+                    {
+                        out.push(cell, 0, count);
+                    }
+                } else {
                     count_chunk_into(
                         cells,
                         segments,
                         depth,
-                        row_groups,
-                        only,
-                        prefixes,
-                        &mut reference,
+                        &RowGroups::None,
+                        None,
+                        prefixes.clone(),
+                        out,
                     );
                 }
-            }
-            Source::Split(sets) => {
-                let one = |cells: CellSet<'_>, ranges: bool, out: &mut As<'_, ByGroup>| {
-                    if ranges {
-                        for (cell, count) in
-                            count_chunk_by_ranges(cells, segments, depth, prefixes.clone()).cells
-                        {
-                            out.push(cell, 0, count);
-                        }
-                    } else {
-                        count_chunk_into(
-                            cells,
-                            segments,
-                            depth,
-                            &RowGroups::None,
-                            None,
-                            prefixes.clone(),
-                            out,
-                        );
-                    }
-                };
-                for group in groups.clone() {
-                    let (cells, in_reference) = sets[group as usize];
-                    let (set_ranges, reference_ranges) = self.methods[group as usize];
+            };
+            for group in groups.clone() {
+                let (cells, of_reference) = sets[group as usize];
+                let (set_ranges, reference_ranges) = methods[group as usize];
+                one(
+                    cells,
+                    set_ranges,
+                    &mut As {
+                        inner: &mut set,
+                        group,
+                    },
+                );
+                if let Some(r) = of_reference {
                     one(
-                        cells,
-                        set_ranges,
+                        r,
+                        reference_ranges,
                         &mut As {
-                            inner: &mut set,
+                            inner: &mut in_reference,
                             group,
                         },
                     );
-                    if let Some(r) = in_reference {
-                        one(
-                            r,
-                            reference_ranges,
-                            &mut As {
-                                inner: &mut reference,
-                                group,
-                            },
-                        );
-                    }
                 }
             }
         }
-        set.groups
-            .into_iter()
-            .zip(reference.groups)
-            .map(|(set, reference)| {
-                let columns = merge(set, self.reference.then_some(reference));
-                match self.area {
-                    // At depth 16 or less the chunks hold only the area's cells.
-                    Some(area) if self.depth > 16 => columns.within(&area.rect),
-                    _ => columns,
-                }
-            })
-            .collect()
     }
+    set.groups
+        .into_iter()
+        .zip(in_reference.groups)
+        .map(|(set, of_reference)| merge(set, reference.then_some(of_reference)))
+        .collect()
 }
 
 /// The parts of `chunks` inside `ranges`, both ascending.
@@ -1359,4 +1501,140 @@ fn listed_rows(groups: &Groups, from: u32, reference: bool) -> (Vec<Run>, bool) 
         })
         .collect();
     (runs, true)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Cells counted over several shards against one segment holding every row.
+
+    use super::*;
+    use crate::select::fixture::{points, segment_of, Stacked};
+
+    use croaring::Bitmap;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+    use rustc_hash::FxHashSet;
+
+    /// One group's rows: cells, counts and reference counts.
+    type Table = Vec<(Vec<u64>, Vec<u64>, Option<Vec<u64>>)>;
+
+    /// Every group's cells, chunk by chunk over every side's segments.
+    fn counted(
+        sides: &[WalkSide<'_>],
+        depth: u8,
+        methods: &[(bool, bool)],
+        chunk_rows: u64,
+    ) -> Table {
+        let segments: Vec<(&SegmentData, u32)> = sides
+            .iter()
+            .flat_map(|side| side.segments.iter().copied())
+            .collect();
+        let groups = methods.len() as u32;
+        let mut out: Table = (0..groups)
+            .map(|_| (vec![], vec![], Some(vec![])))
+            .collect();
+        for prefixes in crate::cells::chunks(&segments, depth, chunk_rows) {
+            let chunk = chunk_of(sides, depth, methods, true, None, 0..groups, prefixes);
+            for ((cells, counts, references), part) in out.iter_mut().zip(chunk) {
+                cells.extend(part.cells);
+                counts.extend(part.counts);
+                references
+                    .as_mut()
+                    .expect("a reference")
+                    .extend(part.references.expect("a reference"));
+            }
+        }
+        out
+    }
+
+    /// One shard's segments, and its rows of the set, the reference and each group.
+    struct Side<'w> {
+        segments: Vec<(&'w SegmentData, u32)>,
+        set: Bitmap,
+        reference: Bitmap,
+        groups: Vec<Bitmap>,
+    }
+
+    impl<'w> Side<'w> {
+        fn of(
+            stacked: &'w Stacked,
+            set: &FxHashSet<u64>,
+            reference: &FxHashSet<u64>,
+            groups: &[FxHashSet<u64>],
+        ) -> Side<'w> {
+            let rows_in = |ids: &FxHashSet<u64>| stacked.rows(|id| ids.contains(&id));
+            Side {
+                segments: stacked.segments(),
+                set: rows_in(set),
+                reference: rows_in(reference),
+                groups: groups.iter().map(rows_in).collect(),
+            }
+        }
+    }
+
+    /// The cells of `sides` at `depth`, by range or by the pass, each group's rows a set of its
+    /// own where `split`, and otherwise the set in one group.
+    fn walked(sides: &[Side<'_>], depth: u8, ranges: bool, split: bool) -> Table {
+        let sides: Vec<WalkSide<'_>> = sides
+            .iter()
+            .map(|side| WalkSide {
+                segments: &side.segments,
+                set: CellSet::Rows(&side.set),
+                reference: Some(CellSet::Rows(&side.reference)),
+                source: match split {
+                    true => Source::Split(
+                        side.groups
+                            .iter()
+                            .map(|rows| (CellSet::Rows(rows), Some(CellSet::Rows(&side.reference))))
+                            .collect(),
+                    ),
+                    false => Source::Grouped(RowGroups::None),
+                },
+            })
+            .collect();
+        let methods = vec![(ranges, ranges); if split { 2 } else { 1 }];
+        counted(&sides, depth, &methods, 200)
+    }
+
+    /// Two shards, the second of two segments, against one segment of every row: by range and by
+    /// the pass, split into groups or not, at every depth.
+    #[test]
+    fn cells_over_two_shards_are_those_of_one_shard_holding_every_row() {
+        for seed in 0..4u64 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let all = points(&mut rng, 3_000);
+            let shards = [
+                Stacked::of(0, vec![segment_of(&all[..1_200])]),
+                Stacked::of(
+                    1,
+                    vec![segment_of(&all[1_200..2_000]), segment_of(&all[2_000..])],
+                ),
+            ];
+            let one = Stacked::of(0, vec![segment_of(&all)]);
+            let visible: FxHashSet<u64> = all
+                .iter()
+                .map(|p| p.2)
+                .filter(|_| rng.gen_bool(0.7))
+                .collect();
+            let of = |keep: fn(u64) -> bool| -> FxHashSet<u64> {
+                visible.iter().copied().filter(|&id| keep(id)).collect()
+            };
+            let groups = [of(|id| id % 3 != 0), of(|id| id % 2 == 0)];
+            let reference = of(|id| id % 5 != 0);
+            let two = shards
+                .each_ref()
+                .map(|s| Side::of(s, &visible, &reference, &groups));
+            let single = [Side::of(&one, &visible, &reference, &groups)];
+            for depth in [0u8, 3, 7, 12, 16, 18] {
+                for ranges in [false, true].into_iter().filter(|&r| !r || depth <= 16) {
+                    for split in [false, true] {
+                        let found = walked(&two, depth, ranges, split);
+                        let expected = walked(&single, depth, ranges, split);
+                        assert_eq!(found, expected, "seed {seed} depth {depth} split {split}");
+                        assert!(found.iter().any(|(cells, ..)| !cells.is_empty()));
+                    }
+                }
+            }
+        }
+    }
 }

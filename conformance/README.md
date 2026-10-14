@@ -12,6 +12,11 @@ reference/.venv/bin/pytest conformance/tests -v
 reference/.venv/bin/pytest conformance/suite -v
 ```
 
+`MOSAICA_CONFORMANCE_SHARDS=many` builds every corpus over several shards
+(`oracle.harness.shards_toml`), into fixture directories of its own. A bundle of several shards
+refuses every write, so that mode runs only the tests marked `writes_nothing`. A marked test that
+writes is answered 409 and fails.
+
 `conformance/suite/` is the correctness suite's shared foundation (`docs/design/correctness-suite.md`
 §3, §12.2, build-order row 1): the read battery's `Query`/`Recorded`/`Canonical` types, the one
 response-canonicalisation implementation, and a recorder that issues a battery against a live

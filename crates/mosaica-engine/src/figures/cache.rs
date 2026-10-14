@@ -37,6 +37,7 @@ use std::time::{Duration, Instant};
 
 use rustc_hash::FxHashMap;
 use mosaica_cache::{CacheWeight, Cancel, SingleFlightCache, WaitEnded, WaitingBuildError};
+use mosaica_types::LayerSpace;
 
 use super::counts::{CountsAt, Deltas, Reserves};
 use super::denied::DenyCorrection;
@@ -102,25 +103,26 @@ pub(crate) struct FieldDenyKey {
     pub failing: Option<u64>,
 }
 
-/// What one session's tail of a field is a function of: its rows above the fragment's base rows,
-/// as [`TailKey`] names them, and their values.
+/// What one session's tail of a field in one shard is a function of: its rows above the
+/// fragment's base rows, as [`TailKey`] names them, and their values.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct FieldTailKey {
+    pub shard: mosaica_types::ShardId,
     pub token_id: u64,
     pub view: String,
     pub column: String,
     pub kind: u8,
-    pub segments_version: u64,
-    pub projection_segments_version: u64,
-    pub overlay_version: u64,
+    /// [`MaskIdentity::shards`].
+    pub shards: [u8; 32],
 }
 
 /// The fragment's counts: a function of the fragment's base rows and the column's base labels.
 ///
 /// - `terms`: the session's grant ([`crate::Session::terms_digest`]).
-/// - `identity`: the bundle identity the fragment was unioned against. A fold rotates it, and
+/// - `identity`: the shard identity the fragment was unioned against. A fold rotates it, and
 ///   nothing else renumbers the base rows or rewrites the postings below them.
-/// - `view`, `layer`, `level`: what the column is of.
+/// - `view`, `space`, `level`: what the column is of. The layer is named by its space, never by its
+///   name, which a layer registered after a drop takes again.
 /// - `column`: [`crate::row_column::RowColumn::identity`], which a column composed, opened,
 ///   recomposed or claimed afresh moves. Within one, a growth or a publication is followed by its
 ///   steps, not by a new key.
@@ -134,26 +136,24 @@ pub(crate) struct FragmentKey {
     pub terms: [u8; 32],
     pub identity: [u8; 32],
     pub view: String,
-    pub layer: String,
+    pub space: LayerSpace,
     pub level: u32,
     pub column: u64,
     pub geometry: Geometry,
 }
 
-/// One request's composed mask, named by every input to it.
+/// One request's composed mask in one shard, named by every input to it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ExactKey {
+    pub shard: mosaica_types::ShardId,
     pub terms: [u8; 32],
     pub view: String,
-    pub layer: String,
+    pub space: LayerSpace,
     pub level: u32,
     pub level_version: u64,
     pub geometry: Geometry,
-    pub segments_version: u64,
-    pub projection_segments_version: u64,
-    pub overlay_version: u64,
-    pub fragment_identity: [u8; 32],
-    pub fragment_watermark: u64,
+    /// [`MaskIdentity::shards`].
+    pub shards: [u8; 32],
 }
 
 /// What a deny correction is a function of: the fragment, the level's labels at one version of
@@ -164,7 +164,7 @@ pub(crate) struct DenyKey {
     pub terms: [u8; 32],
     pub identity: [u8; 32],
     pub view: String,
-    pub layer: String,
+    pub space: LayerSpace,
     pub level: u32,
     pub column: u64,
     pub level_version: u64,
@@ -172,19 +172,41 @@ pub(crate) struct DenyKey {
     pub failing: Option<u64>,
 }
 
-/// What one session's tail is a function of: its rows above the fragment's base rows and the
-/// labels the column gives them.
+/// What one session's tail in one shard is a function of: its rows above the fragment's base rows
+/// and the labels the column gives them.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct TailKey {
+    pub shard: mosaica_types::ShardId,
     pub token_id: u64,
     pub view: String,
-    pub layer: String,
+    pub space: LayerSpace,
     pub level: u32,
     pub column: u64,
     pub level_version: u64,
-    pub segments_version: u64,
-    pub projection_segments_version: u64,
+    /// [`MaskIdentity::shards`].
+    pub shards: [u8; 32],
+}
+
+/// What a cache keyed on a request's mask reads of one shard the request resolves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct SideVersions {
+    pub shard: mosaica_types::ShardId,
     pub overlay_version: u64,
+    pub fragment_identity: [u8; 32],
+    pub fragment_watermark: u64,
+}
+
+#[cfg(test)]
+impl SideVersions {
+    /// Shard `shard`'s versions: overlay 5, identity `shard` in every byte, watermark 100.
+    pub(crate) fn fixture(shard: u32) -> SideVersions {
+        SideVersions {
+            shard: mosaica_types::ShardId::new(shard).unwrap(),
+            overlay_version: 5,
+            fragment_identity: [shard as u8; 32],
+            fragment_watermark: 100,
+        }
+    }
 }
 
 /// Everything about one request's composed mask that a cache keyed on the mask is a function of,
@@ -197,36 +219,64 @@ pub(crate) struct MaskIdentity {
     /// session holding that term set shares.
     pub terms: [u8; 32],
     pub segments_version: u64,
-    /// The generation the session's row projection was built at, one behind `segments_version`
-    /// while a stale projection is served.
+    /// The generation every shard's row projection was taken at, one behind `segments_version`
+    /// while stale projections are served.
     pub projection_segments_version: u64,
-    pub overlay_version: u64,
-    pub fragment_identity: [u8; 32],
-    pub fragment_watermark: u64,
+    /// A digest of the two versions above and every shard's [`SideVersions`], from [`Self::of`]:
+    /// every shard the request resolves, whether or not the viewer sees anything there, so no key
+    /// depends on where a viewer's items sit.
+    pub shards: [u8; 32],
 }
 
 impl MaskIdentity {
-    /// This mask's exact key for one level.
+    /// The identity of a request's mask over `sides`, ascending by shard.
+    pub(crate) fn of(
+        token_id: u64,
+        terms: [u8; 32],
+        segments_version: u64,
+        projection_segments_version: u64,
+        sides: &[SideVersions],
+    ) -> MaskIdentity {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"mosaica-mask-identity-v1");
+        hasher.update(segments_version.to_le_bytes());
+        hasher.update(projection_segments_version.to_le_bytes());
+        hasher.update((sides.len() as u64).to_le_bytes());
+        for side in sides {
+            hasher.update(side.shard.raw().to_le_bytes());
+            hasher.update(side.overlay_version.to_le_bytes());
+            hasher.update(side.fragment_identity);
+            hasher.update(side.fragment_watermark.to_le_bytes());
+        }
+        MaskIdentity {
+            token_id,
+            terms,
+            segments_version,
+            projection_segments_version,
+            shards: hasher.finalize().into(),
+        }
+    }
+
+    /// This mask's exact key for one level in `shard`.
     pub(crate) fn exact_key(
         &self,
+        shard: mosaica_types::ShardId,
         view: &str,
-        layer: &str,
+        space: LayerSpace,
         level: u32,
         level_version: u64,
         geometry: Geometry,
     ) -> ExactKey {
         ExactKey {
+            shard,
             terms: self.terms,
             view: view.to_string(),
-            layer: layer.to_string(),
+            space,
             level,
             level_version,
             geometry,
-            segments_version: self.segments_version,
-            projection_segments_version: self.projection_segments_version,
-            overlay_version: self.overlay_version,
-            fragment_identity: self.fragment_identity,
-            fragment_watermark: self.fragment_watermark,
+            shards: self.shards,
         }
     }
 }
@@ -339,8 +389,8 @@ impl CacheWeight for Tail {
     }
 }
 
-/// `(view, layer, level)`.
-pub(crate) type LevelAddress = (String, String, u32);
+/// `(shard, view, space, level)`.
+pub(crate) type LevelAddress = (mosaica_types::ShardId, String, LayerSpace, u32);
 
 /// The gauges an operator reads. Names no artifact and no principal.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -520,9 +570,9 @@ pub struct FiguresCache {
     pub(super) field_denies: SingleFlightCache<FieldDenyKey, FieldDeny>,
     /// The fields' tails, per session and generation.
     pub(super) field_tails: SingleFlightCache<FieldTailKey, Held>,
-    /// Per `(view, layer, level)`, the labels of the view's denied base rows.
+    /// Per `(view, space, level)`, the labels of the view's denied base rows.
     pub(super) labels: LabelStore,
-    /// Where entries are persisted: one directory per bundle identity beneath it. `None` holds
+    /// Where entries are persisted: one directory per shard identity beneath it. `None` holds
     /// nothing on disk.
     pub(super) dir: Option<std::path::PathBuf>,
     /// The bytes `dir` may hold.
@@ -661,13 +711,15 @@ impl FiguresCache {
         }
     }
 
-    /// Remove from the cache directory every bundle identity's entries but `identity`'s: at open,
-    /// and whenever a compaction rotates the identity.
-    pub(crate) fn sweep(&self, identity: [u8; 32]) {
-        self.field_left.retain_keys(|key| key.identity == identity);
+    /// Remove every entry filed under an identity outside `live`, the identities of the shards
+    /// served: at open, and whenever a compaction rotates them.
+    pub(crate) fn sweep(&self, live: impl IntoIterator<Item = [u8; 32]>) {
+        let live: Vec<[u8; 32]> = live.into_iter().collect();
+        self.field_left
+            .retain_keys(|key| live.contains(&key.identity));
         if let Some(root) = self.dir.clone() {
             self.worker
-                .submit(move || super::persist::sweep_other_identities(&root, &identity));
+                .submit(move || super::persist::sweep_other_identities(&root, &live));
         }
     }
 
@@ -932,19 +984,16 @@ impl Drop for FiguresCache {
 mod tests {
     use super::*;
 
-    fn key(terms: u8, layer: &str, overlay: u64) -> FiguresKey {
+    fn key(terms: u8, shards: u8) -> FiguresKey {
         FiguresKey::Exact(ExactKey {
+            shard: mosaica_types::ShardId::ZERO,
             geometry: Geometry::None,
             terms: [terms; 32],
             view: "s0".into(),
-            layer: layer.into(),
+            space: LayerSpace::ZERO,
             level: 0,
             level_version: 1,
-            segments_version: 1,
-            projection_segments_version: 1,
-            overlay_version: overlay,
-            fragment_identity: [7u8; 32],
-            fragment_watermark: 0,
+            shards: [shards; 32],
         })
     }
 
@@ -968,7 +1017,7 @@ mod tests {
         let cache = FiguresCache::default();
         let built = std::sync::atomic::AtomicU32::new(0);
         for _ in 0..3 {
-            let held = get(&cache, key(1, "a", 0), || {
+            let held = get(&cache, key(1, 0), || {
                 built.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 counts(&[5, 6])
             });
@@ -998,7 +1047,7 @@ mod tests {
                 let (cache, builds, held) =
                     (Arc::clone(&cache), Arc::clone(&builds), Arc::clone(&held));
                 std::thread::spawn(move || {
-                    get(&cache, key(1, "a", 0), || {
+                    get(&cache, key(1, 0), || {
                         builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         held.lock().unwrap().recv().unwrap();
                         counts(&[3, 4])
@@ -1034,7 +1083,7 @@ mod tests {
         let builder = {
             let cache = Arc::clone(&cache);
             std::thread::spawn(move || {
-                get(&cache, key(1, "a", 0), || {
+                get(&cache, key(1, 0), || {
                     held.recv().unwrap();
                     counts(&[7])
                 })
@@ -1047,10 +1096,9 @@ mod tests {
         }
         let gone = crate::CancelToken::new();
         gone.cancel();
-        let waited =
-            cache.get_or_build(key(1, "a", 0), &DrawingTurn::default(), Some(&gone), |_| {
-                Some(counts(&[0]))
-            });
+        let waited = cache.get_or_build(key(1, 0), &DrawingTurn::default(), Some(&gone), |_| {
+            Some(counts(&[0]))
+        });
         assert_eq!(waited.err(), Some(WaitEnded::Cancelled));
         release.send(()).unwrap();
         assert_eq!(builder.join().unwrap(), 7);
@@ -1074,7 +1122,7 @@ mod tests {
                     Arc::clone(&open),
                 );
                 std::thread::spawn(move || {
-                    get(&cache, key(terms, "a", 0), || {
+                    get(&cache, key(terms, 0), || {
                         most.fetch_max(
                             walking.fetch_add(1, Ordering::SeqCst) + 1,
                             Ordering::SeqCst,
@@ -1110,18 +1158,16 @@ mod tests {
     #[test]
     fn a_deny_rotates_the_key_rather_than_editing_the_entry() {
         let cache = FiguresCache::default();
-        let before = get(&cache, key(1, "a", 4), || counts(&[10]));
+        let before = get(&cache, key(1, 4), || counts(&[10]));
         assert_eq!(before.newest().count(0), 10);
-        let after = get(&cache, key(1, "a", 5), || counts(&[9]));
+        let after = get(&cache, key(1, 5), || counts(&[9]));
         assert_eq!(
             after.newest().count(0),
             9,
             "the corrected count, not the held one"
         );
         assert_eq!(
-            get(&cache, key(1, "a", 4), || counts(&[0]))
-                .newest()
-                .count(0),
+            get(&cache, key(1, 4), || counts(&[0])).newest().count(0),
             10
         );
     }
@@ -1130,24 +1176,9 @@ mod tests {
     #[test]
     fn the_counts_are_the_term_sets_own() {
         let cache = FiguresCache::default();
-        assert_eq!(
-            get(&cache, key(1, "a", 0), || counts(&[3]))
-                .newest()
-                .count(0),
-            3
-        );
-        assert_eq!(
-            get(&cache, key(2, "a", 0), || counts(&[8]))
-                .newest()
-                .count(0),
-            8
-        );
-        assert_eq!(
-            get(&cache, key(1, "a", 0), || counts(&[0]))
-                .newest()
-                .count(0),
-            3
-        );
+        assert_eq!(get(&cache, key(1, 0), || counts(&[3])).newest().count(0), 3);
+        assert_eq!(get(&cache, key(2, 0), || counts(&[8])).newest().count(0), 8);
+        assert_eq!(get(&cache, key(1, 0), || counts(&[0])).newest().count(0), 3);
     }
 
     /// The bound evicts the least recently used, lowering it reclaims at once, and an entry
@@ -1156,25 +1187,23 @@ mod tests {
     fn the_budget_bounds_what_is_resident() {
         let floor = mosaica_cache::PER_ENTRY_FLOOR_BYTES;
         let cache = FiguresCache::new(2 * floor, None);
-        get(&cache, key(1, "a", 0), || counts(&[1, 1]));
-        get(&cache, key(2, "a", 0), || counts(&[2, 2]));
+        get(&cache, key(1, 0), || counts(&[1, 1]));
+        get(&cache, key(2, 0), || counts(&[2, 2]));
         assert_eq!(cache.stats().entries, 2);
 
-        get(&cache, key(1, "a", 0), || counts(&[0, 0]));
-        get(&cache, key(3, "a", 0), || counts(&[3, 3]));
+        get(&cache, key(1, 0), || counts(&[0, 0]));
+        get(&cache, key(3, 0), || counts(&[3, 3]));
         assert_eq!(cache.stats().entries, 2);
         assert_eq!(cache.stats().evictions, 1);
         assert_eq!(
-            get(&cache, key(1, "a", 0), || counts(&[0, 0]))
-                .newest()
-                .count(0),
+            get(&cache, key(1, 0), || counts(&[0, 0])).newest().count(0),
             1
         );
 
         cache.set_bound_bytes(0);
         assert_eq!(cache.stats().entries, 0);
         assert_eq!(cache.stats().resident_bytes, 0);
-        let held = get(&cache, key(4, "a", 0), || counts(&[9, 9]));
+        let held = get(&cache, key(4, 0), || counts(&[9, 9]));
         assert_eq!(held.newest().count(0), 9);
         assert_eq!(cache.stats().entries, 0);
     }
@@ -1192,7 +1221,7 @@ mod tests {
             let (cache, order) = (Arc::clone(&cache), Arc::clone(&order));
             std::thread::spawn(move || {
                 cache
-                    .get_or_build(key(1, "a", 0), &DrawingTurn::default(), None, |build| {
+                    .get_or_build(key(1, 0), &DrawingTurn::default(), None, |build| {
                         started.send(()).unwrap();
                         assert!(build.give_way());
                         order.lock().unwrap().push("walked");
@@ -1220,7 +1249,7 @@ mod tests {
         let _drawing = cache.drawing(&turn);
 
         let own = cache
-            .get_or_build(key(1, "a", 0), &turn, None, |build| {
+            .get_or_build(key(1, 0), &turn, None, |build| {
                 assert!(build.give_way());
                 Some(counts(&[3]))
             })
@@ -1232,7 +1261,7 @@ mod tests {
             let cache = Arc::clone(&cache);
             std::thread::spawn(move || {
                 cache
-                    .get_or_build(key(2, "a", 0), &DrawingTurn::default(), None, |build| {
+                    .get_or_build(key(2, 0), &DrawingTurn::default(), None, |build| {
                         started.send(()).unwrap();
                         assert!(build.give_way());
                         Some(counts(&[5]))
@@ -1244,7 +1273,7 @@ mod tests {
         };
         walking.recv().unwrap();
         let waited = cache
-            .get_or_build(key(2, "a", 0), &turn, None, |_| Some(counts(&[0])))
+            .get_or_build(key(2, 0), &turn, None, |_| Some(counts(&[0])))
             .unwrap();
         assert_eq!(waited.newest().count(0), 5);
         assert_eq!(builder.join().unwrap(), 5);
@@ -1264,7 +1293,7 @@ mod tests {
         let slow = {
             let cache = Arc::clone(&cache);
             std::thread::spawn(move || {
-                get(&cache, key(1, "a", 0), || {
+                get(&cache, key(1, 0), || {
                     started.send(()).unwrap();
                     held.recv().unwrap();
                     counts(&[1])
@@ -1280,7 +1309,7 @@ mod tests {
                 let turn = DrawingTurn::default();
                 let _drawing = cache.drawing(&turn);
                 cache
-                    .get_or_build(key(1, "a", 0), &turn, None, |_| Some(counts(&[0])))
+                    .get_or_build(key(1, 0), &turn, None, |_| Some(counts(&[0])))
                     .unwrap()
                     .newest()
                     .count(0)
@@ -1295,7 +1324,7 @@ mod tests {
             let cache = Arc::clone(&cache);
             std::thread::spawn(move || {
                 let got = cache
-                    .get_or_build(key(2, "a", 0), &DrawingTurn::default(), None, |build| {
+                    .get_or_build(key(2, 0), &DrawingTurn::default(), None, |build| {
                         assert!(build.give_way());
                         Some(counts(&[2]))
                     })
@@ -1330,7 +1359,7 @@ mod tests {
                 let (cache, held, started) =
                     (Arc::clone(&cache), Arc::clone(&held), started.clone());
                 std::thread::spawn(move || {
-                    get(&cache, key(terms, "a", 0), || {
+                    get(&cache, key(terms, 0), || {
                         started.send(()).unwrap();
                         held.lock().unwrap().recv().unwrap();
                         counts(&[u32::from(terms)])
@@ -1348,7 +1377,7 @@ mod tests {
         let queued = {
             let (cache, gone) = (Arc::clone(&cache), gone.clone());
             std::thread::spawn(move || {
-                cache.get_or_build(key(9, "a", 0), &DrawingTurn::default(), Some(&gone), |_| {
+                cache.get_or_build(key(9, 0), &DrawingTurn::default(), Some(&gone), |_| {
                     Some(counts(&[9]))
                 })
             })
@@ -1369,5 +1398,36 @@ mod tests {
             CONCURRENT_BUILDS,
             "the stopped build holds nothing"
         );
+    }
+
+    /// Every version of every shard a mask is over moves its identity, and so every key built
+    /// from it.
+    #[test]
+    fn every_shards_versions_move_the_mask_identity() {
+        let sides = [SideVersions::fixture(0), SideVersions::fixture(1)];
+        let of = |sides: &[SideVersions]| MaskIdentity::of(1, [2; 32], 3, 3, sides).shards;
+        let held = of(&sides);
+        let moves: [fn(&mut SideVersions); 4] = [
+            |s| s.shard = mosaica_types::ShardId::new(7).unwrap(),
+            |s| s.overlay_version += 1,
+            |s| s.fragment_identity[0] ^= 1,
+            |s| s.fragment_watermark += 1,
+        ];
+        for at in 0..sides.len() {
+            for (which, change) in moves.iter().enumerate() {
+                let mut moved = sides;
+                change(&mut moved[at]);
+                assert_ne!(
+                    of(&moved),
+                    held,
+                    "shard {at}'s field {which} did not move it"
+                );
+            }
+        }
+        assert_ne!(of(&sides[..1]), held, "a shard fewer");
+        let at = |segments, projection| MaskIdentity::of(1, [2; 32], segments, projection, &sides);
+        assert_ne!(at(4, 3).shards, held, "the generation");
+        assert_ne!(at(3, 2).shards, held, "the projections' generation");
+        assert_eq!(of(&sides), held, "the same versions name the same mask");
     }
 }

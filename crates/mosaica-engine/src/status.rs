@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mosaica_types::TermId;
+use mosaica_types::{ShardId, TermId};
 
 use crate::engine::Engine;
 use crate::Generation;
@@ -78,7 +78,7 @@ pub struct GenerationStatus {
     /// Sorted by `(partition, view)`.
     pub segments: Vec<ViewSegments>,
     pub live_rows: u64,
-    /// The point shard's denied items, and its deletions.
+    /// The point shards' denied items, and their deletions, summed over the shards.
     pub overlay_depth: usize,
     pub retirable_deletions: u64,
     pub layer_spaces: LayerSpacesStatus,
@@ -91,35 +91,51 @@ pub(crate) fn live_rows_of(generation: &Generation) -> u64 {
         .bundle
         .partitions
         .values()
-        .flat_map(|partition| partition.only_shard().record.segments.iter())
+        .flat_map(|partition| partition.shards.iter())
+        .flat_map(|shard| shard.record.segments.iter())
         .map(|descriptor| u64::from(descriptor.row_count))
         .sum()
 }
 
-/// Live segments per (partition, view). A viewport pays a measured 1.4-1.6 µs per
-/// (tile × segment). Sorted, since the generation holds them in `HashMap`s and an operator diffing
-/// two responses must not see a reordering that means nothing.
-fn segment_counts_of(generation: &Generation) -> Vec<ViewSegments> {
-    let mut counts: Vec<ViewSegments> = generation
-        .bundle
-        .partitions
-        .iter()
-        .flat_map(|(partition, data)| {
-            data.only_shard().views
-                .iter()
-                .map(move |(view, view_data)| ViewSegments {
-                    partition: partition.clone(),
-                    view: view.clone(),
-                    segments: view_data.segments.len(),
-                })
-        })
-        .collect();
-    counts.sort_by(|a, b| (&a.partition, &a.view).cmp(&(&b.partition, &b.view)));
-    counts
+/// The point shards' denied items, summed.
+fn overlay_depth_of(generation: &Generation) -> usize {
+    generation.shards().map(|shard| shard.overlay.len()).sum()
 }
 
-/// Each partition's live `(segments_version, watermark)`, sorted by partition.
+/// The point shards' deletions, summed: what a fold can retire.
+fn retirable_deletions_of(generation: &Generation) -> u64 {
+    generation
+        .shards()
+        .map(|shard| shard.overlay.deleted_len())
+        .sum()
+}
+
+/// Live segments per (partition, view), summed over the shards. A viewport pays a measured 1.4-1.6
+/// µs per (tile × segment). Sorted, since the generation holds them in `HashMap`s and an operator
+/// diffing two responses must not see a reordering that means nothing.
+fn segment_counts_of(generation: &Generation) -> Vec<ViewSegments> {
+    let mut counts = std::collections::BTreeMap::<(&String, &String), usize>::new();
+    for (partition, data) in &generation.bundle.partitions {
+        for shard in &data.shards {
+            for (view, view_data) in &shard.views {
+                *counts.entry((partition, view)).or_default() += view_data.segments.len();
+            }
+        }
+    }
+    counts
+        .into_iter()
+        .map(|((partition, view), segments)| ViewSegments {
+            partition: partition.clone(),
+            view: view.clone(),
+            segments,
+        })
+        .collect()
+}
+
+/// Each partition's live `(segments_version, watermark)`, the watermark summed over the shards,
+/// sorted by partition.
 fn partition_status_of(generation: &Generation) -> Vec<PartitionStatus> {
+    let watermark = generation.shards().map(|shard| shard.watermark).sum();
     let mut rows: Vec<PartitionStatus> = generation
         .bundle
         .partitions
@@ -127,7 +143,7 @@ fn partition_status_of(generation: &Generation) -> Vec<PartitionStatus> {
         .map(|partition| PartitionStatus {
             partition: partition.clone(),
             segments_version: generation.segments_version,
-            watermark: generation.only_shard().watermark,
+            watermark,
         })
         .collect();
     rows.sort_by(|a, b| a.partition.cmp(&b.partition));
@@ -179,13 +195,14 @@ impl Engine {
         self.counters.driven_stretches.load(Ordering::Relaxed)
     }
 
+    /// The point shards' high waters, summed.
     pub fn allocator_high_water(&self) -> u64 {
-        self.write.live().only_shard().high_water()
+        self.write.live().high_water()
     }
 
-    /// The point shard's size: the high water an insert may not take it past.
+    /// The point shards' size: the high water an insert may not take a shard past.
     pub fn shard_size(&self) -> u64 {
-        self.write.live().only_shard().size()
+        self.write.live().shard_size()
     }
 
     /// The figures' gauges ([`crate::figures`]). Operator plane only: a count of structures,
@@ -241,11 +258,7 @@ impl Engine {
     pub fn set_cache_bounds(&self, row_projection_bytes: u64, fragment_bytes: u64) {
         self.row_projection_cache
             .set_bound_bytes(row_projection_bytes);
-        self.generation
-            .load()
-            .only_shard()
-            .fragments
-            .set_memory_bound(fragment_bytes);
+        self.fragments.set_memory_bound(fragment_bytes);
     }
 
     /// Bound the fragments' counts held in memory (`serve.masked_count_cache_bytes`). This key
@@ -298,11 +311,7 @@ impl Engine {
     /// before it is refused (`serve.single_flight_wait_ms`). Unset, an embedder gets [`crate::DEFAULT_SINGLE_FLIGHT_WAIT_MS`].
     pub fn set_single_flight_wait_ms(&self, wait_budget_ms: u64) {
         self.row_projection_cache.set_wait_budget_ms(wait_budget_ms);
-        self.generation
-            .load()
-            .only_shard()
-            .fragments
-            .set_wait_budget_ms(wait_budget_ms);
+        self.fragments.set_wait_budget_ms(wait_budget_ms);
     }
 
     /// The row count at which a commit window closes (`ingest.commit_window_max_items`, which
@@ -338,27 +347,26 @@ impl Engine {
     /// in one response describe one publication.
     pub fn generation_status(&self) -> GenerationStatus {
         let generation = self.generation.load();
-        let shard = generation.only_shard();
         let (depth, retirable) = generation.space_overlay_figures();
         GenerationStatus {
             partitions: partition_status_of(&generation),
             segments: segment_counts_of(&generation),
             live_rows: live_rows_of(&generation),
-            overlay_depth: shard.overlay.len(),
-            retirable_deletions: shard.overlay.deleted_len(),
+            overlay_depth: overlay_depth_of(&generation),
+            retirable_deletions: retirable_deletions_of(&generation),
             layer_spaces: LayerSpacesStatus {
                 count: self.write.live().layer_count(),
                 depth,
                 retirable,
             },
-            fragment_cache: shard.fragments.stats(),
-            fragment_cache_rebuilds: shard.fragments.rebuild_count(),
+            fragment_cache: self.fragments.stats(),
+            fragment_cache_rebuilds: self.fragments.rebuild_count(),
         }
     }
 
-    /// The live overlay's entry count, read off the current generation.
+    /// The point shards' overlay entries, summed, read off the current generation.
     pub fn overlay_depth(&self) -> usize {
-        self.generation.load().only_shard().overlay.len()
+        overlay_depth_of(&self.generation.load())
     }
 
     /// Rows the bundle's segments hold, tombstoned ones included: the only figure on
@@ -371,7 +379,7 @@ impl Engine {
     /// [`Engine::overlay_depth`]: this is what a fold can reduce, since a fold retires a
     /// suppression only of an entity it removes, which is deleted too.
     pub fn retirable_deletions(&self) -> u64 {
-        self.generation.load().only_shard().overlay.deleted_len()
+        retirable_deletions_of(&self.generation.load())
     }
 
     /// The row-projection cache's operator gauges, published as `projection_cache`. The fragment
@@ -386,36 +394,36 @@ impl Engine {
     /// `canonical_key_for` and `rebuild_count`, not the whole cache: `FragmentCache::set_memory_bound`
     /// would silently undo the bound [`Self::set_cache_bounds`]'s validated caller sets.
     pub fn fragment_cache_stats(&self) -> mosaica_authz::fragment::CacheStats {
-        self.generation.load().only_shard().fragments.stats()
+        self.fragments.stats()
     }
 
     /// Times the fragment cache has actually re-unioned postings, rather than reopening a
-    /// digest-verified `.frag` sidecar or hitting the in-memory tier. Read off the live
-    /// generation's cache, so this and [`Self::fragment_cache_stats`] both reset at a compaction.
+    /// digest-verified `.frag` sidecar or hitting the in-memory tier, since the engine opened.
     pub fn fragment_cache_rebuilds(&self) -> u64 {
-        self.generation
-            .load()
-            .only_shard()
-            .fragments
-            .rebuild_count()
+        self.fragments.rebuild_count()
     }
 
-    /// The canonical cache key for `satisfied`, at the live generation's watermark — the only way
-    /// to name a fragment entry from outside, and what [`Self::evict_fragment`] takes. Pure;
+    /// The canonical cache key for `satisfied` in the live generation's shard `shard`, at its
+    /// identity and watermark — the only way to name a fragment entry from outside, and what
+    /// [`Self::evict_fragment`] takes. `None` where the generation holds no such shard. Pure;
     /// reveals nothing the caller did not supply.
-    pub fn fragment_canonical_key(&self, satisfied: &[TermId]) -> [u8; 32] {
+    pub fn fragment_canonical_key(&self, shard: ShardId, satisfied: &[TermId]) -> Option<[u8; 32]> {
         let generation = self.generation.load();
-        let shard = generation.only_shard();
-        shard
-            .fragments
-            .canonical_key_for(satisfied, shard.watermark)
+        let shard = generation.shard(shard)?;
+        Some(
+            self.fragments
+                .canonical_key_for(shard.identity, satisfied, shard.watermark),
+        )
     }
 
-    /// Drop one entry from the fragment cache's in-memory tier; returns whether it was there. The
-    /// digest-verified `.frag`/`.meta` pair stays on disk, and a live `Session` holding the fragment
-    /// keeps its mapping alive regardless.
-    pub fn evict_fragment(&self, key: &[u8; 32]) -> bool {
-        self.generation.load().only_shard().fragments.evict(key)
+    /// Drop one of shard `shard`'s entries from the fragment cache's in-memory tier; returns
+    /// whether it was there. The digest-verified `.frag`/`.meta` pair stays on disc, and a request
+    /// holding the fragment keeps its mapping alive regardless.
+    pub fn evict_fragment(&self, shard: ShardId, key: &[u8; 32]) -> bool {
+        let generation = self.generation.load();
+        generation
+            .shard(shard)
+            .is_some_and(|shard| self.fragments.evict(shard.identity, key))
     }
 
     /// Cached row-space projection slots currently held (`Building` and `Ready` both counted).
@@ -425,7 +433,7 @@ impl Engine {
     }
 
     /// Row projections built from the whole fragment, rather than derived from the preceding
-    /// generation's by unioning the new extents' rows. Rising once per session per tick after a
+    /// generation's by unioning the new extents' rows. Rising once per grant per tick after a
     /// flush means a full build, measured at 1 277 ms at 10⁹, is on the steady-state path.
     pub fn full_projection_builds(&self) -> u64 {
         self.counters.full_projection_builds.load(Ordering::Relaxed)

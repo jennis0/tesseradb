@@ -27,7 +27,7 @@ use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource, ServingLayout,
 };
-use mosaica_types::{EntityId, MosaicaId};
+use mosaica_types::{EntityId, MosaicaId, ShardId};
 
 const LAYER: &str = "clusters/a";
 /// The artifact's members: source ids `0..300`, which the broad credential sees whole and the
@@ -531,7 +531,7 @@ fn the_leaf_answers_from_the_column_where_the_form_holds_no_rows() {
         "and the narrow principal's"
     );
     let form = reopened
-        .held_artifact_form_for_test("s0", LAYER, 0)
+        .held_artifact_form_for_test(ShardId::ZERO, "s0", LAYER, 0)
         .expect("the requests left the level's form held");
     assert!(
         !form.membership().rows_held(),

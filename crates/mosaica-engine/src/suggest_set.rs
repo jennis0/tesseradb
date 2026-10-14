@@ -8,7 +8,7 @@
 //!
 //! # What the key is, and why every term of it is there
 //!
-//! `(token_id, resolved column, segments_version, overlay_version)` — the design's own four, and
+//! `(token_id, resolved column, segments_version, overlay_versions)` — the design's own four, and
 //! the first two are the ordinary ones: the set is a function of the principal's mask, and of the
 //! column whose values it is over (a group-scoped family is one column per view, so the *resolved*
 //! spelling is the address, exactly as it is on the two listing verbs).
@@ -17,9 +17,9 @@
 //! overlay version is never served** — it is not stale-but-usable, it is fail-open: a suppression
 //! accepted since the sweep removes the last visible member of a value, and a set taken before it
 //! would keep offering that value's *name*, which is exactly the C11 disclosure `derived` exists to
-//! withhold. `overlay_version` moves at a deny's publication and `segments_version` at every flush,
-//! so a key carrying both cannot name an entry taken before either. The cost is the one §6.3 names:
-//! an entry goes cold on every flush and every deny.
+//! withhold. A shard's overlay version moves at a deny's publication and `segments_version` at
+//! every flush, so a key carrying both cannot name an entry taken before either. The cost is the
+//! one §6.3 names: an entry goes cold on every flush and every deny.
 //!
 //! **A miss is never an error.** The probe route of §6.2 answers every request the set does not,
 //! and the two produce the same page under the same gate — so nothing here can withhold a value or
@@ -52,14 +52,15 @@ use croaring::{Bitmap, Portable};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct SuggestSetKey {
     /// The session's process-local identity, never the bearer token itself. Never reused within a
-    /// process, which is what makes `prune_token` sound.
+    /// process, which is what makes `prune_tokens` sound.
     pub token_id: u64,
     /// The **resolved** column — one view's, under a group-scoped family.
     pub column: String,
     /// The geometry this generation published; moved by every flush.
     pub segments_version: u64,
-    /// The overlay's own counter, bumped by every deny publication. See the module doc.
-    pub overlay_version: u64,
+    /// Every shard's overlay counter, ascending by shard, each bumped by every deny publication in
+    /// its shard. See the module doc.
+    pub overlay_versions: Vec<u64>,
 }
 
 /// One session's visible values, as dense positions in its vocabulary's index.
@@ -337,15 +338,8 @@ impl SuggestSets {
         self.declined.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Remove every entry belonging to one session, on `RowProjectionCache::prune_token`'s
-    /// argument: it only removes, so its worst failure is a needless sweep, and a `token_id` is
-    /// never reused within a process.
-    pub fn prune_token(&self, token_id: u64) {
-        self.prune_tokens(&std::iter::once(token_id).collect());
-    }
-
-    /// The same removal for a set of sessions, in one pass — the expiry sweep's form. See
-    /// `RowProjectionCache::prune_tokens` for why a batch is not a loop over single removals.
+    /// Remove every entry belonging to any of `token_ids`, in one pass. It only removes, so its
+    /// worst failure is a needless sweep, and a `token_id` is never reused within a process.
     pub fn prune_tokens(&self, token_ids: &rustc_hash::FxHashSet<u64>) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let doomed: Vec<SuggestSetKey> = inner
@@ -386,8 +380,9 @@ impl SuggestSets {
     }
 }
 
-/// **The sweep** — one pass over a column's entity-space value layers under `candidate`, turned
-/// into the dense positions of the values it found (§6.3).
+/// **The sweep** — one pass over a column's entity-space value layers in every shard, each
+/// shard's under that shard's candidate, turned into the dense positions of the values it found
+/// (§6.3).
 ///
 /// `None` where the column cannot take the set at all: **rule 4**, a column with no entity-space
 /// value column to sweep — a blob-resident `derived` category, which has postings and nothing else
@@ -408,17 +403,21 @@ impl SuggestSets {
 /// **A code with no dense position is skipped**, which is the fail-closed direction: a value minted
 /// since the index was built has none, is therefore not in the set, and is answered by the probe
 /// route at the walk's side-map arm.
-pub fn sweep<'a>(
-    columns: impl Iterator<Item = &'a mosaica_filter::ValueColumn>,
-    candidate: &Bitmap,
+pub fn sweep<'a, 'c, L>(
+    shards: impl IntoIterator<Item = (L, &'c Bitmap)>,
     index: &crate::suggest::SuggestIndex,
-) -> Option<SuggestSet> {
+) -> Option<SuggestSet>
+where
+    L: Iterator<Item = &'a mosaica_filter::ValueColumn>,
+{
     let mut codes: Vec<u32> = Vec::new();
     let mut swept = false;
-    for column in columns {
-        swept = true;
-        if !column.visit_codes(candidate, |code| codes.push(code)) {
-            return None;
+    for (columns, candidate) in shards {
+        for column in columns {
+            swept = true;
+            if !column.visit_codes(candidate, |code| codes.push(code)) {
+                return None;
+            }
         }
     }
     if !swept {
@@ -458,7 +457,7 @@ mod tests {
             token_id,
             column: "department".to_string(),
             segments_version,
-            overlay_version,
+            overlay_versions: vec![overlay_version],
         }
     }
 
@@ -568,7 +567,8 @@ mod tests {
 
         let mut candidate = Bitmap::new();
         candidate.add_many(&[1, 4, 6]);
-        let set = sweep(std::iter::once(&column), &candidate, &index).expect("a category sweeps");
+        let set = sweep(std::iter::once((std::iter::once(&column), &candidate)), &index)
+            .expect("a category sweeps");
         // Entities 1 and 6 carry positions 1 and 2; entity 4 carries the sentinel, which is bound
         // to no key and so contributes nothing.
         assert!(set.contains(1));
@@ -596,12 +596,13 @@ mod tests {
             .expect("the index builds");
         let candidate = Bitmap::from_range(0..4);
 
-        assert!(sweep(std::iter::empty(), &candidate, &index).is_none());
+        assert!(sweep(std::iter::once((std::iter::empty(), &candidate)), &index).is_none());
 
         let numbers = mosaica_filter::ValueColumn::universal(mosaica_filter::Codes::F64(
             vec![1.0f64, 2.0, 3.0, 4.0].into(),
         ));
-        assert!(sweep(std::iter::once(&numbers), &candidate, &index).is_none());
+        let numbers = std::iter::once(&numbers);
+        assert!(sweep(std::iter::once((numbers, &candidate)), &index).is_none());
     }
 
     /// **A set swept against a superseded index is rejected *and dropped*.** Rejecting without
@@ -630,8 +631,61 @@ mod tests {
         let sets = SuggestSets::default();
         sets.finish(key(1, 7, 3), set(&[1, 2]));
         sets.finish(key(2, 7, 3), set(&[3]));
-        sets.prune_token(1);
+        sets.prune_tokens(&std::iter::once(1).collect());
         assert_eq!(sets.stats().entries, 1);
         assert!(sets.get(&key(2, 7, 3), 1_000).is_some());
+    }
+
+    /// A value carried only by entities outside both candidates is not in the set, and a shard
+    /// whose candidate is empty adds nothing.
+    #[test]
+    fn a_sweep_over_two_shards_is_one_shards_holding_both() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let pool = rayon::ThreadPoolBuilder::new().build().unwrap();
+        let values: Vec<crate::suggest::SuggestValue> = ["alpha", "beta", "delta", "gamma"]
+            .iter()
+            .enumerate()
+            .map(|(at, key)| crate::suggest::SuggestValue {
+                key: (*key).to_string(),
+                title: None,
+                code: 700_000_000 - (at as u32) * 101_000_000,
+            })
+            .collect();
+        let index =
+            crate::suggest::SuggestIndex::build(dir.path(), 0, &values, &pool).expect("an index");
+        // Each shard's entities carry the values at these positions.
+        let column = |positions: &[usize]| {
+            let codes: Vec<u32> = positions.iter().map(|&p| values[p].code).collect();
+            mosaica_filter::ValueColumn::universal(mosaica_filter::Codes::U32(codes.into()))
+        };
+        let (first, second) = (column(&[0, 1, 2, 3]), column(&[3, 2, 1, 0]));
+        let one = column(&[0, 1, 2, 3, 3, 2, 1, 0]);
+        let positions = |set: &SuggestSet| (0..4).filter(|&p| set.contains(p)).collect::<Vec<_>>();
+
+        let two = sweep(
+            [
+                (std::iter::once(&first), &Bitmap::of(&[0])),
+                (std::iter::once(&second), &Bitmap::of(&[0, 1])),
+            ],
+            &index,
+        )
+        .expect("a category sweeps");
+        let whole = sweep(
+            std::iter::once((std::iter::once(&one), &Bitmap::of(&[0, 4, 5]))),
+            &index,
+        )
+        .unwrap();
+        assert_eq!(positions(&two), vec![0, 2, 3]);
+        assert_eq!(positions(&two), positions(&whole));
+
+        let left_out = sweep(
+            [
+                (std::iter::once(&first), &Bitmap::of(&[0, 3])),
+                (std::iter::once(&second), &Bitmap::new()),
+            ],
+            &index,
+        )
+        .unwrap();
+        assert_eq!(positions(&left_out), vec![0, 3]);
     }
 }

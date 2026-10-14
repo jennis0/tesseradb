@@ -2433,21 +2433,24 @@ impl SegmentsManifest {
         }
     }
 
-    /// Refuses a manifest whose shards this reader cannot serve: anything but one shard numbered 0.
+    /// Refuses a manifest naming no shard, or shards not ascending and distinct by number.
     pub(crate) fn check_served_shards(&self) -> std::result::Result<(), String> {
-        match self.shards.records.as_slice() {
-            [record] if record.id == ShardId::ZERO => Ok(()),
-            [] => Err("the side-manifest names no shard; rebuild the bundle".to_string()),
-            records => Err(format!(
-                "the side-manifest names shards {}, and only one shard numbered 0 is served. \
+        let records = &self.shards.records;
+        if records.is_empty() {
+            return Err("the side-manifest names no shard; rebuild the bundle".to_string());
+        }
+        if records.windows(2).any(|pair| pair[0].id >= pair[1].id) {
+            return Err(format!(
+                "the side-manifest names shards {}, which are not ascending and distinct. \
                  Rebuild the bundle.",
                 records
                     .iter()
                     .map(|record| record.id.to_string())
                     .collect::<Vec<_>>()
                     .join(", ")
-            )),
+            ));
         }
+        Ok(())
     }
 
     /// Refuses a manifest whose layer spaces are not ascending, or name a space no registered
@@ -2477,7 +2480,7 @@ impl SegmentsManifest {
         }
     }
 
-    /// The one shard's record. A manifest that passed [`Self::check_served_shards`] has one.
+    /// The one shard's record, for a caller that reads a manifest of one shard.
     pub fn only_shard(&self) -> &ShardRecord {
         mosaica_types::only(&self.shards.records)
     }
@@ -2492,23 +2495,36 @@ impl SegmentsManifest {
         derived_and_held(self.only_shard(), &self.layer_spaces)
     }
 
-    /// File `derived`, replacing what the manifest lists: each held shape under its space's
-    /// record, and the rest on the shard. A held shape of a space with no record is not filed.
+    /// File `derived` on the one shard, as [`Self::file_derived_by_shard`] files it.
     pub fn file_derived(&mut self, derived: Vec<DerivedExtent>) {
+        let shard = self.only_shard().id;
+        self.file_derived_by_shard(derived.into_iter().map(|extent| (shard, extent)));
+    }
+
+    /// File `derived`, replacing what the manifest lists: each held shape under its space's
+    /// record, and the rest on the shard named beside it. A held shape of a space with no record,
+    /// and an extent of a shard with no record, is not filed.
+    pub fn file_derived_by_shard(
+        &mut self,
+        derived: impl IntoIterator<Item = (ShardId, DerivedExtent)>,
+    ) {
         for record in &mut self.layer_spaces {
             record.held_shapes.clear();
         }
-        let mut shard = Vec::new();
-        for extent in derived {
+        for record in &mut self.shards.records {
+            record.derived_extents.clear();
+        }
+        for (shard, extent) in derived {
             if extent.form != DerivedForm::ShapeHeld {
-                shard.push(extent);
+                if let Ok(at) = self.shards.records.binary_search_by_key(&shard, |r| r.id) {
+                    self.shards.records[at].derived_extents.push(extent);
+                }
             } else if let Ok(at) =
                 self.layer_spaces.binary_search_by_key(&extent.space, |r| r.space)
             {
                 self.layer_spaces[at].held_shapes.push(extent);
             }
         }
-        self.only_shard_mut().derived_extents = shard;
     }
 
     /// Every shard's and every layer space's `(tombstones, deny)`.

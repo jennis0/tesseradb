@@ -8,10 +8,10 @@
 //! shape is never shared across principals and is never the bearer token itself nor reused within
 //! a process; `view`, `layer`, `level`, `ordinal`, which artifact in whose row space;
 //! `level_version`, since a publication moves the ordinals a level's memberships sit under;
-//! `segments_version`, since row ids mean something only within one geometry; `overlay_version`,
-//! since a deny removes rows from the composed mask and the counter moves at its publication; the
-//! fragment's identity and watermark, since a session may compose against a stale projection; and
-//! the computed property set, since a request narrows what is derived.
+//! `shards`, every shard's versions, since row ids mean something only within one geometry, a
+//! deny removes rows from the composed mask and the overlay's counter moves at its publication,
+//! and a session may compose against stale projections; and the computed property set, since a
+//! request narrows what is derived.
 //!
 //! The attribute filter is not a term: derived content is taken over `MaskedSet::visible_rows`,
 //! filter-blind as the masked count beside it, so a filtered and an unfiltered request at the same
@@ -38,10 +38,8 @@ pub(crate) struct DerivedKey {
     pub level: u32,
     pub ordinal: u32,
     pub level_version: u64,
-    pub segments_version: u64,
-    pub overlay_version: u64,
-    pub fragment_identity: [u8; 32],
-    pub fragment_watermark: u64,
+    /// [`crate::figures::MaskIdentity::shards`].
+    pub shards: [u8; 32],
     /// One bit per [`ComputedProperty`] ([`properties_bits`]).
     pub properties: u8,
 }
@@ -156,13 +154,8 @@ impl DerivedCache {
         }
     }
 
-    /// Remove every entry belonging to one session. Its worst failure is a needless rebuild, and
-    /// a `token_id` is never reused within a process.
-    pub fn prune_token(&self, token_id: u64) {
-        self.inner.retain_keys(|key| key.token_id != token_id);
-    }
-
-    /// The same removal for a set of sessions, in one pass, for the expiry sweep.
+    /// Remove every entry belonging to any of `token_ids`, in one pass. Its worst failure is a
+    /// needless rebuild, and a `token_id` is never reused within a process.
     pub fn prune_tokens(&self, token_ids: &rustc_hash::FxHashSet<u64>) {
         self.inner
             .retain_keys(|key| !token_ids.contains(&key.token_id));
@@ -173,7 +166,7 @@ impl DerivedCache {
 mod tests {
     use super::*;
 
-    fn key(token: u64, ordinal: u32, overlay: u64) -> DerivedKey {
+    fn key(token: u64, ordinal: u32, shards: u8) -> DerivedKey {
         DerivedKey {
             token_id: token,
             view: "s0".into(),
@@ -181,10 +174,7 @@ mod tests {
             level: 0,
             ordinal,
             level_version: 1,
-            segments_version: 1,
-            overlay_version: overlay,
-            fragment_identity: [7u8; 32],
-            fragment_watermark: 0,
+            shards: [shards; 32],
             properties: properties_bits(&[ComputedProperty::Hull]),
         }
     }
@@ -277,7 +267,7 @@ mod tests {
         let cache = DerivedCache::default();
         cache.get_or_derive(key(1, 4, 0), || shape(10));
         cache.get_or_derive(key(2, 4, 0), || shape(20));
-        cache.prune_token(1);
+        cache.prune_tokens(&std::iter::once(1).collect());
         let stats = cache.stats();
         assert_eq!(stats.entries, 1);
         assert_eq!(stats.resident_bytes, mosaica_cache::PER_ENTRY_FLOOR_BYTES);

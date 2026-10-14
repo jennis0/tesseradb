@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 
 use mosaica_lifecycle::membership::ArtifactStore;
+use mosaica_types::ShardId;
 
 use mosaica_store::permutation::RowSpace;
 
@@ -11,8 +12,9 @@ use mosaica_store::permutation::RowSpace;
 use super::*;
 
 impl ArtifactProjections {
-    /// Publish the row form of one `(view, layer, level)` from the deltas accumulated since the
-    /// last publication — the flush tick's work, and the only moment a served form changes.
+    /// Publish the row form of one `(view, layer, level)` in `shard` from the deltas accumulated
+    /// since the last publication — the flush tick's work, and the only moment a served form
+    /// changes.
     ///
     /// A growth, a page, a publication or a fill moves the level's version, and the interval's
     /// deltas are applied together rather than one form rebuild per move. A request builds no
@@ -44,6 +46,7 @@ impl ArtifactProjections {
     pub fn publish(
         &self,
         prefix: &str,
+        shard: ShardId,
         view: &str,
         layer: &str,
         level: u32,
@@ -59,7 +62,7 @@ impl ArtifactProjections {
         let Some(source) = source else {
             return;
         };
-        let address = (view.to_string(), layer.to_string(), level);
+        let address = (shard, view.to_string(), layer.to_string(), level);
         let Some((Held { key, at, mut rows }, pending, now)) =
             self.taken_to_publish(&address, prefix, space, deltas)
         else {
@@ -145,7 +148,7 @@ impl ArtifactProjections {
         space: &RowSpace,
         deltas: &'d [LevelDelta],
     ) -> Option<(Held, Vec<&'d LevelDelta>, u64)> {
-        let (view, layer, level) = address;
+        let (_, view, layer, level) = address;
         let (read_prefix, read_at, pending_from) = {
             let cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
             let held = cached.get(address)?;
@@ -225,7 +228,7 @@ impl ArtifactProjections {
         pending: &[&LevelDelta],
         source: &DeltaRows<'_>,
     ) -> Applied {
-        let (view, layer, level) = address;
+        let (_, view, layer, level) = address;
         let level = *level;
         let row_major = amended.layout.is_row_major();
         let mut applied = Applied::default();
@@ -336,6 +339,7 @@ impl ArtifactProjections {
     pub fn extend_flushed(
         &self,
         prefix: &str,
+        shard: ShardId,
         view: &str,
         store: &ArtifactStore,
         previous: &RowSpace,
@@ -343,8 +347,8 @@ impl ArtifactProjections {
         at: u64,
         rows_of: &dyn Fn(&str, u32) -> Option<SegmentRows>,
     ) {
-        for (address, key, mut rows) in self.held_of_view(prefix, view) {
-            let (_, layer, level) = &address;
+        for (address, key, mut rows) in self.held_of_view(prefix, shard, view) {
+            let (_, _, layer, level) = &address;
             if !rows.inherited.is_empty() {
                 self.drop_borrowed(&address, view);
                 continue;
@@ -433,6 +437,7 @@ impl ArtifactProjections {
     pub fn rebase_merged(
         &self,
         prefix: &str,
+        shard: ShardId,
         view: &str,
         store: &ArtifactStore,
         previous: &RowSpace,
@@ -448,8 +453,8 @@ impl ArtifactProjections {
         else {
             return;
         };
-        for (address, key, mut rows) in self.held_of_view(prefix, view) {
-            let (_, layer, level) = &address;
+        for (address, key, mut rows) in self.held_of_view(prefix, shard, view) {
+            let (_, _, layer, level) = &address;
             if !rows.inherited.is_empty() {
                 self.drop_borrowed(&address, view);
                 continue;
@@ -517,7 +522,7 @@ impl ArtifactProjections {
         added: &[(u32, u32)],
         amendment: &str,
     ) -> bool {
-        let (view, layer, level) = address;
+        let (_, view, layer, level) = address;
         let started = std::time::Instant::now();
         let scratch = self.scratch().to_path_buf();
         let listed = match (rows.membership().rows_held(), rows.lists_on_overlap) {
@@ -559,16 +564,18 @@ impl ArtifactProjections {
         true
     }
 
-    /// Every form held for `view` under `prefix`, cloned out so the amendment runs outside the lock.
+    /// Every form held for `view` in `shard` under `prefix`, cloned out so the amendment runs
+    /// outside the lock.
     fn held_of_view(
         &self,
         prefix: &str,
+        shard: ShardId,
         view: &str,
     ) -> Vec<(LevelAddress, ProjectionKey, Arc<ArtifactRows>)> {
         let cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
         cached
             .iter()
-            .filter(|((held_view, _, _), _)| held_view == view)
+            .filter(|((held_shard, held_view, _, _), _)| *held_shard == shard && held_view == view)
             .filter(|(_, held)| held.key.prefix == prefix)
             .map(|(address, held)| (address.clone(), held.key.clone(), Arc::clone(&held.rows)))
             .collect()
@@ -578,7 +585,7 @@ impl ArtifactProjections {
     /// failure and not a shape: a list column expresses any membership, so what reaches this is a
     /// scratch directory that would not take the composition or a file that would not read back.
     fn drop_lost_column(&self, address: &LevelAddress, view: &str) {
-        let (_, layer, level) = address;
+        let (_, _, layer, level) = address;
         self.cached
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -596,7 +603,7 @@ impl ArtifactProjections {
     /// Drop a form that borrowed a membership rather than amend it ([`ArtifactRows::inherit`]): the
     /// next request rebuilds it. Said at `debug`: the ordinary course, not a fault.
     fn drop_borrowed(&self, address: &LevelAddress, view: &str) {
-        let (_, layer, level) = address;
+        let (_, _, layer, level) = address;
         self.cached
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -613,7 +620,7 @@ impl ArtifactProjections {
 
     /// Drop a form whose rows are not rows of the generation being published ([`ArtifactRows::covers`]).
     fn drop_disagreeing(&self, address: &LevelAddress, view: &str) {
-        let (_, layer, level) = address;
+        let (_, _, layer, level) = address;
         self.cached
             .lock()
             .unwrap_or_else(|e| e.into_inner())

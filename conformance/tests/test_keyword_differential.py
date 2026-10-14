@@ -37,6 +37,8 @@ from oracle import filters as filt
 from oracle import viewport as vp
 from oracle.wire import decode_viewport, decode_viewport_points, split_frames
 
+pytestmark = pytest.mark.writes_nothing
+
 ZOOM = 3
 
 # The one entity whose `submitter` this module names as a single-carrier value. Inside `cross_lo`,
@@ -273,7 +275,15 @@ def test_meta_publishes_the_keyword_family_and_never_a_range(catalogue_server, c
 @pytest.mark.parametrize("label,expr", BASE_EXPRESSIONS, ids=[n for n, _ in BASE_EXPRESSIONS])
 @pytest.mark.parametrize("case_name", MATRIX_PRINCIPALS)
 def test_every_operator_agrees_with_the_oracle_over_the_base_build(
-    catalogue_server, catalogue_filter_columns, cases, entity_of_fx, unfiltered, case_name, label, expr
+    catalogue_bundle,
+    catalogue_server,
+    catalogue_filter_columns,
+    cases,
+    entity_of_fx,
+    unfiltered,
+    case_name,
+    label,
+    expr,
 ):
     """The matrix: one expression, one principal, exact agreement on the served set.
 
@@ -293,7 +303,7 @@ def test_every_operator_agrees_with_the_oracle_over_the_base_build(
         token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
     )
 
-    m_auth = set(case.entities)
+    m_auth = cat.items_of(catalogue_bundle, case.entities)
     m_sel = filt.evaluate(expr, catalogue_filter_columns, m_auth)
 
     assert _served_entities(raw, entity_of_fx) == m_sel, f"{case_name} / {label}"
@@ -326,7 +336,7 @@ def test_a_keyword_leaf_composes_with_the_other_families(
     """
     case = cases["crossover_above"]
     token = catalogue_server.authorise(list(case.grants))["token"]
-    m_auth = set(case.entities)
+    m_auth = cat.items_of(catalogue_bundle, case.entities)
     m_sel = filt.evaluate(COMPOSED_EXPR, catalogue_filter_columns, m_auth)
     assert m_sel, "the composed expression selects nothing — the case tests an empty corner"
     assert m_sel < m_auth, "the composed expression selects everything — composition is untested"
@@ -364,7 +374,7 @@ def test_the_dictionary_s_first_and_last_values_are_served_exactly(
     """
     case = cases["crossover_below"]
     token = catalogue_server.authorise(list(case.grants))["token"]
-    m_auth = set(case.entities)
+    m_auth = cat.items_of(catalogue_bundle, case.entities)
 
     # The anchors are planted on **source** ids; every set below is in entity space.
     for label, source, value in [
@@ -407,7 +417,7 @@ def test_a_needle_no_dictionary_holds_still_answers_and_answers_empty(
     """
     case = cases["crossover_below"]
     token = catalogue_server.authorise(list(case.grants))["token"]
-    m_auth = set(case.entities)
+    m_auth = cat.items_of(catalogue_bundle, case.entities)
 
     for label, expr in [
         ("eq", {"submitter": {"eq": ABSENT_NEEDLE}}),

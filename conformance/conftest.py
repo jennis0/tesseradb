@@ -22,6 +22,50 @@ sys.path.insert(0, str(REPO_ROOT / "reference"))
 # `suite.canonical` — correctness-suite §12.2 — rather than keeping its own copy).
 sys.path.insert(0, str(REPO_ROOT / "conformance"))
 
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "writes_nothing: the test and its fixtures make no write over HTTP: no ingest, change, "
+        "declaration, publication, drop, flush or compaction. Only these run in the many-shard "
+        "mode.",
+    )
+    config.addinivalue_line(
+        "markers",
+        "two_modes: the test builds its corpora in both modes itself, so the many-shard mode does "
+        "not run it again.",
+    )
+
+
+def pytest_report_header(config):
+    from oracle.harness import SHARDS_ENV, many_shards  # noqa: PLC0415
+
+    if many_shards():
+        return (
+            f"{SHARDS_ENV}=many: every corpus over several shards; only tests marked "
+            "writes_nothing and not two_modes run"
+        )
+    return None
+
+
+def pytest_collection_modifyitems(config, items):
+    from oracle.harness import many_shards  # noqa: PLC0415
+
+    if not many_shards():
+        return
+
+    def runs(item) -> bool:
+        return (
+            item.get_closest_marker("writes_nothing") is not None
+            and item.get_closest_marker("two_modes") is None
+        )
+
+    left_out = [item for item in items if not runs(item)]
+    if left_out:
+        config.hook.pytest_deselected(items=left_out)
+        items[:] = [item for item in items if runs(item)]
+
+
 # **Every fixture in this suite is synthesised from a seed.** Nothing here reads the Phase 0
 # corpus, so the suite runs from a clean checkout with no external data — which is what lets it run
 # in CI at all. The byte-scan and the restart-replay module used to build from a 250,000-item
@@ -213,24 +257,13 @@ def multiview_bundle(multiview_bundle_root: Path):
     answer three views against the fourth's layout. Each file is read against its own view's
     declared extent, which is the frame the build quantised it with.
     """
-    from oracle.bundle import Bundle, read_source_geometry  # noqa: PLC0415
+    from oracle.bundle import Bundle  # noqa: PLC0415
     from oracle import multiview as mv  # noqa: PLC0415
 
-    bundle = Bundle(multiview_bundle_root)
     # **Every view, the gated group's included.** A gate decides which principal may reach a view
     # and nothing about what the view holds, so the oracle needs each one's source geometry to
     # answer for the principal who passes it.
-    for view_id in mv.ALL_VIEW_IDS:
-        bundle.attach_source_geometry(
-            read_source_geometry(
-                mv.points_path(view_id),
-                mv.extent_of(view_id),
-                field=mv.JOIN_FIELD,
-                column=mv.JOIN_COLUMN,
-            ),
-            view_id=view_id,
-        )
-    return bundle
+    return mv.attach_geometry(Bundle(multiview_bundle_root))
 
 
 @pytest.fixture(scope="session")

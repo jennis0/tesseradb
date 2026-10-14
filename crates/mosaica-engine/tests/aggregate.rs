@@ -26,15 +26,14 @@ use mosaica_build::config::Config;
 use mosaica_build::{build, BuildArgs};
 use mosaica_engine::filter::{FilterExpr, FilterOperand, RegionLeaf};
 use mosaica_engine::{
-    AggregateCaps, AggregateHead, AggregateRequest, AggregateSink, AggregateTrailer, By,
-    CancelToken, CategoryQuery, Cut, Engine, EngineError, Grouping, ItemsRequest, PageEnd, Pick,
-    RecordsHead, RecordsLimits, RecordsSink, Reference, ResponseEndedBy, Session, SinkResult,
-    TableHead, ViewportRequest,
+    AggregateHead, AggregateRequest, AggregateSink, AggregateTrailer, By, CancelToken,
+    CategoryQuery, Cut, Engine, EngineError, Grouping, ItemsRequest, PageEnd, Pick, RecordsHead,
+    RecordsSink, Reference, ResponseEndedBy, Session, SinkResult, TableHead, ViewportRequest,
 };
 use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
 use mosaica_lifecycle::UnallocatedRow;
 use mosaica_spatial::shape::{ShapeF64, Space};
-use mosaica_types::AttrLocalId;
+use mosaica_types::{AttrLocalId, ShardId};
 
 const N: u64 = 3_000;
 
@@ -346,25 +345,6 @@ impl AggregateSink for Collect {
         );
         self.pages.push((grouping, batch.clone(), end.clone()));
         Ok(())
-    }
-}
-
-fn limits() -> RecordsLimits {
-    RecordsLimits {
-        max_page_rows: 100_000,
-        max_page_bytes: 64 << 20,
-        response_bytes: 256 << 20,
-        response_time: Duration::from_secs(60),
-    }
-}
-
-fn caps() -> AggregateCaps {
-    AggregateCaps {
-        groupings: 8,
-        top: 100,
-        named: 100,
-        bins: 100,
-        cells: u64::MAX,
     }
 }
 
@@ -1340,7 +1320,10 @@ fn with_cells(mut grouping: Grouping, depth: u8) -> Grouping {
 /// Every row this viewer may see in the view, as the stored geometry holds it: its 64-bit
 /// position and the item it belongs to.
 fn stored_rows<'a>(fx: &'a Fx, session: &Session) -> Vec<(u64, &'a Item)> {
-    let (generation, mask) = fx.engine.composed_mask(session, "s0").unwrap();
+    let (generation, mask) = fx
+        .engine
+        .composed_mask(session, "s0", ShardId::ZERO)
+        .unwrap();
     let view_data = &generation.bundle.only_shard().views["s0"];
     let segments = mosaica_engine::viewport::segments_with_row_bases("s0", view_data).unwrap();
     let tables = view_data
@@ -2006,7 +1989,10 @@ fn cells_over_the_segments_a_flush_adds_are_the_oracles() {
     let session = fx.session(true);
     ingest_items(&mut fx, 600, "cells");
     flush_and_show(&mut fx, &session);
-    let (generation, _) = fx.engine.composed_mask(&session, "s0").unwrap();
+    let (generation, _) = fx
+        .engine
+        .composed_mask(&session, "s0", ShardId::ZERO)
+        .unwrap();
     let segments = mosaica_engine::viewport::segments_with_row_bases(
         "s0",
         &generation.bundle.only_shard().views["s0"],

@@ -104,6 +104,8 @@ pub struct RegionRows {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RegionKey {
     pub view: String,
+    /// The shard whose row space for the view the shape is decomposed over.
+    pub shard: mosaica_types::ShardId,
     pub prefix: String,
     pub segments_version: u64,
     pub digest: [u8; 16],

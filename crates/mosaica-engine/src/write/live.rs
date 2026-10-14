@@ -101,7 +101,7 @@ impl ShardWrite {
 /// the executor (`/control/ingest`'s replay check, `/control/status`'s high-water). The generation pointer is not held here: it is
 /// swapped by `Executor::publish_arc`, the crate's one non-atomic store.
 pub(crate) struct LiveState {
-    /// Each point shard's write state, ascending by id.
+    /// Each point shard's write state, ascending by id; the first is the write shard.
     pub(in crate::write) shards: Vec<ShardWrite>,
     /// The descriptor resolver's extension state. Resolved in the handler before submitting, not
     /// on the executor: signature-sorted assignment needs the term set to compute a sort key
@@ -113,8 +113,13 @@ pub(crate) struct LiveState {
     /// request path, which resolves a session's reachable set from it.
     pub(in crate::write) registry: Mutex<LayerRegistry>,
     /// Every artifact's entity-space membership, on the registry's contract: written only by the
-    /// executor, read by the request path.
+    /// executor, read by the request path. Holds the write shard's slice of each membership;
+    /// [`Self::slices`] the others'.
     pub(in crate::write) artifacts: Mutex<ArtifactStore>,
+    /// Every other point shard's slice of each artifact's membership and generating sets, read at
+    /// open, with only what a row form reads of the record: view, attachment, each set's
+    /// cardinality. Never written.
+    pub(in crate::write) slices: Vec<(ShardId, Arc<ArtifactStore>)>,
     /// The view roster, on the registry's contract: written only by the executor, a create is a
     /// WAL append followed by an apply, on the one thread that also holds the allocator. Read by
     /// the request path, which resolves a view id against the manifest the roster made.
@@ -138,6 +143,16 @@ impl LiveState {
     /// The one shard written to until several are.
     pub(crate) fn only_shard(&self) -> &ShardWrite {
         mosaica_types::only(&self.shards)
+    }
+
+    /// Every shard's high water, summed.
+    pub(crate) fn high_water(&self) -> u64 {
+        self.shards.iter().map(ShardWrite::high_water).sum()
+    }
+
+    /// The size every shard is allocated to.
+    pub(crate) fn shard_size(&self) -> u64 {
+        self.shards[0].size()
     }
 
     /// Runs `f` with the registry held: a registration's or a drop's preparation.
@@ -179,6 +194,24 @@ impl LiveState {
     /// Read the artifact store: the request path's route to a membership.
     pub(crate) fn with_artifacts<R>(&self, f: impl FnOnce(&ArtifactStore) -> R) -> R {
         f(&lock_recover(&self.artifacts))
+    }
+
+    /// `shard`'s slice of every membership, given `written`, the store [`Self::with_artifacts`]
+    /// lends. Panics on a shard the open read no slice of: answering from another shard's slice
+    /// would project its entities through this shard's row space.
+    pub(crate) fn slice_of<'a>(
+        &'a self,
+        shard: ShardId,
+        written: &'a ArtifactStore,
+    ) -> &'a ArtifactStore {
+        if shard == self.shards[0].id {
+            return written;
+        }
+        self.slices
+            .iter()
+            .find(|(held, _)| *held == shard)
+            .map(|(_, slice)| slice.as_ref())
+            .expect("every shard's slice is read at open")
     }
 
     /// Everything not yet in a manifest, packed and ready. See [`ArtifactStore::unpublished`].

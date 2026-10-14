@@ -228,6 +228,7 @@ def unfiltered(catalogue_server, cases):
 # ---------------------------------------------------------------------------------------------
 
 
+@pytest.mark.writes_nothing
 def test_the_text_column_has_the_shapes_its_catalogue_entries_need(
     catalogue_bundle, column, tokens_of
 ):
@@ -281,6 +282,7 @@ def test_the_text_column_has_the_shapes_its_catalogue_entries_need(
     assert cat.N_ITEMS - len(column.tokens) > 1_000
 
 
+@pytest.mark.writes_nothing
 def test_the_manifest_records_the_analyser_the_oracle_tokenises_with(catalogue_bundle):
     """**The differential is only a differential if both sides used one pipeline** (decision 0070).
 
@@ -299,6 +301,7 @@ def test_the_manifest_records_the_analyser_the_oracle_tokenises_with(catalogue_b
     assert recorded.startswith("unicode/")
 
 
+@pytest.mark.writes_nothing
 def test_meta_publishes_the_analyser_identity_a_client_would_need(
     catalogue_server, catalogue_bundle, cases
 ):
@@ -326,6 +329,7 @@ def test_meta_publishes_the_analyser_identity_a_client_would_need(
         )
 
 
+@pytest.mark.writes_nothing
 def test_meta_publishes_text_with_exactly_its_two_operands(catalogue_server, cases):
     """`/v1/meta` names `abstract` a `text` column taking `match` and `phrase`, and **not** the four
     string predicates — the operand list is what a client is held to, and a family that published
@@ -375,6 +379,7 @@ def test_meta_publishes_text_with_exactly_its_two_operands(catalogue_server, cas
 # ---------------------------------------------------------------------------------------------
 
 
+@pytest.mark.writes_nothing
 @pytest.mark.parametrize("principal", MATRIX_PRINCIPALS)
 @pytest.mark.parametrize(
     ("label", "expr", "query", "minimum", "phrase"),
@@ -382,6 +387,7 @@ def test_meta_publishes_text_with_exactly_its_two_operands(catalogue_server, cas
     ids=[e[0] for e in BASE_EXPRESSIONS],
 )
 def test_the_engine_and_the_oracle_name_the_same_entities(
+    catalogue_bundle,
     catalogue_server,
     cases,
     unfiltered,
@@ -410,10 +416,11 @@ def test_the_engine_and_the_oracle_name_the_same_entities(
     got = _served_entities(raw, entity_of_fx)
 
     q = tokens_of(query)
+    entities = cat.items_of(catalogue_bundle, case.entities)
     if phrase:
-        want = column.carriers(lambda e: column.has_phrase(e, q)) & case.entities
+        want = column.carriers(lambda e: column.has_phrase(e, q)) & entities
     else:
-        want = column.carriers(lambda e: column.matches(e, q, minimum)) & case.entities
+        want = column.carriers(lambda e: column.matches(e, q, minimum)) & entities
     assert got == want, (
         f"{principal} / {label}: engine and oracle disagree on "
         f"{len(got ^ want)} entities (engine-only {sorted(got - want)[:5]}, "
@@ -427,6 +434,7 @@ def test_the_engine_and_the_oracle_name_the_same_entities(
         assert matched <= visible, f"{principal} / {label}: tile {tile} matched more than visible"
 
 
+@pytest.mark.writes_nothing
 def test_a_phrase_is_a_strict_subset_of_its_own_conjunction(
     catalogue_server, cases, entity_of_fx, column, tokens_of
 ):
@@ -455,6 +463,7 @@ def test_a_phrase_is_a_strict_subset_of_its_own_conjunction(
     assert len(served["match"] - served["phrase"]) > 1_000
 
 
+@pytest.mark.writes_nothing
 def test_a_word_no_document_carries_answers_and_answers_empty(
     catalogue_server, cases, entity_of_fx
 ):
@@ -509,8 +518,15 @@ def test_a_word_no_document_carries_answers_and_answers_empty(
     assert carried != absent
 
 
+@pytest.mark.writes_nothing
 def test_text_operands_compose_under_the_tree(
-    catalogue_server, cases, entity_of_fx, column, tokens_of, catalogue_filter_columns
+    catalogue_bundle,
+    catalogue_server,
+    cases,
+    entity_of_fx,
+    column,
+    tokens_of,
+    catalogue_filter_columns,
 ):
     """A text leaf beside a category leaf and a keyword leaf, under `all_of`/`any_of`.
 
@@ -531,7 +547,7 @@ def test_text_operands_compose_under_the_tree(
     submitter = catalogue_filter_columns["submitter"]
     want = {
         e
-        for e in case.entities
+        for e in cat.items_of(catalogue_bundle, case.entities)
         if column.has_phrase(e, pair)
         and (
             department.matches(e, "alpha")
@@ -600,6 +616,7 @@ def test_a_suppressed_entity_is_not_served_though_its_terms_are_in_the_postings(
     assert served(phrase_expr) == before_phrase
 
 
+@pytest.mark.writes_nothing
 def test_the_golden_tokeniser_vectors_run_here_too():
     """**The analyser's golden vectors, in the suite** — not only in the crate's own tests.
 

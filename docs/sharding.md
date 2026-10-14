@@ -1,10 +1,13 @@
 # Sharding: several entity spaces in one process
 
-**Status:** design, 2026-10-09. Stages 0 to 3 are built: `count_ranges`; reuse of a deleted item's
-number at the next tenancy; the shard as a parameter, with one shard under `shards/0/` and its
-declared size; and layer spaces, with every artifact and layer identified in its layer's own space
-and its records stored there. Stage 1's churn on Tree of Life (§8.4) is still to run. Nothing else
-in this document is built. Each section says what the code does today and what changes.
+**Status:** design, 2026-10-09. Stages 0 to 4 are built: `count_ranges`; reuse of a deleted item's
+number at the next tenancy; the shard as a parameter, under `shards/<k>/`, and its declared size;
+layer spaces, with every artifact and layer identified in its layer's own space and its records
+stored there; and reading several shards. A build writes several shards past the declared size, a
+running service opens such a bundle for reads only, and every read route combines over the shards
+as §3 says. Stage 1's churn on Tree of Life (§8.4) and stage 4's measurements (§8.1, §8.2) are
+still to run. Nothing else in this document is built. Each section says what the code does today
+and what changes.
 
 ## The limit
 
@@ -327,9 +330,10 @@ declaration, and the CLI through the build's declaration file.
 Any positive integer is accepted. A test sets a size small enough that its corpus spans several
 shards, down to a few dozen items, so every behaviour in this document runs on the conformance
 corpora. Lowering the size seals the open shard if its high water is past the new size. Raising it
-lets the open shard go on issuing ids. A sealed shard stays sealed. Not built yet: sealing. A size
-below the open shard's high water is refused, and so is a batch that would take the high water past
-the size.
+lets the open shard go on issuing ids. A sealed shard stays sealed. Not built yet: sealing, and
+opening a shard at a running service. A size below the open shard's high water is refused, and so
+is a batch that would take the high water past the size. A build whose files hold more items than
+the size writes several shards (§5), which a running service opens for reads only (§10).
 
 The default is 2³² − 2²⁸, 4,026,531,840. A sealed shard keeps the 2²⁸ ids above it for edits of its
 own items (§4.3). The default is chosen again from measurement (§8.5).
@@ -339,10 +343,10 @@ tenancy 4,095.
 
 ### 2.6 Bundle layout
 
-Stage 2 builds the tree below with one shard and holds each shard's record in the partition's
-`SEGMENTS-<n>.json`, and stage 3 holds each layer space's record there too, in `layer_spaces`;
-stage 5 gives each shard and each space its own. Nothing global is under `shards/`, so a
-shard's directory can be linked or removed whole.
+A build writes the tree below with a directory under `shards/` for each point shard. The partition's
+`SEGMENTS-<n>.json` holds each shard's record and, in `layer_spaces`, each layer space's; stage 5
+gives each shard and each space its own. Nothing global is under `shards/`, so a shard's directory
+can be linked or removed whole.
 
 ```text
 bundle/
@@ -354,7 +358,7 @@ bundle/
     partitions/default/
       SEGMENTS-<n>.json                    # registries and the shard and layer-space records
       shards/<shard>/
-        SEGMENTS-<n>.json                  # segments, extents, overlay, pool, watermark, levels
+        SEGMENTS-<n>.json                  # from stage 5: segments, extents, overlay, pool, watermark, levels
         terms/postings.arrow, pairs.parquet  # term ids global
         entities/terms/                    # entity-to-term transpose
         entities/edited/{by_number,by_entity}/
@@ -396,10 +400,12 @@ shard's identity is its own (§3.6).
 
 ### 3.1 The rules
 
-- A request's work over its tiles is one call per shard over the request's sorted ranges, as
-  `tile_ranges_all` is one call per segment today. Nothing is invoked once per (tile, shard). Today
-  the visible count is batched this way; the matched and highlighted counts and the density
-  underlay are still taken per tile, and this design batches them per shard too.
+- A request's counts over its tiles are one call per shard over the request's sorted ranges, as
+  `tile_ranges_all` is one call per segment. The visible, matched and highlighted counts are taken
+  in one walk of each shard's leaf, and the density underlay in one count per shard after the
+  sweep. Two steps are taken per tile: selection, one merge over every shard's parts of the tile
+  (§3.2), and an artifact's presence in a tile, tested in each shard that holds parts of the tile
+  and in which the viewer sees anything (§3.4).
 - A shard in which the viewer can see nothing is left out of the request (§6).
 - A figure that decides what is served is summed or merged across every shard before any shard
   selects anything. Such figures are the viewer's visible total over the view and its occupied
@@ -412,7 +418,7 @@ shard's identity is its own (§3.6).
 
 | | Today | Becomes |
 |---|---|---|
-| the session's projection | one `RowProjection` per (token, view, pin) | one per (fragment, view, shard), shared by every session with the same grant, as a level's figures are |
+| the session's projection | one `RowProjection` per (token, view, pin) | one per (grant, view, shard), shared by every session with the same grant, as a level's figures are |
 | the projection's route | whole domain, walk, term images and residual, or complement, priced per grant | the same, priced per shard |
 | the composed mask | one `croaring::Bitmap` over the view's row space | `ShardedMask`: one leaf per shard, sorted by shard |
 | `minus` and `plus` | bitmaps over the view | per shard |
@@ -446,7 +452,9 @@ selection per part, and a viewer of 1% at depth 8 and N = 100 from 6.1 to 3.9 ti
 shard. The gain is the seek between parts that meet: with each part placed on its own it barely
 moves. At depth 11 and deeper the count of the request's parts sets what N costs: 300,000 parts at
 N = 100 take 5.7 to 11.4 ms to count, against 0.3 to 2.2 ms of selection, and a viewer of 0.1% pays
-about 20 times today's (`probes/2026-10-10-batched-selection/`).
+about 20 times today's (`probes/2026-10-10-batched-selection/`). Not built yet: selection batched
+per shard. Selection is one merge per tile over every shard's parts of it, and §8.2's measurements
+decide whether the batched walk is built.
 
 Leaving out the parts of a tile with no visible row takes most of N's cost off a narrow viewer.
 Measured with the count batched, a viewer of 0.1% or 1% at depth 8 and deeper pays 1.2 to 3.1 times
@@ -457,7 +465,8 @@ depends on other viewers' deletions; §6 accepts the timing difference that adds
 
 `rows_in_range`, the
 materialised `leaf ∩ range` that selection reads while the overlay holds denies, grows worst: 18 ms
-at one shard to 965 ms at 100 at depth 6 and 50% coverage, so the same batching applies to it.
+at one shard to 965 ms at 100 at depth 6 and 50% coverage, so the same batching applies to it,
+and waits on the same measurements.
 
 ### 3.3 Two passes
 
@@ -487,12 +496,12 @@ response sends.
 | θ's cut: the visible total and the occupied tiles at the depth | its visible count, and its occupancy sketch's registers or exact count | counts summed; registers merged, so a tile several shards share counts once; exact only where the view has one segment across every shard |
 | viewport points, threshold and cap | the visible items in the tile below the combined cut, ascending by `mosaica_id`, at most the cap | merge by `mosaica_id`, cut at the cap |
 | viewport points, floor | its `m` smallest visible identities in the tile | merge, keep `m` |
-| identity bands | the band each shard reads is chosen from the combined cut and that shard's tile count | inside the two rows above |
+| identity bands | its parts of the tile, each read at the one band chosen for the tile | one band per tile, chosen from the tile's count summed over every shard's parts, inside the two rows above |
 | a point's artifact tag in each layer | read from that shard's level column | none: whether the artifact is served comes from its combined figures |
 | artifacts of each tile | candidates from that shard's coverings, labels above the base or tile index, each tested for a visible member in the tile | union, one entry per artifact, ordered by combined count then `mosaica_id`, cut to `per_tile`; target layers first, and a dependent enters only where its target is held in the combined frame, taking no place in the quota, as today |
 | a level's figures: count, centroid, box | F per (grant, shard), D per (shard, deny version), T per (session, shard) | counts and position sums add; each side of the box is the extreme across shards of each shard's first kept extreme row that D does not hold, or of a walk of that shard where D holds all eight |
-| a `nested` or `dag` cut | counts in the cut's tiles | summed, then cut once |
-| membership requirement | visible members of the artifact | summed, against the declared total held in the layer space |
+| a `nested` or `dag` cut | its candidates in the request's tiles, each tested for a visible member there | union of the candidates, each judged by its combined verdict, then cut once over the union |
+| membership requirement | visible members of the artifact, and its members in that shard's row form | visible members summed; a count criterion compares the sum, and a fraction compares it with the members summed over every shard, a shard left out of the request included |
 | generating-set containment | per rank, `\|G_s ∩ visible_s\|` and `\|G_s\|` | per rank, each summed against the declared size held in the layer space; the first rank where both equal it is served, as today. A shard left out of the request adds nothing, so the test fails closed |
 | colour slots | centres where the figures carry none: a sample below the cut from the combined visible count | computed from the combined figures and centres, as today |
 | aggregate: values, artifacts, cells | counts | summed; `top` chosen after the sum |
@@ -502,11 +511,11 @@ response sends.
 | category listing and suggest | which values a visible item carries, and counts | union of presence; counts summed |
 | item card | the item's own shard only | none: dispatched to the shard the `mosaica_id` inverts to |
 | artifact card | the artifact's figures and containment, as the rows above, and its visible members' positions | as those rows; the hull as below |
-| an artifact's hull | its visible members' positions, or above 75,000 members their representatives on the reduction grid over the combined box | gathered, then the hull computed once, with the α scale and dig budget from the combined members |
+| an artifact's hull | its visible members' positions | gathered over every shard, then the hull computed once: above 75,000 members from their representatives on the reduction grid over the gathered box, with the α scale and dig budget from the gathered members |
 | bulk items in map order | rows in (cell, `mosaica_id`) order | merge in that order; the cursor is unchanged |
 | bulk items in stored order | rows in entity order | shard by shard; the cursor gains the shard |
 | bulk artifacts, browse | per artifact: filtered counts, and positions where the figures carry no geometry | counts summed before ordering, keeping and the cursor; geometry as the figures and hull rows |
-| filters | every leaf, inside that shard's mask; `eq` and `in` on a unique field read each shard's index after its key filter; `member_of` and a published region read that shard's slice | per shard: a filter only narrows that shard's visible rows. A `member_of` or published-region leaf takes the artifact's combined verdict, count and containment, before any shard evaluates it |
+| filters | every leaf, inside that shard's mask; `eq` and `in` on a unique field read each shard's index, and from stage 5 its key filter first (§4.2); `member_of` and a published region read that shard's slice | per shard: a filter only narrows that shard's visible rows. A `member_of` or published-region leaf takes the artifact's combined verdict, count and containment, before any shard evaluates it |
 
 Each row gives the same answer as one shard holding the same items, but θ's occupied tiles: they
 are counted exactly where the view has one segment across every shard, and by the sketch above
@@ -527,7 +536,7 @@ the pass-2 merge.
 | Cache | Key today | Key under shards |
 |---|---|---|
 | fragment | bundle identity, rule hash, watermark, satisfied terms | the shard's identity, rule hash, the shard's watermark, satisfied terms |
-| row projection | token, view, segments version, prefix | fragment, view, shard, the shard's segments version |
+| row projection | token, view, segments version, prefix | grant, view, shard, the shard's identity, the shard's segments version, prefix |
 | a level's figures, F | terms, bundle identity, view, layer, level, column, geometry | the same with the shard and the shard's identity, on disc per shard |
 | D correction | view, deny version | view, shard, the shard's deny version |
 | term images | partition, view | shard, view |
@@ -538,13 +547,20 @@ the pass-2 merge.
 A shard's identity is a digest its compaction writes into the shard's record (§2.6). It changes at
 that shard's compaction and at no other. A compaction of one shard
 therefore invalidates only that shard's fragments, projections and figures. The background refresh
-runs per (session, view, shard), so a flush into one shard extends only that shard's projections.
+runs per (grant, view, shard), so a flush into one shard extends only that shard's projections.
+Not built yet: the stored identity and a segments version per shard, which come with writes over
+several shards (stage 5). A shard's identity is SHA-256 over the prefix's `MANIFEST.json` digest
+and the shard's number, derived at open, and a generation has one segments version. Every shard's
+identity therefore moves at each compaction, and the segments version at each flush, merge and
+compaction. A bundle of several shards takes no write, so neither moves while it is served.
 
-A level's figures summed across shards are also kept per grant. A change to one shard's figures
-updates the counts and position sums by that shard's difference, and takes each side of the box
-again as the extreme across shards. Summing every shard's count vector costs about 0.8 ms
-per shard at a million artifacts, measured: 2% of a 50% viewer's walk of the level at N = 100, and
-nearly as much as the whole walk of a 0.1% viewer (`probes/2026-10-09-shard-read-costs/`).
+A level's figures are summed across shards per request: each shard's counts and position sums are
+added, and each side of the box is the extreme across shards. Summing every shard's count vector
+costs about 0.8 ms per shard at a million artifacts, measured: 2% of a 50% viewer's walk of the
+level at N = 100, and nearly as much as the whole walk of a 0.1% viewer
+(`probes/2026-10-09-shard-read-costs/`). Not built yet: the sum kept per grant, which a change to
+one shard's figures would update by that shard's difference. §8.2's measurements decide whether it
+is needed.
 
 ### 3.7 A session's cost
 
@@ -717,11 +733,20 @@ and not repeated while that is unchanged.
 
 ## 5. Build
 
-A build is an ingest into an empty database. Items are numbered in signature batches ordered by the
-`allocation_view`, as today. When shard 0's high water reaches `shards.size` and rows remain to place,
-shard 1 opens, as §4.1 opens one, and so on in allocation order. The layout is fitted once over the corpus, since an item's coordinates do not
-depend on its shard. Each shard's view is sorted on its own. A corpus smaller than `shards.size`
-builds today's bundle, apart from the directory layout and the manifest.
+A build is an ingest into an empty database. Items are numbered in one sequence of signature
+batches ordered by the `allocation_view`, as for one shard, and the sequence is cut into shards at
+`shards.size`: shard k holds the items numbered from k × size, each at its number less k × size, so
+every shard but the last holds `size` items. This is the order §4.1 fills shards in when no pool
+is used. The layout is fitted once over the corpus, since an item's coordinates do not depend on
+its shard. Each shard's postings, entity-to-term transpose, unique indexes, attributes, record
+blob, membership slices and views are written on their own, and each view is sorted per shard. A
+level's layout is chosen once, from its shape summed over every shard. `mosaica verify` checks
+every shard. A corpus no larger than `shards.size` builds one shard.
+
+The linear build, the in-memory build the streaming build is compared with, writes one shard and
+refuses a corpus larger than the size. A property test checks instead that each per-entity file of
+a shard is the one-shard build's, restricted to the shard's items and renumbered
+(`crates/mosaica-build/tests/several_shards.rs`).
 
 ## 6. Security
 
@@ -730,9 +755,11 @@ builds today's bundle, apart from the directory layout and the manifest.
   layer-space number or a per-shard count looks like any small integer, and the scanner passes every
   value below 100,000 (`conformance/tests/test_byte_scan.py`). §7 checks them by comparing every
   response field between the suite's two modes, where a per-shard figure differs from the one-shard
-  answer. In the many-shard mode every entity id is below that floor too, so the scanner's floored
-  sweeps cover the default mode only. Artifact entity ids below the floor are swept for in
-  identifier columns and cursors only ([security](system/security.md#evidence)).
+  answer. In the many-shard mode an item's entity id is its number in its shard. Only the
+  catalogue's first shard, of 131,073 items, holds numbers at or above the floor, so the floored
+  sweeps cover that shard's numbers from 100,000 and nothing of the other corpora. Every entity id
+  below the floor, an item's or an artifact's, is swept for in identifier columns and cursors only
+  ([security](system/security.md#evidence)).
 - The kind, the shard, the tenancy and the layer space sit inside the keyed permutation. A viewer
   cannot read them, order identifiers by them or count gaps between them. The permutation is a
   blinding, not encryption, and a holder of the bundle inverts it, as today.
@@ -766,7 +793,9 @@ builds today's bundle, apart from the directory layout and the manifest.
 ## 7. Tests
 
 The conformance suite runs in two modes: with the default shard size, and with a size small enough
-that every corpus spans several shards. Every assertion it makes today holds in both. The
+that every corpus spans several shards. Every assertion it makes today holds in both. Not built
+yet: the many-shard mode's writes. Until stage 5 it runs only the tests marked `writes_nothing`
+and deselects the rest, since a bundle of several shards refuses every write. The
 identifiers differ between the modes, as they differ between two builds, and so do the samples
 drawn by rank. The oracle derives every identifier itself, as it does today. It derives each
 artifact's and each layer's from the layer's space and its levels' runs in the side-manifest, and
@@ -797,7 +826,7 @@ Fixtures beyond that:
 | artifact delete | an artifact deleted while a sealed shard still names it is served on no route, and its deny holds until that shard's compaction removes it |
 | layer drop | its space is removed at the next publication; its artifacts' identifiers answer as naming nothing; its number is not reused, and its name, registered again, names a new layer that answers to none of its identifiers |
 | kind routing | an artifact's `mosaica_id` sent to the item card, and an item's to the artifact card, names nothing |
-| two modes | every response field in the many-shard mode equals the default mode's, but identifiers and the samples drawn by rank, so no shard number, layer-space number or per-shard figure appears; the byte scanner finds no entity id |
+| two modes | every response field in the many-shard mode equals the default mode's but those `conformance/tests/test_two_modes.py` leaves out; the byte scanner finds no entity id |
 
 ## 8. Measuring what sharding costs
 
@@ -937,7 +966,7 @@ bumps `WAL_VERSION`.
 | 1 | the identity input gains the kind bit, the shard field and the tenancy, in the engine and in the oracle's own derivation and its vectors; the tenancy index, written by the compaction that frees numbers and read wherever an identifier is built or resolved; the executor's re-checks compare the tenancy, and a compaction that frees numbers moves the edit stamp; a compaction frees a deleted item's number with its last entity at the next tenancy and retires one at the cap; the threat model's stored-order residual (§6); format bump | reuse, stale identifier, early free, buffered delete and cap fixtures; §8.4 on one shard |
 | 2 | `ShardId`; every per-entity and per-view structure moves under `shards/0/`; the manifest and side-manifest split; `shards.size` declared and recorded, reaching the HTTP API, both clients and the CLI's declaration file, and a size that would open a second shard refused on both paths, as is an insert that would, batch by batch, until stage 5; the compile-fail tests but the `LayerSpace` case; format bump | the whole suite on rebuilt bundles |
 | 3 | layer spaces: artifact records, supplied content, overlay and held shapes move out of the point space into one space per layer, and the point compaction writes each space it touches again; the two-region allocator and its low water go; artifact and layer identifiers take the kind bit and the layer space, and route by kind; a dropped layer leaves nothing and its name registers again; `/control/status` counts the layer spaces apart from the shard, on the HTTP API and both clients; the `LayerSpace` compile-fail case; format bump | the whole suite on rebuilt bundles; layer drop and kind routing fixtures |
-| 4 | `ShardedMask`; every route combined as §3.4 says, θ's occupied tiles merged; caches and response keys over every shard (§3.6); projections shared by grant, and the threat model's fourth shared cache; status's corpus-wide figures across shards; a build writes several shards past `shards.size`, and every write to such a bundle is refused | the conformance suite's tests that write nothing, marked as such, in both modes, and the two modes fixture; §8.1's tile-index run on MedCPT and PaperSeek; §8.2 |
+| 4 | `ShardedMask`; every route combined as §3.4 says, θ's occupied tiles merged; a shard's identity derived from the bundle's and the shard's number; caches and response keys over every shard (§3.6); projections shared by grant and refreshed per (grant, view, shard), and the threat model's fourth shared cache; the stored-order cursor carries the shard; status's corpus-wide figures summed across shards; a build writes several shards past `shards.size`, a containment expression carries the size of the set it was composed over so no shard's slice answers alone, and verification reads every shard; every write to a bundle of several shards is refused with `409`, its write executor runs no thread, and it is refused at open beside a log that holds records; format bump | the conformance suite's tests that write nothing, marked as such, in both modes, and the two modes fixture; §8.1's tile-index run on MedCPT and PaperSeek; §8.2 |
 | 5 | per-shard allocation, pool and target; edits in their shard; denies resolved per shard (§4.4); flush, merge and compaction per shard, with bases tracked per shard; ingest opens shards; a key filter on every unique run; layer publication per shard, and artifact deletions held until every shard has removed them; the partition file as the commit point; format bump | the whole conformance suite in both modes; sealed shard, allocation, unique, build-equals-ingest, restart, stale identifier, commit point, runtime column and artifact delete fixtures; §8.3 and §8.4 at several shards |
 | 6 | seal, drop, status on all four surfaces, the CLI's first control-plane verbs; seal and drop logged, and a drop reconciling generating sets; refuse at open; parallel verification and its record; format bump | dropped and corrupt shard fixtures; seal, drop and the shard list through each surface |
 | 7 | §8.5 | the defaults written into the declaration's reference |

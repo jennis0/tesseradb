@@ -33,7 +33,7 @@ use mosaica_engine::region::RegionDecomposition;
 use mosaica_engine::shapes::{Bounds, ShapeF64, Space};
 use mosaica_engine::viewport::{segments_with_row_bases, ViewportRequest};
 use mosaica_engine::{Engine, EngineConfig, DEFAULT_MAX_REGION_CELLS};
-use mosaica_types::RowId;
+use mosaica_types::{RowId, ShardId};
 
 type BoxError = Box<dyn std::error::Error>;
 
@@ -173,7 +173,7 @@ fn main() -> Result<(), BoxError> {
     )?;
     std::thread::sleep(Duration::from_millis(500));
 
-    let (generation, mask) = engine.composed_mask(&session, &args.view)?;
+    let (generation, mask) = engine.composed_mask(&session, &args.view, ShardId::ZERO)?;
     let view_data = generation
         .bundle
         .only_shard()

@@ -7,12 +7,47 @@ use rustc_hash::FxHashSet;
 
 use mosaica_lifecycle::membership::Attachment;
 use mosaica_lifecycle::Overlay;
-use mosaica_types::layer::{LayerDeclaration, ServingLayout};
+use mosaica_types::layer::{
+    ArtifactVisibility, ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind,
+    LayerDeclaration, MembershipSource, ServingLayout,
+};
 
 
 use crate::tile_index::TileIndex;
 
 use super::*;
+
+/// The declaration of `clusters/a`, drawn on view `s0`, an enumerated flat layer supplying no
+/// content.
+pub(crate) fn declaration(
+    carries_own_labels: bool,
+    criterion: Option<ExistenceCriterion>,
+) -> LayerDeclaration {
+    LayerDeclaration {
+        scope: Default::default(),
+        name: "clusters/a".into(),
+        title: Some("A".into()),
+        views: vec!["s0".into()],
+        membership: MembershipSource::Enumerated,
+        value_set: Default::default(),
+        visibility: None,
+        artifact_visibility: if carries_own_labels {
+            ArtifactVisibility::carried("visibility")
+        } else {
+            ArtifactVisibility::inherited()
+        },
+        require_member_visibility: criterion,
+        hierarchy: Hierarchy {
+            kind: HierarchyKind::Flat,
+            prune_children: false,
+        },
+        content: ContentDeclaration::default(),
+        depends_on: Vec::new(),
+        levels: Vec::new(),
+        layout: None,
+        shape: None,
+    }
+}
 
 /// Row-space memberships without a `RowSpace` to project through — these tests are about the
 /// predicate, and building a permutation would test the projection instead.
@@ -113,12 +148,11 @@ impl Fixture {
             overlay: &self.overlay,
             labels: LabelGate::new(&self.held, self.unlabelled),
             layer_reachable: reachable,
-            rows: &self.rows,
-            mask: &self.mask,
             dependency_served: &dependency_served,
-            containment: None,
-            denied: &self.denied,
-            counts: None,
+            sides: vec![ArtifactSide {
+                denied: &self.denied,
+                ..side(&self.rows, Some(&self.mask))
+            }],
         }
     }
 }
@@ -134,6 +168,83 @@ impl Fixture {
         let access: Vec<Vec<u8>> = access.iter().map(|d| d.to_vec()).collect();
         records.access[idx] = Some(super::rows::parse_access(&access));
     }
+}
+
+/// A view of `sides` on a reachable layer under `d`, with no deny, every label open and every
+/// dependency served.
+pub(super) fn view_of<'a>(
+    d: &'a LayerDeclaration,
+    sides: Vec<ArtifactSide<'a, Bitmap>>,
+) -> ArtifactView<'a, Bitmap> {
+    ArtifactView {
+        declaration: d,
+        overlay: open_overlay(),
+        labels: open_labels(),
+        layer_reachable: true,
+        dependency_served: &dependency_served,
+        sides,
+    }
+}
+
+/// One side: `rows`, seen through `mask` where the request reads it, with nothing denied and no
+/// containment partition or masked counts.
+pub(super) fn side<'a>(
+    rows: &'a ArtifactRows,
+    mask: Option<&'a Bitmap>,
+) -> ArtifactSide<'a, Bitmap> {
+    ArtifactSide {
+        rows,
+        mask,
+        denied: no_denies(),
+        containment: None,
+        counts: None,
+    }
+}
+
+/// What the one predicate serves of `rows`' artifact at `ordinal`, as a containment answer, to a
+/// viewer seeing `mask`, with `denied` denied and the partition's `answers` where given, on a layer
+/// declaring supplied content.
+pub(super) fn contained(
+    rows: &ArtifactRows,
+    ordinal: u32,
+    mask: &Bitmap,
+    denied: &Bitmap,
+    answers: Option<crate::containment::ContainmentAnswers<'_>>,
+) -> Containment {
+    let declaration = LayerDeclaration {
+        content: ContentDeclaration {
+            computed: Vec::new(),
+            supplied: vec![mosaica_types::layer::SuppliedContent {
+                name: "label".into(),
+                ty: "text".into(),
+                require_member_visibility: mosaica_types::layer::SuppliedRequirement::All,
+            }],
+        },
+        ..declaration(false, None)
+    };
+    let side = ArtifactSide {
+        denied,
+        containment: answers,
+        ..side(rows, Some(mask))
+    };
+    match view_of(&declaration, vec![side]).verdict(mosaica_types::EntityId::new(999), ordinal) {
+        ArtifactVerdict::Serve { rank: Some(rank), .. } => Containment::Satisfied(rank),
+        ArtifactVerdict::Serve { rank: None, .. } => Containment::NothingToContain,
+        ArtifactVerdict::Absent(Withheld::Containment) => Containment::Unsatisfied,
+        other => panic!("withheld before containment: {other:?}"),
+    }
+}
+
+/// No row denied.
+pub(super) fn no_denies() -> &'static Bitmap {
+    static EMPTY: std::sync::OnceLock<Bitmap> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(Bitmap::new)
+}
+
+/// An overlay that denies nothing.
+pub(super) fn open_overlay() -> &'static Overlay {
+    static EMPTY: std::sync::OnceLock<Overlay> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(Overlay::new)
 }
 
 /// A label test that admits every artifact with no label and holds no descriptor.

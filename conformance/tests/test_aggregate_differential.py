@@ -70,6 +70,8 @@ from test_shape_membership import (
     visible,
 )
 
+pytestmark = pytest.mark.writes_nothing
+
 CASES = ["full_100pct", "crossover_above", "sparse_0_01pct"]
 
 REGION = {"region": {"bbox": [0.0, 0.0, 30000.0, 65536.0]}}
@@ -214,11 +216,11 @@ def expected_tables(oracle, m_auth: set[int], filters, reference, groupings):
 @pytest.mark.parametrize("filter_name", list(FILTERS))
 @pytest.mark.parametrize("case_name", CASES)
 def test_every_value_and_cell_table_is_the_oracles(
-    catalogue_server, catalogue_oracle, case_name, filter_name
+    catalogue_bundle, catalogue_server, catalogue_oracle, case_name, filter_name
 ):
     case = next(c for c in cat.catalogue() if c.name == case_name)
     token = catalogue_server.authorise(list(case.grants))["token"]
-    m_auth = set(case.entities)
+    m_auth = cat.items_of(catalogue_bundle, case.entities)
     filters = FILTERS[filter_name]
     body = {"view": cat.VIEW_ID, "reference": {}, "groupings": GROUPINGS, "page_rows": 20_000,
             "pages": 3}
@@ -262,7 +264,9 @@ REFERENCE_GROUPINGS = [
 
 @pytest.mark.parametrize("name", list(REFERENCES))
 @pytest.mark.parametrize("case_name", ["full_100pct", "crossover_above"])
-def test_a_filtered_reference_is_the_oracles(catalogue_server, catalogue_oracle, case_name, name):
+def test_a_filtered_reference_is_the_oracles(
+    catalogue_bundle, catalogue_server, catalogue_oracle, case_name, name
+):
     """Each row's reference count and lift against the oracle, for a reference that is the set
     without its region, one that is not a superset of the set, and one that alone carries a
     region, which the `x-mosaica-region` header then reports."""
@@ -276,7 +280,11 @@ def test_a_filtered_reference_is_the_oracles(catalogue_server, catalogue_oracle,
     assert resp.headers.get("x-mosaica-region") == "exact", name
     heads, tables = read_tables(catalogue_server, token, body)
     _items, expected = expected_tables(
-        catalogue_oracle, set(case.entities), filters, reference, REFERENCE_GROUPINGS
+        catalogue_oracle,
+        cat.items_of(catalogue_bundle, case.entities),
+        filters,
+        reference,
+        REFERENCE_GROUPINGS,
     )
     for index, ((head, rows), (want_head, want_rows)) in enumerate(zip(zip(heads, tables), expected)):
         what = f"{case_name} / {name} / grouping {index}"
@@ -290,7 +298,9 @@ def test_a_filtered_reference_is_the_oracles(catalogue_server, catalogue_oracle,
         assert {"listed", "rest", "none"} <= only_in_reference, only_in_reference
 
 
-def test_a_table_without_a_reference_has_no_reference_columns(catalogue_server, catalogue_oracle):
+def test_a_table_without_a_reference_has_no_reference_columns(
+    catalogue_bundle, catalogue_server, catalogue_oracle
+):
     case = next(c for c in cat.catalogue() if c.name == "crossover_above")
     token = catalogue_server.authorise(list(case.grants))["token"]
     groupings = [GROUPINGS[1], GROUPINGS[3], GROUPINGS[7]]
@@ -299,7 +309,11 @@ def test_a_table_without_a_reference_has_no_reference_columns(catalogue_server, 
         {"view": cat.VIEW_ID, "filters": FILTERS["category"], "groupings": groupings},
     )
     _items, expected = expected_tables(
-        catalogue_oracle, set(case.entities), FILTERS["category"], None, groupings
+        catalogue_oracle,
+        cat.items_of(catalogue_bundle, case.entities),
+        FILTERS["category"],
+        None,
+        groupings,
     )
     for index, (rows, (want_head, want_rows)) in enumerate(zip(tables, expected)):
         assert "reference_total" not in heads[index]

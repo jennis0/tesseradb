@@ -78,7 +78,7 @@ pub(crate) fn flushed_scalar_of(
             .iter()
             .find_map(|f| (f.tag as usize == declared_index).then(|| f.value.clone()))
     } else {
-        crate::viewport::flushed_row_scalar(generation, entity, declared_index)
+        crate::viewport::flushed_row_scalar(generation, shard, entity, declared_index)
     }?;
     stored_as_wal(stored, declared)
 }

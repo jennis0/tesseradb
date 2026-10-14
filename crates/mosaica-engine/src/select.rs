@@ -131,6 +131,7 @@ use std::collections::BinaryHeap;
 use std::ops::Range;
 
 use mosaica_store::read::SegmentData;
+use mosaica_types::{RowId, ShardId, ShardRow};
 
 use crate::compose::EffectiveMask;
 
@@ -473,8 +474,6 @@ impl<'a> SelectionParts<'a> {
         SelectionParts { parts }
     }
 
-    /// The parts themselves, for the callers that need to do their own per-segment work over the
-    /// same decomposition — the §3.3 underlay, which resolves sub-cells inside each part's range.
     pub fn as_slice(&self) -> &'a [SelectionPart<'a>] {
         self.parts
     }
@@ -501,6 +500,25 @@ impl<'a> SelectionParts<'a> {
         let (segment, local) = self.resolve(view_row);
         segment.columns.mosaica_id()[local as usize]
     }
+}
+
+/// One shard's share of a tile: the viewer's leaf over the shard, and the tile's parts in the
+/// shard's row space, ascending by `row_base`.
+#[derive(Clone, Copy)]
+pub struct TileShard<'a> {
+    pub shard: ShardId,
+    pub mask: &'a EffectiveMask,
+    pub parts: &'a [SelectionPart<'a>],
+}
+
+/// The `mosaica_id` of `row`, which lies in one of `shards`' parts.
+fn id_across(shards: &[TileShard<'_>], row: ShardRow) -> u64 {
+    let held = shards
+        .iter()
+        .find(|held| held.shard == row.shard())
+        .expect("a row of one of the tile's shards");
+    let row = row.row_in(held.shard).expect("the row's own shard");
+    SelectionParts::new(held.parts).id_at(row.raw())
 }
 
 /// Where the leaf Morton cell being walked ends, and what is already settled about it.
@@ -595,13 +613,14 @@ fn identities_below(slice: &[u64], cut: u64) -> (usize, usize) {
 #[allow(clippy::too_many_arguments)]
 #[inline]
 fn scan_cell_piece(
+    shard: ShardId,
     start_row: u32,
     slice: &[u64],
     params: &SelectParams,
     walk: &mut CellWalk<'_>,
     rows_visited: &mut u64,
     c_theta: &mut u64,
-    heap: &mut BinaryHeap<(u64, u32)>,
+    heap: &mut BinaryHeap<(u64, ShardRow)>,
 ) {
     if slice.is_empty() {
         return;
@@ -650,7 +669,7 @@ fn scan_cell_piece(
                 }
                 heap.pop();
             }
-            heap.push((id, start_row + i as u32));
+            heap.push((id, ShardRow::new(shard, RowId::new(start_row + i as u32))));
         }
     }
     // The two halves read overlapping positions of one piece, and no route can read more distinct
@@ -672,12 +691,13 @@ fn scan_cell_piece(
 /// differ by exactly what the cell route skips.
 #[inline]
 fn scan_row_piece(
+    shard: ShardId,
     start_row: u32,
     slice: &[u64],
     params: &SelectParams,
     rows_visited: &mut u64,
     c_theta: &mut u64,
-    heap: &mut BinaryHeap<(u64, u32)>,
+    heap: &mut BinaryHeap<(u64, ShardRow)>,
 ) {
     if slice.is_empty() {
         return;
@@ -696,7 +716,7 @@ fn scan_row_piece(
             }
             heap.pop();
         }
-        heap.push((id, start_row + i as u32));
+        heap.push((id, ShardRow::new(shard, RowId::new(start_row + i as u32))));
     }
     *rows_visited += slice.len() as u64;
 }
@@ -752,15 +772,58 @@ impl Selection {
         Selection::routed(mask, parts, params, visible, CellRoute::Gated)
     }
 
-    /// [`Selection::of`] with the dense tiers' mechanism named rather than gated.
+    /// [`Selection::of`] with the dense tiers' mechanism named rather than gated:
+    /// [`TileSelection::routed`] over one shard.
     ///
     /// The served rows are the same for every value of `route` — that is what the equivalence test
     /// asserts, over one part evaluated both ways — and `rows_visited` is not, because it is what
-    /// the mechanism read. The service calls [`Selection::of`]; this exists so that a caller who
-    /// must compare the two mechanisms, or time the one the gate would decline, can reach them.
+    /// the mechanism read. The service lets the gate choose; this exists so that a caller who must
+    /// compare the two mechanisms, or time the one the gate would decline, can reach them.
     pub fn routed(
         mask: &EffectiveMask,
         parts: &SelectionParts<'_>,
+        params: &SelectParams,
+        visible: u64,
+        route: CellRoute,
+    ) -> Self {
+        let shards = [TileShard {
+            shard: ShardId::ZERO,
+            mask,
+            parts: parts.as_slice(),
+        }];
+        let selected = TileSelection::routed(&shards, params, visible, route);
+        Selection {
+            rows: selected
+                .rows
+                .into_iter()
+                .map(|row| row.row_in(ShardId::ZERO).expect("the one shard's row").raw())
+                .collect(),
+            rows_visited: selected.rows_visited,
+        }
+    }
+}
+
+/// [`Selection`] over a tile whose parts lie in several shards.
+pub struct TileSelection {
+    /// Each row named with its shard, ascending by the row's `mosaica_id`.
+    pub rows: Vec<ShardRow>,
+    /// See [`Selection::rows_visited`].
+    pub rows_visited: u64,
+}
+
+impl TileSelection {
+    /// [`Selection::of`] over every shard's parts of one tile, each read under its shard's leaf:
+    /// one `C_θ`, one heap and one served set over the union, so the floor and the cap are the
+    /// tile's whatever shards its rows lie in. `visible` is `Σ part.visible` over every shard.
+    /// A part with no visible row is not read.
+    pub fn of(shards: &[TileShard<'_>], params: &SelectParams, visible: u64) -> Self {
+        TileSelection::routed(shards, params, visible, CellRoute::Gated)
+    }
+
+    /// [`TileSelection::of`] with the dense tiers' mechanism named rather than gated; see
+    /// [`Selection::routed`] for why that is reachable.
+    pub fn routed(
+        shards: &[TileShard<'_>],
         params: &SelectParams,
         visible: u64,
         route: CellRoute,
@@ -769,7 +832,7 @@ impl Selection {
         // benches measure). Without this the general branch would run a full counting pass whose
         // result is discarded, and the count-only benchmark would stop measuring counting.
         if params.cap == 0 {
-            return Selection {
+            return TileSelection {
                 rows: Vec::new(),
                 rows_visited: 0,
             };
@@ -785,7 +848,7 @@ impl Selection {
         // the FullRange tier's slice indexing needs the well-formedness guarantee explicit, so
         // every loop below skips one rather than relying on the ranges being well-behaved.
         let mut rows_visited: u64 = 0;
-        let rows: Vec<u32> = if serves_all_visible(params, visible) {
+        let rows: Vec<ShardRow> = if serves_all_visible(params, visible) {
             // Everything visible is served, so there is nothing to count and nothing to select —
             // only ordering.
             //
@@ -802,21 +865,19 @@ impl Selection {
             // The counter takes what each tier actually reads — clamped run lengths, or one per
             // decoded value — which is the field's meaning. Capacity is exact — this branch runs
             // only when `visible <= cap`.
-            let mut rows: Vec<u32> = Vec::with_capacity(params.cap.min(visible as usize));
-            for part in parts.parts {
-                if part.is_empty() {
-                    continue;
-                }
+            let mut rows: Vec<ShardRow> = Vec::with_capacity(params.cap.min(visible as usize));
+            for (shard, mask, part) in visible_parts(shards) {
+                let at = |row: u32| ShardRow::new(shard, RowId::new(row));
                 let view_range = part.view_range();
                 let range_len = u64::from(view_range.end - view_range.start);
                 match decode_tier(part.visible, range_len) {
                     DecodeTier::FullRange => {
                         rows_visited += range_len;
-                        rows.extend(view_range.clone());
+                        rows.extend(view_range.clone().map(at));
                     }
                     DecodeTier::Runs => mask.for_each_visible_run(view_range.clone(), |run| {
                         rows_visited += u64::from(run.end - run.start);
-                        rows.extend(run);
+                        rows.extend(run.map(at));
                     }),
                     DecodeTier::Values => {
                         // Reads are bounded by this part's `visible`, not just by the range-end
@@ -844,7 +905,7 @@ impl Selection {
                                     break 'decode;
                                 }
                                 rows_visited += 1;
-                                rows.push(row);
+                                rows.push(at(row));
                             }
                             remaining -= n as u64;
                         }
@@ -855,7 +916,7 @@ impl Selection {
             // a single `mosaica_id` prefix across the whole tile (the nesting argument's
             // client-truncation clause), and a per-part sort would only be a prefix within each
             // segment.
-            rows.sort_unstable_by_key(|&row| parts.id_at(row));
+            rows.sort_unstable_by_key(|&row| id_across(shards, row));
             rows
         } else {
             // One pass. `m(T) <= cap` always, so the `cap` smallest ids in the tile contain the
@@ -885,17 +946,14 @@ impl Selection {
             // doc for what that used to cost.
             let mut c_theta: u64 = 0;
             let heap_cap = params.cap.min(visible as usize).saturating_add(1);
-            let mut heap: BinaryHeap<(u64, u32)> = BinaryHeap::with_capacity(heap_cap);
+            let mut heap: BinaryHeap<(u64, ShardRow)> = BinaryHeap::with_capacity(heap_cap);
 
             // **One `c_theta`, one heap, across every part.** This is where §7.2's "per tile, not
             // per segment" actually lands: the counting pass accumulates over the union, and the
             // heap's `cap` is the tile's whole budget, so the `cap` smallest ids in the *union*
             // are what survive. Selecting per part and concatenating would serve up to
             // `parts × cap` marks and would inflate the I7 floor by the same factor.
-            for part in parts.parts {
-                if part.is_empty() {
-                    continue;
-                }
+            for (shard, mask, part) in visible_parts(shards) {
                 let ids = part.segment.columns.mosaica_id();
                 let base = part.row_base;
                 let view_range = part.view_range();
@@ -920,6 +978,7 @@ impl Selection {
                         let heap = &mut heap;
                         let mut consume = |run: Range<u32>| {
                             scan_row_piece(
+                                shard,
                                 run.start,
                                 &ids[(run.start - base) as usize..(run.end - base) as usize],
                                 params,
@@ -961,6 +1020,7 @@ impl Selection {
                                 walk.at(lo, base, view_range.end);
                                 let hi = run.end.min(walk.end);
                                 scan_cell_piece(
+                                    shard,
                                     lo,
                                     &ids[(lo - base) as usize..(hi - base) as usize],
                                     params,
@@ -1014,7 +1074,7 @@ impl Selection {
                                     }
                                     heap.pop();
                                 }
-                                heap.push((id, row));
+                                heap.push((id, ShardRow::new(shard, RowId::new(row))));
                             }
                             remaining -= n as u64;
                         }
@@ -1023,7 +1083,7 @@ impl Selection {
             }
 
             let m = served_count(c_theta, params, visible);
-            let mut kept: Vec<(u64, u32)> = heap.into_vec();
+            let mut kept: Vec<(u64, ShardRow)> = heap.into_vec();
             kept.sort_unstable();
             kept.truncate(m);
             kept.into_iter().map(|(_, row)| row).collect()
@@ -1034,13 +1094,25 @@ impl Selection {
         // holding a row for the same entity would alias here rather than anywhere louder.
         debug_assert!(
             rows.windows(2)
-                .all(|w| parts.id_at(w[0]) != parts.id_at(w[1])),
+                .all(|w| id_across(shards, w[0]) != id_across(shards, w[1])),
             "two rows in one tile share a mosaica_id — the identity is a bijection over 2^64 with \
              one row per entity (contracts §2.6), and the determinism of the whole selection rests \
              on that being true"
         );
-        Selection { rows, rows_visited }
+        TileSelection { rows, rows_visited }
     }
+}
+
+/// Every part of `shards` holding a visible row, with its shard and the shard's leaf.
+pub(crate) fn visible_parts<'s, 'a>(
+    shards: &'s [TileShard<'a>],
+) -> impl Iterator<Item = (ShardId, &'a EffectiveMask, &'a SelectionPart<'a>)> + 's {
+    shards.iter().flat_map(|held| {
+        held.parts
+            .iter()
+            .filter(|part| !part.is_empty() && part.visible > 0)
+            .map(move |part| (held.shard, held.mask, part))
+    })
 }
 
 #[cfg(test)]
@@ -1294,5 +1366,348 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod fixture {
+    //! Segments written from `(x, y, mosaica_id)` triples, for the tests of a rule that reads one.
+
+    use std::borrow::Borrow;
+
+    use croaring::Bitmap;
+    use mosaica_spatial::tiler::{sort_batch, TilerItem};
+    use mosaica_spatial::{fixed32, morton_of, Bounds, Tile};
+    use mosaica_store::read::SegmentData;
+    use mosaica_types::{EntityId, MosaicaId, ShardId, ShardRow};
+    use rand::rngs::StdRng;
+    use rand::Rng;
+    use rustc_hash::FxHashSet;
+    use tempfile::TempDir;
+
+    pub(crate) const EXTENT: Bounds = Bounds {
+        x_min: 0.0,
+        x_max: 1024.0,
+        y_min: 0.0,
+        y_max: 1024.0,
+    };
+
+    /// A segment and the directory its mappings read from.
+    pub(crate) struct Written {
+        _temp: TempDir,
+        pub(crate) data: SegmentData,
+        /// Each row's `mosaica_id`, in row order.
+        pub(crate) ids: Vec<u64>,
+    }
+
+    impl Written {
+        /// The rows whose identity `visible` holds.
+        pub(crate) fn rows_of(&self, visible: &FxHashSet<u64>) -> Bitmap {
+            (0..self.ids.len() as u32)
+                .filter(|&row| visible.contains(&self.ids[row as usize]))
+                .collect()
+        }
+    }
+
+    /// One shard's segments, ascending by row base, each segment's rows after the rows of the
+    /// ones before it.
+    pub(crate) struct Stacked {
+        pub(crate) shard: ShardId,
+        pub(crate) segments: Vec<(Written, u32)>,
+    }
+
+    impl Stacked {
+        pub(crate) fn of(shard: u32, written: Vec<Written>) -> Stacked {
+            let mut base = 0;
+            let segments = written
+                .into_iter()
+                .map(|segment| {
+                    let at = base;
+                    base += segment.ids.len() as u32;
+                    (segment, at)
+                })
+                .collect();
+            Stacked {
+                shard: ShardId::new(shard).unwrap(),
+                segments,
+            }
+        }
+
+        pub(crate) fn segments(&self) -> Vec<(&SegmentData, u32)> {
+            self.segments
+                .iter()
+                .map(|(segment, base)| (&segment.data, *base))
+                .collect()
+        }
+
+        /// The rows whose `mosaica_id` `keep` admits.
+        pub(crate) fn rows(&self, keep: impl Fn(u64) -> bool) -> Bitmap {
+            let mut rows = Bitmap::new();
+            for (segment, base) in &self.segments {
+                for (row, &id) in (0u32..).zip(&segment.ids) {
+                    if keep(id) {
+                        rows.add(base + row);
+                    }
+                }
+            }
+            rows
+        }
+
+        pub(crate) fn id_of(&self, row: u32) -> u64 {
+            let (segment, base) = self
+                .segments
+                .iter()
+                .rev()
+                .find(|(_, base)| *base <= row)
+                .unwrap();
+            segment.ids[(row - base) as usize]
+        }
+    }
+
+    /// The `mosaica_id` of each of `rows`, read in its own shard among `sides`.
+    pub(crate) fn ids_of<S: Borrow<Stacked>>(sides: &[S], rows: &[ShardRow]) -> Vec<u64> {
+        rows.iter()
+            .map(|row| {
+                let side = sides
+                    .iter()
+                    .map(Borrow::borrow)
+                    .find(|side: &&Stacked| side.shard == row.shard())
+                    .unwrap();
+                side.id_of(row.row_in(side.shard).unwrap().raw())
+            })
+            .collect()
+    }
+
+    /// The segment of `points`, sorted into row order.
+    pub(crate) fn segment_of(points: &[(f32, f32, u64)]) -> Written {
+        let temp = TempDir::new().unwrap();
+        let mut items: Vec<TilerItem> = points
+            .iter()
+            .map(|&(x, y, id)| TilerItem {
+                mosaica_id: MosaicaId::new(id),
+                qx: fixed32(x as f64, EXTENT.x_min, EXTENT.x_max),
+                qy: fixed32(y as f64, EXTENT.y_min, EXTENT.y_max),
+                scalars: Vec::new(),
+            })
+            .collect();
+        let mut entities: Vec<EntityId> = (0..items.len() as u64).map(EntityId::new).collect();
+        let codes = sort_batch(&mut items, &mut entities);
+        mosaica_store::write::write_segment(temp.path(), &items, &codes, &[], &[]).unwrap();
+        let data = SegmentData::load(
+            temp.path(),
+            "seg0",
+            items.len() as u32,
+            mosaica_store::edited::RowEntities::Numbers,
+        )
+        .unwrap();
+        Written {
+            _temp: temp,
+            data,
+            ids: items.iter().map(|item| item.mosaica_id.raw()).collect(),
+        }
+    }
+
+    /// `n` points with distinct identities, many of them small enough to lie in the bands, at
+    /// clustered positions so tiles at every depth hold several.
+    pub(crate) fn points(rng: &mut StdRng, n: usize) -> Vec<(f32, f32, u64)> {
+        let mut seen = FxHashSet::default();
+        let centres: Vec<(f32, f32)> = (0..6)
+            .map(|_| (rng.gen_range(64.0..960.0), rng.gen_range(64.0..960.0)))
+            .collect();
+        let mut out = Vec::with_capacity(n);
+        while out.len() < n {
+            let id = rng.gen::<u64>() >> rng.gen_range(0..16);
+            if !seen.insert(id) {
+                continue;
+            }
+            let (cx, cy) = centres[rng.gen_range(0..centres.len())];
+            let x = (cx + rng.gen_range(-60.0f32..60.0)).clamp(0.0, 1023.0);
+            let y = (cy + rng.gen_range(-60.0f32..60.0)).clamp(0.0, 1023.0);
+            out.push((x, y, id));
+        }
+        out
+    }
+
+    /// The depth-`depth` tile holding `(x, y)`.
+    pub(crate) fn tile_of(x: f32, y: f32, depth: u8) -> Tile {
+        let code = u64::from(morton_of(x as f64, y as f64, &EXTENT).raw());
+        Tile {
+            prefix: code >> (32 - 2 * u32::from(depth)),
+            depth,
+        }
+    }
+}
+
+#[cfg(test)]
+mod across_tests {
+    //! A tile over several shards against one segment holding the same rows: the served set is a
+    //! function of the visible identities alone, so where the rows lie must not move it.
+
+    use super::fixture::{ids_of, points, segment_of, tile_of, Stacked, Written};
+    use super::*;
+
+    use mosaica_spatial::Tile;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+    use rustc_hash::FxHashSet;
+
+    use crate::bands::{select, BandAnswer};
+
+    /// One shard and its leaf.
+    struct Side {
+        stacked: Stacked,
+        mask: EffectiveMask,
+    }
+
+    impl Side {
+        fn of(shard: u32, segments: Vec<Written>, visible: &FxHashSet<u64>) -> Side {
+            let stacked = Stacked::of(shard, segments);
+            let mask = EffectiveMask::of_rows(stacked.rows(|id| visible.contains(&id)));
+            Side { stacked, mask }
+        }
+
+        fn parts(&self, tile: &Tile) -> Vec<SelectionPart<'_>> {
+            self.stacked
+                .segments
+                .iter()
+                .map(|(segment, row_base)| {
+                    let range = mosaica_store::tile_ranges(&segment.data, tile);
+                    let visible = self
+                        .mask
+                        .count_range(row_base + range.start..row_base + range.end);
+                    SelectionPart {
+                        segment: &segment.data,
+                        range,
+                        row_base: *row_base,
+                        visible,
+                    }
+                })
+                .collect()
+        }
+    }
+
+    /// Every tile a point of `points` lies in, at a few depths, with a few parameter sets: the
+    /// scan and the bands over two shards, the second of two segments, serve the identities the
+    /// scan and the bands serve over one segment of every row.
+    #[test]
+    fn a_tile_over_two_shards_serves_what_one_segment_of_its_rows_serves() {
+        let thresholds = [
+            Threshold::Saturated,
+            Threshold::Cut(1 << 52),
+            Threshold::Cut(1 << 57),
+            Threshold::Cut(u64::MAX / 3),
+        ];
+        let mut served_from_bands = 0;
+        for seed in 0..4u64 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let all = points(&mut rng, 3_000);
+            let density = [0.02, 0.3, 0.9, 1.0][seed as usize];
+            let visible: FxHashSet<u64> = all
+                .iter()
+                .filter(|_| rng.gen_bool(density))
+                .map(|p| p.2)
+                .collect();
+            let mut split: [Vec<(f32, f32, u64)>; 3] = Default::default();
+            for &p in &all {
+                split[rng.gen_range(0..3)].push(p);
+            }
+            let [first, second, third] = split;
+            let whole = Side::of(0, vec![segment_of(&all)], &visible);
+            let sides = [
+                Side::of(0, vec![segment_of(&first)], &visible),
+                Side::of(1, vec![segment_of(&second), segment_of(&third)], &visible),
+            ];
+            for depth in [0u8, 2, 4, 6] {
+                let mut tiles: Vec<u64> = all
+                    .iter()
+                    .step_by(97)
+                    .map(|&(x, y, _)| tile_of(x, y, depth).prefix)
+                    .collect();
+                tiles.sort_unstable();
+                tiles.dedup();
+                for prefix in tiles {
+                    let tile = Tile { prefix, depth };
+                    let one = whole.parts(&tile);
+                    let visible_here: u64 = one.iter().map(|p| p.visible).sum();
+                    let held: Vec<Vec<SelectionPart<'_>>> =
+                        sides.iter().map(|side| side.parts(&tile)).collect();
+                    let shards: Vec<TileShard<'_>> = sides
+                        .iter()
+                        .zip(&held)
+                        .map(|(side, parts)| TileShard {
+                            shard: side.stacked.shard,
+                            mask: &side.mask,
+                            parts,
+                        })
+                        .collect();
+                    let split_visible: u64 =
+                        held.iter().flatten().map(|part| part.visible).sum();
+                    assert_eq!(split_visible, visible_here);
+                    for threshold in thresholds {
+                        for (k_min, cap) in [(2, 30), (8, 500), (0, 4)] {
+                            let p = SelectParams {
+                                k_min,
+                                cap,
+                                threshold,
+                            };
+                            let case = format!("seed {seed} tile {tile:?} {p:?}");
+                            let want: Vec<u64> = Selection::of(
+                                &whole.mask,
+                                &SelectionParts::new(&one),
+                                &p,
+                                visible_here,
+                            )
+                            .rows
+                            .iter()
+                            .map(|&row| whole.stacked.id_of(row))
+                            .collect();
+                            let got = TileSelection::of(&shards, &p, visible_here);
+                            let stacked = sides.each_ref().map(|side| &side.stacked);
+                            assert_eq!(ids_of(&stacked, &got.rows), want, "{case}: scan");
+
+                            let one_shard = [TileShard {
+                                shard: whole.stacked.shard,
+                                mask: &whole.mask,
+                                parts: &one,
+                            }];
+                            let banded = select(&one_shard, &p, visible_here).unwrap();
+                            let across = select(&shards, &p, visible_here).unwrap();
+                            match (banded, across) {
+                                (
+                                    BandAnswer::Served {
+                                        rows,
+                                        entries_read,
+                                        widened,
+                                        ..
+                                    },
+                                    BandAnswer::Served {
+                                        rows: rows_across,
+                                        entries_read: read_across,
+                                        widened: widened_across,
+                                        ..
+                                    },
+                                ) => {
+                                    served_from_bands += 1;
+                                    let ids = ids_of(&[&whole.stacked], &rows);
+                                    assert_eq!(ids, want, "{case}: the bands serve the scan's");
+                                    assert_eq!(ids_of(&stacked, &rows_across), want, "{case}");
+                                    assert_eq!(
+                                        (entries_read, widened),
+                                        (read_across, widened_across),
+                                        "{case}: one band chosen from the tile's count"
+                                    );
+                                }
+                                (BandAnswer::Sparse { read }, BandAnswer::Sparse { read: a }) => {
+                                    assert_eq!(read, a, "{case}")
+                                }
+                                (BandAnswer::Declined, BandAnswer::Declined) => {}
+                                (one, two) => panic!("{case}: {one:?} against {two:?}"),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(served_from_bands > 0, "no tile was answered from the bands");
     }
 }

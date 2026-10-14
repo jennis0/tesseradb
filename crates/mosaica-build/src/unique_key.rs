@@ -116,30 +116,43 @@ impl KeywordCardinality {
 /// Every indexed keyword column the bundle at `prefix_dir` holds, entity-scoped attributes first
 /// and then each group-scoped family per view, read from the files the manifests name.
 ///
-/// `partitions` pairs each partition's hash with its manifest and its shard's record. A column
-/// whose dictionary or value column does not open is an error: the build has just written it, and
-/// a verify that could not read it is looking at a malformed bundle.
+/// `partitions` pairs each partition's hash with its manifest and its shards' records. A column's
+/// figures are over every shard: its rows and its present rows summed, its distinct keys counted
+/// once across the shards' dictionaries. A column whose dictionary or value column does not open
+/// is an error: the build has just written it, and a verify that could not read it is looking at
+/// a malformed bundle.
 pub fn keyword_cardinalities(
     prefix_dir: &Path,
     manifest: &Manifest,
-    partitions: &[(&str, &PartitionManifest, &ShardRecord)],
+    partitions: &[(&str, &PartitionManifest, Vec<&ShardRecord>)],
 ) -> Result<Vec<KeywordCardinality>> {
     let mut out = Vec::new();
-    for &(phash, partition, record) in partitions {
-        let layout = mosaica_store::ShardLayout::new(phash, record.id);
+    for (phash, partition, records) in partitions {
+        let layouts: Vec<mosaica_store::ShardLayout<'_>> = records
+            .iter()
+            .map(|record| mosaica_store::ShardLayout::new(phash, record.id))
+            .collect();
+        let index_bytes = |dirs: &[String]| -> u64 {
+            dirs.iter()
+                .map(|dir_rel| bytes_under(dir_rel, &[&manifest.files, &partition.files]))
+                .sum()
+        };
         for scalar in &manifest.declared_scalars {
             if scalar.arrow_type != ScalarType::Keyword || !scalar.index {
                 continue;
             }
-            let dir_rel = layout.column_rel(&scalar.name);
-            let (distinct, present) = read_column(&prefix_dir.join(&dir_rel))?;
+            let dirs: Vec<String> = layouts
+                .iter()
+                .map(|layout| layout.column_rel(&scalar.name))
+                .collect();
+            let (distinct, present) = read_columns(prefix_dir, &dirs)?;
             out.push(KeywordCardinality {
                 attribute: scalar.name.clone(),
                 view: None,
                 distinct,
                 present,
-                rows: record.high_water,
-                index_bytes: bytes_under(&dir_rel, &[&manifest.files, &partition.files]),
+                rows: records.iter().map(|record| record.high_water).sum(),
+                index_bytes: index_bytes(&dirs),
             });
         }
         for group in &manifest.groups {
@@ -148,15 +161,20 @@ pub fn keyword_cardinalities(
                     continue;
                 }
                 for view in &scalar.views {
-                    let dir_rel = layout.scoped_column_rel(
-                        &scalar.name,
-                        view,
-                        mosaica_types::view::DECLARED_INCARNATION,
-                    );
-                    let (distinct, present) = read_column(&prefix_dir.join(&dir_rel))?;
-                    let rows = record
-                        .segments
+                    let dirs: Vec<String> = layouts
                         .iter()
+                        .map(|layout| {
+                            layout.scoped_column_rel(
+                                &scalar.name,
+                                view,
+                                mosaica_types::view::DECLARED_INCARNATION,
+                            )
+                        })
+                        .collect();
+                    let (distinct, present) = read_columns(prefix_dir, &dirs)?;
+                    let rows = records
+                        .iter()
+                        .flat_map(|record| record.segments.iter())
                         .filter(|segment| &segment.view == view)
                         .map(|segment| segment.row_count as u64)
                         .sum();
@@ -166,7 +184,7 @@ pub fn keyword_cardinalities(
                         distinct,
                         present,
                         rows,
-                        index_bytes: bytes_under(&dir_rel, &[&manifest.files, &partition.files]),
+                        index_bytes: index_bytes(&dirs),
                     });
                 }
             }
@@ -186,17 +204,67 @@ pub(crate) fn report_keyword_cardinalities(columns: &[KeywordCardinality], bundl
     }
 }
 
-/// `(distinct, present)` from the dictionary's key count and the value column's presence. Both are
-/// mapped, and only the dictionary's footer and the presence bitmap are read.
+/// `(distinct, present)` from the dictionary's key count and the value column's presence.
 fn read_column(dir: &Path) -> Result<(u64, u64)> {
-    let dict = SortedDict::open_dir(dir, Access::Mapped).map_err(|e| {
-        BuildError::io(
-            &dir.join(mosaica_filter::DICT_FILE),
-            std::io::Error::from(e),
-        )
-    })?;
+    let (dict, present) = open_column(dir)?;
+    Ok((dict.len() as u64, present))
+}
+
+/// The column's dictionary and its present rows. Both are mapped, and only the dictionary's footer
+/// and the presence bitmap are read.
+fn open_column(dir: &Path) -> Result<(SortedDict, u64)> {
+    let dict = SortedDict::open_dir(dir, Access::Mapped).map_err(|e| dict_error(dir, e))?;
     let values = ValueColumn::open_dir(dir, Access::Mapped).map_err(|e| BuildError::io(dir, e))?;
-    Ok((dict.len() as u64, values.present().cardinality()))
+    Ok((dict, values.present().cardinality()))
+}
+
+fn dict_error(dir: &Path, e: mosaica_filter::DictError) -> BuildError {
+    BuildError::io(&dir.join(mosaica_filter::DICT_FILE), std::io::Error::from(e))
+}
+
+/// [`read_column`] over one column's directory in each shard, the keys merged across the sorted
+/// dictionaries.
+fn read_columns(prefix_dir: &Path, dirs_rel: &[String]) -> Result<(u64, u64)> {
+    if let [dir_rel] = dirs_rel {
+        return read_column(&prefix_dir.join(dir_rel));
+    }
+    let mut present = 0u64;
+    let mut dicts = Vec::with_capacity(dirs_rel.len());
+    for dir_rel in dirs_rel {
+        let dir = prefix_dir.join(dir_rel);
+        let (dict, held) = open_column(&dir)?;
+        present += held;
+        dicts.push((dict, dir));
+    }
+    let key = |at: usize, ordinal: u32| -> Result<Option<String>> {
+        let (dict, dir) = &dicts[at];
+        if ordinal >= dict.len() {
+            return Ok(None);
+        }
+        let mut scratch = Vec::new();
+        dict.key_of(ordinal, &mut scratch)
+            .map(|key| Some(key.to_string()))
+            .map_err(|e| dict_error(dir, e))
+    };
+    let mut heads: std::collections::BinaryHeap<std::cmp::Reverse<(String, usize, u32)>> =
+        std::collections::BinaryHeap::new();
+    for at in 0..dicts.len() {
+        if let Some(first) = key(at, 0)? {
+            heads.push(std::cmp::Reverse((first, at, 0)));
+        }
+    }
+    let mut distinct = 0u64;
+    let mut last: Option<String> = None;
+    while let Some(std::cmp::Reverse((head, at, ordinal))) = heads.pop() {
+        if last.as_ref() != Some(&head) {
+            distinct += 1;
+            last = Some(head);
+        }
+        if let Some(next) = key(at, ordinal + 1)? {
+            heads.push(std::cmp::Reverse((next, at, ordinal + 1)));
+        }
+    }
+    Ok((distinct, present))
 }
 
 /// The sizes of the files directly under `dir_rel`, as the manifests digest them. Files in a

@@ -992,3 +992,66 @@ fn the_figures_directory_is_held_under_its_bound() {
     engine.figures_settled_for_test();
     assert!(engine.figures_stats().disk_bytes <= unbounded / 2);
 }
+
+/// **A layer registered under a dropped layer's name is served its own figures and its own denied
+/// rows' labels**, the restart between the two having forgotten the dropped layer's level
+/// versions, and again after a restart.
+#[test]
+fn a_name_registered_again_is_served_its_own_figures() {
+    let fx = Fixture::new(Corpus::SingleKey);
+    let reader = Principal::Terms(["k0", "k1", "k2", "k3"].map(String::from).to_vec());
+    let publish = |engine: &Engine, sources: std::ops::Range<u64>| {
+        engine
+            .register_layer(declaration(FLAT, ServingLayout::RowMajorLabel))
+            .unwrap();
+        let members = sources.map(|s| fx.entity[&s]);
+        engine
+            .publish_artifacts(
+                FLAT.into(),
+                0,
+                vec![IncomingArtifact::from_entities(Some("a".into()), members)],
+            )
+            .unwrap();
+        tick(engine);
+    };
+    let figures = |engine: &Engine| {
+        let session = reader.session(engine);
+        let served = engine
+            .viewport_artifacts(
+                &session,
+                mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
+                    .layers(LayerSelection::Named(&[FLAT])),
+            )
+            .expect("a viewport naming the layer")
+            .artifacts();
+        let [artifact] = served.as_slice() else {
+            panic!("one artifact served, not {}", served.len());
+        };
+        (
+            artifact.masked_count,
+            artifact.derived.centroid,
+            artifact.derived.bbox,
+        )
+    };
+    // Members of the second layer's artifact alone, so the first layer's labels give them none.
+    let suppressed = (N / 2..N / 2 + N / 8).map(|s| (item(fx.entity[&s]), ChangeOp::Suppress));
+    {
+        let engine = fx.open();
+        engine.accept_changes(suppressed.collect()).unwrap();
+        publish(&engine, 0..N / 2);
+        assert_eq!(figures(&engine).0, N / 2);
+        engine.figures_settled_for_test();
+        engine.drop_layer(FLAT.into()).unwrap();
+        reclaim_log(&engine);
+    }
+    let again = {
+        let engine = fx.open();
+        publish(&engine, N / 2..N / 2 + N / 4);
+        let again = figures(&engine);
+        assert_eq!(again.0, N / 4 - N / 8, "the new layer's count");
+        engine.figures_settled_for_test();
+        again
+    };
+    let engine = fx.open();
+    assert_eq!(figures(&engine), again, "after a restart");
+}

@@ -50,12 +50,12 @@ bounded heap, and a differential between two transcriptions of the same algorith
 copy-paste works — so the two constructions must differ, and only the *definition* may be shared.
 
 **Not literal, and said plainly so a reader is not misled:** finding a tile's rows. [`Selection`]
-makes one pass over every row of the segment, computes that row's depth-*d* tile from its geometry,
-and buckets it. That is `tile_of` applied to every row — the definition of "the tile a row is in" —
-rather than a Morton range search over the stored, sorted `morton.u32` column, which is the
-engine's own construction and would import the engine's assumption. The pass is amortised across
-the tiles of one request because it answers all of them at once, not because a faster route was
-preferred; per tile it is still O(rows in the segment).
+makes one pass over every row of the view, in every segment of every shard, computes that row's
+depth-*d* tile from its geometry, and buckets it. That is `tile_of` applied to every row — the
+definition of "the tile a row is in" — rather than a Morton range search over the stored, sorted
+`morton.u32` column, which is the engine's own construction and would import the engine's
+assumption. The pass is amortised across the tiles of one request because it answers all of them
+at once, not because a faster route was preferred; per tile it is still O(rows in the view).
 
 Two things follow from recomputing the tile from `(x, y)` rather than reading `morton.u32`. It is
 **stronger** — a build that wrote a wrong Morton column and then sorted and served consistently by
@@ -140,8 +140,7 @@ def theta_cut(v_total: int, m_target: int, n_occ: int) -> int | None:
     source geometry and counts the distinct ones, where the engine gallops the stored Morton
     column. A build that wrote a wrong Morton column fails that comparison rather than passing it.
     Above one segment the engine estimates that count instead, and this side transcribes the
-    estimator rather than deriving it — `oracle/occupancy.py` says so, and says why no bundle this
-    oracle opens takes that route.
+    estimator rather than deriving it — `oracle/occupancy.py` says so.
 
     **The rounding and the zero case are the spec's, not this module's** *(r24, `188d961`)*. Both
     were unstated until that revision and both are observable — the differential demands exact
@@ -227,10 +226,10 @@ class Selection:
         because the engine has two routes for it and the differential must take the same one: a
         **count** at one segment, a sketch estimate above it.
 
-        **`segments=1` is a fact about this oracle's bundles, not an assumption.**
-        `oracle/bundle.py` opens exactly one segment per view — `bundle.segment(view_id)` is
-        singular — so the counted route is the one that runs here, and `occupancy.ladder` is handed
-        the segment count rather than being told which route to take.
+        **The route is the segment count's.** `bundle.segment(view_id)` holds every segment of the
+        view in every shard, and `occupancy.ladder` is handed how many there are rather than being
+        told which route to take: the counted route where the view has one segment across every
+        shard, the sketch above that.
 
         **Over the view, never over a request's tiles.** θ is viewport-invariant, so this counts
         every occupied tile in the view and not the ones a bbox happens to name. Narrowing it to a
@@ -240,9 +239,9 @@ class Selection:
         the running maximum that make θ monotone are over the rungs at and below the one asked for.
         """
         if self._n_occ is None:
-            self._n_occ = occupancy.ladder(self.rows_by_tile.keys(), self.depth, segments=1)[
-                self.depth
-            ]
+            self._n_occ = occupancy.ladder(
+                self.rows_by_tile.keys(), self.depth, segments=len(self.segment.parts)
+            )[self.depth]
         return self._n_occ
 
     # -- §7.1 -----------------------------------------------------------------------------------

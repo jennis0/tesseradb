@@ -31,8 +31,8 @@ use crate::manifest::{CurrentPointer, Manifest, SegmentsManifest};
 /// **The returned digest is computed from the bytes handed to the writer, not from a re-read
 /// afterwards, and serialisation happens exactly once.** `CURRENT.manifest_digest` must equal
 /// the SHA-256 of `MANIFEST.json`'s bytes (contracts §2.1) — `open_bundle` checks it on every
-/// open — and that same digest is the bundle identity that keys every mask fragment
-/// (compaction §4's `bundle_identity`). A second serialisation could legally produce different
+/// open — and that same digest is the bundle identity that each shard's identity, and so its
+/// mask fragments' key, is derived from. A second serialisation could legally produce different
 /// bytes (map key order is stable here because `Manifest::files` is a `BTreeMap`, but nothing
 /// about *this* function should have to reason about that to stay correct), and a re-read after
 /// write pays disc I/O to learn something the write already knows. Serialise once, hash that,

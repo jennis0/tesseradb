@@ -318,7 +318,7 @@ def test_no_acked_operation_is_lost_when_the_unsynced_tail_is_discarded(
         # `public` now (`per-point-attributes.md` §3.8), which this corpus's points do not carry, so
         # a hard-coded `0` selects nothing at all.
         (base_term,) = catalogue.dict_terms(oracle_bundle, ["filler_head"])
-        base_mask = mask_mod.mask_of({base_term}, oracle_bundle.pairs_path())
+        base_mask = mask_mod.mask_of({base_term}, oracle_bundle.pairs())
         assert len(base_mask) >= 3, "fixture must have >= 3 members in its first block"
         delete_entity, suppress_a, suppress_b = sorted(base_mask)[:3]
 
@@ -429,7 +429,7 @@ def test_deny_ops_and_ingest_survive_a_sigkill_restart(catalogue_bundle_root: Pa
         # `public` now (`per-point-attributes.md` §3.8), which this corpus's points do not carry, so
         # a hard-coded `0` selects nothing at all.
         (base_term,) = catalogue.dict_terms(oracle_bundle, ["filler_head"])
-        base_mask = mask_mod.mask_of({base_term}, oracle_bundle.pairs_path())
+        base_mask = mask_mod.mask_of({base_term}, oracle_bundle.pairs())
         assert len(base_mask) >= 3, "fixture must have >= 3 members in its first block"
         ordered = sorted(base_mask)
         delete_entity, suppress_entity_a, suppress_entity_b = ordered[0], ordered[1], ordered[2]

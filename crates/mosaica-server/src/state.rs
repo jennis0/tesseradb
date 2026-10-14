@@ -906,7 +906,7 @@ impl AppState {
 
     /// Registers a freshly minted session if `admit` still allows it, under the registry's lock,
     /// and prunes what the insert's sweep removed. An entry `admit` refuses is never registered,
-    /// and its token's projections are pruned. Returns whether it was registered.
+    /// and its token's entries are pruned. Returns whether it was registered.
     pub async fn register_session(
         self: &Arc<Self>,
         entry: SessionEntry,

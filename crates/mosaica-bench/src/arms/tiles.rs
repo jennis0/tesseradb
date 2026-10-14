@@ -198,8 +198,8 @@ fn frozen_fragment(
 ) -> Result<std::sync::Arc<mosaica_authz::FrozenFragment>> {
     let dir = std::env::temp_dir().join(format!("mosaica-bench-frag-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
-    let cache = mosaica_authz::FragmentCache::new(&dir, [0u8; 32], [1u8; 32]);
+    let cache = mosaica_authz::FragmentCache::new(&dir, [1u8; 32]);
     // A fresh cache per call under one fixed credential hash, so the memo can hold nothing this
     // caller could contradict: any stamp is as good as any other, and `0` says so.
-    Ok(cache.get_or_build(terms, postings, &[], u64::MAX)?)
+    Ok(cache.get_or_build([0u8; 32], terms, postings, &[], u64::MAX)?)
 }

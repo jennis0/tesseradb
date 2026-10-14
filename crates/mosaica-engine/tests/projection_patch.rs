@@ -5,7 +5,7 @@
 //! for a rebuild and 40.9 ms for the patch's bitmap clone alone at 10⁹
 //! (`probes/2026-08-04-refresh-ladder/`), against decision 0044's stated budget of 0.2 ms. The
 //! mechanism is therefore a background refresh at each publication, with a three-rung ladder in
-//! front of it (`Engine::session_geometry`).
+//! front of it (`Engine::session_geometries`).
 //!
 //! Three things have to hold together, and each is worthless without the others:
 //!

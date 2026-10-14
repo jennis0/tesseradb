@@ -144,8 +144,10 @@ paths:
         membership changed, a principal disabled or deleted, a password set or cleared, a key
         revoked, or the target's provider or a group it maps to changed.
 
-        Subject to compute admission: a first authorise for a set of terms builds and writes a
-        mask fragment.
+        Authorising builds nothing and takes no compute admission: the session's first read builds
+        its authorised set, under that read's admission. It is `429 backpressure` only when the
+        catalogue changes each time the session is resolved or about to be registered, three
+        times running.
       security:
         - authoriseAsKey: []
       requestBody:
@@ -274,7 +276,9 @@ paths:
         Every reason a credential is not accepted answers the same `401`, so the answer does not
         show whether a principal exists. Password checks have their own admission limit, about one
         per core with as many waiting; past it the request is answered `429` with `Retry-After`,
-        whether or not the name exists. Subject to compute admission.
+        whether or not the name exists. A login takes no compute admission. It is also
+        `429 backpressure` when the catalogue changes each time the session is resolved or about
+        to be registered, three times running.
       security: []
       requestBody:
         required: true
@@ -477,8 +481,8 @@ paths:
         request is not. One suggest runs per session at a time: a second while one is running is
         `429 backpressure`, refused before any work, with `Retry-After`. A request with `view` and
         `counts=true` is also `429 backpressure` when the compute queue is full, when no permit
-        frees within `admission_timeout_ms`, and when another request is building this session's
-        view of the map and does not finish within `single_flight_wait_ms`.
+        frees within `admission_timeout_ms`, and when another request is building the view of the
+        map this session reads and does not finish within `single_flight_wait_ms`.
       security:
         - sessionToken: []
       parameters:
@@ -506,7 +510,7 @@ paths:
         - name: counts
           in: query
           required: false
-          description: "`true` serves `count` beside each value: how many items carrying it this principal may see, exact, computed per request. Without `view`, an item ingested and not yet flushed counts. With `view`, only the items `/v1/viewport` would show this session in that view count: an item holds a row there once it is flushed and the refresh after the flush reaches this session (`x-mosaica-pin` describes that window), and a value this principal can see only in other views counts `0`. Without `counts`, `count` is absent. It does not affect the order."
+          description: "`true` serves `count` beside each value: how many items carrying it this principal may see, exact, computed per request. Without `view`, an item ingested and not yet flushed counts. With `view`, only the items `/v1/viewport` would show this session in that view count: an item holds a row there once it is flushed and, for a session already served that view, the refresh after the flush reaches this session's grant (`x-mosaica-pin` describes that window), and a value this principal can see only in other views counts `0`. Without `counts`, `count` is absent. It does not affect the order."
           schema:
             type: boolean
         - name: view
@@ -678,17 +682,17 @@ paths:
               schema:
                 type: string
             x-mosaica-identity-key:
-              description: The identity key, derived from the credential, its mask fragment and the view. The mask fragment's identity is keyed by the bundle, so a rebuilt bundle, whose `mosaica_id`s are all new, gives a new identity key. A held band may be drawn only under the same key, so a client partitions its cache by it.
+              description: The identity key, derived from the credential, its mask fragment in each shard of the view, and the view. A fragment's identity is keyed by its shard's identity, which is derived from the bundle's, so a rebuilt bundle, whose `mosaica_id`s are all new, gives a new identity key. A held band may be drawn only under the same key, so a client partitions its cache by it.
               required: true
               schema:
                 type: string
             x-mosaica-pin:
-              description: The generation this response was computed from, as JSON `{"prefix", "segments_version"}`. It names the generation of this session's visible set. Until the refresh that follows a flush reaches this session, that is the previous generation, and the flush's new rows are not yet visible; deletions, suppressions, segments and the overlay are always current. Send it back as `pin`; its only effect is `x-mosaica-stale`.
+              description: The generation this response was computed from, as JSON `{"prefix", "segments_version"}`. It names the generation of this session's visible set, one generation for every shard the response reads. A session's first read in a view is answered at the live generation. After that, until the refresh that follows a flush reaches this session's grant, it is the previous generation, and the flush's new rows are not yet visible; deletions, suppressions, segments and the overlay are always current. Send it back as `pin`; its only effect is `x-mosaica-stale`.
               required: true
               schema:
                 type: string
             x-mosaica-stale:
-              description: "`1` where the request's `pin` differs from this response's `x-mosaica-pin`, and `0` otherwise. It moves at every flush, merge and compaction, whether or not anything this principal can see changed, and after a flush it moves when the refresh reaches this session. Advisory."
+              description: "`1` where the request's `pin` differs from this response's `x-mosaica-pin`, and `0` otherwise. It moves at every flush, merge and compaction, whether or not anything this principal can see changed, and after a flush it moves when the refresh reaches this session's grant. Advisory."
               required: true
               schema:
                 type: string
@@ -795,8 +799,9 @@ paths:
         pinned as `<field>@<key>`.
 
         **Order.** `map` returns rows by map cell in `view`, then by `mosaica_id`. `stored` returns
-        them in the order the record store holds items, which groups items by their full set of
-        access labels. The two orders return the same rows. With neither `order` nor `cursor`, the
+        them shard by shard, in shard number order, and within a shard in the order its record
+        store holds items, which groups a shard's items by their full set of access labels. The
+        two orders return the same rows. With neither `order` nor `cursor`, the
         server takes `stored` when any named field's `homes` in `/v1/meta` is `["record"]`, and
         `map` otherwise; that choice may change. Reading a field held only in the record store in
         map order was measured 1.3 to 1.8 times slower than in stored order at 100,000-row pages,
@@ -1800,6 +1805,7 @@ paths:
             - An item a row edits changed while the batch was checked; sending it again answers
             - The items the batch names changed while it was checked twice; sending it again answers
             - The ids the batch's new and edited items take would carry the shard's high water past its size; the detail names the size, the high water and how many ids the batch needed
+            - The bundle holds several point shards, which take no write; the body was not read
           content:
             application/json:
               schema:
@@ -1900,7 +1906,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: With `strict=true`, a change's values name two items. Nothing was applied. The detail names the change by its index in the request.
+          description: With `strict=true`, a change's values name two items. Nothing was applied. The detail names the change by its index in the request. Or the bundle holds several point shards, which take no write; the body was not read.
           content:
             application/json:
               schema:
@@ -1986,6 +1992,8 @@ paths:
           $ref: "#/components/responses/ControlBadCredential"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/SeveralShards"
         "422":
           description: "`wait` has a value other than `visible`, or the query names another parameter. No cycle was requested."
           content:
@@ -2013,6 +2021,8 @@ paths:
           $ref: "#/components/responses/ControlBadCredential"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/SeveralShards"
 
   /control/attributes:
     put:
@@ -2069,7 +2079,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          description: The name is declared with a different type, vocabulary, analyser, flags or scope, which is written into every row and cannot change; or `unique` was declared on a column in which more than one item holds one value, and the detail says how many values and names up to ten.
+          description: The name is declared with a different type, vocabulary, analyser, flags or scope, which is written into every row and cannot change; or `unique` was declared on a column in which more than one item holds one value, and the detail says how many values and names up to ten. Or the bundle holds several point shards, which take no write; the body was not read.
           content:
             application/json:
               schema:
@@ -2142,7 +2152,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          description: The size is below the shard's high water. The detail names the high water.
+          description: The size is below the shard's high water. The detail names the high water. Or the bundle holds several point shards, which take no write; the body was not read.
           content:
             application/json:
               schema:
@@ -2211,7 +2221,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          description: The name is declared with a different value set, visibility, width or reserved list. A code's width is written into every row that carries one, so it cannot change.
+          description: The name is declared with a different value set, visibility, width or reserved list. A code's width is written into every row that carries one, so it cannot change. Or the bundle holds several point shards, which take no write; the body was not read.
           content:
             application/json:
               schema:
@@ -2279,6 +2289,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/SeveralShards"
         "413":
           $ref: "#/components/responses/DeclarationTooLarge"
         "415":
@@ -2350,7 +2362,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: The name is declared with a different title, frame, projection, visibility, point default, metadata or `members`.
+          description: The name is declared with a different title, frame, projection, visibility, point default, metadata or `members`. Or the bundle holds several point shards, which take no write; the body was not read.
           content:
             application/json:
               schema:
@@ -2428,7 +2440,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          description: The name is declared with a different title, frame, projection, visibility or point default.
+          description: The name is declared with a different title, frame, projection, visibility or point default. Or the bundle holds several point shards, which take no write; the body was not read.
           content:
             application/json:
               schema:
@@ -2502,7 +2514,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: A live view holds this key.
+          description: A live view holds this key. Or the bundle holds several point shards, which take no write; the body was not read.
           content:
             application/json:
               schema:
@@ -2567,6 +2579,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/SeveralShards"
         "422":
           description: |
             - `wait` has a value other than `visible`
@@ -2619,7 +2633,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          description: Every one of the 2³¹ layer spaces has been given to a layer, or the layer declares more levels than one layer space holds. Nothing was registered. The detail gives the figures.
+          description: Every one of the 2³¹ layer spaces has been given to a layer, or the layer declares more levels than one layer space holds. Nothing was registered. The detail gives the figures. Or the bundle holds several point shards, which take no write; the body was not read.
           content:
             application/json:
               schema:
@@ -2681,6 +2695,8 @@ paths:
           $ref: "#/components/responses/ControlBadCredential"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/SeveralShards"
         "422":
           description: |
             - No layer is registered under this name
@@ -2766,7 +2782,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: A held artifact holds a part with a different value, or a second `excluding` for a held key; a member of a content's generating set, or with `strict=true` any member, names two items; or the artifacts the batch creates need more ids than the level's layer space has left, which the detail gives. Nothing was written.
+          description: A held artifact holds a part with a different value, or a second `excluding` for a held key; a member of a content's generating set, or with `strict=true` any member, names two items; or the artifacts the batch creates need more ids than the level's layer space has left, which the detail gives. Nothing was written. Or the bundle holds several point shards, which take no write; the body was not read.
           content:
             application/json:
               schema:
@@ -2866,7 +2882,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: An artifact holds a part with a different value, or with `strict=true` a member names two items. Nothing was written.
+          description: An artifact holds a part with a different value, or with `strict=true` a member names two items. Nothing was written. Or the bundle holds several point shards, which take no write; the body was not read.
           content:
             application/json:
               schema:
@@ -3901,6 +3917,12 @@ components:
             type: string
     WriteFailed:
       description: "`500 fail-closed`: the write could not be made durable, or the write executor stopped while holding it. It may have been applied in full, so this is not a refusal; the detail says so. Sending the same request again is safe."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    SeveralShards:
+      description: "`409 conflict`: the bundle holds several point shards, which take no write. Nothing was read or written; serve a bundle of one shard to write."
       content:
         application/json:
           schema:
@@ -7198,7 +7220,7 @@ components:
         entity_id_high_water:
           type: integer
           minimum: 0
-          description: The next entity id the allocator will issue to an item, a corpus-wide figure.
+          description: Each shard's high water, the id past every one its allocator has issued, summed over the bundle's shards.
         shards:
           type: object
           additionalProperties: false
@@ -7229,7 +7251,7 @@ components:
               watermark:
                 type: integer
                 minimum: 0
-                description: The entities the published geometry covers.
+                description: The entities the published geometry covers, summed over the bundle's shards.
               readiness:
                 type: boolean
                 description: Whether the write executor is `running`, the same for every partition. It does not reflect a stepped-down partition, which `/readyz` does.
@@ -7237,7 +7259,7 @@ components:
           type: object
           additionalProperties: false
           required: [admission, queue, in_flight, waiting, streaming, shed_total]
-          description: The compute admission limit the viewport, single-item and single-artifact reads, browse, `/v1/aggregate`, a suggest counting within a view, and `/session/authorise` share.
+          description: The compute admission limit the viewport, single-item and single-artifact reads, browse, `/v1/aggregate` and a suggest counting within a view share.
           properties:
             admission:
               type: integer
@@ -7394,7 +7416,7 @@ components:
                   minimum: 0
         segments:
           type: array
-          description: The live segment count per partition and view, which every viewport pays for. A merge bounds the count; a fold resets it to one. A count past `compaction_max_segments` means folds are being refused.
+          description: The live segment count per partition and view, summed over the bundle's shards, which every viewport pays for. A merge bounds the count; a fold resets it to one a shard. On a bundle of one shard, a count past `compaction_max_segments` means folds are being refused.
           items:
             type: object
             additionalProperties: false
@@ -7411,7 +7433,7 @@ components:
           type: object
           additionalProperties: false
           required: [depth, retirable, soft_limit_alarms]
-          description: The point shard's deletions and suppressions of items in force and not yet folded.
+          description: The deletions and suppressions of items in force and not yet folded, summed over the bundle's shards.
           properties:
             depth:
               type: integer
@@ -7503,7 +7525,7 @@ components:
           type: object
           additionalProperties: false
           required: [entries, bytes, bound_bytes, hits, misses, building_refusals, waits_satisfied, waiters_now, evictions, young_evictions, thrashing, oversized_admissions]
-          description: The sessions' row projections of their visible sets.
+          description: The row projections of authorised sets, one per grant, view and shard, each shared by every session with the grant.
           properties:
             entries: { type: integer, minimum: 0 }
             bytes: { type: integer, minimum: 0 }
@@ -7526,7 +7548,7 @@ components:
             young_evictions:
               type: integer
               minimum: 0
-              description: Entries evicted before they were read again, a sign the bound is smaller than what the sessions hold at once.
+              description: Entries evicted before they were read again, a sign the bound is smaller than what the grants in use hold at once.
             thrashing:
               type: boolean
               description: "`young_evictions` is above 0."
@@ -7545,7 +7567,7 @@ components:
           type: object
           additionalProperties: false
           required: [entries, bytes, bound_bytes, hits, misses, building_refusals, evictions, young_evictions, thrashing, oversized_admissions, rebuilds]
-          description: The mask fragments `POST /session/authorise` builds, one per credential.
+          description: The mask fragments, one per grant and shard, built on a session's first read of the shard and again at each publication that moves it.
           properties:
             entries: { type: integer, minimum: 0 }
             bytes: { type: integer, minimum: 0 }
@@ -7738,7 +7760,7 @@ components:
         posture:
           type: string
           enum: [not-started, running, wal-poisoned, dead]
-          description: "`running` is ready. `wal-poisoned` is not ready, and still applies deletions and suppressions."
+          description: "`running` is ready. Over a bundle of several point shards, which takes no write, `running` has no thread behind it, and nothing is logged, flushed, merged or folded. `wal-poisoned` is not ready, and still applies deletions and suppressions."
         ready:
           type: boolean
           description: Whether `posture` is `running`. `/readyz` answers `200` only when this is `true` and no partition serves a stepped-down manifest.
@@ -7831,7 +7853,7 @@ components:
             buffered_items:
               type: integer
               minimum: 0
-              description: Items buffered, the figure `ingest.ingest_buffer_max_items` bounds.
+              description: Items buffered, summed over the bundle's shards, the figure `ingest.ingest_buffer_max_items` bounds.
             overlay_publications:
               type: integer
               minimum: 0
@@ -7839,7 +7861,7 @@ components:
             refreshes:
               type: integer
               minimum: 0
-              description: Session projections refreshed after a flush or merge. A session serves its old projection until its refresh.
+              description: Grants' projections refreshed after a flush or merge. A session already served a view is served its grant's old projection until the refresh.
             refresh_in_flight:
               type: boolean
               description: The refresh for the newest flush or merge is still running.
@@ -7890,7 +7912,10 @@ components:
       description: Compaction folds. Alarm on `fold_failures`, and on `fold_refusals` rising while `folds` does not.
       required: [live_rows, folds, fold_failures, fold_requested, fold_refusals, fold_refusals_by_gate, last_refusal, last_secs, last_rss_bytes, last_attr_bytes_read, last_attr_bytes_written, passes]
       properties:
-        live_rows: { type: integer, minimum: 0 }
+        live_rows:
+          type: integer
+          minimum: 0
+          description: Rows the bundle's segments hold, deleted ones not yet folded included, summed over the bundle's shards.
         folds: { type: integer, minimum: 0 }
         fold_failures:
           type: integer

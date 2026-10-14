@@ -243,6 +243,7 @@ def test_a_completed_constrained_walk_is_accounted_for_by_its_cgroup(profile_wal
 # -- §12.5's second rule, observed rather than trusted -------------------------------------------
 
 
+@pytest.mark.writes_nothing
 def test_a_memory_killed_run_reports_a_resource_outcome_not_a_correctness_failure(
     tmp_path_factory, private_catalogue_bundle
 ):
@@ -298,6 +299,7 @@ def test_a_memory_killed_run_reports_a_resource_outcome_not_a_correctness_failur
     assert not isinstance(outcome, AssertionError)
 
 
+@pytest.mark.writes_nothing
 def test_a_resource_outcome_can_never_be_scored_as_a_correctness_failure():
     """The type relationship the discrimination hangs on, pinned structurally: anything that
     catches or counts `StageInvarianceViolation` — or assertion failures generally — can never

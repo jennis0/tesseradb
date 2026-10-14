@@ -938,8 +938,13 @@ pub struct ArtifactRecord {
     /// belong to it ([`ArtifactStore::retire_dead_views`]).
     pub incarnation: mosaica_types::view::ViewIncarnation,
     /// Entity-space membership — the canonical, view-invariant record. Owned, or read through a
-    /// mapping of the bytes that carry it (see [`Members`]).
+    /// mapping of the bytes that carry it (see [`Members`]). In a store holding one point shard's
+    /// slice of each membership, that shard's slice alone.
     pub members: Members,
+    /// Whether the artifact declares members of its own, set where [`Self::members`] is one
+    /// shard's slice and an empty slice cannot say. `None` where `members` is the whole
+    /// membership. Not stored.
+    pub declares_members: Option<bool>,
     /// The ranked contents of this artifact's supplied content, most specific first.
     ///
     /// **The values are not here.** This carries each content's *generating set* — the thing the
@@ -998,7 +1003,10 @@ const BORROW_CHAIN_MAX: u32 = 8;
 /// attachment and declares no members of its own (decision 0145). Asked here so that every reader
 /// of a membership asks it the same way.
 pub fn borrows_membership(record: &ArtifactRecord) -> bool {
-    record.attached_to.is_some() && record.members.is_empty()
+    record.attached_to.is_some()
+        && !record
+            .declares_members
+            .unwrap_or_else(|| !record.members.is_empty())
 }
 
 /// The resolved target of an attachment: the edge `annotation-representation.md` §2.4 names, with
@@ -1050,10 +1058,12 @@ pub struct ContentSet {
     /// packed extent restores, which holds no values: it is what a later record carrying this
     /// content is compared against (`ingest.md` §1.5; [`ArtifactStore::fill`]).
     pub digest: [u8; 32],
-    /// Entity-space, canonical. **Empty means corpus-independent** — containment is vacuous and the
-    /// content serves to everyone who reaches the layer — and that is a real declaration rather
-    /// than a missing one: a layer whose kinds are all corpus-independent is refused a generating
-    /// set at publish, so an empty set here cannot be an omission.
+    /// Entity-space, canonical. **A set whose [`Self::cardinality`] is zero is corpus-independent**
+    /// — containment is vacuous and the content serves to everyone who reaches the layer — and
+    /// that is a real declaration rather than a missing one: a layer whose kinds are all
+    /// corpus-independent is refused a generating set at publish, so an empty set cannot be an
+    /// omission. In a store holding one point shard's slice of each set, this is that shard's
+    /// slice, and an empty slice means only that the shard holds no member of the set.
     pub generated_from: Bitmap,
     /// The set's **stored cardinality** (`ingest.md` §1.1): `generated_from`'s at publication,
     /// moved afterwards only by a page at this content's rank, and published beside the set's
@@ -1825,6 +1835,7 @@ impl ArtifactStore {
                     view: published.view.clone(),
                     incarnation: published.incarnation,
                     members: Members::owned(members),
+                    declares_members: None,
                     contents,
                     attached_to: published.attached_to.clone().map(|a| Attachment {
                         layer: a.layer,
@@ -3181,12 +3192,16 @@ pub fn encode_record(record: &ArtifactRecord, shape: Option<&ArtifactShapes>) ->
 /// Every length is explicit, so a truncated blob refuses rather than decoding as a shorter
 /// membership.
 pub fn encode_members(record: &ArtifactRecord) -> Vec<u8> {
-    let members = serialise_members(&record.members.whole());
-    let sets: Vec<Vec<u8>> = record
-        .contents
-        .iter()
-        .map(|v| serialise_members(&v.generated_from))
-        .collect();
+    frame_members(
+        &record.members.whole(),
+        record.contents.iter().map(|v| &v.generated_from),
+    )
+}
+
+/// [`encode_members`]' framing, over the membership and the generating sets.
+pub fn frame_members<'a>(members: &Bitmap, sets: impl Iterator<Item = &'a Bitmap>) -> Vec<u8> {
+    let members = serialise_members(members);
+    let sets: Vec<Vec<u8>> = sets.map(serialise_members).collect();
     let mut out =
         Vec::with_capacity(6 + members.len() + sets.iter().map(|s| s.len() + 4).sum::<usize>());
     out.extend_from_slice(&(members.len() as u32).to_le_bytes());
@@ -3219,7 +3234,7 @@ pub fn members_bytes(blob: &[u8]) -> Option<&[u8]> {
 /// fold over the extents it rewrote. A membership reaches its mapped form one way.
 ///
 /// `None` where the framing does not hold or the bytes are not a bitmap ([`Members::mapped`]). The
-/// caller then keeps the heap bitmap [`decode_record`] gave it, which answers identically.
+/// caller then keeps the heap bitmap [`decode_slice`] gave it, which answers identically.
 ///
 /// # Safety
 ///
@@ -3240,6 +3255,17 @@ pub unsafe fn mapped_members(blob: &[u8], owner: Arc<dyn Any + Send + Sync>) -> 
 /// a low masked count for every viewer — which the existence criterion renders as *absent*, with no
 /// error anywhere to notice. Both must be a decode failure the caller alarms on.
 pub fn decode_record(
+    entity: EntityId,
+    blob: &[u8],
+    members_blob: &[u8],
+) -> Option<(ArtifactRecord, Option<ArtifactShapes>)> {
+    let decoded = decode_slice(entity, blob, members_blob)?;
+    slices_hold_their_sets(&[&decoded.0]).then_some(decoded)
+}
+
+/// [`decode_record`] over one shard's member blob, unchecked against the record's cardinalities:
+/// [`slices_hold_their_sets`] checks the shards' slices together.
+pub fn decode_slice(
     entity: EntityId,
     blob: &[u8],
     members_blob: &[u8],
@@ -3280,15 +3306,6 @@ pub fn decode_record(
         let digest: [u8; 32] = r.take(32)?.try_into().ok()?;
         let cardinality = r.u64()?;
         let generated_from = sets.next()?;
-        // **The pair is checked here, as `ArtifactStore::grow_set` checks it at replay**
-        // (`ingest.md` §1.1). Containment reads the row-space operator against the stored
-        // cardinality, and the two now come from different places in these bytes: an extent whose
-        // number is smaller than the set it travels with would pass containment for a principal
-        // holding a subset of what the content was generated from. Refusing the record is the
-        // reading damage takes everywhere else in this decoder.
-        if generated_from.cardinality() != cardinality {
-            return None;
-        }
         contents.push(ContentSet {
             // ⊘ The extent carries no values — see [`ContentSet::values`]. A restored content is
             // therefore unservable until the blob write lands, which is fail-closed and loud rather
@@ -3394,6 +3411,7 @@ pub fn decode_record(
             view,
             incarnation,
             members: Members::owned(members),
+            declares_members: None,
             contents,
             attached_to,
             parents,
@@ -3439,8 +3457,31 @@ impl<'b> Reader<'b> {
     }
 }
 
+/// Whether `slices`, one record's slice from each point shard, hold the whole of every generating
+/// set the record declares: per content, the slices' sets sum to the cardinality the record holds.
+/// Containment reads the row-space operators against that cardinality, so slices that disagree
+/// with it would contain a set for a principal holding part of what the content was generated
+/// from. A slice with no member of a set adds nothing to the sum; whether the set itself is empty
+/// is the record's cardinality, never a slice's.
+pub fn slices_hold_their_sets(slices: &[&ArtifactRecord]) -> bool {
+    let Some(first) = slices.first() else {
+        return false;
+    };
+    if slices.iter().any(|slice| slice.contents.len() != first.contents.len()) {
+        return false;
+    }
+    first.contents.iter().enumerate().all(|(rank, content)| {
+        let held = slices.iter().try_fold(0u64, |sum, slice| {
+            let set = &slice.contents[rank];
+            (set.cardinality == content.cardinality)
+                .then(|| sum + set.generated_from.cardinality())
+        });
+        held == Some(content.cardinality)
+    })
+}
+
 /// The inverse of [`encode_members`]: the membership and each content's generating set.
-fn decode_members(blob: &[u8]) -> Option<(Bitmap, Vec<Bitmap>)> {
+pub fn decode_members(blob: &[u8]) -> Option<(Bitmap, Vec<Bitmap>)> {
     let mut r = Reader::new(blob);
     let members_len = r.u32()? as usize;
     let members = deserialise_members(r.take(members_len)?)?;
@@ -3642,6 +3683,7 @@ mod tests {
             view: None,
             incarnation: 0,
             members: Members::owned(Bitmap::of(members)),
+            declares_members: None,
             contents: Vec::new(),
             attached_to: None,
             parents: Vec::new(),
@@ -3745,6 +3787,7 @@ mod tests {
     fn a_borrowing_artifact_answers_its_targets_membership() {
         let borrowing = |entity: u64, target: u64, layer: &str, ordinal: u32| ArtifactRecord {
             members: Members::owned(Bitmap::new()),
+            declares_members: None,
             ..attached(entity, target, layer, ordinal)
         };
         let mut store = ArtifactStore::new();
@@ -4589,6 +4632,41 @@ mod tests {
         for len in 0..members.len() {
             assert!(decode_record(r.entity, &blob, &members[..len]).is_none());
         }
+    }
+
+    #[test]
+    fn a_records_slices_hold_its_sets_only_together() {
+        let mut r = record(100, &[1, 2, 3, 4]);
+        r.contents = vec![ContentSet {
+            values: Some(vec!["a label".into()]),
+            digest: content_digest(&["a label".to_string()]),
+            generated_from: Bitmap::of(&[1, 2, 3]),
+            cardinality: 3,
+        }];
+        let blob = encode_record(&r, None);
+        let slice = |members: &[u32], set: &[u32]| {
+            let members = frame_members(&Bitmap::of(members), [Bitmap::of(set)].iter());
+            decode_slice(r.entity, &blob, &members).expect("a slice decodes").0
+        };
+        let (low, high, empty) = (slice(&[1, 2], &[1, 2]), slice(&[3, 4], &[3]), slice(&[], &[]));
+        assert!(slices_hold_their_sets(&[&low, &high]));
+        assert!(slices_hold_their_sets(&[&low, &empty, &high]));
+        assert!(!slices_hold_their_sets(&[&low]));
+        assert!(!slices_hold_their_sets(&[&empty]), "an empty slice is never the set");
+        assert!(
+            !slices_hold_their_sets(&[&low, &high, &high]),
+            "a slice counted twice is damage"
+        );
+        let one = frame_members(&Bitmap::of(&[1, 2]), [Bitmap::of(&[1, 2])].iter());
+        assert!(decode_record(r.entity, &blob, &one).is_none());
+
+        // A set the record declares empty is held by slices that are all empty.
+        r.contents[0].generated_from = Bitmap::new();
+        r.contents[0].cardinality = 0;
+        let blob = encode_record(&r, None);
+        let members = frame_members(&Bitmap::of(&[1]), [Bitmap::new()].iter());
+        let (independent, _) = decode_slice(r.entity, &blob, &members).expect("a slice decodes");
+        assert!(slices_hold_their_sets(&[&independent, &independent]));
     }
 
     #[test]

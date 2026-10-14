@@ -2146,6 +2146,78 @@ async fn the_pin_names_the_generation_a_response_was_served_from_during_a_refres
     assert!(stale);
 }
 
+/// A session's first read is answered at the live generation, whatever its grant's other sessions
+/// are served. With the background refresh off, a write acknowledged visible is read, on the item
+/// card and on the map, by a session authorised after it with the grant of an established session,
+/// while the established session is served the previous generation on both and its pin says so.
+#[tokio::test]
+async fn a_new_session_reads_a_visible_write_its_grants_established_session_is_not_yet_served() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    server.state.engine.set_background_refresh_for_test(false);
+    let read = async |token: &str| {
+        let resp = server
+            .client
+            .post(server.viewer_url("/v1/viewport"))
+            .bearer_auth(token)
+            .json(&serde_json::json!({
+                "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let pin: serde_json::Value =
+            serde_json::from_str(resp.headers()["x-mosaica-pin"].to_str().unwrap()).unwrap();
+        let (tiles, _) = decode_viewport(&resp.bytes().await.unwrap());
+        (tiles.iter().map(|tile| tile.1).sum::<u64>(), pin)
+    };
+
+    let established = token_for(&server, &["0"]).await;
+    let (before, opened_at) = read(&established).await;
+
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest?wait=visible"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-mosaica-batch-id", "seen-by-a-new-session")
+        .header("content-type", "application/vnd.apache.arrow.stream")
+        .body(build_ingest_batch(&rows_from(60_000, 2)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let ack: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(ack["visible"], true, "{ack}");
+    let written = ack["mosaica_ids"][0].as_str().unwrap().to_string();
+    let card = async |token: &str| {
+        server
+            .client
+            .post(server.viewer_url(&format!("/v1/items/{written}")))
+            .bearer_auth(token)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16()
+    };
+
+    let (stale_count, stale_pin) = read(&established).await;
+    assert_eq!(stale_count, before, "the established session is served the previous generation");
+    assert_eq!(stale_pin, opened_at, "and its pin names that generation");
+    assert_eq!(card(&established).await, 404, "and its item card agrees with its map");
+
+    let new = token_for(&server, &["0"]).await;
+    assert_eq!(card(&new).await, 200, "the new session's first read, a card, finds the write");
+    let (count, pin) = read(&new).await;
+    assert_eq!(count, before + 2, "the new session reads the write");
+    assert!(
+        pin["segments_version"].as_u64() > opened_at["segments_version"].as_u64(),
+        "at the live generation: {pin} against {opened_at}"
+    );
+}
+
 /// **Unbounded ingest hangs the viewer plane rather than shedding it, and this closes that.**
 ///
 /// `ComputeGate::admit` is `async` and awaited **before** `spawn_blocking`, so viewer *demand* is

@@ -55,13 +55,14 @@ use croaring::Bitmap;
 use memmap2::Mmap;
 use serde_json::{json, Value};
 
-use mosaica_engine::occupancy::occupied_tiles_ladder;
+use mosaica_engine::occupancy::{occupied_tiles_ladder, OccupancyPart};
 use mosaica_engine::select::{served_count, SelectParams, Threshold};
 use mosaica_engine::viewport::{segments_with_row_bases, ViewportRequest};
 use mosaica_engine::{compose::EffectiveMask, Engine, EngineConfig};
 use mosaica_spatial::{tiles_for_bbox, Bounds, Tile};
 use mosaica_store::read::{open_bundle, SegmentData};
 use mosaica_store::tile_ranges_all;
+use mosaica_types::ShardId;
 
 /// Server defaults, so the reference arm measures a deployment somebody runs (`arms::viewport`,
 /// and `viewport_sweep` beside this).
@@ -1398,7 +1399,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // land rather than have it overlap the first timed arm.
         std::thread::sleep(std::time::Duration::from_millis(500));
 
-        let (gen, mask) = engine.composed_mask(&session, &view_id)?;
+        let (gen, mask) = engine.composed_mask(&session, &view_id, ShardId::ZERO)?;
         let generation = generation.get_or_insert(gen);
         let view_data = generation
             .bundle
@@ -1407,8 +1408,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .get(&view_id)
             .ok_or("the view vanished between open and compose")?;
         let segments = segments_with_row_bases(&view_id, view_data)?;
+        let parts: Vec<OccupancyPart<'_>> = segments
+            .iter()
+            .map(|&(segment, base)| (Some(&mask), segment, base))
+            .collect();
         let before = Counters::now();
-        let rungs = occupied_tiles_ladder(&mask, &segments, LADDER_DEPTH);
+        let rungs = occupied_tiles_ladder(&parts, LADDER_DEPTH);
         let ladder_cost = before.since(ticks);
         let ladder: Vec<u64> = (0..=LADDER_DEPTH).map(|d| rungs.at(d)).collect();
         // The depth whose expected mark count is nearest the client's budget: `16 · N_occ(d)`

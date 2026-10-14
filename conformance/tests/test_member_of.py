@@ -33,7 +33,6 @@ from oracle.filters import MemberOfColumn, NumericColumn, evaluate
 from oracle.harness import (
     CLI_BIN,
     REPO_ROOT,
-    cli_build,
     spawn_server,
     stop_server,
     write_deployment,
@@ -48,6 +47,7 @@ from test_shape_membership import (
     VIEW_ID,
     WHOLE_MAP,
     build_bundle,
+    build_with_layers,
     config_toml,
     containing,
     fixture_points,
@@ -84,11 +84,7 @@ def member_column(points, served, terms: list[str]) -> MemberOfColumn:
 def member_server(tmp_path_factory):
     points = fixture_points()
     work = tmp_path_factory.mktemp("member-of-fixture")
-    build_bundle(work, points)
-    (work / "gated.toml").write_text(config_toml() + gated_layer_toml())
-    bundle = work / "bundle-gated"
-    deployment = write_deployment(work / "mosaica-gated.toml", bundle=bundle, schema=work / "gated.toml")
-    cli_build(deployment, bundle)
+    bundle = build_with_layers(work, "gated", gated_layer_toml())
     server, proc = spawn_server(
         bundle,
         tmp_path_factory.mktemp("member-of-server"),
@@ -100,6 +96,7 @@ def member_server(tmp_path_factory):
     stop_server(proc)
 
 
+@pytest.mark.writes_nothing
 def test_the_leaf_is_the_artifacts_masked_count_and_the_oracles(member_server):
     server, points = member_server
     for terms in PRINCIPALS:
@@ -116,6 +113,7 @@ def test_the_leaf_is_the_artifacts_masked_count_and_the_oracles(member_server):
             assert got == expected, f"{artifact.layer}/{artifact.key}: served {got}, oracle {expected}"
 
 
+@pytest.mark.writes_nothing
 def test_it_composes_with_a_numeric_leaf_and_negates_within_the_visible_set(member_server):
     server, points = member_server
     numeric = NumericColumn({p[0]: p[0] for p in points})
@@ -178,6 +176,7 @@ def test_an_unknown_a_foreign_a_suppressed_and_a_withheld_artifact_are_one_respo
     assert matched_sum(server, broad, withheld) == before
 
 
+@pytest.mark.writes_nothing
 def test_an_unknown_layer_is_refused_where_an_unknown_artifact_is_not(member_server):
     server, _ = member_server
     token = server.authorise(["1", "2"])["token"]
@@ -192,6 +191,7 @@ def test_an_unknown_layer_is_refused_where_an_unknown_artifact_is_not(member_ser
         assert resp.status_code == 422, f"{body}: {resp.text}"
 
 
+@pytest.mark.writes_nothing
 def test_member_of_is_a_reserved_column_name(tmp_path):
     points = fixture_points()
     work = tmp_path / "reserved"

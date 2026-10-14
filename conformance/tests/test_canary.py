@@ -91,6 +91,8 @@ from oracle import wire
 from oracle.wire import decode_viewport, decode_viewport_points
 from suite.canonical import Streamed, canonicalise_viewport
 
+pytestmark = pytest.mark.writes_nothing
+
 GRID_MAX = 65536.0
 VIEW = "s0"
 # Zooms 0-6 of the grid's full 0-16 depth range (contracts §2.5) — deep enough that the corner
@@ -221,7 +223,7 @@ def _points_by_entity(raw: bytes, key: identity_mod.IdentityKey, zoom: int) -> b
         )
     at = points.schema.get_field_index("mosaica_id")
     entities = pa.array(
-        [identity_mod.invert(key, t)[1] for t in points.column(at).to_pylist()], pa.uint64()
+        [identity_mod.item_of(key, t) for t in points.column(at).to_pylist()], pa.uint64()
     )
     points = points.set_column(at, pa.field("entity", pa.uint64()), entities)
     points = points.sort_by([("entity", "ascending")]).combine_chunks()

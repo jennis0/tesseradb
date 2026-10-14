@@ -231,7 +231,7 @@ def test_a_model_with_a_holder_count_checks_every_identifier_against_it():
     """Items 0 and 1 of a build of two. Item 0 is deleted, so its number may be issued at tenancy
     1; item 1's may not, since item 1 is held."""
     a, b = item(0), item(1)
-    numbers = HolderCount(key=KEY, shard=0, built=2)
+    numbers = HolderCount(key=KEY, built={0: 2})
     holdings = Holdings(unique={}, items={a: {}, b: {}}, numbers=numbers)
     apply_changes(holdings, [{"op": "delete", "match": {"mosaica_id": str(a)}}], [Names(a)])
     with pytest.raises(AssertionError):

@@ -35,7 +35,7 @@ use mosaica_engine::{
     Session, SinkResult,
 };
 use mosaica_lifecycle::{ChangeOp, IngestRow};
-use mosaica_types::MosaicaId;
+use mosaica_types::{MosaicaId, ShardId};
 use mosaica_build::config::{AccessInput, AccessSource};
 use mosaica_build::{build, BuildArgs};
 
@@ -158,7 +158,11 @@ fn visible(dir: &Path, terms: &[&str]) -> u64 {
     let session = engine
         .authorise(credential.as_bytes())
         .expect("a credential of known descriptors authorises");
-    let cardinality = session.fragment_at_authorise_for_test().view().cardinality();
+    let cardinality = engine
+        .session_fragment_for_test(&session, ShardId::ZERO)
+        .unwrap()
+        .view()
+        .cardinality();
     cardinality
 }
 
@@ -402,7 +406,11 @@ fn a_conjunction_admits_only_a_principal_satisfying_it() {
         .authorise(&credential(&["\u{0}ir:analyst&ir:legal", "\u{0}ir:analyst"]))
         .unwrap();
     assert_eq!(
-        session.fragment_at_authorise_for_test().view().cardinality(),
+        engine
+            .session_fragment_for_test(&session, ShardId::ZERO)
+            .unwrap()
+            .view()
+            .cardinality(),
         1
     );
 }
@@ -920,9 +928,16 @@ fn deletions_and_suppressions_hide_items_from_a_read_all_session() {
 #[test]
 fn read_all_sessions_share_one_fragment() {
     let (_dir, engine) = expressions_engine();
-    let _first = engine.authorise_all().unwrap();
+    let first = engine.authorise_all().unwrap();
+    engine
+        .session_fragment_for_test(&first, ShardId::ZERO)
+        .unwrap();
     let before = engine.generation_status();
-    let _second = engine.authorise_all().unwrap();
+    assert_eq!(before.fragment_cache.entries, 1);
+    let second = engine.authorise_all().unwrap();
+    engine
+        .session_fragment_for_test(&second, ShardId::ZERO)
+        .unwrap();
     let after = engine.generation_status();
     assert_eq!(after.fragment_cache_rebuilds, before.fragment_cache_rebuilds);
     assert_eq!(after.fragment_cache.entries, before.fragment_cache.entries);

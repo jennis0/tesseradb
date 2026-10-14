@@ -104,12 +104,109 @@ pub use unique_key::{
 const PREFIX: &str = "v00000";
 /// This build writes exactly one partition: there are no compartments.
 const PHASH: &str = "default";
-/// The one shard a build writes.
+/// The one shard the linear build writes.
 const SHARD: ShardId = ShardId::ZERO;
 /// One segment per (partition, view) at build (contracts §2.1).
 const SEG_ID: &str = "seg-0";
 /// The same, for the artifact pass, which reopens the segment the build wrote.
 pub(crate) const BUILD_SEG_ID: &str = SEG_ID;
+
+/// One shard of a build: the items the allocation order numbers `[lo, hi)`, each at its number
+/// less `lo`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ShardSpan {
+    pub(crate) id: ShardId,
+    pub(crate) lo: u64,
+    pub(crate) hi: u64,
+}
+
+impl ShardSpan {
+    /// The one shard of a build of `n` items.
+    pub(crate) fn whole(n: u64) -> ShardSpan {
+        ShardSpan {
+            id: SHARD,
+            lo: 0,
+            hi: n,
+        }
+    }
+
+    /// The shards `n` items fill at `size` apiece, in allocation order: one, empty, where there
+    /// are none.
+    pub(crate) fn of(n: u64, size: u64) -> Result<Vec<ShardSpan>> {
+        let count = n.div_ceil(size).max(1);
+        if count > u64::from(ShardId::LIMIT) {
+            return Err(BuildError::Invalid(format!(
+                "{n} items at a `[shards] size` of {size} fill {count} shards, more than the {} a \
+                 bundle holds. Declare a size of at least {}",
+                ShardId::LIMIT,
+                n.div_ceil(u64::from(ShardId::LIMIT))
+            )));
+        }
+        Ok((0..count)
+            .map(|k| ShardSpan {
+                id: ShardId::new(k as u32).expect("the count is checked against the limit"),
+                lo: k * size,
+                hi: ((k + 1) * size).min(n),
+            })
+            .collect())
+    }
+
+    pub(crate) fn len(&self) -> u64 {
+        self.hi - self.lo
+    }
+
+    pub(crate) fn layout(&self) -> ShardLayout<'static> {
+        ShardLayout::new(PHASH, self.id)
+    }
+
+    /// The shard's part of an ascending run of entities, each at its entity less `lo`.
+    pub(crate) fn slice<'a>(&self, entities: &'a [u32]) -> std::borrow::Cow<'a, [u32]> {
+        let from = entities.partition_point(|&e| u64::from(e) < self.lo);
+        let to = entities.partition_point(|&e| u64::from(e) < self.hi);
+        let part = &entities[from..to];
+        match self.lo {
+            0 => std::borrow::Cow::Borrowed(part),
+            lo => std::borrow::Cow::Owned(part.iter().map(|&e| e - lo as u32).collect()),
+        }
+    }
+
+    /// The shard's part of a set of entities, each at its entity less `lo`.
+    pub(crate) fn members<'a>(
+        &self,
+        entities: &'a croaring::Bitmap,
+    ) -> std::borrow::Cow<'a, croaring::Bitmap> {
+        use std::borrow::Cow;
+        let (Some(min), Some(max)) = (entities.minimum(), entities.maximum()) else {
+            return Cow::Borrowed(entities);
+        };
+        let (min, max) = (u64::from(min), u64::from(max));
+        if max < self.lo || min >= self.hi {
+            return Cow::Owned(croaring::Bitmap::new());
+        }
+        if self.lo <= min && max < self.hi {
+            return match self.lo {
+                0 => Cow::Borrowed(entities),
+                lo => Cow::Owned(entities.add_offset(-(lo as i64))),
+            };
+        }
+        let mut part = entities.clone();
+        part.remove_range(..self.lo as u32);
+        part.remove_range(self.hi as u32..);
+        Cow::Owned(part.add_offset(-(self.lo as i64)))
+    }
+}
+
+/// What one shard of a build wrote, for its record.
+pub(crate) struct ShardWritten {
+    pub(crate) span: ShardSpan,
+    /// One per view, in registry order, `entity_hi` exclusive.
+    pub(crate) segments: Vec<SegmentDescriptor>,
+    pub(crate) occupancies: Vec<Occupancy>,
+    pub(crate) term_images: Vec<Option<crate::term_images_pass::ViewTermImages>>,
+    /// Each unique column's base runs, by attribute, in declaration order.
+    pub(crate) unique: Vec<(String, Vec<mosaica_store::unique::WrittenUniqueRun>)>,
+    pub(crate) membership_extents: Vec<mosaica_store::manifest::MembershipExtent>,
+}
 
 /// The shape layers' geometry report (`polygon-membership.md` §6.5), printed where the build's
 /// other reports are — on stderr, before the artifact pass adds the resolution's cost.
@@ -393,6 +490,8 @@ impl std::fmt::Debug for BuildArgs {
 pub struct ViewReport {
     /// The view id: a plain view's name, or a group's view as `group:key` (`views.md` §3.2).
     pub view_id: String,
+    /// The point shard whose part of the view this is.
+    pub shard: ShardId,
     /// Rows in this view's segment — the view's population, which is a **subset** of entity
     /// space wherever the view does not hold every item (`views.md` §8).
     pub rows: u64,
@@ -407,7 +506,8 @@ pub struct ViewReport {
 #[derive(Debug, Clone)]
 pub struct BuildReport {
     pub prefix: String,
-    /// One entry per view the build materialised, in registry order (`views.md` §7).
+    /// One entry per view the build materialised and shard it wrote, in registry order and then
+    /// shard order (`views.md` §7).
     pub views: Vec<ViewReport>,
     pub seg_id: String,
     /// Number of items (= the shard's high water, since the bootstrap build allocates from 0).
@@ -2016,13 +2116,13 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // the pass needs scratch of its own; the emit above closed the directory it used, and this is
     // the last stage that wants one.
     let artifact_tmp = spill::TmpDir::create(&args.out)?;
+    let shard = ShardSpan::whole(n);
     let artifact_pass = crate::artifact_pass::run(
         &mut published_layers,
         &artifact_store,
         &prefix_dir,
-        layout,
+        &[(shard, n as u32)],
         &view.view_id,
-        n as u32,
         artifact_tmp.path(),
         &mut derived_index,
     );
@@ -2031,7 +2131,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     let containment_extents = crate::artifact_pass::containment(
         &artifact_store,
         &prefix_dir,
-        layout,
+        &[shard],
         &mut derived_index,
     );
     drop(artifact_store);
@@ -2102,7 +2202,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     other_paths.extend(
         containment_extents
             .iter()
-            .map(|entry| prefix_dir.join(&entry.path)),
+            .map(|(_, entry)| prefix_dir.join(&entry.path)),
     );
     let mut report = write_manifests(
         args,
@@ -2110,7 +2210,6 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             dict_paths,
             dict_records,
             other_paths,
-            unique,
         },
         n,
         term_count,
@@ -2118,16 +2217,21 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         args.batch_items.filter(|&b| b < n),
         &minters,
         &published_layers,
-        &[SegmentDescriptor {
-            view: view.view_id.clone(),
-            incarnation: mosaica_store::manifest::DECLARED_INCARNATION,
-            seg_id: SEG_ID.to_string(),
-            row_count: n as u32,
-            entity_lo: 0,
-            entity_hi: n,
+        &[ShardWritten {
+            span: shard,
+            segments: vec![SegmentDescriptor {
+                view: view.view_id.clone(),
+                incarnation: mosaica_store::manifest::DECLARED_INCARNATION,
+                seg_id: SEG_ID.to_string(),
+                row_count: n as u32,
+                entity_lo: 0,
+                entity_hi: n,
+            }],
+            occupancies: vec![occupancy],
+            term_images,
+            unique,
+            membership_extents: published_layers.membership_extents.clone(),
         }],
-        std::slice::from_ref(&occupancy),
-        &term_images,
     )?;
     report.attribute_coverage = attribute_coverage;
     report.refused = numbering.refused;
@@ -2222,8 +2326,6 @@ struct BundleFiles {
     dict_paths: Vec<PathBuf>,
     dict_records: u64,
     other_paths: Vec<PathBuf>,
-    /// Each unique column's base runs, by attribute, in declaration order.
-    unique: Vec<(String, Vec<mosaica_store::unique::WrittenUniqueRun>)>,
 }
 
 /// Write `SEGMENTS-0.json`, `MANIFEST.json` and `CURRENT` over the files a build produced.
@@ -2239,9 +2341,7 @@ fn write_manifests(
     batch_items_recorded: Option<u64>,
     minters: &HashMap<String, mosaica_store::vocabulary::VocabularyMinter>,
     published_layers: &crate::layers::PublishedLayers,
-    segments_written: &[SegmentDescriptor],
-    occupancies: &[Occupancy],
-    term_images: &[Option<crate::term_images_pass::ViewTermImages>],
+    shards: &[ShardWritten],
 ) -> Result<BuildReport> {
     let prefix_dir = args.out.join(PREFIX);
     let partition_dir = mosaica_store::layout::partition_dir(&prefix_dir, PHASH);
@@ -2266,28 +2366,13 @@ fn write_manifests(
         .dict_paths
         .iter()
         .chain(&files.other_paths)
-        .chain(
-            files
+        .chain(shards.iter().flat_map(|shard| {
+            shard
                 .unique
                 .iter()
-                .flat_map(|(_, runs)| runs.iter().map(|run| &run.path)),
-        )
+                .flat_map(|(_, runs)| runs.iter().map(|run| &run.path))
+        }))
         .collect();
-    let unique_indexes = files
-        .unique
-        .iter()
-        .map(|(attribute, runs)| {
-            Ok(mosaica_store::manifest::UniqueIndexRuns {
-                attribute: attribute.clone(),
-                base: runs
-                    .iter()
-                    .map(|run| run.as_base(&prefix_dir))
-                    .collect::<std::result::Result<_, _>>()
-                    .map_err(|e| BuildError::Invalid(e.to_string()))?,
-                live: Vec::new(),
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
     let manifest_files: BTreeMap<String, FileDigest> = all_paths
         .into_par_iter()
         .map(|path| Ok((relative_to(&prefix_dir, path)?, digest_file(path)?)))
@@ -2295,10 +2380,53 @@ fn write_manifests(
 
     let bundle_bytes: u64 = manifest_files.values().map(|f| f.size).sum();
 
-    let unique_columns = unique_indexes
-        .iter()
-        .map(|index| index.attribute.clone())
-        .collect();
+    let unique_columns = shards
+        .first()
+        .map(|shard| shard.unique.iter().map(|(attribute, _)| attribute.clone()).collect())
+        .unwrap_or_default();
+    let mut records = Vec::with_capacity(shards.len());
+    for shard in shards {
+        let unique_indexes = shard
+            .unique
+            .iter()
+            .map(|(attribute, runs)| {
+                Ok(mosaica_store::manifest::UniqueIndexRuns {
+                    attribute: attribute.clone(),
+                    base: runs
+                        .iter()
+                        .map(|run| run.as_base(&prefix_dir))
+                        .collect::<std::result::Result<_, _>>()
+                        .map_err(|e| BuildError::Invalid(e.to_string()))?,
+                    live: Vec::new(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        records.push(mosaica_store::manifest::ShardRecord {
+            watermark: shard.span.len(),
+            high_water: shard.span.len(),
+            membership_extents: shard.membership_extents.clone(),
+            // One per view with images, in build order; a view with no rows, or a build with
+            // no terms, has none.
+            term_image_extents: shard
+                .term_images
+                .iter()
+                .flatten()
+                .map(|images| images.extent.clone())
+                .collect(),
+            // One per view, in registry order. `entity_hi` is inclusive here, exclusive from
+            // pass two; an empty shard's saturates to 0.
+            segments: shard
+                .segments
+                .iter()
+                .map(|descriptor| SegmentDescriptor {
+                    entity_hi: descriptor.entity_hi.saturating_sub(1),
+                    ..descriptor.clone()
+                })
+                .collect(),
+            unique_indexes,
+            ..mosaica_store::manifest::ShardRecord::empty(shard.span.id)
+        });
+    }
     let mut segments = SegmentsManifest {
         partition: mosaica_store::manifest::PartitionManifest {
             next_layer_space: published_layers.next_layer_space,
@@ -2310,35 +2438,13 @@ fn write_manifests(
         },
         shards: mosaica_store::manifest::Shards {
             size: args.shard_size(),
-            records: vec![mosaica_store::manifest::ShardRecord {
-                watermark: n,
-                high_water: n,
-                membership_extents: published_layers.membership_extents.clone(),
-                // One per view with images, in build order; a view with no rows, or a build
-                // with no terms, has none.
-                term_image_extents: term_images
-                    .iter()
-                    .flatten()
-                    .map(|images| images.extent.clone())
-                    .collect(),
-                // One per view, in registry order. `entity_hi` is inclusive here, exclusive from
-                // pass two; an empty build's saturates to 0.
-                segments: segments_written
-                    .iter()
-                    .map(|descriptor| SegmentDescriptor {
-                        entity_hi: descriptor.entity_hi.saturating_sub(1),
-                        ..descriptor.clone()
-                    })
-                    .collect(),
-                unique_indexes,
-                ..mosaica_store::manifest::ShardRecord::empty(SHARD)
-            }],
+            records,
         },
         layer_spaces: published_layers.layer_spaces.clone(),
     };
     // Empty where no artifact was published or a structure would not compose; the level then
     // composes on first use.
-    segments.file_derived(published_layers.derived_extents.clone());
+    segments.file_derived_by_shard(published_layers.derived_extents.clone());
     let segments_path = partition_dir.join("SEGMENTS-0.json");
     write_json(&segments_path, &segments)?;
 
@@ -2484,7 +2590,11 @@ fn write_manifests(
     let keyword_cardinalities = unique_key::keyword_cardinalities(
         &prefix_dir,
         &manifest,
-        &[(PHASH, &segments.partition, segments.only_shard())],
+        &[(
+            PHASH,
+            &segments.partition,
+            segments.shards.records.iter().collect(),
+        )],
     )?;
     unique_key::report_keyword_cardinalities(&keyword_cardinalities, bundle_bytes);
     // Both bundle artefacts, not written here: MANIFEST.json and CURRENT are pass 5's writers
@@ -2500,15 +2610,15 @@ fn write_manifests(
     Ok(BuildReport {
         prefix: PREFIX.to_string(),
         seg_id: SEG_ID.to_string(),
-        views: segments_written
-            .iter()
-            .zip(occupancies)
-            .zip(term_images)
-            .map(|((descriptor, occupancy), images)| ViewReport {
-                view_id: descriptor.view.clone(),
-                rows: descriptor.row_count as u64,
-                occupancy: *occupancy,
-                term_images: images.as_ref().map(|images| images.report),
+        views: (0..args.views.len())
+            .flat_map(|view| {
+                shards.iter().map(move |shard| ViewReport {
+                    view_id: shard.segments[view].view.clone(),
+                    shard: shard.span.id,
+                    rows: shard.segments[view].row_count as u64,
+                    occupancy: shard.occupancies[view],
+                    term_images: shard.term_images[view].as_ref().map(|images| images.report),
+                })
             })
             .collect(),
         items: n,
@@ -2590,52 +2700,56 @@ fn verified_open(
     };
     for partition in bundle.partitions.values() {
         let prefix_dir = root.join(&current.prefix);
-        let shard = partition.only_shard();
-        let edited = mosaica_store::edited::EditedIndex::open(
-            &shard.record.edited_items,
-            &prefix_dir,
-            None,
-        )?;
-        let tenancy = mosaica_store::read::open_tenancy_index(
-            &prefix_dir,
-            &shard.record,
-            mosaica_store::read::Digests {
-                side: &partition.manifest.files,
-                bundle: &bundle.manifest.files,
-            },
-        )?;
-        for (view_id, view) in &shard.views {
-            views += 1;
-            segments += view.segments.len();
-            let total_rows = view.row_space.total_rows();
-            rows += total_rows;
-            // `open_bundle` already ran `validate_rows` on the base and `is_well_formed` on
-            // every extent (no aliasing, no out-of-range row). The remaining half of
-            // bijectivity is surjectivity, and the identity column is checked against the key;
-            // both are `check_view_identity`'s.
-            view.row_space
-                .base()
-                .validate_rows(view.row_space.base_rows())?;
-            check_view_identity(
-                root,
-                &mut scratch,
-                direct_window_rows,
-                view_id,
-                view,
-                Identity {
-                    key: &identity_key,
-                    shard: shard.record.id,
-                    edited: &edited,
-                    tenancy: &tenancy,
+        for shard in &partition.shards {
+            let edited = mosaica_store::edited::EditedIndex::open(
+                &shard.record.edited_items,
+                &prefix_dir,
+                None,
+            )?;
+            let tenancy = mosaica_store::read::open_tenancy_index(
+                &prefix_dir,
+                &shard.record,
+                mosaica_store::read::Digests {
+                    side: &partition.manifest.files,
+                    bundle: &bundle.manifest.files,
                 },
             )?;
+            for (view_id, view) in &shard.views {
+                views += 1;
+                segments += view.segments.len();
+                let total_rows = view.row_space.total_rows();
+                rows += total_rows;
+                // `open_bundle` already ran `validate_rows` on the base and `is_well_formed` on
+                // every extent (no aliasing, no out-of-range row). The remaining half of
+                // bijectivity is surjectivity, and the identity column is checked against the
+                // key; both are `check_view_identity`'s.
+                view.row_space
+                    .base()
+                    .validate_rows(view.row_space.base_rows())?;
+                check_view_identity(
+                    root,
+                    &mut scratch,
+                    direct_window_rows,
+                    view_id,
+                    view,
+                    Identity {
+                        key: &identity_key,
+                        shard: shard.record.id,
+                        edited: &edited,
+                        tenancy: &tenancy,
+                    },
+                )?;
+            }
         }
     }
     // Sorted so two runs over one bundle report the columns in one order.
     let mut partitions: Vec<_> = bundle
         .partitions
         .iter()
-        .map(|(phash, data)| (phash.as_str(), &data.manifest, &data.only_shard().record))
+        .map(|(phash, data)| {
+            let records: Vec<_> = data.shards.iter().map(|shard| &shard.record).collect();
+            (phash.as_str(), &data.manifest, records)
+        })
         .collect();
     partitions.sort_by(|a, b| a.0.cmp(b.0));
     let bundle_bytes = bundle
@@ -2653,7 +2767,7 @@ fn verified_open(
     let entity_id_high_water = bundle
         .partitions
         .values()
-        .map(|data| data.only_shard().record.high_water)
+        .map(|data| data.shards.iter().map(|shard| shard.record.high_water).sum::<u64>())
         .max()
         .unwrap_or(0);
     let report = VerifyReport {

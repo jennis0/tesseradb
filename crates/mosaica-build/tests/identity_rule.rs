@@ -9,35 +9,17 @@
 mod common;
 
 use std::collections::{BTreeMap, HashMap};
-use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray, UInt64Array};
-use arrow::datatypes::{Field, Schema as ArrowSchema};
-use arrow::record_batch::RecordBatch;
-use parquet::arrow::ArrowWriter;
 
+use common::write;
 use mosaica_build::config::Config;
 use mosaica_build::{build, build_in_memory, BuildArgs, BuildReport, RefusedRows};
 use mosaica_filter::{Access, RecordBlob, RecordValue};
 use mosaica_spatial::Bounds;
 use mosaica_store::unique::{UniqueIndexes, UniqueKey};
-
-/// A Parquet file of the named columns.
-fn write(path: &Path, columns: Vec<(&str, ArrayRef)>) {
-    let fields: Vec<Field> = columns
-        .iter()
-        .map(|(name, array)| Field::new(*name, array.data_type().clone(), true))
-        .collect();
-    let schema = Arc::new(ArrowSchema::new(fields));
-    let batch =
-        RecordBatch::try_new(schema.clone(), columns.into_iter().map(|(_, a)| a).collect())
-            .unwrap();
-    let mut writer = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
-    writer.write(&batch).unwrap();
-    writer.close().unwrap();
-}
 
 fn u64s(values: &[Option<u64>]) -> ArrayRef {
     Arc::new(UInt64Array::from(values.to_vec()))
@@ -75,45 +57,13 @@ fn points(path: &Path, a: &[Option<u64>], extra: Vec<(&str, ArrayRef)>) {
 fn args(dir: &Path, declaration: &str, out: &Path) -> BuildArgs {
     let path = dir.join("corpus.toml");
     std::fs::write(&path, declaration).unwrap();
-    let config = Config::parse(&path, &Default::default()).expect("the declaration parses");
-    let registry = config.build_views().expect("the views compile");
-    let anchor = config.anchor_view(&registry).expect("an anchor");
-    let acquired = config.acquire().expect("the files acquire");
-    let views: Vec<mosaica_build::ViewArgs> = registry
-        .iter()
-        .map(|view| {
-            let acquired = mosaica_build::config::acquire_view(view).expect("the view acquires");
-            mosaica_build::ViewArgs {
-                visibility: None,
-                view_id: view.id.clone(),
-                projection: view.projection,
-                extent: Bounds {
-                    x_min: 0.0,
-                    x_max: 100.0,
-                    y_min: 0.0,
-                    y_max: 100.0,
-                },
-                points: acquired.points,
-                point_fields: acquired.point_fields,
-                select: acquired.select,
-                access: acquired.access,
-            }
-        })
-        .collect();
-    let mut layers = config.layers.clone();
-    for layer in &mut layers {
-        layer.views = Config::expand_layer_views(&registry, &layer.views);
-    }
-    BuildArgs {
-        views,
-        anchor,
-        attribute_sources: acquired.attribute_sources,
-        shard_size: config.shard_size,
-        layers,
-        layer_inputs: acquired.layers,
-        schema: config.schema,
-        ..common::build_args(out)
-    }
+    let extent = Bounds {
+        x_min: 0.0,
+        x_max: 100.0,
+        y_min: 0.0,
+        y_max: 100.0,
+    };
+    common::args_from_declaration(&path, out, extent)
 }
 
 /// The items each of `keys` names in the unique column `attribute`.
@@ -201,9 +151,10 @@ unique = true
 
 // -------------------------------------------------------------------------------------------
 
-/// Both build paths refuse one item past `[shards] size`; exactly the size builds and records it.
+/// The linear build, which writes one shard, refuses the item past `[shards] size`; exactly the
+/// size builds one shard and records the size.
 #[test]
-fn a_build_over_its_shard_size_is_refused() {
+fn the_linear_build_refuses_an_item_past_its_shard_size() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     points(
@@ -212,7 +163,6 @@ fn a_build_over_its_shard_size_is_refused() {
         Vec::new(),
     );
     let sized = |size: u64| format!("[shards]\nsize = {size}\n{ONE_VIEW}");
-    assert!(build(&args(dir, &sized(2), &dir.join("over-streamed"))).is_err());
     assert!(build_in_memory(&args(dir, &sized(2), &dir.join("over-linear"))).is_err());
 
     let (out, report) = both_ways(dir, &sized(3));

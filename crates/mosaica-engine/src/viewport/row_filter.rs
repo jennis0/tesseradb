@@ -15,21 +15,21 @@ impl Engine {
         }
     }
 
-    /// Cross a filter's entity-space result into one view's row space, by whichever of two routes
-    /// is cheaper: projecting the whole result, or walking the request's own tiles and testing
-    /// each row's entity. [`PER_TILE_CROSSING_RATIO`] picks between them, and the two agree
-    /// exactly over every range the request can ask about. A view with no `row-entity.u32` gets
-    /// the projecting route regardless — also `per_tile_only`'s fallback, the highlight's route,
-    /// since its answers are all inside the request's own tiles.
+    /// Cross a filter's entity-space result into one shard's row space for the view, by whichever
+    /// of two routes is cheaper: projecting the whole result, or walking the request's own tiles
+    /// and testing each row's entity. [`PER_TILE_CROSSING_RATIO`] picks between them, and the two
+    /// agree exactly over every range the request can ask about. A view with no `row-entity.u32`
+    /// gets the projecting route regardless — also `per_tile_only`'s fallback, the highlight's
+    /// route, since its answers are all inside the request's own tiles.
     fn cross_filter_into_row_space(
         &self,
-        served: &ServedView<'_>,
+        side: &ServedSide<'_>,
         entities: &croaring::Bitmap,
         domain: &[Range<u32>],
         rows_in_ranges: u64,
         per_tile_only: bool,
     ) -> FilterRows {
-        let row_space = &served.data.row_space;
+        let row_space = &side.data.row_space;
         let per_tile_looks_cheaper = per_tile_only
             || entities.cardinality() > rows_in_ranges.saturating_mul(PER_TILE_CROSSING_RATIO);
         if per_tile_looks_cheaper && row_space.can_invert() {
@@ -53,13 +53,13 @@ impl Engine {
         FilterRows::Complete(row_space.project(entities))
     }
 
-    /// A routed filter's answer as rows over `domain`, ascending, disjoint and merged view-space
-    /// ranges holding `rows_in_ranges` rows: an entity-space verdict crossed into row space, or a
-    /// tree with row-space leaves evaluated there. `per_tile_only` holds either to the domain
-    /// rather than letting a whole-view projection be chosen where it is cheaper.
+    /// A routed filter's answer as rows over `domain`, ascending, disjoint and merged ranges of
+    /// `side`'s row space holding `rows_in_ranges` rows: an entity-space verdict crossed into row
+    /// space, or a tree with row-space leaves evaluated there. `per_tile_only` holds either to the
+    /// domain rather than letting a whole-view projection be chosen where it is cheaper.
     pub(crate) fn rows_of_routed(
         &self,
-        served: &ServedView<'_>,
+        side: &ServedSide<'_>,
         routed: crate::filter::RoutedFilter,
         domain: &[Range<u32>],
         rows_in_ranges: u64,
@@ -69,7 +69,7 @@ impl Engine {
             crate::filter::RoutedFilter::Entity(entities) => RoutedRows {
                 unmasked: Some(entities.cardinality()),
                 rows: self.cross_filter_into_row_space(
-                    served,
+                    side,
                     &entities,
                     domain,
                     rows_in_ranges,
@@ -79,7 +79,7 @@ impl Engine {
             },
             crate::filter::RoutedFilter::Row(tree) => {
                 let rows =
-                    self.evaluate_row_route(&tree, served, domain, rows_in_ranges, per_tile_only)?;
+                    self.evaluate_row_route(&tree, side, domain, rows_in_ranges, per_tile_only)?;
                 self.counters.filter_row_routed.fetch_add(1, Ordering::Relaxed);
                 RoutedRows {
                     // A region's interior rows have not met the mask, so their count is a
@@ -104,13 +104,13 @@ impl Engine {
     pub(crate) fn evaluate_row_route(
         &self,
         tree: &crate::filter::RowExpr,
-        served: &ServedView<'_>,
+        side: &ServedSide<'_>,
         domain: &[Range<u32>],
         rows_in_ranges: u64,
         per_tile_only: bool,
     ) -> Result<FilterRows> {
-        let row_space = &served.data.row_space;
-        let segments = &served.segments[..];
+        let row_space = &side.data.row_space;
+        let segments = &side.segments[..];
         let total_rows = row_space.total_rows();
         // Every entity-space verdict's row image, crossed together in one walk.
         let verdicts = tree.entity_verdicts();
@@ -828,11 +828,17 @@ pub(crate) fn crossing_domain(
     ranges: &[Vec<(usize, Range<u32>)>],
     row_bases: &[u32],
 ) -> Vec<Range<u32>> {
-    let mut spans: Vec<Range<u32>> = ranges
-        .iter()
-        .flat_map(|parts| parts.iter())
-        .map(|(s, r)| row_bases[*s] + r.start..row_bases[*s] + r.end)
-        .collect();
+    merged_spans(
+        ranges
+            .iter()
+            .flat_map(|parts| parts.iter())
+            .map(|(s, r)| row_bases[*s] + r.start..row_bases[*s] + r.end)
+            .collect(),
+    )
+}
+
+/// `spans` sorted, and merged where adjacent or overlapping.
+pub(super) fn merged_spans(mut spans: Vec<Range<u32>>) -> Vec<Range<u32>> {
     spans.sort_unstable_by_key(|r| r.start);
     let mut merged: Vec<Range<u32>> = Vec::with_capacity(spans.len());
     for span in spans {
@@ -921,113 +927,120 @@ impl Engine {
     /// together against the same candidate and the same pre-filter mask — a highlight is a
     /// conjunction with the filter's candidate by construction, and evaluating its leaves against
     /// an already-filtered mask would make the two positions of one clause mean different things.
-    /// Only `with_filter`'s result narrows what is drawn.
+    /// Only the filter's rows narrow what is drawn.
+    ///
+    /// Evaluated in each of [`ShardedMask::filtered_leaves`], over the rows the request's tiles
+    /// span in that shard: a filter only narrows a shard's visible rows, so no shard's answer
+    /// depends on another's.
     pub(super) fn narrow_to_filters(
         &self,
         served: &ServedView<'_>,
-        mask: EffectiveMask,
-        tiling: &Tiling,
+        mask: ShardedMask,
+        tiling: &Tiling<'_>,
         v_total: u64,
         req: &ViewportRequest<'_>,
         probe: &mut Probe,
-    ) -> Result<(EffectiveMask, Option<crate::region::RegionVerdict>)> {
+    ) -> Result<(ShardedMask, Option<crate::region::RegionVerdict>)> {
         if req.filter.is_none() && req.highlight.is_none() {
             return Ok((mask, None));
         }
         check_cancelled(&req.cancel)?;
-        let rows_in_ranges = tiling.rows_in_ranges;
-        let row_bases: Vec<u32> = served.segments.iter().map(|&(_, base)| base).collect();
-        let domain = crossing_domain(&tiling.ranges, &row_bases);
+        // The route rule reads the request's whole extent and visible total, so a leaf takes the
+        // same space in every shard.
+        let prefer_row = tiling.rows_in_ranges <= v_total;
         let mut region_verdict: Option<crate::region::RegionVerdict> = None;
-        let (filter_rows, highlight_rows) =
-            self.route_filters(served, &mask, &req.cancel, |route| {
-                // `count_matched` excludes the highlight from the `filter_matched` probe: its
-                // cardinality is not the filter's.
-                let mut evaluate = |expr: &crate::filter::FilterExpr,
-                                    per_tile_only: bool,
-                                    count_matched: bool|
-                 -> Result<(FilterRows, Option<crate::region::RegionVerdict>)> {
-                    let routed = route(expr, rows_in_ranges <= v_total)?;
-                    probe.lap(|t| &mut t.filter_eval_ns);
-                    let out = self.rows_of_routed(
-                        served,
-                        routed,
-                        &domain,
-                        rows_in_ranges,
-                        per_tile_only,
-                    )?;
-                    if let (true, Some(matched)) = (count_matched, out.unmasked) {
-                        probe.count(|t| &mut t.filter_matched, matched);
-                    }
-                    probe.lap(|t| &mut t.filter_cross_ns);
-                    Ok((out.rows, out.region))
-                };
-                let filter_rows = match &req.filter {
-                    None => None,
-                    Some(expr) => {
-                        let (rows, verdict) = evaluate(expr, false, true)?;
-                        region_verdict = verdict;
-                        Some(rows)
-                    }
-                };
-                // The highlight always takes the per-tile walk: its three answers are all inside
-                // the request's tiles, so the whole-view projection would be paid for nothing.
-                let highlight_rows = match &req.highlight {
-                    None => None,
-                    Some(expr) => {
-                        let (rows, verdict) = evaluate(expr, true, false)?;
-                        // The coarsest of the two: a cover anywhere makes the response's verdict
-                        // a cover.
-                        region_verdict =
-                            crate::region::RegionVerdict::coarsest(region_verdict, verdict);
-                        Some(rows)
-                    }
-                };
-                Ok((filter_rows, highlight_rows))
-            })?;
-        let mask = match filter_rows {
-            Some(rows) => mask.with_filter(rows),
-            None => mask,
-        };
-        let mask = match highlight_rows {
-            Some(rows) => mask.with_highlight(rows),
-            None => mask,
-        };
-        Ok((mask, region_verdict))
+        let mut filters = Vec::new();
+        let mut highlights = Vec::new();
+        let resolved = ResolvedLeaves::new(&mask);
+        for (place, side, _) in served.filtered_sides(&mask) {
+            let (domain, rows_in_ranges) = tiling.domain_in(place);
+            let (filter_rows, highlight_rows) =
+                self.route_filters(served, side, &resolved, &req.cancel, |route| {
+                    // `count_matched` excludes the highlight from the `filter_matched` probe: its
+                    // cardinality is not the filter's.
+                    let mut evaluate = |expr: &crate::filter::FilterExpr,
+                                        per_tile_only: bool,
+                                        count_matched: bool|
+                     -> Result<(FilterRows, Option<crate::region::RegionVerdict>)> {
+                        let routed = route(expr, prefer_row)?;
+                        probe.lap(|t| &mut t.filter_eval_ns);
+                        let out = self.rows_of_routed(
+                            side,
+                            routed,
+                            &domain,
+                            rows_in_ranges,
+                            per_tile_only,
+                        )?;
+                        if let (true, Some(matched)) = (count_matched, out.unmasked) {
+                            probe.count(|t| &mut t.filter_matched, matched);
+                        }
+                        probe.lap(|t| &mut t.filter_cross_ns);
+                        Ok((out.rows, out.region))
+                    };
+                    let filter_rows = match &req.filter {
+                        None => None,
+                        Some(expr) => {
+                            let (rows, verdict) = evaluate(expr, false, true)?;
+                            region_verdict =
+                                crate::region::RegionVerdict::coarsest(region_verdict, verdict);
+                            Some(rows)
+                        }
+                    };
+                    // The highlight always takes the per-tile walk: its three answers are all
+                    // inside the request's tiles, so the whole-view projection would be paid for
+                    // nothing.
+                    let highlight_rows = match &req.highlight {
+                        None => None,
+                        Some(expr) => {
+                            let (rows, verdict) = evaluate(expr, true, false)?;
+                            // The coarsest of the two: a cover anywhere makes the response's
+                            // verdict a cover.
+                            region_verdict =
+                                crate::region::RegionVerdict::coarsest(region_verdict, verdict);
+                            Some(rows)
+                        }
+                    };
+                    Ok((filter_rows, highlight_rows))
+                })?;
+            filters.extend(filter_rows.map(|rows| (side.shard.id(), rows)));
+            highlights.extend(highlight_rows.map(|rows| (side.shard.id(), rows)));
+        }
+        Ok((
+            mask.with_filters(filters).with_highlights(highlights),
+            region_verdict,
+        ))
     }
 
-    /// Route this request's filter expressions against its pre-filter mask: bring the fragment
-    /// forward, build the entity-space candidate, close the region and `member_of` resolvers over
-    /// `mask`, and hand `body` a `route` that puts one expression through them. The fragment is
-    /// brought forward rather than read off the session, whose own fragment is fixed at
-    /// authorise: composing against the stale one would silently omit every entity flushed since,
-    /// under-reporting in a way indistinguishable from a correct answer. `mask` is the pre-filter
-    /// mask and both resolvers close over it, so a highlight routed against an already-filtered
-    /// mask would make the two positions of one clause mean different things. What `body` does
-    /// with a [`crate::filter::RoutedFilter`] is the caller's.
+    /// Route this request's filter expressions in one side: the entity-space candidate over the
+    /// session's fragment at the shard's watermark (an earlier one, such as a stale-served
+    /// projection's, would silently omit every entity flushed since), the region and `member_of`
+    /// resolvers over `resolved`'s pre-filter mask, and a `route` handed to `body` that puts one
+    /// expression through them.
     pub(crate) fn route_filters<T>(
         &self,
         served: &ServedView<'_>,
-        mask: &EffectiveMask,
+        side: &ServedSide<'_>,
+        resolved: &ResolvedLeaves<'_>,
         cancel: &Option<CancelToken>,
         body: impl FnOnce(
             &dyn Fn(&crate::filter::FilterExpr, bool) -> Result<crate::filter::RoutedFilter>,
         ) -> Result<T>,
     ) -> Result<T> {
-        let candidate = self.filter_candidate(served.session, served.shard)?;
-        let resolved = ResolvedLeaves::default();
-        self.route_filters_under(served, mask, &candidate, &resolved, cancel, body)
+        let candidate =
+            self.filter_candidate(served.session, side.shard, Some(&side.geometry.fragment))?;
+        self.route_filters_under(served, side, &candidate, resolved, cancel, body)
     }
 
     /// The entity-space set a request's filter is evaluated under in `shard`: the session's
-    /// fragment brought forward to it, with the deny state and the passing buffered entities
-    /// composed in.
+    /// fragment there ([`Self::fragment_for`], given what the request holds as `held`), with the
+    /// deny state and the passing buffered entities composed in.
     pub(crate) fn filter_candidate(
         &self,
         session: &Session,
         shard: &crate::Shard,
+        held: Option<&Arc<FrozenFragment>>,
     ) -> Result<croaring::Bitmap> {
-        let fragment = self.fragment_for(session, shard)?;
+        let fragment = self.fragment_for(session, shard, held)?;
         Ok(crate::filter::candidate(
             &fragment,
             session.satisfied(),
@@ -1041,9 +1054,10 @@ impl Engine {
         &self,
         session: &Session,
         shard: &crate::Shard,
+        held: Option<&Arc<FrozenFragment>>,
         within: &croaring::Bitmap,
     ) -> Result<croaring::Bitmap> {
-        let fragment = self.fragment_for(session, shard)?;
+        let fragment = self.fragment_for(session, shard, held)?;
         Ok(crate::filter::candidate_within(
             &fragment,
             session.satisfied(),
@@ -1056,27 +1070,27 @@ impl Engine {
     /// [`Self::route_filters`] under a candidate the caller composed: a subset of
     /// [`Self::filter_candidate`]'s set, never wider, since every scan returns a subset of it.
     /// A region or `member_of` leaf `resolved` holds is answered from it, and one it does not is
-    /// resolved and kept there; the caller holds it only while `served` and `mask` are the ones
+    /// resolved and kept there; the caller holds it only while `served` and its mask are the ones
     /// it was filled under.
     pub(crate) fn route_filters_under<T>(
         &self,
         served: &ServedView<'_>,
-        mask: &EffectiveMask,
+        side: &ServedSide<'_>,
         candidate: &croaring::Bitmap,
-        resolved: &ResolvedLeaves,
+        resolved: &ResolvedLeaves<'_>,
         cancel: &Option<CancelToken>,
         body: impl FnOnce(
             &dyn Fn(&crate::filter::FilterExpr, bool) -> Result<crate::filter::RoutedFilter>,
         ) -> Result<T>,
     ) -> Result<T> {
         let regions = |leaf: &crate::filter::RegionLeaf| {
-            self.region_rows(leaf, served, mask, resolved, cancel)
+            self.region_rows(leaf, served, side, resolved, cancel)
         };
         let members =
-            |leaf: &crate::filter::MemberOfLeaf| self.member_rows(leaf, served, mask, resolved);
+            |leaf: &crate::filter::MemberOfLeaf| self.member_rows(leaf, served, side, resolved);
         let layers = |layer: &str| self.reaches_layer(served.session, layer);
         let unique = |column: &str, keys: &[mosaica_store::unique::UniqueKey]| {
-            unique_holders(served.shard, column, keys)
+            unique_holders(side.shard, column, keys)
         };
         let resolvers = crate::filter::RowLeafResolvers {
             regions: &regions,
@@ -1085,59 +1099,67 @@ impl Engine {
             unique: &unique,
         };
         body(&|expr: &crate::filter::FilterExpr, prefer_row: bool| {
-            served
-                .shard
+            side.shard
                 .filter_columns
                 .evaluate_routed(expr, candidate, prefer_row, &resolvers)
                 .map_err(filter_refusal)
         })
     }
 
-    /// A region leaf's rows under `mask`, from `resolved` where it holds them, and resolved and
-    /// kept there otherwise.
+    /// A region leaf's rows in `side`, from `resolved` where it holds them, and resolved and kept
+    /// there otherwise.
     pub(crate) fn region_rows(
         &self,
         leaf: &crate::filter::RegionLeaf,
         served: &ServedView<'_>,
-        mask: &EffectiveMask,
-        resolved: &ResolvedLeaves,
+        side: &ServedSide<'_>,
+        resolved: &ResolvedLeaves<'_>,
         cancel: &Option<CancelToken>,
     ) -> std::result::Result<crate::region::RegionRows, crate::filter::FilterError> {
-        let held = resolved
-            .regions
-            .borrow()
-            .iter()
-            .find(|(held, _)| held == leaf)
-            .map(|(_, rows)| rows.clone());
-        if let Some(rows) = held {
-            return Ok(rows);
-        }
-        let rows = self.resolve_region(leaf, served, mask, cancel)?;
-        resolved.regions.borrow_mut().push((leaf.clone(), rows.clone()));
-        Ok(rows)
+        let shard = side.shard.id();
+        memo(
+            &resolved.regions,
+            |(at, held)| *at == shard && held == leaf,
+            || (shard, leaf.clone()),
+            || self.resolve_region(leaf, served, side, resolved, cancel),
+        )
     }
 
-    /// A `member_of` leaf's rows under `mask`, from `resolved` where it holds them, and resolved
-    /// and kept there otherwise.
+    /// A `member_of` leaf's rows in `side`, from `resolved` where it holds them, and resolved and
+    /// kept there otherwise.
     pub(crate) fn member_rows(
         &self,
         leaf: &crate::filter::MemberOfLeaf,
         served: &ServedView<'_>,
-        mask: &EffectiveMask,
-        resolved: &ResolvedLeaves,
+        side: &ServedSide<'_>,
+        resolved: &ResolvedLeaves<'_>,
     ) -> std::result::Result<croaring::Bitmap, crate::filter::FilterError> {
-        let held = resolved
-            .members
-            .borrow()
-            .iter()
-            .find(|(held, _)| held == leaf)
-            .map(|(_, rows)| rows.clone());
-        if let Some(rows) = held {
-            return Ok(rows);
-        }
-        let rows = self.resolve_member_of(leaf, served, mask)?;
-        resolved.members.borrow_mut().push((leaf.clone(), rows.clone()));
-        Ok(rows)
+        let shard = side.shard.id();
+        memo(
+            &resolved.members,
+            |(at, held)| *at == shard && held == leaf,
+            || (shard, leaf.clone()),
+            || self.resolve_member_of(leaf, served, side, resolved),
+        )
+    }
+
+    /// [`Engine::gated_artifact`] for `id` under `resolved`'s mask, once per request.
+    fn gated_once(
+        &self,
+        served: &ServedView<'_>,
+        resolved: &ResolvedLeaves<'_>,
+        id: MosaicaId,
+    ) -> Result<Option<std::rc::Rc<super::artifacts::GatedArtifact>>> {
+        memo(
+            &resolved.gates,
+            |held| *held == id,
+            || id,
+            || {
+                Ok(self
+                    .gated_artifact(served, resolved.mask, id)?
+                    .map(std::rc::Rc::new))
+            },
+        )
     }
 
     /// Whether `session` reaches `layer`: whether a `member_of` may name it.
@@ -1155,11 +1177,13 @@ impl Engine {
         &self,
         leaf: &crate::filter::RegionLeaf,
         served: &ServedView<'_>,
-        mask: &EffectiveMask,
+        side: &ServedSide<'_>,
+        resolved: &ResolvedLeaves<'_>,
         cancel: &Option<CancelToken>,
     ) -> std::result::Result<crate::region::RegionRows, crate::filter::FilterError> {
+        let mask = resolved.leaf(side);
         use crate::filter::{FilterError, RegionLeaf};
-        let segments = &served.segments[..];
+        let segments = &side.segments[..];
         let never_cancelled = CancelToken::new();
         let cancel = cancel.as_ref().unwrap_or(&never_cancelled);
         use crate::region::{digest_of, RegionDecomposition, RegionKey, RegionRows, RegionVerdict};
@@ -1169,6 +1193,7 @@ impl Engine {
                 let canonical = shape.encode();
                 let key = RegionKey {
                     view: served.name.to_string(),
+                    shard: side.shard.id(),
                     prefix: served.generation.prefix.clone(),
                     segments_version: served.generation.segments_version,
                     digest: digest_of(&canonical),
@@ -1194,22 +1219,25 @@ impl Engine {
                     Err(mosaica_cache::WaitEnded::Budget) => Arc::new(build()),
                 };
                 Ok(RegionRows {
-                    rows: entry.rows_under(mask, segments),
+                    rows: mask.map_or_else(croaring::Bitmap::new, |mask| {
+                        entry.rows_under(mask, segments)
+                    }),
                     verdict: entry.verdict(),
                 })
             }
             RegionLeaf::Artifact(id) => {
                 let gated = self
-                    .gated_artifact(served, mask, *id)
+                    .gated_once(served, resolved, *id)
                     .map_err(|e| FilterError::RegionUnavailable(e.to_string()))?;
-                let rows = match gated {
-                    Some(gated)
+                let rows = match (gated, mask) {
+                    (Some(gated), Some(mask))
                         if gated.layer.declaration.drawn_shape()
                             != Some(mosaica_types::layer::DrawnShape::Authored) =>
                     {
-                        // `membership ∩ M_auth`, from whichever half of the form holds it — see
-                        // [`crate::artifacts::ArtifactRows::visible_rows`].
-                        gated.rows.visible_rows(gated.ordinal, mask)
+                        // `membership ∩ M_auth` in this side, from whichever half of its form
+                        // holds it — see [`crate::artifacts::ArtifactRows::visible_rows`].
+                        let place = served.place_of(side.shard.id());
+                        gated.forms.rows[place].visible_rows(gated.ordinal, mask)
                     }
                     _ => croaring::Bitmap::new(),
                 };
@@ -1221,44 +1249,93 @@ impl Engine {
         }
     }
 
-    /// Answer one `member_of` leaf for one request, whose layer the filter's admission has already
-    /// found this principal reaches. The artifact must pass its own existence criterion through
-    /// the same [`Engine::gated_artifact`] the drill-down calls. An artifact that does
-    /// not pass — names nothing, is of another layer, is suppressed, is below the criterion — is
-    /// the empty operand, one answer for every reason: refusing instead would make the leaf an
-    /// existence oracle over what the criterion withholds. The membership is read two ways,
-    /// decided by the level's layout: artifact-major intersects the held row bitmap with the
-    /// composed mask; row-major scans visible rows comparing labels. Either way the answer is
-    /// `membership ∩ M_auth`.
+    /// Answer one `member_of` leaf in one side of one request, whose layer the filter's admission
+    /// has already found this principal reaches. The artifact must pass its own existence
+    /// criterion through the same [`Engine::gated_artifact`] the drill-down calls, over every
+    /// shard, before this side reads its members. An artifact that does not pass — names nothing,
+    /// is of another layer, is suppressed, is below the criterion — is the empty operand, one
+    /// answer for every reason: refusing instead would make the leaf an existence oracle over what
+    /// the criterion withholds. The membership is read two ways, decided by the level's layout:
+    /// artifact-major intersects the held row bitmap with the side's leaf; row-major scans visible
+    /// rows comparing labels. Either way the answer is `membership ∩ M_auth` in the side.
     pub(crate) fn resolve_member_of(
         &self,
         leaf: &crate::filter::MemberOfLeaf,
         served: &ServedView<'_>,
-        mask: &EffectiveMask,
+        side: &ServedSide<'_>,
+        resolved: &ResolvedLeaves<'_>,
     ) -> std::result::Result<croaring::Bitmap, crate::filter::FilterError> {
         use crate::filter::FilterError;
         let gated = self
-            .gated_artifact(served, mask, leaf.artifact)
+            .gated_once(served, resolved, leaf.artifact)
             .map_err(|e| FilterError::MemberOfUnavailable(e.to_string()))?;
         // An identifier of another layer is answered exactly as one that resolves to nothing.
-        let Some(gated) = gated.filter(|g| g.name == leaf.layer) else {
+        let gated = gated.filter(|g| g.name == leaf.layer);
+        let (Some(gated), Some(mask)) = (gated, resolved.leaf(side)) else {
             return Ok(croaring::Bitmap::new());
         };
+        let rows = &gated.forms.rows[served.place_of(side.shard.id())];
         // The counter says which levels answer `member_of` at the column's cost rather than the
         // bitmap's.
-        if !gated.rows.membership().rows_held() {
+        if !rows.membership().rows_held() {
             self.counters.member_of_column_walks.fetch_add(1, Ordering::Relaxed);
         }
-        Ok(gated.rows.visible_rows(gated.ordinal, mask))
+        Ok(rows.visible_rows(gated.ordinal, mask))
     }
 }
 
-/// The region and `member_of` leaves answered under one view and mask, so a leaf evaluated again
-/// under them is resolved once.
-#[derive(Default)]
-pub(crate) struct ResolvedLeaves {
-    regions: std::cell::RefCell<Vec<(crate::filter::RegionLeaf, crate::region::RegionRows)>>,
-    members: std::cell::RefCell<Vec<(crate::filter::MemberOfLeaf, croaring::Bitmap)>>,
+/// The region and `member_of` leaves answered for one request under one view: each artifact a
+/// leaf names, gated once over every shard under the request's mask before any filter narrows it,
+/// and each leaf's rows in each shard it was evaluated in, so a leaf evaluated again is resolved
+/// once.
+pub(crate) struct ResolvedLeaves<'m> {
+    mask: &'m ShardedMask,
+    gates: std::cell::RefCell<
+        Vec<(MosaicaId, Option<std::rc::Rc<super::artifacts::GatedArtifact>>)>,
+    >,
+    regions: std::cell::RefCell<
+        Vec<((ShardId, crate::filter::RegionLeaf), crate::region::RegionRows)>,
+    >,
+    members: std::cell::RefCell<Vec<((ShardId, crate::filter::MemberOfLeaf), croaring::Bitmap)>>,
+}
+
+impl<'m> ResolvedLeaves<'m> {
+    /// Nothing resolved yet under `mask`, the request's mask before any filter narrows it.
+    pub(crate) fn new(mask: &'m ShardedMask) -> Self {
+        ResolvedLeaves {
+            mask,
+            gates: Default::default(),
+            regions: Default::default(),
+            members: Default::default(),
+        }
+    }
+
+    /// The leaf `side` is read through, the one the gates were taken under, or `None` where the
+    /// request leaves the side out.
+    fn leaf(&self, side: &ServedSide<'_>) -> Option<&'m EffectiveMask> {
+        self.mask.read_leaf(side.shard.id())
+    }
+}
+
+/// The value in `cell` whose key `matches`, else `f`'s, kept there under `key()`. The key is built
+/// only on a miss.
+fn memo<K, V: Clone, E>(
+    cell: &std::cell::RefCell<Vec<(K, V)>>,
+    matches: impl Fn(&K) -> bool,
+    key: impl FnOnce() -> K,
+    f: impl FnOnce() -> std::result::Result<V, E>,
+) -> std::result::Result<V, E> {
+    let held = cell
+        .borrow()
+        .iter()
+        .find(|(held, _)| matches(held))
+        .map(|(_, value)| value.clone());
+    if let Some(value) = held {
+        return Ok(value);
+    }
+    let value = f()?;
+    cell.borrow_mut().push((key(), value.clone()));
+    Ok(value)
 }
 
 /// The entities holding `keys` in a unique column, by the column's index and the live entries

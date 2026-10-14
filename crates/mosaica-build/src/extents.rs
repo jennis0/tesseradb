@@ -220,11 +220,13 @@ impl ExtentColumn {
     /// extents a fold consumes and unlinks before this runs).
     pub(crate) fn open(&self) -> Result<OpenExtents> {
         let blobs = open_all(&self.extents)?;
-        let duplicates = DuplicateMap::over(&self.extents, &blobs)?;
+        let (duplicates, bounds) = DuplicateMap::over(&self.extents, &blobs)?;
         Ok(OpenExtents {
             column: self.column,
             blobs,
             duplicates,
+            bounds,
+            entities: 0..u32::MAX,
         })
     }
 
@@ -268,6 +270,9 @@ pub(crate) fn merge_fan_in(budget: u64) -> usize {
         .max(2)
 }
 
+/// One extent's first and last entity, `None` for one with no row.
+type Bounds = Option<(u32, u32)>;
+
 /// One column's extents, open, with the map that says which extent's row wins for a repeated
 /// entity.
 pub(crate) struct OpenExtents {
@@ -275,6 +280,10 @@ pub(crate) struct OpenExtents {
     pub(crate) column: usize,
     pub(crate) blobs: Vec<RecordBlob>,
     pub(crate) duplicates: DuplicateMap,
+    bounds: Vec<Bounds>,
+    /// The entities the readers yield, each at its entity less the start: every one until
+    /// [`OpenExtents::window`] narrows them to one shard's.
+    entities: std::ops::Range<u32>,
 }
 
 /// Which extent's row survives, for every entity one column's extents hold more than once.
@@ -306,12 +315,16 @@ pub(crate) struct DuplicateMap {
 }
 
 impl DuplicateMap {
-    /// Stream the extents' has-row files in write order, twice.
+    /// Stream the extents' has-row files in write order, twice, returning beside the map each
+    /// extent's first and last entity.
     ///
     /// Each file is deserialised, used, and dropped before the next is read, so what stands through
     /// the passes is the running union, the repeats and one extent's bitmap — never a set an
     /// extent.
-    fn over(extents: &[ExtentPaths], blobs: &[RecordBlob]) -> Result<Self> {
+    fn over(
+        extents: &[ExtentPaths],
+        blobs: &[RecordBlob],
+    ) -> Result<(Self, Vec<Bounds>)> {
         assert_eq!(
             extents.len(),
             blobs.len(),
@@ -319,8 +332,10 @@ impl DuplicateMap {
         );
         let mut seen = Bitmap::new();
         let mut repeat = Bitmap::new();
+        let mut bounds = Vec::with_capacity(extents.len());
         for (paths, blob) in extents.iter().zip(blobs) {
             let hasrow = read_checked_hasrow(paths, blob)?;
+            bounds.push(hasrow.minimum().zip(hasrow.maximum()));
             repeat.or_inplace(&seen.and(&hasrow));
             seen.or_inplace(&hasrow);
         }
@@ -346,7 +361,7 @@ impl DuplicateMap {
             }
         }
         drop(repeat);
-        Ok(DuplicateMap { repeats })
+        Ok((DuplicateMap { repeats }, bounds))
     }
 
     /// Whether the row extent `extent` holds for `entity` is the one that survives.
@@ -410,6 +425,24 @@ pub(crate) struct ExtentWindow {
 }
 
 impl OpenExtents {
+    /// Yield entities `[lo, hi)` alone, each at its entity less `lo`: one shard's items.
+    pub(crate) fn window(&mut self, lo: u32, hi: u32) {
+        self.entities = lo..hi;
+    }
+
+    /// Whether extent `extent` holds any entity of the window.
+    fn reaches(&self, extent: usize) -> bool {
+        self.bounds[extent]
+            .is_some_and(|(lo, hi)| lo < self.entities.end && hi >= self.entities.start)
+    }
+
+    /// `entity` as the window yields it, or `None` outside it.
+    fn windowed(&self, entity: u32) -> Option<u32> {
+        self.entities
+            .contains(&entity)
+            .then(|| entity - self.entities.start)
+    }
+
     /// At most `target` windows over the extents' blocks, none spanning two extents.
     ///
     /// The text index divides its work by these, exactly as it divided the arena's byte ranges:
@@ -422,6 +455,9 @@ impl OpenExtents {
         let per_window = blocks.div_ceil(target.max(1)).max(1);
         let mut windows = Vec::new();
         for (extent, blob) in self.blobs.iter().enumerate() {
+            if !self.reaches(extent) {
+                continue;
+            }
             let mut lo = 0usize;
             while lo < blob.block_count() {
                 let hi = (lo + per_window).min(blob.block_count());
@@ -445,9 +481,15 @@ impl OpenExtents {
         let mut cursor = blob.rows_cursor_over(window.lo, window.hi);
         while cursor.advance().map_err(record_error)? {
             let entity = cursor.entity();
+            if entity >= self.entities.end {
+                break;
+            }
             if !self.duplicates.is_live(window.extent, entity) {
                 continue;
             }
+            let Some(entity) = self.windowed(entity) else {
+                continue;
+            };
             let value = field_value(&cursor, self.column)?;
             visit(entity as usize, value)?;
         }
@@ -470,12 +512,17 @@ impl OpenExtents {
         let mut heap: std::collections::BinaryHeap<std::cmp::Reverse<(u32, usize)>> =
             std::collections::BinaryHeap::with_capacity(cursors.len());
         for (i, cursor) in cursors.iter_mut().enumerate() {
-            if next_live(cursor, &self.duplicates, i)? {
+            if self.reaches(i) && next_live(cursor, &self.duplicates, i)? {
                 heap.push(std::cmp::Reverse((cursor.entity(), i)));
             }
         }
         while let Some(std::cmp::Reverse((entity, source))) = heap.pop() {
-            visit(entity, field_value(&cursors[source], self.column)?)?;
+            if entity >= self.entities.end {
+                break;
+            }
+            if let Some(windowed) = self.windowed(entity) {
+                visit(windowed, field_value(&cursors[source], self.column)?)?;
+            }
             if next_live(&mut cursors[source], &self.duplicates, source)? {
                 let next_entity = cursors[source].entity();
                 if next_entity <= entity {
@@ -535,7 +582,7 @@ fn record_error(e: mosaica_filter::RecordError) -> BuildError {
 /// One extent's live rows as a stream the record blob's merge reads.
 pub(crate) struct ExtentRows<'a> {
     cursor: mosaica_filter::RecordRowCursor<'a>,
-    duplicates: &'a DuplicateMap,
+    open: &'a OpenExtents,
     extent: usize,
 }
 
@@ -545,9 +592,10 @@ impl<'a> ExtentRows<'a> {
         open.blobs
             .iter()
             .enumerate()
+            .filter(|&(extent, _)| open.reaches(extent))
             .map(|(extent, blob)| ExtentRows {
                 cursor: blob.rows_cursor(),
-                duplicates: &open.duplicates,
+                open,
                 extent,
             })
             .collect()
@@ -560,13 +608,19 @@ impl mosaica_filter_write::RecordRows for ExtentRows<'_> {
             if !self.cursor.advance().map_err(std::io::Error::from)? {
                 return Ok(false);
             }
-            if self.duplicates.is_live(self.extent, self.cursor.entity()) {
+            let entity = self.cursor.entity();
+            if entity >= self.open.entities.end {
+                return Ok(false);
+            }
+            if self.open.duplicates.is_live(self.extent, entity)
+                && self.open.windowed(entity).is_some()
+            {
                 return Ok(true);
             }
         }
     }
     fn entity(&self) -> u32 {
-        self.cursor.entity()
+        self.cursor.entity() - self.open.entities.start
     }
     fn field_count(&self) -> usize {
         self.cursor.field_count()

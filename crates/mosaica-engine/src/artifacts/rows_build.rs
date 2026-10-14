@@ -268,6 +268,28 @@ impl ArtifactRows {
         .with_column(column)
     }
 
+    /// `sets` over `row_count` rows served from a label column alone, as a level built
+    /// column-only is: no per-artifact rows, the tile index's extents taken off the column.
+    #[cfg(test)]
+    pub(crate) fn synthetic_column_only(sets: &[Option<&[u32]>], row_count: u32) -> Self {
+        let held = ArtifactRows::synthetic(sets, None);
+        let column = RowColumn::compose(
+            held.membership(),
+            row_count,
+            ServingLayout::RowMajorLabel,
+            &std::env::temp_dir(),
+        )
+        .expect("the memberships partition");
+        let mut form = ArtifactRows::synthetic(sets, Some(Arc::new(column)));
+        let column = form.column().expect("composed above");
+        let extents = column.extents(&form.membership.live_slots());
+        form.index = Arc::new(TileIndex::of_bytes(
+            mosaica_store::membership::pack_tile_index(row_count, &extents),
+        ));
+        form.membership.hold_no_rows();
+        form
+    }
+
     /// Place, count and gate an attached artifact that declares no members of its own over its
     /// target's membership. A label with no member rows is the label of its cluster: it sits in
     /// the tiles the cluster sits in, its masked count is the cluster's masked count, its existence

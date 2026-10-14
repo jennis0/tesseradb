@@ -375,68 +375,11 @@ impl CategoryMembership<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-    use std::sync::Arc;
-
     use croaring::Bitmap;
-    use mosaica_filter::{Codes, ColumnPostings, ValueColumn};
 
-    use super::super::columns::{Column, FilterColumns, Layer, Route};
-    use super::super::declared::Family;
+    use super::super::columns::FilterColumns;
+    use super::super::test_support::category_column as column;
     use super::{CategoryCounts, CountCodes};
-
-    /// A `u16` category column: a base over entities `0..base.len()` with its postings where
-    /// `postings` says so, and one extent over `extent`'s entities.
-    fn column(
-        dir: &std::path::Path,
-        base: &[u16],
-        postings: bool,
-        extent: &[(u32, u16)],
-    ) -> FilterColumns {
-        let base_values = Arc::new(ValueColumn::universal(Codes::U16(base.to_vec().into())));
-        let postings = postings.then(|| {
-            let mut by_code: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
-            for (entity, &code) in base.iter().enumerate() {
-                if code != 0 {
-                    by_code
-                        .entry(u32::from(code))
-                        .or_default()
-                        .push(entity as u32);
-                }
-            }
-            let path = dir.join("postings.arrow");
-            let records: Vec<(u32, Vec<u32>)> = by_code.into_iter().collect();
-            mosaica_authz::write_delta_tier_at(&path, &records, 32).expect("postings write");
-            Arc::new(ColumnPostings::open_keyed(&path).expect("postings open"))
-        });
-        let mut held = Column::values(
-            0,
-            true,
-            Family::Category,
-            Some(Layer {
-                values_rel: None,
-                values: base_values,
-                dict: None,
-            }),
-            postings,
-            Route::Scan,
-        );
-        let codes: Vec<u16> = extent.iter().map(|&(_, code)| code).collect();
-        let entities: Vec<u32> = extent.iter().map(|&(entity, _)| entity).collect();
-        held.push_extent(
-            "c",
-            "extent-1",
-            Arc::new(
-                ValueColumn::partial(Codes::U16(codes.into()), Bitmap::of(&entities))
-                    .expect("one code per entity"),
-            ),
-            None,
-        )
-        .expect("the extent is disjoint from the base");
-        let mut columns = FilterColumns::default();
-        columns.columns.insert("c".to_string(), held);
-        columns
-    }
 
     /// `(entity, code)` for every entity of the fixture, the base's then the extent's then the
     /// buffer's.

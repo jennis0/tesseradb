@@ -1465,9 +1465,19 @@ fn main() -> ExitCode {
                     //
                     // **Per view, because the frame is** (decision 0040): two views of one
                     // bundle may give the corpus quite different resolution.
+                    //
+                    // A bundle of several shards reports each shard's part of a view.
+                    let several = report
+                        .views
+                        .iter()
+                        .any(|view| view.shard != mosaica_types::ShardId::ZERO);
+                    let label = |view: &mosaica_build::ViewReport| match several {
+                        true => format!("{} in shard {}", view.view_id, view.shard),
+                        false => view.view_id.clone(),
+                    };
                     for view in &report.views {
-                        eprintln!("{}", view.occupancy.report(&view.view_id));
-                        if let Some(detail) = view.occupancy.warning(&view.view_id) {
+                        eprintln!("{}", view.occupancy.report(&label(view)));
+                        if let Some(detail) = view.occupancy.warning(&label(view)) {
                             eprintln!("{detail}");
                         }
                         // What this view's term images cost and came to, per view because a
@@ -1475,7 +1485,7 @@ fn main() -> ExitCode {
                         // own table and payload (ruling G, the term-images memo). Absent for a
                         // view with no rows.
                         if let Some(images) = &view.term_images {
-                            eprintln!("{}", images.report(&view.view_id));
+                            eprintln!("{}", images.report(&label(view)));
                         }
                     }
                     if let Err(e) = mosaica_build::write_disclosure_report(&out, &disclosure) {
@@ -1513,7 +1523,7 @@ fn main() -> ExitCode {
                     // The per-view shapes, which is what a multi-view build has to say and a
                     // single total cannot: a view holds a subset of entity space (`views.md` §8).
                     for view in &report.views {
-                        println!("  view {}: {} row(s)", view.view_id, view.rows);
+                        println!("  view {}: {} row(s)", label(view), view.rows);
                     }
                     ExitCode::SUCCESS
                 }
