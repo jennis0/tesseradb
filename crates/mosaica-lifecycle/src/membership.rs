@@ -1102,6 +1102,9 @@ impl ArtifactRecord {
     }
 }
 
+/// One level's shapes by ordinal, beside its records ([`ArtifactStore::shapes`]).
+type ShapeSlots = Vec<Option<Box<ArtifactShapes>>>;
+
 /// Every artifact of every layer, keyed by `(layer, level, ordinal)`.
 ///
 /// **Ordinals are dense within a level**, so a level is a vector rather than a map: the address is
@@ -1128,7 +1131,7 @@ pub struct ArtifactStore {
     /// not exist, and a record with no shape on a shape layer is refused at publication.
     /// Nested for [`ArtifactStore::keys`]' reason: `shape_of` is asked once per artifact by
     /// `unpublished`, and a tuple key made every one of those a `String` allocation.
-    shapes: BTreeMap<String, BTreeMap<u32, Vec<Option<Box<ArtifactShapes>>>>>,
+    shapes: BTreeMap<String, BTreeMap<u32, ShapeSlots>>,
     /// `(layer, level, key) → ordinal`. **An index, not a second copy of the truth**: it
     /// exists so a batch of ten thousand artifacts can be checked for duplicate keys in
     /// `O(n log n)` rather than rescanning the level per artifact, which is `O(n²)` and reachable
@@ -3280,8 +3283,6 @@ pub fn decode_slice(
     blob: &[u8],
     members_blob: &[u8],
 ) -> Option<(ArtifactRecord, Option<ArtifactShapes>)> {
-    let (members, sets) = decode_members(members_blob)?;
-    let mut sets = sets.into_iter();
     let mut r = Reader::new(blob);
     let key_len = r.u16()? as usize;
     if key_len == u16::MAX as usize {
@@ -3306,11 +3307,13 @@ pub fn decode_slice(
     if count == u16::MAX as usize {
         return None;
     }
+    let (members, sets) = decode_slice_members(members_blob, count)?;
     // The record and its members are two packs: a count that differs is two blobs that do not
     // describe one artifact.
     if sets.len() != count {
         return None;
     }
+    let mut sets = sets.into_iter();
     let mut contents = Vec::with_capacity(count);
     for _ in 0..count {
         let digest: [u8; 32] = r.take(32)?.try_into().ok()?;
@@ -3488,6 +3491,16 @@ pub fn slices_hold_their_sets(slices: &[&ArtifactRecord]) -> bool {
         });
         held == Some(content.cardinality)
     })
+}
+
+/// [`decode_members`] for one shard's slice of an artifact with `contents` contents. An empty blob
+/// is a slice holding nothing: a shard's member pack does not list an artifact it holds no member
+/// of, and [`encode_members`] never writes an empty blob.
+pub fn decode_slice_members(blob: &[u8], contents: usize) -> Option<(Bitmap, Vec<Bitmap>)> {
+    match blob.is_empty() {
+        true => Some((Bitmap::new(), (0..contents).map(|_| Bitmap::new()).collect())),
+        false => decode_members(blob),
+    }
 }
 
 /// The inverse of [`encode_members`]: the membership and each content's generating set.

@@ -245,7 +245,7 @@ pub struct GenerationStamp {
 // refused.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility.
-pub const BUNDLE_FORMAT: u32 = 40;
+pub const BUNDLE_FORMAT: u32 = 41;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;

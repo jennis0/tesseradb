@@ -31,10 +31,17 @@
 //!
 //! ```text
 //! header  := magic "MSMB" (member pack) or "MSRP" (record pack)
-//!          | u16 version | u16 reserved | u32 count | u32 ordinal_lo
-//! offsets := u64 LE × (count + 1)   -- into the payload region; offsets[0] == 0, ascending
-//! payload := count blobs, concatenated in ordinal order
+//!          | u16 version | u16 reserved | u32 count | u32 ordinal_lo | u32 held | u64 table_at
+//! payload := held blobs, concatenated in ordinal order, from the end of the header
+//! table   := at table_at: u64 LE × (held + 1) offsets into the payload; offsets[0] == 0, ascending
+//!          | where held < count: u32 LE × held, each blob's ordinal within the extent, ascending
 //! ```
+//!
+//! **A member pack lists the ordinals its shard holds something of.** An ordinal it covers and
+//! does not list reads as an empty blob, which the decoder takes as a slice with no member and
+//! empty generating sets. A record pack lists every ordinal, as does every pack written at one
+//! shard, and its ordinals are then implicit. The table is behind the payload so that a writer
+//! streams the blobs without knowing in advance how many it will list.
 //!
 //! **Offsets rather than lengths, and one more of them than there are blobs.** A length array needs
 //! a running sum to address the *n*th blob; an offset array addresses it in two reads, which is what
@@ -50,8 +57,9 @@
 //!
 //! # Fail-closed
 //!
-//! Bad magic, an unknown version, a short file, non-ascending offsets, or a final offset that
-//! disagrees with the payload length all **refuse**. None of them decode to a plausible shorter
+//! Bad magic, an unknown version, a short file, non-ascending offsets, a final offset that
+//! disagrees with the payload length, listed ordinals out of order or outside the extent, or a
+//! record pack that does not list every ordinal all **refuse**. None of them decode to a plausible shorter
 //! extent, because a membership that came back short is an artifact whose masked count is low for
 //! every viewer — which the existence criterion then renders as *absent*, indistinguishable from a
 //! cluster that legitimately failed its bar. There is no error to notice downstream, so it has to be
@@ -74,7 +82,7 @@ use crate::manifest::{MembershipExtent, RecordPackExtent};
 /// Bumped whenever a blob's *content* changes shape, even though this module holds a blob opaquely:
 /// the refusal has to happen at the file, because the decoder on the other side of the boundary
 /// sees only bytes.
-const VERSION: u16 = 5;
+const VERSION: u16 = 6;
 
 /// Which of a level's two packs a file is. The magic differs, so one is never decoded as the other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,12 +101,39 @@ impl PackKind {
         }
     }
 }
-const HEADER_LEN: usize = 4 + 2 + 2 + 4 + 4;
+const HEADER_LEN: usize = 4 + 2 + 2 + 4 + 4 + 4 + 8;
 
 fn malformed(path: &Path, detail: impl std::fmt::Display) -> StoreError {
     StoreError::MalformedBundle {
         detail: format!("membership extent {}: {detail}", path.display()),
     }
+}
+
+/// The header of an extent of `count` ordinals from `ordinal_lo` listing `held` blobs, whose table
+/// starts at `table_at`.
+fn header(kind: PackKind, count: u32, ordinal_lo: u32, held: u32, table_at: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(HEADER_LEN);
+    out.extend_from_slice(kind.magic());
+    out.extend_from_slice(&VERSION.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(&ordinal_lo.to_le_bytes());
+    out.extend_from_slice(&held.to_le_bytes());
+    out.extend_from_slice(&table_at.to_le_bytes());
+    out
+}
+
+/// The table behind the payload: `offsets`, then each listed blob's ordinal within the extent
+/// where `listed` is not every ordinal.
+fn table(offsets: &[u64], listed: Option<&[u32]>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(offsets.len() * 8 + listed.map_or(0, |l| l.len() * 4));
+    for at in offsets {
+        out.extend_from_slice(&at.to_le_bytes());
+    }
+    for i in listed.into_iter().flatten() {
+        out.extend_from_slice(&i.to_le_bytes());
+    }
+    out
 }
 
 /// Serialise one extent: `blobs` in ordinal order, covering `[ordinal_lo, ordinal_lo + blobs.len())`.
@@ -107,25 +142,18 @@ fn malformed(path: &Path, detail: impl std::fmt::Display) -> StoreError {
 /// must be fsynced **before** the manifest that names it, and only the caller knows where that
 /// manifest write sits.
 pub fn pack(kind: PackKind, ordinal_lo: u32, blobs: &[Vec<u8>]) -> Vec<u8> {
-    let count = blobs.len();
-    let payload_len: usize = blobs.iter().map(Vec::len).sum();
-    let mut out = Vec::with_capacity(HEADER_LEN + (count + 1) * 8 + payload_len);
-
-    out.extend_from_slice(kind.magic());
-    out.extend_from_slice(&VERSION.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&(count as u32).to_le_bytes());
-    out.extend_from_slice(&ordinal_lo.to_le_bytes());
-
-    let mut at = 0u64;
-    out.extend_from_slice(&at.to_le_bytes());
+    let count = blobs.len() as u32;
+    let mut offsets = Vec::with_capacity(blobs.len() + 1);
+    offsets.push(0u64);
     for blob in blobs {
-        at += blob.len() as u64;
-        out.extend_from_slice(&at.to_le_bytes());
+        offsets.push(offsets[offsets.len() - 1] + blob.len() as u64);
     }
+    let payload_len = offsets[offsets.len() - 1];
+    let mut out = header(kind, count, ordinal_lo, count, HEADER_LEN as u64 + payload_len);
     for blob in blobs {
         out.extend_from_slice(blob);
     }
+    out.extend_from_slice(&table(&offsets, None));
     out
 }
 
@@ -142,12 +170,14 @@ pub fn pack(kind: PackKind, ordinal_lo: u32, blobs: &[Vec<u8>]) -> Vec<u8> {
 /// reads the artifact store under a lock it must not hold across an fsync, so it materialises and
 /// releases; a build owns its store outright and can encode as it writes.
 ///
-/// **The count is a contract, not a hint.** It is the level's ordinal range, known before the first
-/// blob, which is what lets the offset table be reserved and filled in afterwards. [`Self::push`]
-/// refuses the blob past the end and [`Self::finish`] refuses a writer that was pushed fewer than
-/// it reserved: an extent addresses `[ordinal_lo, ordinal_lo + count)` densely, so a short one is a
-/// membership that decodes as absent for every viewer — which the existence criterion then renders
-/// as a cluster that legitimately failed its bar.
+/// **[`Self::push`] places a blob at every ordinal, and the count is a contract.** It is the
+/// level's ordinal range, known before the first blob; [`Self::push`] refuses the blob past the end
+/// and [`Self::finish`] refuses a writer that was pushed fewer than it reserved: an extent that
+/// lists every ordinal and comes back short is a membership that decodes as absent for every
+/// viewer — which the existence criterion then renders as a cluster that legitimately failed its
+/// bar. **A writer from [`Self::create_listing`] lists only the ordinals [`Self::push_at`] gives
+/// it**, for a member pack whose shard holds nothing of the rest; a record pack lists every
+/// ordinal.
 pub struct PackWriter {
     path: PathBuf,
     kind: PackKind,
@@ -155,46 +185,86 @@ pub struct PackWriter {
     ordinal_lo: u32,
     count: u32,
     /// Where each blob starts within the payload, and one more for the payload's end — the file's
-    /// own table, held here at 8 bytes an artifact until the payload has gone past and it can be
-    /// written back over the space reserved for it.
+    /// own table, held here at 8 bytes a blob until the payload has gone past and it can be
+    /// written behind it.
     offsets: Vec<u64>,
+    /// Each blob's ordinal within the extent, ascending.
+    listed: Vec<u32>,
+    /// Whether the extent lists only the ordinals given a blob ([`Self::create_listing`]).
+    listing: bool,
 }
 
 impl PackWriter {
-    /// Reserve the header and the offset table for `count` blobs, and position at the payload.
+    /// Reserve the header for an extent of `count` ordinals, and position at the payload.
     pub fn create(path: &Path, kind: PackKind, ordinal_lo: u32, count: u32) -> Result<PackWriter> {
         let file = File::create(path).map_err(|source| StoreError::Io {
             path: path.to_path_buf(),
             source,
         })?;
         let mut file = BufWriter::new(file);
-        let prologue = HEADER_LEN + (count as usize + 1) * 8;
-        file.write_all(&vec![0u8; prologue])
+        file.write_all(&[0u8; HEADER_LEN])
             .map_err(|source| StoreError::Io {
                 path: path.to_path_buf(),
                 source,
             })?;
-        let mut offsets = Vec::with_capacity(count as usize + 1);
-        offsets.push(0);
         Ok(PackWriter {
             path: path.to_path_buf(),
             kind,
             file,
             ordinal_lo,
             count,
-            offsets,
+            offsets: vec![0],
+            listed: Vec::new(),
+            listing: false,
         })
     }
 
-    /// Append one blob, in ordinal order.
+    /// [`Self::create`] for a member pack that lists only the ordinals [`Self::push_at`] gives it:
+    /// its reader takes the others as a shard holding nothing of them.
+    pub fn create_listing(path: &Path, ordinal_lo: u32, count: u32) -> Result<PackWriter> {
+        let mut writer = PackWriter::create(path, PackKind::Members, ordinal_lo, count)?;
+        writer.listing = true;
+        Ok(writer)
+    }
+
+    /// Append one blob at the next ordinal.
     pub fn push(&mut self, blob: &[u8]) -> Result<()> {
-        if self.offsets.len() > self.count as usize {
+        let next = self.listed.last().map_or(0, |i| i + 1);
+        self.place(next, blob)
+    }
+
+    /// Append one blob at `ordinal`, above every ordinal placed before it, into an extent from
+    /// [`Self::create_listing`].
+    pub fn push_at(&mut self, ordinal: u32, blob: &[u8]) -> Result<()> {
+        if !self.listing {
+            return Err(malformed(
+                &self.path,
+                "this extent lists every ordinal; push each in turn",
+            ));
+        }
+        let Some(i) = ordinal.checked_sub(self.ordinal_lo) else {
+            return Err(malformed(
+                &self.path,
+                format!("ordinal {ordinal} is below the extent's first, {}", self.ordinal_lo),
+            ));
+        };
+        if self.listed.last().is_some_and(|last| *last >= i) {
+            return Err(malformed(
+                &self.path,
+                format!("ordinal {ordinal} was pushed after an ordinal at or above it"),
+            ));
+        }
+        self.place(i, blob)
+    }
+
+    fn place(&mut self, i: u32, blob: &[u8]) -> Result<()> {
+        if i >= self.count {
             return Err(malformed(
                 &self.path,
                 format!(
-                    "a {}-blob extent was pushed a {}th blob",
+                    "a {}-ordinal extent was pushed a blob at its {}th ordinal",
                     self.count,
-                    self.offsets.len()
+                    i + 1
                 ),
             ));
         }
@@ -204,10 +274,11 @@ impl PackWriter {
         })?;
         let at = self.offsets.last().copied().unwrap_or_default() + blob.len() as u64;
         self.offsets.push(at);
+        self.listed.push(i);
         Ok(())
     }
 
-    /// Write the header and the offset table over the space reserved for them, and fsync.
+    /// Write the table behind the payload and the header over the space reserved for it, and fsync.
     ///
     /// The file is durable when this returns — the caller still owns the *directory* sync and the
     /// ordering against the manifest that names it, exactly as with [`crate::write_and_fsync`].
@@ -219,36 +290,41 @@ impl PackWriter {
             ordinal_lo,
             count,
             offsets,
+            listed,
+            listing,
         } = self;
-        if offsets.len() != count as usize + 1 {
+        let held = listed.len() as u32;
+        if !listing && held != count {
             return Err(malformed(
                 &path,
                 format!(
-                    "{} blob(s) were written into an extent reserved for {count} — the ordinal \
+                    "{held} blob(s) were written into an extent reserved for {count} — the ordinal \
                      range it addresses would decode as absent above the last one",
-                    offsets.len() - 1,
                 ),
             ));
         }
-        let mut head = Vec::with_capacity(HEADER_LEN + offsets.len() * 8);
-        head.extend_from_slice(kind.magic());
-        head.extend_from_slice(&VERSION.to_le_bytes());
-        head.extend_from_slice(&0u16.to_le_bytes());
-        head.extend_from_slice(&count.to_le_bytes());
-        head.extend_from_slice(&ordinal_lo.to_le_bytes());
-        for at in &offsets {
-            head.extend_from_slice(&at.to_le_bytes());
-        }
-        let mut file = file.into_inner().map_err(|e| StoreError::Io {
-            path: path.clone(),
-            source: e.into_error(),
-        })?;
+        let payload_len = offsets.last().copied().unwrap_or_default();
+        let every = held == count;
+        let mut file = file;
         let io = |source| StoreError::Io {
             path: path.clone(),
             source,
         };
+        file.write_all(&table(&offsets, (!every).then_some(&listed[..])))
+            .map_err(io)?;
+        let mut file = file.into_inner().map_err(|e| StoreError::Io {
+            path: path.clone(),
+            source: e.into_error(),
+        })?;
         file.seek(SeekFrom::Start(0)).map_err(io)?;
-        file.write_all(&head).map_err(io)?;
+        file.write_all(&header(
+            kind,
+            count,
+            ordinal_lo,
+            held,
+            HEADER_LEN as u64 + payload_len,
+        ))
+        .map_err(io)?;
         file.sync_all().map_err(io)
     }
 }
@@ -340,10 +416,13 @@ pub struct LevelPack {
     map: Mmap,
     count: u32,
     ordinal_lo: u32,
+    /// How many blobs the extent lists: `count` where it lists every ordinal.
+    held: u32,
     /// Byte offset of `offsets[0]` within the mapping.
     offsets_at: usize,
-    /// Byte offset of the payload region within the mapping.
-    payload_at: usize,
+    /// Byte offset of the listed ordinals within the mapping, where the extent does not list every
+    /// ordinal.
+    listed_at: Option<usize>,
 }
 
 impl LevelPack {
@@ -391,41 +470,54 @@ impl LevelPack {
                 format!("version {version}, expected {VERSION}"),
             ));
         }
-        let count = u32::from_le_bytes([map[8], map[9], map[10], map[11]]);
-        let ordinal_lo = u32::from_le_bytes([map[12], map[13], map[14], map[15]]);
-
-        let offsets_at = HEADER_LEN;
-        let offsets_len = (count as usize + 1)
-            .checked_mul(8)
-            .ok_or_else(|| malformed(path, format!("count {count} overflows the offset table")))?;
-        let payload_at = offsets_at
-            .checked_add(offsets_len)
-            .ok_or_else(|| malformed(path, "offset table overflows the file"))?;
-        if map.len() < payload_at {
+        let word = |at: usize| u32::from_le_bytes(map[at..at + 4].try_into().expect("4 bytes"));
+        let count = word(8);
+        let ordinal_lo = word(12);
+        let held = word(16);
+        let table_at = u64::from_le_bytes(map[20..28].try_into().expect("8 bytes"));
+        if held > count {
+            return Err(malformed(
+                path,
+                format!("it lists {held} blobs over {count} ordinals"),
+            ));
+        }
+        let every = held == count;
+        if kind == PackKind::Records && !every {
+            return Err(malformed(
+                path,
+                format!("a record extent lists every ordinal, and this lists {held} of {count}"),
+            ));
+        }
+        let table_len = (held as u64 + 1) * 8 + if every { 0 } else { held as u64 * 4 };
+        if table_at < HEADER_LEN as u64 || table_at.checked_add(table_len) != Some(map.len() as u64)
+        {
             return Err(malformed(
                 path,
                 format!(
-                    "{} bytes cannot hold {count} offsets: the file is truncated",
+                    "{} bytes cannot hold a payload and a table of {held} blobs from byte \
+                     {table_at}: the file is truncated",
                     map.len()
                 ),
             ));
         }
-
+        let offsets_at = table_at as usize;
         let pack = LevelPack {
             map,
             count,
             ordinal_lo,
+            held,
             offsets_at,
-            payload_at,
+            listed_at: (!every).then_some(offsets_at + (held as usize + 1) * 8),
         };
 
-        // Ascending offsets, and a final one that is exactly the payload length. Checked once, at
-        // open, so every `blob` below is a slice of a range already proven inside the mapping —
-        // which is what lets that function be infallible.
+        // Ascending offsets from zero, and a final one that is exactly the payload length; listed
+        // ordinals ascending and inside the extent. Checked once, at open, so every `blob` below
+        // is a slice of a range already proven inside the mapping — which is what lets that
+        // function be infallible.
         let mut previous = 0u64;
-        for i in 0..=count as usize {
+        for i in 0..=held as usize {
             let offset = pack.offset(i);
-            if offset < previous {
+            if offset < previous || (i == 0 && offset != 0) {
                 return Err(malformed(
                     path,
                     format!("offset {i} goes backwards ({offset} after {previous})"),
@@ -433,7 +525,7 @@ impl LevelPack {
             }
             previous = offset;
         }
-        let payload_len = pack.map.len() - payload_at;
+        let payload_len = offsets_at - HEADER_LEN;
         if previous != payload_len as u64 {
             return Err(malformed(
                 path,
@@ -443,13 +535,44 @@ impl LevelPack {
                 ),
             ));
         }
+        if pack.listed_at.is_some() {
+            let mut previous = None;
+            for k in 0..held as usize {
+                let i = pack.listed(k);
+                if i >= count || previous.is_some_and(|p| p >= i) {
+                    return Err(malformed(
+                        path,
+                        format!("listed ordinal {k} is out of order or outside the extent"),
+                    ));
+                }
+                previous = Some(i);
+            }
+        }
 
         Ok(pack)
     }
 
-    fn offset(&self, i: usize) -> u64 {
-        let at = self.offsets_at + i * 8;
+    fn offset(&self, k: usize) -> u64 {
+        let at = self.offsets_at + k * 8;
         u64::from_le_bytes(self.map[at..at + 8].try_into().expect("8 bytes"))
+    }
+
+    /// The `k`th listed blob's ordinal within the extent.
+    fn listed(&self, k: usize) -> u32 {
+        match self.listed_at {
+            Some(listed_at) => {
+                let at = listed_at + k * 4;
+                u32::from_le_bytes(self.map[at..at + 4].try_into().expect("4 bytes"))
+            }
+            None => k as u32,
+        }
+    }
+
+    /// The `k`th listed blob.
+    fn listed_blob(&self, k: usize) -> &[u8] {
+        let from = HEADER_LEN + self.offset(k) as usize;
+        let to = HEADER_LEN + self.offset(k + 1) as usize;
+        &self.map[from..to]
     }
 
     /// The first ordinal this extent covers.
@@ -462,26 +585,50 @@ impl LevelPack {
         self.count
     }
 
-    /// One membership's bytes, by **absolute** ordinal — not by index within the extent.
+    /// How many blobs this extent lists: [`Self::count`] where it lists every ordinal.
+    pub fn held(&self) -> u32 {
+        self.held
+    }
+
+    /// One membership's bytes, by **absolute** ordinal — not by index within the extent. Empty for
+    /// an ordinal the extent covers and does not list.
     ///
     /// Taking the absolute ordinal is what stops a caller iterating several extents and addressing
     /// the second one from zero, which would serve one artifact's members under another's identity.
     /// `None` for an ordinal this extent does not cover.
     pub fn blob(&self, ordinal: u32) -> Option<&[u8]> {
-        let i = ordinal.checked_sub(self.ordinal_lo)? as usize;
-        if i >= self.count as usize {
+        let i = ordinal.checked_sub(self.ordinal_lo)?;
+        if i >= self.count {
             return None;
         }
-        let from = self.payload_at + self.offset(i) as usize;
-        let to = self.payload_at + self.offset(i + 1) as usize;
-        Some(&self.map[from..to])
+        if self.listed_at.is_none() {
+            return Some(self.listed_blob(i as usize));
+        }
+        let (mut lo, mut hi) = (0usize, self.held as usize);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            match self.listed(mid).cmp(&i) {
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+                std::cmp::Ordering::Equal => return Some(self.listed_blob(mid)),
+            }
+        }
+        Some(&[])
     }
 
-    /// Every membership in this extent, as `(ordinal, bytes)` in ordinal order.
+    /// Every ordinal this extent covers and its bytes, as `(ordinal, bytes)` in ordinal order:
+    /// empty for an ordinal it does not list.
     pub fn iter(&self) -> impl Iterator<Item = (u32, &[u8])> {
+        let mut k = 0usize;
         (0..self.count).map(move |i| {
-            let ordinal = self.ordinal_lo + i;
-            (ordinal, self.blob(ordinal).expect("within this extent"))
+            let blob = match k < self.held as usize && self.listed(k) == i {
+                true => {
+                    k += 1;
+                    self.listed_blob(k - 1)
+                }
+                false => &[][..],
+            };
+            (self.ordinal_lo + i, blob)
         })
     }
 }
@@ -2397,10 +2544,89 @@ mod tests {
         // Rewrite offsets[1] to point past offsets[2]. A reader that did not check would hand back
         // a slice with `from > to`, which panics, or — with the arithmetic reordered — one blob's
         // bytes under the other's ordinal.
-        let at = HEADER_LEN + 8;
+        let table_at = u64::from_le_bytes(bytes[20..28].try_into().unwrap()) as usize;
+        let at = table_at + 8;
         bytes[at..at + 8].copy_from_slice(&999u64.to_le_bytes());
         let path = write(tmp.path(), "backwards.tsmb", &bytes);
         assert!(LevelPack::open(&path, PackKind::Members).is_err());
+    }
+
+    /// A member pack lists the ordinals its shard holds something of; one it covers and does not
+    /// list reads as empty, and one outside it as uncovered.
+    #[test]
+    fn a_member_pack_lists_only_what_its_shard_holds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sparse.tsmb");
+        let mut writer = PackWriter::create_listing(&path, 100, 6).unwrap();
+        writer.push_at(101, &[1, 2]).unwrap();
+        writer.push_at(104, &[3]).unwrap();
+        writer.finish().unwrap();
+
+        let pack = LevelPack::open(&path, PackKind::Members).unwrap();
+        assert_eq!((pack.count(), pack.held()), (6, 2));
+        assert_eq!(pack.blob(101), Some(&[1u8, 2][..]));
+        assert_eq!(pack.blob(104), Some(&[3u8][..]));
+        assert_eq!(pack.blob(100), Some(&[][..]));
+        assert_eq!(pack.blob(105), Some(&[][..]));
+        assert_eq!(pack.blob(106), None);
+        let all: Vec<(u32, usize)> = pack.iter().map(|(o, b)| (o, b.len())).collect();
+        assert_eq!(all, vec![(100, 0), (101, 2), (102, 0), (103, 0), (104, 1), (105, 0)]);
+    }
+
+    /// A pack written a blob at every ordinal reads as one [`pack`] wrote, whichever push placed
+    /// them.
+    #[test]
+    fn a_pack_listing_every_ordinal_is_the_same_bytes_however_it_was_pushed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blobs = vec![vec![7u8; 3], vec![], vec![9u8; 5]];
+        let path = tmp.path().join("every.tsmb");
+        let mut writer = PackWriter::create_listing(&path, 10, 3).unwrap();
+        for (i, blob) in blobs.iter().enumerate() {
+            writer.push_at(10 + i as u32, blob).unwrap();
+        }
+        writer.finish().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), pack(PackKind::Members, 10, &blobs));
+    }
+
+    /// A pack that lists every ordinal takes no ordinal out of turn, and a listing one none out of
+    /// order or outside the extent; a listing pack given nothing is an extent its shard holds
+    /// nothing of.
+    #[test]
+    fn a_pack_refuses_ordinals_out_of_turn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut every =
+            PackWriter::create(&tmp.path().join("r.tsrp"), PackKind::Records, 0, 3).unwrap();
+        assert!(every.push_at(1, &[1]).is_err());
+
+        let none = tmp.path().join("none.tsmb");
+        PackWriter::create_listing(&none, 0, 3).unwrap().finish().unwrap();
+        let pack = LevelPack::open(&none, PackKind::Members).unwrap();
+        assert_eq!((pack.count(), pack.held(), pack.blob(2)), (3, 0, Some(&[][..])));
+
+        let mut members = PackWriter::create_listing(&tmp.path().join("m.tsmb"), 10, 3).unwrap();
+        members.push_at(11, &[1]).unwrap();
+        assert!(members.push_at(11, &[2]).is_err());
+        assert!(members.push_at(10, &[2]).is_err());
+        assert!(members.push_at(13, &[2]).is_err());
+    }
+
+    /// A listed ordinal outside the extent, or out of order, refuses at open.
+    #[test]
+    fn a_listing_out_of_order_refuses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("listed.tsmb");
+        let mut writer = PackWriter::create_listing(&path, 0, 4).unwrap();
+        writer.push_at(1, &[1]).unwrap();
+        writer.push_at(2, &[2]).unwrap();
+        writer.finish().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let listed_at = bytes.len() - 8;
+        for damage in [[2u8, 0, 0, 0], [9, 0, 0, 0]] {
+            let mut damaged = bytes.clone();
+            damaged[listed_at..listed_at + 4].copy_from_slice(&damage);
+            let path = write(tmp.path(), "damaged.tsmb", &damaged);
+            assert!(LevelPack::open(&path, PackKind::Members).is_err());
+        }
     }
 
     // ---- the tile index's extent column -------------------------------------------------------

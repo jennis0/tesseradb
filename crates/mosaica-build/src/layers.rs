@@ -3159,8 +3159,8 @@ fn write_membership_extents(
 /// the shard's first. Shard 0's pack takes the place of the one it was cut from. Returns each
 /// shard's extents, in shard order, and the other shards' files.
 ///
-/// A hole stays a hole in every shard, and an artifact with no member in a shard has the empty
-/// membership there.
+/// A hole stays a hole in every shard, and a shard's pack lists only the artifacts it holds a
+/// member or a generating-set member of: one it does not list reads as the empty membership.
 pub(crate) fn split_member_packs(
     prefix_dir: &Path,
     extents: &[MembershipExtent],
@@ -3189,9 +3189,8 @@ pub(crate) fn split_member_packs(
             let dir = prefix_dir.join(span.layout().members_rel());
             std::fs::create_dir_all(&dir).map_err(|e| BuildError::io(&dir, e))?;
             let staged = dir.join(format!("{name}.split"));
-            let writer = mosaica_store::membership::PackWriter::create(
+            let writer = mosaica_store::membership::PackWriter::create_listing(
                 &staged,
-                mosaica_store::membership::PackKind::Members,
                 extent.ordinal_lo,
                 extent.count,
             )
@@ -3200,9 +3199,6 @@ pub(crate) fn split_member_packs(
         }
         for (ordinal, blob) in whole.iter() {
             if blob.is_empty() {
-                for (_, _, writer) in &mut writers {
-                    writer.push(blob).map_err(BuildError::Store)?;
-                }
                 continue;
             }
             let (members, sets) = mosaica_lifecycle::membership::decode_members(blob)
@@ -3213,12 +3209,16 @@ pub(crate) fn split_member_packs(
                     ))
                 })?;
             for (span, (_, _, writer)) in shards.iter().zip(&mut writers) {
+                let held = span.members(&members);
                 let sets: Vec<_> = sets.iter().map(|set| span.members(set)).collect();
+                if held.is_empty() && sets.iter().all(|set| set.is_empty()) {
+                    continue;
+                }
                 let part = mosaica_lifecycle::membership::frame_members(
-                    &span.members(&members),
+                    &held,
                     sets.iter().map(|set| set.as_ref()),
                 );
-                writer.push(&part).map_err(BuildError::Store)?;
+                writer.push_at(ordinal, &part).map_err(BuildError::Store)?;
             }
         }
         let parts = shards.iter().zip(&mut split).zip(writers);
@@ -3262,6 +3262,9 @@ fn map_level_memberships(
     let owner: std::sync::Arc<dyn std::any::Any + Send + Sync> = pack.clone();
     let mut rehoused = 0;
     for (ordinal, blob) in pack.iter() {
+        if blob.is_empty() {
+            continue;
+        }
         // SAFETY: `blob` is a slice of `pack`'s read-only mapping, `owner` is that same pack, and
         // the `Members` this produces holds `owner` for as long as it holds the view. The file is
         // written, fsynced and closed for writing before this runs, and nothing in the build

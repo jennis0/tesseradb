@@ -300,9 +300,6 @@ fn artifact_slices(
     match (record.is_empty(), held) {
         (true, 0) => return Ok(false),
         (true, _) => return Err(format!("hole {ordinal} has members in a shard")),
-        (false, held) if held != slices.len() => {
-            return Err(format!("ordinal {ordinal} has no slice in some shard"))
-        }
         _ => {}
     }
     let mut decoded = Vec::with_capacity(slices.len());

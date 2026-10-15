@@ -494,7 +494,7 @@ fn seed_artifacts(
     shards: &[ShardId],
     prefix_dir: &Path,
 ) -> Result<SeededArtifacts, EngineError> {
-    use mosaica_lifecycle::membership::{decode_members, decode_slice, slices_hold_their_sets};
+    use mosaica_lifecycle::membership::{decode_slice, decode_slice_members, slices_hold_their_sets};
     let several = shards.len() > 1;
     let mut seeded = SeededArtifacts {
         artifacts: ArtifactStore::new(),
@@ -592,7 +592,7 @@ fn seed_artifacts(
                 };
                 let mut others = Vec::with_capacity(shards.len() - 1);
                 for (at, blob) in blobs.iter().enumerate().skip(1) {
-                    match decode_members(blob) {
+                    match decode_slice_members(blob, record.contents.len()) {
                         Some((members, sets)) if sets.len() == record.contents.len() => {
                             others.push((at, slice_record(&record, members, sets)));
                         }
@@ -615,6 +615,10 @@ fn seed_artifacts(
                 }
                 let on_heap = &mut seeded.on_heap;
                 let mut mapped = |record: &mut ArtifactRecord, at: usize| {
+                    // A pack lists only what its shard holds: an empty blob has nothing to map.
+                    if blobs[at].is_empty() {
+                        return;
+                    }
                     // The membership is read through the pack's mapping and the decoded bitmap
                     // is dropped, to avoid holding a heap bitmap per artifact.
                     //
