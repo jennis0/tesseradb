@@ -65,6 +65,9 @@ impl ArtifactProjections {
             return served;
         }
 
+        // A shard's slice holds no key, label or parent: its form takes the level's records.
+        let shared = self.level_records(&at, records);
+        let slice = LevelSlice::new(store, records, layer, level, Some(shared));
         // Both derivations, and the partition, from one borrow of the store at one level version:
         // the row form, the records and the containment partition must describe the same
         // population, and a growth landing between two reads would leave one of them describing a
@@ -74,46 +77,20 @@ impl ArtifactProjections {
         // unreadable postings file, and the answer to that is the masked-count route, which reads
         // no postings. Logged rather than returned, since the caller's alternative would be to
         // fail a request over a derivation that has a correct fallback.
-        let slice = LevelSlice::new(store, records, layer, level);
-        // A shard's slice holds no key, label or parent, so a form of it takes the level's records
-        // whole rather than building them from the slice.
-        let shared = (!std::ptr::eq(store, records)).then(|| self.level_records(&at, records));
         let partition = source
             .and_then(|source| self.partition_for(&at, &slice, source));
-        let built = match predicate {
-            Some(PredicateSource::Spatial(spatial)) => self.assembled(
-                &at,
-                spatial,
-                store,
-                space,
-                layout,
-                declaration.fixed_layout().is_none(),
-                shared.clone(),
-            ),
-            Some(PredicateSource::Attribute(attribute)) => self.claimed_or_projected(
-                &at,
-                &slice,
-                space,
-                layout,
-                Some(attribute),
-                declaration,
-                shared.clone(),
-            ),
-            None => self.claimed_or_projected(
-                &at,
-                &slice,
-                space,
-                layout,
-                None,
-                declaration,
-                shared.clone(),
-            ),
+        let attribute = match predicate {
+            Some(PredicateSource::Attribute(attribute)) => Some(attribute),
+            _ => None,
         };
-        let mut built = built.with_partition(partition);
-        if shared.is_none() {
-            self.share_records(&at, &mut built);
-        }
-        self.filed(&at, key, segments_version, built)
+        let built = match predicate {
+            Some(PredicateSource::Spatial(spatial)) => {
+                let lists = declaration.fixed_layout().is_none();
+                self.assembled(&at, spatial, &slice, space, layout, lists)
+            }
+            _ => self.claimed_or_projected(&at, &slice, space, layout, attribute, declaration),
+        };
+        self.filed(&at, key, segments_version, built.with_partition(partition))
     }
 
     /// The form held for this coordinate where it still answers for the caller's row space, and the
@@ -166,40 +143,28 @@ impl ArtifactProjections {
         (rows, version)
     }
 
-    /// Give `built`, a form of the level's whole records, the records another shard's form took
-    /// at the same version, else hold its own for the next.
-    fn share_records(&self, at: &Coordinate<'_>, built: &mut ArtifactRows) {
+    /// The level's records at this version: those another shard's form took, else built from
+    /// `records` and held for the next. Held records whose length is not the level's are stale
+    /// and are rebuilt.
+    fn level_records(&self, at: &Coordinate<'_>, records: &ArtifactStore) -> Arc<ArtifactRecords> {
         let key = at.derived_key();
+        let view = view_key(at.view);
+        let len = (0..records.slots(at.layer, at.level).len() as u32)
+            .rev()
+            .find(|&ordinal| records.drawn_in_view(at.layer, at.level, ordinal, view))
+            .map_or(0, |ordinal| ordinal as usize + 1);
         let mut held = self.records_held.lock().unwrap_or_else(|e| e.into_inner());
         let shared = held
             .get(&at.records_address())
             .filter(|(held_key, _)| *held_key == key)
             .and_then(|(_, records)| records.upgrade())
-            .filter(|records| records.len() == built.records.len());
-        if let Some(shared) = shared {
-            built.records = shared;
-            return;
-        }
-        held.insert(at.records_address(), (key, Arc::downgrade(&built.records)));
-    }
-
-    /// The level's records at this version: those another shard's form took, else built from
-    /// `records` and held for the next.
-    fn level_records(&self, at: &Coordinate<'_>, records: &ArtifactStore) -> Arc<ArtifactRecords> {
-        let key = at.derived_key();
-        let mut held = self.records_held.lock().unwrap_or_else(|e| e.into_inner());
-        let shared = held
-            .get(&at.records_address())
-            .filter(|(held_key, _)| *held_key == key)
-            .and_then(|(_, records)| records.upgrade());
+            .filter(|shared| shared.len() == len);
         if let Some(shared) = shared {
             return shared;
         }
-        let built = Arc::new(ArtifactRecords::build(records.level_in_view(
-            at.layer,
-            at.level,
-            view_key(at.view),
-        )));
+        let built = Arc::new(ArtifactRecords::build(
+            records.level_in_view(at.layer, at.level, view),
+        ));
         held.insert(at.records_address(), (key, Arc::downgrade(&built)));
         built
     }
@@ -210,26 +175,24 @@ impl ArtifactProjections {
     /// The fold-written column is claimed only while the generation has no extents: a column that
     /// does not label a flushed segment's rows would count every point ingested since the fold as
     /// in no shape. With extents the column is composed over the assembled form instead.
-    #[allow(clippy::too_many_arguments)]
     fn assembled(
         &self,
         at: &Coordinate<'_>,
         spatial: &SpatialSource<'_>,
-        store: &ArtifactStore,
+        slice: &LevelSlice<'_>,
         space: &RowSpace,
         layout: ServingLayout,
         lists: bool,
-        shared: Option<Arc<ArtifactRecords>>,
     ) -> ArtifactRows {
         let (joined, assembly) = spatial.level.assemble(at.shard, spatial.segments);
         // Filtered by view: a shape belongs to one view of its group, and resolving it into every
         // view's row space would draw it on every view's map with a real masked count.
         let mut built = ArtifactRows::build_resolved(
-            store.level_in_view(at.layer, at.level, view_key(at.view)),
+            slice.in_view(view_key(at.view)),
             joined,
             spatial.total_rows,
             space,
-            shared,
+            slice.shared(),
         );
         built.lists_on_overlap = lists;
         let column = if !layout.is_row_major() {
@@ -277,7 +240,6 @@ impl ArtifactProjections {
     ///
     /// `attribute` is the value column where this level's membership is one, which changes what is
     /// claimed and where the served column comes from and nothing else.
-    #[allow(clippy::too_many_arguments)]
     fn claimed_or_projected(
         &self,
         at: &Coordinate<'_>,
@@ -286,7 +248,6 @@ impl ArtifactProjections {
         layout: ServingLayout,
         attribute: Option<&AttributeSource<'_>>,
         declaration: &LayerDeclaration,
-        shared: Option<Arc<ArtifactRecords>>,
     ) -> ArtifactRows {
         let column_only = super::serves_column_only(declaration);
         let mut adopted = self.claim_index(at);
@@ -310,7 +271,7 @@ impl ArtifactProjections {
                 column,
                 &mut adopted,
                 column_only,
-                shared.clone(),
+                slice.shared(),
             )
         });
         let from_prefix_column = transposed.is_some();
@@ -333,7 +294,7 @@ impl ArtifactProjections {
                 slice.in_view(view_key(at.view)),
                 space,
                 adopted.take(),
-                shared,
+                slice.shared(),
             )
         });
         built.lists_on_overlap = declaration.fixed_layout().is_none();
@@ -344,7 +305,7 @@ impl ArtifactProjections {
         let column = match attribute {
             // The membership *is* the column: the level's own records supply only the ordinal
             // each value's artifact sits at.
-            Some(attribute) => self.attribute_column(at, slice.store(), space, attribute),
+            Some(attribute) => self.attribute_column(at, slice, space, attribute),
             None => self.claimed_or_composed(at, claimed, layout, space, &built),
         };
         let from_column = column.is_some();
@@ -499,7 +460,7 @@ impl ArtifactProjections {
         slice: &LevelSlice<'_>,
         space: &RowSpace,
     ) -> usize {
-        let inherited = built.inherit(slice, space, at.layer, at.level, view_key(at.view));
+        let inherited = built.inherit(slice, space, view_key(at.view));
         if inherited > 0 {
             tracing::info!(
                 layer = %at.layer,
@@ -547,19 +508,20 @@ impl ArtifactProjections {
     fn attribute_column(
         &self,
         at: &Coordinate<'_>,
-        store: &ArtifactStore,
+        slice: &LevelSlice<'_>,
         space: &RowSpace,
         source: &AttributeSource<'_>,
     ) -> Option<Arc<RowColumn>> {
-        // `code → ordinal`, from the level's own records. A key that does not resolve is skipped
-        // rather than guessed at, which understates and never overstates.
+        // `code → ordinal`, from the level's records, since a shard's slice holds no key. A key
+        // that does not resolve is skipped rather than guessed at, which understates and never
+        // overstates.
         //
         // Unfiltered by view, and it cannot reach a group-scoped layer: a predicate layer's
         // artifacts are derived from a value column rather than published.
         let mut ordinal_of_code: std::collections::BTreeMap<u32, u32> =
             std::collections::BTreeMap::new();
         let mut ordinals = 0u32;
-        for (ordinal, record) in store.level(at.layer, at.level) {
+        for (ordinal, record) in slice.records() {
             ordinals = ordinals.max(ordinal + 1);
             if let Some(code) = record.key.as_deref().and_then(source.code_of_key) {
                 ordinal_of_code.insert(code, ordinal);

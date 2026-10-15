@@ -76,7 +76,8 @@ pub(super) fn parse_access(access: &[Vec<u8>]) -> Arc<[Option<Label>]> {
 #[derive(Debug, Clone)]
 pub struct MembershipRows {
     /// Parallel to a level's ordinals; `None` is a hole, not an empty membership. One `Arc` per
-    /// artifact, so `Arc::make_mut` on a write copies only the bitmap that grew.
+    /// artifact that has rows, so `Arc::make_mut` on a write copies only the bitmap that grew; the
+    /// rest share [`no_rows`].
     pub(super) rows: Vec<Option<Arc<Bitmap>>>,
     /// Per ordinal, per rank: that content's generating set in row space. Pushed in lockstep with
     /// [`ArtifactRecords::declared`], the size the same set had in entity space.
@@ -321,10 +322,8 @@ impl Default for MembershipRows {
     }
 }
 
-/// The empty membership every slot without rows shares. A write takes `Arc::make_mut`, so sharing
-/// it copies nothing until a slot gains a row; a shard's slice of a level holds no member of most
-/// of its artifacts. One per thread, so threads building forms side by side do not all count
-/// references on one cache line.
+/// The empty membership slots without rows share, one per thread so parallel builds do not contend
+/// on its reference count.
 fn no_rows() -> Arc<Bitmap> {
     thread_local! {
         static NONE: Arc<Bitmap> = Arc::new(Bitmap::new());
@@ -494,7 +493,7 @@ impl MembershipRows {
             self.rows.resize_with(idx + 1, || None);
             self.generating.resize_with(idx + 1, Vec::new);
         }
-        self.rows[idx] = Some(Arc::new(rows));
+        self.rows[idx] = Some(held_rows(rows));
         self.rows_held = true;
     }
 

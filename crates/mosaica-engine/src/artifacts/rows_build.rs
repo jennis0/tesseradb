@@ -63,8 +63,7 @@ impl ArtifactRows {
         Self::build_over_sharing(artifacts, space, adopted, None)
     }
 
-    /// [`Self::build_over`], taking the level's records from `shared` where given rather than
-    /// building them from `artifacts`: a shard's slice holds none of them.
+    /// [`Self::build_over`], with the level's records taken from `shared` where given.
     pub(super) fn build_over_sharing<'a>(
         artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
         space: &RowSpace,
@@ -140,8 +139,7 @@ impl ArtifactRows {
         Self::build_from_column_sharing(artifacts, space, column, adopted, column_only, None)
     }
 
-    /// [`Self::build_from_column`], taking the level's records from `shared` where given, for
-    /// [`Self::build_over_sharing`]'s reason.
+    /// [`Self::build_from_column`], with the level's records taken from `shared` where given.
     pub(super) fn build_from_column_sharing<'a>(
         artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
         space: &RowSpace,
@@ -239,8 +237,9 @@ impl ArtifactRows {
     /// The same family over a membership resolved elsewhere — a spatial level's, joined from the
     /// per-segment pieces the flush resolved. `rows` is the per-row source, parallel to the level's
     /// ordinals; `row_count` is the generation's total row count, base and every extent, because a
-    /// shape's membership covers a flushed row the moment its segment publishes.
-    pub fn build_resolved<'a>(
+    /// shape's membership covers a flushed row the moment its segment publishes. The level's
+    /// records are taken from `shared` where given, and built from `artifacts` otherwise.
+    pub(super) fn build_resolved<'a>(
         artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
         rows: Vec<Option<Bitmap>>,
         row_count: u32,
@@ -370,15 +369,13 @@ impl ArtifactRows {
         &mut self,
         slice: &LevelSlice<'_>,
         space: &RowSpace,
-        layer: &str,
-        level: u32,
         view: &str,
     ) -> usize {
         let store = slice.store();
         let mut taken = 0usize;
         let mut borrowed: Vec<(String, u32, u64)> = Vec::new();
         let scratch = &mut ProjectScratch::default();
-        for (ordinal, record) in store.level_in_view(layer, level, view) {
+        for (ordinal, record) in slice.in_view(view) {
             if !mosaica_lifecycle::membership::borrows_membership(record) {
                 continue;
             }

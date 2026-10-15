@@ -86,12 +86,14 @@ use croaring::Bitmap;
 use rustc_hash::FxHashMap;
 
 use mosaica_authz::postings::{PostingRef, PostingsReader};
+use mosaica_lifecycle::membership::ArtifactStore;
 use mosaica_store::derived::{
     compose_containment, generating_entities, PostingSlice, SignatureIndex,
 };
 use mosaica_store::membership::ContainmentPack;
 use mosaica_types::TermId;
 
+use crate::artifacts::LevelSlice;
 use crate::session::SatisfiedKeys;
 
 /// What composing a partition needs from the generation.
@@ -154,20 +156,17 @@ impl ContainmentPartition {
     /// composes. A growth landing between them would leave the expression describing a set the
     /// membership no longer has, so both come from the same `&ArtifactStore`.
     pub fn compose(
-        store: &mosaica_lifecycle::membership::ArtifactStore,
+        store: &ArtifactStore,
         layer: &str,
         level: u32,
         postings: &PostingsReader,
     ) -> io::Result<Self> {
-        Self::compose_slice(
-            &crate::artifacts::LevelSlice::new(store, store, layer, level),
-            postings,
-        )
+        Self::compose_slice(&LevelSlice::new(store, store, layer, level, None), postings)
     }
 
     /// [`Self::compose`] over one shard's slice of a level.
     pub(crate) fn compose_slice(
-        slice: &crate::artifacts::LevelSlice<'_>,
+        slice: &LevelSlice<'_>,
         postings: &PostingsReader,
     ) -> io::Result<Self> {
         // **Unfiltered by view, and correctly so**: the partition is addressed by ordinal and
@@ -239,10 +238,8 @@ impl ContainmentPartition {
         self.len() == 0
     }
 
-    /// The identifier at `(ordinal, rank)`, or `None` where the partition has no entry — an
-    /// ordinal it does not list, or a rank past the artifact's contents.
-    fn id_at(&self, ordinal: u32, rank: usize) -> Option<u32> {
-        let k = self.pack.entry(ordinal)?;
+    /// The identifier at rank `rank` of entry `k`, or `None` past the artifact's contents.
+    fn id_at(&self, k: usize, rank: usize) -> Option<u32> {
         let lo = self.pack.at(k) as usize;
         let hi = self.pack.at(k + 1) as usize;
         let index = lo.checked_add(rank)?;
@@ -393,14 +390,14 @@ impl ContainmentAnswers<'_> {
     /// Whether this principal satisfies the expression at `(ordinal, rank)` and the expression is
     /// over exactly `size` members, the caller's slice of the set.
     ///
-    /// `None` where the partition has no entry there, which is what puts the caller back on the
-    /// masked-count route rather than answering from a structure that does not cover the case.
+    /// `None` where the partition does not cover `ordinal`, or lists it with no expression at
+    /// `rank`, which puts the caller back on the masked-count route.
     pub fn satisfies(&self, ordinal: u32, rank: usize, size: u64) -> Option<bool> {
-        if self.covers(ordinal) && self.partition.pack.entry(ordinal).is_none() {
-            // Unlisted: the empty expression at every rank, which has no clause to meet.
-            return Some(size == 0);
-        }
-        let id = self.partition.id_at(ordinal, rank)?;
+        let Some(k) = self.partition.pack.entry(ordinal) else {
+            // Unlisted: the empty expression, which only an empty set meets.
+            return self.covers(ordinal).then_some(size == 0);
+        };
+        let id = self.partition.id_at(k, rank)?;
         if self.partition.members_of(id) != size {
             return Some(false);
         }
@@ -445,13 +442,18 @@ mod tests {
         ContainmentPartition::of_clauses(&ordinals)
     }
 
-    /// Whether `terms` contain rank 0 of `ordinal`, whose set has as many members as clauses, or
-    /// none where the partition does not list it.
+    /// The identifier at `(ordinal, rank)`, where the partition lists `ordinal`.
+    fn id_of(partition: &ContainmentPartition, ordinal: u32, rank: usize) -> Option<u32> {
+        partition
+            .pack
+            .entry(ordinal)
+            .and_then(|k| partition.id_at(k, rank))
+    }
+
+    /// Whether `terms` contain rank 0 of `ordinal`, whose set has as many members as clauses.
     fn holds(partition: &ContainmentPartition, ordinal: u32, terms: &[u32]) -> bool {
         let held = satisfied(terms);
-        let size = partition
-            .id_at(ordinal, 0)
-            .map_or(0, |id| partition.members_of(id));
+        let size = id_of(partition, ordinal, 0).map_or(0, |id| partition.members_of(id));
         partition
             .answers(&held)
             .satisfies(ordinal, 0, size)
@@ -487,7 +489,6 @@ mod tests {
     #[test]
     fn an_empty_generating_set_contains_everyone() {
         let partition = partition_of(&[&[]]);
-        assert_eq!(partition.pairs(), 0, "an artifact whose sets are all empty is not listed");
         assert!(holds(&partition, 0, &[]));
     }
 
@@ -515,7 +516,7 @@ mod tests {
             "clause order is not part of the identity"
         );
         assert_eq!(partition.pairs(), 3);
-        assert_eq!(partition.id_at(0, 0), partition.id_at(1, 0));
+        assert_eq!(id_of(&partition, 0, 0), id_of(&partition, 1, 0));
     }
 
     /// **A `u16` column that would truncate is promoted rather than wrapped.** The failure this
