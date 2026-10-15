@@ -293,19 +293,7 @@ fn the_two_builds_agree_about_the_empty_bundle() {
     args.schema = config.schema;
     build_in_memory(&args).expect("the oracle builds the empty bundle too");
 
-    let left = collect(&streaming);
-    let right = collect(&reference);
-    assert_eq!(
-        left.keys().collect::<Vec<_>>(),
-        right.keys().collect::<Vec<_>>(),
-        "the two builds wrote different files"
-    );
-    for (name, bytes) in &left {
-        if name == "v00000/MANIFEST.json" || name == "CURRENT" {
-            continue; // `created_at`, and the digest of the manifest carrying it
-        }
-        assert_eq!(bytes, &right[name], "{name} is not byte-identical");
-    }
+    common::assert_bundles_identical(&streaming, &reference, "the two builds");
 }
 
 /// **`extent = "auto"` over no rows is still refused**, and the message says what to write
@@ -327,27 +315,4 @@ fn auto_extent_over_no_rows_is_still_refused() {
         text.contains("selects no rows") && text.contains("state the frame"),
         "the refusal must name the remedy: {text}"
     );
-}
-
-fn collect(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
-    fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                walk(root, &path, out);
-            } else {
-                let rel = path
-                    .strip_prefix(root)
-                    .unwrap()
-                    .components()
-                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                    .collect::<Vec<_>>()
-                    .join("/");
-                out.insert(rel, std::fs::read(&path).unwrap());
-            }
-        }
-    }
-    let mut out = std::collections::BTreeMap::new();
-    walk(root, root, &mut out);
-    out
 }

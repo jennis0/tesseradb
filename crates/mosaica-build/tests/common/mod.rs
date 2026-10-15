@@ -224,33 +224,42 @@ pub fn id_attributes(
     (schema, sources)
 }
 
-/// Every file of two bundles, compared byte for byte — `MANIFEST.json` with its wall-clock
-/// `created_at` blanked, and `CURRENT`, which is nothing but that manifest's digest, skipped with
-/// it. Every digest the manifest records for every other file is compared verbatim, so a
-/// membership that differed by one entity fails here.
+/// Every file under `root`, keyed by its `root`-relative slash-separated path.
 #[allow(dead_code)]
-pub fn assert_bundles_identical(left: &Path, right: &Path, what: &str) {
-    fn collect(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
-        fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
-            for entry in std::fs::read_dir(dir).unwrap() {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    walk(root, &path, out);
-                } else {
-                    let rel = path
-                        .strip_prefix(root)
-                        .unwrap()
-                        .to_string_lossy()
-                        .replace('\\', "/");
-                    out.insert(rel, std::fs::read(&path).unwrap());
-                }
+pub fn bundle_files(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(root, &path, out);
+            } else {
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                out.insert(rel, std::fs::read(&path).unwrap());
             }
         }
-        let mut out = std::collections::BTreeMap::new();
-        walk(root, root, &mut out);
-        out
     }
-    let (a, b) = (collect(left), collect(right));
+    let mut out = std::collections::BTreeMap::new();
+    walk(root, root, &mut out);
+    out
+}
+
+/// Every file of two bundles, compared byte for byte, except what follows from `MANIFEST.json`'s
+/// wall-clock `created_at`: the manifest is compared with it blanked, `CURRENT` (the manifest's
+/// digest) is skipped, a shard's file with its `identity` (derived from that digest) blanked, and a
+/// partition file with the digests of the shard files it names blanked. Every other digest is
+/// compared verbatim, so a membership that differed by one entity fails here.
+#[allow(dead_code)]
+pub fn assert_bundles_identical(left: &Path, right: &Path, what: &str) {
+    fn json(bytes: &[u8]) -> serde_json::Value {
+        serde_json::from_slice(bytes).unwrap()
+    }
+    let (a, b) = (bundle_files(left), bundle_files(right));
     assert_eq!(
         a.keys().collect::<Vec<_>>(),
         b.keys().collect::<Vec<_>>(),
@@ -258,26 +267,40 @@ pub fn assert_bundles_identical(left: &Path, right: &Path, what: &str) {
     );
     for (name, left_bytes) in &a {
         let right_bytes = &b[name];
-        if name.ends_with("MANIFEST.json") {
-            let normalise = |bytes: &[u8]| {
-                let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
-                value["created_at"] = serde_json::Value::Null;
-                value
-            };
-            assert_eq!(
-                normalise(left_bytes),
-                normalise(right_bytes),
-                "{what}: MANIFEST.json differs (ignoring created_at)"
-            );
+        let file = name.rsplit('/').next().unwrap_or(name);
+        let in_dir = |dir: &str| name.split('/').rev().nth(2) == Some(dir);
+        let blank: Option<fn(&mut serde_json::Value)> = if file == "CURRENT" {
             continue;
+        } else if file == "MANIFEST.json" {
+            Some(|value| value["created_at"] = serde_json::Value::Null)
+        } else if !file.starts_with("SEGMENTS-") {
+            None
+        } else if in_dir("shards") {
+            Some(|value| value["identity"] = serde_json::Value::Null)
+        } else if in_dir("partitions") {
+            Some(|value| {
+                for file in value["shards"]["files"].as_array_mut().unwrap() {
+                    file["sha256"] = serde_json::Value::Null;
+                }
+            })
+        } else {
+            None
+        };
+        match blank {
+            Some(blank) => {
+                let (mut l, mut r) = (json(left_bytes), json(right_bytes));
+                blank(&mut l);
+                blank(&mut r);
+                assert_eq!(l, r, "{what}: {name} differs");
+            }
+            None => assert_eq!(
+                left_bytes,
+                right_bytes,
+                "{what}: {name} is not byte-identical ({} vs {} bytes)",
+                left_bytes.len(),
+                right_bytes.len()
+            ),
         }
-        if name == "CURRENT" {
-            continue;
-        }
-        assert_eq!(
-            left_bytes, right_bytes,
-            "{what}: {name} is not byte-identical"
-        );
     }
     assert!(
         a.len() > 6,

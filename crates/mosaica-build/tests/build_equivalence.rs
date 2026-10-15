@@ -376,75 +376,6 @@ fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
     }
 }
 
-/// Every file under `root`, keyed by its `root`-relative slash-separated path.
-fn collect(root: &Path) -> BTreeMap<String, Vec<u8>> {
-    fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                walk(root, &path, out);
-            } else {
-                let rel = path
-                    .strip_prefix(root)
-                    .unwrap()
-                    .components()
-                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                    .collect::<Vec<_>>()
-                    .join("/");
-                out.insert(rel, std::fs::read(&path).unwrap());
-            }
-        }
-    }
-    let mut out = BTreeMap::new();
-    walk(root, root, &mut out);
-    out
-}
-
-/// Compare two bundles file for file. `MANIFEST.json` is compared with its wall-clock
-/// `created_at` blanked, and `CURRENT` (which is nothing but that manifest's digest) with it.
-/// Every other file, including all the digests `MANIFEST.json` records, is compared verbatim.
-fn assert_bundles_identical(left: &Path, right: &Path, what: &str) {
-    let a = collect(left);
-    let b = collect(right);
-    assert_eq!(
-        a.keys().collect::<Vec<_>>(),
-        b.keys().collect::<Vec<_>>(),
-        "{what}: the two bundles do not contain the same files"
-    );
-    for (name, left_bytes) in &a {
-        let right_bytes = &b[name];
-        if name == "v00000/MANIFEST.json" {
-            let normalise = |bytes: &[u8]| {
-                let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
-                value["created_at"] = serde_json::Value::Null;
-                value
-            };
-            assert_eq!(
-                normalise(left_bytes),
-                normalise(right_bytes),
-                "{what}: MANIFEST.json differs (ignoring created_at)"
-            );
-            continue;
-        }
-        if name == "CURRENT" {
-            continue; // the digest of a manifest that legitimately differs in created_at only
-        }
-        assert_eq!(
-            left_bytes,
-            right_bytes,
-            "{what}: {name} is not byte-identical ({} vs {} bytes)",
-            left_bytes.len(),
-            right_bytes.len()
-        );
-    }
-    // A bundle that only contained CURRENT and MANIFEST would pass the loop vacuously.
-    assert!(
-        a.len() > 6,
-        "{what}: expected a full bundle, found {} files",
-        a.len()
-    );
-}
-
 #[test]
 fn streaming_build_is_byte_identical_to_the_reference_build() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -467,7 +398,7 @@ fn streaming_build_is_byte_identical_to_the_reference_build() {
     // the other would be worse than none — which path ran is not something the caller chose.
     assert_eq!(reference.views[0].occupancy, streaming.views[0].occupancy);
     assert_eq!(reference.views[0].occupancy.points, reference.items);
-    assert_bundles_identical(&reference_out, &streaming_out, "streaming vs reference");
+    common::assert_bundles_identical(&reference_out, &streaming_out, "streaming vs reference");
 }
 
 /// **The same byte identity over a view whose access terms are a `list<string>` field**, where the
@@ -498,7 +429,7 @@ fn a_field_sourced_build_is_byte_identical_to_the_reference_build() {
     assert_eq!(reference.items, streaming.items);
     assert_eq!(reference.terms, streaming.terms);
     assert_eq!(reference.pairs, streaming.pairs);
-    assert_bundles_identical(
+    common::assert_bundles_identical(
         &reference_args.out,
         &streaming_args.out,
         "field-sourced streaming vs reference",
@@ -598,13 +529,13 @@ fn attributed_build_is_byte_identical_to_the_reference_build() {
     let streaming_out = temp.path().join("streaming");
     build_in_memory(&make_args(reference_out.clone(), None)).unwrap();
     build(&make_args(streaming_out.clone(), None)).unwrap();
-    assert_bundles_identical(&reference_out, &streaming_out, "attributed, single batch");
+    common::assert_bundles_identical(&reference_out, &streaming_out, "attributed, single batch");
 
     let batched_reference = temp.path().join("batched-reference");
     let batched_streaming = temp.path().join("batched-streaming");
     build_in_memory(&make_args(batched_reference.clone(), Some(2_100))).unwrap();
     build(&make_args(batched_streaming.clone(), Some(2_100))).unwrap();
-    assert_bundles_identical(
+    common::assert_bundles_identical(
         &batched_reference,
         &batched_streaming,
         "attributed, batched",
@@ -624,7 +555,7 @@ fn attributed_build_is_byte_identical_to_the_reference_build() {
     );
     let vocabularies = manifest["vocabularies"].as_array().unwrap();
     assert_eq!(vocabularies.len(), 2, "both vocabularies must be recorded");
-    let files = collect(&streaming_out);
+    let files = common::bundle_files(&streaming_out);
     let columns: Vec<_> = files
         .iter()
         .filter(|(path, _)| path.ends_with("columns.arrow"))
@@ -654,7 +585,7 @@ fn streaming_build_is_deterministic() {
     let second = temp.path().join("second");
     build(&args_for(&points, &pairs, first.clone())).unwrap();
     build(&args_for(&points, &pairs, second.clone())).unwrap();
-    assert_bundles_identical(&first, &second, "run 1 vs run 2");
+    common::assert_bundles_identical(&first, &second, "run 1 vs run 2");
 }
 
 /// Signatures engineered around the streaming build's tie-group refinement, covering the group
@@ -751,7 +682,7 @@ fn tie_group_shapes_are_byte_identical_to_the_reference_build() {
     let streaming_out = temp.path().join("streaming");
     build_in_memory(&args_for(&points, &pairs, reference_out.clone())).unwrap();
     build(&args_for(&points, &pairs, streaming_out.clone())).unwrap();
-    assert_bundles_identical(&reference_out, &streaming_out, "tie-group shapes");
+    common::assert_bundles_identical(&reference_out, &streaming_out, "tie-group shapes");
 }
 
 /// A build writing no oracle `pairs.parquet` must hold the same byte-identity between the two
@@ -775,9 +706,9 @@ fn a_build_without_pairs_is_byte_identical_and_verifiable() {
     let streaming_out = temp.path().join("streaming");
     build_in_memory(&make_args(reference_out.clone())).unwrap();
     build(&make_args(streaming_out.clone())).unwrap();
-    assert_bundles_identical(&reference_out, &streaming_out, "no pairs");
+    common::assert_bundles_identical(&reference_out, &streaming_out, "no pairs");
 
-    let files = collect(&streaming_out);
+    let files = common::bundle_files(&streaming_out);
     for name in files.keys() {
         assert!(
             !name.ends_with("pairs.parquet"),
@@ -818,7 +749,7 @@ fn batched_build_is_byte_identical_to_the_batched_reference() {
     let streaming_out = temp.path().join("streaming");
     build_in_memory(&make_args(reference_out.clone())).unwrap();
     build(&make_args(streaming_out.clone())).unwrap();
-    assert_bundles_identical(
+    common::assert_bundles_identical(
         &reference_out,
         &streaming_out,
         "batched, forced spill+bands",
@@ -827,7 +758,7 @@ fn batched_build_is_byte_identical_to_the_batched_reference() {
     // Determinism of the batched path.
     let again = temp.path().join("again");
     build(&make_args(again.clone())).unwrap();
-    assert_bundles_identical(&streaming_out, &again, "batched run 1 vs run 2");
+    common::assert_bundles_identical(&streaming_out, &again, "batched run 1 vs run 2");
 
     // The batch size is identity-bearing and must be recorded (and the single-batch builds
     // above must NOT record one — checked in the conformant test's manifest assertions).
@@ -914,7 +845,7 @@ fn streaming_build_matches_the_reference_under_a_limit() {
     let streaming = build(&b).unwrap();
     assert!(reference.items > 0 && reference.items < N_ITEMS);
     assert_eq!(reference.items, streaming.items);
-    assert_bundles_identical(&reference_out, &streaming_out, "limited");
+    common::assert_bundles_identical(&reference_out, &streaming_out, "limited");
 }
 
 /// I9's assignment rule, asserted directly rather than only through byte equality: entity IDs

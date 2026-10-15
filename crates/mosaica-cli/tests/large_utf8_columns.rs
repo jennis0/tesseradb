@@ -460,6 +460,21 @@ fn a_corpus_at_both_offset_widths_checks_and_builds_the_same() {
         if name == "CURRENT" || by_identity(name) {
             continue;
         }
+        if name.contains("/SEGMENTS-") {
+            // A shard's identity follows the manifest's digest, and so its file's digest does too.
+            let normalise = |bytes: &[u8]| {
+                let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+                value["identity"] = serde_json::Value::Null;
+                if let Some(files) = value["shards"]["files"].as_array_mut() {
+                    for file in files {
+                        file["sha256"] = serde_json::Value::Null;
+                    }
+                }
+                value
+            };
+            assert_eq!(normalise(left_bytes), normalise(right_bytes), "{name} differs");
+            continue;
+        }
         if name.ends_with("columns.arrow") {
             assert_eq!(
                 entity_columns(left_bytes, &key_a),
