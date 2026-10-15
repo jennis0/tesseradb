@@ -9,7 +9,7 @@ use mosaica_lifecycle::wal::ParentRef;
 use mosaica_access::Label;
 use mosaica_types::layer::ServingLayout;
 
-use mosaica_store::permutation::RowSpace;
+use mosaica_store::permutation::{ProjectScratch, RowSpace};
 
 use crate::compose::MaskedSet;
 use crate::containment::{ContainmentAnswers, ContainmentPartition};
@@ -76,7 +76,8 @@ pub(super) fn parse_access(access: &[Vec<u8>]) -> Arc<[Option<Label>]> {
 #[derive(Debug, Clone)]
 pub struct MembershipRows {
     /// Parallel to a level's ordinals; `None` is a hole, not an empty membership. One `Arc` per
-    /// artifact, so `Arc::make_mut` on a write copies only the bitmap that grew.
+    /// artifact that has rows, so `Arc::make_mut` on a write copies only the bitmap that grew; the
+    /// rest share [`no_rows`].
     pub(super) rows: Vec<Option<Arc<Bitmap>>>,
     /// Per ordinal, per rank: that content's generating set in row space. Pushed in lockstep with
     /// [`ArtifactRecords::declared`], the size the same set had in entity space.
@@ -321,6 +322,23 @@ impl Default for MembershipRows {
     }
 }
 
+/// The empty membership slots without rows share, one per thread so parallel builds do not contend
+/// on its reference count.
+fn no_rows() -> Arc<Bitmap> {
+    thread_local! {
+        static NONE: Arc<Bitmap> = Arc::new(Bitmap::new());
+    }
+    NONE.with(Arc::clone)
+}
+
+/// `rows` as a slot holds them: [`no_rows`] where there are none.
+fn held_rows(rows: Bitmap) -> Arc<Bitmap> {
+    match rows.is_empty() {
+        true => no_rows(),
+        false => Arc::new(rows),
+    }
+}
+
 impl MembershipRows {
     /// Project a level's memberships into `space`. Costly and not on any per-request path:
     /// `RowSpace::project` decodes the whole membership. Paid at open and at a generation move.
@@ -329,25 +347,36 @@ impl MembershipRows {
         space: &RowSpace,
     ) -> Self {
         let mut membership = MembershipRows::default();
+        let scratch = &mut ProjectScratch::default();
         for (ordinal, record) in artifacts {
-            membership.put(ordinal as usize, record, space);
+            membership.put(ordinal as usize, record, space, scratch);
         }
         membership
     }
 
     /// Returns the rows it projected, which the publication arms need whether or not this form
     /// keeps them ([`Self::rows_held`]).
-    pub(super) fn put(&mut self, idx: usize, record: &ArtifactRecord, space: &RowSpace) -> Arc<Bitmap> {
+    pub(super) fn put(
+        &mut self,
+        idx: usize,
+        record: &ArtifactRecord,
+        space: &RowSpace,
+        scratch: &mut ProjectScratch,
+    ) -> Arc<Bitmap> {
         if self.rows.len() <= idx {
             self.rows.resize_with(idx + 1, || None);
             self.generating.resize_with(idx + 1, Vec::new);
         }
-        let rows = Arc::new(record.members.projected(|part| space.project(part)));
+        let rows = held_rows(
+            record
+                .members
+                .projected(|part| space.project_with(part, scratch)),
+        );
         // A column-only form keeps the slot and not the set: the `Arc` is shared, not the bitmap.
         self.rows[idx] = Some(if self.rows_held {
             Arc::clone(&rows)
         } else {
-            Arc::new(Bitmap::new())
+            no_rows()
         });
         self.generating[idx] = record
             .contents
@@ -355,7 +384,7 @@ impl MembershipRows {
             // A member still in the commit buffer has no row, so the set projects short of its
             // declared size and [`ArtifactRows::satisfied_rank`] withholds the content from
             // everyone until the flush that gives it one.
-            .map(|v| space.project(&v.generated_from))
+            .map(|v| space.project_with(&v.generated_from, scratch))
             .collect();
         rows
     }
@@ -363,29 +392,41 @@ impl MembershipRows {
     /// One artifact's generating sets alone, with an empty membership standing in for rows a
     /// transposed column supplies afterwards ([`Self::absorb_transposed`]). The generating sets
     /// still project: a row column holds membership and nothing else.
-    pub(super) fn put_generating(&mut self, idx: usize, record: &ArtifactRecord, space: &RowSpace) {
+    pub(super) fn put_generating(
+        &mut self,
+        idx: usize,
+        record: &ArtifactRecord,
+        space: &RowSpace,
+        scratch: &mut ProjectScratch,
+    ) {
         if self.rows.len() <= idx {
             self.rows.resize_with(idx + 1, || None);
             self.generating.resize_with(idx + 1, Vec::new);
         }
-        self.rows[idx] = Some(Arc::new(Bitmap::new()));
+        self.rows[idx] = Some(no_rows());
         self.generating[idx] = record
             .contents
             .iter()
-            .map(|v| space.project(&v.generated_from))
+            .map(|v| space.project_with(&v.generated_from, scratch))
             .collect();
     }
 
     /// One artifact's generating sets projected again from the record, where a page held a leave
     /// or a fill changed which contents the artifact has. The membership is left untouched.
-    pub(super) fn project_generating(&mut self, idx: usize, record: &ArtifactRecord, space: &RowSpace) {
+    pub(super) fn project_generating(
+        &mut self,
+        idx: usize,
+        record: &ArtifactRecord,
+        space: &RowSpace,
+        scratch: &mut ProjectScratch,
+    ) {
         if idx >= self.generating.len() {
             return;
         }
         self.generating[idx] = record
             .contents
             .iter()
-            .map(|v| space.project(&v.generated_from))
+            .map(|v| space.project_with(&v.generated_from, scratch))
             .collect();
     }
 
@@ -398,7 +439,7 @@ impl MembershipRows {
         }
         for (idx, slot) in self.rows.iter_mut().enumerate() {
             if slot.is_some() {
-                *slot = Some(Arc::new(std::mem::take(&mut transposed[idx])));
+                *slot = Some(held_rows(std::mem::take(&mut transposed[idx])));
             }
         }
         self.rows_held = true;
@@ -408,10 +449,9 @@ impl MembershipRows {
     /// Give up the per-artifact rows and serve them from the column instead — see
     /// [`Self::rows_held`]. [`Self::absorb_transposed`] can bring the form back.
     pub(super) fn hold_no_rows(&mut self) {
-        let empty = Arc::new(Bitmap::new());
         for slot in self.rows.iter_mut() {
             if slot.is_some() {
-                *slot = Some(Arc::clone(&empty));
+                *slot = Some(no_rows());
             }
         }
         self.rows_held = false;
@@ -425,21 +465,22 @@ impl MembershipRows {
         record: &ArtifactRecord,
         rows: Bitmap,
         space: &RowSpace,
+        scratch: &mut ProjectScratch,
     ) -> Arc<Bitmap> {
         if self.rows.len() <= idx {
             self.rows.resize_with(idx + 1, || None);
             self.generating.resize_with(idx + 1, Vec::new);
         }
-        let rows = Arc::new(rows);
+        let rows = held_rows(rows);
         self.rows[idx] = Some(if self.rows_held {
             Arc::clone(&rows)
         } else {
-            Arc::new(Bitmap::new())
+            no_rows()
         });
         self.generating[idx] = record
             .contents
             .iter()
-            .map(|v| space.project(&v.generated_from))
+            .map(|v| space.project_with(&v.generated_from, scratch))
             .collect();
         rows
     }
@@ -452,7 +493,7 @@ impl MembershipRows {
             self.rows.resize_with(idx + 1, || None);
             self.generating.resize_with(idx + 1, Vec::new);
         }
-        self.rows[idx] = Some(Arc::new(rows));
+        self.rows[idx] = Some(held_rows(rows));
         self.rows_held = true;
     }
 

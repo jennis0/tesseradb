@@ -65,6 +65,9 @@ impl ArtifactProjections {
             return served;
         }
 
+        // A shard's slice holds no key, label or parent: its form takes the level's records.
+        let shared = self.level_records(&at, records);
+        let slice = LevelSlice::new(store, records, layer, level, Some(shared));
         // Both derivations, and the partition, from one borrow of the store at one level version:
         // the row form, the records and the containment partition must describe the same
         // population, and a growth landing between two reads would leave one of them describing a
@@ -75,24 +78,19 @@ impl ArtifactProjections {
         // no postings. Logged rather than returned, since the caller's alternative would be to
         // fail a request over a derivation that has a correct fallback.
         let partition = source
-            .and_then(|source| self.partition_for(&at, store, source));
-        let built = match predicate {
-            Some(PredicateSource::Spatial(spatial)) => self.assembled(
-                &at,
-                spatial,
-                store,
-                space,
-                layout,
-                declaration.fixed_layout().is_none(),
-            ),
-            Some(PredicateSource::Attribute(attribute)) => {
-                self.claimed_or_projected(&at, store, space, layout, Some(attribute), declaration)
-            }
-            None => self.claimed_or_projected(&at, store, space, layout, None, declaration),
+            .and_then(|source| self.partition_for(&at, &slice, source));
+        let attribute = match predicate {
+            Some(PredicateSource::Attribute(attribute)) => Some(attribute),
+            _ => None,
         };
-        let mut built = built.with_partition(partition);
-        self.share_records(&at, &mut built, store, records);
-        self.filed(&at, key, segments_version, built)
+        let built = match predicate {
+            Some(PredicateSource::Spatial(spatial)) => {
+                let lists = declaration.fixed_layout().is_none();
+                self.assembled(&at, spatial, &slice, space, layout, lists)
+            }
+            _ => self.claimed_or_projected(&at, &slice, space, layout, attribute, declaration),
+        };
+        self.filed(&at, key, segments_version, built.with_partition(partition))
     }
 
     /// The form held for this coordinate where it still answers for the caller's row space, and the
@@ -145,35 +143,30 @@ impl ArtifactProjections {
         (rows, version)
     }
 
-    /// Give `built` the level's records: those another shard's form took at the same version,
-    /// else the ones `built` holds where `store` is `records` itself, else `records`' own. A
-    /// shard's slice holds no key, label or parent, so a form of it never serves its own.
-    fn share_records(
-        &self,
-        at: &Coordinate<'_>,
-        built: &mut ArtifactRows,
-        store: &ArtifactStore,
-        records: &ArtifactStore,
-    ) {
+    /// The level's records at this version: those another shard's form took, else built from
+    /// `records` and held for the next. Held records whose length is not the level's are stale
+    /// and are rebuilt.
+    fn level_records(&self, at: &Coordinate<'_>, records: &ArtifactStore) -> Arc<ArtifactRecords> {
         let key = at.derived_key();
+        let view = view_key(at.view);
+        let len = (0..records.slots(at.layer, at.level).len() as u32)
+            .rev()
+            .find(|&ordinal| records.drawn_in_view(at.layer, at.level, ordinal, view))
+            .map_or(0, |ordinal| ordinal as usize + 1);
         let mut held = self.records_held.lock().unwrap_or_else(|e| e.into_inner());
         let shared = held
             .get(&at.records_address())
             .filter(|(held_key, _)| *held_key == key)
             .and_then(|(_, records)| records.upgrade())
-            .filter(|records| records.len() == built.records.len());
+            .filter(|shared| shared.len() == len);
         if let Some(shared) = shared {
-            built.records = shared;
-            return;
+            return shared;
         }
-        if !std::ptr::eq(store, records) {
-            built.records = Arc::new(ArtifactRecords::build(records.level_in_view(
-                at.layer,
-                at.level,
-                view_key(at.view),
-            )));
-        }
-        held.insert(at.records_address(), (key, Arc::downgrade(&built.records)));
+        let built = Arc::new(ArtifactRecords::build(
+            records.level_in_view(at.layer, at.level, view),
+        ));
+        held.insert(at.records_address(), (key, Arc::downgrade(&built)));
+        built
     }
 
     /// A spatial level's membership is assembled from its segments' resolutions, once, over this
@@ -186,7 +179,7 @@ impl ArtifactProjections {
         &self,
         at: &Coordinate<'_>,
         spatial: &SpatialSource<'_>,
-        store: &ArtifactStore,
+        slice: &LevelSlice<'_>,
         space: &RowSpace,
         layout: ServingLayout,
         lists: bool,
@@ -195,10 +188,11 @@ impl ArtifactProjections {
         // Filtered by view: a shape belongs to one view of its group, and resolving it into every
         // view's row space would draw it on every view's map with a real masked count.
         let mut built = ArtifactRows::build_resolved(
-            store.level_in_view(at.layer, at.level, view_key(at.view)),
+            slice.in_view(view_key(at.view)),
             joined,
             spatial.total_rows,
             space,
+            slice.shared(),
         );
         built.lists_on_overlap = lists;
         let column = if !layout.is_row_major() {
@@ -249,7 +243,7 @@ impl ArtifactProjections {
     fn claimed_or_projected(
         &self,
         at: &Coordinate<'_>,
-        store: &ArtifactStore,
+        slice: &LevelSlice<'_>,
         space: &RowSpace,
         layout: ServingLayout,
         attribute: Option<&AttributeSource<'_>>,
@@ -271,12 +265,13 @@ impl ArtifactProjections {
                 .map(|(claimed, behind)| (Arc::new(claimed), behind)),
         };
         let transposed = claimed.as_ref().and_then(|(column, _)| {
-            ArtifactRows::build_from_column(
-                store.level_in_view(at.layer, at.level, view_key(at.view)),
+            ArtifactRows::build_from_column_sharing(
+                slice.in_view(view_key(at.view)),
                 space,
                 column,
                 &mut adopted,
                 column_only,
+                slice.shared(),
             )
         });
         let from_prefix_column = transposed.is_some();
@@ -295,10 +290,11 @@ impl ArtifactProjections {
         }
         let behind = claimed.as_ref().is_some_and(|(_, behind)| *behind);
         let mut built = transposed.unwrap_or_else(|| {
-            ArtifactRows::build_over(
-                store.level_in_view(at.layer, at.level, view_key(at.view)),
+            ArtifactRows::build_over_sharing(
+                slice.in_view(view_key(at.view)),
                 space,
                 adopted.take(),
+                slice.shared(),
             )
         });
         built.lists_on_overlap = declaration.fixed_layout().is_none();
@@ -309,17 +305,17 @@ impl ArtifactProjections {
         let column = match attribute {
             // The membership *is* the column: the level's own records supply only the ordinal
             // each value's artifact sits at.
-            Some(attribute) => self.attribute_column(at, store, space, attribute),
+            Some(attribute) => self.attribute_column(at, slice, space, attribute),
             None => self.claimed_or_composed(at, claimed, layout, space, &built),
         };
         let from_column = column.is_some();
         let mut built = built.with_column(column);
-        if !built.membership().rows_held() && !self.brought_over(at, &mut built, store, space, behind)
+        if !built.membership().rows_held() && !self.brought_over(at, &mut built, slice, space, behind)
         {
             built = built.with_column(None);
         }
-        self.transpose_back(at, &mut built, store, space);
-        let inherited = self.inherited(at, &mut built, store, space);
+        self.transpose_back(at, &mut built, slice, space);
+        let inherited = self.inherited(at, &mut built, slice, space);
         if layout.is_row_major() && !from_column && inherited == 0 {
             self.fallbacks
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -397,7 +393,7 @@ impl ArtifactProjections {
         &self,
         at: &Coordinate<'_>,
         built: &mut ArtifactRows,
-        store: &ArtifactStore,
+        slice: &LevelSlice<'_>,
         space: &RowSpace,
         behind: bool,
     ) -> bool {
@@ -405,7 +401,7 @@ impl ArtifactProjections {
             return true;
         }
         let started = std::time::Instant::now();
-        let level = || store.level_in_view(at.layer, at.level, view_key(at.view));
+        let level = || slice.in_view(view_key(at.view));
         let mut added = if behind {
             built.base_joins(level(), space)
         } else {
@@ -438,7 +434,7 @@ impl ArtifactProjections {
         &self,
         at: &Coordinate<'_>,
         built: &mut ArtifactRows,
-        store: &ArtifactStore,
+        slice: &LevelSlice<'_>,
         space: &RowSpace,
     ) {
         if built.column().is_some() || built.membership().rows_held() {
@@ -451,10 +447,7 @@ impl ArtifactProjections {
             "ALARM: a level built from its column alone has no column to serve from; its rows \
              are transposed back"
         );
-        built.membership = MembershipRows::build(
-            store.level_in_view(at.layer, at.level, view_key(at.view)),
-            space,
-        );
+        built.membership = MembershipRows::build(slice.in_view(view_key(at.view)), space);
         built.index = Arc::new(TileIndex::build(&built.membership, total_rows(space)));
     }
 
@@ -464,10 +457,10 @@ impl ArtifactProjections {
         &self,
         at: &Coordinate<'_>,
         built: &mut ArtifactRows,
-        store: &ArtifactStore,
+        slice: &LevelSlice<'_>,
         space: &RowSpace,
     ) -> usize {
-        let inherited = built.inherit(store, space, at.layer, at.level, view_key(at.view));
+        let inherited = built.inherit(slice, space, view_key(at.view));
         if inherited > 0 {
             tracing::info!(
                 layer = %at.layer,
@@ -515,19 +508,20 @@ impl ArtifactProjections {
     fn attribute_column(
         &self,
         at: &Coordinate<'_>,
-        store: &ArtifactStore,
+        slice: &LevelSlice<'_>,
         space: &RowSpace,
         source: &AttributeSource<'_>,
     ) -> Option<Arc<RowColumn>> {
-        // `code → ordinal`, from the level's own records. A key that does not resolve is skipped
-        // rather than guessed at, which understates and never overstates.
+        // `code → ordinal`, from the level's records, since a shard's slice holds no key. A key
+        // that does not resolve is skipped rather than guessed at, which understates and never
+        // overstates.
         //
         // Unfiltered by view, and it cannot reach a group-scoped layer: a predicate layer's
         // artifacts are derived from a value column rather than published.
         let mut ordinal_of_code: std::collections::BTreeMap<u32, u32> =
             std::collections::BTreeMap::new();
         let mut ordinals = 0u32;
-        for (ordinal, record) in store.level(at.layer, at.level) {
+        for (ordinal, record) in slice.records() {
             ordinals = ordinals.max(ordinal + 1);
             if let Some(code) = record.key.as_deref().and_then(source.code_of_key) {
                 ordinal_of_code.insert(code, ordinal);
@@ -688,7 +682,7 @@ impl ArtifactProjections {
     fn partition_for(
         &self,
         at: &Coordinate<'_>,
-        store: &ArtifactStore,
+        slice: &LevelSlice<'_>,
         source: &PartitionSource<'_>,
     ) -> Option<ContainmentPartition> {
         let key = at.derived_key();
@@ -703,7 +697,7 @@ impl ArtifactProjections {
                 return Some(partition.clone());
             }
         }
-        let partition = match ContainmentPartition::compose(store, at.layer, at.level, source.postings)
+        let partition = match ContainmentPartition::compose_slice(slice, source.postings)
         {
             Ok(partition) => partition,
             Err(error) => {

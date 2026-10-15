@@ -1125,6 +1125,9 @@ impl Permutation {
         mask: &croaring::Bitmap,
         scratch: &mut ProjectScratch,
     ) -> croaring::Bitmap {
+        if mask.is_empty() {
+            return croaring::Bitmap::new();
+        }
         if let Some(&rows) = self.dense_rows.get() {
             if self.covers_domain(mask) {
                 return Self::row_range(rows);
@@ -2215,7 +2218,16 @@ impl RowSpace {
     /// Inherits [`Permutation::project`]'s cost note in full: never call this on a per-viewport
     /// path.
     pub fn project(&self, mask: &croaring::Bitmap) -> croaring::Bitmap {
-        let mut rows = self.base.project(mask);
+        self.project_with(mask, &mut ProjectScratch::default())
+    }
+
+    /// [`Self::project`], reusing a caller's scratch buffers ([`Permutation::project_with`]).
+    pub fn project_with(
+        &self,
+        mask: &croaring::Bitmap,
+        scratch: &mut ProjectScratch,
+    ) -> croaring::Bitmap {
+        let mut rows = self.base.project_with(mask, scratch);
         rows.or_inplace(&self.project_extents_from(mask, 0));
         rows
     }

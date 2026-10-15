@@ -116,9 +116,9 @@ pub(crate) struct LiveState {
     /// executor, read by the request path. Holds the write shard's slice of each membership;
     /// [`Self::slices`] the others'.
     pub(in crate::write) artifacts: Mutex<ArtifactStore>,
-    /// Every other point shard's slice of each artifact's membership and generating sets, read at
-    /// open, with only what a row form reads of the record: view, attachment, each set's
-    /// cardinality. Never written.
+    /// Every other point shard's slice of the artifacts it holds something of (`seed_artifacts`),
+    /// with only what a row form reads of the record: view, attachment, each set's cardinality.
+    /// Never written.
     pub(in crate::write) slices: Vec<(ShardId, Arc<ArtifactStore>)>,
     /// The view roster, on the registry's contract: written only by the executor, a create is a
     /// WAL append followed by an apply, on the one thread that also holds the allocator. Read by

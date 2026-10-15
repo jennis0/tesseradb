@@ -2,10 +2,6 @@
 
 use std::sync::Arc;
 
-
-
-
-
 /// **Where a predicate level's membership comes from**, resolved against this generation — the
 /// pieces [`ArtifactProjections::get_or_build`](super::ArtifactProjections::get_or_build) needs and cannot reach itself.
 ///

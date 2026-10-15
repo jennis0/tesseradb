@@ -25,6 +25,7 @@ pub mod merge;
 pub mod pairs;
 pub mod partition;
 pub mod permutation;
+mod presence;
 pub mod read;
 pub mod reclaim;
 pub mod render_presence;

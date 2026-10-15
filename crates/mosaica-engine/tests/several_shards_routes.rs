@@ -553,6 +553,11 @@ struct Built {
 
 impl Built {
     fn new(shard_size: Option<u64>) -> Built {
+        Built::declaring(shard_size, CONFIG_TOML)
+    }
+
+    /// The corpus built at `shard_size` under `config`.
+    fn declaring(shard_size: Option<u64>, config: &str) -> Built {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
         let (points, pairs, root) = (
@@ -564,7 +569,7 @@ impl Built {
         write_pairs(&pairs);
         write_layers(dir);
         let config_path = dir.join("config.toml");
-        std::fs::write(&config_path, CONFIG_TOML).unwrap();
+        std::fs::write(&config_path, config).unwrap();
         let config = mosaica_build::config::Config::parse(&config_path, &Default::default())
             .expect("the corpus's declaration parses");
         mosaica_build::build(&build_args(
@@ -1360,6 +1365,78 @@ fn a_level_whose_shards_disagree_on_its_column_reads_every_shard() {
         let read = every_field(RecordsOrder::Stored).filter(member_of(built, "pinned/p1"));
         let read = read_items(&built.engine, session, &read);
         (read.pages, read.counts)
+    });
+}
+
+/// A layer of `cat`'s values, declared beside [`CONFIG_TOML`]'s.
+const BY_CAT: &str = r#"
+[[layer]]
+name = "by-cat"
+views = ["s0"]
+membership = { attribute = "cat" }
+hierarchy = { kind = "flat" }
+visibility = "public"
+artifact_visibility = { default = "inherited" }
+require_member_visibility = "none"
+"#;
+
+/// `by-cat`'s `alpha`, `bravo` and `charlie` hold items of every shard. Each value's count is
+/// summed over every shard, as one shard holding the same items answers it.
+#[test]
+fn an_attribute_layer_counts_its_members_in_every_shard() {
+    let config = [CONFIG_TOML, BY_CAT].concat();
+    let pair = Pair {
+        one: Built::declaring(None, &config),
+        several: Built::declaring(Some(SIZE), &config),
+    };
+    let s = shards();
+    let alpha: BTreeSet<u32> = (0..N)
+        .filter(|&e| cat(e) == "alpha")
+        .map(|e| s.of[&e])
+        .collect();
+    assert_eq!(
+        alpha,
+        BTreeSet::from([0, 1, 2]),
+        "`alpha` lies in every shard"
+    );
+
+    let counts = |built: &Built, session: &Session| -> BTreeMap<String, u64> {
+        let request = ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
+            .layers(mosaica_engine::LayerSelection::Named(&["by-cat"]));
+        frames(built, session, request)
+            .into_iter()
+            .flat_map(|(_, served)| served)
+            .map(|a| (a.name, a.masked_count))
+            .collect()
+    };
+    let session = pair
+        .several
+        .engine
+        .authorise(&full_coverage_credential())
+        .unwrap();
+    let mut want: BTreeMap<String, u64> = BTreeMap::new();
+    for e in 0..N {
+        *want.entry(format!("by-cat/{}", cat(e))).or_default() += 1;
+    }
+    assert_eq!(
+        counts(&pair.several, &session),
+        want,
+        "every item of every shard"
+    );
+
+    pair.same("by-cat's counts", counts);
+    for zoom in 0..=2 {
+        pair.same(
+            &format!("by-cat's frames at depth {zoom}"),
+            |built, session| {
+                let request = ViewportArtifactsRequest::new("s0", zoom, WHOLE_MAP, usize::MAX)
+                    .layers(mosaica_engine::LayerSelection::Named(&["by-cat"]));
+                frames(built, session, request)
+            },
+        );
+    }
+    pair.same("by-cat's artifacts", |built, session| {
+        bulk_artifacts(built, session, "by-cat", None, false)
     });
 }
 

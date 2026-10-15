@@ -1036,6 +1036,8 @@ impl IdColumn {
 #[derive(Default)]
 pub struct ContainmentBuilder {
     interner: Interner,
+    ordinals: u32,
+    listed: Vec<u32>,
     at: Vec<u32>,
     ids: IdColumn,
 }
@@ -1049,31 +1051,39 @@ impl ContainmentBuilder {
     }
 
     /// One artifact's ranks, in order, each already canonically encoded by
-    /// [`encode_expression`].
-    ///
-    /// A level is dense over its ordinals and the walk is in ordinal order, but a hole between two
-    /// artifacts yields no record at all — so the offsets are carried forward to the ordinal being
-    /// written rather than pushed once per record.
+    /// [`encode_expression`]. Ordinals arrive ascending; an artifact whose every rank is the empty
+    /// expression is not listed.
     pub fn push(&mut self, ordinal: u32, ranks: impl IntoIterator<Item = Vec<u32>>) {
-        let idx = ordinal as usize;
-        while self.at.len() <= idx {
-            self.at.push(self.ids.len() as u32);
+        self.ordinals = ordinal + 1;
+        let ranks: Vec<Vec<u32>> = ranks.into_iter().collect();
+        if ranks.iter().all(|expression| expression[..] == EMPTY_EXPRESSION) {
+            return;
         }
         for expression in ranks {
             let id = self.interner.intern(expression);
             self.ids.push(id);
         }
+        self.listed.push(ordinal);
         self.at.push(self.ids.len() as u32);
     }
 
     /// Frame what has been pushed. The caller reads it back through
     /// [`crate::membership::ContainmentPack`], which is what makes composing and opening one reader.
     pub fn finish(self) -> Vec<u8> {
-        let ContainmentBuilder { interner, at, ids } = self;
+        let ContainmentBuilder {
+            interner,
+            ordinals,
+            listed,
+            at,
+            ids,
+        } = self;
         let (words, expr_at) = interner.finish();
-        pack_containment(ids.width(), &at, &ids.ids, &expr_at, &words)
+        pack_containment(ids.width(), ordinals, &listed, &at, &ids.ids, &expr_at, &words)
     }
 }
+
+/// The expression of a set with no member: no clause, so every viewer holds all of it.
+const EMPTY_EXPRESSION: [u32; 2] = [0, 0];
 
 /// Compose one `(layer, level)`'s containment partition, framed.
 ///
@@ -2404,6 +2414,19 @@ mod derived_tests {
         assert!(read_shape_held(&path, 4).is_err(), "another level version");
         std::fs::write(&path, &file[..file.len() - 2]).unwrap();
         assert!(read_shape_held(&path, 3).is_err(), "torn");
+    }
+
+    #[test]
+    fn an_artifact_whose_every_rank_is_empty_is_not_listed() {
+        let empty = encode_expression(0, vec![]);
+        let one = encode_expression(1, vec![&[3][..]]);
+        let mut builder = ContainmentBuilder::new();
+        builder.push(0, [empty.clone(), empty.clone()]);
+        builder.push(1, [one, empty]);
+        let pack = crate::membership::ContainmentPack::from_bytes(builder.finish()).unwrap();
+        assert_eq!(pack.ordinals(), 2);
+        assert_eq!((pack.entry(0), pack.entry(1)), (None, Some(0)));
+        assert_eq!(pack.pairs(), 2);
     }
 
     /// Disjointness is observed, not declared.

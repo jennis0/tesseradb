@@ -8,6 +8,7 @@
 //! Each point shard's form holds that shard's slice of every membership and generating set, and a
 //! slot for every ordinal of the level.
 //! `sources.rs` is where a predicate level's membership is resolved from when it has no stored one.
+//! `slice.rs` is one point shard's slice of a level, as a form of it walks the level.
 //! `view.rs` defines [`ArtifactView`] and its `verdict`: the one predicate for whether an artifact
 //! is served to a principal, and the masked count beside it.
 //!
@@ -24,6 +25,7 @@ mod projections_forward;
 mod rows;
 mod rows_build;
 mod rows_forward;
+mod slice;
 mod sources;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -37,6 +39,7 @@ pub use rows::{
     ArtifactRecords, ArtifactRows, Candidacy, Containment, Matched, MembershipRows,
 };
 pub use sources::{AttributeSource, PredicateSource, SpatialSource};
+pub(crate) use slice::LevelSlice;
 pub use view::{ArtifactSide, ArtifactVerdict, ArtifactView, LabelGate, Withheld};
 
 pub(crate) use rows::view_key;

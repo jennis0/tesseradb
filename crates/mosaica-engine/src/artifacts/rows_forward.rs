@@ -7,7 +7,7 @@ use croaring::Bitmap;
 use mosaica_lifecycle::membership::ArtifactRecord;
 use mosaica_types::layer::ServingLayout;
 
-use mosaica_store::permutation::RowSpace;
+use mosaica_store::permutation::{ProjectScratch, RowSpace};
 
 use crate::tile_index::TileIndex;
 
@@ -75,7 +75,8 @@ impl ArtifactRows {
     ) -> Arc<Bitmap> {
         let idx = ordinal as usize;
         Arc::make_mut(&mut self.records).put(idx, record);
-        self.membership.put(idx, record, space)
+        self.membership
+            .put(idx, record, space, &mut ProjectScratch::default())
     }
 
     /// [`Self::publish_at`] for a membership resolved elsewhere — a spatial level's new shape.
@@ -88,7 +89,8 @@ impl ArtifactRows {
     ) -> Arc<Bitmap> {
         let idx = ordinal as usize;
         Arc::make_mut(&mut self.records).put(idx, record);
-        self.membership.put_resolved(idx, record, rows, space)
+        self.membership
+            .put_resolved(idx, record, rows, space, &mut ProjectScratch::default())
     }
 
     /// One generating set unioned with the entities a page joined to it — the fast arm of the
@@ -127,7 +129,8 @@ impl ArtifactRows {
         }
         Arc::make_mut(&mut self.records).put(idx, record);
         if whole {
-            self.membership.project_generating(idx, record, space);
+            self.membership
+                .project_generating(idx, record, space, &mut ProjectScratch::default());
         }
     }
 

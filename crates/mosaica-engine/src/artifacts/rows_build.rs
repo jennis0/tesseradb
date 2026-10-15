@@ -7,13 +7,41 @@ use croaring::Bitmap;
 use mosaica_lifecycle::membership::{ArtifactRecord, ArtifactStore};
 use mosaica_types::layer::ServingLayout;
 
-use mosaica_store::permutation::RowSpace;
+use mosaica_store::permutation::{ProjectScratch, RowSpace};
 
 use crate::containment::ContainmentPartition;
 use crate::row_column::RowColumn;
 use crate::tile_index::TileIndex;
 
 use super::*;
+
+/// A level's records as a build walks it: built from the walk, or taken whole from `shared`.
+enum RecordsBuilt {
+    Building(ArtifactRecords),
+    Shared(Arc<ArtifactRecords>),
+}
+
+impl RecordsBuilt {
+    fn new(shared: Option<Arc<ArtifactRecords>>) -> Self {
+        match shared {
+            Some(shared) => RecordsBuilt::Shared(shared),
+            None => RecordsBuilt::Building(ArtifactRecords::default()),
+        }
+    }
+
+    fn put(&mut self, idx: usize, record: &ArtifactRecord) {
+        if let RecordsBuilt::Building(records) = self {
+            records.put(idx, record);
+        }
+    }
+
+    fn finish(self) -> Arc<ArtifactRecords> {
+        match self {
+            RecordsBuilt::Building(records) => Arc::new(records),
+            RecordsBuilt::Shared(shared) => shared,
+        }
+    }
+}
 
 impl ArtifactRows {
     /// Build every half from one walk of one level, deriving the index over the projection.
@@ -32,12 +60,23 @@ impl ArtifactRows {
         space: &RowSpace,
         adopted: Option<TileIndex>,
     ) -> Self {
-        let mut records = ArtifactRecords::default();
+        Self::build_over_sharing(artifacts, space, adopted, None)
+    }
+
+    /// [`Self::build_over`], with the level's records taken from `shared` where given.
+    pub(super) fn build_over_sharing<'a>(
+        artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
+        space: &RowSpace,
+        adopted: Option<TileIndex>,
+        shared: Option<Arc<ArtifactRecords>>,
+    ) -> Self {
+        let mut records = RecordsBuilt::new(shared);
         let mut membership = MembershipRows::default();
+        let scratch = &mut ProjectScratch::default();
         for (ordinal, record) in artifacts {
             let idx = ordinal as usize;
             records.put(idx, record);
-            membership.put(idx, record, space);
+            membership.put(idx, record, space, scratch);
         }
         // An offered index is refused outright where the row space has extents: the fold wrote it
         // over the base rows, a flushed segment's rows lie above them, and an artifact whose extent
@@ -57,7 +96,7 @@ impl ArtifactRows {
             None => TileIndex::build(&membership, total_rows(space)),
         };
         ArtifactRows {
-            records: Arc::new(records),
+            records: records.finish(),
             membership,
             index: Arc::new(index),
             partition: None,
@@ -97,18 +136,31 @@ impl ArtifactRows {
         adopted: &mut Option<TileIndex>,
         column_only: bool,
     ) -> Option<Self> {
+        Self::build_from_column_sharing(artifacts, space, column, adopted, column_only, None)
+    }
+
+    /// [`Self::build_from_column`], with the level's records taken from `shared` where given.
+    pub(super) fn build_from_column_sharing<'a>(
+        artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
+        space: &RowSpace,
+        column: &RowColumn,
+        adopted: &mut Option<TileIndex>,
+        column_only: bool,
+        shared: Option<Arc<ArtifactRecords>>,
+    ) -> Option<Self> {
         if column.base_rows() != space.base_rows() {
             return None;
         }
-        let mut records = ArtifactRecords::default();
+        let mut records = RecordsBuilt::new(shared);
         let mut membership = MembershipRows::default();
         // The extent rows are projected here for a form that holds its rows; the base rows come
         // off the column.
         let mut above = Vec::new();
+        let scratch = &mut ProjectScratch::default();
         for (ordinal, record) in artifacts {
             let idx = ordinal as usize;
             records.put(idx, record);
-            membership.put_generating(idx, record, space);
+            membership.put_generating(idx, record, space, scratch);
             if !column_only && space.extent_count() > 0 {
                 above.push((
                     idx,
@@ -128,7 +180,7 @@ impl ArtifactRows {
             ));
             membership.hold_no_rows();
             return Some(ArtifactRows {
-                records: Arc::new(records),
+                records: records.finish(),
                 membership,
                 index: Arc::new(index),
                 partition: None,
@@ -169,7 +221,7 @@ impl ArtifactRows {
             None => TileIndex::build(&membership, total_rows(space)),
         };
         Some(ArtifactRows {
-            records: Arc::new(records),
+            records: records.finish(),
             membership,
             index: Arc::new(index),
             partition: None,
@@ -185,25 +237,28 @@ impl ArtifactRows {
     /// The same family over a membership resolved elsewhere — a spatial level's, joined from the
     /// per-segment pieces the flush resolved. `rows` is the per-row source, parallel to the level's
     /// ordinals; `row_count` is the generation's total row count, base and every extent, because a
-    /// shape's membership covers a flushed row the moment its segment publishes.
-    pub fn build_resolved<'a>(
+    /// shape's membership covers a flushed row the moment its segment publishes. The level's
+    /// records are taken from `shared` where given, and built from `artifacts` otherwise.
+    pub(super) fn build_resolved<'a>(
         artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
         rows: Vec<Option<Bitmap>>,
         row_count: u32,
         space: &RowSpace,
+        shared: Option<Arc<ArtifactRecords>>,
     ) -> Self {
-        let mut records = ArtifactRecords::default();
+        let mut records = RecordsBuilt::new(shared);
         let mut membership = MembershipRows::default();
         let mut rows = rows;
+        let scratch = &mut ProjectScratch::default();
         for (ordinal, record) in artifacts {
             let idx = ordinal as usize;
             records.put(idx, record);
             let resolved = rows.get_mut(idx).and_then(Option::take).unwrap_or_default();
-            membership.put_resolved(idx, record, resolved, space);
+            membership.put_resolved(idx, record, resolved, space, scratch);
         }
         let index = TileIndex::build(&membership, row_count);
         ArtifactRows {
-            records: Arc::new(records),
+            records: records.finish(),
             membership,
             index: Arc::new(index),
             partition: None,
@@ -312,15 +367,15 @@ impl ArtifactRows {
     /// their own.
     pub(super) fn inherit(
         &mut self,
-        store: &ArtifactStore,
+        slice: &LevelSlice<'_>,
         space: &RowSpace,
-        layer: &str,
-        level: u32,
         view: &str,
     ) -> usize {
+        let store = slice.shard();
         let mut taken = 0usize;
         let mut borrowed: Vec<(String, u32, u64)> = Vec::new();
-        for (ordinal, record) in store.level_in_view(layer, level, view) {
+        let scratch = &mut ProjectScratch::default();
+        for (ordinal, record) in slice.in_view(view) {
             if !mosaica_lifecycle::membership::borrows_membership(record) {
                 continue;
             }
@@ -334,12 +389,11 @@ impl ArtifactRows {
             }
             if taken == 0 && !self.membership.rows_held() {
                 // A column-only form holds no bitmap to overwrite; rebuild artifact-major first.
-                self.membership =
-                    MembershipRows::build(store.level_in_view(layer, level, view), space);
+                self.membership = MembershipRows::build(slice.in_view(view), space);
             }
             self.membership.put_rows(
                 ordinal as usize,
-                members.projected(|part| space.project(part)),
+                members.projected(|part| space.project_with(part, scratch)),
             );
             taken += 1;
             for hop in hops {

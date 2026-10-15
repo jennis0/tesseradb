@@ -243,9 +243,15 @@ pub struct GenerationStamp {
 // stored attachment carries its target's space. A 38 bundle is refused.
 // 40: a containment expression carries the size of the set it was composed over. A 39 bundle is
 // refused.
+// 41: a shard's member pack lists only the ordinals it holds something of, its table behind the
+// payload. A 40 bundle is refused.
+// 42: a shard's row-member file and containment partition list only the artifacts they hold
+// something of. A 41 bundle is refused.
+// 43: a member or record pack lists its ordinals by a presence index, as the row-member file and
+// the containment partition do. A 42 bundle is refused.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility.
-pub const BUNDLE_FORMAT: u32 = 40;
+pub const BUNDLE_FORMAT: u32 = 43;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;

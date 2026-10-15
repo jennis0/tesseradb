@@ -1,4 +1,4 @@
-use mosaica_lifecycle::membership::ArtifactRecord;
+use mosaica_lifecycle::membership::{borrows_membership, ArtifactRecord};
 
 use super::*;
 
@@ -526,6 +526,9 @@ fn seed_artifacts(
             continue;
         };
         let name = name.to_string();
+        // A stored layer's slice seeds only the artifacts its shard holds something of, borrowers
+        // and their targets; a resolved layer's seeds every artifact.
+        let held_only = several && stored_membership(&layer.declaration);
         for extent in &space.record_packs {
             let Some(runs) = layer.runs.get(extent.level as usize) else {
                 return Err(EngineError::Malformed(format!(
@@ -586,8 +589,14 @@ fn seed_artifacts(
                     seeded.undecodable += 1;
                     continue;
                 };
-                let mut others = Vec::with_capacity(shards.len() - 1);
+                // Unlisted: adds nothing to any set's sum.
+                let mut others = Vec::new();
+                let mut unlisted = Vec::new();
                 for (at, blob) in blobs.iter().enumerate().skip(1) {
+                    if blob.is_empty() {
+                        unlisted.push(at);
+                        continue;
+                    }
                     match decode_members(blob) {
                         Some((members, sets)) if sets.len() == record.contents.len() => {
                             others.push((at, slice_record(&record, members, sets)));
@@ -598,7 +607,9 @@ fn seed_artifacts(
                 let held = std::iter::once(&record)
                     .chain(others.iter().map(|(_, slice)| slice))
                     .collect::<Vec<_>>();
-                if others.len() + 1 != shards.len() || !slices_hold_their_sets(&held) {
+                if others.len() + unlisted.len() + 1 != shards.len()
+                    || !slices_hold_their_sets(&held)
+                {
                     seeded.undecodable += 1;
                     continue;
                 }
@@ -608,9 +619,21 @@ fn seed_artifacts(
                     for (_, slice) in &mut others {
                         slice.declares_members = Some(declares);
                     }
+                    if !held_only || borrows_membership(&record) {
+                        let nothing = || record.contents.iter().map(|_| croaring::Bitmap::new());
+                        for at in unlisted {
+                            let slice =
+                                slice_record(&record, croaring::Bitmap::new(), nothing().collect());
+                            others.push((at, slice));
+                        }
+                    }
                 }
                 let on_heap = &mut seeded.on_heap;
                 let mut mapped = |record: &mut ArtifactRecord, at: usize| {
+                    // Unlisted: no members to map, and not counted on the heap.
+                    if blobs[at].is_empty() {
+                        return;
+                    }
                     // The membership is read through the pack's mapping and the decoded bitmap
                     // is dropped, to avoid holding a heap bitmap per artifact.
                     //
@@ -658,10 +681,52 @@ fn seed_artifacts(
             }
         }
     }
+    if several {
+        seeded.seed_borrowed_targets();
+    }
     Ok(seeded)
 }
 
 impl SeededArtifacts {
+    /// Seed in each slice, holding nothing, every artifact a borrowing chain reaches that the
+    /// slice left out: a borrower resolves its target in its own shard's slice.
+    fn seed_borrowed_targets(&mut self) {
+        let SeededArtifacts {
+            artifacts, slices, ..
+        } = self;
+        let mut reached = rustc_hash::FxHashSet::default();
+        for (_, _, _, record) in artifacts.every_artifact() {
+            let mut at = record;
+            while borrows_membership(at) {
+                let Some(target) = at.attached_to.as_ref() else {
+                    break;
+                };
+                let Some(held) = artifacts
+                    .get(&target.layer, target.level, target.ordinal)
+                    .filter(|held| held.entity == target.entity)
+                else {
+                    break;
+                };
+                if !reached.insert((target.layer.clone(), target.space, target.level, target.ordinal)) {
+                    break;
+                }
+                at = held;
+            }
+        }
+        for (layer, space, level, ordinal) in reached {
+            let Some(held) = artifacts.get(&layer, level, ordinal) else {
+                continue;
+            };
+            for (_, slice) in slices.iter_mut() {
+                if slice.get(&layer, level, ordinal).is_none() {
+                    let sets = held.contents.iter().map(|_| croaring::Bitmap::new()).collect();
+                    let record = slice_record(held, croaring::Bitmap::new(), sets);
+                    slice.seed(&layer, space, level, ordinal, record, None);
+                }
+            }
+        }
+    }
+
     fn stores_mut(&mut self) -> impl Iterator<Item = &mut ArtifactStore> {
         std::iter::once(&mut self.artifacts).chain(self.slices.iter_mut().map(|(_, slice)| slice))
     }
@@ -781,7 +846,7 @@ mod tests {
         };
         let members = [
             [slice(&[1, 2], &[1, 2]), Vec::new(), slice(&[1], &[1]), slice(&[4], &[])],
-            [slice(&[3], &[3]), Vec::new(), slice(&[], &[]), slice(&[], &[])],
+            [slice(&[3], &[3]), Vec::new(), Vec::new(), Vec::new()],
         ];
         std::fs::write(dir.join("records.pack"), pack(PackKind::Records, 0, &records)).unwrap();
         let mut extents = Vec::new();
@@ -815,9 +880,9 @@ mod tests {
     /// The write store holds each whole record with its shard's slice and the shape, the other
     /// shard's store its slice beside the record's attachment and cardinalities alone, and both
     /// reach the level's bound and version. A record whose slices sum short of a set is refused in
-    /// every shard, and an artifact whose members are all in one shard declares members in each.
+    /// every shard, and a shard holding nothing of an artifact seeds no slice of it.
     #[test]
-    fn every_shards_slice_of_every_artifact_is_read_at_open() {
+    fn each_shards_slice_is_read_at_open() {
         let dir = tempfile::tempdir().expect("tempdir");
         let seeded = two_shards(dir.path(), true).expect("the packs pair");
         let layer = "clusters/a";
@@ -842,10 +907,13 @@ mod tests {
             assert!(store.get(layer, 0, 2).is_none(), "refused in every shard");
             assert_eq!(store.slots(layer, 0).len(), 4);
             assert_eq!(store.level_version(layer, 0), 9);
-            let own = store.get(layer, 0, 3).expect("members in shard 0 alone");
-            assert_eq!(own.declares_members, Some(true));
         }
-        assert!(slice.get(layer, 0, 3).unwrap().members.is_empty());
+        let own = written.get(layer, 0, 3).expect("members in shard 0 alone");
+        assert_eq!(own.declares_members, Some(true));
+        assert!(
+            slice.get(layer, 0, 3).is_none(),
+            "a shard holding nothing of an artifact seeds no slice of it"
+        );
 
         assert!(
             matches!(two_shards(dir.path(), false), Err(EngineError::Malformed(_))),
