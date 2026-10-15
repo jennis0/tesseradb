@@ -573,7 +573,8 @@ impl PrefixReaders {
 /// buffer, the write-side state the engine keeps, and the category bindings replay minted into.
 struct ReconstructedWrites {
     deny: DenyOverlays,
-    buffer: mosaica_lifecycle::IngestBuffer,
+    /// Each point shard's buffer; a shard with none buffered has no entry.
+    buffers: std::collections::BTreeMap<ShardId, mosaica_lifecycle::IngestBuffer>,
     state: crate::write::WritePathState,
     vocabularies: Vocabularies,
 }
@@ -590,11 +591,12 @@ fn reconstruct_writes(
     side: SideDeclarations,
 ) -> Result<ReconstructedWrites> {
     let DenyOverlays {
-        shards: mut shard_deny,
+        shards: shard_deny,
         spaces: space_deny,
     } = initial_deny_of(bundle)?;
     let mut vocabularies = initial_vocabularies_of(bundle)?;
-    let served = &bundle.partitions[&readers.phash].shards;
+    let partition = &bundle.partitions[&readers.phash];
+    let served = &partition.shards;
     let seeds: Vec<crate::write::ShardSeed> = readers
         .shards
         .iter()
@@ -603,13 +605,13 @@ fn reconstruct_writes(
             let (free, held) = freed_of(bundle, shard.id, &shard.tenancy);
             crate::write::ShardSeed {
                 id: shard.id,
+                state: data.record.state,
                 high_water: data.record.high_water,
                 free,
                 held,
             }
         })
         .collect();
-    let write_shard = served[0].record.id;
     // One partition today, so this concatenation is the whole registry; at more than one it is
     // the union.
     let manifest_layers: Vec<mosaica_types::layer::RegisteredLayer> =
@@ -650,15 +652,15 @@ fn reconstruct_writes(
     let manifest_layer_spaces: Vec<mosaica_store::manifest::LayerSpaceRecord> =
         across_partitions(bundle, |p| p.layer_spaces.iter().cloned());
     let initial_deny = Overlays {
-        items: shard_deny.remove(&write_shard).unwrap_or_default(),
+        items: shard_deny,
         spaces: space_deny,
     };
-    let write_views = &served[0].views;
-    let (overlay, buffer, state) = WritePath::reconstruct(
+    let (overlay, buffers, state) = WritePath::reconstruct(
         wal_path,
         several_shards,
         crate::write::ManifestSeed {
             shards: seeds,
+            next_id: partition.next_shard_id,
             size: shard_size_of(bundle),
             layers: &manifest_layers,
             next_layer_space,
@@ -689,22 +691,32 @@ fn reconstruct_writes(
         &readers.dict,
         &initial_deny,
         &mut vocabularies,
-        // Does this row's own view hold it, not "does any view": an entity may hold a row in
-        // several views at once, and a predicate over the entity alone would discard a
-        // pending row of a second view already flushed for the first.
-        |entity, view| {
-            write_views
-                .get(view)
-                .is_some_and(|data| data.row_space.row_of(entity).is_some())
+        // Does this row's own view in its own shard hold it, not "does any view": an entity may
+        // hold a row in several views at once, and a predicate over the entity alone would
+        // discard a pending row of a second view already flushed for the first.
+        |shard, entity, view| {
+            partition.shard(shard).is_some_and(|data| {
+                data.views
+                    .get(view)
+                    .is_some_and(|data| data.row_space.row_of(entity).is_some())
+            })
         },
     )?;
-    shard_deny.insert(write_shard, overlay.items);
+    if let Some(opened) = state
+        .shard_ids()
+        .find(|shard| partition.shard(*shard).is_none())
+    {
+        return Err(EngineError::Malformed(format!(
+            "the WAL opens point shard {opened}, which no side-manifest holds. Restore the \
+             side-manifest and log this bundle was written with"
+        )));
+    }
     Ok(ReconstructedWrites {
         deny: DenyOverlays {
-            shards: shard_deny,
+            shards: overlay.items,
             spaces: overlay.spaces,
         },
-        buffer,
+        buffers,
         state,
         vocabularies,
     })
@@ -853,7 +865,7 @@ fn first_generation(
     state: &crate::write::WritePathState,
     vocabularies: Vocabularies,
     deny: DenyOverlays,
-    buffer: mosaica_lifecycle::IngestBuffer,
+    mut buffers: std::collections::BTreeMap<ShardId, mosaica_lifecycle::IngestBuffer>,
     pool: &rayon::ThreadPool,
 ) -> Result<Arc<GenerationHandle>> {
     let DenyOverlays {
@@ -873,13 +885,17 @@ fn first_generation(
     // The filter columns are carried forward by every generation successor: a restart composes
     // what the flushes before it published, not the build's coverage alone.
     let unfolded_attributes = state.attributes.entity_names();
-    // The write shard alone holds a buffer and edits no run holds yet.
-    let written = std::iter::once((buffer, state.edited_live.clone()))
-        .chain(std::iter::repeat_with(Default::default));
     let served = &bundle.partitions[&readers.phash].shards;
     let mut shards = Vec::with_capacity(readers.shards.len());
-    for ((shard, data), (buffer, edited_live)) in readers.shards.iter().zip(served).zip(written) {
+    for (shard, data) in readers.shards.iter().zip(served) {
         let record = &data.record;
+        // What replay buffered in this shard, and its edits no run holds yet.
+        let buffer = buffers.remove(&shard.id).unwrap_or_default();
+        let edited_live = state
+            .edited_live
+            .get(&shard.id)
+            .cloned()
+            .unwrap_or_default();
         let indexes = open_shard_indexes(
             &readers.prefix_dir,
             bundle,
@@ -1098,7 +1114,7 @@ impl Engine {
         let readers = PrefixReaders::open(bundle_root, &bundle)?;
         let ReconstructedWrites {
             deny,
-            buffer,
+            buffers,
             mut state,
             vocabularies,
         } = reconstruct_writes(wal_path, several_shards, &bundle, &readers, side)?;
@@ -1136,7 +1152,7 @@ impl Engine {
             &state,
             vocabularies,
             deny,
-            buffer,
+            buffers,
             &pool,
         )?;
         let (artifact_projections, shapes) =

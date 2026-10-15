@@ -836,6 +836,7 @@ fn experiment_d(depths: &[usize], rounds: usize) {
         let mut buffer = IngestBuffer::new();
         for id in 0..*depth as u64 {
             let row = WalRow {
+                shard: mosaica_types::ShardId::ZERO,
                 entity_id: EntityId::new(id),
                 view: "v".to_string(),
                 join: false,

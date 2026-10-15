@@ -578,3 +578,121 @@ fn an_engine_writing_several_shards_admits_writes_and_a_log() {
     );
     assert_eq!(served(&engine, &full_coverage_credential()), before);
 }
+
+/// One new item holding the `id` of `key` and every term the full credential holds, and its
+/// `mosaica_id`.
+#[cfg(feature = "several-shard-writes")]
+fn insert(engine: &Engine, key: &str) -> MosaicaId {
+    let receipt = engine
+        .ingest(mosaica_engine::IngestRequest {
+            batch_id: key.to_string(),
+            body_hash: [7; 32],
+            view: Some("s0".to_string()),
+            rows: vec![mosaica_lifecycle::IngestRow {
+                mosaica_id: None,
+                labels: Some(vec![b"0".to_vec()]),
+                position: Some((5.0, 5.0)),
+                scalars: keyed(key),
+                scoped: Vec::new(),
+                omitted: Vec::new(),
+            }],
+            artifacts: Default::default(),
+            strict: true,
+            mosaica_id_column: false,
+        })
+        .expect("the insert is accepted");
+    receipt.mosaica_ids[0].expect("the row created an item")
+}
+
+/// An engine over `built` that writes several shards, its executor running.
+#[cfg(feature = "several-shard-writes")]
+fn writing(built: &Fixture) -> Engine {
+    let mut engine =
+        Engine::open_writing_several_shards(&built.root, &built.cache, &built.wal, config())
+            .expect("the engine opens");
+    engine.start_write_executor(8).expect("the executor starts");
+    engine
+}
+
+/// An insert into a bundle built as two shards lands in the open one, shard 1, at its high
+/// water: its `mosaica_id` and its unique value name it there, and a restart replays it there.
+#[cfg(feature = "several-shard-writes")]
+#[test]
+fn an_insert_lands_in_the_open_shard_and_replays_there() {
+    let several = fixture_sized(N, Some(SIZE));
+    let engine = writing(&several);
+    let before = served(&engine, &full_coverage_credential());
+    let inserted = insert(&engine, "new");
+    let landed = ItemAt::new(ShardId::new(1).unwrap(), EntityId::new(N - SIZE));
+    let named = |engine: &Engine| {
+        let table = by_identifier_and_id(&[(inserted.raw(), key_id("new"))]);
+        let verdicts = engine.name_items(&table).unwrap().verdicts;
+        (engine.resolve_targets(&[inserted]).unwrap(), verdicts)
+    };
+    assert_eq!(
+        named(&engine),
+        (vec![Some(landed.target())], vec![Ok(landed)])
+    );
+    assert_eq!(engine.allocator_high_water(), N + 1);
+    drop(engine);
+
+    let engine = writing(&several);
+    assert_eq!(
+        named(&engine),
+        (vec![Some(landed.target())], vec![Ok(landed)]),
+        "the log replays the row into shard 1"
+    );
+    assert_eq!(engine.allocator_high_water(), N + 1);
+    assert_eq!(served(&engine, &full_coverage_credential()), before);
+    let next = insert(&engine, "next");
+    assert_eq!(
+        engine.resolve_targets(&[next]).unwrap(),
+        vec![Some(Target::Item(
+            ShardId::new(1).unwrap(),
+            EntityId::new(N - SIZE + 1)
+        ))],
+        "shard 1's high water came back from its own rows"
+    );
+}
+
+/// A bundle of two shards whose log holds deletions and suppressions in both reopens with each
+/// shard's denies: what the same denies leave served in a bundle of one shard.
+#[cfg(feature = "several-shard-writes")]
+#[test]
+fn a_log_denying_in_both_shards_reopens_with_each_shards_denies() {
+    use mosaica_lifecycle::wal::{Wal, WalRecord};
+    let one = fixture_sized(N, None);
+    let several = fixture_sized(N, Some(SIZE));
+    let log = |path: &std::path::Path, changes: Vec<(Target, ChangeOp)>| {
+        let mut wal = Wal::open(path).expect("the log opens");
+        wal.append(&WalRecord::ChangeBatch { changes })
+            .expect("an append");
+        wal.fsync().expect("an fsync");
+    };
+    let item =
+        |shard: u32, entity: u64| Target::Item(ShardId::new(shard).unwrap(), EntityId::new(entity));
+    // Shard 0's entity 2 and shard 1's entities 3 and 4 are entities 2, 25 + 3 and 25 + 4 of the
+    // bundle of one shard.
+    log(
+        &several.wal,
+        vec![
+            (item(0, 2), ChangeOp::Suppress),
+            (item(1, 3), ChangeOp::Suppress),
+            (item(1, 4), ChangeOp::Delete),
+        ],
+    );
+    log(
+        &one.wal,
+        vec![
+            (item(0, 2), ChangeOp::Suppress),
+            (item(0, SIZE + 3), ChangeOp::Suppress),
+            (item(0, SIZE + 4), ChangeOp::Delete),
+        ],
+    );
+    let (one, several) = (one.open(), writing(&several));
+    for credential in [full_coverage_credential(), subset_credential()] {
+        assert_eq!(served(&several, &credential), served(&one, &credential));
+    }
+    assert_eq!(several.overlay_depth(), 3);
+    assert_eq!(several.retirable_deletions(), 1);
+}

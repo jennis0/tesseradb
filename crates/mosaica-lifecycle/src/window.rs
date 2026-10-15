@@ -757,8 +757,8 @@ impl<W> CommitWindow<W> {
                 let p = scattered
                     .next()
                     .expect("one PendingItem was gathered per row, in this order");
-                let (wal_row, row_terms) = row.into_wal_row_with(p);
-                entity_ids.push(ItemAt::new(shard, wal_row.entity_id));
+                let (wal_row, row_terms) = row.into_wal_row_with(p, shard);
+                entity_ids.push(ItemAt::new(wal_row.shard, wal_row.entity_id));
                 wal_rows.push(wal_row);
                 terms.push(row_terms);
             }
@@ -778,7 +778,7 @@ impl<W> CommitWindow<W> {
                         entity_id: entity,
                         edit: true,
                     });
-                    let (mut wal_row, row_terms) = row.into_wal_row_with(pending);
+                    let (mut wal_row, row_terms) = row.into_wal_row_with(pending, edit.shard);
                     wal_row.join = at > 0;
                     if at == 0 {
                         edit_terms.push(row_terms);
@@ -788,6 +788,7 @@ impl<W> CommitWindow<W> {
                 let entity = entity.expect("assign_sorted assigns every item it is given");
                 entity_ids.push(ItemAt::new(edit.shard, entity));
                 edits.push(WalEdit {
+                    shard: edit.shard,
                     old: edit.old,
                     number: edit.number,
                     suppressed: false,

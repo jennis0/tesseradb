@@ -64,6 +64,7 @@ fn engine_open_refuses_an_out_of_range_allocator_seed() {
             batch_id: "over-the-top".to_string(),
             body_hash: [0u8; 32],
             rows: vec![mosaica_lifecycle::WalRow {
+                shard: mosaica_types::ShardId::ZERO,
                 entity_id: mosaica_types::EntityId::new(u32::MAX as u64),
                 view: "s0".to_string(),
                 join: false,

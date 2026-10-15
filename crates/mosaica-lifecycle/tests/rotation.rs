@@ -180,9 +180,14 @@ fn a_suppression_survives_the_reclamation_of_the_record_that_carried_it() {
     );
     for record in wal.records() {
         let (position, record) = record.unwrap();
-        replay.apply(&record, position, |_, _| false);
+        replay.apply(&record, position, |_, _, _| false);
     }
-    let overlay = replay.finish().0.items;
+    let overlay = replay
+        .finish()
+        .0
+        .items
+        .remove(&mosaica_types::ShardId::ZERO)
+        .unwrap_or_default();
     assert!(
         overlay.is_suppressed(entity),
         "a live item's suppression retires only on unsuppress; reclaiming its record does not"

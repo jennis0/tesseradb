@@ -497,8 +497,32 @@ impl ShardSets {
         out
     }
 
-    /// Shard 0's set: the one a log record and the store hold until they name the shard. Panics
-    /// where another shard holds something, since writing its set as shard 0's would make its
+    /// The sets as a log record carries them: each shard holding something, ascending by shard.
+    pub fn to_wal(&self) -> Vec<crate::wal::WalShardSet> {
+        self.iter()
+            .map(|(shard, set)| crate::wal::WalShardSet {
+                shard,
+                entities: serialise_members(set),
+            })
+            .collect()
+    }
+
+    /// The sets a log record carries, or `None` where a set's bytes are not a bitmap or the shards
+    /// are not ascending and distinct, on [`deserialise_members`]'s rule: damage is a refusal, not
+    /// an empty set.
+    pub fn from_wal(sets: &[crate::wal::WalShardSet]) -> Option<ShardSets> {
+        if sets.windows(2).any(|pair| pair[0].shard >= pair[1].shard) {
+            return None;
+        }
+        let mut out = ShardSets::default();
+        for logged in sets {
+            out.set(logged.shard, deserialise_members(&logged.entities)?);
+        }
+        Some(out)
+    }
+
+    /// Shard 0's set: the one the artifact store holds until it holds each shard's slice. Panics
+    /// where another shard holds something, since taking its set as shard 0's would make its
     /// entities members there.
     pub fn shard_zero(&self) -> &Bitmap {
         static EMPTY: std::sync::OnceLock<Bitmap> = std::sync::OnceLock::new();
@@ -1907,7 +1931,7 @@ impl ArtifactStore {
             // Damage is a refusal, not an empty membership — see `deserialise_members`. Skipping
             // leaves a hole, which answers *absent*; the alternative decodes a corrupt record to a
             // legitimately emptied artifact and serves it.
-            let Some(members) = deserialise_members(&published.members) else {
+            let Some(members) = store_slice(&published.members) else {
                 refused += 1;
                 continue;
             };
@@ -1925,7 +1949,7 @@ impl ArtifactStore {
                     if digest != v.digest {
                         return None;
                     }
-                    deserialise_members(&v.generated_from).map(|generated_from| ContentSet {
+                    store_slice(&v.generated_from).map(|generated_from| ContentSet {
                         values: Some(v.values.clone()),
                         digest,
                         generated_from,
@@ -1987,12 +2011,12 @@ impl ArtifactStore {
             // decoded short is an acked join that silently did not happen, and the artifact then
             // serves the count it had before — which nothing distinguishes from a criterion it
             // failed to clear.
-            let Some(joining) = deserialise_members(&grown.joining) else {
+            let Some(joining) = store_slice(&grown.joining) else {
                 refused += 1;
                 refused_growth.push(index);
                 continue;
             };
-            let Some(leaving) = deserialise_leaving(&grown.leaving) else {
+            let Some(leaving) = store_slice(&grown.leaving) else {
                 refused += 1;
                 refused_growth.push(index);
                 continue;
@@ -3640,6 +3664,19 @@ pub fn decode_members(blob: &[u8]) -> Option<(Bitmap, Vec<Bitmap>)> {
     Some((members, sets))
 }
 
+/// Shard 0's set of the sets a log record carries, the slice the artifact store holds, or `None`
+/// where the bytes are damage or another shard holds something: the store has no slice to take
+/// that shard's part, so applying the rest would serve a set nobody declared. No sets at all is
+/// the empty set.
+pub fn store_slice(sets: &[crate::wal::WalShardSet]) -> Option<Bitmap> {
+    let mut sets = ShardSets::from_wal(sets)?;
+    match sets.0.as_slice() {
+        [] => Some(Bitmap::new()),
+        [(ShardId::ZERO, _)] => sets.0.pop().map(|(_, set)| set),
+        _ => None,
+    }
+}
+
 /// Serialise a membership for the WAL, in CRoaring's portable form.
 ///
 /// Portable rather than the frozen form the fragment cache uses: frozen is an mmap-oriented layout
@@ -3661,14 +3698,14 @@ pub fn growth_record<'a>(
     layer: &str,
     space: LayerSpace,
     level: u32,
-    joins: impl IntoIterator<Item = (u32, &'a Bitmap)>,
+    joins: impl IntoIterator<Item = (u32, &'a ShardSets)>,
 ) -> Option<crate::wal::WalRecord> {
     let growth: Vec<crate::wal::MembershipGrowth> = joins
         .into_iter()
         .filter(|(_, joining)| !joining.is_empty())
         .map(|(ordinal, joining)| crate::wal::MembershipGrowth {
             ordinal,
-            joining: serialise_members(joining),
+            joining: joining.to_wal(),
             // A membership never shrinks (`ingest.md` §10, R7); a generating-set page is T2b's
             // record and takes the other variant.
             leaving: Vec::new(),
@@ -3690,10 +3727,18 @@ impl ArtifactStore {
     /// removes with the entity. A generating set trades the old for the new, through the one
     /// routine that changes a set, so its cardinality is unchanged and its content is never
     /// withdrawn by the move.
-    pub fn carried_over(&self, moved: &[(EntityId, EntityId)]) -> Vec<crate::wal::WalRecord> {
-        if moved.is_empty() {
+    ///
+    /// Every pair is an edit in `shard`. The store holds shard 0's slice of each set, so an edit
+    /// in another shard finds nothing here to carry.
+    pub fn carried_over(
+        &self,
+        shard: ShardId,
+        moved: &[(EntityId, EntityId)],
+    ) -> Vec<crate::wal::WalRecord> {
+        if moved.is_empty() || shard != ShardId::ZERO {
             return Vec::new();
         }
+        let in_shard = |set: Bitmap| ShardSets::in_shard(shard, set).to_wal();
         let old: Bitmap = moved.iter().map(|(old, _)| old.raw() as u32).collect();
         let new_of: std::collections::BTreeMap<u32, u32> = moved
             .iter()
@@ -3715,7 +3760,7 @@ impl ArtifactStore {
                     let (joining, _) = replaced(&record.members.projected(|part| part.and(&old)));
                     growth.push(crate::wal::MembershipGrowth {
                         ordinal: ordinal as u32,
-                        joining: serialise_members(&joining),
+                        joining: in_shard(joining),
                         leaving: Vec::new(),
                         set: crate::wal::GrownSet::Membership,
                     });
@@ -3727,8 +3772,8 @@ impl ArtifactStore {
                     let (joining, leaving) = replaced(&content.generated_from);
                     growth.push(crate::wal::MembershipGrowth {
                         ordinal: ordinal as u32,
-                        joining: serialise_members(&joining),
-                        leaving: serialise_members(&leaving),
+                        joining: in_shard(joining),
+                        leaving: in_shard(leaving),
                         set: crate::wal::GrownSet::GeneratingSet {
                             rank: rank as u16,
                             cardinality: content.generated_from.cardinality(),
@@ -3760,7 +3805,7 @@ pub fn members_added(record: &crate::wal::WalRecord, store: &ArtifactStore) -> u
     match record {
         crate::wal::WalRecord::ArtifactPublish { artifacts, .. } => artifacts
             .iter()
-            .filter_map(|artifact| deserialise_members(&artifact.members))
+            .filter_map(|artifact| ShardSets::from_wal(&artifact.members))
             .map(|members| members.cardinality())
             .sum(),
         crate::wal::WalRecord::ArtifactGrow {
@@ -3772,25 +3817,13 @@ pub fn members_added(record: &crate::wal::WalRecord, store: &ArtifactStore) -> u
             .iter()
             .filter(|delta| delta.set == crate::wal::GrownSet::Membership)
             .filter_map(|delta| {
-                let joining = deserialise_members(&delta.joining)?;
+                let joining = store_slice(&delta.joining)?;
                 let held = store.get(layer, *level, delta.ordinal)?;
                 Some(joining.cardinality() - held.members.and_cardinality(&joining))
             })
             .sum(),
         _ => 0,
     }
-}
-
-/// A growth's **leaving** set, where no bytes at all is the empty set.
-///
-/// The membership route writes no bytes rather than the serialisation of an empty bitmap
-/// (`ingest.md` §10, R7: a membership never shrinks), so the two spellings of *nothing leaves*
-/// have to read alike. Bytes that are neither are damage, on [`deserialise_members`]'s rule.
-pub fn deserialise_leaving(bytes: &[u8]) -> Option<Bitmap> {
-    if bytes.is_empty() {
-        return Some(Bitmap::new());
-    }
-    deserialise_members(bytes)
 }
 
 /// The inverse, refusing bytes that are not a bitmap.
@@ -4919,7 +4952,7 @@ mod tests {
             level,
             growth: vec![crate::wal::MembershipGrowth {
                 ordinal,
-                joining: serialise_members(&Bitmap::of(joining)),
+                joining: ShardSets::in_shard(ShardId::ZERO, Bitmap::of(joining)).to_wal(),
                 leaving: Vec::new(),
                 set: crate::wal::GrownSet::Membership,
             }],
@@ -4945,7 +4978,7 @@ mod tests {
                 key: Some(format!("c{ordinal}")),
                 view: None,
                 incarnation: 0,
-                members: serialise_members(&Bitmap::of(members)),
+                members: ShardSets::in_shard(ShardId::ZERO, Bitmap::of(members)).to_wal(),
                 contents: Vec::new(),
                 attached_to: None,
                 parents: Vec::new(),
@@ -4968,7 +5001,7 @@ mod tests {
             artifacts[0].contents = vec![crate::wal::PublishedContent {
                 values: vec!["a label".to_string()],
                 digest: content_digest(&["a label".to_string()]),
-                generated_from: serialise_members(&Bitmap::of(sources)),
+                generated_from: ShardSets::in_shard(ShardId::ZERO, Bitmap::of(sources)).to_wal(),
                 cardinality: sources.len() as u64,
             }];
         }
@@ -5164,7 +5197,10 @@ mod tests {
             level: 0,
             growth: vec![crate::wal::MembershipGrowth {
                 ordinal: 0,
-                joining: vec![0xff, 0xff, 0xff, 0xff],
+                joining: vec![crate::wal::WalShardSet {
+                    shard: ShardId::ZERO,
+                    entities: vec![0xff, 0xff, 0xff, 0xff],
+                }],
                 leaving: Vec::new(),
                 set: crate::wal::GrownSet::Membership,
             }],

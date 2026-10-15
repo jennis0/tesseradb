@@ -439,11 +439,21 @@ impl Executor {
     /// own list of those made since it planned, so `fold` leaves them alone.
     fn write_live_state(&self, manifest: &mut SegmentsManifest, fold: bool) {
         let registry = self.live.registry_for_publication();
-        let shard = self.live.only_shard();
-        let record = manifest.only_shard_mut();
-        record.high_water = record.high_water.max(shard.high_water());
-        (record.free_entities, record.held_entities) = shard.freed();
-        manifest.shards.size = shard.size();
+        for shard in &self.live.shards {
+            let Some(record) = manifest
+                .shards
+                .records
+                .iter_mut()
+                .find(|record| record.id == shard.id)
+            else {
+                continue;
+            };
+            record.high_water = record.high_water.max(shard.high_water());
+            (record.free_entities, record.held_entities) = shard.freed();
+            record.state = record.state.max(shard.state);
+        }
+        manifest.shards.next_id = manifest.shards.next_id.max(self.live.next_shard_id);
+        manifest.shards.size = self.live.shard_size();
         let partition = &mut manifest.partition;
         partition.layers = registry.layers;
         partition.next_layer_space = partition.next_layer_space.max(registry.next_layer_space);

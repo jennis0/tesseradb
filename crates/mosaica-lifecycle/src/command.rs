@@ -111,12 +111,15 @@ impl UnallocatedRow {
     /// whole of the "mechanical conversion" this type exists to make mechanical, and a field
     /// added to [`WalRow`] without a matching field here is a compile error at exactly this
     /// method rather than a silently-dropped column somewhere downstream.
-    pub fn into_wal_row_with(self, pending: PendingItem) -> (WalRow, Vec<TermId>) {
+    ///
+    /// `shard` is where the window allocated: a created row's shard. A join row is its item's.
+    pub fn into_wal_row_with(self, pending: PendingItem, shard: ShardId) -> (WalRow, Vec<TermId>) {
         let entity_id = pending
             .entity_id
             .expect("assign_sorted assigns every item it is given");
         (
             WalRow {
+                shard: self.join.map_or(shard, |item| item.shard),
                 entity_id,
                 view: self.view,
                 join: self.join.is_some(),
@@ -605,7 +608,7 @@ mod tests {
         // What `assign_sorted` does, at one item's scale.
         pending.entity_id = Some(EntityId::new(41));
 
-        let (wal_row, terms) = row.into_wal_row_with(pending);
+        let (wal_row, terms) = row.into_wal_row_with(pending, ShardId::ZERO);
         assert_eq!(wal_row.entity_id, EntityId::new(41));
         assert_eq!(wal_row.descriptors, original.descriptors);
         assert_eq!(wal_row.x, original.x);

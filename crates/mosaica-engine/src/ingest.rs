@@ -181,7 +181,10 @@ impl Engine {
         }
         for attempt in 0..2 {
             let generation = self.generation();
-            let unique_seq = generation.only_shard().unique_live.seq();
+            // The live entries of the shard a window adds its values in.
+            let unique_seq = generation
+                .shard(self.write.live().write_shard().id())
+                .map_or(0, |shard| shard.unique_live.seq());
             let submitted = self.plan_ingest(&generation, &request).and_then(|planned| {
                 #[cfg(feature = "fault-injection")]
                 self.switches.hold_write_check_if_wanted();

@@ -442,11 +442,11 @@ impl Executor {
                     let (held_edits, held_items) = window.wanted();
                     shard.room(held_edits + edits, held_items + items)
                 };
-                if !window.is_empty() && room(self.live.only_shard(), &window).is_err() {
+                if !window.is_empty() && room(self.live.write_shard(), &window).is_err() {
                     window = self.close_and_reopen(window);
                     admission = Admission::YieldedAfterClose;
                 }
-                if let Err(full) = room(self.live.only_shard(), &window) {
+                if let Err(full) = room(self.live.write_shard(), &window) {
                     reply.fail(ExecError::ShardFull(full));
                     return (window, admission);
                 }
@@ -489,29 +489,31 @@ impl Executor {
                 .shard(item.shard)
                 .is_none_or(|shard| shard.overlay.is_deleted(item.entity))
         };
-        let stale = crate::unique::moved_since(&generation, &keys, unique_seq, creates)
-            || edits.iter().any(|submitted| {
-                let old = ItemAt::new(submitted.edit.shard, submitted.edit.old);
-                deleted(old)
-                    || crate::write::joined::views_holding(generation.shard_of(old), old.entity)
-                        != submitted.held_views
-            })
-            || slots.iter().any(|slot| match slot {
-                mosaica_lifecycle::Slot::Unchanged { entity, .. }
-                | mosaica_lifecycle::Slot::Joined { entity, .. } => deleted(*entity),
-                _ => false,
-            })
-            || rows.iter().any(|row| match row.join {
-                Some(item) => {
-                    deleted(item)
-                        || crate::edited::holds_in_view(
-                            generation.shard_of(item),
-                            item.entity,
-                            &row.view,
-                        )
-                }
-                None => false,
-            });
+        let write_shard = self.live.write_shard().id;
+        let stale =
+            crate::unique::moved_since(&generation, write_shard, &keys, unique_seq, creates)
+                || edits.iter().any(|submitted| {
+                    let old = ItemAt::new(submitted.edit.shard, submitted.edit.old);
+                    deleted(old)
+                        || crate::write::joined::views_holding(generation.shard_of(old), old.entity)
+                            != submitted.held_views
+                })
+                || slots.iter().any(|slot| match slot {
+                    mosaica_lifecycle::Slot::Unchanged { entity, .. }
+                    | mosaica_lifecycle::Slot::Joined { entity, .. } => deleted(*entity),
+                    _ => false,
+                })
+                || rows.iter().any(|row| match row.join {
+                    Some(item) => {
+                        deleted(item)
+                            || crate::edited::holds_in_view(
+                                generation.shard_of(item),
+                                item.entity,
+                                &row.view,
+                            )
+                    }
+                    None => false,
+                });
         // An entity the handler resolved can since have been retired by a fold, freed, and issued
         // to another item: each must still hold the item the handler resolved it to, and its
         // number must still be at the tenancy the identifier carries.
@@ -651,12 +653,17 @@ impl Executor {
 
         // The allocator's freed ids are at this index's tenancies: a fold swaps its index in before
         // it releases the ids it freed, and both run on this thread.
-        let shard = self.live.only_shard();
+        let shard = self.live.write_shard();
         let (identity, tenancy) = {
             let generation = self.generation.load();
             (
                 self.deps.identity_key,
-                Arc::clone(&generation.only_shard().tenancy),
+                Arc::clone(
+                    &generation
+                        .shard(shard.id)
+                        .expect("the generation serves the write shard")
+                        .tenancy,
+                ),
             )
         };
         let mosaica_id_of = |entity: EntityId| {
@@ -760,18 +767,29 @@ impl Executor {
         // read here, on the thread that changes them, so nothing can move between the read and
         // the append.
         let generation = self.generation.load_full();
-        let mut moved: Vec<(EntityId, EntityId)> = Vec::new();
+        let mut moved: BTreeMap<ShardId, Vec<(EntityId, EntityId)>> = BTreeMap::new();
         let mut first_edit: Option<usize> = None;
         for (index, entry) in closing.entries_mut().iter_mut().enumerate() {
             let (_, edits) = entry.rows_and_edits_mut();
             for edit in edits.iter_mut() {
-                edit.suppressed = generation.only_shard().overlay.is_suppressed(edit.old);
-                moved.push((edit.old, edit.rows[0].entity_id));
+                edit.suppressed = generation
+                    .shard_of(ItemAt::new(edit.shard, edit.old))
+                    .overlay
+                    .is_suppressed(edit.old);
+                moved
+                    .entry(edit.shard)
+                    .or_default()
+                    .push((edit.old, edit.rows[0].entity_id));
                 first_edit.get_or_insert(index);
             }
         }
         drop(generation);
-        let carried = self.live.with_artifacts(|store| store.carried_over(&moved));
+        let carried: Vec<WalRecord> = self.live.with_artifacts(|store| {
+            moved
+                .iter()
+                .flat_map(|(shard, moved)| store.carried_over(*shard, moved))
+                .collect()
+        });
 
         mark = self.health.lap(WriteStage::DeriveRecords, mark);
 
@@ -875,7 +893,10 @@ impl Executor {
             &vocabularies,
             mints,
         );
-        let shard = generation.only_shard();
+        // A window writes into one shard, the write shard, and buffers every row there.
+        let shard = generation
+            .shard(self.live.write_shard().id)
+            .expect("the generation serves the write shard");
         let mut buffer = (*shard.buffer).clone();
         mark = self.health.lap(WriteStage::ApplyBufferClone, mark);
         let declared = &generation.bundle.manifest.declared_scalars;
@@ -902,6 +923,7 @@ impl Executor {
                         .map(move |row| (row, terms.take().unwrap_or_default()))
                 });
             for (row, row_terms) in rows.chain(edit_rows) {
+                debug_assert_eq!(row.shard, shard.id(), "a window writes into one shard");
                 let m = StageMark::now();
                 buffer.insert_row_with_terms(row, row_terms);
                 let m = self.health.lap(WriteStage::RowBufferInsert, m);

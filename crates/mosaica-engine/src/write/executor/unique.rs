@@ -376,11 +376,14 @@ impl Executor {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
         let prefix_dir = self.prefix_dir(&generation);
+        // The rounds read and wrote the one shard's values.
+        let shard = generation.only_shard().id();
         let declared = |runs: &[(WrittenUniqueRun, FileDigest)]| {
             runs.iter()
                 .map(|(run, digest)| {
                     let base = run.as_base(&prefix_dir)?;
                     Ok(mosaica_lifecycle::wal::DeclaredRun {
+                        shard,
                         path: base.path,
                         sha256: digest.sha256.clone(),
                         size: digest.size,

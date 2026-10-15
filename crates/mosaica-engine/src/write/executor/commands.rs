@@ -1315,7 +1315,14 @@ impl Executor {
         let ids = generation.bundle.manifest.view_ids_for_key(&owner, &key);
         // Computed before the drop applies, because the probe reads the row space the drop is
         // about to take away.
-        let dangling = dangling_entities(generation.only_shard(), &ids);
+        let dangling: Vec<Target> = generation
+            .shards()
+            .flat_map(|shard| {
+                dangling_entities(shard, &ids)
+                    .into_iter()
+                    .map(|entity| Target::Item(shard.id(), entity))
+            })
+            .collect();
         let prepared = self
             .live
             .with_roster(|roster| roster.prepare_drop(&owner, &key, dangling.clone()));
@@ -1344,13 +1351,10 @@ impl Executor {
         }
         let deleted = dangling.len() as u64;
         if !dangling.is_empty() {
-            let shard = served.only_shard().id();
             self.apply_changes(
                 dangling
                     .into_iter()
-                    .map(|entity| {
-                        (Target::Item(shard, entity), mosaica_lifecycle::ChangeOp::Delete)
-                    })
+                    .map(|target| (target, mosaica_lifecycle::ChangeOp::Delete))
                     .collect(),
             );
         }

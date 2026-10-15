@@ -39,25 +39,29 @@ use mosaica_types::layer::{
 };
 use mosaica_types::{EntityId, LayerSpace};
 
-use crate::membership::{deserialise_members, serialise_members, ArtifactStore, IncomingArtifact};
+use crate::membership::{ArtifactStore, IncomingArtifact, ShardSets};
 use crate::wal::{PublishedArtifact, WalRecord};
 
 /// The shape of the level one publication fills: how many of its artifacts have members of their
 /// own, and whether any item is a member of two.
 fn publication_shape(artifacts: &[PublishedArtifact]) -> LevelShape {
     let mut shape = LevelShape::empty();
-    let mut claimed = croaring::Bitmap::new();
+    let mut claimed: std::collections::BTreeMap<mosaica_types::ShardId, croaring::Bitmap> =
+        std::collections::BTreeMap::new();
     for members in artifacts
         .iter()
-        .filter_map(|a| deserialise_members(&a.members))
+        .filter_map(|a| ShardSets::from_wal(&a.members))
         .filter(|members| !members.is_empty())
     {
         shape.artifacts += 1;
-        if shape.partitions && claimed.intersect(&members) {
-            shape.partitions = false;
-        }
-        if shape.partitions {
-            claimed.or_inplace(&members);
+        for (shard, members) in members.iter() {
+            let claimed = claimed.entry(shard).or_default();
+            if shape.partitions && claimed.intersect(members) {
+                shape.partitions = false;
+            }
+            if shape.partitions {
+                claimed.or_inplace(members);
+            }
         }
     }
     shape
@@ -401,8 +405,8 @@ fn prepare_set_page(
     }
     Ok(Some(crate::wal::MembershipGrowth {
         ordinal,
-        joining: crate::membership::serialise_members(join.joining.shard_zero()),
-        leaving: crate::membership::serialise_members(join.leaving.shard_zero()),
+        joining: join.joining.to_wal(),
+        leaving: join.leaving.to_wal(),
         set: crate::wal::GrownSet::GeneratingSet { rank, cardinality },
     }))
 }
@@ -1222,7 +1226,7 @@ impl LayerRegistry {
         let mut fills = Vec::new();
         // The delta and never the whole list, so a re-`PUT` whose members are all held appends
         // no growth: a set part already in the state the record asks for is a no-op.
-        let mut joins: Vec<(u32, croaring::Bitmap)> = Vec::new();
+        let mut joins: Vec<(u32, ShardSets)> = Vec::new();
         for ((artifact, ordinal), view) in incoming.iter().zip(&held).zip(&views) {
             let Some(ordinal) = *ordinal else { continue };
             let key = artifact.key.as_deref().expect("a held key is a key");
@@ -1305,7 +1309,10 @@ impl LayerRegistry {
             let mut delta = artifact.members.shard_zero().clone();
             record.members.remove_from(&mut delta);
             if !delta.is_empty() {
-                joins.push((ordinal, delta));
+                joins.push((
+                    ordinal,
+                    ShardSets::in_shard(mosaica_types::ShardId::ZERO, delta),
+                ));
             }
         }
         let growth = crate::membership::growth_record(
@@ -2152,14 +2159,14 @@ impl LayerRegistry {
                     // the artifact in the view it was acked in.
                     view: artifact.view.clone(),
                     incarnation: incarnations[i],
-                    members: serialise_members(artifact.members.shard_zero()),
+                    members: artifact.members.to_wal(),
                     contents: artifact
                         .contents
                         .iter()
                         .map(|v| crate::wal::PublishedContent {
                             values: v.values.clone(),
                             digest: crate::membership::content_digest(&v.values),
-                            generated_from: serialise_members(v.generated_from.shard_zero()),
+                            generated_from: v.generated_from.to_wal(),
                             cardinality: v.generated_from.cardinality(),
                         })
                         .collect(),
@@ -2352,7 +2359,7 @@ impl LayerRegistry {
             }
             growth.push(crate::wal::MembershipGrowth {
                 ordinal,
-                joining: crate::membership::serialise_members(&joining),
+                joining: ShardSets::in_shard(mosaica_types::ShardId::ZERO, joining).to_wal(),
                 leaving: Vec::new(),
                 set: crate::wal::GrownSet::Membership,
             });

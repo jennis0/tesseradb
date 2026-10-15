@@ -33,6 +33,7 @@ pub(crate) use live::*;
 pub(crate) use reconstruct::*;
 pub(crate) use schema::*;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError};
@@ -41,7 +42,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use mosaica_authz::{DeltaTier, Dict};
-use mosaica_lifecycle::alloc::{high_water_from, Allocator};
+use mosaica_lifecycle::alloc::Allocator;
 use mosaica_lifecycle::buffer::DescriptorResolver;
 use mosaica_lifecycle::command::{ExecError, SubmitError};
 use mosaica_lifecycle::faults::WalMeter;
@@ -322,6 +323,7 @@ pub(crate) struct WritePathState {
     wal: Wal,
     several_shards: SeveralShards,
     shards: Vec<ShardWrite>,
+    next_shard_id: u32,
     resolver_state: ResolverState,
     accepted_batches: AcceptedBatches,
     pub(crate) registry: LayerRegistry,
@@ -344,8 +346,9 @@ pub(crate) struct WritePathState {
     /// Every change to a column's `unique` flag the log holds, in log order: what the open applies
     /// to the partition manifest's unique indexes. Taken by the open; empty afterwards.
     pub(crate) unique_events: Vec<UniqueEvent>,
-    /// The edited-items pairs of the edits whose new entity's own row the replayed buffer holds.
-    pub(crate) edited_live: crate::edited::EditedLive,
+    /// Each shard's edited-items pairs of the edits whose new entity's own row the replayed
+    /// buffer holds. A shard with none has no entry.
+    pub(crate) edited_live: BTreeMap<ShardId, crate::edited::EditedLive>,
 }
 
 /// One change to a column's `unique` flag replayed from the log: a declaration made at a running
@@ -358,6 +361,13 @@ pub(crate) struct UniqueEvent {
     pub(crate) live: Vec<mosaica_lifecycle::wal::DeclaredRun>,
 }
 
+impl WritePathState {
+    /// Every point shard the write path holds, ascending.
+    pub(crate) fn shard_ids(&self) -> impl Iterator<Item = ShardId> + '_ {
+        self.shards.iter().map(|shard| shard.id)
+    }
+}
+
 impl WritePath {
     /// Assemble the write path.
     ///
@@ -367,6 +377,7 @@ impl WritePath {
         WritePath {
             live: Arc::new(LiveState {
                 shards: state.shards,
+                next_shard_id: state.next_shard_id,
                 several_shards: state.several_shards,
                 resolver_state: Mutex::new(state.resolver_state),
                 accepted_batches: Mutex::new(state.accepted_batches),

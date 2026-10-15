@@ -16,6 +16,7 @@ use mosaica_types::EntityId;
 /// the `name`. `dem` is absent often enough in the source to be worth carrying as one.
 fn row(i: u64) -> WalRow {
     WalRow {
+        shard: mosaica_types::ShardId::ZERO,
         entity_id: EntityId::new(i),
         view: "world".to_owned(),
         join: false,

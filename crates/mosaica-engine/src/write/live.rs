@@ -36,17 +36,28 @@ pub(in crate::write) struct RegistryForPublication {
 /// One point shard's write state, on [`LiveState`]'s contract.
 pub(crate) struct ShardWrite {
     pub(in crate::write) id: ShardId,
+    /// Whether the shard takes new items at its high water, as its record and the log leave it.
+    pub(in crate::write) state: mosaica_types::ShardState,
     /// The entity id allocator. Written only by the executor, never by a handler: entity ids are
     /// assigned at a window's close, on the one thread that also advances the high-water mark.
     allocator: Mutex<Allocator>,
 }
 
 impl ShardWrite {
-    pub(in crate::write) fn new(id: ShardId, allocator: Allocator) -> ShardWrite {
+    pub(in crate::write) fn new(
+        id: ShardId,
+        state: mosaica_types::ShardState,
+        allocator: Allocator,
+    ) -> ShardWrite {
         ShardWrite {
             id,
+            state,
             allocator: Mutex::new(allocator),
         }
+    }
+
+    pub(crate) fn id(&self) -> ShardId {
+        self.id
     }
 
     pub(crate) fn high_water(&self) -> u64 {
@@ -101,8 +112,12 @@ impl ShardWrite {
 /// the executor (`/control/ingest`'s replay check, `/control/status`'s high-water). The generation pointer is not held here: it is
 /// swapped by `Executor::publish_arc`, the crate's one non-atomic store.
 pub(crate) struct LiveState {
-    /// Each point shard's write state, ascending by id; the first is the write shard.
+    /// Each point shard's write state, ascending by id. The open one is the write shard; the
+    /// first holds the artifact store's slice ([`Self::artifacts`]).
     pub(in crate::write) shards: Vec<ShardWrite>,
+    /// One past the highest shard id ever opened, as the side-manifest's `shards.next_id` and the
+    /// log leave it.
+    pub(in crate::write) next_shard_id: u32,
     /// Whether several shards take writes.
     pub(in crate::write) several_shards: super::SeveralShards,
     /// The descriptor resolver's extension state. Resolved in the handler before submitting, not
@@ -145,6 +160,15 @@ impl LiveState {
     /// The one shard written to until several are.
     pub(crate) fn only_shard(&self) -> &ShardWrite {
         mosaica_types::only(&self.shards)
+    }
+
+    /// The shard a window allocates its new items in: the open one, which the open checked there
+    /// is.
+    pub(crate) fn write_shard(&self) -> &ShardWrite {
+        self.shards
+            .iter()
+            .rfind(|shard| shard.state == mosaica_types::ShardState::Open)
+            .expect("the open refuses a bundle with no open shard")
     }
 
     /// Shard `id`'s write state, or `None` for a shard the bundle does not hold.

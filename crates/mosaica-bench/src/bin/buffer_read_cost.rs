@@ -122,6 +122,7 @@ impl Ids {
 
 fn wal_row(entity: EntityId, view: &str, join: bool) -> WalRow {
     WalRow {
+        shard: mosaica_types::ShardId::ZERO,
         entity_id: entity,
         view: view.to_string(),
         join,

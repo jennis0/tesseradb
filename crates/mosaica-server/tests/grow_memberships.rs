@@ -558,7 +558,7 @@ async fn a_restated_growth_appends_only_the_members_the_artifact_does_not_hold()
     let joining: Vec<u64> = growths[0]
         .iter()
         .map(|grown| {
-            mosaica_lifecycle::membership::deserialise_members(&grown.joining)
+            mosaica_lifecycle::ShardSets::from_wal(&grown.joining)
                 .expect("the delta decodes")
                 .cardinality()
         })

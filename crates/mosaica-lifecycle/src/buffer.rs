@@ -528,6 +528,7 @@ mod tests {
 
     fn row(entity: u64, view: &str, join: bool) -> WalRow {
         WalRow {
+            shard: mosaica_types::ShardId::ZERO,
             entity_id: EntityId::new(entity),
             view: view.to_string(),
             join,

@@ -22,7 +22,7 @@ use rustc_hash::FxHashMap;
 use mosaica_lifecycle::{IngestBuffer, WalScalar};
 use mosaica_store::manifest::{DeclaredScalar, Manifest};
 use mosaica_store::unique::{key_of, key_text, value_text, UniqueKey, DUPLICATE_EXAMPLES};
-use mosaica_types::{EntityId, ItemAt};
+use mosaica_types::{EntityId, ItemAt, ShardId};
 
 use crate::Generation;
 
@@ -370,15 +370,19 @@ pub(crate) fn mosaica_id_text(
 /// holder since the live entries' sequence number was `seq`: the executor's re-check of a batch
 /// its handler resolved at `seq`, from memory. Where an entry added since has already left
 /// memory the answer is yes, and so it is for a batch that `creates` items once the unique
-/// columns have changed, since its keys were taken under the old ones.
+/// columns have changed, since its keys were taken under the old ones. The live entries are
+/// `write_shard`'s, where every window adds its rows' values.
 pub(crate) fn moved_since(
     generation: &Generation,
+    write_shard: ShardId,
     keys: &[(u16, u128)],
     seq: u64,
     creates: bool,
 ) -> bool {
     use mosaica_store::unique::KeyKind;
-    let shard = generation.only_shard();
+    let Some(shard) = generation.shard(write_shard) else {
+        return true;
+    };
     let live = &shard.unique_live;
     if creates && live.columns_changed_since(seq) {
         return true;

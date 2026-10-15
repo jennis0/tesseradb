@@ -11,7 +11,7 @@ use mosaica_lifecycle::alloc::{
     assign_sorted, entities_named, high_water_from, union_of, Allocator, ByTenancy, PendingItem,
 };
 use mosaica_lifecycle::wal::{ChangeOp, WalRecord, WalRow};
-use mosaica_types::{EntityId, Tenancy, TermId};
+use mosaica_types::{EntityId, ShardId, Tenancy, TermId};
 
 proptest! {
     /// Interleaved `allocate` calls on a single allocator never overlap and always advance the
@@ -37,7 +37,7 @@ proptest! {
     /// each "session" allocates some ranges, records one `WalRow` per allocated ID (as the real
     /// system would once each row is fsynced) into a log standing in for the on-disk WAL, then
     /// the allocator is dropped (the crash). The next session rebuilds via
-    /// `Allocator::new(manifest_hw.max(high_water_from(&wal_records)))` — the actual seeding
+    /// `Allocator::new(manifest_hw.max(shard_zero_mark(&wal_records)))` — the actual seeding
     /// contract (`Allocator::high_water()` itself is not durable; only what made it into the WAL
     /// is). No ID handed out in an earlier session may reappear in a later one.
     #[test]
@@ -56,7 +56,7 @@ proptest! {
             // Rebuild exactly as a real restart would: from the bundle's manifest high-water
             // mark and whatever the (accumulated, "replayed") WAL log actually contains.
             #[allow(clippy::unnecessary_min_or_max)]
-            let seed = manifest_hw.max(high_water_from(&wal_records));
+            let seed = manifest_hw.max(shard_zero_mark(&wal_records));
             let mut alloc = Allocator::new(seed);
 
             for n in sizes {
@@ -70,6 +70,7 @@ proptest! {
                         batch_id: format!("batch-{id}"),
                         body_hash: [0u8; 32],
                         rows: vec![WalRow {
+                            shard: ShardId::ZERO,
                             entity_id: EntityId::new(id),
                             view: "default".to_string(),
                             join: false,
@@ -101,7 +102,7 @@ proptest! {
 
         for (n, flush, fold) in rounds {
             // ---- restart, seeded exactly as `Engine::open` does ----------------------------
-            let seed = side_high_water.max(high_water_from(&wal));
+            let seed = side_high_water.max(shard_zero_mark(&wal));
             let mut alloc = Allocator::new(seed);
 
             for id in alloc.allocate(0, n).unwrap().items {
@@ -113,6 +114,7 @@ proptest! {
                     batch_id: format!("batch-{id}"),
                     body_hash: [0u8; 32],
                     rows: vec![WalRow {
+                        shard: ShardId::ZERO,
                         entity_id: EntityId::new(id),
                         view: "default".to_string(),
                         join: false,
@@ -289,12 +291,12 @@ proptest! {
                         (id, published.index.get(&u64::from(id)).copied().unwrap_or(0))
                     }))
                 };
-                let mut next = Allocator::new(published.high_water.max(high_water_from(&wal)));
+                let mut next = Allocator::new(published.high_water.max(shard_zero_mark(&wal)));
                 next.seed_freed(
                     split(&published.free),
                     published.held.iter().map(|(p, ids)| (*p, split(ids))).collect(),
                     retained_from,
-                    &entities_named(&wal),
+                    &entities_named(&wal).remove(&ShardId::ZERO).unwrap_or_default(),
                 );
                 alloc = next;
             }
@@ -389,6 +391,7 @@ fn row(id: u64) -> WalRecord {
         batch_id: format!("batch-{id}"),
         body_hash: [0u8; 32],
         rows: vec![WalRow {
+            shard: ShardId::ZERO,
             entity_id: EntityId::new(id),
             view: "default".to_string(),
             join: false,
@@ -399,6 +402,14 @@ fn row(id: u64) -> WalRecord {
             scoped: Vec::new(),
         }],
     }
+}
+
+/// Shard 0's high water as the log `records` leaves it.
+fn shard_zero_mark(records: &[WalRecord]) -> u64 {
+    high_water_from(records)
+        .get(&ShardId::ZERO)
+        .copied()
+        .unwrap_or(0)
 }
 
 fn item(entity: EntityId) -> mosaica_types::Target {

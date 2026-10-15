@@ -94,7 +94,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use mosaica_types::layer::{EntityRun, LayerDeclaration, ReservedRuns};
-use mosaica_types::{EntityId, LayerSpace, Target};
+use mosaica_types::{EntityId, LayerSpace, ShardId, Target};
 
 /// One declared-scalar value carried by a WAL row: the value type a build writes, under the name the
 /// log's records use.
@@ -138,6 +138,9 @@ pub use mosaica_types::scalar::ScalarValue as WalScalar;
 /// acked.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WalRow {
+    /// The point shard the row landed in: a created item's, where its entity was allocated, and a
+    /// join's, the shard of the item it joins.
+    pub shard: ShardId,
     pub entity_id: EntityId,
     pub view: String,
     /// **This row joined an existing entity to a second view** (`views.md` §4): geometry, and
@@ -334,8 +337,8 @@ pub enum WalRecord {
     /// the overlay as a `ChangeBatch` delete would be, and the fold that executes it retires it.
     ViewDrop {
         view: mosaica_types::view::DeadIncarnation,
-        /// The entities the drop left with a row in no view, flushed or buffered.
-        deleted: Vec<EntityId>,
+        /// The items the drop left with a row in no view, flushed or buffered, each in its shard.
+        deleted: Vec<Target>,
     },
     /// An accepted layer drop. The name is freed; the space is never given again.
     LayerDrop {
@@ -473,6 +476,11 @@ pub enum WalRecord {
     /// side-manifest's `shards.size` is its durable home; replay takes the last of these the log
     /// keeps.
     ShardsDeclare { size: u64 },
+    /// A point shard opened at a running service, at high water 0, in the fsync that first
+    /// writes a row into it. Replay seeds the shard and moves `shards.next_id` past it.
+    ShardOpen { shard: ShardId },
+    /// A point shard sealed: it takes no new item at its high water again. Replay seals it.
+    ShardSeal { shard: ShardId },
 }
 
 /// One index run a [`WalRecord::UniqueDeclare`] adopts.
@@ -480,6 +488,8 @@ pub enum WalRecord {
 /// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeclaredRun {
+    /// The point shard whose values the run indexes.
+    pub shard: ShardId,
     /// Prefix-relative.
     pub path: String,
     /// In lower-case hex, as a manifest's file digest records it.
@@ -543,7 +553,9 @@ pub fn unbuilt_track(record: &WalRecord) -> Option<(&'static str, &'static str)>
         | WalRecord::ArtifactGrow { .. }
         | WalRecord::ArtifactFill { .. }
         | WalRecord::UniqueDeclare { .. }
-        | WalRecord::ShardsDeclare { .. } => None,
+        | WalRecord::ShardsDeclare { .. }
+        | WalRecord::ShardOpen { .. }
+        | WalRecord::ShardSeal { .. } => None,
     }
 }
 
@@ -593,6 +605,9 @@ pub enum RowOutcome {
 /// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WalEdit {
+    /// The item's shard, which holds both the entity it leaves and the one it moves to. Every row
+    /// of the edit carries it, and a record whose rows name another is refused as damage.
+    pub shard: ShardId,
     /// The entity the item leaves. This record deletes it.
     pub old: EntityId,
     /// The item's number: the entity it was first given, which its `mosaica_id` is taken from.
@@ -642,7 +657,9 @@ pub fn batch_identity(record: &WalRecord) -> Option<BatchIdentity<'_>> {
         | WalRecord::ArtifactPublish { .. }
         | WalRecord::ArtifactGrow { .. }
         | WalRecord::ArtifactFill { .. }
-        | WalRecord::ShardsDeclare { .. } => None,
+        | WalRecord::ShardsDeclare { .. }
+        | WalRecord::ShardOpen { .. }
+        | WalRecord::ShardSeal { .. } => None,
     }
 }
 
@@ -656,15 +673,15 @@ pub struct MembershipGrowth {
     /// executor and recorded**, exactly as a publication records the ordinals it claimed: replay
     /// applies what was decided rather than re-resolving a key whose index has since moved.
     pub ordinal: u32,
-    /// The entities joining, CRoaring portable — **entity space and a delta**. Entity space for
+    /// The entities joining, by shard — **entity space and a delta**. Entity space for
     /// [`PublishedArtifact::members`]'s reason (a row-space set is a frozen projection); a delta
     /// for this variant's own.
-    pub joining: Vec<u8>,
-    /// The entities leaving, CRoaring portable, on `joining`'s terms. Empty on every record the
+    pub joining: Vec<WalShardSet>,
+    /// The entities leaving, by shard, on `joining`'s terms. Empty on every record the
     /// membership route writes: a membership never shrinks (`ingest.md` §10, R7), and the one set
     /// that may is a generating set, changed only by a page at its rank. Within one record joins
     /// apply before leaves (`ingest.md` §1.1).
-    pub leaving: Vec<u8>,
+    pub leaving: Vec<WalShardSet>,
     /// Which of the artifact's sets this delta moves.
     pub set: GrownSet,
 }
@@ -805,6 +822,17 @@ pub struct DeclaredFrame {
     pub y_max: f64,
 }
 
+/// One point shard's part of an entity set a record carries: the shard and its entities,
+/// CRoaring portable. A record lists only the shards holding something, ascending by shard, and
+/// one entity number in two shards is two entities.
+///
+/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalShardSet {
+    pub shard: ShardId,
+    pub entities: Vec<u8>,
+}
+
 /// One artifact inside a [`WalRecord::ArtifactPublish`].
 ///
 /// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
@@ -827,10 +855,10 @@ pub struct PublishedArtifact {
     /// The incarnation of `view` the artifact was published under, and `DECLARED_INCARNATION`
     /// where there is no view. A drop of the view retires the artifact.
     pub incarnation: mosaica_types::view::ViewIncarnation,
-    /// Entity-space membership, CRoaring portable. **Entity space and not row space** — a row-space
+    /// Entity-space membership, by shard. **Entity space and not row space** — a row-space
     /// membership is a frozen projection, correct until the first fold and then naming other
     /// people's documents (`membership.rs`).
-    pub members: Vec<u8>,
+    pub members: Vec<WalShardSet>,
     /// The artifact's supplied content, as ranked contents. Empty on a layer declaring none.
     pub contents: Vec<PublishedContent>,
     /// What this artifact is an attachment to, **resolved** — the caller named the target by its
@@ -909,10 +937,10 @@ pub struct PublishedContent {
     /// writes holds the digest and not the values (decision 0077), and the comparison has to
     /// survive the repack (`ArtifactStore::fill`).
     pub digest: [u8; 32],
-    /// The entity-space generating set, CRoaring portable. Empty means corpus-independent, which is
-    /// a declaration rather than an omission — a set supplied where none is tested is refused at
+    /// The entity-space generating set, by shard. Empty means corpus-independent, which is a
+    /// declaration rather than an omission — a set supplied where none is tested is refused at
     /// admission.
-    pub generated_from: Vec<u8>,
+    pub generated_from: Vec<WalShardSet>,
     /// The generating set's **stored cardinality** (`ingest.md` §1.1), `generated_from`'s at
     /// publication and thereafter moved only by a page at this content's rank
     /// ([`GrownSet::GeneratingSet`]). The executor publishes it beside the set's operator at the
@@ -1074,7 +1102,11 @@ const WAL_MAGIC: [u8; 4] = *b"MWAL";
 // refused.
 // **37**: `LayerDrop` and the artifact records carry their registration's space, and an
 // attachment its target's. A log at 36 is refused.
-const WAL_VERSION: u16 = 37;
+// **38**: every part of a record that names a point entity names its shard: a row, an edit, a view
+// drop's deletions, an artifact's members and generating sets, a growth's sets and a unique
+// declaration's runs; and the variant table gained `ShardOpen` and `ShardSeal`. A log at 37 is
+// refused.
+const WAL_VERSION: u16 = 38;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -1449,8 +1481,21 @@ fn read_frame(reader: &mut impl Read, offset: u64, end: u64, body: &mut Vec<u8>)
 /// and `crc32fast::hash(&[]) == 0`, which passes both checks trivially. `postcard::from_bytes` is
 /// the backstop — an empty (or otherwise all-zero) byte string cannot select any `WalRecord`
 /// variant, so the decode fails and the record fails closed like any other damaged one.
+///
+/// An edit whose rows name a shard other than its own is refused the same way: its new entity and
+/// the one it leaves are in one shard, so a row elsewhere would buffer the item in a shard that
+/// does not hold it.
 fn decode(body: &[u8]) -> Result<WalRecord> {
-    postcard::from_bytes(body).map_err(|_| WalError::WalCorruption)
+    let record: WalRecord = postcard::from_bytes(body).map_err(|_| WalError::WalCorruption)?;
+    if let WalRecord::IngestBatch { edits, .. } = &record {
+        if edits
+            .iter()
+            .any(|edit| edit.rows.iter().any(|row| row.shard != edit.shard))
+        {
+            return Err(WalError::WalCorruption);
+        }
+    }
+    Ok(record)
 }
 
 /// The variant index postcard writes at the head of every `IngestBatch` body, read off an encoded
@@ -2516,6 +2561,7 @@ mod tests {
             batch_id: "b1".to_string(),
             body_hash: [7u8; 32],
             rows: vec![WalRow {
+                shard: ShardId::ZERO,
                 entity_id: EntityId::new(1),
                 view: "s0".to_string(),
                 join: false,
@@ -2646,15 +2692,20 @@ mod tests {
     fn an_artifact_publication_round_trips_with_its_memberships_and_its_extension() {
         // The membership is the whole point of the record and the only copy of it on disk, so a
         // field that failed to survive here is a served cluster that comes back empty.
-        use crate::membership::{deserialise_members, serialise_members};
-        use croaring::Bitmap;
+        use crate::membership::ShardSets;
         use mosaica_types::layer::EntityRun;
+        use mosaica_types::ItemAt;
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wal");
 
-        let first = Bitmap::of(&[1, 2, 3, 70_000, 4_000_000]);
-        let second = Bitmap::new();
+        // One entity number in two shards is two members, each in its own shard's set.
+        let shard = |raw| ShardId::new(raw).unwrap();
+        let first = ShardSets::of_items(
+            [(0, 1), (0, 2), (0, 3), (0, 70_000), (3, 3), (3, 4_000_000)]
+                .map(|(at, entity)| ItemAt::new(shard(at), EntityId::new(entity))),
+        );
+        let second = ShardSets::default();
         let publish = WalRecord::ArtifactPublish {
             layer: "clusters/hdbscan-2026-08".into(),
             space: LayerSpace::new(2).unwrap(),
@@ -2670,7 +2721,7 @@ mod tests {
                     key: Some("c-0017".into()),
                     view: None,
                     incarnation: 0,
-                    members: serialise_members(&first),
+                    members: first.to_wal(),
                     contents: Vec::new(),
                     attached_to: None,
                     parents: Vec::new(),
@@ -2689,12 +2740,12 @@ mod tests {
                     // read the members' length as the view's.
                     view: Some("s0".into()),
                     incarnation: 3,
-                    members: serialise_members(&second),
+                    members: second.to_wal(),
                     contents: vec![PublishedContent {
                         values: vec!["a label".into()],
                         digest: crate::membership::content_digest(&["a label".to_string()]),
-                        generated_from: serialise_members(&first),
-                        cardinality: 5,
+                        generated_from: first.to_wal(),
+                        cardinality: 6,
                     }],
                     // A label attached to a cluster — the third optional field, and the one whose
                     // loss is a fail-open rather than a missing name: an attachment read back as
@@ -2747,8 +2798,12 @@ mod tests {
         let WalRecord::ArtifactPublish { artifacts, .. } = &replayed[0] else {
             unreachable!()
         };
-        assert_eq!(deserialise_members(&artifacts[0].members), Some(first));
-        assert_eq!(deserialise_members(&artifacts[1].members), Some(second));
+        assert_eq!(ShardSets::from_wal(&artifacts[0].members), Some(first));
+        assert_eq!(ShardSets::from_wal(&artifacts[1].members), Some(second));
+        assert!(
+            artifacts[1].members.is_empty(),
+            "a shard holding nothing is not listed"
+        );
     }
 
     /// **The ingest design's records round-trip, and each names the track that applies it.**
@@ -2762,7 +2817,7 @@ mod tests {
     /// to wait on no track, beside the growth record every reader applies.
     #[test]
     fn the_ingest_designs_records_round_trip_and_name_their_tracks() {
-        use crate::membership::{content_digest, serialise_members, ArtifactShapes};
+        use crate::membership::{content_digest, ArtifactShapes, ShardSets};
         use croaring::Bitmap;
         use mosaica_types::view::{GroupMetadataField, ViewMetadataType};
         use mosaica_types::vocabulary::{Visibility, VocabularyKind};
@@ -2778,8 +2833,9 @@ mod tests {
                 level: 0,
                 growth: vec![MembershipGrowth {
                     ordinal: 3,
-                    joining: serialise_members(&Bitmap::of(&[1, 2])),
-                    leaving: serialise_members(&Bitmap::of(&[70_000])),
+                    joining: ShardSets::in_shard(ShardId::ZERO, Bitmap::of(&[1, 2])).to_wal(),
+                    leaving: ShardSets::in_shard(ShardId::new(2).unwrap(), Bitmap::of(&[70_000]))
+                        .to_wal(),
                     set: GrownSet::GeneratingSet {
                         rank: 1,
                         cardinality: 2,
@@ -2834,11 +2890,13 @@ mod tests {
                 body_hash: [9u8; 32],
                 rows: Vec::new(),
                 edits: vec![WalEdit {
+                    shard: ShardId::new(4).unwrap(),
                     old: EntityId::new(41),
                     number: EntityId::new(7),
                     suppressed: true,
                     rows: vec![
                         WalRow {
+                            shard: ShardId::new(4).unwrap(),
                             entity_id: EntityId::new(90),
                             view: "quarter:2026-Q1".into(),
                             join: false,
@@ -2849,6 +2907,7 @@ mod tests {
                             scoped: Vec::new(),
                         },
                         WalRow {
+                            shard: ShardId::new(4).unwrap(),
                             entity_id: EntityId::new(90),
                             view: "quarter:2026-Q2".into(),
                             join: true,
@@ -2883,6 +2942,7 @@ mod tests {
                 attribute: "doi".into(),
                 unique: true,
                 base: vec![DeclaredRun {
+                    shard: ShardId::new(1).unwrap(),
                     path: "entities/unique/doi/declared-1-base-0.keys".into(),
                     sha256: "03".repeat(32),
                     size: 8192,
@@ -2945,6 +3005,12 @@ mod tests {
             WalRecord::ShardsDeclare {
                 size: 4_026_531_841,
             },
+            WalRecord::ShardOpen {
+                shard: ShardId::new(5).unwrap(),
+            },
+            WalRecord::ShardSeal {
+                shard: ShardId::new(4).unwrap(),
+            },
         ];
         let tracks: Vec<Option<&str>> = records
             .iter()
@@ -2952,20 +3018,7 @@ mod tests {
             .collect();
         assert_eq!(
             tracks,
-            [
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None
-            ]
+            [None, None, None, None, None, None, None, None, None, None, None, None, None, None]
         );
 
         let mut wal = Wal::open(&path).unwrap();
@@ -2984,10 +3037,62 @@ mod tests {
             "topics/openalex",
             LayerSpace::new(5).unwrap(),
             0,
-            [(3u32, &Bitmap::of(&[1, 2]))],
+            [(
+                3u32,
+                &ShardSets::in_shard(ShardId::ZERO, Bitmap::of(&[1, 2])),
+            )],
         )
         .unwrap();
         assert_eq!(unbuilt_track(&membership), None);
+    }
+
+    /// An edit whose rows name a shard other than its own is refused at open as damage, not
+    /// replayed into a shard that does not hold the item.
+    #[test]
+    fn an_edit_whose_rows_name_another_shard_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal");
+        let row = |shard: u32| WalRow {
+            shard: ShardId::new(shard).unwrap(),
+            entity_id: EntityId::new(9),
+            view: "s0".into(),
+            join: false,
+            descriptors: Vec::new(),
+            x: 0.5,
+            y: 0.5,
+            scalars: Vec::new(),
+            scoped: Vec::new(),
+        };
+        let edit = |rows: u32| WalRecord::IngestBatch {
+            batch_id: "b".into(),
+            body_hash: [0; 32],
+            rows: Vec::new(),
+            edits: vec![WalEdit {
+                shard: ShardId::new(1).unwrap(),
+                old: EntityId::new(2),
+                number: EntityId::new(2),
+                suppressed: false,
+                rows: vec![row(rows)],
+            }],
+            receipt: Vec::new(),
+        };
+
+        let mut wal = Wal::open(&path).unwrap();
+        wal.append(&edit(1)).unwrap();
+        wal.fsync().unwrap();
+        drop(wal);
+        let wal = Wal::open(&path).unwrap();
+        assert_eq!(
+            wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>(),
+            vec![edit(1)]
+        );
+        drop(wal);
+
+        let mut wal = Wal::open(&path).unwrap();
+        wal.append(&edit(0)).unwrap();
+        wal.fsync().unwrap();
+        drop(wal);
+        assert!(matches!(Wal::open(&path), Err(WalError::WalCorruption)));
     }
 
     /// Overwrite `[from, to)` with zeroes through a second handle, standing in for pages a failed

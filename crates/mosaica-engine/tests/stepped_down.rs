@@ -62,6 +62,7 @@ fn a_stepped_down_node_refuses_ingest_flushes_nothing_and_rotates_nothing() {
             batch_id: "pre-existing".to_string(),
             body_hash: [1u8; 32],
             rows: vec![WalRow {
+                shard: mosaica_types::ShardId::ZERO,
                 entity_id: mosaica_types::EntityId::new(N_ITEMS),
                 view: "s0".to_string(),
                 join: false,
