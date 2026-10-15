@@ -799,7 +799,7 @@ impl Members {
     /// `map` of the whole membership, for a `map` that distributes over a union, such as a
     /// projection into row space: each part is mapped separately and the results unioned, so the
     /// membership is never built whole.
-    pub fn projected(&self, map: impl Fn(&Bitmap) -> Bitmap) -> Bitmap {
+    pub fn projected(&self, mut map: impl FnMut(&Bitmap) -> Bitmap) -> Bitmap {
         let mut out = map(self.base());
         if let Some(joined) = self.joined() {
             out.or_inplace(&map(joined));

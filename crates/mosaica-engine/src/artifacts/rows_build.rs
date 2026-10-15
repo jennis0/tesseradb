@@ -7,7 +7,7 @@ use croaring::Bitmap;
 use mosaica_lifecycle::membership::{ArtifactRecord, ArtifactStore};
 use mosaica_types::layer::ServingLayout;
 
-use mosaica_store::permutation::RowSpace;
+use mosaica_store::permutation::{ProjectScratch, RowSpace};
 
 use crate::containment::ContainmentPartition;
 use crate::row_column::RowColumn;
@@ -34,10 +34,11 @@ impl ArtifactRows {
     ) -> Self {
         let mut records = ArtifactRecords::default();
         let mut membership = MembershipRows::default();
+        let scratch = &mut ProjectScratch::default();
         for (ordinal, record) in artifacts {
             let idx = ordinal as usize;
             records.put(idx, record);
-            membership.put(idx, record, space);
+            membership.put(idx, record, space, scratch);
         }
         // An offered index is refused outright where the row space has extents: the fold wrote it
         // over the base rows, a flushed segment's rows lie above them, and an artifact whose extent
@@ -105,10 +106,11 @@ impl ArtifactRows {
         // The extent rows are projected here for a form that holds its rows; the base rows come
         // off the column.
         let mut above = Vec::new();
+        let scratch = &mut ProjectScratch::default();
         for (ordinal, record) in artifacts {
             let idx = ordinal as usize;
             records.put(idx, record);
-            membership.put_generating(idx, record, space);
+            membership.put_generating(idx, record, space, scratch);
             if !column_only && space.extent_count() > 0 {
                 above.push((
                     idx,
@@ -195,11 +197,12 @@ impl ArtifactRows {
         let mut records = ArtifactRecords::default();
         let mut membership = MembershipRows::default();
         let mut rows = rows;
+        let scratch = &mut ProjectScratch::default();
         for (ordinal, record) in artifacts {
             let idx = ordinal as usize;
             records.put(idx, record);
             let resolved = rows.get_mut(idx).and_then(Option::take).unwrap_or_default();
-            membership.put_resolved(idx, record, resolved, space);
+            membership.put_resolved(idx, record, resolved, space, scratch);
         }
         let index = TileIndex::build(&membership, row_count);
         ArtifactRows {
@@ -320,6 +323,7 @@ impl ArtifactRows {
     ) -> usize {
         let mut taken = 0usize;
         let mut borrowed: Vec<(String, u32, u64)> = Vec::new();
+        let scratch = &mut ProjectScratch::default();
         for (ordinal, record) in store.level_in_view(layer, level, view) {
             if !mosaica_lifecycle::membership::borrows_membership(record) {
                 continue;
@@ -339,7 +343,7 @@ impl ArtifactRows {
             }
             self.membership.put_rows(
                 ordinal as usize,
-                members.projected(|part| space.project(part)),
+                members.projected(|part| space.project_with(part, scratch)),
             );
             taken += 1;
             for hop in hops {

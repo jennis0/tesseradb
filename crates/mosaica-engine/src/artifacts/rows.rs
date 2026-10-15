@@ -9,7 +9,7 @@ use mosaica_lifecycle::wal::ParentRef;
 use mosaica_access::Label;
 use mosaica_types::layer::ServingLayout;
 
-use mosaica_store::permutation::RowSpace;
+use mosaica_store::permutation::{ProjectScratch, RowSpace};
 
 use crate::compose::MaskedSet;
 use crate::containment::{ContainmentAnswers, ContainmentPartition};
@@ -329,20 +329,31 @@ impl MembershipRows {
         space: &RowSpace,
     ) -> Self {
         let mut membership = MembershipRows::default();
+        let scratch = &mut ProjectScratch::default();
         for (ordinal, record) in artifacts {
-            membership.put(ordinal as usize, record, space);
+            membership.put(ordinal as usize, record, space, scratch);
         }
         membership
     }
 
     /// Returns the rows it projected, which the publication arms need whether or not this form
     /// keeps them ([`Self::rows_held`]).
-    pub(super) fn put(&mut self, idx: usize, record: &ArtifactRecord, space: &RowSpace) -> Arc<Bitmap> {
+    pub(super) fn put(
+        &mut self,
+        idx: usize,
+        record: &ArtifactRecord,
+        space: &RowSpace,
+        scratch: &mut ProjectScratch,
+    ) -> Arc<Bitmap> {
         if self.rows.len() <= idx {
             self.rows.resize_with(idx + 1, || None);
             self.generating.resize_with(idx + 1, Vec::new);
         }
-        let rows = Arc::new(record.members.projected(|part| space.project(part)));
+        let rows = Arc::new(
+            record
+                .members
+                .projected(|part| space.project_with(part, scratch)),
+        );
         // A column-only form keeps the slot and not the set: the `Arc` is shared, not the bitmap.
         self.rows[idx] = Some(if self.rows_held {
             Arc::clone(&rows)
@@ -355,7 +366,7 @@ impl MembershipRows {
             // A member still in the commit buffer has no row, so the set projects short of its
             // declared size and [`ArtifactRows::satisfied_rank`] withholds the content from
             // everyone until the flush that gives it one.
-            .map(|v| space.project(&v.generated_from))
+            .map(|v| space.project_with(&v.generated_from, scratch))
             .collect();
         rows
     }
@@ -363,7 +374,13 @@ impl MembershipRows {
     /// One artifact's generating sets alone, with an empty membership standing in for rows a
     /// transposed column supplies afterwards ([`Self::absorb_transposed`]). The generating sets
     /// still project: a row column holds membership and nothing else.
-    pub(super) fn put_generating(&mut self, idx: usize, record: &ArtifactRecord, space: &RowSpace) {
+    pub(super) fn put_generating(
+        &mut self,
+        idx: usize,
+        record: &ArtifactRecord,
+        space: &RowSpace,
+        scratch: &mut ProjectScratch,
+    ) {
         if self.rows.len() <= idx {
             self.rows.resize_with(idx + 1, || None);
             self.generating.resize_with(idx + 1, Vec::new);
@@ -372,20 +389,26 @@ impl MembershipRows {
         self.generating[idx] = record
             .contents
             .iter()
-            .map(|v| space.project(&v.generated_from))
+            .map(|v| space.project_with(&v.generated_from, scratch))
             .collect();
     }
 
     /// One artifact's generating sets projected again from the record, where a page held a leave
     /// or a fill changed which contents the artifact has. The membership is left untouched.
-    pub(super) fn project_generating(&mut self, idx: usize, record: &ArtifactRecord, space: &RowSpace) {
+    pub(super) fn project_generating(
+        &mut self,
+        idx: usize,
+        record: &ArtifactRecord,
+        space: &RowSpace,
+        scratch: &mut ProjectScratch,
+    ) {
         if idx >= self.generating.len() {
             return;
         }
         self.generating[idx] = record
             .contents
             .iter()
-            .map(|v| space.project(&v.generated_from))
+            .map(|v| space.project_with(&v.generated_from, scratch))
             .collect();
     }
 
@@ -425,6 +448,7 @@ impl MembershipRows {
         record: &ArtifactRecord,
         rows: Bitmap,
         space: &RowSpace,
+        scratch: &mut ProjectScratch,
     ) -> Arc<Bitmap> {
         if self.rows.len() <= idx {
             self.rows.resize_with(idx + 1, || None);
@@ -439,7 +463,7 @@ impl MembershipRows {
         self.generating[idx] = record
             .contents
             .iter()
-            .map(|v| space.project(&v.generated_from))
+            .map(|v| space.project_with(&v.generated_from, scratch))
             .collect();
         rows
     }
