@@ -1691,24 +1691,27 @@ mod tests {
     /// its entities less its shard's first.
     #[test]
     fn an_artifacts_slices_verify_only_where_they_sum_to_its_record() {
-        let record = ArtifactRecord {
-            entity: mosaica_types::EntityId::new(0),
-            key: None,
-            view: None,
-            incarnation: 0,
-            members: Members::owned(Bitmap::of(&[0, 1, 2, 3])),
-            declares_members: None,
-            contents: vec![ContentSet {
-                values: None,
-                digest: [0; 32],
-                generated_from: Bitmap::of(&[0, 1, 2]),
-                cardinality: 3,
-            }],
-            attached_to: None,
-            parents: Vec::new(),
-            access: Vec::new(),
+        let record = |members: &[u32], set: &[u32]| {
+            let record = ArtifactRecord {
+                entity: mosaica_types::EntityId::new(0),
+                key: None,
+                view: None,
+                incarnation: 0,
+                members: Members::owned(Bitmap::of(members)),
+                declares_members: None,
+                contents: vec![ContentSet {
+                    values: None,
+                    digest: [0; 32],
+                    generated_from: Bitmap::of(set),
+                    cardinality: set.len() as u64,
+                }],
+                attached_to: None,
+                parents: Vec::new(),
+                access: Vec::new(),
+            };
+            encode_record(&record, None)
         };
-        let blob = encode_record(&record, None);
+        let blob = record(&[0, 1, 2, 3], &[0, 1, 2]);
         let slice = |members: &[u32], set: &[u32]| {
             frame_members(&Bitmap::of(members), [Bitmap::of(set)].iter())
         };
@@ -1718,11 +1721,16 @@ mod tests {
             artifact_slices(0, record, &slices)
         };
         assert_eq!(check(&blob, &[&low, &high]), Ok(true));
+        let whole = slice(&[0, 1], &[0, 1]);
+        assert_eq!(
+            check(&record(&[0, 1], &[0, 1]), &[&whole, &[]]),
+            Ok(true),
+            "a shard that holds nothing of the artifact"
+        );
         let refused = [
             ("a slice short of the set", slice(&[0, 1], &[])),
             ("slices summing past the set", slice(&[0, 1], &[0, 1])),
             ("a slice past its high water", slice(&[0, 2], &[0])),
-            ("a shard with no slice", Vec::new()),
             ("a slice that does not decode", high[..high.len() - 1].to_vec()),
         ];
         for (what, second) in refused {

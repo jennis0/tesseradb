@@ -3159,8 +3159,8 @@ fn write_membership_extents(
 /// the shard's first. Shard 0's pack takes the place of the one it was cut from. Returns each
 /// shard's extents, in shard order, and the other shards' files.
 ///
-/// A hole stays a hole in every shard, and a shard's pack lists only the artifacts it holds a
-/// member or a generating-set member of: one it does not list reads as the empty membership.
+/// A hole stays a hole in every shard, and a shard's pack lists only the artifacts it holds
+/// something of.
 pub(crate) fn split_member_packs(
     prefix_dir: &Path,
     extents: &[MembershipExtent],
@@ -3209,14 +3209,14 @@ pub(crate) fn split_member_packs(
                     ))
                 })?;
             for (span, (_, _, writer)) in shards.iter().zip(&mut writers) {
-                let held = span.members(&members);
-                let sets: Vec<_> = sets.iter().map(|set| span.members(set)).collect();
-                if held.is_empty() && sets.iter().all(|set| set.is_empty()) {
+                let in_shard = span.members(&members);
+                let in_shard_sets: Vec<_> = sets.iter().map(|set| span.members(set)).collect();
+                if in_shard.is_empty() && in_shard_sets.iter().all(|set| set.is_empty()) {
                     continue;
                 }
                 let part = mosaica_lifecycle::membership::frame_members(
-                    &held,
-                    sets.iter().map(|set| set.as_ref()),
+                    &in_shard,
+                    in_shard_sets.iter().map(|set| set.as_ref()),
                 );
                 writer.push_at(ordinal, &part).map_err(BuildError::Store)?;
             }

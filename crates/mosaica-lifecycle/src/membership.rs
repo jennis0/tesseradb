@@ -1102,7 +1102,6 @@ impl ArtifactRecord {
     }
 }
 
-/// One level's shapes by ordinal, beside its records ([`ArtifactStore::shapes`]).
 type ShapeSlots = Vec<Option<Box<ArtifactShapes>>>;
 
 /// Every artifact of every layer, keyed by `(layer, level, ordinal)`.
@@ -1113,6 +1112,8 @@ type ShapeSlots = Vec<Option<Box<ArtifactShapes>>>;
 /// a fold has yet to remove — and it must answer *absent* rather than panic.
 #[derive(Debug, Clone, Default)]
 pub struct ArtifactStore {
+    /// Boxed so a hole costs a pointer: a shard's slice holds a record for few of a level's
+    /// ordinals.
     levels: BTreeMap<(String, u32), Vec<Option<Box<ArtifactRecord>>>>,
     /// The space of each layer whose records are here.
     spaces: BTreeMap<String, LayerSpace>,
@@ -3493,10 +3494,9 @@ pub fn slices_hold_their_sets(slices: &[&ArtifactRecord]) -> bool {
     })
 }
 
-/// [`decode_members`] for one shard's slice of an artifact with `contents` contents. An empty blob
-/// is a slice holding nothing: a shard's member pack does not list an artifact it holds no member
-/// of, and [`encode_members`] never writes an empty blob.
-pub fn decode_slice_members(blob: &[u8], contents: usize) -> Option<(Bitmap, Vec<Bitmap>)> {
+/// [`decode_members`], taking an empty blob as a slice of `contents` empty sets: [`encode_members`]
+/// never writes one.
+fn decode_slice_members(blob: &[u8], contents: usize) -> Option<(Bitmap, Vec<Bitmap>)> {
     match blob.is_empty() {
         true => Some((Bitmap::new(), (0..contents).map(|_| Bitmap::new()).collect())),
         false => decode_members(blob),

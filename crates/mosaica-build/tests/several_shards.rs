@@ -112,19 +112,27 @@ fn points(path: &Path, ids: &[u64]) {
 }
 
 /// Five clusters over every item but each seventh, assigned round the corpus so every cluster
-/// has members in every shard of every size the tests build at.
-fn clusters(dir: &Path) {
-    let keys: Vec<Option<String>> = (0..5).map(|c| Some(format!("c{c}"))).collect();
+/// has members in every shard of every size the tests build at, and `c5` over the items `c` names.
+fn clusters(dir: &Path, c: &[u64]) {
+    let keys: Vec<Option<String>> = (0..6).map(|c| Some(format!("c{c}"))).collect();
     write(&dir.join("clusters.parquet"), vec![("key", strings(&keys))]);
-    let members: Vec<u64> = (0..ITEMS).filter(|i| i % 7 != 3).collect();
+    let members: Vec<(String, u64)> = (0..ITEMS)
+        .filter(|i| i % 7 != 3)
+        .map(|i| (format!("c{}", i % 5), i))
+        .chain(c.iter().map(|&i| ("c5".to_string(), i)))
+        .collect();
     write(
         &dir.join("clusters_members.parquet"),
         vec![
             (
                 "key",
-                strings(&members.iter().map(|&i| Some(format!("c{}", i % 5))).collect::<Vec<_>>()),
+                strings(&members.iter().map(|(key, _)| Some(key)).collect::<Vec<_>>()),
             ),
-            ("entity", Arc::new(UInt64Array::from(members)) as ArrayRef),
+            (
+                "entity",
+                Arc::new(UInt64Array::from(members.iter().map(|m| m.1).collect::<Vec<_>>()))
+                    as ArrayRef,
+            ),
         ],
     );
 }
@@ -302,7 +310,7 @@ hierarchy = { kind = "flat" }
 "#;
 
 /// The corpus's files and its declaration, `[shards]` first where `size` is given, with the view
-/// `slices:c` over the items `c` names.
+/// `slices:c` and the cluster `c5` over the items `c` names.
 fn corpus(dir: &Path, size: Option<u64>, c: &[u64]) -> PathBuf {
     let all: Vec<u64> = (0..ITEMS).collect();
     points(&dir.join("world.parquet"), &all);
@@ -311,7 +319,7 @@ fn corpus(dir: &Path, size: Option<u64>, c: &[u64]) -> PathBuf {
     let thirds: Vec<u64> = all.iter().copied().filter(|i| i % 3 == 0).collect();
     points(&dir.join("points_b.parquet"), &thirds);
     points(&dir.join("points_c.parquet"), c);
-    clusters(dir);
+    clusters(dir, c);
     topics(dir);
     // The vocabulary's codes, pinned: a build draws the codes it mints at random.
     write(
@@ -519,26 +527,39 @@ fn cut(whole: &[u32], lo: u32, hi: u32) -> Vec<u32> {
         .collect()
 }
 
-/// A member pack's slices: each artifact's membership and generating sets, `None` for a hole.
+/// A member pack's slices: each artifact's membership and generating sets, `None` for a hole and
+/// empty sets for an artifact the shard holds nothing of.
 type Slices = Vec<Option<(Bitmap, Vec<Bitmap>)>>;
 
-/// Every member pack of a shard, by `(space, level, ordinal_lo)`.
+/// Every member pack of a shard, by `(space, level, ordinal_lo)`, each slice read with its record.
 fn packs(shard: &Shard<'_>) -> BTreeMap<(u32, u32, u32), Slices> {
+    use mosaica_lifecycle::membership::decode_slice;
+    use mosaica_store::membership::{LevelPack, PackKind};
+    let spaces = &shard.bundle.partitions["default"].layer_spaces;
     shard
         .record()
         .membership_extents
         .iter()
         .map(|extent| {
-            let pack = mosaica_store::membership::LevelPack::open(
-                &shard.dir(extent.path.clone()),
-                mosaica_store::membership::PackKind::Members,
-            )
-            .unwrap();
-            let slices = pack
+            let records = spaces
                 .iter()
-                .map(|(_, blob)| {
-                    (!blob.is_empty())
-                        .then(|| mosaica_lifecycle::membership::decode_members(blob).unwrap())
+                .filter(|space| space.space == extent.space)
+                .flat_map(|space| &space.record_packs)
+                .find(|records| extent.pairs(extent.space, records))
+                .expect("a member pack's records are in its space");
+            let records = LevelPack::open(&shard.dir(records.path.clone()), PackKind::Records)
+                .unwrap();
+            let members =
+                LevelPack::open(&shard.dir(extent.path.clone()), PackKind::Members).unwrap();
+            let slices = members
+                .iter()
+                .map(|(ordinal, blob)| {
+                    let record = records.blob(ordinal).unwrap();
+                    (!record.is_empty()).then(|| {
+                        let (slice, _) = decode_slice(EntityId::new(0), record, blob).unwrap();
+                        let sets = slice.contents.into_iter().map(|c| c.generated_from).collect();
+                        (slice.members.whole().into_owned(), sets)
+                    })
                 })
                 .collect();
             ((extent.space.raw(), extent.level, extent.ordinal_lo), slices)
@@ -709,6 +730,7 @@ fn split_property(route: ExtentRoute) {
     assert!(one_derived.len() > one_containment.len(), "the levels derive row-space files");
 
     let mut seen = 0u64;
+    let mut unlisted = 0;
     let mut rows_seen = vec![Vec::new(); views.len()];
     for k in 0..count {
         let (lo, hi) = ((k as u64 * SIZE) as u32, ((k as u64 + 1) * SIZE).min(ITEMS) as u32);
@@ -789,6 +811,10 @@ fn split_property(route: ExtentRoute) {
                     )
                 });
                 assert_eq!(part, &expected, "a membership and its generating sets in shard {k}");
+                let nothing = |(members, sets): &(Bitmap, Vec<Bitmap>)| {
+                    members.is_empty() && sets.iter().all(Bitmap::is_empty)
+                };
+                unlisted += usize::from(part.as_ref().is_some_and(nothing));
             }
         }
         for (level, ranks) in containment(&split) {
@@ -839,6 +865,7 @@ fn split_property(route: ExtentRoute) {
         }
     }
     assert_eq!(seen, ITEMS, "every item is in exactly one shard");
+    assert!(unlisted > 0, "a shard's pack leaves out an artifact it holds nothing of");
     assert_eq!(sizes, one_containment, "the shards' set sizes sum to the one-shard sizes");
     for (index, view) in views.iter().enumerate() {
         let mut whole: Vec<Row> = one_rows[index]
