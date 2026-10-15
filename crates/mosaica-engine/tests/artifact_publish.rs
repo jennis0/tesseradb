@@ -171,7 +171,13 @@ fn an_artifacts_or_a_layers_identifier_names_no_item() {
         named.verdicts[1],
         Err(Refusal::UnknownMosaicaId { row: 1 })
     ));
-    assert_eq!(named.verdicts[2], Ok(point));
+    assert_eq!(
+        named.verdicts[2],
+        Ok(mosaica_types::ItemAt::new(
+            mosaica_types::ShardId::ZERO,
+            point
+        ))
+    );
     assert_eq!(items_of(&engine, &[layer_id, ids[0]]), vec![None, None]);
 }
 

@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use mosaica_engine::{AddressTable, AddressValue, Stamp};
 use mosaica_lifecycle::resolve::Reason;
-use mosaica_types::{EntityId, MosaicaId, Target};
+use mosaica_types::{ItemAt, MosaicaId, Target};
 
 use crate::error::{map_engine_error, ApiError};
 use crate::state::AppState;
@@ -185,10 +185,7 @@ impl Merged {
     }
 
     /// Resolve every row to the item it names.
-    pub(crate) fn name(
-        &self,
-        state: &AppState,
-    ) -> Result<Names<Result<EntityId, Reason>>, ApiError> {
+    pub(crate) fn name(&self, state: &AppState) -> Result<Names<Result<ItemAt, Reason>>, ApiError> {
         let named = state
             .engine
             .name_items(&self.table)

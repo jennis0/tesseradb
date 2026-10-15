@@ -123,13 +123,14 @@ pub(super) fn growth_receipt(
             // order the page is applied in: an entity this page both joins and leaves is one this
             // page took out. Both counts are taken from how much of a bitmap the set holds, so
             // neither the set nor the set after the joins is built.
+            let (joining, leaving) = (join.joining.shard_zero(), join.leaving.shard_zero());
             let counted = |held: &dyn Fn(&croaring::Bitmap) -> u64| {
-                let joined = join.joining.cardinality() - held(&join.joining);
-                let left = if join.leaving.is_empty() {
+                let joined = joining.cardinality() - held(joining);
+                let left = if leaving.is_empty() {
                     0
                 } else {
-                    let both = join.leaving.and(&join.joining);
-                    held(&join.leaving) + both.cardinality() - held(&both)
+                    let both = leaving.and(joining);
+                    held(leaving) + both.cardinality() - held(&both)
                 };
                 (joined, left)
             };
@@ -197,21 +198,33 @@ pub(crate) struct PublishedBatch {
     pub(crate) joined: u64,
 }
 
+/// How many members of `sets` their own shards of `generation` have deleted.
+fn deleted_members(generation: &Generation, sets: &mosaica_lifecycle::ShardSets) -> u64 {
+    sets.iter()
+        .filter_map(|(id, set)| {
+            let shard = generation.shard(id)?;
+            Some(set.and_cardinality(shard.overlay.deleted_set()))
+        })
+        .sum()
+}
+
 /// The refusal of a publication naming a deleted member or content source, where it names one.
 /// A suppressed one is accepted, being a live member temporarily outside every mask. The detail is
 /// the caller's 422 body, so it gives a count and an artifact's position, never an entity id.
-fn deleted_in_publication(shard: &Shard, artifacts: &[IncomingArtifact]) -> Option<ExecError> {
-    let deleted = shard.overlay.deleted_set();
+fn deleted_in_publication(
+    generation: &Generation,
+    artifacts: &[IncomingArtifact],
+) -> Option<ExecError> {
     let (count, first_artifact) =
         first_deleted(artifacts.iter().enumerate().map(|(index, artifact)| {
             let in_contents: u64 = artifact
                 .contents
                 .iter()
-                .map(|content| content.generated_from.and_cardinality(deleted))
+                .map(|content| deleted_members(generation, &content.generated_from))
                 .sum();
             (
                 index,
-                artifact.members.and_cardinality(deleted) + in_contents,
+                deleted_members(generation, &artifact.members) + in_contents,
             )
         }))?;
     Some(ExecError::LayerRefused {
@@ -225,15 +238,15 @@ fn deleted_in_publication(shard: &Shard, artifacts: &[IncomingArtifact]) -> Opti
 /// The refusal of a growth whose joining members include a deleted one, on
 /// [`deleted_in_publication`]'s terms: a count and the key of the first join naming one.
 fn deleted_in_growth(
-    shard: &Shard,
+    generation: &Generation,
     joins: &[mosaica_lifecycle::IncomingGrowth],
 ) -> Option<ExecError> {
-    let deleted = shard.overlay.deleted_set();
-    let (count, first_key) = first_deleted(
-        joins
-            .iter()
-            .map(|join| (join.key.as_str(), join.joining.and_cardinality(deleted))),
-    )?;
+    let (count, first_key) = first_deleted(joins.iter().map(|join| {
+        (
+            join.key.as_str(),
+            deleted_members(generation, &join.joining),
+        )
+    }))?;
     Some(ExecError::LayerRefused {
         detail: format!(
             "{count} joining member(s) are deleted, the first joining '{first_key}'; remove the \
@@ -339,12 +352,12 @@ impl Executor {
             } => {
                 let generation = self.generation.load_full();
                 if !stamp.follow_since(&generation, |generation| {
-                    crate::edited::follow_artifacts(generation.only_shard(), &mut artifacts)
+                    crate::edited::follow_artifacts(generation, &mut artifacts)
                 }) {
                     reply.fail(ExecError::Stale);
                     return;
                 }
-                if let Some(refusal) = deleted_in_publication(generation.only_shard(), &artifacts) {
+                if let Some(refusal) = deleted_in_publication(&generation, &artifacts) {
                     reply.fail(refusal);
                     return;
                 }
@@ -359,12 +372,12 @@ impl Executor {
             } => {
                 let generation = self.generation.load_full();
                 if !stamp.follow_since(&generation, |generation| {
-                    crate::edited::follow_growth(generation.only_shard(), &mut joins)
+                    crate::edited::follow_growth(generation, &mut joins)
                 }) {
                     reply.fail(ExecError::Stale);
                     return;
                 }
-                if let Some(refusal) = deleted_in_growth(generation.only_shard(), &joins) {
+                if let Some(refusal) = deleted_in_growth(&generation, &joins) {
                     reply.fail(refusal);
                     return;
                 }
@@ -465,8 +478,9 @@ impl Executor {
     /// Materialise every membership this batch spelled by exclusion, and answer the refusal where
     /// the layer cannot be read.
     ///
-    /// The view's entity set is every entity holding a row in it or buffered for it, deleted
-    /// entities excluded, and the membership is one `andnot` of the caller's list over it. On a
+    /// The view's entity set in a shard is every entity of that shard holding a row in it or
+    /// buffered for it, deleted entities excluded, and the membership is one `andnot` per shard of
+    /// the caller's list in that shard over it. On a
     /// group-scoped layer the view is the artifact's own; on an entity-scoped one it is the union
     /// of the views the layer is drawn on, which is the layer's whole corpus and the set the
     /// build complements against (`layers.rs::resolve_artifact`, `0..high_water`).
@@ -515,7 +529,7 @@ impl Executor {
             ));
         };
         let generation = self.generation.load_full();
-        let mut sets: std::collections::HashMap<Option<String>, croaring::Bitmap> =
+        let mut sets: std::collections::HashMap<Option<String>, mosaica_lifecycle::ShardSets> =
             std::collections::HashMap::new();
         for artifact in incoming.iter_mut() {
             let Some(excluded) = artifact.excluding.as_ref().map(|e| e.cardinality()) else {
@@ -537,7 +551,11 @@ impl Executor {
                         .collect(),
                     None => registered.declaration.views.clone(),
                 };
-                view_entities(generation.only_shard(), &views)
+                let mut entities = mosaica_lifecycle::ShardSets::default();
+                for shard in generation.shards() {
+                    entities.set(shard.id(), view_entities(shard, &views));
+                }
+                entities
             });
             let started = std::time::Instant::now();
             let members = artifact

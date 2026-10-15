@@ -214,7 +214,10 @@ fn a_build_at_its_size_refuses_an_insert_and_an_edit_past_it() {
         .unwrap()
         .expect("the fixture holds item 1");
     let moved = UnallocatedRow {
-        join: Some(item),
+        join: Some(mosaica_types::ItemAt::new(
+            mosaica_types::ShardId::ZERO,
+            item,
+        )),
         x: 7.0,
         y: 7.0,
         scalars: vec![mosaica_lifecycle::wal::WalScalar::U64(1)],

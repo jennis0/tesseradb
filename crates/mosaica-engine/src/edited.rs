@@ -224,18 +224,29 @@ pub(crate) fn follow_changes(
     Ok(())
 }
 
+/// Every set of `sets` following moves, each in its own shard of `generation`.
+fn follow_sets(
+    generation: &Generation,
+    sets: &mut mosaica_lifecycle::ShardSets,
+) -> Result<(), StoreError> {
+    sets.try_for_each_mut(|id, set| match generation.shard(id) {
+        Some(shard) => follow_moves(shard, set),
+        None => Ok(()),
+    })
+}
+
 /// Every entity set of `artifacts`, members and generating sets, following moves.
 pub(crate) fn follow_artifacts(
-    shard: &Shard,
+    generation: &Generation,
     artifacts: &mut [mosaica_lifecycle::IncomingArtifact],
 ) -> Result<(), StoreError> {
     for artifact in artifacts {
-        follow_moves(shard, &mut artifact.members)?;
+        follow_sets(generation, &mut artifact.members)?;
         if let Some(excluding) = artifact.excluding.as_mut() {
-            follow_moves(shard, excluding)?;
+            follow_sets(generation, excluding)?;
         }
         for content in &mut artifact.contents {
-            follow_moves(shard, &mut content.generated_from)?;
+            follow_sets(generation, &mut content.generated_from)?;
         }
     }
     Ok(())
@@ -243,12 +254,12 @@ pub(crate) fn follow_artifacts(
 
 /// Every entity set of `joins`, following moves.
 pub(crate) fn follow_growth(
-    shard: &Shard,
+    generation: &Generation,
     joins: &mut [mosaica_lifecycle::IncomingGrowth],
 ) -> Result<(), StoreError> {
     for join in joins {
-        follow_moves(shard, &mut join.joining)?;
-        follow_moves(shard, &mut join.leaving)?;
+        follow_sets(generation, &mut join.joining)?;
+        follow_sets(generation, &mut join.leaving)?;
     }
     Ok(())
 }
@@ -333,15 +344,16 @@ pub(crate) fn named<'g>(
     Some((shard, number, shard.tenancy.of(number) == high.tenancy))
 }
 
-/// The number `id` names, or `None` where `id` names no item, an item of a shard `generation` does
-/// not hold, or its number at a tenancy the number is not held at.
+/// The shard `id` names an item of and the number it names there, or `None` where `id` names no
+/// item, an item of a shard `generation` does not hold, or its number at a tenancy the number is
+/// not held at.
 pub(crate) fn number_named(
     key: &IdentityKey,
     generation: &Generation,
     id: MosaicaId,
-) -> Option<EntityId> {
-    let (_, number, current) = named(key, generation, id)?;
-    current.then_some(number)
+) -> Option<(ShardId, EntityId)> {
+    let (shard, number, current) = named(key, generation, id)?;
+    current.then_some((shard.id(), number))
 }
 
 /// The `mosaica_id` of the item holding each of `numbers` as its number in `shard`, at the tenancy
@@ -429,9 +441,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let generation = generation_with(dir.path(), &[(7, 3), (9, 4095)]);
         let key = IdentityKey::from_hex(KEY).unwrap();
-        let named = |id| number_named(&key, &generation, id);
+        let named = |id| number_named(&key, &generation, id).map(|(_, number)| number);
 
-        assert_eq!(named(id(&key, 0, 3, 7)), Some(EntityId::new(7)));
+        assert_eq!(
+            number_named(&key, &generation, id(&key, 0, 3, 7)),
+            Some((ShardId::ZERO, EntityId::new(7))),
+            "the number in its shard"
+        );
         assert_eq!(
             named(id(&key, 0, 0, 7)),
             None,

@@ -54,7 +54,10 @@ fn ingest_into_view(
     }
     let row = mosaica_lifecycle::command::UnallocatedRow {
         view: view.to_string(),
-        join: Some(item),
+        join: Some(mosaica_types::ItemAt::new(
+            mosaica_types::ShardId::ZERO,
+            item,
+        )),
         descriptors: descriptors.clone(),
         x: 5.0,
         y: 5.0,

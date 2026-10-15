@@ -3,7 +3,7 @@
 //!
 //! The handler reads one generation for the whole batch, off the executor thread. It resolves
 //! every row through [`mosaica_lifecycle::resolve`], then reads what each named item stores, in
-//! ascending entity order, and decides the row:
+//! ascending order by shard and entity, and decides the row:
 //!
 //! - a row the rule refuses writes nothing, and the receipt names it with its reason; a strict
 //!   batch is refused whole at its first refused row instead. A row naming no item and carrying no
@@ -33,7 +33,7 @@ use mosaica_lifecycle::{
 };
 use mosaica_store::manifest::DeclaredScalar;
 use mosaica_store::unique::{key_of, value_text, KeyKind, UniqueKey};
-use mosaica_types::{EntityId, MosaicaId, TermId};
+use mosaica_types::{EntityId, ItemAt, MosaicaId, ShardId, TermId};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::engine::Engine;
@@ -326,10 +326,10 @@ impl Engine {
                 _ => None,
             })
             .collect();
-        let named: Vec<Option<EntityId>> = verdicts
+        let named: Vec<Option<ItemAt>> = verdicts
             .into_iter()
             .map(|verdict| match verdict {
-                resolve::Verdict::Names(entity) => Some(entity),
+                resolve::Verdict::Names(item) => Some(item),
                 _ => None,
             })
             .collect();
@@ -347,8 +347,9 @@ impl Engine {
         let mut edited_from: Vec<usize> = Vec::new();
         let mut joined_from: Vec<usize> = Vec::new();
 
-        // Named items in ascending entity order, so the stored reads walk each layer forwards.
-        let mut order: Vec<(EntityId, usize)> = named
+        // Named items in ascending order by shard and entity, so the stored reads walk each
+        // shard's layers forwards.
+        let mut order: Vec<(ItemAt, usize)> = named
             .iter()
             .enumerate()
             .filter_map(|(at, item)| item.map(|e| (e, at)))
@@ -359,12 +360,12 @@ impl Engine {
             not_members: self.memberships_not_held(request, &named),
         };
         let mut decided: FxHashMap<usize, Decided> = FxHashMap::default();
-        for &(entity, at) in &order {
+        for &(item, at) in &order {
             let decision = self.decide(
                 generation,
                 request,
                 at,
-                entity,
+                item,
                 view,
                 owner_view.as_deref(),
                 scoped_families,
@@ -374,13 +375,13 @@ impl Engine {
         }
 
         // An edit carries every value the item holds, so the items edited are read whole.
-        let edited: Vec<(EntityId, usize)> = order
+        let edited: Vec<(ItemAt, usize)> = order
             .iter()
             .copied()
             .filter(|(_, at)| matches!(decided.get(at), Some(Decided::Edited)))
             .collect();
         // The first read took the rows carrying a blob-resident column; the rest are read here.
-        let unread: Vec<(EntityId, usize)> = match &stored.blobs {
+        let unread: Vec<(ItemAt, usize)> = match &stored.blobs {
             Some(_) => edited
                 .iter()
                 .copied()
@@ -395,18 +396,24 @@ impl Engine {
                 None => stored.blobs = Some(more),
             }
         }
-        // Each named item's number, which its `mosaica_id` is taken from and an edit keeps.
-        let entities: Vec<EntityId> = order.iter().map(|(entity, _)| *entity).collect();
+        // Each named item's number in its shard, which its `mosaica_id` is taken from and an edit
+        // keeps.
         let unreadable = |e: mosaica_store::StoreError| AcceptError::Unreadable(e.to_string());
-        let shard = generation.only_shard();
-        let numbers = crate::edited::numbers_of(shard, &entities).map_err(unreadable)?;
-        let ids = crate::edited::ids_of_numbers(&self.identity_key, shard, &numbers)
-            .map_err(unreadable)?;
-        let held: FxHashMap<EntityId, (EntityId, u64)> = entities
-            .iter()
-            .copied()
-            .zip(numbers.into_iter().zip(ids.into_iter().map(|id| id.raw())))
-            .collect();
+        let mut held: FxHashMap<ItemAt, (EntityId, u64)> = FxHashMap::default();
+        for (shard, items) in by_shard(order.iter().map(|(item, _)| *item)) {
+            let shard = generation
+                .shard(shard)
+                .expect("an item is resolved in a shard of the generation it is read from");
+            let entities: Vec<EntityId> = items.iter().map(|item| item.entity).collect();
+            let numbers = crate::edited::numbers_of(shard, &entities).map_err(unreadable)?;
+            let ids = crate::edited::ids_of_numbers(&self.identity_key, shard, &numbers)
+                .map_err(unreadable)?;
+            held.extend(
+                items
+                    .into_iter()
+                    .zip(numbers.into_iter().zip(ids.into_iter().map(|id| id.raw()))),
+            );
+        }
 
         for (at, (row, item)) in request.rows.iter().zip(&named).enumerate() {
             if let Some(reason) = refused[at] {
@@ -438,16 +445,16 @@ impl Engine {
                         terms: Vec::new(),
                     });
                 }
-                Some(entity) => {
-                    let (number, mosaica_id) = held[entity];
+                Some(item) => {
+                    let (number, mosaica_id) = held[item];
                     match decided.remove(&at).expect("every named row was decided") {
                         Decided::Unchanged => slots.push(Slot::Unchanged {
-                            entity: *entity,
+                            entity: *item,
                             mosaica_id,
                         }),
                         Decided::Joined => {
                             slots.push(Slot::Joined {
-                                entity: *entity,
+                                entity: *item,
                                 mosaica_id,
                             });
                             joined_from.push(at);
@@ -462,12 +469,11 @@ impl Engine {
                         }
                         Decided::Edited => {
                             let blob = match &stored.blobs {
-                                Some(blobs) => BlobRow::of(blobs.get(entity).cloned()),
+                                Some(blobs) => BlobRow::of(blobs.get(item).cloned()),
                                 None => BlobRow::default(),
                             };
-                            let edit = self.carry(
-                                generation, &meta, request, at, *entity, number, view, blob,
-                            )?;
+                            let edit = self
+                                .carry(generation, &meta, request, at, *item, number, view, blob)?;
                             keys.extend(identities[at].unique.iter().copied());
                             slots.push(Slot::Edited {
                                 edit: edits.len() as u32,
@@ -511,9 +517,10 @@ impl Engine {
         })
     }
 
-    /// The edit a row makes of `old`: every view the item holds a row in, and the batch's view
-    /// where the row places the item there; the row's label and values where it carries them and
-    /// the stored ones where it leaves them out; and the item's number, which its new entity keeps.
+    /// The edit a row makes of the item `old`: every view the item holds a row in, and the batch's
+    /// view where the row places the item there; the row's label and values where it carries them
+    /// and the stored ones where it leaves them out; and the item's number, which its new entity in
+    /// the item's shard keeps.
     #[allow(clippy::too_many_arguments)]
     fn carry(
         &self,
@@ -521,7 +528,7 @@ impl Engine {
         meta: &crate::viewport::EngineMeta,
         request: &IngestRequest,
         at: usize,
-        old: EntityId,
+        item: ItemAt,
         number: EntityId,
         view: Option<&crate::viewport::MetaView>,
         mut blob: BlobRow,
@@ -529,7 +536,8 @@ impl Engine {
         let row = &request.rows[at];
         let manifest = &generation.bundle.manifest;
         let declared = &manifest.declared_scalars;
-        let shard = generation.only_shard();
+        let shard = generation.shard_of(item);
+        let old = item.entity;
         let held_views = joined::views_holding(shard, old);
         let placing = view.zip(row.position);
         let buffered = shard.buffer.get(old);
@@ -546,7 +554,7 @@ impl Engine {
 
         let descriptors = match &row.labels {
             Some(labels) => index_keys(at, labels)?,
-            None => self.stored_label(generation, old)?,
+            None => self.stored_label(generation, item)?,
         };
         let carried =
             |position: usize| position < row.scalars.len() && !row.omitted.contains(&position);
@@ -556,7 +564,7 @@ impl Engine {
             .map(|(position, d)| match carried(position) {
                 true => row.scalars[position].clone(),
                 false => {
-                    joined::held_entity_value(generation, old, position, d, buffered, &mut blob)
+                    joined::held_entity_value(generation, item, position, d, buffered, &mut blob)
                         .unwrap_or(WalScalar::Null)
                 }
             })
@@ -583,7 +591,7 @@ impl Engine {
                             index: at,
                             view: view_id.clone(),
                         })?;
-                    self.stored_xy(generation, old, frame)?.ok_or_else(|| {
+                    self.stored_xy(generation, item, frame)?.ok_or_else(|| {
                         AcceptError::Unreadable(format!(
                             "row {at}'s item has no readable row in view '{view_id}'"
                         ))
@@ -611,7 +619,7 @@ impl Engine {
                         Some(value) => Ok(value.clone()),
                         None => Ok(joined::held_scoped_value(
                             generation,
-                            old,
+                            item,
                             position,
                             family,
                             &joined::declared_of_scoped(family),
@@ -671,7 +679,12 @@ impl Engine {
             }
         }
         Ok(SubmittedEdit {
-            edit: UnallocatedEdit { old, number, rows },
+            edit: UnallocatedEdit {
+                shard: item.shard,
+                old,
+                number,
+                rows,
+            },
             held_views,
         })
     }
@@ -681,12 +694,12 @@ impl Engine {
     fn stored_label(
         &self,
         generation: &Generation,
-        entity: EntityId,
+        item: ItemAt,
     ) -> Result<Vec<Vec<u8>>, AcceptError> {
-        let shard = generation.only_shard();
-        let terms: Vec<TermId> = match shard.buffer.get(entity) {
-            Some(item) => item.terms.clone(),
-            None => joined::flushed_terms_of(shard, entity).ok_or_else(|| {
+        let shard = generation.shard_of(item);
+        let terms: Vec<TermId> = match shard.buffer.get(item.entity) {
+            Some(buffered) => buffered.terms.clone(),
+            None => joined::flushed_terms_of(shard, item.entity).ok_or_else(|| {
                 AcceptError::Unreadable("an edited item's label could not be read".to_string())
             })?,
         };
@@ -723,20 +736,20 @@ impl Engine {
     fn stored_xy(
         &self,
         generation: &Generation,
-        entity: EntityId,
+        item: ItemAt,
         view: &crate::viewport::MetaView,
     ) -> Result<Option<(f64, f64)>, AcceptError> {
-        if let Some(item) = generation
-            .only_shard()
+        if let Some(buffered) = generation
+            .shard_of(item)
             .buffer
-            .rows_of(entity)
-            .find(|item| item.view == view.id)
+            .rows_of(item.entity)
+            .find(|buffered| buffered.view == view.id)
         {
-            return Ok(Some((item.x, item.y)));
+            return Ok(Some((buffered.x, buffered.y)));
         }
         let q = view.quantisation;
         Ok(self
-            .stored_position(generation, entity, view)?
+            .stored_position(generation, item, view)?
             .map(|(fx, fy)| {
                 (
                     mosaica_spatial::unfixed32(fx, q.x_min, q.x_max),
@@ -769,14 +782,14 @@ impl Engine {
         index_keys(at, &labels)
     }
 
-    /// Decide one row naming `entity` against what the item stores.
+    /// Decide one row naming `item` against what the item stores.
     #[allow(clippy::too_many_arguments)]
     fn decide(
         &self,
         generation: &Generation,
         request: &IngestRequest,
         at: usize,
-        entity: EntityId,
+        item: ItemAt,
         view: Option<&crate::viewport::MetaView>,
         owner_view: Option<&str>,
         scoped_families: &[mosaica_store::manifest::ScopedScalar],
@@ -785,9 +798,10 @@ impl Engine {
         let row = &request.rows[at];
         let manifest = &generation.bundle.manifest;
         let declared = &manifest.declared_scalars;
-        let buffered = generation.only_shard().buffer.get(entity);
+        let shard = generation.shard_of(item);
+        let buffered = shard.buffer.get(item.entity);
         let mut blob = match &stored.blobs {
-            Some(blobs) => BlobRow::of(blobs.get(&entity).cloned()),
+            Some(blobs) => BlobRow::of(blobs.get(&item).cloned()),
             None => BlobRow::default(),
         };
         let membership = || match stored.not_members.contains_key(&at) {
@@ -804,8 +818,8 @@ impl Engine {
                 .live()
                 .lookup_terms(&generation.dict, &descriptors);
             let held: Option<Vec<TermId>> = match buffered {
-                Some(item) => Some(item.terms.clone()),
-                None => joined::flushed_terms_of(generation.only_shard(), entity),
+                Some(buffered) => Some(buffered.terms.clone()),
+                None => joined::flushed_terms_of(shard, item.entity),
             };
             let same = match (supplied, held) {
                 (Some(mut supplied), Some(mut held)) => {
@@ -829,7 +843,7 @@ impl Engine {
             };
             let value = (!joined::scalar_is_absent(value, d)).then_some(value);
             let held =
-                joined::held_entity_value(generation, entity, position, d, buffered, &mut blob);
+                joined::held_entity_value(generation, item, position, d, buffered, &mut blob);
             let same = match (value, &held) {
                 (Some(value), Some(held)) => {
                     joined::supplied_as_stored(generation, value, d).same_as(held)
@@ -845,7 +859,7 @@ impl Engine {
         let (Some(view), Some((x, y))) = (view, row.position) else {
             // No position: nothing about the item's views changes.
             if let Some(owner_view) = owner_view {
-                if scoped_against_held(generation, entity, row, scoped_families, owner_view, false)?
+                if scoped_against_held(generation, item, row, scoped_families, owner_view, false)?
                     .is_none()
                 {
                     return Ok(Decided::Edited);
@@ -854,7 +868,7 @@ impl Engine {
             return Ok(membership());
         };
         let owner_view = owner_view.expect("a view has an owner view");
-        let adding = match self.stored_position(generation, entity, view)? {
+        let adding = match self.stored_position(generation, item, view)? {
             Some(held) => {
                 if held != fixed(view.quantisation, x, y) {
                     return Ok(Decided::Edited);
@@ -864,7 +878,7 @@ impl Engine {
             None => true,
         };
         let Some(repeated) =
-            scoped_against_held(generation, entity, row, scoped_families, owner_view, adding)?
+            scoped_against_held(generation, item, row, scoped_families, owner_view, adding)?
         else {
             return Ok(Decided::Edited);
         };
@@ -879,7 +893,7 @@ impl Engine {
             .map(|(position, d)| match row.scalars.get(position) {
                 Some(value) if carried(position) => value.clone(),
                 _ if d.carried_on_join_row() => {
-                    joined::held_entity_value(generation, entity, position, d, buffered, &mut blob)
+                    joined::held_entity_value(generation, item, position, d, buffered, &mut blob)
                         .unwrap_or(WalScalar::Null)
                 }
                 _ => WalScalar::Null,
@@ -892,7 +906,7 @@ impl Engine {
         }
         Ok(Decided::Added(Box::new(UnallocatedRow {
             view: view.id.clone(),
-            join: Some(entity),
+            join: Some(item),
             descriptors: Vec::new(),
             x,
             y,
@@ -908,31 +922,35 @@ impl Engine {
     fn memberships_not_held(
         &self,
         request: &IngestRequest,
-        named: &[Option<EntityId>],
+        named: &[Option<ItemAt>],
     ) -> FxHashMap<usize, String> {
         if request.artifacts.memberships.is_empty() {
             return FxHashMap::default();
         }
-        self.write.live().with_artifacts(|store| {
+        let live = self.write.live();
+        live.with_artifacts(|store| {
             let mut out = FxHashMap::default();
             for membership in &request.artifacts.memberships {
-                let record = store
-                    .ordinal_of_key(
-                        &membership.layer,
-                        membership.level,
-                        membership.view.as_deref(),
-                        &membership.key,
-                    )
-                    .and_then(|ordinal| store.get(&membership.layer, membership.level, ordinal));
+                let ordinal = store.ordinal_of_key(
+                    &membership.layer,
+                    membership.level,
+                    membership.view.as_deref(),
+                    &membership.key,
+                );
                 for &at in &membership.rows {
                     let at = at as usize;
-                    let Some(entity) = named.get(at).copied().flatten() else {
+                    let Some(item) = named.get(at).copied().flatten() else {
                         continue;
                     };
-                    let held = u32::try_from(entity.raw())
+                    // The item's shard's slice lists the artifact where it holds a member there.
+                    let slice = live.slice_of(item.shard, store);
+                    let record = ordinal.and_then(|ordinal| {
+                        slice.get(&membership.layer, membership.level, ordinal)
+                    });
+                    let held = u32::try_from(item.entity.raw())
                         .ok()
                         .zip(record)
-                        .is_some_and(|(member, record)| store.members_of(record).contains(member));
+                        .is_some_and(|(member, record)| slice.members_of(record).contains(member));
                     if !held {
                         out.entry(at).or_insert_with(|| membership.layer.clone());
                     }
@@ -950,39 +968,45 @@ impl Engine {
     fn read_blobs(
         generation: &Generation,
         request: &IngestRequest,
-        order: &[(EntityId, usize)],
+        order: &[(ItemAt, usize)],
         whole: bool,
-    ) -> Result<Option<FxHashMap<EntityId, Vec<mosaica_filter::RecordField>>>, AcceptError> {
+    ) -> Result<Option<FxHashMap<ItemAt, Vec<mosaica_filter::RecordField>>>, AcceptError> {
         let manifest = &generation.bundle.manifest;
-        let resident: Vec<usize> = manifest
+        let resident = manifest
             .declared_scalars
             .iter()
-            .enumerate()
-            .filter(|(_, d)| crate::filter::blob_resident(d, &manifest.vocabularies))
-            .map(|(at, _)| at)
-            .collect();
-        let wanted: croaring::Bitmap = order
-            .iter()
-            .filter(|(_, at)| whole || Self::carries_resident(generation, &request.rows[*at]))
-            .filter_map(|(entity, _)| u32::try_from(entity.raw()).ok())
-            .collect();
+            .any(|d| crate::filter::blob_resident(d, &manifest.vocabularies));
         let mut blobs = FxHashMap::default();
-        if wanted.is_empty() || resident.is_empty() {
+        if !resident {
             return Ok(Some(blobs));
         }
-        let read = generation
-            .only_shard()
-            .filter_columns
-            .records()
-            .for_each_row_in(&wanted, &mut |entity, fields| {
-                blobs.insert(EntityId::new(u64::from(entity)), fields);
-                Ok(())
-            });
-        match read {
-            Ok(()) => Ok(Some(blobs)),
-            Err(e) if whole => Err(AcceptError::Unreadable(format!("the record blob: {e}"))),
-            Err(_) => Ok(None),
+        let wanted = order
+            .iter()
+            .filter(|(_, at)| whole || Self::carries_resident(generation, &request.rows[*at]))
+            .map(|(item, _)| *item);
+        for (shard, items) in by_shard(wanted) {
+            let wanted: croaring::Bitmap = items
+                .iter()
+                .filter_map(|item| u32::try_from(item.entity.raw()).ok())
+                .collect();
+            let read = generation
+                .shard(shard)
+                .expect("an item is resolved in a shard of the generation it is read from")
+                .filter_columns
+                .records()
+                .for_each_row_in(&wanted, &mut |entity, fields| {
+                    blobs.insert(ItemAt::new(shard, EntityId::new(u64::from(entity))), fields);
+                    Ok(())
+                });
+            match read {
+                Ok(()) => {}
+                Err(e) if whole => {
+                    return Err(AcceptError::Unreadable(format!("the record blob: {e}")))
+                }
+                Err(_) => return Ok(None),
+            }
         }
+        Ok(Some(blobs))
     }
 
     /// Whether `row` carries a column whose value lives in the record blob.
@@ -999,22 +1023,25 @@ impl Engine {
     fn stored_position(
         &self,
         generation: &Generation,
-        entity: EntityId,
+        item: ItemAt,
         view: &crate::viewport::MetaView,
     ) -> Result<Option<(u32, u32)>, AcceptError> {
-        if let Some(item) = generation
-            .only_shard()
+        if let Some(buffered) = generation
+            .shard_of(item)
             .buffer
-            .rows_of(entity)
-            .find(|item| item.view == view.id)
+            .rows_of(item.entity)
+            .find(|buffered| buffered.view == view.id)
         {
-            return Ok(Some(fixed(view.quantisation, item.x, item.y)));
+            return Ok(Some(fixed(view.quantisation, buffered.x, buffered.y)));
         }
         for partition in generation.bundle.partitions.values() {
-            let Some(view_data) = partition.only_shard().views.get(&view.id) else {
+            let Some(view_data) = partition
+                .shard(item.shard)
+                .and_then(|shard| shard.views.get(&view.id))
+            else {
                 continue;
             };
-            let found = crate::viewport::segment_row_of(&view.id, view_data, entity)
+            let found = crate::viewport::segment_row_of(&view.id, view_data, item.entity)
                 .map_err(|e| AcceptError::Unreadable(e.to_string()))?;
             if let Some((segment, local)) = found {
                 return Ok(Some(mosaica_spatial::unsplit32(
@@ -1074,9 +1101,7 @@ impl Engine {
         request: &IngestRequest,
         refusal: &Refusal,
     ) -> String {
-        let tid = |entity: EntityId| {
-            crate::unique::mosaica_id_text(self, generation.only_shard(), entity)
-        };
+        let tid = |item: ItemAt| crate::unique::mosaica_id_text(self, generation, item);
         let value = |row: usize, field: Identifier| match field {
             Identifier::MosaicaId => "its mosaica_id".to_string(),
             Identifier::Unique(at) => {
@@ -1094,13 +1119,13 @@ impl Engine {
                 let mut seen = Vec::new();
                 let parts: Vec<String> = named
                     .iter()
-                    .filter(|(_, entity)| {
-                        let fresh = !seen.contains(entity);
-                        seen.push(*entity);
+                    .filter(|(_, item)| {
+                        let fresh = !seen.contains(item);
+                        seen.push(*item);
                         fresh
                     })
-                    .map(|(field, entity)| {
-                        format!("{} names item {}", value(*row, *field), tid(*entity))
+                    .map(|(field, item)| {
+                        format!("{} names item {}", value(*row, *field), tid(*item))
                     })
                     .collect();
                 format!(
@@ -1142,7 +1167,7 @@ impl Engine {
 /// What a batch's named items store, read once for the whole batch rather than per row.
 struct Stored {
     /// Each named item's record-blob row, where a row carries a column stored there.
-    blobs: Option<FxHashMap<EntityId, Vec<mosaica_filter::RecordField>>>,
+    blobs: Option<FxHashMap<ItemAt, Vec<mosaica_filter::RecordField>>>,
     /// The rows whose membership columns name an artifact that does not hold their item.
     not_members: FxHashMap<usize, String>,
 }
@@ -1184,7 +1209,7 @@ fn fixed(q: mosaica_store::manifest::Quantisation, x: f64, y: f64) -> (u32, u32)
 /// adds the item to the view (`adding`), and differs from one otherwise.
 fn scoped_against_held(
     generation: &Generation,
-    entity: EntityId,
+    item: ItemAt,
     row: &IngestRow,
     families: &[mosaica_store::manifest::ScopedScalar],
     owner_view: &str,
@@ -1201,7 +1226,7 @@ fn scoped_against_held(
         };
         let d = joined::declared_of_scoped(family);
         let supplied = (!joined::scalar_is_absent(supplied, &d)).then_some(supplied);
-        let held = joined::held_scoped_value(generation, entity, position, family, &d, owner_view)?;
+        let held = joined::held_scoped_value(generation, item, position, family, &d, owner_view)?;
         match (supplied, held) {
             (None, None) => {}
             (Some(_), None) if adding => {}
@@ -1227,25 +1252,32 @@ struct Held<'a> {
 impl resolve::Holdings for Held<'_> {
     type Error = AcceptError;
 
-    fn holders(&self, field: u16, keys: &[Key]) -> Result<Vec<(usize, EntityId)>, AcceptError> {
+    fn holders(&self, field: u16, keys: &[Key]) -> Result<Vec<(usize, ItemAt)>, AcceptError> {
         let d = &self.declared[usize::from(field)];
         let kind = KeyKind::of(d.arrow_type).expect("a unique column's type takes a key");
         let keys: Vec<UniqueKey> = keys
             .iter()
             .map(|k| UniqueKey::of_widened(kind, *k))
             .collect();
-        crate::unique::holders(self.generation.only_shard(), &d.name, &keys)
+        crate::unique::holders_in_every_shard(self.generation, &d.name, &keys)
             .map_err(|e| AcceptError::Unreadable(e.to_string()))
     }
 
-    fn mosaica_holders(&self, ids: &[MosaicaId]) -> Result<Vec<Option<EntityId>>, AcceptError> {
-        let high_water = self.engine.write.live().only_shard().high_water();
-        Ok(self
-            .engine
+    fn mosaica_holders(&self, ids: &[MosaicaId]) -> Result<Vec<Option<ItemAt>>, AcceptError> {
+        self.engine
             .mosaica_ids_in(self.generation, ids)
-            .map_err(|e| AcceptError::Unreadable(e.to_string()))?
-            .into_iter()
-            .map(|entity| entity.filter(|e| e.raw() < high_water))
-            .collect())
+            .map_err(|e| AcceptError::Unreadable(e.to_string()))
     }
+}
+
+/// `items`, ascending, grouped by shard.
+fn by_shard(items: impl IntoIterator<Item = ItemAt>) -> BTreeMap<ShardId, Vec<ItemAt>> {
+    let mut grouped: BTreeMap<ShardId, Vec<ItemAt>> = BTreeMap::new();
+    for item in items {
+        grouped.entry(item.shard).or_default().push(item);
+    }
+    for items in grouped.values_mut() {
+        items.sort_unstable();
+    }
+    grouped
 }

@@ -1,5 +1,6 @@
 //! A bundle a build wrote past its `[shards] size`, opened by a running service: it answers every
-//! read as the same items built as one shard answer it, and refuses every write.
+//! read as the same items built as one shard answer it, names each item in its own shard, and
+//! refuses every write unless the engine is opened to write several shards.
 
 mod common;
 
@@ -11,10 +12,11 @@ use mosaica_engine::{
     AcceptError, AggregateRequest, Engine, EngineError, ExecutorPosture, Grouping, RecordsOrder,
     ScalarOut, Session, ViewportRequest,
 };
+use mosaica_lifecycle::resolve::Refusal;
 use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_lifecycle::{DeclaredValue, IncomingArtifact, IncomingGrowth, VocabularyRequest};
 use mosaica_store::manifest::EntitySet;
-use mosaica_types::{EntityId, ShardId, Target};
+use mosaica_types::{EntityId, ItemAt, MosaicaId, ShardId, Target};
 
 /// Items the fixture builds.
 const N: u64 = 40;
@@ -388,7 +390,10 @@ fn writes(engine: &Engine) -> Vec<(&'static str, Result<(), AcceptError>)> {
                     vec![IncomingGrowth {
                         key: "a".into(),
                         view: None,
-                        joining: croaring::Bitmap::of(&[0]),
+                        joining: mosaica_lifecycle::ShardSets::in_shard(
+                            ShardId::ZERO,
+                            croaring::Bitmap::of(&[0]),
+                        ),
                         leaving: Default::default(),
                         rank: None,
                         parts: Default::default(),
@@ -456,4 +461,120 @@ fn a_log_holding_records_is_refused_beside_several_shards() {
         "{:?}",
         opened.err()
     );
+}
+
+/// A table naming each of `read`'s items by its `mosaica_id` and by its unique `id`.
+fn by_identifier_and_id(read: &[(u64, u64)]) -> mosaica_engine::AddressTable {
+    mosaica_engine::AddressTable {
+        rows: read.len(),
+        mosaica_id: Some(
+            read.iter()
+                .map(|&(mosaica_id, _)| Some(MosaicaId::new(mosaica_id)))
+                .collect(),
+        ),
+        columns: vec![(
+            "id".to_string(),
+            read.iter()
+                .map(|&(_, id)| Some(mosaica_engine::AddressValue::Text(id.to_string())))
+                .collect(),
+        )],
+    }
+}
+
+/// Each item is named in its own shard: its `mosaica_id` and its unique value name the one item,
+/// the items of both shards are distinct where their entity numbers repeat, and a row naming an
+/// item of each shard that holds one entity number names two items.
+#[test]
+fn each_item_is_named_in_its_own_shard() {
+    let built = fixture_sized(N, Some(SIZE));
+    let engine = built.open();
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let read = read_items(&engine, &session, &Items::new(RecordsOrder::Stored)).rows_with_ids;
+    assert_eq!(read.len(), N as usize);
+
+    let named = engine.name_items(&by_identifier_and_id(&read)).unwrap();
+    let items: Vec<ItemAt> = named
+        .verdicts
+        .iter()
+        .map(|verdict| verdict.clone().expect("each row names its item"))
+        .collect();
+    let distinct: std::collections::BTreeSet<ItemAt> = items.iter().copied().collect();
+    assert_eq!(distinct.len(), N as usize, "no two items are one");
+    let in_shard = |shard: u32| -> std::collections::BTreeSet<EntityId> {
+        let shard = ShardId::new(shard).unwrap();
+        items
+            .iter()
+            .filter(|item| item.shard == shard)
+            .map(|item| item.entity)
+            .collect()
+    };
+    let (zero, one) = (in_shard(0), in_shard(1));
+    assert_eq!(
+        (zero.len(), one.len()),
+        (SIZE as usize, (N - SIZE) as usize)
+    );
+    let shared: Vec<EntityId> = zero.intersection(&one).copied().collect();
+    assert!(!shared.is_empty(), "the shards repeat entity numbers");
+
+    let ids: Vec<MosaicaId> = read.iter().map(|&(id, _)| MosaicaId::new(id)).collect();
+    assert_eq!(
+        engine.resolve_targets(&ids).unwrap(),
+        items
+            .iter()
+            .map(|item| Some(item.target()))
+            .collect::<Vec<_>>()
+    );
+    let by_id = |shard: u32| {
+        let at = items
+            .iter()
+            .position(|item| *item == ItemAt::new(ShardId::new(shard).unwrap(), shared[0]))
+            .unwrap();
+        read[at]
+    };
+    let (in_zero, in_one) = (by_id(0), by_id(1));
+    let crossed = engine
+        .name_items(&by_identifier_and_id(&[(in_one.0, in_zero.1)]))
+        .unwrap();
+    assert!(
+        matches!(&crossed.verdicts[0], Err(Refusal::NamesTwo { .. })),
+        "{:?}",
+        crossed.verdicts
+    );
+}
+
+/// An engine opened to write several shards admits writes and starts its executor, and opens a
+/// log holding a record beside the shards, which [`Engine::open`] refuses.
+#[cfg(feature = "several-shard-writes")]
+#[test]
+fn an_engine_writing_several_shards_admits_writes_and_a_log() {
+    let several = fixture_sized(N, Some(SIZE));
+    let mut engine =
+        Engine::open_writing_several_shards(&several.root, &several.cache, &several.wal, config())
+            .unwrap();
+    engine.start_write_executor(8).expect("the executor starts");
+    assert!(engine.writable().is_ok());
+    assert_eq!(engine.write_executor_posture(), ExecutorPosture::Running);
+    let before = served(&engine, &full_coverage_credential());
+    drop(engine);
+
+    // A log naming no shard: a layer's registration.
+    let one = fixture_sized(N, None);
+    let engine = one.open();
+    engine.register_layer(flat_declaration("l")).unwrap();
+    drop(engine);
+
+    let refused = Engine::open(&several.root, &several.cache, &one.wal, config());
+    assert!(
+        matches!(refused, Err(EngineError::SeveralShardsLogged { shards: 2 })),
+        "{:?}",
+        refused.err()
+    );
+    let engine =
+        Engine::open_writing_several_shards(&several.root, &several.cache, &one.wal, config())
+            .expect("a log beside several shards opens");
+    assert!(
+        engine.registered_layer("l").is_some(),
+        "the log is replayed"
+    );
+    assert_eq!(served(&engine, &full_coverage_credential()), before);
 }

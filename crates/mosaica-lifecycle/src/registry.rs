@@ -390,8 +390,8 @@ fn prepare_set_page(
     // Joins before leaves, which is the order the store applies them in and the order that makes
     // a paged replacement safe (`ingest.md` §1.1, §2.2).
     let mut next = content.generated_from.clone();
-    next.or_inplace(&join.joining);
-    next.andnot_inplace(&join.leaving);
+    next.or_inplace(join.joining.shard_zero());
+    next.andnot_inplace(join.leaving.shard_zero());
     if next == content.generated_from {
         return Ok(None);
     }
@@ -401,8 +401,8 @@ fn prepare_set_page(
     }
     Ok(Some(crate::wal::MembershipGrowth {
         ordinal,
-        joining: crate::membership::serialise_members(&join.joining),
-        leaving: crate::membership::serialise_members(&join.leaving),
+        joining: crate::membership::serialise_members(join.joining.shard_zero()),
+        leaving: crate::membership::serialise_members(join.leaving.shard_zero()),
         set: crate::wal::GrownSet::GeneratingSet { rank, cardinality },
     }))
 }
@@ -1271,7 +1271,7 @@ impl LayerRegistry {
             // content against a set they did not declare.
             for (rank, content) in artifact.contents.iter().enumerate() {
                 match record.contents.get(rank) {
-                    Some(held) if held.generated_from != content.generated_from => {
+                    Some(held) if held.generated_from != *content.generated_from.shard_zero() => {
                         return Err(RegistryError::PartConflict {
                             layer: layer_name.to_string(),
                             level,
@@ -1302,7 +1302,7 @@ impl LayerRegistry {
                 ordinal,
                 part,
             }));
-            let mut delta = artifact.members.clone();
+            let mut delta = artifact.members.shard_zero().clone();
             record.members.remove_from(&mut delta);
             if !delta.is_empty() {
                 joins.push((ordinal, delta));
@@ -1732,7 +1732,7 @@ impl LayerRegistry {
                 // A predicate layer's artifacts are derived from a value column, which is
                 // entity-scoped; a group-scoped one is refused at `scoped_view`.
                 view: None,
-                members: croaring::Bitmap::new(),
+                members: crate::membership::ShardSets::default(),
                 excluding: None,
                 contents: Vec::new(),
                 attached_to: None,
@@ -2152,14 +2152,14 @@ impl LayerRegistry {
                     // the artifact in the view it was acked in.
                     view: artifact.view.clone(),
                     incarnation: incarnations[i],
-                    members: serialise_members(&artifact.members),
+                    members: serialise_members(artifact.members.shard_zero()),
                     contents: artifact
                         .contents
                         .iter()
                         .map(|v| crate::wal::PublishedContent {
                             values: v.values.clone(),
                             digest: crate::membership::content_digest(&v.values),
-                            generated_from: serialise_members(&v.generated_from),
+                            generated_from: serialise_members(v.generated_from.shard_zero()),
                             cardinality: v.generated_from.cardinality(),
                         })
                         .collect(),
@@ -2343,7 +2343,7 @@ impl LayerRegistry {
             // growth pin is released by the compaction fold alone. Taken against the membership as
             // it stands before the batch, which is the state every row of the batch is prepared
             // against and the state `growth_receipt` counts `joined` over.
-            let mut joining = join.joining.clone();
+            let mut joining = join.joining.shard_zero().clone();
             if let Some(record) = store.get(layer_name, level, ordinal) {
                 record.members.remove_from(&mut joining);
             }
@@ -3307,7 +3307,10 @@ mod tests {
         IncomingArtifact {
             key: Some(key.into()),
             view: None,
-            members: croaring::Bitmap::of(members),
+            members: crate::membership::ShardSets::in_shard(
+                mosaica_types::ShardId::ZERO,
+                croaring::Bitmap::of(members),
+            ),
             excluding: None,
             contents: Vec::new(),
             attached_to: None,
@@ -4292,7 +4295,7 @@ mod tests {
 
         // Across a `PUT`: a new artifact under a held one, and the held one filled under the new.
         let mut a_under_d = under("a", &["d"]);
-        a_under_d.members = croaring::Bitmap::new();
+        a_under_d.members = crate::membership::ShardSets::default();
         let refused = reg
             .prepare_put(
                 "clusters/t",
@@ -4864,7 +4867,10 @@ mod tests {
         apply_put(&mut reg, &mut store, &prepared);
 
         let mut again = incoming("c1", &[]);
-        again.exclude([EntityId::new(4)]);
+        again.exclude([mosaica_types::ItemAt::new(
+            mosaica_types::ShardId::ZERO,
+            EntityId::new(4),
+        )]);
         let refused = reg
             .prepare_put("clusters/a", 0, &[again], &store, &AnyView)
             .unwrap_err();

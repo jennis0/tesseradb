@@ -427,7 +427,10 @@ impl Fixture {
                 vec![IncomingGrowth {
                     key: key.to_string(),
                     view: None,
-                    joining: entities.iter().map(|e| e.raw() as u32).collect(),
+                    joining: mosaica_lifecycle::ShardSets::in_shard(
+                        mosaica_types::ShardId::ZERO,
+                        entities.iter().map(|e| e.raw() as u32).collect(),
+                    ),
                     leaving: Default::default(),
                     rank: None,
                     parts: Default::default(),

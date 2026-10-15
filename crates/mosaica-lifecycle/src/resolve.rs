@@ -25,7 +25,7 @@
 //! access it cannot afford at 10⁹ rows.
 
 use rustc_hash::FxHashMap;
-use mosaica_types::{EntityId, MosaicaId};
+use mosaica_types::{ItemAt, MosaicaId};
 
 /// A unique field's value as its index keys it, widened to 128 bits. Two values of one field
 /// are equal exactly where their keys are.
@@ -39,16 +39,17 @@ pub struct RowIdentity {
     pub unique: Vec<(u16, Key)>,
 }
 
-/// Who holds what: every answer counts live and suppressed items and leaves deleted ones out.
+/// Who holds what: every answer counts live and suppressed items and leaves deleted ones out. An
+/// item is its entity in its shard, so one entity number in two shards is two items.
 pub trait Holdings {
     type Error;
 
     /// Every item holding a key in the unique field at declared position `field`, as
     /// `(position in keys, item)`.
-    fn holders(&self, field: u16, keys: &[Key]) -> Result<Vec<(usize, EntityId)>, Self::Error>;
+    fn holders(&self, field: u16, keys: &[Key]) -> Result<Vec<(usize, ItemAt)>, Self::Error>;
 
     /// For each `mosaica_id`, the item it names.
-    fn mosaica_holders(&self, ids: &[MosaicaId]) -> Result<Vec<Option<EntityId>>, Self::Error>;
+    fn mosaica_holders(&self, ids: &[MosaicaId]) -> Result<Vec<Option<ItemAt>>, Self::Error>;
 }
 
 /// What identified an item in a refusal.
@@ -93,14 +94,14 @@ pub enum Refusal {
     /// A row's values name more than one item: each identifier with the item it names.
     NamesTwo {
         row: usize,
-        named: Vec<(Identifier, EntityId)>,
+        named: Vec<(Identifier, ItemAt)>,
     },
     /// A row's `mosaica_id` names no live or suppressed item.
     UnknownMosaicaId { row: usize },
     /// A row addresses an item and names none, in a batch that creates no items.
     NamesNoItem { row: usize },
     /// A later row names the item an earlier row names: `rows` is the kept row and the refused one.
-    OneItemTwice { rows: [usize; 2], item: EntityId },
+    OneItemTwice { rows: [usize; 2], item: ItemAt },
     /// A later row sets a unique value an earlier row sets: `rows` is the kept row and the refused
     /// one.
     OneValueTwice { rows: [usize; 2], field: Identifier },
@@ -182,7 +183,7 @@ impl Reason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
     Creates,
-    Names(EntityId),
+    Names(ItemAt),
     Refused(Refusal),
 }
 
@@ -190,16 +191,16 @@ pub enum Verdict {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Named {
     Nothing,
-    One(EntityId),
+    One(ItemAt),
     Two,
 }
 
 /// Decide one row from each identifier it carries and the item that identifier names.
-pub fn name_row(named: &[(Identifier, EntityId)]) -> Named {
+pub fn name_row(named: &[(Identifier, ItemAt)]) -> Named {
     let Some(&(_, first)) = named.first() else {
         return Named::Nothing;
     };
-    if named.iter().any(|&(_, entity)| entity != first) {
+    if named.iter().any(|&(_, item)| item != first) {
         return Named::Two;
     }
     Named::One(first)
@@ -238,7 +239,7 @@ pub fn resolve<H: Holdings>(
 ) -> Result<Vec<Verdict>, H::Error> {
     // Each row's identifiers, with the item each names, gathered one lookup per field into one
     // list, then ordered by row.
-    let mut found: Vec<(usize, (Identifier, EntityId))> = Vec::new();
+    let mut found: Vec<(usize, (Identifier, ItemAt))> = Vec::new();
     let mut verdicts: Vec<Option<Verdict>> = vec![None; rows.len()];
 
     let mosaica: Vec<(usize, MosaicaId)> = rows
@@ -249,7 +250,7 @@ pub fn resolve<H: Holdings>(
     let ids: Vec<MosaicaId> = mosaica.iter().map(|(_, id)| *id).collect();
     for ((at, _), holder) in mosaica.iter().zip(holdings.mosaica_holders(&ids)?) {
         match holder {
-            Some(entity) => found.push((*at, (Identifier::MosaicaId, entity))),
+            Some(item) => found.push((*at, (Identifier::MosaicaId, item))),
             None => verdicts[*at] = Some(Verdict::Refused(Refusal::UnknownMosaicaId { row: *at })),
         }
     }
@@ -265,12 +266,12 @@ pub fn resolve<H: Holdings>(
     for field in fields {
         let settings = &by_field[&field];
         let keys: Vec<Key> = settings.iter().map(|(_, key)| *key).collect();
-        for (at, entity) in holdings.holders(field, &keys)? {
-            found.push((settings[at].0, (Identifier::Unique(field), entity)));
+        for (at, item) in holdings.holders(field, &keys)? {
+            found.push((settings[at].0, (Identifier::Unique(field), item)));
         }
     }
     found.sort_by_key(|(at, _)| *at);
-    let named: Vec<(Identifier, EntityId)> = found.iter().map(|(_, named)| *named).collect();
+    let named: Vec<(Identifier, ItemAt)> = found.iter().map(|(_, named)| *named).collect();
 
     let mut next = 0;
     for (at, verdict) in verdicts.iter_mut().enumerate() {
@@ -287,7 +288,7 @@ pub fn resolve<H: Holdings>(
                 row: at,
                 named: named.to_vec(),
             }),
-            Named::One(entity) => Verdict::Names(entity),
+            Named::One(item) => Verdict::Names(item),
             Named::Nothing if batch.creates() => Verdict::Creates,
             Named::Nothing => Verdict::Refused(Refusal::NamesNoItem { row: at }),
         });
@@ -297,7 +298,7 @@ pub fn resolve<H: Holdings>(
     // Rows are decided in row order against the rows kept before them, so a refused row claims
     // neither its item nor its values: of two rows naming one item, or setting one value, the first
     // kept is kept.
-    let mut items: FxHashMap<EntityId, usize> = FxHashMap::default();
+    let mut items: FxHashMap<ItemAt, usize> = FxHashMap::default();
     let mut claimed: FxHashMap<(u16, Key), usize> = FxHashMap::default();
     for (at, row) in rows.iter().enumerate() {
         let item = match verdicts[at] {
@@ -352,23 +353,23 @@ mod tests {
     /// Holdings over fixed maps: `unique[(field, key)]` and `mosaica[id]`.
     #[derive(Default)]
     struct Held {
-        unique: FxHashMap<(u16, Key), Vec<EntityId>>,
-        mosaica: FxHashMap<u64, EntityId>,
+        unique: FxHashMap<(u16, Key), Vec<ItemAt>>,
+        mosaica: FxHashMap<u64, ItemAt>,
     }
 
     impl Holdings for Held {
         type Error = ();
-        fn holders(&self, field: u16, keys: &[Key]) -> Result<Vec<(usize, EntityId)>, ()> {
+        fn holders(&self, field: u16, keys: &[Key]) -> Result<Vec<(usize, ItemAt)>, ()> {
             Ok(keys
                 .iter()
                 .enumerate()
                 .flat_map(|(at, key)| {
                     let held = self.unique.get(&(field, *key)).cloned().unwrap_or_default();
-                    held.into_iter().map(move |entity| (at, entity))
+                    held.into_iter().map(move |item| (at, item))
                 })
                 .collect())
         }
-        fn mosaica_holders(&self, ids: &[MosaicaId]) -> Result<Vec<Option<EntityId>>, ()> {
+        fn mosaica_holders(&self, ids: &[MosaicaId]) -> Result<Vec<Option<ItemAt>>, ()> {
             Ok(ids
                 .iter()
                 .map(|id| self.mosaica.get(&id.raw()).copied())
@@ -376,8 +377,17 @@ mod tests {
         }
     }
 
-    fn e(n: u64) -> EntityId {
-        EntityId::new(n)
+    /// Entity `n` of shard 0.
+    fn e(n: u64) -> ItemAt {
+        at(0, n)
+    }
+
+    /// Entity `n` of shard `shard`.
+    fn at(shard: u32, n: u64) -> ItemAt {
+        ItemAt::new(
+            mosaica_types::ShardId::new(shard).unwrap(),
+            mosaica_types::EntityId::new(n),
+        )
     }
 
     fn held() -> Held {
@@ -633,6 +643,55 @@ mod tests {
         assert_eq!(
             first_refusal(&verdicts),
             Some(&Refusal::UnknownMosaicaId { row: 2 })
+        );
+    }
+
+    /// One entity number held in two shards is two items: values naming both name two items,
+    /// and two rows naming the number in different shards name different items.
+    #[test]
+    fn one_entity_number_in_two_shards_is_two_items() {
+        let mut held = Held::default();
+        held.unique.insert((0, 17), vec![at(0, 5)]);
+        held.unique.insert((1, 9), vec![at(1, 5)]);
+        held.mosaica.insert(201, at(1, 5));
+        let two = RowIdentity {
+            mosaica_id: None,
+            unique: vec![(0, 17), (1, 9)],
+        };
+        assert_eq!(
+            resolve(&[two], &held, Batch::Creates).unwrap(),
+            vec![refused(Refusal::NamesTwo {
+                row: 0,
+                named: vec![
+                    (Identifier::Unique(0), at(0, 5)),
+                    (Identifier::Unique(1), at(1, 5))
+                ],
+            })]
+        );
+
+        let by_mosaica = RowIdentity {
+            mosaica_id: Some(MosaicaId::new(201)),
+            ..RowIdentity::default()
+        };
+        let agreeing = RowIdentity {
+            mosaica_id: Some(MosaicaId::new(201)),
+            unique: vec![(1, 9)],
+        };
+        assert_eq!(
+            resolve(&[by_unique(0, 17), by_mosaica], &held, Batch::Edits).unwrap(),
+            vec![Verdict::Names(at(0, 5)), Verdict::Names(at(1, 5))],
+            "the number in each shard is its own item"
+        );
+        assert_eq!(
+            resolve(&[by_unique(1, 9), agreeing], &held, Batch::Edits).unwrap(),
+            vec![
+                Verdict::Names(at(1, 5)),
+                refused(Refusal::OneItemTwice {
+                    rows: [0, 1],
+                    item: at(1, 5)
+                })
+            ],
+            "two rows naming the item in its shard"
         );
     }
 }

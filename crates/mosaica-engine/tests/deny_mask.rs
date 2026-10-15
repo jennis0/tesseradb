@@ -16,7 +16,7 @@ use common::*;
 use mosaica_engine::{Engine, EngineConfig, ViewportRequest};
 use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_lifecycle::UnallocatedRow;
-use mosaica_types::{EntityId, ShardId};
+use mosaica_types::{EntityId, ItemAt, ShardId};
 
 fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -380,7 +380,7 @@ fn a_join_published_before_the_entitys_own_row_is_drawn_from_the_buffer() {
     let ingest_into = |batch: &str, view: &str, join: Option<EntityId>, descriptors: Vec<Vec<u8>>| {
         let row = UnallocatedRow {
             view: view.to_string(),
-            join,
+            join: join.map(|entity| ItemAt::new(ShardId::ZERO, entity)),
             x: 5.0,
             y: 5.0,
             scalars: Vec::new(),
@@ -512,7 +512,7 @@ fn joined_before_its_own_row(tmp: &Path, root: &Path) -> EntityId {
         |batch: &str, view: &str, join: Option<EntityId>, descriptors: Vec<Vec<u8>>| {
             let row = UnallocatedRow {
                 view: view.to_string(),
-                join,
+                join: join.map(|entity| ItemAt::new(ShardId::ZERO, entity)),
                 x: 5.0,
                 y: 5.0,
                 scalars: Vec::new(),

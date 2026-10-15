@@ -308,9 +308,19 @@ pub(crate) fn retire_dead_view_artifacts(
     })
 }
 
+/// Whether a bundle of several point shards takes writes. Only the engine's own tests open one
+/// that does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SeveralShards {
+    Refused,
+    #[cfg(feature = "several-shard-writes")]
+    Written,
+}
+
 /// Everything [`WritePath::reconstruct`] rebuilds from durable state.
 pub(crate) struct WritePathState {
     wal: Wal,
+    several_shards: SeveralShards,
     shards: Vec<ShardWrite>,
     resolver_state: ResolverState,
     accepted_batches: AcceptedBatches,
@@ -357,6 +367,7 @@ impl WritePath {
         WritePath {
             live: Arc::new(LiveState {
                 shards: state.shards,
+                several_shards: state.several_shards,
                 resolver_state: Mutex::new(state.resolver_state),
                 accepted_batches: Mutex::new(state.accepted_batches),
                 registry: Mutex::new(state.registry),
@@ -464,8 +475,12 @@ impl WritePath {
             let mut members = Vec::new();
             let mut derived = Vec::new();
             let mut spaces = std::collections::BTreeMap::new();
+            let write_shard = live.shards[0].id;
             for partition in generation.bundle.partitions.values() {
-                let record = &partition.only_shard().record;
+                let Some(shard) = partition.shard(write_shard) else {
+                    continue;
+                };
+                let record = &shard.record;
                 members.extend(
                     record
                         .membership_extents
@@ -475,9 +490,9 @@ impl WritePath {
                 );
                 derived.extend(
                     partition
-                        .derived_extents()
-                        .filter(|e| live.holds_space(e.space))
-                        .cloned(),
+                        .derived_by_shard()
+                        .filter(|(shard, e)| *shard == write_shard && live.holds_space(e.space))
+                        .map(|(_, e)| e.clone()),
                 );
                 spaces.extend(
                     partition
@@ -620,9 +635,11 @@ impl WritePath {
     /// every write reaches the executor, ask it; so do the entries that read the write shard
     /// before submitting.
     pub(crate) fn writable(&self) -> Result<(), AcceptError> {
-        match self.live.shards.len() {
-            1 => Ok(()),
-            shards => Err(AcceptError::SeveralShards { shards }),
+        match (self.live.shards.len(), self.live.several_shards) {
+            (1, _) => Ok(()),
+            #[cfg(feature = "several-shard-writes")]
+            (_, SeveralShards::Written) => Ok(()),
+            (shards, _) => Err(AcceptError::SeveralShards { shards }),
         }
     }
 

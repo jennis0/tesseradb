@@ -20,7 +20,7 @@
 //! executor, and this type is what a handler submits: everything a `WalRow` needs *except* the ID,
 //! plus the resolved term set that is the item's sort signature.
 
-use mosaica_types::{EntityId, ShardFull, ShardSizeError, TermId};
+use mosaica_types::{EntityId, ItemAt, ShardFull, ShardId, ShardSizeError, TermId};
 
 use crate::alloc::PendingItem;
 use crate::wal::{WalError, WalRow, WalScalar};
@@ -58,7 +58,7 @@ pub struct IngestRow {
 pub struct UnallocatedRow {
     pub view: String,
     /// The existing item this row adds to `view`, or `None` for a row that creates one.
-    pub join: Option<mosaica_types::EntityId>,
+    pub join: Option<ItemAt>,
     pub descriptors: Vec<Vec<u8>>,
     pub x: f64,
     pub y: f64,
@@ -90,7 +90,7 @@ impl UnallocatedRow {
             // **A join arrives with its id already decided, and `assign_sorted` leaves it
             // alone.** The entity exists; a second allocation for it would be a second identity
             // for one document, which is the whole of what the join rule prevents.
-            entity_id: self.join,
+            entity_id: self.join.map(|item| item.entity),
             edit: false,
         }
     }
@@ -190,10 +190,12 @@ impl BatchArtifacts {
     }
 }
 
-/// An item a row edits, as the handler resolved it: the entity it leaves, its number, and the rows
-/// its new entity takes, awaiting that entity's id on the executor.
+/// An item a row edits, as the handler resolved it: its shard, the entity it leaves, its number,
+/// and the rows its new entity takes, awaiting that entity's id on the executor.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnallocatedEdit {
+    /// The item's shard, which its new entity is allocated in.
+    pub shard: ShardId,
     pub old: EntityId,
     /// The entity the item was first given, which its `mosaica_id` is taken from.
     pub number: EntityId,

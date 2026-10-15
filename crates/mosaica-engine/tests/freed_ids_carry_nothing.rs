@@ -1137,10 +1137,10 @@ fn an_edit_resolved_before_its_entity_was_freed_does_not_reach_the_new_holder() 
 /// What `/control/changes` resolves `tid` to: its entity, and the generation it was named in.
 fn named(engine: &Engine, tid: MosaicaId) -> (EntityId, NamedItems) {
     let named = name_one(engine, tid);
-    let Ok(entity) = named.verdicts[0] else {
+    let Ok(item) = named.verdicts[0] else {
         panic!("{tid:?} names an item: {:?}", named.verdicts[0]);
     };
-    (entity, named)
+    (item.entity, named)
 }
 
 /// An item in `s0` alone, as a new item will be, edited once and flushed, so the entity it holds

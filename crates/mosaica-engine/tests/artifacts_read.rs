@@ -281,7 +281,10 @@ fn fixture() -> Fx {
         let mut t = IncomingArtifact::from_entities(Some(key.into()), fx.entities(members));
         t.contents = vec![IncomingContent {
             values: vec![format!("about {key}")],
-            generated_from: fx.members(generated),
+            generated_from: mosaica_lifecycle::ShardSets::in_shard(
+                mosaica_types::ShardId::ZERO,
+                fx.members(generated),
+            ),
         }];
         t
     };

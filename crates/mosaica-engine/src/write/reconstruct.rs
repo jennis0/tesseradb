@@ -72,9 +72,11 @@ impl WritePath {
     /// registries and the idempotency index. Returns the first generation's overlay and buffer.
     ///
     /// `initial_deny` is the side-manifest's deny state; it seeds the overlay before replay, and
-    /// the WAL is applied on top since dispositions are idempotent.
+    /// the WAL is applied on top since dispositions are idempotent. A log holding a record beside
+    /// several shards is refused unless `several_shards` says they take writes.
     pub(crate) fn reconstruct(
         wal_path: &Path,
+        several_shards: super::SeveralShards,
         seed: ManifestSeed<'_>,
         dict: &Dict,
         initial_deny: &Overlays,
@@ -82,7 +84,10 @@ impl WritePath {
         has_row: impl Fn(EntityId, &str) -> bool,
     ) -> Result<(Overlays, IngestBuffer, WritePathState), EngineError> {
         let wal = Wal::open(wal_path).map_err(EngineError::Wal)?;
-        if seed.shards.len() > 1 && wal.records().next().is_some() {
+        if seed.shards.len() > 1
+            && several_shards == super::SeveralShards::Refused
+            && wal.records().next().is_some()
+        {
             return Err(EngineError::SeveralShardsLogged {
                 shards: seed.shards.len(),
             });
@@ -451,6 +456,7 @@ impl WritePath {
             buffer,
             WritePathState {
                 wal,
+                several_shards,
                 shards,
                 resolver_state,
                 accepted_batches,

@@ -592,6 +592,7 @@ struct ReconstructedWrites {
 /// entity it names.
 fn reconstruct_writes(
     wal_path: &Path,
+    several_shards: crate::write::SeveralShards,
     bundle: &Bundle,
     readers: &PrefixReaders,
     side: SideDeclarations,
@@ -663,6 +664,7 @@ fn reconstruct_writes(
     let write_views = &served[0].views;
     let (overlay, buffer, state) = WritePath::reconstruct(
         wal_path,
+        several_shards,
         crate::write::ManifestSeed {
             shards: seeds,
             size: shard_size_of(bundle),
@@ -1058,6 +1060,40 @@ impl Engine {
         wal_path: &Path,
         config: EngineConfig,
     ) -> Result<Engine> {
+        Engine::open_with(
+            bundle_root,
+            cache_dir,
+            wal_path,
+            config,
+            crate::write::SeveralShards::Refused,
+        )
+    }
+
+    /// [`Engine::open`], taking writes over a bundle of several point shards, and the log beside
+    /// one. For the engine's own tests of the writes several shards take.
+    #[cfg(feature = "several-shard-writes")]
+    pub fn open_writing_several_shards(
+        bundle_root: &Path,
+        cache_dir: &Path,
+        wal_path: &Path,
+        config: EngineConfig,
+    ) -> Result<Engine> {
+        Engine::open_with(
+            bundle_root,
+            cache_dir,
+            wal_path,
+            config,
+            crate::write::SeveralShards::Written,
+        )
+    }
+
+    fn open_with(
+        bundle_root: &Path,
+        cache_dir: &Path,
+        wal_path: &Path,
+        config: EngineConfig,
+        several_shards: crate::write::SeveralShards,
+    ) -> Result<Engine> {
         config.check()?;
         let mut bundle = open_bundle(bundle_root).map_err(EngineError::Store)?;
         let side = merge_side_declarations(&mut bundle);
@@ -1068,7 +1104,7 @@ impl Engine {
             buffer,
             mut state,
             vocabularies,
-        } = reconstruct_writes(wal_path, &bundle, &readers, side)?;
+        } = reconstruct_writes(wal_path, several_shards, &bundle, &readers, side)?;
 
         let fragments = Arc::new(FragmentCache::new(cache_dir, authorisation_rule_hash()));
         // Built now, not lazily on first request: a pool that cannot be built is a fact about this

@@ -20,6 +20,11 @@ bench-timing = []
 # `bench-timing` does — measured, not assumed — so `scripts/check-layers.sh` asserts the property
 # that actually matters: no default-features release build reaches it.
 fault-injection = ["mosaica-lifecycle/fault-injection"]
+# Writes to a bundle of several point shards, for this crate's own tests while the several-shard
+# write path is built: it adds `Engine::open_writing_several_shards` and nothing else, so a build
+# that only calls `Engine::open` refuses those writes whether or not the feature is unified in.
+# Enabled only by the self dev-dependency below.
+several-shard-writes = []
 
 [dependencies]
 mosaica-types = { path = "../mosaica-types" }
@@ -84,7 +89,7 @@ delaunator = "1.1"
 # on it entirely — one of them the only test of the mask independence C4's numerator rests on — and
 # four more lose an assertion arm without it. Which leak-register rows have a test is not a
 # benchmark crate's default feature to decide.
-mosaica-engine = { path = ".", features = ["fault-injection", "bench-timing"] }
+mosaica-engine = { path = ".", features = ["fault-injection", "bench-timing", "several-shard-writes"] }
 tempfile = { workspace = true }
 mosaica-build = { path = "../mosaica-build" }
 # **The corpus census, and this edge may only ever be a dev one.** The generator is a second

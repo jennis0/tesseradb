@@ -2398,7 +2398,7 @@ pub fn unique_holders(
         .name_items(&table)?
         .verdicts
         .into_iter()
-        .map(Result::ok)
+        .map(|verdict| verdict.ok().map(|item| item.entity))
         .collect())
 }
 

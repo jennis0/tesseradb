@@ -37,7 +37,7 @@ pub(super) fn joining_entities<W>(
             .iter()
             .filter(|row| row.join)
             .map(|row| row.entity_id);
-        for entity in entities.chain(joined.iter().copied()) {
+        for entity in entities.chain(joined.iter().map(|item| item.entity)) {
             // Entity space is `u32`-wide, so the narrowing is total.
             restating.add(entity.raw() as u32);
         }
@@ -135,11 +135,11 @@ pub(super) fn joined_per_entry<W>(
                 });
                 let counted = seen.entry(at).or_default();
                 for row in &join.rows {
-                    let Some(entity) = entry.entity_ids.get(*row as usize) else {
+                    let Some(item) = entry.entity_ids.get(*row as usize) else {
                         continue;
                     };
                     // Entity space is `u32`-wide, so the narrowing is total.
-                    let entity = entity.raw() as u32;
+                    let entity = item.entity.raw() as u32;
                     if held.is_some_and(|members| members.contains(entity)) {
                         continue;
                     }
@@ -193,7 +193,12 @@ pub(super) fn growth_records<W>(
 ) -> Result<Vec<(WalRecord, usize)>, String> {
     grouped_growth(
         closed.iter().map(|entry| entry.memberships.as_slice()),
-        &|entry, row| closed[entry].entity_ids.get(row as usize).copied(),
+        &|entry, row| {
+            closed[entry]
+                .entity_ids
+                .get(row as usize)
+                .map(|item| item.entity)
+        },
         held,
     )
 }
@@ -206,7 +211,12 @@ pub(super) fn mint_plan<W>(
 ) -> Result<Option<(MintPlan, Vec<mosaica_lifecycle::BatchEdge>)>, String> {
     let wanted = grouped_mints(
         closed.iter().map(|entry| entry.memberships.as_slice()),
-        &|entry, row| closed[entry].entity_ids.get(row as usize).copied(),
+        &|entry, row| {
+            closed[entry]
+                .entity_ids
+                .get(row as usize)
+                .map(|item| item.entity)
+        },
     )?;
     let edges: Vec<mosaica_lifecycle::BatchEdge> =
         closed.iter().flat_map(|e| e.edges.iter().cloned()).collect();
@@ -502,13 +512,15 @@ impl Executor {
             // Ascending level, coarse first: a tiered chain's parent is fixed by the prior record.
             let mut assigned: BTreeMap<MintAt<'_>, u32> = BTreeMap::new();
             let mut records = Vec::new();
+            // A window's entities are allocated in the write shard.
+            let shard = self.live.only_shard().id;
             for ((layer, level, view), keys) in &to_mint {
                 let incoming: Vec<mosaica_lifecycle::IncomingArtifact> = keys
                     .iter()
                     .map(|(key, members)| mosaica_lifecycle::IncomingArtifact {
                         key: Some((*key).to_string()),
                         view: view.map(str::to_string),
-                        members: (*members).clone(),
+                        members: mosaica_lifecycle::ShardSets::in_shard(shard, (*members).clone()),
                         excluding: None,
                         contents: Vec::new(),
                         attached_to: None,

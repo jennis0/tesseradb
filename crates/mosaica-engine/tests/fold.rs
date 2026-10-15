@@ -2584,7 +2584,12 @@ fn a_fold_lands_while_the_feed_runs(join: bool) {
                     let rows: Vec<UnallocatedRow> = (0..8u64)
                         .map(|i| UnallocatedRow {
                             view: view.to_string(),
-                            join: (join && view != "s0").then(|| created[i as usize]),
+                            join: (join && view != "s0").then(|| {
+                                mosaica_types::ItemAt::new(
+                                    mosaica_types::ShardId::ZERO,
+                                    created[i as usize],
+                                )
+                            }),
                             descriptors: vec![b"0".to_vec()],
                             x: (10 + i * 100) as f64,
                             y: (10 + round % 90 * 10) as f64,

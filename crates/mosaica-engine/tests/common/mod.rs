@@ -68,9 +68,10 @@ mod ingest_rows {
             let rows = rows
                 .into_iter()
                 .map(|row| IngestRow {
-                    mosaica_id: row
-                        .join
-                        .map(|entity| self.mosaica_id_of(entity).expect("a joined item has an id")),
+                    mosaica_id: row.join.map(|item| {
+                        self.mosaica_id_of(item.entity)
+                            .expect("a joined item has an id")
+                    }),
                     labels: Some(row.descriptors),
                     position: Some((row.x, row.y)),
                     scalars: row.scalars,
@@ -993,7 +994,7 @@ pub fn unique_holders(
         .name_items(&table)?
         .verdicts
         .into_iter()
-        .map(Result::ok)
+        .map(|verdict| verdict.ok().map(|item| item.entity))
         .collect())
 }
 

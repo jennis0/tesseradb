@@ -103,6 +103,8 @@ impl ShardWrite {
 pub(crate) struct LiveState {
     /// Each point shard's write state, ascending by id; the first is the write shard.
     pub(in crate::write) shards: Vec<ShardWrite>,
+    /// Whether several shards take writes.
+    pub(in crate::write) several_shards: super::SeveralShards,
     /// The descriptor resolver's extension state. Resolved in the handler before submitting, not
     /// on the executor: signature-sorted assignment needs the term set to compute a sort key
     /// before any id exists, the structural exception argued at [`WritePath::resolve_terms`].
@@ -143,6 +145,11 @@ impl LiveState {
     /// The one shard written to until several are.
     pub(crate) fn only_shard(&self) -> &ShardWrite {
         mosaica_types::only(&self.shards)
+    }
+
+    /// Shard `id`'s write state, or `None` for a shard the bundle does not hold.
+    pub(crate) fn shard(&self, id: ShardId) -> Option<&ShardWrite> {
+        self.shards.iter().find(|shard| shard.id == id)
     }
 
     /// Every shard's high water, summed.
