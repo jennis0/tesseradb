@@ -15,6 +15,34 @@ use crate::tile_index::TileIndex;
 
 use super::*;
 
+/// A level's records as a build walks it: built from the walk, or taken whole from `shared`.
+enum RecordsBuilt {
+    Building(ArtifactRecords),
+    Shared(Arc<ArtifactRecords>),
+}
+
+impl RecordsBuilt {
+    fn new(shared: Option<Arc<ArtifactRecords>>) -> Self {
+        match shared {
+            Some(shared) => RecordsBuilt::Shared(shared),
+            None => RecordsBuilt::Building(ArtifactRecords::default()),
+        }
+    }
+
+    fn put(&mut self, idx: usize, record: &ArtifactRecord) {
+        if let RecordsBuilt::Building(records) = self {
+            records.put(idx, record);
+        }
+    }
+
+    fn finish(self) -> Arc<ArtifactRecords> {
+        match self {
+            RecordsBuilt::Building(records) => Arc::new(records),
+            RecordsBuilt::Shared(shared) => shared,
+        }
+    }
+}
+
 impl ArtifactRows {
     /// Build every half from one walk of one level, deriving the index over the projection.
     pub fn build<'a>(
@@ -32,7 +60,18 @@ impl ArtifactRows {
         space: &RowSpace,
         adopted: Option<TileIndex>,
     ) -> Self {
-        let mut records = ArtifactRecords::default();
+        Self::build_over_sharing(artifacts, space, adopted, None)
+    }
+
+    /// [`Self::build_over`], taking the level's records from `shared` where given rather than
+    /// building them from `artifacts`: a shard's slice holds none of them.
+    pub(super) fn build_over_sharing<'a>(
+        artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
+        space: &RowSpace,
+        adopted: Option<TileIndex>,
+        shared: Option<Arc<ArtifactRecords>>,
+    ) -> Self {
+        let mut records = RecordsBuilt::new(shared);
         let mut membership = MembershipRows::default();
         let scratch = &mut ProjectScratch::default();
         for (ordinal, record) in artifacts {
@@ -58,7 +97,7 @@ impl ArtifactRows {
             None => TileIndex::build(&membership, total_rows(space)),
         };
         ArtifactRows {
-            records: Arc::new(records),
+            records: records.finish(),
             membership,
             index: Arc::new(index),
             partition: None,
@@ -98,10 +137,23 @@ impl ArtifactRows {
         adopted: &mut Option<TileIndex>,
         column_only: bool,
     ) -> Option<Self> {
+        Self::build_from_column_sharing(artifacts, space, column, adopted, column_only, None)
+    }
+
+    /// [`Self::build_from_column`], taking the level's records from `shared` where given, for
+    /// [`Self::build_over_sharing`]'s reason.
+    pub(super) fn build_from_column_sharing<'a>(
+        artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
+        space: &RowSpace,
+        column: &RowColumn,
+        adopted: &mut Option<TileIndex>,
+        column_only: bool,
+        shared: Option<Arc<ArtifactRecords>>,
+    ) -> Option<Self> {
         if column.base_rows() != space.base_rows() {
             return None;
         }
-        let mut records = ArtifactRecords::default();
+        let mut records = RecordsBuilt::new(shared);
         let mut membership = MembershipRows::default();
         // The extent rows are projected here for a form that holds its rows; the base rows come
         // off the column.
@@ -130,7 +182,7 @@ impl ArtifactRows {
             ));
             membership.hold_no_rows();
             return Some(ArtifactRows {
-                records: Arc::new(records),
+                records: records.finish(),
                 membership,
                 index: Arc::new(index),
                 partition: None,
@@ -171,7 +223,7 @@ impl ArtifactRows {
             None => TileIndex::build(&membership, total_rows(space)),
         };
         Some(ArtifactRows {
-            records: Arc::new(records),
+            records: records.finish(),
             membership,
             index: Arc::new(index),
             partition: None,
@@ -193,8 +245,9 @@ impl ArtifactRows {
         rows: Vec<Option<Bitmap>>,
         row_count: u32,
         space: &RowSpace,
+        shared: Option<Arc<ArtifactRecords>>,
     ) -> Self {
-        let mut records = ArtifactRecords::default();
+        let mut records = RecordsBuilt::new(shared);
         let mut membership = MembershipRows::default();
         let mut rows = rows;
         let scratch = &mut ProjectScratch::default();
@@ -206,7 +259,7 @@ impl ArtifactRows {
         }
         let index = TileIndex::build(&membership, row_count);
         ArtifactRows {
-            records: Arc::new(records),
+            records: records.finish(),
             membership,
             index: Arc::new(index),
             partition: None,

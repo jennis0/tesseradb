@@ -321,12 +321,15 @@ impl Default for MembershipRows {
     }
 }
 
-/// The one empty membership every slot without rows shares. A write takes `Arc::make_mut`, so
-/// sharing it copies nothing until a slot gains a row; a shard's slice of a level holds no member
-/// of most of its artifacts.
+/// The empty membership every slot without rows shares. A write takes `Arc::make_mut`, so sharing
+/// it copies nothing until a slot gains a row; a shard's slice of a level holds no member of most
+/// of its artifacts. One per thread, so threads building forms side by side do not all count
+/// references on one cache line.
 fn no_rows() -> Arc<Bitmap> {
-    static NONE: OnceLock<Arc<Bitmap>> = OnceLock::new();
-    Arc::clone(NONE.get_or_init(|| Arc::new(Bitmap::new())))
+    thread_local! {
+        static NONE: Arc<Bitmap> = Arc::new(Bitmap::new());
+    }
+    NONE.with(Arc::clone)
 }
 
 /// `rows` as a slot holds them: [`no_rows`] where there are none.
@@ -437,7 +440,7 @@ impl MembershipRows {
         }
         for (idx, slot) in self.rows.iter_mut().enumerate() {
             if slot.is_some() {
-                *slot = Some(Arc::new(std::mem::take(&mut transposed[idx])));
+                *slot = Some(held_rows(std::mem::take(&mut transposed[idx])));
             }
         }
         self.rows_held = true;
