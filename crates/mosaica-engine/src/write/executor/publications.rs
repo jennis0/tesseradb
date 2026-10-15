@@ -260,7 +260,9 @@ pub(super) fn reopen_edited(
 /// A `spatial` layer's membership is the rows inside its shapes and an `attribute` layer's is the
 /// rows carrying a value. Both are evaluated against the geometry, so neither takes anything from
 /// a publication's or a growth's record.
-pub(super) fn stored_membership(declaration: &mosaica_types::layer::LayerDeclaration) -> bool {
+pub(in crate::write) fn stored_membership(
+    declaration: &mosaica_types::layer::LayerDeclaration,
+) -> bool {
     matches!(
         declaration.membership,
         mosaica_types::layer::MembershipSource::Enumerated

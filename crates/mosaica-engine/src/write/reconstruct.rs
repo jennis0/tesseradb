@@ -526,6 +526,10 @@ fn seed_artifacts(
             continue;
         };
         let name = name.to_string();
+        // A stored layer's slice holds a record only for an artifact the shard holds something
+        // of, or one borrowing its target's membership; the form walks the rest as empty
+        // (`crate::artifacts::LevelSlice`). A resolved membership is read from its slice whole.
+        let sparse = several && stored_membership(&layer.declaration);
         for extent in &space.record_packs {
             let Some(runs) = layer.runs.get(extent.level as usize) else {
                 return Err(EngineError::Malformed(format!(
@@ -633,6 +637,9 @@ fn seed_artifacts(
                 };
                 mapped(&mut record, 0);
                 for (at, mut slice) in others {
+                    if sparse && holds_nothing(&slice) {
+                        continue;
+                    }
                     mapped(&mut slice, at);
                     let (_, store) = &mut seeded.slices[at - 1];
                     store.seed(&name, space.space, extent.level, ordinal, slice, None);
@@ -658,13 +665,68 @@ fn seed_artifacts(
             }
         }
     }
+    if several {
+        seeded.seed_borrowed_targets();
+    }
     Ok(seeded)
 }
 
 impl SeededArtifacts {
+    /// Seed in each slice every artifact a borrowing artifact's chain reaches and the slice left
+    /// out, holding nothing: a borrowing artifact resolves its target in its own shard's slice,
+    /// and over a slice that held every artifact the chain resolves to an empty membership there.
+    fn seed_borrowed_targets(&mut self) {
+        use mosaica_lifecycle::membership::borrows_membership;
+        let SeededArtifacts {
+            artifacts, slices, ..
+        } = self;
+        let mut reached = rustc_hash::FxHashSet::default();
+        for (_, _, _, record) in artifacts.every_artifact() {
+            let mut at = record;
+            while borrows_membership(at) {
+                let Some(target) = at.attached_to.as_ref() else {
+                    break;
+                };
+                let Some(held) = artifacts
+                    .get(&target.layer, target.level, target.ordinal)
+                    .filter(|held| held.entity == target.entity)
+                else {
+                    break;
+                };
+                if !reached.insert((target.layer.clone(), target.space, target.level, target.ordinal)) {
+                    break;
+                }
+                at = held;
+            }
+        }
+        for (layer, space, level, ordinal) in reached {
+            let Some(held) = artifacts.get(&layer, level, ordinal) else {
+                continue;
+            };
+            for (_, slice) in slices.iter_mut() {
+                if slice.get(&layer, level, ordinal).is_none() {
+                    let sets = held.contents.iter().map(|_| croaring::Bitmap::new()).collect();
+                    let record = slice_record(held, croaring::Bitmap::new(), sets);
+                    slice.seed(&layer, space, level, ordinal, record, None);
+                }
+            }
+        }
+    }
+
     fn stores_mut(&mut self) -> impl Iterator<Item = &mut ArtifactStore> {
         std::iter::once(&mut self.artifacts).chain(self.slices.iter_mut().map(|(_, slice)| slice))
     }
+}
+
+/// Whether a shard's `slice` of an artifact holds no member and no generating-set member, and
+/// takes no membership from a target.
+fn holds_nothing(slice: &ArtifactRecord) -> bool {
+    slice.members.is_empty()
+        && slice
+            .contents
+            .iter()
+            .all(|content| content.generated_from.is_empty())
+        && !mosaica_lifecycle::membership::borrows_membership(slice)
 }
 
 /// One point shard's slice of `record`: `members` and `sets` in that shard, and of the record only
@@ -842,10 +904,13 @@ mod tests {
             assert!(store.get(layer, 0, 2).is_none(), "refused in every shard");
             assert_eq!(store.slots(layer, 0).len(), 4);
             assert_eq!(store.level_version(layer, 0), 9);
-            let own = store.get(layer, 0, 3).expect("members in shard 0 alone");
-            assert_eq!(own.declares_members, Some(true));
         }
-        assert!(slice.get(layer, 0, 3).unwrap().members.is_empty());
+        let own = written.get(layer, 0, 3).expect("members in shard 0 alone");
+        assert_eq!(own.declares_members, Some(true));
+        assert!(
+            slice.get(layer, 0, 3).is_none(),
+            "a shard holding nothing of an artifact seeds no slice of it"
+        );
 
         assert!(
             matches!(two_shards(dir.path(), false), Err(EngineError::Malformed(_))),

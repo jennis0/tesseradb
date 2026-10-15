@@ -74,8 +74,9 @@ impl ArtifactProjections {
         // unreadable postings file, and the answer to that is the masked-count route, which reads
         // no postings. Logged rather than returned, since the caller's alternative would be to
         // fail a request over a derivation that has a correct fallback.
+        let slice = LevelSlice::new(store, records, layer, level);
         let partition = source
-            .and_then(|source| self.partition_for(&at, store, source));
+            .and_then(|source| self.partition_for(&at, &slice, source));
         let built = match predicate {
             Some(PredicateSource::Spatial(spatial)) => self.assembled(
                 &at,
@@ -86,9 +87,9 @@ impl ArtifactProjections {
                 declaration.fixed_layout().is_none(),
             ),
             Some(PredicateSource::Attribute(attribute)) => {
-                self.claimed_or_projected(&at, store, space, layout, Some(attribute), declaration)
+                self.claimed_or_projected(&at, &slice, space, layout, Some(attribute), declaration)
             }
-            None => self.claimed_or_projected(&at, store, space, layout, None, declaration),
+            None => self.claimed_or_projected(&at, &slice, space, layout, None, declaration),
         };
         let mut built = built.with_partition(partition);
         self.share_records(&at, &mut built, store, records);
@@ -249,7 +250,7 @@ impl ArtifactProjections {
     fn claimed_or_projected(
         &self,
         at: &Coordinate<'_>,
-        store: &ArtifactStore,
+        slice: &LevelSlice<'_>,
         space: &RowSpace,
         layout: ServingLayout,
         attribute: Option<&AttributeSource<'_>>,
@@ -272,7 +273,7 @@ impl ArtifactProjections {
         };
         let transposed = claimed.as_ref().and_then(|(column, _)| {
             ArtifactRows::build_from_column(
-                store.level_in_view(at.layer, at.level, view_key(at.view)),
+                slice.in_view(view_key(at.view)),
                 space,
                 column,
                 &mut adopted,
@@ -296,7 +297,7 @@ impl ArtifactProjections {
         let behind = claimed.as_ref().is_some_and(|(_, behind)| *behind);
         let mut built = transposed.unwrap_or_else(|| {
             ArtifactRows::build_over(
-                store.level_in_view(at.layer, at.level, view_key(at.view)),
+                slice.in_view(view_key(at.view)),
                 space,
                 adopted.take(),
             )
@@ -309,17 +310,17 @@ impl ArtifactProjections {
         let column = match attribute {
             // The membership *is* the column: the level's own records supply only the ordinal
             // each value's artifact sits at.
-            Some(attribute) => self.attribute_column(at, store, space, attribute),
+            Some(attribute) => self.attribute_column(at, slice.store(), space, attribute),
             None => self.claimed_or_composed(at, claimed, layout, space, &built),
         };
         let from_column = column.is_some();
         let mut built = built.with_column(column);
-        if !built.membership().rows_held() && !self.brought_over(at, &mut built, store, space, behind)
+        if !built.membership().rows_held() && !self.brought_over(at, &mut built, slice, space, behind)
         {
             built = built.with_column(None);
         }
-        self.transpose_back(at, &mut built, store, space);
-        let inherited = self.inherited(at, &mut built, store, space);
+        self.transpose_back(at, &mut built, slice, space);
+        let inherited = self.inherited(at, &mut built, slice, space);
         if layout.is_row_major() && !from_column && inherited == 0 {
             self.fallbacks
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -397,7 +398,7 @@ impl ArtifactProjections {
         &self,
         at: &Coordinate<'_>,
         built: &mut ArtifactRows,
-        store: &ArtifactStore,
+        slice: &LevelSlice<'_>,
         space: &RowSpace,
         behind: bool,
     ) -> bool {
@@ -405,7 +406,7 @@ impl ArtifactProjections {
             return true;
         }
         let started = std::time::Instant::now();
-        let level = || store.level_in_view(at.layer, at.level, view_key(at.view));
+        let level = || slice.in_view(view_key(at.view));
         let mut added = if behind {
             built.base_joins(level(), space)
         } else {
@@ -438,7 +439,7 @@ impl ArtifactProjections {
         &self,
         at: &Coordinate<'_>,
         built: &mut ArtifactRows,
-        store: &ArtifactStore,
+        slice: &LevelSlice<'_>,
         space: &RowSpace,
     ) {
         if built.column().is_some() || built.membership().rows_held() {
@@ -451,10 +452,7 @@ impl ArtifactProjections {
             "ALARM: a level built from its column alone has no column to serve from; its rows \
              are transposed back"
         );
-        built.membership = MembershipRows::build(
-            store.level_in_view(at.layer, at.level, view_key(at.view)),
-            space,
-        );
+        built.membership = MembershipRows::build(slice.in_view(view_key(at.view)), space);
         built.index = Arc::new(TileIndex::build(&built.membership, total_rows(space)));
     }
 
@@ -464,10 +462,10 @@ impl ArtifactProjections {
         &self,
         at: &Coordinate<'_>,
         built: &mut ArtifactRows,
-        store: &ArtifactStore,
+        slice: &LevelSlice<'_>,
         space: &RowSpace,
     ) -> usize {
-        let inherited = built.inherit(store, space, at.layer, at.level, view_key(at.view));
+        let inherited = built.inherit(slice, space, at.layer, at.level, view_key(at.view));
         if inherited > 0 {
             tracing::info!(
                 layer = %at.layer,
@@ -688,7 +686,7 @@ impl ArtifactProjections {
     fn partition_for(
         &self,
         at: &Coordinate<'_>,
-        store: &ArtifactStore,
+        slice: &LevelSlice<'_>,
         source: &PartitionSource<'_>,
     ) -> Option<ContainmentPartition> {
         let key = at.derived_key();
@@ -703,7 +701,7 @@ impl ArtifactProjections {
                 return Some(partition.clone());
             }
         }
-        let partition = match ContainmentPartition::compose(store, at.layer, at.level, source.postings)
+        let partition = match ContainmentPartition::compose_slice(slice, source.postings)
         {
             Ok(partition) => partition,
             Err(error) => {

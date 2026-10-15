@@ -315,12 +315,13 @@ impl ArtifactRows {
     /// their own.
     pub(super) fn inherit(
         &mut self,
-        store: &ArtifactStore,
+        slice: &LevelSlice<'_>,
         space: &RowSpace,
         layer: &str,
         level: u32,
         view: &str,
     ) -> usize {
+        let store = slice.store();
         let mut taken = 0usize;
         let mut borrowed: Vec<(String, u32, u64)> = Vec::new();
         let scratch = &mut ProjectScratch::default();
@@ -338,8 +339,7 @@ impl ArtifactRows {
             }
             if taken == 0 && !self.membership.rows_held() {
                 // A column-only form holds no bitmap to overwrite; rebuild artifact-major first.
-                self.membership =
-                    MembershipRows::build(store.level_in_view(layer, level, view), space);
+                self.membership = MembershipRows::build(slice.in_view(view), space);
             }
             self.membership.put_rows(
                 ordinal as usize,

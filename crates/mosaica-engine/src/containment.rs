@@ -86,7 +86,6 @@ use croaring::Bitmap;
 use rustc_hash::FxHashMap;
 
 use mosaica_authz::postings::{PostingRef, PostingsReader};
-use mosaica_lifecycle::membership::ArtifactStore;
 use mosaica_store::derived::{
     compose_containment, generating_entities, PostingSlice, SignatureIndex,
 };
@@ -155,9 +154,20 @@ impl ContainmentPartition {
     /// composes. A growth landing between them would leave the expression describing a set the
     /// membership no longer has, so both come from the same `&ArtifactStore`.
     pub fn compose(
-        store: &ArtifactStore,
+        store: &mosaica_lifecycle::membership::ArtifactStore,
         layer: &str,
         level: u32,
+        postings: &PostingsReader,
+    ) -> io::Result<Self> {
+        Self::compose_slice(
+            &crate::artifacts::LevelSlice::new(store, store, layer, level),
+            postings,
+        )
+    }
+
+    /// [`Self::compose`] over one shard's slice of a level.
+    pub(crate) fn compose_slice(
+        slice: &crate::artifacts::LevelSlice<'_>,
         postings: &PostingsReader,
     ) -> io::Result<Self> {
         // **Unfiltered by view, and correctly so**: the partition is addressed by ordinal and
@@ -165,7 +175,7 @@ impl ContainmentPartition {
         // never asked about — the row form a request tests against holds that view's ordinals
         // alone (`ArtifactStore::level_in_view`, `views.md` §3.5).
         let contents = |visit: &mut dyn FnMut(u32, &[&Bitmap])| {
-            for (ordinal, record) in store.level(layer, level) {
+            for (ordinal, record) in slice.level() {
                 let generating: Vec<&Bitmap> =
                     record.contents.iter().map(|c| &c.generated_from).collect();
                 visit(ordinal, &generating);

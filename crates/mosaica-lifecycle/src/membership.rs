@@ -1110,7 +1110,7 @@ impl ArtifactRecord {
 /// a fold has yet to remove — and it must answer *absent* rather than panic.
 #[derive(Debug, Clone, Default)]
 pub struct ArtifactStore {
-    levels: BTreeMap<(String, u32), Vec<Option<ArtifactRecord>>>,
+    levels: BTreeMap<(String, u32), Vec<Option<Box<ArtifactRecord>>>>,
     /// The space of each layer whose records are here.
     spaces: BTreeMap<String, LayerSpace>,
     /// Per `(layer, level)`, each ordinal's canonical shapes — the membership of a layer whose
@@ -1128,7 +1128,7 @@ pub struct ArtifactStore {
     /// not exist, and a record with no shape on a shape layer is refused at publication.
     /// Nested for [`ArtifactStore::keys`]' reason: `shape_of` is asked once per artifact by
     /// `unpublished`, and a tuple key made every one of those a `String` allocation.
-    shapes: BTreeMap<String, BTreeMap<u32, Vec<Option<ArtifactShapes>>>>,
+    shapes: BTreeMap<String, BTreeMap<u32, Vec<Option<Box<ArtifactShapes>>>>>,
     /// `(layer, level, key) → ordinal`. **An index, not a second copy of the truth**: it
     /// exists so a batch of ten thousand artifacts can be checked for duplicate keys in
     /// `O(n log n)` rather than rescanning the level per artifact, which is `O(n²)` and reachable
@@ -1268,7 +1268,7 @@ impl ArtifactStore {
             // same publication twice on a re-read prefix, and an index that accumulated a
             // duplicate would cascade one deletion into the same dependent twice.
             let previous = slots[idx].take();
-            slots[idx] = Some(record);
+            slots[idx] = Some(Box::new(record));
             previous
         };
         if let Some(previous) = previous {
@@ -1289,7 +1289,7 @@ impl ArtifactStore {
         if shapes.len() <= idx {
             shapes.resize(idx + 1, None);
         }
-        shapes[idx] = shape;
+        shapes[idx] = shape.map(Box::new);
     }
 
     /// The shapes the artifact at `ordinal` declared, or `None` where it declared none — which is
@@ -1299,7 +1299,7 @@ impl ArtifactStore {
             .get(layer)
             .and_then(|levels| levels.get(&level))
             .and_then(|shapes| shapes.get(ordinal as usize))
-            .and_then(Option::as_ref)
+            .and_then(Option::as_deref)
     }
 
     /// Drop the outgoing dependency edge of `record`, of `space`, from the index.
@@ -1688,7 +1688,7 @@ impl ArtifactStore {
                     Some(held) if held.digest() == rebuilt.digest() => FillOutcome::Identical,
                     Some(_) => FillOutcome::Differs,
                     None => {
-                        shapes[ordinal as usize] = Some(rebuilt);
+                        shapes[ordinal as usize] = Some(Box::new(rebuilt));
                         FillOutcome::Filled
                     }
                 }
@@ -2140,7 +2140,7 @@ impl ArtifactStore {
         self.levels
             .get(&(layer.to_string(), level))
             .and_then(|slots| slots.get(ordinal as usize))
-            .and_then(Option::as_ref)
+            .and_then(Option::as_deref)
     }
 
     /// The membership an artifact is placed, counted and gated over. An artifact that declares
@@ -2226,7 +2226,7 @@ impl ArtifactStore {
     }
 
     /// One level's slots by ordinal, a hole being `None`. Empty for a level nothing holds.
-    pub fn slots(&self, layer: &str, level: u32) -> &[Option<ArtifactRecord>] {
+    pub fn slots(&self, layer: &str, level: u32) -> &[Option<Box<ArtifactRecord>>] {
         self.levels
             .get(&(layer.to_string(), level))
             .map_or(&[], Vec::as_slice)
@@ -2241,7 +2241,7 @@ impl ArtifactStore {
                 slots
                     .iter()
                     .enumerate()
-                    .filter_map(|(i, slot)| slot.as_ref().map(|r| (i as u32, r)))
+                    .filter_map(|(i, slot)| slot.as_deref().map(|r| (i as u32, r)))
             })
     }
 
@@ -2273,6 +2273,16 @@ impl ArtifactStore {
             .is_some_and(|record| record.view.as_deref().is_none_or(|own| own == view))
     }
 
+    /// Every artifact of every layer, as `(layer, level, ordinal, record)`.
+    pub fn every_artifact(&self) -> impl Iterator<Item = (&str, u32, u32, &ArtifactRecord)> {
+        self.levels.iter().flat_map(|((layer, level), slots)| {
+            slots.iter().enumerate().filter_map(move |(i, slot)| {
+                slot.as_deref()
+                    .map(|record| (layer.as_str(), *level, i as u32, record))
+            })
+        })
+    }
+
     /// Every artifact of every level of one layer, as `(level, ordinal, record)`.
     pub fn layer<'a>(
         &'a self,
@@ -2285,7 +2295,7 @@ impl ArtifactStore {
                 slots
                     .iter()
                     .enumerate()
-                    .filter_map(move |(i, slot)| slot.as_ref().map(|r| (*level, i as u32, r)))
+                    .filter_map(move |(i, slot)| slot.as_deref().map(|r| (*level, i as u32, r)))
             })
     }
 

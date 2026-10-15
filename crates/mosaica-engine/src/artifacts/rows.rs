@@ -321,6 +321,22 @@ impl Default for MembershipRows {
     }
 }
 
+/// The one empty membership every slot without rows shares. A write takes `Arc::make_mut`, so
+/// sharing it copies nothing until a slot gains a row; a shard's slice of a level holds no member
+/// of most of its artifacts.
+fn no_rows() -> Arc<Bitmap> {
+    static NONE: OnceLock<Arc<Bitmap>> = OnceLock::new();
+    Arc::clone(NONE.get_or_init(|| Arc::new(Bitmap::new())))
+}
+
+/// `rows` as a slot holds them: [`no_rows`] where there are none.
+fn held_rows(rows: Bitmap) -> Arc<Bitmap> {
+    match rows.is_empty() {
+        true => no_rows(),
+        false => Arc::new(rows),
+    }
+}
+
 impl MembershipRows {
     /// Project a level's memberships into `space`. Costly and not on any per-request path:
     /// `RowSpace::project` decodes the whole membership. Paid at open and at a generation move.
@@ -349,7 +365,7 @@ impl MembershipRows {
             self.rows.resize_with(idx + 1, || None);
             self.generating.resize_with(idx + 1, Vec::new);
         }
-        let rows = Arc::new(
+        let rows = held_rows(
             record
                 .members
                 .projected(|part| space.project_with(part, scratch)),
@@ -358,7 +374,7 @@ impl MembershipRows {
         self.rows[idx] = Some(if self.rows_held {
             Arc::clone(&rows)
         } else {
-            Arc::new(Bitmap::new())
+            no_rows()
         });
         self.generating[idx] = record
             .contents
@@ -385,7 +401,7 @@ impl MembershipRows {
             self.rows.resize_with(idx + 1, || None);
             self.generating.resize_with(idx + 1, Vec::new);
         }
-        self.rows[idx] = Some(Arc::new(Bitmap::new()));
+        self.rows[idx] = Some(no_rows());
         self.generating[idx] = record
             .contents
             .iter()
@@ -431,10 +447,9 @@ impl MembershipRows {
     /// Give up the per-artifact rows and serve them from the column instead — see
     /// [`Self::rows_held`]. [`Self::absorb_transposed`] can bring the form back.
     pub(super) fn hold_no_rows(&mut self) {
-        let empty = Arc::new(Bitmap::new());
         for slot in self.rows.iter_mut() {
             if slot.is_some() {
-                *slot = Some(Arc::clone(&empty));
+                *slot = Some(no_rows());
             }
         }
         self.rows_held = false;
@@ -454,11 +469,11 @@ impl MembershipRows {
             self.rows.resize_with(idx + 1, || None);
             self.generating.resize_with(idx + 1, Vec::new);
         }
-        let rows = Arc::new(rows);
+        let rows = held_rows(rows);
         self.rows[idx] = Some(if self.rows_held {
             Arc::clone(&rows)
         } else {
-            Arc::new(Bitmap::new())
+            no_rows()
         });
         self.generating[idx] = record
             .contents
