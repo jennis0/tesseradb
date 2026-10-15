@@ -494,7 +494,9 @@ fn seed_artifacts(
     shards: &[ShardId],
     prefix_dir: &Path,
 ) -> Result<SeededArtifacts, EngineError> {
-    use mosaica_lifecycle::membership::{decode_slice, decode_slice_members, slices_hold_their_sets};
+    use mosaica_lifecycle::membership::{
+        borrows_membership, decode_members, decode_slice, slices_hold_their_sets,
+    };
     let several = shards.len() > 1;
     let mut seeded = SeededArtifacts {
         artifacts: ArtifactStore::new(),
@@ -590,19 +592,30 @@ fn seed_artifacts(
                     seeded.undecodable += 1;
                     continue;
                 };
-                let mut others = Vec::with_capacity(shards.len() - 1);
+                // A shard whose pack does not list the artifact holds nothing of it, and adds
+                // nothing to any set's sum.
+                let mut others = Vec::new();
+                let mut unlisted = Vec::new();
+                let mut decoded = true;
                 for (at, blob) in blobs.iter().enumerate().skip(1) {
-                    match decode_slice_members(blob, record.contents.len()) {
+                    if blob.is_empty() {
+                        unlisted.push(at);
+                        continue;
+                    }
+                    match decode_members(blob) {
                         Some((members, sets)) if sets.len() == record.contents.len() => {
                             others.push((at, slice_record(&record, members, sets)));
                         }
-                        _ => break,
+                        _ => {
+                            decoded = false;
+                            break;
+                        }
                     }
                 }
                 let held = std::iter::once(&record)
                     .chain(others.iter().map(|(_, slice)| slice))
                     .collect::<Vec<_>>();
-                if others.len() + 1 != shards.len() || !slices_hold_their_sets(&held) {
+                if !decoded || !slices_hold_their_sets(&held) {
                     seeded.undecodable += 1;
                     continue;
                 }
@@ -611,6 +624,14 @@ fn seed_artifacts(
                     record.declares_members = Some(declares);
                     for (_, slice) in &mut others {
                         slice.declares_members = Some(declares);
+                    }
+                    if !sparse || borrows_membership(&record) {
+                        let nothing = || record.contents.iter().map(|_| croaring::Bitmap::new());
+                        for at in unlisted {
+                            let slice =
+                                slice_record(&record, croaring::Bitmap::new(), nothing().collect());
+                            others.push((at, slice));
+                        }
                     }
                 }
                 let on_heap = &mut seeded.on_heap;
