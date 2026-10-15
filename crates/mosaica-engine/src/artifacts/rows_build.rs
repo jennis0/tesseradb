@@ -371,7 +371,7 @@ impl ArtifactRows {
         space: &RowSpace,
         view: &str,
     ) -> usize {
-        let store = slice.store();
+        let store = slice.shard();
         let mut taken = 0usize;
         let mut borrowed: Vec<(String, u32, u64)> = Vec::new();
         let scratch = &mut ProjectScratch::default();

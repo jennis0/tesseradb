@@ -9,11 +9,11 @@ use super::ArtifactRecords;
 /// One point shard's slice of a level, walked over every artifact of the level: one the slice does
 /// not hold walks as [`nothing_held`].
 pub(crate) struct LevelSlice<'a> {
-    store: &'a ArtifactStore,
+    shard: &'a ArtifactStore,
     records: &'a ArtifactStore,
     layer: &'a str,
     level: u32,
-    /// Whether `store` is `records` itself rather than a shard's slice of it.
+    /// Whether `shard` is `records` itself rather than a shard's slice of it.
     whole: bool,
     /// Per number of contents, an artifact of which the shard holds nothing.
     empty: Vec<ArtifactRecord>,
@@ -22,15 +22,15 @@ pub(crate) struct LevelSlice<'a> {
 }
 
 impl<'a> LevelSlice<'a> {
-    /// `store` is a shard's slice of `records`, or `records` itself.
+    /// `shard` is a shard's slice of `records`, or `records` itself.
     pub(crate) fn new(
-        store: &'a ArtifactStore,
+        shard: &'a ArtifactStore,
         records: &'a ArtifactStore,
         layer: &'a str,
         level: u32,
         shared: Option<Arc<ArtifactRecords>>,
     ) -> Self {
-        let whole = std::ptr::eq(store, records);
+        let whole = std::ptr::eq(shard, records);
         let empty = match whole {
             true => Vec::new(),
             false => {
@@ -43,7 +43,7 @@ impl<'a> LevelSlice<'a> {
             }
         };
         LevelSlice {
-            store,
+            shard,
             records,
             layer,
             level,
@@ -54,8 +54,8 @@ impl<'a> LevelSlice<'a> {
     }
 
     /// The shard's slice itself.
-    pub(crate) fn store(&self) -> &'a ArtifactStore {
-        self.store
+    pub(crate) fn shard(&self) -> &'a ArtifactStore {
+        self.shard
     }
 
     /// The level's records, where the caller built them.
@@ -85,7 +85,7 @@ impl<'a> LevelSlice<'a> {
         &'v self,
         records: impl Iterator<Item = (u32, &'v ArtifactRecord)>,
     ) -> impl Iterator<Item = (u32, &'v ArtifactRecord)> {
-        let slots = self.store.slots(self.layer, self.level);
+        let slots = self.shard.slots(self.layer, self.level);
         records.map(move |(ordinal, record)| match self.whole {
             true => (ordinal, record),
             false => (
