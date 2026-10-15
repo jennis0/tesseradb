@@ -13,24 +13,28 @@
 //! ```text
 //! header   := magic "MSRM" | u16 version | u16 ranges a covering holds at most
 //!             | u32 ordinals | u32 rows | u64 ranges | u64 payload_at | u64 ranges_at
-//!             | u64 file_len | zero padding to 64 bytes
-//! table    := ordinals × (u64 offset into the payload | u32 length | u32 members)
-//! cover_at := (ordinals + 1) × u64 index into `ranges`, ascending, the last equal to `ranges`
-//! payload  := at `payload_at`, a multiple of 32: one CRoaring frozen bitmap per artifact with
-//!             members, each at an offset that is a multiple of 32; none for an artifact without
+//!             | u64 file_len | u32 listed | u32 reserved | u64 tables_at
+//! payload  := at `payload_at`, a multiple of 32: one CRoaring frozen bitmap per listed artifact
+//!             with members, each at an offset that is a multiple of 32
 //! ranges   := at `ranges_at`: `ranges` × (u32 lo | u32 hi), inclusive, ascending and disjoint
 //!             within each artifact
+//! tables   := at `tables_at`: the listed ordinals ([`crate::presence`])
+//!             | listed × (u64 offset into the payload | u32 length | u32 members)
+//!             | (listed + 1) × u64 index into `ranges`, ascending, the last equal to `ranges`
 //! ```
 //!
-//! A hole and an artifact that labels no row are the same here, an entry of length zero with no
-//! ranges, and the records tell them apart, as they do for the column.
+//! **The file lists the artifacts with members or a covering.** One it does not list has neither,
+//! as has a hole, and the records tell them apart, as they do for the column. A shard's file lists
+//! what its rows hold, so a level's artifacts cost a shard nothing where it holds none of their
+//! rows. The tables follow the payload so the writer streams the bitmaps without knowing in
+//! advance how many it will list.
 //!
 //! # What the open checks
 //!
-//! The header, the table and the ranges are checked whole: offsets aligned, ascending and inside the
-//! payload, every range inside the rows and in order, no covering longer than the header allows. The
-//! payload is not read. A frozen view over bytes that are not a frozen bitmap is undefined, so that
-//! the payload is what the writer produced rests on the bundle's digest sweep, as it does for
+//! The header, the tables and the ranges are checked whole: offsets aligned, ascending and inside
+//! the payload, every range inside the rows and in order, no covering longer than the header allows.
+//! The payload is not read. A frozen view over bytes that are not a frozen bitmap is undefined, so
+//! that the payload is what the writer produced rests on the bundle's digest sweep, as it does for
 //! [`crate::term_images`], or, for a file this process composed in its own scratch, on having just
 //! written it.
 
@@ -43,10 +47,11 @@ use croaring::{Bitmap, BitmapView, Frozen};
 use memmap2::Mmap;
 
 use crate::error::{io, Result, StoreError};
+use crate::presence::{Presence, PresenceWriter};
 use crate::{le_u32, le_u64};
 
 const MAGIC: &[u8; 4] = b"MSRM";
-const VERSION: u16 = 2;
+const VERSION: u16 = 3;
 const HEADER_LEN: usize = 64;
 const ENTRY_LEN: usize = 16;
 /// CRoaring's frozen deserialiser needs 32-byte alignment, and a mapping is page-aligned.
@@ -62,24 +67,26 @@ fn align_up(at: u64) -> u64 {
     at.div_ceil(ALIGN) * ALIGN
 }
 
-/// Where the table and `cover_at` end, which is where the payload may begin.
-fn tables_end(ordinals: u32) -> u64 {
-    HEADER_LEN as u64 + ENTRY_LEN as u64 * u64::from(ordinals) + 8 * (u64::from(ordinals) + 1)
+/// The tables' length for a level of `ordinals` listing `listed`.
+fn tables_len(ordinals: u32, listed: u32) -> u64 {
+    crate::presence::len(ordinals) as u64
+        + ENTRY_LEN as u64 * u64::from(listed)
+        + 8 * (u64::from(listed) + 1)
 }
 
 /// Writes one member file front to back: the payload as each artifact arrives, then the ranges, the
-/// table and the header once every artifact has.
+/// tables and the header once every artifact has.
 pub struct RowMembersFile {
     out: BufWriter<File>,
     path: PathBuf,
     ordinals: u32,
     rows: u32,
     max_ranges: u16,
-    /// Per ordinal: offset, length, members.
+    presence: PresenceWriter,
+    /// Per listed ordinal: offset, length, members.
     table: Vec<(u64, u32, u32)>,
     cover_at: Vec<u64>,
     ranges: Vec<(u32, u32)>,
-    payload_at: u64,
     /// Bytes of payload written so far.
     written: u64,
     next: u32,
@@ -89,19 +96,19 @@ pub struct RowMembersFile {
 impl RowMembersFile {
     pub fn create(path: &Path, ordinals: u32, rows: u32, max_ranges: u16) -> Result<Self> {
         let file = File::create(path).map_err(io(path))?;
-        let payload_at = align_up(tables_end(ordinals));
         let mut out = BufWriter::with_capacity(1 << 20, file);
-        out.seek(SeekFrom::Start(payload_at)).map_err(io(path))?;
+        out.seek(SeekFrom::Start(HEADER_LEN as u64))
+            .map_err(io(path))?;
         Ok(RowMembersFile {
             out,
             path: path.to_path_buf(),
             ordinals,
             rows,
             max_ranges,
-            table: vec![(0, 0, 0); ordinals as usize],
-            cover_at: Vec::with_capacity(ordinals as usize + 1),
+            presence: PresenceWriter::new(ordinals),
+            table: Vec::new(),
+            cover_at: Vec::new(),
             ranges: Vec::new(),
-            payload_at,
             written: 0,
             next: 0,
             frozen: Vec::new(),
@@ -114,11 +121,15 @@ impl RowMembersFile {
             ordinal >= self.next && ordinal < self.ordinals,
             "a member file takes each ordinal of its level once, ascending"
         );
-        self.skip_to(ordinal);
+        self.next = ordinal + 1;
+        if members.is_empty() && covering.is_empty() {
+            return Ok(());
+        }
+        self.presence.list(ordinal);
         self.cover_at.push(self.ranges.len() as u64);
         self.ranges.extend_from_slice(covering);
-        self.next = ordinal + 1;
         if members.is_empty() {
+            self.table.push((0, 0, 0));
             return Ok(());
         }
         let at = align_up(self.written);
@@ -132,62 +143,54 @@ impl RowMembersFile {
         let bytes = members.serialize_into_vec::<Frozen>(&mut self.frozen);
         self.out.write_all(bytes).map_err(io(&self.path))?;
         let len = bytes.len() as u32;
-        self.table[ordinal as usize] = (at, len, members.cardinality() as u32);
+        self.table.push((at, len, members.cardinality() as u32));
         self.written = at + u64::from(len);
         Ok(())
     }
 
-    fn skip_to(&mut self, ordinal: u32) {
-        while self.next < ordinal {
-            self.cover_at.push(self.ranges.len() as u64);
-            self.next += 1;
-        }
-    }
-
-    /// Write the ranges, the table and the header. The file is then the level's member file.
+    /// Write the ranges, the tables and the header. The file is then the level's member file.
     pub fn finish(mut self) -> Result<()> {
-        self.skip_to(self.ordinals);
         self.cover_at.push(self.ranges.len() as u64);
-        let ranges_at = self.payload_at + align_up(self.written);
-        let pad = (ranges_at - self.payload_at - self.written) as usize;
-        self.out
-            .write_all(&vec![0u8; pad])
-            .map_err(io(&self.path))?;
+        let payload_at = HEADER_LEN as u64;
+        let ranges_at = payload_at + align_up(self.written);
+        let pad = (ranges_at - payload_at - self.written) as usize;
+        let listed = self.presence.listed();
+        let tables_at = ranges_at + 8 * self.ranges.len() as u64;
+        let file_len = tables_at + tables_len(self.ordinals, listed);
+        let mut tail = Vec::with_capacity(pad + (file_len - ranges_at) as usize);
+        tail.resize(pad, 0);
         for (lo, hi) in &self.ranges {
-            self.out
-                .write_all(&lo.to_le_bytes())
-                .map_err(io(&self.path))?;
-            self.out
-                .write_all(&hi.to_le_bytes())
-                .map_err(io(&self.path))?;
+            tail.extend_from_slice(&lo.to_le_bytes());
+            tail.extend_from_slice(&hi.to_le_bytes());
         }
-        let file_len = ranges_at + 8 * self.ranges.len() as u64;
+        tail.extend_from_slice(&self.presence.into_bytes());
+        for (offset, len, members) in &self.table {
+            tail.extend_from_slice(&offset.to_le_bytes());
+            tail.extend_from_slice(&len.to_le_bytes());
+            tail.extend_from_slice(&members.to_le_bytes());
+        }
+        for at in &self.cover_at {
+            tail.extend_from_slice(&at.to_le_bytes());
+        }
+        self.out.write_all(&tail).map_err(io(&self.path))?;
         let file = self.out.into_inner().map_err(|e| StoreError::Io {
             path: self.path.clone(),
             source: e.into_error(),
         })?;
-        let mut head = Vec::with_capacity(self.payload_at as usize);
+        let mut head = Vec::with_capacity(HEADER_LEN);
         head.extend_from_slice(MAGIC);
         head.extend_from_slice(&VERSION.to_le_bytes());
         head.extend_from_slice(&self.max_ranges.to_le_bytes());
         head.extend_from_slice(&self.ordinals.to_le_bytes());
         head.extend_from_slice(&self.rows.to_le_bytes());
         head.extend_from_slice(&(self.ranges.len() as u64).to_le_bytes());
-        head.extend_from_slice(&self.payload_at.to_le_bytes());
+        head.extend_from_slice(&payload_at.to_le_bytes());
         head.extend_from_slice(&ranges_at.to_le_bytes());
         head.extend_from_slice(&file_len.to_le_bytes());
-        head.resize(HEADER_LEN, 0);
-        for (offset, len, members) in &self.table {
-            head.extend_from_slice(&offset.to_le_bytes());
-            head.extend_from_slice(&len.to_le_bytes());
-            head.extend_from_slice(&members.to_le_bytes());
-        }
-        for at in &self.cover_at {
-            head.extend_from_slice(&at.to_le_bytes());
-        }
-        head.resize(self.payload_at as usize, 0);
+        head.extend_from_slice(&listed.to_le_bytes());
+        head.extend_from_slice(&0u32.to_le_bytes());
+        head.extend_from_slice(&tables_at.to_le_bytes());
         file.write_all_at(&head, 0).map_err(io(&self.path))?;
-        file.set_len(file_len).map_err(io(&self.path))?;
         Ok(())
     }
 }
@@ -202,12 +205,19 @@ pub struct RowMembersPack {
     ranges: u64,
     payload_at: usize,
     ranges_at: usize,
+    presence: Presence,
+    listed: u32,
+    /// Where the entries start, behind the presence index.
+    entries_at: usize,
+    /// Where each listed ordinal's index into the ranges starts, behind the entries.
+    cover_at: usize,
 }
 
 impl std::fmt::Debug for RowMembersPack {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RowMembersPack")
             .field("ordinals", &self.ordinals)
+            .field("listed", &self.listed)
             .field("rows", &self.rows)
             .field("ranges", &self.ranges)
             .finish()
@@ -244,6 +254,8 @@ impl RowMembersPack {
         let payload_at = le_u64(&map, 24);
         let ranges_at = le_u64(&map, 32);
         let file_len = le_u64(&map, 40);
+        let listed = le_u32(&map, 48);
+        let tables_at = le_u64(&map, 56);
         if file_len != map.len() as u64 {
             return Err(malformed(
                 path,
@@ -253,16 +265,25 @@ impl RowMembersPack {
                 ),
             ));
         }
-        if payload_at != align_up(tables_end(ordinals))
+        if payload_at != HEADER_LEN as u64
             || ranges_at < payload_at
             || !ranges_at.is_multiple_of(ALIGN)
-            || ranges.checked_mul(8).and_then(|b| b.checked_add(ranges_at)) != Some(file_len)
+            || ranges.checked_mul(8).and_then(|b| b.checked_add(ranges_at)) != Some(tables_at)
+            || listed > ordinals
+            || tables_at.checked_add(tables_len(ordinals, listed)) != Some(file_len)
         {
             return Err(malformed(
                 path,
                 "the header's sections do not tile the file",
             ));
         }
+        let Some(presence) = Presence::check(&map, tables_at as usize, ordinals, listed) else {
+            return Err(malformed(
+                path,
+                format!("its index does not list {listed} ordinals of {ordinals}"),
+            ));
+        };
+        let entries_at = tables_at as usize + crate::presence::len(ordinals);
         let pack = RowMembersPack {
             map,
             ordinals,
@@ -271,16 +292,20 @@ impl RowMembersPack {
             ranges,
             payload_at: payload_at as usize,
             ranges_at: ranges_at as usize,
+            presence,
+            listed,
+            entries_at,
+            cover_at: entries_at + ENTRY_LEN * listed as usize,
         };
         let payload_len = (ranges_at - payload_at) as usize;
         let mut end = 0usize;
-        for ordinal in 0..ordinals {
-            let (offset, len, members) = pack.entry(ordinal);
+        for k in 0..listed as usize {
+            let (offset, len, members) = pack.entry(k);
             if len == 0 {
                 if members != 0 {
                     return Err(malformed(
                         path,
-                        format!("ordinal {ordinal} counts members and has no bitmap"),
+                        format!("entry {k} counts members and has no bitmap"),
                     ));
                 }
                 continue;
@@ -292,28 +317,27 @@ impl RowMembersPack {
                 return Err(malformed(
                     path,
                     format!(
-                        "ordinal {ordinal}'s bitmap is misaligned, overlaps another or leaves the \
-                         payload"
+                        "entry {k}'s bitmap is misaligned, overlaps another or leaves the payload"
                     ),
                 ));
             };
             end = ends;
         }
         let mut previous = 0u64;
-        for ordinal in 0..=ordinals {
-            let at = pack.cover_at(ordinal);
-            if at < previous || at > ranges {
+        for k in 0..=listed as usize {
+            let at = pack.cover_at(k);
+            if at < previous || at > ranges || (k == 0 && at != 0) {
                 return Err(malformed(
                     path,
-                    format!("ordinal {ordinal}'s covering starts out of order"),
+                    format!("entry {k}'s covering starts out of order"),
                 ));
             }
-            if ordinal > 0 && at - previous > u64::from(max_ranges) {
+            if k > 0 && at - previous > u64::from(max_ranges) {
                 return Err(malformed(
                     path,
                     format!(
-                        "ordinal {}'s covering holds more than {max_ranges} ranges",
-                        ordinal - 1
+                        "entry {}'s covering holds more than {max_ranges} ranges",
+                        k - 1
                     ),
                 ));
             }
@@ -325,15 +349,15 @@ impl RowMembersPack {
                 "the coverings do not account for every range",
             ));
         }
-        for ordinal in 0..ordinals {
+        for k in 0..listed as usize {
             let mut last: Option<u32> = None;
-            for (lo, hi) in pack.covering(ordinal) {
+            for (lo, hi) in pack.entry_covering(k) {
                 if lo > hi || hi >= rows || last.is_some_and(|last| lo <= last) {
                     return Err(malformed(
                         path,
                         format!(
-                            "ordinal {ordinal}'s covering is not ascending, disjoint ranges \
-                             inside the rows"
+                            "entry {k}'s covering is not ascending, disjoint ranges inside the \
+                             rows"
                         ),
                     ));
                 }
@@ -351,8 +375,9 @@ impl RowMembersPack {
         Ok(pack)
     }
 
-    fn entry(&self, ordinal: u32) -> (usize, usize, u32) {
-        let at = HEADER_LEN + ENTRY_LEN * ordinal as usize;
+    /// The `k`th listed ordinal's offset, length and members.
+    fn entry(&self, k: usize) -> (usize, usize, u32) {
+        let at = self.entries_at + ENTRY_LEN * k;
         (
             le_u64(&self.map, at) as usize,
             le_u32(&self.map, at + 8) as usize,
@@ -360,11 +385,13 @@ impl RowMembersPack {
         )
     }
 
-    fn cover_at(&self, ordinal: u32) -> u64 {
-        le_u64(
-            &self.map,
-            HEADER_LEN + ENTRY_LEN * self.ordinals as usize + 8 * ordinal as usize,
-        )
+    fn cover_at(&self, k: usize) -> u64 {
+        le_u64(&self.map, self.cover_at + 8 * k)
+    }
+
+    /// `ordinal`'s entry, where the file lists it.
+    fn listed(&self, ordinal: u32) -> Option<usize> {
+        self.presence.entry(&self.map, ordinal)
     }
 
     /// How many ordinals the file covers, holes included.
@@ -389,10 +416,7 @@ impl RowMembersPack {
 
     /// The artifact's members, or `None` where it has none or is past the file.
     pub fn members(&self, ordinal: u32) -> Option<BitmapView<'_>> {
-        if ordinal >= self.ordinals {
-            return None;
-        }
-        let (offset, len, _) = self.entry(ordinal);
+        let (offset, len, _) = self.entry(self.listed(ordinal)?);
         if len == 0 {
             return None;
         }
@@ -420,10 +444,10 @@ impl RowMembersPack {
     /// Ask for the artifact's whole bitmap to be read now and in the background, for a reader
     /// about to read all of it.
     pub fn will_need(&self, ordinal: u32) {
-        if ordinal >= self.ordinals {
+        let Some(k) = self.listed(ordinal) else {
             return;
-        }
-        let (offset, len, _) = self.entry(ordinal);
+        };
+        let (offset, len, _) = self.entry(k);
         if len > 0 {
             let _ = self
                 .map
@@ -433,20 +457,18 @@ impl RowMembersPack {
 
     /// How many members the artifact has.
     pub fn member_count(&self, ordinal: u32) -> u32 {
-        if ordinal >= self.ordinals {
-            return 0;
-        }
-        self.entry(ordinal).2
+        self.listed(ordinal).map_or(0, |k| self.entry(k).2)
     }
 
     /// The artifact's covering, ascending. Empty for an artifact with no members.
     pub fn covering(&self, ordinal: u32) -> impl Iterator<Item = (u32, u32)> + '_ {
-        let (from, to) = if ordinal < self.ordinals {
-            (self.cover_at(ordinal), self.cover_at(ordinal + 1))
-        } else {
-            (0, 0)
-        };
-        (from..to).map(move |i| {
+        let k = self.listed(ordinal);
+        k.into_iter().flat_map(move |k| self.entry_covering(k))
+    }
+
+    /// The `k`th listed ordinal's covering.
+    fn entry_covering(&self, k: usize) -> impl Iterator<Item = (u32, u32)> + '_ {
+        (self.cover_at(k)..self.cover_at(k + 1)).map(move |i| {
             let at = self.ranges_at + 8 * i as usize;
             (le_u32(&self.map, at), le_u32(&self.map, at + 4))
         })
@@ -523,7 +545,8 @@ mod tests {
             "a range past the rows"
         );
         let mut hostile = bytes.clone();
-        hostile[HEADER_LEN..HEADER_LEN + 8].copy_from_slice(&(u64::MAX - 31).to_le_bytes());
+        let entries_at = le_u64(&bytes, 56) as usize + crate::presence::len(1);
+        hostile[entries_at..entries_at + 8].copy_from_slice(&(u64::MAX - 31).to_le_bytes());
         std::fs::write(&path, &hostile).unwrap();
         assert!(
             RowMembersPack::open(&path).is_err(),

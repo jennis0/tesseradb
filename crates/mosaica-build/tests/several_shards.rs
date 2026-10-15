@@ -546,7 +546,8 @@ fn packs(shard: &Shard<'_>) -> BTreeMap<(u32, u32, u32), Slices> {
         .collect()
 }
 
-/// Every containment partition of a shard, by `(space, level)`: each `(ordinal, rank)`'s set size.
+/// Every containment partition of a shard, by `(space, level)`: each `(ordinal, rank)`'s set size,
+/// and no rank for an ordinal the partition does not list.
 fn containment(shard: &Shard<'_>) -> BTreeMap<(u32, u32), Vec<Vec<u32>>> {
     shard
         .record()
@@ -559,7 +560,10 @@ fn containment(shard: &Shard<'_>) -> BTreeMap<(u32, u32), Vec<Vec<u32>>> {
                     .unwrap();
             let sizes = (0..pack.ordinals() as usize)
                 .map(|ordinal| {
-                    (pack.at(ordinal)..pack.at(ordinal + 1))
+                    let Some(k) = pack.entry(ordinal as u32) else {
+                        return Vec::new();
+                    };
+                    (pack.at(k)..pack.at(k + 1))
                         .map(|at| {
                             let expression = pack.id(at as usize) as usize;
                             pack.word(pack.expression_at(expression) as usize)
@@ -791,6 +795,9 @@ fn split_property(route: ExtentRoute) {
             let whole = &one_containment[&level];
             assert_eq!(ranks.len(), whole.len(), "one slot per ordinal in shard {k}");
             for (ordinal, ranks) in ranks.iter().enumerate() {
+                if ranks.is_empty() {
+                    continue;
+                }
                 assert_eq!(ranks.len(), whole[ordinal].len(), "one entry per rank");
                 for (rank, size) in ranks.iter().enumerate() {
                     sizes.get_mut(&level).unwrap()[ordinal][rank] += size;

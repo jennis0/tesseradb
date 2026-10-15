@@ -647,12 +647,17 @@ impl LevelPack {
 //
 // ```text
 // header  := magic "MSCP" | u16 version | u16 id_width | u32 ordinals | u32 pairs
-//                         | u32 expressions | u32 words
-// at      := u32 LE x (ordinals + 1)   -- into `ids`; at[0] == 0, ascending, at[ordinals] == pairs
+//                         | u32 expressions | u32 words | u32 listed
+// present := the listed ordinals (`crate::presence`)
+// at      := u32 LE x (listed + 1)     -- into `ids`; at[0] == 0, ascending, at[listed] == pairs
 // ids     := id_width bytes x pairs, padded to a 4-byte boundary
 // expr_at := u32 LE x (expressions + 1) -- into `words`; expr_at[0] == 0, ascending
 // words   := u32 LE x words            -- per expression: members, nclauses, (len, terms...)*
 // ```
+//
+// **A partition lists the artifacts with a generating set that is not empty.** One it does not list
+// has the empty expression at every rank, which is what a shard's partition holds for an artifact
+// it holds no member of, so a level's artifacts cost a shard nothing where it holds none of them.
 //
 // **Every array is 4-byte framed and read one integer at a time** rather than transmuted from the
 // mapping. A mapped `&[u32]` would need an alignment guarantee the format cannot make once the
@@ -663,8 +668,8 @@ const CONTAINMENT_MAGIC: &[u8; 4] = b"MSCP";
 /// Bumped whenever the array layout or the word encoding changes. There is no compatibility to
 /// keep (decision 0048); the number exists so a stale local file is a loud refusal rather than a
 /// silent misread of a containment answer.
-const CONTAINMENT_VERSION: u16 = 3;
-const CONTAINMENT_HEADER_LEN: usize = 4 + 2 + 2 + 4 + 4 + 4 + 4;
+const CONTAINMENT_VERSION: u16 = 4;
+const CONTAINMENT_HEADER_LEN: usize = 4 + 2 + 2 + 4 + 4 + 4 + 4 + 4;
 
 fn containment_malformed(what: &str, detail: impl std::fmt::Display) -> StoreError {
     StoreError::MalformedBundle {
@@ -672,19 +677,25 @@ fn containment_malformed(what: &str, detail: impl std::fmt::Display) -> StoreErr
     }
 }
 
-/// Serialise one level's partition. `ids` are expression identifiers, `id_width` is 2 or 4 bytes.
+/// Serialise one level's partition over `ordinals`, listing the ordinals `listed`, ascending, whose
+/// identifiers `at` frames. `ids` are expression identifiers, `id_width` is 2 or 4 bytes.
 ///
 /// Returns the bytes rather than writing them, for [`pack`]'s reason: the caller owns the
 /// durability sequence, and only the caller knows where the manifest write naming this file sits.
 pub fn pack_containment(
     id_width: u8,
+    ordinals: u32,
+    listed: &[u32],
     at: &[u32],
     ids: &[u32],
     expr_at: &[u32],
     words: &[u32],
 ) -> Vec<u8> {
-    let ordinals = at.len().saturating_sub(1) as u32;
     let expressions = expr_at.len().saturating_sub(1) as u32;
+    let mut presence = crate::presence::PresenceWriter::new(ordinals);
+    for &ordinal in listed {
+        presence.list(ordinal);
+    }
     let mut out = Vec::with_capacity(CONTAINMENT_HEADER_LEN + (at.len() + words.len()) * 4);
     out.extend_from_slice(CONTAINMENT_MAGIC);
     out.extend_from_slice(&CONTAINMENT_VERSION.to_le_bytes());
@@ -693,6 +704,8 @@ pub fn pack_containment(
     out.extend_from_slice(&(ids.len() as u32).to_le_bytes());
     out.extend_from_slice(&expressions.to_le_bytes());
     out.extend_from_slice(&(words.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(listed.len() as u32).to_le_bytes());
+    out.extend_from_slice(&presence.into_bytes());
     for value in at {
         out.extend_from_slice(&value.to_le_bytes());
     }
@@ -726,9 +739,12 @@ pub struct ContainmentPack {
     bytes: ContainmentBytes,
     id_width: u8,
     ordinals: u32,
+    listed: u32,
+    presence: crate::presence::Presence,
     pairs: u32,
     expressions: u32,
     words: u32,
+    at_at: usize,
     ids_at: usize,
     expr_at: usize,
     words_at: usize,
@@ -818,6 +834,7 @@ impl ContainmentPack {
         let pairs = read(12);
         let expressions = read(16);
         let words = read(20);
+        let listed = read(24);
 
         // **A narrow column cannot address a wide table.** The promotion rule that produced the
         // file is what stops an identifier being truncated into another expression's; a file
@@ -829,8 +846,14 @@ impl ContainmentPack {
             ));
         }
 
-        let at_at = CONTAINMENT_HEADER_LEN;
-        let ids_at = at_at + (ordinals as usize + 1) * 4;
+        if listed > ordinals {
+            return Err(containment_malformed(
+                what,
+                format!("it lists {listed} of {ordinals} ordinals"),
+            ));
+        }
+        let at_at = CONTAINMENT_HEADER_LEN + crate::presence::len(ordinals);
+        let ids_at = at_at + (listed as usize + 1) * 4;
         let expr_at = {
             let unpadded = ids_at + pairs as usize * usize::from(id_width);
             unpadded + (4 - unpadded % 4) % 4
@@ -848,29 +871,40 @@ impl ContainmentPack {
             ));
         }
 
+        let Some(presence) =
+            crate::presence::Presence::check(raw, CONTAINMENT_HEADER_LEN, ordinals, listed)
+        else {
+            return Err(containment_malformed(
+                what,
+                format!("its index does not list {listed} ordinals of {ordinals}"),
+            ));
+        };
         let pack = ContainmentPack {
             bytes,
             id_width,
             ordinals,
+            listed,
+            presence,
             pairs,
             expressions,
             words,
+            at_at,
             ids_at,
             expr_at,
             words_at,
         };
 
-        if pack.at(0) != 0 || pack.at(ordinals as usize) != pairs {
+        if pack.at(0) != 0 || pack.at(listed as usize) != pairs {
             return Err(containment_malformed(
                 what,
                 "the ordinal offsets do not span exactly the identifier column",
             ));
         }
-        for i in 0..ordinals as usize {
+        for i in 0..listed as usize {
             if pack.at(i) > pack.at(i + 1) {
                 return Err(containment_malformed(
                     what,
-                    format!("ordinal offset {i} goes backwards"),
+                    format!("entry offset {i} goes backwards"),
                 ));
             }
         }
@@ -958,11 +992,20 @@ impl ContainmentPack {
         self.id_width
     }
 
-    /// The identifier column's extent for `ordinal`: `at(o)..at(o + 1)`. Infallible for
-    /// `o <= ordinals()`, which [`Self::frame`] proved.
-    pub fn at(&self, ordinal: usize) -> u32 {
-        let base = CONTAINMENT_HEADER_LEN + ordinal * 4;
-        self.u32_at(base)
+    /// How many ordinals the partition lists: those with a generating set that is not empty.
+    pub fn listed(&self) -> u32 {
+        self.listed
+    }
+
+    /// `ordinal`'s entry, where the partition lists it.
+    pub fn entry(&self, ordinal: u32) -> Option<usize> {
+        self.presence.entry(self.bytes.as_slice(), ordinal)
+    }
+
+    /// The identifier column's extent for entry `k`: `at(k)..at(k + 1)`. Infallible for
+    /// `k <= listed()`, which [`Self::frame`] proved.
+    pub fn at(&self, k: usize) -> u32 {
+        self.u32_at(self.at_at + k * 4)
     }
 
     /// The expression identifier at `index` in the column.
@@ -2460,7 +2503,7 @@ mod tests {
         // `{1}` and `{3}`.
         let words = vec![2u32, 1, 2, 1, 2, /* expr 1 */ 2, 2, 1, 1, 1, 3];
         let expr_at = vec![0u32, 5, 11];
-        pack_containment(id_width, &[0, 2, 3], &[0, 1, 0], &expr_at, &words)
+        pack_containment(id_width, 3, &[0, 2], &[0, 2, 3], &[0, 1, 0], &expr_at, &words)
     }
 
     /// **A mapped file and the same bytes in memory are read by one reader**, so a partition the
@@ -2474,7 +2517,8 @@ mod tests {
             let mapped = ContainmentPack::open(&path).unwrap();
             let owned = ContainmentPack::from_bytes(bytes.clone()).unwrap();
             for pack in [&mapped, &owned] {
-                assert_eq!(pack.ordinals(), 2);
+                assert_eq!((pack.ordinals(), pack.listed()), (3, 2));
+                assert_eq!((pack.entry(0), pack.entry(1), pack.entry(2)), (Some(0), None, Some(1)));
                 assert_eq!(pack.pairs(), 3);
                 assert_eq!(pack.expressions(), 2);
                 assert_eq!(pack.id_width(), id_width);
@@ -2520,7 +2564,7 @@ mod tests {
         // identifier column read as a valid one, which is the failure the promotion rule exists
         // to prevent and this check catches from the other side.
         let mut wild = good.clone();
-        let ids_at = CONTAINMENT_HEADER_LEN + 3 * 4;
+        let ids_at = CONTAINMENT_HEADER_LEN + crate::presence::len(3) + 3 * 4;
         wild[ids_at..ids_at + 4].copy_from_slice(&9u32.to_le_bytes());
         assert!(ContainmentPack::from_bytes(wild).is_err());
 

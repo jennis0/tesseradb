@@ -239,14 +239,12 @@ impl ContainmentPartition {
         self.len() == 0
     }
 
-    /// The identifier at `(ordinal, rank)`, or `None` where the partition has no entry — a hole,
-    /// an ordinal past the level, or a rank past the artifact's contents.
+    /// The identifier at `(ordinal, rank)`, or `None` where the partition has no entry — an
+    /// ordinal it does not list, or a rank past the artifact's contents.
     fn id_at(&self, ordinal: u32, rank: usize) -> Option<u32> {
-        if ordinal as usize >= self.len() {
-            return None;
-        }
-        let lo = self.pack.at(ordinal as usize) as usize;
-        let hi = self.pack.at(ordinal as usize + 1) as usize;
+        let k = self.pack.entry(ordinal)?;
+        let lo = self.pack.at(k) as usize;
+        let hi = self.pack.at(k + 1) as usize;
         let index = lo.checked_add(rank)?;
         (index < hi).then(|| self.pack.id(index))
     }
@@ -398,6 +396,10 @@ impl ContainmentAnswers<'_> {
     /// `None` where the partition has no entry there, which is what puts the caller back on the
     /// masked-count route rather than answering from a structure that does not cover the case.
     pub fn satisfies(&self, ordinal: u32, rank: usize, size: u64) -> Option<bool> {
+        if self.covers(ordinal) && self.partition.pack.entry(ordinal).is_none() {
+            // Unlisted: the empty expression at every rank, which has no clause to meet.
+            return Some(size == 0);
+        }
         let id = self.partition.id_at(ordinal, rank)?;
         if self.partition.members_of(id) != size {
             return Some(false);
@@ -443,13 +445,16 @@ mod tests {
         ContainmentPartition::of_clauses(&ordinals)
     }
 
-    /// Whether `terms` contain rank 0 of `ordinal`, whose set has as many members as clauses.
+    /// Whether `terms` contain rank 0 of `ordinal`, whose set has as many members as clauses, or
+    /// none where the partition does not list it.
     fn holds(partition: &ContainmentPartition, ordinal: u32, terms: &[u32]) -> bool {
         let held = satisfied(terms);
-        let id = partition.id_at(ordinal, 0).expect("the fixture covers this ordinal");
+        let size = partition
+            .id_at(ordinal, 0)
+            .map_or(0, |id| partition.members_of(id));
         partition
             .answers(&held)
-            .satisfies(ordinal, 0, partition.members_of(id))
+            .satisfies(ordinal, 0, size)
             .expect("the fixture covers this ordinal")
     }
 
@@ -482,6 +487,7 @@ mod tests {
     #[test]
     fn an_empty_generating_set_contains_everyone() {
         let partition = partition_of(&[&[]]);
+        assert_eq!(partition.pairs(), 0, "an artifact whose sets are all empty is not listed");
         assert!(holds(&partition, 0, &[]));
     }
 
