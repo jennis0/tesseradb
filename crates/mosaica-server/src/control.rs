@@ -1845,7 +1845,7 @@ struct MemberList {
 /// row order; the refused rows, as `{artifact, list, row, reason}`; the columns ignored; and the
 /// generation they were resolved against.
 struct ResolvedLists {
-    entities: Vec<Vec<ItemAt>>,
+    items: Vec<Vec<ItemAt>>,
     refused: Vec<serde_json::Value>,
     ignored: Vec<String>,
     at: mosaica_engine::Stamp,
@@ -1878,10 +1878,10 @@ fn resolve_member_lists(
     let mut refused = Vec::new();
     let mut out = Vec::with_capacity(lists.len());
     for (list, named) in lists.iter().zip(named) {
-        let mut entities = Vec::with_capacity(named.len());
+        let mut items = Vec::with_capacity(named.len());
         for (row, named) in named.into_iter().enumerate() {
             match named {
-                Ok(item) => entities.push(item),
+                Ok(item) => items.push(item),
                 Err(reason) if strict || list.whole => {
                     let what = format!("artifact {}'s `{}`", list.artifact, list.list);
                     return Err(crate::address::strict_refusal(&what, row, reason));
@@ -1894,10 +1894,10 @@ fn resolve_member_lists(
                 })),
             }
         }
-        out.push(entities);
+        out.push(items);
     }
     Ok(ResolvedLists {
-        entities: out,
+        items: out,
         refused,
         ignored,
         at,
@@ -2493,7 +2493,7 @@ async fn publish_artifacts(
             let merged = merge_member_lists(&mut lists)?;
             let answered = with_fresh_names(|| {
                 let ResolvedLists {
-                    entities: resolved,
+                    items: resolved,
                     refused,
                     ignored,
                     at,
@@ -2514,13 +2514,13 @@ async fn publish_artifacts(
                         let mut members: Vec<ItemAt> = Vec::new();
                         let mut excluded: Option<Vec<ItemAt>> = None;
                         let mut sets: Vec<Vec<ItemAt>> = Vec::new();
-                        while let Some(((_, list), entities)) =
+                        while let Some(((_, list), items)) =
                             resolved.next_if(|((at, _), _)| *at == index)
                         {
                             match list {
-                                "members" => members = entities,
-                                "excluding" => excluded = Some(entities),
-                                _ => sets.push(entities),
+                                "members" => members = items,
+                                "excluding" => excluded = Some(items),
+                                _ => sets.push(items),
                             }
                         }
                         let contents: Vec<mosaica_lifecycle::membership::IncomingContent> =
@@ -2540,29 +2540,17 @@ async fn publish_artifacts(
                                 key: a.key.clone(),
                             }
                         });
-                        let mut incoming = match attached_to {
-                            None => mosaica_lifecycle::IncomingArtifact::with_content(
-                                artifact.key.clone(),
-                                [],
-                                contents,
-                            ),
-                            Some(attached_to) => mosaica_lifecycle::IncomingArtifact::attached(
-                                artifact.key.clone(),
-                                [],
-                                contents,
-                                attached_to,
-                            ),
-                        };
-                        incoming.members = mosaica_lifecycle::ShardSets::of_items(members);
-                        incoming.shape = shape.clone();
-                        incoming.parent_keys = artifact.parent.clone();
-                        incoming.view = artifact.view.clone();
-                        incoming.access = access.clone();
-                        // The executor takes the complement against the view's entities.
-                        if let Some(excluded) = excluded {
-                            incoming.exclude(excluded);
+                        mosaica_lifecycle::IncomingArtifact {
+                            key: artifact.key.clone(),
+                            view: artifact.view.clone(),
+                            members: mosaica_lifecycle::ShardSets::of_items(members),
+                            excluding: excluded.map(mosaica_lifecycle::ShardSets::of_items),
+                            contents,
+                            attached_to,
+                            parent_keys: artifact.parent.clone(),
+                            shape: shape.clone(),
+                            access: access.clone(),
                         }
-                        incoming
                     })
                     .collect();
 
@@ -2766,20 +2754,20 @@ async fn grow_memberships(
                 // Joining and leaving members are resolved in one pass, joins first in each row,
                 // so an entity named in both resolves to one entity.
                 let ResolvedLists {
-                    entities,
+                    items,
                     refused,
                     ignored,
                     at,
                 } = resolve_member_lists(state, &merged, &lists, strict)?;
-                let mut entities = entities.into_iter();
+                let mut items = items.into_iter();
 
                 let joins: Vec<mosaica_lifecycle::IncomingGrowth> = artifacts
                     .iter()
                     .zip(&shapes)
                     .zip(&accesses)
                     .map(|((artifact, shape), access)| {
-                        let members = entities.next().expect("a joining list per artifact");
-                        let leaving = entities.next().expect("a leaving list per artifact");
+                        let members = items.next().expect("a joining list per artifact");
+                        let leaving = items.next().expect("a leaving list per artifact");
                         // Every row carries all its fields; the executor refuses combinations it
                         // does not take, rather than this dropping them and answering 200.
                         mosaica_lifecycle::IncomingGrowth {

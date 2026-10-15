@@ -51,7 +51,7 @@ fn engine_open_refuses_an_out_of_range_allocator_seed() {
         &tmp.path().join("pairs.parquet"),
     );
 
-    // A replayed row at `u32::MAX`, which is never issued — `high_water_from` folds
+    // A replayed row at `u32::MAX`, which is never issued — `raise_high_water` folds
     // `entity_id + 1` into the seed, so this is the WAL-side half of the seeding rule, reached
     // without touching MANIFEST's digest. The refusal fires before replay resolves anything, so
     // the row's other fields never matter.

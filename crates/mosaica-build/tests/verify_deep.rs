@@ -28,7 +28,6 @@ use mosaica_build::error::BuildError;
 use mosaica_build::{build, verify, verify_deep, verify_with_window_rows, BuildArgs, VerifyOpts};
 use mosaica_spatial::Bounds;
 use mosaica_store::flush::{write_flush_segment, FlushInput, FlushRow};
-use mosaica_store::layout::partition_dir;
 use mosaica_store::manifest::{
     CurrentPointer, EntitySet, FileDigest, PartitionManifest, SegmentsManifest, ShardRecord,
     TenancyBit,
@@ -304,7 +303,7 @@ fn refresh_digest(root: &Path, rel: &str) {
     let named_in_one = read_publication(&prefix_dir, "default", 1)
         .is_ok_and(|published| published.manifest.partition.files.contains_key(rel));
     if named_in_one {
-        edit_side_manifest(root, |segments| segments["files"][rel] = digest);
+        common::rewrite_publication(&root.join("v00000"), 1, |segments| segments["files"][rel] = digest);
         return;
     }
 
@@ -425,25 +424,6 @@ fn the_partition_route_and_the_window_route_agree() {
     assert_eq!(window.to_string(), partition.to_string());
 }
 
-/// Rewrite the fixture's publication 1 through `change`, applied to it as one JSON value with
-/// every shard and space file merged in.
-fn edit_side_manifest(root: &Path, change: impl FnOnce(&mut serde_json::Value)) {
-    let prefix_dir = root.join("v00000");
-    let published = read_publication(&prefix_dir, "default", 1).unwrap();
-    let mut value = serde_json::to_value(&published.manifest).unwrap();
-    change(&mut value);
-    let manifest: SegmentsManifest = serde_json::from_value(value).unwrap();
-    let name = mosaica_store::layout::segments_name(1);
-    let partition = partition_dir(&prefix_dir, "default");
-    fs::remove_file(partition.join(&name)).unwrap();
-    for kind in ["shards", "layers"] {
-        for entry in fs::read_dir(partition.join(kind)).into_iter().flatten() {
-            let _ = fs::remove_file(entry.unwrap().path().join(&name));
-        }
-    }
-    write_publication(&prefix_dir, "default", 1, &manifest, None).unwrap();
-}
-
 /// An item flushed at a raised tenancy verifies against the index that holds it, and its number
 /// is counted. Without the index its row is at a tenancy its number is not, and the derivation
 /// refuses it; an index file no `files` map digests is refused before it is read.
@@ -458,7 +438,7 @@ fn a_row_is_checked_at_its_numbers_tenancy_in_the_index() {
     let deep = verify_deep(&root, &VerifyOpts::default()).expect("and verifies deep");
     assert_eq!((deep.raised_numbers, deep.retired_numbers), (1, 0));
 
-    edit_side_manifest(&root, |m| {
+    common::rewrite_publication(&root.join("v00000"), 1, |m| {
         m["shards"]["records"][0]["tenancy_index"] = serde_json::json!([])
     });
     let refused = verify(&root);
@@ -470,7 +450,7 @@ fn a_row_is_checked_at_its_numbers_tenancy_in_the_index() {
     let temp = tempfile::TempDir::new().unwrap();
     flushed_bundle_at(temp.path(), 5);
     let root = bundle_root(&temp);
-    edit_side_manifest(&root, |m| {
+    common::rewrite_publication(&root.join("v00000"), 1, |m| {
         let files = m["files"].as_object_mut().unwrap();
         files.retain(|rel, _| !rel.starts_with(&SHARD.tenancy_rel()));
     });
@@ -488,7 +468,7 @@ fn a_retired_number_below_the_highest_tenancy_is_refused() {
     flushed_bundle(temp.path());
     let root = bundle_root(&temp);
     let retired = EntitySet::of(&croaring::Bitmap::of(&[DELETED]));
-    edit_side_manifest(&root, |m| {
+    common::rewrite_publication(&root.join("v00000"), 1, |m| {
         m["shards"]["records"][0]["retired_numbers"] = serde_json::to_value(&retired).unwrap()
     });
     let refused = verify_deep(&root, &VerifyOpts::default());
@@ -637,7 +617,7 @@ fn a_dict_extent_with_a_miscounted_declaration_is_refused() {
     let temp = tempfile::TempDir::new().unwrap();
     flushed_bundle(temp.path());
     let root = bundle_root(&temp);
-    edit_side_manifest(&root, |segments| {
+    common::rewrite_publication(&root.join("v00000"), 1, |segments| {
         let declared = segments["dict_extents"][0]["records"].as_u64().unwrap();
         segments["dict_extents"][0]["records"] = serde_json::json!(declared + 1);
     });
@@ -771,7 +751,7 @@ fn append_dict_extent_repeating_first_descriptor(root: &Path, k: usize) {
     let rel = format!("dictionary/terms-{k}.dict");
     fs::write(prefix_dir.join(&rel), record).unwrap();
 
-    edit_side_manifest(root, |segments| {
+    common::rewrite_publication(&root.join("v00000"), 1, |segments| {
         segments["dict_extents"]
             .as_array_mut()
             .unwrap()

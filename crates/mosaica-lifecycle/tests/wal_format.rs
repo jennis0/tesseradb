@@ -168,8 +168,7 @@ fn a_wal_row_round_trips_a_coordinate_no_f32_holds() {
 /// the operands of its labels read as one disjunction: a 32 row carries one key for a whole label
 /// holding a conjunction, which a 33 reader would evaluate as one conjunction. **33** is the
 /// version whose magic was `TWAL`. **34** is the version before the variant table gained
-/// `ShardsDeclare`. **37** is the version before a record named each entity's shard: a 37 row read
-/// at 38 takes its entity's bytes for its shard, and every entity it names lands in shard 0.
+/// `ShardsDeclare`. **37** is the version before records named a shard.
 #[test]
 fn a_log_at_a_version_whose_records_would_be_misread_is_refused() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -224,7 +223,6 @@ fn view_create_and_drop_round_trip() {
         key: "2026-Q4".to_string(),
         incarnation: 2,
     };
-    // One entity number in two shards is two items.
     let deleted = vec![
         Target::Item(ShardId::ZERO, EntityId::new(7)),
         Target::Item(ShardId::new(1).unwrap(), EntityId::new(7)),

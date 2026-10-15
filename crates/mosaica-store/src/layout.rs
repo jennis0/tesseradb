@@ -44,14 +44,43 @@ pub fn segments_name(n: u64) -> String {
     format!("SEGMENTS-{n}.json")
 }
 
+/// The directory under a partition's holding its shards' directories.
+pub const SHARDS_DIR: &str = "shards";
+
+/// The directory under a partition's holding its layer spaces' directories.
+pub const LAYERS_DIR: &str = "layers";
+
+/// A shard's member packs, under its directory.
+const MEMBERS_DIR: &str = "members";
+
+/// A layer space's record packs, under its directory.
+const RECORDS_DIR: &str = "records";
+
+/// A layer space's content extents, under its directory.
+const CONTENT_DIR: &str = "content";
+
+/// Whether `rel` is a member pack, a record pack or a content extent file of `partition`.
+pub fn is_artifact_file(partition: &str, rel: &str) -> bool {
+    let under = |root: String, dirs: &[&str]| {
+        rel.strip_prefix(&format!("{root}/"))
+            .and_then(|rest| rest.split_once('/'))
+            .is_some_and(|(_, tail)| {
+                dirs.iter()
+                    .any(|dir| tail.strip_prefix(dir).is_some_and(|t| t.starts_with('/')))
+            })
+    };
+    under(layer_spaces_rel(partition), &[RECORDS_DIR, CONTENT_DIR])
+        || under(shards_rel(partition), &[MEMBERS_DIR])
+}
+
 /// A partition's shard directories, prefix-relative.
 pub fn shards_rel(partition: &str) -> String {
-    format!("{}/shards", partition_rel(partition))
+    format!("{}/{SHARDS_DIR}", partition_rel(partition))
 }
 
 /// A partition's layer-space directories, prefix-relative.
 pub fn layer_spaces_rel(partition: &str) -> String {
-    format!("{}/layers", partition_rel(partition))
+    format!("{}/{LAYERS_DIR}", partition_rel(partition))
 }
 
 /// One component for a plain view, two for a group's: `:` is not a path character everywhere.
@@ -180,7 +209,7 @@ impl<'a> ShardLayout<'a> {
     }
 
     pub fn members_rel(self) -> String {
-        format!("{}/members", self.rel())
+        format!("{}/{MEMBERS_DIR}", self.rel())
     }
 
     pub fn coalesced_rel(self, id: &str) -> String {
@@ -223,12 +252,12 @@ impl<'a> LayerSpaceLayout<'a> {
 
     /// The record packs: one per publication per level.
     pub fn records_rel(self) -> String {
-        format!("{}/records", self.rel())
+        format!("{}/{RECORDS_DIR}", self.rel())
     }
 
     /// The supplied content's record-blob extents.
     pub fn content_rel(self) -> String {
-        format!("{}/content", self.rel())
+        format!("{}/{CONTENT_DIR}", self.rel())
     }
 
     /// The three files of the content extent named `stem`.

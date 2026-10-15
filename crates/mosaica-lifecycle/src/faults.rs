@@ -206,24 +206,14 @@ pub enum PauseSite {
     /// with no reference to the step log. Any rewrite of the executor's ack loop is caught by that
     /// discrimination, because the point moves with the code rather than with the line.
     BeforeAck,
-    /// Before a publication's partition `SEGMENTS-<n>.json` commits it in the **live** prefix:
-    /// the publication's files are on disc, the shard and layer-space `SEGMENTS-<n>.json` it
-    /// changed among them, and nothing durable names them yet.
+    /// Before a publication's partition `SEGMENTS-<n>.json` commits it in the **live** prefix: its
+    /// shard and space files and any new segments are on disc, and nothing durable names them. The
+    /// first of three publication-seam sites, where a crash test parks the executor because a
+    /// `SIGKILL` rarely lands there; a process killed here leaves orphans a restart never opens.
     ///
-    /// The first of the three **publication-seam** sites (correctness-suite §10.1, §12.3). The
-    /// two above discriminate the *ack contract*; these three park the executor at the instants a
-    /// crash test needs, because an arbitrary `SIGKILL` essentially never lands on one. A killed
-    /// process parked here leaves exactly the state §12.3's discard table names: the shard and
-    /// space files staged, and any segment file they name that no earlier manifest does — orphans
-    /// a restart never opens, and the next publication commits above.
-    ///
-    /// Fires inside the one commit every executor-side publication into the live prefix takes —
-    /// flush, merge, coalesce, a unique declaration's, and the overlay's deny-state write —
-    /// because all of them share one crash story. It deliberately does **not** fire for the
-    /// fold's manifest writes: those land in a prefix nothing references until `CURRENT` names it,
-    /// so their crash story is [`PauseSite::BeforeCurrentFlip`]'s (the whole unflipped prefix is
-    /// discardable), and a site that fired for both would hand a driver two different discard
-    /// rules under one name.
+    /// Fires in the one commit every executor-side publication into the live prefix takes (flush,
+    /// merge, coalesce, a unique declaration, the overlay's deny state), and not for the fold's
+    /// manifest writes, whose crash story is [`PauseSite::BeforeCurrentFlip`]'s.
     BeforeManifestPublish,
     /// Before the fold's `CURRENT` rename: the folded prefix is complete and synced, and no
     /// durable pointer names it.

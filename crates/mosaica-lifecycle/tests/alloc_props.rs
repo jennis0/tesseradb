@@ -2,13 +2,13 @@
 //! in, no id live twice and no identifier naming two items across simulated crashes and folds that
 //! free ids and numbers, and `assign_sorted`'s contiguous-signature grouping.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use proptest::prelude::*;
 
 use croaring::Bitmap;
 use mosaica_lifecycle::alloc::{
-    assign_sorted, entities_named, high_water_from, union_of, Allocator, ByTenancy, PendingItem,
+    assign_sorted, name_entities, raise_high_water, union_of, Allocator, ByTenancy, PendingItem,
 };
 use mosaica_lifecycle::wal::{ChangeOp, WalRecord, WalRow};
 use mosaica_types::{EntityId, ShardId, Tenancy, TermId};
@@ -292,11 +292,15 @@ proptest! {
                     }))
                 };
                 let mut next = Allocator::new(published.high_water.max(shard_zero_mark(&wal)));
+                let mut named = BTreeMap::new();
+                for record in &wal {
+                    name_entities(record, &mut named);
+                }
                 next.seed_freed(
                     split(&published.free),
                     published.held.iter().map(|(p, ids)| (*p, split(ids))).collect(),
                     retained_from,
-                    &entities_named(&wal).remove(&ShardId::ZERO).unwrap_or_default(),
+                    &named.remove(&ShardId::ZERO).unwrap_or_default(),
                 );
                 alloc = next;
             }
@@ -406,10 +410,11 @@ fn row(id: u64) -> WalRecord {
 
 /// Shard 0's high water as the log `records` leaves it.
 fn shard_zero_mark(records: &[WalRecord]) -> u64 {
-    high_water_from(records)
-        .get(&ShardId::ZERO)
-        .copied()
-        .unwrap_or(0)
+    let mut hw = BTreeMap::new();
+    for record in records {
+        raise_high_water(record, &mut hw);
+    }
+    hw.get(&ShardId::ZERO).copied().unwrap_or(0)
 }
 
 fn item(entity: EntityId) -> mosaica_types::Target {

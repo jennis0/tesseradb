@@ -1,9 +1,8 @@
 //! The key filter a run may carry: a blocked Bloom filter over its keys.
 //!
 //! The filter is an array of 64-byte blocks. A key is hashed to one block and sets
-//! [`HASHES`] bits inside it, so a probe reads one cache line. Its keys at [`BITS_PER_KEY`] bits
-//! each, a filter answers "maybe" for about one key in a hundred it does not hold, and "maybe"
-//! for every key it does.
+//! [`HASHES`] bits inside it, so a probe reads one cache line. At [`BITS_PER_KEY`] bits a key, a
+//! filter answers "maybe" for every key it holds and for about one in a hundred it does not.
 //!
 //! A key is hashed from its value zero-extended to 128 bits, `lo` and `hi` its low and high 64
 //! bits, with `mix` the SplitMix64 finaliser (`z ^= z >> 30; z *= 0xbf58476d1ce4e5b9;
@@ -49,11 +48,20 @@ fn place(key: u128, blocks: u64) -> (usize, u64) {
     (block * BLOCK, mix(x ^ C))
 }
 
-/// A filter being filled.
+/// The `hashes` bits of a block `y` chooses.
+#[inline]
+fn bits(y: u64, hashes: u32) -> impl Iterator<Item = usize> {
+    (0..hashes).scan(y, |y, _| {
+        let bit = (*y & 511) as usize;
+        *y >>= 9;
+        Some(bit)
+    })
+}
+
+/// A filter being filled, setting [`HASHES`] bits a key.
 pub(super) struct FilterBuilder {
     bytes: Vec<u8>,
     blocks: u64,
-    hashes: u32,
 }
 
 impl FilterBuilder {
@@ -61,22 +69,15 @@ impl FilterBuilder {
         FilterBuilder {
             bytes: vec![0; blocks as usize * BLOCK],
             blocks,
-            hashes: HASHES,
         }
     }
 
     pub(super) fn insert(&mut self, key: u128) {
-        let (at, mut y) = place(key, self.blocks);
+        let (at, y) = place(key, self.blocks);
         let block = &mut self.bytes[at..at + BLOCK];
-        for _ in 0..self.hashes {
-            let bit = (y & 511) as usize;
+        for bit in bits(y, HASHES) {
             block[bit >> 3] |= 1 << (bit & 7);
-            y >>= 9;
         }
-    }
-
-    pub(super) fn hashes(&self) -> u32 {
-        self.hashes
     }
 
     pub(super) fn bytes(&self) -> &[u8] {
@@ -87,14 +88,7 @@ impl FilterBuilder {
 /// Whether the filter `bytes`, of `blocks` blocks setting `hashes` bits a key, may hold `key`.
 #[inline]
 pub(super) fn may_hold(bytes: &[u8], blocks: u64, hashes: u32, key: u128) -> bool {
-    let (at, mut y) = place(key, blocks);
+    let (at, y) = place(key, blocks);
     let block = &bytes[at..at + BLOCK];
-    for _ in 0..hashes {
-        let bit = (y & 511) as usize;
-        if block[bit >> 3] & (1 << (bit & 7)) == 0 {
-            return false;
-        }
-        y >>= 9;
-    }
-    true
+    bits(y, hashes).all(|bit| block[bit >> 3] & (1 << (bit & 7)) != 0)
 }

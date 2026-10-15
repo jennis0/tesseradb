@@ -333,7 +333,7 @@ pub(crate) fn check_manifest_publishable(
     next: &mosaica_store::manifest::SegmentsManifest,
 ) -> Result<(), ManifestRegression> {
     for shard in &live.shards {
-        let Some(record) = next.shards.records.iter().find(|r| r.id == shard.record.id) else {
+        let Some(record) = next.shard(shard.record.id) else {
             return Err(ManifestRegression {
                 field: "shards",
                 live: live.shards.len() as u64,
@@ -490,8 +490,7 @@ mod tests {
             .expect_err("a manifest that drops a served shard's record is refused");
     }
 
-    /// **The shard counter never falls and a sealed shard never reopens**, whatever a publication
-    /// assembled them from; a shard numbered or sealed is so for good.
+    /// **The shard counter never falls and a sealed shard never reopens.**
     #[test]
     fn a_side_manifest_may_not_lower_next_id_or_reopen_a_shard() {
         let mut sealed = manifest_at(100, 200);

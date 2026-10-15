@@ -11,16 +11,19 @@ use sha2::{Digest, Sha256};
 
 use mosaica_spatial::fixed32;
 use mosaica_spatial::tiler::{sort_batch, TilerItem};
+use mosaica_store::layout::segments_name;
 use mosaica_store::manifest::{
     CurrentPointer, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation,
-    SegmentDescriptor, SegmentsManifest, ViewDescriptor,
+    SegmentDescriptor, SegmentsManifest, ShardRecord, ViewDescriptor,
 };
 use mosaica_store::permutation::SegmentExtent;
 use mosaica_store::read::SegmentData;
 use mosaica_store::write::{write_permutation, write_segment};
-use mosaica_store::{write_flush_segment, Bundle, FlushInput, FlushRow, ShardLayout};
+use mosaica_store::{
+    write_flush_segment, Bundle, FlushInput, FlushRow, LayerSpaceLayout, ShardLayout,
+};
 use mosaica_types::{
-    EntityId, IdentityKey, MosaicaId, ShardId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS,
+    EntityId, IdentityKey, LayerSpace, MosaicaId, ShardId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS,
 };
 
 pub const PARTITION: &str = "default";
@@ -268,14 +271,14 @@ pub fn write_assembled_named(prefix_dir: &Path, name: &str, n: u64, mut value: s
         let bytes = serde_json::to_vec_pretty(&record).unwrap();
         let dir = prefix_dir.join(&dir_rel);
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join(format!("SEGMENTS-{n}.json")), &bytes).unwrap();
+        fs::write(dir.join(segments_name(n)), &bytes).unwrap();
         (bytes.len() as u64, hex_sha256(&bytes), carries(&record))
     };
     let records = value["shards"]["records"].take();
     let mut shard_refs = Vec::new();
     for record in records.as_array().cloned().unwrap_or_default() {
         let id = record["id"].as_u64().unwrap();
-        let rel = format!("partitions/{PARTITION}/shards/{id}");
+        let rel = ShardLayout::new(PARTITION, ShardId::new(id as u32).unwrap()).rel();
         let (size, sha256, denies) = write_owned(rel, record, &mut files);
         shard_refs
             .push(json!({"id": id, "n": n, "size": size, "sha256": sha256, "denies": denies}));
@@ -284,7 +287,7 @@ pub fn write_assembled_named(prefix_dir: &Path, name: &str, n: u64, mut value: s
     let mut space_refs = Vec::new();
     for record in spaces.as_array().cloned().unwrap_or_default() {
         let space = record["space"].as_u64().unwrap();
-        let rel = format!("partitions/{PARTITION}/layers/{space}");
+        let rel = LayerSpaceLayout::new(PARTITION, LayerSpace::new(space as u32).unwrap()).rel();
         let (size, sha256, denies) = write_owned(rel, record, &mut files);
         space_refs.push(
             json!({"space": space, "n": n, "size": size, "sha256": sha256, "denies": denies}),
@@ -300,5 +303,36 @@ pub fn write_assembled_named(prefix_dir: &Path, name: &str, n: u64, mut value: s
 
 /// [`write_assembled_named`] under the canonical name.
 pub fn write_assembled(prefix_dir: &Path, n: u64, value: serde_json::Value) {
-    write_assembled_named(prefix_dir, &format!("SEGMENTS-{n}.json"), n, value);
+    write_assembled_named(prefix_dir, &segments_name(n), n, value);
+}
+
+/// Add an empty shard 1 beside shard 0.
+pub fn add_shard_one(manifest: &mut SegmentsManifest) {
+    manifest
+        .shards
+        .records
+        .push(ShardRecord::empty(ShardId::new(1).unwrap()));
+    manifest.shards.next_id = 2;
+}
+
+/// Shard `shard`'s `SEGMENTS-<m>.json`.
+pub fn shard_file(prefix_dir: &Path, shard: u32, m: u64) -> std::path::PathBuf {
+    prefix_dir.join(ShardLayout::new(PARTITION, ShardId::new(shard).unwrap()).manifest_rel(m))
+}
+
+/// The `SEGMENTS-<m>.json` numbers present in shard `id`'s directory, ascending.
+pub fn shard_files(prefix_dir: &Path, id: u32) -> Vec<u64> {
+    let dir = prefix_dir.join(ShardLayout::new(PARTITION, ShardId::new(id).unwrap()).rel());
+    let mut found: Vec<u64> = fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| {
+            let name = e.unwrap().file_name().to_string_lossy().into_owned();
+            name.strip_prefix("SEGMENTS-")?
+                .strip_suffix(".json")?
+                .parse()
+                .ok()
+        })
+        .collect();
+    found.sort_unstable();
+    found
 }

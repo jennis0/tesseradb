@@ -7,7 +7,7 @@ use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_store::manifest::DeclaredScalar;
 use mosaica_store::unique::{KeyKind, UniqueKey};
 use mosaica_store::StoreError;
-use mosaica_types::{EntityId, ItemAt, LayerSpace, MosaicaId, ShardId, Target, TermId};
+use mosaica_types::{EntityId, ItemAt, LayerSpace, MosaicaId, Target, TermId};
 
 use crate::edited::Stamp;
 use crate::engine::Engine;
@@ -330,29 +330,22 @@ impl Engine {
         generation: &Generation,
         ids: &[MosaicaId],
     ) -> std::result::Result<Vec<Option<ItemAt>>, StoreError> {
-        let mut by_shard: std::collections::BTreeMap<ShardId, Vec<(usize, EntityId)>> =
-            std::collections::BTreeMap::new();
-        for (at, id) in ids.iter().enumerate() {
-            if let Some((shard, number)) =
-                crate::edited::number_named(&self.identity_key, generation, *id)
-            {
-                by_shard.entry(shard).or_default().push((at, number));
-            }
-        }
+        let by_shard = mosaica_types::by_shard(ids.iter().enumerate().filter_map(|(at, id)| {
+            let (shard, number) = crate::edited::number_named(&self.identity_key, generation, *id)?;
+            Some((shard.id(), (at, shard, number)))
+        }));
         let mut out = vec![None; ids.len()];
         let live = self.write.live();
         for (id, named) in by_shard {
-            let shard = generation
-                .shard(id)
-                .expect("an identifier names a number only in a shard the generation holds");
+            let shard = named[0].1;
             let high_water = live.shard(id).map_or(0, |shard| shard.high_water());
-            let numbers: Vec<EntityId> = named.iter().map(|(_, number)| *number).collect();
+            let numbers: Vec<EntityId> = named.iter().map(|(_, _, number)| *number).collect();
             let held = crate::edited::entities_of_numbers(shard, &numbers, |entity| {
                 entity.raw() < high_water
                     && holds_item(shard, entity)
                     && !shard.overlay.is_deleted(entity)
             })?;
-            for ((at, _), entity) in named.iter().zip(held) {
+            for ((at, ..), entity) in named.iter().zip(held) {
                 out[*at] = entity.map(|entity| ItemAt::new(id, entity));
             }
         }

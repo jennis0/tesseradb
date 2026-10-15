@@ -16,8 +16,8 @@ use mosaica_types::EntityId;
 
 mod fixture;
 use fixture::{
-    build_bundle, file_digest, hex_sha256, read_assembled, write_assembled, write_assembled_named,
-    SHARD,
+    add_shard_one, build_bundle, file_digest, hex_sha256, read_assembled, shard_file,
+    write_assembled, write_assembled_named, SHARD,
 };
 
 fn seg_file(seg_id: &str, file: &str) -> String {
@@ -1093,10 +1093,10 @@ fn a_just_written_prefix_still_refuses_a_manifest_that_disagrees_with_its_own_fi
 // -------------------------------------------------------------------------------------------
 
 /// Write publication 0 again with `edit` applied, its partition file under a literal `name` and
-/// its shard files at `version`. Unlike [`add_segments_manifest`] the
-/// name is not derived from the number, which is the whole point: these fixtures write names
-/// the writer cannot produce, because the file has to arrive from outside it — an operator
-/// copy, a partial object-store sync, another implementation.
+/// its shard files at `version`. Unlike [`add_segments_manifest`] the name is not derived from the
+/// number, which is the whole point: these fixtures write names the writer cannot produce, because
+/// the file has to arrive from outside it — an operator copy, a partial object-store sync, another
+/// implementation.
 fn add_segments_manifest_named(
     root: &Path,
     name: &str,
@@ -1238,12 +1238,7 @@ fn two_shards_published(
     let prefix_dir = root.join("v00000");
     let published = mosaica_store::read_publication(&prefix_dir, "default", 0).unwrap();
     let mut manifest = published.manifest;
-    let one = mosaica_types::ShardId::new(1).unwrap();
-    manifest
-        .shards
-        .records
-        .push(mosaica_store::manifest::ShardRecord::empty(one));
-    manifest.shards.next_id = 2;
+    add_shard_one(&mut manifest);
     let first = mosaica_store::write_publication(&prefix_dir, "default", 1, &manifest, None)
         .expect("publication 1");
     edit(&mut manifest.shards.records[1]);
@@ -1256,13 +1251,6 @@ fn two_shards_published(
         "only shard 1's file was written again"
     );
     prefix_dir
-}
-
-fn shard_file(prefix_dir: &Path, shard: u32, m: u64) -> std::path::PathBuf {
-    prefix_dir.join(
-        mosaica_store::ShardLayout::new("default", mosaica_types::ShardId::new(shard).unwrap())
-            .manifest_rel(m),
-    )
 }
 
 /// **A shard file that fails its digest steps the whole partition down**: both shards are served

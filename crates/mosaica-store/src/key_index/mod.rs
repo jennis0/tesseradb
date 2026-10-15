@@ -54,9 +54,8 @@
 //!
 //! [`KeyRunWriter`] writes sorted entries, starting a new run file at the first key change past a
 //! given entry count, so no run has a size limit and the runs one writer emits have disjoint key
-//! ranges. A writer made [`KeyRunWriter::with_key_filter`] gives every run a filter of about
-//! ten bits a distinct key, filled from the run's pages once they are written. The header page is
-//! written last, so a file cut short while it was written fails its header check. No writer here
+//! ranges. A writer made [`KeyRunWriter::with_key_filter`] gives every run a key filter, filled
+//! from the run's pages once they are written. The header page is written last, so a file cut short while it was written fails its header check. No writer here
 //! fsyncs: a caller publishing runs passes their paths to [`crate::fsync_written`] before the
 //! manifest that names them.
 //!

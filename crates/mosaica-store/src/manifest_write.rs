@@ -20,14 +20,13 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
-
 use crate::error::{Result, StoreError};
 use crate::layout::{segments_name, LayerSpaceLayout, ShardLayout};
 use crate::manifest::{
-    CurrentPointer, LayerSpaceRecord, Manifest, PartitionFile, PublishedRefs, SegmentsManifest,
-    ShardFiles, ShardRecord, ShardRef, SpaceRef,
+    carries_deny, CurrentPointer, Manifest, PartitionFile, PublishedRefs, RecordFile,
+    SegmentsManifest, ShardFiles, ShardRef, SpaceRef,
 };
+use crate::read::hex_sha256;
 
 /// Serialise `manifest` to `<prefix_dir>/MANIFEST.json` and return the hex SHA-256 of the exact
 /// bytes written.
@@ -193,15 +192,6 @@ pub fn fsync_dir(path: &Path) -> Result<()> {
     })
 }
 
-fn hex_sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut hex = String::with_capacity(64);
-    for byte in digest {
-        hex.push_str(&format!("{byte:02x}"));
-    }
-    hex
-}
-
 /// Write publication `n` of `partition`: [`stage_publication`], then [`StagedPublication::commit`].
 pub fn write_publication(
     prefix_dir: &Path,
@@ -224,11 +214,6 @@ pub struct StagedPublication {
 }
 
 impl StagedPublication {
-    /// The files the partition file will name.
-    pub fn refs(&self) -> &PublishedRefs {
-        &self.refs
-    }
-
     /// Write the partition's `SEGMENTS-<n>.json`, which commits the publication.
     pub fn commit(self) -> Result<PublishedRefs> {
         write_once(&self.dir, &segments_name(self.n), &self.bytes)?;
@@ -248,80 +233,57 @@ pub fn stage_publication(
     manifest: &SegmentsManifest,
     previous: Option<&PublishedRefs>,
 ) -> Result<StagedPublication> {
-    #[derive(serde::Serialize)]
-    struct Shard<'a> {
-        #[serde(flatten)]
-        record: &'a ShardRecord,
-        files: &'a std::collections::BTreeMap<String, crate::manifest::FileDigest>,
-    }
-    #[derive(serde::Serialize)]
-    struct Space<'a> {
-        #[serde(flatten)]
-        record: &'a LayerSpaceRecord,
-        files: &'a std::collections::BTreeMap<String, crate::manifest::FileDigest>,
-    }
-
     let mut split = manifest.split_files(partition);
     let mut refs = PublishedRefs::default();
     for record in &manifest.shards.records {
         let files = split.shards.remove(&record.id).unwrap_or_default();
         let dir = prefix_dir.join(ShardLayout::new(partition, record.id).rel());
-        let bytes = to_json(
+        let kept = previous
+            .and_then(|previous| previous.shards.iter().find(|named| named.id == record.id))
+            .map(|named| (named.n, named.size, named.sha256.as_str()));
+        let (written_at, size, sha256) = stage_file(
             &dir,
-            &Shard {
+            n,
+            &RecordFile {
                 record,
                 files: &files,
             },
+            kept,
         )?;
-        let (size, sha256) = (bytes.len() as u64, hex_sha256(&bytes));
-        let kept = previous.and_then(|previous| {
-            previous
-                .shards
-                .iter()
-                .find(|named| named.id == record.id && named.size == size && named.sha256 == sha256)
-        });
-        refs.shards.push(match kept {
-            Some(named) => named.clone(),
-            None => {
-                write_once(&dir, &segments_name(n), &bytes)?;
-                ShardRef {
-                    id: record.id,
-                    n,
-                    size,
-                    sha256,
-                    denies: record.tombstones.carries() || record.deny.carries(),
-                }
-            }
+        refs.shards.push(ShardRef {
+            id: record.id,
+            n: written_at,
+            size,
+            sha256,
+            denies: carries_deny(&record.tombstones, &record.deny),
         });
     }
     for record in &manifest.layer_spaces {
         let files = split.layer_spaces.remove(&record.space).unwrap_or_default();
         let dir = prefix_dir.join(LayerSpaceLayout::new(partition, record.space).rel());
-        let bytes = to_json(
+        let kept = previous
+            .and_then(|previous| {
+                previous
+                    .layer_spaces
+                    .iter()
+                    .find(|named| named.space == record.space)
+            })
+            .map(|named| (named.n, named.size, named.sha256.as_str()));
+        let (written_at, size, sha256) = stage_file(
             &dir,
-            &Space {
+            n,
+            &RecordFile {
                 record,
                 files: &files,
             },
+            kept,
         )?;
-        let (size, sha256) = (bytes.len() as u64, hex_sha256(&bytes));
-        let kept = previous.and_then(|previous| {
-            previous.layer_spaces.iter().find(|named| {
-                named.space == record.space && named.size == size && named.sha256 == sha256
-            })
-        });
-        refs.layer_spaces.push(match kept {
-            Some(named) => named.clone(),
-            None => {
-                write_once(&dir, &segments_name(n), &bytes)?;
-                SpaceRef {
-                    space: record.space,
-                    n,
-                    size,
-                    sha256,
-                    denies: record.tombstones.carries() || record.deny.carries(),
-                }
-            }
+        refs.layer_spaces.push(SpaceRef {
+            space: record.space,
+            n: written_at,
+            size,
+            sha256,
+            denies: carries_deny(&record.tombstones, &record.deny),
         });
     }
     let mut fields = manifest.partition.clone();
@@ -336,7 +298,7 @@ pub fn stage_publication(
         layer_spaces: refs.layer_spaces.clone(),
     };
     let dir = crate::layout::partition_dir(prefix_dir, partition);
-    let bytes = to_json(&dir, &file)?;
+    let bytes = to_json(&dir.join(segments_name(n)), &file)?;
     Ok(StagedPublication {
         dir,
         n,
@@ -345,9 +307,32 @@ pub fn stage_publication(
     })
 }
 
-fn to_json(dir: &Path, value: &impl serde::Serialize) -> Result<Vec<u8>> {
+/// Write `value` as `dir`'s `SEGMENTS-<n>.json`, unless its bytes match `kept`, the size and
+/// digest of the file the previous publication named, and return the `(n, size, sha256)` the
+/// partition file names: `kept`'s where they match.
+fn stage_file(
+    dir: &Path,
+    n: u64,
+    value: &impl serde::Serialize,
+    kept: Option<(u64, u64, &str)>,
+) -> Result<(u64, u64, String)> {
+    let name = segments_name(n);
+    let bytes = to_json(&dir.join(&name), value)?;
+    let (size, sha256) = (bytes.len() as u64, hex_sha256(&bytes));
+    match kept {
+        Some((kept_n, kept_size, kept_sha256)) if kept_size == size && kept_sha256 == sha256 => {
+            Ok((kept_n, size, sha256))
+        }
+        _ => {
+            write_once(dir, &name, &bytes)?;
+            Ok((n, size, sha256))
+        }
+    }
+}
+
+fn to_json(path: &Path, value: &impl serde::Serialize) -> Result<Vec<u8>> {
     serde_json::to_vec_pretty(value).map_err(|source| StoreError::Json {
-        path: dir.to_path_buf(),
+        path: path.to_path_buf(),
         source,
     })
 }

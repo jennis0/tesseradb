@@ -443,10 +443,9 @@ impl WritePath {
         // checked first, so a second `start_executor` on the same path cannot sweep twice.
         sweep_orphan_prefixes(&flush.bundle_root, &generation.load().prefix);
 
-        // Above every `SEGMENTS-<n>.json` on disc, a shard's or a space's a crash left uncommitted
-        // among them, not above what a manifest names: see [`SideManifests`]. The sweep above has
-        // already removed the unpublished prefixes, so what is left is what a reader could
-        // resolve.
+        // Above every `SEGMENTS-<n>.json` on disc, a shard's or space's file a crash left
+        // uncommitted included, not above what a manifest names: see [`SideManifests`]. The sweep
+        // above has already removed the unpublished prefixes.
         let next_manifest_n = mosaica_store::highest_published_n(&flush.bundle_root)
             .map_err(|e| ExecutorStartError::SideManifestScan(e.to_string()))?
             .map_or(1, |highest| highest + 1);
@@ -495,9 +494,9 @@ impl WritePath {
             let mut spaces = std::collections::BTreeMap::new();
             let mut artifact_files = std::collections::BTreeMap::new();
             let mut refs = std::collections::BTreeMap::new();
-            let write_shard = live.shards[0].id;
-            for partition in generation.bundle.partitions.values() {
-                let Some(shard) = partition.shard(write_shard) else {
+            let store_shard = live.shards[0].id;
+            for (phash, partition) in &generation.bundle.partitions {
+                let Some(shard) = partition.shard(store_shard) else {
                     continue;
                 };
                 let record = &shard.record;
@@ -511,7 +510,7 @@ impl WritePath {
                 derived.extend(
                     partition
                         .derived_by_shard()
-                        .filter(|(shard, e)| *shard == write_shard && live.holds_space(e.space))
+                        .filter(|(shard, e)| *shard == store_shard && live.holds_space(e.space))
                         .map(|(_, e)| e.clone()),
                 );
                 spaces.extend(
@@ -523,16 +522,14 @@ impl WritePath {
                 );
                 // The digests a side-manifest gave the packs and content a running service
                 // wrote; a build's are in `MANIFEST.json`.
-                let packs = record.membership_extents.iter().map(|e| e.path.as_str());
-                let spaced = partition.layer_spaces.iter().flat_map(|space| {
-                    let records = space.record_packs.iter().map(|e| e.path.as_str());
-                    records.chain(space.content_extents.iter().flat_map(|e| e.files()))
-                });
-                for rel in packs.chain(spaced) {
-                    if let Some(digest) = partition.manifest.files.get(rel) {
-                        artifact_files.insert(rel.to_string(), digest.clone());
-                    }
-                }
+                artifact_files.extend(
+                    partition
+                        .manifest
+                        .files
+                        .iter()
+                        .filter(|(rel, _)| mosaica_store::layout::is_artifact_file(phash, rel))
+                        .map(|(rel, digest)| (rel.clone(), digest.clone())),
+                );
             }
             for (phash, partition) in &generation.bundle.partitions {
                 refs.insert(phash.clone(), partition.refs.clone());

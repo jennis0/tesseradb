@@ -152,6 +152,17 @@ impl ItemAt {
     }
 }
 
+/// `pairs` grouped by shard, ascending, each group in the order given.
+pub fn by_shard<T>(
+    pairs: impl IntoIterator<Item = (ShardId, T)>,
+) -> std::collections::BTreeMap<ShardId, Vec<T>> {
+    let mut groups = std::collections::BTreeMap::<ShardId, Vec<T>>::new();
+    for (shard, value) in pairs {
+        groups.entry(shard).or_default().push(value);
+    }
+    groups
+}
+
 /// The one item of `items`, for a site that serves one shard of one partition. Panics on any other count.
 pub fn only<I: IntoIterator>(items: I) -> I::Item {
     let mut items = items.into_iter();

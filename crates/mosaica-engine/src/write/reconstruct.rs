@@ -86,16 +86,23 @@ impl ShardSeed {
 /// buffer, and the write-side state.
 pub(crate) type Reconstructed = (Overlays, BTreeMap<ShardId, IngestBuffer>, WritePathState);
 
+/// Refuses a log naming point shard `shard`, which nothing holds: `verb` is what the log does to
+/// it, and `held_by` says what does not hold it.
+pub(crate) fn unknown_shard(shard: ShardId, verb: &str, held_by: &str) -> EngineError {
+    EngineError::Malformed(format!(
+        "the WAL {verb} point shard {shard}, which {held_by}. Restore the side-manifest and log \
+         this bundle was written with"
+    ))
+}
+
 impl WritePath {
-    /// Rebuilds the write-side state from durable storage: opens and replays the WAL, seeds the
-    /// allocator, and rebuilds the descriptor resolver's extension, the
-    /// registries and the idempotency index. Returns the first generation's overlay and buffer.
+    /// Rebuilds the write-side state from durable storage: opens and replays the WAL, seeds each
+    /// shard's allocator, and rebuilds the descriptor resolver's extension, the registries and the
+    /// idempotency index.
     ///
     /// `initial_deny` is the side-manifest's deny state; it seeds the overlay before replay, and
-    /// the WAL is applied on top since dispositions are idempotent. A log holding a record beside
-    /// several shards is refused unless `several_shards` says they take writes. Each shard's
-    /// allocator, buffer and freed ids are rebuilt from its own seed and the records naming it,
-    /// and `has_row` answers for a row in its shard.
+    /// the WAL is applied on top since dispositions are idempotent. A log beside several shards is
+    /// refused unless `several_shards` takes their writes.
     pub(crate) fn reconstruct(
         wal_path: &Path,
         several_shards: super::SeveralShards,
@@ -331,11 +338,11 @@ impl WritePath {
                 }
                 WalRecord::ShardSeal { shard } => {
                     let Some(sealed) = seeds.iter_mut().find(|seed| seed.id == *shard) else {
-                        return Err(EngineError::Malformed(format!(
-                            "the WAL seals point shard {shard}, which neither the manifests nor \
-                             the log open. Restore the side-manifest and log this bundle was \
-                             written with"
-                        )));
+                        return Err(unknown_shard(
+                            *shard,
+                            "seals",
+                            "neither the manifests nor the log open",
+                        ));
                     };
                     sealed.state = mosaica_types::ShardState::Sealed;
                 }
@@ -368,7 +375,7 @@ impl WritePath {
         let mut named: BTreeMap<ShardId, croaring::Bitmap> = BTreeMap::new();
         // Each edit's `(number, new entity)` whose first row no flush has written, and so whose
         // pair no run holds, by shard; kept where the entity ends buffered or deleted.
-        let mut edits: BTreeMap<ShardId, Vec<(EntityId, EntityId)>> = BTreeMap::new();
+        let mut edits: Vec<(ShardId, (EntityId, EntityId))> = Vec::new();
         // Every batch-carrying record, by the rule both accept sites use
         // ([`mosaica_lifecycle::batch_identity`]).
         let mut accepted_batches: AcceptedBatches = FxHashMap::default();
@@ -412,10 +419,7 @@ impl WritePath {
                         continue;
                     };
                     if !has_row(edit.shard, first.entity_id, &first.view) {
-                        edits
-                            .entry(edit.shard)
-                            .or_default()
-                            .push((edit.number, first.entity_id));
+                        edits.push((edit.shard, (edit.number, first.entity_id)));
                     }
                 }
             }
@@ -458,10 +462,11 @@ impl WritePath {
             .chain(overlay.items.keys());
         for shard in named_shards {
             if !seeds.iter().any(|seed| seed.id == *shard) {
-                return Err(EngineError::Malformed(format!(
-                    "the WAL names point shard {shard}, which neither the manifests nor the log \
-                     open. Restore the side-manifest and log this bundle was written with"
-                )));
+                return Err(unknown_shard(
+                    *shard,
+                    "names",
+                    "neither the manifests nor the log open",
+                ));
             }
         }
 
@@ -525,7 +530,7 @@ impl WritePath {
 
         let no_buffer = IngestBuffer::new();
         let no_deny = mosaica_lifecycle::Overlay::new();
-        let edited_live = edits
+        let edited_live = mosaica_types::by_shard(edits)
             .into_iter()
             .map(|(shard, edits)| {
                 let buffer = buffers.get(&shard).unwrap_or(&no_buffer);
@@ -1018,7 +1023,6 @@ mod tests {
 
     /// The write state a log of `records` rebuilds over a manifest naming `seeds`, at
     /// `shards.next_id` `next_id` and size 100, with several shards taking writes.
-    #[cfg(feature = "several-shard-writes")]
     fn replayed(
         seeds: Vec<ShardSeed>,
         next_id: u32,
@@ -1090,7 +1094,6 @@ mod tests {
     }
 
     /// A shard as its record leaves it, at `high_water`.
-    #[cfg(feature = "several-shard-writes")]
     fn held(shard: u32, state: mosaica_types::ShardState, high_water: u64) -> ShardSeed {
         ShardSeed {
             high_water,
@@ -1100,7 +1103,6 @@ mod tests {
     }
 
     /// `(id, state, high water)` of each shard the write path holds, and `next_id`.
-    #[cfg(feature = "several-shard-writes")]
     fn shards_of(state: &WritePathState) -> (Vec<(u32, mosaica_types::ShardState, u64)>, u32) {
         let shards = state
             .shards
@@ -1110,7 +1112,6 @@ mod tests {
         (shards, state.next_shard_id)
     }
 
-    #[cfg(feature = "several-shard-writes")]
     fn row(shard: u32, entity: u64) -> mosaica_lifecycle::wal::WalRow {
         mosaica_lifecycle::wal::WalRow {
             shard: ShardId::new(shard).expect("in range"),
@@ -1127,7 +1128,6 @@ mod tests {
 
     /// A shard the log opens is seeded open at high water 0 and moves `next_id` past it, and the
     /// rows the log gives it raise its high water alone; a seal seals the shard it names.
-    #[cfg(feature = "several-shard-writes")]
     #[test]
     fn the_logs_openings_and_seals_seed_each_shard() {
         use mosaica_types::ShardState::{Open, Sealed};
@@ -1162,7 +1162,6 @@ mod tests {
 
     /// A log naming a shard nothing opens, sealing one nothing opens, or sealing the one open
     /// shard is refused at open.
-    #[cfg(feature = "several-shard-writes")]
     #[test]
     fn a_log_naming_a_shard_nothing_opens_or_sealing_every_shard_is_refused() {
         use mosaica_types::ShardState::{Open, Sealed};

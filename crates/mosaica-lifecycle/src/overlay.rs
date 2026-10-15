@@ -477,8 +477,7 @@ impl<'a> Replay<'a> {
             | WalRecord::ViewGroupCreate { .. }
             | WalRecord::PlainViewCreate { .. }
             | WalRecord::ShardsDeclare { .. } => {}
-            // A shard's opening and sealing are its allocator's, which the write path rebuilds,
-            // and buffer and deny nothing.
+            // Opening and sealing a shard buffer and deny nothing.
             WalRecord::ShardOpen { .. } | WalRecord::ShardSeal { .. } => {}
         }
     }
@@ -622,7 +621,7 @@ mod tests {
     ///
     /// Two pieces of replayed state could have carried the difference, and each is checked here or
     /// named: the **overlay** (below, by comparing against the single-copy replay), and the
-    /// **allocator seed**, which `high_water_from` derives from `IngestBatch` rows alone — pinned
+    /// **allocator seed**, which `raise_high_water` derives from `IngestBatch` rows alone — pinned
     /// by `alloc.rs`'s own tests.
     #[test]
     fn a_disposition_replayed_twice_is_the_same_as_replayed_once() {
@@ -671,8 +670,6 @@ mod tests {
         );
     }
 
-    /// A log naming two shards replays into two buffers and two overlays: each row, edit and
-    /// deletion lands in the shard it names, so one entity number in each shard is two items.
     #[test]
     fn a_log_naming_two_shards_replays_into_each_shards_buffer_and_overlay() {
         use crate::wal::{WalEdit, WalRow};

@@ -302,15 +302,10 @@ impl<K: Key> KeyRun<K> {
         })
     }
 
-    /// Whether the run carries a key filter.
-    pub fn has_key_filter(&self) -> bool {
-        self.header.filter.blocks > 0
-    }
-
     /// Whether the run may hold `key`: false, and the run holds no entry under it, when the key is
     /// outside the run's key range or its key filter does not pass it.
     #[inline]
-    pub fn may_hold(&self, key: K) -> bool {
+    pub(super) fn may_hold(&self, key: K) -> bool {
         self.key_range()
             .is_some_and(|(lo, hi)| lo <= key && key <= hi)
             && self.filter_passes(key.widen())
@@ -379,10 +374,9 @@ impl<K: Key> KeyRun<K> {
         Ok(out)
     }
 
-    /// Ask the kernel to read, in the background, every page a lookup of `keys`, ascending and each
-    /// one the run may hold, will read. The
-    /// entry pages are mapped for random access, so without this a batch reads its pages one at
-    /// a time, each waiting on the disk.
+    /// Ask the kernel to read, in the background, every page a lookup of `keys` (ascending, each one
+    /// the run may hold) will read. The entry pages are mapped for random access, so without this a
+    /// batch reads its pages one at a time, each waiting on the disk.
     ///
     /// Pages are advised in ranges, and a gap of up to [`PREFETCH_GAP`] pages between two ranges
     /// is advised with them: reading a few unneeded pages costs less than a system call per range

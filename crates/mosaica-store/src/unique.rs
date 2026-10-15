@@ -13,9 +13,8 @@
 //! outside a fold, so the caller drops deleted entities; after that at most one entity remains
 //! for any key.
 //!
-//! Every run a unique index is given carries a key filter ([`crate::key_index`]), so a lookup reads
-//! a run's pages only for the keys its filter passes, about one in a hundred of the keys it does
-//! not hold.
+//! Every run a unique index is given carries a key filter ([`crate::key_index`]), so most lookups
+//! of an absent key read no page.
 //!
 //! A run is opened at its first lookup, never at open: a base run's key range comes from the
 //! manifest, so a lookup touches only the runs its keys fall in, and a page is checked the first

@@ -118,7 +118,6 @@ pub(crate) struct LiveState {
     /// One past the highest shard id ever opened, as the side-manifest's `shards.next_id` and the
     /// log leave it.
     pub(in crate::write) next_shard_id: u32,
-    /// Whether several shards take writes.
     pub(in crate::write) several_shards: super::SeveralShards,
     /// The descriptor resolver's extension state. Resolved in the handler before submitting, not
     /// on the executor: signature-sorted assignment needs the term set to compute a sort key

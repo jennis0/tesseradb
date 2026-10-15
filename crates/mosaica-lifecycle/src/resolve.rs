@@ -39,8 +39,7 @@ pub struct RowIdentity {
     pub unique: Vec<(u16, Key)>,
 }
 
-/// Who holds what: every answer counts live and suppressed items and leaves deleted ones out. An
-/// item is its entity in its shard, so one entity number in two shards is two items.
+/// Who holds what: every answer counts live and suppressed items and leaves deleted ones out.
 pub trait Holdings {
     type Error;
 
@@ -382,7 +381,6 @@ mod tests {
         at(0, n)
     }
 
-    /// Entity `n` of shard `shard`.
     fn at(shard: u32, n: u64) -> ItemAt {
         ItemAt::new(
             mosaica_types::ShardId::new(shard).unwrap(),
@@ -646,8 +644,8 @@ mod tests {
         );
     }
 
-    /// One entity number held in two shards is two items: values naming both name two items,
-    /// and two rows naming the number in different shards name different items.
+    /// Values naming the number in both shards name two items; rows naming it in different shards
+    /// name different items.
     #[test]
     fn one_entity_number_in_two_shards_is_two_items() {
         let mut held = Held::default();

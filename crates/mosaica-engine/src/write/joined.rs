@@ -59,7 +59,7 @@ pub(crate) fn flushed_scalar_of(
     blob: &mut BlobRow,
 ) -> Option<mosaica_lifecycle::WalScalar> {
     let manifest = &generation.bundle.manifest;
-    let shard = generation.shard_of(item);
+    let shard = generation.shard_of(item.shard);
     let entity = item.entity;
     let declared = manifest.declared_scalars.get(declared_index)?;
     let vocabularies = &manifest.vocabularies;
@@ -266,7 +266,7 @@ pub(crate) fn held_entity_value(
         (!scalar_is_absent(&value, declared)).then_some(value)
     };
     match buffered {
-        Some(item) => item.scalars.get(at).cloned().and_then(held),
+        Some(buffered) => buffered.scalars.get(at).cloned().and_then(held),
         None => flushed_scalar_of(generation, item, at, blob).and_then(held),
     }
 }
@@ -285,7 +285,7 @@ pub(crate) fn held_scoped_value(
     owner_view: &str,
 ) -> Result<Option<mosaica_lifecycle::WalScalar>, crate::write::AcceptError> {
     let manifest = &generation.bundle.manifest;
-    let shard = generation.shard_of(item);
+    let shard = generation.shard_of(item.shard);
     let entity = item.entity;
     let held = |value: mosaica_lifecycle::WalScalar| {
         (!scalar_is_absent(&value, declared)).then_some(value)

@@ -138,8 +138,7 @@ pub use mosaica_types::scalar::ScalarValue as WalScalar;
 /// acked.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WalRow {
-    /// The point shard the row landed in: a created item's, where its entity was allocated, and a
-    /// join's, the shard of the item it joins.
+    /// The shard holding `entity_id`: where a created item was allocated, or the joined item's.
     pub shard: ShardId,
     pub entity_id: EntityId,
     pub view: String,
@@ -337,7 +336,7 @@ pub enum WalRecord {
     /// the overlay as a `ChangeBatch` delete would be, and the fold that executes it retires it.
     ViewDrop {
         view: mosaica_types::view::DeadIncarnation,
-        /// The items the drop left with a row in no view, flushed or buffered, each in its shard.
+        /// The items the drop left with a row in no view, flushed or buffered.
         deleted: Vec<Target>,
     },
     /// An accepted layer drop. The name is freed; the space is never given again.
@@ -605,8 +604,7 @@ pub enum RowOutcome {
 /// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WalEdit {
-    /// The item's shard, which holds both the entity it leaves and the one it moves to. Every row
-    /// of the edit carries it, and a record whose rows name another is refused as damage.
+    /// The item's shard, which holds the entity it leaves and the one it moves to.
     pub shard: ShardId,
     /// The entity the item leaves. This record deletes it.
     pub old: EntityId,
@@ -822,9 +820,8 @@ pub struct DeclaredFrame {
     pub y_max: f64,
 }
 
-/// One point shard's part of an entity set a record carries: the shard and its entities,
-/// CRoaring portable. A record lists only the shards holding something, ascending by shard, and
-/// one entity number in two shards is two entities.
+/// One point shard's part of an entity set a record carries, its entities CRoaring portable. A
+/// record lists only shards holding something, ascending.
 ///
 /// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2699,7 +2696,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wal");
 
-        // One entity number in two shards is two members, each in its own shard's set.
         let shard = |raw| ShardId::new(raw).unwrap();
         let first = ShardSets::of_items(
             [(0, 1), (0, 2), (0, 3), (0, 70_000), (3, 3), (3, 4_000_000)]
@@ -3046,8 +3042,6 @@ mod tests {
         assert_eq!(unbuilt_track(&membership), None);
     }
 
-    /// An edit whose rows name a shard other than its own is refused at open as damage, not
-    /// replayed into a shard that does not hold the item.
     #[test]
     fn an_edit_whose_rows_name_another_shard_is_refused() {
         let dir = tempfile::tempdir().unwrap();

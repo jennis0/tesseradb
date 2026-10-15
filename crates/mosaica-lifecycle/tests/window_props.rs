@@ -85,7 +85,7 @@ proptest! {
                 // The acked ids and the framed ids are the same set, entry by entry: a window that
                 // returned the right multiset against the wrong record is a silent misattribution.
                 prop_assert_eq!(
-                    entry.entity_ids.iter().map(|i| i.entity.raw()).collect::<Vec<_>>(),
+                    entry.items.iter().map(|i| i.entity.raw()).collect::<Vec<_>>(),
                     framed_ids(&entry.record)
                 );
                 issued.extend(framed_ids(&entry.record));
@@ -214,7 +214,7 @@ fn the_window_run_ratio_against_the_full_sort_ceiling() {
                 waiters: vec![()],
             }, WindowClaims::default());
             for entry in window.allocate(&mut alloc, ShardId::ZERO, |e| e.raw()).unwrap().0 {
-                for (row, id) in group.iter().zip(entry.entity_ids.iter()) {
+                for (row, id) in group.iter().zip(entry.items.iter()) {
                     postings[row.terms[0].raw() as usize].push(id.entity.raw());
                 }
             }

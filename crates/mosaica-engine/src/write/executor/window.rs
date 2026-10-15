@@ -1,7 +1,5 @@
 use super::*;
 
-use std::collections::BTreeMap;
-
 use mosaica_types::ItemAt;
 
 /// What `/control/ingest`'s batch id means to this executor: durably accepted, held in the open
@@ -418,13 +416,10 @@ impl Executor {
                 // What the open window touches is written at its close, and the re-check below
                 // reads what was written.
                 let joined = submission.slots.iter().filter_map(|slot| match slot {
-                    mosaica_lifecycle::Slot::Joined { entity, .. } => Some(*entity),
+                    mosaica_lifecycle::Slot::Joined { item, .. } => Some(*item),
                     _ => None,
                 });
-                let edited = submission
-                    .edits
-                    .iter()
-                    .map(|e| ItemAt::new(e.edit.shard, e.edit.old));
+                let edited = submission.edits.iter().map(|e| e.edit.item());
                 let claims = mosaica_lifecycle::WindowClaims::of(
                     &submission.rows,
                     edited.chain(joined),
@@ -493,21 +488,23 @@ impl Executor {
         let stale =
             crate::unique::moved_since(&generation, write_shard, &keys, unique_seq, creates)
                 || edits.iter().any(|submitted| {
-                    let old = ItemAt::new(submitted.edit.shard, submitted.edit.old);
+                    let old = submitted.edit.item();
                     deleted(old)
-                        || crate::write::joined::views_holding(generation.shard_of(old), old.entity)
-                            != submitted.held_views
+                        || crate::write::joined::views_holding(
+                            generation.shard_of(old.shard),
+                            old.entity,
+                        ) != submitted.held_views
                 })
                 || slots.iter().any(|slot| match slot {
-                    mosaica_lifecycle::Slot::Unchanged { entity, .. }
-                    | mosaica_lifecycle::Slot::Joined { entity, .. } => deleted(*entity),
+                    mosaica_lifecycle::Slot::Unchanged { item, .. }
+                    | mosaica_lifecycle::Slot::Joined { item, .. } => deleted(*item),
                     _ => false,
                 })
                 || rows.iter().any(|row| match row.join {
                     Some(item) => {
                         deleted(item)
                             || crate::edited::holds_in_view(
-                                generation.shard_of(item),
+                                generation.shard_of(item.shard),
                                 item.entity,
                                 &row.view,
                             )
@@ -525,18 +522,17 @@ impl Executor {
                     &generation,
                     mosaica_types::MosaicaId::new(mosaica_id),
                 )
+                .map(|(shard, number)| (shard.id(), number))
             };
             let mut named: Vec<(ItemAt, Option<(ShardId, EntityId)>)> = Vec::new();
             for slot in &slots {
                 match slot {
-                    mosaica_lifecycle::Slot::Unchanged { entity, mosaica_id }
-                    | mosaica_lifecycle::Slot::Joined { entity, mosaica_id } => {
-                        named.push((*entity, number_of(*mosaica_id)));
+                    mosaica_lifecycle::Slot::Unchanged { item, mosaica_id }
+                    | mosaica_lifecycle::Slot::Joined { item, mosaica_id } => {
+                        named.push((*item, number_of(*mosaica_id)));
                     }
                     mosaica_lifecycle::Slot::Edited { edit, mosaica_id } => {
-                        let old = edits
-                            .get(*edit as usize)
-                            .map(|e| ItemAt::new(e.edit.shard, e.edit.old));
+                        let old = edits.get(*edit as usize).map(|e| e.edit.item());
                         named.extend(old.map(|old| (old, number_of(*mosaica_id))));
                     }
                     mosaica_lifecycle::Slot::Written {
@@ -550,10 +546,12 @@ impl Executor {
                     _ => {}
                 }
             }
-            let mut by_shard: BTreeMap<ShardId, Vec<usize>> = BTreeMap::new();
-            for (at, (item, _)) in named.iter().enumerate() {
-                by_shard.entry(item.shard).or_default().push(at);
-            }
+            let by_shard = mosaica_types::by_shard(
+                named
+                    .iter()
+                    .enumerate()
+                    .map(|(at, (item, _))| (item.shard, at)),
+            );
             by_shard.into_iter().any(|(id, ats)| {
                 let Some(shard) = generation.shard(id) else {
                     return true;
@@ -658,12 +656,7 @@ impl Executor {
             let generation = self.generation.load();
             (
                 self.deps.identity_key,
-                Arc::clone(
-                    &generation
-                        .shard(shard.id)
-                        .expect("the generation serves the write shard")
-                        .tenancy,
-                ),
+                Arc::clone(&generation.shard_of(shard.id).tenancy),
             )
         };
         let mosaica_id_of = |entity: EntityId| {
@@ -767,23 +760,21 @@ impl Executor {
         // read here, on the thread that changes them, so nothing can move between the read and
         // the append.
         let generation = self.generation.load_full();
-        let mut moved: BTreeMap<ShardId, Vec<(EntityId, EntityId)>> = BTreeMap::new();
+        let mut pairs: Vec<(ShardId, (EntityId, EntityId))> = Vec::new();
         let mut first_edit: Option<usize> = None;
         for (index, entry) in closing.entries_mut().iter_mut().enumerate() {
             let (_, edits) = entry.rows_and_edits_mut();
             for edit in edits.iter_mut() {
                 edit.suppressed = generation
-                    .shard_of(ItemAt::new(edit.shard, edit.old))
+                    .shard_of(edit.shard)
                     .overlay
                     .is_suppressed(edit.old);
-                moved
-                    .entry(edit.shard)
-                    .or_default()
-                    .push((edit.old, edit.rows[0].entity_id));
+                pairs.push((edit.shard, (edit.old, edit.rows[0].entity_id)));
                 first_edit.get_or_insert(index);
             }
         }
         drop(generation);
+        let moved = mosaica_types::by_shard(pairs);
         let carried: Vec<WalRecord> = self.live.with_artifacts(|store| {
             moved
                 .iter()
@@ -893,10 +884,7 @@ impl Executor {
             &vocabularies,
             mints,
         );
-        // A window writes into one shard, the write shard, and buffers every row there.
-        let shard = generation
-            .shard(self.live.write_shard().id)
-            .expect("the generation serves the write shard");
+        let shard = generation.shard_of(self.live.write_shard().id);
         let mut buffer = (*shard.buffer).clone();
         mark = self.health.lap(WriteStage::ApplyBufferClone, mark);
         let declared = &generation.bundle.manifest.declared_scalars;

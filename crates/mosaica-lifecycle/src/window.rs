@@ -151,10 +151,10 @@ pub enum Slot {
     /// whose `mosaica_id` it carries to a view.
     Written { row: u32, mosaica_id: Option<u64> },
     /// The row named this item and changed nothing, so it writes nothing.
-    Unchanged { entity: ItemAt, mosaica_id: u64 },
+    Unchanged { item: ItemAt, mosaica_id: u64 },
     /// The row places this item in artifacts that do not hold it and changes nothing else: a
     /// change to the artifacts, not the item, which keeps its entity and is answered unchanged.
-    Joined { entity: ItemAt, mosaica_id: u64 },
+    Joined { item: ItemAt, mosaica_id: u64 },
     /// The row moves its item to a new entity as the entry's edit at this position.
     Edited { edit: u32, mosaica_id: u64 },
     /// The identity rule refused the row, which writes nothing.
@@ -167,7 +167,7 @@ pub enum Slot {
 /// admitted only after the window holding it has closed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WindowClaims {
-    pub entities: Vec<ItemAt>,
+    pub items: Vec<ItemAt>,
     /// Unique values, as `(declared position, key widened)`.
     pub keys: Vec<(u16, u128)>,
 }
@@ -181,7 +181,7 @@ impl WindowClaims {
         keys: Vec<(u16, u128)>,
     ) -> Self {
         WindowClaims {
-            entities: rows
+            items: rows
                 .iter()
                 .filter_map(|row| row.join)
                 .chain(named)
@@ -240,9 +240,9 @@ pub struct ClosedEntry<W> {
     /// The assigned ids with their shard, in the entry's row order, then each edit's new entity in
     /// edit order, then each [`Slot::Joined`] item in slot order: a membership names them by
     /// position.
-    pub entity_ids: Vec<ItemAt>,
+    pub items: Vec<ItemAt>,
     /// This entry's memberships, carried through the allocation unchanged: the ids the joins name
-    /// are `entity_ids[row]`, which is why the two travel together.
+    /// are `items[row]`, which is why the two travel together.
     ///
     /// **Mutable after the close, at exactly one site**: the mint pass resolves the keys that had
     /// no ordinal at admission, so that what follows it sees one shape rather than two.
@@ -567,7 +567,7 @@ pub struct CommitWindow<W> {
     /// inside the window is what makes a held batch id cost no window close at all.
     by_batch: FxHashMap<String, usize>,
     /// Everything this window's entries claim: see [`WindowClaims`].
-    entities: FxHashSet<ItemAt>,
+    items: FxHashSet<ItemAt>,
     keys: FxHashSet<(u16, u128)>,
     rows: usize,
     wanted: (u64, u64),
@@ -587,7 +587,7 @@ impl<W> CommitWindow<W> {
         CommitWindow {
             entries: Vec::new(),
             by_batch: FxHashMap::default(),
-            entities: FxHashSet::default(),
+            items: FxHashSet::default(),
             keys: FxHashSet::default(),
             rows: 0,
             wanted: (0, 0),
@@ -603,7 +603,7 @@ impl<W> CommitWindow<W> {
     /// unique entries a new item's values become. Two entries touching one of them in one window
     /// would each be resolved without seeing the other.
     pub fn conflicts(&self, claims: &WindowClaims) -> bool {
-        claims.entities.iter().any(|e| self.entities.contains(e))
+        claims.items.iter().any(|e| self.items.contains(e))
             || claims.keys.iter().any(|k| self.keys.contains(k))
     }
 
@@ -680,7 +680,7 @@ impl<W> CommitWindow<W> {
     pub fn push(&mut self, entry: WindowEntry<W>, claims: WindowClaims) {
         let index = self.entries.len();
         self.by_batch.insert(entry.batch_id.clone(), index);
-        self.entities.extend(claims.entities);
+        self.items.extend(claims.items);
         self.keys.extend(claims.keys);
         self.rows += entry.rows.len() + entry.edits.iter().map(|e| e.rows.len()).sum::<usize>();
         let (edits, items) = wanted(&entry.rows, entry.edits.len());
@@ -752,13 +752,13 @@ impl<W> CommitWindow<W> {
             let n = entry.rows.len();
             let mut wal_rows = Vec::with_capacity(n);
             let mut terms = Vec::with_capacity(n);
-            let mut entity_ids = Vec::with_capacity(n);
+            let mut items = Vec::with_capacity(n);
             for row in entry.rows {
                 let p = scattered
                     .next()
                     .expect("one PendingItem was gathered per row, in this order");
                 let (wal_row, row_terms) = row.into_wal_row_with(p, shard);
-                entity_ids.push(ItemAt::new(wal_row.shard, wal_row.entity_id));
+                items.push(ItemAt::new(wal_row.shard, wal_row.entity_id));
                 wal_rows.push(wal_row);
                 terms.push(row_terms);
             }
@@ -786,7 +786,7 @@ impl<W> CommitWindow<W> {
                     rows.push(wal_row);
                 }
                 let entity = entity.expect("assign_sorted assigns every item it is given");
-                entity_ids.push(ItemAt::new(edit.shard, entity));
+                items.push(ItemAt::new(edit.shard, entity));
                 edits.push(WalEdit {
                     shard: edit.shard,
                     old: edit.old,
@@ -795,8 +795,8 @@ impl<W> CommitWindow<W> {
                     rows,
                 });
             }
-            entity_ids.extend(entry.slots.iter().filter_map(|slot| match slot {
-                Slot::Joined { entity, .. } => Some(*entity),
+            items.extend(entry.slots.iter().filter_map(|slot| match slot {
+                Slot::Joined { item, .. } => Some(*item),
                 _ => None,
             }));
             let receipt = entry
@@ -847,7 +847,7 @@ impl<W> CommitWindow<W> {
                 },
                 terms,
                 edit_terms,
-                entity_ids,
+                items,
                 memberships: entry.memberships,
                 edges: entry.edges,
                 waiters: entry.waiters,
@@ -866,10 +866,7 @@ mod tests {
     fn push<W>(w: &mut CommitWindow<W>, entry: WindowEntry<W>) {
         let claims = WindowClaims::of(
             &entry.rows,
-            entry
-                .edits
-                .iter()
-                .map(|edit| ItemAt::new(edit.shard, edit.old)),
+            entry.edits.iter().map(|edit| edit.item()),
             Vec::new(),
         );
         w.push(entry, claims);
@@ -929,7 +926,7 @@ mod tests {
             .unwrap();
         let split_ids: Vec<u64> = closed
             .iter()
-            .flat_map(|e| e.entity_ids.iter().map(|i| i.entity.raw()))
+            .flat_map(|e| e.items.iter().map(|i| i.entity.raw()))
             .collect();
 
         let mut whole = CommitWindow::new(0);
@@ -944,7 +941,7 @@ mod tests {
             .allocate(&mut alloc_whole, ShardId::ZERO, |e| e.raw())
             .unwrap()
             .0[0]
-            .entity_ids
+            .items
             .iter()
             .map(|i| i.entity.raw())
             .collect();
@@ -974,7 +971,7 @@ mod tests {
         let mut framed = Vec::new();
         for e in &closed {
             assert_eq!(
-                e.entity_ids,
+                e.items,
                 e.rows()
                     .iter()
                     .map(|r| ItemAt::new(ShardId::ZERO, r.entity_id))
@@ -1098,7 +1095,7 @@ mod tests {
             vec!["w", "retry"],
             "both callers are owed the same ids off the one allocation"
         );
-        assert_eq!(closed[0].entity_ids.len(), 1, "one row, one id — not two");
+        assert_eq!(closed[0].items.len(), 1, "one row, one id — not two");
     }
 
     /// **The tally, on a layout whose every counter is worked out by hand below.**
@@ -1176,11 +1173,7 @@ mod tests {
             .allocate(&mut Allocator::new(100_000), ShardId::ZERO, |e| e.raw())
             .unwrap();
 
-        let ids: Vec<u64> = closed[0]
-            .entity_ids
-            .iter()
-            .map(|e| e.entity.raw())
-            .collect();
+        let ids: Vec<u64> = closed[0].items.iter().map(|e| e.entity.raw()).collect();
         assert_eq!(
             ids,
             [70_000, 3, 100_000],
@@ -1237,7 +1230,7 @@ mod tests {
 
         assert_eq!(
             closed[0]
-                .entity_ids
+                .items
                 .iter()
                 .map(|e| e.entity.raw())
                 .collect::<Vec<_>>(),

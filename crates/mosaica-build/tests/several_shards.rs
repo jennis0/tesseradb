@@ -913,7 +913,6 @@ fn one_item_past_the_size_opens_a_second_shard_of_one() {
             .map(|shard| shard.record.high_water)
             .collect();
         assert_eq!(high_waters, held, "at size {size}");
-        // Every shard but the last is sealed, and the next shard opened takes the next number.
         let partition = &bundle.partitions["default"];
         let states: Vec<mosaica_types::ShardState> = partition
             .shards

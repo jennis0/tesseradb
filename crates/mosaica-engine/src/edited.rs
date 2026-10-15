@@ -344,16 +344,15 @@ pub(crate) fn named<'g>(
     Some((shard, number, shard.tenancy.of(number) == high.tenancy))
 }
 
-/// The shard `id` names an item of and the number it names there, or `None` where `id` names no
-/// item, an item of a shard `generation` does not hold, or its number at a tenancy the number is
-/// not held at.
-pub(crate) fn number_named(
+/// The shard and number `id` names, or `None` where it names no item, a shard `generation` does
+/// not hold, or a number at a tenancy the index does not hold.
+pub(crate) fn number_named<'g>(
     key: &IdentityKey,
-    generation: &Generation,
+    generation: &'g Generation,
     id: MosaicaId,
-) -> Option<(ShardId, EntityId)> {
+) -> Option<(&'g Shard, EntityId)> {
     let (shard, number, current) = named(key, generation, id)?;
-    current.then_some((shard.id(), number))
+    current.then_some((shard, number))
 }
 
 /// The `mosaica_id` of the item holding each of `numbers` as its number in `shard`, at the tenancy
@@ -444,7 +443,8 @@ mod tests {
         let named = |id| number_named(&key, &generation, id).map(|(_, number)| number);
 
         assert_eq!(
-            number_named(&key, &generation, id(&key, 0, 3, 7)),
+            number_named(&key, &generation, id(&key, 0, 3, 7))
+                .map(|(shard, number)| (shard.id(), number)),
             Some((ShardId::ZERO, EntityId::new(7))),
             "the number in its shard"
         );

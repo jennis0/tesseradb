@@ -20,10 +20,9 @@ bench-timing = []
 # `bench-timing` does — measured, not assumed — so `scripts/check-layers.sh` asserts the property
 # that actually matters: no default-features release build reaches it.
 fault-injection = ["mosaica-lifecycle/fault-injection"]
-# Writes to a bundle of several point shards, for this crate's own tests while the several-shard
-# write path is built: it adds `Engine::open_writing_several_shards` and nothing else, so a build
-# that only calls `Engine::open` refuses those writes whether or not the feature is unified in.
-# Enabled only by the self dev-dependency below.
+# Adds Engine::open_writing_several_shards, which takes writes over a bundle of several point
+# shards, for this crate's own tests; Engine::open refuses them with or without it. Enabled only
+# by the self dev-dependency below (scripts/check-layers.sh rule 2c).
 several-shard-writes = []
 
 [dependencies]

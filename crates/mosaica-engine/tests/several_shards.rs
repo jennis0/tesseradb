@@ -544,14 +544,10 @@ fn each_item_is_named_in_its_own_shard() {
 
 /// An engine opened to write several shards admits writes and starts its executor, and opens a
 /// log holding a record beside the shards, which [`Engine::open`] refuses.
-#[cfg(feature = "several-shard-writes")]
 #[test]
 fn an_engine_writing_several_shards_admits_writes_and_a_log() {
     let several = fixture_sized(N, Some(SIZE));
-    let mut engine =
-        Engine::open_writing_several_shards(&several.root, &several.cache, &several.wal, config())
-            .unwrap();
-    engine.start_write_executor(8).expect("the executor starts");
+    let engine = writing(&several);
     assert!(engine.writable().is_ok());
     assert_eq!(engine.write_executor_posture(), ExecutorPosture::Running);
     let before = served(&engine, &full_coverage_credential());
@@ -581,7 +577,6 @@ fn an_engine_writing_several_shards_admits_writes_and_a_log() {
 
 /// One new item holding the `id` of `key` and every term the full credential holds, and its
 /// `mosaica_id`.
-#[cfg(feature = "several-shard-writes")]
 fn insert(engine: &Engine, key: &str) -> MosaicaId {
     let receipt = engine
         .ingest(mosaica_engine::IngestRequest {
@@ -605,7 +600,6 @@ fn insert(engine: &Engine, key: &str) -> MosaicaId {
 }
 
 /// An engine over `built` that writes several shards, its executor running.
-#[cfg(feature = "several-shard-writes")]
 fn writing(built: &Fixture) -> Engine {
     let mut engine =
         Engine::open_writing_several_shards(&built.root, &built.cache, &built.wal, config())
@@ -616,7 +610,6 @@ fn writing(built: &Fixture) -> Engine {
 
 /// An insert into a bundle built as two shards lands in the open one, shard 1, at its high
 /// water: its `mosaica_id` and its unique value name it there, and a restart replays it there.
-#[cfg(feature = "several-shard-writes")]
 #[test]
 fn an_insert_lands_in_the_open_shard_and_replays_there() {
     let several = fixture_sized(N, Some(SIZE));
@@ -657,7 +650,6 @@ fn an_insert_lands_in_the_open_shard_and_replays_there() {
 
 /// A bundle of two shards whose log holds deletions and suppressions in both reopens with each
 /// shard's denies: what the same denies leave served in a bundle of one shard.
-#[cfg(feature = "several-shard-writes")]
 #[test]
 fn a_log_denying_in_both_shards_reopens_with_each_shards_denies() {
     use mosaica_lifecycle::wal::{Wal, WalRecord};

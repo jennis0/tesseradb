@@ -254,27 +254,8 @@ impl Allocator {
 
 }
 
-/// Each point shard's entity-ID high-water mark implied by a set of replayed WAL records: the
-/// maximum `WalRow.entity_id.raw() + 1` over the rows naming that shard (with overlay-snapshot
-/// entries as a weak floor). A shard no record names has no entry.
-///
-/// This is the "replayed rows" half of `Allocator::new`'s `max(manifest_hw, replayed rows)`
-/// seeding contract — callers should rebuild each shard's allocator with
-/// `Allocator::new(manifest_hw.max(high_water_from(&replayed)[shard]))` rather than carrying a
-/// pre-crash `Allocator::high_water()` value across a restart, since the allocator itself does
-/// not persist: only what actually made it into the WAL (or the shard record in a side-manifest)
-/// did.
-pub fn high_water_from<'r>(
-    records: impl IntoIterator<Item = &'r WalRecord>,
-) -> BTreeMap<ShardId, u64> {
-    let mut hw = BTreeMap::new();
-    for record in records {
-        raise_high_water(record, &mut hw);
-    }
-    hw
-}
-
-/// Raise each shard's mark in `hw` to what `record` implies, on [`high_water_from`]'s rule.
+/// Raise each shard's mark in `hw` to the highest `entity_id + 1` a row of `record` names in that
+/// shard; an overlay snapshot's items are a weak floor.
 pub fn raise_high_water(record: &WalRecord, hw: &mut BTreeMap<ShardId, u64>) {
     let mut raise = |shard: ShardId, entity: EntityId| {
         let mark = hw.entry(shard).or_insert(0);
@@ -287,7 +268,7 @@ pub fn raise_high_water(record: &WalRecord, hw: &mut BTreeMap<ShardId, u64>) {
             }
         }
         // A mint names no entity. It is the one record whose subject is vocabulary space
-        // rather than entity space, and the two allocators share nothing (§3.4).
+        // rather than entity space, and the two allocators share nothing.
         WalRecord::VocabularyMint { .. } => {}
         // An overlay snapshot names entities that were certainly allocated, so it raises the
         // floor — but only for entities something has *denied*, which is a weak bound and not
@@ -304,8 +285,7 @@ pub fn raise_high_water(record: &WalRecord, hw: &mut BTreeMap<ShardId, u64>) {
         WalRecord::ChangeBatch { .. } => {}
         // A layer's and its artifacts' entities are in its layer space, not a point shard's.
         // A view create and a drop allocate nothing at all: a view is a coordinate system
-        // and holds no entity, which is what keeps entity space the invariant plane
-        // (`views.md` §1).
+        // and holds no entity, which is what keeps entity space the invariant plane.
         WalRecord::LayerCreate { .. }
         | WalRecord::LayerDrop { .. }
         | WalRecord::ArtifactPublish { .. }
@@ -327,56 +307,40 @@ pub fn raise_high_water(record: &WalRecord, hw: &mut BTreeMap<ShardId, u64>) {
     }
 }
 
-/// Every point entity `records` name, by shard: the rows an ingest allocated or joined, the
-/// entities its edits left, every item a change, a view drop or an overlay snapshot names, and
-/// every member an artifact publication or growth names. [`Allocator::seed_freed`] takes each
-/// shard's out of that shard's freed ids.
-pub fn entities_named<'r>(
-    records: impl IntoIterator<Item = &'r WalRecord>,
-) -> BTreeMap<ShardId, Bitmap> {
-    let mut named = BTreeMap::new();
-    for record in records {
-        name_entities(record, &mut named);
-    }
-    named
-}
-
-/// Add the point entities `record` names to `named`, each in its shard's set, on
-/// [`entities_named`]'s rule.
+/// Add each point entity `record` names to its shard's set in `named`: rows, edits' old entities,
+/// items a change, view drop or snapshot names, and artifact members and generating sets.
+/// [`Allocator::seed_freed`] takes each shard's out of that shard's freed ids.
 pub fn name_entities(record: &WalRecord, named: &mut BTreeMap<ShardId, Bitmap>) {
     let mut sets: Vec<&[crate::wal::WalShardSet]> = Vec::new();
-    let mut add = |shard: ShardId, entity: EntityId| {
-        if let Ok(entity) = u32::try_from(entity.raw()) {
-            named.entry(shard).or_default().add(entity);
-        }
-    };
-    let mut add_target = |target: Target| {
+    let mut add = |target: Target| {
         if let Target::Item(shard, entity) = target {
-            add(shard, entity);
+            if let Ok(entity) = u32::try_from(entity.raw()) {
+                named.entry(shard).or_default().add(entity);
+            }
         }
     };
     match record {
         WalRecord::IngestBatch { rows, edits, .. } => {
             for row in rows.iter().chain(edits.iter().flat_map(|edit| &edit.rows)) {
-                add_target(Target::Item(row.shard, row.entity_id));
+                add(Target::Item(row.shard, row.entity_id));
             }
             for edit in edits {
-                add_target(Target::Item(edit.shard, edit.old));
+                add(Target::Item(edit.shard, edit.old));
             }
         }
         WalRecord::ChangeBatch { changes } => {
             for (target, _) in changes {
-                add_target(*target);
+                add(*target);
             }
         }
         WalRecord::ViewDrop { deleted, .. } => {
             for target in deleted {
-                add_target(*target);
+                add(*target);
             }
         }
         WalRecord::OverlaySnapshot { entries } => {
             for entry in entries {
-                add_target(entry.target);
+                add(entry.target);
             }
         }
         WalRecord::ArtifactPublish { artifacts, .. } => {
@@ -697,6 +661,14 @@ mod tests {
             .collect()
     }
 
+    fn high_water_from(records: &[WalRecord]) -> BTreeMap<ShardId, u64> {
+        let mut hw = BTreeMap::new();
+        for record in records {
+            raise_high_water(record, &mut hw);
+        }
+        hw
+    }
+
     #[test]
     fn high_water_from_takes_the_max_over_rows() {
         assert_eq!(high_water_from(&[]), marks(&[]));
@@ -721,11 +693,11 @@ mod tests {
         );
     }
 
-    /// An entity number a record names in one shard is named in that shard's set alone.
     #[test]
     fn each_entity_is_named_in_its_own_shard() {
         let one = ShardId::new(1).unwrap();
-        let named = entities_named(&[
+        let mut named = BTreeMap::new();
+        for record in &[
             row(1, 5),
             WalRecord::ViewDrop {
                 view: mosaica_types::view::DeadIncarnation {
@@ -735,7 +707,9 @@ mod tests {
                 },
                 deleted: vec![Target::Item(ShardId::ZERO, EntityId::new(7))],
             },
-        ]);
+        ] {
+            name_entities(record, &mut named);
+        }
         assert_eq!(
             named,
             BTreeMap::from([(ShardId::ZERO, Bitmap::of(&[7])), (one, Bitmap::of(&[5]))])

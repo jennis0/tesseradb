@@ -250,9 +250,8 @@ if ! cargo tree -e normal -p mosaica-cli --features fault-injection -f "{p} {f}"
   fail=1
 fi
 
-# 2c. WRITES TO SEVERAL SHARDS STAY IN THE ENGINE'S OWN TESTS. `several-shard-writes` adds the
-#     open that takes them, and only mosaica-engine's self dev-dependency enables it: the default
-#     resolution reaches it nowhere, and no other manifest names it.
+# 2c. WRITES TO SEVERAL SHARDS STAY IN THE ENGINE'S OWN TESTS. Only mosaica-engine's self
+#     dev-dependency enables `several-shard-writes`, the open that takes them.
 if cargo tree -e normal --workspace -f "{p} {f}" | grep -n 'several-shard-writes' \
    || grep -l 'several-shard-writes' crates/*/Cargo.toml | grep -v '^crates/mosaica-engine/'; then
   echo "FAIL: 'several-shard-writes' is enabled outside mosaica-engine's own tests (lines above)."

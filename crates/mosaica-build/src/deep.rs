@@ -515,7 +515,7 @@ fn check_edited_items(
 /// **Every unique index agrees with its column, and no key names two live entities.**
 ///
 /// Each run is digested against the manifest, since the open-time sweep defers key runs to their
-/// pages' own checksums, checked page by page ([`mosaica_store::key_index::verify_run`]), and
+/// pages' own checksums. It is checked page by page ([`mosaica_store::key_index::verify_run`]) and
 /// must carry a key filter.
 /// The runs are then merged, the manifest's tombstoned entities dropped, into one sorted stream,
 /// and the column's values for every entity not tombstoned are sorted into another through the

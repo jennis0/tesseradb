@@ -13,8 +13,7 @@ use crate::row_groups::FileGroups;
 use crate::spill::mix64;
 
 /// Who holds each value of each unique field, and each item's value of each field. The build
-/// numbers items before it places them in shards, so it names each item in shard 0 by its number,
-/// and refuses a corpus past one shard's size.
+/// numbers items before it places them in shards, so it names each item in shard 0 by its number.
 #[derive(Default)]
 struct Held {
     holder: FxHashMap<(u16, u128), u32>,

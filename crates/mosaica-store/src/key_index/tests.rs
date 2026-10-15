@@ -1195,7 +1195,6 @@ fn false_positive_rate<K: Key>(keys: &[K], absent: &[K]) -> f64 {
         (distinct.len() as u64 * 10).div_ceil(512)
     );
     let run = open::<K>(&path);
-    assert!(run.has_key_filter());
     assert!(keys.iter().all(|&k| run.may_hold(k)), "no false negative");
     let (lo, hi) = run.key_range().unwrap();
     let in_range: Vec<K> = absent
@@ -1251,25 +1250,16 @@ fn a_key_filter_passes_every_key_its_run_holds_and_about_one_absent_key_in_a_hun
     assert!((0..3000).all(|k| run.get(k).unwrap() == vec![1, 2]));
 }
 
-/// The filter's offset, blocks and hashes, from the header of the run at `path`.
-fn filter_shape(path: &Path) -> (usize, usize, u32) {
-    let bytes = std::fs::read(path).unwrap();
-    let u64_at = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap()) as usize;
-    let hashes = u32::from_le_bytes(bytes[80..84].try_into().unwrap());
-    (u64_at(64), u64_at(72), hashes)
-}
-
 #[test]
 fn a_damaged_or_truncated_key_filter_is_refused_at_open_and_by_the_verifier() {
     let dir = tempfile::tempdir().unwrap();
     let entries: Vec<(u64, u32)> = (0..1500u64).map(|k| (k * 1000, k as u32)).collect();
     let path = write_filtered(dir.path(), "r", &entries);
-    let (offset, blocks, hashes) = filter_shape(&path);
+    let header = Header::decode(&std::fs::read(&path).unwrap()).unwrap();
+    let (offset, blocks) = (header.filter.offset as usize, header.filter.blocks as usize);
     let len = std::fs::metadata(&path).unwrap().len() as usize;
-    assert_eq!((len, hashes), (offset + blocks * 64 + 4, 7));
-    let pages = Header::decode(&std::fs::read(&path).unwrap())
-        .unwrap()
-        .pages as usize;
+    assert_eq!((len, header.filter.hashes), (offset + blocks * 64 + 4, 7));
+    let pages = header.pages as usize;
     let index_end = PAGE_SIZE * (1 + pages) + pages * 8 + 4;
     assert!(
         offset > index_end && offset % 64 == 0,

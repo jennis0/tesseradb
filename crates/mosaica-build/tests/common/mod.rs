@@ -308,3 +308,35 @@ pub fn assert_bundles_identical(left: &Path, right: &Path, what: &str) {
         a.len()
     );
 }
+
+/// Rewrite publication `n` of `prefix_dir`'s partition through `edit`, applied to it as one JSON
+/// value with every shard and space file merged in: the files it wrote at `n` are removed and
+/// written again.
+#[allow(dead_code)]
+pub fn rewrite_publication(prefix_dir: &Path, n: u64, edit: impl FnOnce(&mut serde_json::Value)) {
+    let published = mosaica_store::read_publication(prefix_dir, "default", n).unwrap();
+    let mut value = serde_json::to_value(&published.manifest).unwrap();
+    edit(&mut value);
+    let manifest: mosaica_store::manifest::SegmentsManifest =
+        serde_json::from_value(value).unwrap();
+    let shards = published.refs.shards.iter().filter(|named| named.n == n);
+    let spaces = published
+        .refs
+        .layer_spaces
+        .iter()
+        .filter(|named| named.n == n);
+    let written = shards
+        .map(|named| ShardLayout::new("default", named.id).manifest_rel(n))
+        .chain(spaces.map(|named| {
+            mosaica_store::LayerSpaceLayout::new("default", named.space).manifest_rel(n)
+        }))
+        .chain([format!(
+            "{}/{}",
+            mosaica_store::layout::partition_rel("default"),
+            mosaica_store::layout::segments_name(n)
+        )]);
+    for rel in written {
+        std::fs::remove_file(prefix_dir.join(rel)).unwrap();
+    }
+    mosaica_store::write_publication(prefix_dir, "default", n, &manifest, None).unwrap();
+}

@@ -1748,9 +1748,9 @@ impl MembershipExtent {
     }
 }
 
-/// One level's artifact-write counter, as of the publication this manifest describes: in a layer
-/// space's record the level's records version, and in a shard's its slice version there. A
-/// structure derived from the level is adopted only at the versions it was written for.
+/// One level's records version in its layer space, as of the publication this manifest
+/// describes. A structure derived from the level is adopted only at the version it was written
+/// for.
 ///
 /// A level present in its space's record packs and absent here is a level whose version is
 /// unknown, which is not the same as zero.
@@ -1773,8 +1773,7 @@ pub struct SliceVersion {
     pub version: u64,
 }
 
-/// The deleted artifacts of a layer space whose records one shard's compaction has still to
-/// remove from that shard's slice ([`LayerSpaceRecord::owed`]).
+/// One shard's entry in [`LayerSpaceRecord::owed`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OwedDeletions {
@@ -2065,9 +2064,9 @@ pub struct BaseKeyRun {
     pub last_key: String,
 }
 
-/// `SEGMENTS-<n>.json` (contracts §2.3): complete current state for one partition, written by
-/// that partition's worker only after every file it names is durable. `n` is in the filename and
-/// nowhere else.
+/// One partition's complete current state as publication `n` describes it: its partition
+/// `SEGMENTS-<n>.json` ([`PartitionFile`]) and the shard and space files that names, assembled.
+/// Publication `n`'s own number is in the partition file's name only.
 ///
 /// A list field without `serde(default)` is required: a lost list must not read as an empty one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2152,7 +2151,7 @@ pub struct ShardFiles {
 }
 
 impl PartitionFile {
-    /// The references, ascending and distinct, as the next publication compares against them.
+    /// The shard and space files this one names.
     pub fn refs(&self) -> PublishedRefs {
         PublishedRefs {
             shards: self.shards.files.clone(),
@@ -2160,9 +2159,9 @@ impl PartitionFile {
         }
     }
 
-    /// Refuses a partition file naming no shard, shards not ascending and distinct by number, or
-    /// layer spaces not ascending or held by no registered layer: an older candidate would serve
-    /// without the shards or spaces this one names, and without their denies.
+    /// Refuses a partition file naming no shard, shards not ascending and distinct, or layer
+    /// spaces not ascending or held by no registered layer: an older candidate would serve without
+    /// them and their denies.
     pub(crate) fn check_named(&self) -> std::result::Result<(), String> {
         let shards = &self.shards.files;
         if shards.is_empty() {
@@ -2206,20 +2205,13 @@ impl PartitionFile {
     }
 }
 
-/// A shard's `SEGMENTS-<m>.json` on disc: its record and the files under its directory.
+/// A shard's or a layer space's `SEGMENTS-<m>.json` on disc: its record and the files under its
+/// directory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ShardFile {
+pub(crate) struct RecordFile<R, F> {
     #[serde(flatten)]
-    pub record: ShardRecord,
-    pub files: BTreeMap<String, FileDigest>,
-}
-
-/// A layer space's `SEGMENTS-<m>.json` on disc: its record and the files under its directory.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SpaceFile {
-    #[serde(flatten)]
-    pub record: LayerSpaceRecord,
-    pub files: BTreeMap<String, FileDigest>,
+    pub record: R,
+    pub files: F,
 }
 
 /// The partition's fields of a [`SegmentsManifest`].
@@ -2425,29 +2417,15 @@ pub struct ShardRecord {
     ///
     /// A lost list sends every session through a permutation walk, with no fault reported.
     pub term_image_extents: Vec<TermImageExtent>,
-    /// Every `(group-scoped family, view)` pair a **flush** has written a column or a render lane
-    /// for in this shard, complete current state (`views.md` §5).
-    ///
-    /// **The durable half of `scoped_scalars[..].views`, and the reason it cannot be derived.** A
-    /// family's list in `MANIFEST.json` names the views the *build* wrote a column for; a view
-    /// created while the service runs acquires one at its first flush carrying values, and
-    /// `MANIFEST.json` is rewritten only by a fold. Deriving the pairs from `attr_extents` instead
-    /// would recover a filterable family's — its extents name their view — and lose a
-    /// **render-only** family's, which writes a row lane and no entity-space extent at all: the
-    /// column would come back from a restart as one the manifest does not know exists, and its
-    /// values would be served as the ordinary absence below.
-    ///
-    /// Carried forward for ever and never pruned, exactly as [`PartitionManifest::views`] is: a view's column
-    /// is on disc until a fold rewrites the prefix, and a fold writes the derived list into the
-    /// new `MANIFEST.json` rather than leaving it here.
-    ///
-    /// No `serde(default)`: a manifest omitting it is malformed, not
-    /// column-free, and the two are indistinguishable under a default while only one is safe to
-    /// serve.
+    /// Every `(group-scoped family, view)` pair a flush has written a column or render lane for in
+    /// this shard. Not derivable: `MANIFEST.json` names only the build's, and a render-only family
+    /// writes no entity-space extent. Never pruned, as [`PartitionManifest::views`] is not; a fold
+    /// writes the list into the new `MANIFEST.json`. No `serde(default)`: a lost list must not read
+    /// as column-free.
     pub scoped_columns: Vec<ScopedColumn>,
     /// The columns declared at a running service ([`PartitionManifest::attributes`] and
     /// [`PartitionManifest::scoped_attributes`], by name) this shard's compaction has written a
-    /// base for. A declaration leaves for `MANIFEST.json` once every shard lists it.
+    /// base for.
     pub runtime_bases: Vec<String>,
     /// Each level's slice version in this shard, by layer space.
     pub slice_versions: Vec<SliceVersion>,
@@ -2506,6 +2484,11 @@ impl ShardRecord {
             slice_versions: Vec::new(),
         }
     }
+}
+
+/// Whether a shard's or a layer space's `(tombstones, deny)` carry deny state.
+pub(crate) fn carries_deny(tombstones: &EntitySet, deny: &EntitySet) -> bool {
+    tombstones.carries() || deny.carries()
 }
 
 /// Shard `shard`'s identity in the prefix whose `MANIFEST.json` digest is `bundle`. Moves at every
@@ -2642,7 +2625,7 @@ pub enum Honourability {
 /// A [`SegmentsManifest`]'s `files` by the directory holding each: see
 /// [`SegmentsManifest::split_files`].
 #[derive(Debug, Clone, Default)]
-pub struct SplitFiles {
+pub(crate) struct SplitFiles {
     pub partition: BTreeMap<String, FileDigest>,
     pub shards: BTreeMap<ShardId, BTreeMap<String, FileDigest>>,
     pub layer_spaces: BTreeMap<LayerSpace, BTreeMap<String, FileDigest>>,
@@ -2674,7 +2657,7 @@ impl SegmentsManifest {
 
     /// The files this manifest names split by the directory holding them: each shard's, each layer
     /// space's, and the rest, which the partition's own file names.
-    pub fn split_files(&self, partition: &str) -> SplitFiles {
+    pub(crate) fn split_files(&self, partition: &str) -> SplitFiles {
         let shards_rel = format!("{}/", crate::layout::shards_rel(partition));
         let spaces_rel = format!("{}/", crate::layout::layer_spaces_rel(partition));
         let mut split = SplitFiles {
@@ -2712,10 +2695,10 @@ impl SegmentsManifest {
 
     /// The manifest a partition file and the shard and space files it names describe, with every
     /// `files` map merged into the partition's.
-    pub fn assemble(
+    pub(crate) fn assemble(
         file: PartitionFile,
-        shards: Vec<ShardFile>,
-        layer_spaces: Vec<SpaceFile>,
+        shards: Vec<RecordFile<ShardRecord, BTreeMap<String, FileDigest>>>,
+        layer_spaces: Vec<RecordFile<LayerSpaceRecord, BTreeMap<String, FileDigest>>>,
     ) -> SegmentsManifest {
         let PartitionFile {
             mut partition,
@@ -2740,6 +2723,34 @@ impl SegmentsManifest {
                 records,
             },
             layer_spaces: spaces,
+        }
+    }
+
+    /// Stamp each shard's identity from `manifest_digest`, the hex digest of the prefix's
+    /// `MANIFEST.json`, or `None` where that is not 64 hex digits.
+    pub fn stamp_identities(&mut self, manifest_digest: &str) -> Option<()> {
+        let bundle = hex_32::decode(manifest_digest)?;
+        for record in &mut self.shards.records {
+            record.identity = shard_identity(&bundle, record.id);
+        }
+        Some(())
+    }
+
+    /// Each shard's slice of a level starts at the level's records version.
+    pub fn slices_at_records_versions(&mut self) {
+        let slice_versions: Vec<SliceVersion> = self
+            .layer_spaces
+            .iter()
+            .flat_map(|record| {
+                record.level_versions.iter().map(|level| SliceVersion {
+                    space: record.space,
+                    level: level.level,
+                    version: level.version,
+                })
+            })
+            .collect();
+        for record in &mut self.shards.records {
+            record.slice_versions = slice_versions.clone();
         }
     }
 

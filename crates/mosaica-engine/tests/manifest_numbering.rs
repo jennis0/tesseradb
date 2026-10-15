@@ -419,11 +419,9 @@ fn a_publication_that_changes_no_shard_keeps_the_shards_file() {
         engine
             .accept_change(suppressed, mosaica_lifecycle::wal::ChangeOp::Suppress)
             .expect("a deny is never refused");
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while engine.write_executor_stats().overlay_publications < 1 {
-            assert!(Instant::now() < deadline, "the deny never published");
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        wait_until("the deny to publish", Duration::from_secs(30), || {
+            engine.write_executor_stats().overlay_publications >= 1
+        });
         let denied = newest(&root);
         assert_eq!(
             denied.refs.shards[0].n, denied.n,
@@ -435,11 +433,9 @@ fn a_publication_that_changes_no_shard_keeps_the_shards_file() {
         );
 
         engine.declare_shards(size).expect("the size is declared");
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while newest(&root).manifest.shards.size != size {
-            assert!(Instant::now() < deadline, "the size never published");
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        wait_until("the size to publish", Duration::from_secs(30), || {
+            newest(&root).manifest.shards.size == size
+        });
         let declared = newest(&root);
         assert!(declared.n > denied.n);
         assert_eq!(

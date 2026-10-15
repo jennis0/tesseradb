@@ -37,7 +37,7 @@ use mosaica_types::layer::{
     DeclarationError, EntityRun, LayerDeclaration, LevelShape, MembershipSource, RegisteredLayer,
     ReservedRuns, FIRST_LEVEL_BLOCK, RESERVED_BLOCK, SPACE_BLOCKS,
 };
-use mosaica_types::{EntityId, LayerSpace};
+use mosaica_types::{EntityId, LayerSpace, ShardId};
 
 use crate::membership::{ArtifactStore, IncomingArtifact, ShardSets};
 use crate::wal::{PublishedArtifact, WalRecord};
@@ -46,8 +46,7 @@ use crate::wal::{PublishedArtifact, WalRecord};
 /// own, and whether any item is a member of two.
 fn publication_shape(artifacts: &[PublishedArtifact]) -> LevelShape {
     let mut shape = LevelShape::empty();
-    let mut claimed: std::collections::BTreeMap<mosaica_types::ShardId, croaring::Bitmap> =
-        std::collections::BTreeMap::new();
+    let mut claimed: BTreeMap<ShardId, croaring::Bitmap> = BTreeMap::new();
     for members in artifacts
         .iter()
         .filter_map(|a| ShardSets::from_wal(&a.members))
@@ -1309,10 +1308,7 @@ impl LayerRegistry {
             let mut delta = artifact.members.shard_zero().clone();
             record.members.remove_from(&mut delta);
             if !delta.is_empty() {
-                joins.push((
-                    ordinal,
-                    ShardSets::in_shard(mosaica_types::ShardId::ZERO, delta),
-                ));
+                joins.push((ordinal, ShardSets::in_shard(ShardId::ZERO, delta)));
             }
         }
         let growth = crate::membership::growth_record(
@@ -2359,7 +2355,7 @@ impl LayerRegistry {
             }
             growth.push(crate::wal::MembershipGrowth {
                 ordinal,
-                joining: ShardSets::in_shard(mosaica_types::ShardId::ZERO, joining).to_wal(),
+                joining: ShardSets::in_shard(ShardId::ZERO, joining).to_wal(),
                 leaving: Vec::new(),
                 set: crate::wal::GrownSet::Membership,
             });

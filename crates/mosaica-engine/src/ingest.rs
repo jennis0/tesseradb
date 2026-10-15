@@ -33,7 +33,7 @@ use mosaica_lifecycle::{
 };
 use mosaica_store::manifest::DeclaredScalar;
 use mosaica_store::unique::{key_of, value_text, KeyKind, UniqueKey};
-use mosaica_types::{EntityId, ItemAt, MosaicaId, ShardId, TermId};
+use mosaica_types::{EntityId, ItemAt, MosaicaId, TermId};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::engine::Engine;
@@ -181,7 +181,6 @@ impl Engine {
         }
         for attempt in 0..2 {
             let generation = self.generation();
-            // The live entries of the shard a window adds its values in.
             let unique_seq = generation
                 .shard(self.write.live().write_shard().id())
                 .map_or(0, |shard| shard.unique_live.seq());
@@ -403,10 +402,10 @@ impl Engine {
         // keeps.
         let unreadable = |e: mosaica_store::StoreError| AcceptError::Unreadable(e.to_string());
         let mut held: FxHashMap<ItemAt, (EntityId, u64)> = FxHashMap::default();
-        for (shard, items) in by_shard(order.iter().map(|(item, _)| *item)) {
-            let shard = generation
-                .shard(shard)
-                .expect("an item is resolved in a shard of the generation it is read from");
+        for (shard, items) in
+            mosaica_types::by_shard(order.iter().map(|(item, _)| (item.shard, *item)))
+        {
+            let shard = generation.shard_of(shard);
             let entities: Vec<EntityId> = items.iter().map(|item| item.entity).collect();
             let numbers = crate::edited::numbers_of(shard, &entities).map_err(unreadable)?;
             let ids = crate::edited::ids_of_numbers(&self.identity_key, shard, &numbers)
@@ -452,12 +451,12 @@ impl Engine {
                     let (number, mosaica_id) = held[item];
                     match decided.remove(&at).expect("every named row was decided") {
                         Decided::Unchanged => slots.push(Slot::Unchanged {
-                            entity: *item,
+                            item: *item,
                             mosaica_id,
                         }),
                         Decided::Joined => {
                             slots.push(Slot::Joined {
-                                entity: *item,
+                                item: *item,
                                 mosaica_id,
                             });
                             joined_from.push(at);
@@ -539,7 +538,7 @@ impl Engine {
         let row = &request.rows[at];
         let manifest = &generation.bundle.manifest;
         let declared = &manifest.declared_scalars;
-        let shard = generation.shard_of(item);
+        let shard = generation.shard_of(item.shard);
         let old = item.entity;
         let held_views = joined::views_holding(shard, old);
         let placing = view.zip(row.position);
@@ -699,7 +698,7 @@ impl Engine {
         generation: &Generation,
         item: ItemAt,
     ) -> Result<Vec<Vec<u8>>, AcceptError> {
-        let shard = generation.shard_of(item);
+        let shard = generation.shard_of(item.shard);
         let terms: Vec<TermId> = match shard.buffer.get(item.entity) {
             Some(buffered) => buffered.terms.clone(),
             None => joined::flushed_terms_of(shard, item.entity).ok_or_else(|| {
@@ -743,7 +742,7 @@ impl Engine {
         view: &crate::viewport::MetaView,
     ) -> Result<Option<(f64, f64)>, AcceptError> {
         if let Some(buffered) = generation
-            .shard_of(item)
+            .shard_of(item.shard)
             .buffer
             .rows_of(item.entity)
             .find(|buffered| buffered.view == view.id)
@@ -801,7 +800,7 @@ impl Engine {
         let row = &request.rows[at];
         let manifest = &generation.bundle.manifest;
         let declared = &manifest.declared_scalars;
-        let shard = generation.shard_of(item);
+        let shard = generation.shard_of(item.shard);
         let buffered = shard.buffer.get(item.entity);
         let mut blob = match &stored.blobs {
             Some(blobs) => BlobRow::of(blobs.get(&item).cloned()),
@@ -986,15 +985,14 @@ impl Engine {
         let wanted = order
             .iter()
             .filter(|(_, at)| whole || Self::carries_resident(generation, &request.rows[*at]))
-            .map(|(item, _)| *item);
-        for (shard, items) in by_shard(wanted) {
+            .map(|(item, _)| (item.shard, *item));
+        for (shard, items) in mosaica_types::by_shard(wanted) {
             let wanted: croaring::Bitmap = items
                 .iter()
                 .filter_map(|item| u32::try_from(item.entity.raw()).ok())
                 .collect();
             let read = generation
-                .shard(shard)
-                .expect("an item is resolved in a shard of the generation it is read from")
+                .shard_of(shard)
                 .filter_columns
                 .records()
                 .for_each_row_in(&wanted, &mut |entity, fields| {
@@ -1030,7 +1028,7 @@ impl Engine {
         view: &crate::viewport::MetaView,
     ) -> Result<Option<(u32, u32)>, AcceptError> {
         if let Some(buffered) = generation
-            .shard_of(item)
+            .shard_of(item.shard)
             .buffer
             .rows_of(item.entity)
             .find(|buffered| buffered.view == view.id)
@@ -1271,16 +1269,4 @@ impl resolve::Holdings for Held<'_> {
             .mosaica_ids_in(self.generation, ids)
             .map_err(|e| AcceptError::Unreadable(e.to_string()))
     }
-}
-
-/// `items`, ascending, grouped by shard.
-fn by_shard(items: impl IntoIterator<Item = ItemAt>) -> BTreeMap<ShardId, Vec<ItemAt>> {
-    let mut grouped: BTreeMap<ShardId, Vec<ItemAt>> = BTreeMap::new();
-    for item in items {
-        grouped.entry(item.shard).or_default().push(item);
-    }
-    for items in grouped.values_mut() {
-        items.sort_unstable();
-    }
-    grouped
 }

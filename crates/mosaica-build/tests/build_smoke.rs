@@ -234,8 +234,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
         shard.record.identity,
         mosaica_store::manifest::shard_identity(&digest, shard.record.id)
     );
-    // The build's publication is the format a running service writes: the partition file names
-    // the shard's own file, and the two read back as what the open served.
+    // The partition file names the shard's own file, and reads back as the open served it.
     let published = mosaica_store::read_publication(&out.join(&current.prefix), "default", 0)
         .expect("the built publication reads back");
     assert_eq!(published.refs, part.refs);

@@ -36,8 +36,8 @@ use crate::error::{read_to_vec, Result, StoreError};
 use crate::layout::ShardLayout;
 use crate::manifest::{
     CurrentPointer, DerivedExtent, FileDigest, Honourability, LayerSpaceRecord, Manifest,
-    PartitionFile, PartitionManifest, PublishedRefs, SegmentDescriptor, SegmentsManifest,
-    ShardFile, ShardRecord, Shards, SpaceFile, DENY_DISPOSITION_STATE,
+    PartitionFile, PartitionManifest, PublishedRefs, RecordFile, SegmentDescriptor,
+    SegmentsManifest, ShardRecord, Shards, DENY_DISPOSITION_STATE,
 };
 use crate::permutation::{Permutation, RowSpace, SegmentExtent};
 use crate::render_presence::{render_presence_path, RenderPresence, RENDER_PRESENCE_DIR};
@@ -1282,10 +1282,9 @@ fn open_term_images(
 /// exactly as trustworthy whether or not the shard and space files they describe check out, and
 /// the mid-sync replica that has the new partition file but not yet its other files is the *most*
 /// likely way to meet a deny-carrying candidate whose files fail. Verifying first would step that
-/// case down and re-expose the item. It is also the cheaper order: the refusal costs no I/O where
-/// `verify_files` hashes every named file. "Verify the bytes before interpreting them" is the right instinct and is what every
-/// other arm of this loop does — it is wrong *here*, for that reason, and
-/// `a_deny_carrying_manifest_whose_files_are_missing_is_still_refused` is the test that says so.
+/// case down and re-expose the item. "Verify the bytes before interpreting them" is the right
+/// instinct and is what every other arm of this loop does — it is wrong *here*, for that reason,
+/// and `a_deny_carrying_candidate_with_a_missing_shard_file_is_refused` is the test that says so.
 ///
 /// # Why stepping down is safe, and the one thing that would make it unsafe
 ///
@@ -1336,11 +1335,14 @@ fn load_verifying_segments_manifest(
     // a log line or an error naming only `default` cannot say *which* bundle's `default` it
     // means. Short enough to stay a decent structured field, and free of the absolute prefix.
     // Built before the listing because the listing can itself refuse (a non-canonical name).
-    let partition_label = match (prefix_dir.file_name(), partition_dir.file_name()) {
-        (Some(prefix), Some(phash)) => format!(
+    let partition = partition_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned());
+    let partition_label = match (prefix_dir.file_name(), &partition) {
+        (Some(prefix), Some(partition)) => format!(
             "{}/{}",
             prefix.to_string_lossy(),
-            crate::layout::partition_rel(&phash.to_string_lossy())
+            crate::layout::partition_rel(partition)
         ),
         _ => partition_dir.display().to_string(),
     };
@@ -1349,10 +1351,7 @@ fn load_verifying_segments_manifest(
     // Highest n first.
     candidates.sort_unstable_by(|a, b| b.cmp(a));
     let highest_candidate_n = candidates.first().copied();
-    let phash = partition_dir
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let partition = partition.unwrap_or_default();
 
     // The **first** failure recorded, not the last: the loop walks highest-first, so the first
     // is the newest manifest's — the one an operator must fix. Overwriting per iteration leaves
@@ -1368,15 +1367,13 @@ fn load_verifying_segments_manifest(
                 continue;
             }
         };
-        // Refused rather than stepped past: an older manifest would serve without the shards
-        // this one names, and without their denies.
         if let Err(detail) = file.check_named() {
             return Err(StoreError::MalformedBundle {
                 detail: format!("{}: {detail}", path.display()),
             });
         }
-        // Whether this candidate exists because a deny was accepted, from its flags alone, so a
-        // shard or space file that does not verify cannot carry the walk past it.
+        // From the flags alone, so a shard or space file that fails to verify cannot carry the
+        // walk past a deny.
         let flagged = file.refs().denies();
         let refuse_or_step = |fields: Vec<&'static str>, detail: String| {
             let fields = if fields.is_empty() && flagged {
@@ -1395,7 +1392,7 @@ fn load_verifying_segments_manifest(
                 })
             }
         };
-        let (segments_manifest, refs) = match assemble_publication(prefix_dir, &phash, file) {
+        let (segments_manifest, refs) = match assemble_publication(prefix_dir, &partition, file) {
             Ok(assembled) => assembled,
             Err(e) => {
                 let reason = refuse_or_step(Vec::new(), e.to_string())?;
@@ -1494,7 +1491,7 @@ pub(crate) fn read_partition_file(path: &Path) -> Result<PartitionFile> {
     })
 }
 
-/// Read one shard or space file `named`, checking its size and digest, and parse it.
+/// Read the shard or space file at `rel`, check its size and digest, and parse it.
 fn read_named<T: serde::de::DeserializeOwned>(
     prefix_dir: &Path,
     rel: &str,
@@ -1539,7 +1536,8 @@ fn assemble_publication(
     let mut shards = Vec::with_capacity(refs.shards.len());
     for named in &refs.shards {
         let rel = ShardLayout::new(partition, named.id).manifest_rel(named.n);
-        let shard: ShardFile = read_named(prefix_dir, &rel, named.size, &named.sha256)?;
+        let shard: RecordFile<ShardRecord, _> =
+            read_named(prefix_dir, &rel, named.size, &named.sha256)?;
         if shard.record.id != named.id {
             return Err(StoreError::FileVerificationFailed {
                 path: prefix_dir.join(&rel),
@@ -1551,7 +1549,8 @@ fn assemble_publication(
     let mut spaces = Vec::with_capacity(refs.layer_spaces.len());
     for named in &refs.layer_spaces {
         let rel = crate::LayerSpaceLayout::new(partition, named.space).manifest_rel(named.n);
-        let space: SpaceFile = read_named(prefix_dir, &rel, named.size, &named.sha256)?;
+        let space: RecordFile<LayerSpaceRecord, _> =
+            read_named(prefix_dir, &rel, named.size, &named.sha256)?;
         if space.record.space != named.space {
             return Err(StoreError::FileVerificationFailed {
                 path: prefix_dir.join(&rel),
@@ -1585,7 +1584,7 @@ pub fn newest_publication(prefix_dir: &Path, partition: &str) -> Result<Option<P
 }
 
 /// Every `SEGMENTS-<m>.json` one directory below `rel` under `prefix_dir`, each as its
-/// prefix-relative path and `m`. A name that is not a number's canonical spelling is left out.
+/// prefix-relative path and `m`.
 pub(crate) fn numbered_files_under(prefix_dir: &Path, rel: &str) -> Result<Vec<(String, u64)>> {
     let mut found = Vec::new();
     for dir in sub_directories(&prefix_dir.join(rel))? {
@@ -1605,7 +1604,8 @@ pub(crate) fn numbered_files_under(prefix_dir: &Path, rel: &str) -> Result<Vec<(
     Ok(found)
 }
 
-/// The `n` of every `SEGMENTS-<n>.json` in `dir` spelled canonically, empty where `dir` is absent.
+/// The `n` of every `SEGMENTS-<n>.json` in `dir`, padded spellings included; empty where `dir` is
+/// absent.
 fn numbers_in(dir: &Path) -> Result<Vec<u64>> {
     let mut found = Vec::new();
     for entry in read_dir_if_present(dir)? {
@@ -1724,7 +1724,7 @@ pub fn highest_published_n(bundle_root: &Path) -> Result<Option<u64>> {
     let mut highest = highest_side_manifest_n(bundle_root)?;
     for prefix in sub_directories(bundle_root)? {
         for partition in sub_directories(&crate::layout::partitions_dir(&prefix))? {
-            for kind in ["shards", "layers"] {
+            for kind in [crate::layout::SHARDS_DIR, crate::layout::LAYERS_DIR] {
                 for dir in sub_directories(&partition.join(kind))? {
                     highest = highest.max(numbers_in(&dir)?.into_iter().max());
                 }
@@ -1928,7 +1928,7 @@ fn verify_files(base: &Path, files: &BTreeMap<String, FileDigest>) -> Result<()>
         .unwrap_or(Ok(()))
 }
 
-fn hex_sha256(bytes: &[u8]) -> String {
+pub(crate) fn hex_sha256(bytes: &[u8]) -> String {
     hex_digest(Sha256::digest(bytes).as_slice())
 }
 

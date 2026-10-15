@@ -214,7 +214,7 @@ fn a_reopened_engine_does_not_re_buffer_rows_that_already_have_geometry() {
 }
 
 /// **The allocator floor survives on the side-manifest alone.** Rotation deletes the WAL records
-/// `high_water_from` derives the floor from, and an id reissued after that carries the old item's
+/// `raise_high_water` derives the floor from, and an id reissued after that carries the old item's
 /// access, so the test reopens against an empty WAL.
 #[test]
 fn the_allocator_floor_comes_from_the_side_manifest() {

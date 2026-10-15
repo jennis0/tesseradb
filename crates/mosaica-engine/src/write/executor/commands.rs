@@ -478,12 +478,12 @@ impl Executor {
     /// Materialise every membership this batch spelled by exclusion, and answer the refusal where
     /// the layer cannot be read.
     ///
-    /// The view's entity set in a shard is every entity of that shard holding a row in it or
-    /// buffered for it, deleted entities excluded, and the membership is one `andnot` per shard of
-    /// the caller's list in that shard over it. On a
-    /// group-scoped layer the view is the artifact's own; on an entity-scoped one it is the union
-    /// of the views the layer is drawn on, which is the layer's whole corpus and the set the
-    /// build complements against (`layers.rs::resolve_artifact`, `0..high_water`).
+    /// A view's entity set in a shard is every entity of that shard holding a row in it or
+    /// buffered for it, deleted entities excluded; the membership is, shard by shard, the caller's
+    /// list `andnot`-ed over it. On a group-scoped layer the view is the artifact's own; on an
+    /// entity-scoped one it is the union of the views the layer is drawn on, which is the layer's
+    /// whole corpus and the set the build complements against (`layers.rs::resolve_artifact`,
+    /// `0..high_water`).
     ///
     /// Two divergences from the build's byte-identity are structural and stated rather than
     /// closed: an entity ingested after this step is in the inclusion spelling's membership and

@@ -5,7 +5,7 @@ use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
-use super::filter::{blocks_for, FilterBuilder};
+use super::filter::{blocks_for, FilterBuilder, HASHES};
 use super::page::{Page, PageBuilder};
 use super::{filter_offset, index_end, FilterShape, Header, Key, PAGE_SIZE};
 use crate::error::{Result, StoreError};
@@ -25,8 +25,6 @@ pub struct WrittenRun<K: Key> {
 /// A run is closed at the first key change once it holds `max_entries`, so a run exceeds that only
 /// by the entities of its last key, and the runs one writer emits have disjoint key ranges. A
 /// writer given no entries writes no file.
-///
-/// A writer made [`KeyRunWriter::with_key_filter`] gives each run a key filter.
 ///
 /// A file already at a run's name is an error, never overwritten. A writer dropped before
 /// [`KeyRunWriter::finish`] returns removes every file it created.
@@ -251,7 +249,8 @@ impl<K: Key> OpenRun<K> {
         let end = index_end(pages, K::WIDTH).expect("a written run's length fits");
         let offset = filter_offset(pages, K::WIDTH).expect("a written run's length fits");
         self.out.flush().map_err(|e| self.io(e))?;
-        let mut filter = FilterBuilder::new(blocks_for(keys));
+        let blocks = blocks_for(keys);
+        let mut filter = FilterBuilder::new(blocks);
         let file = File::open(&self.path).map_err(|e| self.io(e))?;
         let mut pages_in = BufReader::with_capacity(64 * PAGE_SIZE, file);
         pages_in
@@ -273,8 +272,8 @@ impl<K: Key> OpenRun<K> {
         }
         self.header.filter = FilterShape {
             offset,
-            blocks: blocks_for(keys),
-            hashes: filter.hashes(),
+            blocks,
+            hashes: HASHES,
         };
         Ok(())
     }

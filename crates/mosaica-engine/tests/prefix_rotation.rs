@@ -64,9 +64,7 @@ fn clone_prefix_and_flip(root: &Path, from: &str, to: &str) {
         .unwrap()
         .expect("the copy holds a publication");
     let mut side = newest.manifest;
-    for record in &mut side.shards.records {
-        record.identity = mosaica_store::manifest::shard_identity(&digest.into(), record.id);
-    }
+    side.stamp_identities(&hex).expect("a SHA-256 digest");
     rewrite_publication(&prefix_dir, newest.n, &side);
     std::fs::write(
         root.join("CURRENT"),

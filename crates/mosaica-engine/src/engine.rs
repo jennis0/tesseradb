@@ -706,10 +706,11 @@ fn reconstruct_writes(
         .shard_ids()
         .find(|shard| partition.shard(*shard).is_none())
     {
-        return Err(EngineError::Malformed(format!(
-            "the WAL opens point shard {opened}, which no side-manifest holds. Restore the \
-             side-manifest and log this bundle was written with"
-        )));
+        return Err(crate::write::unknown_shard(
+            opened,
+            "opens",
+            "no side-manifest holds",
+        ));
     }
     Ok(ReconstructedWrites {
         deny: DenyOverlays {
@@ -1082,8 +1083,8 @@ impl Engine {
         )
     }
 
-    /// [`Engine::open`], taking writes over a bundle of several point shards, and the log beside
-    /// one. For the engine's own tests of the writes several shards take.
+    /// [`Engine::open`], taking writes, and a log, over a bundle of several point shards. For this
+    /// crate's own tests.
     #[cfg(feature = "several-shard-writes")]
     pub fn open_writing_several_shards(
         bundle_root: &Path,

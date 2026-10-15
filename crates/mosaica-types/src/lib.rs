@@ -5,7 +5,7 @@ pub use identity::{
 };
 mod shard;
 pub use shard::{
-    check_room, check_shard_size, only, ItemAt, LayerSpace, ShardFull, ShardId, ShardLimit,
+    by_shard, check_room, check_shard_size, only, ItemAt, LayerSpace, ShardFull, ShardId, ShardLimit,
     ShardRow, ShardSizeError, ShardState, Target, ENTITY_END, SHARD_SIZE_DEFAULT,
 };
 
@@ -249,13 +249,9 @@ pub struct GenerationStamp {
 // something of. A 41 bundle is refused.
 // 43: a member or record pack lists its ordinals by a presence index, as the row-member file and
 // the containment partition do. A 42 bundle is refused.
-// 44: a partition's `SEGMENTS-<n>.json` names each shard's and each layer space's own
-// `SEGMENTS-<m>.json` by number, size and digest, flagging those holding deny state, and holds
-// `shards.next_id`. A shard's file carries its record, its `files`, its state, its identity, its
-// scoped columns, the runtime columns it has a base for and a slice version per level; a space's
-// carries its record, its `files` and the shards each deletion awaits. Runtime member packs, record
-// packs and content extents are digested. A derived file carries its level's slice version, a
-// content its withdrawn marker, and a unique key run its key filter. A 43 bundle is refused.
+// 44: a partition's `SEGMENTS-<n>.json` names each shard's and layer space's own file by number,
+// size and digest; shard records carry state, identity and slice versions; runtime packs and
+// content are digested; a unique key run carries a key filter. A 43 bundle is refused.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility.
 pub const BUNDLE_FORMAT: u32 = 44;

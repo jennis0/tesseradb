@@ -31,7 +31,7 @@ pub(super) fn joining_entities<W>(
 ) -> croaring::Bitmap {
     let mut restating = croaring::Bitmap::new();
     for entry in closed {
-        let joined = &entry.entity_ids[entry.rows().len() + entry.edits().len()..];
+        let joined = &entry.items[entry.rows().len() + entry.edits().len()..];
         let entities = entry
             .rows()
             .iter()
@@ -46,7 +46,7 @@ pub(super) fn joining_entities<W>(
 }
 
 /// The item one membership's row index names, and `None` for a row the source does not carry.
-pub(super) type EntityOfRow<'a> = &'a dyn Fn(usize, u32) -> Option<mosaica_types::ItemAt>;
+pub(super) type ItemOfRow<'a> = &'a dyn Fn(usize, u32) -> Option<mosaica_types::ItemAt>;
 
 fn row_not_carried(layer: &str, row: u32) -> String {
     format!("column '{layer}' names row {row}, which this batch does not carry")
@@ -57,7 +57,7 @@ fn row_not_carried(layer: &str, row: u32) -> String {
 /// at this commit.
 pub(super) fn grouped_growth<'a>(
     sources: impl Iterator<Item = &'a [mosaica_lifecycle::ResolvedMembership]>,
-    entity_of: EntityOfRow<'_>,
+    item_of: ItemOfRow<'_>,
     held: Option<HeldMembers<'_>>,
 ) -> Result<Vec<(WalRecord, usize)>, String> {
     use std::collections::BTreeMap;
@@ -76,9 +76,8 @@ pub(super) fn grouped_growth<'a>(
                 .or_insert_with(|| (index, join.space, BTreeMap::new()));
             let joining = ordinals.entry(ordinal).or_default();
             for row in &join.rows {
-                joining.push(
-                    entity_of(index, *row).ok_or_else(|| row_not_carried(&join.layer, *row))?,
-                );
+                joining
+                    .push(item_of(index, *row).ok_or_else(|| row_not_carried(&join.layer, *row))?);
             }
         }
     }
@@ -95,22 +94,20 @@ pub(super) fn grouped_growth<'a>(
         })
         .collect();
     // What the artifact already holds is not a join, or a restating row would append a record
-    // that changes nothing and pins the log. Read against the store before this commit applies,
-    // which holds shard 0's slice of each membership.
+    // that changes nothing and pins the log. Read against the store before this commit applies.
     if let Some(held) = held {
         for ((layer, level), (_, _, ordinals)) in &mut by_level {
             for (ordinal, joining) in ordinals.iter_mut() {
                 let Some(record) = held.store.get(layer, *level, *ordinal) else {
                     continue;
                 };
-                let _ = joining.try_for_each_mut(|shard, joining| {
-                    if shard == ShardId::ZERO
-                        && held.restating.is_none_or(|rows| joining.intersect(rows))
-                    {
-                        record.members.remove_from(joining);
+                if let Some(set) = joining.get(ShardId::ZERO) {
+                    let mut set = set.clone();
+                    if held.restating.is_none_or(|rows| set.intersect(rows)) {
+                        record.members.remove_from(&mut set);
+                        joining.set(ShardId::ZERO, set);
                     }
-                    Ok::<(), std::convert::Infallible>(())
-                });
+                }
             }
         }
     }
@@ -153,7 +150,7 @@ pub(super) fn joined_per_entry<W>(
                 });
                 let counted = seen.entry(at).or_default();
                 for row in &join.rows {
-                    let Some(item) = entry.entity_ids.get(*row as usize) else {
+                    let Some(item) = entry.items.get(*row as usize) else {
                         continue;
                     };
                     // Entity space is `u32`-wide, so the narrowing is total.
@@ -175,7 +172,7 @@ pub(super) fn joined_per_entry<W>(
 /// `(layer, level, key)`. Two sources naming one unknown key mint once and both join it.
 pub(super) fn grouped_mints<'a>(
     sources: impl Iterator<Item = &'a [mosaica_lifecycle::ResolvedMembership]>,
-    entity_of: EntityOfRow<'_>,
+    item_of: ItemOfRow<'_>,
 ) -> Result<MintPlan, String> {
     let mut wanted: std::collections::BTreeMap<MintKey, (usize, Vec<mosaica_types::ItemAt>)> =
         std::collections::BTreeMap::new();
@@ -194,9 +191,8 @@ pub(super) fn grouped_mints<'a>(
                 // The first source that named the key owns the mint.
                 .or_insert_with(|| (index, Vec::new()));
             for row in &join.rows {
-                members.push(
-                    entity_of(index, *row).ok_or_else(|| row_not_carried(&join.layer, *row))?,
-                );
+                members
+                    .push(item_of(index, *row).ok_or_else(|| row_not_carried(&join.layer, *row))?);
             }
         }
     }
@@ -212,14 +208,14 @@ pub(super) fn grouped_mints<'a>(
 }
 
 /// The growth records one closed window owes, in the order to append them. The entities are
-/// `entity_ids[row]`, the assignment this window just made.
+/// `items[row]`, the assignment this window just made.
 pub(super) fn growth_records<W>(
     closed: &[mosaica_lifecycle::ClosedEntry<W>],
     held: Option<HeldMembers<'_>>,
 ) -> Result<Vec<(WalRecord, usize)>, String> {
     grouped_growth(
         closed.iter().map(|entry| entry.memberships.as_slice()),
-        &|entry, row| closed[entry].entity_ids.get(row as usize).copied(),
+        &|entry, row| closed[entry].items.get(row as usize).copied(),
         held,
     )
 }
@@ -232,7 +228,7 @@ pub(super) fn mint_plan<W>(
 ) -> Result<Option<(MintPlan, Vec<mosaica_lifecycle::BatchEdge>)>, String> {
     let wanted = grouped_mints(
         closed.iter().map(|entry| entry.memberships.as_slice()),
-        &|entry, row| closed[entry].entity_ids.get(row as usize).copied(),
+        &|entry, row| closed[entry].items.get(row as usize).copied(),
     )?;
     let edges: Vec<mosaica_lifecycle::BatchEdge> =
         closed.iter().flat_map(|e| e.edges.iter().cloned()).collect();

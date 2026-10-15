@@ -54,23 +54,6 @@ pub(super) fn artifact_coordinates(
     (versions, still_true)
 }
 
-/// Whether `rel` is a member pack, a record pack or a content extent file of `partition`: a file
-/// [`SideManifests::artifact_files`] digests.
-fn names_artifact_file(partition: &str, rel: &str) -> bool {
-    let under = |root: String, dirs: &[&str]| {
-        rel.strip_prefix(&format!("{root}/"))
-            .and_then(|rest| rest.split_once('/'))
-            .is_some_and(|(_, tail)| {
-                dirs.iter()
-                    .any(|dir| tail.strip_prefix(dir).is_some_and(|t| t.starts_with('/')))
-            })
-    };
-    under(
-        mosaica_store::layout::layer_spaces_rel(partition),
-        &["records", "content"],
-    ) || under(mosaica_store::layout::shards_rel(partition), &["members"])
-}
-
 /// Why [`Executor::commit_side_manifest`] did not commit: the manifest would regress durable
 /// state, or the store could not write it.
 pub(super) enum ManifestCommitRefused {
@@ -203,6 +186,16 @@ impl HeldSpace {
             content_extents: record.content_extents.clone(),
         }
     }
+
+    /// The files the space's record packs and content extents name.
+    pub(in crate::write) fn files(&self) -> impl Iterator<Item = &str> {
+        let records = self.record_packs.iter().map(|extent| extent.path.as_str());
+        records.chain(
+            self.content_extents
+                .iter()
+                .flat_map(|extent| extent.files()),
+        )
+    }
 }
 
 impl SideManifests {
@@ -235,14 +228,7 @@ impl SideManifests {
             .membership_extents
             .iter()
             .map(|extent| extent.path.as_str())
-            .chain(self.spaces.values().flat_map(|held| {
-                let records = held.record_packs.iter().map(|extent| extent.path.as_str());
-                records.chain(
-                    held.content_extents
-                        .iter()
-                        .flat_map(|extent| extent.files()),
-                )
-            }))
+            .chain(self.spaces.values().flat_map(HeldSpace::files))
             .collect();
         self.artifact_files
             .retain(|rel, _| named.contains(rel.as_str()));
@@ -271,15 +257,15 @@ impl SideManifests {
         Ok(self.take_manifest_n())
     }
 
-    /// Raise the counter over every `SEGMENTS-<n>.json` on disc, and alarm if it moved: a floor
-    /// above the counter is evidence of a second writer, since in single-writer operation the two
-    /// are equal at every allocation.
+    /// Raise the counter over every `SEGMENTS-<n>.json` on disc, a partition's, a shard's or a
+    /// space's, and alarm if it moved: a floor above the counter is evidence of a second writer,
+    /// since in single-writer operation the two are equal at every allocation.
     pub(super) fn raise_manifest_floor(
         &mut self,
         bundle_root: &std::path::Path,
         health: &ExecutorHealth,
     ) -> mosaica_store::Result<()> {
-        let on_disk = mosaica_store::highest_side_manifest_n(bundle_root)?;
+        let on_disk = mosaica_store::highest_published_n(bundle_root)?;
         let floor = on_disk.map_or(0, |highest| highest + 1);
         if floor > self.next_n {
             health.foreign_side_manifests.fetch_add(1, Ordering::Relaxed);
@@ -347,7 +333,7 @@ impl Executor {
                 self.side_manifests.membership_extents.clone();
             next.partition
                 .files
-                .retain(|rel, _| !names_artifact_file(partition, rel));
+                .retain(|rel, _| !mosaica_store::layout::is_artifact_file(partition, rel));
             next.partition
                 .files
                 .extend(self.side_manifests.artifact_files.clone());
@@ -372,36 +358,20 @@ impl Executor {
             record.content_extents = contents.cloned().unwrap_or_default();
             record.level_versions = level_versions.remove(&record.space).unwrap_or_default();
         }
-        // Every write moves a level's slice version in every shard with its records version.
-        let slice_versions: Vec<mosaica_store::manifest::SliceVersion> =
-            next.layer_spaces
-                .iter()
-                .flat_map(|record| {
-                    record.level_versions.iter().map(|level| {
-                        mosaica_store::manifest::SliceVersion {
-                            space: record.space,
-                            level: level.level,
-                            version: level.version,
-                        }
-                    })
-                })
-                .collect();
-        for record in &mut next.shards.records {
-            record.slice_versions = slice_versions.clone();
-        }
+        next.slices_at_records_versions();
         next.file_derived(derived_extents);
         crate::geometry::check_manifest_publishable(partition_data, next)
             .map_err(ManifestCommitRefused::Regresses)?;
-        // A fold writes a new prefix, which holds none of the files the live one's name.
+        // A fold's new prefix holds none of the live prefix's files.
         let previous = match fold {
             Some(_) => None,
             None => self.side_manifests.refs.get(partition),
         };
         let staged = mosaica_store::stage_publication(prefix_dir, partition, n, next, previous)
             .map_err(ManifestCommitRefused::Store)?;
-        // The publication seam: the publication's files are on disc, the shard and space files
-        // among them, and nothing durable names them until the partition file is written. A
-        // fold's seam is the flip of `CURRENT` instead.
+        // The publication seam: the publication's files, its shard and space files among them,
+        // are on disc, and nothing durable names them until the partition file is written. A
+        // fold's seam is the flip of `CURRENT`.
         if fold.is_none() {
             self.pause_point(PauseSiteArg::BeforeManifestPublish);
         }

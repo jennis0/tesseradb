@@ -8,7 +8,7 @@ use mosaica_authz::{
 use mosaica_lifecycle::{IngestBuffer, Overlay};
 use mosaica_store::read::{Bundle, ShardData};
 use mosaica_store::vocabulary::Vocabularies;
-use mosaica_types::{EntityId, ItemAt, LayerSpace, ShardId};
+use mosaica_types::{EntityId, LayerSpace, ShardId};
 
 use crate::DenyMask;
 
@@ -436,11 +436,11 @@ impl Generation {
             .map(Arc::as_ref)
     }
 
-    /// The shard `item` is in. Panics where the generation holds no such shard: an item is read
-    /// from the generation it was resolved against, and every shard of it.
-    pub(crate) fn shard_of(&self, item: ItemAt) -> &Shard {
-        self.shard(item.shard)
-            .unwrap_or_else(|| panic!("the generation holds no shard {}", item.shard))
+    /// Shard `id`. Panics where the generation holds no such shard: an item is read from the
+    /// generation it was resolved against, and every shard of it.
+    pub(crate) fn shard_of(&self, id: ShardId) -> &Shard {
+        self.shard(id)
+            .unwrap_or_else(|| panic!("the generation holds no shard {id}"))
     }
 
     /// The generation's one shard; panics if it holds any other number.

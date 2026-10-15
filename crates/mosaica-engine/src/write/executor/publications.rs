@@ -702,8 +702,6 @@ impl Executor {
                 return;
             }
         };
-        // The publication seam is inside the commit: the merged segment's files are on disc and
-        // nothing durable names them until it returns.
         let refs = match self.commit_side_manifest(
             partition_data,
             &self.prefix_dir(&live),
@@ -1023,8 +1021,6 @@ impl Executor {
                 return;
             }
         };
-        // The publication seam is inside the commit: the coalesced extents are on disc and nothing
-        // durable names them until it returns.
         let refs = match self.commit_side_manifest(
             partition_data,
             &self.prefix_dir(&live),
@@ -1867,9 +1863,8 @@ impl Executor {
                 &live.vocabularies,
                 &live.bundle.manifest.vocabularies,
             );
-            // The publication seam, per partition, is inside the commit: the dispositions are
-            // WAL-durable either way, so a kill parked there loses only the restore path's
-            // freshness.
+            // A kill parked at the seam loses only the restore path's freshness: the dispositions
+            // are WAL-durable either way.
             if let Err(e) = self.commit_side_manifest(
                 partition_data,
                 &self.prefix_dir(&live),
@@ -2341,10 +2336,6 @@ impl Executor {
         // discards the flush: its files become orphans nothing references, the buffer is
         // retained, the next tick re-plans. The same posture as every other flush failure, and
         // the reason the write precedes the swap.
-        //
-        // And therefore the publication seam, inside the commit: the segment's files are on disc,
-        // the WAL still holds every row they carry, and nothing durable names them until it
-        // returns.
         let refs = match self.commit_side_manifest(
             partition_data,
             &self.prefix_dir(&live),

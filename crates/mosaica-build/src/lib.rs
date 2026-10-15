@@ -2383,21 +2383,6 @@ fn write_manifests(
         .first()
         .map(|shard| shard.unique.iter().map(|(attribute, _)| attribute.clone()).collect())
         .unwrap_or_default();
-    // Every level's version, which each shard's slice of the level starts at.
-    let slice_versions: Vec<mosaica_store::manifest::SliceVersion> = published_layers
-        .layer_spaces
-        .iter()
-        .flat_map(|space| {
-            space
-                .level_versions
-                .iter()
-                .map(|level| mosaica_store::manifest::SliceVersion {
-                    space: space.space,
-                    level: level.level,
-                    version: level.version,
-                })
-        })
-        .collect();
     let mut records = Vec::with_capacity(shards.len());
     for (index, shard) in shards.iter().enumerate() {
         let unique_indexes = shard
@@ -2422,7 +2407,6 @@ fn write_manifests(
             } else {
                 mosaica_types::ShardState::Sealed
             },
-            slice_versions: slice_versions.clone(),
             watermark: shard.span.len(),
             high_water: shard.span.len(),
             membership_extents: shard.membership_extents.clone(),
@@ -2464,6 +2448,7 @@ fn write_manifests(
         },
         layer_spaces: published_layers.layer_spaces.clone(),
     };
+    segments.slices_at_records_versions();
     // Empty where no artifact was published or a structure would not compose; the level then
     // composes on first use.
     segments.file_derived_by_shard(published_layers.derived_extents.clone());
@@ -2622,14 +2607,11 @@ fn write_manifests(
     // `mosaica-store`), so this build and a fold cannot serialise the same shape two different
     // ways and disagree about what a manifest digests to.
     let manifest_digest = write_manifest_json(&prefix_dir, &manifest)?;
-    // Each shard's identity, from the digest of the `MANIFEST.json` just written.
-    let bundle_identity =
-        mosaica_store::manifest::hex_32::decode(&manifest_digest).ok_or_else(|| {
+    segments
+        .stamp_identities(&manifest_digest)
+        .ok_or_else(|| {
             BuildError::Invalid(format!("'{manifest_digest}' is not a SHA-256 digest"))
         })?;
-    for record in &mut segments.shards.records {
-        record.identity = mosaica_store::manifest::shard_identity(&bundle_identity, record.id);
-    }
     mosaica_store::write_publication(&prefix_dir, PHASH, 0, &segments, None)?;
 
     // Everything the bundle names is now durable; `CURRENT` is written last and by rename, so

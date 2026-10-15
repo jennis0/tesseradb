@@ -284,11 +284,7 @@ fn a_publication_opens_a_shard_it_names_and_may_not_drop_a_served_one() {
     let one = mosaica_types::ShardId::new(1).unwrap();
 
     let mut manifest = next_manifest(&base, 0);
-    manifest
-        .shards
-        .records
-        .push(mosaica_store::manifest::ShardRecord::empty(one));
-    manifest.shards.next_id = 2;
+    fixture::add_shard_one(&mut manifest);
     let next = base
         .with_manifest(
             PARTITION,

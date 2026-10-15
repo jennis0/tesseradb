@@ -11,13 +11,13 @@ use std::fs;
 use std::path::Path;
 
 use mosaica_store::layout::{partition_dir, partitions_dir};
-use mosaica_store::manifest::{Manifest, SegmentsManifest, ShardRecord};
+use mosaica_store::manifest::{Manifest, SegmentsManifest};
 use mosaica_store::manifest_write::{write_current, write_manifest_json};
 use mosaica_store::{open_bundle, read_publication, write_publication, StoreError};
 use mosaica_types::ShardId;
 
 mod fixture;
-use fixture::hex_sha256;
+use fixture::{hex_sha256, shard_files};
 
 const SHARD0: mosaica_store::ShardLayout<'static> =
     mosaica_store::ShardLayout::new("default", ShardId::ZERO);
@@ -363,33 +363,11 @@ fn publish_two(
     previous: Option<&mosaica_store::manifest::PublishedRefs>,
 ) -> mosaica_store::manifest::PublishedRefs {
     let mut manifest = SegmentsManifest::empty();
-    manifest
-        .shards
-        .records
-        .push(ShardRecord::empty(ShardId::new(1).unwrap()));
-    manifest.shards.next_id = 2;
+    fixture::add_shard_one(&mut manifest);
     for (record, watermark) in manifest.shards.records.iter_mut().zip(watermarks) {
         record.watermark = watermark;
     }
     write_publication(prefix_dir, "default", n, &manifest, previous).expect("published")
-}
-
-/// The `SEGMENTS-<m>.json` numbers present in shard `id`'s directory, ascending.
-fn shard_files(prefix_dir: &Path, id: u32) -> Vec<u64> {
-    let dir = prefix_dir
-        .join(mosaica_store::ShardLayout::new("default", ShardId::new(id).unwrap()).rel());
-    let mut found: Vec<u64> = fs::read_dir(dir)
-        .unwrap()
-        .filter_map(|e| {
-            let name = e.unwrap().file_name().to_string_lossy().into_owned();
-            name.strip_prefix("SEGMENTS-")?
-                .strip_suffix(".json")?
-                .parse()
-                .ok()
-        })
-        .collect();
-    found.sort_unstable();
-    found
 }
 
 /// **A publication writes only the files that changed, then the partition file.** A shard whose
@@ -452,8 +430,8 @@ fn an_orphan_shard_file_raises_the_floor_and_is_pruned() {
     )
     .unwrap();
     assert_eq!(
-        orphaned.refs().shards[0].n,
-        1,
+        shard_files(&prefix_dir, 0),
+        vec![0, 1],
         "the changed shard's file was staged"
     );
     drop(orphaned);
@@ -514,9 +492,6 @@ fn pruning_keeps_every_shard_file_a_kept_partition_file_names() {
     );
 }
 
-/// **Every field the stage stores reads back as written**: the shards' counter, each shard's state,
-/// identity, scoped columns, runtime bases and slice versions, and the shards each of a space's
-/// deletions awaits.
 #[test]
 fn the_shard_and_space_fields_round_trip() {
     use mosaica_store::manifest::{

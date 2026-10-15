@@ -168,13 +168,23 @@ pub fn layer_in(manifest: &SegmentsManifest, space: mosaica_types::LayerSpace) -
 /// Write `manifest` as publication `n` of `prefix_dir`'s partition in place of the one there:
 /// its partition file and every shard and space file numbered `n` are replaced.
 pub fn rewrite_publication(prefix_dir: &Path, n: u64, manifest: &SegmentsManifest) {
-    let name = mosaica_store::layout::segments_name(n);
-    let dir = mosaica_store::layout::partition_dir(prefix_dir, PARTITION);
-    let _ = std::fs::remove_file(dir.join(&name));
-    for kind in ["shards", "layers"] {
-        for entry in std::fs::read_dir(dir.join(kind)).into_iter().flatten() {
-            let _ = std::fs::remove_file(entry.unwrap().path().join(&name));
-        }
+    let refs = mosaica_store::read_publication(prefix_dir, PARTITION, n)
+        .expect("the publication reads")
+        .refs;
+    let shards = refs.shards.iter().filter(|named| named.n == n);
+    let spaces = refs.layer_spaces.iter().filter(|named| named.n == n);
+    let written = shards
+        .map(|named| mosaica_store::ShardLayout::new(PARTITION, named.id).manifest_rel(n))
+        .chain(spaces.map(|named| {
+            mosaica_store::LayerSpaceLayout::new(PARTITION, named.space).manifest_rel(n)
+        }))
+        .chain([format!(
+            "{}/{}",
+            mosaica_store::layout::partition_rel(PARTITION),
+            mosaica_store::layout::segments_name(n)
+        )]);
+    for rel in written {
+        std::fs::remove_file(prefix_dir.join(rel)).expect("the publication's file is removed");
     }
     mosaica_store::write_publication(prefix_dir, PARTITION, n, manifest, None)
         .expect("the publication is written again");

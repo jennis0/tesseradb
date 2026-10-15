@@ -140,7 +140,8 @@ fn open_fixture(args: &Args) -> Fixture {
     let newest = mosaica_store::newest_publication(&prefix_dir, "default")
         .expect("the newest publication reads")
         .expect("a SEGMENTS-<n>.json");
-    let (segments_n, manifest): (u64, SegmentsManifest) = (newest.n, newest.manifest);
+    let segments_n = newest.n;
+    let manifest = newest.manifest;
 
     let layer = manifest
         .partition

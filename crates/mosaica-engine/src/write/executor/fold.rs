@@ -1526,8 +1526,7 @@ impl Executor {
             discard(&format!("its carry-forwards would not sync ({e})"));
             return;
         }
-        // The artifact packs and content extents the new prefix holds, digested in its own
-        // side-manifest as a publication's are.
+        // Digested in the new prefix's side-manifest, as a publication's are.
         let artifact_rels = repacked
             .members
             .iter()
@@ -1570,13 +1569,12 @@ impl Executor {
                 }
             };
         // The compacted shard's identity moves with the prefix's `MANIFEST.json`.
-        let Some(bundle_identity) = mosaica_store::manifest::hex_32::decode(&manifest_digest)
-        else {
+        if segments_manifest
+            .stamp_identities(&manifest_digest)
+            .is_none()
+        {
             discard("its MANIFEST.json digest is not 64 hexadecimal digits");
             return;
-        };
-        for record in &mut segments_manifest.shards.records {
-            record.identity = mosaica_store::manifest::shard_identity(&bundle_identity, record.id);
         }
         let fold_refs = match self.commit_side_manifest(
             partition_data,

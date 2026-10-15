@@ -112,7 +112,7 @@ impl UnallocatedRow {
     /// added to [`WalRow`] without a matching field here is a compile error at exactly this
     /// method rather than a silently-dropped column somewhere downstream.
     ///
-    /// `shard` is where the window allocated: a created row's shard. A join row is its item's.
+    /// `shard` is a created row's shard; a join row takes its item's.
     pub fn into_wal_row_with(self, pending: PendingItem, shard: ShardId) -> (WalRow, Vec<TermId>) {
         let entity_id = pending
             .entity_id
@@ -193,8 +193,8 @@ impl BatchArtifacts {
     }
 }
 
-/// An item a row edits, as the handler resolved it: its shard, the entity it leaves, its number,
-/// and the rows its new entity takes, awaiting that entity's id on the executor.
+/// An item a row edits, as the handler resolved it, and the rows its new entity takes, awaiting
+/// that entity's id on the executor.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnallocatedEdit {
     /// The item's shard, which its new entity is allocated in.
@@ -206,6 +206,13 @@ pub struct UnallocatedEdit {
     /// other row places the item in one more view and carries that view's position and
     /// group-scoped values alone. Every `join` is `None`: all of them take the new entity.
     pub rows: Vec<UnallocatedRow>,
+}
+
+impl UnallocatedEdit {
+    /// The item the edit leaves.
+    pub fn item(&self) -> ItemAt {
+        ItemAt::new(self.shard, self.old)
+    }
 }
 
 /// Why a command did not come back with a receipt. Distinct from [`ExecError`], which is why an

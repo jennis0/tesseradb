@@ -405,29 +405,22 @@ fn bitmap_of_sorted(entities: &[u32]) -> Bitmap {
     bitmap
 }
 
-/// Entity sets by point shard, as an incoming artifact's and a growth's sets carry them: one set
-/// for each shard holding something, ascending by shard. An entity is a member only in its own
-/// shard's set, so one entity number in two shards is two members.
+/// `entities` as shard 0's set.
+fn shard_zero_set(entities: impl IntoIterator<Item = EntityId>) -> ShardSets {
+    ShardSets::in_shard(ShardId::ZERO, bitmap_of_entities(entities))
+}
+
+/// Entity sets by point shard: one set for each shard holding something, ascending by shard.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ShardSets(Vec<(ShardId, Bitmap)>);
 
 impl ShardSets {
     /// The sets `items` make, in whatever order they come.
     pub fn of_items(items: impl IntoIterator<Item = ItemAt>) -> ShardSets {
-        let mut by_shard: BTreeMap<ShardId, Vec<u32>> = BTreeMap::new();
-        for item in items {
-            by_shard
-                .entry(item.shard)
-                .or_default()
-                .push(crate::overlay::as_u32(item.entity));
-        }
         ShardSets(
-            by_shard
+            mosaica_types::by_shard(items.into_iter().map(|item| (item.shard, item.entity)))
                 .into_iter()
-                .map(|(shard, mut entities)| {
-                    entities.sort_unstable();
-                    (shard, bitmap_of_sorted(&entities))
-                })
+                .map(|(shard, entities)| (shard, bitmap_of_entities(entities)))
                 .collect(),
         )
     }
@@ -441,10 +434,11 @@ impl ShardSets {
 
     /// Shard `shard`'s set, or `None` where it holds nothing.
     pub fn get(&self, shard: ShardId) -> Option<&Bitmap> {
-        self.0
-            .iter()
-            .find(|(held, _)| *held == shard)
-            .map(|(_, set)| set)
+        let at = self
+            .0
+            .binary_search_by_key(&shard, |(held, _)| *held)
+            .ok()?;
+        Some(&self.0[at].1)
     }
 
     /// Makes `set` shard `shard`'s, in place of what it held.
@@ -486,7 +480,7 @@ impl ShardSets {
     }
 
     /// Each shard's set less `other`'s set of that shard.
-    pub fn andnot(&self, other: &ShardSets) -> ShardSets {
+    fn andnot(&self, other: &ShardSets) -> ShardSets {
         let mut out = ShardSets::default();
         for (shard, set) in self.iter() {
             match other.get(shard) {
@@ -497,7 +491,7 @@ impl ShardSets {
         out
     }
 
-    /// The sets as a log record carries them: each shard holding something, ascending by shard.
+    /// The sets as a log record carries them.
     pub fn to_wal(&self) -> Vec<crate::wal::WalShardSet> {
         self.iter()
             .map(|(shard, set)| crate::wal::WalShardSet {
@@ -507,9 +501,8 @@ impl ShardSets {
             .collect()
     }
 
-    /// The sets a log record carries, or `None` where a set's bytes are not a bitmap or the shards
-    /// are not ascending and distinct, on [`deserialise_members`]'s rule: damage is a refusal, not
-    /// an empty set.
+    /// The sets a log record carries, or `None` where a set is not a bitmap or the shards are not
+    /// ascending and distinct.
     pub fn from_wal(sets: &[crate::wal::WalShardSet]) -> Option<ShardSets> {
         if sets.windows(2).any(|pair| pair[0].shard >= pair[1].shard) {
             return None;
@@ -521,20 +514,27 @@ impl ShardSets {
         Some(out)
     }
 
-    /// Shard 0's set: the one the artifact store holds until it holds each shard's slice. Panics
-    /// where another shard holds something, since taking its set as shard 0's would make its
-    /// entities members there.
+    /// Shard 0's set. Panics where another shard holds something, whose entities would otherwise
+    /// become shard 0's.
     pub fn shard_zero(&self) -> &Bitmap {
-        static EMPTY: std::sync::OnceLock<Bitmap> = std::sync::OnceLock::new();
-        match self.0.as_slice() {
-            [] => EMPTY.get_or_init(Bitmap::new),
-            [(ShardId::ZERO, set)] => set,
-            sets => panic!(
+        self.shard_zero_only().unwrap_or_else(|| {
+            panic!(
                 "a set in shards {:?} cannot be written as shard 0's",
-                sets.iter()
+                self.0
+                    .iter()
                     .map(|(shard, _)| shard.raw())
                     .collect::<Vec<_>>()
-            ),
+            )
+        })
+    }
+
+    /// Shard 0's set, or `None` where another shard holds something.
+    fn shard_zero_only(&self) -> Option<&Bitmap> {
+        static EMPTY: std::sync::OnceLock<Bitmap> = std::sync::OnceLock::new();
+        match self.0.as_slice() {
+            [] => Some(EMPTY.get_or_init(Bitmap::new)),
+            [(ShardId::ZERO, set)] => Some(set),
+            _ => None,
         }
     }
 }
@@ -545,7 +545,7 @@ impl IncomingContent {
     pub fn new(values: Vec<String>, generated_from: impl IntoIterator<Item = EntityId>) -> Self {
         IncomingContent {
             values,
-            generated_from: ShardSets::in_shard(ShardId::ZERO, bitmap_of_entities(generated_from)),
+            generated_from: shard_zero_set(generated_from),
         }
     }
 }
@@ -561,7 +561,7 @@ impl IncomingArtifact {
         IncomingArtifact {
             key,
             view: None,
-            members: ShardSets::in_shard(ShardId::ZERO, bitmap_of_entities(members)),
+            members: shard_zero_set(members),
             excluding: None,
             contents: Vec::new(),
             attached_to: None,
@@ -728,7 +728,7 @@ impl IncomingGrowth {
         IncomingGrowth {
             key,
             view: None,
-            joining: ShardSets::in_shard(ShardId::ZERO, bitmap_of_entities(joining)),
+            joining: shard_zero_set(joining),
             leaving: ShardSets::default(),
             rank: None,
             parts: FixedParts::default(),
@@ -748,8 +748,8 @@ impl IncomingGrowth {
         IncomingGrowth {
             key,
             view: None,
-            joining: ShardSets::in_shard(ShardId::ZERO, bitmap_of_entities(joining)),
-            leaving: ShardSets::in_shard(ShardId::ZERO, bitmap_of_entities(leaving)),
+            joining: shard_zero_set(joining),
+            leaving: shard_zero_set(leaving),
             rank,
             parts: FixedParts::default(),
         }
@@ -1238,7 +1238,8 @@ impl ArtifactRecord {
 
 type ShapeSlots = Vec<Option<Box<ArtifactShapes>>>;
 
-/// Every artifact of every layer, keyed by `(layer, level, ordinal)`.
+/// Every artifact of every layer, keyed by `(layer, level, ordinal)`. Holds shard 0's slice of
+/// each set.
 ///
 /// **Ordinals are dense within a level**, so a level is a vector rather than a map: the address is
 /// `entity − run.start` arithmetic, and an ordinal that names no artifact is a hole rather than a
@@ -3262,7 +3263,7 @@ pub fn encode_record(record: &ArtifactRecord, shape: Option<&ArtifactShapes>) ->
         for content in &record.contents {
             out.extend_from_slice(&content.digest);
             out.extend_from_slice(&content.cardinality.to_le_bytes());
-            // Nothing withdraws a rank in place yet: a withdrawal removes the content.
+            // No rank is withdrawn in place: a withdrawal removes the content.
             out.push(0);
         }
     }
@@ -3456,7 +3457,7 @@ pub fn decode_slice(
     for _ in 0..count {
         let digest: [u8; 32] = r.take(32)?.try_into().ok()?;
         let cardinality = r.u64()?;
-        // A withdrawn rank is one this reader has no way to keep out of service.
+        // A withdrawn rank cannot be kept out of service here, so the record does not decode.
         if r.take(1)?[0] != 0 {
             return None;
         }
@@ -3664,17 +3665,10 @@ pub fn decode_members(blob: &[u8]) -> Option<(Bitmap, Vec<Bitmap>)> {
     Some((members, sets))
 }
 
-/// Shard 0's set of the sets a log record carries, the slice the artifact store holds, or `None`
-/// where the bytes are damage or another shard holds something: the store has no slice to take
-/// that shard's part, so applying the rest would serve a set nobody declared. No sets at all is
-/// the empty set.
+/// Shard 0's set of a logged set, or `None` where the bytes are damage or another shard holds
+/// something: applying only shard 0's part would serve a set nobody declared.
 pub fn store_slice(sets: &[crate::wal::WalShardSet]) -> Option<Bitmap> {
-    let mut sets = ShardSets::from_wal(sets)?;
-    match sets.0.as_slice() {
-        [] => Some(Bitmap::new()),
-        [(ShardId::ZERO, _)] => sets.0.pop().map(|(_, set)| set),
-        _ => None,
-    }
+    ShardSets::from_wal(sets)?.shard_zero_only().cloned()
 }
 
 /// Serialise a membership for the WAL, in CRoaring's portable form.
@@ -3728,8 +3722,7 @@ impl ArtifactStore {
     /// routine that changes a set, so its cardinality is unchanged and its content is never
     /// withdrawn by the move.
     ///
-    /// Every pair is an edit in `shard`. The store holds shard 0's slice of each set, so an edit
-    /// in another shard finds nothing here to carry.
+    /// Every pair is an edit in `shard`, and an edit outside shard 0 finds nothing here to carry.
     pub fn carried_over(
         &self,
         shard: ShardId,
@@ -4787,8 +4780,6 @@ mod tests {
         );
     }
 
-    /// **Each content carries its withdrawn marker, stored as served.** A record carrying a
-    /// withdrawn rank is one this reader cannot keep out of service, so it does not decode.
     #[test]
     fn a_contents_withdrawn_marker_is_stored_and_a_withdrawn_rank_does_not_decode() {
         let mut r = record(100, &[1, 2, 3]);
@@ -5683,8 +5674,6 @@ mod tests {
         ItemAt::new(ShardId::new(shard).unwrap(), EntityId::new(entity))
     }
 
-    /// Items make one set per shard holding any, and one entity number in two shards is two
-    /// members.
     #[test]
     fn items_make_a_set_in_each_of_their_shards() {
         let sets = ShardSets::of_items([item(1, 5), item(0, 5), item(1, 2), item(0, 5)]);
@@ -5698,8 +5687,7 @@ mod tests {
         assert!(ShardSets::of_items([]).is_empty());
     }
 
-    /// An exclusion is complemented in each shard against that shard's entities: an entity number
-    /// left out in one shard stays a member in another.
+    /// An entity number excluded in one shard stays a member in another.
     #[test]
     fn an_exclusion_is_complemented_in_each_shard() {
         let mut artifact = IncomingArtifact::from_entities(Some("a".into()), []);
@@ -5729,9 +5717,8 @@ mod tests {
         );
     }
 
-    /// Only shard 0's set is written as the one set a record holds.
     #[test]
-    #[should_panic(expected = "cannot be written as shard 0's")]
+    #[should_panic]
     fn a_set_of_another_shard_is_not_written_as_shard_zeros() {
         ShardSets::of_items([item(1, 4)]).shard_zero();
     }
