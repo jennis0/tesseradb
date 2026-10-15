@@ -3155,6 +3155,7 @@ impl ArtifactStore {
 ///             | shape
 /// content    := digest (32 bytes, SHA-256 of the values)
 ///             | u64 LE cardinality                       -- the set's stored cardinality
+///             | u8 withdrawn                             -- 0: served at its rank
 /// attachment := u8 0                                     -- unattached
 ///             | u8 1 | u16 LE layer_len | layer bytes (UTF-8)
 ///                    | u32 LE space | u32 LE level | u32 LE ordinal | u64 LE target entity
@@ -3237,6 +3238,8 @@ pub fn encode_record(record: &ArtifactRecord, shape: Option<&ArtifactShapes>) ->
         for content in &record.contents {
             out.extend_from_slice(&content.digest);
             out.extend_from_slice(&content.cardinality.to_le_bytes());
+            // Nothing withdraws a rank in place yet: a withdrawal removes the content.
+            out.push(0);
         }
     }
     match &record.attached_to {
@@ -3429,6 +3432,10 @@ pub fn decode_slice(
     for _ in 0..count {
         let digest: [u8; 32] = r.take(32)?.try_into().ok()?;
         let cardinality = r.u64()?;
+        // A withdrawn rank is one this reader has no way to keep out of service.
+        if r.take(1)?[0] != 0 {
+            return None;
+        }
         let generated_from = sets.next()?;
         contents.push(ContentSet {
             // ⊘ The extent carries no values — see [`ContentSet::values`]. A restored content is
@@ -4745,6 +4752,31 @@ mod tests {
             round_trip(&r).is_none(),
             "and a larger one is damage too, though it fails containment for everybody"
         );
+    }
+
+    /// **Each content carries its withdrawn marker, stored as served.** A record carrying a
+    /// withdrawn rank is one this reader cannot keep out of service, so it does not decode.
+    #[test]
+    fn a_contents_withdrawn_marker_is_stored_and_a_withdrawn_rank_does_not_decode() {
+        let mut r = record(100, &[1, 2, 3]);
+        let digest = content_digest(&["a label".to_string()]);
+        r.contents = vec![ContentSet {
+            values: Some(vec!["a label".into()]),
+            digest,
+            generated_from: Bitmap::of(&[1, 2, 3]),
+            cardinality: 3,
+        }];
+        let mut blob = encode_record(&r, None);
+        let marker = blob
+            .windows(32)
+            .position(|window| window == digest)
+            .expect("the content's digest is stored")
+            + 32
+            + 8;
+        assert_eq!(blob[marker], 0, "served at its rank");
+        assert!(decode_record(r.entity, &blob, &encode_members(&r)).is_some());
+        blob[marker] = 1;
+        assert!(decode_record(r.entity, &blob, &encode_members(&r)).is_none());
     }
 
     #[test]

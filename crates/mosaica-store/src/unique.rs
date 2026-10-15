@@ -13,6 +13,10 @@
 //! outside a fold, so the caller drops deleted entities; after that at most one entity remains
 //! for any key.
 //!
+//! Every run a unique index is given carries a key filter ([`crate::key_index`]), so a lookup reads
+//! a run's pages only for the keys its filter passes, about one in a hundred of the keys it does
+//! not hold.
+//!
 //! A run is opened at its first lookup, never at open: a base run's key range comes from the
 //! manifest, so a lookup touches only the runs its keys fall in, and a page is checked the first
 //! time it is read.
@@ -269,7 +273,7 @@ impl UniqueSpill {
     ) -> Result<Vec<WrittenUniqueRun>> {
         Ok(match self {
             UniqueSpill::Int(spill) => spill
-                .finish(out_dir, stem, RUN_MAX_ENTRIES, |d: DuplicateKey<u64>| {
+                .finish(writer(out_dir, stem), |d: DuplicateKey<u64>| {
                     on_duplicate(DuplicateUniqueKey {
                         key: UniqueKey::Int(d.key),
                         first: d.first,
@@ -280,7 +284,7 @@ impl UniqueSpill {
                 .map(WrittenUniqueRun::of_int)
                 .collect(),
             UniqueSpill::Keyword(spill) => spill
-                .finish(out_dir, stem, RUN_MAX_ENTRIES, |d: DuplicateKey<u128>| {
+                .finish(writer(out_dir, stem), |d: DuplicateKey<u128>| {
                     on_duplicate(DuplicateUniqueKey {
                         key: UniqueKey::Keyword(d.key),
                         first: d.first,
@@ -292,6 +296,12 @@ impl UniqueSpill {
                 .collect(),
         })
     }
+}
+
+/// The writer of every run a unique index is given: split at [`RUN_MAX_ENTRIES`], with a key
+/// filter.
+fn writer<K: crate::key_index::Key>(out_dir: &Path, stem: &str) -> KeyRunWriter<K> {
+    KeyRunWriter::create(out_dir, stem, RUN_MAX_ENTRIES).with_key_filter()
 }
 
 fn width_mismatch() -> StoreError {
@@ -315,7 +325,7 @@ pub fn write_sorted_runs(
         source,
     })?;
     if kind.is_keyword() {
-        let mut writer = KeyRunWriter::<u128>::create(out_dir, stem, RUN_MAX_ENTRIES);
+        let mut writer = writer::<u128>(out_dir, stem);
         for &(key, entity) in entries {
             let UniqueKey::Keyword(k) = key else {
                 return Err(width_mismatch());
@@ -328,7 +338,7 @@ pub fn write_sorted_runs(
             .map(WrittenUniqueRun::of_keyword)
             .collect())
     } else {
-        let mut writer = KeyRunWriter::<u64>::create(out_dir, stem, RUN_MAX_ENTRIES);
+        let mut writer = writer::<u64>(out_dir, stem);
         for &(key, entity) in entries {
             let UniqueKey::Int(k) = key else {
                 return Err(width_mismatch());
@@ -364,9 +374,7 @@ pub fn merge_unique_runs(
         true => merge_runs::<u128>(
             inputs,
             |_, entity| retired.contains(entity),
-            out_dir,
-            stem,
-            RUN_MAX_ENTRIES,
+            writer(out_dir, stem),
         )?
         .into_iter()
         .map(WrittenUniqueRun::of_keyword)
@@ -374,9 +382,7 @@ pub fn merge_unique_runs(
         false => merge_runs::<u64>(
             inputs,
             |_, entity| retired.contains(entity),
-            out_dir,
-            stem,
-            RUN_MAX_ENTRIES,
+            writer(out_dir, stem),
         )?
         .into_iter()
         .map(WrittenUniqueRun::of_int)
@@ -863,5 +869,51 @@ mod tests {
         assert_eq!(found, vec![(0, 12), (1, 11), (1, 20), (3, 21)]);
         let again = UniqueIndex::open(&listed, KeyKind::Unsigned, prefix, Some(&index)).unwrap();
         assert!(Arc::ptr_eq(&again.live[0], &index.live[0]));
+    }
+
+    /// Runs written sorted, merged and spilled all carry a key filter, and a lookup answers from
+    /// them as from the entries.
+    #[test]
+    fn every_run_a_unique_index_is_given_carries_a_key_filter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prefix = tmp.path();
+        let dir = prefix.join("u");
+        let keys: Vec<UniqueKey> = (0..3000)
+            .map(|i| UniqueKey::keyword(&format!("v{i}")))
+            .collect();
+        let mut sorted: Vec<(UniqueKey, u32)> =
+            keys.iter().zip(0..).map(|(&k, e)| (k, e)).collect();
+        sorted.sort_unstable();
+        let written = write_sorted_runs(KeyKind::Keyword, &dir, "live", &sorted).unwrap();
+        let retired = croaring::Bitmap::of(&[7]);
+        let paths: Vec<PathBuf> = written.iter().map(|r| r.path.clone()).collect();
+        let merged = merge_unique_runs(&paths, &retired, &dir, "merged").unwrap();
+        let mut spill = UniqueSpill::create(KeyKind::Keyword, prefix, 1 << 20).unwrap();
+        for &(key, entity) in &sorted {
+            spill.push(key, entity).unwrap();
+        }
+        let spilled = spill.finish(&dir, "spilled", |_| unreachable!()).unwrap();
+        for run in written.iter().chain(&merged).chain(&spilled) {
+            assert!(
+                crate::key_index::verify_run(&run.path)
+                    .unwrap()
+                    .filter_blocks
+                    > 0
+            );
+        }
+
+        let listed = UniqueIndexRuns {
+            attribute: "name".into(),
+            base: merged.iter().map(|r| r.as_base(prefix).unwrap()).collect(),
+            live: Vec::new(),
+        };
+        let index = UniqueIndex::open(&listed, KeyKind::Keyword, prefix, None).unwrap();
+        let absent: Vec<UniqueKey> = (0..3000)
+            .map(|i| UniqueKey::keyword(&format!("w{i}")))
+            .collect();
+        assert_eq!(index.lookup(&absent).unwrap(), vec![]);
+        let found = index.lookup(&keys[..10]).unwrap();
+        let want: Vec<(usize, u32)> = (0..10).filter(|&e| e != 7).map(|e| (e, e as u32)).collect();
+        assert_eq!(found, want);
     }
 }

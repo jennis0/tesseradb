@@ -2301,12 +2301,25 @@ fn the_dead_bytes_route_dispatches_a_fold_on_a_bundle_with_nothing_deleted() {
     assert!(!root.join("v00000").exists());
     let generation = engine.generation();
     let prefix = root.join(&generation.prefix);
-    let segments_n = generation.bundle.partitions["default"].segments_n;
+    let partition = &generation.bundle.partitions["default"];
+    let segments_n = partition.segments_n;
+    let shard_files = partition.refs.shards.iter().map(|named| {
+        prefix.join(mosaica_store::ShardLayout::new("default", named.id).manifest_rel(named.n))
+    });
+    let space_files = partition.refs.layer_spaces.iter().map(|named| {
+        prefix.join(
+            mosaica_store::LayerSpaceLayout::new("default", named.space).manifest_rel(named.n),
+        )
+    });
     let manifests = [
         prefix.join("MANIFEST.json"),
         common::partition_dir(&root, &generation.prefix)
             .join(format!("SEGMENTS-{segments_n}.json")),
     ]
+    .into_iter()
+    .chain(shard_files)
+    .chain(space_files)
+    .collect::<Vec<_>>()
     .iter()
     .map(|path| {
         std::fs::metadata(path)
@@ -2317,7 +2330,7 @@ fn the_dead_bytes_route_dispatches_a_fold_on_a_bundle_with_nothing_deleted() {
     assert_eq!(
         unnamed_and_named(&root, &engine).0,
         manifests,
-        "the folded bundle holds nothing unnamed but its two manifests, as a freshly built one does"
+        "the folded bundle holds nothing unnamed but its manifests, as a freshly built one does"
     );
 }
 

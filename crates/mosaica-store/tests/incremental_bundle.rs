@@ -35,6 +35,7 @@ fn an_incremental_bundle_shares_its_base_mappings() {
             PublishedManifest {
                 manifest: next_manifest(&base, 3),
                 n: &base.partitions[PARTITION].segments_n + 1,
+                refs: Default::default(),
             },
         )
         .unwrap();
@@ -70,6 +71,7 @@ fn a_flushed_entity_resolves_and_the_base_is_untouched() {
             PublishedManifest {
                 manifest: next_manifest(&base, 3),
                 n: &base.partitions[PARTITION].segments_n + 1,
+                refs: Default::default(),
             },
         )
         .unwrap();
@@ -127,6 +129,7 @@ fn a_merge_substitutes_the_consumed_segments() {
             PublishedManifest {
                 manifest: next_manifest(&base, 2),
                 n: &base.partitions[PARTITION].segments_n + 1,
+                refs: Default::default(),
             },
         )
         .unwrap();
@@ -140,6 +143,7 @@ fn a_merge_substitutes_the_consumed_segments() {
             PublishedManifest {
                 manifest: next_manifest(&one, 2),
                 n: &one.partitions[PARTITION].segments_n + 1,
+                refs: Default::default(),
             },
         )
         .unwrap();
@@ -167,6 +171,7 @@ fn a_merge_substitutes_the_consumed_segments() {
             PublishedManifest {
                 manifest: next_manifest(&two, 4),
                 n: &two.partitions[PARTITION].segments_n + 1,
+                refs: Default::default(),
             },
         )
         .unwrap();
@@ -207,6 +212,7 @@ fn a_merge_whose_inputs_are_absent_is_refused() {
         PublishedManifest {
             manifest: next_manifest(&base, 3),
             n: &base.partitions[PARTITION].segments_n + 1,
+            refs: Default::default(),
         },
     );
     assert!(
@@ -232,7 +238,8 @@ fn an_unknown_view_is_refused() {
             extent,
             PublishedManifest {
                 manifest: next_manifest(&base, 3),
-                n: 1
+                n: 1,
+                refs: Default::default(),
             },
         )
         .is_err());
@@ -256,6 +263,7 @@ fn the_original_generation_is_unchanged_by_a_publication() {
             PublishedManifest {
                 manifest: next_manifest(&base, 3),
                 n: &base.partitions[PARTITION].segments_n + 1,
+                refs: Default::default(),
             },
         )
         .unwrap();
@@ -264,4 +272,55 @@ fn the_original_generation_is_unchanged_by_a_publication() {
     assert_eq!(view.segments.len(), 1);
     assert_eq!(view.row_space.extent_count(), 0);
     assert_eq!(view.row_space.total_rows(), 50);
+}
+
+/// **A publication may name a shard the bundle does not serve yet**, which is served from then on
+/// with every declared view empty; one that leaves out a served shard is refused.
+#[test]
+fn a_publication_opens_a_shard_it_names_and_may_not_drop_a_served_one() {
+    let dir = tempfile::tempdir().unwrap();
+    build_bundle(dir.path(), 50);
+    let base = Arc::new(open_bundle(dir.path()).unwrap());
+    let one = mosaica_types::ShardId::new(1).unwrap();
+
+    let mut manifest = next_manifest(&base, 0);
+    manifest
+        .shards
+        .records
+        .push(mosaica_store::manifest::ShardRecord::empty(one));
+    manifest.shards.next_id = 2;
+    let next = base
+        .with_manifest(
+            PARTITION,
+            PublishedManifest {
+                manifest,
+                n: 1,
+                refs: Default::default(),
+            },
+        )
+        .expect("a new shard is opened");
+    let opened = next.shard(one).expect("shard 1 is served");
+    assert_eq!(
+        opened.views[VIEW].segments.len(),
+        0,
+        "its declared view is empty"
+    );
+    assert_eq!(next.partitions[PARTITION].next_shard_id, 2);
+    assert!(Arc::ptr_eq(
+        &base.only_shard().views[VIEW].segments[0],
+        &next.shard(mosaica_types::ShardId::ZERO).unwrap().views[VIEW].segments[0]
+    ));
+
+    let mut without = next.partitions[PARTITION].side_manifest();
+    without.shards.records.remove(0);
+    assert!(next
+        .with_manifest(
+            PARTITION,
+            PublishedManifest {
+                manifest: without,
+                n: 2,
+                refs: Default::default(),
+            },
+        )
+        .is_err());
 }

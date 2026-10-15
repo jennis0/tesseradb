@@ -1398,7 +1398,9 @@ impl Executor {
             },
             shards: mosaica_store::manifest::Shards {
                 size: partition_data.shard_size,
+                next_id: partition_data.next_shard_id,
                 records: vec![mosaica_store::manifest::ShardRecord {
+                    state: live_record.state,
                     // Live: from the fold's inputs it would move back past every post-snapshot
                     // entity.
                     watermark: live_record.watermark,
@@ -1524,6 +1526,41 @@ impl Executor {
             discard(&format!("its carry-forwards would not sync ({e})"));
             return;
         }
+        // The artifact packs and content extents the new prefix holds, digested in its own
+        // side-manifest as a publication's are.
+        let artifact_rels = repacked
+            .members
+            .iter()
+            .map(|extent| extent.path.clone())
+            .chain(
+                repacked
+                    .records
+                    .values()
+                    .flatten()
+                    .map(|extent| extent.path.clone()),
+            )
+            .chain(
+                contents
+                    .values()
+                    .flatten()
+                    .flat_map(|extent| extent.files().map(String::from)),
+            );
+        let mut artifact_files = std::collections::BTreeMap::new();
+        for rel in artifact_rels {
+            match mosaica_store::digest_of(&to_prefix_dir.join(&rel)) {
+                Ok(digest) => {
+                    artifact_files.insert(rel, digest);
+                }
+                Err(e) => {
+                    discard(&format!("an artifact pack would not digest ({e})"));
+                    return;
+                }
+            }
+        }
+        segments_manifest
+            .partition
+            .files
+            .extend(artifact_files.clone());
         let manifest_digest =
             match mosaica_store::write_manifest_json(&to_prefix_dir, &bundle_manifest) {
                 Ok(digest) => digest,
@@ -1532,7 +1569,16 @@ impl Executor {
                     return;
                 }
             };
-        if let Err(e) = self.commit_side_manifest(
+        // The compacted shard's identity moves with the prefix's `MANIFEST.json`.
+        let Some(bundle_identity) = mosaica_store::manifest::hex_32::decode(&manifest_digest)
+        else {
+            discard("its MANIFEST.json digest is not 64 hexadecimal digits");
+            return;
+        };
+        for record in &mut segments_manifest.shards.records {
+            record.identity = mosaica_store::manifest::shard_identity(&bundle_identity, record.id);
+        }
+        let fold_refs = match self.commit_side_manifest(
             partition_data,
             &to_prefix_dir,
             &plan.partition,
@@ -1546,11 +1592,14 @@ impl Executor {
                 freed: &freed,
             }),
         ) {
-            discard(&format!(
-                "its SEGMENTS-{manifest_n}.json would not commit ({e})"
-            ));
-            return;
-        }
+            Ok(refs) => refs,
+            Err(e) => {
+                discard(&format!(
+                    "its SEGMENTS-{manifest_n}.json would not commit ({e})"
+                ));
+                return;
+            }
+        };
         // The commit point. Everything above is reversible; nothing below is. A kill parked before
         // this line leaves a complete, synced `v#####` tree `CURRENT` never named, and the startup
         // sweep reclaims it whole.
@@ -1596,6 +1645,10 @@ impl Executor {
             );
         }
         self.side_manifests.membership_extents = repacked.members;
+        self.side_manifests.artifact_files = artifact_files;
+        self.side_manifests
+            .refs
+            .insert(plan.partition.clone(), fold_refs);
         self.side_manifests.spaces = segments_manifest
             .layer_spaces
             .iter()

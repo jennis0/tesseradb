@@ -21,10 +21,13 @@ fn write_sorted<K: Key>(
     entries: &[(K, u32)],
     max: u64,
 ) -> Vec<WrittenRun<K>> {
+    write_with(KeyRunWriter::create(dir, stem, nz(max)), entries)
+}
+
+fn write_with<K: Key>(mut writer: KeyRunWriter<K>, entries: &[(K, u32)]) -> Vec<WrittenRun<K>> {
     let mut sorted = entries.to_vec();
     sorted.sort_unstable();
     sorted.dedup();
-    let mut writer = KeyRunWriter::create(dir, stem, nz(max));
     for (k, e) in sorted {
         writer.push(k, e).unwrap();
     }
@@ -328,8 +331,9 @@ fn check_spill<K: Key>(entries: &[(K, u32)], budget: usize, max: u64) {
         spill.push(k, e).unwrap();
     }
     let mut reported = BTreeMap::new();
+    let writer = KeyRunWriter::create(&out, "s", nz(max)).with_key_filter();
     let runs = spill
-        .finish(&out, "s", nz(max), |d| {
+        .finish(writer, |d| {
             let first = (d.first, d.entities);
             assert!(
                 reported.insert(d.key, first).is_none(),
@@ -358,7 +362,7 @@ fn check_spill<K: Key>(entries: &[(K, u32)], budget: usize, max: u64) {
     assert!(runs.windows(2).all(|w| w[0].max_key < w[1].min_key));
     let mut back = Vec::new();
     for r in &runs {
-        verify_run(&r.path).unwrap();
+        assert!(verify_run(&r.path).unwrap().filter_blocks > 0);
         back.extend(all(&open::<K>(&r.path)));
     }
     assert_eq!(back, expected);
@@ -426,7 +430,12 @@ fn a_merge_drops_exactly_the_retired_entities() {
     let mut model: BTreeSet<(u64, u32)> = a.iter().chain(&b).chain(&c).copied().collect();
     let out = dir.path().join("kept");
     std::fs::create_dir(&out).unwrap();
-    let kept = merge_runs::<u64>(&inputs, |_, _| false, &out, "m", nz(1000)).unwrap();
+    let kept = merge_runs::<u64>(
+        &inputs,
+        |_, _| false,
+        KeyRunWriter::create(&out, "m", nz(1000)),
+    )
+    .unwrap();
     let back: Vec<(u64, u32)> = kept
         .iter()
         .flat_map(|r| all(&open::<u64>(&r.path)))
@@ -438,8 +447,12 @@ fn a_merge_drops_exactly_the_retired_entities() {
     model.retain(|&(_, e)| !retired.contains(e));
     let out = dir.path().join("folded");
     std::fs::create_dir(&out).unwrap();
-    let folded =
-        merge_runs::<u64>(&inputs, |_, e| retired.contains(e), &out, "m", nz(1000)).unwrap();
+    let folded = merge_runs::<u64>(
+        &inputs,
+        |_, e| retired.contains(e),
+        KeyRunWriter::create(&out, "m", nz(1000)),
+    )
+    .unwrap();
     let back: Vec<(u64, u32)> = folded
         .iter()
         .flat_map(|r| all(&open::<u64>(&r.path)))
@@ -448,9 +461,13 @@ fn a_merge_drops_exactly_the_retired_entities() {
 
     let out = dir.path().join("none");
     std::fs::create_dir(&out).unwrap();
-    assert!(merge_runs::<u64>(&inputs, |_, _| true, &out, "m", nz(1000))
-        .unwrap()
-        .is_empty());
+    assert!(merge_runs::<u64>(
+        &inputs,
+        |_, _| true,
+        KeyRunWriter::create(&out, "m", nz(1000))
+    )
+    .unwrap()
+    .is_empty());
     assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0, "no file");
 }
 
@@ -465,8 +482,12 @@ fn a_merge_can_drop_entries_by_key() {
     let removed: Bitmap = (0..3000u32).filter(|e| e % 3 == 0).collect();
     let out = dir.path().join("folded");
     std::fs::create_dir(&out).unwrap();
-    let folded =
-        merge_runs::<u32>(&[input], |k, _| removed.contains(k), &out, "m", nz(1000)).unwrap();
+    let folded = merge_runs::<u32>(
+        &[input],
+        |k, _| removed.contains(k),
+        KeyRunWriter::create(&out, "m", nz(1000)),
+    )
+    .unwrap();
     let back: Vec<(u32, u32)> = folded
         .iter()
         .flat_map(|r| all(&open::<u32>(&r.path)))
@@ -732,6 +753,7 @@ fn a_header_whose_entry_count_does_not_fit_its_pages_is_refused() {
         pages: 9,
         min_key: 0,
         max_key: 7 * 7999,
+        filter: FilterShape::default(),
     };
     // Nine pages hold 9 to 9 × 1020 entries; 8001 fits them and is found wrong by a full read.
     for (entries, at_open) in [(8, true), (9 * 1020 + 1, true), (8001, false)] {
@@ -762,6 +784,7 @@ fn the_verifier_refuses_a_key_width_the_format_does_not_have() {
         pages: 0,
         min_key: 0,
         max_key: 0,
+        filter: FilterShape::default(),
     };
     let mut bytes = header.encode();
     bytes.extend_from_slice(&crc32fast::hash(&[]).to_le_bytes());
@@ -966,7 +989,14 @@ fn check_against_a_set_of_pairs<K: Key>(
     for (i, (entries, max)) in runs.iter().enumerate() {
         let entries: Vec<(K, u32)> = entries.iter().map(|&(k, e)| (key(k), e)).collect();
         model.extend(entries.iter().copied());
-        for w in write_sorted(dir.path(), &format!("in{i}"), &entries, *max) {
+        // Every other run carries a key filter.
+        let writer = KeyRunWriter::create(dir.path(), &format!("in{i}"), nz(*max));
+        let writer = if i % 2 == 1 {
+            writer.with_key_filter()
+        } else {
+            writer
+        };
+        for w in write_with(writer, &entries) {
             paths.push(w.path.clone());
             live.push(Arc::new(open::<K>(&w.path)));
         }
@@ -974,8 +1004,12 @@ fn check_against_a_set_of_pairs<K: Key>(
     let retired: Bitmap = retired.iter().copied().collect();
     let out = dir.path().join("merged");
     std::fs::create_dir(&out).unwrap();
-    let merged =
-        merge_runs::<K>(&paths, |_, e| retired.contains(e), &out, "m", nz(merge_max)).unwrap();
+    let merged = merge_runs::<K>(
+        &paths,
+        |_, e| retired.contains(e),
+        KeyRunWriter::create(&out, "m", nz(merge_max)).with_key_filter(),
+    )
+    .unwrap();
     let base: Vec<Arc<KeyRun<K>>> = merged.iter().map(|w| Arc::new(open(&w.path))).collect();
     let kept: BTreeSet<(K, u32)> = model
         .iter()
@@ -1133,5 +1167,277 @@ proptest! {
             &probes,
             merge_max,
         )?;
+    }
+}
+
+/// A filtered run of `entries` in `dir`, as one file.
+fn write_filtered<K: Key>(dir: &Path, stem: &str, entries: &[(K, u32)]) -> PathBuf {
+    let writer = KeyRunWriter::create(dir, stem, nz(u64::MAX)).with_key_filter();
+    let written = write_with(writer, entries);
+    assert_eq!(written.len(), 1);
+    written[0].path.clone()
+}
+
+/// The share of the `absent` keys in its key range that a filtered run of `keys` passes, after
+/// checking that it passes every key it holds and has blocks for ten bits a distinct key.
+fn false_positive_rate<K: Key>(keys: &[K], absent: &[K]) -> f64 {
+    let dir = tempfile::tempdir().unwrap();
+    let entries: Vec<(K, u32)> = keys
+        .iter()
+        .enumerate()
+        .map(|(i, &k)| (k, i as u32))
+        .collect();
+    let path = write_filtered(dir.path(), "fpr", &entries);
+    let distinct: BTreeSet<K> = keys.iter().copied().collect();
+    let check = verify_run(&path).unwrap();
+    assert_eq!(
+        check.filter_blocks,
+        (distinct.len() as u64 * 10).div_ceil(512)
+    );
+    let run = open::<K>(&path);
+    assert!(run.has_key_filter());
+    assert!(keys.iter().all(|&k| run.may_hold(k)), "no false negative");
+    let (lo, hi) = run.key_range().unwrap();
+    let in_range: Vec<K> = absent
+        .iter()
+        .copied()
+        .filter(|k| lo <= *k && *k <= hi && !distinct.contains(k))
+        .collect();
+    assert!(in_range.len() > absent.len() / 2);
+    let passed = in_range.iter().filter(|&&k| run.may_hold(k)).count();
+    let rate = passed as f64 / in_range.len() as f64;
+    let bits = check.filter_blocks as f64 * 512.0 / distinct.len() as f64;
+    eprintln!(
+        "{} keys: {bits:.2} bits a key, false positives {rate:.4}",
+        distinct.len()
+    );
+    rate
+}
+
+#[test]
+fn a_key_filter_passes_every_key_its_run_holds_and_about_one_absent_key_in_a_hundred() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = StdRng::seed_from_u64(41);
+    let n = 200_000;
+    let near = |rate: f64| (0.005..0.016).contains(&rate);
+
+    let keys: Vec<u64> = (0..n).map(|_| rng.gen()).collect();
+    let absent: Vec<u64> = (0..1_000_000).map(|_| rng.gen()).collect();
+    assert!(near(false_positive_rate(&keys, &absent)));
+
+    // Record numbers: the even ones held, the odd ones between them looked up.
+    let keys: Vec<u64> = (0..n as u64).map(|i| 2 * i).collect();
+    let absent: Vec<u64> = (0..n as u64).map(|i| 2 * i + 1).collect();
+    assert!(near(false_positive_rate(&keys, &absent)));
+
+    let keys: Vec<u128> = (0..n).map(|i| keyword_key(&format!("held {i}"))).collect();
+    let absent: Vec<u128> = (0..1_000_000)
+        .map(|i| keyword_key(&format!("absent {i}")))
+        .collect();
+    assert!(near(false_positive_rate(&keys, &absent)));
+
+    let keys: Vec<u32> = (0..n).map(|_| rng.gen()).collect();
+    let absent: Vec<u32> = (0..1_000_000).map(|_| rng.gen()).collect();
+    assert!(near(false_positive_rate(&keys, &absent)));
+
+    // A key held by several entities is one key to the filter.
+    let entries: Vec<(u64, u32)> = (0..3000u64).flat_map(|k| [(k, 1), (k, 2)]).collect();
+    let path = write_filtered(dir.path(), "repeated", &entries);
+    assert_eq!(
+        verify_run(&path).unwrap().filter_blocks,
+        3000 * 10 / 512 + 1
+    );
+    let run = open::<u64>(&path);
+    assert!((0..3000).all(|k| run.get(k).unwrap() == vec![1, 2]));
+}
+
+/// The filter's offset, blocks and hashes, from the header of the run at `path`.
+fn filter_shape(path: &Path) -> (usize, usize, u32) {
+    let bytes = std::fs::read(path).unwrap();
+    let u64_at = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap()) as usize;
+    let hashes = u32::from_le_bytes(bytes[80..84].try_into().unwrap());
+    (u64_at(64), u64_at(72), hashes)
+}
+
+#[test]
+fn a_damaged_or_truncated_key_filter_is_refused_at_open_and_by_the_verifier() {
+    let dir = tempfile::tempdir().unwrap();
+    let entries: Vec<(u64, u32)> = (0..1500u64).map(|k| (k * 1000, k as u32)).collect();
+    let path = write_filtered(dir.path(), "r", &entries);
+    let (offset, blocks, hashes) = filter_shape(&path);
+    let len = std::fs::metadata(&path).unwrap().len() as usize;
+    assert_eq!((len, hashes), (offset + blocks * 64 + 4, 7));
+    let pages = Header::decode(&std::fs::read(&path).unwrap())
+        .unwrap()
+        .pages as usize;
+    let index_end = PAGE_SIZE * (1 + pages) + pages * 8 + 4;
+    assert!(
+        offset > index_end && offset % 64 == 0,
+        "padding before the filter"
+    );
+
+    let copy = dir.path().join("copy.keys");
+    for (at, part) in [
+        (offset, RunPart::Filter),        // the first block
+        (len - 10, RunPart::Filter),      // the last block
+        (len - 2, RunPart::Filter),       // the filter's checksum
+        (index_end + 1, RunPart::Filter), // the padding before it
+        (66, RunPart::Header),            // the filter's offset
+        (73, RunPart::Header),            // its block count
+    ] {
+        std::fs::copy(&path, &copy).unwrap();
+        flip(&copy, at);
+        assert_eq!(
+            part_of(KeyRun::<u64>::open(&copy).err().unwrap()),
+            part,
+            "byte {at}"
+        );
+        assert_eq!(part_of(verify_run(&copy).unwrap_err()), part, "byte {at}");
+    }
+
+    let bytes = std::fs::read(&path).unwrap();
+    for cut in [len - 1, len - 4, len - 64, offset, index_end] {
+        std::fs::write(&copy, &bytes[..cut]).unwrap();
+        assert_eq!(
+            part_of(KeyRun::<u64>::open(&copy).err().unwrap()),
+            RunPart::Header,
+            "cut at {cut}"
+        );
+        assert_eq!(part_of(verify_run(&copy).unwrap_err()), RunPart::Header);
+    }
+
+    // A header that agrees with its checksum and names a filter the file cannot hold.
+    let mut header = Header::decode(&bytes).unwrap();
+    for shape in [
+        FilterShape::default(),
+        FilterShape {
+            offset: offset as u64 + 64,
+            ..header.filter
+        },
+        FilterShape {
+            hashes: 8,
+            ..header.filter
+        },
+        FilterShape {
+            hashes: 0,
+            ..header.filter
+        },
+        FilterShape {
+            blocks: 0,
+            ..header.filter
+        },
+    ] {
+        header.filter = shape;
+        let mut damaged = bytes.clone();
+        damaged[..PAGE_SIZE].copy_from_slice(&header.encode());
+        std::fs::write(&copy, &damaged).unwrap();
+        assert_eq!(
+            part_of(KeyRun::<u64>::open(&copy).err().unwrap()),
+            RunPart::Header,
+            "{shape:?}"
+        );
+    }
+
+    // A filter cleared under a checksum that matches opens, and the verifier finds the keys it
+    // no longer passes.
+    let mut cleared = bytes.clone();
+    cleared[offset..len - 4].fill(0);
+    let crc = crc32fast::hash(&cleared[offset..len - 4]);
+    cleared[len - 4..].copy_from_slice(&crc.to_le_bytes());
+    std::fs::write(&copy, &cleared).unwrap();
+    assert!(KeyRun::<u64>::open(&copy).is_ok());
+    assert_eq!(part_of(verify_run(&copy).unwrap_err()), RunPart::Filter);
+}
+
+/// A key the filter rejects is answered without reading a page; a key it passes reads the page
+/// its range points at.
+#[test]
+fn a_lookup_reads_no_page_for_a_key_the_filter_rejects() {
+    let dir = tempfile::tempdir().unwrap();
+    let entries: Vec<(u64, u32)> = (0..400u64).map(|k| (k * 10, k as u32)).collect();
+    let path = write_filtered(dir.path(), "r", &entries);
+    let rejected: Vec<u64> = (0..4000u64)
+        .filter(|k| k % 10 != 0 && !open::<u64>(&path).may_hold(*k))
+        .collect();
+    assert!(rejected.len() > 3000);
+    rewrite_page(&path, 0, |page| page[100] ^= 1);
+    let run = open::<u64>(&path);
+    assert_eq!(run.lookup_sorted(&rejected).unwrap(), vec![]);
+    assert!(rejected.iter().all(|&k| run.get(k).unwrap().is_empty()));
+    assert_eq!(part_of(run.get(50).unwrap_err()), RunPart::Page(0));
+}
+
+/// The shared vectors at `reference/vectors/key_run.json`: runs a filtered writer stores, byte
+/// for byte, which the oracle's reader reads back.
+fn key_run_vectors() -> serde_json::Value {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../reference/vectors/key_run.json"
+    );
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+/// A file's bytes as `[offset, hex]` runs of non-zero bytes, the vectors' form.
+fn as_segments(bytes: &[u8]) -> serde_json::Value {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == 0 {
+            at += 1;
+            continue;
+        }
+        let start = at;
+        while at < bytes.len() && bytes[at..bytes.len().min(at + 8)].iter().any(|&b| b != 0) {
+            at += 1;
+        }
+        let hex: String = bytes[start..at]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        out.push(serde_json::json!([start, hex]));
+    }
+    serde_json::Value::Array(out)
+}
+
+fn from_segments(len: usize, segments: &serde_json::Value) -> Vec<u8> {
+    let mut bytes = vec![0u8; len];
+    for segment in segments.as_array().unwrap() {
+        let start = segment[0].as_u64().unwrap() as usize;
+        let hex = segment[1].as_str().unwrap();
+        for (i, pair) in hex.as_bytes().chunks(2).enumerate() {
+            let byte = std::str::from_utf8(pair).unwrap();
+            bytes[start + i] = u8::from_str_radix(byte, 16).unwrap();
+        }
+    }
+    bytes
+}
+
+#[test]
+fn a_filtered_run_is_stored_as_the_shared_vectors_say() {
+    let dir = tempfile::tempdir().unwrap();
+    let vectors = key_run_vectors();
+    for (i, vector) in vectors["runs"].as_array().unwrap().iter().enumerate() {
+        let entries = vector["entries"].as_array().unwrap().iter().map(|entry| {
+            let key = u128::from_str_radix(entry[0].as_str().unwrap(), 16).unwrap();
+            (key, entry[1].as_u64().unwrap() as u32)
+        });
+        let stem = format!("v{i}");
+        let path = match vector["key_width"].as_u64().unwrap() {
+            8 => {
+                let entries: Vec<(u64, u32)> = entries.map(|(k, e)| (k as u64, e)).collect();
+                write_filtered(dir.path(), &stem, &entries)
+            }
+            16 => write_filtered(dir.path(), &stem, &entries.collect::<Vec<_>>()),
+            w => panic!("the vectors hold a run of {w}-byte keys"),
+        };
+        let written = std::fs::read(&path).unwrap();
+        let len = vector["length"].as_u64().unwrap() as usize;
+        assert!(
+            written == from_segments(len, &vector["bytes"]),
+            "run {i} is stored otherwise than the vectors say; if the format changed on purpose, \
+             set its length to {} and its bytes to {}",
+            written.len(),
+            as_segments(&written)
+        );
     }
 }

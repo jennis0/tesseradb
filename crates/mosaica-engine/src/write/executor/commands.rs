@@ -703,6 +703,7 @@ impl Executor {
             self.side_manifests
                 .derived_extents
                 .retain(|extent| extent.space != *space);
+            self.side_manifests.retain_named_artifact_files();
             // The deltas held for the tick describe forms that are going with the layer.
             self.pending_forms.retain(|(layer, _), _| layer != name);
             self.deps.artifact_projections.forget(name);

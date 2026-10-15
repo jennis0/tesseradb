@@ -41,8 +41,8 @@ use mosaica_types::{EntityId, ShardId};
 /// **The files are byte-copies and their digests are carried verbatim**, so the new prefix verifies
 /// in full under `open_bundle` — which is what lets the restart case here assert something. Only
 /// `MANIFEST.json` differs, in `provenance`, which is free-form and load-bearing for nothing: it is
-/// the smallest edit that rotates the digest `CURRENT` names, and the digest *is* the bundle
-/// identity.
+/// the smallest edit that rotates the digest `CURRENT` names, and each shard's stored identity is
+/// written again from it.
 fn clone_prefix_and_flip(root: &Path, from: &str, to: &str) {
     copy_tree(&root.join(from), &root.join(to));
 
@@ -58,6 +58,16 @@ fn clone_prefix_and_flip(root: &Path, from: &str, to: &str) {
     for byte in digest {
         hex.push_str(&format!("{byte:02x}"));
     }
+    // Each shard's stored identity, as a fold writes it from the new `MANIFEST.json`'s digest.
+    let prefix_dir = root.join(to);
+    let newest = mosaica_store::newest_publication(&prefix_dir, PARTITION)
+        .unwrap()
+        .expect("the copy holds a publication");
+    let mut side = newest.manifest;
+    for record in &mut side.shards.records {
+        record.identity = mosaica_store::manifest::shard_identity(&digest.into(), record.id);
+    }
+    rewrite_publication(&prefix_dir, newest.n, &side);
     std::fs::write(
         root.join("CURRENT"),
         serde_json::to_vec_pretty(&serde_json::json!({

@@ -116,7 +116,7 @@ pub enum ExecutorStartError {
     /// from the same seed.
     BundleLocked(crate::bundle_lock::BundleLockError),
     /// The bundle root could not be listed for the side-manifest numbers already on disc
-    /// (`mosaica_store::highest_side_manifest_n`). Refusing to start leaves the bundle untouched.
+    /// (`mosaica_store::highest_published_n`). Refusing to start leaves the bundle untouched.
     SideManifestScan(String),
 }
 
@@ -432,10 +432,11 @@ impl WritePath {
         // checked first, so a second `start_executor` on the same path cannot sweep twice.
         sweep_orphan_prefixes(&flush.bundle_root, &generation.load().prefix);
 
-        // Above every `SEGMENTS-<n>.json` on disc, not above what a manifest names: see
-        // [`SideManifests`]. The sweep above has already removed the unpublished
-        // prefixes, so what is left is what a reader could resolve.
-        let next_manifest_n = mosaica_store::highest_side_manifest_n(&flush.bundle_root)
+        // Above every `SEGMENTS-<n>.json` on disc, a shard's or a space's a crash left uncommitted
+        // among them, not above what a manifest names: see [`SideManifests`]. The sweep above has
+        // already removed the unpublished prefixes, so what is left is what a reader could
+        // resolve.
+        let next_manifest_n = mosaica_store::highest_published_n(&flush.bundle_root)
             .map_err(|e| ExecutorStartError::SideManifestScan(e.to_string()))?
             .map_or(1, |highest| highest + 1);
 
@@ -470,11 +471,19 @@ impl WritePath {
         // is where each held artifact list starts: see [`SideManifests`] for why they are held
         // rather than re-cloned from a (stale) live manifest at each publication.
         // A dropped layer's extents are not carried.
-        let (seeded_membership_extents, seeded_derived_extents, seeded_spaces) = {
+        let (
+            seeded_membership_extents,
+            seeded_derived_extents,
+            seeded_spaces,
+            seeded_artifact_files,
+            seeded_refs,
+        ) = {
             let generation = generation.load();
             let mut members = Vec::new();
             let mut derived = Vec::new();
             let mut spaces = std::collections::BTreeMap::new();
+            let mut artifact_files = std::collections::BTreeMap::new();
+            let mut refs = std::collections::BTreeMap::new();
             let write_shard = live.shards[0].id;
             for partition in generation.bundle.partitions.values() {
                 let Some(shard) = partition.shard(write_shard) else {
@@ -501,8 +510,23 @@ impl WritePath {
                         .filter(|record| live.holds_space(record.space))
                         .map(|record| (record.space, executor::HeldSpace::of(record))),
                 );
+                // The digests a side-manifest gave the packs and content a running service
+                // wrote; a build's are in `MANIFEST.json`.
+                let packs = record.membership_extents.iter().map(|e| e.path.as_str());
+                let spaced = partition.layer_spaces.iter().flat_map(|space| {
+                    let records = space.record_packs.iter().map(|e| e.path.as_str());
+                    records.chain(space.content_extents.iter().flat_map(|e| e.files()))
+                });
+                for rel in packs.chain(spaced) {
+                    if let Some(digest) = partition.manifest.files.get(rel) {
+                        artifact_files.insert(rel.to_string(), digest.clone());
+                    }
+                }
             }
-            (members, derived, spaces)
+            for (phash, partition) in &generation.bundle.partitions {
+                refs.insert(phash.clone(), partition.refs.clone());
+            }
+            (members, derived, spaces, artifact_files, refs)
         };
         // What replay left in the log and no manifest carries: the same publication is owed for
         // it, and without this a node that restarted between a batch and its tick would wait for
@@ -540,6 +564,8 @@ impl WritePath {
                         seeded_membership_extents,
                         seeded_derived_extents,
                         seeded_spaces,
+                        seeded_artifact_files,
+                        seeded_refs,
                         growth_unpublished,
                     ),
                     coalesce: executor::Background::sharing(

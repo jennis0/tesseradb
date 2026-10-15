@@ -1376,6 +1376,7 @@ pub fn file_derived(
             space: item.space,
             level: item.level,
             level_version: item.level_version,
+            slice_version: item.level_version,
             view: item.view.clone(),
             incarnation: item.incarnation,
             form: item.form.clone(),

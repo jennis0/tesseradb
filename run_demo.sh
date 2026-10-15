@@ -299,18 +299,16 @@ items_of() {
     *) echo 0 ;;
   esac
 }
-# A built bundle's items: the high water of every shard in its newest side-manifest.
+# A built bundle's items: the high water of every shard in its newest publication, read by the
+# oracle's reader of the layout.
 high_water_of() {
   python3 -c "
-import json, pathlib, sys
-bundle = pathlib.Path(sys.argv[1])
-prefix = json.loads((bundle / 'CURRENT').read_text())['prefix']
-side = max(
-    (bundle / prefix / 'partitions' / 'default').glob('SEGMENTS-*.json'),
-    key=lambda path: int(path.stem.split('-', 1)[1]),
-)
-print(sum(record['high_water'] for record in json.loads(side.read_text())['shards']['records']))
-" "$1"
+import pathlib, sys
+sys.path.insert(0, sys.argv[2])
+from oracle.layout import live_prefix_dir, newest_publication
+_, side = newest_publication(live_prefix_dir(pathlib.Path(sys.argv[1])))
+print(sum(record['high_water'] for record in side['shards']['records']))
+" "$1" "$REPO/reference"
 }
 prose_of()   { case "$1" in 2m4|notebook*) echo '"title","abstract"' ;; 25m) echo '"title"' ;; *) echo '' ;; esac; }
 # The column the viewer titles a record by: `title` wherever the scale declares it, else none.

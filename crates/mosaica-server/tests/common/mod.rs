@@ -357,20 +357,13 @@ pub fn newest_shard_record(root: &Path) -> serde_json::Value {
     newest_side_manifest(root)["shards"]["records"][0].take()
 }
 
-/// The newest `SEGMENTS-<n>.json` in the live prefix of the bundle at `root`.
+/// The newest publication in the live prefix of the bundle at `root`, every shard and space file
+/// it names merged in.
 pub fn newest_side_manifest(root: &Path) -> serde_json::Value {
-    let partition = mosaica_store::layout::partition_dir(&live_prefix(root).1, "default");
-    let (_, newest) = std::fs::read_dir(&partition)
-        .expect("the partition directory")
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name().into_string().ok()?;
-            let n: u64 = name.strip_prefix("SEGMENTS-")?.strip_suffix(".json")?.parse().ok()?;
-            Some((n, entry.path()))
-        })
-        .max_by_key(|(n, _)| *n)
+    let published = mosaica_store::newest_publication(&live_prefix(root).1, "default")
+        .expect("the publication reads")
         .expect("a side-manifest");
-    serde_json::from_slice(&std::fs::read(newest).unwrap()).unwrap()
+    serde_json::to_value(&published.manifest).unwrap()
 }
 
 static STANDARD: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();

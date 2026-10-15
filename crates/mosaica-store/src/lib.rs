@@ -70,15 +70,17 @@ pub use flush::{digest_of, write_flush_segment, FlushInput, FlushOutput, FlushRo
 pub use fold::{fold_row_space, FoldRowSpaceOutput, FoldRowSpaceSpec, FoldSegmentInput};
 pub use layout::{view_path_components, LayerSpaceLayout, ShardLayout, GROUP_SEPARATOR};
 pub use manifest_write::{
-    fsync_dir, fsync_written, prune_superseded_segments_manifests, write_and_fsync, write_current,
-    write_manifest_json, write_segments_manifest, SIDE_MANIFESTS_KEPT,
+    fsync_dir, fsync_written, prune_superseded_segments_manifests, stage_publication,
+    write_and_fsync, write_current, write_manifest_json, write_publication, StagedPublication,
+    SIDE_MANIFESTS_KEPT,
 };
 pub use pairs::PairsParquetWriter;
 pub use permutation::{EntityBuckets, Permutation, RowEntities, RowSpace, SegmentExtent};
 pub use read::{
-    first_code_at_or_past, highest_side_manifest_n, open_bundle, open_written_prefix, tile_ranges,
-    tile_ranges_all, tile_ranges_within, Bundle, ColumnsRef, CutIndex, MortonSlice, PartitionData,
-    ScalarSlice, SegmentData, ShardData, ViewData,
+    first_code_at_or_past, highest_published_n, highest_side_manifest_n, newest_publication,
+    open_bundle, open_written_prefix, read_publication, tile_ranges, tile_ranges_all,
+    tile_ranges_within, Bundle, ColumnsRef, CutIndex, MortonSlice, PartitionData, ScalarSlice,
+    SegmentData, ShardData, ViewData,
 };
 pub use reclaim::{hard_link_forward, reclaim_prefix, reclaim_unpublished_prefix};
 pub use row_entity::{write_row_entity, RowToEntity, ROW_ENTITY_FILE};

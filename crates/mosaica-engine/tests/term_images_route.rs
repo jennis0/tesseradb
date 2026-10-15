@@ -344,50 +344,23 @@ fn authorise(engine: &Engine, credential: &[u8]) -> mosaica_engine::Session {
     }
 }
 
-/// Rewrite every `SEGMENTS-<n>.json` under `root` to name no term-image extent.
+/// Rewrite the publication `root` serves to name no term-image extent.
 ///
 /// A view whose segments manifest names no extent for it has no image table, which is the state
 /// `open_bundle` reaches without reading a file (`read.rs::open_term_images`). It is what an
 /// ingest-only deployment carries until its first fold. The image files stay on disk and stay in
 /// the digest maps, so the bundle verifies exactly as it did.
 fn drop_term_image_extents(root: &Path) {
-    fn walk(dir: &Path, found: &mut usize) {
-        for entry in std::fs::read_dir(dir).expect("the bundle is readable") {
-            let path = entry.expect("a directory entry").path();
-            if path.is_dir() {
-                walk(&path, found);
-                continue;
-            }
-            let is_segments = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("SEGMENTS-") && name.ends_with(".json"));
-            if !is_segments {
-                continue;
-            }
-            let mut manifest: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(&path).expect("the manifest is readable"))
-                    .expect("the manifest is JSON");
-            let extents = manifest["shards"]["records"][0]
-                .get_mut("term_image_extents")
-                .expect("a shard record carries the field");
+    common::edit_side_manifest(root, |manifest| {
+        for record in &mut manifest.shards.records {
             assert!(
-                !extents.as_array().expect("an array").is_empty(),
-                "{path:?} named no term-image extent before it was stripped"
+                !record.term_image_extents.is_empty(),
+                "shard {} named no term-image extent before it was stripped",
+                record.id
             );
-            *extents = serde_json::Value::Array(Vec::new());
-            std::fs::write(
-                &path,
-                serde_json::to_vec_pretty(&manifest).expect("the manifest serialises"),
-            )
-            .expect("the manifest is writable");
-            *found += 1;
+            record.term_image_extents.clear();
         }
-    }
-
-    let mut found = 0;
-    walk(root, &mut found);
-    assert!(found > 0, "no segments manifest was found under {root:?}");
+    });
 }
 
 fn whole_extent() -> ViewportRequest<'static> {

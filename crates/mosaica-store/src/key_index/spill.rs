@@ -7,7 +7,6 @@
 //! one more pass and never more memory. A bucket holding one key is routed by entity in the same
 //! way.
 
-use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -97,18 +96,15 @@ impl<K: Key> KeySpill<K> {
         )
     }
 
-    /// Write every entry, sorted, as runs under `out_dir` (named and split as [`KeyRunWriter`]
-    /// names and splits them), and call `on_duplicate` once for each key held by more than one
-    /// entity.
+    /// Write every entry, sorted, as runs through `writer`, and call `on_duplicate` once for each
+    /// key held by more than one entity.
     pub fn finish(
         mut self,
-        out_dir: &Path,
-        stem: &str,
-        max_entries: NonZeroU64,
+        writer: KeyRunWriter<K>,
         on_duplicate: impl FnMut(DuplicateKey<K>),
     ) -> Result<Vec<WrittenRun<K>>> {
         let mut sink = Sink {
-            writer: KeyRunWriter::create(out_dir, stem, max_entries),
+            writer,
             last: None,
             group: None,
             on_duplicate,

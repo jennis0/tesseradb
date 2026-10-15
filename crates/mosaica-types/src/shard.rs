@@ -92,6 +92,19 @@ impl TryFrom<u32> for LayerSpace {
     }
 }
 
+/// Whether a point shard takes new items at its high water. A sealed shard takes new items only
+/// into ids its compactions freed, and edits of its own items; nothing reopens it.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "lowercase")
+)]
+pub enum ShardState {
+    Open,
+    Sealed,
+}
+
 /// What a resolved `mosaica_id` names: an item's entity in its shard, or an artifact's or a layer's
 /// entity in its layer space.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]

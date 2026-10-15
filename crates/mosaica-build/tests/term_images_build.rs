@@ -473,14 +473,26 @@ fn rewrite_manifest(prefix: &Path, root: &Path, edit: impl FnOnce(&mut serde_jso
     .unwrap();
 }
 
-/// Edit the partition's `SEGMENTS-0.json`. Nothing digests a side-manifest, so an edit to one
-/// needs no other file moved with it: the loader verifies the files it *names*.
+/// Edit the partition's publication 0, as one JSON value with every shard and space file merged
+/// in, and write it back in its place.
 fn rewrite_side_manifest(prefix: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
-    let path = mosaica_store::layout::partition_dir(prefix, "default").join("SEGMENTS-0.json");
-    let mut manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    edit(&mut manifest);
-    std::fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    let published = mosaica_store::read_publication(prefix, "default", 0).unwrap();
+    let mut value = serde_json::to_value(&published.manifest).unwrap();
+    edit(&mut value);
+    let manifest: mosaica_store::manifest::SegmentsManifest =
+        serde_json::from_value(value).unwrap();
+    let name = mosaica_store::layout::segments_name(0);
+    let partition = mosaica_store::layout::partition_dir(prefix, "default");
+    std::fs::remove_file(partition.join(&name)).unwrap();
+    for kind in ["shards", "layers"] {
+        for entry in std::fs::read_dir(partition.join(kind))
+            .into_iter()
+            .flatten()
+        {
+            let _ = std::fs::remove_file(entry.unwrap().path().join(&name));
+        }
+    }
+    mosaica_store::write_publication(prefix, "default", 0, &manifest, None).unwrap();
 }
 
 /// A file's prefix-relative name, as the manifests carry it.

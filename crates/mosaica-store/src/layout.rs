@@ -38,6 +38,22 @@ pub fn partition_dir(prefix_dir: &Path, partition: &str) -> PathBuf {
     prefix_dir.join(partition_rel(partition))
 }
 
+/// The name of the `SEGMENTS-<n>.json` publication `n` writes in a partition's, a shard's or a
+/// layer space's directory.
+pub fn segments_name(n: u64) -> String {
+    format!("SEGMENTS-{n}.json")
+}
+
+/// A partition's shard directories, prefix-relative.
+pub fn shards_rel(partition: &str) -> String {
+    format!("{}/shards", partition_rel(partition))
+}
+
+/// A partition's layer-space directories, prefix-relative.
+pub fn layer_spaces_rel(partition: &str) -> String {
+    format!("{}/layers", partition_rel(partition))
+}
+
 /// One component for a plain view, two for a group's: `:` is not a path character everywhere.
 pub fn view_path_components(view_id: &str) -> Vec<&str> {
     match view_id.split_once(GROUP_SEPARATOR) {
@@ -60,7 +76,12 @@ impl<'a> ShardLayout<'a> {
 
     /// The shard's directory, prefix-relative: `partitions/<partition>/shards/<shard>`.
     pub fn rel(self) -> String {
-        format!("{}/shards/{}", partition_rel(self.partition), self.shard)
+        format!("{}/{}", shards_rel(self.partition), self.shard)
+    }
+
+    /// The shard's `SEGMENTS-<n>.json`, prefix-relative.
+    pub fn manifest_rel(self, n: u64) -> String {
+        format!("{}/{}", self.rel(), segments_name(n))
     }
 
     pub fn dir(self, prefix_dir: &Path) -> PathBuf {
@@ -188,7 +209,12 @@ impl<'a> LayerSpaceLayout<'a> {
 
     /// The space's directory, prefix-relative: `partitions/<partition>/layers/<space>`.
     pub fn rel(self) -> String {
-        format!("{}/layers/{}", partition_rel(self.partition), self.space)
+        format!("{}/{}", layer_spaces_rel(self.partition), self.space)
+    }
+
+    /// The space's `SEGMENTS-<n>.json`, prefix-relative.
+    pub fn manifest_rel(self, n: u64) -> String {
+        format!("{}/{}", self.rel(), segments_name(n))
     }
 
     pub fn dir(self, prefix_dir: &Path) -> PathBuf {

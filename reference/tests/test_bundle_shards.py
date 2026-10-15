@@ -24,7 +24,7 @@ from oracle import occupancy, viewport
 from oracle.bundle import Bundle
 from oracle.harness import cli_build, ensure_cli_built, write_deployment
 from oracle.identity import ROUNDS, by_shard, invert_item, item_of_key
-from oracle.layout import partition_dir
+from oracle.layout import partition_dir, shard_dir
 from oracle.mask import mask_of
 from oracle.tenancy import HolderCount
 
@@ -53,13 +53,35 @@ def _bundle(root: Path, records: list[dict]) -> Path:
     (root / "CURRENT").write_text(
         json.dumps({"prefix": "v00000", "manifest_digest": hashlib.sha256(manifest).hexdigest()})
     )
-    side = {"files": {}, "dict_extents": [], "shards": {"size": 7, "records": records}}
+    named = []
+    for record in records:
+        data = json.dumps({**record, "files": {}}).encode()
+        shard = shard_dir(prefix, shard=record["id"])
+        shard.mkdir(parents=True, exist_ok=True)
+        (shard / "SEGMENTS-0.json").write_bytes(data)
+        digest = hashlib.sha256(data).hexdigest()
+        named.append(
+            {"id": record["id"], "n": 0, "size": len(data), "sha256": digest, "denies": False}
+        )
+    next_id = max((record["id"] for record in records), default=-1) + 1
+    side = {
+        "files": {},
+        "dict_extents": [],
+        "shards": {"size": 7, "next_id": next_id, "files": named},
+        "layer_spaces": [],
+    }
     (partition / "SEGMENTS-0.json").write_text(json.dumps(side))
     return root
 
 
 def _record(shard: int) -> dict:
-    return {"id": shard, "high_water": 12, "segments": []}
+    return {
+        "id": shard,
+        "state": "open",
+        "identity": "00" * 32,
+        "high_water": 12,
+        "segments": [],
+    }
 
 
 @pytest.mark.parametrize(

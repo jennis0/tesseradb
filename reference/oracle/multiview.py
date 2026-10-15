@@ -701,10 +701,13 @@ def _is_usable_bundle(bundle_root: Path, wanted: dict) -> bool:
         manifest = json.loads((prefix_dir / "MANIFEST.json").read_text())
         if manifest.get("identity") is None:
             return False
-        for partition in (prefix_dir / "partitions").iterdir():
-            if len(list(partition.glob("SEGMENTS-*.json"))) > 1:
-                return False
-        return True
+        # A folded bundle holds one publication too, at a number past 0.
+        published = [
+            p.name
+            for p in prefix_dir.glob("partitions/*/SEGMENTS-*.json")
+            if p.name != "SEGMENTS-0.json"
+        ]
+        return not published
     except (OSError, KeyError, ValueError):
         return False
 

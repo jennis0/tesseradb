@@ -13,6 +13,7 @@ import itertools
 import json
 import os
 import random
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -23,6 +24,10 @@ from .control import wait_for
 from .cycle import Cycle, fold_sentences, safe
 from .holdout import HoldOut
 from .split import bundle_manifest, declared_entities, declared_layers
+
+# The oracle's reader of a publication, so the churn and the suites read one layout one way.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "reference"))
+from oracle.layout import newest_publication  # noqa: E402
 
 
 class Churn(Cycle):
@@ -394,7 +399,8 @@ def served_state(bundle: Path) -> dict:
     frees: list[str] = []
     held: list[str] = []
     for partition in sorted(path for path in (root / "partitions").iterdir() if path.is_dir()):
-        for record in newest_side_manifest(partition)["shards"]["records"]:
+        _, published = newest_publication(root, partition.name)
+        for record in published["shards"]["records"]:
             postings = partition / "shards" / str(record["id"]) / "terms" / "postings.arrow"
             out["postings_bytes"] += postings.stat().st_size
             out["postings_bytes"] += sum((root / path).stat().st_size for path in record["deltas"])
@@ -406,16 +412,6 @@ def served_state(bundle: Path) -> dict:
     out["free_ids"] = sum(map(roaring_cardinality, frees))
     out["held_ids"] = sum(map(roaring_cardinality, held))
     return out
-
-
-def newest_side_manifest(partition: Path) -> dict:
-    """The `SEGMENTS-<n>.json` of the largest `n` in one partition directory."""
-    numbered = [
-        (int(path.stem.split("-", 1)[1]), path) for path in partition.glob("SEGMENTS-*.json")
-    ]
-    if not numbered:
-        raise FileNotFoundError(f"{partition} holds no SEGMENTS-<n>.json")
-    return json.loads(max(numbered)[1].read_text())
 
 
 def roaring_cardinality(encoded: str) -> int:

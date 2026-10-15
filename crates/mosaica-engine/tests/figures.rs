@@ -844,6 +844,19 @@ fn a_restart_reads_the_counts_and_the_denied_labels_back() {
     }
     let engine = fx.open();
     check(&fx, &engine, "after the restart");
+    // Filed under the identity the fold stored for the shard, which the restart read back rather
+    // than derived.
+    let stored = side_manifest(&fx.root).only_shard().identity;
+    let hex: String = stored.iter().map(|byte| format!("{byte:02x}")).collect();
+    let filed: Vec<String> = std::fs::read_dir(fx.cache.join(mosaica_engine::figures::FIGURES_DIR))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        filed,
+        vec![hex],
+        "the figures are filed under the stored identity"
+    );
     let stats = engine.figures_stats();
     assert_eq!(stats.fills, 0, "nothing was walked again");
     assert!(stats.loads > 0, "the counts were read back");

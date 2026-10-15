@@ -515,7 +515,8 @@ fn check_edited_items(
 /// **Every unique index agrees with its column, and no key names two live entities.**
 ///
 /// Each run is digested against the manifest, since the open-time sweep defers key runs to their
-/// pages' own checksums, and checked page by page ([`mosaica_store::key_index::verify_run`]).
+/// pages' own checksums, checked page by page ([`mosaica_store::key_index::verify_run`]), and
+/// must carry a key filter.
 /// The runs are then merged, the manifest's tombstoned entities dropped, into one sorted stream,
 /// and the column's values for every entity not tombstoned are sorted into another through the
 /// same spill; the two must be equal entry for entry, and no key may carry two entities. The
@@ -579,6 +580,11 @@ fn check_unique_indexes(
             }
             let checked = mosaica_store::key_index::verify_run(&path)
                 .map_err(|e| BuildError::Invalid(format!("{rel}: {e}")))?;
+            if checked.filter_blocks == 0 {
+                return Err(BuildError::Invalid(format!(
+                    "{rel}: a unique index run carries no key filter; rebuild the index"
+                )));
+            }
             let width = if kind == KeyKind::Keyword { 16 } else { 8 };
             if checked.key_width != width {
                 return Err(BuildError::Invalid(format!(

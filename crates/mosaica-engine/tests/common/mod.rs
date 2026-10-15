@@ -165,20 +165,30 @@ pub fn layer_in(manifest: &SegmentsManifest, space: mosaica_types::LayerSpace) -
     &layer.expect("a registered layer holds the space").declaration.name
 }
 
-/// The file of [`side_manifest`].
-pub fn side_manifest_path(root: &Path) -> PathBuf {
-    let n = open_bundle(root).expect("the bundle opens").partitions[PARTITION].segments_n;
-    partition_dir(root, &current_prefix(root)).join(format!("SEGMENTS-{n}.json"))
+/// Write `manifest` as publication `n` of `prefix_dir`'s partition in place of the one there:
+/// its partition file and every shard and space file numbered `n` are replaced.
+pub fn rewrite_publication(prefix_dir: &Path, n: u64, manifest: &SegmentsManifest) {
+    let name = mosaica_store::layout::segments_name(n);
+    let dir = mosaica_store::layout::partition_dir(prefix_dir, PARTITION);
+    let _ = std::fs::remove_file(dir.join(&name));
+    for kind in ["shards", "layers"] {
+        for entry in std::fs::read_dir(dir.join(kind)).into_iter().flatten() {
+            let _ = std::fs::remove_file(entry.unwrap().path().join(&name));
+        }
+    }
+    mosaica_store::write_publication(prefix_dir, PARTITION, n, manifest, None)
+        .expect("the publication is written again");
 }
 
-/// Rewrite the side-manifest `root` serves with `edit` applied. It carries no digest of its own,
-/// so this needs no resealing.
+/// Rewrite the side-manifest `root` serves with `edit` applied.
 pub fn edit_side_manifest(root: &Path, edit: impl FnOnce(&mut SegmentsManifest)) {
-    let path = side_manifest_path(root);
-    let mut manifest: SegmentsManifest =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let n = open_bundle(root).expect("the bundle opens").partitions[PARTITION].segments_n;
+    let prefix_dir = root.join(current_prefix(root));
+    let mut manifest = mosaica_store::read_publication(&prefix_dir, PARTITION, n)
+        .expect("the served publication reads")
+        .manifest;
     edit(&mut manifest);
-    std::fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    rewrite_publication(&prefix_dir, n, &manifest);
 }
 
 /// The bundle's shard size, and each shard's id and high water, as an open reads them.
@@ -730,9 +740,9 @@ pub fn set_tenancy(bundle_root: &Path, number: EntityId, tenancy: u16) {
 
     let prefix_dir = bundle_root.join("v00000");
     let bits = bits_of(&[(number.raw() as u32, tenancy)]);
-    let path = partition_dir(bundle_root, "v00000").join("SEGMENTS-0.json");
-    let mut manifest: SegmentsManifest =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let mut manifest = mosaica_store::read_publication(&prefix_dir, PARTITION, 0)
+        .unwrap()
+        .manifest;
     let tenancy_rel = SHARD.tenancy_rel();
     for (bit, file) in mosaica_store::tenancy::write(&prefix_dir.join(&tenancy_rel), &bits).unwrap()
     {
@@ -747,7 +757,7 @@ pub fn set_tenancy(bundle_root: &Path, number: EntityId, tenancy: u16) {
             .tenancy_index
             .push(TenancyBit { bit, path: rel });
     }
-    std::fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    rewrite_publication(&prefix_dir, 0, &manifest);
 }
 
 /// The item the unique `id` value `source` names, deleted items left out.

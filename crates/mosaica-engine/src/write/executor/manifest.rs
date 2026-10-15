@@ -54,6 +54,23 @@ pub(super) fn artifact_coordinates(
     (versions, still_true)
 }
 
+/// Whether `rel` is a member pack, a record pack or a content extent file of `partition`: a file
+/// [`SideManifests::artifact_files`] digests.
+fn names_artifact_file(partition: &str, rel: &str) -> bool {
+    let under = |root: String, dirs: &[&str]| {
+        rel.strip_prefix(&format!("{root}/"))
+            .and_then(|rest| rest.split_once('/'))
+            .is_some_and(|(_, tail)| {
+                dirs.iter()
+                    .any(|dir| tail.strip_prefix(dir).is_some_and(|t| t.starts_with('/')))
+            })
+    };
+    under(
+        mosaica_store::layout::layer_spaces_rel(partition),
+        &["records", "content"],
+    ) || under(mosaica_store::layout::shards_rel(partition), &["members"])
+}
+
 /// Why [`Executor::commit_side_manifest`] did not commit: the manifest would regress durable
 /// state, or the store could not write it.
 pub(super) enum ManifestCommitRefused {
@@ -84,13 +101,28 @@ pub(super) fn write_deny_state(
     for space in spaces.keys() {
         mosaica_store::manifest::layer_space_mut(&mut manifest.layer_spaces, *space);
     }
+    let shards: Vec<ShardId> = manifest.shards.records.iter().map(|r| r.id).collect();
     for record in &mut manifest.layer_spaces {
         let overlay = match spaces.get(&record.space) {
             Some(parts) => &*parts.overlay,
             None => &Overlay::new(),
         };
         record.deny = EntitySet::of(overlay.suppressed_set());
-        record.tombstones = EntitySet::of(overlay.deleted_set());
+        let deleted = overlay.deleted_set();
+        record.tombstones = EntitySet::of(deleted);
+        // Every deletion is owed by every shard: each shard's compaction removes it from its own
+        // slice.
+        record.owed = if deleted.is_empty() {
+            Vec::new()
+        } else {
+            shards
+                .iter()
+                .map(|&shard| mosaica_store::manifest::OwedDeletions {
+                    shard,
+                    artifacts: EntitySet::of(deleted),
+                })
+                .collect()
+        };
     }
 }
 
@@ -146,6 +178,14 @@ pub(in crate::write) struct SideManifests {
     /// `membership_extents`, which they travel with: a membership without its record or its
     /// content withholds the artifact.
     pub(super) spaces: std::collections::BTreeMap<LayerSpace, HeldSpace>,
+    /// The digest of every member pack, record pack and content extent file a publication into
+    /// the current prefix wrote, restated into every side-manifest's `files` as the extent lists
+    /// are; a fold replaces it wholesale.
+    pub(super) artifact_files:
+        std::collections::BTreeMap<String, mosaica_store::manifest::FileDigest>,
+    /// The shard and space files each partition's newest side-manifest names, which the next
+    /// publication keeps where its own would be the same bytes.
+    pub(super) refs: std::collections::BTreeMap<String, mosaica_store::manifest::PublishedRefs>,
 }
 
 /// One layer space's files as [`SideManifests`] holds them.
@@ -172,6 +212,8 @@ impl SideManifests {
         membership_extents: Vec<mosaica_store::manifest::MembershipExtent>,
         derived_extents: Vec<mosaica_store::manifest::DerivedExtent>,
         spaces: std::collections::BTreeMap<LayerSpace, HeldSpace>,
+        artifact_files: std::collections::BTreeMap<String, mosaica_store::manifest::FileDigest>,
+        refs: std::collections::BTreeMap<String, mosaica_store::manifest::PublishedRefs>,
         growth_unpublished: bool,
     ) -> Self {
         SideManifests {
@@ -182,7 +224,41 @@ impl SideManifests {
             membership_extents,
             derived_extents,
             spaces,
+            artifact_files,
+            refs,
         }
+    }
+
+    /// Keep in [`Self::artifact_files`] only what the held lists still name.
+    pub(super) fn retain_named_artifact_files(&mut self) {
+        let named: std::collections::BTreeSet<&str> = self
+            .membership_extents
+            .iter()
+            .map(|extent| extent.path.as_str())
+            .chain(self.spaces.values().flat_map(|held| {
+                let records = held.record_packs.iter().map(|extent| extent.path.as_str());
+                records.chain(
+                    held.content_extents
+                        .iter()
+                        .flat_map(|extent| extent.files()),
+                )
+            }))
+            .collect();
+        self.artifact_files
+            .retain(|rel, _| named.contains(rel.as_str()));
+    }
+
+    /// Digest each of `rels` under `prefix_dir` onto [`Self::artifact_files`].
+    pub(super) fn digest_artifact_files<'a>(
+        &mut self,
+        prefix_dir: &std::path::Path,
+        rels: impl IntoIterator<Item = &'a str>,
+    ) -> mosaica_store::Result<()> {
+        for rel in rels {
+            let digest = mosaica_store::digest_of(&prefix_dir.join(rel))?;
+            self.artifact_files.insert(rel.to_string(), digest);
+        }
+        Ok(())
     }
 
     /// Take the next side-manifest number, having raised the floor over disc.
@@ -231,17 +307,19 @@ impl SideManifests {
 impl Executor {
     /// Restates the live registry, roster, shard size and declarations, checks the manifest does
     /// not regress durable state, stamps its level versions, restates the extent lists unless a
-    /// fold brings its own, and writes it; a refusal writes nothing. Also prunes the partition's
-    /// superseded side-manifests, unless it is stepped down.
+    /// fold brings its own, and writes it: the shard and space files that changed, then the
+    /// partition file that commits them. A refusal writes nothing. Also prunes the partition's
+    /// superseded side-manifests, unless it is stepped down. Returns the files the partition file
+    /// names.
     pub(super) fn commit_side_manifest(
-        &self,
+        &mut self,
         partition_data: &mosaica_store::read::PartitionData,
         prefix_dir: &std::path::Path,
         partition: &str,
         n: u64,
         next: &mut mosaica_store::manifest::SegmentsManifest,
         fold: Option<FoldDerived<'_>>,
-    ) -> Result<(), ManifestCommitRefused> {
+    ) -> Result<mosaica_store::manifest::PublishedRefs, ManifestCommitRefused> {
         self.write_live_state(next, fold.is_some());
         if let Some(fold) = &fold {
             next.only_shard_mut().held_entities.push(fold.freed.clone());
@@ -262,10 +340,17 @@ impl Executor {
         let (mut level_versions, derived_extents) = self.live.with_artifacts(|store| {
             artifact_coordinates(store, derived, pending, &spaces, &enumerated)
         });
-        // The clone may predate these extents, so they are restated from the held lists.
+        // The clone may predate these extents, so they are restated from the held lists, and
+        // their files' digests with them.
         if fold.is_none() {
             next.only_shard_mut().membership_extents =
                 self.side_manifests.membership_extents.clone();
+            next.partition
+                .files
+                .retain(|rel, _| !names_artifact_file(partition, rel));
+            next.partition
+                .files
+                .extend(self.side_manifests.artifact_files.clone());
         }
         // One record per registered layer, at its space; a dropped layer's leaves the manifest.
         next.layer_spaces
@@ -287,11 +372,46 @@ impl Executor {
             record.content_extents = contents.cloned().unwrap_or_default();
             record.level_versions = level_versions.remove(&record.space).unwrap_or_default();
         }
+        // Every write moves a level's slice version in every shard with its records version.
+        let slice_versions: Vec<mosaica_store::manifest::SliceVersion> =
+            next.layer_spaces
+                .iter()
+                .flat_map(|record| {
+                    record.level_versions.iter().map(|level| {
+                        mosaica_store::manifest::SliceVersion {
+                            space: record.space,
+                            level: level.level,
+                            version: level.version,
+                        }
+                    })
+                })
+                .collect();
+        for record in &mut next.shards.records {
+            record.slice_versions = slice_versions.clone();
+        }
         next.file_derived(derived_extents);
         crate::geometry::check_manifest_publishable(partition_data, next)
             .map_err(ManifestCommitRefused::Regresses)?;
-        mosaica_store::write_segments_manifest(prefix_dir, partition, n, next)
+        // A fold writes a new prefix, which holds none of the files the live one's name.
+        let previous = match fold {
+            Some(_) => None,
+            None => self.side_manifests.refs.get(partition),
+        };
+        let staged = mosaica_store::stage_publication(prefix_dir, partition, n, next, previous)
             .map_err(ManifestCommitRefused::Store)?;
+        // The publication seam: the publication's files are on disc, the shard and space files
+        // among them, and nothing durable names them until the partition file is written. A
+        // fold's seam is the flip of `CURRENT` instead.
+        if fold.is_none() {
+            self.pause_point(PauseSiteArg::BeforeManifestPublish);
+        }
+        let refs = staged.commit().map_err(ManifestCommitRefused::Store)?;
+        // A fold's are the live prefix's only once `CURRENT` names its prefix.
+        if fold.is_none() {
+            self.side_manifests
+                .refs
+                .insert(partition.to_string(), refs.clone());
+        }
         // Nothing is pruned on a stepped-down partition: the manifests between its older served
         // `n` and the newest are what a reopen walks back through.
         if !partition_data.stepped_down() {
@@ -310,7 +430,7 @@ impl Executor {
                 ),
             }
         }
-        Ok(())
+        Ok(refs)
     }
 
     /// Restate the live registry, roster, shard size and runtime declarations into a side-manifest

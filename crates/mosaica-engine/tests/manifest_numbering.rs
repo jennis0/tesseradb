@@ -388,3 +388,87 @@ fn pruning_bounds_the_directory_and_keeps_the_highest_number() {
          like a second writer"
     );
 }
+
+/// **A publication writes only the shard files it changes.** A suppression changes the shard's
+/// deny state, so its publication writes the shard's file; a declared shard size is the
+/// partition's alone, so its publication writes the partition file and names the shard's file
+/// where the suppression left it. Both survive a restart.
+#[test]
+fn a_publication_that_changes_no_shard_keeps_the_shards_file() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let entities = source_to_new_map(&root, "v00000");
+    let newest = |root: &Path| {
+        mosaica_store::newest_publication(&root.join(current_prefix(root)), PARTITION)
+            .unwrap()
+            .expect("a publication")
+    };
+    let suppressed = mosaica_types::EntityId::new(entities[&1]);
+    let size = 1 << 20;
+    let (shard_n, partition_n) = {
+        let engine = open_engine_publishing(
+            &root,
+            &tmp.path().join("cache"),
+            &tmp.path().join("wal.log"),
+        );
+        engine
+            .accept_change(suppressed, mosaica_lifecycle::wal::ChangeOp::Suppress)
+            .expect("a deny is never refused");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while engine.write_executor_stats().overlay_publications < 1 {
+            assert!(Instant::now() < deadline, "the deny never published");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let denied = newest(&root);
+        assert_eq!(
+            denied.refs.shards[0].n, denied.n,
+            "the suppression wrote the shard's file"
+        );
+        assert!(
+            denied.refs.shards[0].denies,
+            "and flagged it as holding deny state"
+        );
+
+        engine.declare_shards(size).expect("the size is declared");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while newest(&root).manifest.shards.size != size {
+            assert!(Instant::now() < deadline, "the size never published");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let declared = newest(&root);
+        assert!(declared.n > denied.n);
+        assert_eq!(
+            declared.refs.shards[0].n, denied.n,
+            "the shard's file is the one the suppression wrote"
+        );
+        let shard_dir = SHARD.dir(&root.join(current_prefix(&root)));
+        assert!(!shard_dir
+            .join(mosaica_store::layout::segments_name(declared.n))
+            .exists());
+        (denied.n, declared.n)
+    };
+    let engine = open_engine(
+        &root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal-2.log"),
+    );
+    let partition = &engine.generation().bundle.partitions[PARTITION];
+    assert_eq!(partition.segments_n, partition_n);
+    assert_eq!(partition.refs.shards[0].n, shard_n);
+    assert_eq!(partition.shard_size, size);
+    assert_eq!(
+        partition
+            .only_shard()
+            .record
+            .deny
+            .entities()
+            .unwrap()
+            .to_vec(),
+        vec![suppressed.raw() as u32]
+    );
+}

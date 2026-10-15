@@ -34,7 +34,7 @@ use mosaica_store::manifest::{
     TenancyBit,
 };
 use mosaica_store::tenancy::bits_of;
-use mosaica_store::{write_segments_manifest, StoreError};
+use mosaica_store::{read_publication, write_publication, StoreError};
 use mosaica_types::{EntityId, ShardId, TermId, SMALL_TERM_THRESHOLD_DEFAULT};
 
 const N_ITEMS: u64 = 48;
@@ -178,11 +178,9 @@ fn flushed_bundle_at(root: &Path, tenancy: u16) {
         &fs::read(prefix_dir.join("MANIFEST.json")).expect("MANIFEST.json readable"),
     )
     .expect("MANIFEST.json parses");
-    let seg0: SegmentsManifest = serde_json::from_slice(
-        &fs::read(partition_dir(&prefix_dir, "default").join("SEGMENTS-0.json"))
-            .expect("SEGMENTS-0"),
-    )
-    .expect("SEGMENTS-0 parses");
+    let seg0 = read_publication(&prefix_dir, "default", 0)
+        .expect("SEGMENTS-0 reads")
+        .manifest;
     let n = seg0.only_shard().high_water;
     assert_eq!(n, N_ITEMS);
 
@@ -277,7 +275,7 @@ fn flushed_bundle_at(root: &Path, tenancy: u16) {
         tenancy_index,
         ..ShardRecord::empty(ShardId::ZERO)
     };
-    write_segments_manifest(&prefix_dir, "default", 1, &manifest_1)
+    write_publication(&prefix_dir, "default", 1, &manifest_1, None)
         .expect("SEGMENTS-1.json commits");
 }
 
@@ -303,17 +301,10 @@ fn refresh_digest(root: &Path, rel: &str) {
     let bytes = fs::read(prefix_dir.join(rel)).expect("the damaged file reads back");
     let digest = serde_json::json!({ "size": bytes.len(), "sha256": hex_sha256(&bytes) });
 
-    let segments_path = partition_dir(&prefix_dir, "default").join("SEGMENTS-1.json");
-    let mut segments: serde_json::Value = fs::read(&segments_path)
-        .map(|bytes| serde_json::from_slice(&bytes).unwrap())
-        .unwrap_or_default();
-    if segments["files"].get(rel).is_some() {
-        segments["files"][rel] = digest;
-        fs::write(
-            &segments_path,
-            serde_json::to_vec_pretty(&segments).unwrap(),
-        )
-        .unwrap();
+    let named_in_one = read_publication(&prefix_dir, "default", 1)
+        .is_ok_and(|published| published.manifest.partition.files.contains_key(rel));
+    if named_in_one {
+        edit_side_manifest(root, |segments| segments["files"][rel] = digest);
         return;
     }
 
@@ -434,12 +425,23 @@ fn the_partition_route_and_the_window_route_agree() {
     assert_eq!(window.to_string(), partition.to_string());
 }
 
-/// Rewrite the fixture's `SEGMENTS-1.json` through `change`.
+/// Rewrite the fixture's publication 1 through `change`, applied to it as one JSON value with
+/// every shard and space file merged in.
 fn edit_side_manifest(root: &Path, change: impl FnOnce(&mut serde_json::Value)) {
-    let path = partition_dir(&root.join("v00000"), "default").join("SEGMENTS-1.json");
-    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let prefix_dir = root.join("v00000");
+    let published = read_publication(&prefix_dir, "default", 1).unwrap();
+    let mut value = serde_json::to_value(&published.manifest).unwrap();
     change(&mut value);
-    fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    let manifest: SegmentsManifest = serde_json::from_value(value).unwrap();
+    let name = mosaica_store::layout::segments_name(1);
+    let partition = partition_dir(&prefix_dir, "default");
+    fs::remove_file(partition.join(&name)).unwrap();
+    for kind in ["shards", "layers"] {
+        for entry in fs::read_dir(partition.join(kind)).into_iter().flatten() {
+            let _ = fs::remove_file(entry.unwrap().path().join(&name));
+        }
+    }
+    write_publication(&prefix_dir, "default", 1, &manifest, None).unwrap();
 }
 
 /// An item flushed at a raised tenancy verifies against the index that holds it, and its number

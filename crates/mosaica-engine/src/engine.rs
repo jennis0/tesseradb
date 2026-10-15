@@ -465,7 +465,6 @@ pub(crate) struct PrefixReaders {
     pub(crate) prefix_dir: PathBuf,
     /// The partition the prefix is served from.
     pub(crate) phash: String,
-    pub(crate) bundle_identity: [u8; 32],
     /// The geometry version, seeded from the served filename and process-local thereafter: bumped
     /// only by a geometry publication, never by a manifest written for deny state alone.
     pub(crate) segments_version: u64,
@@ -493,12 +492,6 @@ impl PrefixReaders {
     fn open(bundle_root: &Path, bundle: &Bundle) -> Result<PrefixReaders> {
         let current = read_current(bundle_root)?;
         let prefix = current.prefix.clone();
-        let bundle_identity = hex_decode_32(&current.manifest_digest).ok_or_else(|| {
-            EngineError::Malformed(format!(
-                "CURRENT manifest_digest '{}' is not 64 hex characters",
-                current.manifest_digest
-            ))
-        })?;
 
         let prefix_dir = bundle_root.join(&prefix);
 
@@ -567,7 +560,6 @@ impl PrefixReaders {
             prefix,
             prefix_dir,
             phash,
-            bundle_identity,
             segments_version: partition.segments_n,
             dict,
             shards,
@@ -809,10 +801,15 @@ fn served_bundle(
     // dead incarnation rather than publishing its values as the new view's.
     let scoped_columns: Vec<(String, String, mosaica_types::view::ViewIncarnation)> =
         across_partitions(&bundle, |p| {
-            p.manifest
-                .scoped_columns
+            let mut columns: Vec<_> = p
+                .shards
                 .iter()
+                .flat_map(|shard| shard.record.scoped_columns.iter())
                 .map(|c| (c.column.clone(), c.view.clone(), c.incarnation))
+                .collect();
+            columns.sort();
+            columns.dedup();
+            columns
         });
     let manifest = bundle.manifest.with_declarations(&Declarations {
         groups: &runtime_groups,
@@ -897,7 +894,7 @@ fn first_generation(
             crate::ShardParts {
                 watermark: record.watermark,
                 postings: Arc::clone(&shard.postings),
-                identity: crate::shard_identity(&readers.bundle_identity, shard.id),
+                identity: record.identity,
                 unique: indexes.unique,
                 unique_live: Arc::new(crate::unique::UniqueLive::derive(&bundle.manifest, &buffer)),
                 edited: indexes.edited,
@@ -1374,13 +1371,6 @@ pub(crate) fn open_rotation(
             current: current.prefix,
         });
     }
-    let bundle_identity = hex_decode_32(&current.manifest_digest).ok_or_else(|| {
-        PublishGeometryError::PrefixNotOpenable(format!(
-            "CURRENT manifest_digest '{}' is not 64 hex characters",
-            current.manifest_digest
-        ))
-    })?;
-
     let prefix_dir = bundle_root.join(prefix);
     let mut bundle = mosaica_store::open_written_prefix(bundle_root, prefix)
         .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;
@@ -1411,7 +1401,7 @@ pub(crate) fn open_rotation(
         })?;
 
     let record = &partition.only_shard().record;
-    let identity = crate::shard_identity(&bundle_identity, record.id);
+    let identity = record.identity;
     let postings = open_postings(&prefix_dir, mosaica_store::ShardLayout::new(&phash, record.id))
         .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;
 
@@ -1468,17 +1458,6 @@ fn read_current(root: &Path) -> Result<CurrentPointer> {
 pub(crate) fn authorisation_rule_hash() -> [u8; 32] {
     use sha2::Digest;
     sha2::Sha256::digest(b"mosaica access expressions:1").into()
-}
-
-fn hex_decode_32(s: &str) -> Option<[u8; 32]> {
-    if s.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (i, slot) in out.iter_mut().enumerate() {
-        *slot = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
-    }
-    Some(out)
 }
 
 pub(crate) fn hex_encode(bytes: &[u8]) -> String {

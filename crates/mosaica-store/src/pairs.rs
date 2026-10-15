@@ -2,7 +2,7 @@
 //! against (contracts §2.4).
 //!
 //! **A bundle artefact, so its writer lives with the others.** `SegmentWriter`, `PermutationWriter`,
-//! `write_segments_manifest` and `write_manifest_json` all sit in this
+//! `write_publication` and `write_manifest_json` all sit in this
 //! crate because they write files contracts §2 defines; this one wrote from `mosaica-build` alone
 //! for as long as a build was the only thing that produced it. Compaction's pass 2 is the second producer, and it
 //! cannot reach `mosaica-build` — that crate already depends on `mosaica-authz`, so the edge only

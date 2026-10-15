@@ -11,13 +11,16 @@ use std::fs;
 use std::path::Path;
 
 use mosaica_store::layout::{partition_dir, partitions_dir};
-use mosaica_store::manifest::{Manifest, SegmentsManifest};
+use mosaica_store::manifest::{Manifest, SegmentsManifest, ShardRecord};
 use mosaica_store::manifest_write::{write_current, write_manifest_json};
-use mosaica_store::write_segments_manifest;
-use mosaica_store::{open_bundle, StoreError};
+use mosaica_store::{open_bundle, read_publication, write_publication, StoreError};
+use mosaica_types::ShardId;
 
 mod fixture;
 use fixture::hex_sha256;
+
+const SHARD0: mosaica_store::ShardLayout<'static> =
+    mosaica_store::ShardLayout::new("default", ShardId::ZERO);
 
 /// Build the one-partition, one-view, one-segment fixture `MANIFEST.json` needs to sit beside
 /// for `open_bundle` to succeed — everything short of the two files this module's functions
@@ -172,11 +175,11 @@ fn a_side_manifest_is_never_replaced() {
 
     let mut first = SegmentsManifest::empty();
     first.only_shard_mut().watermark = 11;
-    write_segments_manifest(prefix_dir, "default", 4, &first).expect("the first write commits");
+    write_publication(prefix_dir, "default", 4, &first, None).expect("the first write commits");
 
     let mut second = SegmentsManifest::empty();
     second.only_shard_mut().watermark = 22;
-    let refused = write_segments_manifest(prefix_dir, "default", 4, &second)
+    let refused = write_publication(prefix_dir, "default", 4, &second, None)
         .expect_err("the second write at the same n must be refused");
     assert!(
         matches!(
@@ -190,19 +193,15 @@ fn a_side_manifest_is_never_replaced() {
         "the refusal must name the file an operator has to look at: {refused}"
     );
 
-    let committed: SegmentsManifest = serde_json::from_slice(
-        &std::fs::read(partition_dir(prefix_dir, "default").join("SEGMENTS-4.json")).unwrap(),
-    )
-    .unwrap();
+    let committed = read_publication(prefix_dir, "default", 4).unwrap().manifest;
     assert_eq!(
         committed.only_shard().watermark,
         11,
         "the first writer's manifest is intact — the loser overwrote nothing"
     );
+    let shard_dir = prefix_dir.join(SHARD0.rel());
     assert!(
-        !partition_dir(prefix_dir, "default")
-            .join("SEGMENTS-4.json.tmp")
-            .exists(),
+        !shard_dir.join("SEGMENTS-4.json.tmp").exists(),
         "and the refused write left no temporary behind"
     );
 }
@@ -354,4 +353,216 @@ fn pruning_keeps_the_newest_manifests_and_never_the_lowest() {
     fs::write(dir.join("SEGMENTS-05.json"), b"{}").unwrap();
     assert!(mosaica_store::prune_superseded_segments_manifests(&prefix_dir, "default").is_err());
     assert_eq!(names().len(), 4);
+}
+
+/// Publication `n` of two shards, each with its own watermark, over `previous`.
+fn publish_two(
+    prefix_dir: &Path,
+    n: u64,
+    watermarks: [u64; 2],
+    previous: Option<&mosaica_store::manifest::PublishedRefs>,
+) -> mosaica_store::manifest::PublishedRefs {
+    let mut manifest = SegmentsManifest::empty();
+    manifest
+        .shards
+        .records
+        .push(ShardRecord::empty(ShardId::new(1).unwrap()));
+    manifest.shards.next_id = 2;
+    for (record, watermark) in manifest.shards.records.iter_mut().zip(watermarks) {
+        record.watermark = watermark;
+    }
+    write_publication(prefix_dir, "default", n, &manifest, previous).expect("published")
+}
+
+/// The `SEGMENTS-<m>.json` numbers present in shard `id`'s directory, ascending.
+fn shard_files(prefix_dir: &Path, id: u32) -> Vec<u64> {
+    let dir = prefix_dir
+        .join(mosaica_store::ShardLayout::new("default", ShardId::new(id).unwrap()).rel());
+    let mut found: Vec<u64> = fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| {
+            let name = e.unwrap().file_name().to_string_lossy().into_owned();
+            name.strip_prefix("SEGMENTS-")?
+                .strip_suffix(".json")?
+                .parse()
+                .ok()
+        })
+        .collect();
+    found.sort_unstable();
+    found
+}
+
+/// **A publication writes only the files that changed, then the partition file.** A shard whose
+/// record is unchanged keeps its file and number, and the partition file names it there.
+#[test]
+fn a_publication_writes_only_the_shard_it_changed_and_the_partition_file() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let prefix_dir = tmp.path();
+    let first = publish_two(prefix_dir, 1, [5, 0], None);
+    assert_eq!((first.shards[0].n, first.shards[1].n), (1, 1));
+
+    let second = publish_two(prefix_dir, 2, [5, 3], Some(&first));
+    assert_eq!(
+        (second.shards[0].n, second.shards[1].n),
+        (1, 2),
+        "shard 0 is unchanged and keeps its file; shard 1 is written at the new number"
+    );
+    assert_eq!(shard_files(prefix_dir, 0), vec![1]);
+    assert_eq!(shard_files(prefix_dir, 1), vec![1, 2]);
+
+    let third = publish_two(prefix_dir, 3, [5, 3], Some(&second));
+    assert_eq!(
+        (third.shards[0].n, third.shards[1].n),
+        (1, 2),
+        "nothing changed"
+    );
+    assert_eq!(shard_files(prefix_dir, 1), vec![1, 2]);
+    let published = read_publication(prefix_dir, "default", 3).unwrap();
+    assert_eq!(published.refs, third);
+    let watermarks: Vec<u64> = published
+        .manifest
+        .shards
+        .records
+        .iter()
+        .map(|r| r.watermark)
+        .collect();
+    assert_eq!(watermarks, vec![5, 3]);
+    assert_eq!(published.manifest.shards.next_id, 2);
+}
+
+/// **A shard file a crash left uncommitted raises the floor, and the next publication's prune
+/// removes it.** Staged at `n` and never committed, it is named by no partition file: an open
+/// serves `n - 1`, the next publication takes `n + 1`, and after it the orphan is gone.
+#[test]
+fn an_orphan_shard_file_raises_the_floor_and_is_pruned() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    let (manifest_json, prefix_dir) = build_fixture(root, 20, "2026-10-15T00:00:00Z");
+    let digest = write_manifest_json(&prefix_dir, &manifest_json).unwrap();
+    write_current(root, "v00000", &digest).unwrap();
+
+    let mut manifest = read_publication(&prefix_dir, "default", 0).unwrap();
+    manifest.manifest.only_shard_mut().high_water += 1;
+    let orphaned = mosaica_store::stage_publication(
+        &prefix_dir,
+        "default",
+        1,
+        &manifest.manifest,
+        Some(&manifest.refs),
+    )
+    .unwrap();
+    assert_eq!(
+        orphaned.refs().shards[0].n,
+        1,
+        "the changed shard's file was staged"
+    );
+    drop(orphaned);
+
+    assert_eq!(
+        mosaica_store::highest_side_manifest_n(root).unwrap(),
+        Some(0)
+    );
+    assert_eq!(
+        mosaica_store::highest_published_n(root).unwrap(),
+        Some(1),
+        "the staged shard file takes its number"
+    );
+    let bundle = open_bundle(root).expect("the committed publication opens");
+    assert_eq!(bundle.partitions["default"].segments_n, 0);
+    assert!(!bundle.partitions["default"].stepped_down());
+
+    manifest.manifest.only_shard_mut().high_water += 1;
+    write_publication(
+        &prefix_dir,
+        "default",
+        2,
+        &manifest.manifest,
+        Some(&manifest.refs),
+    )
+    .unwrap();
+    assert_eq!(shard_files(&prefix_dir, 0), vec![0, 1, 2]);
+    mosaica_store::prune_superseded_segments_manifests(&prefix_dir, "default").unwrap();
+    assert_eq!(
+        shard_files(&prefix_dir, 0),
+        vec![0, 2],
+        "the orphan is gone, and the files the kept partition files name stay"
+    );
+    assert_eq!(
+        open_bundle(root).unwrap().partitions["default"].segments_n,
+        2
+    );
+}
+
+/// Pruning removes a shard file once no kept partition file names it, and keeps one an older
+/// kept partition file still names.
+#[test]
+fn pruning_keeps_every_shard_file_a_kept_partition_file_names() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let prefix_dir = tmp.path();
+    let mut previous = publish_two(prefix_dir, 1, [1, 0], None);
+    for n in 2..=5 {
+        previous = publish_two(prefix_dir, n, [n, 0], Some(&previous));
+    }
+    assert_eq!(shard_files(prefix_dir, 0), vec![1, 2, 3, 4, 5]);
+    assert_eq!(shard_files(prefix_dir, 1), vec![1]);
+    mosaica_store::prune_superseded_segments_manifests(prefix_dir, "default").unwrap();
+    assert_eq!(shard_files(prefix_dir, 0), vec![3, 4, 5]);
+    assert_eq!(
+        shard_files(prefix_dir, 1),
+        vec![1],
+        "every kept partition file names shard 1's first file"
+    );
+}
+
+/// **Every field the stage stores reads back as written**: the shards' counter, each shard's state,
+/// identity, scoped columns, runtime bases and slice versions, and the shards each of a space's
+/// deletions awaits.
+#[test]
+fn the_shard_and_space_fields_round_trip() {
+    use mosaica_store::manifest::{
+        EntitySet, LayerSpaceRecord, OwedDeletions, ScopedColumn, SliceVersion,
+    };
+    let tmp = tempfile::TempDir::new().unwrap();
+    let prefix_dir = tmp.path();
+    let space = mosaica_types::LayerSpace::new(3).unwrap();
+    let mut manifest = SegmentsManifest::empty();
+    manifest.shards.next_id = 5;
+    let record = manifest.only_shard_mut();
+    record.state = mosaica_types::ShardState::Sealed;
+    record.identity = mosaica_store::manifest::shard_identity(&[9; 32], record.id);
+    record.scoped_columns.push(ScopedColumn {
+        column: "mood".to_string(),
+        view: "quarter:2026-Q3".to_string(),
+        incarnation: 2,
+    });
+    record.runtime_bases.push("score".to_string());
+    record.slice_versions.push(SliceVersion {
+        space,
+        level: 1,
+        version: 4,
+    });
+    let deleted: croaring::Bitmap = [7u32, 9].into_iter().collect();
+    let mut layer = LayerSpaceRecord::empty(space);
+    layer.tombstones = EntitySet::of(&deleted);
+    layer.owed.push(OwedDeletions {
+        shard: ShardId::ZERO,
+        artifacts: EntitySet::of(&deleted),
+    });
+    manifest.layer_spaces.push(layer);
+
+    let refs = write_publication(prefix_dir, "default", 1, &manifest, None).unwrap();
+    assert!(!refs.shards[0].denies && refs.layer_spaces[0].denies);
+    let read = read_publication(prefix_dir, "default", 1).unwrap().manifest;
+    assert_eq!(read.shards.next_id, 5);
+    let back = read.only_shard();
+    let written = manifest.only_shard();
+    assert_eq!(back.state, written.state);
+    assert_eq!(back.identity, written.identity);
+    assert_eq!(back.scoped_columns, written.scoped_columns);
+    assert_eq!(back.runtime_bases, written.runtime_bases);
+    assert_eq!(back.slice_versions, written.slice_versions);
+    let owed = &read.layer_spaces[0].owed;
+    assert_eq!(owed.len(), 1);
+    assert_eq!(owed[0].shard, ShardId::ZERO);
+    assert_eq!(owed[0].artifacts.entities().unwrap().to_vec(), vec![7, 9]);
 }

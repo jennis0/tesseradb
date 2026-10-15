@@ -702,10 +702,9 @@ impl Executor {
                 return;
             }
         };
-        // The publication seam: the merged segment's files are on disc and nothing durable names
-        // them until this write returns.
-        self.pause_point(PauseSiteArg::BeforeManifestPublish);
-        if let Err(e) = self.commit_side_manifest(
+        // The publication seam is inside the commit: the merged segment's files are on disc and
+        // nothing durable names them until it returns.
+        let refs = match self.commit_side_manifest(
             partition_data,
             &self.prefix_dir(&live),
             &completed.plan.partition,
@@ -713,9 +712,12 @@ impl Executor {
             &mut manifest,
             None,
         ) {
-            discard(&format!("its side-manifest could not be committed ({e})"));
-            return;
-        }
+            Ok(refs) => refs,
+            Err(e) => {
+                discard(&format!("its side-manifest could not be committed ({e})"));
+                return;
+            }
+        };
 
         let consumed: Vec<String> = completed
             .plan
@@ -733,6 +735,7 @@ impl Executor {
             mosaica_store::read::PublishedManifest {
                 manifest,
                 n: manifest_n,
+                refs,
             },
         ) {
             Ok(bundle) => bundle,
@@ -1020,10 +1023,9 @@ impl Executor {
                 return;
             }
         };
-        // The publication seam: the coalesced extents are on disc and nothing durable names them
-        // until this write returns.
-        self.pause_point(PauseSiteArg::BeforeManifestPublish);
-        if let Err(e) = self.commit_side_manifest(
+        // The publication seam is inside the commit: the coalesced extents are on disc and nothing
+        // durable names them until it returns.
+        let refs = match self.commit_side_manifest(
             partition_data,
             &self.prefix_dir(&live),
             &completed.partition,
@@ -1031,15 +1033,19 @@ impl Executor {
             &mut manifest,
             None,
         ) {
-            discard(&format!("its side-manifest could not be committed ({e})"));
-            return;
-        }
+            Ok(refs) => refs,
+            Err(e) => {
+                discard(&format!("its side-manifest could not be committed ({e})"));
+                return;
+            }
+        };
 
         let next_bundle = match live.bundle.with_manifest(
             &completed.partition,
             mosaica_store::read::PublishedManifest {
                 manifest,
                 n: manifest_n,
+                refs,
             },
         ) {
             Ok(bundle) => bundle,
@@ -1777,6 +1783,32 @@ impl Executor {
                     return;
                 }
             };
+            // Their digests, which the manifest names so an open verifies them as it does a
+            // segment.
+            let packed_rels = packed
+                .members
+                .iter()
+                .map(|extent| extent.path.as_str())
+                .chain(
+                    packed
+                        .records
+                        .values()
+                        .flatten()
+                        .map(|extent| extent.path.as_str()),
+                );
+            if let Err(e) = self
+                .side_manifests
+                .digest_artifact_files(&prefix_dir, packed_rels)
+            {
+                tracing::error!(
+                    error = %e,
+                    partition = %partition,
+                    "ALARM: could not digest the artifact record and member packs; the \
+                     memberships stay WAL-durable and the log stays pinned, and the write is \
+                     retried at the next tick"
+                );
+                return;
+            }
             // Onto the held lists; [`Executor::commit_side_manifest`] restates them into the
             // manifest below.
             self.side_manifests
@@ -1799,6 +1831,17 @@ impl Executor {
                 // un-named comes back with its description unreadable and is withheld from every
                 // viewer, with the log already released.
                 Ok(extents) => {
+                    let rels = extents.iter().flat_map(|(_, extent)| extent.files());
+                    if let Err(e) = self.side_manifests.digest_artifact_files(&prefix_dir, rels) {
+                        tracing::error!(
+                            error = %e,
+                            partition = %partition,
+                            "ALARM: could not digest the artifact content extent; the content \
+                             stays WAL-durable and the log stays pinned, and the write is retried \
+                             at the next tick"
+                        );
+                        return;
+                    }
                     for (space, extent) in extents {
                         self.side_manifests
                             .spaces
@@ -1824,9 +1867,9 @@ impl Executor {
                 &live.vocabularies,
                 &live.bundle.manifest.vocabularies,
             );
-            // The publication seam, per partition: the dispositions are WAL-durable either way,
-            // so a kill parked here loses only the restore path's freshness.
-            self.pause_point(PauseSiteArg::BeforeManifestPublish);
+            // The publication seam, per partition, is inside the commit: the dispositions are
+            // WAL-durable either way, so a kill parked there loses only the restore path's
+            // freshness.
             if let Err(e) = self.commit_side_manifest(
                 partition_data,
                 &self.prefix_dir(&live),
@@ -2191,8 +2234,9 @@ impl Executor {
                 // is what keeps a key created again from publishing it as its own.
                 incarnation: completed.scoped_incarnation,
             };
-            if !manifest.partition.scoped_columns.contains(&entry) {
-                manifest.partition.scoped_columns.push(entry);
+            let record = manifest.only_shard_mut();
+            if !record.scoped_columns.contains(&entry) {
+                record.scoped_columns.push(entry);
             }
         }
         manifest.partition.files.extend(completed.files);
@@ -2298,10 +2342,10 @@ impl Executor {
         // retained, the next tick re-plans. The same posture as every other flush failure, and
         // the reason the write precedes the swap.
         //
-        // And therefore the publication seam: the segment's files are on disc, the WAL still holds
-        // every row they carry, and nothing durable names them until this write returns.
-        self.pause_point(PauseSiteArg::BeforeManifestPublish);
-        if let Err(e) = self.commit_side_manifest(
+        // And therefore the publication seam, inside the commit: the segment's files are on disc,
+        // the WAL still holds every row they carry, and nothing durable names them until it
+        // returns.
+        let refs = match self.commit_side_manifest(
             partition_data,
             &self.prefix_dir(&live),
             &completed.partition,
@@ -2309,9 +2353,12 @@ impl Executor {
             &mut manifest,
             None,
         ) {
-            discard(&format!("its side-manifest could not be committed ({e})"));
-            return false;
-        }
+            Ok(refs) => refs,
+            Err(e) => {
+                discard(&format!("its side-manifest could not be committed ({e})"));
+                return false;
+            }
+        };
         *mark = self
             .health
             .flush_lap(crate::flush::FlushStage::Commit, *mark);
@@ -2326,6 +2373,7 @@ impl Executor {
         let published = mosaica_store::read::PublishedManifest {
             manifest,
             n: manifest_n,
+            refs,
         };
         // A values-only publication substitutes the manifest and leaves the row space alone. It
         // wrote no segment, so there is nothing to rebase and nothing that could fail to; what it

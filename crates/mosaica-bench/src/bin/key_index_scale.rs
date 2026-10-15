@@ -188,14 +188,9 @@ fn spill_arm(args: &Args, dir: &Path, arm: &str) {
     let pushed = t.elapsed();
     let anon_after_push = status_bytes("RssAnon:");
     let mut duplicates = 0u64;
-    let runs = spill
-        .finish(
-            &out,
-            "run",
-            NonZeroU64::new(250_000_000).expect("non-zero"),
-            |_| duplicates += 1,
-        )
-        .expect("finish");
+    let writer = KeyRunWriter::create(&out, "run", NonZeroU64::new(250_000_000).expect("non-zero"))
+        .with_key_filter();
+    let runs = spill.finish(writer, |_| duplicates += 1).expect("finish");
     println!(
         "spill of {n} {arm} keys under {} MiB: push {pushed:.2?}, total {:.2?}, {} runs, \
          {duplicates} duplicate keys; peak RSS {} MiB, anonymous after push {} MiB",
@@ -229,7 +224,8 @@ fn main() {
 
     let started = Instant::now();
     let mut writer =
-        KeyRunWriter::<u64>::create(&dir, "run", NonZeroU64::new(u64::MAX).expect("non-zero"));
+        KeyRunWriter::<u64>::create(&dir, "run", NonZeroU64::new(u64::MAX).expect("non-zero"))
+            .with_key_filter();
     for i in 0..n {
         writer
             .push(keys.key(i), mix(i ^ 0xABCD) as u32)

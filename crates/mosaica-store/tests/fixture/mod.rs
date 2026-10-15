@@ -106,7 +106,7 @@ pub fn publish_seg0(prefix_dir: &Path, mut items: Vec<TilerItem>) -> (Vec<TilerI
         entity_lo: 0,
         entity_hi: n.saturating_sub(1),
     }];
-    mosaica_store::write_segments_manifest(prefix_dir, PARTITION, 0, &manifest)
+    mosaica_store::write_publication(prefix_dir, PARTITION, 0, &manifest, None)
         .expect("SEGMENTS-0");
     (items, codes)
 }
@@ -232,4 +232,73 @@ pub fn next_manifest(bundle: &Bundle, added: u64) -> SegmentsManifest {
     record.watermark += added;
     record.high_water += added;
     manifest
+}
+
+/// Publication `n` of `prefix_dir`'s partition as one JSON value, every file it names merged in:
+/// the shape a test edits.
+pub fn read_assembled(prefix_dir: &Path, n: u64) -> serde_json::Value {
+    let published =
+        mosaica_store::read_publication(prefix_dir, PARTITION, n).expect("the publication reads");
+    serde_json::to_value(&published.manifest).expect("serialise")
+}
+
+/// Write `value`, an assembled publication, as publication `n` of `prefix_dir`'s partition: each
+/// shard record and layer space with the files under its directory in its own `SEGMENTS-<n>.json`,
+/// named by digest from the partition's, which is written under `name`. Files of those names are
+/// replaced, and the value need not be one a writer would produce.
+pub fn write_assembled_named(prefix_dir: &Path, name: &str, n: u64, mut value: serde_json::Value) {
+    use serde_json::{json, Map, Value};
+    let empty = serde_json::to_value(mosaica_store::manifest::EntitySet::default()).unwrap();
+    let carries = |record: &Value| {
+        ["deny", "tombstones"]
+            .iter()
+            .any(|field| record.get(*field).is_some_and(|set| *set != empty))
+    };
+    let mut files: Map<String, Value> =
+        serde_json::from_value(value["files"].take()).unwrap_or_default();
+    let write_owned = |dir_rel: String, mut record: Value, files: &mut Map<String, Value>| {
+        let under = format!("{dir_rel}/");
+        let owned: Map<String, Value> = files
+            .iter()
+            .filter(|(rel, _)| rel.starts_with(&under))
+            .map(|(rel, digest)| (rel.clone(), digest.clone()))
+            .collect();
+        files.retain(|rel, _| !rel.starts_with(&under));
+        record["files"] = Value::Object(owned);
+        let bytes = serde_json::to_vec_pretty(&record).unwrap();
+        let dir = prefix_dir.join(&dir_rel);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(format!("SEGMENTS-{n}.json")), &bytes).unwrap();
+        (bytes.len() as u64, hex_sha256(&bytes), carries(&record))
+    };
+    let records = value["shards"]["records"].take();
+    let mut shard_refs = Vec::new();
+    for record in records.as_array().cloned().unwrap_or_default() {
+        let id = record["id"].as_u64().unwrap();
+        let rel = format!("partitions/{PARTITION}/shards/{id}");
+        let (size, sha256, denies) = write_owned(rel, record, &mut files);
+        shard_refs
+            .push(json!({"id": id, "n": n, "size": size, "sha256": sha256, "denies": denies}));
+    }
+    let spaces = value["layer_spaces"].take();
+    let mut space_refs = Vec::new();
+    for record in spaces.as_array().cloned().unwrap_or_default() {
+        let space = record["space"].as_u64().unwrap();
+        let rel = format!("partitions/{PARTITION}/layers/{space}");
+        let (size, sha256, denies) = write_owned(rel, record, &mut files);
+        space_refs.push(
+            json!({"space": space, "n": n, "size": size, "sha256": sha256, "denies": denies}),
+        );
+    }
+    value["files"] = Value::Object(files);
+    value["shards"]["files"] = Value::Array(shard_refs);
+    value["shards"].as_object_mut().unwrap().remove("records");
+    value["layer_spaces"] = Value::Array(space_refs);
+    let dir = mosaica_store::layout::partition_dir(prefix_dir, PARTITION);
+    fs::write(dir.join(name), serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+}
+
+/// [`write_assembled_named`] under the canonical name.
+pub fn write_assembled(prefix_dir: &Path, n: u64, value: serde_json::Value) {
+    write_assembled_named(prefix_dir, &format!("SEGMENTS-{n}.json"), n, value);
 }

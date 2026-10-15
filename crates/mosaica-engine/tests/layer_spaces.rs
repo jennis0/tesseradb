@@ -712,3 +712,86 @@ fn a_replayed_growth_the_side_manifest_holds_is_not_applied_again() {
     let engine = fx.open();
     assert_eq!(engine.registered_layer("clusters/a").unwrap().runs, runs);
 }
+
+/// The path, under the prefix `CURRENT` names, of a file the served side-manifest names.
+fn served_file(fx: &Fixture, rel: &str) -> std::path::PathBuf {
+    fx.root.join(current_prefix(&fx.root)).join(rel)
+}
+
+/// **A record pack and a member pack a running service writes are digested in the side-manifest
+/// naming them**, so a corrupt record pack is a publication that does not verify, and the open
+/// steps down past it rather than serving it.
+#[test]
+fn a_corrupt_runtime_record_pack_steps_the_partition_down() {
+    let fx = fixture();
+    let published = {
+        let engine = fx.open();
+        register_and_publish(&fx, &engine, "clusters/a");
+        tick_until(&engine, "the artifact's publication", WAIT, || {
+            !side_manifest(&fx.root)
+                .only_shard()
+                .membership_extents
+                .is_empty()
+        });
+        mosaica_store::open_bundle(&fx.root).unwrap().partitions[PARTITION].segments_n
+    };
+    let manifest = side_manifest(&fx.root);
+    let records = &manifest.layer_spaces[0].record_packs[0].path;
+    let members = &manifest.only_shard().membership_extents[0].path;
+    assert!(
+        manifest.partition.files.contains_key(records),
+        "{records} is digested"
+    );
+    assert!(
+        manifest.partition.files.contains_key(members),
+        "{members} is digested"
+    );
+
+    let path = served_file(&fx, records);
+    let mut bytes = std::fs::read(&path).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0x01;
+    std::fs::write(&path, bytes).unwrap();
+    let bundle = mosaica_store::open_bundle(&fx.root).expect("an older publication verifies");
+    let partition = &bundle.partitions[PARTITION];
+    assert!(partition.stepped_down());
+    assert!(partition.segments_n < published);
+    assert!(partition.only_shard().record.membership_extents.is_empty());
+}
+
+/// **A missing member pack is refused at open**: the newest publication names it, carries a
+/// suppression, and so may not be stepped past.
+#[test]
+fn a_missing_runtime_member_pack_is_refused_at_open() {
+    let fx = fixture();
+    {
+        let engine = fx.open();
+        register_and_publish(&fx, &engine, "clusters/a");
+        engine
+            .accept_change(fx.members(0..1)[0], ChangeOp::Suppress)
+            .unwrap();
+        tick_until(
+            &engine,
+            "the artifact's and the deny's publication",
+            WAIT,
+            || {
+                let manifest = side_manifest(&fx.root);
+                !manifest.only_shard().membership_extents.is_empty()
+                    && manifest.only_shard().deny.carries()
+            },
+        );
+    }
+    let manifest = side_manifest(&fx.root);
+    std::fs::remove_file(served_file(
+        &fx,
+        &manifest.only_shard().membership_extents[0].path,
+    ))
+    .unwrap();
+    match mosaica_store::open_bundle(&fx.root) {
+        Err(mosaica_store::StoreError::UnverifiedDenyManifest { .. }) => {}
+        other => panic!(
+            "expected the open to be refused, got {:?}",
+            other.map(|_| ())
+        ),
+    }
+}

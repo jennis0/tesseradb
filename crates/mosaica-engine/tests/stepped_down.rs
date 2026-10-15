@@ -22,28 +22,23 @@ use mosaica_lifecycle::UnallocatedRow;
 
 const WAIT: Duration = Duration::from_secs(10);
 
-/// Write a `SEGMENTS-1.json` cloned from the build's `SEGMENTS-0.json`, carrying a delta-tier
-/// declaration and a file that does not verify — honourable, unverifiable, steppable.
+/// Publish the build's publication again at 1, carrying a delta tier and a file that does not
+/// verify — honourable, unverifiable, steppable.
 fn fabricate_stepped_down(root: &std::path::Path) {
-    let current: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(root.join("CURRENT")).unwrap()).unwrap();
-    let prefix = current["prefix"].as_str().unwrap().to_string();
-    let dir = common::partition_dir(root, &prefix);
-    let mut manifest: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(dir.join("SEGMENTS-0.json")).unwrap())
-            .unwrap();
-    manifest["shards"]["records"][0]["deltas"] = serde_json::json!([1]);
-    manifest["files"] = serde_json::json!({
-        format!("{}/never-written.arrow", common::SHARD.rel()): {
-            "size": 1,
-            "sha256": "0".repeat(64)
-        }
-    });
-    std::fs::write(
-        dir.join("SEGMENTS-1.json"),
-        serde_json::to_vec_pretty(&manifest).unwrap(),
-    )
-    .unwrap();
+    let prefix_dir = root.join(current_prefix(root));
+    let mut manifest = mosaica_store::read_publication(&prefix_dir, PARTITION, 0)
+        .unwrap()
+        .manifest;
+    let missing = format!("{}/never-written.arrow", common::SHARD.rel());
+    manifest.only_shard_mut().deltas = vec![missing.clone()];
+    manifest.partition.files.insert(
+        missing,
+        mosaica_store::manifest::FileDigest {
+            size: 1,
+            sha256: "0".repeat(64),
+        },
+    );
+    mosaica_store::write_publication(&prefix_dir, PARTITION, 1, &manifest, None).unwrap();
 }
 
 #[test]

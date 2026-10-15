@@ -509,7 +509,7 @@ impl Executor {
                 None
             }
         };
-        let committed = n.is_some_and(|n| {
+        let committed = n.and_then(|n| {
             match self.commit_side_manifest(
                 partition_data,
                 &self.prefix_dir(generation),
@@ -518,26 +518,27 @@ impl Executor {
                 &mut manifest,
                 None,
             ) {
-                Ok(()) => true,
+                Ok(refs) => Some((n, refs)),
                 Err(e) => {
                     tracing::error!(error = %e, "a unique declaration's side-manifest could not be committed");
-                    false
+                    None
                 }
             }
         });
-        if !committed {
-            // Durable in the log; the next publication writes it.
-            self.side_manifests.behind_live = true;
-        }
-        let served_n = match (committed, n) {
-            (true, Some(n)) => n,
-            _ => partition_data.segments_n,
+        let (served_n, refs) = match committed {
+            Some(committed) => committed,
+            None => {
+                // Durable in the log; the next publication writes it.
+                self.side_manifests.behind_live = true;
+                (partition_data.segments_n, partition_data.refs.clone())
+            }
         };
         let bundle = match generation.bundle.with_manifest(
             partition,
             mosaica_store::read::PublishedManifest {
                 manifest,
                 n: served_n,
+                refs,
             },
         ) {
             Ok(bundle) => bundle,

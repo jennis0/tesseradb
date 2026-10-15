@@ -9,7 +9,6 @@ use mosaica_lifecycle::{IngestBuffer, Overlay};
 use mosaica_store::read::{Bundle, ShardData};
 use mosaica_store::vocabulary::Vocabularies;
 use mosaica_types::{EntityId, ItemAt, LayerSpace, ShardId};
-use sha2::{Digest, Sha256};
 
 use crate::DenyMask;
 
@@ -108,7 +107,7 @@ pub struct ShardParts {
     pub watermark: u64,
     /// The base postings — the build's `terms/postings.arrow`, unchanged by any flush.
     pub postings: Arc<PostingsReader>,
-    /// This shard's identity ([`shard_identity`]) in the prefix `postings` was read from.
+    /// This shard's identity (`ShardRecord::identity`) in the prefix `postings` was read from.
     pub(crate) identity: [u8; 32],
     /// Every unique column's index runs, as the shard's record lists them.
     pub(crate) unique: Arc<mosaica_store::unique::UniqueIndexes>,
@@ -160,16 +159,6 @@ pub struct Generation {
     parts: GenerationParts,
     /// Ascending by id.
     shards: Vec<Arc<Shard>>,
-}
-
-/// Shard `shard`'s identity in the prefix whose `MANIFEST.json` digest is `bundle`: what its
-/// fragments and figures are keyed and filed under. Moves at every compaction, since the digest
-/// does, and differs between two shards of one prefix.
-pub(crate) fn shard_identity(bundle: &[u8; 32], shard: ShardId) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(bundle);
-    hasher.update(shard.raw().to_le_bytes());
-    hasher.finalize().into()
 }
 
 /// Per view, the version of its denied base rows: see [`Shard::deny_version`].
@@ -685,6 +674,8 @@ pub(crate) fn partition_of(
     mosaica_store::read::PartitionData {
         manifest: manifest.partition,
         shard_size: manifest.shards.size,
+        next_shard_id: manifest.shards.next_id,
+        refs: Default::default(),
         segments_n: 0,
         highest_candidate_n: 0,
         shards: manifest
@@ -699,23 +690,5 @@ pub(crate) fn partition_of(
             })
             .collect(),
         layer_spaces: manifest.layer_spaces,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn two_shards_of_one_prefix_have_two_identities() {
-        let bundle = [7u8; 32];
-        let zero = shard_identity(&bundle, ShardId::ZERO);
-        let one = shard_identity(&bundle, ShardId::new(1).expect("in range"));
-        assert_ne!(zero, one);
-        assert_ne!(
-            zero,
-            shard_identity(&[8u8; 32], ShardId::ZERO),
-            "a new prefix moves it"
-        );
     }
 }

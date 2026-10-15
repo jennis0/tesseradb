@@ -36,7 +36,8 @@ use crate::error::{read_to_vec, Result, StoreError};
 use crate::layout::ShardLayout;
 use crate::manifest::{
     CurrentPointer, DerivedExtent, FileDigest, Honourability, LayerSpaceRecord, Manifest,
-    PartitionManifest, SegmentDescriptor, SegmentsManifest, ShardRecord, Shards,
+    PartitionFile, PartitionManifest, PublishedRefs, SegmentDescriptor, SegmentsManifest,
+    ShardFile, ShardRecord, Shards, SpaceFile, DENY_DISPOSITION_STATE,
 };
 use crate::permutation::{Permutation, RowSpace, SegmentExtent};
 use crate::render_presence::{render_presence_path, RenderPresence, RENDER_PRESENCE_DIR};
@@ -242,6 +243,10 @@ pub struct PartitionData {
     pub manifest: PartitionManifest,
     /// The side-manifest's `shards.size`.
     pub shard_size: u64,
+    /// The side-manifest's `shards.next_id`.
+    pub next_shard_id: u32,
+    /// The shard and layer-space files the served `SEGMENTS-<n>.json` names.
+    pub refs: PublishedRefs,
     /// The `n` of the `SEGMENTS-<n>.json` actually served, taken from the filename.
     pub segments_n: u64,
     /// The highest `SEGMENTS-<n>.json` present for this partition at open, whether or not it
@@ -340,6 +345,7 @@ impl PartitionData {
             partition: self.manifest.clone(),
             shards: Shards {
                 size: self.shard_size,
+                next_id: self.next_shard_id,
                 records: self
                     .shards
                     .iter()
@@ -351,51 +357,64 @@ impl PartitionData {
     }
 
     /// This partition as `published` leaves it, with `replacement` substituted for one view of one
-    /// shard.
+    /// shard. A shard the publication names and this partition does not serve is opened empty,
+    /// with every view `manifest` declares.
     fn publishing(
         &self,
+        manifest: &Manifest,
         published: PublishedManifest,
         mut replacement: Option<(ShardId, &str, ViewData)>,
     ) -> Result<PartitionData> {
-        let SegmentsManifest {
-            partition: manifest,
-            shards: published_shards,
-            layer_spaces,
-        } = published.manifest;
-        if !published_shards
-            .records
-            .iter()
-            .map(|record| record.id)
-            .eq(self.shards.iter().map(|shard| shard.record.id))
-        {
+        let PublishedManifest {
+            manifest:
+                SegmentsManifest {
+                    partition: partition_manifest,
+                    shards: published_shards,
+                    layer_spaces,
+                },
+            n,
+            refs,
+        } = published;
+        if let Some(gone) = self.shards.iter().find(|shard| {
+            !published_shards
+                .records
+                .iter()
+                .any(|record| record.id == shard.record.id)
+        }) {
             return Err(StoreError::MalformedBundle {
-                detail: "a publication's shard records do not name the shards being served"
-                    .to_string(),
+                detail: format!(
+                    "a publication's shard records omit shard {}, which is being served",
+                    gone.record.id
+                ),
             });
         }
         let shards = published_shards
             .records
             .into_iter()
-            .zip(&self.shards)
-            .map(|(record, shard)| {
-                let mut shard_views = shard.views.clone();
-                if let Some((_, view, data)) =
-                    replacement.take_if(|(id, _, _)| *id == shard.record.id)
-                {
+            .map(|record| {
+                let mut shard_views = match self.shard(record.id) {
+                    Some(served) => served.views.clone(),
+                    None => HashMap::new(),
+                };
+                if let Some((_, view, data)) = replacement.take_if(|(id, _, _)| *id == record.id) {
                     shard_views.insert(view.to_string(), data);
                 }
-                Arc::new(ShardData {
+                let mut shard = ShardData {
                     record,
                     views: shard_views,
-                })
+                };
+                shard.seed_declared(manifest);
+                Arc::new(shard)
             })
             .collect();
         // This generation is the newest manifest, so it is not stepped down.
         Ok(PartitionData {
-            manifest,
+            manifest: partition_manifest,
             shard_size: published_shards.size,
-            segments_n: published.n,
-            highest_candidate_n: published.n,
+            next_shard_id: published_shards.next_id,
+            refs,
+            segments_n: n,
+            highest_candidate_n: n,
             shards,
             layer_spaces,
         })
@@ -409,7 +428,8 @@ pub struct Bundle {
     pub partitions: HashMap<String, PartitionData>,
 }
 
-/// A side-manifest together with the `n` it is published at.
+/// A side-manifest together with the `n` it is published at and the shard and space files its
+/// partition file names.
 ///
 /// **One value because they must never be supplied separately.** `n` lives in the filename and
 /// nothing inside the manifest carries it (see [`SegmentsManifest`]'s doc), so a caller holding
@@ -418,6 +438,7 @@ pub struct Bundle {
 pub struct PublishedManifest {
     pub manifest: SegmentsManifest,
     pub n: u64,
+    pub refs: PublishedRefs,
 }
 
 impl Bundle {
@@ -555,7 +576,7 @@ impl Bundle {
             .ok_or_else(|| StoreError::MalformedBundle {
                 detail: format!("no partition '{partition}' in this bundle"),
             })?
-            .publishing(published, None)?;
+            .publishing(&self.manifest, published, None)?;
         Ok(self.with_partition(partition, next))
     }
 
@@ -614,7 +635,8 @@ impl Bundle {
                 detail: format!("no view '{view}' in shard {shard} of partition '{partition}'"),
             })?;
         let next_view = replace(view_data)?;
-        let next = existing.publishing(published, Some((shard, view, next_view)))?;
+        let next =
+            existing.publishing(&self.manifest, published, Some((shard, view, next_view)))?;
         Ok(self.with_partition(partition, next))
     }
 
@@ -794,6 +816,7 @@ fn open_prefix(
             shards:
                 Shards {
                     size: shard_size,
+                    next_id: next_shard_id,
                     records,
                 },
             layer_spaces,
@@ -823,6 +846,8 @@ fn open_prefix(
             PartitionData {
                 manifest: partition_manifest,
                 shard_size,
+                next_shard_id,
+                refs: selected.refs,
                 segments_n: selected.n,
                 highest_candidate_n: selected.highest_candidate_n,
                 shards,
@@ -1252,13 +1277,13 @@ fn open_term_images(
 /// suppression is live carries both), and an `any`/`all` slip over that pair silently converts
 /// the refusal below into a step-down. Nothing here re-derives the posture from a field list.
 ///
-/// **The check runs before `verify_files`, deliberately.** A `SEGMENTS-<n>.json` carries no
-/// digest of its own — only the files it names are verified — so its `deny` list is exactly as
-/// trustworthy whether or not those files check out, and the mid-sync replica that has the new
-/// manifest but not yet its data files is the *most* likely way to meet a deny-carrying manifest
-/// whose files fail. Verifying first would step that case down and re-expose the item. It is
-/// also the cheaper order: the refusal costs no I/O where `verify_files` hashes every named
-/// file. "Verify the bytes before interpreting them" is the right instinct and is what every
+/// **The deny posture is read from the partition file's flags before any file it names is read,
+/// deliberately.** A partition `SEGMENTS-<n>.json` carries no digest of its own, so its flags are
+/// exactly as trustworthy whether or not the shard and space files they describe check out, and
+/// the mid-sync replica that has the new partition file but not yet its other files is the *most*
+/// likely way to meet a deny-carrying candidate whose files fail. Verifying first would step that
+/// case down and re-expose the item. It is also the cheaper order: the refusal costs no I/O where
+/// `verify_files` hashes every named file. "Verify the bytes before interpreting them" is the right instinct and is what every
 /// other arm of this loop does — it is wrong *here*, for that reason, and
 /// `a_deny_carrying_manifest_whose_files_are_missing_is_still_refused` is the test that says so.
 ///
@@ -1324,6 +1349,10 @@ fn load_verifying_segments_manifest(
     // Highest n first.
     candidates.sort_unstable_by(|a, b| b.cmp(a));
     let highest_candidate_n = candidates.first().copied();
+    let phash = partition_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
 
     // The **first** failure recorded, not the last: the loop walks highest-first, so the first
     // is the newest manifest's — the one an operator must fix. Overwriting per iteration leaves
@@ -1331,32 +1360,49 @@ fn load_verifying_segments_manifest(
     let mut highest_candidate_error: Option<String> = None;
 
     for n in candidates {
-        let path = partition_dir.join(format!("SEGMENTS-{n}.json"));
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
+        let path = partition_dir.join(crate::layout::segments_name(n));
+        let file = match read_partition_file(&path) {
+            Ok(file) => file,
             Err(e) => {
-                highest_candidate_error.get_or_insert_with(|| format!("{}: {e}", path.display()));
-                continue;
-            }
-        };
-        let segments_manifest = match serde_json::from_slice::<SegmentsManifest>(&bytes) {
-            Ok(m) => m,
-            Err(e) => {
-                highest_candidate_error
-                    .get_or_insert_with(|| format!("{}: invalid JSON: {e}", path.display()));
+                highest_candidate_error.get_or_insert_with(|| e.to_string());
                 continue;
             }
         };
         // Refused rather than stepped past: an older manifest would serve without the shards
         // this one names, and without their denies.
-        if let Err(detail) = segments_manifest
-            .check_served_shards()
-            .and_then(|()| segments_manifest.check_layer_spaces())
-        {
+        if let Err(detail) = file.check_named() {
             return Err(StoreError::MalformedBundle {
                 detail: format!("{}: {detail}", path.display()),
             });
         }
+        // Whether this candidate exists because a deny was accepted, from its flags alone, so a
+        // shard or space file that does not verify cannot carry the walk past it.
+        let flagged = file.refs().denies();
+        let refuse_or_step = |fields: Vec<&'static str>, detail: String| {
+            let fields = if fields.is_empty() && flagged {
+                DENY_DISPOSITION_STATE.to_vec()
+            } else {
+                fields
+            };
+            if fields.is_empty() {
+                Ok(detail)
+            } else {
+                Err(StoreError::UnverifiedDenyManifest {
+                    partition: partition_label.clone(),
+                    n,
+                    fields,
+                    detail,
+                })
+            }
+        };
+        let (segments_manifest, refs) = match assemble_publication(prefix_dir, &phash, file) {
+            Ok(assembled) => assembled,
+            Err(e) => {
+                let reason = refuse_or_step(Vec::new(), e.to_string())?;
+                highest_candidate_error.get_or_insert(reason);
+                continue;
+            }
+        };
         // One classification, made where the fields are defined (`SegmentsManifest`), never
         // re-derived here — see this function's doc and [`Honourability`].
         //
@@ -1366,7 +1412,7 @@ fn load_verifying_segments_manifest(
             Honourability::Honourable => {}
             Honourability::Unready { fields } => {
                 return Err(StoreError::UnhonourableManifest {
-                    partition: partition_label,
+                    partition: partition_label.clone(),
                     n,
                     fields,
                 });
@@ -1400,6 +1446,7 @@ fn load_verifying_segments_manifest(
             Ok(()) => {
                 return Ok(SelectedManifest {
                     manifest: segments_manifest,
+                    refs,
                     n,
                     highest_candidate_n: highest_candidate_n
                         .expect("a candidate was selected, so the candidate list is non-empty"),
@@ -1407,23 +1454,13 @@ fn load_verifying_segments_manifest(
             }
             Err(e) => {
                 // **A candidate carrying deny-disposition state is never stepped past, whether
-                // the objection came from classification or from verification.** The
-                // classification arm above no longer catches this one: `deny` and `tombstones`
-                // are honoured, so such a manifest is `Honourable` and arrives here like any
-                // other. A `continue` would then serve an older manifest that re-exposes every
-                // entity denied since it was written — the fail-open decision 0018 promoted into
-                // contract, reached in exactly the damaged-newest case this reader calls most
-                // likely.
-                let fields = segments_manifest.deny_disposition_state();
-                if !fields.is_empty() {
-                    return Err(StoreError::UnverifiedDenyManifest {
-                        partition: partition_label,
-                        n,
-                        fields,
-                        detail: e.to_string(),
-                    });
-                }
-                highest_candidate_error.get_or_insert_with(|| e.to_string());
+                // the objection came from classification or from verification.** `deny` and
+                // `tombstones` are honoured, so such a manifest is `Honourable` and arrives here
+                // like any other. A `continue` would then serve an older manifest that re-exposes
+                // every entity denied since it was written.
+                let reason =
+                    refuse_or_step(segments_manifest.deny_disposition_state(), e.to_string())?;
+                highest_candidate_error.get_or_insert(reason);
                 continue;
             }
         }
@@ -1440,8 +1477,153 @@ fn load_verifying_segments_manifest(
 /// the last of these is returned rather than left in the `warn!`.
 struct SelectedManifest {
     manifest: SegmentsManifest,
+    refs: PublishedRefs,
     n: u64,
     highest_candidate_n: u64,
+}
+
+/// Read and parse a partition's `SEGMENTS-<n>.json` at `path`, without reading what it names.
+pub(crate) fn read_partition_file(path: &Path) -> Result<PartitionFile> {
+    let bytes = std::fs::read(path).map_err(|source| StoreError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    serde_json::from_slice(&bytes).map_err(|source| StoreError::Json {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// Read one shard or space file `named`, checking its size and digest, and parse it.
+fn read_named<T: serde::de::DeserializeOwned>(
+    prefix_dir: &Path,
+    rel: &str,
+    size: u64,
+    sha256: &str,
+) -> Result<T> {
+    let path = safe_join(prefix_dir, rel)?;
+    let bytes = std::fs::read(&path).map_err(|source| StoreError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    if bytes.len() as u64 != size {
+        return Err(StoreError::FileVerificationFailed {
+            path,
+            reason: format!(
+                "size mismatch: the partition's side-manifest says {size}, file is {} bytes",
+                bytes.len()
+            ),
+        });
+    }
+    let actual = hex_sha256(&bytes);
+    if actual != sha256 {
+        return Err(StoreError::FileVerificationFailed {
+            path,
+            reason: format!(
+                "SHA-256 mismatch: the partition's side-manifest says {sha256}, computed {actual}"
+            ),
+        });
+    }
+    serde_json::from_slice(&bytes).map_err(|source| StoreError::Json { path, source })
+}
+
+/// The manifest `file`, a partition `SEGMENTS-<n>.json` of `partition`, describes, with every
+/// shard and space file it names read and checked against its size and digest, and those files'
+/// references.
+fn assemble_publication(
+    prefix_dir: &Path,
+    partition: &str,
+    file: PartitionFile,
+) -> Result<(SegmentsManifest, PublishedRefs)> {
+    let refs = file.refs();
+    let mut shards = Vec::with_capacity(refs.shards.len());
+    for named in &refs.shards {
+        let rel = ShardLayout::new(partition, named.id).manifest_rel(named.n);
+        let shard: ShardFile = read_named(prefix_dir, &rel, named.size, &named.sha256)?;
+        if shard.record.id != named.id {
+            return Err(StoreError::FileVerificationFailed {
+                path: prefix_dir.join(&rel),
+                reason: format!("holds shard {}'s record", shard.record.id),
+            });
+        }
+        shards.push(shard);
+    }
+    let mut spaces = Vec::with_capacity(refs.layer_spaces.len());
+    for named in &refs.layer_spaces {
+        let rel = crate::LayerSpaceLayout::new(partition, named.space).manifest_rel(named.n);
+        let space: SpaceFile = read_named(prefix_dir, &rel, named.size, &named.sha256)?;
+        if space.record.space != named.space {
+            return Err(StoreError::FileVerificationFailed {
+                path: prefix_dir.join(&rel),
+                reason: format!("holds layer space {}'s record", space.record.space),
+            });
+        }
+        spaces.push(space);
+    }
+    Ok((SegmentsManifest::assemble(file, shards, spaces), refs))
+}
+
+/// Publication `n` of `partition` under `prefix_dir`: its partition file and every shard and
+/// space file it names, each checked against its size and digest, assembled. The data files the
+/// manifest names are not read.
+pub fn read_publication(prefix_dir: &Path, partition: &str, n: u64) -> Result<PublishedManifest> {
+    let path =
+        crate::layout::partition_dir(prefix_dir, partition).join(crate::layout::segments_name(n));
+    let (manifest, refs) =
+        assemble_publication(prefix_dir, partition, read_partition_file(&path)?)?;
+    Ok(PublishedManifest { manifest, n, refs })
+}
+
+/// The highest-numbered publication of `partition` under `prefix_dir`, read as
+/// [`read_publication`] reads one, or `None` where there is none.
+pub fn newest_publication(prefix_dir: &Path, partition: &str) -> Result<Option<PublishedManifest>> {
+    let dir = crate::layout::partition_dir(prefix_dir, partition);
+    match list_segments_manifests(&dir, partition)?.into_iter().max() {
+        Some(n) => read_publication(prefix_dir, partition, n).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Every `SEGMENTS-<m>.json` one directory below `rel` under `prefix_dir`, each as its
+/// prefix-relative path and `m`. A name that is not a number's canonical spelling is left out.
+pub(crate) fn numbered_files_under(prefix_dir: &Path, rel: &str) -> Result<Vec<(String, u64)>> {
+    let mut found = Vec::new();
+    for dir in sub_directories(&prefix_dir.join(rel))? {
+        let Some(component) = dir
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+        else {
+            continue;
+        };
+        for n in numbers_in(&dir)? {
+            found.push((
+                format!("{rel}/{component}/{}", crate::layout::segments_name(n)),
+                n,
+            ));
+        }
+    }
+    Ok(found)
+}
+
+/// The `n` of every `SEGMENTS-<n>.json` in `dir` spelled canonically, empty where `dir` is absent.
+fn numbers_in(dir: &Path) -> Result<Vec<u64>> {
+    let mut found = Vec::new();
+    for entry in read_dir_if_present(dir)? {
+        let entry = entry.map_err(|source| StoreError::Io {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if let Some(n) = name
+            .strip_prefix("SEGMENTS-")
+            .and_then(|r| r.strip_suffix(".json"))
+            .and_then(|r| r.parse::<u64>().ok())
+        {
+            found.push(n);
+        }
+    }
+    Ok(found)
 }
 
 /// List the `n` values of every `SEGMENTS-<n>.json` present in `partition_dir` (unordered,
@@ -1528,21 +1710,23 @@ pub fn highest_side_manifest_n(bundle_root: &Path) -> Result<Option<u64>> {
     let mut highest: Option<u64> = None;
     for prefix in sub_directories(bundle_root)? {
         for partition in sub_directories(&crate::layout::partitions_dir(&prefix))? {
-            for entry in read_dir_if_present(&partition)? {
-                let entry = entry.map_err(|source| StoreError::Io {
-                    path: partition.clone(),
-                    source,
-                })?;
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                let Some(rest) = name
-                    .strip_prefix("SEGMENTS-")
-                    .and_then(|r| r.strip_suffix(".json"))
-                else {
-                    continue;
-                };
-                if let Ok(n) = rest.parse::<u64>() {
-                    highest = Some(highest.map_or(n, |h: u64| h.max(n)));
+            highest = highest.max(numbers_in(&partition)?.into_iter().max());
+        }
+    }
+    Ok(highest)
+}
+
+/// [`highest_side_manifest_n`] over every shard's and layer space's `SEGMENTS-<m>.json` too: the
+/// floor a writer starting over this bundle root must clear. A shard or space file a publication
+/// staged and never committed takes its number, and the next publication at that number would be
+/// refused.
+pub fn highest_published_n(bundle_root: &Path) -> Result<Option<u64>> {
+    let mut highest = highest_side_manifest_n(bundle_root)?;
+    for prefix in sub_directories(bundle_root)? {
+        for partition in sub_directories(&crate::layout::partitions_dir(&prefix))? {
+            for kind in ["shards", "layers"] {
+                for dir in sub_directories(&partition.join(kind))? {
+                    highest = highest.max(numbers_in(&dir)?.into_iter().max());
                 }
             }
         }
@@ -1748,7 +1932,7 @@ fn hex_sha256(bytes: &[u8]) -> String {
     hex_digest(Sha256::digest(bytes).as_slice())
 }
 
-fn hex_digest(digest: &[u8]) -> String {
+pub(crate) fn hex_digest(digest: &[u8]) -> String {
     use std::fmt::Write;
     let mut out = String::with_capacity(digest.len() * 2);
     for byte in digest {

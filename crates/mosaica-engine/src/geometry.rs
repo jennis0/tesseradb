@@ -102,7 +102,7 @@ pub struct GeometryPublication {
 pub(crate) struct PrefixRotation {
     /// The new prefix's base postings.
     pub(crate) postings: Arc<PostingsReader>,
-    /// The shard's identity in the new prefix ([`crate::shard_identity`]), which files its
+    /// The shard's identity in the new prefix (`ShardRecord::identity`), which files its
     /// fragments and figures apart from the superseded prefix's.
     pub(crate) identity: [u8; 32],
     /// The new prefix's filter columns — **opened over it, never cloned from the live
@@ -324,9 +324,10 @@ impl std::fmt::Display for ManifestRegression {
 /// (caught by the endurance tier, 2026-08-15), and what contained it was an accident: the boot
 /// rebuilds the buffer by `has_row`, not by the watermark, so the under-report never miscounted.
 ///
-/// **Compared: every ordered scalar** — each shard's `watermark` and `high_water`, and the
-/// partition's `layer_registry_version`; the rest are lists and maps no total order describes. A
-/// new ordered scalar joins this comparison, and a served shard's record may not be dropped.
+/// **Compared: every ordered scalar** — each shard's `watermark`, `high_water` and state (open
+/// before sealed: nothing reopens a shard), and the partition's `layer_registry_version` and
+/// `shards.next_id`; the rest are lists and maps no total order describes. A new ordered scalar
+/// joins this comparison, and a served shard's record may not be dropped.
 pub(crate) fn check_manifest_publishable(
     live: &mosaica_store::read::PartitionData,
     next: &mosaica_store::manifest::SegmentsManifest,
@@ -340,9 +341,11 @@ pub(crate) fn check_manifest_publishable(
             });
         };
         let live_record = &shard.record;
+        let sealed = |state| u64::from(state == mosaica_types::ShardState::Sealed);
         for (field, live, offered) in [
             ("watermark", live_record.watermark, record.watermark),
             ("high_water", live_record.high_water, record.high_water),
+            ("state", sealed(live_record.state), sealed(record.state)),
         ] {
             if offered < live {
                 return Err(ManifestRegression {
@@ -352,6 +355,13 @@ pub(crate) fn check_manifest_publishable(
                 });
             }
         }
+    }
+    if next.shards.next_id < live.next_shard_id {
+        return Err(ManifestRegression {
+            field: "next_id",
+            live: live.next_shard_id.into(),
+            offered: next.shards.next_id.into(),
+        });
     }
     if next.partition.layer_registry_version < live.manifest.layer_registry_version {
         return Err(ManifestRegression {
@@ -478,5 +488,36 @@ mod tests {
         without.shards.records.clear();
         check_manifest_publishable(&live, &without)
             .expect_err("a manifest that drops a served shard's record is refused");
+    }
+
+    /// **The shard counter never falls and a sealed shard never reopens**, whatever a publication
+    /// assembled them from; a shard numbered or sealed is so for good.
+    #[test]
+    fn a_side_manifest_may_not_lower_next_id_or_reopen_a_shard() {
+        let mut sealed = manifest_at(100, 200);
+        sealed.shards.next_id = 3;
+        sealed.only_shard_mut().state = mosaica_types::ShardState::Sealed;
+        let live = crate::generation::partition_of(sealed.clone());
+
+        assert!(check_manifest_publishable(&live, &sealed).is_ok());
+        let mut opened = sealed.clone();
+        opened.shards.next_id = 4;
+        assert!(
+            check_manifest_publishable(&live, &opened).is_ok(),
+            "a shard opened raises the counter"
+        );
+
+        let mut fallen = sealed.clone();
+        fallen.shards.next_id = 2;
+        let refused = check_manifest_publishable(&live, &fallen)
+            .expect_err("a falling shard counter is refused");
+        assert_eq!(refused.field, "next_id");
+        assert_eq!((refused.live, refused.offered), (3, 2));
+
+        let mut reopened = sealed;
+        reopened.only_shard_mut().state = mosaica_types::ShardState::Open;
+        let refused = check_manifest_publishable(&live, &reopened)
+            .expect_err("a sealed shard reopened is refused");
+        assert_eq!(refused.field, "state");
     }
 }

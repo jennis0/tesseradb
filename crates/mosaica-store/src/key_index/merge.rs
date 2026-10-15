@@ -2,17 +2,16 @@
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
-use std::num::NonZeroU64;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use super::run::Entries;
 use super::{Key, KeyRun, KeyRunWriter, WrittenRun};
 use crate::error::Result;
 
-/// Merge the runs at `inputs` into new runs under `out_dir` (named as [`KeyRunWriter`] names
-/// them), dropping every entry for which `retired(key, entity)` is true and keeping every other
-/// entry once. A value-to-entity index tests the entity against the removed entities; an
-/// entity-to-value map tests the key. A merge that drops every entry writes no file.
+/// Merge the runs at `inputs` into new runs through `writer`, dropping every entry for which
+/// `retired(key, entity)` is true and keeping every other entry once. A value-to-entity index
+/// tests the entity against the removed entities; an entity-to-value map tests the key. A merge
+/// that drops every entry writes no file.
 ///
 /// The output is split as [`KeyRunWriter`] splits, so the runs it returns have disjoint key ranges
 /// whatever the inputs' ranges were. Each input is read front to back once, every page checked as
@@ -20,11 +19,8 @@ use crate::error::Result;
 pub fn merge_runs<K: Key>(
     inputs: &[PathBuf],
     retired: impl FnMut(K, u32) -> bool,
-    out_dir: &Path,
-    stem: &str,
-    max_entries: NonZeroU64,
+    mut writer: KeyRunWriter<K>,
 ) -> Result<Vec<WrittenRun<K>>> {
-    let mut writer = KeyRunWriter::create(out_dir, stem, max_entries);
     for_each_merged(inputs, retired, |key, entity| writer.push(key, entity))?;
     writer.finish()
 }

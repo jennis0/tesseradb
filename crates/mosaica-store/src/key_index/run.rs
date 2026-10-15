@@ -7,8 +7,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use memmap2::{Advice, Mmap};
 
+use super::filter::{self, BLOCK, MAX_HASHES};
 use super::page::{max_entries, Page, PageCursor};
-use super::{file_len, Header, Key, RunPart, HEADER_LEN, PAGE_BODY, PAGE_SIZE};
+use super::{
+    file_len, filter_offset, index_end, Header, Key, RunPart, HEADER_LEN, PAGE_BODY, PAGE_SIZE,
+};
 use crate::error::{Result, StoreError};
 
 /// The most pages between two ranges a batched lookup needs that it prefetches with them.
@@ -22,8 +25,8 @@ fn corrupt(path: &Path, part: RunPart, detail: impl Into<String>) -> StoreError 
     }
 }
 
-/// One run file, mapped. Opening reads the header and the page index; each entry page is checked
-/// the first time it is read (see the module doc of [`crate::key_index`]).
+/// One run file, mapped. Opening reads the header, the page index and the key filter; each entry
+/// page is checked the first time it is read (see the module doc of [`crate::key_index`]).
 pub struct KeyRun<K: Key> {
     path: PathBuf,
     map: Mmap,
@@ -93,7 +96,23 @@ impl<K: Key> KeyRun<K> {
                 "the smallest and largest keys are out of order or wider than the key".to_string(),
             ));
         }
-        let expected = file_len(header.pages, width)
+        let shape = header.filter;
+        if shape.blocks == 0 {
+            if shape.offset != 0 || shape.hashes != 0 {
+                return Err(header_err(
+                    "the key filter has no blocks and a non-zero offset or hash count".to_string(),
+                ));
+            }
+        } else if Some(shape.offset) != filter_offset(header.pages, width)
+            || !(1..=MAX_HASHES).contains(&shape.hashes)
+        {
+            return Err(header_err(format!(
+                "the key filter starts at byte {} with {} hashes; it starts at the first \
+                 {BLOCK}-byte boundary after the page index and sets 1 to {MAX_HASHES} bits a key",
+                shape.offset, shape.hashes
+            )));
+        }
+        let expected = file_len(&header, width)
             .ok_or_else(|| header_err("the page count overflows a file length".to_string()))?;
         if map.len() as u64 != expected {
             return Err(header_err(format!(
@@ -117,7 +136,29 @@ impl<K: Key> KeyRun<K> {
             .map
             .advise_range(Advice::WillNeed, run.index_offset(), index_len);
         run.check_page_index()?;
+        run.check_filter()?;
         Ok(run)
+    }
+
+    /// The key filter's checksum, and that the bytes between the page index and it are zero.
+    fn check_filter(&self) -> Result<()> {
+        let shape = self.header.filter;
+        if shape.blocks == 0 {
+            return Ok(());
+        }
+        let fail = |detail: &str| corrupt(&self.path, RunPart::Filter, detail);
+        let end = index_end(self.header.pages, K::WIDTH).expect("checked against the length");
+        let (start, stop) = (shape.offset as usize, self.map.len() - 4);
+        if self.map[end as usize..start].iter().any(|&b| b != 0) {
+            return Err(fail(
+                "the bytes between the page index and the key filter are not zero",
+            ));
+        }
+        let stored = u32::from_le_bytes(self.map[stop..].try_into().expect("four bytes"));
+        if crc32fast::hash(&self.map[start..stop]) != stored {
+            return Err(fail("the key filter checksum does not match its bytes"));
+        }
+        Ok(())
     }
 
     /// The page index's checksum, its order, and its agreement with the header's key range.
@@ -261,9 +302,29 @@ impl<K: Key> KeyRun<K> {
         })
     }
 
-    fn may_hold(&self, key: K) -> bool {
+    /// Whether the run carries a key filter.
+    pub fn has_key_filter(&self) -> bool {
+        self.header.filter.blocks > 0
+    }
+
+    /// Whether the run may hold `key`: false, and the run holds no entry under it, when the key is
+    /// outside the run's key range or its key filter does not pass it.
+    #[inline]
+    pub fn may_hold(&self, key: K) -> bool {
         self.key_range()
             .is_some_and(|(lo, hi)| lo <= key && key <= hi)
+            && self.filter_passes(key.widen())
+    }
+
+    #[inline]
+    fn filter_passes(&self, key: u128) -> bool {
+        let shape = self.header.filter;
+        if shape.blocks == 0 {
+            return true;
+        }
+        let start = shape.offset as usize;
+        let bytes = &self.map[start..start + shape.blocks as usize * BLOCK];
+        filter::may_hold(bytes, shape.blocks, shape.hashes, key)
     }
 
     /// Every entity stored under `key`, ascending.
@@ -287,16 +348,17 @@ impl<K: Key> KeyRun<K> {
             keys.windows(2).all(|w| w[0] <= w[1]),
             "lookup_sorted takes keys in ascending order"
         );
-        self.prefetch(keys);
+        let held: Vec<usize> = (0..keys.len())
+            .filter(|&i| self.may_hold(keys[i]))
+            .collect();
+        self.prefetch(held.iter().map(|&i| keys[i]));
         let mut out: Vec<(usize, u32)> = Vec::new();
         let mut at = None;
         // Where the previous key's entities start in `out`. A repeated key copies them, since the
         // cursor has moved past that key's entries.
         let mut previous: Option<(K, usize)> = None;
-        for (i, &key) in keys.iter().enumerate() {
-            if !self.may_hold(key) {
-                continue;
-            }
+        for i in held {
+            let key = keys[i];
             match previous {
                 Some((k, from)) if k == key => {
                     let end = out.len();
@@ -317,14 +379,15 @@ impl<K: Key> KeyRun<K> {
         Ok(out)
     }
 
-    /// Ask the kernel to read, in the background, every page a lookup of `keys` will read. The
+    /// Ask the kernel to read, in the background, every page a lookup of `keys`, ascending and each
+    /// one the run may hold, will read. The
     /// entry pages are mapped for random access, so without this a batch reads its pages one at
     /// a time, each waiting on the disk.
     ///
     /// Pages are advised in ranges, and a gap of up to [`PREFETCH_GAP`] pages between two ranges
     /// is advised with them: reading a few unneeded pages costs less than a system call per range
     /// when the pages are already resident.
-    fn prefetch(&self, keys: &[K]) {
+    fn prefetch(&self, keys: impl Iterator<Item = K>) {
         let advise = |(first, end): (u64, u64)| {
             let _ = self.map.advise_range(
                 Advice::WillNeed,
@@ -334,10 +397,7 @@ impl<K: Key> KeyRun<K> {
         };
         let mut pending: Option<(u64, u64)> = None;
         let mut from = 0;
-        for &key in keys {
-            if !self.may_hold(key) {
-                continue;
-            }
+        for key in keys {
             from = self.start_page(key, from);
             let mut end = from + 1;
             while end < self.header.pages && self.index_key(end) <= key {
@@ -506,11 +566,14 @@ pub struct RunCheck {
     pub key_width: usize,
     pub entries: u64,
     pub pages: u64,
+    /// The key filter's blocks; zero for a run without one.
+    pub filter_blocks: u64,
 }
 
 /// Check the run at `path` completely: the header, the page index, every page's checksum, the
 /// order of every entry within and across pages, the page index against every page, the header's
-/// counts and key range, and that the bytes the format leaves unused are zero. Reads every byte.
+/// counts and key range, that the key filter passes every key, and that the bytes the format
+/// leaves unused are zero. Reads every byte.
 pub fn verify_run(path: &Path) -> Result<RunCheck> {
     let io = |source| StoreError::Io {
         path: path.to_path_buf(),
@@ -549,7 +612,19 @@ fn verify_all<K: Key>(path: &Path) -> Result<RunCheck> {
     // Reading the pages in order checks each against the one before it (see `check_page`).
     let mut entries = 0u64;
     for p in 0..run.header.pages {
-        entries += run.page(p)?.len() as u64;
+        let page = run.page(p)?;
+        entries += page.len() as u64;
+        let missed = page
+            .checked_keys()
+            .flatten()
+            .find(|&k| !run.filter_passes(k));
+        if let Some(key) = missed {
+            return Err(corrupt(
+                path,
+                RunPart::Filter,
+                format!("page {p} holds key {key:#x} and the key filter does not pass it"),
+            ));
+        }
     }
     if entries != run.header.entries {
         return Err(corrupt(
@@ -565,5 +640,6 @@ fn verify_all<K: Key>(path: &Path) -> Result<RunCheck> {
         key_width: K::WIDTH,
         entries: run.header.entries,
         pages: run.header.pages,
+        filter_blocks: run.header.filter.blocks,
     })
 }

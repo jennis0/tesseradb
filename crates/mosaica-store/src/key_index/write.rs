@@ -1,12 +1,13 @@
 //! Writing sorted entries into run files.
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
-use super::page::PageBuilder;
-use super::{Header, Key, PAGE_SIZE};
+use super::filter::{blocks_for, FilterBuilder};
+use super::page::{Page, PageBuilder};
+use super::{filter_offset, index_end, FilterShape, Header, Key, PAGE_SIZE};
 use crate::error::{Result, StoreError};
 
 /// One run file a writer finished.
@@ -25,12 +26,15 @@ pub struct WrittenRun<K: Key> {
 /// by the entities of its last key, and the runs one writer emits have disjoint key ranges. A
 /// writer given no entries writes no file.
 ///
+/// A writer made [`KeyRunWriter::with_key_filter`] gives each run a key filter.
+///
 /// A file already at a run's name is an error, never overwritten. A writer dropped before
 /// [`KeyRunWriter::finish`] returns removes every file it created.
 pub struct KeyRunWriter<K: Key> {
     dir: PathBuf,
     stem: String,
     max_entries: u64,
+    filter: bool,
     open: Option<OpenRun<K>>,
     written: Vec<WrittenRun<K>>,
     last: Option<(K, u32)>,
@@ -43,10 +47,17 @@ impl<K: Key> KeyRunWriter<K> {
             dir: dir.to_path_buf(),
             stem: stem.to_string(),
             max_entries: max_entries.get(),
+            filter: false,
             open: None,
             written: Vec::new(),
             last: None,
         }
+    }
+
+    /// This writer, writing a key filter into every run it writes.
+    pub fn with_key_filter(mut self) -> Self {
+        self.filter = true;
+        self
     }
 
     /// Append one entry. It must follow the previous entry in `(key, entity)` order.
@@ -75,7 +86,7 @@ impl<K: Key> KeyRunWriter<K> {
             let path = self
                 .dir
                 .join(format!("{}-{}.keys", self.stem, self.written.len()));
-            self.open = Some(OpenRun::create(path)?);
+            self.open = Some(OpenRun::create(path, self.filter)?);
         }
         self.open
             .as_mut()
@@ -125,10 +136,12 @@ struct OpenRun<K: Key> {
     filling: PageBuilder<K>,
     first_keys: Vec<K>,
     header: Header,
+    /// The distinct keys pushed, where the run takes a key filter.
+    filter_keys: Option<u64>,
 }
 
 impl<K: Key> OpenRun<K> {
-    fn create(path: PathBuf) -> Result<Self> {
+    fn create(path: PathBuf, filter: bool) -> Result<Self> {
         let io = |source| StoreError::Io {
             path: path.clone(),
             source,
@@ -152,7 +165,9 @@ impl<K: Key> OpenRun<K> {
                 pages: 0,
                 min_key: 0,
                 max_key: 0,
+                filter: FilterShape::default(),
             },
+            filter_keys: filter.then_some(0),
         })
     }
 
@@ -164,6 +179,11 @@ impl<K: Key> OpenRun<K> {
     }
 
     fn push(&mut self, key: K, entity: u32) -> Result<()> {
+        if let Some(keys) = &mut self.filter_keys {
+            if self.header.entries == 0 || self.header.max_key != key.widen() {
+                *keys += 1;
+            }
+        }
         if self.header.entries == 0 {
             self.header.min_key = key.widen();
         }
@@ -204,6 +224,9 @@ impl<K: Key> OpenRun<K> {
         self.out
             .write_all(&crc.to_le_bytes())
             .map_err(|e| self.io(e))?;
+        if let Some(keys) = self.filter_keys {
+            self.write_filter(keys)?;
+        }
         let header = self.header.encode();
         let path = self.path.clone();
         let io = |source| StoreError::Io {
@@ -219,5 +242,40 @@ impl<K: Key> OpenRun<K> {
             min_key: K::narrow(self.header.min_key),
             max_key: K::narrow(self.header.max_key),
         })
+    }
+
+    /// Fill a filter of `keys` distinct keys from the entry pages already written, read back from
+    /// the file, and write it after the page index.
+    fn write_filter(&mut self, keys: u64) -> Result<()> {
+        let pages = self.header.pages;
+        let end = index_end(pages, K::WIDTH).expect("a written run's length fits");
+        let offset = filter_offset(pages, K::WIDTH).expect("a written run's length fits");
+        self.out.flush().map_err(|e| self.io(e))?;
+        let mut filter = FilterBuilder::new(blocks_for(keys));
+        let file = File::open(&self.path).map_err(|e| self.io(e))?;
+        let mut pages_in = BufReader::with_capacity(64 * PAGE_SIZE, file);
+        pages_in
+            .seek(SeekFrom::Start(PAGE_SIZE as u64))
+            .map_err(|e| self.io(e))?;
+        for _ in 0..pages {
+            pages_in
+                .read_exact(&mut self.page)
+                .map_err(|e| self.io(e))?;
+            let page = Page::<K>::parse(&self.page).expect("a page this writer sealed parses");
+            for key in page.checked_keys() {
+                filter.insert(key.expect("a page this writer sealed holds its keys"));
+            }
+        }
+        let padding = vec![0u8; (offset - end) as usize];
+        let crc = crc32fast::hash(filter.bytes());
+        for bytes in [&padding[..], filter.bytes(), &crc.to_le_bytes()] {
+            self.out.write_all(bytes).map_err(|e| self.io(e))?;
+        }
+        self.header.filter = FilterShape {
+            offset,
+            blocks: blocks_for(keys),
+            hashes: filter.hashes(),
+        };
+        Ok(())
     }
 }

@@ -482,31 +482,48 @@ def _reference_strings(node) -> set[str]:
 
 def _committed_references(bundle_root: Path) -> tuple[str, set[str]]:
     """The live prefix and every path a durable, reachable manifest names. Reachability roots at
-    `CURRENT`: the prefix it names, that prefix's `MANIFEST.json`, and every complete
-    `SEGMENTS-<n>.json` under it. A manifest inside an unflipped prefix is itself unreachable and
-    deliberately contributes nothing."""
+    `CURRENT`: the prefix it names, that prefix's `MANIFEST.json`, every complete partition
+    `SEGMENTS-<n>.json` under it, and each shard's and layer space's `SEGMENTS-<m>.json` a
+    partition file names, with what that file names in turn. A manifest inside an unflipped prefix
+    is itself unreachable and deliberately contributes nothing, and so is a shard or space file
+    no partition file names: it is the staged half of a publication that never committed."""
     prefix = _live_prefix(bundle_root)
     prefix_dir = bundle_root / prefix
-    refs: set[str] = set()
-    for manifest in [
-        prefix_dir / "MANIFEST.json",
-        *sorted(prefix_dir.glob("partitions/*/SEGMENTS-*.json")),
-    ]:
-        refs |= _reference_strings(json.loads(manifest.read_text()))
+    refs = _reference_strings(json.loads((prefix_dir / "MANIFEST.json").read_text()))
+    for manifest in sorted(prefix_dir.glob("partitions/*/SEGMENTS-*.json")):
+        published = json.loads(manifest.read_text())
+        refs |= _reference_strings(published)
+        partition = manifest.parent.relative_to(prefix_dir)
+        named = [
+            partition / "shards" / str(ref["id"]) / f"SEGMENTS-{ref['n']}.json"
+            for ref in published.get("shards", {}).get("files", [])
+        ] + [
+            partition / "layers" / str(ref["space"]) / f"SEGMENTS-{ref['n']}.json"
+            for ref in published.get("layer_spaces", [])
+        ]
+        for rel in named:
+            refs.add(str(rel))
+            if (prefix_dir / rel).is_file():
+                refs |= _reference_strings(json.loads((prefix_dir / rel).read_text()))
     return prefix, refs
 
 
 def _looks_like_commitment(rel_path: str) -> bool:
     """Whether a path is itself commit-point metadata — `CURRENT`, a `MANIFEST.json`, a complete
-    side-manifest. None may ever *appear* during a stage parked before its commit; one appearing
-    means the kill did not land where the seam claimed, and the discard must refuse rather than
-    delete committed state."""
-    name = Path(rel_path).name
+    partition side-manifest. None may ever *appear* during a stage parked before its commit; one
+    appearing means the kill did not land where the seam claimed, and the discard must refuse
+    rather than delete committed state. A shard's or a layer space's `SEGMENTS-<m>.json` is not
+    one: a publication writes those before the partition file that commits them."""
+    path = Path(rel_path)
+    name = path.name
     if name.endswith(".tmp"):
         return False
-    return name in ("CURRENT", "MANIFEST.json") or (
-        name.startswith("SEGMENTS-") and name.endswith(".json")
+    partition_file = (
+        name.startswith("SEGMENTS-")
+        and name.endswith(".json")
+        and path.parent.parent.name == "partitions"
     )
+    return name in ("CURRENT", "MANIFEST.json") or partition_file
 
 
 def _discard_appeared_files(bundle_root: Path, before: frozenset[str]) -> tuple[str, ...]:
