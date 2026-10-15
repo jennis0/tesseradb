@@ -1051,10 +1051,8 @@ impl ContainmentBuilder {
     }
 
     /// One artifact's ranks, in order, each already canonically encoded by
-    /// [`encode_expression`]. Ordinals arrive ascending, and one never pushed is a hole.
-    ///
-    /// An artifact whose every rank is the empty expression is not listed: the reader answers it
-    /// as that expression.
+    /// [`encode_expression`]. Ordinals arrive ascending; an artifact whose every rank is the empty
+    /// expression is not listed.
     pub fn push(&mut self, ordinal: u32, ranks: impl IntoIterator<Item = Vec<u32>>) {
         self.ordinals = ordinal + 1;
         let ranks: Vec<Vec<u32>> = ranks.into_iter().collect();
@@ -2416,6 +2414,19 @@ mod derived_tests {
         assert!(read_shape_held(&path, 4).is_err(), "another level version");
         std::fs::write(&path, &file[..file.len() - 2]).unwrap();
         assert!(read_shape_held(&path, 3).is_err(), "torn");
+    }
+
+    #[test]
+    fn an_artifact_whose_every_rank_is_empty_is_not_listed() {
+        let empty = encode_expression(0, vec![]);
+        let one = encode_expression(1, vec![&[3][..]]);
+        let mut builder = ContainmentBuilder::new();
+        builder.push(0, [empty.clone(), empty.clone()]);
+        builder.push(1, [one, empty]);
+        let pack = crate::membership::ContainmentPack::from_bytes(builder.finish()).unwrap();
+        assert_eq!(pack.ordinals(), 2);
+        assert_eq!((pack.entry(0), pack.entry(1)), (None, Some(0)));
+        assert_eq!(pack.pairs(), 2);
     }
 
     /// Disjointness is observed, not declared.

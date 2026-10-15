@@ -3,7 +3,8 @@
 //! A shard holds something of a few of its level's artifacts, and a file with an entry per ordinal
 //! pays for every one it holds nothing of. This index is one bit per ordinal and a running count
 //! per 64, so a file lists only what its shard holds and a reader finds a listed ordinal's entry in
-//! one population count.
+//! one population count. An ordinal a file covers and does not list holds nothing: each format
+//! says what that reads as.
 //!
 //! ```text
 //! words := ceil(ordinals / 64) × u64 LE   -- bit `o % 64` of word `o / 64` is set where `o` is listed
@@ -36,7 +37,7 @@ impl PresenceWriter {
         }
     }
 
-    /// List `ordinal`. Ordinals arrive ascending, each at most once.
+    /// Ordinals arrive ascending, each at most once.
     pub(crate) fn list(&mut self, ordinal: u32) {
         self.words[ordinal as usize / 64] |= 1 << (ordinal % 64);
         self.listed += 1;
@@ -85,7 +86,7 @@ impl Presence {
             }
             before = before.checked_add(word.count_ones())?;
         }
-        let spare = (n * 64) as u32 - ordinals;
+        let spare = n * 64 - ordinals as usize;
         let last_ok = n == 0 || spare == 0 || presence.word(bytes, n - 1) >> (64 - spare) == 0;
         (last_ok && before == listed).then_some(presence)
     }

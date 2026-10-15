@@ -23,11 +23,9 @@
 //!             | (listed + 1) × u64 index into `ranges`, ascending, the last equal to `ranges`
 //! ```
 //!
-//! **The file lists the artifacts with members or a covering.** One it does not list has neither,
-//! as has a hole, and the records tell them apart, as they do for the column. A shard's file lists
-//! what its rows hold, so a level's artifacts cost a shard nothing where it holds none of their
-//! rows. The tables follow the payload so the writer streams the bitmaps without knowing in
-//! advance how many it will list.
+//! **The file lists only artifacts with members or a covering.** One it does not list has neither,
+//! as has a hole, and the records tell them apart, as they do for the column. The tables follow the
+//! payload so the writer streams the bitmaps without knowing how many it will list.
 //!
 //! # What the open checks
 //!
@@ -47,7 +45,7 @@ use croaring::{Bitmap, BitmapView, Frozen};
 use memmap2::Mmap;
 
 use crate::error::{io, Result, StoreError};
-use crate::presence::{Presence, PresenceWriter};
+use crate::presence::{self, Presence, PresenceWriter};
 use crate::{le_u32, le_u64};
 
 const MAGIC: &[u8; 4] = b"MSRM";
@@ -69,7 +67,7 @@ fn align_up(at: u64) -> u64 {
 
 /// The tables' length for a level of `ordinals` listing `listed`.
 fn tables_len(ordinals: u32, listed: u32) -> u64 {
-    crate::presence::len(ordinals) as u64
+    presence::len(ordinals) as u64
         + ENTRY_LEN as u64 * u64::from(listed)
         + 8 * (u64::from(listed) + 1)
 }
@@ -210,7 +208,7 @@ pub struct RowMembersPack {
     /// Where the entries start, behind the presence index.
     entries_at: usize,
     /// Where each listed ordinal's index into the ranges starts, behind the entries.
-    cover_at: usize,
+    covers_at: usize,
 }
 
 impl std::fmt::Debug for RowMembersPack {
@@ -269,7 +267,6 @@ impl RowMembersPack {
             || ranges_at < payload_at
             || !ranges_at.is_multiple_of(ALIGN)
             || ranges.checked_mul(8).and_then(|b| b.checked_add(ranges_at)) != Some(tables_at)
-            || listed > ordinals
             || tables_at.checked_add(tables_len(ordinals, listed)) != Some(file_len)
         {
             return Err(malformed(
@@ -283,7 +280,7 @@ impl RowMembersPack {
                 format!("its index does not list {listed} ordinals of {ordinals}"),
             ));
         };
-        let entries_at = tables_at as usize + crate::presence::len(ordinals);
+        let entries_at = tables_at as usize + presence::len(ordinals);
         let pack = RowMembersPack {
             map,
             ordinals,
@@ -295,12 +292,12 @@ impl RowMembersPack {
             presence,
             listed,
             entries_at,
-            cover_at: entries_at + ENTRY_LEN * listed as usize,
+            covers_at: entries_at + ENTRY_LEN * listed as usize,
         };
         let payload_len = (ranges_at - payload_at) as usize;
         let mut end = 0usize;
         for k in 0..listed as usize {
-            let (offset, len, members) = pack.entry(k);
+            let (offset, len, members) = pack.slot(k);
             if len == 0 {
                 if members != 0 {
                     return Err(malformed(
@@ -351,7 +348,7 @@ impl RowMembersPack {
         }
         for k in 0..listed as usize {
             let mut last: Option<u32> = None;
-            for (lo, hi) in pack.entry_covering(k) {
+            for (lo, hi) in pack.slot_covering(k) {
                 if lo > hi || hi >= rows || last.is_some_and(|last| lo <= last) {
                     return Err(malformed(
                         path,
@@ -376,7 +373,7 @@ impl RowMembersPack {
     }
 
     /// The `k`th listed ordinal's offset, length and members.
-    fn entry(&self, k: usize) -> (usize, usize, u32) {
+    fn slot(&self, k: usize) -> (usize, usize, u32) {
         let at = self.entries_at + ENTRY_LEN * k;
         (
             le_u64(&self.map, at) as usize,
@@ -386,11 +383,11 @@ impl RowMembersPack {
     }
 
     fn cover_at(&self, k: usize) -> u64 {
-        le_u64(&self.map, self.cover_at + 8 * k)
+        le_u64(&self.map, self.covers_at + 8 * k)
     }
 
     /// `ordinal`'s entry, where the file lists it.
-    fn listed(&self, ordinal: u32) -> Option<usize> {
+    fn entry(&self, ordinal: u32) -> Option<usize> {
         self.presence.entry(&self.map, ordinal)
     }
 
@@ -416,7 +413,7 @@ impl RowMembersPack {
 
     /// The artifact's members, or `None` where it has none or is past the file.
     pub fn members(&self, ordinal: u32) -> Option<BitmapView<'_>> {
-        let (offset, len, _) = self.entry(self.listed(ordinal)?);
+        let (offset, len, _) = self.slot(self.entry(ordinal)?);
         if len == 0 {
             return None;
         }
@@ -444,10 +441,10 @@ impl RowMembersPack {
     /// Ask for the artifact's whole bitmap to be read now and in the background, for a reader
     /// about to read all of it.
     pub fn will_need(&self, ordinal: u32) {
-        let Some(k) = self.listed(ordinal) else {
+        let Some(k) = self.entry(ordinal) else {
             return;
         };
-        let (offset, len, _) = self.entry(k);
+        let (offset, len, _) = self.slot(k);
         if len > 0 {
             let _ = self
                 .map
@@ -457,17 +454,17 @@ impl RowMembersPack {
 
     /// How many members the artifact has.
     pub fn member_count(&self, ordinal: u32) -> u32 {
-        self.listed(ordinal).map_or(0, |k| self.entry(k).2)
+        self.entry(ordinal).map_or(0, |k| self.slot(k).2)
     }
 
     /// The artifact's covering, ascending. Empty for an artifact with no members.
     pub fn covering(&self, ordinal: u32) -> impl Iterator<Item = (u32, u32)> + '_ {
-        let k = self.listed(ordinal);
-        k.into_iter().flat_map(move |k| self.entry_covering(k))
+        let k = self.entry(ordinal);
+        k.into_iter().flat_map(move |k| self.slot_covering(k))
     }
 
     /// The `k`th listed ordinal's covering.
-    fn entry_covering(&self, k: usize) -> impl Iterator<Item = (u32, u32)> + '_ {
+    fn slot_covering(&self, k: usize) -> impl Iterator<Item = (u32, u32)> + '_ {
         (self.cover_at(k)..self.cover_at(k + 1)).map(move |i| {
             let at = self.ranges_at + 8 * i as usize;
             (le_u32(&self.map, at), le_u32(&self.map, at + 4))
@@ -545,7 +542,7 @@ mod tests {
             "a range past the rows"
         );
         let mut hostile = bytes.clone();
-        let entries_at = le_u64(&bytes, 56) as usize + crate::presence::len(1);
+        let entries_at = le_u64(&bytes, 56) as usize + presence::len(1);
         hostile[entries_at..entries_at + 8].copy_from_slice(&(u64::MAX - 31).to_le_bytes());
         std::fs::write(&path, &hostile).unwrap();
         assert!(
