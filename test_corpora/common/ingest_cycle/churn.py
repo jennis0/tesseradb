@@ -25,7 +25,7 @@ from .cycle import Cycle, fold_sentences, safe
 from .holdout import HoldOut
 from .split import bundle_manifest, declared_entities, declared_layers
 
-# The oracle's reader of a publication, so the churn and the suites read one layout one way.
+# The oracle's publication reader.
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "reference"))
 from oracle.layout import newest_publication  # noqa: E402
 

@@ -7,8 +7,8 @@ import time
 
 from oracle import catalogue
 from oracle import identity as identity_mod
-from oracle.bundle import newest_side_manifest
 from oracle.harness import kill_server, spawn_server, stop_server
+from oracle.layout import newest_side_manifest
 from oracle.wire import decode_viewport
 
 VIEW = catalogue.VIEW_ID

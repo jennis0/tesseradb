@@ -118,6 +118,7 @@ from oracle.harness import (
     kill_server,
     stop_server,
 )
+from oracle.layout import named_files
 from oracle.tenancy import HolderCount
 
 from .battery import Battery, Recorded, Viewport, build_battery, record
@@ -484,27 +485,19 @@ def _committed_references(bundle_root: Path) -> tuple[str, set[str]]:
     """The live prefix and every path a durable, reachable manifest names. Reachability roots at
     `CURRENT`: the prefix it names, that prefix's `MANIFEST.json`, every complete partition
     `SEGMENTS-<n>.json` under it, and each shard's and layer space's `SEGMENTS-<m>.json` a
-    partition file names, with what that file names in turn. A manifest inside an unflipped prefix
-    is itself unreachable and deliberately contributes nothing, and so is a shard or space file
-    no partition file names: it is the staged half of a publication that never committed."""
+    partition file names, with what that file names in turn. A manifest inside an unflipped
+    prefix, and a shard or space file no partition file names, are unreachable and contribute
+    nothing."""
     prefix = _live_prefix(bundle_root)
     prefix_dir = bundle_root / prefix
     refs = _reference_strings(json.loads((prefix_dir / "MANIFEST.json").read_text()))
     for manifest in sorted(prefix_dir.glob("partitions/*/SEGMENTS-*.json")):
         published = json.loads(manifest.read_text())
         refs |= _reference_strings(published)
-        partition = manifest.parent.relative_to(prefix_dir)
-        named = [
-            partition / "shards" / str(ref["id"]) / f"SEGMENTS-{ref['n']}.json"
-            for ref in published.get("shards", {}).get("files", [])
-        ] + [
-            partition / "layers" / str(ref["space"]) / f"SEGMENTS-{ref['n']}.json"
-            for ref in published.get("layer_spaces", [])
-        ]
-        for rel in named:
-            refs.add(str(rel))
-            if (prefix_dir / rel).is_file():
-                refs |= _reference_strings(json.loads((prefix_dir / rel).read_text()))
+        for path, _ in named_files(prefix_dir, published, manifest.parent.name):
+            refs.add(str(path.relative_to(prefix_dir)))
+            if path.is_file():
+                refs |= _reference_strings(json.loads(path.read_text()))
     return prefix, refs
 
 

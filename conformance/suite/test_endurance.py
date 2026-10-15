@@ -490,14 +490,14 @@ def observe(
     t.prev_live_seg_ids = live_ids
 
     fresh_ns = []
-    for (partition, n), digest in sorted(view.side_digests.items()):
-        key = (view.live_prefix, partition, n)
+    for (where, n), digest in sorted(view.side_digests.items()):
+        key = (view.live_prefix, where, n)
         earlier = t.side_seen.get(key)
         assert earlier is None or earlier == digest, (
-            f"{label}: {view.live_prefix}/partitions/{partition}/SEGMENTS-{n}.json changed bytes "
+            f"{label}: {view.live_prefix}/partitions/{where}/SEGMENTS-{n}.json changed bytes "
             f"under observation — the sequence is append-only and a member is never replaced"
         )
-        if earlier is None and "/" not in partition:
+        if earlier is None and "/" not in where:
             fresh_ns.append(n)
         t.side_seen[key] = digest
     # One global counter: every partition manifest not seen before must sit above everything ever

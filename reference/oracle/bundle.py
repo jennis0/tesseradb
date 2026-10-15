@@ -27,7 +27,7 @@ from pyroaring import BitMap
 from . import identity as identity_mod
 from . import morton as morton_mod
 from .identity import item_key, item_keys, item_of_key, pack_item_high
-from .layout import live_prefix_dir, newest_publication, read_publication, shard_dir, view_dir
+from .layout import read_publication, shard_dir, view_dir
 
 PERMUTATION_MAGIC = b"MSPM"
 # The two-level paged form (contracts 2.6). Version 1 was the flat array it replaced, and this
@@ -753,12 +753,6 @@ KEY_RUN_HEADER = 84
 KEY_FILTER_BLOCK = 64
 _U64 = (1 << 64) - 1
 _GOLDEN = 0x9E3779B97F4A7C15
-
-
-def newest_side_manifest(root: Path | str, partition: str = "default") -> dict:
-    """The highest-numbered publication of the prefix `CURRENT` names, assembled: what a running
-    server last published, where [`Bundle`] reads the build's publication 0."""
-    return newest_publication(live_prefix_dir(Path(root)), partition)[1]
 
 
 def shard_records(side_manifest: dict) -> list[dict]:

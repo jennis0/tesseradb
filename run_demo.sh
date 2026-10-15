@@ -299,14 +299,13 @@ items_of() {
     *) echo 0 ;;
   esac
 }
-# A built bundle's items: the high water of every shard in its newest publication, read by the
-# oracle's reader of the layout.
+# A built bundle's items: the high water of every shard in its newest publication.
 high_water_of() {
   python3 -c "
-import pathlib, sys
+import sys
 sys.path.insert(0, sys.argv[2])
-from oracle.layout import live_prefix_dir, newest_publication
-_, side = newest_publication(live_prefix_dir(pathlib.Path(sys.argv[1])))
+from oracle.layout import newest_side_manifest
+side = newest_side_manifest(sys.argv[1])
 print(sum(record['high_water'] for record in side['shards']['records']))
 " "$1" "$REPO/reference"
 }

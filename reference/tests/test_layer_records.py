@@ -11,10 +11,9 @@ from oracle import identity
 from oracle.bundle import (
     artifact_mosaica_id,
     layer_mosaica_id,
-    newest_side_manifest,
     registered_layer,
 )
-from oracle.layout import partition_dir
+from oracle.layout import newest_side_manifest, partition_dir
 
 KEY = identity.IdentityKey.from_hex("000102030405060708090a0b0c0d0e0f")
 

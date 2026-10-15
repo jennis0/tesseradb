@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from oracle.bundle import key_filter_passes, read_key_run
+from oracle.bundle import KEY_FILTER_BLOCK, key_filter_passes, read_key_run
 
 VECTORS = json.loads((Path(__file__).resolve().parents[1] / "vectors" / "key_run.json").read_text())
 RUNS = VECTORS["runs"]
@@ -28,7 +28,7 @@ def run_bytes(run: dict) -> bytearray:
 def filter_span(data: bytes) -> tuple[int, int, int]:
     """The filter's first byte, the byte after its blocks, and its hash count."""
     offset, blocks, hashes = struct.unpack_from("<QQI", data, 64)
-    return offset, offset + blocks * 64, hashes
+    return offset, offset + blocks * KEY_FILTER_BLOCK, hashes
 
 
 def write(tmp_path: Path, data: bytes) -> Path:

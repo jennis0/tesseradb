@@ -29,6 +29,8 @@ from pathlib import Path
 
 import requests
 
+from .layout import holds_only_the_build_publication
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CLI_BIN = REPO_ROOT / "target" / "release" / "mosaica"
 
@@ -589,13 +591,7 @@ def _fixture_bundle_is_usable(bundle_root: Path, wanted: dict) -> bool:
         prefix_dir = bundle_root / current["prefix"]
         if json.loads((prefix_dir / "MANIFEST.json").read_text()) is None:
             return False
-        # A folded bundle holds one publication too, at a number past 0.
-        published = [
-            p.name
-            for p in prefix_dir.glob("partitions/*/SEGMENTS-*.json")
-            if p.name != "SEGMENTS-0.json"
-        ]
-        return not published
+        return holds_only_the_build_publication(prefix_dir)
     except (OSError, KeyError, ValueError):
         return False
 

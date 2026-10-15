@@ -234,12 +234,10 @@ own slice of every artifact's membership and generating sets (§2.1).
 
 An artifact's id is never reused. A deleted artifact leaves a hole in its level's run. Its key is
 free from the deletion's acknowledgement, so a publication can give the key to a new artifact at
-once. Its record stays in the space, denied, until every shard whose slice lists the artifact has
-compacted. Dropping a
-view retires the artifacts scoped to it directly, removing their records at once. Not built yet:
-deleting them in the space's overlay instead, which stage 5 needs so that each shard reconciles its
-slices at its own compaction. With one shard, retiring them directly removes every part of them in
-one publication.
+once. Dropping a view retires the artifacts scoped to it directly, removing their records at once.
+Not built yet: deleting them in the space's overlay instead, which stage 5 needs so that each shard
+reconciles its slices at its own compaction. With one shard, retiring them directly removes every
+part of them in one publication.
 
 Dropping a layer removes its space, and every shard's slices and row forms of it, from the next
 publication, and their files from the next compaction's prefix. Nothing of the layer is kept. Its
@@ -248,16 +246,15 @@ none of the dropped layer's identifiers names the new layer or its artifacts. An
 layer that can outlive a drop, such as a cursor, a cache entry or a file name, is keyed by its
 space.
 
-Each artifact deletion records the shards whose slice lists the artifact. The compaction that
-clears the last of them removes the artifact's record, supplied content and deny, writing every
-layer space it touches again in the same publication and keeping every id. A deletion that no shard
-owes leaves at the next compaction of any shard. `/control/status` counts the spaces' deletions and
-suppressions under `layer_spaces`, apart from the shard's, and the compaction schedule counts each
-shard's owed artifact deletions with its deleted items, and those no shard owes with the open
-shard's. Not built yet: an artifact's deletion held
-in the space's overlay, with the shards that owe it, until every point shard's compaction has
-removed the artifact from that shard's slice and row forms. With one shard, the one
-compaction does both, so no deletion leaves an overlay while a shard still names its artifact.
+Each artifact deletion lists the shards whose slice holds the artifact, and the record stays in the
+space, denied, until each has compacted. The compaction that clears the last of them removes the
+record, supplied content and deny, writing every layer space it touches again in the same
+publication and keeping every id. A deletion that lists no shard leaves at the next compaction of
+any shard. `/control/status` counts the spaces' deletions and suppressions under `layer_spaces`,
+apart from the shard's. The compaction schedule counts a shard's listed artifact deletions with its
+deleted items, and deletions that list no shard with the open shard's. Not built yet: a deletion
+held until its listed shards compact. With one shard, the one compaction does both, so no deletion
+leaves an overlay while a shard still names its artifact.
 
 An artifact's or a layer's `mosaica_id` is
 
@@ -336,13 +333,13 @@ Any positive integer is accepted. A test sets a size small enough that its corpu
 shards, down to a few dozen items, so every behaviour in this document runs on the conformance
 corpora. No write is refused because of the size. An insert that takes the open shard's high water
 to the size seals the shard, and its remaining rows open the next one (§4.1). Lowering the size
-seals the open shard if its high water is past the new size, and `PUT /control/shards` answers as
-it does for any other size; the seal shows in the shard list (§4.9). Raising the size lets the open
+seals the open shard if its high water is past the new size, and `PUT /control/shards` answers as it
+does for any other size; the seal shows in the shard list (§4.9). Raising the size lets the open
 shard go on issuing ids. A sealed shard stays sealed. Not built yet: sealing, and opening a shard at
 a running service. A size below the open shard's high water is refused, and so is a batch that would
-take the high water past the size. These two refusals stand in for the seal and the open, and stage
-5 removes them. A build whose files hold more items than the size writes several shards (§5), which
-a running service opens for reads only (§10).
+take the high water past the size. These two refusals stand in for the seal and the open. A build
+whose files hold more items than the size writes several shards (§5), which a running service opens
+for reads only (§10).
 
 The default is 2³² − 2²⁸, 4,026,531,840. A sealed shard keeps the 2²⁸ ids above it for edits of its
 own items (§4.3). The default is chosen again from measurement (§8.5).
@@ -365,7 +362,7 @@ bundle/
     dictionary/terms-0.dict                # global
     dictionary/<flush or coalesce>/terms-0.dict  # each flush's extent and their coalesced files
     partitions/default/
-      SEGMENTS-<n>.json                    # registries and the shard and layer-space records
+      SEGMENTS-<n>.json                    # registries; from stage 5, each shard's and space's file by number and digest
       shards/<shard>/
         SEGMENTS-<n>.json                  # from stage 5: segments, extents, overlay, pool, watermark, levels, runtime-column bases
         terms/postings.arrow, pairs.parquet  # term ids global
@@ -392,14 +389,11 @@ bundle/
 | `entity_id_high_water` | manifest | removed: each shard's high water is in its record |
 | `entity_id_low_water` | side-manifest | removed: there is no low water |
 | `shards` | partition side-manifest | new: one record per point shard: number, state, high water, pool size, retired count, identity (§3.6), the runtime columns it has a base for, a slice version per level (§4.7), and from stage 6 when it opened and sealed |
-| `next_shard_id`, `next_layer_space` | partition side-manifest | new: monotone counters |
+| `shards.next_id`, `next_layer_space` | partition side-manifest | new: monotone counters |
 | `shards.size` | partition side-manifest | new |
 | `layers[].space` | partition side-manifest, in each layer's record | new: the layer's space |
 | `layer_spaces` | partition side-manifest | new: one record per layer space: its deletions and suppressions, the shards each deletion awaits, record and content extents, a records version per level (§4.7) and held shapes |
 | `files` | manifest | the same shape, covering every shard's files |
-
-Stage 5 writes a shard's state, its stored identity and `next_shard_id`. Stage 6 adds when a shard
-opened and sealed.
 
 A field a running service changes lives in the partition side-manifest. A compaction folds the
 declarations into `MANIFEST.json`, as today; every publication restates the shard records and
@@ -588,10 +582,9 @@ touch, was made before term images existed. It is re-measured (§8.2).
 ## 4. The write path
 
 Users never handle shards. No user's write is refused or changed because of shards, and nothing a
-user must act on names one. Timing that differs between shards is not something a user acts on: a
-batch whose rows land in two shards can show in one a tick before the other (§4.5). Admins see
-shards in `/control/status` and in the logs. The system allocates, seals, flushes and compacts on
-its own. An admin may force an action on a named shard but never has to choose one.
+user must act on names one. Admins see shards in `/control/status` and in the logs. The system
+allocates, seals, flushes and compacts on its own. An admin may force an action on a named shard but
+never has to choose one.
 
 ### 4.1 Where a new item goes
 
@@ -671,12 +664,12 @@ holds.
 
 ### 4.5 Flush and merge
 
-A flush writes the buffered rows of one view in one shard as a segment, and publishes it in one
-publication (§4.10). Where several (view, shard) pairs hold buffered rows, the pair whose oldest
-row has the oldest WAL position flushes first, since entity ids are neither comparable across
-shards nor in order under reuse. A batch whose rows land in two shards can therefore show in one
-shard a tick before the other. A merge combines segments of one view of one shard and never crosses
-shards. A session's projection is rebased for the shard and the span the merge moved.
+A flush writes the buffered rows of one view in one shard as a segment, and publishes it (§4.10).
+Where several (view, shard) pairs hold buffered rows, the pair whose oldest row has the oldest WAL
+position flushes first, since entity ids are neither comparable across shards nor in order under
+reuse. A batch whose rows land in two shards can therefore show in one shard a tick before the
+other. A merge combines segments of one view of one shard and never crosses shards. A session's
+projection is rebased for the shard and the span the merge moved.
 
 ### 4.6 Compaction
 
@@ -687,11 +680,10 @@ own. Among the shards that are due, the schedule compacts the one with the highe
 then the one with more segments, then the lowest number.
 
 `POST /control/compact` compacts every shard with something to reclaim, one after another. A shard
-has something to reclaim when its overlay holds a deletion, it owes an artifact deletion, it has a
-segment written since its last compaction, it lacks the base of a runtime column, or it holds dead
-bytes. When no shard has anything to reclaim, the request compacts the shard the schedule ranks
-first.
-`/control/status` keeps `compaction.fold_requested` true until the request's last compaction
+has something to reclaim when its overlay holds a deletion, it is listed by an artifact deletion, it
+has a segment written since its last compaction, it lacks the base of a runtime column, or it holds
+dead bytes. When no shard has anything to reclaim, the request compacts the shard the schedule ranks
+first. `/control/status` keeps `compaction.fold_requested` true until the request's last compaction
 publishes.
 
 The passes are today's (the code calls the operation a fold), run over that shard's files: row
@@ -712,9 +704,8 @@ window, and obeys the memory and disc pre-flights. A sealed shard then stays unc
 an edit, a deletion, a suppression, a new item from its pool, a publication's slice, a level's new
 layout (§4.8) or a new view lands in it.
 
-A layer space is rewritten in the publication of the compaction that clears the last shard owing
-one of its artifact deletions (§2.2). That publication removes the artifact's record, content and
-deny.
+A layer space is rewritten in the publication of the compaction that clears the last shard listed by
+one of its artifact deletions (§2.2).
 
 Splitting a compaction into a tier that removes rows and a tier that rewrites entity structures,
 running several compactions at once, and compacting a layer space on its own gauges are left until a
@@ -754,9 +745,8 @@ they are acknowledged, as a deny is. The system's own open and seal are WAL reco
 operator's seal is the same record as the seal at `shards.size`.
 
 `POST /control/compact` takes an optional shard and compacts that shard alone. Without one it
-compacts as §4.6 says. `/control/status`'s `compaction` block and the compaction's log line name
-the shard the last or running compaction is on, from stage 5; the optional shard comes at stage 6,
-on all four surfaces.
+compacts as §4.6 says. `/control/status`'s `compaction` block and the compaction's log line name the
+shard the last or running compaction is on.
 
 A drop applies to every request that starts after it is acknowledged: the shard is left out of
 every request, and every identifier it issued answers as one naming nothing. Its items leave every
@@ -790,11 +780,10 @@ listed in their directory's files with their digests, and verified at open as se
 
 Opening takes the highest partition file whose named files all verify, digesting each shard's in
 parallel, and steps down whole: every shard and space moves back with it, never one alone. A file
-that holds deny state is never stepped past, as today, and the partition file's flags say which
-files do. Where nothing verifies, the bundle is refused, naming the file that failed and its shard or space;
-serving the other shards alone would lower every count with nothing a viewer could see. A shard's
-verification is recorded against its side-manifest's digest and not repeated while that is
-unchanged.
+that holds deny state is never stepped past, as today. Where nothing verifies, the bundle is
+refused, naming the file that failed and its shard or space; serving the other shards alone would
+lower every count with nothing a viewer could see. A shard's verification is recorded against its
+side-manifest's digest and not repeated while that is unchanged.
 
 ## 5. Build
 
@@ -858,17 +847,16 @@ a shard is the one-shard build's, restricted to the shard's items and renumbered
 ## 7. Tests
 
 The conformance suite runs in two modes: with the default shard size, and with a size small enough
-that every corpus spans several shards. Every assertion it makes today holds in both. Not built
-yet: the many-shard mode's writes. Until stage 5 it runs only the tests marked `writes_nothing`
-and deselects the rest, since a bundle of several shards refuses every write. Stage 5 deletes the
-marker and the deselection, and every test runs in both modes. The
-identifiers differ between the modes, as they differ between two builds, and so do the samples
-drawn by rank. The oracle derives every identifier itself, as it does today. It derives each
-artifact's and each layer's from the layer's space and its levels' runs in the side-manifest, and
-checks every publication's receipt against it. It reads each item's shard and
-number from the bundle, takes the tenancy from its own count of the items it has seen hold that
-number, never from the stored identifiers or the tenancy index, and checks each sample against its
-own selection over them. Every identifier a receipt carries must invert to the tenancy it expects.
+that every corpus spans several shards. Every assertion it makes today holds in both. Not built yet:
+the many-shard mode's writes. Until stage 5 it runs only the tests marked `writes_nothing` and
+deselects the rest, since a bundle of several shards refuses every write. The identifiers differ
+between the modes, as they differ between two builds, and so do the samples drawn by rank. The
+oracle derives every identifier itself, as it does today. It derives each artifact's and each
+layer's from the layer's space and its levels' runs in the side-manifest, and checks every
+publication's receipt against it. It reads each item's shard and number from the bundle, takes the
+tenancy from its own count of the items it has seen hold that number, never from the stored
+identifiers or the tenancy index, and checks each sample against its own selection over them. Every
+identifier a receipt carries must invert to the tenancy it expects.
 
 Fixtures beyond that:
 

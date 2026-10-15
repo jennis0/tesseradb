@@ -125,6 +125,7 @@ from .harness import (
     write_deployment,
     write_recipe,
 )
+from .layout import holds_only_the_build_publication
 
 WORK_DIR_NAME = "multiview"
 
@@ -701,13 +702,7 @@ def _is_usable_bundle(bundle_root: Path, wanted: dict) -> bool:
         manifest = json.loads((prefix_dir / "MANIFEST.json").read_text())
         if manifest.get("identity") is None:
             return False
-        # A folded bundle holds one publication too, at a number past 0.
-        published = [
-            p.name
-            for p in prefix_dir.glob("partitions/*/SEGMENTS-*.json")
-            if p.name != "SEGMENTS-0.json"
-        ]
-        return not published
+        return holds_only_the_build_publication(prefix_dir)
     except (OSError, KeyError, ValueError):
         return False
 

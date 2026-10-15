@@ -69,36 +69,36 @@ def _read_named(path: Path, named: dict) -> dict:
     return json.loads(data)
 
 
+def named_files(
+    prefix_dir: Path, published: dict, partition: str = "default"
+) -> list[tuple[Path, dict]]:
+    """Each shard's and each layer space's own `SEGMENTS-<m>.json` that the partition file
+    `published` names, with the reference naming it: the shards' first, then the spaces'."""
+    return [
+        (shard_dir(prefix_dir, partition, named["id"]) / segments_name(named["n"]), named)
+        for named in published["shards"]["files"]
+    ] + [
+        (layer_space_dir(prefix_dir, named["space"], partition) / segments_name(named["n"]), named)
+        for named in published["layer_spaces"]
+    ]
+
+
 def read_publication(prefix_dir: Path, n: int, partition: str = "default") -> dict:
-    """Publication `n` of `partition` under `prefix_dir`, assembled: its partition
-    `SEGMENTS-<n>.json` with each shard's and each layer space's own `SEGMENTS-<m>.json` it names
-    read, checked against the size and digest it names, and merged in, so `shards.records` holds
-    the shard records, `layer_spaces` the space records and `files` every file any of them names.
-    """
+    """Publication `n` of `partition` under `prefix_dir`, with each shard and space file it names
+    checked against its size and digest and merged in: `shards.records` holds the shard records,
+    `layer_spaces` the space records, and `files` every file any of them names."""
     published = json.loads((partition_dir(prefix_dir, partition) / segments_name(n)).read_bytes())
     files = dict(published.get("files", {}))
     shards = published["shards"]
     records = []
-    for named in shards["files"]:
-        record = _read_named(
-            shard_dir(prefix_dir, partition, named["id"]) / segments_name(named["n"]), named
-        )
-        if record.get("id") != named["id"]:
-            raise ValueError(f"shard {named['id']}'s file holds shard {record.get('id')}'s record")
-        files.update(record.pop("files"))
-        records.append(record)
     spaces = []
-    for named in published["layer_spaces"]:
-        record = _read_named(
-            layer_space_dir(prefix_dir, named["space"], partition) / segments_name(named["n"]),
-            named,
-        )
-        if record.get("space") != named["space"]:
-            raise ValueError(
-                f"layer space {named['space']}'s file holds space {record.get('space')}'s record"
-            )
+    for path, named in named_files(prefix_dir, published, partition):
+        record = _read_named(path, named)
+        kind, key, held = ("shard", "id", records) if "id" in named else ("space", "space", spaces)
+        if record.get(key) != named[key]:
+            raise ValueError(f"{kind} {named[key]}'s file holds {kind} {record.get(key)}'s record")
         files.update(record.pop("files"))
-        spaces.append(record)
+        held.append(record)
     _check_stored_fields(shards["next_id"], records, spaces)
     return {
         **published,
@@ -117,10 +117,25 @@ def newest_publication(prefix_dir: Path, partition: str = "default") -> tuple[in
     return numbers[-1], read_publication(prefix_dir, numbers[-1], partition)
 
 
+def newest_side_manifest(root: Path | str, partition: str = "default") -> dict:
+    """The highest-numbered publication of the prefix `CURRENT` names under the bundle root `root`,
+    read as [`read_publication`] reads one: what a running server last published, where
+    [`Bundle`] reads the build's publication 0."""
+    return newest_publication(live_prefix_dir(Path(root)), partition)[1]
+
+
+def holds_only_the_build_publication(prefix_dir: Path) -> bool:
+    """Whether no partition under `prefix_dir` holds a publication other than the build's
+    `SEGMENTS-0.json`. A folded bundle holds one publication too, at a number past 0."""
+    return all(
+        publication_numbers(prefix_dir, partition.name) in ([], [0])
+        for partition in (prefix_dir / "partitions").glob("*")
+        if partition.is_dir()
+    )
+
+
 def _check_stored_fields(next_id: int, records: list[dict], spaces: list[dict]) -> None:
-    """Refuses a publication whose shard fields a writer could not have written: a state that is
-    neither open nor sealed, an identity that is not a SHA-256 digest, a shard numbered at or past
-    `next_id`, or a deletion owed by a shard the publication does not name."""
+    """Refuses shard and space fields no writer writes."""
     ids = {record["id"] for record in records}
     for record in records:
         if record["state"] not in ("open", "sealed"):
