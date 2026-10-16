@@ -181,14 +181,16 @@ impl ShardsParts {
     }
 }
 
-/// A shard's new buffer: its present one with `inserted` added and anything else only removed.
+/// A shard's new buffer: its present one with `inserted` added and anything else only removed. The
+/// buffered-row lists are updated at the cost of those lists and `inserted`, not the buffer.
 pub(crate) struct BufferSwap<'a> {
     pub(crate) buffer: Arc<IngestBuffer>,
     pub(crate) inserted: &'a [EntityId],
 }
 
 /// A shard's new overlay, which differs from its present one only by deletions and suppressions
-/// of `newly_denied`, and its new buffer.
+/// of `newly_denied`, and its new buffer. Their rows are added to the mask without walking the
+/// overlay, so an unsuppress may not take this route: the entity may still be deleted.
 pub(crate) struct DenySwap<'a> {
     pub(crate) overlay: Arc<Overlay>,
     pub(crate) newly_denied: &'a [EntityId],
@@ -594,6 +596,33 @@ impl Generation {
         })
     }
 
+    /// The successor over `bundle`, which serves every shard this one does and each of `opened`,
+    /// holding each of `opened` with its parts. Every shard held already is carried.
+    pub(crate) fn with_new_shards(
+        &self,
+        bundle: Arc<Bundle>,
+        opened: Vec<(ShardId, ShardParts)>,
+    ) -> Generation {
+        let mut parts = self.parts.clone();
+        parts.bundle = bundle;
+        let mut next = self.succeeded_by(parts, |_, _, _| None);
+        for (id, shard) in opened {
+            assert!(
+                next.shard(id).is_none(),
+                "shard {id} is opened in a generation that holds it"
+            );
+            let data = next
+                .parts
+                .bundle
+                .shard(id)
+                .unwrap_or_else(|| panic!("the bundle holds no shard {id}"));
+            next.shards
+                .push(Arc::new(Shard::new(Arc::clone(data), shard)));
+        }
+        next.shards.sort_by_key(|shard| shard.id());
+        next
+    }
+
     /// A copy with `change` applied to what is held once.
     pub(crate) fn with(&self, change: impl FnOnce(&mut GenerationParts)) -> Generation {
         let mut parts = self.parts.clone();
@@ -602,7 +631,7 @@ impl Generation {
     }
 
     /// A copy with `change` applied to what is held once and to each shard of `ids`. A
-    /// buffer-only change should use [`Self::with_buffer`], which derives less.
+    /// buffer-only change should [`Self::publish`] a [`ShardSwap::Buffer`], which derives less.
     pub(crate) fn with_shards(
         &self,
         ids: impl IntoIterator<Item = ShardId>,
@@ -619,38 +648,6 @@ impl Generation {
         change: impl FnOnce(&mut GenerationParts, &mut ShardParts),
     ) -> Generation {
         self.with_shards([id], |parts, shards| change(parts, shards.of(id)))
-    }
-
-    /// [`Self::with_shards`] that also sets each named shard's buffer to its swap's, which must be
-    /// its present one with the swap's `inserted` added and anything else only removed; the
-    /// buffered-row lists are then updated at the cost of those lists and `inserted`, not the
-    /// buffer.
-    pub(crate) fn with_buffer(
-        &self,
-        buffers: BTreeMap<ShardId, BufferSwap<'_>>,
-        change: impl FnOnce(&mut GenerationParts, &mut ShardsParts),
-    ) -> Generation {
-        let swaps = buffers
-            .into_iter()
-            .map(|(id, swap)| (id, ShardSwap::Buffer(swap)))
-            .collect();
-        self.publish(swaps, change)
-    }
-
-    /// [`Self::with_buffer`] that also sets each named shard's overlay to its swap's, which must
-    /// differ from the shard's only by deletions and suppressions of the swap's `newly_denied`;
-    /// their rows are added to the mask without walking the overlay. An unsuppress may not take
-    /// this route: the entity may still be deleted.
-    pub(crate) fn with_denies(
-        &self,
-        denies: BTreeMap<ShardId, DenySwap<'_>>,
-        change: impl FnOnce(&mut GenerationParts, &mut ShardsParts),
-    ) -> Generation {
-        let swaps = denies
-            .into_iter()
-            .map(|(id, swap)| (id, ShardSwap::Denies(swap)))
-            .collect();
-        self.publish(swaps, change)
     }
 
     /// `shard`'s `segments_version` in the generation one below this one: its own where its row

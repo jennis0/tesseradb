@@ -1966,3 +1966,253 @@ fn forms_held_in_both_shards_take_a_ticks_deltas_as_one_level() {
     );
     assert_eq!(served_layer(&engine), expected, "after the tick");
 }
+
+/// How many items each credential sees in `view` over the whole map.
+fn visible_in(engine: &Engine, view: &str) -> Vec<u64> {
+    [full_coverage_credential(), subset_credential()]
+        .iter()
+        .map(|credential| {
+            let session = engine.authorise(credential).unwrap();
+            engine
+                .viewport(
+                    &session,
+                    ViewportRequest::new(view, 0, WHOLE_MAP, N as usize),
+                )
+                .unwrap()
+                .tiles
+                .iter()
+                .map(|tile| tile.visible)
+                .sum()
+        })
+        .collect()
+}
+
+/// A row joining an item of the sealed shard 0 into a view created while the service runs, a
+/// membership-only row joining another to an artifact, and an edit of a third, which takes shard
+/// 0's high water past the size, serve as the same writes to one shard serve them, before a tick,
+/// after a tick and a flush, and across a restart; each item stays in shard 0.
+#[test]
+fn a_join_a_membership_row_and_an_edit_in_the_sealed_shard_serve_as_one_shard_does() {
+    let one = layered_fixture(None);
+    let several = layered_fixture(Some(SIZE));
+    let (one_engine, engine) = (one.open(), writing(&several));
+    let in_shard_zero = ids_in_shard(&engine, 0);
+    let joiner = *in_shard_zero.iter().find(|id| unheld(**id)).unwrap();
+    let edited = *in_shard_zero.iter().find(|id| !unheld(**id)).unwrap();
+    let viewed = *in_shard_zero
+        .iter()
+        .find(|id| ![joiner, edited].contains(id))
+        .unwrap();
+    let frame = mosaica_engine::DeclaredFrame {
+        x_min: 0.0,
+        x_max: 1000.0,
+        y_min: 0.0,
+        y_max: 1000.0,
+    };
+    for engine in [&one_engine, &engine] {
+        engine
+            .create_plain_view(mosaica_engine::PlainViewDeclaration {
+                name: "p".into(),
+                title: None,
+                projection: "none".into(),
+                frame,
+                visibility: None,
+                point_default: None,
+            })
+            .unwrap();
+        engine
+            .ingest(mosaica_engine::IngestRequest {
+                batch_id: "view".to_string(),
+                body_hash: [5; 32],
+                view: Some("p".to_string()),
+                rows: vec![mosaica_lifecycle::IngestRow {
+                    mosaica_id: None,
+                    labels: None,
+                    position: Some((3.0, 3.0)),
+                    scalars: vec![mosaica_lifecycle::wal::WalScalar::U64(viewed)],
+                    scoped: Vec::new(),
+                    omitted: Vec::new(),
+                }],
+                artifacts: Default::default(),
+                strict: true,
+                mosaica_id_column: false,
+            })
+            .expect("the join is accepted");
+        name_item(engine, "join", joiner, None, Some("c-0"));
+        name_item(engine, "edit", edited, Some((7.0, 7.0)), None);
+    }
+    let shard_zero = ShardId::ZERO;
+    let held = |engine: &Engine| {
+        items_by_id(engine, 0..N)
+            .into_iter()
+            .map(|item| item.unwrap().shard)
+            .collect::<Vec<_>>()
+    };
+    let before = held(&engine);
+    for id in [joiner, edited, viewed] {
+        assert_eq!(
+            before[id as usize], shard_zero,
+            "item {id} stays in shard 0"
+        );
+    }
+    assert_eq!(
+        items_by_id(&engine, edited..edited + 1)[0].unwrap().entity,
+        EntityId::new(SIZE),
+        "the edit takes shard 0's high water, past the size"
+    );
+    let compare = |engine: &Engine, one_engine: &Engine, when: &str| {
+        assert_eq!(served_layer(engine), served_layer(one_engine), "{when}");
+        assert_eq!(
+            visible_in(engine, "p"),
+            visible_in(one_engine, "p"),
+            "{when}"
+        );
+        for credential in [full_coverage_credential(), subset_credential()] {
+            assert_eq!(
+                served(engine, &credential),
+                served(one_engine, &credential),
+                "{when}"
+            );
+        }
+    };
+    compare(&engine, &one_engine, "before a tick");
+
+    tick(&one_engine);
+    tick(&engine);
+    publish_buffered(&one_engine);
+    publish_buffered(&engine);
+    compare(&engine, &one_engine, "after a tick and a flush");
+    let joined = vec![1, u64::from(viewed % 3 == 0)];
+    assert_eq!(visible_in(&engine, "p"), joined, "the joined row is served");
+
+    drop(engine);
+    let engine = writing(&several);
+    compare(&engine, &one_engine, "across a restart");
+    assert_eq!(visible_in(&engine, "p"), joined);
+    assert_eq!(held(&engine), before);
+}
+
+/// New items past the open shard's size, some joining an artifact, open shard 2 and serve as the
+/// same items in one shard serve: before a tick, across a restart that replays the opening, after
+/// a tick and a flush, and across a restart that reads it from a manifest. The opened shard holds
+/// an empty member pack beside each record pack.
+#[test]
+fn items_in_a_shard_opened_while_the_service_runs_serve_as_one_shard_does() {
+    let one = layered_fixture(None);
+    let several = layered_fixture(Some(SIZE));
+    let (one_engine, engine) = (one.open(), writing(&several));
+    let served_n = mosaica_store::open_bundle(&several.root)
+        .unwrap()
+        .partitions[PARTITION]
+        .segments_n;
+    // Ten fill shard 1 to its size and the last two open shard 2.
+    let insert_twelve = |engine: &Engine| {
+        let rows = (0..12)
+            .map(|at| mosaica_lifecycle::IngestRow {
+                mosaica_id: None,
+                labels: Some(vec![b"0".to_vec(), b"1".to_vec()]),
+                position: Some((4.0 + at as f64, 4.0)),
+                scalars: keyed(&format!("new-{at}")),
+                scoped: Vec::new(),
+                omitted: Vec::new(),
+            })
+            .collect();
+        engine
+            .ingest(mosaica_engine::IngestRequest {
+                batch_id: "past-the-size".to_string(),
+                body_hash: [6; 32],
+                view: Some("s0".to_string()),
+                rows,
+                artifacts: mosaica_lifecycle::BatchArtifacts {
+                    memberships: vec![mosaica_lifecycle::BatchMembership {
+                        layer: "t".to_string(),
+                        level: 0,
+                        view: None,
+                        key: "c-1".to_string(),
+                        rows: vec![9, 10, 11],
+                    }],
+                    edges: Vec::new(),
+                },
+                strict: true,
+                mosaica_id_column: false,
+            })
+            .expect("the batch is accepted")
+    };
+    insert_twelve(&one_engine);
+    let receipt = insert_twelve(&engine);
+    let shards: Vec<u32> = engine
+        .resolve_targets(
+            &receipt
+                .mosaica_ids
+                .iter()
+                .map(|id| id.unwrap())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|target| match target {
+            Some(Target::Item(shard, _)) => shard.raw(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(shards, [vec![1; 10], vec![2; 2]].concat());
+    let compare = |engine: &Engine, when: &str| {
+        assert_eq!(served_layer(engine), served_layer(&one_engine), "{when}");
+        for credential in [full_coverage_credential(), subset_credential()] {
+            assert_eq!(
+                served(engine, &credential),
+                served(&one_engine, &credential),
+                "{when}"
+            );
+        }
+    };
+    compare(&engine, "before a tick");
+    drop(engine);
+
+    let partition = partition_dir(&several.root, &current_prefix(&several.root));
+    for entry in std::fs::read_dir(&partition).unwrap() {
+        let name = entry.unwrap().file_name();
+        let later = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("SEGMENTS-"))
+            .and_then(|name| name.strip_suffix(".json"))
+            .and_then(|m| m.parse::<u64>().ok())
+            .is_some_and(|m| m > served_n);
+        if later {
+            std::fs::remove_file(partition.join(name)).unwrap();
+        }
+    }
+    let engine = writing(&several);
+    compare(&engine, "across a restart that replays the opening");
+
+    tick(&one_engine);
+    tick(&engine);
+    publish_buffered(&one_engine);
+    publish_buffered(&engine);
+    compare(&engine, "after a tick and a flush");
+    let manifest = side_manifest(&several.root);
+    let opened = manifest.shard(ShardId::new(2).unwrap()).unwrap();
+    assert_eq!(opened.high_water, 2);
+    let first = manifest.shard(ShardId::ZERO).unwrap();
+    for record_pack in manifest
+        .layer_spaces
+        .iter()
+        .flat_map(|space| space.record_packs.iter().map(move |r| (space.space, r)))
+    {
+        assert!(
+            opened
+                .membership_extents
+                .iter()
+                .any(|members| members.pairs(record_pack.0, record_pack.1)),
+            "shard 2 pairs every record pack"
+        );
+        assert!(first
+            .membership_extents
+            .iter()
+            .any(|members| members.pairs(record_pack.0, record_pack.1)));
+    }
+
+    drop(engine);
+    let engine = writing(&several);
+    compare(&engine, "across a restart that reads the manifest");
+}

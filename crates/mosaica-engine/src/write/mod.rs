@@ -22,6 +22,7 @@ mod executor;
 mod health;
 pub(crate) mod joined;
 mod live;
+mod opening;
 mod reconstruct;
 mod schema;
 
@@ -30,6 +31,7 @@ pub(crate) use command::*;
 pub use executor::*;
 pub use health::*;
 pub(crate) use live::*;
+pub(crate) use opening::*;
 pub(crate) use reconstruct::*;
 pub(crate) use schema::*;
 
@@ -37,7 +39,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -375,8 +377,8 @@ impl WritePath {
     pub(crate) fn new(state: WritePathState) -> Self {
         WritePath {
             live: Arc::new(LiveState {
-                shards: state.shards,
-                next_shard_id: state.next_shard_id,
+                shards: RwLock::new(state.shards.into_iter().map(Arc::new).collect()),
+                next_shard_id: std::sync::atomic::AtomicU32::new(state.next_shard_id),
                 size: std::sync::atomic::AtomicU64::new(state.size),
                 several_shards: state.several_shards,
                 resolver_state: Mutex::new(state.resolver_state),
@@ -665,7 +667,7 @@ impl WritePath {
     /// every write reaches the executor, ask it; so do the entries that read the write shard
     /// before submitting.
     pub(crate) fn writable(&self) -> Result<(), AcceptError> {
-        match (self.live.shards.len(), self.live.several_shards) {
+        match (self.live.shards().len(), self.live.several_shards) {
             (1, _) => Ok(()),
             #[cfg(feature = "several-shard-writes")]
             (_, SeveralShards::Written) => Ok(()),

@@ -1480,6 +1480,65 @@ impl ArtifactStore {
             .map(|(_, slice)| slice)
     }
 
+    /// Take a slice for `shard`, opened holding no item: each level reaches as far, and is
+    /// published as far, as in this store, and the slice holds, holding nothing, each artifact a
+    /// publication puts in every slice and each artifact its borrowing chain reaches. Nothing where
+    /// the store holds a slice of `shard`.
+    pub fn open_slice(&mut self, shard: ShardId) {
+        if self.slice(shard).is_some() {
+            return;
+        }
+        if self.slices.others.is_empty() {
+            for record in self.levels.values_mut().flatten().flatten() {
+                record.declares_members = Some(!record.members.is_empty());
+            }
+        }
+        let mut slice = ArtifactStore {
+            spaces: self.spaces.clone(),
+            published_through: self.published_through.clone(),
+            versions: self.records_versions.clone(),
+            ..ArtifactStore::default()
+        };
+        let mut everywhere = Vec::new();
+        for ((layer, level), slots) in &self.levels {
+            let space = self.spaces[layer];
+            let held = slice.levels.entry((layer.clone(), *level)).or_default();
+            held.resize_with(slots.len(), || None);
+            for (ordinal, record) in slots.iter().enumerate() {
+                let Some(record) = record else {
+                    continue;
+                };
+                let ordinal = ordinal as u32;
+                let generates_nothing = self.shards().all(|held| {
+                    self.slice(held)
+                        .and_then(|slice| slice.get(layer, *level, ordinal))
+                        .is_none_or(|record| {
+                            record
+                                .contents
+                                .iter()
+                                .all(|content| content.generated_from.is_empty())
+                        })
+                });
+                let memberless = record.declares_members == Some(false)
+                    && (record.attached_to.is_some() || generates_nothing);
+                if self.shape_of(layer, *level, ordinal).is_some() || memberless {
+                    everywhere.push((layer.clone(), space, *level, ordinal));
+                }
+            }
+        }
+        for (layer, space, level, ordinal) in &everywhere {
+            if let Some(record) = self.get(layer, *level, *ordinal) {
+                let nothing = record.slice_holding_nothing();
+                slice.put(layer, *space, *level, *ordinal, nothing, None);
+            }
+        }
+        self.slices.others.push((shard, slice));
+        self.slices.others.sort_unstable_by_key(|(held, _)| *held);
+        for (layer, _, level, ordinal) in everywhere {
+            self.hold_borrowed_everywhere(&layer, level, ordinal);
+        }
+    }
+
     /// The artifact's declared membership size, over every shard's slice.
     pub fn declared_size(&self, layer: &str, level: u32, ordinal: u32) -> u64 {
         self.shards()
@@ -6648,5 +6707,90 @@ mod tests {
         );
         let own = store.get("labels/x", 0, 0).unwrap();
         assert_eq!(store.members_of(own).iter().collect::<Vec<u32>>(), vec![1]);
+    }
+
+    /// A slice opened after a store's writes holds what a slice open before them holds: the
+    /// artifacts a publication puts in every slice, holding nothing, and none whose members are
+    /// all another shard's. Its levels reach as far, and a write after it lands in it.
+    #[test]
+    fn a_slice_opened_after_the_writes_holds_what_one_open_before_them_holds() {
+        let label = crate::wal::WalRecord::ArtifactPublish {
+            layer: "labels/x".to_string(),
+            space: space("labels/x"),
+            level: 0,
+            extend_runs: Vec::new(),
+            artifacts: vec![crate::wal::PublishedArtifact {
+                ordinal: 0,
+                entity: EntityId::new(200),
+                key: Some("l".to_string()),
+                view: None,
+                incarnation: 0,
+                members: Vec::new(),
+                contents: Vec::new(),
+                attached_to: Some(crate::wal::PublishedAttachment {
+                    layer: "clusters/b".to_string(),
+                    space: space("clusters/b"),
+                    level: 0,
+                    ordinal: 0,
+                    entity: EntityId::new(100),
+                }),
+                parents: Vec::new(),
+                shape: None,
+                access: Vec::new(),
+            }],
+        };
+        let writes = [
+            publication("clusters/b", 0, 100, &[1]),
+            label,
+            publication("clusters/a", 0, 300, &[]),
+            publication("clusters/a", 1, 301, &[2]),
+        ];
+        let mut open_before =
+            ArtifactStore::new().with_slices(ShardId::ZERO, vec![(shard(1), ArtifactStore::new())]);
+        let mut opened_after = ArtifactStore::new();
+        for write in &writes {
+            assert_eq!(open_before.apply(write, 0), 0);
+            assert_eq!(opened_after.apply(write, 0), 0);
+        }
+        opened_after.open_slice(shard(1));
+        let held = |store: &ArtifactStore, layer: &str, ordinal: u32| {
+            let slice = store.slice(shard(1)).expect("shard 1 has a slice");
+            let record = slice.get(layer, 0, ordinal)?;
+            let declares = store.get(layer, 0, ordinal)?.declares_members;
+            Some((
+                slice.members_of(record).iter().collect::<Vec<u32>>(),
+                declares,
+            ))
+        };
+        let addresses = [
+            ("clusters/b", 0),
+            ("labels/x", 0),
+            ("clusters/a", 0),
+            ("clusters/a", 1),
+        ];
+        for (layer, ordinal) in addresses {
+            assert_eq!(
+                held(&opened_after, layer, ordinal),
+                held(&open_before, layer, ordinal),
+                "{layer} {ordinal}"
+            );
+        }
+        assert_eq!(held(&opened_after, "clusters/a", 1), None);
+
+        let mut grown = growth("clusters/a", 0, 1, &[]);
+        if let crate::wal::WalRecord::ArtifactGrow { growth, .. } = &mut grown {
+            growth[0].joining = in_shards(&[(1, &[5])]).to_wal();
+        }
+        assert_eq!(open_before.apply(&grown, 0), 0);
+        assert_eq!(opened_after.apply(&grown, 0), 0);
+        assert_eq!(
+            held(&opened_after, "clusters/a", 1),
+            held(&open_before, "clusters/a", 1)
+        );
+        assert_eq!(
+            opened_after.unpublished()[0].members.len(),
+            2,
+            "both shards' slices are packed"
+        );
     }
 }

@@ -422,6 +422,40 @@ impl MemberPackWriter {
     }
 }
 
+/// A member pack in `shard` over the ordinals of `records`, a record pack of `space`, listing no
+/// ordinal: what a shard opened after that pack was written holds of it. Named for the publication
+/// that wrote `records`, so the name is the same however often it is written and no later
+/// publication's pack takes it.
+pub fn empty_member_pack(
+    prefix_dir: &Path,
+    shard: crate::ShardLayout<'_>,
+    space: mosaica_types::LayerSpace,
+    records: &RecordPackExtent,
+) -> Result<MembershipExtent> {
+    let n = Path::new(&records.path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("records-"))
+        .and_then(|rest| rest.split_once('-'))
+        .and_then(|(n, _)| n.parse::<u64>().ok())
+        .ok_or_else(|| StoreError::MalformedBundle {
+            detail: format!(
+                "record pack '{}' is not named as a publication names one",
+                records.path
+            ),
+        })?;
+    MemberPackWriter::create(
+        prefix_dir,
+        shard,
+        space,
+        n,
+        records.level,
+        records.ordinal_lo,
+        records.count,
+    )?
+    .finish()
+}
+
 /// One extent, opened and validated. The mapping is held for the reader's life; blobs are slices
 /// into it, so nothing is copied until a caller decodes one.
 pub struct LevelPack {

@@ -49,6 +49,73 @@ pub(super) struct ClosingWindow {
     started: std::time::Instant,
 }
 
+/// What a window's placement did beyond issuing ids: the shards it sealed and opened. Unless the
+/// window commits, every seal is undone and no opened shard takes writes.
+pub(super) struct Placing {
+    /// The shards held before the window that it sealed.
+    sealed: Vec<Arc<ShardWrite>>,
+    placed: mosaica_lifecycle::Placed,
+    committed: bool,
+}
+
+impl Placing {
+    pub(super) fn new(shards: &[Arc<ShardWrite>], placed: mosaica_lifecycle::Placed) -> Placing {
+        Placing {
+            sealed: shards
+                .iter()
+                .filter(|shard| placed.sealed.contains(&shard.id))
+                .cloned()
+                .collect(),
+            placed,
+            committed: false,
+        }
+    }
+
+    /// The shards the window opened, ascending.
+    pub(super) fn opened(&self) -> Vec<ShardId> {
+        self.placed.opened.iter().map(|(shard, _)| *shard).collect()
+    }
+
+    /// The records that open and seal them, appended ahead of the window's entries.
+    pub(super) fn records(&self) -> Vec<WalRecord> {
+        self.placed.records()
+    }
+
+    /// The window is durable: its seals stand and the shards it opened take writes.
+    pub(super) fn commit(mut self, live: &LiveState) {
+        self.committed = true;
+        let opened = std::mem::take(&mut self.placed.opened);
+        live.add_shards(
+            opened
+                .into_iter()
+                .map(|(shard, alloc)| ShardWrite::new(shard, alloc))
+                .collect(),
+        );
+    }
+}
+
+impl Drop for Placing {
+    fn drop(&mut self) {
+        if !self.committed {
+            for shard in &self.sealed {
+                shard.with_allocator(|alloc| alloc.reopen());
+            }
+        }
+    }
+}
+
+/// The shards a window opens, written and opened before anything names them.
+pub(super) struct OpenedShards {
+    /// The live bundle, serving each of them as well.
+    bundle: Arc<mosaica_store::read::Bundle>,
+    /// Each one's parts, as a generation first serves it.
+    parts: Vec<(ShardId, crate::ShardParts)>,
+    /// Each one's member packs, one beside each record pack, listing nothing.
+    members: Vec<(ShardId, Vec<mosaica_store::manifest::MembershipExtent>)>,
+    /// Those packs' digests.
+    member_files: std::collections::BTreeMap<String, mosaica_store::manifest::FileDigest>,
+}
+
 impl ClosingWindow {
     pub(super) fn new(
         closed: Vec<ClosedEntry<Reply<Ingested>>>,
@@ -435,20 +502,26 @@ impl Executor {
                     &submission.rows,
                     submission.edits.iter().map(|e| e.edit.shard),
                 );
-                let size = self.live.shard_size();
-                let room = |shard: &ShardWrite, window: &CommitWindow<Reply<Ingested>>| {
+                let live = Arc::clone(&self.live);
+                let room = |window: &CommitWindow<Reply<Ingested>>| {
                     let held = window.wanted();
-                    shard.room(
-                        held.edits_total() + wanted.edits_total(),
-                        held.items + wanted.items,
-                        size,
-                    )
+                    let mut edits = held.edits.clone();
+                    for (shard, n) in &wanted.edits {
+                        *edits.entry(*shard).or_default() += n;
+                    }
+                    let items = match live.several_shards {
+                        SeveralShards::Refused => held.items + wanted.items,
+                        // New items open the next shard past the open one's size.
+                        #[cfg(feature = "several-shard-writes")]
+                        SeveralShards::Written => 0,
+                    };
+                    live.window_room(&edits, items)
                 };
-                if !window.is_empty() && room(self.live.write_shard(), &window).is_err() {
+                if !window.is_empty() && room(&window).is_err() {
                     window = self.close_and_reopen(window);
                     admission = Admission::YieldedAfterClose;
                 }
-                if let Err(full) = room(self.live.write_shard(), &window) {
+                if let Err(full) = room(&window) {
                     reply.fail(ExecError::ShardFull(full));
                     return (window, admission);
                 }
@@ -654,42 +727,43 @@ impl Executor {
         let started = window.opened_at();
         let mut mark = StageMark::now();
 
-        // The allocator's freed ids are at this index's tenancies: a fold swaps its index in before
-        // it releases the ids it freed, and both run on this thread.
-        let shard = self.live.write_shard();
-        let (identity, tenancy) = {
-            let generation = self.generation.load();
-            (
-                self.deps.identity_key,
-                Arc::clone(&generation.shard_of(shard.id).tenancy),
-            )
-        };
-        let mosaica_id_of = |item: mosaica_types::ItemAt| {
-            crate::edited::id_at(&identity, item.shard, tenancy.of(item.entity), item.entity)
+        // Each allocator's freed ids are at its shard's index's tenancies: a fold swaps its index
+        // in before it releases the ids it freed, and both run on this thread. A shard the window
+        // opens has no index, and its every number is at tenancy 0.
+        let generation = self.generation.load_full();
+        let identity = self.deps.identity_key;
+        let mosaica_id_of = |item: ItemAt| {
+            let tenancy = generation
+                .shard(item.shard)
+                .map_or(mosaica_types::Tenancy::ZERO, |shard| {
+                    shard.tenancy.of(item.entity)
+                });
+            crate::edited::id_at(&identity, item.shard, tenancy, item.entity)
                 .map(|id| id.raw())
                 .expect("the allocator issues entities inside the identity space")
         };
-        let size = self.live.shard_size();
-        let next_id = self.live.next_shard_id;
-        let allocated = shard.with_allocator(|alloc| {
+        let shards = self.live.shards();
+        let allocated = {
+            let mut allocators = lock_allocators(&shards);
             window.allocate(
                 &mut mosaica_lifecycle::Allocators {
-                    shards: vec![(shard.id, alloc)],
-                    size,
-                    next_id,
+                    shards: shards
+                        .iter()
+                        .zip(allocators.iter_mut())
+                        .map(|(shard, alloc)| (shard.id, &mut **alloc))
+                        .collect(),
+                    size: self.live.shard_size(),
+                    next_id: self.live.next_shard_id(),
                 },
                 mosaica_id_of,
             )
-        });
-        let closed = match allocated {
+        };
+        drop(generation);
+        let (closed, placing) = match allocated {
             Ok((closed, tally, placed)) => {
-                debug_assert!(
-                    placed.sealed.is_empty() && placed.opened.is_empty(),
-                    "admission leaves the write shard room for every new item of the window"
-                );
                 // Recorded at allocation: a failed append still fragmented the entity axis.
                 self.health.record_fragmentation(tally);
-                closed
+                (closed, Placing::new(&shards, placed))
             }
             Err((error, waiters)) => {
                 fail_allocation(&self.health, error, waiters, entries, started);
@@ -697,6 +771,24 @@ impl Executor {
             }
         };
         let mut closing = ClosingWindow::new(closed, entries, started);
+        // Written before anything names them; a failure leaves files nothing names.
+        let opened = match self.open_shards(&placing.opened()) {
+            Ok(opened) => opened,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "ALARM: a shard this window opens could not be written; nothing of the \
+                     window is in force"
+                );
+                let detail = e.to_string();
+                closing.fail_all(&self.health, || {
+                    ExecError::Wal(mosaica_lifecycle::wal::WalError::Io(std::io::Error::other(
+                        detail.clone(),
+                    )))
+                });
+                return;
+            }
+        };
 
         mark = self.health.lap(WriteStage::Allocate, mark);
 
@@ -805,12 +897,14 @@ impl Executor {
 
         mark = self.health.lap(WriteStage::DeriveRecords, mark);
 
-        let entries_at = vocabulary_records.len();
+        let shard_records = placing.records();
+        let entries_at = vocabulary_records.len() + shard_records.len();
         let artifacts_at = entries_at + closing.entries().len();
         let growth_at = artifacts_at + mint_records.len();
         let carried_at = growth_at + growth.len();
         let durable: Vec<&WalRecord> = vocabulary_records
             .iter()
+            .chain(shard_records.iter())
             .chain(closing.entries().iter().map(|entry| &entry.record))
             .chain(mint_records.iter())
             .chain(growth.iter().map(|(record, _)| record))
@@ -838,11 +932,16 @@ impl Executor {
 
         // Durable, not yet in force. See `pause_point`.
         self.pause_point(PauseSiteArg::AfterFsync);
+        placing.commit(&self.live);
+        if let Some(opened) = &opened {
+            self.adopt_opened(opened);
+        }
         self.apply_window(
             closing.entries_mut(),
             &positions[entries_at..artifacts_at],
             vocabularies,
             &fresh_bindings,
+            opened,
         );
 
         // After the rows are in force, never before: a membership is projected through rows.
@@ -882,9 +981,112 @@ impl Executor {
         self.observe_wal();
     }
 
-    /// Clone the buffer once, insert every entry in the window, publish once. The clone is
-    /// O(total buffered items), so a window of k entries pays it once. `vocabularies` is
-    /// `close_window`'s own mutated copy, published verbatim, not cloned from the published `Arc`.
+    /// The shards `ids` a window opens, each written as a build of no item writes a shard, with a
+    /// member pack beside each record pack the publications name, and opened over the live
+    /// bundle. `None` where it opens none.
+    pub(super) fn open_shards(
+        &self,
+        ids: &[ShardId],
+    ) -> Result<Option<OpenedShards>, crate::EngineError> {
+        if ids.is_empty() {
+            return Ok(None);
+        }
+        let generation = self.generation.load_full();
+        let prefix_dir = self.prefix_dir(&generation);
+        let (phash, _) = generation
+            .bundle
+            .partitions
+            .iter()
+            .next()
+            .expect("a served bundle has a partition");
+        let manifest_digest = crate::engine::read_current(&self.deps.bundle_root)?.manifest_digest;
+        let record_packs: Vec<(LayerSpace, mosaica_store::manifest::RecordPackExtent)> = self
+            .side_manifests
+            .spaces
+            .iter()
+            .flat_map(|(space, held)| {
+                held.record_packs
+                    .iter()
+                    .map(move |extent| (*space, extent.clone()))
+            })
+            .collect();
+        let (attributes, scoped_attributes) = self.live.attributes_for_publication();
+        let unfolded: Vec<String> = attributes.into_iter().map(|a| a.name).collect();
+        let runtime: Vec<String> = unfolded
+            .iter()
+            .cloned()
+            .chain(scoped_attributes.into_iter().map(|family| family.name))
+            .collect();
+        let mut bundle = Arc::clone(&generation.bundle);
+        let mut members = Vec::with_capacity(ids.len());
+        let mut member_files = std::collections::BTreeMap::new();
+        for &id in ids {
+            let (record, files) = crate::write::write_opened_shard(
+                &crate::write::OpenedBase {
+                    prefix_dir: &prefix_dir,
+                    phash,
+                    bundle: &bundle,
+                    manifest_digest: &manifest_digest,
+                    terms: generation.dict.len() as u64,
+                    record_packs: &record_packs,
+                    runtime: &runtime,
+                },
+                id,
+            )
+            .map_err(crate::EngineError::Store)?;
+            members.push((id, record.membership_extents.clone()));
+            member_files.extend(
+                files
+                    .iter()
+                    .filter(|(rel, _)| mosaica_store::layout::is_artifact_file(phash, rel))
+                    .map(|(rel, digest)| (rel.clone(), digest.clone())),
+            );
+            bundle = bundle
+                .with_opened_shard(&prefix_dir, &generation.prefix, phash, record, files)
+                .map_err(crate::EngineError::Store)?;
+        }
+        let parts = ids
+            .iter()
+            .map(|&id| {
+                let parts = crate::engine::opened_shard_parts(
+                    &prefix_dir,
+                    &bundle,
+                    phash,
+                    id,
+                    &unfolded,
+                    generation.segments_version,
+                )?;
+                Ok((id, parts))
+            })
+            .collect::<Result<_, crate::EngineError>>()?;
+        Ok(Some(OpenedShards {
+            bundle,
+            parts,
+            members,
+            member_files,
+        }))
+    }
+
+    /// Hold what the shards a committed window opened need beside their parts: a slice of every
+    /// membership, and their member packs, which the next publication names.
+    fn adopt_opened(&mut self, opened: &OpenedShards) {
+        self.live
+            .open_slices(opened.parts.iter().map(|(shard, _)| *shard));
+        for (shard, extents) in &opened.members {
+            self.side_manifests
+                .membership_extents
+                .insert(*shard, extents.clone());
+        }
+        self.side_manifests
+            .artifact_files
+            .extend(opened.member_files.clone());
+        self.side_manifests.behind_live = true;
+    }
+
+    /// Clone each touched shard's buffer once, insert every entry in the window, publish once over
+    /// every shard the window writes in and every shard it opened. A clone is O(the shard's
+    /// buffered items), so a window of k entries pays it once. `vocabularies` is `close_window`'s
+    /// own mutated copy, published verbatim, not cloned from the published `Arc`.
     ///
     /// An edit deletes its old entity and gives the new one the old one's suppression in the same
     /// swap that buffers the new one's rows, so the item is hidden from its acknowledgement until
@@ -895,28 +1097,49 @@ impl Executor {
         positions: &[u64],
         vocabularies: Vocabularies,
         mints: &[(String, String, u32)],
+        opened: Option<OpenedShards>,
     ) {
         let started = std::time::Instant::now();
         let mut mark = StageMark::now();
-        let generation = self.generation.load_full();
+        let generation = match opened {
+            None => self.generation.load_full(),
+            Some(opened) => Arc::new(
+                self.generation
+                    .load()
+                    .with_new_shards(opened.bundle, opened.parts),
+            ),
+        };
         // Grown by exactly the keys this window minted; every other index carries forward.
         let suggest = generation.suggest.with_mints(
             &mosaica_analyse::SuggestionFold::new(),
             &vocabularies,
             mints,
         );
-        let shard = generation.shard_of(self.live.write_shard().id);
-        let mut buffer = (*shard.buffer).clone();
+        // A window buffering nothing still publishes its bindings through the open shard.
+        let mut written: std::collections::BTreeSet<ShardId> = closed
+            .iter()
+            .flat_map(|entry| {
+                entry
+                    .rows()
+                    .iter()
+                    .map(|row| row.shard)
+                    .chain(entry.edits().iter().map(|edit| edit.shard))
+            })
+            .collect();
+        if written.is_empty() {
+            written.insert(self.live.open_shard().id);
+        }
+        let mut touched: std::collections::BTreeMap<ShardId, ShardWrites> = written
+            .into_iter()
+            .map(|id| {
+                let buffer = (*generation.shard_of(id).buffer).clone();
+                (id, ShardWrites::over(buffer))
+            })
+            .collect();
         mark = self.health.lap(WriteStage::ApplyBufferClone, mark);
         let declared = &generation.bundle.manifest.declared_scalars;
         let unique = !generation.unique_live.is_empty_schema();
 
-        // What the buffered-row lists grow by: every entity this window buffered a row for.
-        let mut inserted: Vec<EntityId> = Vec::new();
-        let mut overlay: Option<mosaica_lifecycle::Overlay> = None;
-        let mut deleted: Vec<EntityId> = Vec::new();
-        let mut newly_denied: Vec<EntityId> = Vec::new();
-        let mut pairs: Vec<(u32, u32)> = Vec::new();
         for (entry, wal_pos) in closed.iter_mut().zip(positions) {
             let terms = std::mem::take(&mut entry.terms);
             let edit_terms = std::mem::take(&mut entry.edit_terms);
@@ -932,37 +1155,51 @@ impl Executor {
                         .map(move |row| (row, terms.take().unwrap_or_default()))
                 });
             for (row, row_terms) in rows.chain(edit_rows) {
-                debug_assert_eq!(row.shard, shard.id(), "a window writes into one shard");
+                let writes = touched
+                    .get_mut(&row.shard)
+                    .expect("every shard a row names is touched");
                 let m = StageMark::now();
-                buffer.insert_row_with_terms(row, row_terms);
+                writes.buffer.insert_row_with_terms(row, row_terms);
                 let m = self.health.lap(WriteStage::RowBufferInsert, m);
-                buffer.set_wal_pos(row.entity_id, &row.view, *wal_pos);
+                writes
+                    .buffer
+                    .set_wal_pos(row.entity_id, &row.view, *wal_pos);
                 self.health.lap(WriteStage::RowWalPos, m);
-                inserted.push(row.entity_id);
+                writes.inserted.push(row.entity_id);
             }
             for edit in entry.edits() {
                 let new = edit.rows[0].entity_id;
-                let overlay = overlay.get_or_insert_with(|| (*shard.overlay).clone());
+                let shard = generation.shard_of(edit.shard);
+                let writes = touched
+                    .get_mut(&edit.shard)
+                    .expect("every shard an edit names is touched");
+                let overlay = writes
+                    .overlay
+                    .get_or_insert_with(|| (*shard.overlay).clone());
                 overlay.apply(edit.old, mosaica_lifecycle::ChangeOp::Delete);
-                deleted.push(edit.old);
-                newly_denied.push(edit.old);
+                writes.deleted.push(edit.old);
+                writes.newly_denied.push(edit.old);
                 if edit.suppressed {
                     overlay.apply(new, mosaica_lifecycle::ChangeOp::Suppress);
-                    newly_denied.push(new);
+                    writes.newly_denied.push(new);
                 }
-                buffer.remove(edit.old);
-                pairs.push((edit.number.raw() as u32, new.raw() as u32));
+                writes.buffer.remove(edit.old);
+                writes
+                    .pairs
+                    .push((edit.number.raw() as u32, new.raw() as u32));
             }
         }
         // A joining row's values are its item's, whose entries are held already. An edited item's
         // old entity names nothing, so its entries go.
         let unique_live = unique.then(|| {
             let mut unique_live = (*generation.unique_live).clone();
-            if !deleted.is_empty() {
-                unique_live.remove_entities(
-                    shard.id(),
-                    &deleted.iter().map(|e| e.raw() as u32).collect(),
-                );
+            for (id, writes) in &touched {
+                if !writes.deleted.is_empty() {
+                    unique_live.remove_entities(
+                        *id,
+                        &writes.deleted.iter().map(|e| e.raw() as u32).collect(),
+                    );
+                }
             }
             unique_live.add(
                 declared,
@@ -986,52 +1223,88 @@ impl Executor {
         });
         // An old entity's pair stays until the fold that removes the entity, which reads it to tell
         // an entity an edit made from an item's number.
-        let edited_live = (!pairs.is_empty()).then(|| {
-            let mut edited_live = (*shard.edited_live).clone();
-            edited_live.add(&pairs);
-            edited_live
-        });
+        let edited_live: std::collections::BTreeMap<ShardId, crate::edited::EditedLive> = touched
+            .iter()
+            .filter(|(_, writes)| !writes.pairs.is_empty())
+            .map(|(id, writes)| {
+                let mut edited_live = (*generation.shard_of(*id).edited_live).clone();
+                edited_live.add(&writes.pairs);
+                (*id, edited_live)
+            })
+            .collect();
         mark = self.health.lap(WriteStage::ApplyRows, mark);
 
-        // Published here, and everywhere else buffer occupancy changes.
-        self.health
-            .buffered_items
-            .store(buffer.len(), Ordering::SeqCst);
-
-        let change = |g: &mut crate::GenerationParts, s: &mut crate::ShardParts| {
-            s.overlay_version = shard.overlay_version + 1;
+        let overlay_versions: std::collections::BTreeMap<ShardId, u64> = touched
+            .keys()
+            .map(|id| (*id, generation.shard_of(*id).overlay_version + 1))
+            .collect();
+        let edited = !edited_live.is_empty();
+        let change = |g: &mut crate::GenerationParts, shards: &mut crate::ShardsParts| {
             g.vocabularies = Arc::new(vocabularies);
             g.suggest = suggest;
             if let Some(unique_live) = unique_live {
                 g.unique_live = Arc::new(unique_live);
             }
-            if let Some(edited_live) = edited_live {
-                s.edited_live = Arc::new(edited_live);
+            if edited {
                 g.edit_epoch = generation.edit_epoch + 1;
             }
-        };
-        let id = shard.id();
-        let change = |g: &mut crate::GenerationParts, shards: &mut crate::ShardsParts| {
-            change(g, shards.of(id))
-        };
-        let buffer = crate::BufferSwap {
-            buffer: Arc::new(buffer),
-            inserted: &inserted,
-        };
-        let next = match overlay {
-            None => {
-                generation.with_buffer(std::collections::BTreeMap::from([(id, buffer)]), change)
+            for (id, version) in overlay_versions {
+                shards.of(id).overlay_version = version;
             }
-            Some(overlay) => {
-                let denies = crate::DenySwap {
-                    overlay: Arc::new(overlay),
-                    newly_denied: &newly_denied,
-                    buffer,
+            for (id, edited_live) in edited_live {
+                shards.of(id).edited_live = Arc::new(edited_live);
+            }
+        };
+        let swaps = touched
+            .iter_mut()
+            .map(|(id, writes)| {
+                let buffer = crate::BufferSwap {
+                    buffer: Arc::new(std::mem::take(&mut writes.buffer)),
+                    inserted: &writes.inserted,
                 };
-                generation.with_denies(std::collections::BTreeMap::from([(id, denies)]), change)
-            }
-        };
+                let swap = match writes.overlay.take() {
+                    None => crate::ShardSwap::Buffer(buffer),
+                    Some(overlay) => crate::ShardSwap::Denies(crate::DenySwap {
+                        overlay: Arc::new(overlay),
+                        newly_denied: &writes.newly_denied,
+                        buffer,
+                    }),
+                };
+                (*id, swap)
+            })
+            .collect();
+        let next = generation.publish(swaps, change);
+        // Published here, and everywhere else buffer occupancy changes.
+        self.health
+            .buffered_items
+            .store(buffered_in(&next), Ordering::SeqCst);
         self.publish(next, started);
         self.health.lap(WriteStage::ApplySwap, mark);
+    }
+}
+
+/// What a window writes in one shard before its publication.
+struct ShardWrites {
+    buffer: mosaica_lifecycle::IngestBuffer,
+    /// Every entity the window buffered a row for.
+    inserted: Vec<EntityId>,
+    /// The shard's overlay with the window's edits' denies, where it edits any item.
+    overlay: Option<mosaica_lifecycle::Overlay>,
+    deleted: Vec<EntityId>,
+    newly_denied: Vec<EntityId>,
+    /// Each edit's `(number, new entity)`.
+    pairs: Vec<(u32, u32)>,
+}
+
+impl ShardWrites {
+    fn over(buffer: mosaica_lifecycle::IngestBuffer) -> ShardWrites {
+        ShardWrites {
+            buffer,
+            inserted: Vec::new(),
+            overlay: None,
+            deleted: Vec::new(),
+            newly_denied: Vec::new(),
+            pairs: Vec::new(),
+        }
     }
 }

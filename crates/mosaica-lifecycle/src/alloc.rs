@@ -152,6 +152,11 @@ impl Allocator {
         self.state = ShardState::Sealed;
     }
 
+    /// Undoes a seal no log record holds: a window that sealed the shard and did not commit.
+    pub fn reopen(&mut self) {
+        self.state = ShardState::Open;
+    }
+
     fn at_zero(&self) -> u64 {
         self.free.get(&Tenancy::ZERO).map_or(0, Bitmap::cardinality)
     }
@@ -392,6 +397,38 @@ pub fn place(
     Ok(placement)
 }
 
+/// Whether a window fits among `shards`, ascending, when its edits take `edits` ids in each shard
+/// and its `items` new items are placed there: a sealed shard's edits within the end of its ids,
+/// and the open shard's edits and every new item no pool at or above [`reuse_min_free`] takes
+/// within `size`, the open shard's freed ids first. Held ids are not counted.
+pub fn check_window_room(
+    shards: &[(ShardId, &Allocator)],
+    edits: &BTreeMap<ShardId, u64>,
+    items: u64,
+    size: u64,
+) -> Result<(), ShardFull> {
+    let threshold = reuse_min_free(size);
+    let open = shards
+        .iter()
+        .rfind(|(_, alloc)| alloc.state() == ShardState::Open);
+    let edited = |shard: &ShardId| edits.get(shard).copied().unwrap_or(0);
+    let mut pooled = 0u64;
+    for (shard, alloc) in shards {
+        if alloc.state() == ShardState::Open {
+            continue;
+        }
+        alloc.edits_room(edited(shard))?;
+        let pool = alloc.item_pool();
+        if pool >= threshold {
+            pooled += pool;
+        }
+    }
+    match open {
+        Some((shard, alloc)) => alloc.room(edited(shard), items.saturating_sub(pooled), size),
+        None => check_room(size, ENTITY_END, size, items.saturating_sub(pooled)),
+    }
+}
+
 /// What a window's assignment did beyond issuing ids.
 #[derive(Default)]
 pub struct Placed {
@@ -399,6 +436,23 @@ pub struct Placed {
     pub sealed: Vec<ShardId>,
     /// The shards that opened, each with its allocator, ascending.
     pub opened: Vec<(ShardId, Allocator)>,
+}
+
+impl Placed {
+    /// The log records that open and seal what this placement opened and sealed: every opening,
+    /// ascending, then every seal in order, so a shard opened and filled in one window is opened
+    /// before it is sealed.
+    pub fn records(&self) -> Vec<WalRecord> {
+        let opened = self
+            .opened
+            .iter()
+            .map(|(shard, _)| WalRecord::ShardOpen { shard: *shard });
+        let sealed = self
+            .sealed
+            .iter()
+            .map(|shard| WalRecord::ShardSeal { shard: *shard });
+        opened.chain(sealed).collect()
+    }
 }
 
 /// Raise each shard's mark in `hw` to the highest `entity_id + 1` a row of `record` names in that
@@ -1134,6 +1188,102 @@ mod tests {
             (*opened, alloc.state(), alloc.high_water()),
             (shard(1), Open, 2)
         );
+        assert_eq!(
+            placed.records(),
+            vec![
+                WalRecord::ShardOpen { shard: shard(1) },
+                WalRecord::ShardSeal { shard: shard(0) },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_shard_opened_and_filled_in_one_window_is_opened_before_it_is_sealed() {
+        let mut zero = Allocator::new(10);
+        let mut items: Vec<PendingItem> = (0..15).map(|_| pending(&[1], None)).collect();
+        let placed = assign_sorted(
+            &mut items,
+            &mut Allocators {
+                shards: vec![(shard(0), &mut zero)],
+                size: 10,
+                next_id: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            placed.records(),
+            vec![
+                WalRecord::ShardOpen { shard: shard(1) },
+                WalRecord::ShardOpen { shard: shard(2) },
+                WalRecord::ShardSeal { shard: shard(0) },
+                WalRecord::ShardSeal { shard: shard(1) },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_window_fits_the_pools_at_the_threshold_and_the_open_shards_room() {
+        let size = 2048;
+        let full = |high_water, needed| ShardFull {
+            limit: mosaica_types::ShardLimit::Size(size),
+            high_water,
+            needed,
+        };
+        let mut pooled = freed(3000, &[(0, &[1, 2]), (1, &[3, 4])]);
+        pooled.seal();
+        let mut below = freed(2100, &[(1, &[5])]);
+        below.seal();
+        let open = freed(2040, &[(0, &[6])]);
+        let shards = [(shard(0), &pooled), (shard(1), &below), (shard(2), &open)];
+        let none = BTreeMap::new();
+        // Shard 0's pool of 2 is at the threshold of 2; shard 1's of 1 is below it.
+        assert_eq!(check_window_room(&shards, &none, 11, size), Ok(()));
+        assert_eq!(
+            check_window_room(&shards, &none, 12, size),
+            Err(full(2040, 9))
+        );
+        let edited = BTreeMap::from([(shard(2), 1)]);
+        assert_eq!(
+            check_window_room(&shards, &edited, 11, size),
+            Err(full(2040, 9)),
+            "the open shard's edit takes its tenancy-0 id before a new item can"
+        );
+        let edited = BTreeMap::from([(shard(0), 2), (shard(1), 1)]);
+        assert_eq!(
+            check_window_room(&shards, &edited, 11, size),
+            Ok(()),
+            "a sealed shard's edits are not bounded by the size"
+        );
+
+        let mut ended = freed(ENTITY_END, &[(1, &[7])]);
+        ended.seal();
+        let shards = [(shard(0), &ended), (shard(1), &open)];
+        let edited = BTreeMap::from([(shard(0), 1)]);
+        assert_eq!(
+            check_window_room(&shards, &edited, 0, size),
+            Err(ShardFull {
+                limit: mosaica_types::ShardLimit::End(ENTITY_END),
+                high_water: ENTITY_END,
+                needed: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn one_open_shard_has_the_room_its_allocator_has() {
+        let alloc = freed(8, &[(0, &[2]), (1, &[3])]);
+        for (edits, items) in [(0, 4), (0, 5), (1, 3), (2, 3), (3, 0), (4, 0)] {
+            assert_eq!(
+                check_window_room(
+                    &[(shard(0), &alloc)],
+                    &BTreeMap::from([(shard(0), edits)]),
+                    items,
+                    10
+                ),
+                alloc.room(edits, items, 10),
+                "{edits} edits, {items} items"
+            );
+        }
     }
 
     #[test]

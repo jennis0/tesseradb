@@ -494,6 +494,54 @@ pub(crate) struct ShardReaders {
     pub(crate) tenancy: Arc<mosaica_store::tenancy::TenancyIndex>,
 }
 
+impl ShardReaders {
+    /// `shard`'s readers, in partition `phash` of `bundle` under `prefix_dir`.
+    fn open(
+        prefix_dir: &Path,
+        phash: &str,
+        bundle: &Bundle,
+        shard: &mosaica_store::read::ShardData,
+    ) -> Result<ShardReaders> {
+        let partition = &bundle.partitions[phash];
+        let layout = mosaica_store::ShardLayout::new(phash, shard.record.id);
+        let postings = open_postings(prefix_dir, layout).map_err(EngineError::Io)?;
+
+        // Every live delta postings tier, reopened; without this, every item flushed since the
+        // last compaction would silently vanish from every principal's map after a restart.
+        // Every path must be digest-named in one of the two `files` maps, since `open_bundle`
+        // verifies only what those maps carry.
+        let mut delta_postings: Vec<Arc<DeltaTier>> = Vec::new();
+        for rel in &shard.record.deltas {
+            if !partition.manifest.files.contains_key(rel)
+                && !bundle.manifest.files.contains_key(rel)
+            {
+                return Err(EngineError::Malformed(format!(
+                    "the side-manifest lists delta tier '{rel}' which no files map digests, \
+                     so opening it would serve unverified postings"
+                )));
+            }
+            delta_postings.push(Arc::new(
+                DeltaTier::open(&prefix_dir.join(rel)).map_err(EngineError::Io)?,
+            ));
+        }
+        let tenancy = mosaica_store::read::open_tenancy_index(
+            prefix_dir,
+            &shard.record,
+            mosaica_store::read::Digests {
+                side: &partition.manifest.files,
+                bundle: &bundle.manifest.files,
+            },
+        )
+        .map_err(EngineError::Store)?;
+        Ok(ShardReaders {
+            id: shard.record.id,
+            postings,
+            delta_postings,
+            tenancy: Arc::new(tenancy),
+        })
+    }
+}
+
 impl PrefixReaders {
     fn open(bundle_root: &Path, bundle: &Bundle) -> Result<PrefixReaders> {
         let current = read_current(bundle_root)?;
@@ -519,42 +567,7 @@ impl PrefixReaders {
 
         let mut shards = Vec::with_capacity(partition.shards.len());
         for shard in &partition.shards {
-            let layout = mosaica_store::ShardLayout::new(&phash, shard.record.id);
-            let postings = open_postings(&prefix_dir, layout).map_err(EngineError::Io)?;
-
-            // Every live delta postings tier, reopened; without this, every item flushed since the
-            // last compaction would silently vanish from every principal's map after a restart.
-            // Every path must be digest-named in one of the two `files` maps, since `open_bundle`
-            // verifies only what those maps carry.
-            let mut delta_postings: Vec<Arc<DeltaTier>> = Vec::new();
-            for rel in &shard.record.deltas {
-                if !partition.manifest.files.contains_key(rel)
-                    && !bundle.manifest.files.contains_key(rel)
-                {
-                    return Err(EngineError::Malformed(format!(
-                        "the side-manifest lists delta tier '{rel}' which no files map digests, \
-                         so opening it would serve unverified postings"
-                    )));
-                }
-                delta_postings.push(Arc::new(
-                    DeltaTier::open(&prefix_dir.join(rel)).map_err(EngineError::Io)?,
-                ));
-            }
-            let tenancy = mosaica_store::read::open_tenancy_index(
-                &prefix_dir,
-                &shard.record,
-                mosaica_store::read::Digests {
-                    side: &partition.manifest.files,
-                    bundle: &bundle.manifest.files,
-                },
-            )
-            .map_err(EngineError::Store)?;
-            shards.push(ShardReaders {
-                id: shard.record.id,
-                postings,
-                delta_postings,
-                tenancy: Arc::new(tenancy),
-            });
+            shards.push(ShardReaders::open(&prefix_dir, &phash, bundle, shard)?);
         }
         shards.sort_by_key(|shard| shard.id);
 
@@ -720,16 +733,6 @@ fn reconstruct_writes(
             })
         },
     )?;
-    if let Some(opened) = state
-        .shard_ids()
-        .find(|shard| partition.shard(*shard).is_none())
-    {
-        return Err(crate::write::unknown_shard(
-            opened,
-            "opens",
-            "no side-manifest holds",
-        ));
-    }
     Ok(ReconstructedWrites {
         deny: DenyOverlays {
             shards: overlay.items,
@@ -738,6 +741,112 @@ fn reconstruct_writes(
         buffers,
         state,
         vocabularies,
+    })
+}
+
+/// Serve every shard the log opened and no side-manifest holds, as the running service that opened
+/// it did: its empty base written again and its record added to the partition.
+fn open_logged_shards(
+    bundle_root: &Path,
+    bundle: &mut Bundle,
+    readers: &mut PrefixReaders,
+    state: &crate::write::WritePathState,
+) -> Result<()> {
+    let partition = &bundle.partitions[&readers.phash];
+    let opened: Vec<ShardId> = state
+        .shard_ids()
+        .filter(|shard| partition.shard(*shard).is_none())
+        .collect();
+    if opened.is_empty() {
+        return Ok(());
+    }
+    let manifest_digest = read_current(bundle_root)?.manifest_digest;
+    let record_packs: Vec<_> = partition
+        .layer_spaces
+        .iter()
+        .flat_map(|space| {
+            space
+                .record_packs
+                .iter()
+                .map(|extent| (space.space, extent.clone()))
+        })
+        .collect();
+    let (attributes, scoped_attributes) = state.attributes.snapshot();
+    let runtime: Vec<String> = attributes
+        .into_iter()
+        .map(|attribute| attribute.name)
+        .chain(scoped_attributes.into_iter().map(|family| family.name))
+        .collect();
+    for id in opened {
+        let (record, files) = crate::write::write_opened_shard(
+            &crate::write::OpenedBase {
+                prefix_dir: &readers.prefix_dir,
+                phash: &readers.phash,
+                bundle,
+                manifest_digest: &manifest_digest,
+                terms: readers.dict.len() as u64,
+                record_packs: &record_packs,
+                runtime: &runtime,
+            },
+            id,
+        )
+        .map_err(EngineError::Store)?;
+        bundle
+            .add_opened_shard(
+                &readers.prefix_dir,
+                &readers.prefix,
+                &readers.phash,
+                record,
+                files,
+            )
+            .map_err(EngineError::Store)?;
+        let data = bundle.partitions[&readers.phash]
+            .shard(id)
+            .expect("the shard was just added");
+        readers.shards.push(ShardReaders::open(
+            &readers.prefix_dir,
+            &readers.phash,
+            bundle,
+            data,
+        )?);
+    }
+    readers.shards.sort_by_key(|shard| shard.id);
+    Ok(())
+}
+
+/// Shard `id` of `bundle`'s partition `phash`, opened at a running service, as a generation serves
+/// it from `segments_version`: its readers and indexes over its empty base, no buffered row and no
+/// deny. `unfolded_attributes` are the columns whose base no fold has written yet.
+pub(crate) fn opened_shard_parts(
+    prefix_dir: &Path,
+    bundle: &Bundle,
+    phash: &str,
+    id: ShardId,
+    unfolded_attributes: &[String],
+    segments_version: u64,
+) -> Result<crate::ShardParts> {
+    let data = bundle.partitions[phash]
+        .shard(id)
+        .unwrap_or_else(|| panic!("the bundle serves no shard {id}"));
+    let readers = ShardReaders::open(prefix_dir, phash, bundle, data)?;
+    let record = &data.record;
+    let indexes = open_shard_indexes(prefix_dir, bundle, phash, record, unfolded_attributes)
+        .map_err(EngineError::Store)?;
+    Ok(crate::ShardParts {
+        watermark: record.watermark,
+        postings: readers.postings,
+        identity: record.identity,
+        unique: indexes.unique,
+        edited: indexes.edited,
+        edited_live: Arc::default(),
+        tenancy: readers.tenancy,
+        delta_postings: readers.delta_postings,
+        segments_version,
+        previous_segments_version: None,
+        overlay_version: 0,
+        overlay: Arc::default(),
+        buffer: Arc::default(),
+        filter_columns: indexes.filter_columns,
     })
 }
 
@@ -1132,13 +1241,14 @@ impl Engine {
         let mut bundle = open_bundle(bundle_root).map_err(EngineError::Store)?;
         let side = merge_side_declarations(&mut bundle);
 
-        let readers = PrefixReaders::open(bundle_root, &bundle)?;
+        let mut readers = PrefixReaders::open(bundle_root, &bundle)?;
         let ReconstructedWrites {
             deny,
             buffers,
             mut state,
             vocabularies,
         } = reconstruct_writes(wal_path, several_shards, &bundle, &readers, side)?;
+        open_logged_shards(bundle_root, &mut bundle, &mut readers, &state)?;
 
         let fragments = Arc::new(FragmentCache::new(cache_dir, authorisation_rule_hash()));
         // Built now, not lazily on first request: a pool that cannot be built is a fact about this
@@ -1482,7 +1592,7 @@ pub(crate) fn open_rotation(
     ))
 }
 
-fn read_current(root: &Path) -> Result<CurrentPointer> {
+pub(crate) fn read_current(root: &Path) -> Result<CurrentPointer> {
     let bytes = std::fs::read(root.join("CURRENT")).map_err(EngineError::Io)?;
     serde_json::from_slice(&bytes)
         .map_err(|e| EngineError::Malformed(format!("CURRENT is not valid JSON: {e}")))

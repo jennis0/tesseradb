@@ -60,16 +60,6 @@ impl ShardWrite {
         lock_recover(&self.allocator).state()
     }
 
-    /// [`Allocator::room`], under the lock.
-    pub(in crate::write) fn room(
-        &self,
-        edits: u64,
-        items: u64,
-        size: u64,
-    ) -> Result<(), mosaica_types::ShardFull> {
-        lock_recover(&self.allocator).room(edits, items, size)
-    }
-
     /// The allocator's freed ids and the sets it holds back, as a side-manifest records them.
     pub(crate) fn freed(
         &self,
@@ -91,12 +81,22 @@ impl ShardWrite {
         (free, held)
     }
 
-    /// Run `f` with the entity id allocator held. The window's whole allocation is one call to
-    /// this, so the sorted run and the high-water advance cannot be separated.
+    /// Run `f` with the entity id allocator held.
     pub(in crate::write) fn with_allocator<R>(&self, f: impl FnOnce(&mut Allocator) -> R) -> R {
         let mut alloc = lock_recover(&self.allocator);
         f(&mut alloc)
     }
+}
+
+/// Every allocator of `shards`, ascending, locked in that order: a window's whole allocation runs
+/// under these, so the sorted run and every high-water advance cannot be separated.
+pub(in crate::write) fn lock_allocators(
+    shards: &[Arc<ShardWrite>],
+) -> Vec<MutexGuard<'_, Allocator>> {
+    shards
+        .iter()
+        .map(|shard| lock_recover(&shard.allocator))
+        .collect()
 }
 
 /// State the handler side reads and the executor thread writes.
@@ -105,12 +105,12 @@ impl ShardWrite {
 /// the executor (`/control/ingest`'s replay check, `/control/status`'s high-water). The generation pointer is not held here: it is
 /// swapped by `Executor::publish_arc`, the crate's one non-atomic store.
 pub(crate) struct LiveState {
-    /// Each point shard's write state, ascending by id. The open one is the write shard; the
-    /// first holds the artifact store's slice ([`Self::artifacts`]).
-    pub(in crate::write) shards: Vec<ShardWrite>,
-    /// One past the highest shard id ever opened, as the side-manifest's `shards.next_id` and the
-    /// log leave it.
-    pub(in crate::write) next_shard_id: u32,
+    /// Each point shard's write state, ascending by id, the open one taking new items. Grown only
+    /// by the executor, when a window that opens a shard commits.
+    pub(in crate::write) shards: RwLock<Vec<Arc<ShardWrite>>>,
+    /// One past the highest shard id ever opened, as the side-manifest's `shards.next_id`, the log
+    /// and the windows since leave it. Written only by the executor.
+    pub(in crate::write) next_shard_id: std::sync::atomic::AtomicU32,
     /// The high water at which the open shard seals, as the side-manifest's `shards.size` and the
     /// log leave it. Written only by the executor.
     pub(in crate::write) size: std::sync::atomic::AtomicU64,
@@ -148,28 +148,71 @@ pub(crate) struct LiveState {
 }
 
 impl LiveState {
-    /// The one shard written to until several are.
-    pub(crate) fn only_shard(&self) -> &ShardWrite {
-        mosaica_types::only(&self.shards)
+    /// Every shard's write state, ascending by id.
+    pub(crate) fn shards(&self) -> Vec<Arc<ShardWrite>> {
+        self.shards
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
-    /// The shard a window allocates its new items in: the open one, which the open checked there
-    /// is.
-    pub(crate) fn write_shard(&self) -> &ShardWrite {
-        self.shards
-            .iter()
+    /// The one shard written to until several are.
+    pub(crate) fn only_shard(&self) -> Arc<ShardWrite> {
+        Arc::clone(mosaica_types::only(&self.shards()))
+    }
+
+    /// The open shard, which takes new items at its high water: the open checked there is one,
+    /// and a window that seals it opens the next.
+    pub(crate) fn open_shard(&self) -> Arc<ShardWrite> {
+        self.shards()
+            .into_iter()
             .rfind(|shard| shard.state() == mosaica_types::ShardState::Open)
             .expect("the open refuses a bundle with no open shard")
     }
 
     /// Shard `id`'s write state, or `None` for a shard the bundle does not hold.
-    pub(crate) fn shard(&self, id: ShardId) -> Option<&ShardWrite> {
-        self.shards.iter().find(|shard| shard.id == id)
+    pub(crate) fn shard(&self, id: ShardId) -> Option<Arc<ShardWrite>> {
+        self.shards().into_iter().find(|shard| shard.id == id)
     }
 
     /// Every shard's high water, summed.
     pub(crate) fn high_water(&self) -> u64 {
-        self.shards.iter().map(ShardWrite::high_water).sum()
+        self.shards().iter().map(|shard| shard.high_water()).sum()
+    }
+
+    /// One past the highest shard id ever opened.
+    pub(crate) fn next_shard_id(&self) -> u32 {
+        self.next_shard_id
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Take the write state of the shards a committed window opened.
+    pub(in crate::write) fn add_shards(&self, opened: Vec<ShardWrite>) {
+        let mut shards = self.shards.write().unwrap_or_else(|e| e.into_inner());
+        for shard in opened {
+            self.next_shard_id
+                .fetch_max(shard.id.raw() + 1, std::sync::atomic::Ordering::Relaxed);
+            shards.push(Arc::new(shard));
+        }
+        shards.sort_by_key(|shard| shard.id);
+    }
+
+    /// Whether a window whose edits take `edits` ids in each shard and whose `items` new items are
+    /// placed fits beside every shard's allocator
+    /// ([`mosaica_lifecycle::alloc::check_window_room`]).
+    pub(crate) fn window_room(
+        &self,
+        edits: &BTreeMap<ShardId, u64>,
+        items: u64,
+    ) -> Result<(), mosaica_types::ShardFull> {
+        let shards = self.shards();
+        let allocators = lock_allocators(&shards);
+        let held: Vec<(ShardId, &Allocator)> = shards
+            .iter()
+            .zip(&allocators)
+            .map(|(shard, alloc)| (shard.id, &**alloc))
+            .collect();
+        mosaica_lifecycle::alloc::check_window_room(&held, edits, items, self.shard_size())
     }
 
     /// The size every shard is allocated to.
@@ -211,6 +254,14 @@ impl LiveState {
     /// it.
     pub(in crate::write) fn artifacts_oldest_wal_pos(&self) -> Option<u64> {
         lock_recover(&self.artifacts).oldest_wal_pos()
+    }
+
+    /// Give the artifact store a slice for each of `shards`, opened holding no item.
+    pub(in crate::write) fn open_slices(&self, shards: impl IntoIterator<Item = ShardId>) {
+        let mut artifacts = lock_recover(&self.artifacts);
+        for shard in shards {
+            artifacts.open_slice(shard);
+        }
     }
 
     /// Read the artifact store: the request path's route to a membership.
@@ -398,7 +449,7 @@ impl LiveState {
                 Some((entity, level, ordinal))
             })
             .collect();
-        self.shards
+        self.shards()
             .iter()
             .filter_map(|shard| {
                 let slice = self.slice_of(shard.id, &written);

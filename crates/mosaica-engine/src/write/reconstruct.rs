@@ -91,7 +91,7 @@ pub(crate) type Reconstructed = (Overlays, BTreeMap<ShardId, IngestBuffer>, Writ
 
 /// Refuses a log naming point shard `shard`, which nothing holds: `verb` is what the log does to
 /// it, and `held_by` says what does not hold it.
-pub(crate) fn unknown_shard(shard: ShardId, verb: &str, held_by: &str) -> EngineError {
+fn unknown_shard(shard: ShardId, verb: &str, held_by: &str) -> EngineError {
     EngineError::Malformed(format!(
         "the WAL {verb} point shard {shard}, which {held_by}. Restore the side-manifest and log \
          this bundle was written with"
@@ -371,6 +371,10 @@ impl WritePath {
         )?;
         let own = shard_ids.first().copied().unwrap_or(ShardId::ZERO);
         let mut artifacts = artifacts.with_slices(own, slices);
+        // A shard the log opened holds nothing the manifests' packs name.
+        for opened in seeds.iter().filter(|seed| !shard_ids.contains(&seed.id)) {
+            artifacts.open_slice(opened.id);
+        }
 
         // Same ordering rule again: the overlay is seeded and the log replayed on top, because
         // seeding after replay would revert an acked unsuppress the newest manifest predates.
@@ -513,14 +517,18 @@ impl WritePath {
                         mosaica_types::ENTITY_END,
                     ))
                 })?;
-            // A size no declaration could have left is refused at open, not at the first batch.
-            mosaica_types::check_shard_size(size, allocator.high_water()).map_err(|e| {
-                EngineError::Malformed(format!(
-                    "the shard size the manifest and the WAL leave ({size}) does not hold: {e}"
-                ))
-            })?;
-            if shard.state == mosaica_types::ShardState::Sealed {
-                allocator.seal();
+            // A size no declaration could have left is refused at open, not at the first batch. A
+            // sealed shard's edits take ids past the size.
+            match shard.state {
+                mosaica_types::ShardState::Open => {
+                    mosaica_types::check_shard_size(size, allocator.high_water()).map_err(|e| {
+                        EngineError::Malformed(format!(
+                            "the shard size the manifest and the WAL leave ({size}) does not \
+                             hold: {e}"
+                        ))
+                    })?;
+                }
+                mosaica_types::ShardState::Sealed => allocator.seal(),
             }
             allocator.seed_freed(shard.free, shard.held, wal.retained_from(), named);
             shards.push(ShardWrite::new(shard.id, allocator));

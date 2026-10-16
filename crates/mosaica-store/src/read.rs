@@ -664,6 +664,79 @@ impl Bundle {
         Ok(self.with_partition(partition, next))
     }
 
+    /// Serve shard `record.id` of `partition`, opened at a running service: its files, written
+    /// under `prefix_dir` and digested in `files`, are named in the partition's `files`, and every
+    /// declared view of it is opened from them or seeded empty.
+    pub fn add_opened_shard(
+        &mut self,
+        prefix_dir: &Path,
+        prefix: &str,
+        partition: &str,
+        record: ShardRecord,
+        files: BTreeMap<String, FileDigest>,
+    ) -> Result<()> {
+        let identity_key =
+            IdentityKey::from_hex(&self.manifest.identity.key).map_err(|source| {
+                StoreError::InvalidIdentity {
+                    detail: format!("MANIFEST.json's identity key is unusable: {source}"),
+                }
+            })?;
+        let Bundle {
+            manifest,
+            partitions,
+        } = self;
+        let data = partitions
+            .get_mut(partition)
+            .ok_or_else(|| StoreError::MalformedBundle {
+                detail: format!("no partition '{partition}' in this bundle"),
+            })?;
+        if data.shard(record.id).is_some() {
+            return Err(StoreError::MalformedBundle {
+                detail: format!(
+                    "shard {} is opened in partition '{partition}', which serves it already",
+                    record.id
+                ),
+            });
+        }
+        data.manifest.files.extend(files);
+        data.next_shard_id = data.next_shard_id.max(record.id.raw() + 1);
+        let layout = ShardLayout::new(partition, record.id);
+        let digests = Digests {
+            side: &data.manifest.files,
+            bundle: &manifest.files,
+        };
+        let mut shard = open_shard(
+            prefix_dir,
+            prefix,
+            layout,
+            record,
+            digests,
+            &identity_key,
+            Verification::JustWritten,
+        )?;
+        shard.seed_declared(manifest);
+        data.shards.push(Arc::new(shard));
+        data.shards.sort_by_key(|shard| shard.record.id);
+        Ok(())
+    }
+
+    /// This bundle with [`Self::add_opened_shard`]'s shard added.
+    pub fn with_opened_shard(
+        &self,
+        prefix_dir: &Path,
+        prefix: &str,
+        partition: &str,
+        record: ShardRecord,
+        files: BTreeMap<String, FileDigest>,
+    ) -> Result<Arc<Bundle>> {
+        let mut next = Bundle {
+            manifest: self.manifest.clone(),
+            partitions: self.partitions.clone(),
+        };
+        next.add_opened_shard(prefix_dir, prefix, partition, record, files)?;
+        Ok(Arc::new(next))
+    }
+
     fn with_partition(&self, partition: &str, next: PartitionData) -> Arc<Bundle> {
         let mut partitions = self.partitions.clone();
         partitions.insert(partition.to_string(), next);

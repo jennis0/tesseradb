@@ -770,6 +770,46 @@ pub fn set_tenancy(bundle_root: &Path, number: EntityId, tenancy: u16) {
     rewrite_publication(&prefix_dir, 0, &manifest);
 }
 
+/// Give `shard` of the bundle `root` serves the high water `high_water` and the freed ids `free`,
+/// each number at its tenancy in the shard's tenancy index, as a compaction that freed them leaves
+/// its record.
+pub fn seed_freed(root: &Path, shard: ShardId, high_water: u64, free: &[(u16, &[u32])]) {
+    use mosaica_store::manifest::{EntitySet, TenancyBit};
+    let prefix_dir = root.join(current_prefix(root));
+    edit_side_manifest(root, |manifest| {
+        let tenancies: Vec<(u32, u16)> = free
+            .iter()
+            .filter(|(tenancy, _)| *tenancy > 0)
+            .flat_map(|(tenancy, ids)| ids.iter().map(move |id| (*id, *tenancy)))
+            .collect();
+        let tenancy_rel = mosaica_store::ShardLayout::new(PARTITION, shard).tenancy_rel();
+        let bits = mosaica_store::tenancy::bits_of(&tenancies);
+        let mut index = Vec::new();
+        for (bit, file) in
+            mosaica_store::tenancy::write(&prefix_dir.join(&tenancy_rel), &bits).unwrap()
+        {
+            let name = file.file_name().unwrap().to_str().unwrap();
+            let rel = format!("{tenancy_rel}/{name}");
+            manifest
+                .partition
+                .files
+                .insert(rel.clone(), mosaica_store::digest_of(&file).unwrap());
+            index.push(TenancyBit { bit, path: rel });
+        }
+        let record = manifest
+            .shard_mut(shard)
+            .expect("the bundle holds the shard");
+        record.high_water = high_water;
+        record.free_entities = EntitySet::of(&croaring::Bitmap::of(
+            &free
+                .iter()
+                .flat_map(|(_, ids)| ids.iter().copied())
+                .collect::<Vec<u32>>(),
+        ));
+        record.tenancy_index = index;
+    });
+}
+
 /// The item the unique `id` value `source` names, deleted items left out.
 pub fn item_of_id(
     engine: &Engine,

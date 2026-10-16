@@ -246,3 +246,41 @@ fn an_empty_shard_holds_every_declared_structure_and_no_item() {
             .is_file());
     }
 }
+
+/// A shard opened after a record pack was written holds an empty member pack over its ordinals,
+/// named for the publication that wrote the record pack, which pairs with it and lists nothing.
+#[test]
+fn an_empty_member_pack_pairs_with_its_record_pack_and_lists_nothing() {
+    use mosaica_store::membership::{empty_member_pack, LevelPack, PackKind, RecordPackWriter};
+    let tmp = tempfile::TempDir::new().unwrap();
+    let prefix = tmp.path();
+    let space = mosaica_types::LayerSpace::new(2).unwrap();
+    let mut records = RecordPackWriter::create(
+        prefix,
+        mosaica_store::LayerSpaceLayout::new("default", space),
+        12,
+        1,
+        40,
+        3,
+    )
+    .unwrap();
+    for _ in 0..3 {
+        records.push(&[]).unwrap();
+    }
+    let records = records.finish().unwrap();
+    let shard = ShardLayout::new("default", ShardId::new(4).unwrap());
+
+    let members = empty_member_pack(prefix, shard, space, &records).unwrap();
+    assert!(members.pairs(space, &records));
+    assert!(members.path.starts_with(&shard.members_rel()));
+    assert_eq!(
+        empty_member_pack(prefix, shard, space, &records)
+            .unwrap()
+            .path,
+        members.path,
+        "written again under the same name"
+    );
+    let pack = LevelPack::open(&prefix.join(&members.path), PackKind::Members).unwrap();
+    assert_eq!((pack.ordinal_lo(), pack.count()), (40, 3));
+    assert!(pack.iter().all(|(_, blob)| blob.is_empty()));
+}
