@@ -164,10 +164,22 @@ fn retained<'r>(
 /// Content that requires only inherited visibility carries no generating set at all (C28) and is
 /// never reached. Which contents are withdrawn is [`Retired::withdrawn_ranks`]' answer, asked of
 /// the retired shard's slice; whether a record moved is asked of [`retirement_of`].
+///
+/// Each withdrawn content's position joins [`ArtifactRecord::withdrawn`], so every content ranked
+/// below it goes on reading its own values.
 fn withdraw_ranks(record: &mut ArtifactRecord, withdrawn: &[usize]) {
-    if withdrawn.is_empty() {
+    let positions: Vec<u16> = withdrawn
+        .iter()
+        .filter(|rank| **rank < record.contents.len())
+        .filter_map(|rank| u16::try_from(record.content_position(*rank)).ok())
+        .collect();
+    if positions.is_empty() {
         return;
     }
+    let mut held = record.withdrawn.to_vec();
+    held.extend(positions);
+    held.sort_unstable();
+    record.withdrawn = held.into();
     let mut rank = 0;
     record.contents.retain(|_| {
         let keep = !withdrawn.contains(&rank);
@@ -1161,6 +1173,11 @@ pub struct ArtifactRecord {
     /// per generation and intersected per request, and a form that had to be decompressed to be
     /// tested would pay that cost on every artifact of every viewport.
     pub contents: Vec<ContentSet>,
+    /// The positions of the contents withdrawn from this artifact, ascending. A content's values
+    /// are stored at its position in the artifact's content row, which is its rank counting the
+    /// withdrawn positions as well ([`Self::content_position`]); a withdrawn position is never
+    /// served and never taken again.
+    pub withdrawn: Box<[u16]>,
     /// What this artifact exists as an attachment to, resolved at publication.
     ///
     /// **A visibility term, not a navigation aid.** An artifact carrying one is tested on its
@@ -1307,6 +1324,19 @@ impl ArtifactRecord {
         self.members.cardinality()
     }
 
+    /// Where the content at `rank` has its values in the artifact's content row: tags
+    /// `position × kinds + kind`.
+    pub fn content_position(&self, rank: usize) -> usize {
+        let mut position = rank;
+        for withdrawn in &self.withdrawn {
+            if usize::from(*withdrawn) > position {
+                break;
+            }
+            position += 1;
+        }
+        position
+    }
+
     /// One point shard's slice of this record: `members` and `sets` in that shard, and of the
     /// record only what a row form reads beside them.
     pub fn slice(&self, members: Bitmap, sets: Vec<Bitmap>) -> ArtifactRecord {
@@ -1328,6 +1358,7 @@ impl ArtifactRecord {
                     cardinality: content.cardinality,
                 })
                 .collect(),
+            withdrawn: self.withdrawn.clone(),
             attached_to: self.attached_to.clone(),
             parents: Vec::new(),
             access: Vec::new(),
@@ -2464,6 +2495,7 @@ impl ArtifactStore {
                         ..content.clone()
                     })
                     .collect(),
+                withdrawn: Box::default(),
                 attached_to: published.attached_to.clone().map(|a| Attachment {
                     layer: a.layer,
                     space: a.space,
@@ -2691,9 +2723,7 @@ impl ArtifactStore {
         let rank = rank as usize;
         if cardinality == 0 {
             self.each_held(layer, level, ordinal, |record| {
-                if rank < record.contents.len() {
-                    record.contents.remove(rank);
-                }
+                withdraw_ranks(record, &[rank])
             });
             return true;
         }
@@ -3706,8 +3736,9 @@ impl ArtifactStore {
 
     /// The supplied content of every artifact not yet in a manifest, for its layer's space.
     ///
-    /// **Tags are `rank × kinds + kind`**, positions in the artifact's own layer declaration, as a
-    /// point row's tags are positions in the manifest's declared scalars.
+    /// **Tags are `position × kinds + kind`**, `position` the content's
+    /// ([`ArtifactRecord::content_position`]) and `kind` the value's in the artifact's own layer
+    /// declaration, as a point row's tags are positions in the manifest's declared scalars.
     ///
     /// Every content of one artifact carries a value for every declared kind — refused at
     /// publication otherwise — so the stride is the same for all of them and is recoverable from
@@ -3738,7 +3769,7 @@ impl ArtifactStore {
                         continue;
                     };
                     for (k, value) in values.iter().enumerate() {
-                        let tag = v * values.len() + k;
+                        let tag = record.content_position(v) * values.len() + k;
                         // A layer whose kinds and contents multiply past the tag space cannot be
                         // written back. **The whole artifact's row is abandoned, not the one
                         // field**: the reader requires every declared kind or none, so a row
@@ -3918,15 +3949,16 @@ impl ArtifactStore {
 /// blob       := u16 LE key_len | key bytes (UTF-8)
 ///             | u16 LE view_len | view bytes (UTF-8)   -- 0 on an entity-scoped layer
 ///             | u64 LE incarnation                     -- only where view_len is not 0
-///             | u16 LE content_count
-///             | content*
+///             | u16 LE position_count                  -- contents and withdrawn positions
+///             | content*                               -- one per position, ascending
 ///             | attachment
 ///             | parents
 ///             | access
 ///             | shape
 /// content    := digest (32 bytes, SHA-256 of the values)
 ///             | u64 LE cardinality                       -- the set's stored cardinality
-///             | u8 withdrawn                             -- 0: served at its rank
+///             | u8 withdrawn                             -- 0: a content; 1: a withdrawn
+///                                                        --   position, digest and cardinality 0
 /// attachment := u8 0                                     -- unattached
 ///             | u8 1 | u16 LE layer_len | layer bytes (UTF-8)
 ///                    | u32 LE space | u32 LE level | u32 LE ordinal | u64 LE target entity
@@ -4003,13 +4035,22 @@ pub fn encode_record(record: &ArtifactRecord, shape: Option<&ArtifactShapes>) ->
     // encoding cannot read back, so it refuses rather than writing a prefix of the ranking. A
     // dropped content is a viewer served a *different* description from the one the caller
     // ranked for them.
-    let count = u16::try_from(record.contents.len()).unwrap_or(u16::MAX);
+    let count = u16::try_from(record.contents.len() + record.withdrawn.len()).unwrap_or(u16::MAX);
     out.extend_from_slice(&count.to_le_bytes());
     if count != u16::MAX {
-        for content in &record.contents {
+        let mut contents = record.contents.iter();
+        for position in 0..count {
+            if record.withdrawn.contains(&position) {
+                out.extend_from_slice(&[0; 32]);
+                out.extend_from_slice(&0u64.to_le_bytes());
+                out.push(1);
+                continue;
+            }
+            let Some(content) = contents.next() else {
+                break;
+            };
             out.extend_from_slice(&content.digest);
             out.extend_from_slice(&content.cardinality.to_le_bytes());
-            // No rank is withdrawn in place: a withdrawal removes the content.
             out.push(0);
         }
     }
@@ -4199,27 +4240,31 @@ pub fn decode_slice(
         let view = std::str::from_utf8(r.take(view_len)?).ok()?.to_string();
         (Some(view), r.u64()?)
     };
-    let count = r.u16()? as usize;
-    if count == u16::MAX as usize {
+    let count = r.u16()?;
+    if count == u16::MAX {
         return None;
     }
-    let (members, sets) = decode_slice_members(members_blob, count)?;
-    // The record and its members are two packs: a count that differs is two blobs that do not
-    // describe one artifact.
-    if sets.len() != count {
-        return None;
-    }
-    let mut sets = sets.into_iter();
-    let mut contents = Vec::with_capacity(count);
-    for _ in 0..count {
+    let mut held = Vec::with_capacity(count as usize);
+    let mut withdrawn = Vec::new();
+    for position in 0..count {
         let digest: [u8; 32] = r.take(32)?.try_into().ok()?;
         let cardinality = r.u64()?;
-        // A withdrawn rank cannot be kept out of service here, so the record does not decode.
-        if r.take(1)?[0] != 0 {
-            return None;
+        match r.take(1)?[0] {
+            0 => held.push((digest, cardinality)),
+            1 if digest == [0; 32] && cardinality == 0 => withdrawn.push(position),
+            _ => return None,
         }
-        let generated_from = sets.next()?;
-        contents.push(ContentSet {
+    }
+    let (members, sets) = decode_slice_members(members_blob, held.len())?;
+    // The record and its members are two packs: a count that differs is two blobs that do not
+    // describe one artifact.
+    if sets.len() != held.len() {
+        return None;
+    }
+    let contents: Vec<ContentSet> = held
+        .into_iter()
+        .zip(sets)
+        .map(|((digest, cardinality), generated_from)| ContentSet {
             // ⊘ The extent carries no values — see [`ContentSet::values`]. A restored content is
             // therefore unservable until the blob write lands, which is fail-closed and loud rather
             // than an artifact served with its description missing.
@@ -4227,8 +4272,8 @@ pub fn decode_slice(
             digest,
             generated_from,
             cardinality,
-        });
-    }
+        })
+        .collect();
     // An attachment absent is one byte and never zero bytes: *unattached* and *this reader does not
     // know whether it was attached* must not encode the same, since the second answer is one that
     // serves a label whose cluster is hidden.
@@ -4326,6 +4371,7 @@ pub fn decode_slice(
             members: Members::owned(members),
             declares_members: None,
             contents,
+            withdrawn: withdrawn.into(),
             attached_to,
             parents,
             access,
@@ -4611,6 +4657,7 @@ mod tests {
             members: Members::owned(Bitmap::of(members)),
             declares_members: None,
             contents: Vec::new(),
+            withdrawn: Box::default(),
             attached_to: None,
             parents: Vec::new(),
             access: Vec::new(),
@@ -5573,7 +5620,7 @@ mod tests {
     }
 
     #[test]
-    fn a_contents_withdrawn_marker_is_stored_and_a_withdrawn_rank_does_not_decode() {
+    fn a_contents_withdrawn_marker_is_stored_and_a_content_marked_withdrawn_does_not_decode() {
         let mut r = record(100, &[1, 2, 3]);
         let digest = content_digest(&["a label".to_string()]);
         r.contents = vec![ContentSet {
@@ -5593,6 +5640,73 @@ mod tests {
         assert!(decode_record(r.entity, &blob, &encode_members(&r)).is_some());
         blob[marker] = 1;
         assert!(decode_record(r.entity, &blob, &encode_members(&r)).is_none());
+    }
+
+    /// A withdrawn content's position is kept and never taken again, whether a fold or a page
+    /// withdrew it: each remaining content's values are written at its own position, the record
+    /// round-trips the positions, and a later fill takes a new one.
+    #[test]
+    fn a_withdrawn_contents_position_is_kept_and_never_taken_again() {
+        let mut store = ArtifactStore::new();
+        let mut published = publication("clusters/a", 0, 100, &[1, 2, 3, 4]);
+        if let crate::wal::WalRecord::ArtifactPublish { artifacts, .. } = &mut published {
+            artifacts[0].contents = [("a", 1), ("b", 2), ("c", 3)]
+                .iter()
+                .map(|(value, source)| crate::wal::PublishedContent {
+                    values: vec![value.to_string()],
+                    digest: content_digest(&[value.to_string()]),
+                    generated_from: ShardSets::in_shard(ShardId::ZERO, Bitmap::of(&[*source]))
+                        .to_wal(),
+                    cardinality: 1,
+                })
+                .collect();
+        }
+        assert_eq!(store.apply(&published, 0), 0);
+        let rows = |store: &ArtifactStore| -> Vec<(u16, String)> {
+            store.unpublished_content().remove(0).2
+        };
+        let positions = |store: &ArtifactStore| -> Vec<usize> {
+            let record = store.get("clusters/a", 0, 0).unwrap();
+            (0..record.contents.len())
+                .map(|rank| record.content_position(rank))
+                .collect()
+        };
+
+        store.retire(&Retired {
+            shard: ShardId::ZERO,
+            points: Bitmap::of(&[2]),
+            artifacts: BTreeMap::new(),
+        });
+        assert_eq!(positions(&store), vec![0, 2]);
+        assert_eq!(rows(&store), vec![(0, "a".into()), (2, "c".into())]);
+        let (back, _) = round_trip(store.get("clusters/a", 0, 0).unwrap()).unwrap();
+        assert_eq!(
+            (0..back.contents.len())
+                .map(|rank| back.content_position(rank))
+                .collect::<Vec<_>>(),
+            vec![0, 2],
+            "the record carries the withdrawn position"
+        );
+
+        assert_eq!(
+            store.apply(
+                &page(0, &ShardSets::default(), &in_shards(&[(0, &[1])]), 0),
+                0
+            ),
+            0
+        );
+        assert_eq!(positions(&store), vec![2]);
+        assert_eq!(rows(&store), vec![(2, "c".into())]);
+
+        let values = vec!["d".to_string()];
+        let fill = crate::wal::ArtifactPart::Content {
+            rank: 1,
+            digest: content_digest(&values),
+            values,
+        };
+        assert_eq!(store.fill("clusters/a", 0, 0, &fill), FillOutcome::Filled);
+        assert_eq!(positions(&store), vec![2, 3]);
+        assert_eq!(rows(&store), vec![(2, "c".into()), (3, "d".into())]);
     }
 
     #[test]

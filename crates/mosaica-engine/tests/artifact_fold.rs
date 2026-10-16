@@ -959,6 +959,61 @@ fn a_deleted_source_withdraws_only_the_content_whose_set_named_it() {
     );
 }
 
+/// A content withdrawn at a fold stays withdrawn, and the content ranked below it is served with
+/// its own value, whether the record was restored from the prefix before the fold or after it:
+/// each credential is served `wide`, gated by `wide`'s set, and never `near`, whose set names the
+/// deleted document and items the subset credential cannot see.
+#[test]
+fn the_content_below_a_withdrawn_one_keeps_its_value_across_a_restart() {
+    let fx = fixture();
+    let wide_set = fx.members((0..90).filter(|s| terms_of(*s).contains(&SUBSET_TERM)));
+    let deleted = fx.member(7);
+    let served = |engine: &Engine| -> Vec<Vec<Vec<String>>> {
+        [full_coverage_credential(), subset_credential()]
+            .iter()
+            .map(|credential| {
+                artifacts_of(engine, credential)
+                    .into_iter()
+                    .map(|a| a.content)
+                    .collect()
+            })
+            .collect()
+    };
+    let expected = vec![vec![vec!["wide".to_string()]]; 2];
+    {
+        let engine = fx.open_unrefreshed();
+        engine.register_layer(content_layer()).unwrap();
+        engine
+            .publish_artifacts(
+                "clusters/a".into(),
+                0,
+                vec![IncomingArtifact::with_content(
+                    Some("c0".into()),
+                    fx.members(0..300),
+                    vec![
+                        IncomingContent::new(vec!["near".into()], fx.members(0..30)),
+                        IncomingContent::new(vec!["wide".into()], wide_set),
+                    ],
+                )],
+            )
+            .unwrap();
+        wait_for_publication(&fx, &engine, 1);
+        // Releases the log, so the next open restores the record from the prefix alone.
+        fold(&engine);
+    }
+    {
+        let engine = fx.open_unrefreshed();
+        engine
+            .accept_change(deleted, ChangeOp::Delete)
+            .expect("the delete is accepted");
+        assert_eq!(served(&engine), expected, "at the ack");
+        fold(&engine);
+        assert_eq!(served(&engine), expected, "after the fold");
+    }
+    let engine = fx.open_unrefreshed();
+    assert_eq!(served(&engine), expected, "across a restart");
+}
+
 /// **A declared member that is deleted refuses the batch; a suppressed one is accepted.** The two
 /// are not near-neighbours: a deletion is irreversible, so the content would be unservable from
 /// birth and the count short for ever, while a suppression is an operator's reversible action that

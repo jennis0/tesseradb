@@ -1561,22 +1561,9 @@ fn a_compaction_of_shard_one_retires_its_members_from_its_slice_alone() {
         expected,
         "after shard 0's compaction"
     );
-    // A withdrawn content's value is read back by rank at an open, in one shard as in two, so
-    // the restart is compared without content.
-    let without_content =
-        |served: Vec<Vec<ServedArtifact>>| -> Vec<Vec<(Option<String>, u64, u64)>> {
-            served
-                .into_iter()
-                .map(|artifacts| artifacts.into_iter().map(|a| (a.0, a.1, a.3)).collect())
-                .collect()
-        };
     drop(engine);
     let engine = writing(&several);
-    assert_eq!(
-        without_content(served_layer(&engine)),
-        without_content(expected),
-        "across a restart"
-    );
+    assert_eq!(served_layer(&engine), expected, "across a restart");
 }
 
 /// Whether the layered fixture's layer `t` leaves the item of `id` out of every artifact.

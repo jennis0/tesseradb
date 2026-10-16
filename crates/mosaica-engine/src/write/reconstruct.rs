@@ -917,6 +917,7 @@ mod tests {
                 generated_from: Bitmap::new(),
                 cardinality,
             }],
+            withdrawn: Box::default(),
             attached_to: None,
             parents: Vec::new(),
             access: vec![b"t".to_vec()],

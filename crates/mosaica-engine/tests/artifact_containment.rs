@@ -220,6 +220,7 @@ fn build_fixture_n(artifacts: u32) -> Fixture {
                         generated_from: set.into_iter().collect(),
                     })
                     .collect(),
+                withdrawn: Box::default(),
                 attached_to: None,
                 parents: Vec::new(),
                 access: Vec::new(),

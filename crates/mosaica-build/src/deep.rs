@@ -1718,6 +1718,7 @@ mod tests {
                     generated_from: Bitmap::of(set),
                     cardinality: set.len() as u64,
                 }],
+                withdrawn: Box::default(),
                 attached_to: None,
                 parents: Vec::new(),
                 access: Vec::new(),

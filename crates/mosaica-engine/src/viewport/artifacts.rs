@@ -596,25 +596,26 @@ impl Engine {
         };
         // The publication's own copy, the only home the content has before the manifest carries it.
         let held = self.write.live().with_artifacts(|store| {
-            store
-                .get(layer, level, ordinal)
-                .and_then(|record| record.contents.get(rank as usize))
-                .and_then(|set| match (&set.values, materialise) {
-                    (Some(values), true) => Some(values.clone()),
-                    (Some(_), false) => Some(Vec::new()),
-                    (None, _) => None,
-                })
+            let record = store.get(layer, level, ordinal)?;
+            let set = record.contents.get(rank as usize)?;
+            Some(match (&set.values, materialise) {
+                (Some(values), true) => Ok(values.clone()),
+                (Some(_), false) => Ok(Vec::new()),
+                (None, _) => Err(record.content_position(rank as usize)),
+            })
         });
-        if let Some(values) = held {
-            return Some(values);
-        }
+        let position = match held {
+            Some(Ok(values)) => return Some(values),
+            Some(Err(position)) => Some(position),
+            None => None,
+        };
 
-        // Otherwise the layer space's record blob. Tags are `rank × kinds + kind` against the
+        // Otherwise the layer space's record blob. Tags are `position × kinds + kind` against the
         // declaration.
         if kinds == 0 {
             return Some(Vec::new());
         }
-        let base = (rank as usize).checked_mul(kinds)?;
+        let base = position?.checked_mul(kinds)?;
         let entity = u32::try_from(entity.raw()).ok()?;
         /// Every declared kind or none: a partial row looks, to a client, like content withheld.
         fn values_for<'a>(

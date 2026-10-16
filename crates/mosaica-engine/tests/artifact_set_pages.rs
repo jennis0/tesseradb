@@ -511,3 +511,45 @@ fn a_set_page_replays_from_the_log() {
         Some("a label")
     );
 }
+
+/// A content a page withdrew stays withdrawn across a restart, and the content ranked below it is
+/// served with its own value: each credential is served `wide`, gated by `wide`'s set, before and
+/// after the restart, and never `near`, whose set the page emptied.
+#[test]
+fn the_content_below_a_withdrawn_one_keeps_its_value_across_a_restart() {
+    let fx = fixture();
+    let served = |engine: &Engine| -> Vec<Option<String>> {
+        [full_coverage_credential(), subset_credential()]
+            .iter()
+            .map(|credential| label_for(engine, credential))
+            .collect()
+    };
+    let expected = vec![Some("wide".to_string()); 2];
+    {
+        let engine = fx.open();
+        engine.register_layer(label_layer(LAYER)).unwrap();
+        engine
+            .publish_artifacts(
+                LAYER.into(),
+                0,
+                vec![IncomingArtifact::with_content(
+                    Some("t0".into()),
+                    fx.members(0..300),
+                    vec![
+                        IncomingContent::new(vec!["near".to_string()], fx.members([0, 1])),
+                        IncomingContent::new(
+                            vec!["wide".to_string()],
+                            fx.members((0..90).filter(|s| seen_by_subset(*s))),
+                        ),
+                    ],
+                )],
+            )
+            .unwrap();
+        tick(&engine);
+        assert_eq!(page(&engine, &fx, [], [0, 1]).withdrawn, Some(0));
+        tick(&engine);
+        assert_eq!(served(&engine), expected, "after the page");
+    }
+    let engine = fx.open();
+    assert_eq!(served(&engine), expected, "across a restart");
+}

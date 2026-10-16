@@ -2236,6 +2236,7 @@ fn main() {
                 members: to_entities(&in_rows, &space).into(),
                 declares_members: None,
                 contents,
+                withdrawn: Box::default(),
                 attached_to: None,
                 parents: Vec::new(),
                 access: Vec::new(),

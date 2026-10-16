@@ -117,6 +117,7 @@ pub(super) fn nothing_held(contents: usize) -> ArtifactRecord {
                 cardinality: 0,
             })
             .collect(),
+        withdrawn: Box::default(),
         attached_to: None,
         parents: Vec::new(),
         access: Vec::new(),
