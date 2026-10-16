@@ -1295,6 +1295,19 @@ pub struct ContentSet {
     pub cardinality: u64,
 }
 
+/// Where the content at `rank` has its values in an artifact's content row, given the artifact's
+/// withdrawn positions, ascending: its rank counting the withdrawn positions as well.
+pub fn content_position(withdrawn: &[u16], rank: usize) -> usize {
+    let mut position = rank;
+    for withdrawn in withdrawn {
+        if usize::from(*withdrawn) > position {
+            break;
+        }
+        position += 1;
+    }
+    position
+}
+
 /// The digest a content's values are stored with: SHA-256 over each value's UTF-8 bytes, each
 /// preceded by its length as a `u32` LE, so that two value lists that concatenate to the same
 /// bytes digest differently.
@@ -1327,14 +1340,19 @@ impl ArtifactRecord {
     /// Where the content at `rank` has its values in the artifact's content row: tags
     /// `position × kinds + kind`.
     pub fn content_position(&self, rank: usize) -> usize {
-        let mut position = rank;
-        for withdrawn in &self.withdrawn {
-            if usize::from(*withdrawn) > position {
-                break;
-            }
-            position += 1;
+        content_position(&self.withdrawn, rank)
+    }
+
+    /// The rank of the content at `position` in the artifact's content row, or `None` where that
+    /// position is withdrawn or past the last content.
+    pub fn rank_at(&self, position: usize) -> Option<usize> {
+        let withdrawn = u16::try_from(position).ok()?;
+        if self.withdrawn.contains(&withdrawn) {
+            return None;
         }
-        position
+        let below = self.withdrawn.partition_point(|held| *held < withdrawn);
+        let rank = position - below;
+        (rank < self.contents.len()).then_some(rank)
     }
 
     /// One point shard's slice of this record: `members` and `sets` in that shard, and of the
@@ -5678,6 +5696,13 @@ mod tests {
             artifacts: BTreeMap::new(),
         });
         assert_eq!(positions(&store), vec![0, 2]);
+        assert_eq!(
+            (0..4)
+                .map(|position| store.get("clusters/a", 0, 0).unwrap().rank_at(position))
+                .collect::<Vec<_>>(),
+            vec![Some(0), None, Some(1), None],
+            "a withdrawn position and one past the last content name no content"
+        );
         assert_eq!(rows(&store), vec![(0, "a".into()), (2, "c".into())]);
         let (back, _) = round_trip(store.get("clusters/a", 0, 0).unwrap()).unwrap();
         assert_eq!(

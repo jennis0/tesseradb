@@ -33,6 +33,7 @@ use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
     SuppliedContent, SuppliedRequirement,
 };
+use mosaica_types::EntityId;
 
 const LAYER: &str = "topics/a";
 
@@ -552,4 +553,134 @@ fn the_content_below_a_withdrawn_one_keeps_its_value_across_a_restart() {
     }
     let engine = fx.open();
     assert_eq!(served(&engine), expected, "across a restart");
+}
+
+/// Publish `t0` with `near`, generated from a document the subset principal can see, ranked above
+/// `wide`, generated from documents it cannot, and tick so both are served.
+fn publish_near_above_wide(engine: &Engine, fx: &Fixture) {
+    assert!(seen_by_subset(0) && !seen_by_subset(1));
+    engine.register_layer(label_layer(LAYER)).unwrap();
+    engine
+        .publish_artifacts(
+            LAYER.into(),
+            0,
+            vec![IncomingArtifact::with_content(
+                Some("t0".into()),
+                fx.members(0..300),
+                vec![
+                    IncomingContent::new(vec!["near".to_string()], fx.members([0])),
+                    IncomingContent::new(vec!["wide".to_string()], fx.members(0..90)),
+                ],
+            )],
+        )
+        .unwrap();
+    tick(engine);
+}
+
+/// Between a page that withdraws `near` and the tick that publishes it, the served form still
+/// ranks `near` first while `wide` now stands first in the store. The subset principal, who holds
+/// `near`'s set and not `wide`'s, is never served `wide` on any route that reads content, and a
+/// point names `t0` for each principal exactly where the artifact is served; nobody is served
+/// `near` once the page is accepted. `near_set` is `near`'s generating set.
+fn withdrawing_near_never_serves_wide_to_the_subset(engine: &Engine, near_set: Vec<EntityId>) {
+    let id = artifacts_of(engine, &full_coverage_credential())
+        .into_iter()
+        .find(|a| a.key.as_deref() == Some("t0"))
+        .expect("t0 is served")
+        .mosaica_id;
+    // Per route, what this principal is served for `t0`: the viewport's artifacts, the artifact
+    // read by its identifier, and whether a point of the viewport names it.
+    let routes = |credential: &[u8]| -> (Option<String>, Option<String>, bool) {
+        let session = engine.authorise(credential).unwrap();
+        let single = engine
+            .artifact(&session, id, "s0", None)
+            .unwrap()
+            .map(|a| a.content.first().cloned().unwrap_or_default());
+        let tagged = engine
+            .viewport(
+                &session,
+                mosaica_engine::viewport::ViewportRequest::new(
+                    "s0",
+                    0,
+                    WHOLE_MAP,
+                    N_ITEMS as usize,
+                )
+                .layers(mosaica_engine::LayerSelection::All),
+            )
+            .expect("a viewport")
+            .points
+            .membership
+            .iter()
+            .flat_map(|column| &column.ids)
+            .any(|tag| *tag == Some(id.raw()));
+        (label_for(engine, credential), single, tagged)
+    };
+    let near = Some("near".to_string());
+    let wide = Some("wide".to_string());
+    assert_eq!(
+        routes(&subset_credential()),
+        (near.clone(), near.clone(), true)
+    );
+    assert_eq!(
+        routes(&full_coverage_credential()),
+        (near.clone(), near, true)
+    );
+
+    let withdrawing = IncomingGrowth::page_of_entities("t0".into(), Some(0), Vec::new(), near_set);
+    let receipt = engine
+        .grow_memberships(LAYER.into(), 0, vec![withdrawing])
+        .expect("a page that empties `near`'s set");
+    assert_eq!(receipt[0].withdrawn, Some(0));
+    for (credential, holds_wides_set) in [
+        (subset_credential(), false),
+        (full_coverage_credential(), true),
+    ] {
+        let (listed, single, tagged) = routes(&credential);
+        for served in [&listed, &single] {
+            assert!(
+                served.is_none() || (holds_wides_set && *served == wide),
+                "served {served:?} before the tick, which is no content whose set this principal \
+                 holds"
+            );
+        }
+        assert_eq!(listed, single, "the two routes serve one answer");
+        assert_eq!(
+            tagged,
+            listed.is_some(),
+            "a point names t0 exactly where it is served"
+        );
+    }
+
+    tick(engine);
+    assert_eq!(routes(&subset_credential()), (None, None, false));
+    assert_eq!(
+        routes(&full_coverage_credential()),
+        (wide.clone(), wide, true)
+    );
+}
+
+/// **A verdict and the value it serves are of one version**, while the store holds the
+/// publication's values.
+#[test]
+fn a_page_that_withdraws_a_content_never_serves_the_next_ones_value_before_the_tick() {
+    let fx = fixture();
+    let engine = fx.open();
+    publish_near_above_wide(&engine, &fx);
+    withdrawing_near_never_serves_wide_to_the_subset(&engine, fx.members([0]));
+}
+
+/// The same, once a restart has restored the record from the prefix, so its values are read from
+/// the layer space's content row by position.
+#[test]
+fn a_page_that_withdraws_a_restored_content_never_serves_the_next_ones_value_before_the_tick() {
+    let fx = fixture();
+    let near_set = fx.members([0]);
+    {
+        let engine = fx.open();
+        publish_near_above_wide(&engine, &fx);
+        // Releases the log, so the next open restores the record from the prefix alone.
+        fold(&engine);
+    }
+    let engine = fx.open();
+    withdrawing_near_never_serves_wide_to_the_subset(&engine, near_set);
 }

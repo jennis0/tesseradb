@@ -223,9 +223,10 @@ impl std::fmt::Display for BrowseRefused {
 
 /// One artifact of one level, as the gate left it.
 ///
-/// **Its entity and its content rank are consumed inside the walk and not carried out of it**: the
-/// rank decides which content this viewer is served, and both are answered before the row is
-/// pushed. Keeping them here would be state a later reader could reach a second verdict from.
+/// **Its entity and its content position are consumed inside the walk and not carried out of
+/// it**: the position decides which content this viewer is served, and both are answered before
+/// the row is pushed. Keeping them here would be state a later reader could reach a second verdict
+/// from.
 struct Gated {
     level: u32,
     ordinal: u32,
@@ -331,8 +332,10 @@ impl crate::Engine {
                 let Some(entity) = runs.entity_of(ordinal as u64).map(EntityId::new) else {
                     continue;
                 };
-                let crate::artifacts::ArtifactVerdict::Serve { masked_count, rank } =
-                    view_of.verdict(entity, ordinal)
+                let crate::artifacts::ArtifactVerdict::Serve {
+                    masked_count,
+                    position,
+                } = view_of.verdict(entity, ordinal)
                 else {
                     continue;
                 };
@@ -343,7 +346,7 @@ impl crate::Engine {
                 // generating set receives no artifact at all rather than one with its description
                 // missing (decision 0076), which is why this runs inside the gate and not beside
                 // the row build.
-                let Some(content) = level_read.content(self, &layer, ordinal, entity, rank)
+                let Some(content) = level_read.content(self, &layer, ordinal, entity, position)
                 else {
                     continue;
                 };
@@ -760,10 +763,11 @@ impl<'a, 'c> Namer<'a, 'c> {
                         let entity = label.runs[read.level as usize]
                             .entity_of(u64::from(at))
                             .map(EntityId::new)?;
-                        let ArtifactVerdict::Serve { rank, .. } = view.verdict(entity, at) else {
+                        let ArtifactVerdict::Serve { position, .. } = view.verdict(entity, at)
+                        else {
                             return None;
                         };
-                        read.content(engine, label, at, entity, rank)?.name()
+                        read.content(engine, label, at, entity, position)?.name()
                     })
                 })
             })

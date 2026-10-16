@@ -127,7 +127,7 @@ pub(super) struct GatedArtifact {
     /// this gate's walk of the mask instead of repeating it.
     pub(super) forms: crate::layer_read::LevelForms,
     pub(super) masked_count: u64,
-    pub(super) rank: Option<u32>,
+    pub(super) position: Option<u32>,
 }
 
 /// One request's state, as the dependency prerequisite needs it: gathered once per response,
@@ -345,7 +345,11 @@ impl Engine {
             .view(served, mask, &layer, labels, &dependency_served, true)
             .verdict(entity, ordinal);
         ctx.finish()?;
-        let crate::artifacts::ArtifactVerdict::Serve { masked_count, rank } = verdict else {
+        let crate::artifacts::ArtifactVerdict::Serve {
+            masked_count,
+            position,
+        } = verdict
+        else {
             return Ok(None);
         };
         Ok(Some(GatedArtifact {
@@ -356,7 +360,7 @@ impl Engine {
             layer,
             forms,
             masked_count,
-            rank,
+            position,
         }))
     }
 
@@ -396,7 +400,7 @@ impl Engine {
             layer,
             forms,
             masked_count,
-            rank,
+            position,
         } = gated;
         // Same call as the viewport's, so the two routes cannot serve different content.
         let Some(supplied) = self.supplied_content(
@@ -405,7 +409,7 @@ impl Engine {
             level,
             ordinal,
             entity,
-            rank,
+            position,
             true,
             // Reads the row directly: one artifact does not justify building the level's table.
             None,
@@ -533,7 +537,8 @@ impl Engine {
     }
 
     /// The values of the content the predicate chose, or `None` where it cannot be read back.
-    /// `rank` indexes the artifact's ranked `contents`, not a Morton or bitmap rank.
+    /// `position` is the verdict's: where that content has its values in the artifact's content
+    /// row, which names one content for as long as the artifact exists.
     ///
     /// `Some(vec![])` is a layer declaring no supplied content; `None` is an artifact that
     /// should carry content and does not, which withholds the artifact. `materialise = false`
@@ -554,7 +559,7 @@ impl Engine {
         level: u32,
         ordinal: u32,
         entity: EntityId,
-        rank: Option<u32>,
+        position: Option<u32>,
         materialise: bool,
         table: Option<&crate::artifact_content::LevelContent>,
     ) -> Option<Supplied> {
@@ -565,7 +570,7 @@ impl Engine {
             ordinal,
             entity,
             declaration.content.supplied.len(),
-            rank,
+            position,
             materialise,
             table,
         )?;
@@ -587,35 +592,35 @@ impl Engine {
         ordinal: u32,
         entity: EntityId,
         kinds: usize,
-        rank: Option<u32>,
+        position: Option<u32>,
         materialise: bool,
         table: Option<&crate::artifact_content::LevelContent>,
     ) -> Option<Vec<String>> {
-        let Some(rank) = rank else {
+        let Some(position) = position else {
             return Some(Vec::new());
         };
         // The publication's own copy, the only home the content has before the manifest carries it.
+        // A content withdrawn since the verdict's version of the record is not served, and no other
+        // content is read in its place.
         let held = self.write.live().with_artifacts(|store| {
             let record = store.get(layer, level, ordinal)?;
-            let set = record.contents.get(rank as usize)?;
+            let set = record.contents.get(record.rank_at(position as usize)?)?;
             Some(match (&set.values, materialise) {
-                (Some(values), true) => Ok(values.clone()),
-                (Some(_), false) => Ok(Vec::new()),
-                (None, _) => Err(record.content_position(rank as usize)),
+                (Some(values), true) => Some(values.clone()),
+                (Some(_), false) => Some(Vec::new()),
+                (None, _) => None,
             })
         });
-        let position = match held {
-            Some(Ok(values)) => return Some(values),
-            Some(Err(position)) => Some(position),
-            None => None,
-        };
+        if let Some(values) = held? {
+            return Some(values);
+        }
 
         // Otherwise the layer space's record blob. Tags are `position × kinds + kind` against the
         // declaration.
         if kinds == 0 {
             return Some(Vec::new());
         }
-        let base = position?.checked_mul(kinds)?;
+        let base = (position as usize).checked_mul(kinds)?;
         let entity = u32::try_from(entity.raw()).ok()?;
         /// Every declared kind or none: a partial row looks, to a client, like content withheld.
         fn values_for<'a>(
@@ -1021,12 +1026,14 @@ impl Engine {
             let Some(entity) = level.runs.entity_of(ordinal as u64).map(EntityId::new) else {
                 continue;
             };
-            let crate::artifacts::ArtifactVerdict::Serve { masked_count, rank } =
-                view.verdict(entity, ordinal)
+            let crate::artifacts::ArtifactVerdict::Serve {
+                masked_count,
+                position,
+            } = view.verdict(entity, ordinal)
             else {
                 continue;
             };
-            passing.push((ordinal, entity, masked_count, rank));
+            passing.push((ordinal, entity, masked_count, position));
         }
         passing
     }
@@ -1282,7 +1289,7 @@ impl Engine {
 }
 
 /// One artifact the gate admitted: its ordinal, its entity, the masked count its verdict carried
-/// and the rank of the content that verdict chose.
+/// and the position of the content that verdict chose.
 pub(crate) type Passing = (u32, EntityId, u64, Option<u32>);
 
 /// One treed level's cut for one request: the level's lineage, the artifacts whose verdict passed

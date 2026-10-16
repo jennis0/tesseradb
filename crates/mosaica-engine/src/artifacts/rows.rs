@@ -37,6 +37,10 @@ pub struct ArtifactRecords {
     /// projected set because without it a lossy projection would read as containment of a set
     /// smaller than the caller declared.
     pub(super) declared: Vec<Vec<u64>>,
+    /// Per ordinal, the positions of the artifact's withdrawn contents, as the record at this
+    /// version held them: what turns a rank this form serves into the position of that content's
+    /// values ([`Self::position`]). Grown only as far as the last ordinal with one.
+    pub(super) withdrawn: Vec<Box<[u16]>>,
     /// Per ordinal, the artifact's own access labels, each parsed once here, and `None` for one
     /// that does not parse, which admits nobody. Grown only as far as the last labelled ordinal,
     /// so a layer whose artifacts carry no label holds nothing here.
@@ -227,6 +231,14 @@ impl ArtifactRecords {
         // The set's stored cardinality, moved by the page that joined or left it, not a count
         // taken of the set here: the store refuses a page whose count disagrees.
         self.declared[idx] = record.contents.iter().map(|v| v.cardinality).collect();
+        if !record.withdrawn.is_empty() {
+            if self.withdrawn.len() <= idx {
+                self.withdrawn.resize_with(idx + 1, Box::default);
+            }
+            self.withdrawn[idx] = record.withdrawn.clone();
+        } else if let Some(slot) = self.withdrawn.get_mut(idx) {
+            *slot = Box::default();
+        }
         if !record.access.is_empty() {
             if self.access.len() <= idx {
                 self.access.resize_with(idx + 1, || None);
@@ -300,6 +312,14 @@ impl ArtifactRecords {
             .get(ordinal as usize)
             .map(Vec::as_slice)
             .unwrap_or(&[])
+    }
+
+    /// Where the content this version of the record ranks at `rank` has its values in the
+    /// artifact's content row.
+    pub(crate) fn position(&self, ordinal: u32, rank: u32) -> u32 {
+        let withdrawn = self.withdrawn.get(ordinal as usize).map_or(&[][..], |w| w);
+        // At most `u16::MAX` positions, so the sum fits.
+        mosaica_lifecycle::membership::content_position(withdrawn, rank as usize) as u32
     }
 
     /// How many ordinals this level covers, holes included.

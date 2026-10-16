@@ -767,7 +767,10 @@ impl Engine {
                 let Some(entity) = runs.entity_of(u64::from(ordinal)).map(EntityId::new) else {
                     continue;
                 };
-                let ArtifactVerdict::Serve { masked_count, rank } = view.verdict(entity, ordinal)
+                let ArtifactVerdict::Serve {
+                    masked_count,
+                    position,
+                } = view.verdict(entity, ordinal)
                 else {
                     continue;
                 };
@@ -775,7 +778,7 @@ impl Engine {
                     continue;
                 }
                 if read
-                    .content(self, layer, ordinal, entity, rank)
+                    .content(self, layer, ordinal, entity, position)
                     .is_none()
                 {
                     continue;

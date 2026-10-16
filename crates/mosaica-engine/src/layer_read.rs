@@ -530,7 +530,7 @@ impl ReadLevel {
             .view(served, mask, layer, labels, dependency_served, false)
     }
 
-    /// The content the verdict's `rank` chose, with any authored shape taken out of it, or
+    /// The content the verdict's `position` names, with any authored shape taken out of it, or
     /// `None` where it cannot be read back, which withholds the artifact.
     pub(crate) fn content(
         &self,
@@ -538,7 +538,7 @@ impl ReadLevel {
         layer: &RegisteredLayer,
         ordinal: u32,
         entity: EntityId,
-        rank: Option<u32>,
+        position: Option<u32>,
     ) -> Option<crate::viewport::Supplied> {
         engine.supplied_content(
             self.space_content.as_deref(),
@@ -546,7 +546,7 @@ impl ReadLevel {
             self.level,
             ordinal,
             entity,
-            rank,
+            position,
             true,
             self.contents.as_deref(),
         )
