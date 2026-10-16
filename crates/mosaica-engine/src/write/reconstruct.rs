@@ -1050,7 +1050,7 @@ mod tests {
             identity: mosaica_store::manifest::IdentityDescriptor {
                 construction: "siphash-2-4".to_string(),
                 rounds: 1,
-                key: "0123456789abcdef0123456789abcdef".to_string(),
+                key: "ab".repeat(16),
             },
             groups: Vec::new(),
             views: vec![],

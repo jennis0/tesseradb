@@ -27,7 +27,7 @@ from .split import bundle_manifest, declared_entities, declared_layers
 
 # The oracle's publication reader.
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "reference"))
-from oracle.layout import newest_publication  # noqa: E402
+from oracle.layout import newest_publication
 
 
 class Churn(Cycle):
