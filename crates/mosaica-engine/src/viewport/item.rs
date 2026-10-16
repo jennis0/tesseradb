@@ -185,10 +185,8 @@ impl Engine {
             shard,
             &generation.prefix,
             match session.served_in(shard.id()) {
-                true => generation
-                    .segments_version
-                    .saturating_sub(crate::cache::KEEP_SUPERSEDED_GENERATIONS),
-                false => generation.segments_version,
+                true => crate::cache::retention_floor(&generation, shard.id()),
+                false => shard.segments_version,
             },
         ) {
             Some(fragment) => fragment,

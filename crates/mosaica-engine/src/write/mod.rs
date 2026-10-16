@@ -54,7 +54,6 @@ use mosaica_lifecycle::window::{ClosedEntry, CommitWindow, FragmentationTally, W
 use mosaica_lifecycle::{IngestBuffer, Overlay, Overlays};
 
 use crate::cache::RowProjectionCache;
-use crate::cache::KEEP_SUPERSEDED_GENERATIONS;
 use crate::geometry::{check_publishable, GeometryPublication, GeometryRefused};
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_store::manifest::{EntitySet, ManifestVocabulary, SegmentsManifest};

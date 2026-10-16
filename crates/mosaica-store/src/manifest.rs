@@ -2655,6 +2655,16 @@ impl SegmentsManifest {
         Some(&self.shards.records[at])
     }
 
+    /// [`Self::shard`], to edit.
+    pub fn shard_mut(&mut self, id: ShardId) -> Option<&mut ShardRecord> {
+        let at = self
+            .shards
+            .records
+            .binary_search_by_key(&id, |r| r.id)
+            .ok()?;
+        Some(&mut self.shards.records[at])
+    }
+
     /// The files this manifest names split by the directory holding them: each shard's, each layer
     /// space's, and the rest, which the partition's own file names.
     pub(crate) fn split_files(&self, partition: &str) -> SplitFiles {
@@ -2736,6 +2746,15 @@ impl SegmentsManifest {
         Some(())
     }
 
+    /// [`Self::stamp_identities`] for shard `shard` alone, every other shard keeping the identity
+    /// its record holds; `None` also where no record is `shard`'s.
+    pub fn stamp_identity(&mut self, shard: ShardId, manifest_digest: &str) -> Option<()> {
+        let bundle = hex_32::decode(manifest_digest)?;
+        let record = self.shard_mut(shard)?;
+        record.identity = shard_identity(&bundle, shard);
+        Some(())
+    }
+
     /// Each shard's slice of a level starts at the level's records version.
     pub fn slices_at_records_versions(&mut self) {
         let slice_versions: Vec<SliceVersion> = self
@@ -2769,10 +2788,28 @@ impl SegmentsManifest {
         derived_and_held(self.only_shard(), &self.layer_spaces)
     }
 
-    /// File `derived` on the one shard, as [`Self::file_derived_by_shard`] files it.
-    pub fn file_derived(&mut self, derived: Vec<DerivedExtent>) {
-        let shard = self.only_shard().id;
-        self.file_derived_by_shard(derived.into_iter().map(|extent| (shard, extent)));
+    /// File `derived` on `shard`, as [`Self::file_derived_by_shard`] files it, every other shard
+    /// keeping the derived files it lists.
+    pub fn file_derived(&mut self, shard: ShardId, derived: Vec<DerivedExtent>) {
+        let others: Vec<(ShardId, DerivedExtent)> = self
+            .shards
+            .records
+            .iter()
+            .filter(|record| record.id != shard)
+            .flat_map(|record| {
+                let id = record.id;
+                record
+                    .derived_extents
+                    .iter()
+                    .map(move |extent| (id, extent.clone()))
+            })
+            .collect();
+        self.file_derived_by_shard(
+            derived
+                .into_iter()
+                .map(|extent| (shard, extent))
+                .chain(others),
+        );
     }
 
     /// File `derived`, replacing what the manifest lists: each held shape under its space's

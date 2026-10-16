@@ -981,16 +981,26 @@ impl Executor {
                 g.edit_epoch = generation.edit_epoch + 1;
             }
         };
+        let id = shard.id();
+        let change = |g: &mut crate::GenerationParts, shards: &mut crate::ShardsParts| {
+            change(g, shards.of(id))
+        };
+        let buffer = crate::BufferSwap {
+            buffer: Arc::new(buffer),
+            inserted: &inserted,
+        };
         let next = match overlay {
-            None => generation.with_buffer(shard.id(), Arc::new(buffer), &inserted, change),
-            Some(overlay) => generation.with_denies(
-                shard.id(),
-                Arc::new(overlay),
-                &newly_denied,
-                Arc::new(buffer),
-                &inserted,
-                change,
-            ),
+            None => {
+                generation.with_buffer(std::collections::BTreeMap::from([(id, buffer)]), change)
+            }
+            Some(overlay) => {
+                let denies = crate::DenySwap {
+                    overlay: Arc::new(overlay),
+                    newly_denied: &newly_denied,
+                    buffer,
+                };
+                generation.with_denies(std::collections::BTreeMap::from([(id, denies)]), change)
+            }
         };
         self.publish(next, started);
         self.health.lap(WriteStage::ApplySwap, mark);

@@ -214,7 +214,7 @@ impl Engine {
             Some(&shard.partition_source()),
             layer.layout_of(level),
             predicate.as_ref(),
-            generation.segments_version,
+            shard.segments_version,
             declaration,
         )
     }

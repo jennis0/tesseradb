@@ -86,9 +86,15 @@ enum Carry {
     Derive,
 }
 
-/// [`Carry`]'s rule for `key` at `generation`, whose shard of `key` has identity `identity`.
-fn carry_for(key: &RowProjectionKey, generation: &Generation, identity: [u8; 32]) -> Carry {
-    if key.segments_version >= generation.segments_version {
+/// [`Carry`]'s rule for `key` at `generation`, whose shard of `key` has identity `identity` and
+/// its row space at `segments_version`.
+fn carry_for(
+    key: &RowProjectionKey,
+    generation: &Generation,
+    identity: [u8; 32],
+    segments_version: u64,
+) -> Carry {
+    if key.segments_version >= segments_version {
         // Includes the entry the live geometry already produced. `>=` rather than `==` because a
         // key from a *newer* generation means a publication raced this pass, and rebuilding
         // backwards onto older geometry is the one direction that could hand a session a mask over
@@ -127,7 +133,7 @@ pub(crate) fn refresh_resident(
         let Some(shard) = generation.shard(key.shard) else {
             continue;
         };
-        let carry = carry_for(&key, generation, shard.identity);
+        let carry = carry_for(&key, generation, shard.identity, shard.segments_version);
         if carry == Carry::Skip {
             continue;
         }
@@ -162,7 +168,7 @@ pub(crate) fn refresh_resident(
         // it: the pass would report work it did and every session would still rebuild inline.
         let next_key = RowProjectionKey {
             identity: shard.identity,
-            segments_version: generation.segments_version,
+            segments_version: shard.segments_version,
             prefix: generation.prefix.clone(),
             ..key.clone()
         };
@@ -412,22 +418,37 @@ mod tests {
         let generation = generation_at("v00001", 9);
 
         // 1. The ordinary case: same prefix, older geometry — the flush and merge path.
-        assert_eq!(carry_for(&key_at("v00001", 8), &generation, [0; 32]), Carry::Derive);
+        assert_eq!(
+            carry_for(&key_at("v00001", 8), &generation, [0; 32], 9),
+            Carry::Derive
+        );
 
         // 2. A compaction: the entry names the superseded prefix.
-        assert_eq!(carry_for(&key_at("v00000", 8), &generation, [0; 32]), Carry::Rebuild);
+        assert_eq!(
+            carry_for(&key_at("v00000", 8), &generation, [0; 32], 9),
+            Carry::Rebuild
+        );
 
         // 3. A shard whose identity moved within the prefix.
         assert_eq!(
-            carry_for(&key_at("v00001", 8), &generation, [1; 32]),
+            carry_for(&key_at("v00001", 8), &generation, [1; 32], 9),
             Carry::Rebuild
         );
 
         // 4. Nothing owed — the live geometry's own entry, and one from a publication that raced
         //    this pass. Rebuilding backwards onto older geometry is the direction that hands a
         //    session a mask over a row space already superseded.
-        assert_eq!(carry_for(&key_at("v00001", 9), &generation, [0; 32]), Carry::Skip);
-        assert_eq!(carry_for(&key_at("v00001", 10), &generation, [0; 32]), Carry::Skip);
-        assert_eq!(carry_for(&key_at("v00000", 9), &generation, [0; 32]), Carry::Skip);
+        assert_eq!(
+            carry_for(&key_at("v00001", 9), &generation, [0; 32], 9),
+            Carry::Skip
+        );
+        assert_eq!(
+            carry_for(&key_at("v00001", 10), &generation, [0; 32], 9),
+            Carry::Skip
+        );
+        assert_eq!(
+            carry_for(&key_at("v00000", 9), &generation, [0; 32], 9),
+            Carry::Skip
+        );
     }
 }

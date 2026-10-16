@@ -550,15 +550,12 @@ the pass-2 merge.
 | the identity and content keys, the pin, the aggregate's recompose stamp | the fragment's identity and watermark, the overlay version, the segments version | every shard's fragment identity and watermark, every point shard's and layer space's overlay version, every shard's segments version |
 | the occupancy memo, the suggest set, colour slots, derived geometry, a level's exact and tail figures, regions | one fragment's identity and watermark, the overlay and segments versions | the same versions of every shard the answer reads |
 
-A shard's identity is a digest its compaction writes into the shard's record (§2.6). It changes at
-that shard's compaction and at no other. A compaction of one shard
-therefore invalidates only that shard's fragments, projections and figures. The background refresh
-runs per (grant, view, shard), so a flush into one shard extends only that shard's projections.
-Not built yet: the stored identity and a segments version per shard, which come with writes over
-several shards (stage 5). A shard's identity is SHA-256 over the prefix's `MANIFEST.json` digest
-and the shard's number, derived at open, and a generation has one segments version. Every shard's
-identity therefore moves at each compaction, and the segments version at each flush, merge and
-compaction. A bundle of several shards takes no write, so neither moves while it is served.
+A shard's identity is a digest its compaction writes into the shard's record (§2.6): SHA-256 over
+the new prefix's `MANIFEST.json` digest and the shard's number. It changes at that shard's
+compaction and at no other. A shard also has its own segments version, which moves at that shard's
+flush, merge and compaction. A compaction of one shard therefore invalidates only that shard's
+fragments, projections and figures. The background refresh runs per (grant, view, shard), so a
+flush into one shard extends only that shard's projections.
 
 A level's figures are summed across shards per request: each shard's counts and position sums are
 added, and each side of the box is the extreme across shards. Summing every shard's count vector

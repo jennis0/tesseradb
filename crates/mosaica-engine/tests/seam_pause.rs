@@ -284,3 +284,116 @@ fn the_manifest_publish_site_parks_a_flush_with_its_segment_unreferenced() {
         "the released flush committed exactly one side-manifest"
     );
 }
+
+/// **A flush into shard 1 killed between its shard file and its partition file.** The shard file
+/// is on disc and no partition file names it, so a reopened service serves the previous
+/// publication and replays the row from the WAL, and its next publication commits above the
+/// orphan.
+#[test]
+fn a_flush_killed_between_its_shard_file_and_its_partition_file_reopens_on_the_publication_before()
+{
+    use mosaica_engine::{ExecutorPosture, IngestRequest, RecordsOrder};
+    use mosaica_types::ShardId;
+
+    const N: u64 = 40;
+    let several = fixture_sized(N, Some(25));
+    let open = || {
+        let mut engine = Engine::open_writing_several_shards(
+            &several.root,
+            &several.cache,
+            &several.wal,
+            EngineConfig {
+                flush_max_age_secs: 3600,
+                flush_max_items: usize::MAX,
+                ..config_uncapped()
+            },
+        )
+        .expect("the engine opens");
+        let faults = Arc::new(FaultSwitchboard::new());
+        engine
+            .start_write_executor_with_faults(8, Arc::clone(&faults))
+            .expect("the executor starts once");
+        (engine, faults)
+    };
+    let served_n = || {
+        mosaica_store::open_bundle(&several.root)
+            .expect("the bundle opens")
+            .partitions[PARTITION]
+            .segments_n
+    };
+    let shard_files = |n: u64| {
+        let prefix_dir = several.root.join(current_prefix(&several.root));
+        let shard = mosaica_store::ShardLayout::new(PARTITION, ShardId::new(1).unwrap());
+        let partition = mosaica_store::layout::partition_dir(&prefix_dir, PARTITION)
+            .join(mosaica_store::layout::segments_name(n));
+        (
+            prefix_dir.join(shard.manifest_rel(n)).is_file(),
+            partition.is_file(),
+        )
+    };
+    let items = |engine: &Engine| {
+        let session = engine.authorise(&full_coverage_credential()).unwrap();
+        read_items(engine, &session, &Items::new(RecordsOrder::Stored))
+            .rows_with_ids
+            .len() as u64
+    };
+
+    let (engine, faults) = open();
+    let before = served_n();
+    engine
+        .ingest(IngestRequest {
+            batch_id: "seam".to_string(),
+            body_hash: [7; 32],
+            view: Some("s0".to_string()),
+            rows: vec![mosaica_lifecycle::IngestRow {
+                mosaica_id: None,
+                labels: Some(vec![b"0".to_vec()]),
+                position: Some((5.0, 5.0)),
+                scalars: keyed("seam"),
+                scoped: Vec::new(),
+                omitted: Vec::new(),
+            }],
+            artifacts: Default::default(),
+            strict: true,
+            mosaica_id_column: false,
+        })
+        .expect("the row is accepted into shard 1");
+    faults.arm_pause(PauseSite::BeforeManifestPublish, PauseAction::Panic);
+    engine.request_flush();
+    faults.await_arrivals(PauseSite::BeforeManifestPublish, 1, WAIT);
+    wait_until("the executor's death is reported", WAIT, || {
+        engine.write_executor_posture() == ExecutorPosture::Dead
+    });
+    let orphan = before + 1;
+    assert_eq!(
+        shard_files(orphan),
+        (true, false),
+        "shard 1's file is written and no partition file names it"
+    );
+    faults.release();
+    drop(engine);
+
+    let (engine, _faults) = open();
+    assert_eq!(served_n(), before, "the publication before is served");
+    assert_eq!(items(&engine), N);
+    assert_eq!(
+        engine.buffered_items(),
+        1,
+        "the row is replayed from the WAL"
+    );
+    publish_buffered(&engine);
+    let next = served_n();
+    assert!(
+        next > orphan,
+        "the next publication commits above the orphan"
+    );
+    assert_eq!(shard_files(next), (true, true));
+    assert_eq!(engine.buffered_items(), 0);
+    assert_eq!(items(&engine), N + 1, "the replayed row is published");
+    drop(engine);
+
+    let (engine, _faults) = open();
+    assert_eq!(served_n(), next);
+    assert_eq!(engine.buffered_items(), 0);
+    assert_eq!(items(&engine), N + 1);
+}

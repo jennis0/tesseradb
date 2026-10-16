@@ -15,7 +15,7 @@ pub(crate) fn rebased(
         let dict = m.output.clone();
         replace_window(&mut next.partition.dict_extents, &m.consumed, dict, |e| &e.path, all)?;
     }
-    let record = next.only_shard_mut();
+    let record = next.shard_mut(completed.shard)?;
     if let Some(m) = &completed.tier {
         let tier = m.output.0.clone();
         replace_window(&mut record.deltas, &m.consumed, tier, |rel| rel, all)?;

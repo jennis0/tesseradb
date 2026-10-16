@@ -688,3 +688,218 @@ fn a_log_denying_in_both_shards_reopens_with_each_shards_denies() {
     assert_eq!(several.overlay_depth(), 3);
     assert_eq!(several.retirable_deletions(), 1);
 }
+
+/// The publication `root` serves, as its partition file names it.
+fn served_publication(root: &std::path::Path) -> mosaica_store::read::PublishedManifest {
+    let n = mosaica_store::open_bundle(root)
+        .expect("the bundle opens")
+        .partitions[PARTITION]
+        .segments_n;
+    mosaica_store::read_publication(&root.join(current_prefix(root)), PARTITION, n)
+        .expect("the served publication reads")
+}
+
+/// Each shard file the publication names, by shard.
+fn shard_refs(
+    published: &mosaica_store::read::PublishedManifest,
+) -> Vec<(ShardId, mosaica_store::manifest::ShardRef)> {
+    published
+        .refs
+        .shards
+        .iter()
+        .map(|named| (named.id, named.clone()))
+        .collect()
+}
+
+/// Rows inserted into shard 1 flush into shard 1 alone: the publication writes shard 1's file
+/// and keeps shard 0's, the segment is under shard 1's directory, and the items are served as the
+/// same inserts into one shard serve them, before and after a restart.
+#[test]
+fn rows_flush_into_their_own_shard_and_leave_the_others_file() {
+    let one = fixture_sized(N, None);
+    let several = fixture_sized(N, Some(SIZE));
+    let (one_engine, engine) = (one.open(), writing(&several));
+    let before = served_publication(&several.root);
+    for key in ["a", "b", "c"] {
+        insert(&one_engine, key);
+        insert(&engine, key);
+    }
+    publish_buffered(&one_engine);
+    publish_buffered(&engine);
+    assert_eq!(engine.buffered_items(), 0, "every row flushed");
+
+    let after = served_publication(&several.root);
+    assert!(after.n > before.n);
+    let (refs_before, refs_after) = (shard_refs(&before), shard_refs(&after));
+    let [zero, first] = [0, 1].map(|id| ShardId::new(id).unwrap());
+    assert_eq!(refs_after[0], refs_before[0], "shard 0's file is kept");
+    assert_eq!(refs_after[0].0, zero);
+    assert_eq!(
+        (refs_after[1].0, refs_after[1].1.n),
+        (first, after.n),
+        "shard 1's file is the publication's own"
+    );
+    let segments = |published: &mosaica_store::read::PublishedManifest, shard: ShardId| {
+        published
+            .manifest
+            .shard(shard)
+            .expect("the shard is listed")
+            .segments
+            .iter()
+            .map(|segment| segment.seg_id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        segments(&after, zero),
+        segments(&before, zero),
+        "shard 0 took no segment"
+    );
+    let flushed: Vec<String> = segments(&after, first)
+        .into_iter()
+        .filter(|seg_id| !segments(&before, first).contains(seg_id))
+        .collect();
+    assert_eq!(flushed.len(), 1);
+    let layout = mosaica_store::ShardLayout::new(PARTITION, first);
+    assert!(several
+        .root
+        .join(current_prefix(&several.root))
+        .join(layout.segment_rel("s0", &flushed[0]))
+        .is_dir());
+
+    for credential in [full_coverage_credential(), subset_credential()] {
+        assert_eq!(
+            served(&engine, &credential),
+            served(&one_engine, &credential)
+        );
+    }
+    let expected = served(&one_engine, &full_coverage_credential());
+    drop(engine);
+    let engine = writing(&several);
+    assert_eq!(
+        engine.buffered_items(),
+        0,
+        "the restart replays no flushed row"
+    );
+    assert_eq!(served(&engine, &full_coverage_credential()), expected);
+}
+
+/// Four flushes into shard 1 merge there and nowhere else: shard 1's segments come down, shard
+/// 0's file and segments are as they were, and every viewer is served what the same writes into
+/// one shard serve, before and after a restart.
+#[test]
+fn a_merge_in_one_shard_leaves_the_others_segments_and_counts() {
+    let one = fixture_sized(N, None);
+    let several = fixture_sized(N, Some(SIZE));
+    let engines = [one.open(), writing(&several)];
+    let before = served_publication(&several.root);
+    for engine in &engines {
+        engine.set_merge_for_test(false);
+    }
+    for round in 0..4 {
+        for engine in &engines {
+            insert(engine, &format!("merged-{round}"));
+            publish_buffered(engine);
+        }
+    }
+    let flushed = served_publication(&several.root);
+    for engine in &engines {
+        engine.set_merge_for_test(true);
+        engine.request_flush();
+        wait_until(
+            "the merge publishes",
+            std::time::Duration::from_secs(30),
+            || engine.write_executor_stats().merges >= 1,
+        );
+    }
+    let after = served_publication(&several.root);
+    let [zero, first] = [0, 1].map(|id| ShardId::new(id).unwrap());
+    let segments = |published: &mosaica_store::read::PublishedManifest, shard: ShardId| {
+        published
+            .manifest
+            .shard(shard)
+            .expect("the shard is listed")
+            .segments
+            .len()
+    };
+    assert_eq!(segments(&after, zero), segments(&before, zero));
+    assert_eq!(
+        shard_refs(&after)[0],
+        shard_refs(&before)[0],
+        "shard 0's file is kept"
+    );
+    assert_eq!(segments(&flushed, first), segments(&before, first) + 4);
+    assert_eq!(
+        segments(&after, first),
+        segments(&before, first) + 1,
+        "the four flushed segments merged into one"
+    );
+
+    let [one_engine, engine] = engines;
+    for credential in [full_coverage_credential(), subset_credential()] {
+        assert_eq!(
+            served(&engine, &credential),
+            served(&one_engine, &credential)
+        );
+    }
+    let expected = served(&one_engine, &full_coverage_credential());
+    drop(engine);
+    let engine = writing(&several);
+    assert_eq!(served(&engine, &full_coverage_credential()), expected);
+}
+
+/// A flush and then a merge in shard 1 leave shard 0's row space, and what is cached over it,
+/// standing: each publication's refresh carries shard 1's projection forward and not shard 0's,
+/// the next viewport is answered from the cache without a projection built, and only shard 1's
+/// fragment is rebuilt, at the flush that moved its watermark.
+#[test]
+fn a_flush_or_merge_in_one_shard_leaves_the_others_projections_and_fragments() {
+    let several = fixture_sized(N, Some(SIZE));
+    let engine = writing(&several);
+    engine.set_merge_for_test(false);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let wait = std::time::Duration::from_secs(30);
+    tile_counts(&engine, &session, 3);
+    let builds = engine.full_projection_builds();
+    assert_eq!(builds, 2, "one projection in each shard");
+    let fragments = engine.fragment_cache_rebuilds();
+
+    let mut refreshes = engine.refreshes();
+    let mut published = |engine: &Engine| {
+        wait_until("the publication's refresh", wait, || {
+            engine.refreshes() > refreshes
+        });
+        assert_eq!(
+            engine.refreshes(),
+            refreshes + 1,
+            "the refresh carries shard 1's projection alone"
+        );
+        refreshes += 1;
+        tile_counts(engine, &session, 3);
+        assert_eq!(
+            engine.full_projection_builds(),
+            builds,
+            "the viewport is answered from the cache in both shards"
+        );
+    };
+    for round in 0..4 {
+        insert(&engine, &format!("cached-{round}"));
+        publish_buffered(&engine);
+        published(&engine);
+    }
+    assert_eq!(
+        engine.fragment_cache_rebuilds(),
+        fragments + 4,
+        "shard 1's fragment, once a flush"
+    );
+    engine.set_merge_for_test(true);
+    engine.request_flush();
+    wait_until("the merge publishes", wait, || {
+        engine.write_executor_stats().merges >= 1
+    });
+    published(&engine);
+    assert_eq!(
+        engine.fragment_cache_rebuilds(),
+        fragments + 4,
+        "a merge moves no watermark"
+    );
+}

@@ -918,6 +918,8 @@ fn first_generation(
                 edited_live: Arc::new(edited_live),
                 tenancy: Arc::clone(&shard.tenancy),
                 delta_postings: shard.delta_postings.clone(),
+                segments_version: readers.segments_version,
+                previous_segments_version: readers.segments_version.checked_sub(1),
                 overlay_version: 0,
                 overlay: Arc::new(overlay),
                 buffer: Arc::new(buffer),

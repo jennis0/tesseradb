@@ -73,6 +73,11 @@ pub(super) struct Executor {
     pub(super) faults: Option<Arc<mosaica_lifecycle::faults::FaultSwitchboard>>,
 }
 
+/// The rows every shard's buffer holds.
+pub(super) fn buffered_in(generation: &Generation) -> usize {
+    generation.shards().map(|shard| shard.buffer.len()).sum()
+}
+
 /// Why a tick fired: `due` is the period or the buffered-row count, `period_due` the period alone.
 struct TickDue {
     due: bool,
@@ -106,12 +111,11 @@ fn rotated_spaces(
 }
 
 impl Executor {
-    /// Drop the region decompositions of generations older than the retention depth.
-    pub(super) fn prune_region_cache(&self, segments_version: u64) {
-        let floor = segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS);
-        self.deps
-            .region_cache
-            .retain_keys(|key| key.segments_version >= floor);
+    /// Drop the region decompositions of each shard's row spaces older than the retention depth.
+    pub(super) fn prune_region_cache(&self, live: &Generation) {
+        self.deps.region_cache.retain_keys(|key| {
+            key.segments_version >= crate::cache::retention_floor(live, key.shard)
+        });
     }
 
     /// Runs the tick, then drains deny to empty, then at most one work item, repeating, blocking
@@ -214,7 +218,7 @@ impl Executor {
         self.health.mark_tick(self.last_tick);
         self.health.ticks.fetch_add(1, Ordering::Relaxed);
         // No deletion filter needed: the buffer never holds rows of a deleted entity.
-        let flushable = generation.only_shard().buffer.len();
+        let flushable = buffered_in(generation);
         self.health
             .flushable_items
             .store(flushable, Ordering::SeqCst);
@@ -229,7 +233,8 @@ impl Executor {
         }
     }
 
-    /// Plan every view's flush and report whether any view was refused, not merely empty.
+    /// Plan every view's flush in every shard and report whether any was refused, not merely
+    /// empty.
     fn plan_view_flushes(
         &self,
         generation: &Arc<Generation>,
@@ -238,10 +243,11 @@ impl Executor {
         let mut flushable = 0usize;
         let mut gated = false;
         let mut plans: Vec<(String, crate::flush::FlushPlan)> = Vec::new();
-        for view in views_of(generation) {
+        for (shard, view) in views_of(generation) {
             match crate::flush::plan_flush(
                 generation,
                 &view,
+                shard,
                 self.log.wal.is_poisoned(),
                 self.health.overlay_diverged.load(Ordering::SeqCst),
             ) {
@@ -255,6 +261,7 @@ impl Executor {
                     if self.health.refusal_log_due() {
                         tracing::warn!(
                             view = %view,
+                            shard = %shard,
                             gate = ?refusal,
                             "flush skipped: this node publishes no geometry in this state"
                         );
@@ -370,6 +377,7 @@ impl Executor {
         let next = previous.with_shard(shard.id(), |g, s| {
             g.prefix = prefix;
             g.segments_version = segments_version;
+            s.moved_to(segments_version);
             s.watermark = watermark;
             g.bundle = bundle;
             g.dict = dict;
@@ -406,15 +414,13 @@ impl Executor {
         let next = Arc::new(next);
         self.publish_arc(Arc::clone(&next), started);
         // Pruned before the refresh starts, so its snapshot holds what retention keeps and no more.
-        self.row_projection_cache.prune_generations_below(
-            segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS),
-            &next.prefix,
-        );
+        self.row_projection_cache.prune_superseded(&next);
 
         // After the swap, so a missing projection after a fold is an ordinary cache miss, and
         // nothing is lost if the swap never lands. The identities this swap superseded keep their
         // fragments until the next rotation: a request still on the previous generation reads
         // them, and may be writing one.
+        self.prune_region_cache(&next);
         if rotation.is_some() {
             self.deps
                 .figures
@@ -432,8 +438,6 @@ impl Executor {
             );
             self.deps.refresh.spawn(next);
         }
-
-        self.prune_region_cache(segments_version);
         Ok(())
     }
 

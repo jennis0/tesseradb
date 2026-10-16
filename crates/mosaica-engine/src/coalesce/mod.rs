@@ -64,9 +64,12 @@ impl Default for CoalescePolicy {
 /// The entries one coalesce consumes; an empty list is a kind it does not take. Entries are named
 /// by path, and paths are never reused, so a path still listed when the pass publishes holds the
 /// bytes the plan saw. A flush while the pass ran only appends.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct CoalescePlan {
     pub(crate) partition: String,
+    /// The shard whose entity-space extents the plan takes. The dictionary window is the
+    /// partition's, and rides with whichever shard's pass takes it.
+    pub(crate) shard: mosaica_types::ShardId,
     pub(crate) tiers: Vec<String>,
     pub(crate) dicts: Vec<DictExtent>,
     pub(crate) attrs: Vec<ColumnWindow<AttrExtent>>,
@@ -223,6 +226,7 @@ pub(crate) type OpenedTier = (String, Arc<DeltaTier>);
 /// empty is a kind the pass did not take.
 pub(crate) struct CompletedCoalesce {
     pub(crate) partition: String,
+    pub(crate) shard: mosaica_types::ShardId,
     pub(crate) prefix: String,
     pub(crate) tier: Option<Merged<Vec<String>, OpenedTier>>,
     pub(crate) dict: Option<Merged<Vec<DictExtent>, DictExtent>>,
@@ -316,6 +320,7 @@ pub(crate) fn execute_coalesce(
     }
     Ok(CompletedCoalesce {
         partition: plan.partition,
+        shard: plan.shard,
         prefix: ctx.prefix,
         tier,
         dict,
