@@ -43,46 +43,72 @@ pub(super) fn view_row_space<'a>(
     view_data(bundle, partition, shard, view).map(|v| &v.row_space)
 }
 
-/// What [`pack_levels`] wrote: the shard's member packs and each layer space's record packs.
+/// Member packs, by the shard holding them.
+pub(in crate::write) type PackedMembers =
+    std::collections::BTreeMap<ShardId, Vec<mosaica_store::manifest::MembershipExtent>>;
+
+/// What [`pack_levels`] wrote: each shard's member packs and each layer space's record packs.
 #[derive(Default)]
 pub(super) struct PackedLevels {
-    pub(super) members: Vec<mosaica_store::manifest::MembershipExtent>,
+    pub(super) members: PackedMembers,
     pub(super) records:
         std::collections::BTreeMap<LayerSpace, Vec<mosaica_store::manifest::RecordPackExtent>>,
 }
 
-/// Write each packed level's two packs into the prefix, the records into its layer space and the
-/// members into `layout`'s shard, and fsync them, returning the manifest entries. The file half of
+/// Write each packed level's record pack into its layer space and each shard's member pack into
+/// that shard of `partition`, and fsync them, returning the manifest entries. The file half of
 /// [`Executor::write_level_packs`] and [`Executor::rewrite_level_packs`], which differ only in
 /// where `ready` comes from. A level of a layer `space_of` names no space for is registered no
 /// longer and is not written.
 pub(super) fn pack_levels(
     prefix_dir: &std::path::Path,
-    layout: ShardLayout<'_>,
+    partition: &str,
     n: u64,
-    ready: Vec<mosaica_lifecycle::membership::PendingExtent>,
+    ready: Vec<mosaica_lifecycle::membership::PendingLevel>,
     space_of: impl Fn(&str) -> Option<LayerSpace>,
 ) -> mosaica_store::Result<PackedLevels> {
+    use mosaica_store::membership::{MemberPackWriter, RecordPackWriter};
     let mut packed = PackedLevels::default();
-    for (layer, level, ordinal_lo, blobs) in ready {
-        let Some(space) = space_of(&layer) else {
+    for pending in ready {
+        let Some(space) = space_of(&pending.layer) else {
             continue;
         };
-        let mut writer = mosaica_store::membership::LevelPackWriter::create(
+        let count = pending.records.len() as u32;
+        let mut records = RecordPackWriter::create(
             prefix_dir,
-            layout,
-            space,
+            mosaica_store::LayerSpaceLayout::new(partition, space),
             n,
-            level,
-            ordinal_lo,
-            blobs.len() as u32,
+            pending.level,
+            pending.ordinal_lo,
+            count,
         )?;
-        for (record, members) in &blobs {
-            writer.push(record, members)?;
+        for record in &pending.records {
+            records.push(record)?;
         }
-        let (records, members) = writer.finish()?;
-        packed.records.entry(space).or_default().push(records);
-        packed.members.push(members);
+        for (shard, listed) in &pending.members {
+            let mut members = MemberPackWriter::create(
+                prefix_dir,
+                ShardLayout::new(partition, *shard),
+                space,
+                n,
+                pending.level,
+                pending.ordinal_lo,
+                count,
+            )?;
+            for (ordinal, blob) in listed {
+                members.push_at(*ordinal, blob)?;
+            }
+            packed
+                .members
+                .entry(*shard)
+                .or_default()
+                .push(members.finish()?);
+        }
+        packed
+            .records
+            .entry(space)
+            .or_default()
+            .push(records.finish()?);
     }
     Ok(packed)
 }
@@ -1590,6 +1616,12 @@ impl Executor {
             return;
         }
         let generation = self.generation.load_full();
+        // A held delta names the first shard's entities alone, so where there are several shards
+        // every shard's form of the level is dropped, and built again from its slice.
+        if generation.shards().nth(1).is_some() {
+            self.deps.artifact_projections.forget_level(layer, level);
+            return;
+        }
         let mut views: std::collections::BTreeMap<&str, Option<&mosaica_store::read::ViewData>> =
             std::collections::BTreeMap::new();
         for partition in generation.bundle.partitions.values() {
@@ -1786,10 +1818,7 @@ impl Executor {
         }
         // What this publication wrote, per partition, so the resident memberships can move onto it
         // once every manifest naming one is durable (`LiveState::rehouse_memberships`).
-        let mut written: Vec<(
-            std::path::PathBuf,
-            Vec<mosaica_store::manifest::MembershipExtent>,
-        )> = Vec::new();
+        let mut written: Vec<(std::path::PathBuf, PackedMembers)> = Vec::new();
         for (partition, partition_data) in &live.bundle.partitions {
             let mut manifest = partition_data.side_manifest();
             write_deny_state(
@@ -1825,7 +1854,8 @@ impl Executor {
             // segment.
             let packed_rels = packed
                 .members
-                .iter()
+                .values()
+                .flatten()
                 .map(|extent| extent.path.as_str())
                 .chain(
                     packed
@@ -1849,9 +1879,13 @@ impl Executor {
             }
             // Onto the held lists; [`Executor::commit_side_manifest`] restates them into the
             // manifest below.
-            self.side_manifests
-                .membership_extents
-                .extend(packed.members.clone());
+            for (shard, members) in &packed.members {
+                self.side_manifests
+                    .membership_extents
+                    .entry(*shard)
+                    .or_default()
+                    .extend(members.iter().cloned());
+            }
             for (space, records) in packed.records {
                 self.side_manifests
                     .spaces
@@ -2017,13 +2051,9 @@ impl Executor {
         n: u64,
     ) -> mosaica_store::Result<PackedLevels> {
         let ready = self.live.unpublished_memberships();
-        pack_levels(
-            prefix_dir,
-            ShardLayout::new(partition, self.live.written_slice()),
-            n,
-            ready,
-            |layer| self.live.space_of(layer),
-        )
+        pack_levels(prefix_dir, partition, n, ready, |layer| {
+            self.live.space_of(layer)
+        })
     }
 
     /// Publication by rebase: apply a completed flush to the then-current generation rather than

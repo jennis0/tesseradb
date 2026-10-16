@@ -109,24 +109,29 @@ fn record_moved_by(space: LayerSpace, record: &ArtifactRecord, retired: &Retired
             .any(|content| content.generated_from.and_cardinality(points) != 0)
 }
 
-/// One artifact's two blobs: its record ([`encode_record`]) and its members ([`encode_members`]).
-/// A hole is two empty blobs.
-pub type ArtifactBlobs = (Vec<u8>, Vec<u8>);
+/// The ordinals of a range one shard's slice holds something of, ascending, each with its member
+/// blob ([`encode_members`]).
+pub type ListedMembers = Vec<(u32, Vec<u8>)>;
 
-/// One level's not-yet-published artifacts, ready to pack: `(layer, level, ordinal_lo, blobs)`.
-///
-/// A tuple alias rather than a struct because it is a *transfer* between two modules that both
-/// already name these four things — a struct would be a third name for the same tuple, and the
-/// packer takes them apart again immediately.
-pub type PendingExtent = (String, u32, u32, Vec<ArtifactBlobs>);
+/// One level's artifacts from `ordinal_lo`, ready to pack.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingLevel {
+    pub layer: String,
+    pub level: u32,
+    pub ordinal_lo: u32,
+    /// Each ordinal's record ([`encode_record`]), empty for a hole.
+    pub records: Vec<Vec<u8>>,
+    /// Each shard's slice of the same ordinals ([`ArtifactStore::members_in`]), in
+    /// [`ArtifactStore::shards`] order.
+    pub members: Vec<(ShardId, ListedMembers)>,
+}
 
 /// One artifact's supplied content as [`ArtifactStore::unpublished_content`] answers it:
 /// `(layer, entity, tagged values)`.
 pub type ContentRow = (String, EntityId, Vec<(u16, String)>);
 
-/// One level's not-yet-published **range**: `(layer, level, ordinal_lo, count)` — the same four
-/// things a [`PendingExtent`] names, with the blobs left where they are for a caller that will
-/// encode them one at a time. See [`ArtifactStore::pending_ranges`].
+/// One level's not-yet-published **range**: `(layer, level, ordinal_lo, count)`. See
+/// [`ArtifactStore::pending_ranges`].
 pub type PendingRange = (String, u32, u32, u32);
 
 /// What [`ArtifactStore::fill`] did with one part, under the fill rule (`ingest.md` §1.1).
@@ -1234,12 +1239,69 @@ impl ArtifactRecord {
     pub fn declared_size(&self) -> u64 {
         self.members.cardinality()
     }
+
+    /// One point shard's slice of this record: `members` and `sets` in that shard, and of the
+    /// record only what a row form reads beside them.
+    pub fn slice(&self, members: Bitmap, sets: Vec<Bitmap>) -> ArtifactRecord {
+        ArtifactRecord {
+            entity: self.entity,
+            key: None,
+            view: self.view.clone(),
+            incarnation: self.incarnation,
+            members: members.into(),
+            declares_members: self.declares_members,
+            contents: self
+                .contents
+                .iter()
+                .zip(sets)
+                .map(|(content, generated_from)| ContentSet {
+                    values: None,
+                    digest: [0; 32],
+                    generated_from,
+                    cardinality: content.cardinality,
+                })
+                .collect(),
+            attached_to: self.attached_to.clone(),
+            parents: Vec::new(),
+            access: Vec::new(),
+        }
+    }
+
+    /// [`Self::slice`] holding nothing.
+    fn slice_holding_nothing(&self) -> ArtifactRecord {
+        self.slice(
+            Bitmap::new(),
+            self.contents.iter().map(|_| Bitmap::new()).collect(),
+        )
+    }
+}
+
+/// The point shards an [`ArtifactStore`] holds a slice of: its own, and each other shard's in a
+/// store of its own.
+#[derive(Debug, Clone)]
+struct Slices {
+    own: ShardId,
+    /// Ascending by shard, none of them `own`.
+    others: Vec<(ShardId, ArtifactStore)>,
+}
+
+impl Default for Slices {
+    fn default() -> Self {
+        Slices {
+            own: ShardId::ZERO,
+            others: Vec::new(),
+        }
+    }
 }
 
 type ShapeSlots = Vec<Option<Box<ArtifactShapes>>>;
 
-/// Every artifact of every layer, keyed by `(layer, level, ordinal)`. Holds shard 0's slice of
-/// each set.
+/// Every artifact of every layer, keyed by `(layer, level, ordinal)`, with one point shard's slice
+/// of each set, and each other shard's slice in a store of its own ([`Self::slice`]).
+///
+/// **A slice holds a record of an artifact** where its shard holds a member or a generating entity
+/// of it, where the artifact has a shape or holds no member in any shard, and where a borrowing
+/// chain held there reaches it; the record carries only what a row form reads.
 ///
 /// **Ordinals are dense within a level**, so a level is a vector rather than a map: the address is
 /// `entity − run.start` arithmetic, and an ordinal that names no artifact is a hole rather than a
@@ -1361,11 +1423,245 @@ pub struct ArtifactStore {
     /// time, and an address built per artifact was a heap `String` per artifact for the map and
     /// two more for the lookups around it.
     vacated: BTreeMap<(String, u32), BTreeMap<u32, u64>>,
+    /// The shard whose slice this store holds, and the other shards' slices. A publication, a
+    /// growth and a fill write each shard's part into that shard's slice; a level's version moves
+    /// in every slice with this store's.
+    slices: Slices,
 }
 
 impl ArtifactStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// This store, holding `own`'s slice, with `others`, each another shard's slice of it.
+    pub fn with_slices(mut self, own: ShardId, mut others: Vec<(ShardId, ArtifactStore)>) -> Self {
+        others.sort_unstable_by_key(|(shard, _)| *shard);
+        self.slices = Slices { own, others };
+        self
+    }
+
+    /// Every shard this store holds a slice of, its own first.
+    pub fn shards(&self) -> impl Iterator<Item = ShardId> + '_ {
+        std::iter::once(self.slices.own).chain(self.slices.others.iter().map(|(shard, _)| *shard))
+    }
+
+    /// `shard`'s slice: this store for its own shard, `None` for a shard it holds no slice of.
+    pub fn slice(&self, shard: ShardId) -> Option<&ArtifactStore> {
+        if shard == self.slices.own {
+            return Some(self);
+        }
+        self.slices
+            .others
+            .iter()
+            .find(|(held, _)| *held == shard)
+            .map(|(_, slice)| slice)
+    }
+
+    /// [`Self::slice`], to write.
+    pub fn slice_mut(&mut self, shard: ShardId) -> Option<&mut ArtifactStore> {
+        if shard == self.slices.own {
+            return Some(self);
+        }
+        self.slices
+            .others
+            .iter_mut()
+            .find(|(held, _)| *held == shard)
+            .map(|(_, slice)| slice)
+    }
+
+    /// The artifact's declared membership size, over every shard's slice.
+    pub fn declared_size(&self, layer: &str, level: u32, ordinal: u32) -> u64 {
+        self.shards()
+            .filter_map(|shard| self.slice(shard)?.get(layer, level, ordinal))
+            .map(ArtifactRecord::declared_size)
+            .sum()
+    }
+
+    /// Each shard's part of `members` less what that shard's slice of the artifact holds.
+    pub fn not_held(
+        &self,
+        layer: &str,
+        level: u32,
+        ordinal: u32,
+        members: &ShardSets,
+    ) -> ShardSets {
+        let mut out = ShardSets::default();
+        for (shard, part) in members.iter() {
+            let mut part = part.clone();
+            if let Some(held) = self
+                .slice(shard)
+                .and_then(|slice| slice.get(layer, level, ordinal))
+            {
+                held.members.remove_from(&mut part);
+            }
+            out.set(shard, part);
+        }
+        out
+    }
+
+    /// `shard`'s part of the generating set at `rank`, `None` where its slice holds no record of
+    /// the artifact or the rank names no content there.
+    fn held_set(
+        &self,
+        shard: ShardId,
+        layer: &str,
+        level: u32,
+        ordinal: u32,
+        rank: u16,
+    ) -> Option<&Bitmap> {
+        self.slice(shard)?
+            .get(layer, level, ordinal)?
+            .contents
+            .get(rank as usize)
+            .map(|content| &content.generated_from)
+    }
+
+    /// Whether the generating set at `rank` is `sets` in every shard.
+    pub fn set_is(
+        &self,
+        layer: &str,
+        level: u32,
+        ordinal: u32,
+        rank: u16,
+        sets: &ShardSets,
+    ) -> bool {
+        let held = |shard| self.held_set(shard, layer, level, ordinal, rank);
+        sets.iter().all(|(shard, set)| held(shard) == Some(set))
+            && self
+                .shards()
+                .filter(|shard| sets.get(*shard).is_none())
+                .all(|shard| held(shard).is_none_or(Bitmap::is_empty))
+    }
+
+    /// The generating set at `rank` after a page joining `joining` and then leaving `leaving` in
+    /// each shard: whether the page changes it, and its cardinality over every shard after. `None`
+    /// where the ordinal is a hole or the rank names no content.
+    pub fn paged(
+        &self,
+        layer: &str,
+        level: u32,
+        ordinal: u32,
+        rank: u16,
+        joining: &ShardSets,
+        leaving: &ShardSets,
+    ) -> Option<(bool, u64)> {
+        self.get(layer, level, ordinal)?
+            .contents
+            .get(rank as usize)?;
+        let shards: std::collections::BTreeSet<ShardId> = self
+            .shards()
+            .chain(joining.iter().map(|(shard, _)| shard))
+            .chain(leaving.iter().map(|(shard, _)| shard))
+            .collect();
+        let (mut changed, mut cardinality) = (false, 0);
+        for shard in shards {
+            let held = self.held_set(shard, layer, level, ordinal, rank);
+            let mut next = held.cloned().unwrap_or_default();
+            if let Some(joins) = joining.get(shard) {
+                next.or_inplace(joins);
+            }
+            if let Some(leaves) = leaving.get(shard) {
+                next.andnot_inplace(leaves);
+            }
+            changed |= held.map_or(!next.is_empty(), |held| *held != next);
+            cardinality += next.cardinality();
+        }
+        Some((changed, cardinality))
+    }
+
+    /// The sets a log record carries, where each is a bitmap in a shard this store holds a slice
+    /// of; `None` where one is damage or names another shard.
+    fn held_shards(&self, sets: &[crate::wal::WalShardSet]) -> Option<ShardSets> {
+        let sets = ShardSets::from_wal(sets)?;
+        let held = sets.iter().all(|(shard, _)| self.slice(shard).is_some());
+        held.then_some(sets)
+    }
+
+    /// The record at `ordinal`, to write.
+    fn record_mut(&mut self, layer: &str, level: u32, ordinal: u32) -> Option<&mut ArtifactRecord> {
+        self.levels
+            .get_mut(&(layer.to_string(), level))
+            .and_then(|slots| slots.get_mut(ordinal as usize))
+            .and_then(Option::as_deref_mut)
+    }
+
+    /// Put `nothing` at `ordinal` in `shard`'s slice where the slice holds no record there.
+    fn hold_in(
+        &mut self,
+        shard: ShardId,
+        (layer, space, level, ordinal): (&str, LayerSpace, u32, u32),
+        nothing: &ArtifactRecord,
+    ) {
+        let Some(slice) = self.slice_mut(shard) else {
+            return;
+        };
+        if slice.get(layer, level, ordinal).is_none() {
+            slice.put(layer, space, level, ordinal, nothing.clone(), None);
+        }
+    }
+
+    /// Runs `f` over every slice's record of the artifact at `ordinal`, this store's included.
+    fn each_held(
+        &mut self,
+        layer: &str,
+        level: u32,
+        ordinal: u32,
+        mut f: impl FnMut(&mut ArtifactRecord),
+    ) {
+        if let Some(record) = self.record_mut(layer, level, ordinal) {
+            f(record);
+        }
+        for (_, slice) in &mut self.slices.others {
+            if let Some(record) = slice.record_mut(layer, level, ordinal) {
+                f(record);
+            }
+        }
+    }
+
+    /// Put in every other shard's slice, holding nothing, the artifact at `ordinal` and each
+    /// artifact its borrowing chain reaches, where the slice holds none: a borrower resolves its
+    /// target in its own shard's slice.
+    fn hold_borrowed_everywhere(&mut self, layer: &str, level: u32, ordinal: u32) {
+        if self.slices.others.is_empty() {
+            return;
+        }
+        let mut reached = Vec::new();
+        let mut at = self.get(layer, level, ordinal).map(|record| {
+            (
+                (layer.to_string(), self.spaces[layer], level, ordinal),
+                record,
+            )
+        });
+        let mut depth = BORROW_CHAIN_MAX;
+        while let Some((address, record)) = at.take() {
+            reached.push((address, record.slice_holding_nothing()));
+            if depth == 0 || !borrows_membership(record) {
+                break;
+            }
+            depth -= 1;
+            let Some(target) = record.attached_to.as_ref() else {
+                break;
+            };
+            at = self
+                .get(&target.layer, target.level, target.ordinal)
+                .filter(|held| held.entity == target.entity)
+                .map(|held| {
+                    let address = (
+                        target.layer.clone(),
+                        target.space,
+                        target.level,
+                        target.ordinal,
+                    );
+                    (address, held)
+                });
+        }
+        let shards: Vec<ShardId> = self.slices.others.iter().map(|(shard, _)| *shard).collect();
+        for ((layer, space, level, ordinal), nothing) in reached {
+            for shard in &shards {
+                self.hold_in(*shard, (&layer, space, level, ordinal), &nothing);
+            }
+        }
     }
 
     /// Insert or replace one artifact, and the shapes it declared if its layer declares a kind.
@@ -1696,7 +1992,11 @@ impl ArtifactStore {
         part: &crate::wal::ArtifactPart,
         position: u64,
     ) -> usize {
-        let refused = match self.fill(layer, level, ordinal, part) {
+        let outcome = self.fill(layer, level, ordinal, part);
+        if outcome == FillOutcome::Filled {
+            self.fill_slices(layer, level, ordinal, part);
+        }
+        let refused = match outcome {
             FillOutcome::Filled | FillOutcome::Identical => 0,
             // A record the log carries that disagrees with the record it names, or that does not
             // decode, is damage on the publication's argument: it was compared before it was
@@ -1726,6 +2026,52 @@ impl ArtifactStore {
         // will act on it, and one rebuild of one level is the cheaper mistake.
         self.bump(layer, level);
         refused
+    }
+
+    /// What a fill of the record at `ordinal` changes in the other shards' slices: an attachment
+    /// reaches each slice's record, and the artifact everywhere where it now borrows; a content
+    /// reaches each slice's record with nothing in its set.
+    fn fill_slices(
+        &mut self,
+        layer: &str,
+        level: u32,
+        ordinal: u32,
+        part: &crate::wal::ArtifactPart,
+    ) {
+        use crate::wal::ArtifactPart;
+        if self.slices.others.is_empty() {
+            return;
+        }
+        let Some(record) = self.get(layer, level, ordinal) else {
+            return;
+        };
+        match part {
+            ArtifactPart::AttachedTo(_) => {
+                let attached_to = record.attached_to.clone();
+                let borrows = borrows_membership(record);
+                for (_, slice) in &mut self.slices.others {
+                    if let Some(held) = slice.record_mut(layer, level, ordinal) {
+                        held.attached_to = attached_to.clone();
+                    }
+                }
+                if borrows {
+                    self.hold_borrowed_everywhere(layer, level, ordinal);
+                }
+            }
+            ArtifactPart::Content { .. } => {
+                for (_, slice) in &mut self.slices.others {
+                    if let Some(held) = slice.record_mut(layer, level, ordinal) {
+                        held.contents.push(ContentSet {
+                            values: None,
+                            digest: [0; 32],
+                            generated_from: Bitmap::new(),
+                            cardinality: 0,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     /// **The one way a fixed part is filled**, taken by every route through the durable record
@@ -1931,8 +2277,9 @@ impl ArtifactStore {
         for published in artifacts {
             // Damage is a refusal, not an empty membership — see `deserialise_members`. Skipping
             // leaves a hole, which answers *absent*; the alternative decodes a corrupt record to a
-            // legitimately emptied artifact and serves it.
-            let Some(members) = store_slice(&published.members) else {
+            // legitimately emptied artifact and serves it. A set naming a shard this store holds
+            // no slice of is damage too.
+            let Some(members) = self.held_shards(&published.members) else {
                 refused += 1;
                 continue;
             };
@@ -1942,7 +2289,7 @@ impl ArtifactStore {
             // localised to the one content and skipped. The digest is recomputed from the values
             // the record carries and checked against the stored one, so the log is self-checking
             // and a record whose two halves disagree is refused as damage.
-            let sets: Option<Vec<ContentSet>> = published
+            let sets: Option<Vec<(ContentSet, ShardSets)>> = published
                 .contents
                 .iter()
                 .map(|v| {
@@ -1950,44 +2297,68 @@ impl ArtifactStore {
                     if digest != v.digest {
                         return None;
                     }
-                    store_slice(&v.generated_from).map(|generated_from| ContentSet {
+                    let sets = self.held_shards(&v.generated_from)?;
+                    let content = ContentSet {
                         values: Some(v.values.clone()),
                         digest,
-                        generated_from,
+                        generated_from: Bitmap::new(),
                         cardinality: v.cardinality,
-                    })
+                    };
+                    Some((content, sets))
                 })
                 .collect();
             let Some(contents) = sets else {
                 refused += 1;
                 continue;
             };
+            let several = !self.slices.others.is_empty();
+            let part = |sets: &ShardSets, shard| sets.get(shard).cloned().unwrap_or_default();
+            let own = self.slices.own;
+            let record = ArtifactRecord {
+                entity: published.entity,
+                key: published.key.clone(),
+                view: published.view.clone(),
+                incarnation: published.incarnation,
+                members: Members::owned(part(&members, own)),
+                declares_members: several.then(|| !members.is_empty()),
+                contents: contents
+                    .iter()
+                    .map(|(content, sets)| ContentSet {
+                        generated_from: part(sets, own),
+                        ..content.clone()
+                    })
+                    .collect(),
+                attached_to: published.attached_to.clone().map(|a| Attachment {
+                    layer: a.layer,
+                    space: a.space,
+                    level: a.level,
+                    ordinal: a.ordinal,
+                    entity: a.entity,
+                }),
+                parents: published.parents.clone(),
+                access: published.access.clone(),
+            };
+            let everywhere = published.shape.is_some()
+                || (members.is_empty()
+                    && (record.attached_to.is_some()
+                        || contents.iter().all(|(_, sets)| sets.is_empty())));
+            for (shard, slice) in &mut self.slices.others {
+                let holds = members.get(*shard).is_some()
+                    || contents.iter().any(|(_, sets)| sets.get(*shard).is_some());
+                if everywhere || holds {
+                    let sets = contents
+                        .iter()
+                        .map(|(_, sets)| part(sets, *shard))
+                        .collect();
+                    let held = record.slice(part(&members, *shard), sets);
+                    slice.put(layer, space, level, published.ordinal, held, None);
+                }
+            }
             let shape = published.shape.clone();
-            self.put(
-                layer,
-                space,
-                level,
-                published.ordinal,
-                ArtifactRecord {
-                    entity: published.entity,
-                    key: published.key.clone(),
-                    view: published.view.clone(),
-                    incarnation: published.incarnation,
-                    members: Members::owned(members),
-                    declares_members: None,
-                    contents,
-                    attached_to: published.attached_to.clone().map(|a| Attachment {
-                        layer: a.layer,
-                        space: a.space,
-                        level: a.level,
-                        ordinal: a.ordinal,
-                        entity: a.entity,
-                    }),
-                    parents: published.parents.clone(),
-                    access: published.access.clone(),
-                },
-                shape,
-            );
+            self.put(layer, space, level, published.ordinal, record, shape);
+            if everywhere {
+                self.hold_borrowed_everywhere(layer, level, published.ordinal);
+            }
         }
         self.oldest_wal_pos = Some(match self.oldest_wal_pos {
             Some(existing) => existing.min(position),
@@ -2012,12 +2383,12 @@ impl ArtifactStore {
             // decoded short is an acked join that silently did not happen, and the artifact then
             // serves the count it had before — which nothing distinguishes from a criterion it
             // failed to clear.
-            let Some(joining) = store_slice(&grown.joining) else {
+            let Some(joining) = self.held_shards(&grown.joining) else {
                 refused += 1;
                 refused_growth.push(index);
                 continue;
             };
-            let Some(leaving) = store_slice(&grown.leaving) else {
+            let Some(leaving) = self.held_shards(&grown.leaving) else {
                 refused += 1;
                 refused_growth.push(index);
                 continue;
@@ -2090,16 +2461,31 @@ impl ArtifactStore {
     /// still names. Nothing is counted for it either: the state is reachable and legitimate (a
     /// growth still in the log for an artifact this fold removed), so alarming on it would alarm on
     /// every restart after such a fold.
-    fn grow(&mut self, layer: &str, level: u32, ordinal: u32, joining: &Bitmap) {
-        let Some(record) = self
-            .levels
-            .get_mut(&(layer.to_string(), level))
-            .and_then(|slots| slots.get_mut(ordinal as usize))
-            .and_then(Option::as_mut)
+    ///
+    /// Each shard's part joins that shard's slice, which takes a record of the artifact where it
+    /// held none.
+    fn grow(&mut self, layer: &str, level: u32, ordinal: u32, joining: &ShardSets) {
+        let Some(nothing) = self
+            .get(layer, level, ordinal)
+            .map(ArtifactRecord::slice_holding_nothing)
         else {
             return;
         };
-        record.members.join(joining);
+        let space = self.spaces[layer];
+        for (shard, part) in joining.iter() {
+            self.hold_in(shard, (layer, space, level, ordinal), &nothing);
+            if let Some(record) = self
+                .slice_mut(shard)
+                .and_then(|slice| slice.record_mut(layer, level, ordinal))
+            {
+                record.members.join(part);
+            }
+        }
+        if !self.slices.others.is_empty() && !joining.is_empty() {
+            self.each_held(layer, level, ordinal, |record| {
+                record.declares_members = Some(true)
+            });
+        }
     }
 
     /// **The one way a generating set changes**, taken by the live page and by replay alike
@@ -2127,6 +2513,9 @@ impl ArtifactStore {
     /// **An ordinal naming no record, and a rank naming no content, change nothing** and are not
     /// damage: the first is a hole a fold left, on [`Self::grow`]'s rule, and the second is a
     /// content that same fold withdrew.
+    ///
+    /// The cardinality is the set's over every shard, and each shard's part moves in that shard's
+    /// slice, which takes a record of the artifact where the page joins it and it held none.
     #[allow(clippy::too_many_arguments)]
     fn grow_set(
         &mut self,
@@ -2134,33 +2523,52 @@ impl ArtifactStore {
         level: u32,
         ordinal: u32,
         rank: u16,
-        joining: &Bitmap,
-        leaving: &Bitmap,
+        joining: &ShardSets,
+        leaving: &ShardSets,
         cardinality: u64,
     ) -> bool {
-        let Some(record) = self
-            .levels
-            .get_mut(&(layer.to_string(), level))
-            .and_then(|slots| slots.get_mut(ordinal as usize))
-            .and_then(Option::as_mut)
+        let Some((_, after)) = self.paged(layer, level, ordinal, rank, joining, leaving) else {
+            return true;
+        };
+        if after != cardinality {
+            return false;
+        }
+        let rank = rank as usize;
+        if cardinality == 0 {
+            self.each_held(layer, level, ordinal, |record| {
+                if rank < record.contents.len() {
+                    record.contents.remove(rank);
+                }
+            });
+            return true;
+        }
+        let Some(nothing) = self
+            .get(layer, level, ordinal)
+            .map(ArtifactRecord::slice_holding_nothing)
         else {
             return true;
         };
-        let Some(content) = record.contents.get_mut(rank as usize) else {
-            return true;
-        };
-        let mut next = content.generated_from.clone();
-        next.or_inplace(joining);
-        next.andnot_inplace(leaving);
-        if next.cardinality() != cardinality {
-            return false;
+        let space = self.spaces[layer];
+        for (shard, _) in joining.iter() {
+            self.hold_in(shard, (layer, space, level, ordinal), &nothing);
         }
-        if cardinality == 0 {
-            record.contents.remove(rank as usize);
-            return true;
+        let shards: Vec<ShardId> = self.shards().collect();
+        for shard in shards {
+            let Some(content) = self
+                .slice_mut(shard)
+                .and_then(|slice| slice.record_mut(layer, level, ordinal))
+                .and_then(|record| record.contents.get_mut(rank))
+            else {
+                continue;
+            };
+            if let Some(joins) = joining.get(shard) {
+                content.generated_from.or_inplace(joins);
+            }
+            if let Some(leaves) = leaving.get(shard) {
+                content.generated_from.andnot_inplace(leaves);
+            }
+            content.cardinality = cardinality;
         }
-        content.generated_from = next;
-        content.cardinality = cardinality;
         true
     }
 
@@ -2249,7 +2657,12 @@ impl ArtifactStore {
         let vacated = self.vacated.entry(address.clone()).or_default();
         let mut done = 0;
         for ordinal in lo..lo + count {
-            let Some(record) = slots.get_mut(ordinal as usize).and_then(Option::as_mut) else {
+            // An empty membership has nothing to free, and its pack may not list it to rehouse.
+            let Some(record) = slots
+                .get_mut(ordinal as usize)
+                .and_then(Option::as_mut)
+                .filter(|record| !record.members.is_empty())
+            else {
                 continue;
             };
             debug_assert!(
@@ -2479,6 +2892,10 @@ impl ArtifactStore {
         for (target, dependent) in edges {
             self.dependents.entry(target).or_default().push(dependent);
         }
+        for (_, slice) in &mut self.slices.others {
+            slice.levels.retain(|(l, _), _| l != layer);
+            slice.spaces.remove(layer);
+        }
     }
 
     /// See [`Self::versions`]: what a structure derived from this level is valid for.
@@ -2496,6 +2913,9 @@ impl ArtifactStore {
     /// Move one level's version — called by every route that changes what a level's records say.
     fn bump(&mut self, layer: &str, level: u32) {
         *self.versions.entry((layer.to_string(), level)).or_insert(0) += 1;
+        for (_, slice) in &mut self.slices.others {
+            slice.bump(layer, level);
+        }
     }
 
     /// Move one level's lineage version — called by the routes that change what a level's edges
@@ -2588,29 +3008,42 @@ impl ArtifactStore {
             .map(|((layer, level), version)| (layer.as_str(), *level, *version))
     }
 
-    /// Every level's artifacts that are **not yet in a manifest**, as
-    /// `(layer, level, ordinal_lo, blobs)` ready to pack — see [`encode_record`].
-    pub fn unpublished(&self) -> Vec<PendingExtent> {
+    /// Every level's artifacts that are **not yet in a manifest**, ready to pack.
+    pub fn unpublished(&self) -> Vec<PendingLevel> {
         self.pending_ranges()
             .into_iter()
             .map(|(layer, level, ordinal_lo, count)| {
-                let blobs: Vec<ArtifactBlobs> = self
-                    .encode_pending(&layer, level, ordinal_lo, count)
+                let slots = self.slots(&layer, level);
+                let records = (ordinal_lo..ordinal_lo + count)
+                    .map(|ordinal| {
+                        slots
+                            .get(ordinal as usize)
+                            .and_then(Option::as_deref)
+                            .map(|record| {
+                                encode_record(record, self.shape_of(&layer, level, ordinal))
+                            })
+                            .unwrap_or_default()
+                    })
                     .collect();
-                (layer, level, ordinal_lo, blobs)
+                let members = self
+                    .shards()
+                    .filter_map(|shard| {
+                        let slice = self.slice(shard)?;
+                        Some((shard, slice.members_in(&layer, level, ordinal_lo, count)))
+                    })
+                    .collect();
+                PendingLevel {
+                    layer,
+                    level,
+                    ordinal_lo,
+                    records,
+                    members,
+                }
             })
             .collect()
     }
 
-    /// The same levels [`Self::unpublished`] answers, as **ranges rather than blobs**:
-    /// `(layer, level, ordinal_lo, count)`.
-    ///
-    /// **What a caller that means to stream them asks instead**, [`Self::encode_pending`] being the
-    /// other half. A build publishes every level of a corpus in one pass, so encoding them all
-    /// before the first is written holds the whole corpus's memberships a second time, beside the
-    /// bitmaps they came from; a level's ordinal range is enough to open the extent and take them
-    /// one at a time. The online publication materialises instead, and not from preference: it
-    /// reads this store under a lock it may not hold across an fsync.
+    /// The levels [`Self::unpublished`] answers, as ranges: `(layer, level, ordinal_lo, count)`.
     pub fn pending_ranges(&self) -> Vec<PendingRange> {
         let mut ready = Vec::new();
         for ((layer, level), slots) in &self.levels {
@@ -2631,35 +3064,23 @@ impl ArtifactStore {
         ready
     }
 
-    /// The blobs of one pending range, **encoded as they are taken** — the other half of
-    /// [`Self::pending_ranges`].
-    ///
-    /// A hole is an empty blob, as the fold writes one: an extent addresses its range densely, so
-    /// a hole left out would shift every later artifact's identity by one. Publication claims
-    /// ordinals in order, so a hole here is an artifact removed, never one still to arrive.
-    ///
-    /// The level is looked up once, not once an artifact: the store is keyed by an owned
-    /// `(String, u32)`, so a lookup per ordinal would be a `String` allocation per artifact on the
-    /// one path that walks every artifact of the corpus.
-    pub fn encode_pending<'a>(
-        &'a self,
-        layer: &'a str,
+    /// The member blob ([`encode_members`]) of each ordinal in `[ordinal_lo, ordinal_lo + count)`
+    /// whose record here holds something ([`listed_members`]), ascending: what this store's
+    /// shard's member pack lists over the range.
+    pub fn members_in(
+        &self,
+        layer: &str,
         level: u32,
         ordinal_lo: u32,
         count: u32,
-    ) -> impl Iterator<Item = ArtifactBlobs> + 'a {
-        let slots = self.levels.get(&(layer.to_string(), level));
-        (ordinal_lo..ordinal_lo + count).map(move |ordinal| {
-            slots
-                .and_then(|slots| slots.get(ordinal as usize)?.as_ref())
-                .map(|record| {
-                    (
-                        encode_record(record, self.shape_of(layer, level, ordinal)),
-                        encode_members(record),
-                    )
-                })
-                .unwrap_or_default()
-        })
+    ) -> ListedMembers {
+        let slots = self.slots(layer, level);
+        (ordinal_lo..ordinal_lo + count)
+            .filter_map(|ordinal| {
+                let record = slots.get(ordinal as usize)?.as_deref()?;
+                Some((ordinal, listed_members(record)?))
+            })
+            .collect()
     }
 
     /// What this fold's deletions took away from every artifact that held one — the sweep behind
@@ -2714,7 +3135,7 @@ impl ArtifactStore {
                     ordinal: ordinal as u32,
                     key: record.key.clone(),
                     members_lost,
-                    declared_members: record.declared_size(),
+                    declared_members: self.declared_size(layer, *level, ordinal as u32),
                     contents_lost,
                 });
             }
@@ -2765,47 +3186,77 @@ impl ArtifactStore {
     /// together ([`withdraw_content_of_retired_members`], decision 0135): containment is
     /// all-or-nothing and a set that lost a member fails it for every principal for ever; the
     /// caller re-declares.
-    pub fn repack_all(&self, retired: &Retired) -> Vec<PendingExtent> {
+    ///
+    /// `retired` is this store's own shard's: every other shard's slice is written as it stands,
+    /// less the artifacts that leave the level.
+    pub fn repack_all(&self, retired: &Retired) -> Vec<PendingLevel> {
         let points = &retired.points;
         let mut ready = Vec::new();
         for ((layer, level), slots) in &self.levels {
             if slots.is_empty() {
                 continue;
             }
-            let blobs: Vec<ArtifactBlobs> = slots
+            let mut records = Vec::with_capacity(slots.len());
+            let mut members = Vec::new();
+            let mut others: Vec<(ShardId, ListedMembers)> = self
+                .slices
+                .others
                 .iter()
-                .enumerate()
-                .map(|(ordinal, slot)| {
-                    // An empty blob is a hole: an artifact a fold or a view drop removed. It is
-                    // written rather than packed around, because an ordinal is identity and closing
-                    // the gap would hand every later artifact its neighbour's `mosaica_id`.
-                    let Some(record) = slot else {
-                        return ArtifactBlobs::default();
-                    };
-                    // **Rule F's artifact arm.** An artifact whose own entity this fold executed
-                    // leaves the level here, in the same publication that retires the overlay entry
-                    // hiding it — which is the ordering the rule is about, not reclamation. A
-                    // deleted artifact has no rows and no postings, so compaction's derivation
-                    // would otherwise call it executed *vacuously* at the first fold and retire the
-                    // entry while its slot went on being served.
-                    if retired.retires_artifact(self.spaces[layer], record.entity) {
-                        return ArtifactBlobs::default();
-                    }
-                    // **The shape survives a fold unchanged**: it is geometry, not rows, so nothing
-                    // the fold renumbers reaches it; the fold re-resolves the rows against it. What
-                    // a deletion removes from such a layer is the *point*, which leaves the mask —
-                    // the artifact's rule is untouched.
-                    let shape = self.shape_of(layer, *level, ordinal as u32);
-                    if points.is_empty() {
-                        return (encode_record(record, shape), encode_members(record));
-                    }
-                    let mut record = record.clone();
-                    record.members.to_mut().andnot_inplace(points);
-                    withdraw_content_of_retired_members(&mut record, points);
-                    (encode_record(&record, shape), encode_members(&record))
-                })
+                .map(|(shard, _)| (*shard, Vec::new()))
                 .collect();
-            ready.push((layer.clone(), *level, 0, blobs));
+            for (ordinal, slot) in slots.iter().enumerate() {
+                // An empty record is a hole: an artifact a fold or a view drop removed. It is
+                // written rather than packed around, because an ordinal is identity and closing
+                // the gap would hand every later artifact its neighbour's `mosaica_id`.
+                let Some(record) = slot else {
+                    records.push(Vec::new());
+                    continue;
+                };
+                // **Rule F's artifact arm.** An artifact whose own entity this fold executed
+                // leaves the level here, in the same publication that retires the overlay entry
+                // hiding it — which is the ordering the rule is about, not reclamation. A
+                // deleted artifact has no rows and no postings, so compaction's derivation
+                // would otherwise call it executed *vacuously* at the first fold and retire the
+                // entry while its slot went on being served.
+                if retired.retires_artifact(self.spaces[layer], record.entity) {
+                    records.push(Vec::new());
+                    continue;
+                }
+                // **The shape survives a fold unchanged**: it is geometry, not rows, so nothing
+                // the fold renumbers reaches it; the fold re-resolves the rows against it. What
+                // a deletion removes from such a layer is the *point*, which leaves the mask —
+                // the artifact's rule is untouched.
+                let shape = self.shape_of(layer, *level, ordinal as u32);
+                let retained;
+                let record = match points.is_empty() {
+                    true => record.as_ref(),
+                    false => {
+                        let mut cloned = record.as_ref().clone();
+                        cloned.members.to_mut().andnot_inplace(points);
+                        withdraw_content_of_retired_members(&mut cloned, points);
+                        retained = cloned;
+                        &retained
+                    }
+                };
+                records.push(encode_record(record, shape));
+                if let Some(blob) = listed_members(record) {
+                    members.push((ordinal as u32, blob));
+                }
+                for ((_, slice), (_, listed)) in self.slices.others.iter().zip(&mut others) {
+                    let held = slice.get(layer, *level, ordinal as u32);
+                    if let Some(blob) = held.and_then(listed_members) {
+                        listed.push((ordinal as u32, blob));
+                    }
+                }
+            }
+            others.insert(0, (self.slices.own, members));
+            ready.push(PendingLevel {
+                layer: layer.clone(),
+                level: *level,
+                ordinal_lo: 0,
+                records,
+                members: others,
+            });
         }
         ready
     }
@@ -2947,6 +3398,15 @@ impl ArtifactStore {
             let space = self.spaces[layer.as_str()];
             self.forget_dependency(space, &record);
             self.dependents.remove(&(space, record.entity));
+            for (_, slice) in &mut self.slices.others {
+                if let Some(slot) = slice
+                    .levels
+                    .get_mut(&(layer.clone(), level))
+                    .and_then(|slots| slots.get_mut(ordinal as usize))
+                {
+                    *slot = None;
+                }
+            }
             if moved.last() != Some(&(layer.clone(), level)) {
                 moved.push((layer, level));
             }
@@ -3348,6 +3808,17 @@ pub fn encode_members(record: &ArtifactRecord) -> Vec<u8> {
         &record.members.whole(),
         record.contents.iter().map(|v| &v.generated_from),
     )
+}
+
+/// [`encode_members`] where `record` holds a member or a generating entity, and `None` where it
+/// holds neither and its shard's member pack does not list it.
+pub fn listed_members(record: &ArtifactRecord) -> Option<Vec<u8>> {
+    let holds = !record.members.is_empty()
+        || record
+            .contents
+            .iter()
+            .any(|content| !content.generated_from.is_empty());
+    holds.then(|| encode_members(record))
 }
 
 /// [`encode_members`]' framing, over the membership and the generating sets.
@@ -3810,9 +4281,13 @@ pub fn members_added(record: &crate::wal::WalRecord, store: &ArtifactStore) -> u
             .iter()
             .filter(|delta| delta.set == crate::wal::GrownSet::Membership)
             .filter_map(|delta| {
-                let joining = store_slice(&delta.joining)?;
-                let held = store.get(layer, *level, delta.ordinal)?;
-                Some(joining.cardinality() - held.members.and_cardinality(&joining))
+                let joining = ShardSets::from_wal(&delta.joining)?;
+                store.get(layer, *level, delta.ordinal)?;
+                Some(
+                    store
+                        .not_held(layer, *level, delta.ordinal, &joining)
+                        .cardinality(),
+                )
             })
             .sum(),
         _ => 0,
@@ -4054,18 +4529,20 @@ mod tests {
             "a point retires as a member, never as an artifact"
         );
         let packed = store.repack_all(&artifacts_of("clusters/b", &[100]));
-        let b = packed.iter().find(|(layer, ..)| layer == "clusters/b").unwrap();
-        assert!(b.3[0].0.is_empty(), "the artifact leaves the pack");
-        let x = packed.iter().find(|(layer, ..)| layer == "topics/x").unwrap();
-        assert!(!x.3[0].0.is_empty(), "an artifact at another entity stays");
+        let b = packed.iter().find(|p| p.layer == "clusters/b").unwrap();
+        assert!(b.records[0].is_empty(), "the artifact leaves the pack");
+        assert_eq!(b.members, vec![(ShardId::ZERO, Vec::new())]);
+        let x = packed.iter().find(|p| p.layer == "topics/x").unwrap();
+        assert!(
+            !x.records[0].is_empty(),
+            "an artifact at another entity stays"
+        );
     }
 
-    /// **The streaming route and the materialising one answer the same thing.** A build takes
-    /// ranges and encodes an artifact at a time; the online publication takes the blobs. Two routes
-    /// to one set of bytes is one place for them to drift, so the equality is asserted rather than
-    /// argued. A hole is an empty blob in both, at its own ordinal.
+    /// A pending level holds a record for every ordinal of its range, a hole an empty one, and
+    /// lists the members of only the artifacts holding something.
     #[test]
-    fn the_ranges_and_the_blobs_describe_the_same_pending_levels() {
+    fn a_pending_level_lists_only_the_artifacts_holding_something() {
         let mut store = ArtifactStore::new();
         store.put("clusters/a", space("clusters/a"), 0, 0, record(100, &[1, 2, 3]), None);
         store.put("clusters/a", space("clusters/a"), 0, 1, record(101, &[4]), None);
@@ -4073,22 +4550,43 @@ mod tests {
         store.put("holed/h", space("holed/h"), 0, 1, record(103, &[7]), None);
 
         let ready = store.unpublished();
-        let ranges = store.pending_ranges();
-        assert_eq!(ready.len(), ranges.len());
-        let holed = ready.iter().find(|(layer, ..)| layer == "holed/h").unwrap();
-        assert_eq!((holed.2, holed.3.len()), (0, 2));
-        assert!(holed.3[0].0.is_empty() && holed.3[0].1.is_empty());
-        assert!(!holed.3[1].0.is_empty() && !holed.3[1].1.is_empty());
-        for ((layer, level, lo, blobs), (r_layer, r_level, r_lo, count)) in
-            ready.iter().zip(ranges.iter())
-        {
-            assert_eq!((layer, level, lo), (r_layer, r_level, r_lo));
-            assert_eq!(blobs.len(), *count as usize);
-            let streamed: Vec<ArtifactBlobs> = store
-                .encode_pending(r_layer, *r_level, *r_lo, *count)
-                .collect();
-            assert_eq!(*blobs, streamed);
-        }
+        let ranges: Vec<PendingRange> = ready
+            .iter()
+            .map(|p| {
+                (
+                    p.layer.clone(),
+                    p.level,
+                    p.ordinal_lo,
+                    p.records.len() as u32,
+                )
+            })
+            .collect();
+        assert_eq!(ranges, store.pending_ranges());
+        let holed = ready.iter().find(|p| p.layer == "holed/h").unwrap();
+        assert_eq!(holed.ordinal_lo, 0);
+        assert!(holed.records[0].is_empty() && !holed.records[1].is_empty());
+        let [(ShardId::ZERO, listed)] = holed.members.as_slice() else {
+            panic!("one shard's slice")
+        };
+        assert_eq!(
+            listed
+                .iter()
+                .map(|(ordinal, _)| *ordinal)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        let empty = ready
+            .iter()
+            .find(|p| p.layer == "clusters/a" && p.level == 1)
+            .unwrap();
+        assert!(!empty.records[0].is_empty());
+        assert!(
+            empty.members[0].1.is_empty(),
+            "an artifact holding nothing is not listed"
+        );
+        let (_, blob) = &listed[0];
+        let (record, _) = decode_record(EntityId::new(103), &holed.records[1], blob).unwrap();
+        assert_eq!(record.members, Bitmap::of(&[7]));
     }
 
     /// A dead incarnation's artifacts leave holes and free their keys, and a key the live
@@ -4221,7 +4719,7 @@ mod tests {
         let pending: Vec<(String, u32, u32)> = store
             .unpublished()
             .into_iter()
-            .map(|(layer, level, ordinal_lo, _)| (layer, level, ordinal_lo))
+            .map(|p| (p.layer, p.level, p.ordinal_lo))
             .collect();
         assert_eq!(pending, vec![("clusters/a".to_string(), 0, 0)]);
     }
@@ -5721,5 +6219,291 @@ mod tests {
     #[should_panic]
     fn a_set_of_another_shard_is_not_written_as_shard_zeros() {
         ShardSets::of_items([item(1, 4)]).shard_zero();
+    }
+
+    fn shard(shard: u32) -> ShardId {
+        ShardId::new(shard).unwrap()
+    }
+
+    /// Sets by shard, as `(shard, entities)`.
+    fn in_shards(parts: &[(u32, &[u32])]) -> ShardSets {
+        let mut sets = ShardSets::default();
+        for (at, entities) in parts {
+            sets.set(shard(*at), Bitmap::of(entities));
+        }
+        sets
+    }
+
+    /// The members and the set at rank 0 the artifact at `ordinal` holds in each slice, `None`
+    /// where the slice holds no record of it.
+    fn held_parts(store: &ArtifactStore, ordinal: u32) -> Vec<Option<(Vec<u32>, Vec<u32>)>> {
+        store
+            .shards()
+            .map(|at| {
+                let record = store.slice(at)?.get("clusters/a", 0, ordinal)?;
+                let set = record
+                    .contents
+                    .first()
+                    .map(|content| content.generated_from.iter().collect())
+                    .unwrap_or_default();
+                Some((record.members.iter().collect(), set))
+            })
+            .collect()
+    }
+
+    fn page(
+        ordinal: u32,
+        joining: &ShardSets,
+        leaving: &ShardSets,
+        cardinality: u64,
+    ) -> crate::wal::WalRecord {
+        crate::wal::WalRecord::ArtifactGrow {
+            layer: "clusters/a".to_string(),
+            space: space("clusters/a"),
+            level: 0,
+            growth: vec![crate::wal::MembershipGrowth {
+                ordinal,
+                joining: joining.to_wal(),
+                leaving: leaving.to_wal(),
+                set: crate::wal::GrownSet::GeneratingSet {
+                    rank: 0,
+                    cardinality,
+                },
+            }],
+        }
+    }
+
+    /// Each shard's part of a publication, a growth and a page lands in that shard's slice, a
+    /// slice taking a record where it held none; the declared size and a set's cardinality are
+    /// over every shard, and every slice's version moves with the store's.
+    #[test]
+    fn each_shards_part_of_a_write_lands_in_its_own_slice() {
+        let mut store =
+            ArtifactStore::new().with_slices(ShardId::ZERO, vec![(shard(1), ArtifactStore::new())]);
+        let mut published = publication_with_content("clusters/a", 0, 100, &[], &[]);
+        if let crate::wal::WalRecord::ArtifactPublish { artifacts, .. } = &mut published {
+            artifacts[0].members = in_shards(&[(0, &[1, 2]), (1, &[3])]).to_wal();
+            artifacts[0].contents[0].generated_from = in_shards(&[(0, &[1]), (1, &[3])]).to_wal();
+            artifacts[0].contents[0].cardinality = 2;
+        }
+        assert_eq!(store.apply(&published, 0), 0);
+        assert_eq!(store.apply(&publication("clusters/a", 1, 101, &[4]), 0), 0);
+        assert_eq!(
+            held_parts(&store, 0),
+            vec![Some((vec![1, 2], vec![1])), Some((vec![3], vec![3]))]
+        );
+        assert_eq!(held_parts(&store, 1), vec![Some((vec![4], vec![])), None]);
+        assert_eq!(store.declared_size("clusters/a", 0, 0), 3);
+        assert!(store.set_is("clusters/a", 0, 0, 0, &in_shards(&[(0, &[1]), (1, &[3])])));
+        assert!(!store.set_is("clusters/a", 0, 0, 0, &in_shards(&[(0, &[1])])));
+
+        let mut joining = growth("clusters/a", 0, 1, &[]);
+        if let crate::wal::WalRecord::ArtifactGrow { growth, .. } = &mut joining {
+            growth[0].joining = in_shards(&[(1, &[5])]).to_wal();
+        }
+        assert_eq!(store.apply(&joining, 0), 0);
+        assert_eq!(
+            held_parts(&store, 1),
+            vec![Some((vec![4], vec![])), Some((vec![5], vec![]))],
+            "shard 1's slice takes the artifact it now holds a member of"
+        );
+        assert_eq!(
+            store
+                .not_held(
+                    "clusters/a",
+                    0,
+                    1,
+                    &in_shards(&[(0, &[4, 6]), (1, &[5, 7])])
+                )
+                .cardinality(),
+            2
+        );
+        let listed: Vec<(u32, Vec<u32>)> = store.unpublished()[0]
+            .members
+            .iter()
+            .map(|(at, listed)| {
+                (
+                    at.raw(),
+                    listed.iter().map(|(ordinal, _)| *ordinal).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            vec![(0, vec![0, 1]), (1, vec![0, 1])],
+            "each shard's pack lists its slice"
+        );
+
+        let (joins, leaves) = (in_shards(&[(1, &[6])]), in_shards(&[(0, &[1])]));
+        assert_eq!(
+            store.paged("clusters/a", 0, 0, 0, &joins, &leaves),
+            Some((true, 2))
+        );
+        assert_eq!(
+            store.apply(&page(0, &joins, &leaves, 3), 0),
+            1,
+            "a cardinality no slice sum gives"
+        );
+        assert_eq!(store.apply(&page(0, &joins, &leaves, 2), 0), 0);
+        assert_eq!(
+            held_parts(&store, 0),
+            vec![Some((vec![1, 2], vec![])), Some((vec![3], vec![3, 6]))]
+        );
+        let cardinalities: Vec<u64> = store
+            .shards()
+            .map(|at| {
+                store
+                    .slice(at)
+                    .unwrap()
+                    .get("clusters/a", 0, 0)
+                    .unwrap()
+                    .contents[0]
+                    .cardinality
+            })
+            .collect();
+        assert_eq!(cardinalities, vec![2, 2]);
+
+        let emptied = in_shards(&[(1, &[3, 6])]);
+        assert_eq!(
+            store.apply(&page(0, &ShardSets::default(), &emptied, 0), 0),
+            0
+        );
+        let contents: Vec<usize> = store
+            .shards()
+            .map(|at| {
+                store
+                    .slice(at)
+                    .unwrap()
+                    .get("clusters/a", 0, 0)
+                    .unwrap()
+                    .contents
+                    .len()
+            })
+            .collect();
+        assert_eq!(
+            contents,
+            vec![0, 0],
+            "an emptied set's content is withdrawn in every slice"
+        );
+
+        let versions: Vec<u64> = store
+            .shards()
+            .map(|at| store.slice(at).unwrap().level_version("clusters/a", 0))
+            .collect();
+        assert_eq!(versions[0], versions[1]);
+
+        let mut elsewhere = publication("clusters/a", 2, 102, &[]);
+        if let crate::wal::WalRecord::ArtifactPublish { artifacts, .. } = &mut elsewhere {
+            artifacts[0].members = in_shards(&[(2, &[1])]).to_wal();
+        }
+        assert_eq!(
+            store.apply(&elsewhere, 0),
+            1,
+            "a shard holding no slice here is damage"
+        );
+    }
+
+    /// A content filled on an artifact reaches every slice holding it, and an attachment filled on
+    /// one with no member makes it a borrower held in every slice: each shard's pack still decodes
+    /// with the record into slices that hold its sets together.
+    #[test]
+    fn a_fill_reaches_every_slice_holding_the_artifact() {
+        use crate::wal::{ArtifactPart, PublishedAttachment};
+        let mut store =
+            ArtifactStore::new().with_slices(ShardId::ZERO, vec![(shard(1), ArtifactStore::new())]);
+        let mut published = publication("clusters/a", 0, 100, &[]);
+        if let crate::wal::WalRecord::ArtifactPublish { artifacts, .. } = &mut published {
+            artifacts[0].members = in_shards(&[(0, &[1]), (1, &[2])]).to_wal();
+        }
+        assert_eq!(store.apply(&published, 0), 0);
+        assert_eq!(store.apply(&publication("clusters/b", 0, 200, &[]), 0), 0);
+        let values = vec!["a topic".to_string()];
+        let content = ArtifactPart::Content {
+            rank: 0,
+            digest: content_digest(&values),
+            values,
+        };
+        assert_eq!(store.apply(&fill_record("clusters/a", 0, content), 0), 0);
+        let pending = store.unpublished();
+        let level = pending.iter().find(|p| p.layer == "clusters/a").unwrap();
+        let slices: Vec<ArtifactRecord> = level
+            .members
+            .iter()
+            .map(|(_, listed)| {
+                let blob = listed
+                    .iter()
+                    .find(|(ordinal, _)| *ordinal == 0)
+                    .map(|(_, b)| b);
+                let (slice, _) = decode_slice(
+                    EntityId::new(100),
+                    &level.records[0],
+                    blob.map_or(&[][..], |b| b),
+                )
+                .unwrap();
+                slice
+            })
+            .collect();
+        assert!(slices_hold_their_sets(&slices.iter().collect::<Vec<_>>()));
+        assert!(slices.iter().all(|slice| slice.contents.len() == 1));
+
+        let attachment = ArtifactPart::AttachedTo(PublishedAttachment {
+            layer: "clusters/a".to_string(),
+            space: space("clusters/a"),
+            level: 0,
+            ordinal: 0,
+            entity: EntityId::new(100),
+        });
+        assert_eq!(store.apply(&fill_record("clusters/b", 0, attachment), 0), 0);
+        let slice = store.slice(shard(1)).unwrap();
+        let held = slice
+            .get("clusters/b", 0, 0)
+            .expect("the borrower is in shard 1's slice");
+        assert_eq!(slice.members_of(held).iter().collect::<Vec<u32>>(), vec![2]);
+    }
+
+    /// An artifact borrowing its target's membership is held in every slice, and so is its target,
+    /// holding nothing where its shard holds no member of it.
+    #[test]
+    fn a_borrower_and_its_target_are_held_in_every_slice() {
+        let mut store =
+            ArtifactStore::new().with_slices(ShardId::ZERO, vec![(shard(1), ArtifactStore::new())]);
+        assert_eq!(store.apply(&publication("clusters/b", 0, 100, &[1]), 0), 0);
+        let label = crate::wal::WalRecord::ArtifactPublish {
+            layer: "labels/x".to_string(),
+            space: space("labels/x"),
+            level: 0,
+            extend_runs: Vec::new(),
+            artifacts: vec![crate::wal::PublishedArtifact {
+                ordinal: 0,
+                entity: EntityId::new(200),
+                key: Some("l".to_string()),
+                view: None,
+                incarnation: 0,
+                members: Vec::new(),
+                contents: Vec::new(),
+                attached_to: Some(crate::wal::PublishedAttachment {
+                    layer: "clusters/b".to_string(),
+                    space: space("clusters/b"),
+                    level: 0,
+                    ordinal: 0,
+                    entity: EntityId::new(100),
+                }),
+                parents: Vec::new(),
+                shape: None,
+                access: Vec::new(),
+            }],
+        };
+        assert_eq!(store.apply(&label, 0), 0);
+        let slice = store.slice(shard(1)).unwrap();
+        let held = slice
+            .get("labels/x", 0, 0)
+            .expect("the borrower is in shard 1's slice");
+        assert!(slice.members_of(held).is_empty());
+        assert!(
+            slice.get("clusters/b", 0, 0).is_some(),
+            "and so is its target"
+        );
+        let own = store.get("labels/x", 0, 0).unwrap();
+        assert_eq!(store.members_of(own).iter().collect::<Vec<u32>>(), vec![1]);
     }
 }

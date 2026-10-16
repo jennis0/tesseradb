@@ -125,13 +125,9 @@ pub(crate) struct LiveState {
     /// request path, which resolves a session's reachable set from it.
     pub(in crate::write) registry: Mutex<LayerRegistry>,
     /// Every artifact's entity-space membership, on the registry's contract: written only by the
-    /// executor, read by the request path. Holds the write shard's slice of each membership;
-    /// [`Self::slices`] the others'.
+    /// executor, read by the request path. Holds every record with the first shard's slice of each
+    /// membership, and every other shard's slice ([`ArtifactStore::slice`]).
     pub(in crate::write) artifacts: Mutex<ArtifactStore>,
-    /// Every other point shard's slice of the artifacts it holds something of (`seed_artifacts`),
-    /// with only what a row form reads of the record: view, attachment, each set's cardinality.
-    /// Never written.
-    pub(in crate::write) slices: Vec<(ShardId, Arc<ArtifactStore>)>,
     /// The view roster, on the registry's contract: written only by the executor, a create is a
     /// WAL append followed by an apply, on the one thread that also holds the allocator. Read by
     /// the request path, which resolves a view id against the manifest the roster made.
@@ -222,33 +218,23 @@ impl LiveState {
         f(&lock_recover(&self.artifacts))
     }
 
-    /// The shard whose slice of each membership [`Self::artifacts`] holds.
-    pub(crate) fn written_slice(&self) -> ShardId {
-        self.shards[0].id
-    }
-
     /// `shard`'s slice of every membership, given `written`, the store [`Self::with_artifacts`]
     /// lends. Panics on a shard the open read no slice of: answering from another shard's slice
     /// would project its entities through this shard's row space.
     pub(crate) fn slice_of<'a>(
-        &'a self,
+        &self,
         shard: ShardId,
         written: &'a ArtifactStore,
     ) -> &'a ArtifactStore {
-        if shard == self.written_slice() {
-            return written;
-        }
-        self.slices
-            .iter()
-            .find(|(held, _)| *held == shard)
-            .map(|(_, slice)| slice.as_ref())
+        written
+            .slice(shard)
             .expect("every shard's slice is read at open")
     }
 
     /// Everything not yet in a manifest, packed and ready. See [`ArtifactStore::unpublished`].
     pub(in crate::write) fn unpublished_memberships(
         &self,
-    ) -> Vec<mosaica_lifecycle::membership::PendingExtent> {
+    ) -> Vec<mosaica_lifecycle::membership::PendingLevel> {
         lock_recover(&self.artifacts).unpublished()
     }
 
@@ -307,12 +293,18 @@ impl LiveState {
     pub(in crate::write) fn rehouse_memberships(
         &self,
         prefix_dir: &std::path::Path,
-        extents: &[mosaica_store::manifest::MembershipExtent],
+        extents: &executor::PackedMembers,
     ) -> (u64, u64) {
         let mut artifacts = lock_recover(&self.artifacts);
         let (mut rehoused, mut kept) = (0u64, 0u64);
-        for extent in extents {
+        for (shard, extent) in extents
+            .iter()
+            .flat_map(|(shard, extents)| extents.iter().map(move |extent| (*shard, extent)))
+        {
             let Some(layer) = artifacts.layer_in(extent.space).map(str::to_string) else {
+                continue;
+            };
+            let Some(slice) = artifacts.slice_mut(shard) else {
                 continue;
             };
             let path = prefix_dir.join(&extent.path);
@@ -334,8 +326,9 @@ impl LiveState {
             };
             let owner: Arc<dyn std::any::Any + Send + Sync> = pack.clone();
             for (ordinal, blob) in pack.iter() {
-                // An empty blob is a hole: an ordinal a retirement emptied, or one no artifact was
-                // ever published at. There is nothing to rehouse and nothing is wrong.
+                // An empty blob is an artifact the shard holds nothing of, or a hole: an ordinal a
+                // retirement emptied, or one no artifact was ever published at. There is nothing
+                // to rehouse and nothing is wrong.
                 if blob.is_empty() {
                     continue;
                 }
@@ -347,9 +340,7 @@ impl LiveState {
                 let took = match mapped {
                     // `LevelPack::iter` answers the absolute ordinal, which is what the
                     // store addresses by.
-                    Some(members) => {
-                        artifacts.rehouse_members(&layer, extent.level, ordinal, members)
-                    }
+                    Some(members) => slice.rehouse_members(&layer, extent.level, ordinal, members),
                     None => false,
                 };
                 match took {

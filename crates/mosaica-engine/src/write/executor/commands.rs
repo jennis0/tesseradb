@@ -115,34 +115,52 @@ pub(super) fn growth_receipt(
                 .get(layer, level, ordinal)
                 .expect("a resolved ordinal names a record");
             // The set this row moves, which is the membership on a row with no rank and the
-            // content's generating set on a row with one. A rank naming no content refused the
-            // batch in `prepare_grow` above, so the `None` arm here is unreachable and answers
-            // nothing rather than panicking on a thread that owes an acknowledgement.
+            // content's generating set on a row with one, each shard's part counted against that
+            // shard's slice. A rank naming no content refused the batch in `prepare_grow` above,
+            // so the arm answering nothing for one is unreachable and does not panic on a thread
+            // that owes an acknowledgement.
             //
             // `left` is counted against the set the joins have already entered, which is the
             // order the page is applied in: an entity this page both joins and leaves is one this
             // page took out. Both counts are taken from how much of a bitmap the set holds, so
             // neither the set nor the set after the joins is built.
-            let (joining, leaving) = (join.joining.shard_zero(), join.leaving.shard_zero());
-            let counted = |held: &dyn Fn(&croaring::Bitmap) -> u64| {
-                let joined = joining.cardinality() - held(joining);
-                let left = if leaving.is_empty() {
-                    0
-                } else {
-                    let both = leaving.and(joining);
-                    held(leaving) + both.cardinality() - held(&both)
-                };
-                (joined, left)
-            };
-            let (joined, left) = match join.rank {
-                None => counted(&|other| record.members.and_cardinality(other)),
-                Some(rank) => record
-                    .contents
-                    .get(rank as usize)
-                    .map_or((0, 0), |content| {
-                        counted(&|other| content.generated_from.and_cardinality(other))
-                    }),
-            };
+            let unranked = join
+                .rank
+                .is_some_and(|rank| record.contents.get(rank as usize).is_none());
+            let shards: std::collections::BTreeSet<ShardId> = join
+                .joining
+                .iter()
+                .chain(join.leaving.iter())
+                .map(|(shard, _)| shard)
+                .collect();
+            let nothing = croaring::Bitmap::new();
+            let (joined, left) = shards
+                .into_iter()
+                .filter(|_| !unranked)
+                .map(|shard| {
+                    let slice = store
+                        .slice(shard)
+                        .and_then(|slice| slice.get(layer, level, ordinal));
+                    let held = |other: &croaring::Bitmap| match (slice, join.rank) {
+                        (None, _) => 0,
+                        (Some(slice), None) => slice.members.and_cardinality(other),
+                        (Some(slice), Some(rank)) => slice
+                            .contents
+                            .get(rank as usize)
+                            .map_or(0, |content| content.generated_from.and_cardinality(other)),
+                    };
+                    let joining = join.joining.get(shard).unwrap_or(&nothing);
+                    let leaving = join.leaving.get(shard).unwrap_or(&nothing);
+                    let joined = joining.cardinality() - held(joining);
+                    let left = if leaving.is_empty() {
+                        0
+                    } else {
+                        let both = leaving.and(joining);
+                        held(leaving) + both.cardinality() - held(&both)
+                    };
+                    (joined, left)
+                })
+                .fold((0, 0), |(joined, left), (j, l)| (joined + j, left + l));
             mosaica_lifecycle::MembershipGrown {
                 entity: record.entity,
                 joined,
@@ -697,9 +715,9 @@ impl Executor {
                 let next = generation.with(|g| g.layer_spaces = Arc::new(spaces));
                 self.publish(next, std::time::Instant::now());
             }
-            self.side_manifests
-                .membership_extents
-                .retain(|extent| extent.space != *space);
+            for extents in self.side_manifests.membership_extents.values_mut() {
+                extents.retain(|extent| extent.space != *space);
+            }
             self.side_manifests
                 .derived_extents
                 .retain(|extent| extent.space != *space);

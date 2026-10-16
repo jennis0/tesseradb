@@ -354,7 +354,7 @@ impl WritePath {
         // extent is addressed by absolute ordinal from the layer's reserved runs, so this must run
         // after the whole registry is replayed.
         let SeededArtifacts {
-            mut artifacts,
+            artifacts,
             slices,
             mut undecodable,
             on_heap,
@@ -365,6 +365,8 @@ impl WritePath {
             &shard_ids,
             &seed.prefix_dir,
         )?;
+        let own = shard_ids.first().copied().unwrap_or(ShardId::ZERO);
+        let mut artifacts = artifacts.with_slices(own, slices);
 
         // Same ordering rule again: the overlay is seeded and the log replayed on top, because
         // seeding after replay would revert an acked unsuppress the newest manifest predates.
@@ -556,10 +558,6 @@ impl WritePath {
                 accepted_batches,
                 registry,
                 artifacts,
-                slices: slices
-                    .into_iter()
-                    .map(|(shard, slice)| (shard, Arc::new(slice)))
-                    .collect(),
                 roster,
                 attributes,
                 vocabularies: runtime_vocabularies,
@@ -576,7 +574,7 @@ struct SeededArtifacts {
     /// Every artifact's whole record, with the write shard's slice of its membership and
     /// generating sets.
     artifacts: ArtifactStore,
-    /// Every other point shard's slice: see [`LiveState::slices`].
+    /// Every other point shard's slice ([`ArtifactStore::with_slices`]).
     slices: Vec<(ShardId, ArtifactStore)>,
     /// Artifacts a pack held that did not decode, or whose slices did not hold their sets.
     undecodable: usize,
@@ -699,7 +697,7 @@ fn seed_artifacts(
                     }
                     match decode_members(blob) {
                         Some((members, sets)) if sets.len() == record.contents.len() => {
-                            others.push((at, slice_record(&record, members, sets)));
+                            others.push((at, record.slice(members, sets)));
                         }
                         _ => break,
                     }
@@ -722,8 +720,7 @@ fn seed_artifacts(
                     if !held_only || borrows_membership(&record) {
                         let nothing = || record.contents.iter().map(|_| croaring::Bitmap::new());
                         for at in unlisted {
-                            let slice =
-                                slice_record(&record, croaring::Bitmap::new(), nothing().collect());
+                            let slice = record.slice(croaring::Bitmap::new(), nothing().collect());
                             others.push((at, slice));
                         }
                     }
@@ -820,7 +817,7 @@ impl SeededArtifacts {
             for (_, slice) in slices.iter_mut() {
                 if slice.get(&layer, level, ordinal).is_none() {
                     let sets = held.contents.iter().map(|_| croaring::Bitmap::new()).collect();
-                    let record = slice_record(held, croaring::Bitmap::new(), sets);
+                    let record = held.slice(croaring::Bitmap::new(), sets);
                     slice.seed(&layer, space, level, ordinal, record, None);
                 }
             }
@@ -829,37 +826,6 @@ impl SeededArtifacts {
 
     fn stores_mut(&mut self) -> impl Iterator<Item = &mut ArtifactStore> {
         std::iter::once(&mut self.artifacts).chain(self.slices.iter_mut().map(|(_, slice)| slice))
-    }
-}
-
-/// One point shard's slice of `record`: `members` and `sets` in that shard, and of the record only
-/// what a row form reads beside them.
-fn slice_record(
-    record: &ArtifactRecord,
-    members: croaring::Bitmap,
-    sets: Vec<croaring::Bitmap>,
-) -> ArtifactRecord {
-    ArtifactRecord {
-        entity: record.entity,
-        key: None,
-        view: record.view.clone(),
-        incarnation: record.incarnation,
-        members: members.into(),
-        declares_members: record.declares_members,
-        contents: record
-            .contents
-            .iter()
-            .zip(sets)
-            .map(|(content, generated_from)| mosaica_lifecycle::membership::ContentSet {
-                values: None,
-                digest: [0; 32],
-                generated_from,
-                cardinality: content.cardinality,
-            })
-            .collect(),
-        attached_to: record.attached_to.clone(),
-        parents: Vec::new(),
-        access: Vec::new(),
     }
 }
 

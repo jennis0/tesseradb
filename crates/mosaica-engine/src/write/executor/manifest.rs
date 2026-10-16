@@ -157,8 +157,8 @@ pub(in crate::write) struct SideManifests {
     /// Deny windows applied since the last publication, the counter
     /// [`OVERLAY_PUBLICATION_MAX_WINDOWS`] floors.
     pub(super) windows_since_publication: u64,
-    /// Every member pack of the shard this node has published.
-    pub(super) membership_extents: Vec<mosaica_store::manifest::MembershipExtent>,
+    /// Every member pack this node has published, by shard.
+    pub(super) membership_extents: super::publications::PackedMembers,
     /// Every derived file the current prefix holds, the shard's and the layer spaces' held shapes,
     /// filtered to what a manifest reaches ([`artifact_coordinates`]); a fold replaces it
     /// wholesale.
@@ -208,7 +208,7 @@ impl SideManifests {
     /// Open over what the bundle's manifests already carry.
     pub(in crate::write) fn seeded(
         next_n: u64,
-        membership_extents: Vec<mosaica_store::manifest::MembershipExtent>,
+        membership_extents: super::publications::PackedMembers,
         derived_extents: Vec<mosaica_store::manifest::DerivedExtent>,
         spaces: std::collections::BTreeMap<LayerSpace, HeldSpace>,
         artifact_files: std::collections::BTreeMap<String, mosaica_store::manifest::FileDigest>,
@@ -232,7 +232,8 @@ impl SideManifests {
     pub(super) fn retain_named_artifact_files(&mut self) {
         let named: std::collections::BTreeSet<&str> = self
             .membership_extents
-            .iter()
+            .values()
+            .flatten()
             .map(|extent| extent.path.as_str())
             .chain(self.spaces.values().flat_map(HeldSpace::files))
             .collect();
@@ -332,13 +333,18 @@ impl Executor {
         let (mut level_versions, derived_extents) = self.live.with_artifacts(|store| {
             artifact_coordinates(store, derived, pending, &spaces, &enumerated)
         });
-        // The held lists are the writable slice's shard's.
+        // The held derived files are the first shard's.
         let store_shard = self.live.shards[0].id;
         // The clone may predate these extents, so they are restated from the held lists, and
         // their files' digests with them.
         if fold.is_none() {
-            if let Some(record) = next.shard_mut(store_shard) {
-                record.membership_extents = self.side_manifests.membership_extents.clone();
+            for record in &mut next.shards.records {
+                record.membership_extents = self
+                    .side_manifests
+                    .membership_extents
+                    .get(&record.id)
+                    .cloned()
+                    .unwrap_or_default();
             }
             next.partition
                 .files

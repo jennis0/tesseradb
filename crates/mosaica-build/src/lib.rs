@@ -2076,7 +2076,8 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 &|source| by_source.get(&source).copied(),
                 n,
                 &prefix_dir,
-                layout,
+                &[ShardSpan::whole(n)],
+                tmp.path(),
                 std::slice::from_ref(&view.view_id),
                 // The linear build holds its values on the items rather than in typed entity
                 // columns, which is the only thing about the two builds this rule sees.
@@ -2230,7 +2231,11 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             occupancies: vec![occupancy],
             term_images,
             unique,
-            membership_extents: published_layers.membership_extents.clone(),
+            membership_extents: published_layers
+                .membership_extents
+                .first()
+                .cloned()
+                .unwrap_or_default(),
         }],
     )?;
     report.attribute_coverage = attribute_coverage;

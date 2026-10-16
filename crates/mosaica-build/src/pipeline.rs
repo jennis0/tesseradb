@@ -1785,14 +1785,13 @@ fn build_bundle(
         )?;
         // The member rows are read, so every file's numbers have served their last reader.
         drop(numbering);
-        // The member packs are written over every entity, in shard 0's directory, and cut into
-        // one a shard once the artifact pass has read them (`layers::split_member_packs`).
         crate::layers::publish(
             &mut plan,
             &|number| (number < n).then(|| u64::from(entity_of_ordinal[number as usize])),
             n,
             &prefix_dir,
-            spans[0].layout(),
+            &spans,
+            tmp.path(),
             &view_ids,
             &derived,
             publication_batch,
@@ -2238,12 +2237,10 @@ fn build_bundle(
         published_layers.derived_extents.extend(containment);
         timer.end(BuildStage::ArtifactPass, composed);
     }
-    let (member_packs, member_paths) = crate::layers::split_member_packs(
-        &prefix_dir,
-        &published_layers.membership_extents,
-        &spans,
-    )?;
-    for (shard, extents) in shards.iter_mut().zip(member_packs) {
+    for (shard, extents) in shards
+        .iter_mut()
+        .zip(std::mem::take(&mut published_layers.membership_extents))
+    {
         shard.membership_extents = extents;
     }
 
@@ -2262,7 +2259,6 @@ fn build_bundle(
     other_paths.extend(record_paths);
     other_paths.extend(pairs_paths);
     other_paths.extend(published_layers.paths.iter().cloned());
-    other_paths.extend(member_paths);
     other_paths.extend(artifact_paths);
     let mut report = write_manifests(
         args,

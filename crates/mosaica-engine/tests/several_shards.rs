@@ -1341,3 +1341,149 @@ fn a_scoped_column_flushed_in_one_shard_reopens_in_every_shard() {
     let engine = writing(&several);
     assert_eq!(in_view(&engine), 1);
 }
+
+/// A label layer whose content is served only to a viewer seeing every item it was generated from.
+fn label_layer(name: &str) -> mosaica_types::layer::LayerDeclaration {
+    use mosaica_types::layer::{ContentDeclaration, SuppliedContent, SuppliedRequirement};
+    let mut declaration = flat_declaration(name);
+    declaration.require_member_visibility = None;
+    declaration.content = ContentDeclaration {
+        computed: Vec::new(),
+        supplied: vec![SuppliedContent {
+            name: "label".into(),
+            ty: "text".into(),
+            require_member_visibility: SuppliedRequirement::All,
+        }],
+    };
+    declaration
+}
+
+/// One artifact as a credential is served it: its key, masked count and content, and how many
+/// items its `member_of` leaf matches.
+type ServedArtifact = (Option<String>, u64, Vec<String>, u64);
+
+/// What each credential is served of the layer `t`.
+fn served_layer(engine: &Engine) -> Vec<Vec<ServedArtifact>> {
+    use mosaica_engine::filter::{FilterExpr, MemberOfLeaf};
+    [full_coverage_credential(), subset_credential()]
+        .iter()
+        .map(|credential| {
+            let session = engine.authorise(credential).unwrap();
+            let mut served: Vec<_> = artifacts_of(engine, credential)
+                .into_iter()
+                .map(|artifact| {
+                    let request = ViewportRequest::new("s0", 0, WHOLE_MAP, N as usize).filter(
+                        FilterExpr::MemberOf(MemberOfLeaf {
+                            layer: "t".to_string(),
+                            artifact: artifact.mosaica_id,
+                        }),
+                    );
+                    let out = engine.viewport(&session, request).unwrap();
+                    let matched = out.tiles.iter().map(|tile| tile.matched).sum();
+                    (
+                        artifact.key,
+                        artifact.masked_count,
+                        artifact.content,
+                        matched,
+                    )
+                })
+                .collect();
+            served.sort();
+            served
+        })
+        .collect()
+}
+
+/// A publication with members and generating sets in both shards, a growth adding a shard-1 item
+/// and a page moving a set into shard 1 serve the counts, containment and `member_of` verdicts one
+/// shard holding the same items serves, before a tick, after it and across a restart; the tick
+/// writes a member pack into each shard.
+#[test]
+fn memberships_over_both_shards_serve_as_one_shard_does() {
+    use mosaica_lifecycle::membership::IncomingContent;
+    use mosaica_lifecycle::ShardSets;
+    let one = fixture_sized(N, None);
+    let several = fixture_sized(N, Some(SIZE));
+    let (one_engine, engine) = (one.open(), writing(&several));
+    let in_shard_one: Vec<u64> = items_by_id(&engine, 0..N)
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.is_some_and(|item| item.shard == ShardId::new(1).unwrap()))
+        .map(|(id, _)| id as u64)
+        .collect();
+    // An item of shard 1 the subset credential cannot see, and one it can.
+    let unseen = *in_shard_one.iter().find(|id| *id % 3 != 0).unwrap();
+    let seen = *in_shard_one.iter().find(|id| *id % 3 == 0).unwrap();
+    let write = |engine: &Engine| {
+        let items = items_by_id(engine, 0..N);
+        let sets =
+            |ids: &[u64]| ShardSets::of_items(ids.iter().map(|id| items[*id as usize].unwrap()));
+        engine.register_layer(label_layer("t")).unwrap();
+        let mut artifact = IncomingArtifact::with_content(
+            Some("a".into()),
+            Vec::new(),
+            vec![
+                IncomingContent::new(vec!["near".to_string()], Vec::new()),
+                IncomingContent::new(vec!["wide".to_string()], Vec::new()),
+            ],
+        );
+        let members: Vec<u64> = (0..N).filter(|id| id % 2 == 0 && *id != unseen).collect();
+        artifact.members = sets(&members);
+        artifact.contents[0].generated_from = sets(&[0, seen]);
+        artifact.contents[1].generated_from = sets(&[3, 6, seen]);
+        let mut other = IncomingArtifact::with_content(
+            Some("b".into()),
+            Vec::new(),
+            vec![IncomingContent::new(vec!["b".to_string()], Vec::new())],
+        );
+        other.members = sets(&[1, 2]);
+        other.contents[0].generated_from = sets(&[1]);
+        engine
+            .publish_artifacts("t".into(), 0, vec![artifact, other])
+            .unwrap();
+        let mut joins = IncomingGrowth::from_entities("a".into(), Vec::new());
+        joins.joining = sets(&[unseen]);
+        let mut page =
+            IncomingGrowth::page_of_entities("a".into(), Some(0), Vec::new(), Vec::new());
+        page.joining = sets(&[unseen]);
+        for growth in [joins, page] {
+            engine
+                .grow_memberships("t".into(), 0, vec![growth])
+                .unwrap();
+        }
+    };
+    write(&one_engine);
+    write(&engine);
+    let expected = served_layer(&one_engine);
+    assert_eq!(
+        expected[1]
+            .iter()
+            .find(|a| a.0.as_deref() == Some("a"))
+            .map(|a| a.2.clone()),
+        Some(vec!["wide".to_string()]),
+        "the page took the subset credential's nearer content away"
+    );
+    assert_eq!(served_layer(&engine), expected, "before a tick");
+
+    tick(&one_engine);
+    tick_until(
+        &engine,
+        "each shard's member pack",
+        std::time::Duration::from_secs(30),
+        || {
+            let manifest = side_manifest(&several.root);
+            manifest.shards.records.len() == 2
+                && manifest
+                    .shards
+                    .records
+                    .iter()
+                    .all(|record| !record.membership_extents.is_empty())
+        },
+    );
+    assert_eq!(served_layer(&one_engine), expected);
+    assert_eq!(served_layer(&engine), expected, "after a tick");
+
+    drop(engine);
+    let engine = writing(&several);
+    assert_eq!(served_layer(&engine), expected, "across a restart");
+}

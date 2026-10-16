@@ -1235,20 +1235,16 @@ impl Executor {
             points: executed.clone(),
             artifacts: executed_artifacts.clone(),
         };
-        let repacked = match self.rewrite_level_packs(
-            &to_prefix_dir,
-            ShardLayout::new(&plan.partition, shard_id),
-            manifest_n,
-            &retired,
-        ) {
-            Ok(repacked) => repacked,
-            Err(e) => {
-                discard(&format!(
-                    "its artifact memberships would not be rewritten ({e})"
-                ));
-                return;
-            }
-        };
+        let repacked =
+            match self.rewrite_level_packs(&to_prefix_dir, &plan.partition, manifest_n, &retired) {
+                Ok(repacked) => repacked,
+                Err(e) => {
+                    discard(&format!(
+                        "its artifact memberships would not be rewritten ({e})"
+                    ));
+                    return;
+                }
+            };
 
         stairs.record("7 memberships");
 
@@ -1409,7 +1405,11 @@ impl Executor {
                     text_extents: forward.texts.clone(),
                     // The artifact pass's own output: paths are prefix-relative, so this is the
                     // only list naming files the new prefix contains.
-                    membership_extents: repacked.members.clone(),
+                    membership_extents: repacked
+                        .members
+                        .get(&shard_id)
+                        .cloned()
+                        .unwrap_or_default(),
                     term_image_extents: completed
                         .term_images
                         .iter()
@@ -1535,7 +1535,8 @@ impl Executor {
         // Digested in the new prefix's side-manifest, as a publication's are.
         let artifact_rels = repacked
             .members
-            .iter()
+            .values()
+            .flatten()
             .map(|extent| extent.path.clone())
             .chain(
                 repacked
@@ -2019,12 +2020,14 @@ impl Executor {
     pub(super) fn rewrite_level_packs(
         &self,
         prefix_dir: &std::path::Path,
-        layout: ShardLayout<'_>,
+        partition: &str,
         n: u64,
         retired: &mosaica_lifecycle::membership::Retired,
     ) -> mosaica_store::Result<PackedLevels> {
         let ready = self.live.with_artifacts(|store| store.repack_all(retired));
-        pack_levels(prefix_dir, layout, n, ready, |layer| self.live.space_of(layer))
+        pack_levels(prefix_dir, partition, n, ready, |layer| {
+            self.live.space_of(layer)
+        })
     }
 
     /// Compose and write this prefix's containment partitions, one file per `(layer, level)`.

@@ -327,8 +327,6 @@ pub(crate) struct WritePathState {
     accepted_batches: AcceptedBatches,
     pub(crate) registry: LayerRegistry,
     pub(crate) artifacts: ArtifactStore,
-    /// Every other point shard's slice of every artifact's membership: see [`LiveState::slices`].
-    pub(crate) slices: Vec<(ShardId, Arc<ArtifactStore>)>,
     /// The view roster: which views of which groups exist, and which keys are burnt. Rebuilt
     /// exactly as the layer registry beside it is: seeded from the manifests, then the log
     /// replayed on top.
@@ -382,7 +380,6 @@ impl WritePath {
                 accepted_batches: Mutex::new(state.accepted_batches),
                 registry: Mutex::new(state.registry),
                 artifacts: Mutex::new(state.artifacts),
-                slices: state.slices,
                 roster: Mutex::new(state.roster),
                 attributes: Mutex::new(state.attributes),
                 vocabularies: Mutex::new(state.vocabularies),
@@ -488,24 +485,23 @@ impl WritePath {
             seeded_refs,
         ) = {
             let generation = generation.load();
-            let mut members = Vec::new();
+            let mut members = executor::PackedMembers::new();
             let mut derived = Vec::new();
             let mut spaces = std::collections::BTreeMap::new();
             let mut artifact_files = std::collections::BTreeMap::new();
             let mut refs = std::collections::BTreeMap::new();
             let store_shard = live.shards[0].id;
             for (phash, partition) in &generation.bundle.partitions {
-                let Some(shard) = partition.shard(store_shard) else {
-                    continue;
-                };
-                let record = &shard.record;
-                members.extend(
-                    record
-                        .membership_extents
-                        .iter()
-                        .filter(|e| live.holds_space(e.space))
-                        .cloned(),
-                );
+                for shard in &partition.shards {
+                    members.entry(shard.record.id).or_default().extend(
+                        shard
+                            .record
+                            .membership_extents
+                            .iter()
+                            .filter(|e| live.holds_space(e.space))
+                            .cloned(),
+                    );
+                }
                 derived.extend(
                     partition
                         .derived_by_shard()

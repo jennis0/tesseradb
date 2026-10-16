@@ -382,23 +382,25 @@ fn prepare_set_page(
     withdrawn: &mut Vec<(usize, u16)>,
     index: usize,
 ) -> Result<Option<crate::wal::MembershipGrowth>, RegistryError> {
-    let content = store
-        .get(layer_name, level, ordinal)
-        .and_then(|record| record.contents.get(rank as usize))
+    // Joins before leaves, which is the order the store applies them in and the order that makes
+    // a paged replacement safe (`ingest.md` §1.1, §2.2).
+    let (changed, cardinality) = store
+        .paged(
+            layer_name,
+            level,
+            ordinal,
+            rank,
+            &join.joining,
+            &join.leaving,
+        )
         .ok_or_else(|| RegistryError::NoSuchContent {
             layer: layer_name.to_string(),
             key: join.key.clone(),
             rank,
         })?;
-    // Joins before leaves, which is the order the store applies them in and the order that makes
-    // a paged replacement safe (`ingest.md` §1.1, §2.2).
-    let mut next = content.generated_from.clone();
-    next.or_inplace(join.joining.shard_zero());
-    next.andnot_inplace(join.leaving.shard_zero());
-    if next == content.generated_from {
+    if !changed {
         return Ok(None);
     }
-    let cardinality = next.cardinality();
     if cardinality == 0 {
         withdrawn.push((index, rank));
     }
@@ -1274,7 +1276,15 @@ impl LayerRegistry {
             // content against a set they did not declare.
             for (rank, content) in artifact.contents.iter().enumerate() {
                 match record.contents.get(rank) {
-                    Some(held) if held.generated_from != *content.generated_from.shard_zero() => {
+                    Some(_)
+                        if !store.set_is(
+                            layer_name,
+                            level,
+                            ordinal,
+                            rank as u16,
+                            &content.generated_from,
+                        ) =>
+                    {
                         return Err(RegistryError::PartConflict {
                             layer: layer_name.to_string(),
                             level,
@@ -1305,10 +1315,9 @@ impl LayerRegistry {
                 ordinal,
                 part,
             }));
-            let mut delta = artifact.members.shard_zero().clone();
-            record.members.remove_from(&mut delta);
+            let delta = store.not_held(layer_name, level, ordinal, &artifact.members);
             if !delta.is_empty() {
-                joins.push((ordinal, ShardSets::in_shard(ShardId::ZERO, delta)));
+                joins.push((ordinal, delta));
             }
         }
         let growth = crate::membership::growth_record(
@@ -2346,16 +2355,13 @@ impl LayerRegistry {
             // growth pin is released by the compaction fold alone. Taken against the membership as
             // it stands before the batch, which is the state every row of the batch is prepared
             // against and the state `growth_receipt` counts `joined` over.
-            let mut joining = join.joining.shard_zero().clone();
-            if let Some(record) = store.get(layer_name, level, ordinal) {
-                record.members.remove_from(&mut joining);
-            }
+            let joining = store.not_held(layer_name, level, ordinal, &join.joining);
             if joining.is_empty() {
                 continue;
             }
             growth.push(crate::wal::MembershipGrowth {
                 ordinal,
-                joining: ShardSets::in_shard(ShardId::ZERO, joining).to_wal(),
+                joining: joining.to_wal(),
                 leaving: Vec::new(),
                 set: crate::wal::GrownSet::Membership,
             });
