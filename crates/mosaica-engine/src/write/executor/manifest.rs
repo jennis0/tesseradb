@@ -79,11 +79,13 @@ pub(super) fn shard_overlays(generation: &Generation) -> impl Iterator<Item = (S
 
 /// Replace a manifest's deny fields, each named shard's and each layer space's, with the overlays'
 /// live state, restated fresh at every write as two separate sets and never their union:
-/// publishing the union would make every deletion look retirable by an unsuppress.
+/// publishing the union would make every deletion look retirable by an unsuppress. Each space's
+/// deletions are owed by the shards `live` says still hold something of them.
 pub(super) fn write_deny_state<'a>(
     manifest: &mut SegmentsManifest,
     overlays: impl IntoIterator<Item = (ShardId, &'a Overlay)>,
     spaces: &crate::LayerSpaces,
+    live: &LiveState,
 ) {
     for (shard, overlay) in overlays {
         let Some(record) = manifest.shard_mut(shard) else {
@@ -95,7 +97,8 @@ pub(super) fn write_deny_state<'a>(
     for space in spaces.keys() {
         mosaica_store::manifest::layer_space_mut(&mut manifest.layer_spaces, *space);
     }
-    let shards: Vec<ShardId> = manifest.shards.records.iter().map(|r| r.id).collect();
+    let shards: std::collections::BTreeSet<ShardId> =
+        manifest.shards.records.iter().map(|r| r.id).collect();
     for record in &mut manifest.layer_spaces {
         let overlay = match spaces.get(&record.space) {
             Some(parts) => &*parts.overlay,
@@ -104,19 +107,11 @@ pub(super) fn write_deny_state<'a>(
         record.deny = EntitySet::of(overlay.suppressed_set());
         let deleted = overlay.deleted_set();
         record.tombstones = EntitySet::of(deleted);
-        // Every deletion is owed by every shard: each shard's compaction removes it from its own
-        // slice.
-        record.owed = if deleted.is_empty() {
-            Vec::new()
-        } else {
-            shards
-                .iter()
-                .map(|&shard| mosaica_store::manifest::OwedDeletions {
-                    shard,
-                    artifacts: EntitySet::of(deleted),
-                })
-                .collect()
+        record.owed = match deleted.is_empty() {
+            true => Vec::new(),
+            false => live.owed_deletions(record.space, deleted),
         };
+        record.owed.retain(|owed| shards.contains(&owed.shard));
     }
 }
 

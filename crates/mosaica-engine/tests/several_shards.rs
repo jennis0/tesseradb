@@ -903,3 +903,441 @@ fn a_flush_or_merge_in_one_shard_leaves_the_others_projections_and_fragments() {
         "a merge moves no watermark"
     );
 }
+
+/// Shard `shard`'s item `entity`, as a change names it.
+fn item_in(shard: u32, entity: u64) -> Target {
+    Target::Item(ShardId::new(shard).unwrap(), EntityId::new(entity))
+}
+
+/// The entities a deny set names.
+fn ids_in(set: &EntitySet) -> Vec<u32> {
+    set.entities().expect("the set decodes").iter().collect()
+}
+
+/// Each shard's `(suppressed, deleted)` in the side-manifest, by shard.
+fn shard_denies(root: &std::path::Path) -> Vec<(Vec<u32>, Vec<u32>)> {
+    side_manifest(root)
+        .shards
+        .records
+        .iter()
+        .map(|record| (ids_in(&record.deny), ids_in(&record.tombstones)))
+        .collect()
+}
+
+/// A deletion and a suppression of an item in each shard, then an unsuppression in shard 1, serve
+/// as the same changes to one shard holding the same items serve them; each shard's record holds
+/// its own denies; a restart after a rotation opens with them.
+#[test]
+fn denies_in_both_shards_serve_as_one_shard_and_survive_a_restart() {
+    let one = fixture_sized(N, None);
+    let several = fixture_sized(N, Some(SIZE));
+    let (one_engine, engine) = (one.open(), writing(&several));
+    // Shard 1's entities 3, 4 and 6 are entities 25 + 3, 25 + 4 and 25 + 6 of the bundle of one
+    // shard.
+    let base = SIZE;
+    engine
+        .accept_changes(vec![
+            (item_in(0, 2), ChangeOp::Suppress),
+            (item_in(0, 5), ChangeOp::Delete),
+            (item_in(1, 3), ChangeOp::Suppress),
+            (item_in(1, 4), ChangeOp::Delete),
+            (item_in(1, 6), ChangeOp::Suppress),
+        ])
+        .unwrap();
+    one_engine
+        .accept_changes(vec![
+            (item_in(0, 2), ChangeOp::Suppress),
+            (item_in(0, 5), ChangeOp::Delete),
+            (item_in(0, base + 3), ChangeOp::Suppress),
+            (item_in(0, base + 4), ChangeOp::Delete),
+            (item_in(0, base + 6), ChangeOp::Suppress),
+        ])
+        .unwrap();
+    engine
+        .accept_changes(vec![(item_in(1, 6), ChangeOp::Unsuppress)])
+        .unwrap();
+    one_engine
+        .accept_changes(vec![(item_in(0, base + 6), ChangeOp::Unsuppress)])
+        .unwrap();
+    for credential in [full_coverage_credential(), subset_credential()] {
+        assert_eq!(
+            served(&engine, &credential),
+            served(&one_engine, &credential)
+        );
+    }
+    assert_eq!(
+        (engine.overlay_depth(), engine.retirable_deletions()),
+        (4, 2)
+    );
+
+    let wanted = vec![(vec![2], vec![5]), (vec![3], vec![4])];
+    tick_until(
+        &engine,
+        "each shard's deny state's publication",
+        std::time::Duration::from_secs(30),
+        || shard_denies(&several.root) == wanted,
+    );
+    // The rotation's snapshot carries each shard's denies, and the changes leave the log.
+    reclaim_log(&engine);
+    let changes = mosaica_lifecycle::wal::Wal::open(&several.wal)
+        .unwrap()
+        .records()
+        .filter(|r| {
+            matches!(
+                r,
+                Ok((_, mosaica_lifecycle::wal::WalRecord::ChangeBatch { .. }))
+            )
+        })
+        .count();
+    assert_eq!(changes, 0);
+
+    let expected = served(&one_engine, &full_coverage_credential());
+    drop(engine);
+    let engine = writing(&several);
+    assert_eq!(served(&engine, &full_coverage_credential()), expected);
+    assert_eq!(
+        (engine.overlay_depth(), engine.retirable_deletions()),
+        (4, 2)
+    );
+}
+
+/// An identifier naming a shard-1 item at a tenancy its number is not at names nothing; the item's
+/// own names it in shard 1.
+#[test]
+fn an_identifier_at_another_tenancy_names_nothing_in_its_shard() {
+    let several = fixture_sized(N, Some(SIZE));
+    let engine = writing(&several);
+    let at = |tenancy: u16| {
+        let high = mosaica_types::ItemHigh::new(
+            ShardId::new(1).unwrap(),
+            mosaica_types::Tenancy::new(tenancy).unwrap(),
+        );
+        test_key().forward(high, EntityId::new(3)).unwrap()
+    };
+    assert_eq!(
+        engine.resolve_targets(&[at(0), at(1)]).unwrap(),
+        vec![Some(item_in(1, 3)), None]
+    );
+    let table = mosaica_engine::AddressTable {
+        rows: 1,
+        mosaica_id: Some(vec![Some(at(1))]),
+        columns: Vec::new(),
+    };
+    assert_eq!(
+        engine.name_targets(&table).unwrap().verdicts,
+        vec![Err(Refusal::UnknownMosaicaId { row: 0 })]
+    );
+}
+
+/// A deletion of a shard-1 item resolved before an edit moved the item reaches it where it is now:
+/// the item is served to no one and its `mosaica_id` names nothing, before and after a restart.
+#[test]
+fn a_deletion_resolved_before_an_edit_follows_the_item_in_its_shard() {
+    let several = fixture_sized(N, Some(SIZE));
+    let engine = writing(&several);
+    let moved = insert(&engine, "moved");
+    let table = by_identifier_and_id(&[(moved.raw(), key_id("moved"))]);
+    let named = engine.name_items(&table).unwrap();
+    let resolved = named.verdicts[0].clone().expect("the row names the item");
+    assert_eq!(resolved.shard, ShardId::new(1).unwrap());
+
+    let receipt = engine
+        .ingest(mosaica_engine::IngestRequest {
+            batch_id: "edit".to_string(),
+            body_hash: [8; 32],
+            view: Some("s0".to_string()),
+            rows: vec![mosaica_lifecycle::IngestRow {
+                mosaica_id: Some(moved),
+                labels: Some(vec![b"0".to_vec()]),
+                position: Some((6.0, 6.0)),
+                scalars: keyed("moved"),
+                scoped: Vec::new(),
+                omitted: Vec::new(),
+            }],
+            artifacts: Default::default(),
+            strict: true,
+            mosaica_id_column: false,
+        })
+        .expect("the edit is accepted");
+    assert_eq!(
+        receipt.mosaica_ids[0],
+        Some(moved),
+        "an edit keeps its identifier"
+    );
+    assert_ne!(
+        engine.resolve_targets(&[moved]).unwrap(),
+        vec![Some(resolved.target())],
+        "the edit moved the item"
+    );
+
+    engine
+        .accept_changes_at(vec![(resolved.target(), ChangeOp::Delete)], named.at)
+        .unwrap();
+    let gone = |engine: &Engine| {
+        assert_eq!(engine.resolve_targets(&[moved]).unwrap(), vec![None]);
+        let ids = served(engine, &full_coverage_credential()).ids;
+        assert!(!ids.contains(&key_id("moved")), "the item is served");
+        assert_eq!(ids.len(), N as usize);
+    };
+    gone(&engine);
+    drop(engine);
+    gone(&writing(&several));
+}
+
+/// Items the grouped fixture builds: `s0` holds the first [`N`], and the group `g`'s view `g:k`
+/// holds those from [`GROUPED_FROM`] to here, so the last ten are in `g:k` alone.
+const GROUPED: u64 = 50;
+const GROUPED_FROM: u64 = 30;
+
+/// The fixture with a group `g` whose view `k` holds items [`GROUPED_FROM`]..[`GROUPED`],
+/// declaring `[shards] size` where `shard_size` is given.
+fn grouped_fixture(shard_size: Option<u64>) -> Fixture {
+    use arrow::array::Float64Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path();
+    let (points, every, pairs) = (
+        dir.join("points.parquet"),
+        dir.join("every.parquet"),
+        dir.join("pairs.parquet"),
+    );
+    write_points_n(&points, N);
+    write_points_n(&every, GROUPED);
+    write_pairs_n(&pairs, GROUPED);
+    let grouped = dir.join("grouped.parquet");
+    let ids: Vec<u64> = (GROUPED_FROM..GROUPED).collect();
+    let schema = std::sync::Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            std::sync::Arc::new(UInt64Array::from(ids.clone())),
+            std::sync::Arc::new(Float64Array::from(
+                ids.iter()
+                    .map(|e| ((e * 41) % 1000) as f64)
+                    .collect::<Vec<_>>(),
+            )),
+            std::sync::Arc::new(Float64Array::from(
+                ids.iter()
+                    .map(|e| ((e * 59) % 1000) as f64)
+                    .collect::<Vec<_>>(),
+            )),
+        ],
+    )
+    .unwrap();
+    let mut writer = parquet::arrow::ArrowWriter::try_new(
+        std::fs::File::create(&grouped).unwrap(),
+        schema,
+        None,
+    )
+    .unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+
+    let view = |id: &str, points: &std::path::Path| mosaica_build::ViewArgs {
+        visibility: None,
+        view_id: id.to_string(),
+        projection: mosaica_spatial::Projection::None,
+        extent: extent(),
+        points: points.to_path_buf(),
+        point_fields: Default::default(),
+        select: None,
+        access: mosaica_build::config::AccessInput::relation(pairs.clone()),
+    };
+    let e = extent();
+    let root = dir.join("bundle");
+    let schema = id_schema();
+    mosaica_build::build(&mosaica_build::BuildArgs {
+        views: vec![view("s0", &points), view("g:k", &grouped)],
+        anchor: 0,
+        groups: vec![mosaica_build::GroupDescriptor {
+            title: None,
+            point_default: Some("public".to_string()),
+            visibility: None,
+            name: "g".to_string(),
+            members_of: None,
+            views: vec![mosaica_build::GroupViewDescriptor {
+                key: "k".to_string(),
+                visibility: None,
+                metadata: Default::default(),
+            }],
+            quantisation: mosaica_build::Quantisation {
+                x_min: e.x_min,
+                x_max: e.x_max,
+                y_min: e.y_min,
+                y_max: e.y_max,
+            },
+            projection: mosaica_spatial::Projection::None,
+            metadata: Vec::new(),
+            scoped_scalars: Vec::new(),
+        }],
+        scoped_attributes: Vec::new(),
+        attribute_sources: mosaica_build::config::AttributeSource::over(every, &schema),
+        out: root.clone(),
+        limit: None,
+        shard_size,
+        strict: false,
+        identity_key: test_key(),
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
+        emit_oracle_pairs: true,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema,
+    })
+    .expect("the grouped fixture builds");
+    Fixture {
+        root,
+        cache: dir.join("cache"),
+        wal: dir.join("wal.log"),
+        _tmp: tmp,
+    }
+}
+
+/// The item each built `id` of `ids` names, `None` where it names none.
+fn items_by_id(engine: &Engine, ids: std::ops::Range<u64>) -> Vec<Option<ItemAt>> {
+    let table = mosaica_engine::AddressTable {
+        rows: ids.clone().count(),
+        mosaica_id: None,
+        columns: vec![(
+            "id".to_string(),
+            ids.map(|id| Some(mosaica_engine::AddressValue::Text(id.to_string())))
+                .collect(),
+        )],
+    };
+    engine
+        .name_items(&table)
+        .unwrap()
+        .verdicts
+        .into_iter()
+        .map(Result::ok)
+        .collect()
+}
+
+/// Dropping a view deletes, in each shard, the items it leaves in no view: the drop's count is
+/// the one shard's holding the same items, those items name nothing, every other item stays, and
+/// a restart before any compaction agrees.
+#[test]
+fn a_view_drop_deletes_the_items_it_leaves_in_no_view_in_every_shard() {
+    let one = grouped_fixture(None);
+    let several = grouped_fixture(Some(SIZE));
+    let (one_engine, engine) = (one.open(), writing(&several));
+    let alone: Vec<ItemAt> = items_by_id(&engine, N..GROUPED)
+        .into_iter()
+        .map(|item| item.expect("each built item holds its id"))
+        .collect();
+    let shards: std::collections::BTreeSet<ShardId> = alone.iter().map(|item| item.shard).collect();
+    assert_eq!(
+        shards.len(),
+        2,
+        "the items in `g:k` alone are in both shards"
+    );
+
+    let dropped = engine.drop_view("g".into(), "k".into()).unwrap();
+    let one_dropped = one_engine.drop_view("g".into(), "k".into()).unwrap();
+    assert_eq!(dropped.deleted, GROUPED - N);
+    assert_eq!(dropped.deleted, one_dropped.deleted);
+
+    let check = |engine: &Engine| {
+        assert!(items_by_id(engine, N..GROUPED).iter().all(Option::is_none));
+        assert!(items_by_id(engine, 0..N).iter().all(Option::is_some));
+        assert_eq!(engine.retirable_deletions(), GROUPED - N);
+    };
+    check(&engine);
+    check(&one_engine);
+    let expected = served(&one_engine, &full_coverage_credential());
+    assert_eq!(served(&engine, &full_coverage_credential()), expected);
+    drop(engine);
+    let engine = writing(&several);
+    check(&engine);
+    assert_eq!(served(&engine, &full_coverage_credential()), expected);
+}
+
+/// A group-scoped column of a view created at a running service has a base only in the shard a
+/// flush wrote one in: the other shard reopens without one, and the view serves after a restart
+/// what it served before it.
+#[test]
+fn a_scoped_column_flushed_in_one_shard_reopens_in_every_shard() {
+    let several = fixture_sized(N, Some(SIZE));
+    let engine = writing(&several);
+    engine
+        .create_view_group(mosaica_lifecycle::wal::ViewGroupDeclaration {
+            name: "g".into(),
+            title: None,
+            projection: "none".into(),
+            frame: mosaica_engine::DeclaredFrame {
+                x_min: 0.0,
+                x_max: 1000.0,
+                y_min: 0.0,
+                y_max: 1000.0,
+            },
+            visibility: None,
+            point_default: None,
+            members: None,
+            metadata: Vec::new(),
+        })
+        .unwrap();
+    engine
+        .declare_attribute(mosaica_engine::AttributeRequest {
+            name: "heat".into(),
+            title: None,
+            ty: "u64".into(),
+            vocabulary: None,
+            analyser: None,
+            index: true,
+            render: false,
+            scope: mosaica_types::layer::LayerScope::Group("g".into()),
+            unique: false,
+        })
+        .unwrap();
+    engine
+        .create_view("g".into(), "k".into(), None, Default::default())
+        .unwrap();
+    engine
+        .ingest(mosaica_engine::IngestRequest {
+            batch_id: "hot".to_string(),
+            body_hash: [9; 32],
+            view: Some("g:k".to_string()),
+            rows: vec![mosaica_lifecycle::IngestRow {
+                mosaica_id: None,
+                labels: Some(vec![b"0".to_vec()]),
+                position: Some((5.0, 5.0)),
+                scalars: keyed("hot"),
+                scoped: vec![mosaica_lifecycle::wal::WalScalar::U64(7)],
+                omitted: Vec::new(),
+            }],
+            artifacts: Default::default(),
+            strict: true,
+            mosaica_id_column: false,
+        })
+        .expect("the insert is accepted");
+    publish_buffered(&engine);
+    let named: Vec<Vec<String>> = side_manifest(&several.root)
+        .shards
+        .records
+        .iter()
+        .map(|record| {
+            record
+                .scoped_columns
+                .iter()
+                .map(|c| c.view.clone())
+                .collect()
+        })
+        .collect();
+    assert_eq!(named, vec![Vec::<String>::new(), vec!["g:k".to_string()]]);
+
+    let in_view = |engine: &Engine| {
+        let session = engine.authorise(&full_coverage_credential()).unwrap();
+        let request = ViewportRequest::new("g:k", 0, WHOLE_MAP, N as usize);
+        engine.viewport(&session, request).unwrap().points.len()
+    };
+    assert_eq!(in_view(&engine), 1);
+    drop(engine);
+    let engine = writing(&several);
+    assert_eq!(in_view(&engine), 1);
+}

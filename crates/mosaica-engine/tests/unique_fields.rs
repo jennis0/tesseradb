@@ -134,6 +134,11 @@ fn fixture_with(unique: bool) -> Fixture {
 /// The fixture over `views`, each holding every built item, so an item ingested into one can
 /// join another.
 fn fixture_of(unique: bool, views: &[&str]) -> Fixture {
+    fixture_sized_of(unique, views, None)
+}
+
+/// [`fixture_of`], declaring `[shards] size` where `shard_size` is given.
+fn fixture_sized_of(unique: bool, views: &[&str], shard_size: Option<u64>) -> Fixture {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("bundle");
     let points = tmp.path().join("points.parquet");
@@ -170,7 +175,7 @@ fn fixture_of(unique: bool, views: &[&str]) -> Fixture {
         attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
         out: root.clone(),
         limit: None,
-        shard_size: None,
+        shard_size,
         strict: false,
         identity_key: test_key(),
         layers: Vec::new(),
@@ -1552,5 +1557,214 @@ fn a_new_unique_column_declared_at_runtime_is_enforced_and_indexed() {
             with_isbn(&engine, "i3", "10.i/3", BIG * 15 + 2, "978-1"),
             3
         )]
+    )));
+}
+
+/// The fixture built as two shards, of 50 and 40 items.
+fn two_shards(unique: bool) -> Fixture {
+    fixture_sized_of(unique, &["s0"], Some(50))
+}
+
+/// [`engine_over`], writing both shards.
+fn writing_two(fx: &Fixture) -> Engine {
+    let mut engine = Engine::open_writing_several_shards(
+        &fx.root,
+        &fx.tmp.path().join("cache"),
+        &fx.tmp.path().join("wal.log"),
+        EngineConfig {
+            flush_max_age_secs: 3600,
+            flush_max_items: usize::MAX,
+            ..config_uncapped()
+        },
+    )
+    .expect("the engine opens");
+    engine.start_write_executor(8).expect("the executor starts");
+    engine.set_background_refresh_for_test(false);
+    engine
+}
+
+/// The item the build made of `source`, in its shard, `None` where it no longer holds its id.
+fn named_item(engine: &Engine, source: u64) -> Option<ItemAt> {
+    let table = mosaica_engine::AddressTable {
+        rows: 1,
+        mosaica_id: None,
+        columns: vec![(
+            "id".to_string(),
+            vec![Some(mosaica_engine::AddressValue::Text(source.to_string()))],
+        )],
+    };
+    engine.name_items(&table).unwrap().verdicts[0].clone().ok()
+}
+
+/// [`named_item`] of an item that holds its id.
+fn built_item(engine: &Engine, source: u64) -> ItemAt {
+    named_item(engine, source).expect("the built item holds its id")
+}
+
+/// A built source whose item is in `shard`.
+fn source_in(engine: &Engine, shard: u32) -> u64 {
+    (0..N)
+        .find(|source| built_item(engine, *source).shard == ShardId::new(shard).unwrap())
+        .expect("the shard holds a built item")
+}
+
+/// The `mosaica_id` of the item the build made of `source`.
+fn built_id(engine: &Engine, source: u64) -> mosaica_types::MosaicaId {
+    let read = read_items(
+        engine,
+        &full(engine),
+        &Items::new(mosaica_engine::RecordsOrder::Stored),
+    );
+    read.rows_with_ids
+        .iter()
+        .find(|(_, id)| *id == source)
+        .map(|(mosaica_id, _)| mosaica_types::MosaicaId::new(*mosaica_id))
+        .expect("the built item is served")
+}
+
+/// One row naming the built item of `source` by its `mosaica_id` and giving it `doi` and `gid`.
+fn giving_built(
+    engine: &Engine,
+    batch: &str,
+    source: u64,
+    doi: &str,
+    gid: u64,
+) -> Result<Vec<EntityId>, AcceptError> {
+    let r = row(engine, batch, b"0", doi, gid, 1_000 + (gid % 1_000) as i64);
+    let receipt = engine.ingest(mosaica_engine::IngestRequest {
+        batch_id: batch.to_string(),
+        body_hash: hash_of(batch),
+        view: Some("s0".to_string()),
+        rows: vec![mosaica_lifecycle::IngestRow {
+            mosaica_id: Some(built_id(engine, source)),
+            labels: Some(r.descriptors),
+            position: Some((r.x, r.y)),
+            scalars: r.scalars,
+            scoped: Vec::new(),
+            omitted: Vec::new(),
+        }],
+        artifacts: Default::default(),
+        strict: true,
+        mosaica_id_column: false,
+    })?;
+    let ids: Vec<_> = receipt.mosaica_ids.iter().flatten().copied().collect();
+    Ok(items_of(engine, &ids).into_iter().flatten().collect())
+}
+
+/// **A value held in one shard refuses it to an item of another**: a row giving a shard-1 item a
+/// value held by shard 0's base run, by shard 1's buffer, or by a run a flush wrote in shard 1
+/// names two items and is refused; deleting the holder frees the value, and a restart keeps what
+/// was decided.
+#[test]
+fn a_value_held_in_one_shard_is_refused_to_an_item_of_another() {
+    let fx = two_shards(true);
+    let engine = writing_two(&fx);
+    let (zero, one) = (source_in(&engine, 0), source_in(&engine, 1));
+    let give = |engine: &Engine, batch: &str, doi: &str, gid: u64| {
+        giving_built(engine, batch, one, doi, gid)
+    };
+    assert!(
+        is_taken(give(&engine, "base", &doi_of(zero), BIG + 2_020)),
+        "shard 0's base run holds it"
+    );
+    ingest(
+        &engine,
+        "first",
+        vec![row(&engine, "f", b"0", "10.two/1", BIG + 2_021, 8_001)],
+    );
+    assert!(
+        is_taken(give(&engine, "buffered", "10.two/1", BIG + 2_022)),
+        "shard 1's buffer holds it"
+    );
+    publish_buffered(&engine);
+    assert!(
+        is_taken(give(&engine, "flushed", "10.two/1", BIG + 2_023)),
+        "a run flushed in shard 1 holds it"
+    );
+
+    engine
+        .accept_changes(vec![(built_item(&engine, zero).target(), ChangeOp::Delete)])
+        .unwrap();
+    let holder = give(&engine, "freed", &doi_of(zero), BIG + 2_024).expect("the value is free")[0];
+    assert_eq!(
+        unique_holders(&engine, "doi", &[doi_of(zero)]).unwrap(),
+        vec![Some(holder)],
+        "the item the row named holds the freed value"
+    );
+
+    let engine = {
+        drop(engine);
+        writing_two(&fx)
+    };
+    assert_eq!(
+        unique_holders(&engine, "doi", &[doi_of(zero)]).unwrap(),
+        vec![Some(holder)]
+    );
+    let other = (0..N)
+        .find(|source| {
+            *source != one && named_item(&engine, *source).is_some_and(|item| item.shard.raw() == 1)
+        })
+        .unwrap();
+    assert!(is_taken(giving_built(
+        &engine,
+        "restarted",
+        other,
+        &doi_of(zero),
+        BIG + 2_025
+    )));
+}
+
+/// **A declaration over a value held in two shards is refused**, whether the second holder is
+/// buffered or flushed; once it is deleted, the declaration holds and answers in both shards.
+#[test]
+fn a_declaration_over_a_value_held_in_two_shards_is_refused() {
+    let fx = two_shards(false);
+    let engine = writing_two(&fx);
+    let (zero, one) = (source_in(&engine, 0), source_in(&engine, 1));
+    let twin = ingest(
+        &engine,
+        "twin",
+        vec![row(&engine, "tw", b"0", &doi_of(zero), BIG + 2_030, 9_000)],
+    )[0];
+    let refused = |engine: &Engine| {
+        matches!(
+            declare(engine, "doi", true),
+            Err(AcceptError::Exec(ExecError::UniqueTaken { .. }))
+        )
+    };
+    assert!(refused(&engine), "a buffered holder in shard 1");
+    publish_buffered(&engine);
+    assert!(refused(&engine), "a flushed holder in shard 1");
+    assert!(!is_unique(&engine, "doi"));
+
+    engine
+        .accept_changes(vec![(
+            ItemAt::new(ShardId::new(1).unwrap(), twin).target(),
+            ChangeOp::Delete,
+        )])
+        .unwrap();
+    assert!(declare(&engine, "doi", true).is_ok());
+    let both = text_in("doi", &[doi_of(zero), doi_of(one)]);
+    assert_eq!(matching(&engine, &full(&engine), both.clone()).len(), 2);
+    assert!(is_taken(giving_built(
+        &engine,
+        "dup",
+        one,
+        &doi_of(zero),
+        BIG + 2_031
+    )));
+
+    let engine = {
+        drop(engine);
+        writing_two(&fx)
+    };
+    assert!(is_unique(&engine, "doi"));
+    assert_eq!(matching(&engine, &full(&engine), both).len(), 2);
+    assert!(is_taken(giving_built(
+        &engine,
+        "dup-2",
+        one,
+        &doi_of(zero),
+        BIG + 2_032
     )));
 }

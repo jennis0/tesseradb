@@ -484,9 +484,7 @@ impl Executor {
                 .shard(item.shard)
                 .is_none_or(|shard| shard.overlay.is_deleted(item.entity))
         };
-        let write_shard = self.live.write_shard().id;
-        let stale =
-            crate::unique::moved_since(&generation, write_shard, &keys, unique_seq, creates)
+        let stale = crate::unique::moved_since(&generation, &keys, unique_seq, creates)
                 || edits.iter().any(|submitted| {
                     let old = submitted.edit.item();
                     deleted(old)
@@ -888,7 +886,7 @@ impl Executor {
         let mut buffer = (*shard.buffer).clone();
         mark = self.health.lap(WriteStage::ApplyBufferClone, mark);
         let declared = &generation.bundle.manifest.declared_scalars;
-        let unique = !shard.unique_live.is_empty_schema();
+        let unique = !generation.unique_live.is_empty_schema();
 
         // What the buffered-row lists grow by: every entity this window buffered a row for.
         let mut inserted: Vec<EntityId> = Vec::new();
@@ -936,9 +934,12 @@ impl Executor {
         // A joining row's values are its item's, whose entries are held already. An edited item's
         // old entity names nothing, so its entries go.
         let unique_live = unique.then(|| {
-            let mut unique_live = (*shard.unique_live).clone();
+            let mut unique_live = (*generation.unique_live).clone();
             if !deleted.is_empty() {
-                unique_live.remove_entities(&deleted.iter().map(|e| e.raw() as u32).collect());
+                unique_live.remove_entities(
+                    shard.id(),
+                    &deleted.iter().map(|e| e.raw() as u32).collect(),
+                );
             }
             unique_live.add(
                 declared,
@@ -951,7 +952,12 @@ impl Executor {
                             .chain(entry.edits().iter().flat_map(|edit| &edit.rows))
                     })
                     .filter(|row| !row.join)
-                    .map(|row| (row.entity_id, row.scalars.as_slice())),
+                    .map(|row| {
+                        (
+                            ItemAt::new(row.shard, row.entity_id),
+                            row.scalars.as_slice(),
+                        )
+                    }),
             );
             unique_live
         });
@@ -974,7 +980,7 @@ impl Executor {
             g.vocabularies = Arc::new(vocabularies);
             g.suggest = suggest;
             if let Some(unique_live) = unique_live {
-                s.unique_live = Arc::new(unique_live);
+                g.unique_live = Arc::new(unique_live);
             }
             if let Some(edited_live) = edited_live {
                 s.edited_live = Arc::new(edited_live);

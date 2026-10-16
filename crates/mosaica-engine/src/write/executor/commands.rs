@@ -292,7 +292,7 @@ impl Executor {
                 reply,
             } => {
                 if !stamp.follow_since(&self.generation.load_full(), |generation| {
-                    crate::edited::follow_changes(generation.only_shard(), &mut changes)
+                    crate::edited::follow_changes(generation, &mut changes)
                 }) {
                     reply.fail(ExecError::Stale);
                     return;
@@ -830,30 +830,36 @@ impl Executor {
             crate::attributes::CompiledAttribute::Scoped(f) => (Vec::new(), vec![f.clone()]),
         };
         let manifest = generation.bundle.manifest.with_attributes(&entity, &scoped);
-        // An entity-scoped column takes an empty stack in the filter columns, at its position in
-        // the served list; a scoped family's per-view columns are opened by the first flush that
-        // writes one, as a family declared at the build is for a view created since. Built before
-        // the append, so a column this process cannot hold is refused with nothing written.
-        let shard = generation.only_shard();
-        let filter_columns = match &compiled {
-            crate::attributes::CompiledAttribute::Entity(d) => {
-                let declared_index = manifest.declared_scalars.len() - 1;
-                match shard.filter_columns.with_runtime_column(
-                    d,
-                    declared_index,
-                    &manifest.vocabularies,
-                ) {
-                    Ok(columns) => Arc::new(columns),
-                    Err(e) => {
-                        reply.fail(ExecError::AttributeRefused {
-                            detail: format!("attribute '{}': {e}", request.name),
-                        });
-                        return;
+        // An entity-scoped column takes an empty stack in every shard's filter columns, at its
+        // position in the served list; a scoped family's per-view columns are opened by the first
+        // flush that writes one, as a family declared at the build is for a view created since.
+        // Built before the append, so a column this process cannot hold is refused with nothing
+        // written.
+        let mut filter_columns = Vec::new();
+        for shard in generation.shards() {
+            let columns = match &compiled {
+                crate::attributes::CompiledAttribute::Entity(d) => {
+                    let declared_index = manifest.declared_scalars.len() - 1;
+                    match shard.filter_columns.with_runtime_column(
+                        d,
+                        declared_index,
+                        &manifest.vocabularies,
+                    ) {
+                        Ok(columns) => Arc::new(columns),
+                        Err(e) => {
+                            reply.fail(ExecError::AttributeRefused {
+                                detail: format!("attribute '{}': {e}", request.name),
+                            });
+                            return;
+                        }
                     }
                 }
-            }
-            crate::attributes::CompiledAttribute::Scoped(_) => Arc::clone(&shard.filter_columns),
-        };
+                crate::attributes::CompiledAttribute::Scoped(_) => {
+                    Arc::clone(&shard.filter_columns)
+                }
+            };
+            filter_columns.push((shard.id(), columns));
+        }
         let record = WalRecord::AttributeDeclare {
             declaration: Box::new(compiled.declaration(request.title.clone())),
         };
@@ -885,10 +891,13 @@ impl Executor {
             _ => Arc::clone(&generation.suggest),
         };
         let bundle = generation.bundle.with_views(manifest);
-        let next = generation.with_shard(shard.id(), |g, s| {
+        let ids: Vec<ShardId> = filter_columns.iter().map(|(id, _)| *id).collect();
+        let next = generation.with_shards(ids, |g, shards| {
             g.bundle = bundle;
             g.vocabularies = vocabularies;
-            s.filter_columns = filter_columns;
+            for (id, columns) in filter_columns {
+                shards.of(id).filter_columns = columns;
+            }
             g.suggest = suggest;
         });
         self.publish(next, started);
@@ -1363,8 +1372,8 @@ impl Executor {
     }
 
     /// Publish the generation a create or a drop makes: the bundle as the live roster describes
-    /// it, the deny mask re-derived over the views it now has, and every buffered row of a view
-    /// that has gone.
+    /// it, each shard's deny mask re-derived over the views it now has, and every shard's buffered
+    /// rows of a view that has gone.
     ///
     /// The buffered rows of a dropped view are discarded. They name a coordinate system that no
     /// longer exists, so nothing will ever give them geometry, and a row left in the buffer for a
@@ -1386,24 +1395,38 @@ impl Executor {
             .manifest
             .with_roster(&created, &tombstones);
         let bundle = generation.bundle.with_views(manifest);
-        let shard = generation.only_shard();
-        let buffer = if dropped.is_empty() {
-            Arc::clone(&shard.buffer)
-        } else {
-            let mut buffer = (*shard.buffer).clone();
-            buffer.remove_views(dropped);
-            self.health
-                .buffered_items
-                .store(buffer.len(), Ordering::SeqCst);
-            Arc::new(buffer)
-        };
-        let next = generation.with_shard(shard.id(), |g, s| {
+        let shards: Vec<(
+            ShardId,
+            Arc<IngestBuffer>,
+            Arc<crate::filter::FilterColumns>,
+        )> = generation
+            .shards()
+            .map(|shard| match dropped.is_empty() {
+                true => (
+                    shard.id(),
+                    Arc::clone(&shard.buffer),
+                    Arc::clone(&shard.filter_columns),
+                ),
+                false => {
+                    let mut buffer = (*shard.buffer).clone();
+                    buffer.remove_views(dropped);
+                    let columns = shard.filter_columns.without_scoped_columns(dropped);
+                    (shard.id(), Arc::new(buffer), Arc::new(columns))
+                }
+            })
+            .collect();
+        let ids: Vec<ShardId> = shards.iter().map(|(id, ..)| *id).collect();
+        let next = generation.with_shards(ids, |g, parts| {
             g.bundle = bundle;
-            s.buffer = buffer;
-            if !dropped.is_empty() {
-                s.filter_columns = Arc::new(shard.filter_columns.without_scoped_columns(dropped));
+            for (id, buffer, filter_columns) in shards {
+                let s = parts.of(id);
+                s.buffer = buffer;
+                s.filter_columns = filter_columns;
             }
         });
+        self.health
+            .buffered_items
+            .store(buffered_in(&next), Ordering::SeqCst);
         self.publish(next, started);
     }
 }

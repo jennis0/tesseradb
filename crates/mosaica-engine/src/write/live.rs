@@ -56,10 +56,6 @@ impl ShardWrite {
         }
     }
 
-    pub(crate) fn id(&self) -> ShardId {
-        self.id
-    }
-
     pub(crate) fn high_water(&self) -> u64 {
         lock_recover(&self.allocator).high_water()
     }
@@ -226,6 +222,11 @@ impl LiveState {
         f(&lock_recover(&self.artifacts))
     }
 
+    /// The shard whose slice of each membership [`Self::artifacts`] holds.
+    pub(crate) fn written_slice(&self) -> ShardId {
+        self.shards[0].id
+    }
+
     /// `shard`'s slice of every membership, given `written`, the store [`Self::with_artifacts`]
     /// lends. Panics on a shard the open read no slice of: answering from another shard's slice
     /// would project its entities through this shard's row space.
@@ -234,7 +235,7 @@ impl LiveState {
         shard: ShardId,
         written: &'a ArtifactStore,
     ) -> &'a ArtifactStore {
-        if shard == self.shards[0].id {
+        if shard == self.written_slice() {
             return written;
         }
         self.slices
@@ -380,6 +381,59 @@ impl LiveState {
         lock_recover(&self.registry)
             .locate_in(space, entity)
             .map(|(_, level, ordinal)| (level, ordinal))
+    }
+
+    /// For each shard, the artifacts of `deleted` in `space` its compaction has to remove from its
+    /// slice: those its slice holds a member or a generating entity of, or borrows a membership
+    /// for. Every shard owes each deletion of a layer whose memberships are not stored, since
+    /// each shard derives them. A shard owing none is left out, and so is every shard where no
+    /// live layer holds `space`.
+    pub(in crate::write) fn owed_deletions(
+        &self,
+        space: LayerSpace,
+        deleted: &croaring::Bitmap,
+    ) -> Vec<mosaica_store::manifest::OwedDeletions> {
+        let registry = lock_recover(&self.registry);
+        let Some((name, layer)) = registry.in_space(space) else {
+            return Vec::new();
+        };
+        let every = !stored_membership(&layer.declaration);
+        let written = lock_recover(&self.artifacts);
+        let places: Vec<(u32, u32, u32)> = deleted
+            .iter()
+            .filter_map(|entity| {
+                let (_, level, ordinal) =
+                    registry.locate_in(space, EntityId::new(u64::from(entity)))?;
+                Some((entity, level, ordinal))
+            })
+            .collect();
+        self.shards
+            .iter()
+            .filter_map(|shard| {
+                let slice = self.slice_of(shard.id, &written);
+                let owed: croaring::Bitmap = match every {
+                    true => deleted.clone(),
+                    false => places
+                        .iter()
+                        .filter(|(_, level, ordinal)| {
+                            slice.get(name, *level, *ordinal).is_some_and(|record| {
+                                mosaica_lifecycle::membership::borrows_membership(record)
+                                    || !record.members.is_empty()
+                                    || record
+                                        .contents
+                                        .iter()
+                                        .any(|content| !content.generated_from.is_empty())
+                            })
+                        })
+                        .map(|(entity, ..)| *entity)
+                        .collect(),
+                };
+                (!owed.is_empty()).then(|| mosaica_store::manifest::OwedDeletions {
+                    shard: shard.id,
+                    artifacts: mosaica_store::manifest::EntitySet::of(&owed),
+                })
+            })
+            .collect()
     }
 
     /// Whether `entity` of `space` is a live layer's own entity or an artifact its levels hold.

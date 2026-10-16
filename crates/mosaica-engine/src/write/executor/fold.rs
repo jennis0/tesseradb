@@ -1456,6 +1456,7 @@ impl Executor {
             &mut segments_manifest,
             [(live_record.id, &published_overlay)],
             &published_spaces,
+            &self.live,
         );
 
         // ---- the new `MANIFEST.json` ----------------------------------------------------------

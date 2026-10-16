@@ -310,6 +310,30 @@ impl PartitionData {
         mosaica_types::only(&self.shards)
     }
 
+    /// Whether `shard` holds a base for the column of the group-scoped `family` of `view` at
+    /// `incarnation`: the family lists the view, and either `shard`'s record names the pair or no
+    /// shard's does, the base then being the one the build or a compaction wrote in every shard.
+    pub fn scoped_base_in(
+        &self,
+        shard: ShardId,
+        family: &crate::manifest::ScopedScalar,
+        view: &str,
+        incarnation: mosaica_types::view::ViewIncarnation,
+    ) -> bool {
+        let names = |record: &ShardRecord| {
+            record.scoped_columns.iter().any(|column| {
+                column.column == family.name
+                    && column.view == view
+                    && column.incarnation == incarnation
+            })
+        };
+        family.views.iter().any(|listed| listed == view)
+            && match self.shard(shard) {
+                Some(data) if names(&data.record) => true,
+                _ => !self.shards.iter().any(|data| names(&data.record)),
+            }
+    }
+
     /// [`Self::only_shard`], to edit.
     pub fn only_shard_mut(&mut self) -> &mut ShardData {
         Arc::make_mut(mosaica_types::only(&mut self.shards))

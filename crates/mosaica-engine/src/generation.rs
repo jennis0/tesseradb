@@ -47,6 +47,9 @@ pub struct GenerationParts {
     /// Each layer space's deny state and supplied content. A space absent here denies nothing and
     /// has no content on disc.
     pub(crate) layer_spaces: Arc<LayerSpaces>,
+    /// The unique index entries of the rows every shard's buffer holds, published with the
+    /// buffers.
+    pub(crate) unique_live: Arc<crate::unique::UniqueLive>,
 }
 
 /// A generation's layer spaces, by space.
@@ -112,8 +115,6 @@ pub struct ShardParts {
     pub(crate) identity: [u8; 32],
     /// Every unique column's index runs, as the shard's record lists them.
     pub(crate) unique: Arc<mosaica_store::unique::UniqueIndexes>,
-    /// The unique index entries of the rows the buffer holds, published with the buffer.
-    pub(crate) unique_live: Arc<crate::unique::UniqueLive>,
     /// The edited-items map's runs, as the shard's record lists them.
     pub(crate) edited: Arc<mosaica_store::edited::EditedIndex>,
     /// The edited-items pairs no run holds yet, published with the buffer.
@@ -196,7 +197,7 @@ pub(crate) struct DenySwap<'a> {
 
 /// What a publication sets in one shard it names beyond what its change sets, which decides how
 /// the shard's derived fields are carried.
-enum ShardSwap<'a> {
+pub(crate) enum ShardSwap<'a> {
     Parts,
     Buffer(BufferSwap<'a>),
     Denies(DenySwap<'a>),
@@ -544,7 +545,7 @@ impl Generation {
     /// The successor with `change` applied to what is held once and to the parts of every shard
     /// `swaps` names, each of those shards then taking its swap and replaced by what its swap
     /// derives. Every other shard is carried.
-    fn publish(
+    pub(crate) fn publish(
         &self,
         mut swaps: BTreeMap<ShardId, ShardSwap<'_>>,
         change: impl FnOnce(&mut GenerationParts, &mut ShardsParts),
@@ -727,6 +728,7 @@ impl Generation {
                 vocabularies: Arc::new(Vocabularies::default()),
                 suggest: Arc::new(crate::suggest::SuggestIndexes::default()),
                 layer_spaces: Arc::default(),
+                unique_live: Arc::default(),
             },
             vec![(
                 shard,
@@ -737,7 +739,6 @@ impl Generation {
                     ),
                     identity: [0u8; 32],
                     unique: Arc::default(),
-                    unique_live: Arc::default(),
                     edited: Arc::default(),
                     edited_live: Arc::default(),
                     tenancy: Arc::default(),

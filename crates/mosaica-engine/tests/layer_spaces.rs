@@ -209,6 +209,53 @@ fn space_deny(fx: &Fixture, space: LayerSpace) -> (Vec<u32>, Vec<u32>) {
     (ids(&record.tombstones), ids(&record.deny))
 }
 
+/// A deleted artifact is owed, in its space's record, by the shard holding its members, and one
+/// holding no member is owed by no shard.
+#[test]
+fn a_deleted_artifact_is_owed_by_the_shard_holding_its_members() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(flat_declaration("clusters/a"))
+        .unwrap();
+    let ids = engine
+        .publish_artifacts(
+            "clusters/a".into(),
+            0,
+            vec![
+                IncomingArtifact::from_entities(Some("c0".into()), fx.members(0..40)),
+                IncomingArtifact::from_entities(Some("c1".into()), Vec::<EntityId>::new()),
+            ],
+        )
+        .unwrap();
+    let targets: Vec<Target> = ids.iter().map(|id| artifact_target(&engine, *id)).collect();
+    engine
+        .accept_changes(targets.iter().map(|t| (*t, ChangeOp::Delete)).collect())
+        .unwrap();
+    let Target::Artifact(space, held) = targets[0] else {
+        panic!("an artifact's target")
+    };
+    tick_until(
+        &engine,
+        "the space's deny state's publication",
+        WAIT,
+        || space_deny(&fx, space).0.len() == 2,
+    );
+    let manifest = side_manifest(&fx.root);
+    let record = mosaica_store::manifest::layer_space(&manifest.layer_spaces, space).unwrap();
+    let owed: Vec<(ShardId, Vec<u32>)> = record
+        .owed
+        .iter()
+        .map(|owed| {
+            (
+                owed.shard,
+                owed.artifacts.entities().unwrap().iter().collect(),
+            )
+        })
+        .collect();
+    assert_eq!(owed, vec![(ShardId::ZERO, vec![held.raw() as u32])]);
+}
+
 /// An artifact's and a layer's deny is kept in its layer space's overlay, through a publication, a
 /// WAL rotation that reclaims the change records and a restart: the shard's deny state never holds
 /// them, and the restart opens with both still denied.

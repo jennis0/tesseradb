@@ -201,11 +201,11 @@ pub(crate) fn follow_moves(shard: &Shard, set: &mut croaring::Bitmap) -> Result<
     Ok(())
 }
 
-/// `changes` with each change naming an entity an edit has moved an item of `shard` away from
-/// also applied to the entity the item holds now. The change to the old entity stays, so the log
-/// names both. An artifact is never moved.
+/// `changes` with each change naming an entity an edit has moved an item away from also applied
+/// to the entity the item holds now, in the item's shard of `generation`. The change to the old
+/// entity stays, so the log names both. An artifact is never moved.
 pub(crate) fn follow_changes(
-    shard: &Shard,
+    generation: &Generation,
     changes: &mut Vec<(Target, mosaica_lifecycle::ChangeOp)>,
 ) -> Result<(), StoreError> {
     let mut followed = Vec::new();
@@ -213,7 +213,10 @@ pub(crate) fn follow_changes(
         let Target::Item(at, entity) = target else {
             continue;
         };
-        if at != shard.id() || (!shard.overlay.is_deleted(entity) && holds(shard, entity)) {
+        let Some(shard) = generation.shard(at) else {
+            continue;
+        };
+        if !shard.overlay.is_deleted(entity) && holds(shard, entity) {
             continue;
         }
         if let Some(now) = moved_to(shard, entity)? {

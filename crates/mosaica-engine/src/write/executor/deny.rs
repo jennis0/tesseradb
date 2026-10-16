@@ -64,7 +64,7 @@ impl Executor {
                 return true;
             };
             if !stamp.follow_since(&self.generation.load_full(), |generation| {
-                crate::edited::follow_changes(generation.only_shard(), &mut changes)
+                crate::edited::follow_changes(generation, &mut changes)
             }) {
                 reply.fail(ExecError::Stale);
                 continue;
@@ -197,22 +197,18 @@ impl Executor {
     }
 
     /// Clone each overlay the window touches once, apply every change in the window in order to
-    /// the overlay its target names, publish once. Pins are never invalidated by this: a pin fixes
-    /// `(prefix, segments_version)`, and this bumps the overlay versions instead, so a suppression
-    /// applies to a pinned request the moment accepted.
+    /// the overlay its target names, publish once over every shard touched. Pins are never
+    /// invalidated by this: a pin fixes `(prefix, segments_version)`, and this bumps the overlay
+    /// versions instead, so a suppression applies to a pinned request the moment accepted.
     pub(super) fn apply_changes(&self, changes: Vec<(Target, ChangeOp)>) {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
-        let shard = generation.only_shard();
-        let mut overlay: Option<Overlay> = None;
+        let mut shards: std::collections::BTreeMap<ShardId, ShardChanges> = Default::default();
         let mut spaces = (*generation.layer_spaces).clone();
         let mut touched: std::collections::BTreeSet<LayerSpace> = Default::default();
-        let mut newly_denied: Vec<EntityId> = Vec::new();
-        let mut deleted: Vec<EntityId> = Vec::new();
-        let mut unsuppressed = false;
         for (target, op) in changes {
-            let entity = match target {
-                Target::Item(_, entity) => entity,
+            let (id, entity) = match target {
+                Target::Item(shard, entity) => (shard, entity),
                 // A change resolved before its layer was dropped names a space nothing holds.
                 Target::Artifact(space, _) if !self.live.holds_space(space) => continue,
                 Target::Artifact(space, entity) => {
@@ -224,32 +220,42 @@ impl Executor {
                     continue;
                 }
             };
+            let changed = shards.entry(id).or_insert_with(|| ShardChanges {
+                overlay: (*generation.shard_of(id).overlay).clone(),
+                newly_denied: Vec::new(),
+                deleted: Vec::new(),
+                unsuppressed: false,
+            });
             match op {
                 ChangeOp::Delete => {
-                    newly_denied.push(entity);
-                    deleted.push(entity);
+                    changed.newly_denied.push(entity);
+                    changed.deleted.push(entity);
                 }
-                ChangeOp::Suppress => newly_denied.push(entity),
-                ChangeOp::Unsuppress => unsuppressed = true,
+                ChangeOp::Suppress => changed.newly_denied.push(entity),
+                ChangeOp::Unsuppress => changed.unsuppressed = true,
             }
-            overlay
-                .get_or_insert_with(|| (*shard.overlay).clone())
-                .apply(entity, op);
+            changed.overlay.apply(entity, op);
         }
         let layer_spaces = Arc::new(spaces);
         let deny_epoch = generation.deny_epoch + 1;
-        let Some(overlay) = overlay else {
+        if shards.is_empty() {
             let next = generation.with(|g| {
                 g.deny_epoch = deny_epoch;
                 g.layer_spaces = layer_spaces;
             });
             self.publish(next, started);
             return;
-        };
+        }
 
-        // Gauges `deleted ∪ suppressed`. Edge-triggered, or this WARN would fire on every
-        // subsequent deny once the limit is crossed.
-        let depth = overlay.len();
+        // Gauges `deleted ∪ suppressed` over every shard. Edge-triggered, or this WARN would fire
+        // on every subsequent deny once the limit is crossed.
+        let depth: usize = generation
+            .shards()
+            .map(|shard| match shards.get(&shard.id()) {
+                Some(changed) => changed.overlay.len(),
+                None => shard.overlay.len(),
+            })
+            .sum();
         let limit = self.health.overlay_soft_limit();
         if self.health.note_overlay_depth(depth) {
             tracing::warn!(
@@ -261,64 +267,88 @@ impl Executor {
             );
         }
 
-        // A deleted entity's rows leave the buffer here, or they would pin the WAL: `plan_flush`
-        // never consumes a deleted row.
-        let (buffer, unique_live) = if !shard.buffer.holds_any(&deleted) {
-            (Arc::clone(&shard.buffer), Arc::clone(&shard.unique_live))
-        } else {
-            let mut buffer = (*shard.buffer).clone();
-            for entity in &deleted {
-                buffer.remove(*entity);
-            }
-            self.health
-                .buffered_items
-                .store(buffer.len(), Ordering::SeqCst);
-            // A deleted entity names nothing, so its live unique entries go with its rows. Its
-            // edited-item pair stays until the fold that removes it, which reads the pair to tell
-            // an entity an edit made from an item's number.
-            let mut unique_live = (*shard.unique_live).clone();
-            unique_live.remove_entities(
-                &deleted
-                    .iter()
-                    .filter_map(|e| u32::try_from(e.raw()).ok())
-                    .collect(),
-            );
-            (Arc::new(buffer), Arc::new(unique_live))
-        };
+        // A deleted entity's rows leave its shard's buffer here, or they would pin the WAL:
+        // `plan_flush` never consumes a deleted row. A deleted entity names nothing, so its live
+        // unique entries go with its rows. Its edited-item pair stays until the fold that removes
+        // it, which reads the pair to tell an entity an edit made from an item's number.
+        let mut unique_live: Option<crate::unique::UniqueLive> = None;
+        let buffers: Vec<Arc<IngestBuffer>> = shards
+            .iter()
+            .map(|(id, changed)| {
+                let shard = generation.shard_of(*id);
+                if !shard.buffer.holds_any(&changed.deleted) {
+                    return Arc::clone(&shard.buffer);
+                }
+                let mut buffer = (*shard.buffer).clone();
+                for entity in &changed.deleted {
+                    buffer.remove(*entity);
+                }
+                unique_live
+                    .get_or_insert_with(|| (*generation.unique_live).clone())
+                    .remove_entities(
+                        *id,
+                        &changed
+                            .deleted
+                            .iter()
+                            .filter_map(|e| u32::try_from(e.raw()).ok())
+                            .collect(),
+                    );
+                Arc::new(buffer)
+            })
+            .collect();
 
-        // A window of deletes and suppressions only grows the mask; an unsuppress re-derives it,
-        // since subtracting a row would re-expose a still-deleted entity.
-        let overlay_version = shard.overlay_version + 1;
-        let id = shard.id();
-        let buffer = crate::BufferSwap {
-            buffer,
-            inserted: &[],
-        };
-        let next = if unsuppressed {
-            let buffers = std::collections::BTreeMap::from([(id, buffer)]);
-            generation.with_buffer(buffers, |g, shards| {
-                let s = shards.of(id);
-                s.overlay_version = overlay_version;
-                g.deny_epoch = deny_epoch;
-                g.layer_spaces = layer_spaces;
-                s.overlay = Arc::new(overlay);
-                s.unique_live = unique_live;
+        // A window of deletes and suppressions only grows a shard's mask; an unsuppress re-derives
+        // it, since subtracting a row would re-expose a still-deleted entity.
+        let overlays: Vec<Arc<Overlay>> = shards
+            .values_mut()
+            .map(|changed| Arc::new(std::mem::take(&mut changed.overlay)))
+            .collect();
+        let swaps = shards
+            .iter()
+            .zip(&buffers)
+            .zip(&overlays)
+            .map(|(((id, changed), buffer), overlay)| {
+                let buffer = crate::BufferSwap {
+                    buffer: Arc::clone(buffer),
+                    inserted: &[],
+                };
+                let swap = match changed.unsuppressed {
+                    true => crate::ShardSwap::Buffer(buffer),
+                    false => crate::ShardSwap::Denies(crate::DenySwap {
+                        overlay: Arc::clone(overlay),
+                        newly_denied: &changed.newly_denied,
+                        buffer,
+                    }),
+                };
+                (*id, swap)
             })
-        } else {
-            let denies = crate::DenySwap {
-                overlay: Arc::new(overlay),
-                newly_denied: &newly_denied,
-                buffer,
-            };
-            let denies = std::collections::BTreeMap::from([(id, denies)]);
-            generation.with_denies(denies, |g, shards| {
-                let s = shards.of(id);
-                s.overlay_version = overlay_version;
-                g.deny_epoch = deny_epoch;
-                g.layer_spaces = layer_spaces;
-                s.unique_live = unique_live;
-            })
-        };
+            .collect();
+        let next = generation.publish(swaps, |g, parts| {
+            g.deny_epoch = deny_epoch;
+            g.layer_spaces = layer_spaces;
+            if let Some(unique_live) = unique_live {
+                g.unique_live = Arc::new(unique_live);
+            }
+            for ((id, changed), overlay) in shards.iter().zip(&overlays) {
+                let s = parts.of(*id);
+                s.overlay_version += 1;
+                if changed.unsuppressed {
+                    s.overlay = Arc::clone(overlay);
+                }
+            }
+        });
+        self.health
+            .buffered_items
+            .store(buffered_in(&next), Ordering::SeqCst);
         self.publish(next, started)
     }
+}
+
+/// One shard's part of a deny window: its overlay with the window's changes applied, and what
+/// they deny.
+struct ShardChanges {
+    overlay: Overlay,
+    newly_denied: Vec<EntityId>,
+    deleted: Vec<EntityId>,
+    unsuppressed: bool,
 }

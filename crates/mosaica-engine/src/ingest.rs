@@ -181,9 +181,7 @@ impl Engine {
         }
         for attempt in 0..2 {
             let generation = self.generation();
-            let unique_seq = generation
-                .shard(self.write.live().write_shard().id())
-                .map_or(0, |shard| shard.unique_live.seq());
+            let unique_seq = generation.unique_live.seq();
             let submitted = self.plan_ingest(&generation, &request).and_then(|planned| {
                 #[cfg(feature = "fault-injection")]
                 self.switches.hold_write_check_if_wanted();
@@ -1260,7 +1258,7 @@ impl resolve::Holdings for Held<'_> {
             .iter()
             .map(|k| UniqueKey::of_widened(kind, *k))
             .collect();
-        crate::unique::holders_in_every_shard(self.generation, &d.name, &keys)
+        crate::unique::holders(self.generation, &d.name, &keys)
             .map_err(|e| AcceptError::Unreadable(e.to_string()))
     }
 

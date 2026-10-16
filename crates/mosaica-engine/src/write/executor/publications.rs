@@ -712,7 +712,12 @@ impl Executor {
             tracing::warn!("discarding a completed merge that no longer rebases");
             return;
         }
-        write_deny_state(&mut manifest, shard_overlays(&live), &live.layer_spaces);
+        write_deny_state(
+            &mut manifest,
+            shard_overlays(&live),
+            &live.layer_spaces,
+            &self.live,
+        );
         write_vocabulary_extensions(
             &mut manifest,
             &live.vocabularies,
@@ -1024,7 +1029,12 @@ impl Executor {
         };
         // Complete current state, serialised fresh from the overlay this publication carries, the
         // same rule every other manifest write follows.
-        write_deny_state(&mut manifest, shard_overlays(&live), &live.layer_spaces);
+        write_deny_state(
+            &mut manifest,
+            shard_overlays(&live),
+            &live.layer_spaces,
+            &self.live,
+        );
         write_vocabulary_extensions(
             &mut manifest,
             &live.vocabularies,
@@ -1363,8 +1373,7 @@ impl Executor {
                         filterable: crate::filter::scoped_is_filterable(family),
                         has_value_column: crate::filter::scoped_has_value_column(family),
                         render: family.render,
-                        has_base: scoped_base_in(
-                            partition_data,
+                        has_base: partition_data.scoped_base_in(
                             shard.id(),
                             family,
                             &scoped_view,
@@ -1783,7 +1792,12 @@ impl Executor {
         )> = Vec::new();
         for (partition, partition_data) in &live.bundle.partitions {
             let mut manifest = partition_data.side_manifest();
-            write_deny_state(&mut manifest, shard_overlays(&live), &live.layer_spaces);
+            write_deny_state(
+                &mut manifest,
+                shard_overlays(&live),
+                &live.layer_spaces,
+                &self.live,
+            );
             // Record and member packs are written before the manifest that names them, which is
             // the whole of their durability contract: a manifest naming a missing pack refuses at
             // open, so the file has to be durable first. A failure here abandons the publication
@@ -2005,7 +2019,7 @@ impl Executor {
         let ready = self.live.unpublished_memberships();
         pack_levels(
             prefix_dir,
-            ShardLayout::new(partition, self.live.only_shard().id),
+            ShardLayout::new(partition, self.live.written_slice()),
             n,
             ready,
             |layer| self.live.space_of(layer),
@@ -2355,7 +2369,12 @@ impl Executor {
         record
             .text_extents
             .extend(completed.text_extents.iter().cloned());
-        write_deny_state(&mut manifest, shard_overlays(&live), &live.layer_spaces);
+        write_deny_state(
+            &mut manifest,
+            shard_overlays(&live),
+            &live.layer_spaces,
+            &self.live,
+        );
         n = self
             .health
             .flush_lap(crate::flush::FlushStage::ManifestDenyState, n);
@@ -2623,10 +2642,11 @@ impl Executor {
             }
         };
         let unique_live = if completed.unique_runs.is_empty() {
-            Arc::clone(&shard.unique_live)
+            Arc::clone(&live.unique_live)
         } else {
-            let mut unique_live = (*shard.unique_live).clone();
+            let mut unique_live = (*live.unique_live).clone();
             unique_live.flushed(
+                completed.shard,
                 completed
                     .unique_runs
                     .iter()
@@ -2634,7 +2654,8 @@ impl Executor {
             );
             Arc::new(unique_live)
         };
-        self.unique_declarations.flushed(&completed.consumed);
+        self.unique_declarations
+            .flushed(completed.shard, &completed.consumed);
         let next = Arc::new(live.with_shard(shard.id(), |g, s| {
             // The live columns with this flush's extents composed on: the whole of what makes an
             // entity ingested since the build answer a filter on its own value.
@@ -2647,7 +2668,7 @@ impl Executor {
             s.delta_postings = delta_postings;
             s.buffer = Arc::new(buffer);
             s.unique = unique;
-            s.unique_live = unique_live;
+            g.unique_live = unique_live;
             s.edited = edited;
             s.edited_live = edited_live;
         }));
@@ -2717,28 +2738,6 @@ pub(super) fn plan_to_dispatch(
             plan.items.first().map(|(entity, _)| entity.raw()),
         )
     })
-}
-
-/// Whether `shard` holds a base for the column of the group-scoped `family` of `view` at
-/// `incarnation`: the family lists the view, and either `shard`'s record names the pair or no
-/// shard's does, the base then being the one the build or a compaction wrote in every shard.
-pub(super) fn scoped_base_in(
-    partition: &mosaica_store::read::PartitionData,
-    shard: ShardId,
-    family: &mosaica_store::manifest::ScopedScalar,
-    view: &str,
-    incarnation: mosaica_types::view::ViewIncarnation,
-) -> bool {
-    let names = |record: &mosaica_store::manifest::ShardRecord| {
-        record.scoped_columns.iter().any(|column| {
-            column.column == family.name && column.view == view && column.incarnation == incarnation
-        })
-    };
-    family.views.iter().any(|listed| listed == view)
-        && match partition.shard(shard) {
-            Some(data) if names(&data.record) => true,
-            _ => !partition.shards.iter().any(|data| names(&data.record)),
-        }
 }
 
 /// Whether a completed flush's dictionary moved under it. See the call site in

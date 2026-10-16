@@ -383,11 +383,17 @@ fn open_shard_indexes(
 ) -> std::result::Result<ShardIndexes, mosaica_store::StoreError> {
     let partition = &bundle.partitions[phash];
     let layout = mosaica_store::ShardLayout::new(phash, record.id);
+    let scoped_base = |family: &mosaica_store::manifest::ScopedScalar, view: &str, incarnation| {
+        partition.scoped_base_in(record.id, family, view, incarnation)
+    };
     let filter_columns = crate::filter::FilterColumns::open(
         prefix_dir,
         layout,
         &bundle.manifest,
-        crate::filter::ShardExtents::of(record),
+        crate::filter::ShardExtents {
+            scoped_base: Some(&scoped_base),
+            ..crate::filter::ShardExtents::of(record)
+        },
         unfolded_attributes,
         // Mapped: the engine opens every declared column at once and holds it for the process
         // lifetime, so the alternative is paying tens of GB of residency before any filter arrives.
@@ -723,11 +729,11 @@ fn reconstruct_writes(
     })
 }
 
-/// Apply the log's changes to `unique` onto each partition's unique columns and its shard's
+/// Apply the log's changes to `unique` onto each partition's unique columns and each shard's
 /// indexes. The last change to a column is the one in force, and the manifest is newer than a
-/// declaration it already carries an index for, so a declaration adopts its runs only where the
-/// manifest has no index for the column; each run adopted is checked against the digest the log
-/// recorded.
+/// declaration it already carries an index for, so a declaration adopts a shard's runs only where
+/// that shard's record has no index for the column; each run adopted is checked against the digest
+/// the log recorded.
 fn apply_unique_events(
     bundle: &mut Bundle,
     events: Vec<crate::write::UniqueEvent>,
@@ -740,58 +746,53 @@ fn apply_unique_events(
     }
     for partition in bundle.partitions.values_mut() {
         for event in last.values() {
-            let held = partition
-                .only_shard()
-                .record
-                .unique_indexes
-                .iter()
-                .any(|runs| runs.attribute == event.attribute);
-            let runs = match (event.unique, held) {
-                (false, true) => None,
-                (true, false) => {
-                    for run in event.base.iter().chain(&event.live) {
-                        let digest = mosaica_store::digest_of(&prefix_dir.join(&run.path))
-                            .map_err(EngineError::Store)?;
-                        if digest.size != run.size || digest.sha256 != run.sha256 {
-                            return Err(EngineError::Malformed(format!(
-                                "the WAL declares '{}' unique over index run '{}', whose \
-                                 bytes do not match the digest the log recorded; restore the \
-                                 run or the bundle it was written into",
-                                event.attribute, run.path
-                            )));
+            for shard in &mut partition.shards {
+                let id = shard.record.id;
+                let held = shard
+                    .record
+                    .unique_indexes
+                    .iter()
+                    .any(|runs| runs.attribute == event.attribute);
+                let runs = match (event.unique, held) {
+                    (false, true) => None,
+                    (true, false) => {
+                        let runs = event.base.iter().chain(&event.live);
+                        for run in runs.filter(|run| run.shard == id) {
+                            let digest = mosaica_store::digest_of(&prefix_dir.join(&run.path))
+                                .map_err(EngineError::Store)?;
+                            if digest.size != run.size || digest.sha256 != run.sha256 {
+                                return Err(EngineError::Malformed(format!(
+                                    "the WAL declares '{}' unique over index run '{}', whose \
+                                     bytes do not match the digest the log recorded; restore \
+                                     the run or the bundle it was written into",
+                                    event.attribute, run.path
+                                )));
+                            }
+                            partition.manifest.files.insert(run.path.clone(), digest);
                         }
-                        partition.manifest.files.insert(run.path.clone(), digest);
+                        Some(crate::unique::declared_runs(
+                            &event.attribute,
+                            id,
+                            &event.base,
+                            &event.live,
+                        ))
                     }
-                    Some(mosaica_store::manifest::UniqueIndexRuns {
-                        attribute: event.attribute.clone(),
-                        base: event
-                            .base
-                            .iter()
-                            .map(|run| mosaica_store::manifest::BaseKeyRun {
-                                path: run.path.clone(),
-                                first_key: run.first_key.clone(),
-                                last_key: run.last_key.clone(),
-                            })
-                            .collect(),
-                        live: event.live.iter().map(|run| run.path.clone()).collect(),
-                    })
-                }
-                // The manifest's index is the declaration's own, or, where the side-manifests of
-                // a removal and of this declaration were not written, the one from before the
-                // removal. That one indexes the same flushed values, since every flush writes a
-                // side-manifest and none came after it; the values buffered since are live
-                // entries again after the replay.
-                (true, true) => continue,
-                (false, false) => continue,
-            };
-            let record =
-                &mut std::sync::Arc::make_mut(mosaica_types::only(&mut partition.shards)).record;
-            mosaica_store::unique::set_unique_index(
-                &mut partition.manifest,
-                record,
-                &event.attribute,
-                runs,
-            );
+                    // The record's index is the declaration's own, or, where the side-manifests
+                    // of a removal and of this declaration were not written, the one from before
+                    // the removal. That one indexes the same flushed values, since every flush
+                    // writes a side-manifest and none came after it; the values buffered since
+                    // are live entries again after the replay.
+                    (true, true) => continue,
+                    (false, false) => continue,
+                };
+                let record = &mut std::sync::Arc::make_mut(shard).record;
+                mosaica_store::unique::set_unique_index(
+                    &mut partition.manifest,
+                    record,
+                    &event.attribute,
+                    runs,
+                );
+            }
         }
     }
     Ok(())
@@ -913,7 +914,6 @@ fn first_generation(
                 postings: Arc::clone(&shard.postings),
                 identity: record.identity,
                 unique: indexes.unique,
-                unique_live: Arc::new(crate::unique::UniqueLive::derive(&bundle.manifest, &buffer)),
                 edited: indexes.edited,
                 edited_live: Arc::new(edited_live),
                 tenancy: Arc::clone(&shard.tenancy),
@@ -927,6 +927,11 @@ fn first_generation(
             },
         ));
     }
+
+    let unique_live = crate::unique::UniqueLive::derive(
+        &bundle.manifest,
+        shards.iter().map(|(id, parts)| (*id, &*parts.buffer)),
+    );
 
     // Built synchronously at open, not lazily, so a first keystroke never pays the sort as a
     // cold start; only for the vocabularies a declared category column draws on.
@@ -966,6 +971,7 @@ fn first_generation(
             free_epoch: 0,
             vocabularies: Arc::new(vocabularies),
             layer_spaces: Arc::new(layer_spaces),
+            unique_live: Arc::new(unique_live),
         },
         shards,
     )))))

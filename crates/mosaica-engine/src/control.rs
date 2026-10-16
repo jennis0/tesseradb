@@ -199,8 +199,7 @@ pub(crate) fn name_items_in(
             }
             let mut verdicts: Vec<Verdict> = (0..table.rows).map(no_item).collect();
             let field = resolve::Identifier::Unique(*position);
-            let holders =
-                crate::unique::holders_in_every_shard(generation, &d.name, &keys).map_err(store)?;
+            let holders = crate::unique::holders(generation, &d.name, &keys).map_err(store)?;
             for (at, item) in holders {
                 let row = from[at];
                 verdicts[row] = match &verdicts[row] {
@@ -309,7 +308,7 @@ impl resolve::Holdings for Addressed<'_> {
             .iter()
             .map(|k| UniqueKey::of_widened(kind, *k))
             .collect();
-        crate::unique::holders_in_every_shard(self.generation, &declared.name, &keys)
+        crate::unique::holders(self.generation, &declared.name, &keys)
     }
 
     fn mosaica_holders(&self, ids: &[MosaicaId]) -> Result<Vec<Option<ItemAt>>, StoreError> {

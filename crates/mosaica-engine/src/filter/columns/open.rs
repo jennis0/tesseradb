@@ -240,6 +240,13 @@ pub(super) fn runtime_layers(
     )))
 }
 
+/// Whether a shard holds a base for a group-scoped family's column of a view at an incarnation.
+pub type ScopedBase<'a> = &'a dyn Fn(
+    &mosaica_store::manifest::ScopedScalar,
+    &str,
+    mosaica_types::view::ViewIncarnation,
+) -> bool;
+
 /// Every extent list one shard's record names, as [`FilterColumns::open`] reads them.
 #[derive(Default, Clone, Copy)]
 pub struct ShardExtents<'a> {
@@ -247,6 +254,9 @@ pub struct ShardExtents<'a> {
     pub records: &'a [mosaica_store::manifest::RecordExtent],
     pub entity_terms: &'a [mosaica_store::manifest::EntityTermsExtent],
     pub texts: &'a [mosaica_store::manifest::TextExtent],
+    /// Which listed views' group-scoped columns the shard holds a base for; `None` where it holds
+    /// one for every view a family lists.
+    pub scoped_base: Option<ScopedBase<'a>>,
 }
 
 impl<'a> ShardExtents<'a> {
@@ -256,6 +266,7 @@ impl<'a> ShardExtents<'a> {
             records: &record.record_extents,
             entity_terms: &record.entity_terms_extents,
             texts: &record.text_extents,
+            scoped_base: None,
         }
     }
 }
@@ -378,6 +389,14 @@ impl FilterColumns {
                 let Some(incarnation) = view_incarnation(view_id) else {
                     continue;
                 };
+                // A view created at a running service has a base only in a shard a flush wrote
+                // one in.
+                if !extents
+                    .scoped_base
+                    .is_none_or(|base| base(family, view_id, incarnation))
+                {
+                    continue;
+                }
                 let (name, placement, mut column) = open_scoped_column(
                     prefix_dir,
                     layout,

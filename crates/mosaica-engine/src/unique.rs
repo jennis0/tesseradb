@@ -1,11 +1,12 @@
 //! Unique fields at a running service: the index entries of values no run holds yet, and the one
 //! lookup every reader of a unique column goes through.
 //!
-//! A unique column's values reach its index in two steps. A row accepted into the ingest buffer
-//! adds a live entry here at its window's close; the flush that writes the row
-//! writes a run holding the same entries, and its publication removes them from here. A lookup
-//! gathers the runs' entities and the live entries' and drops deleted entities, so a value is
-//! found from its acknowledgement onwards whichever of the two holds it.
+//! A unique column's values reach its index in two steps. A row accepted into a shard's ingest
+//! buffer adds a live entry here at its window's close; the flush that writes the row writes a run
+//! in that shard holding the same entries, and its publication removes them from here. A lookup
+//! gathers every shard's runs' items and the live entries' and drops deleted items, so a value is
+//! found in any shard from its acknowledgement onwards whichever of the two holds it. One record
+//! holds the live entries of every shard.
 //!
 //! Every entry carries the sequence number it was added under. A handler that checked a batch
 //! against one generation sends that generation's number with it, and the executor re-checks the
@@ -26,15 +27,22 @@ use mosaica_types::{EntityId, ItemAt, ShardId};
 
 use crate::Generation;
 
-/// One entity holding a key, and the sequence number the entry was added under.
+/// One item holding a key, and the sequence number the entry was added under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Entry {
     key: UniqueKey,
+    shard: ShardId,
     entity: EntityId,
     seq: u64,
 }
 
-/// Entries sorted by key, then entity.
+impl Entry {
+    fn item(&self) -> ItemAt {
+        ItemAt::new(self.shard, self.entity)
+    }
+}
+
+/// Entries sorted by key, then shard, then entity.
 type Sorted = Arc<[Entry]>;
 
 /// The entries that start at `key` in `run`.
@@ -110,8 +118,8 @@ type Retired = BTreeMap<String, Sorted>;
 /// them. The newest flush's are kept whatever their number.
 const RETIRED_MAX_ENTRIES: usize = 1 << 20;
 
-/// The index entries no run holds yet, per unique column. Cloning one copies a few pointers per
-/// column, since every generation shares the entries.
+/// The index entries no run holds yet, of every shard, per unique column. Cloning one copies a
+/// few pointers per column, since every generation shares the entries.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct UniqueLive {
     /// Keyed by attribute name.
@@ -127,14 +135,17 @@ pub(crate) struct UniqueLive {
 }
 
 impl UniqueLive {
-    /// The live entries of every unique column `manifest` declares, from the rows `buffer` holds:
-    /// what a restart or a declaration starts from.
-    pub(crate) fn derive(manifest: &Manifest, buffer: &IngestBuffer) -> UniqueLive {
+    /// The live entries of every unique column `manifest` declares, from the rows each shard's
+    /// buffer holds: what a restart starts from.
+    pub(crate) fn derive<'a>(
+        manifest: &Manifest,
+        buffers: impl IntoIterator<Item = (ShardId, &'a IngestBuffer)>,
+    ) -> UniqueLive {
         let mut live = UniqueLive::default();
         for declared in manifest.declared_scalars.iter().filter(|d| d.unique) {
             live.columns.insert(declared.name.clone(), Column::default());
         }
-        live.add(&manifest.declared_scalars, buffered_scalars(buffer));
+        live.add(&manifest.declared_scalars, buffered_items(buffers));
         live
     }
 
@@ -159,11 +170,11 @@ impl UniqueLive {
         self.columns.is_empty()
     }
 
-    /// Add the entries of each entity's entity-scoped scalars, for every column held here.
+    /// Add the entries of each item's entity-scoped scalars, for every column held here.
     pub(crate) fn add<'a>(
         &mut self,
         declared: &[DeclaredScalar],
-        rows: impl IntoIterator<Item = (EntityId, &'a [WalScalar])>,
+        rows: impl IntoIterator<Item = (ItemAt, &'a [WalScalar])>,
     ) {
         let columns: Vec<(usize, &DeclaredScalar)> = declared
             .iter()
@@ -174,13 +185,14 @@ impl UniqueLive {
             return;
         }
         let mut added: Vec<Vec<Entry>> = vec![Vec::new(); columns.len()];
-        for (entity, scalars) in rows {
+        for (item, scalars) in rows {
             for ((at, d), into) in columns.iter().zip(&mut added) {
                 if let Some(key) = scalars.get(*at).and_then(|v| key_of(d.arrow_type, v)) {
                     self.seq += 1;
                     into.push(Entry {
                         key,
-                        entity,
+                        shard: item.shard,
+                        entity: item.entity,
                         seq: self.seq,
                     });
                 }
@@ -193,10 +205,11 @@ impl UniqueLive {
         }
     }
 
-    /// Move the entries one flush wrote into runs, per attribute, from the live entries to the
-    /// kept ones, forgetting the oldest kept flushes past [`RETIRED_MAX_ENTRIES`].
+    /// Move the entries one flush wrote into runs of `shard`, per attribute, from the live entries
+    /// to the kept ones, forgetting the oldest kept flushes past [`RETIRED_MAX_ENTRIES`].
     pub(crate) fn flushed<'a>(
         &mut self,
+        shard: ShardId,
         written: impl IntoIterator<Item = (&'a str, &'a [(UniqueKey, EntityId)])>,
     ) {
         let mut moved: Retired = BTreeMap::new();
@@ -207,8 +220,9 @@ impl UniqueLive {
             };
             let mut written: Vec<(UniqueKey, EntityId)> = entries_written.to_vec();
             written.sort_unstable();
-            let mut out =
-                column.remove_where(|e| written.binary_search(&(e.key, e.entity)).is_ok());
+            let mut out = column.remove_where(|e| {
+                e.shard == shard && written.binary_search(&(e.key, e.entity)).is_ok()
+            });
             if out.is_empty() {
                 continue;
             }
@@ -230,24 +244,26 @@ impl UniqueLive {
         }
     }
 
-    /// Remove every entry of the deleted entities. A deleted entity names nothing, so this changes
-    /// no answer; it only returns the memory.
-    pub(crate) fn remove_entities(&mut self, deleted: &croaring::Bitmap) {
+    /// Remove every entry of `shard`'s deleted entities. A deleted entity names nothing, so this
+    /// changes no answer; it only returns the memory.
+    pub(crate) fn remove_entities(&mut self, shard: ShardId, deleted: &croaring::Bitmap) {
         if deleted.is_empty() {
             return;
         }
-        let gone = |e: &Entry| u32::try_from(e.entity.raw()).is_ok_and(|id| deleted.contains(id));
+        let gone = |e: &Entry| {
+            e.shard == shard && u32::try_from(e.entity.raw()).is_ok_and(|id| deleted.contains(id))
+        };
         for column in self.columns.values_mut() {
             column.remove_where(gone);
         }
     }
 
-    /// Make `attribute` unique, with the entries of every row `buffer` holds, or stop it being
-    /// unique.
-    pub(crate) fn set_unique(
+    /// Make `attribute` unique, with the entries of every row each shard's buffer holds, or stop
+    /// it being unique.
+    pub(crate) fn set_unique<'a>(
         &mut self,
         manifest: &Manifest,
-        buffer: &IngestBuffer,
+        buffers: impl IntoIterator<Item = (ShardId, &'a IngestBuffer)>,
         attribute: &str,
         unique: bool,
     ) {
@@ -257,7 +273,7 @@ impl UniqueLive {
                 ..UniqueLive::default()
             };
             only.columns.insert(attribute.to_string(), Column::default());
-            only.add(&manifest.declared_scalars, buffered_scalars(buffer));
+            only.add(&manifest.declared_scalars, buffered_items(buffers));
             self.seq = only.seq;
             self.columns.extend(only.columns);
         } else {
@@ -268,9 +284,9 @@ impl UniqueLive {
         self.columns_changed_at = self.seq;
     }
 
-    /// Every entity a live entry of `attribute` holds under each of `keys`, as `(position in keys,
-    /// entity)`.
-    pub(crate) fn lookup(&self, attribute: &str, keys: &[UniqueKey]) -> Vec<(usize, EntityId)> {
+    /// Every item a live entry of `attribute` holds under each of `keys`, as `(position in keys,
+    /// item)`.
+    pub(crate) fn lookup(&self, attribute: &str, keys: &[UniqueKey]) -> Vec<(usize, ItemAt)> {
         self.added_after(attribute, keys, 0, false)
     }
 
@@ -281,7 +297,7 @@ impl UniqueLive {
         attribute: &str,
         keys: &[UniqueKey],
         after: u64,
-    ) -> Vec<(usize, EntityId)> {
+    ) -> Vec<(usize, ItemAt)> {
         self.added_after(attribute, keys, after, true)
     }
 
@@ -291,7 +307,7 @@ impl UniqueLive {
         keys: &[UniqueKey],
         after: u64,
         retired: bool,
-    ) -> Vec<(usize, EntityId)> {
+    ) -> Vec<(usize, ItemAt)> {
         let mut out = Vec::new();
         let column = self.columns.get(attribute);
         for (i, key) in keys.iter().enumerate() {
@@ -305,7 +321,7 @@ impl UniqueLive {
             out.extend(
                 live.chain(kept)
                     .filter(|e| e.seq > after)
-                    .map(|e| (i, e.entity)),
+                    .map(|e| (i, e.item())),
             );
         }
         out
@@ -313,10 +329,11 @@ impl UniqueLive {
 }
 
 /// The entities of `shard` holding each of `keys` in unique column `attribute`, from its runs and
-/// its live entries, deleted entities dropped, as `(position in keys, entity)` ascending
-/// by position. A suppressed entity holds its value. Nothing here asks who may see a holder: a
-/// caller answering a viewer intersects with the viewer's visible set.
-pub(crate) fn holders(
+/// its live entries in `generation`, deleted entities dropped, as `(position in keys, entity)`
+/// ascending by position. A suppressed entity holds its value. Nothing here asks who may see a
+/// holder: a caller answering a viewer intersects with the viewer's visible set.
+pub(crate) fn holders_in(
+    generation: &Generation,
     shard: &crate::Shard,
     attribute: &str,
     keys: &[UniqueKey],
@@ -329,15 +346,24 @@ pub(crate) fn holders(
             .collect(),
         None => Vec::new(),
     };
-    out.extend(shard.unique_live.lookup(attribute, keys));
+    out.extend(
+        generation
+            .unique_live
+            .lookup(attribute, keys)
+            .into_iter()
+            .filter(|(_, item)| item.shard == shard.id())
+            .map(|(i, item)| (i, item.entity)),
+    );
     out.retain(|(_, entity)| !shard.overlay.is_deleted(*entity));
     out.sort_unstable();
     out.dedup();
     Ok(out)
 }
 
-/// [`holders`] in every shard of `generation`, each holder with its shard, ascending by shard.
-pub(crate) fn holders_in_every_shard(
+/// The items of every shard of `generation` holding each of `keys` in unique column `attribute`,
+/// as [`holders_in`] finds them in each, ascending by shard, then position. Each shard's runs are
+/// probed through their key filters, so a shard holding none of `keys` reads no entry page.
+pub(crate) fn holders(
     generation: &Generation,
     attribute: &str,
     keys: &[UniqueKey],
@@ -345,12 +371,46 @@ pub(crate) fn holders_in_every_shard(
     let mut out = Vec::new();
     for shard in generation.shards() {
         out.extend(
-            holders(shard, attribute, keys)?
+            holders_in(generation, shard, attribute, keys)?
                 .into_iter()
                 .map(|(at, entity)| (at, ItemAt::new(shard.id(), entity))),
         );
     }
     Ok(out)
+}
+
+/// Shard `shard`'s index of `attribute` as a declaration's log record names its runs: the runs
+/// written in that shard, none where the declaration wrote none there.
+pub(crate) fn declared_runs(
+    attribute: &str,
+    shard: ShardId,
+    base: &[mosaica_lifecycle::wal::DeclaredRun],
+    live: &[mosaica_lifecycle::wal::DeclaredRun],
+) -> mosaica_store::manifest::UniqueIndexRuns {
+    mosaica_store::manifest::UniqueIndexRuns {
+        attribute: attribute.to_string(),
+        base: base
+            .iter()
+            .filter(|run| run.shard == shard)
+            .map(|run| mosaica_store::manifest::BaseKeyRun {
+                path: run.path.clone(),
+                first_key: run.first_key.clone(),
+                last_key: run.last_key.clone(),
+            })
+            .collect(),
+        live: live
+            .iter()
+            .filter(|run| run.shard == shard)
+            .map(|run| run.path.clone())
+            .collect(),
+    }
+}
+
+/// Whether `generation` has deleted `item`, or holds no shard of it.
+fn deleted_in(generation: &Generation, item: ItemAt) -> bool {
+    generation
+        .shard(item.shard)
+        .is_none_or(|shard| shard.overlay.is_deleted(item.entity))
 }
 
 /// An item's `mosaica_id` as a refusal names it.
@@ -370,20 +430,16 @@ pub(crate) fn mosaica_id_text(
 /// holder since the live entries' sequence number was `seq`: the executor's re-check of a batch
 /// its handler resolved at `seq`, from memory. Where an entry added since has already left
 /// memory the answer is yes, and so it is for a batch that `creates` items once the unique
-/// columns have changed, since its keys were taken under the old ones. The live entries are
-/// `write_shard`'s, where every window adds its rows' values.
+/// columns have changed, since its keys were taken under the old ones. A holder is read in its
+/// own shard.
 pub(crate) fn moved_since(
     generation: &Generation,
-    write_shard: ShardId,
     keys: &[(u16, u128)],
     seq: u64,
     creates: bool,
 ) -> bool {
     use mosaica_store::unique::KeyKind;
-    let Some(shard) = generation.shard(write_shard) else {
-        return true;
-    };
-    let live = &shard.unique_live;
+    let live = &generation.unique_live;
     if creates && live.columns_changed_since(seq) {
         return true;
     }
@@ -403,22 +459,22 @@ pub(crate) fn moved_since(
         };
         live.added_since(&d.name, &[UniqueKey::of_widened(kind, *key)], seq)
             .into_iter()
-            .any(|(_, holder)| !shard.overlay.is_deleted(holder))
+            .any(|(_, holder)| !deleted_in(generation, holder))
     })
 }
 
-/// Every value `generation` has flushed for column `at` among `wanted`, to `visit`, deleted
-/// entities left out, read from the column's own home: its value layers where it has them, the
-/// record blob a block at a time where it is blob-resident, and each view's row tail where it is
-/// rendered alone.
+/// Every value `shard` of `generation` has flushed for column `at` among `wanted`, to `visit`,
+/// deleted entities left out, read from the column's own home: its value layers where it has
+/// them, the record blob a block at a time where it is blob-resident, and each view's row tail
+/// where it is rendered alone.
 pub(crate) fn for_each_flushed_value(
     generation: &Generation,
+    shard: &crate::Shard,
     at: usize,
     wanted: &croaring::Bitmap,
     visit: &mut dyn FnMut(u32, WalScalar) -> Result<(), String>,
 ) -> Result<(), String> {
     let manifest = &generation.bundle.manifest;
-    let shard = generation.only_shard();
     let declared = &manifest.declared_scalars[at];
     let mut wanted = wanted.clone();
     wanted.andnot_inplace(shard.overlay.deleted_set());
@@ -476,13 +532,15 @@ pub(crate) fn for_each_flushed_value(
     failed.map_or(Ok(()), Err)
 }
 
-/// What one round of a declaration's build is given: the generation it reads, the flushed
-/// entities it reads the column's values for, the runs earlier rounds wrote, and where it writes.
+/// What one round of a declaration's build is given: the generation it reads, the shard and the
+/// flushed entities of it it reads the column's values for, the runs earlier rounds wrote in
+/// every shard, and where it writes.
 pub(crate) struct RoundInput {
     pub(crate) generation: Arc<Generation>,
+    pub(crate) shard: ShardId,
     pub(crate) at: usize,
     pub(crate) wanted: croaring::Bitmap,
-    pub(crate) prior: Vec<std::path::PathBuf>,
+    pub(crate) prior: Vec<(ShardId, std::path::PathBuf)>,
     pub(crate) prefix_dir: std::path::PathBuf,
     pub(crate) out_dir: std::path::PathBuf,
     pub(crate) stem: String,
@@ -496,27 +554,61 @@ pub(crate) struct RoundOutput {
     /// [`DUPLICATE_EXAMPLES`] of their values.
     pub(crate) duplicates: u64,
     pub(crate) examples: Vec<String>,
-    /// The buffered `(entity, key)` pairs this round checked against every run.
-    pub(crate) checked: FxHashMap<EntityId, UniqueKey>,
+    /// The buffered `(item, key)` pairs this round checked against every run.
+    pub(crate) checked: FxHashMap<ItemAt, UniqueKey>,
+}
+
+/// Every item holding each of `keys` in `runs`, each run read as an index of its own shard,
+/// deleted items left out, as `(position in keys, item)`.
+pub(crate) fn run_holders(
+    generation: &Generation,
+    attribute: &str,
+    kind: mosaica_store::unique::KeyKind,
+    prefix_dir: &std::path::Path,
+    runs: &[(ShardId, String)],
+    keys: &[UniqueKey],
+) -> Result<Vec<(usize, ItemAt)>, String> {
+    let mut out = Vec::new();
+    for (shard, live) in mosaica_types::by_shard(runs.iter().cloned()) {
+        let runs = mosaica_store::manifest::UniqueIndexRuns {
+            attribute: attribute.to_string(),
+            base: Vec::new(),
+            live,
+        };
+        let index = mosaica_store::unique::UniqueIndex::open(&runs, kind, prefix_dir, None)
+            .map_err(|e| e.to_string())?;
+        out.extend(
+            index
+                .lookup(keys)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(|(i, entity)| (i, ItemAt::new(shard, EntityId::new(u64::from(entity)))))
+                .filter(|(_, item)| !deleted_in(generation, *item)),
+        );
+    }
+    Ok(out)
 }
 
 /// One round of a unique declaration's build, off the executor: sort the flushed values of the
-/// wanted entities into runs, then find every key more than one item holds, among them, against
-/// the earlier rounds' runs, and among and against the buffered rows.
+/// wanted entities of one shard into runs there, then find every key more than one item holds,
+/// among them, against the runs earlier rounds wrote in any shard, and among and against every
+/// shard's buffered rows.
 pub(crate) fn build_round(input: RoundInput) -> Result<RoundOutput, String> {
-    use mosaica_store::unique::{KeyKind, UniqueIndex, UniqueSpill};
+    use mosaica_store::unique::{KeyKind, UniqueSpill};
     let generation = &input.generation;
     let declared = &generation.bundle.manifest.declared_scalars[input.at];
     let ty = declared.arrow_type;
     let kind = KeyKind::of(ty).ok_or_else(|| format!("'{}' cannot be unique", declared.name))?;
-    let shard = generation.only_shard();
-    let deleted = |entity: EntityId| shard.overlay.is_deleted(entity);
+    let shard = generation
+        .shard(input.shard)
+        .ok_or_else(|| format!("shard {} is no longer served", input.shard))?;
 
     std::fs::create_dir_all(&input.out_dir).map_err(|e| e.to_string())?;
     let mut spill = UniqueSpill::create(kind, &input.out_dir, input.memory_budget)
         .map_err(|e| e.to_string())?;
     for_each_flushed_value(
         generation,
+        shard,
         input.at,
         &input.wanted,
         &mut |entity, value| match key_of(ty, &value) {
@@ -543,61 +635,60 @@ pub(crate) fn build_round(input: RoundInput) -> Result<RoundOutput, String> {
         }
     };
 
-    // Every run so far, this round's and the earlier ones', as one index to look up in.
+    // Every run so far, this round's and the earlier ones', each with its shard.
     let rel = |path: &std::path::Path| {
         mosaica_store::unique::relative(&input.prefix_dir, path).map_err(|e| e.to_string())
     };
-    let this_round: Vec<String> = written
+    let this_round: Vec<(ShardId, String)> = written
         .iter()
-        .map(|run| rel(&run.path))
-        .collect::<Result<_, _>>()?;
-    let prior: Vec<String> = input
+        .map(|run| Ok((input.shard, rel(&run.path)?)))
+        .collect::<Result<_, String>>()?;
+    let prior: Vec<(ShardId, String)> = input
         .prior
         .iter()
-        .map(|path| rel(path))
-        .collect::<Result<_, _>>()?;
-    let lookup =
-        |live: Vec<String>, keys: &[UniqueKey]| -> Result<Vec<(usize, EntityId)>, String> {
-            let runs = mosaica_store::manifest::UniqueIndexRuns {
-                attribute: declared.name.clone(),
-                base: Vec::new(),
-                live,
-            };
-            let index = UniqueIndex::open(&runs, kind, &input.prefix_dir, None)
-                .map_err(|e| e.to_string())?;
-            Ok(index
-                .lookup(keys)
-                .map_err(|e| e.to_string())?
-                .into_iter()
-                .map(|(i, entity)| (i, EntityId::new(u64::from(entity))))
-                .filter(|(_, entity)| !deleted(*entity))
-                .collect())
-        };
+        .map(|(shard, path)| Ok((*shard, rel(path)?)))
+        .collect::<Result<_, String>>()?;
+    let lookup = |runs: &[(ShardId, String)], keys: &[UniqueKey]| {
+        run_holders(
+            generation,
+            &declared.name,
+            kind,
+            &input.prefix_dir,
+            runs,
+            keys,
+        )
+    };
 
     // This round's values against the earlier rounds' runs.
     if !prior.is_empty() {
-        let mut entries: Vec<(UniqueKey, EntityId)> = Vec::new();
+        let mut entries: Vec<(UniqueKey, ItemAt)> = Vec::new();
         for run in &written {
             mosaica_store::unique::for_each_entry(kind, &run.path, |key, entity| {
-                entries.push((key, EntityId::new(u64::from(entity))));
+                entries.push((
+                    key,
+                    ItemAt::new(input.shard, EntityId::new(u64::from(entity))),
+                ));
                 Ok(())
             })
             .map_err(|e| e.to_string())?;
         }
         let keys: Vec<UniqueKey> = entries.iter().map(|(key, _)| *key).collect();
-        for (i, holder) in lookup(prior.clone(), &keys)? {
+        for (i, holder) in lookup(&prior, &keys)? {
             if holder != entries[i].1 {
                 note(entries[i].0, &mut duplicates, &mut duplicate_keys);
             }
         }
     }
 
-    // The buffered values, among themselves and against every run.
-    let mut checked: FxHashMap<EntityId, UniqueKey> = FxHashMap::default();
-    let mut by_key: FxHashMap<UniqueKey, EntityId> = FxHashMap::default();
+    // Every shard's buffered values, among themselves and against every run.
+    let mut checked: FxHashMap<ItemAt, UniqueKey> = FxHashMap::default();
+    let mut by_key: FxHashMap<UniqueKey, ItemAt> = FxHashMap::default();
     let mut texts: FxHashMap<UniqueKey, String> = FxHashMap::default();
-    for (entity, scalars) in buffered_scalars(&shard.buffer) {
-        if deleted(entity) {
+    let buffers = generation
+        .shards()
+        .map(|shard| (shard.id(), &*shard.buffer));
+    for (item, scalars) in buffered_items(buffers) {
+        if deleted_in(generation, item) {
             continue;
         }
         let Some(value) = scalars.get(input.at) else {
@@ -609,16 +700,16 @@ pub(crate) fn build_round(input: RoundInput) -> Result<RoundOutput, String> {
         if let WalScalar::Utf8(text) = value {
             texts.entry(key).or_insert_with(|| text.clone());
         }
-        checked.insert(entity, key);
-        if by_key.insert(key, entity).is_some_and(|other| other != entity) {
+        checked.insert(item, key);
+        if by_key.insert(key, item).is_some_and(|other| other != item) {
             note(key, &mut duplicates, &mut duplicate_keys);
         }
     }
-    let buffered: Vec<(EntityId, UniqueKey)> = checked.iter().map(|(e, k)| (*e, *k)).collect();
+    let buffered: Vec<(ItemAt, UniqueKey)> = checked.iter().map(|(e, k)| (*e, *k)).collect();
     let keys: Vec<UniqueKey> = buffered.iter().map(|(_, key)| *key).collect();
-    let every_run: Vec<String> = prior.iter().chain(&this_round).cloned().collect();
+    let every_run: Vec<(ShardId, String)> = prior.iter().chain(&this_round).cloned().collect();
     if !keys.is_empty() && !every_run.is_empty() {
-        for (i, holder) in lookup(every_run, &keys)? {
+        for (i, holder) in lookup(&every_run, &keys)? {
             if holder != buffered[i].0 {
                 note(buffered[i].1, &mut duplicates, &mut duplicate_keys);
             }
@@ -628,7 +719,14 @@ pub(crate) fn build_round(input: RoundInput) -> Result<RoundOutput, String> {
     let examples = if duplicates == 0 {
         Vec::new()
     } else {
-        describe_keys(generation, input.at, &input.wanted, &duplicate_keys, &texts)?
+        describe_keys(
+            generation,
+            shard,
+            input.at,
+            &input.wanted,
+            &duplicate_keys,
+            &texts,
+        )?
     };
     let mut runs = Vec::with_capacity(written.len());
     let paths: Vec<std::path::PathBuf> = written.iter().map(|run| run.path.clone()).collect();
@@ -645,19 +743,26 @@ pub(crate) fn build_round(input: RoundInput) -> Result<RoundOutput, String> {
     })
 }
 
-/// Every buffered item's entity-scoped scalars, with the entity.
-pub(crate) fn buffered_scalars(buffer: &IngestBuffer) -> Vec<(EntityId, &[WalScalar])> {
-    buffer
-        .iter()
-        .map(|(entity, item)| (*entity, item.scalars.as_slice()))
+/// Every buffered item's entity-scoped scalars, with the item, over each shard's buffer.
+pub(crate) fn buffered_items<'a>(
+    buffers: impl IntoIterator<Item = (ShardId, &'a IngestBuffer)>,
+) -> Vec<(ItemAt, &'a [WalScalar])> {
+    buffers
+        .into_iter()
+        .flat_map(|(shard, buffer)| {
+            buffer
+                .iter()
+                .map(move |(entity, item)| (ItemAt::new(shard, *entity), item.scalars.as_slice()))
+        })
         .collect()
 }
 
 /// The values of `keys` as a refusal names them. An integer key is its own value; a keyword key
-/// is a hash, so its text is found among the buffered values or read again from the flushed
-/// ones.
+/// is a hash, so its text is found among the buffered values or read again from `shard`'s
+/// flushed ones.
 fn describe_keys(
     generation: &Generation,
+    shard: &crate::Shard,
     at: usize,
     wanted: &croaring::Bitmap,
     keys: &[UniqueKey],
@@ -673,7 +778,7 @@ fn describe_keys(
         .copied()
         .collect();
     if !missing.is_empty() {
-        for_each_flushed_value(generation, at, wanted, &mut |_, value| {
+        for_each_flushed_value(generation, shard, at, wanted, &mut |_, value| {
             if let Some(key) = key_of(declared.arrow_type, &value) {
                 if missing.contains(&key) && !found.contains_key(&key) {
                     found.insert(key, value_text(&value));
@@ -707,7 +812,17 @@ mod tests {
         live
     }
 
+    const ZERO: ShardId = ShardId::ZERO;
+
+    fn at(entity: EntityId) -> ItemAt {
+        ItemAt::new(ZERO, entity)
+    }
+
     fn add(live: &mut UniqueLive, entries: &[(UniqueKey, EntityId)]) {
+        add_in(live, ZERO, entries)
+    }
+
+    fn add_in(live: &mut UniqueLive, shard: ShardId, entries: &[(UniqueKey, EntityId)]) {
         let declared = [DeclaredScalar {
             name: "id".to_string(),
             arrow_type: mosaica_spatial::tiler::ScalarType::U64,
@@ -726,7 +841,10 @@ mod tests {
             .collect();
         live.add(
             &declared,
-            entries.iter().zip(&scalars).map(|((_, e), s)| (*e, &s[..])),
+            entries
+                .iter()
+                .zip(&scalars)
+                .map(|((_, e), s)| (ItemAt::new(shard, *e), &s[..])),
         );
     }
 
@@ -740,10 +858,10 @@ mod tests {
         let key = UniqueKey::unsigned(7);
         let entity = EntityId::new(3);
         add(&mut live, &[(key, entity)]);
-        assert_eq!(live.added_since("id", &[key], seen), vec![(0, entity)]);
-        live.flushed([("id", &[(key, entity)][..])]);
+        assert_eq!(live.added_since("id", &[key], seen), vec![(0, at(entity))]);
+        live.flushed(ZERO, [("id", &[(key, entity)][..])]);
         assert!(live.lookup("id", &[key]).is_empty(), "a run holds it now");
-        assert_eq!(live.added_since("id", &[key], seen), vec![(0, entity)]);
+        assert_eq!(live.added_since("id", &[key], seen), vec![(0, at(entity))]);
         assert!(!live.stale_since(seen));
 
         // Enough later flushes push it out, and the check made before it is then stale.
@@ -751,7 +869,7 @@ mod tests {
             .map(|i| (UniqueKey::unsigned(1_000 + i), EntityId::new(100 + i)))
             .collect();
         add(&mut live, &filler);
-        live.flushed([("id", &filler[..])]);
+        live.flushed(ZERO, [("id", &filler[..])]);
         assert!(live.stale_since(seen));
         assert!(!live.stale_since(live.seq()));
     }
@@ -772,15 +890,44 @@ mod tests {
         let keys: Vec<UniqueKey> = entries.iter().map(|(k, _)| *k).collect();
         let found = live.lookup("id", &keys);
         assert_eq!(found.len(), entries.len());
-        assert!(found.iter().all(|(i, e)| entries[*i].1 == *e));
+        assert!(found.iter().all(|(i, e)| at(entries[*i].1) == *e));
 
-        live.flushed([("id", &entries[..5_000])]);
+        live.flushed(ZERO, [("id", &entries[..5_000])]);
         let deleted: croaring::Bitmap = (5_000u32..6_000).collect();
-        live.remove_entities(&deleted);
-        let left: Vec<EntityId> = live.lookup("id", &keys).into_iter().map(|(_, e)| e).collect();
+        live.remove_entities(ZERO, &deleted);
+        let left: Vec<EntityId> = live
+            .lookup("id", &keys)
+            .into_iter()
+            .map(|(_, e)| e.entity)
+            .collect();
         let expected: Vec<EntityId> = (6_000..10_000).map(EntityId::new).collect();
         let mut left = left;
         left.sort_unstable();
         assert_eq!(left, expected);
+    }
+
+    /// One entity number holding one key in two shards is two entries: a flush or a deletion in
+    /// one shard leaves the other's.
+    #[test]
+    fn a_flush_or_a_deletion_in_one_shard_leaves_the_others_entries() {
+        let one = ShardId::new(1).unwrap();
+        let key = UniqueKey::unsigned(7);
+        let entity = EntityId::new(3);
+        let mut live = live();
+        add(&mut live, &[(key, entity)]);
+        add_in(&mut live, one, &[(key, entity)]);
+        assert_eq!(
+            live.lookup("id", &[key]),
+            vec![(0, at(entity)), (0, ItemAt::new(one, entity))]
+        );
+
+        live.flushed(one, [("id", &[(key, entity)][..])]);
+        assert_eq!(live.lookup("id", &[key]), vec![(0, at(entity))]);
+        add_in(&mut live, one, &[(key, entity)]);
+        live.remove_entities(ZERO, &croaring::Bitmap::of(&[3]));
+        assert_eq!(
+            live.lookup("id", &[key]),
+            vec![(0, ItemAt::new(one, entity))]
+        );
     }
 }
