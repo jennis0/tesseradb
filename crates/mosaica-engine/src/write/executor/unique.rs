@@ -494,7 +494,7 @@ impl Executor {
         }
         write_deny_state(
             &mut manifest,
-            &generation.only_shard().overlay,
+            shard_overlays(generation),
             &generation.layer_spaces,
         );
         write_vocabulary_extensions(

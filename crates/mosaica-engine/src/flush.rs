@@ -313,16 +313,26 @@ fn text_lap(sub: &mut Option<TextLaps<'_>>, stage: FlushStage) {
     }
 }
 
-/// One flush's immutable plan: the items of one view that will acquire geometry. The view itself
-/// is not carried; the caller already holds it.
+/// One flush's immutable plan: the items of one view in one shard that will acquire geometry. The
+/// view itself is not carried; the caller already holds it.
 #[derive(Debug)]
 pub(crate) struct FlushPlan {
+    /// The shard whose buffer the items are taken from, and whose entity space they are in.
+    pub(crate) shard: ShardId,
     /// Ascending by entity id, deleted entities already removed; its ends give the segment's
     /// entity range.
     pub(crate) items: Vec<(EntityId, BufferedItem)>,
 }
 
 impl FlushPlan {
+    /// The WAL position of the oldest row this plan holds, `Some(None)` where a row's position is
+    /// unknown, and `None` for a plan holding no row: what a dispatch orders plans by, since
+    /// entity ids are neither comparable across shards nor issued in order once numbers are
+    /// reused.
+    pub(crate) fn oldest_wal_pos(&self) -> Option<Option<u64>> {
+        self.items.iter().map(|(_, item)| item.wal_pos).min()
+    }
+
     /// The rows that carry entity-space facts: this entity's label, attributes and prose. A join
     /// is excluded, since its entity-space facts are already written by an earlier flush.
     pub(crate) fn entity_space_items(&self) -> impl Iterator<Item = &(EntityId, BufferedItem)> {
@@ -359,12 +369,13 @@ pub(crate) enum NoFlush {
     SteppedDown,
 }
 
-/// Plan a flush of `view` against `generation`. Pure: reads only the generation, so the same
-/// generation always yields the same plan. The WAL and overlay postures are passed in because
+/// Plan a flush of `view` in `shard` against `generation`. Pure: reads only the generation, so the
+/// same generation always yields the same plan. The WAL and overlay postures are passed in because
 /// they are the executor's health, not the generation's.
 pub(crate) fn plan_flush(
     generation: &Generation,
     view: &str,
+    shard: ShardId,
     wal_poisoned: bool,
     overlay_diverged: bool,
 ) -> Result<FlushPlan, NoFlush> {
@@ -385,7 +396,9 @@ pub(crate) fn plan_flush(
         return Err(NoFlush::SteppedDown);
     }
 
-    let shard = generation.only_shard();
+    let Some(shard) = generation.shard(shard) else {
+        return Err(NoFlush::NothingToFlush);
+    };
     let mut items: Vec<(EntityId, BufferedItem)> = shard
         .buffer
         .rows()
@@ -405,7 +418,10 @@ pub(crate) fn plan_flush(
     // ascending entity id.
     items.sort_unstable_by_key(|(entity, _)| entity.raw());
 
-    Ok(FlushPlan { items })
+    Ok(FlushPlan {
+        shard: shard.id(),
+        items,
+    })
 }
 
 /// Everything the background pool needs to turn a [`FlushPlan`] into durable files. Taken from
@@ -2153,7 +2169,7 @@ mod tests {
     }
 
     fn plan(generation: &Generation) -> Result<FlushPlan, NoFlush> {
-        plan_flush(generation, VIEW, false, false)
+        plan_flush(generation, VIEW, ShardId::ZERO, false, false)
     }
 
     /// **A suppression never touches postings, and an item's is lifted only by an unsuppress**, so
@@ -2194,7 +2210,7 @@ mod tests {
         // A later delete cannot reach this plan: it is a value, taken from one generation.
         let later = generation_with(&[(7, item(&[1]))], &[(7, ChangeOp::Delete)]);
         assert!(matches!(
-            plan_flush(&later, VIEW, false, false),
+            plan_flush(&later, VIEW, ShardId::ZERO, false, false),
             Err(NoFlush::NothingToFlush)
         ));
     }
@@ -2207,7 +2223,7 @@ mod tests {
     fn a_wal_poisoned_node_plans_nothing() {
         let generation = generation_with(&[(7, item(&[1]))], &[]);
         assert!(matches!(
-            plan_flush(&generation, VIEW, true, false),
+            plan_flush(&generation, VIEW, ShardId::ZERO, true, false),
             Err(NoFlush::WalPoisoned)
         ));
     }
@@ -2219,7 +2235,7 @@ mod tests {
     fn a_diverged_node_plans_nothing_even_though_its_wal_is_healthy() {
         let generation = generation_with(&[(7, item(&[1]))], &[]);
         assert!(matches!(
-            plan_flush(&generation, VIEW, false, true),
+            plan_flush(&generation, VIEW, ShardId::ZERO, false, true),
             Err(NoFlush::OverlayDiverged)
         ));
     }

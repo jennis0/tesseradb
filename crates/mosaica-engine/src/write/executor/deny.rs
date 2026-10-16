@@ -289,8 +289,15 @@ impl Executor {
         // A window of deletes and suppressions only grows the mask; an unsuppress re-derives it,
         // since subtracting a row would re-expose a still-deleted entity.
         let overlay_version = shard.overlay_version + 1;
+        let id = shard.id();
+        let buffer = crate::BufferSwap {
+            buffer,
+            inserted: &[],
+        };
         let next = if unsuppressed {
-            generation.with_buffer(shard.id(), buffer, &[], |g, s| {
+            let buffers = std::collections::BTreeMap::from([(id, buffer)]);
+            generation.with_buffer(buffers, |g, shards| {
+                let s = shards.of(id);
                 s.overlay_version = overlay_version;
                 g.deny_epoch = deny_epoch;
                 g.layer_spaces = layer_spaces;
@@ -298,8 +305,14 @@ impl Executor {
                 s.unique_live = unique_live;
             })
         } else {
-            let overlay = Arc::new(overlay);
-            generation.with_denies(shard.id(), overlay, &newly_denied, buffer, &[], |g, s| {
+            let denies = crate::DenySwap {
+                overlay: Arc::new(overlay),
+                newly_denied: &newly_denied,
+                buffer,
+            };
+            let denies = std::collections::BTreeMap::from([(id, denies)]);
+            generation.with_denies(denies, |g, shards| {
+                let s = shards.of(id);
                 s.overlay_version = overlay_version;
                 g.deny_epoch = deny_epoch;
                 g.layer_spaces = layer_spaces;

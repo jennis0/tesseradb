@@ -70,17 +70,28 @@ impl std::fmt::Display for ManifestCommitRefused {
     }
 }
 
-/// Replace a manifest's deny fields, the shard's and each layer space's, with the overlays' live
-/// state, restated fresh at every write as two separate sets and never their union: publishing
-/// the union would make every deletion look retirable by an unsuppress.
-pub(super) fn write_deny_state(
+/// Every shard's overlay in `generation`, as [`write_deny_state`] takes them.
+pub(super) fn shard_overlays(generation: &Generation) -> impl Iterator<Item = (ShardId, &Overlay)> {
+    generation
+        .shards()
+        .map(|shard| (shard.id(), &*shard.overlay))
+}
+
+/// Replace a manifest's deny fields, each named shard's and each layer space's, with the overlays'
+/// live state, restated fresh at every write as two separate sets and never their union:
+/// publishing the union would make every deletion look retirable by an unsuppress.
+pub(super) fn write_deny_state<'a>(
     manifest: &mut SegmentsManifest,
-    overlay: &Overlay,
+    overlays: impl IntoIterator<Item = (ShardId, &'a Overlay)>,
     spaces: &crate::LayerSpaces,
 ) {
-    let record = manifest.only_shard_mut();
-    record.deny = EntitySet::of(overlay.suppressed_set());
-    record.tombstones = EntitySet::of(overlay.deleted_set());
+    for (shard, overlay) in overlays {
+        let Some(record) = manifest.shard_mut(shard) else {
+            continue;
+        };
+        record.deny = EntitySet::of(overlay.suppressed_set());
+        record.tombstones = EntitySet::of(overlay.deleted_set());
+    }
     for space in spaces.keys() {
         mosaica_store::manifest::layer_space_mut(&mut manifest.layer_spaces, *space);
     }
@@ -326,11 +337,14 @@ impl Executor {
         let (mut level_versions, derived_extents) = self.live.with_artifacts(|store| {
             artifact_coordinates(store, derived, pending, &spaces, &enumerated)
         });
+        // The held lists are the writable slice's shard's.
+        let store_shard = self.live.shards[0].id;
         // The clone may predate these extents, so they are restated from the held lists, and
         // their files' digests with them.
         if fold.is_none() {
-            next.only_shard_mut().membership_extents =
-                self.side_manifests.membership_extents.clone();
+            if let Some(record) = next.shard_mut(store_shard) {
+                record.membership_extents = self.side_manifests.membership_extents.clone();
+            }
             next.partition
                 .files
                 .retain(|rel, _| !mosaica_store::layout::is_artifact_file(partition, rel));
@@ -359,7 +373,7 @@ impl Executor {
             record.level_versions = level_versions.remove(&record.space).unwrap_or_default();
         }
         next.slices_at_records_versions();
-        next.file_derived(derived_extents);
+        next.file_derived(store_shard, derived_extents);
         crate::geometry::check_manifest_publishable(partition_data, next)
             .map_err(ManifestCommitRefused::Regresses)?;
         // A fold's new prefix holds none of the live prefix's files.

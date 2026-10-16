@@ -376,14 +376,15 @@ pub(super) fn free_disc(_path: &Path) -> Option<u64> {
     None
 }
 
-/// The largest live segment count across this generation's views: the maximum, not the sum, since
-/// a viewport in one view pays only that view's own segment count.
+/// The largest live segment count across this generation's views in every shard: the maximum, not
+/// the sum, since a viewport in one view pays only that view's own segment count.
 pub(super) fn live_segments_of(generation: &Generation) -> usize {
     generation
         .bundle
         .partitions
         .values()
-        .flat_map(|partition| partition.only_shard().views.values())
+        .flat_map(|partition| partition.shards.iter())
+        .flat_map(|shard| shard.views.values())
         .map(|view| view.segments.len())
         .max()
         .unwrap_or(0)
@@ -716,7 +717,7 @@ impl Executor {
             self.fold_floor_from(),
             crate::compact::Gauges {
                 live_segments: live_segments_of(generation),
-                retirable_deletions: generation.only_shard().overlay.deleted_len(),
+                retirable_deletions: crate::status::retirable_deletions_of(generation),
                 artifact_deletions: generation.space_overlay_figures().1,
                 live_rows: crate::status::live_rows_of(generation),
             },
@@ -1451,7 +1452,11 @@ impl Executor {
             },
             layer_spaces: Vec::new(),
         };
-        write_deny_state(&mut segments_manifest, &published_overlay, &published_spaces);
+        write_deny_state(
+            &mut segments_manifest,
+            [(live_record.id, &published_overlay)],
+            &published_spaces,
+        );
 
         // ---- the new `MANIFEST.json` ----------------------------------------------------------
         let mut bundle_manifest = self.fold_bundle_manifest(&live, &completed);
@@ -1570,7 +1575,7 @@ impl Executor {
             };
         // The compacted shard's identity moves with the prefix's `MANIFEST.json`.
         if segments_manifest
-            .stamp_identities(&manifest_digest)
+            .stamp_identity(plan.shard, &manifest_digest)
             .is_none()
         {
             discard("its MANIFEST.json digest is not 64 hexadecimal digits");
@@ -2841,7 +2846,7 @@ impl Executor {
                             Some(&generation.only_shard().partition_source()),
                             layout,
                             predicate.as_ref(),
-                            generation.segments_version,
+                            generation.only_shard().segments_version,
                             &registered.declaration,
                         )
                     });

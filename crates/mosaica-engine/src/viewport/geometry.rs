@@ -244,13 +244,16 @@ impl Engine {
                 view: view.to_string(),
                 shard: shard.id(),
                 identity: shard.identity,
-                segments_version: generation.segments_version,
+                segments_version: shard.segments_version,
                 prefix: generation.prefix.clone(),
             })
             .collect();
-        let served = |geometries: Vec<Arc<SessionGeometry>>, segments_version: u64| {
-            for (shard, _) in &shards {
-                session.record_served(view, shard.id(), segments_version);
+        // Each shard's row space the geometries address, recorded against the session.
+        let served = |geometries: Vec<Arc<SessionGeometry>>,
+                      keys: &[RowProjectionKey],
+                      segments_version: u64| {
+            for ((shard, _), key) in shards.iter().zip(keys) {
+                session.record_served(view, shard.id(), key.segments_version);
             }
             Geometries {
                 sides: shards
@@ -269,18 +272,23 @@ impl Engine {
         if live.iter().all(Option::is_some) {
             return Ok(served(
                 live.into_iter().flatten().collect(),
+                &keys,
                 generation.segments_version,
             ));
         }
 
-        // Rung 2: the generation one below is the only one retention keeps.
+        // Rung 2: the generation one below is the only one retention keeps, each shard's row
+        // space as it stood there.
         // A `Ready` predecessor rung 2 does not serve: rung 3 sheds on it, or carries it forward.
         let mut predecessors: Vec<Option<RowProjectionKey>> = vec![None; shards.len()];
         if let Some(previous) = generation.segments_version.checked_sub(1) {
             let mut stale = Vec::with_capacity(shards.len());
             for (index, ((shard, view_data), key)) in shards.iter().zip(&keys).enumerate() {
+                let Some(before) = generation.segments_version_before(shard) else {
+                    continue;
+                };
                 let stale_key = RowProjectionKey {
-                    segments_version: previous,
+                    segments_version: before,
                     ..key.clone()
                 };
                 let Some(geometry) = ready(&stale_key) else {
@@ -288,7 +296,7 @@ impl Engine {
                 };
                 if session
                     .served_at(view, shard.id())
-                    .is_some_and(|at| at <= previous)
+                    .is_some_and(|at| at <= before)
                     && geometry.projection.extends_to(&view_data.row_space)
                 {
                     stale.push(geometry);
@@ -297,7 +305,9 @@ impl Engine {
             }
             if stale.len() == shards.len() {
                 self.counters.stale_serves.fetch_add(1, Ordering::Relaxed);
-                return Ok(served(stale, previous));
+                let stale_keys: Vec<RowProjectionKey> =
+                    predecessors.iter().flatten().cloned().collect();
+                return Ok(served(stale, &stale_keys, previous));
             }
         }
 
@@ -319,7 +329,7 @@ impl Engine {
         let mut geometries = Vec::with_capacity(shards.len());
         for (((shard, view_data), key), (live, predecessor)) in shards
             .iter()
-            .zip(keys)
+            .zip(keys.iter().cloned())
             .zip(live.into_iter().zip(predecessors))
         {
             let geometry = match live {
@@ -336,7 +346,7 @@ impl Engine {
             };
             geometries.push(geometry);
         }
-        Ok(served(geometries, generation.segments_version))
+        Ok(served(geometries, &keys, generation.segments_version))
     }
 
     /// Rung 3 in one shard: the live entry under `key`, carried forward from `predecessor` where a

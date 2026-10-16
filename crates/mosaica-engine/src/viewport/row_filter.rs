@@ -1195,7 +1195,7 @@ impl Engine {
                     view: served.name.to_string(),
                     shard: side.shard.id(),
                     prefix: served.generation.prefix.clone(),
-                    segments_version: served.generation.segments_version,
+                    segments_version: side.shard.segments_version,
                     digest: digest_of(&canonical),
                     max_cells,
                 };

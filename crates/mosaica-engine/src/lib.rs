@@ -216,7 +216,7 @@ pub use mosaica_lifecycle::wal::{DeclaredFrame, PlainViewDeclaration, ViewGroupD
 pub use mosaica_lifecycle::{DeclaredValue, VocabularyRequest};
 
 pub use generation::{Generation, GenerationParts, Shard, ShardParts};
-pub(crate) use generation::LayerSpaces;
+pub(crate) use generation::{BufferSwap, DenySwap, LayerSpaces, ShardsParts};
 
 /// Per-view row-space deny masks — see [`Shard::denied`].
 pub type DenyMask = rustc_hash::FxHashMap<String, croaring::Bitmap>;
