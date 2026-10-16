@@ -718,12 +718,12 @@ impl Executor {
             for extents in self.side_manifests.membership_extents.values_mut() {
                 extents.retain(|extent| extent.space != *space);
             }
-            self.side_manifests
-                .derived_extents
-                .retain(|extent| extent.space != *space);
+            for extents in self.side_manifests.derived_extents.values_mut() {
+                extents.retain(|extent| extent.space != *space);
+            }
             self.side_manifests.retain_named_artifact_files();
             // The deltas held for the tick describe forms that are going with the layer.
-            self.pending_forms.retain(|(layer, _), _| layer != name);
+            self.pending_forms.retain(|(layer, _, _), _| layer != name);
             self.deps.artifact_projections.forget(name);
             self.deps.lineages.forget(name);
             self.deps.level_contents.forget(name);
@@ -1371,7 +1371,7 @@ impl Executor {
             crate::write::retire_dead_view_artifacts(registry, store, &served.bundle.manifest)
         });
         for (layer, _) in &retired {
-            self.pending_forms.retain(|(held, _), _| held != layer);
+            self.pending_forms.retain(|(held, _, _), _| held != layer);
             self.deps.artifact_projections.forget(layer);
             self.deps.lineages.forget(layer);
             self.deps.level_contents.forget(layer);

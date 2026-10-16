@@ -655,6 +655,17 @@ fn reconstruct_writes(
                 shard.record.membership_extents.iter().map(move |m| (id, m.clone()))
             })
         });
+    let manifest_slice_versions: Vec<(ShardId, mosaica_store::manifest::SliceVersion)> =
+        across_partitions(bundle, |p| {
+            p.shards.iter().flat_map(|shard| {
+                let id = shard.record.id;
+                shard
+                    .record
+                    .slice_versions
+                    .iter()
+                    .map(move |v| (id, v.clone()))
+            })
+        });
     let manifest_layer_spaces: Vec<mosaica_store::manifest::LayerSpaceRecord> =
         across_partitions(bundle, |p| p.layer_spaces.iter().cloned());
     let initial_deny = Overlays {
@@ -681,6 +692,7 @@ fn reconstruct_writes(
             // buffered rows would flush into whatever takes the key next.
             view_ids_of_key: &|group: &str, key: &str| bundle.manifest.view_ids_for_key(group, key),
             membership_extents: &manifest_membership_extents,
+            slice_versions: &manifest_slice_versions,
             layer_spaces: &manifest_layer_spaces,
             prefix_dir: readers.prefix_dir.clone(),
             manifest: &bundle.manifest,

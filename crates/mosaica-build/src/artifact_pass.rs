@@ -419,6 +419,7 @@ pub(crate) fn run(
                 incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
                 space: spaces[layer],
                 level: *level,
+                records_version: store.records_version(layer, *level),
                 level_version: store.level_version(layer, *level),
                 form: DerivedForm::TileIndex,
                 bytes: derived::FiledBytes::InHand(derived::project_tile_index(
@@ -475,6 +476,7 @@ pub(crate) fn run(
                 incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
                 space: spaces[layer],
                 level: *level,
+                records_version: store.records_version(layer, *level),
                 level_version,
                 form,
                 bytes: derived::FiledBytes::Staged(path),
@@ -568,6 +570,7 @@ pub(crate) fn run(
                     incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
                     space: spaces[layer],
                     level: *level,
+                    records_version: store.records_version(layer, *level),
                     level_version,
                     form: DerivedForm::ShapeRows {
                         seg_id: segment.seg_id.clone(),
@@ -608,6 +611,7 @@ pub(crate) fn run(
                 incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
                 space: spaces[layer],
                 level: *level,
+                records_version: store.records_version(layer, *level),
                 level_version,
                 form: DerivedForm::ShapeHeld,
                 bytes: derived::FiledBytes::InHand(derived::shape_held_bytes(
@@ -751,6 +755,7 @@ fn shard_containment(store: &ArtifactStore, prefix_dir: &Path, span: ShardSpan) 
             incarnation: None,
             space: *space,
             level: *level,
+            records_version: store.records_version(layer, *level),
             level_version: store.level_version(layer, *level),
             form: DerivedForm::Containment,
             bytes: derived::FiledBytes::InHand(derived::compose_containment(

@@ -1758,7 +1758,7 @@ impl MembershipExtent {
 #[serde(deny_unknown_fields)]
 pub struct LevelVersion {
     pub level: u32,
-    /// How many artifact writes had landed on this level when this manifest was written.
+    /// How many writes had changed this level's records when this manifest was written.
     pub version: u64,
 }
 
@@ -1877,8 +1877,9 @@ pub(crate) fn derived_and_held<'a>(
 /// column, a segment's shape row form, a level's held shapes, or a level's label column and its
 /// band-order copy.
 ///
-/// A reader adopts the file only where the level it seeded is at exactly `level_version`, and
-/// derives the structure again otherwise. A stale file is narrow (a growth added members it does
+/// A reader adopts the file only where the level's records are at exactly `level_version` and
+/// the file's shard's slice at exactly `slice_version`, and derives the structure again
+/// otherwise. A stale file is narrow (a growth added members it does
 /// not cover), so nothing weaker than equality is safe.
 ///
 /// Every form but containment is addressed by row, so it names the view and the incarnation whose
@@ -1895,7 +1896,7 @@ pub struct DerivedExtent {
     /// The level's records version ([`LayerSpaceRecord::level_versions`]) the file was written at.
     pub level_version: u64,
     /// The level's slice version in the file's shard ([`ShardRecord::slice_versions`]) the file
-    /// was written at. Equal to `level_version` while every write moves both.
+    /// was written at.
     pub slice_version: u64,
     pub view: Option<String>,
     pub incarnation: Option<ViewIncarnation>,

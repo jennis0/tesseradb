@@ -832,11 +832,14 @@ impl Executor {
                         store,
                     )
                 };
+                let Some(slice) = store.slice(completed.plan.shard) else {
+                    return;
+                };
                 self.deps.artifact_projections.rebase_merged(
                     &live.prefix,
                     completed.plan.shard,
                     &completed.plan.view,
-                    store,
+                    slice,
                     previous,
                     space,
                     &merged_seg_id,
@@ -1580,13 +1583,13 @@ impl Executor {
     /// reach such a level are what build one.
     pub(super) fn publish_row_forms(&mut self) {
         let pending = std::mem::take(&mut self.pending_forms);
-        for ((layer, level), deltas) in &pending {
-            self.publish_level_forms(layer, *level, deltas);
+        for ((layer, level, shard), deltas) in &pending {
+            self.publish_level_forms(layer, *level, *shard, deltas);
         }
     }
 
-    /// Apply an interval's deltas to every held row form of one level, in every view the
-    /// generation carries.
+    /// Apply an interval's deltas to every held row form of one level in `shard`, in every view
+    /// the generation carries there, each over that shard's row space and slice.
     ///
     /// A form at a version these deltas do not follow is dropped rather than amended, which
     /// [`crate::artifacts::ArtifactProjections::publish`] argues in full.
@@ -1598,6 +1601,7 @@ impl Executor {
         &self,
         layer: &str,
         level: u32,
+        shard: ShardId,
         deltas: &[crate::artifacts::LevelDelta],
     ) {
         // Where the delta's rows come from. A stored membership's are the records' members,
@@ -1616,16 +1620,13 @@ impl Executor {
             return;
         }
         let generation = self.generation.load_full();
-        // A held delta names the first shard's entities alone, so where there are several shards
-        // every shard's form of the level is dropped, and built again from its slice.
-        if generation.shards().nth(1).is_some() {
-            self.deps.artifact_projections.forget_level(layer, level);
-            return;
-        }
         let mut views: std::collections::BTreeMap<&str, Option<&mosaica_store::read::ViewData>> =
             std::collections::BTreeMap::new();
         for partition in generation.bundle.partitions.values() {
-            for (name, data) in &partition.only_shard().views {
+            let Some(data) = partition.shard(shard) else {
+                continue;
+            };
+            for (name, data) in &data.views {
                 views
                     .entry(name.as_str())
                     .and_modify(|held| *held = None)
@@ -1633,15 +1634,19 @@ impl Executor {
             }
         }
         self.live.with_artifacts(|store| {
+            let Some(slice) = store.slice(shard) else {
+                return;
+            };
             for (view, data) in views {
                 let Some(data) = data else { continue };
                 if stored {
                     self.deps.artifact_projections.publish(
                         &generation.prefix,
-                        self.live.only_shard().id,
+                        shard,
                         view,
                         layer,
                         level,
+                        slice,
                         store,
                         &data.row_space,
                         deltas,
@@ -1711,10 +1716,11 @@ impl Executor {
                 };
                 self.deps.artifact_projections.publish(
                     &generation.prefix,
-                    self.live.only_shard().id,
+                    shard,
                     view,
                     layer,
                     level,
+                    slice,
                     store,
                     &data.row_space,
                     deltas,
@@ -2611,11 +2617,14 @@ impl Executor {
                         store,
                     )
                 };
+                let Some(slice) = store.slice(completed.shard) else {
+                    return;
+                };
                 self.deps.artifact_projections.extend_flushed(
                     &live.prefix,
                     completed.shard,
                     &completed.view,
-                    store,
+                    slice,
                     previous,
                     space,
                     segments_version,

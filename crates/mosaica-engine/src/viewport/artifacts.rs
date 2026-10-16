@@ -435,7 +435,7 @@ impl Engine {
                 level_version: self
                     .write
                     .live()
-                    .with_artifacts(|store| store.level_version(&name, level)),
+                    .with_artifacts(|store| store.every_slice_version(&name, level)),
                 shards: mask_identity.shards,
                 properties: crate::derived::cache::properties_bits(&declared_derived),
             };

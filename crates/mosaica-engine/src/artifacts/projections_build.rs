@@ -55,6 +55,7 @@ impl ArtifactProjections {
             layer,
             level,
             level_version: store.level_version(layer, level),
+            records_version: records.records_version(layer, level),
         };
         // See [`ProjectionKey::live`].
         let key = at.projection_key(match predicate {
@@ -147,7 +148,7 @@ impl ArtifactProjections {
     /// `records` and held for the next. Held records whose length is not the level's are stale
     /// and are rebuilt.
     fn level_records(&self, at: &Coordinate<'_>, records: &ArtifactStore) -> Arc<ArtifactRecords> {
-        let key = at.derived_key();
+        let key = at.records_key();
         let view = view_key(at.view);
         let len = (0..records.slots(at.layer, at.level).len() as u32)
             .rev()

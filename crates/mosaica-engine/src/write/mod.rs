@@ -486,11 +486,10 @@ impl WritePath {
         ) = {
             let generation = generation.load();
             let mut members = executor::PackedMembers::new();
-            let mut derived = Vec::new();
+            let mut derived = executor::DerivedByShard::new();
             let mut spaces = std::collections::BTreeMap::new();
             let mut artifact_files = std::collections::BTreeMap::new();
             let mut refs = std::collections::BTreeMap::new();
-            let store_shard = live.shards[0].id;
             for (phash, partition) in &generation.bundle.partitions {
                 for shard in &partition.shards {
                     members.entry(shard.record.id).or_default().extend(
@@ -502,12 +501,11 @@ impl WritePath {
                             .cloned(),
                     );
                 }
-                derived.extend(
-                    partition
-                        .derived_by_shard()
-                        .filter(|(shard, e)| *shard == store_shard && live.holds_space(e.space))
-                        .map(|(_, e)| e.clone()),
-                );
+                for (shard, extent) in partition.derived_by_shard() {
+                    if live.holds_space(extent.space) {
+                        derived.entry(shard).or_default().push(extent.clone());
+                    }
+                }
                 spaces.extend(
                     partition
                         .layer_spaces

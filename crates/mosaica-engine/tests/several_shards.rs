@@ -1487,3 +1487,482 @@ fn memberships_over_both_shards_serve_as_one_shard_does() {
     let engine = writing(&several);
     assert_eq!(served_layer(&engine), expected, "across a restart");
 }
+
+/// Whether the layered fixture's layer `t` leaves the item of `id` out of every artifact.
+fn unheld(id: u64) -> bool {
+    id % 4 == 3
+}
+
+/// The layered fixture's build configuration: a flat layer `t` over `s0`, served to a viewer who
+/// sees one member.
+const LAYERED_TOML: &str = r#"
+[sources]
+keys    = "keys.parquet"
+members = "members.parquet"
+
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
+
+[[view]]
+name             = "s0"
+extent           = { min = 0.0, max = 1000.0 }
+point_visibility = { default = "public" }
+
+[[layer]]
+name = "t"
+views = ["s0"]
+source = "keys"
+membership = "enumerated"
+visibility = "public"
+artifact_visibility = { default = "inherited" }
+require_member_visibility = { count = 1 }
+hierarchy = { kind = "flat" }
+
+  [layer.members]
+  source = "members"
+  fields = { id = "entity" }
+"#;
+
+/// The fixture with the layer `t` built beside it: artifact `c-k` holds the items whose `id` is in
+/// `[10k, 10k + 10)` and not [`unheld`], declaring `[shards] size` where `shard_size` is given.
+fn layered_fixture(shard_size: Option<u64>) -> Fixture {
+    use arrow::array::{StringArray, UInt32Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path();
+    let write = |name: &str, schema: Schema, columns: Vec<arrow::array::ArrayRef>| {
+        let schema = std::sync::Arc::new(schema);
+        let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+        let file = std::fs::File::create(dir.join(name)).unwrap();
+        let mut writer = parquet::arrow::ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    };
+    let keys: Vec<String> = (0..N / 10).map(|k| format!("c-{k}")).collect();
+    let members: Vec<(String, u64)> = (0..N)
+        .filter(|id| !unheld(*id))
+        .map(|id| (keys[(id / 10) as usize].clone(), id))
+        .collect();
+    write(
+        "keys.parquet",
+        Schema::new(vec![Field::new("key", DataType::Utf8, false)]),
+        vec![std::sync::Arc::new(StringArray::from(keys.clone()))],
+    );
+    write(
+        "members.parquet",
+        Schema::new(vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new("rank", DataType::UInt32, true),
+            Field::new("entity", DataType::UInt64, false),
+        ]),
+        vec![
+            std::sync::Arc::new(StringArray::from(
+                members
+                    .iter()
+                    .map(|(key, _)| key.clone())
+                    .collect::<Vec<_>>(),
+            )),
+            std::sync::Arc::new(UInt32Array::from(vec![None::<u32>; members.len()])),
+            std::sync::Arc::new(UInt64Array::from(
+                members.iter().map(|(_, id)| *id).collect::<Vec<_>>(),
+            )),
+        ],
+    );
+    let (points, pairs, config_path) = (
+        dir.join("points.parquet"),
+        dir.join("pairs.parquet"),
+        dir.join("config.toml"),
+    );
+    write_points_n(&points, N);
+    write_pairs_n(&pairs, N);
+    std::fs::write(&config_path, LAYERED_TOML).unwrap();
+    let config = mosaica_build::config::Config::parse(&config_path, &Default::default())
+        .expect("the layered fixture's config parses");
+    let root = dir.join("bundle");
+    mosaica_build::build(&mosaica_build::BuildArgs {
+        views: vec![mosaica_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: mosaica_spatial::Projection::None,
+            extent: extent(),
+            points: points.clone(),
+            point_fields: Default::default(),
+            select: None,
+            access: mosaica_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points, &config.schema),
+        out: root.clone(),
+        limit: None,
+        shard_size,
+        strict: false,
+        identity_key: test_key(),
+        layers: config.layers,
+        layer_inputs: config.layer_sources,
+        scoped_layers: Default::default(),
+        emit_oracle_pairs: true,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: config.schema,
+    })
+    .expect("the layered fixture builds");
+    Fixture {
+        root,
+        cache: dir.join("cache"),
+        wal: dir.join("wal.log"),
+        _tmp: tmp,
+    }
+}
+
+/// One batch of one row naming the item of `id` by its unique value: at `position` where given,
+/// joining `key` of the layer `t` where given.
+fn name_item(
+    engine: &Engine,
+    batch: &str,
+    id: u64,
+    position: Option<(f64, f64)>,
+    key: Option<&str>,
+) {
+    let memberships = key
+        .map(|key| mosaica_lifecycle::BatchMembership {
+            layer: "t".to_string(),
+            level: 0,
+            view: None,
+            key: key.to_string(),
+            rows: vec![0],
+        })
+        .into_iter()
+        .collect();
+    engine
+        .ingest(mosaica_engine::IngestRequest {
+            batch_id: batch.to_string(),
+            body_hash: [3; 32],
+            view: Some("s0".to_string()),
+            rows: vec![mosaica_lifecycle::IngestRow {
+                mosaica_id: None,
+                labels: None,
+                position,
+                scalars: vec![mosaica_lifecycle::wal::WalScalar::U64(id)],
+                scoped: Vec::new(),
+                omitted: Vec::new(),
+            }],
+            artifacts: mosaica_lifecycle::BatchArtifacts {
+                memberships,
+                edges: Vec::new(),
+            },
+            strict: true,
+            mosaica_id_column: false,
+        })
+        .expect("the row is accepted");
+}
+
+/// The `id`s of the layered fixture's items in shard `shard` of `engine`.
+fn ids_in_shard(engine: &Engine, shard: u32) -> Vec<u64> {
+    items_by_id(engine, 0..N)
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.is_some_and(|item| item.shard == ShardId::new(shard).unwrap()))
+        .map(|(id, _)| id as u64)
+        .collect()
+}
+
+/// A membership-only row joining a shard-1 item to an artifact, and an edit moving a shard-1
+/// member, serve the counts and `member_of` verdicts one shard holding the same items serves,
+/// before a tick, after a tick and a flush, and across a restart; the edited item stays in shard 1.
+#[test]
+fn a_membership_row_and_an_edit_in_shard_one_serve_as_one_shard_does() {
+    let one = layered_fixture(None);
+    let several = layered_fixture(Some(SIZE));
+    let (one_engine, engine) = (one.open(), writing(&several));
+    let in_shard_one = ids_in_shard(&engine, 1);
+    let joiner = *in_shard_one.iter().find(|id| unheld(**id)).unwrap();
+    let edited = *in_shard_one.iter().find(|id| !unheld(**id)).unwrap();
+    let before = items_by_id(&engine, edited..edited + 1)[0].unwrap();
+    for engine in [&one_engine, &engine] {
+        name_item(engine, "join", joiner, None, Some("c-0"));
+        name_item(engine, "edit", edited, Some((7.0, 7.0)), None);
+    }
+    let after = items_by_id(&engine, edited..edited + 1)[0].unwrap();
+    assert_eq!(
+        after.shard, before.shard,
+        "an edit stays in its item's shard"
+    );
+    assert_ne!(after.entity, before.entity, "the edit took a new entity");
+    assert_eq!(
+        served_layer(&engine),
+        served_layer(&one_engine),
+        "before a tick"
+    );
+
+    tick(&one_engine);
+    tick(&engine);
+    publish_buffered(&one_engine);
+    publish_buffered(&engine);
+    let expected = served_layer(&one_engine);
+    assert!(
+        expected[0]
+            .iter()
+            .any(|a| a.0.as_deref() == Some("c-0") && a.1 == 9),
+        "the joined item counts for its artifact: {expected:?}"
+    );
+    assert_eq!(served_layer(&engine), expected, "after a tick and a flush");
+
+    drop(engine);
+    let engine = writing(&several);
+    assert_eq!(served_layer(&engine), expected, "across a restart");
+}
+
+/// Each shard's derived files of the layer `t`'s space, as the served side-manifest names them.
+fn derived_of(root: &std::path::Path) -> Vec<Vec<mosaica_store::manifest::DerivedExtent>> {
+    side_manifest(root)
+        .shards
+        .records
+        .iter()
+        .map(|record| record.derived_extents.clone())
+        .collect()
+}
+
+/// Each shard's slice version of level 0, and the level's records version, as the served
+/// side-manifest records them.
+fn versions_of(root: &std::path::Path) -> (Vec<u64>, u64) {
+    let manifest = side_manifest(root);
+    let slices = manifest
+        .shards
+        .records
+        .iter()
+        .map(|record| {
+            record
+                .slice_versions
+                .iter()
+                .find(|version| version.level == 0)
+                .map_or(0, |version| version.version)
+        })
+        .collect();
+    let records = manifest
+        .layer_spaces
+        .iter()
+        .find_map(|space| space.level_version(0))
+        .unwrap_or(0);
+    (slices, records)
+}
+
+/// Whether a derived file is one a growth leaves standing: an enumerated level's column and the
+/// member file beside it, which an open completes.
+fn completed_at_open(extent: &mosaica_store::manifest::DerivedExtent) -> bool {
+    use mosaica_store::manifest::DerivedForm;
+    matches!(
+        extent.form,
+        DerivedForm::RowColumn { .. } | DerivedForm::RowMembers
+    )
+}
+
+/// A growth in shard 0 moves shard 0's slice version and no other: the next manifest names shard
+/// 1's derived files as they were and shard 1's figures are still held, while shard 0's files
+/// written at one version leave. A new artifact moves the records version and every shard's, and
+/// every shard's files written at one version leave.
+#[test]
+fn a_growth_in_one_shard_leaves_the_others_files_and_figures() {
+    use mosaica_lifecycle::ShardSets;
+    let several = layered_fixture(Some(SIZE));
+    let engine = writing(&several);
+    let full = full_coverage_credential();
+    let files = derived_of(&several.root);
+    assert!(
+        files
+            .iter()
+            .all(|shard| shard.iter().any(|extent| !completed_at_open(extent))),
+        "the build writes files at one version in each shard: {files:?}"
+    );
+    let (slices, records) = versions_of(&several.root);
+
+    let figures = |engine: &Engine| {
+        let stats = engine.figures_stats();
+        (stats.misses, stats.hits)
+    };
+    let opened = figures(&engine);
+    let served = artifacts_of(&engine, &full);
+    let cold = figures(&engine).0 - opened.0;
+    assert_eq!(cold, 2, "the first request takes each shard's figures");
+
+    let joiner = *ids_in_shard(&engine, 0)
+        .iter()
+        .find(|id| unheld(**id))
+        .unwrap();
+    let mut growth = IncomingGrowth::from_entities("c-3".into(), Vec::new());
+    growth.joining = ShardSets::of_items(items_by_id(&engine, joiner..joiner + 1)[0]);
+    engine
+        .grow_memberships("t".into(), 0, vec![growth])
+        .unwrap();
+    tick_until(
+        &engine,
+        "the growth's publication",
+        std::time::Duration::from_secs(30),
+        || versions_of(&several.root).0[0] > slices[0],
+    );
+    let (grown, grown_records) = versions_of(&several.root);
+    assert_eq!(grown[1], slices[1], "shard 1's slice did not move");
+    assert_eq!(grown_records, records, "a growth changes no record");
+    let after_growth = derived_of(&several.root);
+    assert_eq!(after_growth[1], files[1], "shard 1's derived files stand");
+    assert!(
+        after_growth[0].iter().all(completed_at_open),
+        "shard 0's files at the old version leave: {:?}",
+        after_growth[0]
+    );
+    let before = figures(&engine);
+    let regrown = artifacts_of(&engine, &full);
+    let count = |served: &[mosaica_engine::ArtifactOut], key: &str| {
+        served
+            .iter()
+            .find(|artifact| artifact.key.as_deref() == Some(key))
+            .map(|artifact| artifact.masked_count)
+    };
+    assert_eq!(
+        count(&regrown, "c-3"),
+        count(&served, "c-3").map(|held| held + 1),
+        "the joined item counts"
+    );
+    let now = figures(&engine);
+    assert!(
+        now.0 - before.0 < cold && now.1 > before.1,
+        "shard 1's figures are held: {before:?} then {now:?}"
+    );
+
+    let first = |shard: u32| {
+        let id = ids_in_shard(&engine, shard)[0];
+        items_by_id(&engine, id..id + 1)[0].unwrap()
+    };
+    let mut fresh = IncomingArtifact::from_entities(Some("c-new".into()), Vec::new());
+    fresh.members = ShardSets::of_items([first(0), first(1)]);
+    engine
+        .publish_artifacts("t".into(), 0, vec![fresh])
+        .unwrap();
+    tick_until(
+        &engine,
+        "the publication's manifest",
+        std::time::Duration::from_secs(30),
+        || versions_of(&several.root).1 > records,
+    );
+    let (published, _) = versions_of(&several.root);
+    assert!(
+        published[0] > grown[0] && published[1] > grown[1],
+        "a new artifact moves every shard's slice: {published:?} after {grown:?}"
+    );
+    assert!(
+        derived_of(&several.root)
+            .iter()
+            .all(|shard| shard.iter().all(completed_at_open)),
+        "every shard's files at the old version leave"
+    );
+    assert_eq!(
+        count(&artifacts_of(&engine, &full), "c-new"),
+        Some(2),
+        "both shards serve the new artifact's members"
+    );
+}
+
+/// Dropping a layer at two shards removes every shard's member packs and derived files of its
+/// space, and its space's record, from the next manifest, and a restart agrees.
+#[test]
+fn a_layer_drop_removes_every_shards_files_from_the_next_manifest() {
+    let several = layered_fixture(Some(SIZE));
+    let engine = writing(&several);
+    let space = side_manifest(&several.root).layer_spaces[0].space;
+    let holds = |root: &std::path::Path| {
+        let manifest = side_manifest(root);
+        let shards: Vec<bool> = manifest
+            .shards
+            .records
+            .iter()
+            .map(|record| {
+                record.membership_extents.iter().any(|e| e.space == space)
+                    || record.derived_extents.iter().any(|e| e.space == space)
+            })
+            .collect();
+        let spaces = manifest.layer_spaces.iter().any(|s| s.space == space);
+        (shards, spaces)
+    };
+    assert_eq!(holds(&several.root), (vec![true, true], true));
+    engine.drop_layer("t".into()).unwrap();
+    tick_until(
+        &engine,
+        "the drop's manifest",
+        std::time::Duration::from_secs(30),
+        || holds(&several.root) == (vec![false, false], false),
+    );
+    drop(engine);
+    let engine = writing(&several);
+    assert!(engine.registered_layer("t").is_none());
+    tick(&engine);
+    assert_eq!(holds(&several.root), (vec![false, false], false));
+}
+
+/// Forms of a level held in both shards take a tick's publication, growth and page, and read one
+/// version of the level's records after it: counts, content and `member_of` verdicts are one
+/// shard's holding the same items.
+#[test]
+fn forms_held_in_both_shards_take_a_ticks_deltas_as_one_level() {
+    use mosaica_lifecycle::membership::IncomingContent;
+    use mosaica_lifecycle::ShardSets;
+    let one = fixture_sized(N, None);
+    let several = fixture_sized(N, Some(SIZE));
+    let (one_engine, engine) = (one.open(), writing(&several));
+    let (zero, one_id) = (ids_in_shard(&engine, 0)[0], ids_in_shard(&engine, 1)[0]);
+    let sets = |engine: &Engine, ids: &[u64]| {
+        let items = items_by_id(engine, 0..N);
+        ShardSets::of_items(ids.iter().map(|id| items[*id as usize].unwrap()))
+    };
+    let labelled = |engine: &Engine, key: &str, members: &[u64], from: &[u64]| {
+        let mut artifact = IncomingArtifact::with_content(
+            Some(key.into()),
+            Vec::new(),
+            vec![IncomingContent::new(vec![key.to_string()], Vec::new())],
+        );
+        artifact.members = sets(engine, members);
+        artifact.contents[0].generated_from = sets(engine, from);
+        artifact
+    };
+    for engine in [&one_engine, &engine] {
+        engine.register_layer(label_layer("t")).unwrap();
+        engine
+            .publish_artifacts(
+                "t".into(),
+                0,
+                vec![labelled(engine, "a", &[zero, one_id], &[zero])],
+            )
+            .unwrap();
+        tick(engine);
+    }
+    assert_eq!(
+        served_layer(&engine),
+        served_layer(&one_engine),
+        "forms held"
+    );
+
+    for engine in [&one_engine, &engine] {
+        engine
+            .publish_artifacts(
+                "t".into(),
+                0,
+                vec![labelled(engine, "b", &[one_id], &[one_id])],
+            )
+            .unwrap();
+        let mut page =
+            IncomingGrowth::page_of_entities("a".into(), Some(0), Vec::new(), Vec::new());
+        page.joining = sets(engine, &[one_id]);
+        engine.grow_memberships("t".into(), 0, vec![page]).unwrap();
+        tick(engine);
+    }
+    let expected = served_layer(&one_engine);
+    assert!(
+        expected[0].iter().all(|artifact| !artifact.2.is_empty()),
+        "the full credential is served every content: {expected:?}"
+    );
+    assert_eq!(served_layer(&engine), expected, "after the tick");
+}

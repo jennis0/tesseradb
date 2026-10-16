@@ -716,10 +716,10 @@ one publication (§4.10). A membership-only ingest row joins its item to the art
 level's figures are kept per shard (§3.6).
 
 A level has a records version, held in its layer space, and a slice version for each shard. A
-publication moves the records version only when it changes records, and a shard's slice version
-only when it changes that shard's slice. A shard's derived files and figures for the level are
-stamped with both, so a write to one shard's slice leaves every other shard's files and figures
-standing.
+publication that changes records moves the records version and every shard's slice version; a
+growth that changes only some shards' slices moves only their slice versions. A shard's derived
+files and figures for the level are stamped with both, so a growth in one shard leaves every other
+shard's files and figures standing.
 
 When a generating set loses a member in one shard, its rank is withdrawn in the record: the rank's
 values go and it is never served, and its position stays and is never reused. Each shard drops its

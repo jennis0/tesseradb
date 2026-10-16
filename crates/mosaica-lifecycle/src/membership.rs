@@ -1383,7 +1383,17 @@ pub struct ArtifactStore {
     /// dropped layer's entry and starting again at zero when the name is re-registered — would
     /// make a cached form built over the *old* artifacts compare equal to the new level and be
     /// served. [`Self::remove_layer`] therefore bumps what it drops rather than forgetting it.
+    ///
+    /// **This store's slice's version of each level**: it moves with every write that changes the
+    /// level's records ([`Self::records_versions`]) and with every write that changes this
+    /// slice, so a write to another shard's slice alone leaves it, and everything derived from
+    /// this slice, standing.
     versions: BTreeMap<(String, u32), u64>,
+    /// Per `(layer, level)`, how many writes have changed the level's records: everything of an
+    /// artifact but its members and generating sets. Read from the store holding the records; a
+    /// shard's derived files are stamped with it beside the shard's slice version, on
+    /// [`Self::versions`]' rules.
+    records_versions: BTreeMap<(String, u32), u64>,
     /// Per `(layer, level)`, how many writes have moved its **edges**: the second version counter
     /// of `ingest.md` §1.5 and §4.1. A publication, a fill of a parent list, a retirement and a
     /// layer drop move it; a growth and a fill of any other part move [`Self::versions`] alone. The
@@ -2378,6 +2388,10 @@ impl ArtifactStore {
         refused_growth: &mut Vec<usize>,
     ) -> usize {
         let mut refused = 0;
+        // Whether the growth changed a record, which moves every slice's version, and the shards
+        // whose slices it changed otherwise.
+        let mut records_moved = false;
+        let mut touched = std::collections::BTreeSet::new();
         for (index, grown) in growth.iter().enumerate() {
             // Damage is a refusal, not an empty delta, on the publication's argument: a growth
             // decoded short is an acked join that silently did not happen, and the artifact then
@@ -2386,11 +2400,13 @@ impl ArtifactStore {
             let Some(joining) = self.held_shards(&grown.joining) else {
                 refused += 1;
                 refused_growth.push(index);
+                records_moved = true;
                 continue;
             };
             let Some(leaving) = self.held_shards(&grown.leaving) else {
                 refused += 1;
                 refused_growth.push(index);
+                records_moved = true;
                 continue;
             };
             match grown.set {
@@ -2402,11 +2418,15 @@ impl ArtifactStore {
                     if !leaving.is_empty() {
                         refused += 1;
                         refused_growth.push(index);
+                        records_moved = true;
                         continue;
                     }
-                    self.grow(layer, level, grown.ordinal, &joining);
+                    records_moved |= self.grow(layer, level, grown.ordinal, &joining);
+                    touched.extend(joining.iter().map(|(shard, _)| shard));
                 }
+                // A page moves the set's cardinality, which every slice's record carries.
                 crate::wal::GrownSet::GeneratingSet { rank, cardinality } => {
+                    records_moved = true;
                     if !self.grow_set(
                         layer,
                         level,
@@ -2432,7 +2452,11 @@ impl ArtifactStore {
         // **Unconditional, including where every delta was refused.** A refusal has already
         // returned a count to a caller who will act on it; spending one rebuild of one level to
         // keep the bump off a decision about damaged input is the cheaper of the two mistakes.
-        self.bump(layer, level);
+        if records_moved || touched.is_empty() {
+            self.bump(layer, level);
+        } else {
+            self.bump_slices(layer, level, &touched);
+        }
         refused
     }
 
@@ -2464,12 +2488,15 @@ impl ArtifactStore {
     ///
     /// Each shard's part joins that shard's slice, which takes a record of the artifact where it
     /// held none.
-    fn grow(&mut self, layer: &str, level: u32, ordinal: u32, joining: &ShardSets) {
-        let Some(nothing) = self
+    ///
+    /// `true` where the growth changed the record itself: an artifact published with no member
+    /// now declares some.
+    fn grow(&mut self, layer: &str, level: u32, ordinal: u32, joining: &ShardSets) -> bool {
+        let Some((nothing, declared)) = self
             .get(layer, level, ordinal)
-            .map(ArtifactRecord::slice_holding_nothing)
+            .map(|record| (record.slice_holding_nothing(), record.declares_members))
         else {
-            return;
+            return false;
         };
         let space = self.spaces[layer];
         for (shard, part) in joining.iter() {
@@ -2485,7 +2512,9 @@ impl ArtifactStore {
             self.each_held(layer, level, ordinal, |record| {
                 record.declares_members = Some(true)
             });
+            return declared == Some(false);
         }
+        false
     }
 
     /// **The one way a generating set changes**, taken by the live page and by replay alike
@@ -2898,7 +2927,8 @@ impl ArtifactStore {
         }
     }
 
-    /// See [`Self::versions`]: what a structure derived from this level is valid for.
+    /// See [`Self::versions`]: what a structure derived from this slice of the level is valid
+    /// for.
     ///
     /// **A level nothing has ever written to is version 0**, and so is a caller's first read of
     /// it — which is right rather than a coincidence: there are no records, so the empty
@@ -2910,11 +2940,47 @@ impl ArtifactStore {
             .unwrap_or(0)
     }
 
-    /// Move one level's version — called by every route that changes what a level's records say.
+    /// See [`Self::records_versions`].
+    pub fn records_version(&self, layer: &str, level: u32) -> u64 {
+        self.records_versions
+            .get(&(layer.to_string(), level))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// The sum of every slice's version of the level: it moves with every write to the level in
+    /// any shard, which is what a structure derived from every shard's slice is valid for.
+    pub fn every_slice_version(&self, layer: &str, level: u32) -> u64 {
+        self.shards()
+            .filter_map(|shard| self.slice(shard))
+            .map(|slice| slice.level_version(layer, level))
+            .sum()
+    }
+
+    /// Move one level's records version and every slice's version of it — called by every route
+    /// that changes what a level's records say.
     fn bump(&mut self, layer: &str, level: u32) {
-        *self.versions.entry((layer.to_string(), level)).or_insert(0) += 1;
+        let key = (layer.to_string(), level);
+        *self.records_versions.entry(key.clone()).or_insert(0) += 1;
+        *self.versions.entry(key.clone()).or_insert(0) += 1;
         for (_, slice) in &mut self.slices.others {
-            slice.bump(layer, level);
+            *slice.versions.entry(key.clone()).or_insert(0) += 1;
+        }
+    }
+
+    /// Move the version of each of `shards`' slices of one level, once each — a write that changes
+    /// those slices and no record.
+    fn bump_slices(
+        &mut self,
+        layer: &str,
+        level: u32,
+        shards: &std::collections::BTreeSet<ShardId>,
+    ) {
+        let key = (layer.to_string(), level);
+        for shard in shards {
+            if let Some(slice) = self.slice_mut(*shard) {
+                *slice.versions.entry(key.clone()).or_insert(0) += 1;
+            }
         }
     }
 
@@ -2942,7 +3008,18 @@ impl ArtifactStore {
     /// slot and counts nothing — but replay does, through `apply`, so a record the log carries past
     /// the manifest moves the version off the published value. That is exactly the signal a reader
     /// deciding whether to adopt a derived structure needs (`manifest::ContainmentExtent`).
+    ///
+    /// Seeds the records version and this store's slice version alike;
+    /// [`Self::seed_slice_version`] then sets a slice's own where the manifest recorded one.
     pub fn seed_level_version(&mut self, layer: &str, level: u32, version: u64) {
+        self.records_versions
+            .insert((layer.to_string(), level), version);
+        self.versions.insert((layer.to_string(), level), version);
+    }
+
+    /// Set this store's slice version of one level to what the manifest recorded for its shard.
+    /// **Open only**, after [`Self::seed_level_version`], on its argument.
+    pub fn seed_slice_version(&mut self, layer: &str, level: u32, version: u64) {
         self.versions.insert((layer.to_string(), level), version);
     }
 
@@ -2966,7 +3043,11 @@ impl ArtifactStore {
             "a level published in {records} record(s) counted fewer than that many versions"
         );
         let extra = records.saturating_sub(1);
-        for counter in [&mut self.versions, &mut self.lineage_versions] {
+        for counter in [
+            &mut self.versions,
+            &mut self.records_versions,
+            &mut self.lineage_versions,
+        ] {
             if let Some(version) = counter.get_mut(&(layer.to_string(), level)) {
                 *version = version.saturating_sub(extra);
             }
@@ -3000,9 +3081,17 @@ impl ArtifactStore {
         moved
     }
 
-    /// Every level this store holds a version for, as `(layer, level, version)` — what a
-    /// publication records in `manifest::SegmentsManifest::level_versions`.
-    pub fn level_versions(&self) -> impl Iterator<Item = (&str, u32, u64)> {
+    /// Every level this store holds a records version for, as `(layer, level, version)` — what a
+    /// publication records in each layer space's `level_versions`.
+    pub fn records_versions(&self) -> impl Iterator<Item = (&str, u32, u64)> {
+        self.records_versions
+            .iter()
+            .map(|((layer, level), version)| (layer.as_str(), *level, *version))
+    }
+
+    /// Every level this store's slice holds a version for, as `(layer, level, version)` — what a
+    /// publication records in the slice's shard's `slice_versions`.
+    pub fn slice_versions(&self) -> impl Iterator<Item = (&str, u32, u64)> {
         self.versions
             .iter()
             .map(|((layer, level), version)| (layer.as_str(), *level, *version))
@@ -4136,12 +4225,6 @@ pub fn decode_members(blob: &[u8]) -> Option<(Bitmap, Vec<Bitmap>)> {
     Some((members, sets))
 }
 
-/// Shard 0's set of a logged set, or `None` where the bytes are damage or another shard holds
-/// something: applying only shard 0's part would serve a set nobody declared.
-pub fn store_slice(sets: &[crate::wal::WalShardSet]) -> Option<Bitmap> {
-    ShardSets::from_wal(sets)?.shard_zero_only().cloned()
-}
-
 /// Serialise a membership for the WAL, in CRoaring's portable form.
 ///
 /// Portable rather than the frozen form the fragment cache uses: frozen is an mmap-oriented layout
@@ -4193,16 +4276,16 @@ impl ArtifactStore {
     /// routine that changes a set, so its cardinality is unchanged and its content is never
     /// withdrawn by the move.
     ///
-    /// Every pair is an edit in `shard`, and an edit outside shard 0 finds nothing here to carry.
+    /// Every pair is an edit in `shard`, and is read from and written to that shard's slice.
     pub fn carried_over(
         &self,
         shard: ShardId,
         moved: &[(EntityId, EntityId)],
     ) -> Vec<crate::wal::WalRecord> {
-        if moved.is_empty() || shard != ShardId::ZERO {
+        let Some(slice) = self.slice(shard).filter(|_| !moved.is_empty()) else {
             return Vec::new();
-        }
-        let in_shard = |set: Bitmap| ShardSets::in_shard(shard, set).to_wal();
+        };
+        let in_shard = |set: Bitmap| ShardSets::in_shard(shard, set);
         let old: Bitmap = moved.iter().map(|(old, _)| old.raw() as u32).collect();
         let new_of: std::collections::BTreeMap<u32, u32> = moved
             .iter()
@@ -4214,17 +4297,18 @@ impl ArtifactStore {
             (joining, leaving)
         };
         let mut records = Vec::new();
-        for ((layer, level), slots) in &self.levels {
+        for ((layer, level), slots) in &slice.levels {
             let mut growth = Vec::new();
             for (ordinal, record) in slots.iter().enumerate() {
                 let Some(record) = record else {
                     continue;
                 };
+                let ordinal = ordinal as u32;
                 if record.members.intersect(&old) {
                     let (joining, _) = replaced(&record.members.projected(|part| part.and(&old)));
                     growth.push(crate::wal::MembershipGrowth {
-                        ordinal: ordinal as u32,
-                        joining: in_shard(joining),
+                        ordinal,
+                        joining: in_shard(joining).to_wal(),
                         leaving: Vec::new(),
                         set: crate::wal::GrownSet::Membership,
                     });
@@ -4234,14 +4318,18 @@ impl ArtifactStore {
                         continue;
                     }
                     let (joining, leaving) = replaced(&content.generated_from);
+                    let (joining, leaving) = (in_shard(joining), in_shard(leaving));
+                    let rank = rank as u16;
+                    let Some((_, cardinality)) =
+                        self.paged(layer, *level, ordinal, rank, &joining, &leaving)
+                    else {
+                        continue;
+                    };
                     growth.push(crate::wal::MembershipGrowth {
-                        ordinal: ordinal as u32,
-                        joining: in_shard(joining),
-                        leaving: in_shard(leaving),
-                        set: crate::wal::GrownSet::GeneratingSet {
-                            rank: rank as u16,
-                            cardinality: content.generated_from.cardinality(),
-                        },
+                        ordinal,
+                        joining: joining.to_wal(),
+                        leaving: leaving.to_wal(),
+                        set: crate::wal::GrownSet::GeneratingSet { rank, cardinality },
                     });
                 }
             }
@@ -5558,7 +5646,7 @@ mod tests {
         );
         assert_eq!(store.apply(&publication("untouched", 0, 104, &[9]), 32), 0);
         let before: BTreeMap<(String, u32), u64> = store
-            .level_versions()
+            .records_versions()
             .map(|(layer, level, version)| ((layer.to_string(), level), version))
             .collect();
 
@@ -5577,7 +5665,7 @@ mod tests {
             .collect();
         assert_eq!(reported, expected, "every way a record moves is reported");
         assert_eq!(moved, reported, "and the retirement moved exactly those");
-        for (layer, level, after) in store.level_versions() {
+        for (layer, level, after) in store.records_versions() {
             let key = (layer.to_string(), level);
             let step = u64::from(reported.contains(&key));
             assert_eq!(
@@ -6275,7 +6363,7 @@ mod tests {
 
     /// Each shard's part of a publication, a growth and a page lands in that shard's slice, a
     /// slice taking a record where it held none; the declared size and a set's cardinality are
-    /// over every shard, and every slice's version moves with the store's.
+    /// over every shard.
     #[test]
     fn each_shards_part_of_a_write_lands_in_its_own_slice() {
         let mut store =
@@ -6386,12 +6474,6 @@ mod tests {
             "an emptied set's content is withdrawn in every slice"
         );
 
-        let versions: Vec<u64> = store
-            .shards()
-            .map(|at| store.slice(at).unwrap().level_version("clusters/a", 0))
-            .collect();
-        assert_eq!(versions[0], versions[1]);
-
         let mut elsewhere = publication("clusters/a", 2, 102, &[]);
         if let crate::wal::WalRecord::ArtifactPublish { artifacts, .. } = &mut elsewhere {
             artifacts[0].members = in_shards(&[(2, &[1])]).to_wal();
@@ -6400,6 +6482,67 @@ mod tests {
             store.apply(&elsewhere, 0),
             1,
             "a shard holding no slice here is damage"
+        );
+    }
+
+    /// Each level's records version and each shard's slice version, as `(records, [slices])`.
+    fn versions_of(store: &ArtifactStore) -> (u64, Vec<u64>) {
+        (
+            store.records_version("clusters/a", 0),
+            store
+                .shards()
+                .map(|at| store.slice(at).unwrap().level_version("clusters/a", 0))
+                .collect(),
+        )
+    }
+
+    /// A write moves the records version only where it changes a record, and a shard's slice
+    /// version where it changes that shard's slice or a record: a publication, a page and a fill
+    /// move every version, and a membership growth only its own shards'.
+    #[test]
+    fn a_growth_moves_only_the_slices_it_changes() {
+        let mut store =
+            ArtifactStore::new().with_slices(ShardId::ZERO, vec![(shard(1), ArtifactStore::new())]);
+        let mut published = publication_with_content("clusters/a", 0, 100, &[], &[]);
+        if let crate::wal::WalRecord::ArtifactPublish { artifacts, .. } = &mut published {
+            artifacts[0].members = in_shards(&[(0, &[1, 2]), (1, &[3])]).to_wal();
+            artifacts[0].contents[0].generated_from = in_shards(&[(0, &[1])]).to_wal();
+            artifacts[0].contents[0].cardinality = 1;
+        }
+        assert_eq!(store.apply(&published, 0), 0);
+        assert_eq!(versions_of(&store), (1, vec![1, 1]), "a publication");
+
+        let mut joining = growth("clusters/a", 0, 0, &[]);
+        if let crate::wal::WalRecord::ArtifactGrow { growth, .. } = &mut joining {
+            growth[0].joining = in_shards(&[(1, &[5])]).to_wal();
+        }
+        assert_eq!(store.apply(&joining, 0), 0);
+        assert_eq!(versions_of(&store), (1, vec![1, 2]), "a join in shard 1");
+
+        let joins = in_shards(&[(0, &[2])]);
+        assert_eq!(
+            store.apply(&page(0, &joins, &ShardSets::default(), 2), 0),
+            0
+        );
+        assert_eq!(versions_of(&store), (2, vec![2, 3]), "a page in shard 0");
+
+        assert_eq!(store.apply(&growth("clusters/a", 0, 7, &[9]), 0), 0);
+        assert_eq!(
+            versions_of(&store),
+            (2, vec![3, 3]),
+            "a join in shard 0 naming a hole"
+        );
+
+        let mut reopened =
+            ArtifactStore::new().with_slices(ShardId::ZERO, vec![(shard(1), ArtifactStore::new())]);
+        reopened.seed_level_version("clusters/a", 0, 2);
+        if let Some(slice) = reopened.slice_mut(shard(1)) {
+            slice.seed_slice_version("clusters/a", 0, 3);
+        }
+        assert_eq!(
+            versions_of(&reopened),
+            (2, vec![2, 3]),
+            "as a manifest seeds them"
         );
     }
 

@@ -21,28 +21,23 @@ pub(super) fn artifact_level_of(record: &WalRecord) -> Option<(&str, u32)> {
 /// What a joining set is subtracted against. `restating` is `None` where any row could be.
 pub(super) struct HeldMembers<'a> {
     pub(super) store: &'a mosaica_lifecycle::ArtifactStore,
-    pub(super) restating: Option<&'a croaring::Bitmap>,
+    pub(super) restating: Option<&'a mosaica_lifecycle::ShardSets>,
 }
 
-/// The entities of a window's join rows and of the items it places in artifacts in place: the
-/// only rows that can restate a membership.
+/// The items of a window's join rows and of the items it places in artifacts in place, by shard:
+/// the only rows that can restate a membership.
 pub(super) fn joining_entities<W>(
     closed: &[mosaica_lifecycle::ClosedEntry<W>],
-) -> croaring::Bitmap {
-    let mut restating = croaring::Bitmap::new();
-    for entry in closed {
-        let joined = &entry.items[entry.rows().len() + entry.edits().len()..];
-        let entities = entry
-            .rows()
-            .iter()
-            .filter(|row| row.join)
-            .map(|row| row.entity_id);
-        for entity in entities.chain(joined.iter().map(|item| item.entity)) {
-            // Entity space is `u32`-wide, so the narrowing is total.
-            restating.add(entity.raw() as u32);
-        }
-    }
-    restating
+) -> mosaica_lifecycle::ShardSets {
+    mosaica_lifecycle::ShardSets::of_items(closed.iter().flat_map(|entry| {
+        let rows = entry.rows();
+        let joined = &entry.items[rows.len() + entry.edits().len()..];
+        rows.iter()
+            .zip(&entry.items)
+            .filter(|(row, _)| row.join)
+            .map(|(_, item)| *item)
+            .chain(joined.iter().copied())
+    }))
 }
 
 /// The item one membership's row index names, and `None` for a row the source does not carry.
@@ -98,16 +93,19 @@ pub(super) fn grouped_growth<'a>(
     if let Some(held) = held {
         for ((layer, level), (_, _, ordinals)) in &mut by_level {
             for (ordinal, joining) in ordinals.iter_mut() {
-                let Some(record) = held.store.get(layer, *level, *ordinal) else {
-                    continue;
-                };
-                if let Some(set) = joining.get(ShardId::ZERO) {
-                    let mut set = set.clone();
-                    if held.restating.is_none_or(|rows| set.intersect(rows)) {
-                        record.members.remove_from(&mut set);
-                        joining.set(ShardId::ZERO, set);
+                let _ = joining.try_for_each_mut(|shard, set| {
+                    let restates = held
+                        .restating
+                        .is_none_or(|rows| rows.get(shard).is_some_and(|rows| set.intersect(rows)));
+                    let record = held
+                        .store
+                        .slice(shard)
+                        .and_then(|slice| slice.get(layer, *level, *ordinal));
+                    if let Some(record) = record.filter(|_| restates) {
+                        record.members.remove_from(set);
                     }
-                }
+                    Ok::<(), std::convert::Infallible>(())
+                });
             }
         }
     }
@@ -123,42 +121,54 @@ pub(super) fn grouped_growth<'a>(
         .collect())
 }
 
-/// How many memberships each entry adds: an entity joining an artifact that did not hold it,
+/// How many memberships each entry adds: an item joining an artifact that did not hold it,
 /// counted for the first entry naming the pair. A key the close mints holds nothing yet. `store`
-/// is read only where a row can restate a membership, which `restating` says.
+/// is read only where a row can restate a membership, which `restating` says; each item is asked
+/// of its own shard's slice.
 pub(super) fn joined_per_entry<W>(
     closed: &[mosaica_lifecycle::ClosedEntry<W>],
     store: Option<&mosaica_lifecycle::ArtifactStore>,
 ) -> Vec<u64> {
     use std::collections::BTreeMap;
-    let mut seen: BTreeMap<(&str, u32, Option<&str>, &str), croaring::Bitmap> = BTreeMap::new();
+    type Joined<'a> = (&'a str, u32, Option<&'a str>, &'a str, ShardId);
+    let mut seen: BTreeMap<Joined<'_>, croaring::Bitmap> = BTreeMap::new();
     closed
         .iter()
         .map(|entry| {
             let mut joined = 0u64;
             for join in &entry.memberships {
-                let at = (
-                    join.layer.as_str(),
-                    join.level,
-                    join.view.as_deref(),
-                    join.key.as_str(),
-                );
-                let held = join.ordinal.zip(store).and_then(|(ordinal, store)| {
-                    store
-                        .get(&join.layer, join.level, ordinal)
-                        .map(|record| store.members_of(record))
-                });
-                let counted = seen.entry(at).or_default();
+                // Each shard's members of the artifact, read once for the join.
+                let mut held: Vec<(ShardId, Option<&mosaica_lifecycle::membership::Members>)> =
+                    Vec::new();
                 for row in &join.rows {
                     let Some(item) = entry.items.get(*row as usize) else {
                         continue;
                     };
                     // Entity space is `u32`-wide, so the narrowing is total.
                     let entity = item.entity.raw() as u32;
-                    if held.is_some_and(|members| members.contains(entity)) {
+                    let members = match held.iter().find(|(shard, _)| *shard == item.shard) {
+                        Some((_, members)) => *members,
+                        None => {
+                            let members = join.ordinal.zip(store).and_then(|(ordinal, store)| {
+                                let slice = store.slice(item.shard)?;
+                                let record = slice.get(&join.layer, join.level, ordinal)?;
+                                Some(slice.members_of(record))
+                            });
+                            held.push((item.shard, members));
+                            members
+                        }
+                    };
+                    if members.is_some_and(|members| members.contains(entity)) {
                         continue;
                     }
-                    if counted.add_checked(entity) {
+                    let at = (
+                        join.layer.as_str(),
+                        join.level,
+                        join.view.as_deref(),
+                        join.key.as_str(),
+                        item.shard,
+                    );
+                    if seen.entry(at).or_default().add_checked(entity) {
                         joined += 1;
                     }
                 }
@@ -653,10 +663,18 @@ impl Executor {
         })
     }
 
-    /// Hold one accepted write's delta until the tick, when the level's row forms take the run of
-    /// them. `refused` names the growth entries the store did not take; a record whose every entry
-    /// was refused is still held, empty, since a level's delta versions must stay consecutive.
-    pub(super) fn hold_delta(&mut self, record: &WalRecord, before: u64, refused: &[usize]) {
+    /// Hold one accepted write's delta in `shard` until the tick, when the level's row forms in that
+    /// shard take the run of them: the record's part in `shard`, and every ordinal it published or
+    /// filled, whose records every shard's form reads. `refused` names the growth entries the store
+    /// did not take; a record whose every entry was refused is still held, empty, since a form's
+    /// delta versions must stay consecutive.
+    pub(super) fn hold_delta(
+        &mut self,
+        record: &WalRecord,
+        shard: ShardId,
+        before: u64,
+        refused: &[usize],
+    ) {
         let (layer, level, kind) = match record {
             WalRecord::ArtifactPublish {
                 layer,
@@ -676,22 +694,28 @@ impl Executor {
                 growth,
                 ..
             } => {
+                let part = |sets: &[mosaica_lifecycle::wal::WalShardSet]| {
+                    mosaica_lifecycle::ShardSets::from_wal(sets)
+                        .map(|sets| sets.get(shard).cloned().unwrap_or_default())
+                };
                 let mut joins = Vec::new();
                 let mut pages = Vec::new();
                 for (index, grown) in growth.iter().enumerate() {
                     if refused.contains(&index) {
                         continue;
                     }
-                    let Some(joining) = mosaica_lifecycle::membership::store_slice(&grown.joining)
-                    else {
+                    let Some(joining) = part(&grown.joining) else {
                         continue;
                     };
                     match grown.set {
                         mosaica_lifecycle::wal::GrownSet::Membership => {
-                            joins.push((grown.ordinal, joining))
+                            if !joining.is_empty() {
+                                joins.push((grown.ordinal, joining));
+                            }
                         }
                         mosaica_lifecycle::wal::GrownSet::GeneratingSet { rank, cardinality } => {
-                            // A leave re-derives the operator whole: a union cannot express one.
+                            // A leave in any shard re-derives the operator whole: a union cannot
+                            // express one.
                             let leaves = !grown.leaving.is_empty();
                             pages.push(crate::artifacts::SetPage {
                                 ordinal: grown.ordinal,
@@ -721,14 +745,14 @@ impl Executor {
             _ => return,
         };
         self.pending_forms
-            .entry((layer.clone(), level))
+            .entry((layer.clone(), level, shard))
             .or_default()
             .push(crate::artifacts::LevelDelta { before, kind });
     }
 
     /// Applies durable artifact records to the registry and the store, and holds the delta each
-    /// made. Each record moves its level's version by one, so a delta's starting version walks
-    /// with the records. `publish` says only when the growth reaches a side-manifest.
+    /// made in every shard whose form of the level it moved, from the version that shard's form was
+    /// at before it. `publish` says only when the growth reaches a side-manifest.
     pub(super) fn apply_artifact_records(
         &mut self,
         records: &[&WalRecord],
@@ -738,34 +762,33 @@ impl Executor {
         if records.is_empty() {
             return;
         }
-        let befores: Vec<u64> = self.live.with_artifacts(|store| {
-            let mut seen: std::collections::BTreeMap<(&str, u32), u64> = Default::default();
-            records
-                .iter()
-                .map(|record| {
-                    let Some((layer, level)) = artifact_level_of(record) else {
-                        return 0;
-                    };
-                    let at = seen
-                        .entry((layer, level))
-                        .or_insert_with(|| store.level_version(layer, level));
-                    let version = *at;
-                    *at += 1;
-                    version
-                })
-                .collect()
-        });
         let mut refused_per_record: Vec<Vec<usize>> = vec![Vec::new(); records.len()];
+        let mut moved_per_record: Vec<Vec<(ShardId, u64)>> = vec![Vec::new(); records.len()];
         let mut settled: Vec<(String, u32)> = Vec::new();
         let undecodable = self.live.with_publication_state(|registry, store| {
+            let versions = |store: &mosaica_lifecycle::ArtifactStore, layer: &str, level: u32| {
+                store
+                    .shards()
+                    .filter_map(|shard| {
+                        Some((shard, store.slice(shard)?.level_version(layer, level)))
+                    })
+                    .collect::<Vec<_>>()
+            };
             records
                 .iter()
                 .zip(positions)
-                .zip(refused_per_record.iter_mut())
-                .map(|((record, position), refused)| {
+                .zip(refused_per_record.iter_mut().zip(&mut moved_per_record))
+                .map(|((record, position), (refused, moved))| {
+                    let at = artifact_level_of(record);
+                    let before = at.map(|(layer, level)| versions(store, layer, level));
                     registry.apply(record);
                     settled.extend(registry.settle_layout(store, record));
-                    store.apply_reporting(record, *position, refused)
+                    let undecodable = store.apply_reporting(record, *position, refused);
+                    if let (Some((layer, level)), Some(before)) = (at, before) {
+                        let after = versions(store, layer, level);
+                        moved.extend(before.into_iter().filter(|held| !after.contains(held)));
+                    }
+                    undecodable
                 })
                 .sum::<usize>()
         });
@@ -779,8 +802,14 @@ impl Executor {
                 "ALARM: artifact records did not survive their own round trip; those artifacts are absent"
             );
         }
-        for ((record, before), refused) in records.iter().zip(befores).zip(&refused_per_record) {
-            self.hold_delta(record, before, refused);
+        for ((record, moved), refused) in records
+            .iter()
+            .zip(moved_per_record)
+            .zip(&refused_per_record)
+        {
+            for (shard, before) in moved {
+                self.hold_delta(record, shard, before, refused);
+            }
         }
         // Durable in the log and not yet in a manifest.
         match publish {

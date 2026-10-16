@@ -33,6 +33,9 @@ pub(crate) struct ManifestSeed<'a> {
     /// Every published member pack, across every partition's manifest, beside the shard holding
     /// it, with the prefix directory their paths are relative to.
     pub membership_extents: &'a [(ShardId, mosaica_store::manifest::MembershipExtent)],
+    /// Every shard's slice version of each level, as its record holds them, seeded after the
+    /// layer spaces' records versions.
+    pub slice_versions: &'a [(ShardId, mosaica_store::manifest::SliceVersion)],
     /// Every layer space's record, across every partition's manifest: its record packs, which
     /// pair with the member packs over the same ordinals, and its levels' artifact-write counters.
     ///
@@ -362,6 +365,7 @@ impl WritePath {
             &registry,
             seed.layer_spaces,
             seed.membership_extents,
+            seed.slice_versions,
             &shard_ids,
             &seed.prefix_dir,
         )?;
@@ -589,6 +593,7 @@ fn seed_artifacts(
     registry: &LayerRegistry,
     layer_spaces: &[mosaica_store::manifest::LayerSpaceRecord],
     membership_extents: &[(ShardId, mosaica_store::manifest::MembershipExtent)],
+    slice_versions: &[(ShardId, mosaica_store::manifest::SliceVersion)],
     shards: &[ShardId],
     prefix_dir: &Path,
 ) -> Result<SeededArtifacts, EngineError> {
@@ -777,6 +782,17 @@ fn seed_artifacts(
                 store.seed_level_version(&name, version.level, version.version);
             }
         }
+        for (shard, version) in slice_versions {
+            if version.space != space.space {
+                continue;
+            }
+            let Some(at) = shards.iter().position(|held| held == shard) else {
+                continue;
+            };
+            if let Some(store) = seeded.stores_mut().nth(at) {
+                store.seed_slice_version(&name, version.level, version.version);
+            }
+        }
     }
     if several {
         seeded.seed_borrowed_targets();
@@ -847,7 +863,7 @@ mod tests {
         content_digest, encode_record, frame_members, ArtifactShapes, ContentSet, Members,
     };
     use mosaica_store::manifest::{
-        LayerSpaceRecord, LevelVersion, MembershipExtent, RecordPackExtent,
+        LayerSpaceRecord, LevelVersion, MembershipExtent, RecordPackExtent, SliceVersion,
     };
     use mosaica_store::membership::{pack, PackKind};
     use mosaica_types::layer::{EntityRun, RegisteredLayer, ReservedRuns, RESERVED_BLOCK};
@@ -940,12 +956,28 @@ mod tests {
         }];
         space.level_versions = vec![LevelVersion { level: 0, version: 9 }];
         let shards = [ShardId::ZERO, ShardId::new(1).expect("in range")];
-        seed_artifacts(&registry(), &[space], &extents, &shards, dir)
+        let slice_versions = [(
+            shards[1],
+            SliceVersion {
+                space: LayerSpace::ZERO,
+                level: 0,
+                version: 11,
+            },
+        )];
+        seed_artifacts(
+            &registry(),
+            &[space],
+            &extents,
+            &slice_versions,
+            &shards,
+            dir,
+        )
     }
 
     /// The write store holds each whole record with its shard's slice and the shape, the other
     /// shard's store its slice beside the record's attachment and cardinalities alone, and both
-    /// reach the level's bound and version. A record whose slices sum short of a set is refused in
+    /// reach the level's bound and records version, each at its own slice version. A record whose
+    /// slices sum short of a set is refused in
     /// every shard, and a shard holding nothing of an artifact seeds no slice of it.
     #[test]
     fn each_shards_slice_is_read_at_open() {
@@ -968,11 +1000,12 @@ mod tests {
         assert!(written.shape_of(layer, 0, 0).is_some());
         assert!(slice.shape_of(layer, 0, 0).is_none());
 
-        for store in [written, slice] {
+        for (store, version) in [(written, 9), (slice, 11)] {
             assert!(store.get(layer, 0, 1).is_none(), "a hole");
             assert!(store.get(layer, 0, 2).is_none(), "refused in every shard");
             assert_eq!(store.slots(layer, 0).len(), 4);
-            assert_eq!(store.level_version(layer, 0), 9);
+            assert_eq!(store.records_version(layer, 0), 9);
+            assert_eq!(store.level_version(layer, 0), version);
         }
         let own = written.get(layer, 0, 3).expect("members in shard 0 alone");
         assert_eq!(own.declares_members, Some(true));
@@ -1037,6 +1070,7 @@ mod tests {
             declared_views: Vec::new(),
             view_ids_of_key: &mosaica_lifecycle::owner_id_only,
             membership_extents: &[],
+            slice_versions: &[],
             layer_spaces: &[],
             prefix_dir: dir.path().to_path_buf(),
             manifest: &manifest,

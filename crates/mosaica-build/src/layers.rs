@@ -1970,7 +1970,7 @@ pub(crate) fn publish(
     for space in spaces.values() {
         layer_space_mut(&mut published.layer_spaces, *space);
     }
-    for (layer, level, version) in store.level_versions() {
+    for (layer, level, version) in store.records_versions() {
         if let Some(space) = spaces.get(layer) {
             layer_space_mut(&mut published.layer_spaces, *space)
                 .level_versions

@@ -669,12 +669,12 @@ impl PersistedPieces<'_> {
         }) else {
             return Vec::new();
         };
-        if extent.level_version != version {
+        if extent.slice_version != version {
             tracing::warn!(
                 layer = %layer,
                 level,
                 view = %view,
-                written_at = extent.level_version,
+                written_at = extent.slice_version,
                 now = version,
                 "the prefix's persisted decompositions are not this level version's; every shape \
                  is decomposed again"
@@ -724,13 +724,13 @@ impl PersistedPieces<'_> {
             _ => None,
         });
         if let Some((extent, row_count)) = shape_rows {
-            if extent.level_version != level.level_version || row_count != segment.row_count {
+            if extent.slice_version != level.level_version || row_count != segment.row_count {
                 tracing::warn!(
                     layer = %level.layer,
                     level = level.level,
                     view = %level.view,
                     seg_id = %segment.seg_id,
-                    written_at = extent.level_version,
+                    written_at = extent.slice_version,
                     now = level.level_version,
                     written_rows = row_count,
                     rows = segment.row_count,
@@ -776,12 +776,12 @@ impl PersistedPieces<'_> {
             _ => None,
         });
         if let Some((extent, layout)) = column {
-            if extent.level_version != level.level_version {
+            if extent.slice_version != level.level_version {
                 tracing::warn!(
                     layer = %level.layer,
                     level = level.level,
                     view = %level.view,
-                    written_at = extent.level_version,
+                    written_at = extent.slice_version,
                     now = level.level_version,
                     "a persisted row-major column is not this level version's; the base segment \
                      is resolved again from the geometry"

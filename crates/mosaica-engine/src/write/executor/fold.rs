@@ -51,6 +51,16 @@ impl PendingRetirement {
         store.level_version(layer, level) + u64::from(self.is_pending(layer, level))
     }
 
+    /// The records version `layer`'s `level` will have once this fold's retirement has run.
+    pub(super) fn records_version_after(
+        &self,
+        store: &ArtifactStore,
+        layer: &str,
+        level: u32,
+    ) -> u64 {
+        store.records_version(layer, level) + u64::from(self.is_pending(layer, level))
+    }
+
     /// The level's records as the retirement will leave them: every artifact but those whose own
     /// entity is retired.
     fn records<'s>(
@@ -80,6 +90,8 @@ fn level_length<'a>(
 /// What a fold hands the manifest commit in place of the held list: the derived files it has just
 /// written, and the retirement its levels are stamped for.
 pub(super) struct FoldDerived<'a> {
+    /// The shard the fold compacts, which holds what it wrote.
+    pub(super) shard: ShardId,
     pub(super) written: &'a [mosaica_store::manifest::DerivedExtent],
     /// Each layer space's record packs, rewritten into the new prefix.
     pub(super) records: &'a std::collections::BTreeMap<
@@ -246,17 +258,20 @@ fn held_at_current_version(
     entries
         .iter()
         .filter(|entry| {
-            let now = store
-                .layer_in(entry.space)
-                .map(|layer| store.level_version(layer, entry.level));
-            if now == Some(entry.level_version) {
+            let now = store.layer_in(entry.space).map(|layer| {
+                (
+                    store.records_version(layer, entry.level),
+                    store.level_version(layer, entry.level),
+                )
+            });
+            if now == Some((entry.level_version, entry.slice_version)) {
                 return true;
             }
             tracing::error!(
                 space = %entry.space,
                 level = entry.level,
                 form = entry.form.dir(),
-                stamped = entry.level_version,
+                stamped = ?(entry.level_version, entry.slice_version),
                 now = ?now,
                 "ALARM: a fold-written derived file is stamped with a version the level does not \
                  carry after the retirement; it is dropped and the level recomposes on first use"
@@ -1590,6 +1605,7 @@ impl Executor {
             manifest_n,
             &mut segments_manifest,
             Some(FoldDerived {
+                shard: plan.shard,
                 written: &derived,
                 records: &repacked.records,
                 contents: &contents,
@@ -1677,9 +1693,11 @@ impl Executor {
         let published = segments_manifest.only_shard();
         let written: Vec<mosaica_store::manifest::DerivedExtent> =
             segments_manifest.derived_extents().cloned().collect();
-        self.side_manifests.derived_extents = self
-            .live
-            .with_artifacts(|store| held_at_current_version(store, &written));
+        self.side_manifests.derived_extents = DerivedByShard::from([(
+            published.id,
+            self.live
+                .with_artifacts(|store| held_at_current_version(store, &written)),
+        )]);
         *lock_recover(&self.health.last_fold_report) = degraded;
         stairs.record("12 retire");
 
@@ -1702,12 +1720,11 @@ impl Executor {
         generations.push(Arc::downgrade(&live));
         stairs.record("13 open");
 
-        let shard = self.live.only_shard().id;
         let derived: Vec<_> = self
             .side_manifests
             .derived_extents
             .iter()
-            .map(|extent| (shard, extent.clone()))
+            .flat_map(|(shard, extents)| extents.iter().map(|extent| (*shard, extent.clone())))
             .collect();
         self.live.with_artifacts(|store| {
             self.deps.artifact_projections.adopt_derived(
@@ -2101,6 +2118,9 @@ impl Executor {
                         incarnation: None,
                         space: self.live.space_of(&layer)?,
                         level,
+                        records_version: self.live.with_artifacts(|store| {
+                            pending.records_version_after(store, &layer, level)
+                        }),
                         level_version,
                         form: mosaica_store::manifest::DerivedForm::Containment,
                         bytes: mosaica_store::derived::FiledBytes::InHand(bytes),
@@ -2526,6 +2546,9 @@ impl Executor {
                         incarnation: Some(incarnation),
                         space,
                         level,
+                        records_version: self.live.with_artifacts(|store| {
+                            pending.records_version_after(store, &layer, level)
+                        }),
                         level_version,
                         form,
                         bytes: mosaica_store::derived::FiledBytes::Staged(path),
@@ -2563,9 +2586,12 @@ impl Executor {
             let Some(space) = self.live.space_of(layer) else {
                 continue;
             };
-            let version = self
-                .live
-                .with_artifacts(|store| store.level_version(layer, *level));
+            let (records_version, version) = self.live.with_artifacts(|store| {
+                (
+                    store.records_version(layer, *level),
+                    store.level_version(layer, *level),
+                )
+            });
             for (view, segment) in fold_segments {
                 let covered = columns.iter().any(|c| {
                     matches!(
@@ -2603,6 +2629,7 @@ impl Executor {
                     incarnation: Some(incarnation),
                     space,
                     level: *level,
+                    records_version,
                     level_version: version,
                     form: mosaica_store::manifest::DerivedForm::ShapeRows {
                         seg_id: segment.seg_id.clone(),
@@ -2671,6 +2698,7 @@ impl Executor {
                         incarnation: Some(incarnation),
                         space,
                         level: *level,
+                        records_version: store.records_version(layer, *level),
                         level_version: version,
                         form: mosaica_store::manifest::DerivedForm::ShapeHeld,
                         bytes: mosaica_store::derived::FiledBytes::InHand(
@@ -2758,6 +2786,9 @@ impl Executor {
                         incarnation: Some(incarnation),
                         space: self.live.space_of(&layer)?,
                         level,
+                        records_version: self.live.with_artifacts(|store| {
+                            pending.records_version_after(store, &layer, level)
+                        }),
                         level_version,
                         form: mosaica_store::manifest::DerivedForm::TileIndex,
                         bytes: mosaica_store::derived::FiledBytes::InHand(bytes),

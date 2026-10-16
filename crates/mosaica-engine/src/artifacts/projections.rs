@@ -69,7 +69,11 @@ pub(super) struct Coordinate<'a> {
     pub(super) view: &'a str,
     pub(super) layer: &'a str,
     pub(super) level: u32,
+    /// The shard's version of the level ([`ArtifactStore::level_version`]).
     pub(super) level_version: u64,
+    /// The level's records version ([`ArtifactStore::records_version`]), which the records every
+    /// shard's form shares are filed at.
+    pub(super) records_version: u64,
 }
 
 impl Coordinate<'_> {
@@ -88,6 +92,11 @@ impl Coordinate<'_> {
 
     pub(super) fn derived_key(&self) -> DerivedKey {
         DerivedKey::of(self.prefix, self.level_version)
+    }
+
+    /// What the level's records are filed at.
+    pub(super) fn records_key(&self) -> DerivedKey {
+        DerivedKey::of(self.prefix, self.records_version)
     }
 
     /// What a row form of this level is valid at. `live` is the caller's because only the caller
@@ -110,7 +119,7 @@ impl Coordinate<'_> {
 pub(super) type PartitionAddress = (ShardId, String, u32);
 
 /// `(view, layer, level)` — what one level's records are for. No shard: every shard's form shares
-/// them.
+/// them, at the level's records version.
 pub(super) type RecordsAddress = (String, String, u32);
 
 /// What a cached [`ContainmentPartition`], an adopted [`TileIndex`] and an adopted [`RowColumn`]
@@ -297,6 +306,21 @@ pub fn serves_column_only(declaration: &LayerDeclaration) -> bool {
         .any(|p| p == crate::derived::ComputedProperty::Hull)
 }
 
+/// The layer an extent of `shard` belongs to, `shard`'s version of its level now, and whether the
+/// level's records and that shard's slice are both still at the versions the extent was written
+/// at. `None` where no layer holds the space or the store holds no slice of `shard`.
+fn standing<'s>(
+    store: &'s ArtifactStore,
+    shard: ShardId,
+    extent: &mosaica_store::manifest::DerivedExtent,
+) -> Option<(&'s str, u64, bool)> {
+    let layer = store.layer_in(extent.space)?;
+    let now = store.slice(shard)?.level_version(layer, extent.level);
+    let standing = now == extent.slice_version
+        && store.records_version(layer, extent.level) == extent.level_version;
+    Some((layer, now, standing))
+}
+
 impl ArtifactProjections {
     pub fn new(scratch: impl Into<std::path::PathBuf>) -> Self {
         Self {
@@ -374,14 +398,11 @@ impl ArtifactProjections {
             let Some(view) = extent.view.as_deref() else {
                 continue;
             };
-            let Some(layer) = store.layer_in(extent.space) else {
+            let Some((layer, now, true)) = standing(store, *shard, extent) else {
                 continue;
             };
-            if store.level_version(layer, extent.level) != extent.level_version {
-                continue;
-            }
             let address = (*shard, view.to_string(), layer.to_string(), extent.level);
-            let key = DerivedKey::of(prefix, extent.level_version);
+            let key = DerivedKey::of(prefix, now);
             let path = prefix_dir.join(&extent.path);
             match &extent.form {
                 mosaica_store::manifest::DerivedForm::LevelLabels => {
@@ -501,15 +522,14 @@ impl ArtifactProjections {
             .iter()
             .filter(|(_, e)| e.form == mosaica_store::manifest::DerivedForm::Containment)
         {
-            let Some(layer) = store.layer_in(extent.space) else {
+            let Some((layer, level_version, standing)) = standing(store, *shard, extent) else {
                 continue;
             };
-            let level_version = store.level_version(layer, extent.level);
-            if level_version != extent.level_version {
+            if !standing {
                 tracing::info!(
                     layer = %layer,
                     level = extent.level,
-                    composed_at = extent.level_version,
+                    composed_at = extent.slice_version,
                     now = level_version,
                     "a fold-written containment partition is not adopted: the level has moved                      since it was composed, so it is recomposed on first use"
                 );
@@ -566,16 +586,15 @@ impl ArtifactProjections {
             else {
                 continue;
             };
-            let Some(layer) = store.layer_in(extent.space) else {
+            let Some((layer, level_version, standing)) = standing(store, *shard, extent) else {
                 continue;
             };
-            let level_version = store.level_version(layer, extent.level);
-            if level_version != extent.level_version {
+            if !standing {
                 tracing::info!(
                     layer = %layer,
                     level = extent.level,
                     view = %view,
-                    projected_at = extent.level_version,
+                    projected_at = extent.slice_version,
                     now = level_version,
                     "a fold-written tile index is not adopted: the level has moved since it was \
                      projected, so its extents are derived on first use"
@@ -638,16 +657,17 @@ impl ArtifactProjections {
                 continue;
             };
             let layout = *layout;
-            let Some(layer) = store.layer_in(extent.space) else {
+            let Some((layer, level_version, _)) = standing(store, *shard, extent) else {
                 continue;
             };
-            let level_version = store.level_version(layer, extent.level);
-            if level_version < extent.level_version {
+            if level_version < extent.slice_version
+                || store.records_version(layer, extent.level) < extent.level_version
+            {
                 tracing::warn!(
                     layer = %layer,
                     level = extent.level,
                     view = %view,
-                    written_at = extent.level_version,
+                    written_at = extent.slice_version,
                     now = level_version,
                     "a fold-written row-major column describes a later version of its level than \
                      the store holds; it is not adopted and the level is recomposed on first use"
@@ -695,7 +715,7 @@ impl ArtifactProjections {
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(
                     (*shard, view.to_string(), layer.to_string(), extent.level),
-                    (DerivedKey::of(prefix, extent.level_version), column),
+                    (DerivedKey::of(prefix, extent.slice_version), column),
                 );
         }
     }

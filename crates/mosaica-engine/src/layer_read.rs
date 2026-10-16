@@ -417,10 +417,10 @@ impl LevelForms {
         &self.rows[0]
     }
 
-    /// The version of the level the first side's form is of, which the level's contents and
-    /// derived geometry are keyed by.
+    /// The sum of the versions of the level every side's form is of, which the level's contents
+    /// and derived geometry are keyed by: it moves whenever any side's does.
     pub(crate) fn level_version(&self) -> u64 {
-        self.versions[0]
+        self.versions.iter().sum()
     }
 
     /// The version of the level the form of the side at `place` is of.

@@ -13,7 +13,7 @@ mod window;
 
 pub(crate) use background::outstanding;
 pub(super) use background::Background;
-pub(super) use manifest::{HeldSpace, SideManifests};
+pub(super) use manifest::{DerivedByShard, HeldSpace, SideManifests};
 pub(in crate::write) use unique::UniqueDeclarations;
 pub(super) use wal::ExecutorLog;
 
@@ -66,9 +66,9 @@ pub(super) struct Executor {
     pub(super) superseded: std::sync::Mutex<Vec<std::sync::Weak<Generation>>>,
     /// So the first tick lands one period after construction, not immediately.
     pub(super) last_tick: std::time::Instant,
-    /// What every accepted write since the last tick did to each level's row forms.
+    /// What every accepted write since the last tick did to each level's row forms in each shard.
     pub(super) pending_forms:
-        std::collections::BTreeMap<(String, u32), Vec<crate::artifacts::LevelDelta>>,
+        std::collections::BTreeMap<(String, u32, ShardId), Vec<crate::artifacts::LevelDelta>>,
     #[cfg(feature = "fault-injection")]
     pub(super) faults: Option<Arc<mosaica_lifecycle::faults::FaultSwitchboard>>,
 }

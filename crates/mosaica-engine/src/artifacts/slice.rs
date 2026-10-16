@@ -101,7 +101,7 @@ impl<'a> LevelSlice<'a> {
 
 /// A record with `contents` empty generating sets and no member. A slice's form reads nothing else
 /// of it.
-fn nothing_held(contents: usize) -> ArtifactRecord {
+pub(super) fn nothing_held(contents: usize) -> ArtifactRecord {
     ArtifactRecord {
         entity: mosaica_types::EntityId::new(0),
         key: None,

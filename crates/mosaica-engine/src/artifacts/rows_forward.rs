@@ -66,17 +66,19 @@ impl ArtifactRows {
     }
 
     /// One newly published artifact placed at its ordinal, exactly as [`Self::build_over`]'s walk
-    /// would have placed it. A publication only ever appends ordinals, so this widens the form.
+    /// would have placed it: `record` the level's whole record and `held` this form's slice of it.
+    /// A publication only ever appends ordinals, so this widens the form.
     pub(super) fn publish_at(
         &mut self,
         ordinal: u32,
         record: &ArtifactRecord,
+        held: &ArtifactRecord,
         space: &RowSpace,
     ) -> Arc<Bitmap> {
         let idx = ordinal as usize;
         Arc::make_mut(&mut self.records).put(idx, record);
         self.membership
-            .put(idx, record, space, &mut ProjectScratch::default())
+            .put(idx, held, space, &mut ProjectScratch::default())
     }
 
     /// [`Self::publish_at`] for a membership resolved elsewhere — a spatial level's new shape.
@@ -84,13 +86,14 @@ impl ArtifactRows {
         &mut self,
         ordinal: u32,
         record: &ArtifactRecord,
+        held: &ArtifactRecord,
         rows: Bitmap,
         space: &RowSpace,
     ) -> Arc<Bitmap> {
         let idx = ordinal as usize;
         Arc::make_mut(&mut self.records).put(idx, record);
         self.membership
-            .put_resolved(idx, record, rows, space, &mut ProjectScratch::default())
+            .put_resolved(idx, held, rows, space, &mut ProjectScratch::default())
     }
 
     /// One generating set unioned with the entities a page joined to it — the fast arm of the
@@ -113,13 +116,13 @@ impl ArtifactRows {
         true
     }
 
-    /// One artifact's records entry read again, and its operators re-derived where a page held a
-    /// leave. The operators are re-projected from entity truth where `whole` says so; the
-    /// membership is untouched.
+    /// One artifact's records entry read again from `record`, and its operators re-derived from
+    /// `held`, this form's slice of it, where a page held a leave. The membership is untouched.
     pub(super) fn refresh_sets(
         &mut self,
         ordinal: u32,
         record: &ArtifactRecord,
+        held: &ArtifactRecord,
         space: &RowSpace,
         whole: bool,
     ) {
@@ -130,7 +133,7 @@ impl ArtifactRows {
         Arc::make_mut(&mut self.records).put(idx, record);
         if whole {
             self.membership
-                .project_generating(idx, record, space, &mut ProjectScratch::default());
+                .project_generating(idx, held, space, &mut ProjectScratch::default());
         }
     }
 

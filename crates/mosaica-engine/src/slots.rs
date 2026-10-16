@@ -492,7 +492,7 @@ impl Engine {
                 (0..levels as u32)
                     .map(|level| {
                         (
-                            store.level_version(name, level),
+                            store.every_slice_version(name, level),
                             store.lineage_version(name, level),
                         )
                     })

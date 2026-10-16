@@ -1172,6 +1172,9 @@ pub struct Filed {
     pub incarnation: Option<mosaica_types::view::ViewIncarnation>,
     pub space: mosaica_types::LayerSpace,
     pub level: u32,
+    /// The level's records version the file was written at ([`DerivedExtent::level_version`]).
+    pub records_version: u64,
+    /// The level's version in the file's shard ([`DerivedExtent::slice_version`]).
     pub level_version: u64,
     pub form: DerivedForm,
     pub bytes: FiledBytes,
@@ -1375,7 +1378,7 @@ pub fn file_derived(
             path: format!("{dir_rel}/{name}"),
             space: item.space,
             level: item.level,
-            level_version: item.level_version,
+            level_version: item.records_version,
             slice_version: item.level_version,
             view: item.view.clone(),
             incarnation: item.incarnation,
