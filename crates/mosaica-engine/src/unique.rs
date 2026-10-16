@@ -22,7 +22,7 @@ use rustc_hash::FxHashMap;
 use mosaica_lifecycle::{IngestBuffer, WalScalar};
 use mosaica_store::manifest::{DeclaredScalar, Manifest};
 use mosaica_store::unique::{key_of, key_text, value_text, UniqueKey, DUPLICATE_EXAMPLES};
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, ItemAt, ShardId};
 
 use crate::Generation;
 
@@ -336,31 +336,53 @@ pub(crate) fn holders(
     Ok(out)
 }
 
+/// [`holders`] in every shard of `generation`, each holder with its shard, ascending by shard.
+pub(crate) fn holders_in_every_shard(
+    generation: &Generation,
+    attribute: &str,
+    keys: &[UniqueKey],
+) -> Result<Vec<(usize, ItemAt)>, mosaica_store::StoreError> {
+    let mut out = Vec::new();
+    for shard in generation.shards() {
+        out.extend(
+            holders(shard, attribute, keys)?
+                .into_iter()
+                .map(|(at, entity)| (at, ItemAt::new(shard.id(), entity))),
+        );
+    }
+    Ok(out)
+}
+
 /// An item's `mosaica_id` as a refusal names it.
 pub(crate) fn mosaica_id_text(
     engine: &crate::Engine,
-    shard: &crate::Shard,
-    entity: EntityId,
+    generation: &Generation,
+    item: ItemAt,
 ) -> String {
-    engine
-        .mosaica_id_in(shard, entity)
+    generation
+        .shard(item.shard)
+        .and_then(|shard| engine.mosaica_id_in(shard, item.entity).ok())
         .map(|id| id.raw().to_string())
-        .unwrap_or_else(|_| "unknown".to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// Whether a value in `keys`, each as `(declared position, key widened)`, may have been given a
 /// holder since the live entries' sequence number was `seq`: the executor's re-check of a batch
 /// its handler resolved at `seq`, from memory. Where an entry added since has already left
 /// memory the answer is yes, and so it is for a batch that `creates` items once the unique
-/// columns have changed, since its keys were taken under the old ones.
+/// columns have changed, since its keys were taken under the old ones. The live entries are
+/// `write_shard`'s, where every window adds its rows' values.
 pub(crate) fn moved_since(
     generation: &Generation,
+    write_shard: ShardId,
     keys: &[(u16, u128)],
     seq: u64,
     creates: bool,
 ) -> bool {
     use mosaica_store::unique::KeyKind;
-    let shard = generation.only_shard();
+    let Some(shard) = generation.shard(write_shard) else {
+        return true;
+    };
     let live = &shard.unique_live;
     if creates && live.columns_changed_since(seq) {
         return true;

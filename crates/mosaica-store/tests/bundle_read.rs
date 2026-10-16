@@ -15,7 +15,10 @@ use mosaica_store::{open_bundle, tile_ranges, StoreError};
 use mosaica_types::EntityId;
 
 mod fixture;
-use fixture::{build_bundle, file_digest, hex_sha256, SHARD};
+use fixture::{
+    add_shard_one, build_bundle, file_digest, hex_sha256, read_assembled, shard_file,
+    write_assembled, write_assembled_named, SHARD,
+};
 
 fn seg_file(seg_id: &str, file: &str) -> String {
     format!("{}/{file}", SHARD.segment_rel("main", seg_id))
@@ -182,24 +185,20 @@ fn tile_ranges_covers_the_whole_segment_at_depth_zero() {
     );
 }
 
-/// Read `partitions/default/SEGMENTS-0.json` under `root`'s bundle prefix, apply `edit` to its
-/// parsed JSON, and rewrite it — the standard way these tests attack the manifest layer without
-/// touching the real segment files or breaking the `MANIFEST.json` digest chain (SEGMENTS
-/// manifests carry no digest of their own; only the `files` entries *inside* them are
-/// verified).
+/// Read publication 0 under `root`'s bundle prefix as one JSON value, apply `edit`, and write it
+/// back in place, every shard and space file with its digest named again — the standard way these
+/// tests attack the manifest layer without touching the real segment files or breaking the
+/// `MANIFEST.json` digest chain.
 fn edit_segments_manifest(root: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
-    let path = partition_dir(root).join("SEGMENTS-0.json");
-    let mut value: serde_json::Value =
-        serde_json::from_slice(&fs::read(&path).expect("read SEGMENTS-0.json"))
-            .expect("parse SEGMENTS-0.json");
+    let prefix_dir = root.join("v00000");
+    let mut value = read_assembled(&prefix_dir, 0);
     edit(&mut value);
-    fs::write(&path, serde_json::to_vec_pretty(&value).expect("serialise")).expect("rewrite");
+    write_assembled(&prefix_dir, 0, value);
 }
 
-/// Copy `SEGMENTS-0.json` to `SEGMENTS-<n>.json` in the same partition directory, setting
-/// `segments_version` to `n` and applying `edit` to the parsed JSON.
+/// Publication 0 written again as publication `n`, with `edit` applied to its JSON first.
 ///
-/// Unless `edit` says otherwise, every file the copy names is untouched on disk, so the copy
+/// Unless `edit` says otherwise, every data file the copy names is untouched on disk, so the copy
 /// verifies by size and digest exactly as the original does. That is the point: with
 /// verification held constant, a step-down (or a refusal to step down) in these fixtures can
 /// only have come from the honourable-state check, never from a file that failed to verify.
@@ -208,17 +207,10 @@ fn edit_segments_manifest(root: &Path, edit: impl FnOnce(&mut serde_json::Value)
 /// is why one test (`a_deny_carrying_manifest_whose_files_are_missing_is_still_refused`) breaks
 /// the pattern deliberately and has `edit` name a file that does not exist.
 fn add_segments_manifest(root: &Path, n: u64, edit: impl FnOnce(&mut serde_json::Value)) {
-    let dir = partition_dir(root);
-    let mut value: serde_json::Value =
-        serde_json::from_slice(&fs::read(dir.join("SEGMENTS-0.json")).expect("read SEGMENTS-0"))
-            .expect("parse SEGMENTS-0.json");
-    value["segments_version"] = serde_json::json!(n);
+    let prefix_dir = root.join("v00000");
+    let mut value = read_assembled(&prefix_dir, 0);
     edit(&mut value);
-    fs::write(
-        dir.join(format!("SEGMENTS-{n}.json")),
-        serde_json::to_vec_pretty(&value).expect("serialise"),
-    )
-    .expect("write SEGMENTS-<n>");
+    write_assembled(&prefix_dir, n, value);
 }
 
 // -------------------------------------------------------------------------------------------
@@ -1100,28 +1092,21 @@ fn a_just_written_prefix_still_refuses_a_manifest_that_disagrees_with_its_own_fi
 // that hides it."
 // -------------------------------------------------------------------------------------------
 
-/// Copy `SEGMENTS-0.json` to a literal `name` in the same partition directory, setting
-/// `segments_version` to `version` and applying `edit`. Unlike [`add_segments_manifest`] the
-/// name is not derived from the number, which is the whole point: these fixtures write names
-/// the writer cannot produce, because the file has to arrive from outside it — an operator
-/// copy, a partial object-store sync, another implementation.
+/// Write publication 0 again with `edit` applied, its partition file under a literal `name` and
+/// its shard files at `version`. Unlike [`add_segments_manifest`] the name is not derived from the
+/// number, which is the whole point: these fixtures write names the writer cannot produce, because
+/// the file has to arrive from outside it — an operator copy, a partial object-store sync, another
+/// implementation.
 fn add_segments_manifest_named(
     root: &Path,
     name: &str,
     version: u64,
     edit: impl FnOnce(&mut serde_json::Value),
 ) {
-    let dir = partition_dir(root);
-    let mut value: serde_json::Value =
-        serde_json::from_slice(&fs::read(dir.join("SEGMENTS-0.json")).expect("read SEGMENTS-0"))
-            .expect("parse SEGMENTS-0.json");
-    value["segments_version"] = serde_json::json!(version);
+    let prefix_dir = root.join("v00000");
+    let mut value = read_assembled(&prefix_dir, 0);
     edit(&mut value);
-    fs::write(
-        dir.join(name),
-        serde_json::to_vec_pretty(&value).expect("serialise"),
-    )
-    .expect("write the named manifest");
+    write_assembled_named(&prefix_dir, name, version, value);
 }
 
 /// **The disclosure this refusal exists to close.** A zero-padded `SEGMENTS-01.json` carrying an
@@ -1236,4 +1221,98 @@ fn a_crashed_write_orphan_is_not_a_candidate() {
 
     let bundle = open_bundle(dir.path()).expect("a .json.tmp orphan is not a manifest candidate");
     assert_eq!(bundle.partitions["default"].segments_n, 0);
+}
+
+// -------------------------------------------------------------------------------------------
+// The commit point over split files: a partition `SEGMENTS-<n>.json` names each shard's own file
+// by number and digest, and a candidate steps down or is refused whole.
+// -------------------------------------------------------------------------------------------
+
+/// The fixture's bundle with an empty shard 1 beside shard 0, published at 1, then at 2 with
+/// `edit` applied to shard 1's record. Returns the prefix directory.
+fn two_shards_published(
+    root: &Path,
+    edit: impl FnOnce(&mut mosaica_store::manifest::ShardRecord),
+) -> std::path::PathBuf {
+    build_bundle(root, 50);
+    let prefix_dir = root.join("v00000");
+    let published = mosaica_store::read_publication(&prefix_dir, "default", 0).unwrap();
+    let mut manifest = published.manifest;
+    add_shard_one(&mut manifest);
+    let first = mosaica_store::write_publication(&prefix_dir, "default", 1, &manifest, None)
+        .expect("publication 1");
+    edit(&mut manifest.shards.records[1]);
+    let second =
+        mosaica_store::write_publication(&prefix_dir, "default", 2, &manifest, Some(&first))
+            .expect("publication 2");
+    assert_eq!(
+        (second.shards[0].n, second.shards[1].n),
+        (1, 2),
+        "only shard 1's file was written again"
+    );
+    prefix_dir
+}
+
+/// **A shard file that fails its digest steps the whole partition down**: both shards are served
+/// from the publication below, never shard 0 from one and shard 1 from another.
+#[test]
+fn a_corrupt_shard_file_steps_the_whole_partition_down() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let prefix_dir = two_shards_published(dir.path(), |record| record.high_water = 9);
+    let path = shard_file(&prefix_dir, 1, 2);
+    let mut bytes = fs::read(&path).unwrap();
+    let at = bytes.len() / 2;
+    bytes[at] ^= 0x20;
+    fs::write(&path, bytes).unwrap();
+
+    let bundle = open_bundle(dir.path()).expect("the partition steps down");
+    let partition = &bundle.partitions["default"];
+    assert_eq!(partition.segments_n, 1);
+    assert!(partition.stepped_down());
+    let high_waters: Vec<u64> = partition
+        .shards
+        .iter()
+        .map(|shard| shard.record.high_water)
+        .collect();
+    assert_eq!(
+        high_waters,
+        vec![50, 0],
+        "both shards as publication 1 left them"
+    );
+}
+
+/// **A candidate whose partition file flags deny state is refused when a file it names is
+/// missing**, before that file could say what it denied.
+#[test]
+fn a_deny_carrying_candidate_with_a_missing_shard_file_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let prefix_dir = two_shards_published(dir.path(), |record| record.deny = deny_set(&[3]));
+    fs::remove_file(shard_file(&prefix_dir, 1, 2)).unwrap();
+
+    match open_bundle(dir.path()).expect_err("a deny-carrying candidate is never stepped past") {
+        StoreError::UnverifiedDenyManifest { n, .. } => assert_eq!(n, 2),
+        other => panic!("expected UnverifiedDenyManifest, got: {other}"),
+    }
+}
+
+/// **Where nothing verifies, the refusal names the shard file that failed.**
+#[test]
+fn a_refusal_names_the_shard_file_that_failed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 50);
+    let path = shard_file(&dir.path().join("v00000"), 0, 0);
+    let mut bytes = fs::read(&path).unwrap();
+    bytes.push(b' ');
+    fs::write(&path, bytes).unwrap();
+
+    match open_bundle(dir.path()).expect_err("nothing verifies") {
+        StoreError::NoVerifyingSegmentsManifest {
+            highest_candidate_error: Some(reason),
+            ..
+        } => assert!(
+            reason.contains("shards/0/SEGMENTS-0.json"),
+            "the reason names the shard file: {reason}"
+        ),
+        other => panic!("expected NoVerifyingSegmentsManifest, got: {other}"),
+    }
 }

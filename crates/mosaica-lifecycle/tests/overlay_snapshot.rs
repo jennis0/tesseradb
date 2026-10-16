@@ -26,7 +26,12 @@ fn round_trip(overlay: &Overlay) -> Overlay {
     let entries = overlay.snapshot(item);
     let mut restored = Overlays::default();
     restored.apply_snapshot(&entries);
-    restored.items
+    shard_zero(restored)
+}
+
+/// Shard 0's items of `overlays`.
+fn shard_zero(mut overlays: Overlays) -> Overlay {
+    overlays.items.remove(&ShardId::ZERO).unwrap_or_default()
 }
 
 /// **Keyed by entity.** An entity deleted before it was ever flushed has no row and may hold no
@@ -140,9 +145,9 @@ fn a_snapshot_replays_in_position_and_never_displaces_what_precedes_it() {
     );
     for record in wal.records() {
         let (position, record) = record.unwrap();
-        replay.apply(&record, position, |_, _| false);
+        replay.apply(&record, position, |_, _, _| false);
     }
-    let overlay = replay.finish().0.items;
+    let overlay = shard_zero(replay.finish().0);
 
     assert!(
         overlay.is_suppressed(EntityId::new(7)),
@@ -162,12 +167,13 @@ fn a_snapshot_unions_with_state_already_applied() {
     snapshotted.apply(EntityId::new(1), ChangeOp::Delete);
 
     let mut live = Overlays::default();
-    live.items.apply(EntityId::new(2), ChangeOp::Suppress);
+    live.apply(item(EntityId::new(2)), ChangeOp::Suppress);
     live.apply_snapshot(&snapshotted.snapshot(item));
+    let live = shard_zero(live);
 
-    assert!(live.items.is_deleted(EntityId::new(1)));
+    assert!(live.is_deleted(EntityId::new(1)));
     assert!(
-        live.items.is_suppressed(EntityId::new(2)),
+        live.is_suppressed(EntityId::new(2)),
         "applying a snapshot must not discard what was already there"
     );
 }
@@ -181,15 +187,26 @@ fn a_snapshot_restores_each_deny_into_the_overlay_its_target_names() {
     overlays.apply(Target::Artifact(space, EntityId::new(5)), ChangeOp::Suppress);
     overlays.apply(item(EntityId::new(6)), ChangeOp::Delete);
 
+    let one = ShardId::new(1).unwrap();
+    overlays.apply(Target::Item(one, EntityId::new(7)), ChangeOp::Suppress);
+
     let mut restored = Overlays::default();
     restored.apply_snapshot(&mosaica_lifecycle::overlay::snapshot(
-        ShardId::ZERO,
-        &overlays.items,
-        overlays.spaces.iter().map(|(space, overlay)| (*space, overlay)),
+        overlays
+            .items
+            .iter()
+            .map(|(shard, overlay)| (*shard, overlay)),
+        overlays
+            .spaces
+            .iter()
+            .map(|(space, overlay)| (*space, overlay)),
     ));
     assert!(restored.spaces[&space].is_suppressed(EntityId::new(5)));
-    assert!(!restored.items.touches(EntityId::new(5)));
-    assert!(restored.items.is_deleted(EntityId::new(6)));
+    assert!(restored.items[&one].is_suppressed(EntityId::new(7)));
+    assert!(!restored.items[&ShardId::ZERO].touches(EntityId::new(7)));
+    let items = shard_zero(restored.clone());
+    assert!(!items.touches(EntityId::new(5)));
+    assert!(items.is_deleted(EntityId::new(6)));
     assert!(!restored.spaces[&space].touches(EntityId::new(6)));
 }
 

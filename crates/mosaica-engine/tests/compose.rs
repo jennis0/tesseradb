@@ -524,6 +524,7 @@ fn insert_buffered(buffer: &mut IngestBuffer, entity: u64, terms: Vec<TermId>) {
     use mosaica_lifecycle::WalRow;
 
     let row = WalRow {
+        shard: mosaica_types::ShardId::ZERO,
         entity_id: e(entity),
         view: "s0".to_string(),
         join: false,
@@ -563,6 +564,7 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
             body_hash: [0u8; 32],
             rows: vec![
                 WalRow {
+                    shard: mosaica_types::ShardId::ZERO,
                     entity_id: e(ENTITY_X),
                     view: "s0".to_string(),
                     join: false,
@@ -573,6 +575,7 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
                     scoped: Vec::new(),
                 },
                 WalRow {
+                    shard: mosaica_types::ShardId::ZERO,
                     entity_id: e(ENTITY_Y),
                     view: "s0".to_string(),
                     join: false,
@@ -632,10 +635,12 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
     );
     for record in wal.records() {
         let (position, record) = record.unwrap();
-        replay.apply(&record, position, |_, _| false);
+        replay.apply(&record, position, |_, _, _| false);
     }
-    let (overlays, buffer, _resolver) = replay.finish();
-    let overlay = overlays.items;
+    let (mut overlays, mut buffers, _resolver) = replay.finish();
+    let shard = mosaica_types::ShardId::ZERO;
+    let overlay = overlays.items.remove(&shard).unwrap_or_default();
+    let buffer = buffers.remove(&shard).unwrap_or_default();
 
     assert!(
         overlay.is_deleted(e(ENTITY_X)),

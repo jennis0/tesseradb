@@ -233,9 +233,10 @@ fn build_reported(
 }
 
 fn unique_indexes(root: &Path) -> Vec<UniqueIndexRuns> {
-    let path = mosaica_store::layout::partition_dir(&root.join("v00000"), "default")
-        .join("SEGMENTS-0.json");
-    let manifest: SegmentsManifest = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    let manifest: SegmentsManifest =
+        mosaica_store::read_publication(&root.join("v00000"), "default", 0)
+            .unwrap()
+            .manifest;
     manifest.only_shard().unique_indexes.clone()
 }
 
@@ -403,7 +404,8 @@ fn an_index_disagreeing_with_its_column_is_refused_by_the_deep_verifier() {
             dir,
             stem,
             std::num::NonZeroU64::new(u64::MAX).unwrap(),
-        );
+        )
+        .with_key_filter();
         for (key, entity) in entries {
             writer.push(key, entity).unwrap();
         }

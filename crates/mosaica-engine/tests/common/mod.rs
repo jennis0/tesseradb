@@ -68,9 +68,10 @@ mod ingest_rows {
             let rows = rows
                 .into_iter()
                 .map(|row| IngestRow {
-                    mosaica_id: row
-                        .join
-                        .map(|entity| self.mosaica_id_of(entity).expect("a joined item has an id")),
+                    mosaica_id: row.join.map(|item| {
+                        self.mosaica_id_of(item.entity)
+                            .expect("a joined item has an id")
+                    }),
                     labels: Some(row.descriptors),
                     position: Some((row.x, row.y)),
                     scalars: row.scalars,
@@ -164,20 +165,40 @@ pub fn layer_in(manifest: &SegmentsManifest, space: mosaica_types::LayerSpace) -
     &layer.expect("a registered layer holds the space").declaration.name
 }
 
-/// The file of [`side_manifest`].
-pub fn side_manifest_path(root: &Path) -> PathBuf {
-    let n = open_bundle(root).expect("the bundle opens").partitions[PARTITION].segments_n;
-    partition_dir(root, &current_prefix(root)).join(format!("SEGMENTS-{n}.json"))
+/// Write `manifest` as publication `n` of `prefix_dir`'s partition in place of the one there:
+/// its partition file and every shard and space file numbered `n` are replaced.
+pub fn rewrite_publication(prefix_dir: &Path, n: u64, manifest: &SegmentsManifest) {
+    let refs = mosaica_store::read_publication(prefix_dir, PARTITION, n)
+        .expect("the publication reads")
+        .refs;
+    let shards = refs.shards.iter().filter(|named| named.n == n);
+    let spaces = refs.layer_spaces.iter().filter(|named| named.n == n);
+    let written = shards
+        .map(|named| mosaica_store::ShardLayout::new(PARTITION, named.id).manifest_rel(n))
+        .chain(spaces.map(|named| {
+            mosaica_store::LayerSpaceLayout::new(PARTITION, named.space).manifest_rel(n)
+        }))
+        .chain([format!(
+            "{}/{}",
+            mosaica_store::layout::partition_rel(PARTITION),
+            mosaica_store::layout::segments_name(n)
+        )]);
+    for rel in written {
+        std::fs::remove_file(prefix_dir.join(rel)).expect("the publication's file is removed");
+    }
+    mosaica_store::write_publication(prefix_dir, PARTITION, n, manifest, None)
+        .expect("the publication is written again");
 }
 
-/// Rewrite the side-manifest `root` serves with `edit` applied. It carries no digest of its own,
-/// so this needs no resealing.
+/// Rewrite the side-manifest `root` serves with `edit` applied.
 pub fn edit_side_manifest(root: &Path, edit: impl FnOnce(&mut SegmentsManifest)) {
-    let path = side_manifest_path(root);
-    let mut manifest: SegmentsManifest =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let n = open_bundle(root).expect("the bundle opens").partitions[PARTITION].segments_n;
+    let prefix_dir = root.join(current_prefix(root));
+    let mut manifest = mosaica_store::read_publication(&prefix_dir, PARTITION, n)
+        .expect("the served publication reads")
+        .manifest;
     edit(&mut manifest);
-    std::fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    rewrite_publication(&prefix_dir, n, &manifest);
 }
 
 /// The bundle's shard size, and each shard's id and high water, as an open reads them.
@@ -729,9 +750,9 @@ pub fn set_tenancy(bundle_root: &Path, number: EntityId, tenancy: u16) {
 
     let prefix_dir = bundle_root.join("v00000");
     let bits = bits_of(&[(number.raw() as u32, tenancy)]);
-    let path = partition_dir(bundle_root, "v00000").join("SEGMENTS-0.json");
-    let mut manifest: SegmentsManifest =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let mut manifest = mosaica_store::read_publication(&prefix_dir, PARTITION, 0)
+        .unwrap()
+        .manifest;
     let tenancy_rel = SHARD.tenancy_rel();
     for (bit, file) in mosaica_store::tenancy::write(&prefix_dir.join(&tenancy_rel), &bits).unwrap()
     {
@@ -746,7 +767,7 @@ pub fn set_tenancy(bundle_root: &Path, number: EntityId, tenancy: u16) {
             .tenancy_index
             .push(TenancyBit { bit, path: rel });
     }
-    std::fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    rewrite_publication(&prefix_dir, 0, &manifest);
 }
 
 /// The item the unique `id` value `source` names, deleted items left out.
@@ -993,7 +1014,7 @@ pub fn unique_holders(
         .name_items(&table)?
         .verdicts
         .into_iter()
-        .map(Result::ok)
+        .map(|verdict| verdict.ok().map(|item| item.entity))
         .collect())
 }
 

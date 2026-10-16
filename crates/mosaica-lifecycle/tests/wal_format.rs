@@ -5,7 +5,7 @@
 //! contiguity arithmetic assumes and the format did not carry.
 
 use mosaica_lifecycle::wal::{Wal, WalError, WalRecord, WalRow, WalScalar};
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, ShardId, Target};
 
 /// The view a row belongs to is durable, because a flush segment's entity range is
 /// contiguous only within one view (§2.1) and the WAL is append-only.
@@ -14,6 +14,7 @@ fn a_wal_row_round_trips_its_view() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("wal.log");
     let row = WalRow {
+        shard: ShardId::ZERO,
         entity_id: EntityId::new(7),
         view: "default".to_string(),
         join: false,
@@ -95,6 +96,7 @@ fn a_wal_row_round_trips_a_coordinate_no_f32_holds() {
     assert_ne!(f64::from(y as f32), y);
 
     let row = WalRow {
+        shard: ShardId::ZERO,
         entity_id: EntityId::new(7),
         view: "default".to_string(),
         join: false,
@@ -166,12 +168,13 @@ fn a_wal_row_round_trips_a_coordinate_no_f32_holds() {
 /// the operands of its labels read as one disjunction: a 32 row carries one key for a whole label
 /// holding a conjunction, which a 33 reader would evaluate as one conjunction. **33** is the
 /// version whose magic was `TWAL`. **34** is the version before the variant table gained
-/// `ShardsDeclare`.
+/// `ShardsDeclare`. **37** is the version before records named a shard.
 #[test]
 fn a_log_at_a_version_whose_records_would_be_misread_is_refused() {
     let dir = tempfile::TempDir::new().unwrap();
     for (index, version) in [
         15u16, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36,
+        37,
     ]
         .into_iter()
         .enumerate()
@@ -189,7 +192,7 @@ fn a_log_at_a_version_whose_records_would_be_misread_is_refused() {
     // a statement about the version rather than about the rest of the header.
     let other = dir.path().join("current");
     std::fs::create_dir(&other).unwrap();
-    std::fs::write(other.join("wal-000001.log"), header_at_version(37, 1, 0)).unwrap();
+    std::fs::write(other.join("wal-000001.log"), header_at_version(38, 1, 0)).unwrap();
     assert!(Wal::open(other.join("wal.log")).is_ok());
 }
 
@@ -220,6 +223,11 @@ fn view_create_and_drop_round_trip() {
         key: "2026-Q4".to_string(),
         incarnation: 2,
     };
+    let deleted = vec![
+        Target::Item(ShardId::ZERO, EntityId::new(7)),
+        Target::Item(ShardId::new(1).unwrap(), EntityId::new(7)),
+        Target::Item(ShardId::ZERO, EntityId::new(9)),
+    ];
     {
         let mut wal = Wal::open(&path).unwrap();
         wal.append(&WalRecord::ViewCreate {
@@ -228,7 +236,7 @@ fn view_create_and_drop_round_trip() {
         .unwrap();
         wal.append(&WalRecord::ViewDrop {
             view: dropped.clone(),
-            deleted: vec![EntityId::new(7), EntityId::new(9)],
+            deleted: deleted.clone(),
         })
         .unwrap();
         wal.fsync().unwrap();
@@ -237,10 +245,16 @@ fn view_create_and_drop_round_trip() {
     let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     assert_eq!(records.len(), 2);
     match (&records[0], &records[1]) {
-        (WalRecord::ViewCreate { view }, WalRecord::ViewDrop { view: stone, deleted }) => {
+        (
+            WalRecord::ViewCreate { view },
+            WalRecord::ViewDrop {
+                view: stone,
+                deleted: replayed,
+            },
+        ) => {
             assert_eq!(view, &created);
             assert_eq!(stone, &dropped);
-            assert_eq!(deleted, &[EntityId::new(7), EntityId::new(9)]);
+            assert_eq!(replayed, &deleted);
         }
         other => panic!("expected a create then a drop, got {other:?}"),
     }
@@ -253,6 +267,7 @@ fn a_row_of_every_scalar_kind_is_written_as_these_bytes() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("wal.log");
     let row = WalRow {
+        shard: ShardId::ZERO,
         entity_id: EntityId::new(3),
         view: "v".to_string(),
         join: false,
@@ -293,9 +308,61 @@ fn a_row_of_every_scalar_kind_is_written_as_these_bytes() {
     let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
     assert_eq!(
         hex,
-        "4d57414c25000100000000000000000000000000000086000000010162000000000000000000000000000000\
-         0000000000000000000000000000000000010301760000000000000000e03f000000000000d03f0e000101ab\
-         02cdd702038486880804ffffffffffffffffff0105fe06d70407dfc50808ffffffffffffffffff01090000c0\
-         3f0a00000000000002c00b8080f281838985060c016b0d0101010000a8d5d049"
+        "4d57414c26000100000000000000000000000000000087000000010162000000000000000000000000000000\
+         000000000000000000000000000000000001000301760000000000000000e03f000000000000d03f0e000101\
+         ab02cdd702038486880804ffffffffffffffffff0105fe06d70407dfc50808ffffffffffffffffff01090000\
+         c03f0a00000000000002c00b8080f281838985060c016b0d01010100002e2ccded"
+    );
+}
+
+/// The parts that name a shard are written as these bytes: a shard's opening and sealing, each the
+/// shard's number after its variant, and a growth's sets, each shard's number before its portable
+/// bitmap. A change to how a record names a shard changes them, and is a `WAL_VERSION` bump.
+#[test]
+fn the_records_naming_a_shard_are_written_as_these_bytes() {
+    use mosaica_lifecycle::wal::{GrownSet, MembershipGrowth, WalShardSet};
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("wal.log");
+    let shard = ShardId::new(300).unwrap();
+    let records = [
+        WalRecord::ShardOpen { shard },
+        WalRecord::ShardSeal { shard },
+        WalRecord::ArtifactGrow {
+            layer: "l".into(),
+            space: mosaica_types::LayerSpace::new(1).unwrap(),
+            level: 0,
+            growth: vec![MembershipGrowth {
+                ordinal: 2,
+                joining: vec![WalShardSet {
+                    shard,
+                    entities: mosaica_lifecycle::membership::serialise_members(
+                        &croaring::Bitmap::of(&[7]),
+                    ),
+                }],
+                leaving: Vec::new(),
+                set: GrownSet::Membership,
+            }],
+        },
+    ];
+    {
+        let mut wal = Wal::open(&path).unwrap();
+        for record in &records {
+            wal.append(record).unwrap();
+        }
+        wal.fsync().unwrap();
+    }
+    let wal = Wal::open(&path).unwrap();
+    let replayed: Vec<WalRecord> = wal.records().map(|r| r.unwrap().1).collect();
+    assert_eq!(replayed, records);
+
+    let bytes = std::fs::read(dir.path().join("wal-000001.log")).unwrap();
+    let hex: String = bytes[22..].iter().map(|b| format!("{b:02x}")).collect();
+    // Variants 17 and 18, each the shard as a varint (`ac02`, 300); then the growth's one set,
+    // shard 300 before its 18 bytes of bitmap.
+    assert_eq!(
+        hex,
+        "0300000011ac029c82190e0300000012ac02c53c5f0c1f00000009016c0100010201ac02123a300000010000\
+         00000000001000000007000000aff4b0dd"
     );
 }

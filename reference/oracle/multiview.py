@@ -125,6 +125,7 @@ from .harness import (
     write_deployment,
     write_recipe,
 )
+from .layout import holds_only_the_build_publication
 
 WORK_DIR_NAME = "multiview"
 
@@ -701,10 +702,7 @@ def _is_usable_bundle(bundle_root: Path, wanted: dict) -> bool:
         manifest = json.loads((prefix_dir / "MANIFEST.json").read_text())
         if manifest.get("identity") is None:
             return False
-        for partition in (prefix_dir / "partitions").iterdir():
-            if len(list(partition.glob("SEGMENTS-*.json"))) > 1:
-                return False
-        return True
+        return holds_only_the_build_publication(prefix_dir)
     except (OSError, KeyError, ValueError):
         return False
 

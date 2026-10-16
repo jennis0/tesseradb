@@ -209,7 +209,7 @@ fn ingest_into(engine: &Engine, batch: &str, item: Option<EntityId>, view: &str)
     }
     let row = UnallocatedRow {
         view: view.to_string(),
-        join: item,
+        join: item.map(|entity| mosaica_types::ItemAt::new(mosaica_types::ShardId::ZERO, entity)),
         descriptors: descriptors.clone(),
         x: 5.0,
         y: 5.0,
@@ -317,7 +317,10 @@ fn a_deleted_edits_rows_are_not_rebuilt_at_a_restart() {
         hash[0] = b'e';
         let row = UnallocatedRow {
             view: "s0".to_string(),
-            join: Some(first),
+            join: Some(mosaica_types::ItemAt::new(
+                mosaica_types::ShardId::ZERO,
+                first,
+            )),
             descriptors: vec![b"0".to_vec()],
             x: 7.0,
             y: 7.0,

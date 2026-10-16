@@ -961,22 +961,21 @@ async fn a_stepped_down_partition_is_not_ready() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = build_fixture(tmp.path(), N_ITEMS);
 
-    // Copy SEGMENTS-0 to a newer SEGMENTS-1 naming a file that does not exist, so the walk steps
-    // down to SEGMENTS-0 and serves.
-    let partition_dir =
-        mosaica_store::layout::partition_dir(&bundle_root.join("v00000"), "default");
-    let mut value: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(partition_dir.join("SEGMENTS-0.json")).unwrap())
-            .unwrap();
-    value["segments_version"] = serde_json::json!(1);
+    // Publish the build's publication again at 1 naming a file that does not exist, so the walk
+    // steps down to 0 and serves.
+    let prefix_dir = bundle_root.join("v00000");
+    let mut manifest = mosaica_store::read_publication(&prefix_dir, "default", 0)
+        .unwrap()
+        .manifest;
     let unsynced = SHARD.segment_rel("s0", "seg-unsynced");
-    value["files"][format!("{unsynced}/columns.arrow")] =
-        serde_json::json!({ "size": 4, "sha256": "00".repeat(32) });
-    std::fs::write(
-        partition_dir.join("SEGMENTS-1.json"),
-        serde_json::to_vec_pretty(&value).unwrap(),
-    )
-    .unwrap();
+    manifest.partition.files.insert(
+        format!("{unsynced}/columns.arrow"),
+        mosaica_store::manifest::FileDigest {
+            size: 4,
+            sha256: "00".repeat(32),
+        },
+    );
+    mosaica_store::write_publication(&prefix_dir, "default", 1, &manifest, None).unwrap();
 
     let engine = Engine::open(
         &bundle_root,

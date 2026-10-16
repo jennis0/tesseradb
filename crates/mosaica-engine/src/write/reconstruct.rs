@@ -8,9 +8,10 @@ use super::*;
 /// A struct rather than four arguments: the fields travel together and are all read from the same
 /// manifests, and a fifth stays a compile error here rather than a defaulted argument.
 pub(crate) struct ManifestSeed<'a> {
-    /// Every point shard's allocator seed, ascending by shard; the first is the write shard
-    /// ([`LiveState::shards`]).
+    /// Every point shard's allocator seed, ascending by shard.
     pub shards: Vec<ShardSeed>,
+    /// The served side-manifest's `shards.next_id`.
+    pub next_id: u32,
     /// The served side-manifest's `shards.size`.
     pub size: u64,
     pub layers: &'a [mosaica_types::layer::RegisteredLayer],
@@ -58,6 +59,8 @@ pub(crate) struct ManifestSeed<'a> {
 /// One point shard's allocator, as its record leaves it.
 pub(crate) struct ShardSeed {
     pub id: ShardId,
+    /// The shard record's `state`.
+    pub state: mosaica_types::ShardState,
     /// The shard record's `high_water`.
     pub high_water: u64,
     /// The newest served side-manifest's freed ids of this shard, and the sets it holds back with
@@ -66,28 +69,61 @@ pub(crate) struct ShardSeed {
     pub held: Vec<(u64, mosaica_lifecycle::ByTenancy)>,
 }
 
+impl ShardSeed {
+    /// A shard the log opened: open, at high water 0, holding no freed id.
+    fn opened(id: ShardId) -> ShardSeed {
+        ShardSeed {
+            id,
+            state: mosaica_types::ShardState::Open,
+            high_water: 0,
+            free: Default::default(),
+            held: Vec::new(),
+        }
+    }
+}
+
+/// What a reconstruction leaves for the first generation: the overlays, each point shard's
+/// buffer, and the write-side state.
+pub(crate) type Reconstructed = (Overlays, BTreeMap<ShardId, IngestBuffer>, WritePathState);
+
+/// Refuses a log naming point shard `shard`, which nothing holds: `verb` is what the log does to
+/// it, and `held_by` says what does not hold it.
+pub(crate) fn unknown_shard(shard: ShardId, verb: &str, held_by: &str) -> EngineError {
+    EngineError::Malformed(format!(
+        "the WAL {verb} point shard {shard}, which {held_by}. Restore the side-manifest and log \
+         this bundle was written with"
+    ))
+}
+
 impl WritePath {
-    /// Rebuilds the write-side state from durable storage: opens and replays the WAL, seeds the
-    /// allocator, and rebuilds the descriptor resolver's extension, the
-    /// registries and the idempotency index. Returns the first generation's overlay and buffer.
+    /// Rebuilds the write-side state from durable storage: opens and replays the WAL, seeds each
+    /// shard's allocator, and rebuilds the descriptor resolver's extension, the registries and the
+    /// idempotency index.
     ///
     /// `initial_deny` is the side-manifest's deny state; it seeds the overlay before replay, and
-    /// the WAL is applied on top since dispositions are idempotent.
+    /// the WAL is applied on top since dispositions are idempotent. A log beside several shards is
+    /// refused unless `several_shards` takes their writes.
     pub(crate) fn reconstruct(
         wal_path: &Path,
+        several_shards: super::SeveralShards,
         seed: ManifestSeed<'_>,
         dict: &Dict,
         initial_deny: &Overlays,
         vocabularies: &mut Vocabularies,
-        has_row: impl Fn(EntityId, &str) -> bool,
-    ) -> Result<(Overlays, IngestBuffer, WritePathState), EngineError> {
+        has_row: impl Fn(ShardId, EntityId, &str) -> bool,
+    ) -> Result<Reconstructed, EngineError> {
         let wal = Wal::open(wal_path).map_err(EngineError::Wal)?;
-        if seed.shards.len() > 1 && wal.records().next().is_some() {
+        if seed.shards.len() > 1
+            && several_shards == super::SeveralShards::Refused
+            && wal.records().next().is_some()
+        {
             return Err(EngineError::SeveralShardsLogged {
                 shards: seed.shards.len(),
             });
         }
         let shard_ids: Vec<ShardId> = seed.shards.iter().map(|shard| shard.id).collect();
+        let mut seeds = seed.shards;
+        let mut next_shard_id = seed.next_id;
 
         // Two walks over the log, each holding one record at a time. The first rebuilds what the
         // second is read against: the declarations, the registry an extent's ordinals resolve
@@ -293,9 +329,27 @@ impl WritePath {
                 }
                 WalRecord::ViewDrop { .. } => last_view_drop = Some(position),
                 WalRecord::ShardsDeclare { size: declared } => size = *declared,
+                // A shard the manifests already hold was published after its opening.
+                WalRecord::ShardOpen { shard } => {
+                    if !seeds.iter().any(|seed| seed.id == *shard) {
+                        seeds.push(ShardSeed::opened(*shard));
+                    }
+                    next_shard_id = next_shard_id.max(shard.raw() + 1);
+                }
+                WalRecord::ShardSeal { shard } => {
+                    let Some(sealed) = seeds.iter_mut().find(|seed| seed.id == *shard) else {
+                        return Err(unknown_shard(
+                            *shard,
+                            "seals",
+                            "neither the manifests nor the log open",
+                        ));
+                    };
+                    sealed.state = mosaica_types::ShardState::Sealed;
+                }
                 _ => {}
             }
         }
+        seeds.sort_by_key(|seed| seed.id);
         // Same ordering rule again: replay unions onto the manifests' membership extents. An
         // extent is addressed by absolute ordinal from the layer's reserved runs, so this must run
         // after the whole registry is replayed.
@@ -315,12 +369,13 @@ impl WritePath {
         // Same ordering rule again: the overlay is seeded and the log replayed on top, because
         // seeding after replay would revert an acked unsuppress the newest manifest predates.
         let mut replay = Replay::new(dict, initial_deny.clone(), seed.view_ids_of_key);
-        let mut wal_high_water = 0u64;
-        // Every point entity a kept record names.
-        let mut named = croaring::Bitmap::new();
+        // Each shard's high water as the kept records leave it.
+        let mut wal_high_water: BTreeMap<ShardId, u64> = BTreeMap::new();
+        // Every point entity a kept record names, by shard.
+        let mut named: BTreeMap<ShardId, croaring::Bitmap> = BTreeMap::new();
         // Each edit's `(number, new entity)` whose first row no flush has written, and so whose
-        // pair no run holds; kept where the entity ends buffered or deleted.
-        let mut edits: Vec<(EntityId, EntityId)> = Vec::new();
+        // pair no run holds, by shard; kept where the entity ends buffered or deleted.
+        let mut edits: Vec<(ShardId, (EntityId, EntityId))> = Vec::new();
         // Every batch-carrying record, by the rule both accept sites use
         // ([`mosaica_lifecycle::batch_identity`]).
         let mut accepted_batches: AcceptedBatches = FxHashMap::default();
@@ -353,17 +408,20 @@ impl WritePath {
             // would have the next flush write it twice. The test is per (entity, view), not a
             // watermark, since an entity may hold rows in several views.
             let past_drops = last_view_drop.is_none_or(|drop| position > drop);
-            replay.apply(&record, position, |entity, view| {
-                past_drops && has_row(entity, view)
+            replay.apply(&record, position, |shard, entity, view| {
+                past_drops && has_row(shard, entity, view)
             });
-            wal_high_water = wal_high_water.max(high_water_from([&record]));
-            named.or_inplace(&mosaica_lifecycle::alloc::entities_named([&record]));
+            mosaica_lifecycle::alloc::raise_high_water(&record, &mut wal_high_water);
+            mosaica_lifecycle::alloc::name_entities(&record, &mut named);
             if let WalRecord::IngestBatch { edits: batch, .. } = &record {
-                edits.extend(batch.iter().filter_map(|edit| {
-                    let first = edit.rows.first()?;
-                    (!has_row(first.entity_id, &first.view))
-                        .then_some((edit.number, first.entity_id))
-                }));
+                for edit in batch {
+                    let Some(first) = edit.rows.first() else {
+                        continue;
+                    };
+                    if !has_row(edit.shard, first.entity_id, &first.view) {
+                        edits.push((edit.shard, (edit.number, first.entity_id)));
+                    }
+                }
             }
             if let Some(identity) = mosaica_lifecycle::batch_identity(&record) {
                 accepted_batches.insert(
@@ -392,32 +450,50 @@ impl WritePath {
             );
         }
 
-        let (mut overlay, mut buffer, resolver) = replay.finish();
+        let (mut overlay, mut buffers, resolver) = replay.finish();
         // A dropped layer's denies leave with it, though the log and the manifest still hold them.
         overlay.spaces.retain(|space, _| registry.in_space(*space).is_some());
 
+        // A shard a record names is one the manifests or the log's openings hold.
+        let named_shards = wal_high_water
+            .keys()
+            .chain(named.keys())
+            .chain(buffers.keys())
+            .chain(overlay.items.keys());
+        for shard in named_shards {
+            if !seeds.iter().any(|seed| seed.id == *shard) {
+                return Err(unknown_shard(
+                    *shard,
+                    "names",
+                    "neither the manifests nor the log open",
+                ));
+            }
+        }
+
         // Rows buffered up to the last view drop that a flush has already given geometry.
-        let already_flushed: Vec<(EntityId, String)> = buffer
-            .rows()
-            .map(|(entity, item)| (*entity, item.view.clone()))
-            .filter(|(entity, view)| has_row(*entity, view))
-            .collect();
-        for (entity, view) in already_flushed {
-            buffer.remove_in_view(entity, &view);
+        for (shard, buffer) in &mut buffers {
+            let already_flushed: Vec<(EntityId, String)> = buffer
+                .rows()
+                .map(|(entity, item)| (*entity, item.view.clone()))
+                .filter(|(entity, view)| has_row(*shard, *entity, view))
+                .collect();
+            for (entity, view) in already_flushed {
+                buffer.remove_in_view(entity, &view);
+            }
         }
 
         // An id the manifest records as free and a kept record or the overlay names was issued
         // since the manifest was written.
-        named.or_inplace(overlay.items.deleted_set());
-        named.or_inplace(overlay.items.suppressed_set());
+        for (shard, items) in &overlay.items {
+            let named = named.entry(*shard).or_default();
+            named.or_inplace(items.deleted_set());
+            named.or_inplace(items.suppressed_set());
+        }
         let unnamed = croaring::Bitmap::new();
-        let mut shards = Vec::with_capacity(seed.shards.len());
-        for (at, shard) in seed.shards.into_iter().enumerate() {
-            // The log and `named` are the write shard's alone.
-            let (wal_high_water, named) = match at {
-                0 => (wal_high_water, &named),
-                _ => (0, &unnamed),
-            };
+        let mut shards = Vec::with_capacity(seeds.len());
+        for shard in seeds {
+            let wal_high_water = wal_high_water.get(&shard.id).copied().unwrap_or(0);
+            let named = named.get(&shard.id).unwrap_or(&unnamed);
             // `try_new`: the seed comes from durable state this run did not write, so a corrupt
             // or hand-edited mark is refused here, not as a later opaque refusal.
             let mut allocator = Allocator::try_new(shard.high_water.max(wal_high_water))
@@ -439,19 +515,43 @@ impl WritePath {
             })?;
             allocator.set_size(size);
             allocator.seed_freed(shard.free, shard.held, wal.retained_from(), named);
-            shards.push(ShardWrite::new(shard.id, allocator));
+            shards.push(ShardWrite::new(shard.id, shard.state, allocator));
+        }
+        if !shards
+            .iter()
+            .any(|shard| shard.state == mosaica_types::ShardState::Open)
+        {
+            return Err(EngineError::Malformed(
+                "every point shard the manifests and the WAL leave is sealed, so no shard takes \
+                 new items. Restore the side-manifest and log this bundle was written with"
+                    .to_string(),
+            ));
         }
 
-        let edited_live = crate::edited::EditedLive::derive(&edits, &buffer, &overlay.items);
+        let no_buffer = IngestBuffer::new();
+        let no_deny = mosaica_lifecycle::Overlay::new();
+        let edited_live = mosaica_types::by_shard(edits)
+            .into_iter()
+            .map(|(shard, edits)| {
+                let buffer = buffers.get(&shard).unwrap_or(&no_buffer);
+                let overlay = overlay.items.get(&shard).unwrap_or(&no_deny);
+                (
+                    shard,
+                    crate::edited::EditedLive::derive(&edits, buffer, overlay),
+                )
+            })
+            .collect();
 
         let resolver_state = resolver.into_state();
 
         Ok((
             overlay,
-            buffer,
+            buffers,
             WritePathState {
                 wal,
+                several_shards,
                 shards,
+                next_shard_id,
                 resolver_state,
                 accepted_batches,
                 registry,
@@ -919,5 +1019,175 @@ mod tests {
             matches!(two_shards(dir.path(), false), Err(EngineError::Malformed(_))),
             "a record pack with no member pack in one shard"
         );
+    }
+
+    /// The write state a log of `records` rebuilds over a manifest naming `seeds`, at
+    /// `shards.next_id` `next_id` and size 100, with several shards taking writes.
+    fn replayed(
+        seeds: Vec<ShardSeed>,
+        next_id: u32,
+        records: &[WalRecord],
+    ) -> Result<WritePathState, EngineError> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal_path = dir.path().join("wal.log");
+        let mut wal = Wal::open(&wal_path).expect("a log opens");
+        for record in records {
+            wal.append(record).expect("an append");
+        }
+        wal.fsync().expect("an fsync");
+        drop(wal);
+        let dict = Dict::load(
+            &mosaica_authz::DictWriter::new(dir.path())
+                .finish()
+                .expect("a dictionary"),
+        )
+        .expect("a dictionary loads");
+        let manifest = mosaica_store::manifest::Manifest {
+            bundle_format: 3,
+            created_at: String::new(),
+            vocabularies: vec![],
+            small_term_threshold: 32,
+            identity: mosaica_store::manifest::IdentityDescriptor {
+                construction: "siphash-2-4".to_string(),
+                rounds: 1,
+                key: "ab".repeat(16),
+            },
+            groups: Vec::new(),
+            views: vec![],
+            partitions: vec![],
+            provenance: serde_json::json!({}),
+            files: std::collections::BTreeMap::new(),
+            declared_scalars: vec![],
+        };
+        let seed = ManifestSeed {
+            shards: seeds,
+            next_id,
+            size: 100,
+            layers: &[],
+            next_layer_space: 0,
+            registry_version: 0,
+            created_views: &[],
+            dead_view_incarnations: &[],
+            declared_views: Vec::new(),
+            view_ids_of_key: &mosaica_lifecycle::owner_id_only,
+            membership_extents: &[],
+            layer_spaces: &[],
+            prefix_dir: dir.path().to_path_buf(),
+            manifest: &manifest,
+            attributes: crate::attributes::RuntimeAttributes::seed(Vec::new(), Vec::new()),
+            vocabularies: crate::vocabularies::RuntimeVocabularies::seed(Vec::new()),
+            view_declarations: crate::view_declarations::RuntimeViewDeclarations::seed(
+                Vec::new(),
+                Vec::new(),
+            ),
+        };
+        WritePath::reconstruct(
+            &wal_path,
+            super::super::SeveralShards::Written,
+            seed,
+            &dict,
+            &Overlays::default(),
+            &mut Vocabularies::default(),
+            |_, _, _| false,
+        )
+        .map(|(_, _, state)| state)
+    }
+
+    /// A shard as its record leaves it, at `high_water`.
+    fn held(shard: u32, state: mosaica_types::ShardState, high_water: u64) -> ShardSeed {
+        ShardSeed {
+            high_water,
+            state,
+            ..ShardSeed::opened(ShardId::new(shard).expect("in range"))
+        }
+    }
+
+    /// `(id, state, high water)` of each shard the write path holds, and `next_id`.
+    fn shards_of(state: &WritePathState) -> (Vec<(u32, mosaica_types::ShardState, u64)>, u32) {
+        let shards = state
+            .shards
+            .iter()
+            .map(|shard| (shard.id.raw(), shard.state, shard.high_water()))
+            .collect();
+        (shards, state.next_shard_id)
+    }
+
+    fn row(shard: u32, entity: u64) -> mosaica_lifecycle::wal::WalRow {
+        mosaica_lifecycle::wal::WalRow {
+            shard: ShardId::new(shard).expect("in range"),
+            entity_id: EntityId::new(entity),
+            view: "s0".into(),
+            join: false,
+            descriptors: Vec::new(),
+            x: 0.5,
+            y: 0.5,
+            scalars: Vec::new(),
+            scoped: Vec::new(),
+        }
+    }
+
+    /// A shard the log opens is seeded open at high water 0 and moves `next_id` past it, and the
+    /// rows the log gives it raise its high water alone; a seal seals the shard it names.
+    #[test]
+    fn the_logs_openings_and_seals_seed_each_shard() {
+        use mosaica_types::ShardState::{Open, Sealed};
+        let (one, two) = (ShardId::new(1).unwrap(), ShardId::new(2).unwrap());
+        let records = [
+            WalRecord::ShardSeal { shard: one },
+            WalRecord::ShardOpen { shard: two },
+            WalRecord::IngestBatch {
+                batch_id: "b".into(),
+                body_hash: [0; 32],
+                rows: vec![row(2, 0), row(2, 1), row(0, 7)],
+                edits: Vec::new(),
+                receipt: Vec::new(),
+            },
+        ];
+        let state = replayed(vec![held(0, Sealed, 25), held(1, Open, 15)], 2, &records)
+            .expect("the log replays");
+        assert_eq!(
+            shards_of(&state),
+            (vec![(0, Sealed, 25), (1, Sealed, 15), (2, Open, 2)], 3)
+        );
+
+        // An opening the manifests already publish changes nothing.
+        let state = replayed(
+            vec![held(0, Sealed, 25), held(1, Open, 15)],
+            2,
+            &[WalRecord::ShardOpen { shard: one }],
+        )
+        .expect("the log replays");
+        assert_eq!(shards_of(&state), (vec![(0, Sealed, 25), (1, Open, 15)], 2));
+    }
+
+    /// A log naming a shard nothing opens, sealing one nothing opens, or sealing the one open
+    /// shard is refused at open.
+    #[test]
+    fn a_log_naming_a_shard_nothing_opens_or_sealing_every_shard_is_refused() {
+        use mosaica_types::ShardState::{Open, Sealed};
+        let seeds = || vec![held(0, Sealed, 25), held(1, Open, 15)];
+        let batch = WalRecord::IngestBatch {
+            batch_id: "b".into(),
+            body_hash: [0; 32],
+            rows: vec![row(3, 0)],
+            edits: Vec::new(),
+            receipt: Vec::new(),
+        };
+        let three = ShardId::new(3).unwrap();
+        for records in [
+            vec![batch],
+            vec![WalRecord::ShardSeal { shard: three }],
+            vec![WalRecord::ShardSeal {
+                shard: ShardId::new(1).unwrap(),
+            }],
+        ] {
+            assert!(
+                matches!(
+                    replayed(seeds(), 2, &records),
+                    Err(EngineError::Malformed(_))
+                ),
+                "{records:?}"
+            );
+        }
     }
 }

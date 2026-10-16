@@ -27,7 +27,7 @@ from pyroaring import BitMap
 from . import identity as identity_mod
 from . import morton as morton_mod
 from .identity import item_key, item_keys, item_of_key, pack_item_high
-from .layout import live_prefix_dir, partition_dir, shard_dir, view_dir
+from .layout import read_publication, shard_dir, view_dir
 
 PERMUTATION_MAGIC = b"MSPM"
 # The two-level paged form (contracts 2.6). Version 1 was the flat array it replaced, and this
@@ -376,7 +376,7 @@ class Permutation:
 
 
 class Bundle:
-    """A verified, opened bundle: `CURRENT` -> `MANIFEST.json` -> `SEGMENTS-0.json` -> segments.
+    """A verified, opened bundle: `CURRENT` -> `MANIFEST.json` -> publication 0 -> segments.
 
     One partition (`default`) and every shard its side-manifest records. Every item this class
     answers is an [`item_key`].
@@ -423,9 +423,8 @@ class Bundle:
         else:
             self.identity_key = None
 
-        segments_path = partition_dir(self.prefix_dir) / "SEGMENTS-0.json"
-        self.side_manifest = json.loads(segments_path.read_bytes())
-        #: Every shard's record in `SEGMENTS-0.json`, ascending by shard.
+        self.side_manifest = read_publication(self.prefix_dir, 0)
+        #: Every shard's record in publication 0, ascending by shard.
         self.shards = shard_records(self.side_manifest)
         self._verify_files(self.side_manifest.get("files", {}))
 
@@ -748,16 +747,12 @@ class Bundle:
 
 
 KEY_RUN_MAGIC = b"MSKEYRUN"
-KEY_RUN_VERSION = 3
+KEY_RUN_VERSION = 4
 KEY_RUN_PAGE = 4096
-
-
-def newest_side_manifest(root: Path | str, partition: str = "default") -> dict:
-    """The highest-numbered `SEGMENTS-<n>.json` of the prefix `CURRENT` names: what a running
-    server last published, where [`Bundle`] reads the build's `SEGMENTS-0.json`."""
-    side_manifests = partition_dir(live_prefix_dir(Path(root)), partition).glob("SEGMENTS-*.json")
-    newest = max(side_manifests, key=lambda path: int(path.stem.removeprefix("SEGMENTS-")))
-    return json.loads(newest.read_bytes())
+KEY_RUN_HEADER = 84
+KEY_FILTER_BLOCK = 64
+_U64 = (1 << 64) - 1
+_GOLDEN = 0x9E3779B97F4A7C15
 
 
 def shard_records(side_manifest: dict) -> list[dict]:
@@ -798,6 +793,32 @@ def artifact_mosaica_id(key: identity_mod.IdentityKey, layer: dict, level: int, 
     )
 
 
+def _mix64(z: int) -> int:
+    """The SplitMix64 finaliser."""
+    z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & _U64
+    z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & _U64
+    return z ^ (z >> 31)
+
+
+def key_filter_passes(blocks: bytes, hashes: int, key: int) -> bool:
+    """Whether a key run's filter, `blocks` its 64-byte blocks, passes `key`.
+
+    The key's block is `(x * blocks) >> 64` for `x = mix(lo ^ mix(hi ^ C))`, `lo` and `hi` the
+    halves of the key zero-extended to 128 bits, `mix` the SplitMix64 finaliser and `C` the golden
+    ratio constant; the key's bits in it are the `hashes` 9-bit fields of `y = mix(x ^ C)`, lowest
+    first, each naming bit `b & 7` of the block's byte `b >> 3`.
+    """
+    count = len(blocks) // KEY_FILTER_BLOCK
+    x = _mix64((key & _U64) ^ _mix64((key >> 64) ^ _GOLDEN))
+    at = ((x * count) >> 64) * KEY_FILTER_BLOCK
+    y = _mix64(x ^ _GOLDEN)
+    for i in range(hashes):
+        bit = (y >> (9 * i)) & 511
+        if not blocks[at + (bit >> 3)] & (1 << (bit & 7)):
+            return False
+    return True
+
+
 def _page_checksum_holds(page: bytes) -> bool:
     return zlib.crc32(page[: KEY_RUN_PAGE - 4]) == struct.unpack_from("<I", page, KEY_RUN_PAGE - 4)[0]
 
@@ -806,11 +827,14 @@ def read_key_run(path: Path) -> list[tuple[int, int]]:
     """One key run file's `(key, entity)` entries, in file order, every checksum checked.
 
     The layout (`mosaica_store::key_index`): a 4096-byte header page — magic, format version,
-    key width, entry count, page count, smallest and largest key, then a CRC-32 of those 64
-    bytes — and one 4096-byte page per group of entries. A page holds its entry count (u16), the
-    bit width of its gaps (u8), its first key, the gap from each key to the next packed least
-    significant bit first, then each entry's entity (u32), and a CRC-32 of its first 4092 bytes
-    in its last four. Every integer is little-endian.
+    key width, entry count, page count, smallest and largest key, the key filter's offset, block
+    count and hash count, then a CRC-32 of those 84 bytes — one 4096-byte page per group of
+    entries, the first key of each page with a CRC-32 of them, and, where the filter's block
+    count is not zero, zeros up to its offset, its 64-byte blocks and a CRC-32 of them. A page
+    holds its entry count (u16), the bit width of its gaps (u8), its first key, the gap from each
+    key to the next packed least significant bit first, then each entry's entity (u32), and a
+    CRC-32 of its first 4092 bytes in its last four. Every integer is little-endian. Every entry's
+    key must pass the filter ([`key_filter_passes`]).
     """
     data = path.read_bytes()
     if data[:8] != KEY_RUN_MAGIC:
@@ -818,8 +842,24 @@ def read_key_run(path: Path) -> list[tuple[int, int]]:
     version, width, count, pages = struct.unpack_from("<IIQQ", data, 8)
     if version != KEY_RUN_VERSION:
         raise ValueError(f"{path}: key run format {version}, this reader reads {KEY_RUN_VERSION}")
-    if zlib.crc32(data[:64]) != struct.unpack_from("<I", data, 64)[0]:
+    if zlib.crc32(data[:KEY_RUN_HEADER]) != struct.unpack_from("<I", data, KEY_RUN_HEADER)[0]:
         raise ValueError(f"{path}: the header fails its checksum")
+    filter_at, filter_blocks, hashes = struct.unpack_from("<QQI", data, 64)
+    index_end = KEY_RUN_PAGE * (1 + pages) + pages * width + 4
+    if filter_blocks == 0:
+        if (filter_at, hashes) != (0, 0) or len(data) != index_end:
+            raise ValueError(f"{path}: a run without a key filter ends at its page index")
+        blocks = None
+    else:
+        aligned = -(-index_end // KEY_FILTER_BLOCK) * KEY_FILTER_BLOCK
+        filter_end = filter_at + filter_blocks * KEY_FILTER_BLOCK
+        if filter_at != aligned or not 1 <= hashes <= 7 or len(data) != filter_end + 4:
+            raise ValueError(f"{path}: the key filter's offset, hashes or length are wrong")
+        if any(data[index_end:filter_at]):
+            raise ValueError(f"{path}: the bytes before the key filter are not zero")
+        blocks = data[filter_at:filter_end]
+        if zlib.crc32(blocks) != struct.unpack_from("<I", data, filter_end)[0]:
+            raise ValueError(f"{path}: the key filter fails its checksum")
     entries: list[tuple[int, int]] = []
     for p in range(pages):
         page = data[KEY_RUN_PAGE * (1 + p) : KEY_RUN_PAGE * (2 + p)]
@@ -838,6 +878,8 @@ def read_key_run(path: Path) -> list[tuple[int, int]]:
         raise ValueError(f"{path}: the header counts {count} entries and the pages hold {len(entries)}")
     if any(a >= b for a, b in zip(entries, entries[1:])):
         raise ValueError(f"{path}: entries are not in strictly ascending (key, entity) order")
+    if blocks is not None and not all(key_filter_passes(blocks, hashes, k) for k, _ in entries):
+        raise ValueError(f"{path}: the key filter does not pass every key the run holds")
     return entries
 
 

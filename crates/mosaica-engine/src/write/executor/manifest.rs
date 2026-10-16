@@ -84,13 +84,28 @@ pub(super) fn write_deny_state(
     for space in spaces.keys() {
         mosaica_store::manifest::layer_space_mut(&mut manifest.layer_spaces, *space);
     }
+    let shards: Vec<ShardId> = manifest.shards.records.iter().map(|r| r.id).collect();
     for record in &mut manifest.layer_spaces {
         let overlay = match spaces.get(&record.space) {
             Some(parts) => &*parts.overlay,
             None => &Overlay::new(),
         };
         record.deny = EntitySet::of(overlay.suppressed_set());
-        record.tombstones = EntitySet::of(overlay.deleted_set());
+        let deleted = overlay.deleted_set();
+        record.tombstones = EntitySet::of(deleted);
+        // Every deletion is owed by every shard: each shard's compaction removes it from its own
+        // slice.
+        record.owed = if deleted.is_empty() {
+            Vec::new()
+        } else {
+            shards
+                .iter()
+                .map(|&shard| mosaica_store::manifest::OwedDeletions {
+                    shard,
+                    artifacts: EntitySet::of(deleted),
+                })
+                .collect()
+        };
     }
 }
 
@@ -146,6 +161,14 @@ pub(in crate::write) struct SideManifests {
     /// `membership_extents`, which they travel with: a membership without its record or its
     /// content withholds the artifact.
     pub(super) spaces: std::collections::BTreeMap<LayerSpace, HeldSpace>,
+    /// The digest of every member pack, record pack and content extent file a publication into
+    /// the current prefix wrote, restated into every side-manifest's `files` as the extent lists
+    /// are; a fold replaces it wholesale.
+    pub(super) artifact_files:
+        std::collections::BTreeMap<String, mosaica_store::manifest::FileDigest>,
+    /// The shard and space files each partition's newest side-manifest names, which the next
+    /// publication keeps where its own would be the same bytes.
+    pub(super) refs: std::collections::BTreeMap<String, mosaica_store::manifest::PublishedRefs>,
 }
 
 /// One layer space's files as [`SideManifests`] holds them.
@@ -163,6 +186,16 @@ impl HeldSpace {
             content_extents: record.content_extents.clone(),
         }
     }
+
+    /// The files the space's record packs and content extents name.
+    pub(in crate::write) fn files(&self) -> impl Iterator<Item = &str> {
+        let records = self.record_packs.iter().map(|extent| extent.path.as_str());
+        records.chain(
+            self.content_extents
+                .iter()
+                .flat_map(|extent| extent.files()),
+        )
+    }
 }
 
 impl SideManifests {
@@ -172,6 +205,8 @@ impl SideManifests {
         membership_extents: Vec<mosaica_store::manifest::MembershipExtent>,
         derived_extents: Vec<mosaica_store::manifest::DerivedExtent>,
         spaces: std::collections::BTreeMap<LayerSpace, HeldSpace>,
+        artifact_files: std::collections::BTreeMap<String, mosaica_store::manifest::FileDigest>,
+        refs: std::collections::BTreeMap<String, mosaica_store::manifest::PublishedRefs>,
         growth_unpublished: bool,
     ) -> Self {
         SideManifests {
@@ -182,7 +217,34 @@ impl SideManifests {
             membership_extents,
             derived_extents,
             spaces,
+            artifact_files,
+            refs,
         }
+    }
+
+    /// Keep in [`Self::artifact_files`] only what the held lists still name.
+    pub(super) fn retain_named_artifact_files(&mut self) {
+        let named: std::collections::BTreeSet<&str> = self
+            .membership_extents
+            .iter()
+            .map(|extent| extent.path.as_str())
+            .chain(self.spaces.values().flat_map(HeldSpace::files))
+            .collect();
+        self.artifact_files
+            .retain(|rel, _| named.contains(rel.as_str()));
+    }
+
+    /// Digest each of `rels` under `prefix_dir` onto [`Self::artifact_files`].
+    pub(super) fn digest_artifact_files<'a>(
+        &mut self,
+        prefix_dir: &std::path::Path,
+        rels: impl IntoIterator<Item = &'a str>,
+    ) -> mosaica_store::Result<()> {
+        for rel in rels {
+            let digest = mosaica_store::digest_of(&prefix_dir.join(rel))?;
+            self.artifact_files.insert(rel.to_string(), digest);
+        }
+        Ok(())
     }
 
     /// Take the next side-manifest number, having raised the floor over disc.
@@ -195,15 +257,15 @@ impl SideManifests {
         Ok(self.take_manifest_n())
     }
 
-    /// Raise the counter over every `SEGMENTS-<n>.json` on disc, and alarm if it moved: a floor
-    /// above the counter is evidence of a second writer, since in single-writer operation the two
-    /// are equal at every allocation.
+    /// Raise the counter over every `SEGMENTS-<n>.json` on disc, a partition's, a shard's or a
+    /// space's, and alarm if it moved: a floor above the counter is evidence of a second writer,
+    /// since in single-writer operation the two are equal at every allocation.
     pub(super) fn raise_manifest_floor(
         &mut self,
         bundle_root: &std::path::Path,
         health: &ExecutorHealth,
     ) -> mosaica_store::Result<()> {
-        let on_disk = mosaica_store::highest_side_manifest_n(bundle_root)?;
+        let on_disk = mosaica_store::highest_published_n(bundle_root)?;
         let floor = on_disk.map_or(0, |highest| highest + 1);
         if floor > self.next_n {
             health.foreign_side_manifests.fetch_add(1, Ordering::Relaxed);
@@ -231,17 +293,19 @@ impl SideManifests {
 impl Executor {
     /// Restates the live registry, roster, shard size and declarations, checks the manifest does
     /// not regress durable state, stamps its level versions, restates the extent lists unless a
-    /// fold brings its own, and writes it; a refusal writes nothing. Also prunes the partition's
-    /// superseded side-manifests, unless it is stepped down.
+    /// fold brings its own, and writes it: the shard and space files that changed, then the
+    /// partition file that commits them. A refusal writes nothing. Also prunes the partition's
+    /// superseded side-manifests, unless it is stepped down. Returns the files the partition file
+    /// names.
     pub(super) fn commit_side_manifest(
-        &self,
+        &mut self,
         partition_data: &mosaica_store::read::PartitionData,
         prefix_dir: &std::path::Path,
         partition: &str,
         n: u64,
         next: &mut mosaica_store::manifest::SegmentsManifest,
         fold: Option<FoldDerived<'_>>,
-    ) -> Result<(), ManifestCommitRefused> {
+    ) -> Result<mosaica_store::manifest::PublishedRefs, ManifestCommitRefused> {
         self.write_live_state(next, fold.is_some());
         if let Some(fold) = &fold {
             next.only_shard_mut().held_entities.push(fold.freed.clone());
@@ -262,10 +326,17 @@ impl Executor {
         let (mut level_versions, derived_extents) = self.live.with_artifacts(|store| {
             artifact_coordinates(store, derived, pending, &spaces, &enumerated)
         });
-        // The clone may predate these extents, so they are restated from the held lists.
+        // The clone may predate these extents, so they are restated from the held lists, and
+        // their files' digests with them.
         if fold.is_none() {
             next.only_shard_mut().membership_extents =
                 self.side_manifests.membership_extents.clone();
+            next.partition
+                .files
+                .retain(|rel, _| !mosaica_store::layout::is_artifact_file(partition, rel));
+            next.partition
+                .files
+                .extend(self.side_manifests.artifact_files.clone());
         }
         // One record per registered layer, at its space; a dropped layer's leaves the manifest.
         next.layer_spaces
@@ -287,11 +358,30 @@ impl Executor {
             record.content_extents = contents.cloned().unwrap_or_default();
             record.level_versions = level_versions.remove(&record.space).unwrap_or_default();
         }
+        next.slices_at_records_versions();
         next.file_derived(derived_extents);
         crate::geometry::check_manifest_publishable(partition_data, next)
             .map_err(ManifestCommitRefused::Regresses)?;
-        mosaica_store::write_segments_manifest(prefix_dir, partition, n, next)
+        // A fold's new prefix holds none of the live prefix's files.
+        let previous = match fold {
+            Some(_) => None,
+            None => self.side_manifests.refs.get(partition),
+        };
+        let staged = mosaica_store::stage_publication(prefix_dir, partition, n, next, previous)
             .map_err(ManifestCommitRefused::Store)?;
+        // The publication seam: the publication's files, its shard and space files among them,
+        // are on disc, and nothing durable names them until the partition file is written. A
+        // fold's seam is the flip of `CURRENT`.
+        if fold.is_none() {
+            self.pause_point(PauseSiteArg::BeforeManifestPublish);
+        }
+        let refs = staged.commit().map_err(ManifestCommitRefused::Store)?;
+        // A fold's are the live prefix's only once `CURRENT` names its prefix.
+        if fold.is_none() {
+            self.side_manifests
+                .refs
+                .insert(partition.to_string(), refs.clone());
+        }
         // Nothing is pruned on a stepped-down partition: the manifests between its older served
         // `n` and the newest are what a reopen walks back through.
         if !partition_data.stepped_down() {
@@ -310,7 +400,7 @@ impl Executor {
                 ),
             }
         }
-        Ok(())
+        Ok(refs)
     }
 
     /// Restate the live registry, roster, shard size and runtime declarations into a side-manifest
@@ -319,11 +409,21 @@ impl Executor {
     /// own list of those made since it planned, so `fold` leaves them alone.
     fn write_live_state(&self, manifest: &mut SegmentsManifest, fold: bool) {
         let registry = self.live.registry_for_publication();
-        let shard = self.live.only_shard();
-        let record = manifest.only_shard_mut();
-        record.high_water = record.high_water.max(shard.high_water());
-        (record.free_entities, record.held_entities) = shard.freed();
-        manifest.shards.size = shard.size();
+        for shard in &self.live.shards {
+            let Some(record) = manifest
+                .shards
+                .records
+                .iter_mut()
+                .find(|record| record.id == shard.id)
+            else {
+                continue;
+            };
+            record.high_water = record.high_water.max(shard.high_water());
+            (record.free_entities, record.held_entities) = shard.freed();
+            record.state = record.state.max(shard.state);
+        }
+        manifest.shards.next_id = manifest.shards.next_id.max(self.live.next_shard_id);
+        manifest.shards.size = self.live.shard_size();
         let partition = &mut manifest.partition;
         partition.layers = registry.layers;
         partition.next_layer_space = partition.next_layer_space.max(registry.next_layer_space);

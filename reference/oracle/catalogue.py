@@ -135,6 +135,7 @@ from .harness import (
     write_recipe,
 )
 from .identity import item_of_key, numbers_of
+from .layout import holds_only_the_build_publication
 
 WORK_DIR_NAME = "catalogue"
 
@@ -1411,12 +1412,7 @@ def _is_usable_bundle(bundle_root: Path, wanted: dict) -> bool:
         manifest = json.loads((prefix / "MANIFEST.json").read_text())
         if "identity" not in manifest:
             return False
-        published = [
-            p.name
-            for p in prefix.glob("partitions/*/SEGMENTS-*.json")
-            if p.name != "SEGMENTS-0.json"
-        ]
-        return not published
+        return holds_only_the_build_publication(prefix)
     except (OSError, KeyError, ValueError):
         return False
 

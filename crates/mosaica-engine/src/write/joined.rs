@@ -1,6 +1,6 @@
 //! The ingest join rule's readers of already-flushed values.
 
-use mosaica_types::{EntityId, TermId};
+use mosaica_types::{EntityId, ItemAt, TermId};
 
 use crate::{Generation, Shard};
 
@@ -54,12 +54,13 @@ impl BlobRow {
 /// will clone from rather than re-loading the pointer.
 pub(crate) fn flushed_scalar_of(
     generation: &Generation,
-    entity: EntityId,
+    item: ItemAt,
     declared_index: usize,
     blob: &mut BlobRow,
 ) -> Option<mosaica_lifecycle::WalScalar> {
     let manifest = &generation.bundle.manifest;
-    let shard = generation.only_shard();
+    let shard = generation.shard_of(item.shard);
+    let entity = item.entity;
     let declared = manifest.declared_scalars.get(declared_index)?;
     let vocabularies = &manifest.vocabularies;
     // Entity ids are capped at `u32::MAX`; a violated invariant is loud rather than a `None`
@@ -250,12 +251,12 @@ pub(crate) fn stored_as_wal(
     })
 }
 
-/// What this deployment holds for one entity and one entity-scoped column: the entity's own
-/// buffered row where it has one, which carries every value it holds, and the flushed homes
-/// otherwise. `None` is no value held.
+/// What this deployment holds for one item and one entity-scoped column: the item's own buffered
+/// row where it has one, which carries every value it holds, and the flushed homes otherwise.
+/// `None` is no value held.
 pub(crate) fn held_entity_value(
     generation: &Generation,
-    entity: EntityId,
+    item: ItemAt,
     at: usize,
     declared: &mosaica_store::manifest::DeclaredScalar,
     buffered: Option<&mosaica_lifecycle::BufferedItem>,
@@ -265,26 +266,27 @@ pub(crate) fn held_entity_value(
         (!scalar_is_absent(&value, declared)).then_some(value)
     };
     match buffered {
-        Some(item) => item.scalars.get(at).cloned().and_then(held),
-        None => flushed_scalar_of(generation, entity, at, blob).and_then(held),
+        Some(buffered) => buffered.scalars.get(at).cloned().and_then(held),
+        None => flushed_scalar_of(generation, item, at, blob).and_then(held),
     }
 }
 
-/// What this deployment already holds for one `(entity, attribute, key)` cell, on
+/// What this deployment already holds for one `(item, attribute, key)` cell, on
 /// [`held_entity_value`]'s rule for absence.
 ///
-/// The buffered source is every row of the entity whose view addresses this same key: the cell's
-/// own rows, not the entity's own row, which is a different question.
+/// The buffered source is every row of the item whose view addresses this same key: the cell's
+/// own rows, not the item's own row, which is a different question.
 pub(crate) fn held_scoped_value(
     generation: &Generation,
-    entity: EntityId,
+    item: ItemAt,
     at: usize,
     family: &mosaica_store::manifest::ScopedScalar,
     declared: &mosaica_store::manifest::DeclaredScalar,
     owner_view: &str,
 ) -> Result<Option<mosaica_lifecycle::WalScalar>, crate::write::AcceptError> {
     let manifest = &generation.bundle.manifest;
-    let shard = generation.only_shard();
+    let shard = generation.shard_of(item.shard);
+    let entity = item.entity;
     let held = |value: mosaica_lifecycle::WalScalar| {
         (!scalar_is_absent(&value, declared)).then_some(value)
     };

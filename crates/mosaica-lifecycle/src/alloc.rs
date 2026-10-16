@@ -37,7 +37,9 @@
 use std::collections::BTreeMap;
 
 use croaring::Bitmap;
-use mosaica_types::{check_room, EntityId, ShardFull, Tenancy, TermId, ENTITY_END};
+use mosaica_types::{
+    check_room, EntityId, ShardFull, ShardId, Target, Tenancy, TermId, ENTITY_END,
+};
 
 use crate::wal::WalRecord;
 
@@ -252,127 +254,121 @@ impl Allocator {
 
 }
 
-/// Computes the entity-ID high-water mark implied by a set of replayed WAL records: the maximum
-/// `WalRow.entity_id.raw() + 1` (with overlay-snapshot entries as a weak floor).
-///
-/// This is the "replayed rows" half of `Allocator::new`'s `max(manifest_hw, replayed rows)`
-/// seeding contract — callers should rebuild with
-/// `Allocator::new(manifest_hw.max(high_water_from(&replayed)))` rather than carrying a
-/// pre-crash `Allocator::high_water()` value across a restart, since the allocator itself does
-/// not persist: only what actually made it into the WAL (or the shard record in a side-manifest)
-/// did.
-pub fn high_water_from<'r>(records: impl IntoIterator<Item = &'r WalRecord>) -> u64 {
-    let mut hw = 0u64;
-    for rec in records {
-        match rec {
-            WalRecord::IngestBatch { rows, edits, .. } => {
-                for row in rows.iter().chain(edits.iter().flat_map(|edit| &edit.rows)) {
-                    let candidate = row.entity_id.raw() + 1;
-                    if candidate > hw {
-                        hw = candidate;
-                    }
-                }
+/// Raise each shard's mark in `hw` to the highest `entity_id + 1` a row of `record` names in that
+/// shard; an overlay snapshot's items are a weak floor.
+pub fn raise_high_water(record: &WalRecord, hw: &mut BTreeMap<ShardId, u64>) {
+    let mut raise = |shard: ShardId, entity: EntityId| {
+        let mark = hw.entry(shard).or_insert(0);
+        *mark = (*mark).max(entity.raw() + 1);
+    };
+    match record {
+        WalRecord::IngestBatch { rows, edits, .. } => {
+            for row in rows.iter().chain(edits.iter().flat_map(|edit| &edit.rows)) {
+                raise(row.shard, row.entity_id);
             }
-            // A mint names no entity. It is the one record whose subject is vocabulary space
-            // rather than entity space, and the two allocators share nothing (§3.4).
-            WalRecord::VocabularyMint { .. } => {}
-            // An overlay snapshot names entities that were certainly allocated, so it raises the
-            // floor — but only for entities something has *denied*, which is a weak bound and not
-            // the mechanism. Rotation deletes the `IngestBatch` records this function really
-            // derives from; what replaces them is the shard record's `high_water` in the
-            // side-manifest, refreshed at every publication.
-            WalRecord::OverlaySnapshot { entries } => {
-                for entity in entries.iter().filter_map(|entry| entry.target.item()) {
-                    let candidate = entity.raw() + 1;
-                    if candidate > hw {
-                        hw = candidate;
-                    }
-                }
-            }
-            WalRecord::ChangeBatch { .. } => {}
-            // A layer's and its artifacts' entities are in its layer space, not a point shard's.
-            // A view create and a drop allocate nothing at all: a view is a coordinate system
-            // and holds no entity, which is what keeps entity space the invariant plane
-            // (`views.md` §1).
-            WalRecord::LayerCreate { .. }
-            | WalRecord::LayerDrop { .. }
-            | WalRecord::ArtifactPublish { .. }
-            | WalRecord::ArtifactGrow { .. }
-            | WalRecord::ViewCreate { .. }
-            | WalRecord::ViewDrop { .. } => {}
-            // The declarations allocate nothing: a column, a vocabulary and a group hold no
-            // entity, and a fill names an artifact that already has its ordinal and its entity.
-            WalRecord::ArtifactFill { .. }
-            | WalRecord::AttributeDeclare { .. }
-            | WalRecord::UniqueDeclare { .. }
-            | WalRecord::VocabularyDeclare { .. }
-            | WalRecord::ViewGroupCreate { .. }
-            | WalRecord::PlainViewCreate { .. }
-            | WalRecord::ShardsDeclare { .. } => {}
         }
+        // A mint names no entity. It is the one record whose subject is vocabulary space
+        // rather than entity space, and the two allocators share nothing.
+        WalRecord::VocabularyMint { .. } => {}
+        // An overlay snapshot names entities that were certainly allocated, so it raises the
+        // floor — but only for entities something has *denied*, which is a weak bound and not
+        // the mechanism. Rotation deletes the `IngestBatch` records this function really
+        // derives from; what replaces them is the shard record's `high_water` in the
+        // side-manifest, refreshed at every publication.
+        WalRecord::OverlaySnapshot { entries } => {
+            for entry in entries {
+                if let Target::Item(shard, entity) = entry.target {
+                    raise(shard, entity);
+                }
+            }
+        }
+        WalRecord::ChangeBatch { .. } => {}
+        // A layer's and its artifacts' entities are in its layer space, not a point shard's.
+        // A view create and a drop allocate nothing at all: a view is a coordinate system
+        // and holds no entity, which is what keeps entity space the invariant plane.
+        WalRecord::LayerCreate { .. }
+        | WalRecord::LayerDrop { .. }
+        | WalRecord::ArtifactPublish { .. }
+        | WalRecord::ArtifactGrow { .. }
+        | WalRecord::ViewCreate { .. }
+        | WalRecord::ViewDrop { .. } => {}
+        // The declarations allocate nothing: a column, a vocabulary and a group hold no
+        // entity, and a fill names an artifact that already has its ordinal and its entity. A
+        // shard opens at high water 0, and a seal moves no mark.
+        WalRecord::ArtifactFill { .. }
+        | WalRecord::AttributeDeclare { .. }
+        | WalRecord::UniqueDeclare { .. }
+        | WalRecord::VocabularyDeclare { .. }
+        | WalRecord::ViewGroupCreate { .. }
+        | WalRecord::PlainViewCreate { .. }
+        | WalRecord::ShardsDeclare { .. }
+        | WalRecord::ShardOpen { .. }
+        | WalRecord::ShardSeal { .. } => {}
     }
-    hw
 }
 
-/// Every point entity `records` name: the rows an ingest allocated or joined, the entities its
-/// edits left, every entity a change or an overlay snapshot names, and every member an artifact
-/// publication or growth names. [`Allocator::seed_freed`] takes these out of the freed ids.
-pub fn entities_named<'r>(records: impl IntoIterator<Item = &'r WalRecord>) -> Bitmap {
-    let mut named = Bitmap::new();
-    let mut sets: Vec<&Vec<u8>> = Vec::new();
-    let mut add = |entity: EntityId| {
-        if let Ok(entity) = u32::try_from(entity.raw()) {
-            named.add(entity);
+/// Add each point entity `record` names to its shard's set in `named`: rows, edits' old entities,
+/// items a change, view drop or snapshot names, and artifact members and generating sets.
+/// [`Allocator::seed_freed`] takes each shard's out of that shard's freed ids.
+pub fn name_entities(record: &WalRecord, named: &mut BTreeMap<ShardId, Bitmap>) {
+    let mut sets: Vec<&[crate::wal::WalShardSet]> = Vec::new();
+    let mut add = |target: Target| {
+        if let Target::Item(shard, entity) = target {
+            if let Ok(entity) = u32::try_from(entity.raw()) {
+                named.entry(shard).or_default().add(entity);
+            }
         }
     };
-    for record in records {
-        match record {
-            WalRecord::IngestBatch { rows, edits, .. } => {
-                for row in rows.iter().chain(edits.iter().flat_map(|edit| &edit.rows)) {
-                    add(row.entity_id);
-                }
-                for edit in edits {
-                    add(edit.old);
-                }
+    match record {
+        WalRecord::IngestBatch { rows, edits, .. } => {
+            for row in rows.iter().chain(edits.iter().flat_map(|edit| &edit.rows)) {
+                add(Target::Item(row.shard, row.entity_id));
             }
-            WalRecord::ChangeBatch { changes } => {
-                for (target, _) in changes {
-                    if let Some(entity) = target.item() {
-                        add(entity);
-                    }
-                }
+            for edit in edits {
+                add(Target::Item(edit.shard, edit.old));
             }
-            WalRecord::ViewDrop { deleted, .. } => {
-                for entity in deleted {
-                    add(*entity);
-                }
-            }
-            WalRecord::OverlaySnapshot { entries } => {
-                for entity in entries.iter().filter_map(|entry| entry.target.item()) {
-                    add(entity);
-                }
-            }
-            WalRecord::ArtifactPublish { artifacts, .. } => {
-                for artifact in artifacts {
-                    sets.push(&artifact.members);
-                    sets.extend(artifact.contents.iter().map(|c| &c.generated_from));
-                }
-            }
-            WalRecord::ArtifactGrow { growth, .. } => {
-                for grown in growth {
-                    sets.extend([&grown.joining, &grown.leaving]);
-                }
-            }
-            _ => {}
         }
+        WalRecord::ChangeBatch { changes } => {
+            for (target, _) in changes {
+                add(*target);
+            }
+        }
+        WalRecord::ViewDrop { deleted, .. } => {
+            for target in deleted {
+                add(*target);
+            }
+        }
+        WalRecord::OverlaySnapshot { entries } => {
+            for entry in entries {
+                add(entry.target);
+            }
+        }
+        WalRecord::ArtifactPublish { artifacts, .. } => {
+            for artifact in artifacts {
+                sets.push(&artifact.members);
+                sets.extend(
+                    artifact
+                        .contents
+                        .iter()
+                        .map(|c| c.generated_from.as_slice()),
+                );
+            }
+        }
+        WalRecord::ArtifactGrow { growth, .. } => {
+            for grown in growth {
+                sets.extend([grown.joining.as_slice(), grown.leaving.as_slice()]);
+            }
+        }
+        _ => {}
     }
     // A set that does not decode names nothing the replay could apply.
-    for bytes in sets.into_iter().filter(|bytes| !bytes.is_empty()) {
-        if let Some(members) = crate::membership::deserialise_members(bytes) {
-            named.or_inplace(&members);
+    for logged in sets {
+        if let Some(members) = crate::membership::ShardSets::from_wal(logged) {
+            for (shard, set) in members.iter() {
+                named.entry(shard).or_default().or_inplace(set);
+            }
         }
     }
-    named
 }
 
 /// One item awaiting entity-ID assignment at serve time (append ingest).
@@ -638,13 +634,14 @@ mod tests {
         assert_eq!(key, vec![2, 9]);
     }
 
-    fn row(entity_id: u64) -> WalRecord {
+    fn row(shard: u32, entity_id: u64) -> WalRecord {
         WalRecord::IngestBatch {
             edits: Vec::new(),
             receipt: Vec::new(),
             batch_id: "b".into(),
             body_hash: [0u8; 32],
             rows: vec![crate::wal::WalRow {
+                shard: ShardId::new(shard).unwrap(),
                 entity_id: EntityId::new(entity_id),
                 view: "default".to_string(),
                 join: false,
@@ -657,13 +654,33 @@ mod tests {
         }
     }
 
+    fn marks(marks: &[(u32, u64)]) -> BTreeMap<ShardId, u64> {
+        marks
+            .iter()
+            .map(|&(shard, mark)| (ShardId::new(shard).unwrap(), mark))
+            .collect()
+    }
+
+    fn high_water_from(records: &[WalRecord]) -> BTreeMap<ShardId, u64> {
+        let mut hw = BTreeMap::new();
+        for record in records {
+            raise_high_water(record, &mut hw);
+        }
+        hw
+    }
+
     #[test]
     fn high_water_from_takes_the_max_over_rows() {
-        assert_eq!(high_water_from(&[]), 0);
+        assert_eq!(high_water_from(&[]), marks(&[]));
         // A row with entity_id 5 means IDs 0..=5 are taken, so the next free ID is 6.
-        assert_eq!(high_water_from(&[row(5)]), 6);
+        assert_eq!(high_water_from(&[row(0, 5)]), marks(&[(0, 6)]));
         // A later, lower row must not pull the high-water mark backwards.
-        assert_eq!(high_water_from(&[row(5), row(3)]), 6);
+        assert_eq!(high_water_from(&[row(0, 5), row(0, 3)]), marks(&[(0, 6)]));
+        // Each shard's mark is its own rows'.
+        assert_eq!(
+            high_water_from(&[row(0, 5), row(1, 3)]),
+            marks(&[(0, 6), (1, 4)])
+        );
         // Change records carry no entity-ID information beyond an entity already allocated.
         assert_eq!(
             high_water_from(&[WalRecord::ChangeBatch {
@@ -672,7 +689,30 @@ mod tests {
                     crate::wal::ChangeOp::Delete,
                 )],
             }]),
-            0
+            marks(&[])
+        );
+    }
+
+    #[test]
+    fn each_entity_is_named_in_its_own_shard() {
+        let one = ShardId::new(1).unwrap();
+        let mut named = BTreeMap::new();
+        for record in &[
+            row(1, 5),
+            WalRecord::ViewDrop {
+                view: mosaica_types::view::DeadIncarnation {
+                    group: "g".into(),
+                    key: "k".into(),
+                    incarnation: 0,
+                },
+                deleted: vec![Target::Item(ShardId::ZERO, EntityId::new(7))],
+            },
+        ] {
+            name_entities(record, &mut named);
+        }
+        assert_eq!(
+            named,
+            BTreeMap::from([(ShardId::ZERO, Bitmap::of(&[7])), (one, Bitmap::of(&[5]))])
         );
     }
 }

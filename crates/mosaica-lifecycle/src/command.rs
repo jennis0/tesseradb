@@ -20,7 +20,7 @@
 //! executor, and this type is what a handler submits: everything a `WalRow` needs *except* the ID,
 //! plus the resolved term set that is the item's sort signature.
 
-use mosaica_types::{EntityId, ShardFull, ShardSizeError, TermId};
+use mosaica_types::{EntityId, ItemAt, ShardFull, ShardId, ShardSizeError, TermId};
 
 use crate::alloc::PendingItem;
 use crate::wal::{WalError, WalRow, WalScalar};
@@ -58,7 +58,7 @@ pub struct IngestRow {
 pub struct UnallocatedRow {
     pub view: String,
     /// The existing item this row adds to `view`, or `None` for a row that creates one.
-    pub join: Option<mosaica_types::EntityId>,
+    pub join: Option<ItemAt>,
     pub descriptors: Vec<Vec<u8>>,
     pub x: f64,
     pub y: f64,
@@ -90,7 +90,7 @@ impl UnallocatedRow {
             // **A join arrives with its id already decided, and `assign_sorted` leaves it
             // alone.** The entity exists; a second allocation for it would be a second identity
             // for one document, which is the whole of what the join rule prevents.
-            entity_id: self.join,
+            entity_id: self.join.map(|item| item.entity),
             edit: false,
         }
     }
@@ -111,12 +111,15 @@ impl UnallocatedRow {
     /// whole of the "mechanical conversion" this type exists to make mechanical, and a field
     /// added to [`WalRow`] without a matching field here is a compile error at exactly this
     /// method rather than a silently-dropped column somewhere downstream.
-    pub fn into_wal_row_with(self, pending: PendingItem) -> (WalRow, Vec<TermId>) {
+    ///
+    /// `shard` is a created row's shard; a join row takes its item's.
+    pub fn into_wal_row_with(self, pending: PendingItem, shard: ShardId) -> (WalRow, Vec<TermId>) {
         let entity_id = pending
             .entity_id
             .expect("assign_sorted assigns every item it is given");
         (
             WalRow {
+                shard: self.join.map_or(shard, |item| item.shard),
                 entity_id,
                 view: self.view,
                 join: self.join.is_some(),
@@ -190,10 +193,12 @@ impl BatchArtifacts {
     }
 }
 
-/// An item a row edits, as the handler resolved it: the entity it leaves, its number, and the rows
-/// its new entity takes, awaiting that entity's id on the executor.
+/// An item a row edits, as the handler resolved it, and the rows its new entity takes, awaiting
+/// that entity's id on the executor.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnallocatedEdit {
+    /// The item's shard, which its new entity is allocated in.
+    pub shard: ShardId,
     pub old: EntityId,
     /// The entity the item was first given, which its `mosaica_id` is taken from.
     pub number: EntityId,
@@ -201,6 +206,13 @@ pub struct UnallocatedEdit {
     /// other row places the item in one more view and carries that view's position and
     /// group-scoped values alone. Every `join` is `None`: all of them take the new entity.
     pub rows: Vec<UnallocatedRow>,
+}
+
+impl UnallocatedEdit {
+    /// The item the edit leaves.
+    pub fn item(&self) -> ItemAt {
+        ItemAt::new(self.shard, self.old)
+    }
 }
 
 /// Why a command did not come back with a receipt. Distinct from [`ExecError`], which is why an
@@ -603,7 +615,7 @@ mod tests {
         // What `assign_sorted` does, at one item's scale.
         pending.entity_id = Some(EntityId::new(41));
 
-        let (wal_row, terms) = row.into_wal_row_with(pending);
+        let (wal_row, terms) = row.into_wal_row_with(pending, ShardId::ZERO);
         assert_eq!(wal_row.entity_id, EntityId::new(41));
         assert_eq!(wal_row.descriptors, original.descriptors);
         assert_eq!(wal_row.x, original.x);

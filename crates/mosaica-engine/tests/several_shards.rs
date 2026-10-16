@@ -1,5 +1,6 @@
 //! A bundle a build wrote past its `[shards] size`, opened by a running service: it answers every
-//! read as the same items built as one shard answer it, and refuses every write.
+//! read as the same items built as one shard answer it, names each item in its own shard, and
+//! refuses every write unless the engine is opened to write several shards.
 
 mod common;
 
@@ -11,10 +12,11 @@ use mosaica_engine::{
     AcceptError, AggregateRequest, Engine, EngineError, ExecutorPosture, Grouping, RecordsOrder,
     ScalarOut, Session, ViewportRequest,
 };
+use mosaica_lifecycle::resolve::Refusal;
 use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_lifecycle::{DeclaredValue, IncomingArtifact, IncomingGrowth, VocabularyRequest};
 use mosaica_store::manifest::EntitySet;
-use mosaica_types::{EntityId, ShardId, Target};
+use mosaica_types::{EntityId, ItemAt, MosaicaId, ShardId, Target};
 
 /// Items the fixture builds.
 const N: u64 = 40;
@@ -388,7 +390,10 @@ fn writes(engine: &Engine) -> Vec<(&'static str, Result<(), AcceptError>)> {
                     vec![IncomingGrowth {
                         key: "a".into(),
                         view: None,
-                        joining: croaring::Bitmap::of(&[0]),
+                        joining: mosaica_lifecycle::ShardSets::in_shard(
+                            ShardId::ZERO,
+                            croaring::Bitmap::of(&[0]),
+                        ),
                         leaving: Default::default(),
                         rank: None,
                         parts: Default::default(),
@@ -456,4 +461,230 @@ fn a_log_holding_records_is_refused_beside_several_shards() {
         "{:?}",
         opened.err()
     );
+}
+
+/// A table naming each of `read`'s items by its `mosaica_id` and by its unique `id`.
+fn by_identifier_and_id(read: &[(u64, u64)]) -> mosaica_engine::AddressTable {
+    mosaica_engine::AddressTable {
+        rows: read.len(),
+        mosaica_id: Some(
+            read.iter()
+                .map(|&(mosaica_id, _)| Some(MosaicaId::new(mosaica_id)))
+                .collect(),
+        ),
+        columns: vec![(
+            "id".to_string(),
+            read.iter()
+                .map(|&(_, id)| Some(mosaica_engine::AddressValue::Text(id.to_string())))
+                .collect(),
+        )],
+    }
+}
+
+/// Each item is named in its own shard: its `mosaica_id` and its unique value name the one item,
+/// the items of both shards are distinct where their entity numbers repeat, and a row naming an
+/// item of each shard that holds one entity number names two items.
+#[test]
+fn each_item_is_named_in_its_own_shard() {
+    let built = fixture_sized(N, Some(SIZE));
+    let engine = built.open();
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let read = read_items(&engine, &session, &Items::new(RecordsOrder::Stored)).rows_with_ids;
+    assert_eq!(read.len(), N as usize);
+
+    let named = engine.name_items(&by_identifier_and_id(&read)).unwrap();
+    let items: Vec<ItemAt> = named
+        .verdicts
+        .iter()
+        .map(|verdict| verdict.clone().expect("each row names its item"))
+        .collect();
+    let distinct: std::collections::BTreeSet<ItemAt> = items.iter().copied().collect();
+    assert_eq!(distinct.len(), N as usize, "no two items are one");
+    let in_shard = |shard: u32| -> std::collections::BTreeSet<EntityId> {
+        let shard = ShardId::new(shard).unwrap();
+        items
+            .iter()
+            .filter(|item| item.shard == shard)
+            .map(|item| item.entity)
+            .collect()
+    };
+    let (zero, one) = (in_shard(0), in_shard(1));
+    assert_eq!(
+        (zero.len(), one.len()),
+        (SIZE as usize, (N - SIZE) as usize)
+    );
+    let shared: Vec<EntityId> = zero.intersection(&one).copied().collect();
+    assert!(!shared.is_empty(), "the shards repeat entity numbers");
+
+    let ids: Vec<MosaicaId> = read.iter().map(|&(id, _)| MosaicaId::new(id)).collect();
+    assert_eq!(
+        engine.resolve_targets(&ids).unwrap(),
+        items
+            .iter()
+            .map(|item| Some(item.target()))
+            .collect::<Vec<_>>()
+    );
+    let by_id = |shard: u32| {
+        let at = items
+            .iter()
+            .position(|item| *item == ItemAt::new(ShardId::new(shard).unwrap(), shared[0]))
+            .unwrap();
+        read[at]
+    };
+    let (in_zero, in_one) = (by_id(0), by_id(1));
+    let crossed = engine
+        .name_items(&by_identifier_and_id(&[(in_one.0, in_zero.1)]))
+        .unwrap();
+    assert!(
+        matches!(&crossed.verdicts[0], Err(Refusal::NamesTwo { .. })),
+        "{:?}",
+        crossed.verdicts
+    );
+}
+
+/// An engine opened to write several shards admits writes and starts its executor, and opens a
+/// log holding a record beside the shards, which [`Engine::open`] refuses.
+#[test]
+fn an_engine_writing_several_shards_admits_writes_and_a_log() {
+    let several = fixture_sized(N, Some(SIZE));
+    let engine = writing(&several);
+    assert!(engine.writable().is_ok());
+    assert_eq!(engine.write_executor_posture(), ExecutorPosture::Running);
+    let before = served(&engine, &full_coverage_credential());
+    drop(engine);
+
+    // A log naming no shard: a layer's registration.
+    let one = fixture_sized(N, None);
+    let engine = one.open();
+    engine.register_layer(flat_declaration("l")).unwrap();
+    drop(engine);
+
+    let refused = Engine::open(&several.root, &several.cache, &one.wal, config());
+    assert!(
+        matches!(refused, Err(EngineError::SeveralShardsLogged { shards: 2 })),
+        "{:?}",
+        refused.err()
+    );
+    let engine =
+        Engine::open_writing_several_shards(&several.root, &several.cache, &one.wal, config())
+            .expect("a log beside several shards opens");
+    assert!(
+        engine.registered_layer("l").is_some(),
+        "the log is replayed"
+    );
+    assert_eq!(served(&engine, &full_coverage_credential()), before);
+}
+
+/// One new item holding the `id` of `key` and every term the full credential holds, and its
+/// `mosaica_id`.
+fn insert(engine: &Engine, key: &str) -> MosaicaId {
+    let receipt = engine
+        .ingest(mosaica_engine::IngestRequest {
+            batch_id: key.to_string(),
+            body_hash: [7; 32],
+            view: Some("s0".to_string()),
+            rows: vec![mosaica_lifecycle::IngestRow {
+                mosaica_id: None,
+                labels: Some(vec![b"0".to_vec()]),
+                position: Some((5.0, 5.0)),
+                scalars: keyed(key),
+                scoped: Vec::new(),
+                omitted: Vec::new(),
+            }],
+            artifacts: Default::default(),
+            strict: true,
+            mosaica_id_column: false,
+        })
+        .expect("the insert is accepted");
+    receipt.mosaica_ids[0].expect("the row created an item")
+}
+
+/// An engine over `built` that writes several shards, its executor running.
+fn writing(built: &Fixture) -> Engine {
+    let mut engine =
+        Engine::open_writing_several_shards(&built.root, &built.cache, &built.wal, config())
+            .expect("the engine opens");
+    engine.start_write_executor(8).expect("the executor starts");
+    engine
+}
+
+/// An insert into a bundle built as two shards lands in the open one, shard 1, at its high
+/// water: its `mosaica_id` and its unique value name it there, and a restart replays it there.
+#[test]
+fn an_insert_lands_in_the_open_shard_and_replays_there() {
+    let several = fixture_sized(N, Some(SIZE));
+    let engine = writing(&several);
+    let before = served(&engine, &full_coverage_credential());
+    let inserted = insert(&engine, "new");
+    let landed = ItemAt::new(ShardId::new(1).unwrap(), EntityId::new(N - SIZE));
+    let named = |engine: &Engine| {
+        let table = by_identifier_and_id(&[(inserted.raw(), key_id("new"))]);
+        let verdicts = engine.name_items(&table).unwrap().verdicts;
+        (engine.resolve_targets(&[inserted]).unwrap(), verdicts)
+    };
+    assert_eq!(
+        named(&engine),
+        (vec![Some(landed.target())], vec![Ok(landed)])
+    );
+    assert_eq!(engine.allocator_high_water(), N + 1);
+    drop(engine);
+
+    let engine = writing(&several);
+    assert_eq!(
+        named(&engine),
+        (vec![Some(landed.target())], vec![Ok(landed)]),
+        "the log replays the row into shard 1"
+    );
+    assert_eq!(engine.allocator_high_water(), N + 1);
+    assert_eq!(served(&engine, &full_coverage_credential()), before);
+    let next = insert(&engine, "next");
+    assert_eq!(
+        engine.resolve_targets(&[next]).unwrap(),
+        vec![Some(Target::Item(
+            ShardId::new(1).unwrap(),
+            EntityId::new(N - SIZE + 1)
+        ))],
+        "shard 1's high water came back from its own rows"
+    );
+}
+
+/// A bundle of two shards whose log holds deletions and suppressions in both reopens with each
+/// shard's denies: what the same denies leave served in a bundle of one shard.
+#[test]
+fn a_log_denying_in_both_shards_reopens_with_each_shards_denies() {
+    use mosaica_lifecycle::wal::{Wal, WalRecord};
+    let one = fixture_sized(N, None);
+    let several = fixture_sized(N, Some(SIZE));
+    let log = |path: &std::path::Path, changes: Vec<(Target, ChangeOp)>| {
+        let mut wal = Wal::open(path).expect("the log opens");
+        wal.append(&WalRecord::ChangeBatch { changes })
+            .expect("an append");
+        wal.fsync().expect("an fsync");
+    };
+    let item =
+        |shard: u32, entity: u64| Target::Item(ShardId::new(shard).unwrap(), EntityId::new(entity));
+    // Shard 0's entity 2 and shard 1's entities 3 and 4 are entities 2, 25 + 3 and 25 + 4 of the
+    // bundle of one shard.
+    log(
+        &several.wal,
+        vec![
+            (item(0, 2), ChangeOp::Suppress),
+            (item(1, 3), ChangeOp::Suppress),
+            (item(1, 4), ChangeOp::Delete),
+        ],
+    );
+    log(
+        &one.wal,
+        vec![
+            (item(0, 2), ChangeOp::Suppress),
+            (item(0, SIZE + 3), ChangeOp::Suppress),
+            (item(0, SIZE + 4), ChangeOp::Delete),
+        ],
+    );
+    let (one, several) = (one.open(), writing(&several));
+    for credential in [full_coverage_credential(), subset_credential()] {
+        assert_eq!(served(&several, &credential), served(&one, &credential));
+    }
+    assert_eq!(several.overlay_depth(), 3);
+    assert_eq!(several.retirable_deletions(), 1);
 }

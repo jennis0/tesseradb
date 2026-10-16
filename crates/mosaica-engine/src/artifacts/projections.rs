@@ -1014,6 +1014,7 @@ mod tests {
             space: LayerSpace::ZERO,
             level: 0,
             level_version: 7,
+            slice_version: 7,
             view: Some("s0".into()),
             incarnation: None,
             form: mosaica_store::manifest::DerivedForm::TileIndex,

@@ -11,10 +11,9 @@ from oracle import identity
 from oracle.bundle import (
     artifact_mosaica_id,
     layer_mosaica_id,
-    newest_side_manifest,
     registered_layer,
 )
-from oracle.layout import partition_dir
+from oracle.layout import newest_side_manifest, partition_dir
 
 KEY = identity.IdentityKey.from_hex("000102030405060708090a0b0c0d0e0f")
 
@@ -31,7 +30,14 @@ def test_the_newest_side_manifest_of_the_live_prefix_is_read(tmp_path):
     partition = partition_dir(tmp_path / "v00002")
     partition.mkdir(parents=True)
     for n in (2, 10, 9):
-        (partition / f"SEGMENTS-{n}.json").write_text(json.dumps({"n": n, "layers": []}))
+        published = {
+            "n": n,
+            "layers": [],
+            "files": {},
+            "shards": {"size": 7, "next_id": 0, "files": []},
+            "layer_spaces": [],
+        }
+        (partition / f"SEGMENTS-{n}.json").write_text(json.dumps(published))
     (tmp_path / "CURRENT").write_text(json.dumps({"prefix": "v00002"}))
     side_manifest = newest_side_manifest(tmp_path)
     assert side_manifest["n"] == 10

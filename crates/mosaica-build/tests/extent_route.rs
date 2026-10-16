@@ -19,7 +19,6 @@
 
 mod common;
 
-use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -186,75 +185,6 @@ fn args(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
     }
 }
 
-/// Every file under `root`, keyed by its `root`-relative slash-separated path.
-fn collect(root: &Path) -> BTreeMap<String, Vec<u8>> {
-    fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                walk(root, &path, out);
-            } else {
-                let rel = path
-                    .strip_prefix(root)
-                    .unwrap()
-                    .components()
-                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                    .collect::<Vec<_>>()
-                    .join("/");
-                out.insert(rel, std::fs::read(&path).unwrap());
-            }
-        }
-    }
-    let mut out = BTreeMap::new();
-    walk(root, root, &mut out);
-    out
-}
-
-/// Compare two bundles file for file, with `MANIFEST.json`'s wall-clock `created_at` blanked and
-/// the `CURRENT` that carries its digest skipped. `tests/build_equivalence.rs` holds the same
-/// comparison for the oracle; it is repeated here rather than shared because a test binary is its
-/// own crate.
-fn assert_bundles_identical(left: &Path, right: &Path, what: &str) {
-    let a = collect(left);
-    let b = collect(right);
-    assert_eq!(
-        a.keys().collect::<Vec<_>>(),
-        b.keys().collect::<Vec<_>>(),
-        "{what}: the two bundles do not contain the same files"
-    );
-    for (name, left_bytes) in &a {
-        let right_bytes = &b[name];
-        if name.ends_with("MANIFEST.json") {
-            let normalise = |bytes: &[u8]| {
-                let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
-                value["created_at"] = serde_json::Value::Null;
-                value
-            };
-            assert_eq!(
-                normalise(left_bytes),
-                normalise(right_bytes),
-                "{what}: {name} differs (ignoring created_at)"
-            );
-            continue;
-        }
-        if name == "CURRENT" {
-            continue;
-        }
-        assert_eq!(
-            left_bytes,
-            right_bytes,
-            "{what}: {name} is not byte-identical ({} vs {} bytes)",
-            left_bytes.len(),
-            right_bytes.len()
-        );
-    }
-    assert!(
-        a.len() > 6,
-        "{what}: expected a full bundle, found {} files",
-        a.len()
-    );
-}
-
 /// Build the fixture down one route.
 fn built(dir: &Path, name: &str, route: ExtentRoute) -> (PathBuf, BuildReport) {
     let points = dir.join("points.parquet");
@@ -293,7 +223,7 @@ fn the_route_a_string_column_takes_is_not_in_the_bundle() {
         "the arena route leaves `text` where it is and takes back the rest"
     );
 
-    assert_bundles_identical(&spilling, &arena, "the two routes");
+    common::assert_bundles_identical(&spilling, &arena, "the two routes");
 }
 
 /// **Both build paths route the same way**, so the byte-equality oracle and the streaming pipeline
@@ -314,7 +244,7 @@ fn the_oracle_and_the_streaming_build_derive_the_same_routes() {
     assert_eq!(streaming.spilled_columns, oracle.spilled_columns);
     // And `text` is in it whatever the free space said.
     assert!(streaming.spilled_columns.contains(&"prose".to_string()));
-    assert_bundles_identical(
+    common::assert_bundles_identical(
         &dir.path().join("streaming"),
         &dir.path().join("oracle"),
         "the derived route, both build paths",

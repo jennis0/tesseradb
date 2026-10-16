@@ -752,6 +752,7 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
         space: mosaica_types::LayerSpace::ZERO,
         level: 0,
         level_version: version,
+        slice_version: version,
         form: mosaica_store::manifest::DerivedForm::TileIndex,
     };
 
@@ -942,6 +943,7 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
         space: mosaica_types::LayerSpace::ZERO,
         level: 0,
         level_version: version,
+        slice_version: version,
         form: mosaica_store::manifest::DerivedForm::TileIndex,
     };
     let column_entry = |version: u64| mosaica_store::manifest::DerivedExtent {
@@ -951,6 +953,7 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
         space: mosaica_types::LayerSpace::ZERO,
         level: 0,
         level_version: version,
+        slice_version: version,
         form: mosaica_store::manifest::DerivedForm::RowColumn {
             layout: ServingLayout::RowMajorLabel,
         },
@@ -962,6 +965,7 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
         space: mosaica_types::LayerSpace::ZERO,
         level: 0,
         level_version: version,
+        slice_version: version,
         form: mosaica_store::manifest::DerivedForm::RowMembers,
     };
 

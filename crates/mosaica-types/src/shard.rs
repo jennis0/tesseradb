@@ -1,5 +1,5 @@
-//! A point shard's number, a layer space's number, a row named together with its shard, and what
-//! a resolved `mosaica_id` names.
+//! A point shard's number, a layer space's number, a row and an item each named together with its
+//! shard, and what a resolved `mosaica_id` names.
 
 use crate::{EntityId, IdentityError, RowId};
 
@@ -92,6 +92,19 @@ impl TryFrom<u32> for LayerSpace {
     }
 }
 
+/// Whether a point shard takes new items at its high water. A sealed shard takes new items only
+/// into ids its compactions freed, and edits of its own items; nothing reopens it.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "lowercase")
+)]
+pub enum ShardState {
+    Open,
+    Sealed,
+}
+
 /// What a resolved `mosaica_id` names: an item's entity in its shard, or an artifact's or a layer's
 /// entity in its layer space.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -116,6 +129,38 @@ impl Target {
             Target::Artifact(..) => None,
         }
     }
+}
+
+/// An item's entity in its shard: what resolution names and a write addresses. The same entity
+/// number in two shards is two items. Ordered shard-major.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct ItemAt {
+    pub shard: ShardId,
+    pub entity: EntityId,
+}
+
+impl ItemAt {
+    #[inline]
+    pub const fn new(shard: ShardId, entity: EntityId) -> ItemAt {
+        ItemAt { shard, entity }
+    }
+
+    /// The item as a change names it.
+    #[inline]
+    pub const fn target(self) -> Target {
+        Target::Item(self.shard, self.entity)
+    }
+}
+
+/// `pairs` grouped by shard, ascending, each group in the order given.
+pub fn by_shard<T>(
+    pairs: impl IntoIterator<Item = (ShardId, T)>,
+) -> std::collections::BTreeMap<ShardId, Vec<T>> {
+    let mut groups = std::collections::BTreeMap::<ShardId, Vec<T>>::new();
+    for (shard, value) in pairs {
+        groups.entry(shard).or_default().push(value);
+    }
+    groups
 }
 
 /// The one item of `items`, for a site that serves one shard of one partition. Panics on any other count.

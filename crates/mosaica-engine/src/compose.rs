@@ -963,6 +963,7 @@ mod walk_tests {
         terms: Vec<TermId>,
     ) {
         let row = WalRow {
+            shard: mosaica_types::ShardId::ZERO,
             entity_id: EntityId::new(entity),
             view: view.to_string(),
             join,

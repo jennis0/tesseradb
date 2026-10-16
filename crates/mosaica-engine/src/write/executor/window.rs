@@ -1,5 +1,7 @@
 use super::*;
 
+use mosaica_types::ItemAt;
+
 /// What `/control/ingest`'s batch id means to this executor: durably accepted, held in the open
 /// commit window, or never seen. Computed by [`BatchState::of`] on the executor thread only.
 pub(super) enum BatchState {
@@ -414,12 +416,13 @@ impl Executor {
                 // What the open window touches is written at its close, and the re-check below
                 // reads what was written.
                 let joined = submission.slots.iter().filter_map(|slot| match slot {
-                    mosaica_lifecycle::Slot::Joined { entity, .. } => Some(*entity),
+                    mosaica_lifecycle::Slot::Joined { item, .. } => Some(*item),
                     _ => None,
                 });
+                let edited = submission.edits.iter().map(|e| e.edit.item());
                 let claims = mosaica_lifecycle::WindowClaims::of(
                     &submission.rows,
-                    submission.edits.iter().map(|e| e.edit.old).chain(joined),
+                    edited.chain(joined),
                     submission.keys.clone(),
                 );
                 if window.conflicts(&claims) {
@@ -434,11 +437,11 @@ impl Executor {
                     let (held_edits, held_items) = window.wanted();
                     shard.room(held_edits + edits, held_items + items)
                 };
-                if !window.is_empty() && room(self.live.only_shard(), &window).is_err() {
+                if !window.is_empty() && room(self.live.write_shard(), &window).is_err() {
                     window = self.close_and_reopen(window);
                     admission = Admission::YieldedAfterClose;
                 }
-                if let Err(full) = room(self.live.only_shard(), &window) {
+                if let Err(full) = room(self.live.write_shard(), &window) {
                     reply.fail(ExecError::ShardFull(full));
                     return (window, admission);
                 }
@@ -473,28 +476,41 @@ impl Executor {
             over_bound,
         } = submission;
         let generation = self.generation.load();
-        let shard = generation.only_shard();
         let creates = rows.iter().any(|row| row.join.is_none()) || !edits.is_empty();
-        let stale = crate::unique::moved_since(&generation, &keys, unique_seq, creates)
-            || edits.iter().any(|submitted| {
-                let old = submitted.edit.old;
-                shard.overlay.is_deleted(old)
-                    || crate::write::joined::views_holding(shard, old) != submitted.held_views
-            })
-            || slots.iter().any(|slot| match slot {
-                mosaica_lifecycle::Slot::Unchanged { entity, .. }
-                | mosaica_lifecycle::Slot::Joined { entity, .. } => {
-                    shard.overlay.is_deleted(*entity)
-                }
-                _ => false,
-            })
-            || rows.iter().any(|row| match row.join {
-                Some(entity) => {
-                    shard.overlay.is_deleted(entity)
-                        || crate::edited::holds_in_view(shard, entity, &row.view)
-                }
-                None => false,
-            });
+        // Each item is read in its own shard; one in a shard the generation no longer holds is
+        // gone.
+        let deleted = |item: ItemAt| {
+            generation
+                .shard(item.shard)
+                .is_none_or(|shard| shard.overlay.is_deleted(item.entity))
+        };
+        let write_shard = self.live.write_shard().id;
+        let stale =
+            crate::unique::moved_since(&generation, write_shard, &keys, unique_seq, creates)
+                || edits.iter().any(|submitted| {
+                    let old = submitted.edit.item();
+                    deleted(old)
+                        || crate::write::joined::views_holding(
+                            generation.shard_of(old.shard),
+                            old.entity,
+                        ) != submitted.held_views
+                })
+                || slots.iter().any(|slot| match slot {
+                    mosaica_lifecycle::Slot::Unchanged { item, .. }
+                    | mosaica_lifecycle::Slot::Joined { item, .. } => deleted(*item),
+                    _ => false,
+                })
+                || rows.iter().any(|row| match row.join {
+                    Some(item) => {
+                        deleted(item)
+                            || crate::edited::holds_in_view(
+                                generation.shard_of(item.shard),
+                                item.entity,
+                                &row.view,
+                            )
+                    }
+                    None => false,
+                });
         // An entity the handler resolved can since have been retired by a fold, freed, and issued
         // to another item: each must still hold the item the handler resolved it to, and its
         // number must still be at the tenancy the identifier carries.
@@ -506,37 +522,49 @@ impl Executor {
                     &generation,
                     mosaica_types::MosaicaId::new(mosaica_id),
                 )
+                .map(|(shard, number)| (shard.id(), number))
             };
-            let mut named: Vec<(EntityId, Option<EntityId>)> = Vec::new();
+            let mut named: Vec<(ItemAt, Option<(ShardId, EntityId)>)> = Vec::new();
             for slot in &slots {
                 match slot {
-                    mosaica_lifecycle::Slot::Unchanged { entity, mosaica_id }
-                    | mosaica_lifecycle::Slot::Joined { entity, mosaica_id } => {
-                        named.push((*entity, number_of(*mosaica_id)));
+                    mosaica_lifecycle::Slot::Unchanged { item, mosaica_id }
+                    | mosaica_lifecycle::Slot::Joined { item, mosaica_id } => {
+                        named.push((*item, number_of(*mosaica_id)));
                     }
                     mosaica_lifecycle::Slot::Edited { edit, mosaica_id } => {
-                        let old = edits.get(*edit as usize).map(|e| e.edit.old);
+                        let old = edits.get(*edit as usize).map(|e| e.edit.item());
                         named.extend(old.map(|old| (old, number_of(*mosaica_id))));
                     }
                     mosaica_lifecycle::Slot::Written {
                         row,
                         mosaica_id: Some(mosaica_id),
                     } => {
-                        if let Some(entity) = rows.get(*row as usize).and_then(|r| r.join) {
-                            named.push((entity, number_of(*mosaica_id)));
+                        if let Some(item) = rows.get(*row as usize).and_then(|r| r.join) {
+                            named.push((item, number_of(*mosaica_id)));
                         }
                     }
                     _ => {}
                 }
             }
-            let entities: Vec<EntityId> = named.iter().map(|(entity, _)| *entity).collect();
-            match crate::edited::numbers_of(shard, &entities) {
-                Ok(numbers) => named
+            let by_shard = mosaica_types::by_shard(
+                named
                     .iter()
-                    .zip(numbers)
-                    .any(|((_, resolved), now)| Some(now) != *resolved),
-                Err(_) => true,
-            }
+                    .enumerate()
+                    .map(|(at, (item, _))| (item.shard, at)),
+            );
+            by_shard.into_iter().any(|(id, ats)| {
+                let Some(shard) = generation.shard(id) else {
+                    return true;
+                };
+                let entities: Vec<EntityId> = ats.iter().map(|&at| named[at].0.entity).collect();
+                match crate::edited::numbers_of(shard, &entities) {
+                    Ok(numbers) => ats
+                        .iter()
+                        .zip(numbers)
+                        .any(|(&at, now)| named[at].1 != Some((id, now))),
+                    Err(_) => true,
+                }
+            })
         };
         drop(generation);
         if stale {
@@ -623,12 +651,12 @@ impl Executor {
 
         // The allocator's freed ids are at this index's tenancies: a fold swaps its index in before
         // it releases the ids it freed, and both run on this thread.
-        let shard = self.live.only_shard();
+        let shard = self.live.write_shard();
         let (identity, tenancy) = {
             let generation = self.generation.load();
             (
                 self.deps.identity_key,
-                Arc::clone(&generation.only_shard().tenancy),
+                Arc::clone(&generation.shard_of(shard.id).tenancy),
             )
         };
         let mosaica_id_of = |entity: EntityId| {
@@ -636,7 +664,7 @@ impl Executor {
                 .map(|id| id.raw())
                 .expect("the allocator issues entities inside the identity space")
         };
-        let closed = match shard.with_allocator(|a| window.allocate(a, mosaica_id_of)) {
+        let closed = match shard.with_allocator(|a| window.allocate(a, shard.id, mosaica_id_of)) {
             Ok((closed, tally)) => {
                 // Recorded at allocation: a failed append still fragmented the entity axis.
                 self.health.record_fragmentation(tally);
@@ -732,18 +760,27 @@ impl Executor {
         // read here, on the thread that changes them, so nothing can move between the read and
         // the append.
         let generation = self.generation.load_full();
-        let mut moved: Vec<(EntityId, EntityId)> = Vec::new();
+        let mut pairs: Vec<(ShardId, (EntityId, EntityId))> = Vec::new();
         let mut first_edit: Option<usize> = None;
         for (index, entry) in closing.entries_mut().iter_mut().enumerate() {
             let (_, edits) = entry.rows_and_edits_mut();
             for edit in edits.iter_mut() {
-                edit.suppressed = generation.only_shard().overlay.is_suppressed(edit.old);
-                moved.push((edit.old, edit.rows[0].entity_id));
+                edit.suppressed = generation
+                    .shard_of(edit.shard)
+                    .overlay
+                    .is_suppressed(edit.old);
+                pairs.push((edit.shard, (edit.old, edit.rows[0].entity_id)));
                 first_edit.get_or_insert(index);
             }
         }
         drop(generation);
-        let carried = self.live.with_artifacts(|store| store.carried_over(&moved));
+        let moved = mosaica_types::by_shard(pairs);
+        let carried: Vec<WalRecord> = self.live.with_artifacts(|store| {
+            moved
+                .iter()
+                .flat_map(|(shard, moved)| store.carried_over(*shard, moved))
+                .collect()
+        });
 
         mark = self.health.lap(WriteStage::DeriveRecords, mark);
 
@@ -847,7 +884,7 @@ impl Executor {
             &vocabularies,
             mints,
         );
-        let shard = generation.only_shard();
+        let shard = generation.shard_of(self.live.write_shard().id);
         let mut buffer = (*shard.buffer).clone();
         mark = self.health.lap(WriteStage::ApplyBufferClone, mark);
         let declared = &generation.bundle.manifest.declared_scalars;
@@ -874,6 +911,7 @@ impl Executor {
                         .map(move |row| (row, terms.take().unwrap_or_default()))
                 });
             for (row, row_terms) in rows.chain(edit_rows) {
+                debug_assert_eq!(row.shard, shard.id(), "a window writes into one shard");
                 let m = StageMark::now();
                 buffer.insert_row_with_terms(row, row_terms);
                 let m = self.health.lap(WriteStage::RowBufferInsert, m);

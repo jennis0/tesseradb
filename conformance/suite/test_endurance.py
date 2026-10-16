@@ -151,7 +151,7 @@ import pyarrow.ipc as ipc
 import pytest
 
 from oracle.harness import CLI_BIN
-from oracle.layout import shard_dir, view_dir
+from oracle.layout import read_publication, shard_dir, view_dir
 
 from .battery import Viewport
 from .driver import (
@@ -352,9 +352,11 @@ def read_bundle(bundle_root: Path) -> BundleView:
     )
     prefix_dir = bundle_root / live
 
+    # Keyed by the directory under `partitions/` holding each `SEGMENTS-<n>.json`: a partition's
+    # own, or one of its shards' or layer spaces'.
     side_digests: dict[tuple[str, int], str] = {}
     latest_paths: dict[str, tuple[int, Path]] = {}
-    for manifest_path in sorted(prefix_dir.glob("partitions/*/SEGMENTS-*.json")):
+    for manifest_path in sorted(prefix_dir.glob("partitions/**/SEGMENTS-*.json")):
         match = _SIDE_RE.search(manifest_path.name)
         n_text = match.group(1)
         if n_text != str(int(n_text)):
@@ -363,18 +365,18 @@ def read_bundle(bundle_root: Path) -> BundleView:
                 f"unpadded (`SEGMENTS-{{n}}.json`) and a padded member is a foreign writer"
             )
         n = int(n_text)
-        partition = manifest_path.parent.name
-        side_digests[(partition, n)] = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
-        if partition not in latest_paths or n > latest_paths[partition][0]:
-            latest_paths[partition] = (n, manifest_path)
+        where = str(manifest_path.parent.relative_to(prefix_dir / "partitions"))
+        side_digests[(where, n)] = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        if "/" not in where and (where not in latest_paths or n > latest_paths[where][0]):
+            latest_paths[where] = (n, manifest_path)
 
     latest = {
-        partition: json.loads(path.read_text())
-        for partition, (_n, path) in latest_paths.items()
+        partition: read_publication(prefix_dir, n, partition)
+        for partition, (n, _path) in latest_paths.items()
     }
 
     referenced: set[str] = set()
-    for manifest_path in [prefix_dir / "MANIFEST.json", *prefix_dir.glob("partitions/*/SEGMENTS-*.json")]:
+    for manifest_path in [prefix_dir / "MANIFEST.json", *prefix_dir.glob("partitions/**/SEGMENTS-*.json")]:
         referenced |= _strings(json.loads(manifest_path.read_text()))
 
     total_bytes = _du(bundle_root)
@@ -488,18 +490,19 @@ def observe(
     t.prev_live_seg_ids = live_ids
 
     fresh_ns = []
-    for (partition, n), digest in sorted(view.side_digests.items()):
-        key = (view.live_prefix, partition, n)
+    for (where, n), digest in sorted(view.side_digests.items()):
+        key = (view.live_prefix, where, n)
         earlier = t.side_seen.get(key)
         assert earlier is None or earlier == digest, (
-            f"{label}: {view.live_prefix}/partitions/{partition}/SEGMENTS-{n}.json changed bytes "
+            f"{label}: {view.live_prefix}/partitions/{where}/SEGMENTS-{n}.json changed bytes "
             f"under observation — the sequence is append-only and a member is never replaced"
         )
-        if earlier is None:
+        if earlier is None and "/" not in where:
             fresh_ns.append(n)
         t.side_seen[key] = digest
-    # One global counter: every manifest not seen before must sit above everything ever seen —
-    # across flushes, merges, denies, coalesces and the fold's new prefix alike.
+    # One global counter: every partition manifest not seen before must sit above everything ever
+    # seen — across flushes, merges, denies, coalesces and the fold's new prefix alike. A shard's
+    # or a space's file takes its publication's number, so it is at most the partition's.
     for n in fresh_ns:
         assert n > t.side_global_max or not t.side_global_max, (
             f"{label}: SEGMENTS-{n}.json appeared below the sequence's high-water "

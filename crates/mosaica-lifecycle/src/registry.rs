@@ -37,27 +37,30 @@ use mosaica_types::layer::{
     DeclarationError, EntityRun, LayerDeclaration, LevelShape, MembershipSource, RegisteredLayer,
     ReservedRuns, FIRST_LEVEL_BLOCK, RESERVED_BLOCK, SPACE_BLOCKS,
 };
-use mosaica_types::{EntityId, LayerSpace};
+use mosaica_types::{EntityId, LayerSpace, ShardId};
 
-use crate::membership::{deserialise_members, serialise_members, ArtifactStore, IncomingArtifact};
+use crate::membership::{ArtifactStore, IncomingArtifact, ShardSets};
 use crate::wal::{PublishedArtifact, WalRecord};
 
 /// The shape of the level one publication fills: how many of its artifacts have members of their
 /// own, and whether any item is a member of two.
 fn publication_shape(artifacts: &[PublishedArtifact]) -> LevelShape {
     let mut shape = LevelShape::empty();
-    let mut claimed = croaring::Bitmap::new();
+    let mut claimed: BTreeMap<ShardId, croaring::Bitmap> = BTreeMap::new();
     for members in artifacts
         .iter()
-        .filter_map(|a| deserialise_members(&a.members))
+        .filter_map(|a| ShardSets::from_wal(&a.members))
         .filter(|members| !members.is_empty())
     {
         shape.artifacts += 1;
-        if shape.partitions && claimed.intersect(&members) {
-            shape.partitions = false;
-        }
-        if shape.partitions {
-            claimed.or_inplace(&members);
+        for (shard, members) in members.iter() {
+            let claimed = claimed.entry(shard).or_default();
+            if shape.partitions && claimed.intersect(members) {
+                shape.partitions = false;
+            }
+            if shape.partitions {
+                claimed.or_inplace(members);
+            }
         }
     }
     shape
@@ -390,8 +393,8 @@ fn prepare_set_page(
     // Joins before leaves, which is the order the store applies them in and the order that makes
     // a paged replacement safe (`ingest.md` §1.1, §2.2).
     let mut next = content.generated_from.clone();
-    next.or_inplace(&join.joining);
-    next.andnot_inplace(&join.leaving);
+    next.or_inplace(join.joining.shard_zero());
+    next.andnot_inplace(join.leaving.shard_zero());
     if next == content.generated_from {
         return Ok(None);
     }
@@ -401,8 +404,8 @@ fn prepare_set_page(
     }
     Ok(Some(crate::wal::MembershipGrowth {
         ordinal,
-        joining: crate::membership::serialise_members(&join.joining),
-        leaving: crate::membership::serialise_members(&join.leaving),
+        joining: join.joining.to_wal(),
+        leaving: join.leaving.to_wal(),
         set: crate::wal::GrownSet::GeneratingSet { rank, cardinality },
     }))
 }
@@ -1222,7 +1225,7 @@ impl LayerRegistry {
         let mut fills = Vec::new();
         // The delta and never the whole list, so a re-`PUT` whose members are all held appends
         // no growth: a set part already in the state the record asks for is a no-op.
-        let mut joins: Vec<(u32, croaring::Bitmap)> = Vec::new();
+        let mut joins: Vec<(u32, ShardSets)> = Vec::new();
         for ((artifact, ordinal), view) in incoming.iter().zip(&held).zip(&views) {
             let Some(ordinal) = *ordinal else { continue };
             let key = artifact.key.as_deref().expect("a held key is a key");
@@ -1271,7 +1274,7 @@ impl LayerRegistry {
             // content against a set they did not declare.
             for (rank, content) in artifact.contents.iter().enumerate() {
                 match record.contents.get(rank) {
-                    Some(held) if held.generated_from != content.generated_from => {
+                    Some(held) if held.generated_from != *content.generated_from.shard_zero() => {
                         return Err(RegistryError::PartConflict {
                             layer: layer_name.to_string(),
                             level,
@@ -1302,10 +1305,10 @@ impl LayerRegistry {
                 ordinal,
                 part,
             }));
-            let mut delta = artifact.members.clone();
+            let mut delta = artifact.members.shard_zero().clone();
             record.members.remove_from(&mut delta);
             if !delta.is_empty() {
-                joins.push((ordinal, delta));
+                joins.push((ordinal, ShardSets::in_shard(ShardId::ZERO, delta)));
             }
         }
         let growth = crate::membership::growth_record(
@@ -1732,7 +1735,7 @@ impl LayerRegistry {
                 // A predicate layer's artifacts are derived from a value column, which is
                 // entity-scoped; a group-scoped one is refused at `scoped_view`.
                 view: None,
-                members: croaring::Bitmap::new(),
+                members: crate::membership::ShardSets::default(),
                 excluding: None,
                 contents: Vec::new(),
                 attached_to: None,
@@ -2152,14 +2155,14 @@ impl LayerRegistry {
                     // the artifact in the view it was acked in.
                     view: artifact.view.clone(),
                     incarnation: incarnations[i],
-                    members: serialise_members(&artifact.members),
+                    members: artifact.members.to_wal(),
                     contents: artifact
                         .contents
                         .iter()
                         .map(|v| crate::wal::PublishedContent {
                             values: v.values.clone(),
                             digest: crate::membership::content_digest(&v.values),
-                            generated_from: serialise_members(&v.generated_from),
+                            generated_from: v.generated_from.to_wal(),
                             cardinality: v.generated_from.cardinality(),
                         })
                         .collect(),
@@ -2343,7 +2346,7 @@ impl LayerRegistry {
             // growth pin is released by the compaction fold alone. Taken against the membership as
             // it stands before the batch, which is the state every row of the batch is prepared
             // against and the state `growth_receipt` counts `joined` over.
-            let mut joining = join.joining.clone();
+            let mut joining = join.joining.shard_zero().clone();
             if let Some(record) = store.get(layer_name, level, ordinal) {
                 record.members.remove_from(&mut joining);
             }
@@ -2352,7 +2355,7 @@ impl LayerRegistry {
             }
             growth.push(crate::wal::MembershipGrowth {
                 ordinal,
-                joining: crate::membership::serialise_members(&joining),
+                joining: ShardSets::in_shard(ShardId::ZERO, joining).to_wal(),
                 leaving: Vec::new(),
                 set: crate::wal::GrownSet::Membership,
             });
@@ -3307,7 +3310,10 @@ mod tests {
         IncomingArtifact {
             key: Some(key.into()),
             view: None,
-            members: croaring::Bitmap::of(members),
+            members: crate::membership::ShardSets::in_shard(
+                mosaica_types::ShardId::ZERO,
+                croaring::Bitmap::of(members),
+            ),
             excluding: None,
             contents: Vec::new(),
             attached_to: None,
@@ -4292,7 +4298,7 @@ mod tests {
 
         // Across a `PUT`: a new artifact under a held one, and the held one filled under the new.
         let mut a_under_d = under("a", &["d"]);
-        a_under_d.members = croaring::Bitmap::new();
+        a_under_d.members = crate::membership::ShardSets::default();
         let refused = reg
             .prepare_put(
                 "clusters/t",
@@ -4864,7 +4870,10 @@ mod tests {
         apply_put(&mut reg, &mut store, &prepared);
 
         let mut again = incoming("c1", &[]);
-        again.exclude([EntityId::new(4)]);
+        again.exclude([mosaica_types::ItemAt::new(
+            mosaica_types::ShardId::ZERO,
+            EntityId::new(4),
+        )]);
         let refused = reg
             .prepare_put("clusters/a", 0, &[again], &store, &AnyView)
             .unwrap_err();

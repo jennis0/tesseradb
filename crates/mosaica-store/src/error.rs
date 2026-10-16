@@ -167,7 +167,7 @@ pub enum StoreError {
     /// rename it to its canonical spelling or remove it.
     NonCanonicalManifestName { partition: String, name: String },
     /// A `SEGMENTS-<n>.json` already exists at the `n` a publication was writing at
-    /// (`hard_link`'s `AlreadyExists`, [`crate::write_segments_manifest`]).
+    /// (`hard_link`'s `AlreadyExists`, [`crate::write_publication`]).
     ///
     /// **Its own variant, naming the file, because the raw `Io` form reads as a filesystem
     /// fault.** A side-manifest is complete current state rather than a diff, so `n` is allocated

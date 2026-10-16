@@ -240,11 +240,12 @@ impl Overlay {
     }
 }
 
-/// The deny state of a shard's items and of every layer space's artifacts, each target in the
-/// overlay of the shard or the space it names.
+/// The deny state of every point shard's items and of every layer space's artifacts, each target
+/// in the overlay of the shard or the space it names.
 #[derive(Debug, Default, Clone)]
 pub struct Overlays {
-    pub items: Overlay,
+    /// One per point shard holding a deny; a shard absent here denies nothing.
+    pub items: BTreeMap<ShardId, Overlay>,
     /// One per layer space holding a deny; a space absent here denies nothing.
     pub spaces: BTreeMap<LayerSpace, Overlay>,
 }
@@ -253,7 +254,7 @@ impl Overlays {
     /// Apply one change to the overlay its target names.
     pub fn apply(&mut self, target: Target, op: ChangeOp) {
         match target {
-            Target::Item(_, entity) => self.items.apply(entity, op),
+            Target::Item(shard, entity) => self.items.entry(shard).or_default().apply(entity, op),
             Target::Artifact(space, entity) => {
                 self.spaces.entry(space).or_default().apply(entity, op)
             }
@@ -270,13 +271,15 @@ impl Overlays {
     }
 }
 
-/// Every overlay re-stated as one snapshot: the items of `shard`, then each space's.
+/// Every overlay re-stated as one snapshot: each shard's items, then each space's.
 pub fn snapshot<'o>(
-    shard: ShardId,
-    items: &Overlay,
+    shards: impl IntoIterator<Item = (ShardId, &'o Overlay)>,
     spaces: impl IntoIterator<Item = (LayerSpace, &'o Overlay)>,
 ) -> Vec<OverlaySnapshotEntry> {
-    let mut out = items.snapshot(|entity| Target::Item(shard, entity));
+    let mut out = Vec::new();
+    for (shard, items) in shards {
+        out.extend(items.snapshot(|entity| Target::Item(shard, entity)));
+    }
     for (space, overlay) in spaces {
         out.extend(overlay.snapshot(|entity| Target::Artifact(space, entity)));
     }
@@ -310,12 +313,14 @@ pub fn owner_id_only(group: &str, key: &str) -> Vec<String> {
     )]
 }
 
-/// Replays a WAL's records into an `Overlay` and an `IngestBuffer`, one record at a time.
+/// Replays a WAL's records into the overlays and an `IngestBuffer` per point shard, one record at
+/// a time.
 ///
 /// Single left-to-right pass over the records, in on-disk order (the order changes and ingests
 /// were accepted in — WAL append order is causal order):
-/// - `IngestBatch` rows populate `IngestBuffer` (term descriptors resolved via `dict` plus a
-///   deterministic, replay-order in-memory extension — see [`DescriptorResolver`]).
+/// - `IngestBatch` rows populate the buffer of the shard each names (term descriptors resolved via
+///   `dict` plus a deterministic, replay-order in-memory extension shared by every shard — see
+///   [`DescriptorResolver`]).
 /// - `ChangeBatch` records apply their disposition directly. **No resolution happens here at
 ///   all**: the entity was fixed at admission, which is what makes replay infallible.
 /// - `OverlaySnapshot` records are applied **at the position they occupy**, never used as a
@@ -338,7 +343,7 @@ pub fn owner_id_only(group: &str, key: &str) -> Vec<String> {
 /// would be fail-open).
 pub struct Replay<'a> {
     overlay: Overlays,
-    buffer: IngestBuffer,
+    buffers: BTreeMap<ShardId, IngestBuffer>,
     resolver: DescriptorResolver<'a>,
     view_ids_of_key: &'a dyn Fn(&str, &str) -> Vec<String>,
 }
@@ -365,35 +370,39 @@ impl<'a> Replay<'a> {
         // folds to the same state.
         Replay {
             overlay: seed,
-            buffer: IngestBuffer::new(),
+            buffers: BTreeMap::new(),
             resolver: DescriptorResolver::new(dict),
             view_ids_of_key,
         }
     }
 
     /// Applies `record`, which sits at `position` in the log, and stamps each row it buffers with
-    /// that position. `flushed` names the rows that already have geometry: they are not buffered,
-    /// though their descriptors are still resolved.
+    /// that position. `flushed` names the rows, each by its shard, that already have geometry:
+    /// they are not buffered, though their descriptors are still resolved.
     pub fn apply(
         &mut self,
         record: &WalRecord,
         position: u64,
-        flushed: impl Fn(EntityId, &str) -> bool,
+        flushed: impl Fn(ShardId, EntityId, &str) -> bool,
     ) {
         match record {
             WalRecord::IngestBatch { rows, edits, .. } => {
                 // An edit deletes the entity its item leaves and gives the new one the old one's
-                // suppression, both in the record that creates the new one.
+                // suppression, both in the record that creates the new one, in the item's shard.
                 for edit in edits {
-                    self.overlay.items.apply(edit.old, ChangeOp::Delete);
+                    self.overlay
+                        .apply(Target::Item(edit.shard, edit.old), ChangeOp::Delete);
                     if let Some(first) = edit.rows.first() {
                         if edit.suppressed {
-                            self.overlay.items.apply(first.entity_id, ChangeOp::Suppress);
+                            self.overlay.apply(
+                                Target::Item(edit.shard, first.entity_id),
+                                ChangeOp::Suppress,
+                            );
                         }
                     }
                 }
                 for row in rows.iter().chain(edits.iter().flat_map(|edit| &edit.rows)) {
-                    if flushed(row.entity_id, &row.view) {
+                    if flushed(row.shard, row.entity_id, &row.view) {
                         // Resolved all the same, so the extension sequence is the one the live
                         // path took.
                         for descriptor in &row.descriptors {
@@ -401,8 +410,9 @@ impl<'a> Replay<'a> {
                         }
                         continue;
                     }
-                    self.buffer.insert_row(row, &mut self.resolver);
-                    self.buffer.set_wal_pos(row.entity_id, &row.view, position);
+                    let buffer = self.buffers.entry(row.shard).or_default();
+                    buffer.insert_row(row, &mut self.resolver);
+                    buffer.set_wal_pos(row.entity_id, &row.view, position);
                 }
             }
             WalRecord::ChangeBatch { changes } => {
@@ -445,10 +455,12 @@ impl<'a> Replay<'a> {
                 // leave the sharing group's buffered rows to be flushed into whatever takes the
                 // key next. The expansion is `Manifest::view_ids_for_key`'s, passed in because
                 // this crate holds no manifest.
-                self.buffer
-                    .remove_views(&(self.view_ids_of_key)(&view.group, &view.key));
-                for entity in deleted {
-                    self.overlay.items.apply(*entity, ChangeOp::Delete);
+                let views = (self.view_ids_of_key)(&view.group, &view.key);
+                for buffer in self.buffers.values_mut() {
+                    buffer.remove_views(&views);
+                }
+                for target in deleted {
+                    self.overlay.apply(*target, ChangeOp::Delete);
                 }
             }
             // A view create is the roster's, which the write path rebuilds, and names no entity.
@@ -465,13 +477,26 @@ impl<'a> Replay<'a> {
             | WalRecord::ViewGroupCreate { .. }
             | WalRecord::PlainViewCreate { .. }
             | WalRecord::ShardsDeclare { .. } => {}
+            // Opening and sealing a shard buffer and deny nothing.
+            WalRecord::ShardOpen { .. } | WalRecord::ShardSeal { .. } => {}
         }
     }
 
-    /// The overlays, the buffer and the resolver the records replayed to.
-    pub fn finish(mut self) -> (Overlays, IngestBuffer, DescriptorResolver<'a>) {
-        drop_deleted(&self.overlay.items, &mut self.buffer);
-        (self.overlay, self.buffer, self.resolver)
+    /// The overlays, each point shard's buffer and the resolver the records replayed to. A shard
+    /// no row was buffered for has no buffer here.
+    pub fn finish(
+        mut self,
+    ) -> (
+        Overlays,
+        BTreeMap<ShardId, IngestBuffer>,
+        DescriptorResolver<'a>,
+    ) {
+        for (shard, buffer) in &mut self.buffers {
+            if let Some(overlay) = self.overlay.items.get(shard) {
+                drop_deleted(overlay, buffer);
+            }
+        }
+        (self.overlay, self.buffers, self.resolver)
     }
 }
 
@@ -596,7 +621,7 @@ mod tests {
     ///
     /// Two pieces of replayed state could have carried the difference, and each is checked here or
     /// named: the **overlay** (below, by comparing against the single-copy replay), and the
-    /// **allocator seed**, which `high_water_from` derives from `IngestBatch` rows alone — pinned
+    /// **allocator seed**, which `raise_high_water` derives from `IngestBatch` rows alone — pinned
     /// by `alloc.rs`'s own tests.
     #[test]
     fn a_disposition_replayed_twice_is_the_same_as_replayed_once() {
@@ -616,12 +641,22 @@ mod tests {
         };
 
         let mut once = Replay::new(&dict, Overlays::default(), &owner_id_only);
-        once.apply(&suppress, 0, |_, _| false);
-        let once = once.finish().0.items;
+        once.apply(&suppress, 0, |_, _, _| false);
+        let once = once
+            .finish()
+            .0
+            .items
+            .remove(&ShardId::ZERO)
+            .unwrap_or_default();
         let mut twice = Replay::new(&dict, Overlays::default(), &owner_id_only);
-        twice.apply(&suppress, 0, |_, _| false);
-        twice.apply(&suppress, 1, |_, _| false);
-        let twice = twice.finish().0.items;
+        twice.apply(&suppress, 0, |_, _, _| false);
+        twice.apply(&suppress, 1, |_, _, _| false);
+        let twice = twice
+            .finish()
+            .0
+            .items
+            .remove(&ShardId::ZERO)
+            .unwrap_or_default();
 
         assert_eq!(
             once.is_suppressed(entity),
@@ -633,5 +668,81 @@ mod tests {
             twice.is_suppressed(entity),
             "and the entry must actually be a suppression, or this compares two absences"
         );
+    }
+
+    #[test]
+    fn a_log_naming_two_shards_replays_into_each_shards_buffer_and_overlay() {
+        use crate::wal::{WalEdit, WalRow};
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let paths = mosaica_authz::DictWriter::new(temp.path())
+            .finish()
+            .unwrap();
+        let dict = Dict::load(&paths).unwrap();
+        let (zero, one) = (ShardId::ZERO, ShardId::new(1).unwrap());
+        let row = |shard: ShardId, entity: u64| WalRow {
+            shard,
+            entity_id: EntityId::new(entity),
+            view: "s0".into(),
+            join: false,
+            descriptors: Vec::new(),
+            x: 0.5,
+            y: 0.5,
+            scalars: Vec::new(),
+            scoped: Vec::new(),
+        };
+        let batch = WalRecord::IngestBatch {
+            batch_id: "b".into(),
+            body_hash: [0; 32],
+            rows: vec![row(zero, 3), row(one, 3), row(one, 4)],
+            edits: vec![WalEdit {
+                shard: one,
+                old: EntityId::new(1),
+                number: EntityId::new(1),
+                suppressed: true,
+                rows: vec![row(one, 5)],
+            }],
+            receipt: Vec::new(),
+        };
+        let drop = WalRecord::ViewDrop {
+            view: mosaica_types::view::DeadIncarnation {
+                group: "g".into(),
+                key: "k".into(),
+                incarnation: 0,
+            },
+            deleted: vec![Target::Item(zero, EntityId::new(3))],
+        };
+
+        let mut replay = Replay::new(&dict, Overlays::default(), &owner_id_only);
+        replay.apply(&batch, 7, |_, _, _| false);
+        replay.apply(&drop, 9, |_, _, _| false);
+        let (overlays, buffers, _) = replay.finish();
+
+        let entities = |shard: ShardId| -> Vec<u64> {
+            let mut held: Vec<u64> = buffers[&shard].rows().map(|(e, _)| e.raw()).collect();
+            held.sort_unstable();
+            held
+        };
+        assert_eq!(
+            entities(zero),
+            Vec::<u64>::new(),
+            "shard 0's row was deleted"
+        );
+        assert_eq!(entities(one), vec![3, 4, 5]);
+        let (items_zero, items_one) = (&overlays.items[&zero], &overlays.items[&one]);
+        assert!(items_zero.is_deleted(EntityId::new(3)));
+        assert!(
+            !items_one.is_deleted(EntityId::new(3)),
+            "the same number in shard 1"
+        );
+        assert!(
+            items_one.is_deleted(EntityId::new(1)),
+            "the edit's old entity"
+        );
+        assert!(
+            items_one.is_suppressed(EntityId::new(5)),
+            "the edit's new entity"
+        );
+        assert!(!items_zero.touches(EntityId::new(1)) && !items_zero.touches(EntityId::new(5)));
     }
 }

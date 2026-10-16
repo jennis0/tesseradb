@@ -3,7 +3,7 @@
 
 use rustc_hash::FxHashMap;
 use mosaica_lifecycle::resolve::{self, Batch, Holdings, RowIdentity, Verdict};
-use mosaica_types::{EntityId, MosaicaId};
+use mosaica_types::{EntityId, ItemAt, MosaicaId, ShardId};
 
 use super::report::{Tally, OUTSIDE_LIMIT};
 use super::scan::FileRead;
@@ -12,7 +12,8 @@ use crate::error::{BuildError, Result};
 use crate::row_groups::FileGroups;
 use crate::spill::mix64;
 
-/// Who holds each value of each unique field, and each item's value of each field.
+/// Who holds each value of each unique field, and each item's value of each field. The build
+/// numbers items before it places them in shards, so it names each item in shard 0 by its number.
 #[derive(Default)]
 struct Held {
     holder: FxHashMap<(u16, u128), u32>,
@@ -26,13 +27,16 @@ impl Holdings for Held {
         &self,
         field: u16,
         keys: &[resolve::Key],
-    ) -> std::result::Result<Vec<(usize, EntityId)>, Self::Error> {
+    ) -> std::result::Result<Vec<(usize, ItemAt)>, Self::Error> {
         Ok(keys
             .iter()
             .enumerate()
             .filter_map(|(at, key)| {
                 let item = self.holder.get(&(field, *key))?;
-                Some((at, EntityId::new(u64::from(*item))))
+                Some((
+                    at,
+                    ItemAt::new(ShardId::ZERO, EntityId::new(u64::from(*item))),
+                ))
             })
             .collect())
     }
@@ -41,7 +45,7 @@ impl Holdings for Held {
     fn mosaica_holders(
         &self,
         ids: &[MosaicaId],
-    ) -> std::result::Result<Vec<Option<EntityId>>, Self::Error> {
+    ) -> std::result::Result<Vec<Option<ItemAt>>, Self::Error> {
         Ok(vec![None; ids.len()])
     }
 }
@@ -232,7 +236,7 @@ fn decide(
                 tally.refuse_row(refusal, row as u64);
                 continue;
             }
-            Verdict::Names(entity) => entity.raw() as u32,
+            Verdict::Names(item) => item.entity.raw() as u32,
             Verdict::Creates => {
                 check_one_shard(*next + 1, shard_size)?;
                 let item = *next as u32;

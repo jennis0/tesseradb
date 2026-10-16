@@ -14,7 +14,7 @@ use mosaica_lifecycle::alloc::Allocator;
 use mosaica_lifecycle::command::UnallocatedRow;
 use mosaica_lifecycle::wal::WalRecord;
 use mosaica_lifecycle::window::{CommitWindow, FragmentationTally, Slot, WindowClaims, WindowEntry};
-use mosaica_types::TermId;
+use mosaica_types::{ShardId, TermId};
 
 fn row(terms: &[u32]) -> UnallocatedRow {
     UnallocatedRow {
@@ -78,14 +78,14 @@ proptest! {
                 }, WindowClaims::default());
             }
             let rows_in_window = window.rows();
-            let (closed, _) = window.allocate(&mut alloc, |e| e.raw()).expect("the id space is not exhausted");
+            let (closed, _) = window.allocate(&mut alloc, ShardId::ZERO, |e| e.raw()).expect("the id space is not exhausted");
 
             let mut issued: Vec<u64> = Vec::new();
             for entry in &closed {
                 // The acked ids and the framed ids are the same set, entry by entry: a window that
                 // returned the right multiset against the wrong record is a silent misattribution.
                 prop_assert_eq!(
-                    entry.entity_ids.iter().map(|i| i.raw()).collect::<Vec<_>>(),
+                    entry.items.iter().map(|i| i.entity.raw()).collect::<Vec<_>>(),
                     framed_ids(&entry.record)
                 );
                 issued.extend(framed_ids(&entry.record));
@@ -130,7 +130,7 @@ proptest! {
             }, WindowClaims::default());
         }
         let chunked_ids: Vec<u64> = chunked
-            .allocate(&mut Allocator::new(9), |e| e.raw())
+            .allocate(&mut Allocator::new(9), ShardId::ZERO, |e| e.raw())
             .unwrap()
             .0
             .iter()
@@ -151,7 +151,7 @@ proptest! {
             waiters: vec![()],
         }, WindowClaims::default());
         let whole_ids: Vec<u64> = whole
-            .allocate(&mut Allocator::new(9), |e| e.raw())
+            .allocate(&mut Allocator::new(9), ShardId::ZERO, |e| e.raw())
             .unwrap()
             .0
             .iter()
@@ -213,9 +213,9 @@ fn the_window_run_ratio_against_the_full_sort_ceiling() {
                 edges: Vec::new(),
                 waiters: vec![()],
             }, WindowClaims::default());
-            for entry in window.allocate(&mut alloc, |e| e.raw()).unwrap().0 {
-                for (row, id) in group.iter().zip(entry.entity_ids.iter()) {
-                    postings[row.terms[0].raw() as usize].push(id.raw());
+            for entry in window.allocate(&mut alloc, ShardId::ZERO, |e| e.raw()).unwrap().0 {
+                for (row, id) in group.iter().zip(entry.items.iter()) {
+                    postings[row.terms[0].raw() as usize].push(id.entity.raw());
                 }
             }
         }
@@ -308,7 +308,7 @@ fn the_emitted_run_ratio_rises_with_the_window_and_stays_under_the_full_sort_cei
                 edges: Vec::new(),
                 waiters: vec![()],
             }, WindowClaims::default());
-            let (_, tally) = window.allocate(&mut alloc, |e| e.raw()).unwrap();
+            let (_, tally) = window.allocate(&mut alloc, ShardId::ZERO, |e| e.raw()).unwrap();
             total.merge(tally);
         }
         (

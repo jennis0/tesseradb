@@ -20,10 +20,13 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
-
 use crate::error::{Result, StoreError};
-use crate::manifest::{CurrentPointer, Manifest, SegmentsManifest};
+use crate::layout::{segments_name, LayerSpaceLayout, ShardLayout};
+use crate::manifest::{
+    carries_deny, CurrentPointer, Manifest, PartitionFile, PublishedRefs, RecordFile,
+    SegmentsManifest, ShardFiles, ShardRef, SpaceRef,
+};
+use crate::read::hex_sha256;
 
 /// Serialise `manifest` to `<prefix_dir>/MANIFEST.json` and return the hex SHA-256 of the exact
 /// bytes written.
@@ -189,75 +192,184 @@ pub fn fsync_dir(path: &Path) -> Result<()> {
     })
 }
 
-fn hex_sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut hex = String::with_capacity(64);
-    for byte in digest {
-        hex.push_str(&format!("{byte:02x}"));
-    }
-    hex
-}
-
-/// Write `SEGMENTS-<n>.json`, fsynced, and fsync its directory entry.
-///
-/// **This is the commit point** (§7.3). Everything it names is already durable; a crash before the
-/// link leaves orphan files nothing references, and a crash after it leaves a bundle that opens
-/// at `n` with everything present.
-///
-/// **It refuses to replace an existing `SEGMENTS-<n>.json`, and that is a safety property.** A
-/// side-manifest is complete current state for its partition, not a diff, so a second writer at
-/// the same `n` does not merge with the first — it *replaces* it, with a manifest built from the
-/// same base and naming only its own segment. The winner's rows would then be absent from the
-/// manifest a restart opens, having been acked and published: silent loss of exactly the kind the
-/// rest of this module is built to prevent. Two plans in one dispatch share `next_n` and would do
-/// this; `dispatch_flushes` now sends one, and this is the guard at the artefact rather than at
-/// the caller — the same belt-and-braces the dictionary's no-duplicate rule takes, and for the
-/// same reason: a rule held by one caller is rediscovered from prose by the next.
-///
-/// **`hard_link` rather than `rename`, because `std` has no `RENAME_NOREPLACE`.** `rename(2)`
-/// replaces silently; `link(2)` fails with `AlreadyExists` and is equally atomic, so the reader's
-/// property — `SEGMENTS-<n>.json` existing at all means it is complete — is unchanged. A crash
-/// between the link and the unlink leaves a `.tmp` orphan, which is the same orphan story every
-/// stage before this one already accepts.
-pub fn write_segments_manifest(
+/// Write publication `n` of `partition`: [`stage_publication`], then [`StagedPublication::commit`].
+pub fn write_publication(
     prefix_dir: &Path,
     partition: &str,
     n: u64,
     manifest: &SegmentsManifest,
-) -> Result<()> {
+    previous: Option<&PublishedRefs>,
+) -> Result<PublishedRefs> {
+    stage_publication(prefix_dir, partition, n, manifest, previous)?.commit()
+}
+
+/// A publication whose shard and space files are durable and whose partition file, the commit
+/// point, is not yet written. Nothing names the staged files until [`Self::commit`] returns.
+#[must_use = "a staged publication commits nothing until `commit` is called"]
+pub struct StagedPublication {
+    dir: PathBuf,
+    n: u64,
+    bytes: Vec<u8>,
+    refs: PublishedRefs,
+}
+
+impl StagedPublication {
+    /// Write the partition's `SEGMENTS-<n>.json`, which commits the publication.
+    pub fn commit(self) -> Result<PublishedRefs> {
+        write_once(&self.dir, &segments_name(self.n), &self.bytes)?;
+        Ok(self.refs)
+    }
+}
+
+/// Write each shard's and each layer space's `SEGMENTS-<n>.json` of `manifest` whose bytes differ
+/// from the file `previous` names for it, fsynced with their directories, and return the
+/// partition file still to be written. A file whose bytes match keeps the reference, and so the
+/// number, of the publication that wrote it. `previous` is the newest publication's references,
+/// and `None` writes every file, as a new prefix needs.
+pub fn stage_publication(
+    prefix_dir: &Path,
+    partition: &str,
+    n: u64,
+    manifest: &SegmentsManifest,
+    previous: Option<&PublishedRefs>,
+) -> Result<StagedPublication> {
+    let mut split = manifest.split_files(partition);
+    let mut refs = PublishedRefs::default();
+    for record in &manifest.shards.records {
+        let files = split.shards.remove(&record.id).unwrap_or_default();
+        let dir = prefix_dir.join(ShardLayout::new(partition, record.id).rel());
+        let kept = previous
+            .and_then(|previous| previous.shards.iter().find(|named| named.id == record.id))
+            .map(|named| (named.n, named.size, named.sha256.as_str()));
+        let (written_at, size, sha256) = stage_file(
+            &dir,
+            n,
+            &RecordFile {
+                record,
+                files: &files,
+            },
+            kept,
+        )?;
+        refs.shards.push(ShardRef {
+            id: record.id,
+            n: written_at,
+            size,
+            sha256,
+            denies: carries_deny(&record.tombstones, &record.deny),
+        });
+    }
+    for record in &manifest.layer_spaces {
+        let files = split.layer_spaces.remove(&record.space).unwrap_or_default();
+        let dir = prefix_dir.join(LayerSpaceLayout::new(partition, record.space).rel());
+        let kept = previous
+            .and_then(|previous| {
+                previous
+                    .layer_spaces
+                    .iter()
+                    .find(|named| named.space == record.space)
+            })
+            .map(|named| (named.n, named.size, named.sha256.as_str()));
+        let (written_at, size, sha256) = stage_file(
+            &dir,
+            n,
+            &RecordFile {
+                record,
+                files: &files,
+            },
+            kept,
+        )?;
+        refs.layer_spaces.push(SpaceRef {
+            space: record.space,
+            n: written_at,
+            size,
+            sha256,
+            denies: carries_deny(&record.tombstones, &record.deny),
+        });
+    }
+    let mut fields = manifest.partition.clone();
+    fields.files = split.partition;
+    let file = PartitionFile {
+        partition: fields,
+        shards: ShardFiles {
+            size: manifest.shards.size,
+            next_id: manifest.shards.next_id,
+            files: refs.shards.clone(),
+        },
+        layer_spaces: refs.layer_spaces.clone(),
+    };
     let dir = crate::layout::partition_dir(prefix_dir, partition);
-    let path = dir.join(format!("SEGMENTS-{n}.json"));
-    let bytes = serde_json::to_vec_pretty(manifest).map_err(|source| StoreError::Json {
-        path: path.clone(),
+    let bytes = to_json(&dir.join(segments_name(n)), &file)?;
+    Ok(StagedPublication {
+        dir,
+        n,
+        bytes,
+        refs,
+    })
+}
+
+/// Write `value` as `dir`'s `SEGMENTS-<n>.json`, unless its bytes match `kept`, the size and
+/// digest of the file the previous publication named, and return the `(n, size, sha256)` the
+/// partition file names: `kept`'s where they match.
+fn stage_file(
+    dir: &Path,
+    n: u64,
+    value: &impl serde::Serialize,
+    kept: Option<(u64, u64, &str)>,
+) -> Result<(u64, u64, String)> {
+    let name = segments_name(n);
+    let bytes = to_json(&dir.join(&name), value)?;
+    let (size, sha256) = (bytes.len() as u64, hex_sha256(&bytes));
+    match kept {
+        Some((kept_n, kept_size, kept_sha256)) if kept_size == size && kept_sha256 == sha256 => {
+            Ok((kept_n, size, sha256))
+        }
+        _ => {
+            write_once(dir, &name, &bytes)?;
+            Ok((n, size, sha256))
+        }
+    }
+}
+
+fn to_json(path: &Path, value: &impl serde::Serialize) -> Result<Vec<u8>> {
+    serde_json::to_vec_pretty(value).map_err(|source| StoreError::Json {
+        path: path.to_path_buf(),
         source,
-    })?;
+    })
+}
+
+/// Write `name` in `dir`, fsynced, and fsync `dir`, refusing to replace a file of that name.
+///
+/// **A file named for a publication is never replaced, and that is a safety property.** Each
+/// `SEGMENTS-<n>.json` is complete current state for what it describes, not a diff, so a second
+/// writer at the same `n` would not merge with the first but replace it, and rows acknowledged
+/// and published under the first would be absent from the manifest a restart opens.
+///
+/// **`hard_link` rather than `rename`, because `std` has no `RENAME_NOREPLACE`.** `rename(2)`
+/// replaces silently; `link(2)` fails with `AlreadyExists` and is equally atomic, so a name
+/// existing at all means its file is complete. A crash between the link and the unlink leaves a
+/// `.tmp` orphan, which nothing reads.
+fn write_once(dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
+    let path = dir.join(name);
     let io = |what: &str, source: std::io::Error| StoreError::Io {
         path: PathBuf::from(format!("{} ({what})", path.display())),
         source,
     };
-
-    // Written to a temporary sibling and linked into place, so a reader walking the candidate list
-    // never sees a partial one: `SEGMENTS-<n>.json` existing at all must mean it is complete.
-    let tmp = dir.join(format!("SEGMENTS-{n}.json.tmp"));
+    fs::create_dir_all(dir).map_err(|e| io("create the directory", e))?;
+    let tmp = dir.join(format!("{name}.tmp"));
     {
         let mut file = File::create(&tmp).map_err(|e| io("create", e))?;
-        file.write_all(&bytes).map_err(|e| io("write", e))?;
+        file.write_all(bytes).map_err(|e| io("write", e))?;
         file.sync_all().map_err(|e| io("fsync", e))?;
     }
-    // Refuse-to-replace — see this function's doc for why this is not a rename.
     let linked = std::fs::hard_link(&tmp, &path);
-    // The temporary is consumed either way: on success it has a second name, on refusal it is
-    // rubbish. Unlinked before the error surfaces so a refused write leaves nothing behind for the
-    // next attempt at this `n` to trip over.
+    // The temporary is consumed either way, so a refused write leaves nothing for the next
+    // attempt at this name to trip over.
     let _ = std::fs::remove_file(&tmp);
-    // **A collision is its own error, naming the file.** The generic form reads as a filesystem
-    // fault, and this is a statement about `n`: one was allocated that another writer had already
-    // published at. See [`StoreError::SideManifestExists`].
     linked.map_err(|e| match e.kind() {
         std::io::ErrorKind::AlreadyExists => StoreError::SideManifestExists { path: path.clone() },
         _ => io("link (a side-manifest is never replaced)", e),
     })?;
-    File::open(&dir)
+    File::open(dir)
         .and_then(|d| d.sync_all())
         .map_err(|e| io("dir fsync", e))?;
     Ok(())
@@ -266,41 +378,67 @@ pub fn write_segments_manifest(
 /// How many `SEGMENTS-<n>.json` one partition directory keeps: the newest and the two before it.
 pub const SIDE_MANIFESTS_KEPT: usize = 3;
 
-/// Delete every `SEGMENTS-<n>.json` under one partition directory below the
-/// [`SIDE_MANIFESTS_KEPT`] highest, and return how many were removed.
+/// Delete every partition `SEGMENTS-<n>.json` below the [`SIDE_MANIFESTS_KEPT`] highest, then
+/// every shard's and layer space's `SEGMENTS-<m>.json` that no kept partition file names and whose
+/// `m` is below the highest kept `n`, and return how many files were removed.
 ///
 /// **Deleting a superseded candidate removes it from the step-down walk rather than letting the
 /// walk skip it, and that is what keeps the walk safe.** The walk's safety rests on never stepping
-/// *past* a deny-carrying manifest unexamined, and a side-manifest is complete current state for
-/// its partition rather than a diff: the newest one restates the whole deny state, serialised
-/// fresh from the live overlay, so nothing a pruned manifest carried is absent from the ones kept.
-/// What a reader loses is depth to step down into — below the kept three it errors with no
-/// verifying manifest, which is a refusal, never an older state served.
+/// *past* a deny-carrying manifest unexamined, and a publication is complete current state rather
+/// than a diff: the newest one restates the whole deny state, so nothing a pruned one carried is
+/// absent from the ones kept. What a reader loses is depth to step down into.
 ///
 /// **The highest `n` is never deleted**, whoever wrote it: the next number a writer may take is
-/// derived from the names present ([`crate::highest_side_manifest_n`]), and
-/// [`write_segments_manifest`]'s refusal to replace an existing `n` is the only thing standing
-/// between two writers at one number.
+/// derived from the names present. A shard or space file at or above it is a publication's that
+/// has not committed yet, and is left. Where a kept partition file cannot be read, no shard or
+/// space file is removed, since what it names is unknown.
 ///
-/// The directory entry is left unsynced: a deletion lost to a crash leaves a superseded manifest
-/// that the next publication prunes again.
+/// Directory entries are left unsynced: a deletion lost to a crash is pruned again.
 pub fn prune_superseded_segments_manifests(prefix_dir: &Path, partition: &str) -> Result<usize> {
     let dir = crate::layout::partition_dir(prefix_dir, partition);
     let mut present = crate::read::list_segments_manifests(&dir, partition)?;
-    if present.len() <= SIDE_MANIFESTS_KEPT {
-        return Ok(0);
-    }
     // Highest first, so the skip below keeps the newest and the two before it.
     present.sort_unstable_by(|a, b| b.cmp(a));
     let mut removed = 0;
-    for n in present.into_iter().skip(SIDE_MANIFESTS_KEPT) {
-        let path = dir.join(format!("SEGMENTS-{n}.json"));
-        match fs::remove_file(&path) {
-            Ok(()) => removed += 1,
-            // Another pass removed it, which is not a failure to remove it.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => return Err(StoreError::Io { path, source }),
+    for n in present.iter().skip(SIDE_MANIFESTS_KEPT) {
+        removed += remove_if_present(&dir.join(segments_name(*n)))?;
+    }
+    let Some(&highest) = present.first() else {
+        return Ok(removed);
+    };
+    let mut named = std::collections::BTreeSet::new();
+    for n in present.iter().take(SIDE_MANIFESTS_KEPT) {
+        let Ok(file) = crate::read::read_partition_file(&dir.join(segments_name(*n))) else {
+            return Ok(removed);
+        };
+        for shard in &file.shards.files {
+            named.insert(ShardLayout::new(partition, shard.id).manifest_rel(shard.n));
+        }
+        for space in &file.layer_spaces {
+            named.insert(LayerSpaceLayout::new(partition, space.space).manifest_rel(space.n));
+        }
+    }
+    for kind in [
+        crate::layout::shards_rel(partition),
+        crate::layout::layer_spaces_rel(partition),
+    ] {
+        for (rel, m) in crate::read::numbered_files_under(prefix_dir, &kind)? {
+            if m < highest && !named.contains(&rel) {
+                removed += remove_if_present(&prefix_dir.join(&rel))?;
+            }
         }
     }
     Ok(removed)
+}
+
+/// Remove `path`, counting it: one already gone is not a failure to remove it.
+fn remove_if_present(path: &Path) -> Result<usize> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(1),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(source) => Err(StoreError::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
 }

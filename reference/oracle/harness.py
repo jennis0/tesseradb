@@ -29,6 +29,8 @@ from pathlib import Path
 
 import requests
 
+from .layout import holds_only_the_build_publication
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CLI_BIN = REPO_ROOT / "target" / "release" / "mosaica"
 
@@ -579,7 +581,7 @@ def _fixture_bundle_is_usable(bundle_root: Path, wanted: dict) -> bool:
     is handed a corpus whose visible counts disagree with the oracle's parquet-derived ones by
     exactly the previous run's suppressions and deletes. Measured: a fresh fixture passes the
     differential, the very next invocation fails it, deterministically. A fresh build writes
-    exactly one segment set per partition (`SEGMENTS-0.json`); any partition carrying more has
+    exactly one publication per partition (`SEGMENTS-0.json`); any partition carrying another has
     been served against with writes and is rebuilt.
     """
     if not recipe_matches(bundle_root, wanted):
@@ -589,11 +591,7 @@ def _fixture_bundle_is_usable(bundle_root: Path, wanted: dict) -> bool:
         prefix_dir = bundle_root / current["prefix"]
         if json.loads((prefix_dir / "MANIFEST.json").read_text()) is None:
             return False
-        for partition in (prefix_dir / "partitions").iterdir():
-            segment_sets = list(partition.glob("SEGMENTS-*.json"))
-            if len(segment_sets) > 1:
-                return False
-        return True
+        return holds_only_the_build_publication(prefix_dir)
     except (OSError, KeyError, ValueError):
         return False
 

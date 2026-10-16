@@ -434,11 +434,15 @@ impl Probe {
                 continue;
             }
             // A manifest pruned between listing and reading was superseded; skip it.
-            let Ok(raw) = std::fs::read(dir.join(&name)) else {
-                continue;
+            let published = match mosaica_store::read_publication(prefix_dir, partition, n) {
+                Err(mosaica_store::StoreError::Io { source, .. })
+                    if source.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    continue
+                }
+                read => read?,
             };
-            let manifest: SegmentsManifest = serde_json::from_slice(&raw)?;
-            for breach in ordering_breaches(&manifest) {
+            for breach in ordering_breaches(&published.manifest) {
                 self.breaches.push(format!("SEGMENTS-{n}: {breach}"));
             }
         }

@@ -24,11 +24,10 @@ from oracle import identity as identity_mod
 from oracle.bundle import (
     artifact_mosaica_id,
     layer_mosaica_id,
-    newest_side_manifest,
     registered_layer,
     shard_records,
 )
-from oracle.layout import layer_space_dir, live_prefix_dir
+from oracle.layout import layer_space_dir, live_prefix_dir, newest_side_manifest
 
 A, B, C = "drop-a", "drop-b", "drop-c"
 #: The never-registered layer every route naming a dropped one is compared with.

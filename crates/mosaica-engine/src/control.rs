@@ -7,7 +7,7 @@ use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_store::manifest::DeclaredScalar;
 use mosaica_store::unique::{KeyKind, UniqueKey};
 use mosaica_store::StoreError;
-use mosaica_types::{EntityId, LayerSpace, MosaicaId, Target, TermId};
+use mosaica_types::{EntityId, ItemAt, LayerSpace, MosaicaId, Target, TermId};
 
 use crate::edited::Stamp;
 use crate::engine::Engine;
@@ -66,11 +66,10 @@ impl Engine {
             }
         }
         let named = name_items_in(self, &generation, &items)?;
-        let shard = generation.only_shard().id();
         let mut verdicts: Vec<std::result::Result<Target, resolve::Refusal>> = named
             .verdicts
             .into_iter()
-            .map(|verdict| verdict.map(|entity| Target::Item(shard, entity)))
+            .map(|verdict| verdict.map(ItemAt::target))
             .collect();
         for &(row, space, entity) in &artifact_rows {
             let target = self.artifact_target_in(&generation, space, entity);
@@ -126,7 +125,7 @@ pub enum AddressValue {
 /// generation it resolved them against, which a write naming the items carries.
 #[derive(Debug, Clone)]
 pub struct NamedItems {
-    pub verdicts: Vec<std::result::Result<EntityId, resolve::Refusal>>,
+    pub verdicts: Vec<std::result::Result<ItemAt, resolve::Refusal>>,
     pub ignored: Vec<String>,
     pub at: Stamp,
 }
@@ -138,7 +137,6 @@ pub(crate) fn name_items_in(
     table: &AddressTable,
 ) -> std::result::Result<NamedItems, crate::EngineError> {
     let declared = &generation.bundle.manifest.declared_scalars;
-    let shard = generation.only_shard();
     let mut unique: Vec<(u16, &DeclaredScalar, &[Option<AddressValue>])> = Vec::new();
     let mut ignored: Vec<String> = Vec::new();
     for (name, cells) in &table.columns {
@@ -146,7 +144,11 @@ pub(crate) fn name_items_in(
             .iter()
             .enumerate()
             .find(|(_, d)| d.name == *name)
-            .filter(|_| shard.unique.get(name).is_some());
+            .filter(|_| {
+                generation
+                    .shards()
+                    .any(|shard| shard.unique.get(name).is_some())
+            });
         match found {
             Some((at, d)) => unique.push((at as u16, d, cells)),
             None => ignored.push(name.clone()),
@@ -177,9 +179,9 @@ pub(crate) fn name_items_in(
             let wanted: Vec<MosaicaId> = present.iter().map(|(_, id)| *id).collect();
             let mut verdicts: Vec<Verdict> = (0..table.rows).map(no_item).collect();
             let found = engine.mosaica_ids_in(generation, &wanted).map_err(store)?;
-            for ((at, _), entity) in present.iter().zip(found) {
-                verdicts[*at] = match entity {
-                    Some(entity) => Verdict::Names(entity),
+            for ((at, _), item) in present.iter().zip(found) {
+                verdicts[*at] = match item {
+                    Some(item) => Verdict::Names(item),
                     None => Verdict::Refused(resolve::Refusal::UnknownMosaicaId { row: *at }),
                 };
             }
@@ -197,17 +199,19 @@ pub(crate) fn name_items_in(
             }
             let mut verdicts: Vec<Verdict> = (0..table.rows).map(no_item).collect();
             let field = resolve::Identifier::Unique(*position);
-            for (at, entity) in crate::unique::holders(shard, &d.name, &keys).map_err(store)? {
+            let holders =
+                crate::unique::holders_in_every_shard(generation, &d.name, &keys).map_err(store)?;
+            for (at, item) in holders {
                 let row = from[at];
                 verdicts[row] = match &verdicts[row] {
-                    Verdict::Names(held) if *held != entity => {
+                    Verdict::Names(held) if *held != item => {
                         Verdict::Refused(resolve::Refusal::NamesTwo {
                             row,
-                            named: vec![(field, *held), (field, entity)],
+                            named: vec![(field, *held), (field, item)],
                         })
                     }
                     Verdict::Refused(resolve::Refusal::NamesTwo { .. }) => continue,
-                    _ => Verdict::Names(entity),
+                    _ => Verdict::Names(item),
                 };
             }
             verdicts
@@ -234,7 +238,7 @@ pub(crate) fn name_items_in(
     let verdicts = verdicts
         .into_iter()
         .map(|verdict| match verdict {
-            Verdict::Names(entity) => Ok(entity),
+            Verdict::Names(item) => Ok(item),
             Verdict::Refused(refusal) => Err(refusal),
             Verdict::Creates => unreachable!("a call that addresses items creates none"),
         })
@@ -298,50 +302,54 @@ impl resolve::Holdings for Addressed<'_> {
         &self,
         field: u16,
         keys: &[resolve::Key],
-    ) -> Result<Vec<(usize, EntityId)>, StoreError> {
+    ) -> Result<Vec<(usize, ItemAt)>, StoreError> {
         let declared = &self.generation.bundle.manifest.declared_scalars[usize::from(field)];
         let kind = KeyKind::of(declared.arrow_type).expect("a unique column's type takes a key");
         let keys: Vec<UniqueKey> = keys
             .iter()
             .map(|k| UniqueKey::of_widened(kind, *k))
             .collect();
-        crate::unique::holders(self.generation.only_shard(), &declared.name, &keys)
+        crate::unique::holders_in_every_shard(self.generation, &declared.name, &keys)
     }
 
-    fn mosaica_holders(&self, ids: &[MosaicaId]) -> Result<Vec<Option<EntityId>>, StoreError> {
+    fn mosaica_holders(&self, ids: &[MosaicaId]) -> Result<Vec<Option<ItemAt>>, StoreError> {
         self.engine.mosaica_ids_in(self.generation, ids)
     }
 }
 
 impl Engine {
     /// The item each of `ids` names in `generation`: `None` per position for an identifier that
-    /// names no item, an artifact's and a layer's among them. An identifier's number names the
-    /// entity the edited-items map holds for it, or the number itself where it has none
-    /// ([`crate::edited`]). An item is named while `generation` holds it ([`holds_item`]) and has
-    /// not deleted it: a fold that removes a deleted item also drops its deletion, so the overlay
-    /// alone no longer says it is gone.
+    /// names no item, an artifact's and a layer's among them. An identifier names a number in its
+    /// shard, and the number names the entity the shard's edited-items map holds for it, or the
+    /// number itself where it has none ([`crate::edited`]). An item is named while its shard holds
+    /// it ([`holds_item`]) below the shard's high water and has not deleted it: a fold that
+    /// removes a deleted item also drops its deletion, so the overlay alone no longer says it is
+    /// gone.
     pub(crate) fn mosaica_ids_in(
         &self,
         generation: &Generation,
         ids: &[MosaicaId],
-    ) -> std::result::Result<Vec<Option<EntityId>>, StoreError> {
-        let high_water = self.write.live().only_shard().high_water();
-        let shard = generation.only_shard();
-        let named: Vec<Option<EntityId>> = ids
-            .iter()
-            .map(|id| crate::edited::number_named(&self.identity_key, generation, *id))
-            .collect();
-        let numbers: Vec<EntityId> = named.iter().flatten().copied().collect();
-        let mut held = crate::edited::entities_of_numbers(shard, &numbers, |entity| {
-            entity.raw() < high_water
-                && holds_item(shard, entity)
-                && !shard.overlay.is_deleted(entity)
-        })?
-        .into_iter();
-        Ok(named
-            .iter()
-            .map(|number| number.and_then(|_| held.next().flatten()))
-            .collect())
+    ) -> std::result::Result<Vec<Option<ItemAt>>, StoreError> {
+        let by_shard = mosaica_types::by_shard(ids.iter().enumerate().filter_map(|(at, id)| {
+            let (shard, number) = crate::edited::number_named(&self.identity_key, generation, *id)?;
+            Some((shard.id(), (at, shard, number)))
+        }));
+        let mut out = vec![None; ids.len()];
+        let live = self.write.live();
+        for (id, named) in by_shard {
+            let shard = named[0].1;
+            let high_water = live.shard(id).map_or(0, |shard| shard.high_water());
+            let numbers: Vec<EntityId> = named.iter().map(|(_, _, number)| *number).collect();
+            let held = crate::edited::entities_of_numbers(shard, &numbers, |entity| {
+                entity.raw() < high_water
+                    && holds_item(shard, entity)
+                    && !shard.overlay.is_deleted(entity)
+            })?;
+            for ((at, ..), entity) in named.iter().zip(held) {
+                out[*at] = entity.map(|entity| ItemAt::new(id, entity));
+            }
+        }
+        Ok(out)
     }
 
     /// Resolve `mosaica_id`s of items, artifacts and layers to what each names: `None` per
@@ -351,13 +359,12 @@ impl Engine {
         ids: &[MosaicaId],
     ) -> std::result::Result<Vec<Option<Target>>, StoreError> {
         let generation = self.generation.load_full();
-        let shard = generation.only_shard().id();
         let items = self.mosaica_ids_in(&generation, ids)?;
         Ok(ids
             .iter()
             .zip(items)
             .map(|(id, item)| match item {
-                Some(entity) => Some(Target::Item(shard, entity)),
+                Some(item) => Some(item.target()),
                 None => {
                     let (space, entity) = self.identity_key.invert_artifact(*id)?;
                     self.artifact_target_in(&generation, space, entity)
@@ -379,14 +386,16 @@ impl Engine {
             .then_some(Target::Artifact(space, entity))
     }
 
-    /// Does `view` hold a row for `entity`, flushed or buffered?
-    pub fn view_holds(&self, entity: EntityId, view: &str) -> bool {
-        crate::edited::holds_in_view(self.generation().only_shard(), entity, view)
+    /// Does `view` hold a row for `item`, flushed or buffered?
+    pub fn view_holds(&self, item: ItemAt, view: &str) -> bool {
+        self.generation()
+            .shard(item.shard)
+            .is_some_and(|shard| crate::edited::holds_in_view(shard, item.entity, view))
     }
 
-    /// An already-flushed entity's full term set, ascending, once the entity's own row has left
-    /// the buffer. The full set, never a subset: comparing only the terms the writer named would
-    /// accept a batch that dropped one.
+    /// An already-flushed entity's full term set in the one shard served, ascending, once the
+    /// entity's own row has left the buffer. The full set, never a subset: comparing only the
+    /// terms the writer named would accept a batch that dropped one.
     ///
     /// `None` where no layer holds a list — unknown, not empty. `Some(vec![])` means the item
     /// legitimately carries no label. A malformed layer is `None` and is logged, naming the
@@ -404,8 +413,8 @@ impl Engine {
             .map(|(hash, _)| hash)
     }
 
-    /// The wire `mosaica_id` of the item `entity` holds: the permutation of its number, returned
-    /// instead of the raw `EntityId`, which never crosses the trust boundary.
+    /// The wire `mosaica_id` of the item `entity` holds in the one shard served: the permutation of
+    /// its number, returned instead of the raw `EntityId`, which never crosses the trust boundary.
     pub fn mosaica_id_of(&self, entity: EntityId) -> std::result::Result<MosaicaId, StoreError> {
         self.mosaica_id_in(self.generation.load_full().only_shard(), entity)
     }
@@ -445,7 +454,7 @@ impl Engine {
         Stamp::of(&self.generation.load())
     }
 
-    /// [`Engine::accept_changes`] for one change to the item `entity` of the shard served now.
+    /// [`Engine::accept_changes`] for one change to the item `entity` of the one shard served.
     pub fn accept_change(
         &self,
         entity: EntityId,

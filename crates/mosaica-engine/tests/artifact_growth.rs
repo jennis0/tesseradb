@@ -913,7 +913,7 @@ fn ingest_into_view(
     }
     let row = mosaica_lifecycle::command::UnallocatedRow {
         view: view.to_string(),
-        join: item,
+        join: item.map(|entity| mosaica_types::ItemAt::new(mosaica_types::ShardId::ZERO, entity)),
         descriptors: descriptors.clone(),
         x: 5.0,
         y: 5.0,

@@ -135,28 +135,13 @@ fn open_fixture(args: &Args) -> Fixture {
             .expect("CURRENT parses");
     let prefix = current["prefix"].as_str().expect("CURRENT.prefix");
     let prefix_dir = args.fixture.join(prefix);
-    let partition_dir = mosaica_store::layout::partition_dir(&prefix_dir, "default");
-
-    // The highest SEGMENTS-<n>.json present. The store walks down from it verifying digests;
-    // this bin reads the bundle only and takes the newest.
-    let mut best: Option<(u64, PathBuf)> = None;
-    for entry in std::fs::read_dir(&partition_dir).expect("partition dir") {
-        let entry = entry.expect("dir entry");
-        let name = entry.file_name().to_string_lossy().to_string();
-        if let Some(n) = name
-            .strip_prefix("SEGMENTS-")
-            .and_then(|s| s.strip_suffix(".json"))
-            .and_then(|s| s.parse::<u64>().ok())
-        {
-            if best.as_ref().is_none_or(|(b, _)| n > *b) {
-                best = Some((n, entry.path()));
-            }
-        }
-    }
-    let (segments_n, segments_path) = best.expect("a SEGMENTS-<n>.json");
-    let manifest: SegmentsManifest =
-        serde_json::from_slice(&std::fs::read(&segments_path).expect("read segments manifest"))
-            .expect("segments manifest parses");
+    // The highest publication present. The store walks down from it verifying digests; this bin
+    // reads the bundle only and takes the newest.
+    let newest = mosaica_store::newest_publication(&prefix_dir, "default")
+        .expect("the newest publication reads")
+        .expect("a SEGMENTS-<n>.json");
+    let segments_n = newest.n;
+    let manifest = newest.manifest;
 
     let layer = manifest
         .partition

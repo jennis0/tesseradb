@@ -2118,6 +2118,7 @@ mod tests {
         let mut buffer = IngestBuffer::new();
         for (entity, item) in buffered {
             let row = WalRow {
+                shard: mosaica_types::ShardId::ZERO,
                 entity_id: EntityId::new(*entity),
                 view: item.view.clone(),
                 join: false,

@@ -33,7 +33,7 @@ use rayon::prelude::*;
 use mosaica_lifecycle::resolve::{self, Batch, Named, Refusal};
 use mosaica_store::key_index::{Key, KeySpill};
 use mosaica_store::unique::{KeyKind, UniqueKey};
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, ItemAt, ShardId};
 
 use super::report::{Tally, OUTSIDE_LIMIT};
 use super::scan::{FileRead, Scanned};
@@ -1372,10 +1372,12 @@ fn decide_row(
         tally.refuse(reason, row);
         return Ok(());
     }
+    // The build numbers items before it places them in shards, so each is named in shard 0 by
+    // its number.
     let named = |code: u32| {
         (
             resolve::Identifier::Unique(0),
-            EntityId::new(u64::from(code - 1)),
+            ItemAt::new(ShardId::ZERO, EntityId::new(u64::from(code - 1))),
         )
     };
     let verdict = match decisions {
@@ -1384,9 +1386,9 @@ fn decide_row(
     };
     match verdict {
         Named::One(item) => {
-            *stored = item.raw() as u32 + 1;
+            *stored = item.entity.raw() as u32 + 1;
             if let Some(sort) = named_items {
-                sort.push(item.raw() as u32, row as u32)
+                sort.push(item.entity.raw() as u32, row as u32)
                     .map_err(|e| BuildError::Invalid(e.to_string()))?;
             }
         }

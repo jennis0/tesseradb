@@ -24,9 +24,9 @@ one-shard answer, which is how this module looks for them.
    multiset. A point's `membership:<layer>` names the deepest served artifact holding it, the
    lowest `mosaica_id` among those at one rung, so it is put as that tie class, and a tag
    outside its class or not the lowest identifier in it fails the comparison.
-4. *Samples drawn by rank:* a sampled histogram's counts and the items its head says it counted,
-   whose cut is a bound on `mosaica_id`; and the points of a viewport whose cap binds in some
-   tile. Colour slots are a function of `mosaica_id` too, so no request names a palette.
+4. *Samples drawn by rank:* a sampled histogram's counts, and the groups and items its head says
+   it counted, whose cut is a bound on `mosaica_id`; and the points of a viewport whose cap binds
+   in some tile. Colour slots are a function of `mosaica_id` too, so no request names a palette.
 5. *Where θ is a sketch.* Over several shards the view has a segment per shard, so θ's `N_occ` is
    estimated, and `served`, the points and the trailer's counts may move by the sketch's error.
    The catalogue is served twice in each mode: θ-saturated, where everything is compared, and
@@ -577,7 +577,7 @@ def send_aggregate(side, server, token, body, request):
                 blocks.setdefault(row["key"], []).append(row)
             rows = multiset(list(blocks.values())) + [r for r in rows if r["group"] != "listed"]
         if head.get("sample") is not None and head["sample"].get("sampled"):
-            head = {**head, "sample": {"sampled": True}}
+            head = {k: v for k, v in head.items() if k != "groups"} | {"sample": {"sampled": True}}
             rows = [
                 {k: v for k, v in row.items() if k not in ("count", "reference_count", "lift")}
                 for row in rows

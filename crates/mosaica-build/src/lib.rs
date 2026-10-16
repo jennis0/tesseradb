@@ -2344,7 +2344,6 @@ fn write_manifests(
     shards: &[ShardWritten],
 ) -> Result<BuildReport> {
     let prefix_dir = args.out.join(PREFIX);
-    let partition_dir = mosaica_store::layout::partition_dir(&prefix_dir, PHASH);
     // Contracts §2.2 / §2.3 divide the two `files` maps by *when* a file appeared:
     // `MANIFEST.files` covers every file present at build time, and `SEGMENTS-<n>.files` covers
     // only what has been added *since* that manifest was written (streamed segments, later
@@ -2385,7 +2384,7 @@ fn write_manifests(
         .map(|shard| shard.unique.iter().map(|(attribute, _)| attribute.clone()).collect())
         .unwrap_or_default();
     let mut records = Vec::with_capacity(shards.len());
-    for shard in shards {
+    for (index, shard) in shards.iter().enumerate() {
         let unique_indexes = shard
             .unique
             .iter()
@@ -2402,6 +2401,12 @@ fn write_manifests(
             })
             .collect::<Result<Vec<_>>>()?;
         records.push(mosaica_store::manifest::ShardRecord {
+            // Every shard but the last is full; the last takes new items.
+            state: if index + 1 == shards.len() {
+                mosaica_types::ShardState::Open
+            } else {
+                mosaica_types::ShardState::Sealed
+            },
             watermark: shard.span.len(),
             high_water: shard.span.len(),
             membership_extents: shard.membership_extents.clone(),
@@ -2438,15 +2443,15 @@ fn write_manifests(
         },
         shards: mosaica_store::manifest::Shards {
             size: args.shard_size(),
+            next_id: shards.len() as u32,
             records,
         },
         layer_spaces: published_layers.layer_spaces.clone(),
     };
+    segments.slices_at_records_versions();
     // Empty where no artifact was published or a structure would not compose; the level then
     // composes on first use.
     segments.file_derived_by_shard(published_layers.derived_extents.clone());
-    let segments_path = partition_dir.join("SEGMENTS-0.json");
-    write_json(&segments_path, &segments)?;
 
     let manifest = Manifest {
         bundle_format: BUNDLE_FORMAT,
@@ -2602,6 +2607,12 @@ fn write_manifests(
     // `mosaica-store`), so this build and a fold cannot serialise the same shape two different
     // ways and disagree about what a manifest digests to.
     let manifest_digest = write_manifest_json(&prefix_dir, &manifest)?;
+    segments
+        .stamp_identities(&manifest_digest)
+        .ok_or_else(|| {
+            BuildError::Invalid(format!("'{manifest_digest}' is not a SHA-256 digest"))
+        })?;
+    mosaica_store::write_publication(&prefix_dir, PHASH, 0, &segments, None)?;
 
     // Everything the bundle names is now durable; `CURRENT` is written last and by rename, so
     // a reader either sees the previous bundle or this complete one, never a half-built prefix.

@@ -101,7 +101,7 @@
 
 use std::time::Instant;
 
-use mosaica_types::{EntityId, ShardFull, TermId};
+use mosaica_types::{EntityId, ItemAt, ShardFull, ShardId, TermId};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::alloc::{assign_sorted, Allocator, PendingItem};
@@ -151,10 +151,10 @@ pub enum Slot {
     /// whose `mosaica_id` it carries to a view.
     Written { row: u32, mosaica_id: Option<u64> },
     /// The row named this item and changed nothing, so it writes nothing.
-    Unchanged { entity: EntityId, mosaica_id: u64 },
+    Unchanged { item: ItemAt, mosaica_id: u64 },
     /// The row places this item in artifacts that do not hold it and changes nothing else: a
     /// change to the artifacts, not the item, which keeps its entity and is answered unchanged.
-    Joined { entity: EntityId, mosaica_id: u64 },
+    Joined { item: ItemAt, mosaica_id: u64 },
     /// The row moves its item to a new entity as the entry's edit at this position.
     Edited { edit: u32, mosaica_id: u64 },
     /// The identity rule refused the row, which writes nothing.
@@ -167,7 +167,7 @@ pub enum Slot {
 /// admitted only after the window holding it has closed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WindowClaims {
-    pub entities: Vec<EntityId>,
+    pub items: Vec<ItemAt>,
     /// Unique values, as `(declared position, key widened)`.
     pub keys: Vec<(u16, u128)>,
 }
@@ -177,11 +177,11 @@ impl WindowClaims {
     /// place touch, with `keys` the unique values the rows set.
     pub fn of(
         rows: &[UnallocatedRow],
-        named: impl IntoIterator<Item = EntityId>,
+        named: impl IntoIterator<Item = ItemAt>,
         keys: Vec<(u16, u128)>,
     ) -> Self {
         WindowClaims {
-            entities: rows
+            items: rows
                 .iter()
                 .filter_map(|row| row.join)
                 .chain(named)
@@ -237,11 +237,12 @@ pub struct ClosedEntry<W> {
     pub terms: Vec<Vec<TermId>>,
     /// The resolved term set of each edit's first row, in the record's edit order.
     pub edit_terms: Vec<Vec<TermId>>,
-    /// The assigned ids, in the entry's row order, then each edit's new entity in edit order, then
-    /// each [`Slot::Joined`] item's entity in slot order: a membership names them by position.
-    pub entity_ids: Vec<EntityId>,
+    /// The assigned ids with their shard, in the entry's row order, then each edit's new entity in
+    /// edit order, then each [`Slot::Joined`] item in slot order: a membership names them by
+    /// position.
+    pub items: Vec<ItemAt>,
     /// This entry's memberships, carried through the allocation unchanged: the ids the joins name
-    /// are `entity_ids[row]`, which is why the two travel together.
+    /// are `items[row]`, which is why the two travel together.
     ///
     /// **Mutable after the close, at exactly one site**: the mint pass resolves the keys that had
     /// no ordinal at admission, so that what follows it sees one shape rather than two.
@@ -566,7 +567,7 @@ pub struct CommitWindow<W> {
     /// inside the window is what makes a held batch id cost no window close at all.
     by_batch: FxHashMap<String, usize>,
     /// Everything this window's entries claim: see [`WindowClaims`].
-    entities: FxHashSet<EntityId>,
+    items: FxHashSet<ItemAt>,
     keys: FxHashSet<(u16, u128)>,
     rows: usize,
     wanted: (u64, u64),
@@ -586,7 +587,7 @@ impl<W> CommitWindow<W> {
         CommitWindow {
             entries: Vec::new(),
             by_batch: FxHashMap::default(),
-            entities: FxHashSet::default(),
+            items: FxHashSet::default(),
             keys: FxHashSet::default(),
             rows: 0,
             wanted: (0, 0),
@@ -602,7 +603,7 @@ impl<W> CommitWindow<W> {
     /// unique entries a new item's values become. Two entries touching one of them in one window
     /// would each be resolved without seeing the other.
     pub fn conflicts(&self, claims: &WindowClaims) -> bool {
-        claims.entities.iter().any(|e| self.entities.contains(e))
+        claims.items.iter().any(|e| self.items.contains(e))
             || claims.keys.iter().any(|k| self.keys.contains(k))
     }
 
@@ -679,7 +680,7 @@ impl<W> CommitWindow<W> {
     pub fn push(&mut self, entry: WindowEntry<W>, claims: WindowClaims) {
         let index = self.entries.len();
         self.by_batch.insert(entry.batch_id.clone(), index);
-        self.entities.extend(claims.entities);
+        self.items.extend(claims.items);
         self.keys.extend(claims.keys);
         self.rows += entry.rows.len() + entry.edits.iter().map(|e| e.rows.len()).sum::<usize>();
         let (edits, items) = wanted(&entry.rows, entry.edits.len());
@@ -711,12 +712,14 @@ impl<W> CommitWindow<W> {
     /// the numbers mean and what they do not. The error path returns none: a window that could not
     /// allocate made no assignment to measure, which is the same statement as "no effect at all".
     ///
+    /// `alloc` is shard `shard`'s, and every row and edit the window holds takes its id there.
     /// `mosaica_id_of` gives a created item's `mosaica_id` for the receipt each record carries; a
     /// row naming an item carries its own.
     #[allow(clippy::type_complexity)]
     pub fn allocate(
         self,
         alloc: &mut Allocator,
+        shard: ShardId,
         mosaica_id_of: impl Fn(EntityId) -> u64,
     ) -> Result<(Vec<ClosedEntry<W>>, FragmentationTally), (ShardFull, Vec<Vec<W>>)> {
         let mut entries = self.entries;
@@ -749,19 +752,20 @@ impl<W> CommitWindow<W> {
             let n = entry.rows.len();
             let mut wal_rows = Vec::with_capacity(n);
             let mut terms = Vec::with_capacity(n);
-            let mut entity_ids = Vec::with_capacity(n);
+            let mut items = Vec::with_capacity(n);
             for row in entry.rows {
                 let p = scattered
                     .next()
                     .expect("one PendingItem was gathered per row, in this order");
-                let (wal_row, row_terms) = row.into_wal_row_with(p);
-                entity_ids.push(wal_row.entity_id);
+                let (wal_row, row_terms) = row.into_wal_row_with(p, shard);
+                items.push(ItemAt::new(wal_row.shard, wal_row.entity_id));
                 wal_rows.push(wal_row);
                 terms.push(row_terms);
             }
             let mut edits = Vec::with_capacity(entry.edits.len());
             let mut edit_terms = Vec::with_capacity(entry.edits.len());
             for edit in entry.edits {
+                debug_assert_eq!(edit.shard, shard, "an edit takes its id in its own shard");
                 let p = scattered
                     .next()
                     .expect("one PendingItem was gathered per edit, in this order");
@@ -774,23 +778,25 @@ impl<W> CommitWindow<W> {
                         entity_id: entity,
                         edit: true,
                     });
-                    let (mut wal_row, row_terms) = row.into_wal_row_with(pending);
+                    let (mut wal_row, row_terms) = row.into_wal_row_with(pending, edit.shard);
                     wal_row.join = at > 0;
                     if at == 0 {
                         edit_terms.push(row_terms);
                     }
                     rows.push(wal_row);
                 }
-                entity_ids.push(entity.expect("assign_sorted assigns every item it is given"));
+                let entity = entity.expect("assign_sorted assigns every item it is given");
+                items.push(ItemAt::new(edit.shard, entity));
                 edits.push(WalEdit {
+                    shard: edit.shard,
                     old: edit.old,
                     number: edit.number,
                     suppressed: false,
                     rows,
                 });
             }
-            entity_ids.extend(entry.slots.iter().filter_map(|slot| match slot {
-                Slot::Joined { entity, .. } => Some(*entity),
+            items.extend(entry.slots.iter().filter_map(|slot| match slot {
+                Slot::Joined { item, .. } => Some(*item),
                 _ => None,
             }));
             let receipt = entry
@@ -841,7 +847,7 @@ impl<W> CommitWindow<W> {
                 },
                 terms,
                 edit_terms,
-                entity_ids,
+                items,
                 memberships: entry.memberships,
                 edges: entry.edges,
                 waiters: entry.waiters,
@@ -860,7 +866,7 @@ mod tests {
     fn push<W>(w: &mut CommitWindow<W>, entry: WindowEntry<W>) {
         let claims = WindowClaims::of(
             &entry.rows,
-            entry.edits.iter().map(|edit| edit.old),
+            entry.edits.iter().map(|edit| edit.item()),
             Vec::new(),
         );
         w.push(entry, claims);
@@ -915,10 +921,12 @@ mod tests {
             );
         }
         let mut alloc_split = Allocator::new(100);
-        let (closed, _) = split.allocate(&mut alloc_split, |e| e.raw()).unwrap();
+        let (closed, _) = split
+            .allocate(&mut alloc_split, ShardId::ZERO, |e| e.raw())
+            .unwrap();
         let split_ids: Vec<u64> = closed
             .iter()
-            .flat_map(|e| e.entity_ids.iter().map(|i| i.raw()))
+            .flat_map(|e| e.items.iter().map(|i| i.entity.raw()))
             .collect();
 
         let mut whole = CommitWindow::new(0);
@@ -929,10 +937,13 @@ mod tests {
         }
         push(&mut whole, entry("one", rows));
         let mut alloc_whole = Allocator::new(100);
-        let whole_ids: Vec<u64> = whole.allocate(&mut alloc_whole, |e| e.raw()).unwrap().0[0]
-            .entity_ids
+        let whole_ids: Vec<u64> = whole
+            .allocate(&mut alloc_whole, ShardId::ZERO, |e| e.raw())
+            .unwrap()
+            .0[0]
+            .items
             .iter()
-            .map(|i| i.raw())
+            .map(|i| i.entity.raw())
             .collect();
 
         assert_eq!(
@@ -953,13 +964,18 @@ mod tests {
         let mut w = CommitWindow::new(3);
         push(&mut w, entry("a", vec![row(&[5]), row(&[0])]));
         push(&mut w, entry("b", vec![row(&[3])]));
-        let (closed, _) = w.allocate(&mut Allocator::new(0), |e| e.raw()).unwrap();
+        let (closed, _) = w
+            .allocate(&mut Allocator::new(0), ShardId::ZERO, |e| e.raw())
+            .unwrap();
 
         let mut framed = Vec::new();
         for e in &closed {
             assert_eq!(
-                e.entity_ids,
-                e.rows().iter().map(|r| r.entity_id).collect::<Vec<_>>(),
+                e.items,
+                e.rows()
+                    .iter()
+                    .map(|r| ItemAt::new(ShardId::ZERO, r.entity_id))
+                    .collect::<Vec<_>>(),
                 "the acked ids must be this entry's rows' ids, in this entry's row order"
             );
             for r in e.rows() {
@@ -984,7 +1000,7 @@ mod tests {
     #[test]
     fn an_item_a_row_adds_and_a_value_a_row_sets_are_claimed() {
         let joining = UnallocatedRow {
-            join: Some(EntityId::new(7)),
+            join: Some(ItemAt::new(ShardId::ZERO, EntityId::new(7))),
             ..row(&[1])
         };
         let mut w: CommitWindow<&'static str> = CommitWindow::new(0);
@@ -1002,12 +1018,13 @@ mod tests {
         let mut w: CommitWindow<&'static str> = CommitWindow::new(0);
         assert_eq!(w.wanted(), (0, 0));
         let joining = UnallocatedRow {
-            join: Some(EntityId::new(7)),
+            join: Some(ItemAt::new(ShardId::ZERO, EntityId::new(7))),
             ..row(&[1])
         };
         push(&mut w, entry("a", vec![row(&[1]), joining, row(&[2])]));
         let mut edited = entry("b", vec![row(&[3])]);
         edited.edits.push(UnallocatedEdit {
+            shard: ShardId::ZERO,
             old: EntityId::new(5),
             number: EntityId::new(5),
             rows: vec![row(&[4]), row(&[4])],
@@ -1015,7 +1032,7 @@ mod tests {
         push(&mut w, edited);
         assert_eq!(w.wanted(), (1, 3));
         let mut alloc = Allocator::new(0);
-        w.allocate(&mut alloc, |e| e.raw()).unwrap();
+        w.allocate(&mut alloc, ShardId::ZERO, |e| e.raw()).unwrap();
         assert_eq!(
             alloc.high_water(),
             4,
@@ -1069,14 +1086,16 @@ mod tests {
         assert_eq!(w.len(), entries_before, "a join adds no entry");
         assert!(!w.conflicts(&claims(&[row(&[1])])), "a join claims nothing");
 
-        let (closed, _) = w.allocate(&mut Allocator::new(0), |e| e.raw()).unwrap();
+        let (closed, _) = w
+            .allocate(&mut Allocator::new(0), ShardId::ZERO, |e| e.raw())
+            .unwrap();
         assert_eq!(closed.len(), 1);
         assert_eq!(
             closed[0].waiters,
             vec!["w", "retry"],
             "both callers are owed the same ids off the one allocation"
         );
-        assert_eq!(closed[0].entity_ids.len(), 1, "one row, one id — not two");
+        assert_eq!(closed[0].items.len(), 1, "one row, one id — not two");
     }
 
     /// **The tally, on a layout whose every counter is worked out by hand below.**
@@ -1121,7 +1140,9 @@ mod tests {
                 ],
             ),
         );
-        let (_, t) = w.allocate(&mut Allocator::new(0), |e| e.raw()).unwrap();
+        let (_, t) = w
+            .allocate(&mut Allocator::new(0), ShardId::ZERO, |e| e.raw())
+            .unwrap();
 
         assert_eq!(t.rows, 6);
         assert_eq!(t.postings, 8, "four postings for each of the two terms");
@@ -1137,7 +1158,7 @@ mod tests {
     #[test]
     fn a_window_of_joins_is_tallied_in_id_order_whatever_the_gaps() {
         let joining = |entity: u64, terms: &[u32]| UnallocatedRow {
-            join: Some(mosaica_types::EntityId::new(entity)),
+            join: Some(ItemAt::new(ShardId::ZERO, EntityId::new(entity))),
             ..row(terms)
         };
         let mut w: CommitWindow<&'static str> = CommitWindow::new(0);
@@ -1149,10 +1170,10 @@ mod tests {
             ),
         );
         let (closed, t) = w
-            .allocate(&mut Allocator::new(100_000), |e| e.raw())
+            .allocate(&mut Allocator::new(100_000), ShardId::ZERO, |e| e.raw())
             .unwrap();
 
-        let ids: Vec<u64> = closed[0].entity_ids.iter().map(|e| e.raw()).collect();
+        let ids: Vec<u64> = closed[0].items.iter().map(|e| e.entity.raw()).collect();
         assert_eq!(
             ids,
             [70_000, 3, 100_000],
@@ -1179,7 +1200,9 @@ mod tests {
     fn a_term_repeated_within_one_row_is_one_posting() {
         let mut w: CommitWindow<&'static str> = CommitWindow::new(0);
         push(&mut w, entry("b1", vec![row(&[7, 9, 7]), row(&[7, 9, 7])]));
-        let (_, t) = w.allocate(&mut Allocator::new(0), |e| e.raw()).unwrap();
+        let (_, t) = w
+            .allocate(&mut Allocator::new(0), ShardId::ZERO, |e| e.raw())
+            .unwrap();
 
         assert_eq!(t.rows, 2);
         assert_eq!(t.postings, 4, "two rows x two DISTINCT terms, not six");
@@ -1201,13 +1224,15 @@ mod tests {
             &mut w,
             entry("b1", vec![row(&[1]), row(&[1]), row(&[1]), row(&[1])]),
         );
-        let (closed, t) = w.allocate(&mut Allocator::new(LO), |e| e.raw()).unwrap();
+        let (closed, t) = w
+            .allocate(&mut Allocator::new(LO), ShardId::ZERO, |e| e.raw())
+            .unwrap();
 
         assert_eq!(
             closed[0]
-                .entity_ids
+                .items
                 .iter()
-                .map(|e| e.raw())
+                .map(|e| e.entity.raw())
                 .collect::<Vec<_>>(),
             vec![65_534, 65_535, 65_536, 65_537],
             "the fixture must actually straddle the boundary, or it tests nothing"
@@ -1223,7 +1248,7 @@ mod tests {
         let mut w = CommitWindow::new(0);
         push(&mut w, entry("a", vec![row(&[1]), row(&[1])]));
         let mut alloc = Allocator::new(mosaica_types::ENTITY_END - 1);
-        let err = w.allocate(&mut alloc, |e| e.raw());
+        let err = w.allocate(&mut alloc, ShardId::ZERO, |e| e.raw());
         let Err((full, waiters)) = err else {
             panic!("a window past the end of the shard's ids must be refused");
         };

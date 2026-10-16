@@ -639,7 +639,7 @@ async fn a_partly_restated_page_appends_only_the_new_members() {
     let joining: Vec<u64> = growths[1]
         .iter()
         .map(|grown| {
-            mosaica_lifecycle::membership::deserialise_members(&grown.joining)
+            mosaica_lifecycle::ShardSets::from_wal(&grown.joining)
                 .expect("the delta decodes")
                 .cardinality()
         })

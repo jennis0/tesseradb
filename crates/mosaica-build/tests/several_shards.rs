@@ -913,6 +913,26 @@ fn one_item_past_the_size_opens_a_second_shard_of_one() {
             .map(|shard| shard.record.high_water)
             .collect();
         assert_eq!(high_waters, held, "at size {size}");
+        let partition = &bundle.partitions["default"];
+        let states: Vec<mosaica_types::ShardState> = partition
+            .shards
+            .iter()
+            .map(|shard| shard.record.state)
+            .collect();
+        let mut sealed = vec![mosaica_types::ShardState::Sealed; held.len() - 1];
+        sealed.push(mosaica_types::ShardState::Open);
+        assert_eq!(states, sealed, "at size {size}");
+        assert_eq!(partition.next_shard_id as usize, held.len());
+        let identities: std::collections::BTreeSet<[u8; 32]> = partition
+            .shards
+            .iter()
+            .map(|shard| shard.record.identity)
+            .collect();
+        assert_eq!(
+            identities.len(),
+            held.len(),
+            "each shard has its own identity"
+        );
         mosaica_build::verify(&root).expect("the bundle verifies");
     }
 }

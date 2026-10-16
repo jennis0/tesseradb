@@ -126,21 +126,10 @@ pub fn merge_edited_runs(
         path: dir.to_path_buf(),
         source,
     })?;
+    let writer = KeyRunWriter::<u32>::create(dir, stem, RUN_MAX_ENTRIES);
     match direction {
-        Direction::ByNumber => merge_runs::<u32>(
-            inputs,
-            |_, entity| retired.contains(entity),
-            dir,
-            stem,
-            RUN_MAX_ENTRIES,
-        ),
-        Direction::ByEntity => merge_runs::<u32>(
-            inputs,
-            |entity, _| retired.contains(entity),
-            dir,
-            stem,
-            RUN_MAX_ENTRIES,
-        ),
+        Direction::ByNumber => merge_runs(inputs, |_, entity| retired.contains(entity), writer),
+        Direction::ByEntity => merge_runs(inputs, |entity, _| retired.contains(entity), writer),
     }
 }
 
@@ -625,6 +614,19 @@ mod tests {
         .unwrap();
         assert_eq!(folded.entities_of(&[3]).unwrap(), vec![(0, 41)]);
         assert_eq!(folded.numbers_of(&[40, 41]).unwrap(), vec![(1, 3)]);
+        let runs = [
+            &written.by_number,
+            &written.by_entity,
+            &by_number,
+            &by_entity,
+        ];
+        for run in runs.into_iter().flatten() {
+            let check = crate::key_index::verify_run(&run.path).unwrap();
+            assert_eq!(
+                check.filter_blocks, 0,
+                "an edited-items map carries no key filter"
+            );
+        }
     }
 
     #[test]

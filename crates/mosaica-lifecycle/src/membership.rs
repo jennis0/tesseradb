@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use croaring::{Bitmap, Portable};
 use mosaica_roaring::OwnedView;
-use mosaica_types::{EntityId, LayerSpace};
+use mosaica_types::{EntityId, ItemAt, LayerSpace, ShardId};
 
 /// Withdraw every content of one record whose generating set names a member this fold retired
 /// ([decision 0135](../../../docs/decisions/0135-a-generating-set-is-the-callers-claim-i8-withdrawn.md)).
@@ -289,7 +289,7 @@ pub struct IncomingArtifact {
     /// not cross views. `None` on an entity-scoped layer, whose one artifact set is drawn on
     /// every view it names, and refused there.
     pub view: Option<String>,
-    pub members: Bitmap,
+    pub members: ShardSets,
     /// The entities the membership leaves out, where the caller spelled it by exclusion
     /// (`ingest.md` §2.3), and `None` for the inclusion spelling `members` carries.
     ///
@@ -301,7 +301,7 @@ pub struct IncomingArtifact {
     /// this one that can carry the spelling**, so no serving path can learn it and none can
     /// evaluate a complement against a viewer's mask, which would disclose the existence of items
     /// outside it (`annotation-write-cycle.md` §6.1).
-    pub excluding: Option<Bitmap>,
+    pub excluding: Option<ShardSets>,
     /// The artifact's supplied content, as **ranked contents** — most specific first. Empty on a
     /// layer that declares no supplied content, which is every layer Stage 2 could publish.
     ///
@@ -363,7 +363,7 @@ pub struct IncomingContent {
     /// vacuous and the content serves unconditionally. A set supplied where none is tested is
     /// refused rather than stored: a claim the service carries and never checks is worse than no
     /// claim, because a reader takes its presence for a control.
-    pub generated_from: Bitmap,
+    pub generated_from: ShardSets,
 }
 
 /// One membership, built from resolved entities — **sorted once, then appended**.
@@ -405,30 +405,163 @@ fn bitmap_of_sorted(entities: &[u32]) -> Bitmap {
     bitmap
 }
 
+/// `entities` as shard 0's set.
+fn shard_zero_set(entities: impl IntoIterator<Item = EntityId>) -> ShardSets {
+    ShardSets::in_shard(ShardId::ZERO, bitmap_of_entities(entities))
+}
+
+/// Entity sets by point shard: one set for each shard holding something, ascending by shard.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ShardSets(Vec<(ShardId, Bitmap)>);
+
+impl ShardSets {
+    /// The sets `items` make, in whatever order they come.
+    pub fn of_items(items: impl IntoIterator<Item = ItemAt>) -> ShardSets {
+        ShardSets(
+            mosaica_types::by_shard(items.into_iter().map(|item| (item.shard, item.entity)))
+                .into_iter()
+                .map(|(shard, entities)| (shard, bitmap_of_entities(entities)))
+                .collect(),
+        )
+    }
+
+    /// `set` as shard `shard`'s, and no other shard holding anything.
+    pub fn in_shard(shard: ShardId, set: Bitmap) -> ShardSets {
+        let mut sets = ShardSets::default();
+        sets.set(shard, set);
+        sets
+    }
+
+    /// Shard `shard`'s set, or `None` where it holds nothing.
+    pub fn get(&self, shard: ShardId) -> Option<&Bitmap> {
+        let at = self
+            .0
+            .binary_search_by_key(&shard, |(held, _)| *held)
+            .ok()?;
+        Some(&self.0[at].1)
+    }
+
+    /// Makes `set` shard `shard`'s, in place of what it held.
+    pub fn set(&mut self, shard: ShardId, set: Bitmap) {
+        match self.0.binary_search_by_key(&shard, |(held, _)| *held) {
+            Ok(at) if set.is_empty() => {
+                self.0.remove(at);
+            }
+            Ok(at) => self.0[at].1 = set,
+            Err(_) if set.is_empty() => {}
+            Err(at) => self.0.insert(at, (shard, set)),
+        }
+    }
+
+    /// Each shard holding something, with its set, ascending by shard.
+    pub fn iter(&self) -> impl Iterator<Item = (ShardId, &Bitmap)> {
+        self.0.iter().map(|(shard, set)| (*shard, set))
+    }
+
+    /// Runs `f` over each shard's set, which it may change; a set left empty is dropped.
+    pub fn try_for_each_mut<E>(
+        &mut self,
+        mut f: impl FnMut(ShardId, &mut Bitmap) -> Result<(), E>,
+    ) -> Result<(), E> {
+        for (shard, set) in &mut self.0 {
+            f(*shard, set)?;
+        }
+        self.0.retain(|(_, set)| !set.is_empty());
+        Ok(())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The members over every shard.
+    pub fn cardinality(&self) -> u64 {
+        self.0.iter().map(|(_, set)| set.cardinality()).sum()
+    }
+
+    /// Each shard's set less `other`'s set of that shard.
+    fn andnot(&self, other: &ShardSets) -> ShardSets {
+        let mut out = ShardSets::default();
+        for (shard, set) in self.iter() {
+            match other.get(shard) {
+                Some(less) => out.set(shard, set.andnot(less)),
+                None => out.set(shard, set.clone()),
+            }
+        }
+        out
+    }
+
+    /// The sets as a log record carries them.
+    pub fn to_wal(&self) -> Vec<crate::wal::WalShardSet> {
+        self.iter()
+            .map(|(shard, set)| crate::wal::WalShardSet {
+                shard,
+                entities: serialise_members(set),
+            })
+            .collect()
+    }
+
+    /// The sets a log record carries, or `None` where a set is not a bitmap or the shards are not
+    /// ascending and distinct.
+    pub fn from_wal(sets: &[crate::wal::WalShardSet]) -> Option<ShardSets> {
+        if sets.windows(2).any(|pair| pair[0].shard >= pair[1].shard) {
+            return None;
+        }
+        let mut out = ShardSets::default();
+        for logged in sets {
+            out.set(logged.shard, deserialise_members(&logged.entities)?);
+        }
+        Some(out)
+    }
+
+    /// Shard 0's set. Panics where another shard holds something, whose entities would otherwise
+    /// become shard 0's.
+    pub fn shard_zero(&self) -> &Bitmap {
+        self.shard_zero_only().unwrap_or_else(|| {
+            panic!(
+                "a set in shards {:?} cannot be written as shard 0's",
+                self.0
+                    .iter()
+                    .map(|(shard, _)| shard.raw())
+                    .collect::<Vec<_>>()
+            )
+        })
+    }
+
+    /// Shard 0's set, or `None` where another shard holds something.
+    fn shard_zero_only(&self) -> Option<&Bitmap> {
+        static EMPTY: std::sync::OnceLock<Bitmap> = std::sync::OnceLock::new();
+        match self.0.as_slice() {
+            [] => Some(EMPTY.get_or_init(Bitmap::new)),
+            [(ShardId::ZERO, set)] => Some(set),
+            _ => None,
+        }
+    }
+}
+
 impl IncomingContent {
-    /// Builds one from resolved entities — the constructor exists for
-    /// [`IncomingArtifact::from_entities`]'s reason: `mosaica-server` names a set without being
-    /// able to do arithmetic on one.
+    /// Builds one from resolved entities of shard 0 — the constructor exists for
+    /// [`IncomingArtifact::from_entities`]'s reason.
     pub fn new(values: Vec<String>, generated_from: impl IntoIterator<Item = EntityId>) -> Self {
         IncomingContent {
             values,
-            generated_from: bitmap_of_entities(generated_from),
+            generated_from: shard_zero_set(generated_from),
         }
     }
 }
 
 impl IncomingArtifact {
-    /// Builds one from resolved entities.
+    /// Builds one from resolved entities of shard 0, as a build numbers items and a caller over
+    /// one shard names them.
     ///
-    /// **The constructor exists so the bitmap type stays inside this crate.** `mosaica-server`
-    /// assembles these from a resolved batch and carries no Roaring dependency — a layering
-    /// `check-layers.sh` holds, and one worth holding: the request plane should be able to name a
-    /// membership without being able to do arithmetic on one.
+    /// **The constructor exists so the bitmap type stays inside this crate**, as
+    /// [`ShardSets::of_items`] does for a caller naming items in their shards: the request plane
+    /// should be able to name a membership without being able to do arithmetic on one.
     pub fn from_entities(key: Option<String>, members: impl IntoIterator<Item = EntityId>) -> Self {
         IncomingArtifact {
             key,
             view: None,
-            members: bitmap_of_entities(members),
+            members: shard_zero_set(members),
             excluding: None,
             contents: Vec::new(),
             attached_to: None,
@@ -444,19 +577,20 @@ impl IncomingArtifact {
     /// **The method exists so the bitmap type stays inside this crate**, on
     /// [`Self::from_entities`]'s argument: the request plane names a list without being able to
     /// complement one.
-    pub fn exclude(&mut self, excluded: impl IntoIterator<Item = EntityId>) {
-        self.excluding = Some(bitmap_of_entities(excluded));
+    pub fn exclude(&mut self, excluded: impl IntoIterator<Item = ItemAt>) {
+        self.excluding = Some(ShardSets::of_items(excluded));
     }
 
-    /// The membership an exclusion means: `entities` — the view's entity set as of this step —
-    /// minus the excluded list, materialised here and the spelling dropped.
+    /// The membership an exclusion means: `entities` — the view's entity set in each shard as of
+    /// this step — minus the excluded list in that shard, materialised here and the spelling
+    /// dropped.
     ///
-    /// One `andnot` over the view's entity bitmap, which is what the bound on the *list* buys:
-    /// the complement itself is not bounded and need not be (`ingest.md` §2.3). Answers how large
-    /// the membership became, for the caller's log, or `None` where the artifact carried no
+    /// One `andnot` over each shard's view entity bitmap, which is what the bound on the *list*
+    /// buys: the complement itself is not bounded and need not be (`ingest.md` §2.3). Answers how
+    /// large the membership became, for the caller's log, or `None` where the artifact carried no
     /// exclusion. The list is left in place: the held-key refusal is what reads it, and it
     /// reaches no record.
-    pub fn complement_against(&mut self, entities: &Bitmap) -> Option<u64> {
+    pub fn complement_against(&mut self, entities: &ShardSets) -> Option<u64> {
         let excluded = self.excluding.as_ref()?;
         self.members = entities.andnot(excluded);
         Some(self.members.cardinality())
@@ -495,7 +629,7 @@ impl IncomingArtifact {
         IncomingArtifact {
             key,
             view: None,
-            members: bitmap_of_sorted(members),
+            members: ShardSets::in_shard(ShardId::ZERO, bitmap_of_sorted(members)),
             excluding: None,
             contents,
             attached_to: None,
@@ -535,12 +669,12 @@ pub struct IncomingGrowth {
     pub view: Option<String>,
     /// The entities joining. Empty is a no-op rather than a refusal: nothing joining is a thing a
     /// caller can honestly say, and it discloses nothing.
-    pub joining: Bitmap,
+    pub joining: ShardSets,
     /// The entities leaving, on `joining`'s terms and applied after it (`ingest.md` §1.1).
     ///
     /// **Only a generating set may shrink.** A membership never does (`ingest.md` §10, R7), so a
     /// non-empty set here with `rank` absent refuses the batch.
-    pub leaving: Bitmap,
+    pub leaving: ShardSets,
     /// Which of the artifact's sets this row moves: `None` the membership, `Some(k)` the
     /// generating set of the content at rank *k* (`ingest.md` §1.1, §1.5).
     ///
@@ -587,21 +721,21 @@ impl FixedParts {
 }
 
 impl IncomingGrowth {
-    /// Builds one from resolved entities — [`IncomingArtifact::from_entities`]'s reason: the
-    /// bitmap type stays inside this crate, so a request plane can name a set without being able
-    /// to do arithmetic on one.
+    /// Builds one from resolved entities of shard 0 — [`IncomingArtifact::from_entities`]'s
+    /// reason: the bitmap type stays inside this crate, so a request plane can name a set without
+    /// being able to do arithmetic on one.
     pub fn from_entities(key: String, joining: impl IntoIterator<Item = EntityId>) -> Self {
         IncomingGrowth {
             key,
             view: None,
-            joining: bitmap_of_entities(joining),
-            leaving: Bitmap::new(),
+            joining: shard_zero_set(joining),
+            leaving: ShardSets::default(),
             rank: None,
             parts: FixedParts::default(),
         }
     }
 
-    /// A page of one set: the entities joining it and the entities leaving it, at the content's
+    /// A page of one set: the entities of shard 0 joining it and leaving it, at the content's
     /// rank or, with no rank, the membership (`ingest.md` §1.1). A membership never shrinks, so a
     /// page with no rank and entities leaving is refused at `LayerRegistry::prepare_grow`, which
     /// is where the caller is told which spelling they wanted.
@@ -614,8 +748,8 @@ impl IncomingGrowth {
         IncomingGrowth {
             key,
             view: None,
-            joining: bitmap_of_entities(joining),
-            leaving: bitmap_of_entities(leaving),
+            joining: shard_zero_set(joining),
+            leaving: shard_zero_set(leaving),
             rank,
             parts: FixedParts::default(),
         }
@@ -1104,7 +1238,8 @@ impl ArtifactRecord {
 
 type ShapeSlots = Vec<Option<Box<ArtifactShapes>>>;
 
-/// Every artifact of every layer, keyed by `(layer, level, ordinal)`.
+/// Every artifact of every layer, keyed by `(layer, level, ordinal)`. Holds shard 0's slice of
+/// each set.
 ///
 /// **Ordinals are dense within a level**, so a level is a vector rather than a map: the address is
 /// `entity − run.start` arithmetic, and an ordinal that names no artifact is a hole rather than a
@@ -1797,7 +1932,7 @@ impl ArtifactStore {
             // Damage is a refusal, not an empty membership — see `deserialise_members`. Skipping
             // leaves a hole, which answers *absent*; the alternative decodes a corrupt record to a
             // legitimately emptied artifact and serves it.
-            let Some(members) = deserialise_members(&published.members) else {
+            let Some(members) = store_slice(&published.members) else {
                 refused += 1;
                 continue;
             };
@@ -1815,7 +1950,7 @@ impl ArtifactStore {
                     if digest != v.digest {
                         return None;
                     }
-                    deserialise_members(&v.generated_from).map(|generated_from| ContentSet {
+                    store_slice(&v.generated_from).map(|generated_from| ContentSet {
                         values: Some(v.values.clone()),
                         digest,
                         generated_from,
@@ -1877,12 +2012,12 @@ impl ArtifactStore {
             // decoded short is an acked join that silently did not happen, and the artifact then
             // serves the count it had before — which nothing distinguishes from a criterion it
             // failed to clear.
-            let Some(joining) = deserialise_members(&grown.joining) else {
+            let Some(joining) = store_slice(&grown.joining) else {
                 refused += 1;
                 refused_growth.push(index);
                 continue;
             };
-            let Some(leaving) = deserialise_leaving(&grown.leaving) else {
+            let Some(leaving) = store_slice(&grown.leaving) else {
                 refused += 1;
                 refused_growth.push(index);
                 continue;
@@ -3045,6 +3180,7 @@ impl ArtifactStore {
 ///             | shape
 /// content    := digest (32 bytes, SHA-256 of the values)
 ///             | u64 LE cardinality                       -- the set's stored cardinality
+///             | u8 withdrawn                             -- 0: served at its rank
 /// attachment := u8 0                                     -- unattached
 ///             | u8 1 | u16 LE layer_len | layer bytes (UTF-8)
 ///                    | u32 LE space | u32 LE level | u32 LE ordinal | u64 LE target entity
@@ -3127,6 +3263,8 @@ pub fn encode_record(record: &ArtifactRecord, shape: Option<&ArtifactShapes>) ->
         for content in &record.contents {
             out.extend_from_slice(&content.digest);
             out.extend_from_slice(&content.cardinality.to_le_bytes());
+            // No rank is withdrawn in place: a withdrawal removes the content.
+            out.push(0);
         }
     }
     match &record.attached_to {
@@ -3319,6 +3457,10 @@ pub fn decode_slice(
     for _ in 0..count {
         let digest: [u8; 32] = r.take(32)?.try_into().ok()?;
         let cardinality = r.u64()?;
+        // A withdrawn rank cannot be kept out of service here, so the record does not decode.
+        if r.take(1)?[0] != 0 {
+            return None;
+        }
         let generated_from = sets.next()?;
         contents.push(ContentSet {
             // ⊘ The extent carries no values — see [`ContentSet::values`]. A restored content is
@@ -3523,6 +3665,12 @@ pub fn decode_members(blob: &[u8]) -> Option<(Bitmap, Vec<Bitmap>)> {
     Some((members, sets))
 }
 
+/// Shard 0's set of a logged set, or `None` where the bytes are damage or another shard holds
+/// something: applying only shard 0's part would serve a set nobody declared.
+pub fn store_slice(sets: &[crate::wal::WalShardSet]) -> Option<Bitmap> {
+    ShardSets::from_wal(sets)?.shard_zero_only().cloned()
+}
+
 /// Serialise a membership for the WAL, in CRoaring's portable form.
 ///
 /// Portable rather than the frozen form the fragment cache uses: frozen is an mmap-oriented layout
@@ -3544,14 +3692,14 @@ pub fn growth_record<'a>(
     layer: &str,
     space: LayerSpace,
     level: u32,
-    joins: impl IntoIterator<Item = (u32, &'a Bitmap)>,
+    joins: impl IntoIterator<Item = (u32, &'a ShardSets)>,
 ) -> Option<crate::wal::WalRecord> {
     let growth: Vec<crate::wal::MembershipGrowth> = joins
         .into_iter()
         .filter(|(_, joining)| !joining.is_empty())
         .map(|(ordinal, joining)| crate::wal::MembershipGrowth {
             ordinal,
-            joining: serialise_members(joining),
+            joining: joining.to_wal(),
             // A membership never shrinks (`ingest.md` §10, R7); a generating-set page is T2b's
             // record and takes the other variant.
             leaving: Vec::new(),
@@ -3573,10 +3721,17 @@ impl ArtifactStore {
     /// removes with the entity. A generating set trades the old for the new, through the one
     /// routine that changes a set, so its cardinality is unchanged and its content is never
     /// withdrawn by the move.
-    pub fn carried_over(&self, moved: &[(EntityId, EntityId)]) -> Vec<crate::wal::WalRecord> {
-        if moved.is_empty() {
+    ///
+    /// Every pair is an edit in `shard`, and an edit outside shard 0 finds nothing here to carry.
+    pub fn carried_over(
+        &self,
+        shard: ShardId,
+        moved: &[(EntityId, EntityId)],
+    ) -> Vec<crate::wal::WalRecord> {
+        if moved.is_empty() || shard != ShardId::ZERO {
             return Vec::new();
         }
+        let in_shard = |set: Bitmap| ShardSets::in_shard(shard, set).to_wal();
         let old: Bitmap = moved.iter().map(|(old, _)| old.raw() as u32).collect();
         let new_of: std::collections::BTreeMap<u32, u32> = moved
             .iter()
@@ -3598,7 +3753,7 @@ impl ArtifactStore {
                     let (joining, _) = replaced(&record.members.projected(|part| part.and(&old)));
                     growth.push(crate::wal::MembershipGrowth {
                         ordinal: ordinal as u32,
-                        joining: serialise_members(&joining),
+                        joining: in_shard(joining),
                         leaving: Vec::new(),
                         set: crate::wal::GrownSet::Membership,
                     });
@@ -3610,8 +3765,8 @@ impl ArtifactStore {
                     let (joining, leaving) = replaced(&content.generated_from);
                     growth.push(crate::wal::MembershipGrowth {
                         ordinal: ordinal as u32,
-                        joining: serialise_members(&joining),
-                        leaving: serialise_members(&leaving),
+                        joining: in_shard(joining),
+                        leaving: in_shard(leaving),
                         set: crate::wal::GrownSet::GeneratingSet {
                             rank: rank as u16,
                             cardinality: content.generated_from.cardinality(),
@@ -3643,7 +3798,7 @@ pub fn members_added(record: &crate::wal::WalRecord, store: &ArtifactStore) -> u
     match record {
         crate::wal::WalRecord::ArtifactPublish { artifacts, .. } => artifacts
             .iter()
-            .filter_map(|artifact| deserialise_members(&artifact.members))
+            .filter_map(|artifact| ShardSets::from_wal(&artifact.members))
             .map(|members| members.cardinality())
             .sum(),
         crate::wal::WalRecord::ArtifactGrow {
@@ -3655,25 +3810,13 @@ pub fn members_added(record: &crate::wal::WalRecord, store: &ArtifactStore) -> u
             .iter()
             .filter(|delta| delta.set == crate::wal::GrownSet::Membership)
             .filter_map(|delta| {
-                let joining = deserialise_members(&delta.joining)?;
+                let joining = store_slice(&delta.joining)?;
                 let held = store.get(layer, *level, delta.ordinal)?;
                 Some(joining.cardinality() - held.members.and_cardinality(&joining))
             })
             .sum(),
         _ => 0,
     }
-}
-
-/// A growth's **leaving** set, where no bytes at all is the empty set.
-///
-/// The membership route writes no bytes rather than the serialisation of an empty bitmap
-/// (`ingest.md` §10, R7: a membership never shrinks), so the two spellings of *nothing leaves*
-/// have to read alike. Bytes that are neither are damage, on [`deserialise_members`]'s rule.
-pub fn deserialise_leaving(bytes: &[u8]) -> Option<Bitmap> {
-    if bytes.is_empty() {
-        return Some(Bitmap::new());
-    }
-    deserialise_members(bytes)
 }
 
 /// The inverse, refusing bytes that are not a bitmap.
@@ -4638,6 +4781,29 @@ mod tests {
     }
 
     #[test]
+    fn a_contents_withdrawn_marker_is_stored_and_a_withdrawn_rank_does_not_decode() {
+        let mut r = record(100, &[1, 2, 3]);
+        let digest = content_digest(&["a label".to_string()]);
+        r.contents = vec![ContentSet {
+            values: Some(vec!["a label".into()]),
+            digest,
+            generated_from: Bitmap::of(&[1, 2, 3]),
+            cardinality: 3,
+        }];
+        let mut blob = encode_record(&r, None);
+        let marker = blob
+            .windows(32)
+            .position(|window| window == digest)
+            .expect("the content's digest is stored")
+            + 32
+            + 8;
+        assert_eq!(blob[marker], 0, "served at its rank");
+        assert!(decode_record(r.entity, &blob, &encode_members(&r)).is_some());
+        blob[marker] = 1;
+        assert!(decode_record(r.entity, &blob, &encode_members(&r)).is_none());
+    }
+
+    #[test]
     fn a_record_and_a_members_blob_that_do_not_agree_are_refused() {
         let mut r = record(100, &[1, 2, 3]);
         r.contents = vec![ContentSet {
@@ -4777,7 +4943,7 @@ mod tests {
             level,
             growth: vec![crate::wal::MembershipGrowth {
                 ordinal,
-                joining: serialise_members(&Bitmap::of(joining)),
+                joining: ShardSets::in_shard(ShardId::ZERO, Bitmap::of(joining)).to_wal(),
                 leaving: Vec::new(),
                 set: crate::wal::GrownSet::Membership,
             }],
@@ -4803,7 +4969,7 @@ mod tests {
                 key: Some(format!("c{ordinal}")),
                 view: None,
                 incarnation: 0,
-                members: serialise_members(&Bitmap::of(members)),
+                members: ShardSets::in_shard(ShardId::ZERO, Bitmap::of(members)).to_wal(),
                 contents: Vec::new(),
                 attached_to: None,
                 parents: Vec::new(),
@@ -4826,7 +4992,7 @@ mod tests {
             artifacts[0].contents = vec![crate::wal::PublishedContent {
                 values: vec!["a label".to_string()],
                 digest: content_digest(&["a label".to_string()]),
-                generated_from: serialise_members(&Bitmap::of(sources)),
+                generated_from: ShardSets::in_shard(ShardId::ZERO, Bitmap::of(sources)).to_wal(),
                 cardinality: sources.len() as u64,
             }];
         }
@@ -5022,7 +5188,10 @@ mod tests {
             level: 0,
             growth: vec![crate::wal::MembershipGrowth {
                 ordinal: 0,
-                joining: vec![0xff, 0xff, 0xff, 0xff],
+                joining: vec![crate::wal::WalShardSet {
+                    shard: ShardId::ZERO,
+                    entities: vec![0xff, 0xff, 0xff, 0xff],
+                }],
                 leaving: Vec::new(),
                 set: crate::wal::GrownSet::Membership,
             }],
@@ -5495,9 +5664,62 @@ mod tests {
             "a duplicate member entry is one member"
         );
         assert_eq!(
-            sorted.members.iter().collect::<Vec<u32>>(),
+            sorted.members.shard_zero().iter().collect::<Vec<u32>>(),
             distinct,
             "the set is the distinct members, ascending"
         );
+    }
+
+    fn item(shard: u32, entity: u64) -> ItemAt {
+        ItemAt::new(ShardId::new(shard).unwrap(), EntityId::new(entity))
+    }
+
+    #[test]
+    fn items_make_a_set_in_each_of_their_shards() {
+        let sets = ShardSets::of_items([item(1, 5), item(0, 5), item(1, 2), item(0, 5)]);
+        assert_eq!(
+            sets.iter()
+                .map(|(shard, set)| (shard.raw(), set.iter().collect::<Vec<u32>>()))
+                .collect::<Vec<_>>(),
+            vec![(0, vec![5]), (1, vec![2, 5])]
+        );
+        assert_eq!(sets.cardinality(), 3);
+        assert!(ShardSets::of_items([]).is_empty());
+    }
+
+    /// An entity number excluded in one shard stays a member in another.
+    #[test]
+    fn an_exclusion_is_complemented_in_each_shard() {
+        let mut artifact = IncomingArtifact::from_entities(Some("a".into()), []);
+        artifact.exclude([item(1, 2), item(1, 9)]);
+        let mut entities = ShardSets::default();
+        entities.set(ShardId::ZERO, Bitmap::of(&[1, 2, 3]));
+        entities.set(ShardId::new(1).unwrap(), Bitmap::of(&[1, 2]));
+        entities.set(ShardId::new(2).unwrap(), Bitmap::of(&[2]));
+        assert_eq!(artifact.complement_against(&entities), Some(5));
+        assert_eq!(
+            artifact
+                .members
+                .iter()
+                .map(|(shard, set)| (shard.raw(), set.iter().collect::<Vec<u32>>()))
+                .collect::<Vec<_>>(),
+            vec![(0, vec![1, 2, 3]), (1, vec![1]), (2, vec![2])]
+        );
+        let mut nothing_left = IncomingArtifact::from_entities(Some("b".into()), []);
+        nothing_left.exclude([item(2, 2)]);
+        nothing_left.complement_against(&ShardSets::in_shard(
+            ShardId::new(2).unwrap(),
+            Bitmap::of(&[2]),
+        ));
+        assert!(
+            nothing_left.members.is_empty(),
+            "an emptied shard holds no set"
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn a_set_of_another_shard_is_not_written_as_shard_zeros() {
+        ShardSets::of_items([item(1, 4)]).shard_zero();
     }
 }

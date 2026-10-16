@@ -31,13 +31,13 @@ pub(super) fn joining_entities<W>(
 ) -> croaring::Bitmap {
     let mut restating = croaring::Bitmap::new();
     for entry in closed {
-        let joined = &entry.entity_ids[entry.rows().len() + entry.edits().len()..];
+        let joined = &entry.items[entry.rows().len() + entry.edits().len()..];
         let entities = entry
             .rows()
             .iter()
             .filter(|row| row.join)
             .map(|row| row.entity_id);
-        for entity in entities.chain(joined.iter().copied()) {
+        for entity in entities.chain(joined.iter().map(|item| item.entity)) {
             // Entity space is `u32`-wide, so the narrowing is total.
             restating.add(entity.raw() as u32);
         }
@@ -45,53 +45,68 @@ pub(super) fn joining_entities<W>(
     restating
 }
 
-/// The entity one membership's row index names, and `None` for a row the source does not carry.
-pub(super) type EntityOfRow<'a> = &'a dyn Fn(usize, u32) -> Option<EntityId>;
+/// The item one membership's row index names, and `None` for a row the source does not carry.
+pub(super) type ItemOfRow<'a> = &'a dyn Fn(usize, u32) -> Option<mosaica_types::ItemAt>;
 
 fn row_not_carried(layer: &str, row: u32) -> String {
     format!("column '{layer}' names row {row}, which this batch does not carry")
 }
 
-/// The joins both write doors' resolved memberships declared, as one bitmap per `(layer, level,
-/// ordinal)` less what the artifact already holds. A key with no ordinal was minted at this commit.
+/// The joins both write doors' resolved memberships declared, as one set per shard of each
+/// `(layer, level, ordinal)` less what the artifact already holds. A key with no ordinal was minted
+/// at this commit.
 pub(super) fn grouped_growth<'a>(
     sources: impl Iterator<Item = &'a [mosaica_lifecycle::ResolvedMembership]>,
-    entity_of: EntityOfRow<'_>,
+    item_of: ItemOfRow<'_>,
     held: Option<HeldMembers<'_>>,
 ) -> Result<Vec<(WalRecord, usize)>, String> {
     use std::collections::BTreeMap;
-    /// One `(layer, level)`'s joins: the source to blame for the append, the layer's space, and a
-    /// bitmap per ordinal.
-    type Level = (usize, LayerSpace, BTreeMap<u32, croaring::Bitmap>);
+    /// One `(layer, level)`'s joins: the source to blame for the append, the layer's space, and
+    /// the items joining each ordinal.
+    type Level<T> = (usize, LayerSpace, BTreeMap<u32, T>);
     // Ordered, so replay does not depend on hash iteration.
-    let mut by_level: BTreeMap<(&str, u32), Level> = BTreeMap::new();
+    let mut items: BTreeMap<(&str, u32), Level<Vec<mosaica_types::ItemAt>>> = BTreeMap::new();
     for (index, memberships) in sources.enumerate() {
         for join in memberships {
             let Some(ordinal) = join.ordinal else {
                 continue;
             };
-            let (_, _, ordinals) = by_level
+            let (_, _, ordinals) = items
                 .entry((join.layer.as_str(), join.level))
                 .or_insert_with(|| (index, join.space, BTreeMap::new()));
             let joining = ordinals.entry(ordinal).or_default();
             for row in &join.rows {
-                let entity =
-                    entity_of(index, *row).ok_or_else(|| row_not_carried(&join.layer, *row))?;
-                // Entity space is `u32`-wide, so the narrowing is total.
-                joining.add(entity.raw() as u32);
+                joining
+                    .push(item_of(index, *row).ok_or_else(|| row_not_carried(&join.layer, *row))?);
             }
         }
     }
+    let mut by_level: BTreeMap<(&str, u32), Level<mosaica_lifecycle::ShardSets>> = items
+        .into_iter()
+        .map(|(at, (index, space, ordinals))| {
+            let ordinals = ordinals
+                .into_iter()
+                .map(|(ordinal, joining)| {
+                    (ordinal, mosaica_lifecycle::ShardSets::of_items(joining))
+                })
+                .collect();
+            (at, (index, space, ordinals))
+        })
+        .collect();
     // What the artifact already holds is not a join, or a restating row would append a record
     // that changes nothing and pins the log. Read against the store before this commit applies.
     if let Some(held) = held {
         for ((layer, level), (_, _, ordinals)) in &mut by_level {
             for (ordinal, joining) in ordinals.iter_mut() {
-                if held.restating.is_some_and(|rows| !joining.intersect(rows)) {
+                let Some(record) = held.store.get(layer, *level, *ordinal) else {
                     continue;
-                }
-                if let Some(record) = held.store.get(layer, *level, *ordinal) {
-                    record.members.remove_from(joining);
+                };
+                if let Some(set) = joining.get(ShardId::ZERO) {
+                    let mut set = set.clone();
+                    if held.restating.is_none_or(|rows| set.intersect(rows)) {
+                        record.members.remove_from(&mut set);
+                        joining.set(ShardId::ZERO, set);
+                    }
                 }
             }
         }
@@ -135,11 +150,11 @@ pub(super) fn joined_per_entry<W>(
                 });
                 let counted = seen.entry(at).or_default();
                 for row in &join.rows {
-                    let Some(entity) = entry.entity_ids.get(*row as usize) else {
+                    let Some(item) = entry.items.get(*row as usize) else {
                         continue;
                     };
                     // Entity space is `u32`-wide, so the narrowing is total.
-                    let entity = entity.raw() as u32;
+                    let entity = item.entity.raw() as u32;
                     if held.is_some_and(|members| members.contains(entity)) {
                         continue;
                     }
@@ -157,9 +172,10 @@ pub(super) fn joined_per_entry<W>(
 /// `(layer, level, key)`. Two sources naming one unknown key mint once and both join it.
 pub(super) fn grouped_mints<'a>(
     sources: impl Iterator<Item = &'a [mosaica_lifecycle::ResolvedMembership]>,
-    entity_of: EntityOfRow<'_>,
+    item_of: ItemOfRow<'_>,
 ) -> Result<MintPlan, String> {
-    let mut wanted: MintPlan = std::collections::BTreeMap::new();
+    let mut wanted: std::collections::BTreeMap<MintKey, (usize, Vec<mosaica_types::ItemAt>)> =
+        std::collections::BTreeMap::new();
     for (index, memberships) in sources.enumerate() {
         for join in memberships {
             if join.ordinal.is_some() {
@@ -173,27 +189,33 @@ pub(super) fn grouped_mints<'a>(
                     join.key.clone(),
                 ))
                 // The first source that named the key owns the mint.
-                .or_insert_with(|| (index, croaring::Bitmap::new()));
+                .or_insert_with(|| (index, Vec::new()));
             for row in &join.rows {
-                let entity =
-                    entity_of(index, *row).ok_or_else(|| row_not_carried(&join.layer, *row))?;
-                // Entity space is `u32`-wide, so the narrowing is total.
-                members.add(entity.raw() as u32);
+                members
+                    .push(item_of(index, *row).ok_or_else(|| row_not_carried(&join.layer, *row))?);
             }
         }
     }
-    Ok(wanted)
+    Ok(wanted
+        .into_iter()
+        .map(|(key, (index, members))| {
+            (
+                key,
+                (index, mosaica_lifecycle::ShardSets::of_items(members)),
+            )
+        })
+        .collect())
 }
 
 /// The growth records one closed window owes, in the order to append them. The entities are
-/// `entity_ids[row]`, the assignment this window just made.
+/// `items[row]`, the assignment this window just made.
 pub(super) fn growth_records<W>(
     closed: &[mosaica_lifecycle::ClosedEntry<W>],
     held: Option<HeldMembers<'_>>,
 ) -> Result<Vec<(WalRecord, usize)>, String> {
     grouped_growth(
         closed.iter().map(|entry| entry.memberships.as_slice()),
-        &|entry, row| closed[entry].entity_ids.get(row as usize).copied(),
+        &|entry, row| closed[entry].items.get(row as usize).copied(),
         held,
     )
 }
@@ -206,7 +228,7 @@ pub(super) fn mint_plan<W>(
 ) -> Result<Option<(MintPlan, Vec<mosaica_lifecycle::BatchEdge>)>, String> {
     let wanted = grouped_mints(
         closed.iter().map(|entry| entry.memberships.as_slice()),
-        &|entry, row| closed[entry].entity_ids.get(row as usize).copied(),
+        &|entry, row| closed[entry].items.get(row as usize).copied(),
     )?;
     let edges: Vec<mosaica_lifecycle::BatchEdge> =
         closed.iter().flat_map(|e| e.edges.iter().cloned()).collect();
@@ -219,9 +241,10 @@ pub(super) fn mint_plan<W>(
 /// An artifact a key names: `(layer, level, view, key)`, the view `None` on an entity-scoped layer.
 pub(super) type MintKey = (String, u32, Option<String>, String);
 
-/// What one commit is about to mint: each key to the source that first named it, and the entities
+/// What one commit is about to mint: each key to the source that first named it, and the items
 /// joining it.
-pub(super) type MintPlan = std::collections::BTreeMap<MintKey, (usize, croaring::Bitmap)>;
+pub(super) type MintPlan =
+    std::collections::BTreeMap<MintKey, (usize, mosaica_lifecycle::ShardSets)>;
 
 /// A key that acquired an artifact between its resolution and its preparation grows into it
 /// rather than minting a second one: writes the ordinals found back onto the memberships, so
@@ -484,7 +507,7 @@ impl Executor {
             // Re-resolved here, not trusted from admission, since a publication may land between.
             let mut resolved: BTreeMap<MintKey, u32> = BTreeMap::new();
             // One publication per view, since a parent is resolved inside its child's view.
-            type Minting<'a> = Vec<(&'a str, &'a croaring::Bitmap)>;
+            type Minting<'a> = Vec<(&'a str, &'a mosaica_lifecycle::ShardSets)>;
             let mut to_mint: BTreeMap<(&str, u32, Option<&str>), Minting<'_>> = BTreeMap::new();
             for (at, (_, members)) in wanted {
                 let (layer, level, view, key) = at;
@@ -659,8 +682,7 @@ impl Executor {
                     if refused.contains(&index) {
                         continue;
                     }
-                    let Some(joining) =
-                        mosaica_lifecycle::membership::deserialise_members(&grown.joining)
+                    let Some(joining) = mosaica_lifecycle::membership::store_slice(&grown.joining)
                     else {
                         continue;
                     };
@@ -670,9 +692,7 @@ impl Executor {
                         }
                         mosaica_lifecycle::wal::GrownSet::GeneratingSet { rank, cardinality } => {
                             // A leave re-derives the operator whole: a union cannot express one.
-                            let leaves =
-                                mosaica_lifecycle::membership::deserialise_leaving(&grown.leaving)
-                                    .is_none_or(|leaving| !leaving.is_empty());
+                            let leaves = !grown.leaving.is_empty();
                             pages.push(crate::artifacts::SetPage {
                                 ordinal: grown.ordinal,
                                 rank,

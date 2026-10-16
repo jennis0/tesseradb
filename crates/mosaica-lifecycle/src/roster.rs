@@ -334,7 +334,7 @@ impl ViewRoster {
         &self,
         group: &str,
         key: &str,
-        deleted: Vec<mosaica_types::EntityId>,
+        deleted: Vec<mosaica_types::Target>,
     ) -> Result<WalRecord, RosterError> {
         let Some(incarnation) = self.incarnation_of(group, key) else {
             // A dropped key and a key that never existed are the same answer, and deliberately:

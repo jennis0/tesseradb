@@ -31,7 +31,7 @@ use mosaica_lifecycle::command::UnallocatedRow;
 use mosaica_lifecycle::wal::WalScalar;
 use mosaica_lifecycle::{ChangeOp, ExecError};
 use mosaica_types::layer::LayerScope;
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, ItemAt, ShardId};
 
 const N: u64 = 90;
 const VIEWPORT: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
@@ -269,7 +269,7 @@ fn taken(result: &Result<Vec<EntityId>, AcceptError>) -> bool {
 
 /// `r`, naming the built item of `source` by its `mosaica_id` beside whatever its values name.
 fn naming_built(engine: &Engine, mut r: UnallocatedRow, source: u64) -> UnallocatedRow {
-    r.join = Some(built(engine, source));
+    r.join = Some(ItemAt::new(ShardId::ZERO, built(engine, source)));
     r
 }
 
@@ -538,7 +538,10 @@ fn a_generation_from_before_a_coalesce_and_a_fold_still_answers_from_its_runs() 
         .verdicts;
     assert_eq!(
         found,
-        vec![Ok(a[0]), Ok(b[0])]
+        vec![
+            Ok(ItemAt::new(ShardId::ZERO, a[0])),
+            Ok(ItemAt::new(ShardId::ZERO, b[0]))
+        ]
     );
 
     let superseded = fx.root.join(&held.prefix);
@@ -623,7 +626,7 @@ fn an_address_cell_is_checked_against_its_field_alone() {
         .expect("columns naming nothing are ignored");
     assert_eq!(
         named.verdicts,
-        vec![Ok(built(&engine, 4))]
+        vec![Ok(ItemAt::new(ShardId::ZERO, built(&engine, 4)))]
     );
     assert_eq!(named.ignored, ["score", "flags", "rank"]);
 }
@@ -765,7 +768,7 @@ fn row_into(engine: &Engine, view: &str, id: &str, doi: &str, join: Option<Entit
     r.scalars[2] = WalScalar::Null;
     r.scalars[3] = WalScalar::Utf8(format!("note-{doi}"));
     r.view = view.to_string();
-    r.join = join;
+    r.join = join.map(|entity| ItemAt::new(ShardId::ZERO, entity));
     r
 }
 

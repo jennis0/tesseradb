@@ -195,14 +195,16 @@ impl Executor {
             );
             return;
         }
-        let shard = generation.only_shard();
-        let reclaim_below = match shard.buffer.oldest_wal_pos() {
-            // Nothing buffered: the whole durable prefix is reclaimable.
-            None => self.log.wal.position(),
-            Some(Some(oldest)) => oldest,
-            // A buffered row of unknown position pins the log: fail-safe rather than guessing.
-            Some(None) => 0,
-        };
+        // The oldest buffered row of any shard pins the log, and one of unknown position pins it
+        // whole: fail-safe rather than guessing.
+        let mut reclaim_below = self.log.wal.position();
+        for shard in generation.shards() {
+            match shard.buffer.oldest_wal_pos() {
+                None => {}
+                Some(Some(oldest)) => reclaim_below = reclaim_below.min(oldest),
+                Some(None) => reclaim_below = 0,
+            }
+        }
         // The oldest unpublished artifact record pins the log too: a membership has no home
         // outside the WAL.
         let reclaim_below = match self.live.artifacts_oldest_wal_pos() {
@@ -210,11 +212,12 @@ impl Executor {
             None => reclaim_below,
         };
 
-        // An artifact's deny goes under its space; in the shard's its entity would read as an
-        // item's at the next open.
+        // Each item's deny goes under its shard and an artifact's under its space; in another
+        // shard or a space an entity would read as a different item's at the next open.
         let snapshot = mosaica_lifecycle::overlay::snapshot(
-            shard.id(),
-            &shard.overlay,
+            generation
+                .shards()
+                .map(|shard| (shard.id(), &*shard.overlay)),
             generation
                 .layer_spaces
                 .iter()
@@ -223,10 +226,13 @@ impl Executor {
         match self.log.wal.rotate(&snapshot, reclaim_below) {
             Ok(deleted) => {
                 self.log.mark_rotated();
-                let freed = self
+                let retained_from = self.log.wal.retained_from();
+                let freed: u64 = self
                     .live
-                    .only_shard()
-                    .with_allocator(|alloc| alloc.promote(self.log.wal.retained_from()));
+                    .shards
+                    .iter()
+                    .map(|shard| shard.with_allocator(|alloc| alloc.promote(retained_from)))
+                    .sum();
                 if freed > 0 {
                     tracing::info!(
                         freed,

@@ -48,7 +48,7 @@ use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
-use mosaica_types::{AttrLocalId, EntityId, IdentityKey, MosaicaId};
+use mosaica_types::{AttrLocalId, EntityId, IdentityKey, ItemAt, MosaicaId, ShardId};
 
 const N: u64 = 2000;
 const GEO: &str = "geo";
@@ -1902,7 +1902,7 @@ fn a_joined_item_whose_own_record_is_unflushed_has_null_record_fields() {
         let descriptors = vec![b"0".to_vec(), b"1".to_vec()];
         let row = UnallocatedRow {
             view: view.to_string(),
-            join,
+            join: join.map(|entity| ItemAt::new(ShardId::ZERO, entity)),
             x,
             y,
             scalars,

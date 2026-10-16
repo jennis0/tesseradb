@@ -33,6 +33,7 @@ pub(crate) use live::*;
 pub(crate) use reconstruct::*;
 pub(crate) use schema::*;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError};
@@ -41,7 +42,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use mosaica_authz::{DeltaTier, Dict};
-use mosaica_lifecycle::alloc::{high_water_from, Allocator};
+use mosaica_lifecycle::alloc::Allocator;
 use mosaica_lifecycle::buffer::DescriptorResolver;
 use mosaica_lifecycle::command::{ExecError, SubmitError};
 use mosaica_lifecycle::faults::WalMeter;
@@ -116,7 +117,7 @@ pub enum ExecutorStartError {
     /// from the same seed.
     BundleLocked(crate::bundle_lock::BundleLockError),
     /// The bundle root could not be listed for the side-manifest numbers already on disc
-    /// (`mosaica_store::highest_side_manifest_n`). Refusing to start leaves the bundle untouched.
+    /// (`mosaica_store::highest_published_n`). Refusing to start leaves the bundle untouched.
     SideManifestScan(String),
 }
 
@@ -308,10 +309,21 @@ pub(crate) fn retire_dead_view_artifacts(
     })
 }
 
+/// Whether a bundle of several point shards takes writes. Only the engine's own tests open one
+/// that does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SeveralShards {
+    Refused,
+    #[cfg(feature = "several-shard-writes")]
+    Written,
+}
+
 /// Everything [`WritePath::reconstruct`] rebuilds from durable state.
 pub(crate) struct WritePathState {
     wal: Wal,
+    several_shards: SeveralShards,
     shards: Vec<ShardWrite>,
+    next_shard_id: u32,
     resolver_state: ResolverState,
     accepted_batches: AcceptedBatches,
     pub(crate) registry: LayerRegistry,
@@ -334,8 +346,9 @@ pub(crate) struct WritePathState {
     /// Every change to a column's `unique` flag the log holds, in log order: what the open applies
     /// to the partition manifest's unique indexes. Taken by the open; empty afterwards.
     pub(crate) unique_events: Vec<UniqueEvent>,
-    /// The edited-items pairs of the edits whose new entity's own row the replayed buffer holds.
-    pub(crate) edited_live: crate::edited::EditedLive,
+    /// Each shard's edited-items pairs of the edits whose new entity's own row the replayed
+    /// buffer holds. A shard with none has no entry.
+    pub(crate) edited_live: BTreeMap<ShardId, crate::edited::EditedLive>,
 }
 
 /// One change to a column's `unique` flag replayed from the log: a declaration made at a running
@@ -348,6 +361,13 @@ pub(crate) struct UniqueEvent {
     pub(crate) live: Vec<mosaica_lifecycle::wal::DeclaredRun>,
 }
 
+impl WritePathState {
+    /// Every point shard the write path holds, ascending.
+    pub(crate) fn shard_ids(&self) -> impl Iterator<Item = ShardId> + '_ {
+        self.shards.iter().map(|shard| shard.id)
+    }
+}
+
 impl WritePath {
     /// Assemble the write path.
     ///
@@ -357,6 +377,8 @@ impl WritePath {
         WritePath {
             live: Arc::new(LiveState {
                 shards: state.shards,
+                next_shard_id: state.next_shard_id,
+                several_shards: state.several_shards,
                 resolver_state: Mutex::new(state.resolver_state),
                 accepted_batches: Mutex::new(state.accepted_batches),
                 registry: Mutex::new(state.registry),
@@ -421,10 +443,10 @@ impl WritePath {
         // checked first, so a second `start_executor` on the same path cannot sweep twice.
         sweep_orphan_prefixes(&flush.bundle_root, &generation.load().prefix);
 
-        // Above every `SEGMENTS-<n>.json` on disc, not above what a manifest names: see
-        // [`SideManifests`]. The sweep above has already removed the unpublished
-        // prefixes, so what is left is what a reader could resolve.
-        let next_manifest_n = mosaica_store::highest_side_manifest_n(&flush.bundle_root)
+        // Above every `SEGMENTS-<n>.json` on disc, a shard's or space's file a crash left
+        // uncommitted included, not above what a manifest names: see [`SideManifests`]. The sweep
+        // above has already removed the unpublished prefixes.
+        let next_manifest_n = mosaica_store::highest_published_n(&flush.bundle_root)
             .map_err(|e| ExecutorStartError::SideManifestScan(e.to_string()))?
             .map_or(1, |highest| highest + 1);
 
@@ -459,13 +481,25 @@ impl WritePath {
         // is where each held artifact list starts: see [`SideManifests`] for why they are held
         // rather than re-cloned from a (stale) live manifest at each publication.
         // A dropped layer's extents are not carried.
-        let (seeded_membership_extents, seeded_derived_extents, seeded_spaces) = {
+        let (
+            seeded_membership_extents,
+            seeded_derived_extents,
+            seeded_spaces,
+            seeded_artifact_files,
+            seeded_refs,
+        ) = {
             let generation = generation.load();
             let mut members = Vec::new();
             let mut derived = Vec::new();
             let mut spaces = std::collections::BTreeMap::new();
-            for partition in generation.bundle.partitions.values() {
-                let record = &partition.only_shard().record;
+            let mut artifact_files = std::collections::BTreeMap::new();
+            let mut refs = std::collections::BTreeMap::new();
+            let store_shard = live.shards[0].id;
+            for (phash, partition) in &generation.bundle.partitions {
+                let Some(shard) = partition.shard(store_shard) else {
+                    continue;
+                };
+                let record = &shard.record;
                 members.extend(
                     record
                         .membership_extents
@@ -475,9 +509,9 @@ impl WritePath {
                 );
                 derived.extend(
                     partition
-                        .derived_extents()
-                        .filter(|e| live.holds_space(e.space))
-                        .cloned(),
+                        .derived_by_shard()
+                        .filter(|(shard, e)| *shard == store_shard && live.holds_space(e.space))
+                        .map(|(_, e)| e.clone()),
                 );
                 spaces.extend(
                     partition
@@ -486,8 +520,21 @@ impl WritePath {
                         .filter(|record| live.holds_space(record.space))
                         .map(|record| (record.space, executor::HeldSpace::of(record))),
                 );
+                // The digests a side-manifest gave the packs and content a running service
+                // wrote; a build's are in `MANIFEST.json`.
+                artifact_files.extend(
+                    partition
+                        .manifest
+                        .files
+                        .iter()
+                        .filter(|(rel, _)| mosaica_store::layout::is_artifact_file(phash, rel))
+                        .map(|(rel, digest)| (rel.clone(), digest.clone())),
+                );
             }
-            (members, derived, spaces)
+            for (phash, partition) in &generation.bundle.partitions {
+                refs.insert(phash.clone(), partition.refs.clone());
+            }
+            (members, derived, spaces, artifact_files, refs)
         };
         // What replay left in the log and no manifest carries: the same publication is owed for
         // it, and without this a node that restarted between a batch and its tick would wait for
@@ -525,6 +572,8 @@ impl WritePath {
                         seeded_membership_extents,
                         seeded_derived_extents,
                         seeded_spaces,
+                        seeded_artifact_files,
+                        seeded_refs,
                         growth_unpublished,
                     ),
                     coalesce: executor::Background::sharing(
@@ -620,9 +669,11 @@ impl WritePath {
     /// every write reaches the executor, ask it; so do the entries that read the write shard
     /// before submitting.
     pub(crate) fn writable(&self) -> Result<(), AcceptError> {
-        match self.live.shards.len() {
-            1 => Ok(()),
-            shards => Err(AcceptError::SeveralShards { shards }),
+        match (self.live.shards.len(), self.live.several_shards) {
+            (1, _) => Ok(()),
+            #[cfg(feature = "several-shard-writes")]
+            (_, SeveralShards::Written) => Ok(()),
+            (shards, _) => Err(AcceptError::SeveralShards { shards }),
         }
     }
 

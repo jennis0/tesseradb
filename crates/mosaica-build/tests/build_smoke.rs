@@ -223,6 +223,28 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     assert!(shard.record.deltas.is_empty());
     assert!(!shard.record.tombstones.carries());
     assert!(!shard.record.deny.carries());
+    // One shard, so it is the open one, and the next shard opened takes 1.
+    assert_eq!(shard.record.state, mosaica_types::ShardState::Open);
+    assert_eq!(part.next_shard_id, 1);
+    // Its identity is derived from the digest `CURRENT` names, and stored.
+    let current: mosaica_store::manifest::CurrentPointer =
+        serde_json::from_slice(&std::fs::read(out.join("CURRENT")).unwrap()).unwrap();
+    let digest = mosaica_store::manifest::hex_32::decode(&current.manifest_digest).unwrap();
+    assert_eq!(
+        shard.record.identity,
+        mosaica_store::manifest::shard_identity(&digest, shard.record.id)
+    );
+    // The partition file names the shard's own file, and reads back as the open served it.
+    let published = mosaica_store::read_publication(&out.join(&current.prefix), "default", 0)
+        .expect("the built publication reads back");
+    assert_eq!(published.refs, part.refs);
+    assert_eq!(published.refs.shards.len(), 1);
+    assert_eq!(published.refs.shards[0].n, 0);
+    assert!(!published.refs.shards[0].denies);
+    assert_eq!(
+        serde_json::to_value(&published.manifest).unwrap(),
+        serde_json::to_value(part.side_manifest()).unwrap()
+    );
     assert_eq!(part.manifest.dict_extents.len(), 1);
     assert_eq!(
         part.manifest.dict_extents[0].path,

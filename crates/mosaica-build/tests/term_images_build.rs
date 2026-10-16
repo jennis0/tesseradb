@@ -377,7 +377,7 @@ fn a_stamp_the_bundle_disagrees_with_leaves_the_view_walking() {
 fn two_term_image_extents_for_one_view_refuse_the_bundle() {
     let temp = tempfile::TempDir::new().unwrap();
     let root = built(temp.path(), "streaming", build);
-    rewrite_side_manifest(&root.join("v00000"), |manifest| {
+    common::rewrite_publication(&root.join("v00000"), 0, |manifest| {
         let list = manifest["shards"]["records"][0]["term_image_extents"]
             .as_array_mut()
             .expect("the list the build wrote");
@@ -398,7 +398,7 @@ fn two_term_image_extents_for_one_view_refuse_the_bundle() {
 fn a_file_derived_under_another_keep_rule_leaves_the_view_walking() {
     let temp = tempfile::TempDir::new().unwrap();
     let root = built(temp.path(), "streaming", build);
-    rewrite_side_manifest(&root.join("v00000"), |manifest| {
+    common::rewrite_publication(&root.join("v00000"), 0, |manifest| {
         manifest["shards"]["records"][0]["term_image_extents"][0]["keep_rows_per_container"] =
             serde_json::Value::from(KEEP_ROWS_PER_CONTAINER - 1);
     });
@@ -471,16 +471,6 @@ fn rewrite_manifest(prefix: &Path, root: &Path, edit: impl FnOnce(&mut serde_jso
         serde_json::to_vec_pretty(&current).unwrap(),
     )
     .unwrap();
-}
-
-/// Edit the partition's `SEGMENTS-0.json`. Nothing digests a side-manifest, so an edit to one
-/// needs no other file moved with it: the loader verifies the files it *names*.
-fn rewrite_side_manifest(prefix: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
-    let path = mosaica_store::layout::partition_dir(prefix, "default").join("SEGMENTS-0.json");
-    let mut manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    edit(&mut manifest);
-    std::fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
 }
 
 /// A file's prefix-relative name, as the manifests carry it.
