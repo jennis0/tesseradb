@@ -1504,11 +1504,14 @@ impl Engine {
 /// the executor to itself would deadlock. Reads `CURRENT` first and refuses unless it names
 /// `prefix`, since publishing a prefix `CURRENT` does not name would serve geometry a restart
 /// could not find. Opens with [`mosaica_store::open_written_prefix`], not `open_bundle`: the
-/// caller wrote and digested these bytes moments ago.
+/// caller wrote and digested these bytes moments ago. `shard` is the shard whose rows the prefix
+/// renumbers; with `carried`, every other shard keeps the rows `carried` serves for it.
 pub(crate) fn open_rotation(
     bundle_root: &Path,
     prefix: &str,
+    shard: mosaica_types::ShardId,
     retired: croaring::Bitmap,
+    carried: Option<&Bundle>,
 ) -> std::result::Result<(Arc<Bundle>, crate::geometry::PrefixRotation), PublishGeometryError> {
     let current = read_current(bundle_root)
         .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;
@@ -1519,8 +1522,13 @@ pub(crate) fn open_rotation(
         });
     }
     let prefix_dir = bundle_root.join(prefix);
-    let mut bundle = mosaica_store::open_written_prefix(bundle_root, prefix)
-        .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;
+    let mut bundle = match carried {
+        Some(carried) => {
+            mosaica_store::open_written_prefix_carrying(bundle_root, prefix, shard, carried)
+        }
+        None => mosaica_store::open_written_prefix(bundle_root, prefix),
+    }
+    .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;
     // The columns declared while the fold ran, appended on `Engine::open`'s rule: the new
     // `MANIFEST.json` carries the schema as it stood at the plan, and the side manifest the fold
     // published carries the rest.
@@ -1547,7 +1555,20 @@ pub(crate) fn open_rotation(
             )
         })?;
 
-    let record = &partition.only_shard().record;
+    let not_openable =
+        |e: mosaica_store::StoreError| PublishGeometryError::PrefixNotOpenable(e.to_string());
+    let digests = mosaica_store::read::Digests {
+        side: &partition.manifest.files,
+        bundle: &bundle.manifest.files,
+    };
+    let record = &partition
+        .shard(shard)
+        .ok_or_else(|| {
+            PublishGeometryError::PrefixNotOpenable(format!(
+                "the written prefix has no shard {shard}"
+            ))
+        })?
+        .record;
     let identity = record.identity;
     let postings = open_postings(&prefix_dir, mosaica_store::ShardLayout::new(&phash, record.id))
         .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;
@@ -1564,20 +1585,43 @@ pub(crate) fn open_rotation(
     let space_contents = crate::artifact_content::open_space_contents(&prefix_dir, &bundle)
         .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;
     let tenancy = Arc::new(
-        mosaica_store::read::open_tenancy_index(
-            &prefix_dir,
-            record,
-            mosaica_store::read::Digests {
-                side: &partition.manifest.files,
-                bundle: &bundle.manifest.files,
-            },
-        )
-        .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,
+        mosaica_store::read::open_tenancy_index(&prefix_dir, record, digests)
+            .map_err(not_openable)?,
     );
+    let carried = partition
+        .shards
+        .iter()
+        .filter(|other| other.record.id != shard)
+        .map(|other| {
+            let record = &other.record;
+            Ok(crate::geometry::CarriedIndexes {
+                shard: record.id,
+                unique: Arc::new(mosaica_store::unique::UniqueIndexes::open(
+                    &bundle.manifest,
+                    &partition.manifest,
+                    record,
+                    &prefix_dir,
+                    None,
+                )?),
+                edited: Arc::new(mosaica_store::edited::EditedIndex::open(
+                    &record.edited_items,
+                    &prefix_dir,
+                    None,
+                )?),
+                tenancy: Arc::new(mosaica_store::read::open_tenancy_index(
+                    &prefix_dir,
+                    record,
+                    digests,
+                )?),
+            })
+        })
+        .collect::<std::result::Result<Vec<_>, mosaica_store::StoreError>>()
+        .map_err(not_openable)?;
 
     Ok((
         bundle,
         crate::geometry::PrefixRotation {
+            shard,
             postings,
             identity,
             filter_columns,
@@ -1587,6 +1631,7 @@ pub(crate) fn open_rotation(
             retired,
             frees: false,
             retired_artifacts: std::collections::BTreeMap::new(),
+            carried,
             space_contents,
         },
     ))

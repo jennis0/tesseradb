@@ -81,9 +81,11 @@ impl Placing {
         self.placed.records()
     }
 
-    /// The window is durable: its seals stand and the shards it opened take writes.
-    pub(super) fn commit(mut self, live: &LiveState) {
+    /// The window is durable: its seals stand and the shards it opened take writes. Answers the
+    /// shards it sealed.
+    pub(super) fn commit(mut self, live: &LiveState) -> Vec<ShardId> {
         self.committed = true;
+        let sealed = self.sealed.iter().map(|shard| shard.id).collect();
         let opened = std::mem::take(&mut self.placed.opened);
         live.add_shards(
             opened
@@ -91,6 +93,7 @@ impl Placing {
                 .map(|(shard, alloc)| ShardWrite::new(shard, alloc))
                 .collect(),
         );
+        sealed
     }
 }
 
@@ -932,7 +935,9 @@ impl Executor {
 
         // Durable, not yet in force. See `pause_point`.
         self.pause_point(PauseSiteArg::AfterFsync);
-        placing.commit(&self.live);
+        let sealed = placing.commit(&self.live);
+        // A sealed shard is owed one closing compaction.
+        self.compactions.sealed(sealed);
         if let Some(opened) = &opened {
             self.adopt_opened(opened);
         }

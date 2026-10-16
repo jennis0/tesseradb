@@ -37,12 +37,9 @@ pub(super) fn artifact_coordinates(
         Some(pending) => pending.records_version_after(store, layer, level),
         None => store.records_version(layer, level),
     };
-    let slice_at = |shard: ShardId, layer: &str, level: u32| {
-        let slice = store.slice(shard)?;
-        Some(match pending {
-            Some(pending) => pending.version_after(slice, layer, level),
-            None => slice.level_version(layer, level),
-        })
+    let slice_at = |shard: ShardId, layer: &str, level: u32| match pending {
+        Some(pending) => pending.version_after(store, shard, layer, level),
+        None => Some(store.slice(shard)?.level_version(layer, level)),
     };
     let mut records = std::collections::BTreeMap::<_, Vec<_>>::new();
     for (layer, level, _) in store.records_versions() {
@@ -364,12 +361,18 @@ impl Executor {
     ) -> Result<mosaica_store::manifest::PublishedRefs, ManifestCommitRefused> {
         self.write_live_state(next, fold.is_some());
         if let Some(fold) = &fold {
-            next.only_shard_mut().held_entities.push(fold.freed.clone());
+            if let Some(record) = next.shard_mut(fold.shard) {
+                record.held_entities.push(fold.freed.clone());
+            }
         }
         let fold_written: DerivedByShard;
         let (derived, pending) = match &fold {
             Some(fold) => {
-                fold_written = DerivedByShard::from([(fold.shard, fold.written.to_vec())]);
+                let mut held = DerivedByShard::from([(fold.shard, fold.written.to_vec())]);
+                for (shard, extent) in &fold.kept {
+                    held.entry(*shard).or_default().push(extent.clone());
+                }
+                fold_written = held;
                 (&fold_written, Some(fold.pending_retirement))
             }
             None => (&self.side_manifests.derived_extents, None),

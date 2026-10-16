@@ -1,13 +1,11 @@
 //! The control-plane calls: resolving, writing, declaring and publishing.
 
-use std::sync::atomic::Ordering;
-
 use mosaica_lifecycle::resolve::{self, Batch, RowIdentity, Verdict};
 use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_store::manifest::DeclaredScalar;
 use mosaica_store::unique::{KeyKind, UniqueKey};
 use mosaica_store::StoreError;
-use mosaica_types::{EntityId, ItemAt, LayerSpace, MosaicaId, Target, TermId};
+use mosaica_types::{EntityId, ItemAt, LayerSpace, MosaicaId, ShardId, Target, TermId};
 
 use crate::edited::Stamp;
 use crate::engine::Engine;
@@ -427,17 +425,19 @@ impl Engine {
         let _ = self.request_flush_publication();
     }
 
-    /// Request a compaction fold — the trigger `POST /control/compact` will take (reserved,
-    /// unbuilt). The same shape as [`Engine::request_flush`], but a fold gets its own thread
-    /// rather than the shared pool, and a 202 means minutes to hours of IO still to come. At most
-    /// one fold is in flight: a second request while one runs is satisfied by neither.
-    ///
-    /// Not built yet: the trigger's own gauges and minimum interval.
+    /// Request a compaction of every shard with something to reclaim, one after another, or of
+    /// the shard the schedule ranks first where none has: the trigger `POST /control/compact`
+    /// takes. A compaction gets its own thread rather than the shared pool, and the 202 means
+    /// minutes to hours of IO still to come. At most one compaction is in flight: a request
+    /// arriving while one runs is refused, and `fold_requested` stays true until the last shard a
+    /// request named publishes.
     pub fn request_fold(&self) {
-        self.write
-            .health()
-            .fold_requested
-            .store(true, Ordering::SeqCst);
+        self.request_compaction(None);
+    }
+
+    /// [`Engine::request_fold`], for `shard` alone where it names one.
+    pub fn request_compaction(&self, shard: Option<ShardId>) {
+        self.write.health().request_compaction(shard);
         self.write.wake();
     }
 

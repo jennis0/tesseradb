@@ -1488,6 +1488,97 @@ fn memberships_over_both_shards_serve_as_one_shard_does() {
     assert_eq!(served_layer(&engine), expected, "across a restart");
 }
 
+/// A deletion of a shard-1 item that is a member and a generating entity of an artifact with
+/// members in both shards leaves at shard 1's compaction: the content it generated is withdrawn
+/// from every shard, shard 0's members stay, and every viewer is served what one shard serves
+/// after its own compaction, before and after shard 0's compaction and across a restart.
+#[test]
+fn a_compaction_of_shard_one_retires_its_members_from_its_slice_alone() {
+    use mosaica_lifecycle::membership::IncomingContent;
+    use mosaica_lifecycle::ShardSets;
+    let one = fixture_sized(N, None);
+    let several = fixture_sized(N, Some(SIZE));
+    let (one_engine, engine) = (one.open(), writing(&several));
+    let items = items_by_id(&engine, 0..N);
+    let in_shard = |shard: u32| -> Vec<u64> {
+        (0..N)
+            .filter(|id| items[*id as usize].unwrap().shard == ShardId::new(shard).unwrap())
+            .collect()
+    };
+    let (zero, first) = (in_shard(0), in_shard(1));
+    let gone = first[1];
+    let write = |engine: &Engine| {
+        let items = items_by_id(engine, 0..N);
+        let sets =
+            |ids: &[u64]| ShardSets::of_items(ids.iter().map(|id| items[*id as usize].unwrap()));
+        engine.register_layer(label_layer("t")).unwrap();
+        let mut artifact = IncomingArtifact::with_content(
+            Some("a".into()),
+            Vec::new(),
+            vec![
+                IncomingContent::new(vec!["near".to_string()], Vec::new()),
+                IncomingContent::new(vec!["wide".to_string()], Vec::new()),
+            ],
+        );
+        artifact.members = sets(&[zero[0], zero[1], first[0], gone]);
+        artifact.contents[0].generated_from = sets(&[zero[0], gone]);
+        artifact.contents[1].generated_from = sets(&[zero[1], first[0]]);
+        engine
+            .publish_artifacts("t".into(), 0, vec![artifact])
+            .unwrap();
+        tick(engine);
+    };
+    write(&one_engine);
+    write(&engine);
+    let deleted = |engine: &Engine| {
+        let target = items_by_id(engine, gone..gone + 1)[0].unwrap().target();
+        engine
+            .accept_changes(vec![(target, ChangeOp::Delete)])
+            .unwrap();
+    };
+    deleted(&one_engine);
+    deleted(&engine);
+    fold(&one_engine);
+    let expected = served_layer(&one_engine);
+    assert_eq!(
+        expected[0]
+            .iter()
+            .find(|a| a.0.as_deref() == Some("a"))
+            .map(|a| (a.1, a.2.clone())),
+        Some((3, vec!["wide".to_string()])),
+        "the near content left with its generating item"
+    );
+
+    compact(&engine, Some(ShardId::new(1).unwrap()));
+    assert_eq!(
+        served_layer(&engine),
+        expected,
+        "after shard 1's compaction"
+    );
+    compact(&engine, Some(ShardId::new(0).unwrap()));
+    assert_eq!(
+        served_layer(&engine),
+        expected,
+        "after shard 0's compaction"
+    );
+    // A withdrawn content's value is read back by rank at an open, in one shard as in two, so
+    // the restart is compared without content.
+    let without_content =
+        |served: Vec<Vec<ServedArtifact>>| -> Vec<Vec<(Option<String>, u64, u64)>> {
+            served
+                .into_iter()
+                .map(|artifacts| artifacts.into_iter().map(|a| (a.0, a.1, a.3)).collect())
+                .collect()
+        };
+    drop(engine);
+    let engine = writing(&several);
+    assert_eq!(
+        without_content(served_layer(&engine)),
+        without_content(expected),
+        "across a restart"
+    );
+}
+
 /// Whether the layered fixture's layer `t` leaves the item of `id` out of every artifact.
 fn unheld(id: u64) -> bool {
     id % 4 == 3

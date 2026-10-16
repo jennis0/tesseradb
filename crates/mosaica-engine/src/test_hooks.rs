@@ -125,6 +125,16 @@ impl Engine {
         self.switches.fold_paused.store(paused, Ordering::SeqCst);
     }
 
+    /// Have a compaction's memory pre-flight take the host to have `bytes`, or measure it again
+    /// with `None`.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn set_fold_memory_for_test(&self, bytes: Option<u64>) {
+        self.switches
+            .fold_memory
+            .store(bytes.unwrap_or(0), Ordering::SeqCst);
+    }
+
     /// Hold a flush on the pool after it has executed, so it is still in flight when the next
     /// tick lands and the tick takes the behind-a-flush branch.
     #[cfg(feature = "fault-injection")]
@@ -413,7 +423,9 @@ impl Engine {
                 "entity ids are capped at u32::MAX by the I9 allocator (contracts §2.6 r6)",
             ));
         }
-        let (bundle, rotation) = open_rotation(&self.bundle_root, prefix, retired_bitmap)?;
+        let shard = self.generation.load().only_shard().id();
+        let (bundle, rotation) =
+            open_rotation(&self.bundle_root, prefix, shard, retired_bitmap, None)?;
 
         self.write.publish_geometry(
             GeometryPublication::within_prefix(

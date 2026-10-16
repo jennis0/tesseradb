@@ -36,12 +36,14 @@ from .holdout import HoldOut
 from .publication import Publication
 from .split import (
     build_bundle,
+    declare_shard_size,
     declared_entities,
     declared_layers,
     declared_views,
     unique_field,
     ranks_for,
     read_view_rows,
+    shard_state,
     split_entities,
     state_extent,
     write_base_inputs,
@@ -211,6 +213,9 @@ class Cycle:
             write_base_inputs(self.rung, base_dir, base_ids)
             # Release what the split left in the pool: the build runs beside this process.
             pa.default_memory_pool().release_unused()
+        if self.args.shard_size is not None:
+            declare_shard_size(base_dir / "corpus.toml", self.args.shard_size)
+            self.result["shard_size"] = self.args.shard_size
         if self.args.state_extent:
             self.result["stated_extent"] = state_extent(base_dir / "corpus.toml", self.all_in)
             self.log(f"stated the all-in frame in the base declaration: {self.result['stated_extent']}")
@@ -376,6 +381,16 @@ class Cycle:
             return None
         self.result["open_s"] = round(time.perf_counter() - t0, 2)
         self.log(f"served pid={served.pid} open={self.result['open_s']} s")
+        if args.shard_size is not None:
+            declared = Control(served.control, served.operator_credential()).declare_shards(
+                args.shard_size
+            )
+            self.result["shard_size_declared"] = {
+                "size": args.shard_size,
+                "status": declared.status_code,
+                "body": declared.text[:2000],
+            }
+            self.log(f"declared [shards] size {args.shard_size}: {declared.status_code}")
         self.served = served
         return served
 
@@ -839,24 +854,39 @@ class Cycle:
         return r.status_code, landed, wall
 
     def do_fold(self, control) -> dict:
-        """`POST /control/compact`, and the compaction block once a fold has landed."""
+        """`POST /control/compact`, and the compaction block once the request is answered: the
+        server compacts every shard with something to reclaim, one after another, and keeps
+        `fold_requested` raised until the last publishes. Each compaction seen to publish is
+        recorded with its shard, where the status names it, its seconds and its peak memory; the
+        shards whose identity moved on disc are the ones compacted."""
         before = control.status()["compaction"]
+        identities = self.shard_identities()
         code = control.compact().status_code
+        compactions: list[dict] = []
+        seen = before["folds"]
 
-        # A fold the server discarded counts a failure and never lands, and a fold refused for want
-        # of memory or disc counts a refusal and is not asked again, so any of the three ends the
-        # wait.
+        # A request is answered when its last compaction publishes, is discarded or is refused,
+        # so `fold_requested` falling ends the wait whichever happened.
         def settled() -> bool:
+            nonlocal seen
             now = control.status()["compaction"]
-            return (
-                now["folds"] > before["folds"]
-                or now["fold_failures"] > before["fold_failures"]
-                or now.get("fold_refusals", 0) > before.get("fold_refusals", 0)
-            )
+            if now["folds"] > seen:
+                compactions.append(
+                    {
+                        "folds": now["folds"],
+                        "shard": now.get("shard"),
+                        "fold_s": now.get("last_secs"),
+                        "fold_peak_rss_bytes": now.get("last_rss_bytes"),
+                        "missed": now["folds"] - seen - 1,
+                    }
+                )
+                seen = now["folds"]
+            return not now["fold_requested"]
 
         settled_in_time, wall = wait_for(settled, timeout=self.args.fold_timeout, interval=1.0)
         compaction = control.status()["compaction"]
         done = settled_in_time and compaction["folds"] > before["folds"]
+        after = self.shard_identities()
         return {
             "status": code,
             "completed": done,
@@ -864,11 +894,26 @@ class Cycle:
             "fold_s": compaction.get("last_secs"),
             "fold_peak_rss_bytes": compaction.get("last_rss_bytes"),
             "folds": compaction.get("folds"),
+            "compactions": compactions,
+            "shards_compacted": sorted(
+                shard for shard, identity in after.items() if identities.get(shard) != identity
+            ),
             "fold_failures": compaction.get("fold_failures", 0) - before.get("fold_failures", 0),
             "fold_refusals": compaction.get("fold_refusals", 0) - before.get("fold_refusals", 0),
             "last_refusal": compaction.get("last_refusal"),
             "live_rows": compaction.get("live_rows"),
         }
+
+    def shard_identities(self) -> dict[int, str]:
+        """Each shard's identity as the served copy's newest publication records it, by shard;
+        empty where nothing is served."""
+        if self.served is None:
+            return {}
+        try:
+            state = shard_state(self.served.bundle)
+        except FileNotFoundError:
+            return {}
+        return {shard["id"]: shard["identity"] for shard in state}
 
     def declared_levels(self, view: str) -> dict[str, list[int]]:
         """The levels each of one view's layers declares, from `/v1/meta`: what the census's zooms

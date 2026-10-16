@@ -187,6 +187,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         "scope with no cap, which on a rung whose bundle does not fit in memory is the box's own "
         "memory as the limit",
     )
+    ap.add_argument(
+        "--shard-size",
+        type=int,
+        default=None,
+        help="`[shards] size`: written into the base build's declaration, and declared on every "
+        "served copy through `PUT /control/shards`. Absent keeps the declaration's own size",
+    )
     ap.add_argument("--flush-timeout", type=float, default=900.0)
     ap.add_argument("--fold-timeout", type=float, default=7200.0)
     args = ap.parse_args(argv)
@@ -195,6 +202,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "give exactly one of --fraction, which runs the ingest cycle, and --churn-rounds, "
             "which runs the churn"
         )
+    if args.shard_size is not None and args.shard_size < 1:
+        ap.error(f"--shard-size is {args.shard_size}; give a size of at least 1")
     if not 0.0 < args.churn_fraction <= 1.0:
         ap.error(
             f"--churn-fraction is {args.churn_fraction}; give a fraction above 0 and at most 1"

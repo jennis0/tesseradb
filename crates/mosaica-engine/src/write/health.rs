@@ -146,8 +146,11 @@ pub struct ExecutorHealth {
     /// Folds that failed or were discarded. Each leaves orphan files under a prefix `CURRENT` never
     /// named.
     pub(crate) fold_failures: AtomicU64,
-    /// A `POST /control/compact` awaiting the tick that dispatches it.
+    /// A compaction request awaiting the tick that dispatches it, or whose shards are not all
+    /// compacted yet: true until the last of them publishes, is refused or fails.
     pub(crate) fold_requested: AtomicBool,
+    /// The request [`Self::fold_requested`] raised and no tick has taken yet.
+    pub(crate) compaction_request: Mutex<Option<CompactionRequest>>,
     /// Folds that were asked for and `plan_fold` refused, one counter per gate
     /// ([`crate::compact::NoFold::index`]). A gate that stands is counted at every tick, so the
     /// largest entry is the condition the deployment is in.
@@ -351,6 +354,35 @@ impl StageMark {
         {
             self
         }
+    }
+}
+
+/// The shards a compaction request names: every shard with something to reclaim, or these.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct CompactionRequest {
+    pub(crate) every: bool,
+    pub(crate) shards: std::collections::BTreeSet<ShardId>,
+}
+
+impl ExecutorHealth {
+    /// Raise a request for `shard`'s compaction, or every shard's with something to reclaim,
+    /// beside any request not yet taken.
+    pub(crate) fn request_compaction(&self, shard: Option<ShardId>) {
+        let mut held = lock_recover(&self.compaction_request);
+        let request = held.get_or_insert_with(CompactionRequest::default);
+        match shard {
+            Some(shard) => {
+                request.shards.insert(shard);
+            }
+            None => request.every = true,
+        }
+        drop(held);
+        self.fold_requested.store(true, Ordering::SeqCst);
+    }
+
+    /// The request no tick has taken yet, taken.
+    pub(crate) fn take_compaction_request(&self) -> Option<CompactionRequest> {
+        lock_recover(&self.compaction_request).take()
     }
 }
 
@@ -588,6 +620,7 @@ impl ExecutorHealth {
             folds: AtomicU64::new(0),
             fold_failures: AtomicU64::new(0),
             fold_requested: AtomicBool::new(false),
+            compaction_request: Mutex::new(None),
             fold_refusals: std::array::from_fn(|_| AtomicU64::new(0)),
             last_fold_refusal: Mutex::new(None),
             wal_gauge: Mutex::new(WalGauge::default()),

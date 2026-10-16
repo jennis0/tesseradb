@@ -2817,6 +2817,29 @@ impl SegmentsManifest {
         derived_and_held(self.only_shard(), &self.layer_spaces)
     }
 
+    /// Every shard's derived files, each beside its shard, and every layer space's held shapes
+    /// beside the first shard: the pairs [`Self::file_derived_by_shard`] files.
+    pub fn derived_by_shard(&self) -> impl Iterator<Item = (ShardId, &DerivedExtent)> {
+        let first = self.shards.records.first().map(|record| record.id);
+        let held = first.into_iter().flat_map(move |first| {
+            self.layer_spaces
+                .iter()
+                .flat_map(|space| space.held_shapes.iter())
+                .map(move |extent| (first, extent))
+        });
+        self.shards
+            .records
+            .iter()
+            .flat_map(|record| {
+                let id = record.id;
+                record
+                    .derived_extents
+                    .iter()
+                    .map(move |extent| (id, extent))
+            })
+            .chain(held)
+    }
+
     /// File `derived` on `shard`, as [`Self::file_derived_by_shard`] files it, every other shard
     /// keeping the derived files it lists.
     pub fn file_derived(&mut self, shard: ShardId, derived: Vec<DerivedExtent>) {

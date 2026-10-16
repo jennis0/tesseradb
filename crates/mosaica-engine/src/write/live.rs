@@ -156,11 +156,6 @@ impl LiveState {
             .clone()
     }
 
-    /// The one shard written to until several are.
-    pub(crate) fn only_shard(&self) -> Arc<ShardWrite> {
-        Arc::clone(mosaica_types::only(&self.shards()))
-    }
-
     /// The open shard, which takes new items at its high water: the open checked there is one,
     /// and a window that seals it opens the next.
     pub(crate) fn open_shard(&self) -> Arc<ShardWrite> {
@@ -409,7 +404,7 @@ impl LiveState {
     pub(in crate::write) fn retire_artifacts(
         &self,
         retired: &mosaica_lifecycle::membership::Retired,
-    ) -> Vec<(String, u32)> {
+    ) -> Vec<mosaica_lifecycle::membership::MovedLevel> {
         lock_recover(&self.artifacts).retire(retired)
     }
 

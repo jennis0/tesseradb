@@ -43,7 +43,7 @@ Each stage's barrier is wire- or filesystem-observable, never a sleep:
 | merge | ``merges`` up, ``segments_version`` bumped, ``refreshes`` up (a merge's publication runs the same refresh pass) |
 | coalesce | ``coalesces`` up — the one stage that moves no row and bumps no version (write-path §7), so its barrier must be a counter; the version is asserted *unchanged* |
 | deny | the 200 acknowledgement itself — a deny is fail-closed at acceptance (write-path §5.4), so there is nothing later to wait for |
-| fold | ``compaction.folds`` up (``fold_failures`` watched so a refused fold is its own diagnosis), then ``refreshes`` up |
+| fold | ``compaction.fold_requested`` false with ``compaction.folds`` up (``fold_failures`` watched so a refused fold is its own diagnosis), then ``refreshes`` up |
 | rotation | the WAL's active member index rises on disc — no rotation counter reaches `/control/status`, and the WAL family lives at a path the harness owns (decision 0038: the log is a sequence, not a file) |
 
 The refresh barrier leans on this suite having **one live session per server process**: the
@@ -1449,9 +1449,13 @@ class Fold(Stage):
             compaction = h.status()["compaction"]
             if compaction["fold_failures"] > self._snap["fold_failures"]:
                 raise RuntimeError(f"the fold failed rather than landed: {compaction}")
-            return compaction["folds"] > self._snap["folds"]
+            if compaction["fold_requested"]:
+                return False
+            if compaction["folds"] > self._snap["folds"]:
+                return True
+            raise RuntimeError(f"the compaction was refused rather than landed: {compaction}")
 
-        poll(landed, "no compaction fold landed", timeout=300.0)
+        poll(landed, "the compaction request was not answered", timeout=300.0)
         poll(
             lambda: h.executor()["flush"]["refreshes"] > self._snap["refreshes"],
             "the post-fold refresh never carried the resident session across the flip",

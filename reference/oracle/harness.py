@@ -938,13 +938,16 @@ class Server:
         assert resp.status_code == 202 and resp.json()["visible"], resp.text
 
     def compact(self, timeout: float = 300.0) -> None:
-        """Ask for a compaction fold and **wait for one to land** (contracts §3.4).
+        """Ask for a compaction and **wait for the request to be answered** (contracts §3.4): the
+        server compacts every shard with something to reclaim, one after another, and keeps
+        `fold_requested` raised until the last publishes.
 
-        Same shape as [`flush`] and the same reason for the barrier, over a longer wait: a fold
-        re-reads and rewrites the whole corpus. `fold_failures` is watched beside `folds` so a
-        refused or failed fold surfaces as its own error rather than as a timeout — the two are
-        different diagnoses, and the gates a fold can refuse on (memory, free disc, a poisoned WAL)
-        are properties of the machine rather than of the code under test.
+        Same shape as [`flush`] and the same reason for the barrier, over a longer wait: a
+        compaction re-reads and rewrites a shard. `fold_failures` is watched beside `folds` so a
+        failed compaction surfaces as its own error rather than as a timeout, and a request
+        answered with no compaction published is a refusal — different diagnoses, and the gates a
+        compaction can refuse on (memory, free disc, a poisoned WAL) are properties of the machine
+        rather than of the code under test.
         """
         before = self.status()["compaction"]
         resp = requests.post(
@@ -958,10 +961,12 @@ class Server:
             now = self.status()["compaction"]
             if now["fold_failures"] > before["fold_failures"]:
                 raise RuntimeError(f"the compaction fold failed: {now}")
-            if now["folds"] > before["folds"]:
-                return
+            if not now["fold_requested"]:
+                if now["folds"] > before["folds"]:
+                    return
+                raise RuntimeError(f"the compaction was refused: {now}")
             time.sleep(0.2)
-        raise TimeoutError(f"no compaction fold landed within {timeout}s")
+        raise TimeoutError(f"the compaction request was not answered within {timeout}s")
 
 
 def write_config(

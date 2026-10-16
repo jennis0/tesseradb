@@ -596,7 +596,7 @@ impl WritePath {
                         Arc::clone(&health.flush_in_flight),
                         Arc::clone(&health.flush_completed_pending),
                     ),
-                    last_fold_start_unix: None,
+                    compactions: executor::Compactions::default(),
                     pending_reclaim: Vec::new(),
                     superseded: std::sync::Mutex::new(Vec::new()),
                     last_tick: std::time::Instant::now(),

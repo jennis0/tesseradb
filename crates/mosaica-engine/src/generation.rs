@@ -276,19 +276,19 @@ impl Shard {
         }
     }
 
-    /// The successor over `data` holding these, with its deny versions; none is carried across a
-    /// new prefix, since a fold renumbers the base.
+    /// The successor over `data` holding these, with its deny versions; none is carried unless
+    /// `same_rows`, since a compaction renumbers its shard's base.
     fn successor(
         &self,
-        same_prefix: bool,
+        same_rows: bool,
         data: Arc<ShardData>,
         parts: ShardParts,
         denied: Arc<DenyMask>,
         buffered_rows: Arc<crate::BufferedRows>,
     ) -> Shard {
-        let deny_versions = match Arc::ptr_eq(&denied, &self.denied) && same_prefix {
+        let deny_versions = match Arc::ptr_eq(&denied, &self.denied) && same_rows {
             true => Arc::clone(&self.deny_versions),
-            false => deny_versions(same_prefix.then_some(self), &denied, &data),
+            false => deny_versions(same_rows.then_some(self), &denied, &data),
         };
         Shard {
             data,
@@ -307,31 +307,31 @@ impl Shard {
         }
     }
 
-    fn next(&self, same_prefix: bool, data: Arc<ShardData>, parts: ShardParts) -> Shard {
+    fn next(&self, same_rows: bool, data: Arc<ShardData>, parts: ShardParts) -> Shard {
         let denied = self.carried_denied(&data, &parts.overlay);
         let buffered_rows =
             match Arc::ptr_eq(&data, &self.data) && Arc::ptr_eq(&parts.buffer, &self.buffer) {
                 true => Arc::clone(&self.buffered_rows),
                 false => Arc::new(crate::compose::derive_buffered_rows(&parts.buffer, &data)),
             };
-        self.successor(same_prefix, data, parts, denied, buffered_rows)
+        self.successor(same_rows, data, parts, denied, buffered_rows)
     }
 
     fn next_buffer(
         &self,
-        same_prefix: bool,
+        same_rows: bool,
         data: Arc<ShardData>,
         parts: ShardParts,
         inserted: &[EntityId],
     ) -> Shard {
         let denied = self.carried_denied(&data, &parts.overlay);
         let buffered_rows = self.next_buffered_rows(&data, &parts.buffer, inserted);
-        self.successor(same_prefix, data, parts, denied, buffered_rows)
+        self.successor(same_rows, data, parts, denied, buffered_rows)
     }
 
     fn next_denies(
         &self,
-        same_prefix: bool,
+        same_rows: bool,
         data: Arc<ShardData>,
         parts: ShardParts,
         newly_denied: &[EntityId],
@@ -354,7 +354,7 @@ impl Shard {
             "the incremental deny mask does not equal a fresh derivation"
         );
         let buffered_rows = self.next_buffered_rows(&data, &parts.buffer, inserted);
-        self.successor(same_prefix, data, parts, Arc::new(denied), buffered_rows)
+        self.successor(same_rows, data, parts, Arc::new(denied), buffered_rows)
     }
 
     fn next_buffered_rows(
@@ -514,10 +514,12 @@ impl Generation {
     }
 
     /// The successor holding `parts`: the shard `changed` answers for is replaced, and every other
-    /// is carried, re-derived where its data changed.
+    /// is carried, re-derived where its data changed. A shard keeps its rows where the prefix is
+    /// the same or `renumbered` names another shard, and only then are its deny versions carried.
     fn succeeded_by(
         &self,
         parts: GenerationParts,
+        renumbered: Option<ShardId>,
         mut changed: impl FnMut(&Shard, bool, Arc<ShardData>) -> Option<Shard>,
     ) -> Generation {
         let same_prefix = parts.prefix == self.parts.prefix;
@@ -526,18 +528,20 @@ impl Generation {
             .iter()
             .map(|shard| {
                 let id = shard.id();
+                let same_rows =
+                    same_prefix || renumbered.is_some_and(|renumbered| renumbered != id);
                 let data = Arc::clone(
                     parts
                         .bundle
                         .shard(id)
                         .unwrap_or_else(|| panic!("the bundle holds no shard {id}")),
                 );
-                if let Some(next) = changed(shard, same_prefix, Arc::clone(&data)) {
+                if let Some(next) = changed(shard, same_rows, Arc::clone(&data)) {
                     return Arc::new(next);
                 }
                 match same_prefix && Arc::ptr_eq(&data, &shard.data) {
                     true => Arc::clone(shard),
-                    false => Arc::new(shard.next(same_prefix, data, shard.parts.clone())),
+                    false => Arc::new(shard.next(same_rows, data, shard.parts.clone())),
                 }
             })
             .collect();
@@ -549,6 +553,17 @@ impl Generation {
     /// derives. Every other shard is carried.
     pub(crate) fn publish(
         &self,
+        swaps: BTreeMap<ShardId, ShardSwap<'_>>,
+        change: impl FnOnce(&mut GenerationParts, &mut ShardsParts),
+    ) -> Generation {
+        self.publish_renumbering(None, swaps, change)
+    }
+
+    /// [`Self::publish`], into a new prefix that renumbers the rows of `renumbered` alone where it
+    /// names a shard.
+    fn publish_renumbering(
+        &self,
+        renumbered: Option<ShardId>,
         mut swaps: BTreeMap<ShardId, ShardSwap<'_>>,
         change: impl FnOnce(&mut GenerationParts, &mut ShardsParts),
     ) -> Generation {
@@ -577,16 +592,14 @@ impl Generation {
             }
         }
         let mut shards = shards.0;
-        self.succeeded_by(parts, |held, same_prefix, data| {
+        self.succeeded_by(parts, renumbered, |held, same_rows, data| {
             let swap = swaps.remove(&held.id())?;
             let parts = shards.remove(&held.id())?;
             Some(match swap {
-                ShardSwap::Parts => held.next(same_prefix, data, parts),
-                ShardSwap::Buffer(swap) => {
-                    held.next_buffer(same_prefix, data, parts, swap.inserted)
-                }
+                ShardSwap::Parts => held.next(same_rows, data, parts),
+                ShardSwap::Buffer(swap) => held.next_buffer(same_rows, data, parts, swap.inserted),
                 ShardSwap::Denies(swap) => held.next_denies(
-                    same_prefix,
+                    same_rows,
                     data,
                     parts,
                     swap.newly_denied,
@@ -605,7 +618,7 @@ impl Generation {
     ) -> Generation {
         let mut parts = self.parts.clone();
         parts.bundle = bundle;
-        let mut next = self.succeeded_by(parts, |_, _, _| None);
+        let mut next = self.succeeded_by(parts, None, |_, _, _| None);
         for (id, shard) in opened {
             assert!(
                 next.shard(id).is_none(),
@@ -627,7 +640,7 @@ impl Generation {
     pub(crate) fn with(&self, change: impl FnOnce(&mut GenerationParts)) -> Generation {
         let mut parts = self.parts.clone();
         change(&mut parts);
-        self.succeeded_by(parts, |_, _, _| None)
+        self.succeeded_by(parts, None, |_, _, _| None)
     }
 
     /// A copy with `change` applied to what is held once and to each shard of `ids`. A
@@ -639,6 +652,18 @@ impl Generation {
     ) -> Generation {
         let swaps = ids.into_iter().map(|id| (id, ShardSwap::Parts)).collect();
         self.publish(swaps, change)
+    }
+
+    /// [`Self::with_shards`] for a compaction of `compacted` into a new prefix: its rows are
+    /// renumbered and every other shard keeps its own.
+    pub(crate) fn compacting(
+        &self,
+        compacted: ShardId,
+        ids: impl IntoIterator<Item = ShardId>,
+        change: impl FnOnce(&mut GenerationParts, &mut ShardsParts),
+    ) -> Generation {
+        let swaps = ids.into_iter().map(|id| (id, ShardSwap::Parts)).collect();
+        self.publish_renumbering(Some(compacted), swaps, change)
     }
 
     /// [`Self::with_shards`] over shard `id` alone.

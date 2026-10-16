@@ -4,9 +4,11 @@ try:  # 3.11+
     import tomllib
 except ModuleNotFoundError:  # 3.10 on this box
     import tomli as tomllib
+import base64
 import json
 import shutil
 import subprocess
+import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -15,6 +17,10 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
+
+# The oracle's publication reader.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "reference"))
+from oracle.layout import newest_publication
 
 # ---------------------------------------------------------------------------------------------
 # The split
@@ -363,6 +369,93 @@ def bundle_manifest(bundle: Path) -> tuple[str, dict] | None:
     named = json.loads(current.read_text())
     prefix = named["prefix"] if isinstance(named, dict) else str(named)
     return prefix, json.loads((bundle / prefix / "MANIFEST.json").read_text())
+
+
+def served_state(bundle: Path) -> dict:
+    """What the churn reads off the newest side-manifest of each partition of `bundle`'s current
+    version, summed over the shards, and each shard's own beside it ([`shard_state`]).
+    `postings_bytes` is the term index on disc, the base postings and every live delta tier;
+    `term_images_bytes`, every view's term images; `free_ids` and `held_ids`, the freed entity ids
+    the allocator issues next and those it holds back until the log rotates."""
+    shards = shard_state(bundle)
+    prefix = bundle_manifest(bundle)[0]
+    out = {"prefix": prefix, "shards": shards}
+    for key in ("postings_bytes", "term_images_bytes", "free_ids", "held_ids"):
+        out[key] = sum(shard[key] for shard in shards)
+    return out
+
+
+def shard_state(bundle: Path) -> list[dict]:
+    """Each point shard of `bundle`'s current version, as the newest side-manifest of its partition
+    records it, read through the oracle's publication reader: its number, state, identity, high
+    water, live segments and rows, its term index and term images on disc, and its freed ids."""
+    read = bundle_manifest(bundle)
+    if read is None:
+        raise FileNotFoundError(f"{bundle} has no CURRENT; state --all-in-bundle as a built bundle")
+    prefix, _ = read
+    root = bundle / prefix
+    shards: list[dict] = []
+    for partition in sorted(path for path in (root / "partitions").iterdir() if path.is_dir()):
+        _, published = newest_publication(root, partition.name)
+        for record in published["shards"]["records"]:
+            postings = partition / "shards" / str(record["id"]) / "terms" / "postings.arrow"
+            shards.append(
+                {
+                    "partition": partition.name,
+                    "id": record["id"],
+                    "state": record.get("state"),
+                    "identity": record.get("identity"),
+                    "high_water": record["high_water"],
+                    "segments": len(record["segments"]),
+                    "live_rows": sum(segment["row_count"] for segment in record["segments"]),
+                    "postings_bytes": postings.stat().st_size
+                    + sum((root / path).stat().st_size for path in record["deltas"]),
+                    "term_images_bytes": sum(
+                        (root / extent["path"]).stat().st_size
+                        for extent in record["term_image_extents"]
+                    ),
+                    "free_ids": roaring_cardinality(record["free_entities"]),
+                    "held_ids": sum(
+                        roaring_cardinality(entry["entities"]) for entry in record["held_entities"]
+                    ),
+                }
+            )
+    return shards
+
+
+def roaring_cardinality(encoded: str) -> int:
+    """How many ids a side-manifest's base64 portable Roaring bitmap holds, read from its header:
+    after the cookie and, where the cookie says run containers are present, their bitset, each
+    container's key and its cardinality less one."""
+    data = base64.b64decode(encoded)
+    cookie = int.from_bytes(data[:4], "little")
+    if cookie & 0xFFFF == 12347:
+        containers = (cookie >> 16) + 1
+        at = 4 + (containers + 7) // 8
+    elif cookie == 12346:
+        containers = int.from_bytes(data[4:8], "little")
+        at = 8
+    else:
+        raise ValueError(
+            f"a Roaring bitmap whose cookie is {cookie}, which is not the portable format"
+        )
+    if containers == 0:
+        return 0
+    header = np.frombuffer(data, dtype="<u2", count=2 * containers, offset=at)
+    return int(header[1::2].astype(np.int64).sum()) + containers
+
+
+def declare_shard_size(corpus_toml: Path, size: int) -> None:
+    """Rewrite the declaration's `[shards]` table as `size`, appending one where it has none."""
+    lines = corpus_toml.read_text().splitlines(keepends=True)
+    heads = [i for i, line in enumerate(lines) if line.lstrip().startswith("[")]
+    for n, start in enumerate(heads):
+        if lines[start].strip() == "[shards]":
+            end = heads[n + 1] if n + 1 < len(heads) else len(lines)
+            del lines[start:end]
+            break
+    text = "".join(lines).rstrip("\n")
+    corpus_toml.write_text(f"{text}\n\n[shards]\nsize = {size}\n")
 
 
 def state_extent(corpus_toml: Path, bundle: Path) -> dict | None:

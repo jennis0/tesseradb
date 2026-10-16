@@ -54,16 +54,30 @@ pub fn publish_buffered(engine: &Engine) {
 /// Force a fold and wait for it to publish, failing the moment one is discarded rather than
 /// published — a discarded fold leaves the counters where a timeout would.
 pub fn fold(engine: &Engine) {
+    compact(engine, None);
+}
+
+/// Request a compaction of `shard`, or of every shard with something to reclaim, and wait until
+/// the request is answered, failing the moment a compaction is discarded rather than published.
+/// Returns how many compactions published.
+pub fn compact(engine: &Engine, shard: Option<mosaica_types::ShardId>) -> u64 {
     let before = engine.write_executor_stats();
-    engine.request_fold();
-    wait_until("the fold never published", Duration::from_secs(120), || {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        now.folds > before.folds
-    });
+    engine.request_compaction(shard);
+    let mut published = 0;
+    wait_until(
+        "the compaction never published",
+        Duration::from_secs(120),
+        || {
+            let now = engine.write_executor_stats();
+            assert_eq!(
+                now.fold_failures, before.fold_failures,
+                "the fold was discarded rather than published"
+            );
+            published = now.folds - before.folds;
+            published > 0 && !now.fold_requested
+        },
+    );
+    published
 }
 
 /// **Force a tick and wait for it** — the moment a level's row forms are published from the

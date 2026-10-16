@@ -79,9 +79,9 @@ pub use pairs::PairsParquetWriter;
 pub use permutation::{EntityBuckets, Permutation, RowEntities, RowSpace, SegmentExtent};
 pub use read::{
     first_code_at_or_past, highest_published_n, highest_side_manifest_n, newest_publication,
-    open_bundle, open_written_prefix, read_publication, tile_ranges, tile_ranges_all,
-    tile_ranges_within, Bundle, ColumnsRef, CutIndex, MortonSlice, PartitionData, ScalarSlice,
-    SegmentData, ShardData, ViewData,
+    open_bundle, open_written_prefix, open_written_prefix_carrying, read_publication, tile_ranges,
+    tile_ranges_all, tile_ranges_within, Bundle, ColumnsRef, CutIndex, MortonSlice, PartitionData,
+    ScalarSlice, SegmentData, ShardData, ViewData,
 };
 pub use reclaim::{hard_link_forward, reclaim_prefix, reclaim_unpublished_prefix};
 pub use row_entity::{write_row_entity, RowToEntity, ROW_ENTITY_FILE};

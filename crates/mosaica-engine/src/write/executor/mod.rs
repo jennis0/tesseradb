@@ -56,8 +56,8 @@ pub(super) struct Executor {
     pub(super) flush: Background<crate::flush::CompletedFlush>,
     /// The `unique` declarations on existing columns being built, and those waiting to be.
     pub(super) unique_declarations: UniqueDeclarations,
-    /// When the last fold attempt started, as a unix second, so the interval can limit attempts.
-    pub(super) last_fold_start_unix: Option<u64>,
+    /// What decides the next compaction's shard beside the schedule.
+    pub(super) compactions: Compactions,
     /// Deleted once nothing holds its generation; a dead node leaves it to the sweep.
     pub(super) pending_reclaim: Vec<PendingReclaim>,
     /// Every generation replaced since the last fold's publication, held weakly. A reader holding
@@ -201,7 +201,10 @@ impl Executor {
         let period_due = self.last_tick.elapsed() >= period;
         let due = period_due || rows_due;
         let requested = self.health.flush_requested.load(Ordering::SeqCst);
-        let fold_requested = self.health.fold_requested.load(Ordering::SeqCst);
+        // A request stays raised while its compactions run, and one in flight wakes nothing:
+        // its completion is published at the next wake, and dispatches the request's next shard.
+        let fold_requested =
+            self.health.fold_requested.load(Ordering::SeqCst) && !self.fold.in_flight();
         if !due && !requested && !fold_requested {
             return None;
         }
@@ -354,8 +357,12 @@ impl Executor {
         } = publication;
         let started = std::time::Instant::now();
         let previous = self.generation.load_full();
-        check_publishable(&previous, &prefix, segments_version, watermark)?;
-        let shard = previous.only_shard();
+        let shard_id = match &rotation {
+            Some(rotation) => rotation.shard,
+            None => previous.only_shard().id(),
+        };
+        check_publishable(&previous, &prefix, segments_version, shard_id, watermark)?;
+        let shard = previous.shard_of(shard_id);
 
         // Cloned and retired against here, never mutated on the shared `Arc` the read path holds.
         // Cache keys read `overlay_version` as the security state, so a geometry-only swap must
@@ -367,6 +374,7 @@ impl Executor {
                 tracing::info!(
                     retired = count,
                     prefix = %prefix,
+                    shard = %shard_id,
                     "Rule F: executed deletions retired in the fold's own publication"
                 );
                 (Arc::new(overlay), shard.overlay_version + 1)
@@ -374,13 +382,39 @@ impl Executor {
             _ => (Arc::clone(&shard.overlay), shard.overlay_version),
         };
 
-        let next = previous.with_shard(shard.id(), |g, s| {
+        // Every other shard keeps its rows across a rotation, and reads its unique, edited-items
+        // and tenancy runs over the new prefix.
+        let ids: Vec<ShardId> = std::iter::once(shard_id)
+            .chain(
+                rotation
+                    .iter()
+                    .flat_map(|r| r.carried.iter().map(|carried| carried.shard)),
+            )
+            .collect();
+        let change = |g: &mut crate::generation::GenerationParts,
+                      shards: &mut crate::generation::ShardsParts| {
             g.prefix = prefix;
             g.segments_version = segments_version;
-            s.moved_to(segments_version);
-            s.watermark = watermark;
             g.bundle = bundle;
             g.dict = dict;
+            if rotation.as_ref().is_some_and(|r| !r.retired.is_empty()) {
+                g.fold_epoch = previous.fold_epoch + 1;
+            }
+            if rotation.as_ref().is_some_and(|r| r.frees) {
+                g.free_epoch = previous.free_epoch + 1;
+            }
+            if let Some(r) = &rotation {
+                g.layer_spaces = Arc::new(rotated_spaces(&previous.layer_spaces, r));
+                for carried in &r.carried {
+                    let s = shards.of(carried.shard);
+                    s.unique = Arc::clone(&carried.unique);
+                    s.edited = Arc::clone(&carried.edited);
+                    s.tenancy = Arc::clone(&carried.tenancy);
+                }
+            }
+            let s = shards.of(shard_id);
+            s.moved_to(segments_version);
+            s.watermark = watermark;
             // A rotation carries the new prefix's own columns, or the successor would serve stale
             // entries.
             if let Some(r) = &rotation {
@@ -399,18 +433,13 @@ impl Executor {
                 }
             }
             s.delta_postings = delta_postings;
-            if rotation.as_ref().is_some_and(|r| !r.retired.is_empty()) {
-                g.fold_epoch = previous.fold_epoch + 1;
-            }
-            if rotation.as_ref().is_some_and(|r| r.frees) {
-                g.free_epoch = previous.free_epoch + 1;
-            }
             s.overlay_version = overlay_version;
             s.overlay = overlay;
-            if let Some(r) = &rotation {
-                g.layer_spaces = Arc::new(rotated_spaces(&previous.layer_spaces, r));
-            }
-        });
+        };
+        let next = match &rotation {
+            Some(_) => previous.compacting(shard_id, ids, change),
+            None => previous.with_shards(ids, change),
+        };
         let next = Arc::new(next);
         self.publish_arc(Arc::clone(&next), started);
         // Pruned before the refresh starts, so its snapshot holds what retention keeps and no more.

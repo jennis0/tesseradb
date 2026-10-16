@@ -777,7 +777,13 @@ pub fn open_bundle(root: &Path) -> Result<Bundle> {
     // (§2.1 — `CURRENT` is the only mutable file), but building the bundle from a re-read would
     // make the digest a claim about one read and the bundle a product of another, on the one file
     // whose digest *is* the bundle identity.
-    open_prefix(root, &current.prefix, manifest_bytes, Verification::Digests)
+    open_prefix(
+        root,
+        &current.prefix,
+        manifest_bytes,
+        Verification::Digests,
+        None,
+    )
 }
 
 /// How much of a prefix an open re-checks before mapping it — see [`open_written_prefix`] for the
@@ -844,7 +850,34 @@ enum Verification {
 pub fn open_written_prefix(root: &Path, prefix: &str) -> Result<Bundle> {
     let manifest_path = root.join(prefix).join("MANIFEST.json");
     let manifest_bytes = read_to_vec(&manifest_path)?;
-    open_prefix(root, prefix, manifest_bytes, Verification::JustWritten)
+    open_prefix(
+        root,
+        prefix,
+        manifest_bytes,
+        Verification::JustWritten,
+        None,
+    )
+}
+
+/// [`open_written_prefix`] for a compaction of `opened` alone: every other shard `carried` serves
+/// keeps the views, row spaces and segments `carried` holds for it, under the record the new
+/// prefix names, and only `opened` is opened from the prefix. The new prefix links the other
+/// shards' files, so `carried`'s mappings are of the same bytes.
+pub fn open_written_prefix_carrying(
+    root: &Path,
+    prefix: &str,
+    opened: ShardId,
+    carried: &Bundle,
+) -> Result<Bundle> {
+    let manifest_path = root.join(prefix).join("MANIFEST.json");
+    let manifest_bytes = read_to_vec(&manifest_path)?;
+    open_prefix(
+        root,
+        prefix,
+        manifest_bytes,
+        Verification::JustWritten,
+        Some((opened, carried)),
+    )
 }
 
 fn open_prefix(
@@ -852,6 +885,7 @@ fn open_prefix(
     prefix: &str,
     manifest_bytes: Vec<u8>,
     verification: Verification,
+    carrying: Option<(ShardId, &Bundle)>,
 ) -> Result<Bundle> {
     let prefix_dir = root.join(prefix);
     let manifest_path = prefix_dir.join("MANIFEST.json");
@@ -924,6 +958,19 @@ fn open_prefix(
         };
         let mut shards = Vec::with_capacity(records.len());
         for record in records {
+            let held = carrying
+                .filter(|(opened, _)| *opened != record.id)
+                .and_then(|(_, carried)| carried.partitions.get(&partition_desc.phash))
+                .and_then(|partition| partition.shard(record.id));
+            if let Some(held) = held {
+                let mut shard = ShardData {
+                    record,
+                    views: held.views.clone(),
+                };
+                shard.seed_declared(&manifest);
+                shards.push(Arc::new(shard));
+                continue;
+            }
             let layout = ShardLayout::new(&partition_desc.phash, record.id);
             let mut shard = open_shard(
                 &prefix_dir,

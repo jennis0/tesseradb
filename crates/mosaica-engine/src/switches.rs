@@ -22,6 +22,8 @@ pub(crate) struct TestSwitches {
     pub(crate) fold_paused: AtomicBool,
     /// See [`crate::Engine::set_fold_publication_paused_for_test`].
     pub(crate) fold_publication_paused: AtomicBool,
+    /// The memory a compaction's pre-flight takes the host to have, in bytes; zero measures it.
+    pub(crate) fold_memory: AtomicU64,
     /// See [`crate::Engine::set_merge_publication_paused_for_test`].
     pub(crate) merge_publication_paused: AtomicBool,
     /// Whether the background occupancy fill runs at all. A test turns it off so an assertion about
@@ -203,6 +205,7 @@ impl Default for TestSwitches {
             flush_paused: AtomicBool::new(false),
             fold_paused: AtomicBool::new(false),
             fold_publication_paused: AtomicBool::new(false),
+            fold_memory: AtomicU64::new(0),
             merge_publication_paused: AtomicBool::new(false),
             occupancy_stage_enabled: AtomicBool::new(true),
             serial_fallback_max_rows: AtomicU64::new(crate::viewport::SERIAL_FALLBACK_MAX_ROWS),

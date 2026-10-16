@@ -72,6 +72,12 @@ class Control:
     def compact(self):
         return requests.post(f"{self.base}/control/compact", headers=self.headers, timeout=60)
 
+    def declare_shards(self, size: int):
+        """`PUT /control/shards`: the point shards' size."""
+        return requests.put(
+            f"{self.base}/control/shards", headers=self.headers, json={"size": size}, timeout=60
+        )
+
     def drop_view(self, group: str, key: str):
         """`DELETE /control/views/{group}/{key}`: the key's view in every group sharing it."""
         return requests.delete(
