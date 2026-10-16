@@ -646,6 +646,18 @@ pub fn build_with_layers(
     corpus: &mosaica_corpus::Corpus,
     config: mosaica_build::config::Config,
 ) {
+    build_with_layers_sized(out, points_path, pairs_path, corpus, config, None);
+}
+
+/// [`build_with_layers`], built at `shard_size`.
+pub fn build_with_layers_sized(
+    out: &Path,
+    points_path: &Path,
+    pairs_path: &Path,
+    corpus: &mosaica_corpus::Corpus,
+    config: mosaica_build::config::Config,
+    shard_size: Option<u64>,
+) {
     let schema = with_id(config.schema);
     let args = BuildArgs {
         views: vec![mosaica_build::ViewArgs {
@@ -667,7 +679,7 @@ pub fn build_with_layers(
         ),
         out: out.to_path_buf(),
         limit: None,
-        shard_size: None,
+        shard_size,
         strict: false,
         identity_key: test_key(),
         layers: config.layers,

@@ -31,9 +31,20 @@ pub(crate) struct FoldContext {
     pub(crate) band_schema: Vec<(String, ScalarType)>,
     /// Per view, the columns a segment may lack; any other missing column is a torn segment.
     pub(crate) absent_ok: BTreeMap<String, Vec<String>>,
-    /// Entity-scoped columns declared at a running service and not yet folded.
+    /// The columns declared at a running service that `MANIFEST.json` does not declare,
+    /// entity-scoped and group-scoped: the compacted shard holds the base of every one of them
+    /// once this compaction publishes.
     pub(crate) runtime_attributes: Vec<String>,
     pub(crate) runtime_scoped_attributes: Vec<String>,
+    /// The entity-scoped columns the compacted shard holds no base of, read from their extents
+    /// alone.
+    pub(crate) unbased: Vec<String>,
+    /// Each `(family, view, incarnation)` of a group-scoped column the compacted shard holds no
+    /// base of.
+    pub(crate) unbased_scoped: Vec<ScopedView>,
+    /// Each `(family, view, incarnation)` of a group-scoped column at the plan: the shard holds
+    /// the base of every one once this compaction publishes.
+    pub(crate) scoped_views: Vec<ScopedView>,
     /// The new base segment's id in every view. Never reused.
     pub(crate) seg_id: String,
     pub(crate) base_postings: Arc<PostingsReader>,
@@ -71,10 +82,15 @@ pub(crate) struct CompletedFold {
     pub(crate) finished: std::time::Instant,
     pub(crate) attr_bytes_read: u64,
     pub(crate) attr_bytes_written: u64,
-    /// The columns this fold gave a base, which publication takes off the runtime lists.
+    /// The columns this compaction gave the shard a base of, which its record lists.
     pub(crate) runtime_attributes: Vec<String>,
     pub(crate) runtime_scoped_attributes: Vec<String>,
+    /// [`FoldContext::scoped_views`].
+    pub(crate) scoped_views: Vec<ScopedView>,
 }
+
+/// A group-scoped family's column of one view at one incarnation.
+pub(crate) type ScopedView = (String, String, mosaica_types::view::ViewIncarnation);
 
 #[derive(Default)]
 pub(super) struct FoldOutput {
@@ -170,6 +186,7 @@ pub(crate) fn execute(
         attr_bytes_written: out.attr_written,
         runtime_attributes: ctx.runtime_attributes,
         runtime_scoped_attributes: ctx.runtime_scoped_attributes,
+        scoped_views: ctx.scoped_views,
     })
 }
 

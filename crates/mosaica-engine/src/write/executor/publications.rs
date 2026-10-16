@@ -1018,10 +1018,10 @@ impl Executor {
                 .iter()
                 .map(|e| crate::filter::record_extent_paths(&prefix_dir, e))
                 .collect();
-            // The columns whose base no fold has written yet, which the schema owes no base
-            // for — the list `Engine::open` passes, so this stack and the one a restart opens
-            // are the same stack.
-            let unfolded = self.live.with_attributes(|a| a.entity_names());
+            // The columns this shard holds no base of, which the schema owes no base for — the
+            // list `Engine::open` reads, so this stack and the one a restart opens are the same
+            // stack.
+            let unfolded = record.unbased(&self.live.with_attributes(|a| a.entity_names()));
             match crate::filter::open_record_stack(
                 &prefix_dir,
                 layout,
@@ -2233,22 +2233,23 @@ impl Executor {
         // composes onto a column, so the column has to exist before the composition below can
         // find it. Empty in every steady-state flush, where the base has been on disc since the
         // build.
-        let live_columns = if completed.scoped_columns.is_empty() {
+        // Stamped with the incarnation of the view the pair names, which is what places the base
+        // the flush just wrote.
+        let opening: Vec<(String, String, mosaica_types::view::ViewIncarnation)> = completed
+            .scoped_columns
+            .iter()
+            .map(|(column, view)| (column.clone(), view.clone(), completed.scoped_incarnation))
+            .collect();
+        let live_columns = if opening.is_empty() {
             Arc::clone(&shard.filter_columns)
         } else {
-            // Stamped with the incarnation of the view the pair names, which is what places the
-            // base the flush just wrote.
-            let opening: Vec<(String, String, mosaica_types::view::ViewIncarnation)> = completed
-                .scoped_columns
-                .iter()
-                .map(|(column, view)| (column.clone(), view.clone(), completed.scoped_incarnation))
-                .collect();
             match shard.filter_columns.with_scoped_columns(
                 &record_dir,
                 ShardLayout::new(&completed.partition, completed.shard),
                 &opening,
                 &live.bundle.manifest.scoped_scalars(),
                 &live.bundle.manifest.vocabularies,
+                true,
                 true,
             ) {
                 Ok(columns) => Arc::new(columns),
@@ -2261,6 +2262,30 @@ impl Executor {
                 }
             }
         };
+        // Every other shard holding no column of the view takes one holding nothing, so a filter
+        // naming it is admitted and answered there as it is here.
+        let mut unbased_columns = Vec::new();
+        let others = live.shards().filter(|other| other.id() != shard.id());
+        for other in others.take_while(|_| !opening.is_empty()) {
+            match other.filter_columns.with_scoped_columns(
+                &record_dir,
+                ShardLayout::new(&completed.partition, other.id()),
+                &opening,
+                &live.bundle.manifest.scoped_scalars(),
+                &live.bundle.manifest.vocabularies,
+                true,
+                false,
+            ) {
+                Ok(columns) => unbased_columns.push((other.id(), Arc::new(columns))),
+                Err(e) => {
+                    discard(&format!(
+                        "it wrote a group-scoped column this process cannot open ({e}), and a \
+                         manifest must not name a column no request could read"
+                    ));
+                    return false;
+                }
+            }
+        }
         let filter_columns = match live_columns.with_extents(
             &completed.filter_extents,
             &record_paths,
@@ -2695,7 +2720,14 @@ impl Executor {
         };
         self.unique_declarations
             .flushed(completed.shard, &completed.consumed);
-        let next = Arc::new(live.with_shard(shard.id(), |g, s| {
+        let ids: Vec<ShardId> = std::iter::once(shard.id())
+            .chain(unbased_columns.iter().map(|(id, _)| *id))
+            .collect();
+        let next = Arc::new(live.with_shards(ids, |g, shards| {
+            for (id, columns) in unbased_columns {
+                shards.of(id).filter_columns = columns;
+            }
+            let s = shards.of(shard.id());
             // The live columns with this flush's extents composed on: the whole of what makes an
             // entity ingested since the build answer a filter on its own value.
             s.filter_columns = filter_columns;

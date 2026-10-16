@@ -1,7 +1,3 @@
-use std::path::Path;
-
-use croaring::Bitmap;
-
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_store::manifest::{AttrExtent, DeclaredScalar, ScopedScalar};
 use mosaica_types::view::ViewIncarnation;
@@ -19,7 +15,7 @@ struct ColumnJob {
     /// `None`, like `incarnation`, for an entity-scoped column.
     view: Option<String>,
     incarnation: Option<ViewIncarnation>,
-    /// False for a column declared at a running service, which has extents only until this pass
+    /// False for a column the shard holds no base of, which has extents only until this pass
     /// writes its base.
     has_base: bool,
     arrow_type: ScalarType,
@@ -50,7 +46,7 @@ fn column_jobs(
             name: d.name.clone(),
             view: None,
             incarnation: None,
-            has_base: !ctx.runtime_attributes.contains(&d.name),
+            has_base: !ctx.unbased.contains(&d.name),
             arrow_type: d.arrow_type,
             postings: crate::filter::owes_postings(d, &ctx.vocabularies),
         })
@@ -67,7 +63,9 @@ fn column_jobs(
                 name: family.name.clone(),
                 view: Some(view.clone()),
                 incarnation: Some(incarnation),
-                has_base: true,
+                has_base: !ctx.unbased_scoped.iter().any(|(column, held, at)| {
+                    *column == family.name && held == view && *at == incarnation
+                }),
                 arrow_type: family.arrow_type,
                 postings: crate::filter::scoped_owes_postings(family),
             });
@@ -338,19 +336,13 @@ fn fold_value_column(
         MaintenanceFailed("pass 4a (attributes): the entity bound exceeds u32".to_string())
     })?;
     let partial = if layers.is_empty() {
-        // No layer holds the column yet.
-        write_empty_value_column(
-            &values_path,
-            &presence_path,
-            mosaica_store::empty_shard::value_column_kind(job.arrow_type, job.postings),
-        )
-        .map_err(failed("pass 4a (attributes: an empty base)"))?;
+        // No layer holds the column yet: the base an empty shard is written with.
+        mosaica_store::empty_shard::write_empty_value_column(&to_dir, job.arrow_type, job.postings)
+            .map_err(failed("pass 4a (attributes: an empty base)"))?;
         if job.arrow_type == mosaica_spatial::tiler::ScalarType::Keyword {
-            write_empty_dictionary(&dict_path)
-                .map_err(failed("pass 4a (attributes: an empty dictionary)"))?;
             out.wrote(dict_rel, dict_path.clone());
         }
-        true
+        false
     } else if keyword_dicts.is_empty() {
         mosaica_filter_write::fold_value_column(
             &layers,
@@ -419,9 +411,9 @@ pub(super) fn fold_record_blob(
         .declared_scalars
         .iter()
         .any(|d| crate::filter::blob_resident(d, &ctx.vocabularies));
-    // A blob-resident column declared at a running service has no base yet.
+    // A blob-resident column the shard holds no base of is in the extents alone.
     let based_blob_resident = ctx.declared_scalars.iter().any(|d| {
-        !ctx.runtime_attributes.contains(&d.name)
+        !ctx.unbased.contains(&d.name)
             && crate::filter::blob_resident(d, &ctx.vocabularies)
     });
     if !blob_resident && !plan.record_extents.is_empty() {
@@ -564,22 +556,4 @@ pub(super) fn fold_entity_terms(
     }
 
     Ok(())
-}
-
-/// The empty presence bitmap makes the reader take the column as partial, not dense.
-fn write_empty_value_column(
-    values_path: &Path,
-    presence_path: &Path,
-    kind: mosaica_filter::ColumnKind,
-) -> std::io::Result<()> {
-    mosaica_filter::ValueColumnWriter::create(values_path, presence_path, kind)?
-        .finish(Some(&Bitmap::new()))
-}
-
-fn write_empty_dictionary(dict_path: &Path) -> std::io::Result<()> {
-    let file = std::io::BufWriter::new(std::fs::File::create(dict_path)?);
-    mosaica_filter::SortedDictWriter::new(file)
-        .and_then(|writer| writer.finish())
-        .map(|_| ())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
 }

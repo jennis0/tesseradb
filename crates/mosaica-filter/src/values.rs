@@ -763,9 +763,12 @@ impl ValueColumn {
             // to one run per entity and pays what a per-value walk paid — the honest outcome rather
             // than a regression.
             None => {
-                let bound = len as u32;
+                // A column of no value holds no slot, whatever the candidate.
+                let Some(final_slot) = (len as u32).checked_sub(1) else {
+                    return;
+                };
                 for_each_run(candidate, |start, last| {
-                    let last = last.min(bound.saturating_sub(1));
+                    let last = last.min(final_slot);
                     if start > last {
                         return;
                     }
@@ -1503,6 +1506,23 @@ mod tests {
         assert_eq!(hits.iter().collect::<Vec<_>>(), vec![10, 30]);
         assert_eq!(column.value_of(20), Some(AttrLocalId::new(200)));
         assert_eq!(column.value_of(21), None);
+    }
+
+    /// A column of no value and no presence bitmap, the base an empty shard is written with,
+    /// answers nothing for entities its shard has issued since.
+    #[test]
+    fn a_column_of_no_value_holds_no_entity() {
+        let column = ValueColumn::universal(Codes::F32(Vec::new().into()));
+        assert!(column.scan_range(&candidate(0..40), None, None).is_empty());
+        let mut seen = Vec::new();
+        column
+            .for_each_record_value_in(&candidate(0..40), |entity, _| {
+                seen.push(entity);
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+        assert!(seen.is_empty());
+        assert_eq!(column.record_value_of(0), None);
     }
 
     /// A presence bitmap that disagrees with the value count is refused rather than trusted: it

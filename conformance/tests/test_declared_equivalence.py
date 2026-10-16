@@ -5,12 +5,13 @@ one whose declaration carries the thing, with all the data, and one whose declar
 served, with the thing then declared through the control plane, its data written, and a
 publication waited for. Every principal's answers to one battery are recorded against both and
 compared after the live declaration, after a restart, after a fold, and after a restart following
-that fold. `declared_fixture` holds the corpus, the deployments and the one place identifiers are
-rekeyed for the comparison.
+that fold, and what the fold stored is checked. `declared_fixture` holds the corpus, the
+deployments and the one place identifiers are rekeyed for the comparison.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 import pyarrow as pa
@@ -18,6 +19,7 @@ import pytest
 
 import declared_fixture as fx
 from declared_fixture import Column, Corpus, Deployment, Plan, Vocabulary
+from oracle.layout import live_prefix_dir, newest_side_manifest
 
 STAGES = ("live", "restart", "fold", "fold-restart")
 
@@ -833,6 +835,33 @@ def test_a_live_declaration_serves_what_a_build_serves(walks, case, stage, known
         _, matching = fx.split(found, k.places)
         shown = "\n".join(map(str, matching[:6]))
         assert not matching, f"{k.reason}\n{shown}"
+
+
+# ---------------------------------------------------------------------------------------------
+# What a compaction stores
+# ---------------------------------------------------------------------------------------------
+
+#: The columns each case declares live, by name.
+COMPACTED = {
+    "entity-attributes": [c.name for c in ENTITY_COLUMNS],
+    "group-scoped": [c.name for c in _scoped("Q1")],
+}
+
+
+@pytest.mark.parametrize("case", list(COMPACTED))
+def test_a_compaction_moves_each_live_declaration_into_the_bundle_manifest(walks, case):
+    """After the compaction every shard holds each live column's base, so `MANIFEST.json`
+    declares the column, and neither the side manifest nor any shard record names it any more."""
+    live = walks(case).at("fold-restart")
+    manifest = json.loads((live_prefix_dir(live.bundle) / "MANIFEST.json").read_text())
+    declared = {d["name"] for d in manifest["declared_scalars"]}
+    declared |= {f["name"] for g in manifest["groups"] for f in g["scoped_scalars"]}
+    missing = [name for name in COMPACTED[case] if name not in declared]
+    assert not missing, f"MANIFEST.json does not declare {missing}"
+    side = newest_side_manifest(live.bundle)
+    assert (side["attributes"], side["scoped_attributes"]) == ([], [])
+    for record in side["shards"]["records"]:
+        assert (record["runtime_bases"], record["scoped_columns"]) == ([], []), record["id"]
 
 
 # ---------------------------------------------------------------------------------------------

@@ -69,6 +69,40 @@ pub fn value_column_kind(arrow_type: ScalarType, category: bool) -> mosaica_filt
     }
 }
 
+/// A value column of no entity in `dir`, the base of a column no layer holds a value of: its
+/// values, which name no presence bitmap, and for a keyword its empty dictionary. Returns the
+/// files written.
+pub fn write_empty_value_column(
+    dir: &Path,
+    arrow_type: ScalarType,
+    category: bool,
+) -> Result<Vec<PathBuf>> {
+    let values = dir.join(mosaica_filter::VALUES_FILE);
+    mosaica_filter::ValueColumnWriter::create(
+        &values,
+        &dir.join(mosaica_filter::PRESENCE_FILE),
+        value_column_kind(arrow_type, category),
+    )
+    .and_then(|writer| writer.finish(None))
+    .map_err(io(&values))?;
+    let mut written = vec![values];
+    if arrow_type == ScalarType::Keyword {
+        let path = dir.join(mosaica_filter::DICT_FILE);
+        write_empty_dictionary(&path)?;
+        written.push(path);
+    }
+    Ok(written)
+}
+
+/// A sorted dictionary of no term at `path`.
+fn write_empty_dictionary(path: &Path) -> Result<()> {
+    let file = std::fs::File::create(path).map_err(io(path))?;
+    mosaica_filter::SortedDictWriter::new(std::io::BufWriter::new(file))
+        .and_then(|writer| writer.finish())
+        .map_err(|e| io(path)(std::io::Error::from(e)))?;
+    Ok(())
+}
+
 /// Write an empty base of every structure `shard` declares under its layout: the postings, the
 /// entity-to-term transpose, each value column with its dictionary and postings, each indexed
 /// text column's index, the record blob, each view's columns of every scoped family, and each
@@ -235,17 +269,8 @@ impl Written<'_> {
         postings: bool,
     ) -> Result<()> {
         let dir = self.dir(column_rel)?;
-        let values = dir.join(mosaica_filter::VALUES_FILE);
-        mosaica_filter::ValueColumnWriter::create(
-            &values,
-            &dir.join(mosaica_filter::PRESENCE_FILE),
-            value_column_kind(arrow_type, category),
-        )
-        .and_then(|writer| writer.finish(None))
-        .map_err(io(&values))?;
-        self.push(format!("{column_rel}/{}", mosaica_filter::VALUES_FILE));
-        if arrow_type == ScalarType::Keyword {
-            self.dictionary(column_rel)?;
+        for path in write_empty_value_column(&dir, arrow_type, category)? {
+            self.wrote(column_rel, path);
         }
         if postings {
             let path = dir.join("postings.arrow");
@@ -262,11 +287,7 @@ impl Written<'_> {
     }
 
     fn dictionary(&mut self, column_rel: &str) -> Result<()> {
-        let path = self.path(&format!("{column_rel}/{}", mosaica_filter::DICT_FILE));
-        let file = std::fs::File::create(&path).map_err(io(&path))?;
-        mosaica_filter::SortedDictWriter::new(std::io::BufWriter::new(file))
-            .and_then(|writer| writer.finish())
-            .map_err(|e| io(&path)(std::io::Error::from(e)))?;
+        write_empty_dictionary(&self.path(&format!("{column_rel}/{}", mosaica_filter::DICT_FILE)))?;
         self.push(format!("{column_rel}/{}", mosaica_filter::DICT_FILE));
         Ok(())
     }

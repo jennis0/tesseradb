@@ -264,6 +264,15 @@ fn fixture(criterion: &str) -> Fixture {
 
 /// As [`fixture`], with the declaration edited on its way to the build — a pin, say.
 fn fixture_with(criterion: &str, edit: impl FnOnce(String) -> String) -> Fixture {
+    fixture_sized(criterion, edit, None)
+}
+
+/// As [`fixture_with`], built at `shard_size`.
+fn fixture_sized(
+    criterion: &str,
+    edit: impl FnOnce(String) -> String,
+    shard_size: Option<u64>,
+) -> Fixture {
     let corpus = corpus();
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
@@ -275,7 +284,7 @@ fn fixture_with(criterion: &str, edit: impl FnOnce(String) -> String) -> Fixture
     std::fs::write(&config_path, edit(config_toml(&corpus, criterion))).unwrap();
     let config = mosaica_build::config::Config::parse(&config_path, &Default::default())
         .expect("the spatial fixture's declaration parses");
-    build_with_layers(&root, &points, &pairs, &corpus, config);
+    build_with_layers_sized(&root, &points, &pairs, &corpus, config, shard_size);
     let cache = tmp.path().join("cache");
     let wal = tmp.path().join("wal");
     Fixture {
@@ -545,6 +554,44 @@ fn a_fold_leaves_a_boundarys_answers_unchanged() {
     }
     assert_eq!(after.len(), before.len(), "a box left the map at the fold");
     assert_eq!(after_narrow.len(), before_narrow.len());
+}
+
+/// **Over two shards, a compaction of each in turn leaves every boundary's answers where they
+/// were**, the level's shape observed over both shards' rows and its layout chosen from the sum;
+/// and a restart after them serves the same.
+#[test]
+fn a_compaction_of_each_shard_leaves_a_boundarys_answers_unchanged() {
+    let fx = fixture_sized("\"none\"", |toml| toml, Some(N / 2));
+    let writing = || {
+        let mut engine = Engine::open_writing_several_shards(
+            &fx.root,
+            &fx.cache,
+            &fx.wal,
+            config_uncapped(),
+        )
+        .expect("the engine opens");
+        engine.start_write_executor(8).expect("the executor starts");
+        engine.set_background_refresh_for_test(false);
+        engine
+    };
+    let engine = writing();
+    let grant = "0,1";
+    let answers = |engine: &Engine| {
+        (
+            served(engine, grant, 0, WHOLE_MAP),
+            served(engine, grant, VIEWPORT_ZOOM, [0.0, 0.0, 500.0, 500.0]),
+        )
+    };
+    let expected = answers(&engine);
+    assert!(!expected.0.is_empty());
+    assert_eq!(expected.0, fx.expected(grant, &[], &[]));
+
+    compact(&engine, Some(ShardId::ZERO));
+    assert_eq!(answers(&engine), expected, "after shard 0's compaction");
+    compact(&engine, Some(ShardId::new(1).unwrap()));
+    assert_eq!(answers(&engine), expected, "after shard 1's compaction");
+    drop(engine);
+    assert_eq!(answers(&writing()), expected, "across a restart");
 }
 
 /// **A suppressed member leaves the count, and a suppressed artifact leaves the map** — the same

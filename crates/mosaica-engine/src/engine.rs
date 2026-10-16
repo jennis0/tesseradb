@@ -373,14 +373,16 @@ struct ShardIndexes {
 
 /// The indexes of partition `phash`'s shard `record` under `prefix_dir`: the build's filter
 /// columns plus every extent the record names, and the unique and edited-items runs it lists.
-/// `unfolded_attributes` are the columns whose base no fold has written yet.
+/// `runtime_attributes` are the entity-scoped columns declared at a running service that
+/// `MANIFEST.json` does not declare; the record says which of them the shard holds a base of.
 fn open_shard_indexes(
     prefix_dir: &Path,
     bundle: &Bundle,
     phash: &str,
     record: &mosaica_store::manifest::ShardRecord,
-    unfolded_attributes: &[String],
+    runtime_attributes: &[String],
 ) -> std::result::Result<ShardIndexes, mosaica_store::StoreError> {
+    let unbased = record.unbased(runtime_attributes);
     let partition = &bundle.partitions[phash];
     let layout = mosaica_store::ShardLayout::new(phash, record.id);
     let scoped_base = |family: &mosaica_store::manifest::ScopedScalar, view: &str, incarnation| {
@@ -394,7 +396,7 @@ fn open_shard_indexes(
             scoped_base: Some(&scoped_base),
             ..crate::filter::ShardExtents::of(record)
         },
-        unfolded_attributes,
+        &unbased,
         // Mapped: the engine opens every declared column at once and holds it for the process
         // lifetime, so the alternative is paying tens of GB of residency before any filter arrives.
         true,
@@ -816,13 +818,14 @@ fn open_logged_shards(
 
 /// Shard `id` of `bundle`'s partition `phash`, opened at a running service, as a generation serves
 /// it from `segments_version`: its readers and indexes over its empty base, no buffered row and no
-/// deny. `unfolded_attributes` are the columns whose base no fold has written yet.
+/// deny. `runtime_attributes` are the entity-scoped columns declared at a running service that
+/// `MANIFEST.json` does not declare.
 pub(crate) fn opened_shard_parts(
     prefix_dir: &Path,
     bundle: &Bundle,
     phash: &str,
     id: ShardId,
-    unfolded_attributes: &[String],
+    runtime_attributes: &[String],
     segments_version: u64,
 ) -> Result<crate::ShardParts> {
     let data = bundle.partitions[phash]
@@ -830,7 +833,7 @@ pub(crate) fn opened_shard_parts(
         .unwrap_or_else(|| panic!("the bundle serves no shard {id}"));
     let readers = ShardReaders::open(prefix_dir, phash, bundle, data)?;
     let record = &data.record;
-    let indexes = open_shard_indexes(prefix_dir, bundle, phash, record, unfolded_attributes)
+    let indexes = open_shard_indexes(prefix_dir, bundle, phash, record, runtime_attributes)
         .map_err(EngineError::Store)?;
     Ok(crate::ShardParts {
         watermark: record.watermark,
@@ -1007,7 +1010,7 @@ fn first_generation(
 
     // The filter columns are carried forward by every generation successor: a restart composes
     // what the flushes before it published, not the build's coverage alone.
-    let unfolded_attributes = state.attributes.entity_names();
+    let runtime_attributes = state.attributes.entity_names();
     let served = &bundle.partitions[&readers.phash].shards;
     let mut shards = Vec::with_capacity(readers.shards.len());
     for (shard, data) in readers.shards.iter().zip(served) {
@@ -1024,7 +1027,7 @@ fn first_generation(
             bundle,
             &readers.phash,
             record,
-            &unfolded_attributes,
+            &runtime_attributes,
         )
         .map_err(EngineError::Store)?;
         let overlay = shard_deny.remove(&shard.id).unwrap_or_default();
@@ -1529,11 +1532,10 @@ pub(crate) fn open_rotation(
         None => mosaica_store::open_written_prefix(bundle_root, prefix),
     }
     .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;
-    // The columns declared while the fold ran, appended on `Engine::open`'s rule: the new
-    // `MANIFEST.json` carries the schema as it stood at the plan, and the side manifest the fold
-    // published carries the rest.
+    // The columns the side manifest still declares, appended on `Engine::open`'s rule: those
+    // declared while the compaction ran and those some shard holds no base of.
     let (side_attributes, side_scoped_attributes) = side_manifest_attributes(&bundle);
-    let unfolded_attributes: Vec<String> = side_attributes.iter().map(|d| d.name.clone()).collect();
+    let runtime_attributes: Vec<String> = side_attributes.iter().map(|d| d.name.clone()).collect();
     bundle.manifest = bundle.manifest.with_declarations(&Declarations {
         attributes: &side_attributes,
         scoped_attributes: &side_scoped_attributes,
@@ -1580,7 +1582,7 @@ pub(crate) fn open_rotation(
         filter_columns,
         unique,
         edited,
-    } = open_shard_indexes(&prefix_dir, &bundle, &phash, record, &unfolded_attributes)
+    } = open_shard_indexes(&prefix_dir, &bundle, &phash, record, &runtime_attributes)
         .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;
     let space_contents = crate::artifact_content::open_space_contents(&prefix_dir, &bundle)
         .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;

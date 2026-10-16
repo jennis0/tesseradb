@@ -1259,8 +1259,9 @@ fn a_view_drop_deletes_the_items_it_leaves_in_no_view_in_every_shard() {
 }
 
 /// A group-scoped column of a view created at a running service has a base only in the shard a
-/// flush wrote one in: the other shard reopens without one, and the view serves after a restart
-/// what it served before it.
+/// flush wrote one in: the other shard holds the column empty, so a filter on it is admitted and
+/// answered in both shards. Each shard's compaction gives it a base, and the family leaves for
+/// `MANIFEST.json` at the second; the view serves the same at every step and after each restart.
 #[test]
 fn a_scoped_column_flushed_in_one_shard_reopens_in_every_shard() {
     let several = fixture_sized(N, Some(SIZE));
@@ -1334,12 +1335,61 @@ fn a_scoped_column_flushed_in_one_shard_reopens_in_every_shard() {
     let in_view = |engine: &Engine| {
         let session = engine.authorise(&full_coverage_credential()).unwrap();
         let request = ViewportRequest::new("g:k", 0, WHOLE_MAP, N as usize);
-        engine.viewport(&session, request).unwrap().points.len()
+        let all = engine.viewport(&session, request.clone()).unwrap().points.len();
+        let hot = request.filter(mosaica_engine::filter::FilterExpr::Leaf {
+            column: "heat@g:k".to_string(),
+            operand: mosaica_engine::filter::FilterOperand::Range {
+                lo: Some(mosaica_engine::filter::Endpoint {
+                    value: mosaica_engine::filter::Scalar::Int(7),
+                    inclusive: true,
+                }),
+                hi: None,
+            },
+        });
+        let hot = engine.viewport(&session, hot).unwrap().points.len();
+        (all, hot)
     };
-    assert_eq!(in_view(&engine), 1);
+    // Each shard's listed pairs' views, and whether it lists the family's base.
+    let stored = |root: &std::path::Path| -> Vec<(Vec<String>, bool)> {
+        side_manifest(root)
+            .shards
+            .records
+            .iter()
+            .map(|record| {
+                (
+                    record.scoped_columns.iter().map(|c| c.view.clone()).collect(),
+                    record.runtime_bases.contains(&"heat".to_string()),
+                )
+            })
+            .collect()
+    };
+    let k = || vec!["g:k".to_string()];
+    assert_eq!(in_view(&engine), (1, 1));
     drop(engine);
     let engine = writing(&several);
-    assert_eq!(in_view(&engine), 1);
+    assert_eq!(in_view(&engine), (1, 1));
+
+    compact(&engine, Some(ShardId::ZERO));
+    assert_eq!(
+        stored(&several.root),
+        vec![(k(), true), (k(), false)],
+        "shard 0 holds the column's base now, and shard 1 not the family's"
+    );
+    assert_eq!(in_view(&engine), (1, 1));
+    drop(engine);
+    let engine = writing(&several);
+    assert_eq!(in_view(&engine), (1, 1));
+
+    compact(&engine, Some(ShardId::new(1).unwrap()));
+    assert_eq!(
+        stored(&several.root),
+        vec![(Vec::new(), false), (Vec::new(), false)],
+        "MANIFEST.json declares the family with the view, a base in every shard"
+    );
+    assert_eq!(in_view(&engine), (1, 1));
+    drop(engine);
+    let engine = writing(&several);
+    assert_eq!(in_view(&engine), (1, 1));
 }
 
 /// A label layer whose content is served only to a viewer seeing every item it was generated from.
@@ -1561,6 +1611,95 @@ fn a_compaction_of_shard_one_retires_its_members_from_its_slice_alone() {
         expected,
         "after shard 0's compaction"
     );
+    drop(engine);
+    let engine = writing(&several);
+    assert_eq!(served_layer(&engine), expected, "across a restart");
+}
+
+/// A compaction of one shard chooses a level's layout from its shape over every shard: an overlap
+/// only shard 1 holds moves the level to the list layout at shard 0's compaction, and both shards'
+/// columns are written in it in that publication. Every viewer is served the same before, after
+/// and across a restart.
+#[test]
+fn a_compaction_of_one_shard_chooses_a_layout_over_every_shard() {
+    use mosaica_lifecycle::membership::IncomingContent;
+    use mosaica_lifecycle::ShardSets;
+    use mosaica_store::manifest::DerivedForm;
+    use mosaica_types::layer::ServingLayout;
+    let several = fixture_sized(N, Some(SIZE));
+    let engine = writing(&several);
+    let items = items_by_id(&engine, 0..N);
+    let in_shard = |shard: u32| -> Vec<u64> {
+        (0..N)
+            .filter(|id| items[*id as usize].unwrap().shard == ShardId::new(shard).unwrap())
+            .collect()
+    };
+    let (zero, first) = (in_shard(0), in_shard(1));
+    let sets = |ids: &[u64]| ShardSets::of_items(ids.iter().map(|id| items[*id as usize].unwrap()));
+    let artifact = |key: &str, members: &[u64]| {
+        let mut artifact = IncomingArtifact::with_content(
+            Some(key.into()),
+            Vec::new(),
+            vec![IncomingContent::new(vec![key.to_string()], Vec::new())],
+        );
+        artifact.members = sets(members);
+        artifact.contents[0].generated_from = sets(members);
+        artifact
+    };
+    engine.register_layer(label_layer("t")).unwrap();
+    engine
+        .publish_artifacts(
+            "t".into(),
+            0,
+            vec![
+                artifact("a", &[zero[0], zero[1], first[0]]),
+                artifact("b", &[zero[2], first[1]]),
+            ],
+        )
+        .unwrap();
+    tick(&engine);
+    let layout = |root: &std::path::Path| {
+        side_manifest(root)
+            .partition
+            .layers
+            .iter()
+            .find(|layer| layer.declaration.name == "t")
+            .expect("the layer is registered")
+            .layout_of(0)
+    };
+    assert_eq!(layout(&several.root), ServingLayout::RowMajorLabel);
+    let mut growth = IncomingGrowth::from_entities("b".into(), Vec::new());
+    growth.joining = sets(&[first[0]]);
+    engine
+        .grow_memberships("t".into(), 0, vec![growth])
+        .unwrap();
+    tick(&engine);
+    let expected = served_layer(&engine);
+
+    compact(&engine, Some(ShardId::ZERO));
+    assert_eq!(
+        layout(&several.root),
+        ServingLayout::RowMajorList,
+        "shard 1's overlap moves the level"
+    );
+    let columns: Vec<Vec<ServingLayout>> = derived_of(&several.root)
+        .iter()
+        .map(|extents| {
+            extents
+                .iter()
+                .filter_map(|extent| match extent.form {
+                    DerivedForm::RowColumn { layout } => Some(layout),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        columns,
+        vec![vec![ServingLayout::RowMajorList]; 2],
+        "every shard's column is written in the new layout"
+    );
+    assert_eq!(served_layer(&engine), expected);
     drop(engine);
     let engine = writing(&several);
     assert_eq!(served_layer(&engine), expected, "across a restart");

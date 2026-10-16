@@ -177,7 +177,9 @@ impl FilterColumns {
     /// This generation's columns with a newly based group-scoped column opened onto them: the
     /// first flush of a view a family had no column for. Applied before the extents compose,
     /// since the extent composes onto a column that must exist first. A `(column, view)` pair
-    /// already held is a no-op, a re-publication reaching the same state.
+    /// already held is a no-op, a re-publication reaching the same state. Not `based`, each opens
+    /// holding nothing: another shard's flush gave the view its column, and this shard has none.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_scoped_columns(
         &self,
         prefix_dir: &Path,
@@ -186,6 +188,7 @@ impl FilterColumns {
         scoped: &[mosaica_store::manifest::ScopedScalar],
         vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
         mmap: bool,
+        based: bool,
     ) -> Result<FilterColumns, ComposeError> {
         let mut next = self.successor();
         for (column, view, incarnation) in columns {
@@ -209,6 +212,7 @@ impl FilterColumns {
                 *incarnation,
                 vocabularies,
                 mmap,
+                based,
             )?;
             next.placements.insert(name.clone(), placement);
             next.columns.insert(name, layers);

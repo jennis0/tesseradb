@@ -1016,8 +1016,8 @@ impl Executor {
             })
             .collect();
         let (attributes, scoped_attributes) = self.live.attributes_for_publication();
-        let unfolded: Vec<String> = attributes.into_iter().map(|a| a.name).collect();
-        let runtime: Vec<String> = unfolded
+        let entity: Vec<String> = attributes.into_iter().map(|a| a.name).collect();
+        let runtime: Vec<String> = entity
             .iter()
             .cloned()
             .chain(scoped_attributes.into_iter().map(|family| family.name))
@@ -1058,7 +1058,7 @@ impl Executor {
                     &bundle,
                     phash,
                     id,
-                    &unfolded,
+                    &entity,
                     generation.segments_version,
                 )?;
                 Ok((id, parts))

@@ -2279,14 +2279,14 @@ pub struct PartitionManifest {
     /// argument: rotation reclaims the `AttributeDeclare` record, and a column whose declaration
     /// lived only there comes back from a restart as one no reader knows exists. The columns a
     /// build declared are in `MANIFEST.json` and are not restated here; the served schema is the
-    /// two together ([`Manifest::with_attributes`]), and the fold writes the union into the next
-    /// `MANIFEST.json` and leaves here only the declarations made after it planned.
+    /// two together ([`Manifest::with_attributes`]). A compaction moves a column into the next
+    /// `MANIFEST.json` once every shard holds its base ([`Shards::based_everywhere`]).
     ///
-    /// **The list is also the set of columns whose base artefacts do not exist yet.** A column
-    /// declared at a running service has no base value column, no base postings and no slot in
-    /// any segment written before it; a fold writes all of those and moves the column into
-    /// `MANIFEST.json` in the same publication, so a name here is one the opener must not demand
-    /// a base for (`FilterColumns::open`) and the fold must not read one from.
+    /// **A name here is a column some shard holds no base of.** A column declared at a running
+    /// service has no base value column, no base postings and no slot in any segment written
+    /// before it until a shard's compaction writes them there; the opener demands a base of it
+    /// (`FilterColumns::open`), and the compaction reads one, only in a shard whose
+    /// [`ShardRecord::runtime_bases`] lists it.
     ///
     /// No `serde(default)`: a manifest omitting it is malformed, not
     /// declaration-free, and the two are indistinguishable under a default while only one is safe
@@ -2446,15 +2446,18 @@ pub struct ShardRecord {
     ///
     /// A lost list sends every session through a permutation walk, with no fault reported.
     pub term_image_extents: Vec<TermImageExtent>,
-    /// Every `(group-scoped family, view)` pair a flush has written a column or render lane for in
-    /// this shard. Not derivable: `MANIFEST.json` names only the build's, and a render-only family
-    /// writes no entity-space extent. Never pruned, as [`PartitionManifest::views`] is not; a fold
-    /// writes the list into the new `MANIFEST.json`. No `serde(default)`: a lost list must not read
-    /// as column-free.
+    /// Every `(group-scoped family, view)` pair this shard holds a column or render lane of,
+    /// written by a flush, a compaction or the shard's opening, while `MANIFEST.json` does not
+    /// stand for it in every shard. Not derivable: `MANIFEST.json` names only the build's, and a render-only family writes no
+    /// entity-space extent. A pair leaves every shard's list once every shard lists it and
+    /// `MANIFEST.json` lists the view in the family ([`Shards::settle_scoped_columns`]). No
+    /// `serde(default)`: a lost list must not read as column-free.
     pub scoped_columns: Vec<ScopedColumn>,
     /// The columns declared at a running service ([`PartitionManifest::attributes`] and
-    /// [`PartitionManifest::scoped_attributes`], by name) this shard's compaction has written a
-    /// base for.
+    /// [`PartitionManifest::scoped_attributes`], by name) this shard holds a base of: written by
+    /// its compaction, or empty when the shard was opened. A reader demands the base of a column
+    /// listed here and of none other of those lists. A column leaves both lists for
+    /// `MANIFEST.json` once every shard lists it ([`Shards::based_everywhere`]).
     pub runtime_bases: Vec<String>,
     /// Each level's slice version in this shard, by layer space.
     pub slice_versions: Vec<SliceVersion>,
@@ -2511,6 +2514,69 @@ impl ShardRecord {
             scoped_columns: Vec::new(),
             runtime_bases: Vec::new(),
             slice_versions: Vec::new(),
+        }
+    }
+
+    /// The columns of `runtime`, declared at a running service, this shard holds no base of.
+    pub fn unbased(&self, runtime: &[String]) -> Vec<String> {
+        runtime
+            .iter()
+            .filter(|name| !self.runtime_bases.contains(name))
+            .cloned()
+            .collect()
+    }
+}
+
+impl Shards {
+    /// The leading run of `declared`, columns declared at a running service in declaration order,
+    /// that every shard lists a base of: the columns that may leave for `MANIFEST.json`. A column
+    /// some shard lacks holds back every column declared after it, since `MANIFEST.json` appends
+    /// them in this order and a row's scalars are positional against it.
+    pub fn based_everywhere<'a>(&self, declared: &'a [String]) -> &'a [String] {
+        let held = declared
+            .iter()
+            .take_while(|name| {
+                self.records
+                    .iter()
+                    .all(|record| record.runtime_bases.contains(name))
+            })
+            .count();
+        &declared[..held]
+    }
+
+    /// Strike `names`, the columns `MANIFEST.json` now declares, off every shard's list of bases.
+    pub fn forget_bases(&mut self, names: &[String]) {
+        for record in &mut self.records {
+            record.runtime_bases.retain(|name| !names.contains(name));
+        }
+    }
+
+    /// Strike off every shard's `scoped_columns` each pair every shard lists and `settled` accepts:
+    /// a pair whose family `MANIFEST.json` lists the view of, so that no shard naming it reads as
+    /// every shard holding its base. A pair some shard does not list stays wherever it is listed.
+    pub fn settle_scoped_columns(&mut self, settled: impl Fn(&ScopedColumn) -> bool) {
+        let everywhere: Vec<ScopedColumn> = self
+            .records
+            .first()
+            .map(|first| {
+                first
+                    .scoped_columns
+                    .iter()
+                    .filter(|pair| {
+                        settled(pair)
+                            && self
+                                .records
+                                .iter()
+                                .all(|record| record.scoped_columns.contains(pair))
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        for record in &mut self.records {
+            record
+                .scoped_columns
+                .retain(|pair| !everywhere.contains(pair));
         }
     }
 }
@@ -3720,6 +3786,72 @@ mod tests {
         assert_eq!(
             later.groups[0].scoped_scalars[0].views,
             keys.iter().map(|k| id(k)).collect::<Vec<_>>()
+        );
+    }
+
+    fn shards_listing(bases: &[&[&str]]) -> Shards {
+        Shards {
+            size: 10,
+            next_id: bases.len() as u32,
+            records: bases
+                .iter()
+                .enumerate()
+                .map(|(id, names)| ShardRecord {
+                    runtime_bases: names.iter().map(|n| n.to_string()).collect(),
+                    ..ShardRecord::empty(ShardId::new(id as u32).expect("in range"))
+                })
+                .collect(),
+        }
+    }
+
+    /// A declaration leaves for `MANIFEST.json` only once every shard lists its base, and never
+    /// ahead of one declared before it.
+    #[test]
+    fn a_declaration_leaves_once_every_shard_lists_its_base_and_not_before_an_earlier_one() {
+        let declared: Vec<String> = ["a", "b", "c"].iter().map(|n| n.to_string()).collect();
+        assert_eq!(
+            shards_listing(&[&["a", "b"], &["a", "b", "c"]]).based_everywhere(&declared),
+            ["a", "b"]
+        );
+        assert!(shards_listing(&[&["b", "c"], &["a", "b", "c"]])
+            .based_everywhere(&declared)
+            .is_empty());
+        assert_eq!(
+            shards_listing(&[&["a", "b", "c"]]).based_everywhere(&declared),
+            declared.as_slice()
+        );
+
+        let mut shards = shards_listing(&[&["a", "b"], &["a", "b", "c"]]);
+        shards.forget_bases(&declared[..2]);
+        let left: Vec<Vec<String>> = shards
+            .records
+            .iter()
+            .map(|r| r.runtime_bases.clone())
+            .collect();
+        assert_eq!(left, vec![Vec::<String>::new(), vec!["c".to_string()]]);
+    }
+
+    /// A scoped pair leaves the shard records only where every shard lists it and the caller
+    /// settles it.
+    #[test]
+    fn a_scoped_pair_leaves_only_where_every_shard_lists_it() {
+        let pair = |view: &str| ScopedColumn {
+            column: "heat".to_string(),
+            view: view.to_string(),
+            incarnation: 1,
+        };
+        let mut shards = shards_listing(&[&[], &[]]);
+        shards.records[0].scoped_columns = vec![pair("g:a"), pair("g:b"), pair("g:c")];
+        shards.records[1].scoped_columns = vec![pair("g:a"), pair("g:c")];
+        shards.settle_scoped_columns(|pair| pair.view != "g:c");
+        let left: Vec<Vec<ScopedColumn>> = shards
+            .records
+            .iter()
+            .map(|r| r.scoped_columns.clone())
+            .collect();
+        assert_eq!(
+            left,
+            vec![vec![pair("g:b"), pair("g:c")], vec![pair("g:c")]]
         );
     }
 }

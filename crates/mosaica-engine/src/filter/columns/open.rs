@@ -20,7 +20,9 @@ use crate::filter::{
 /// One column per view, opened under its resolved name, so a scoped leaf evaluates through
 /// exactly the machinery an unscoped one of its family does. Called both by
 /// [`FilterColumns::open`] at startup and, through [`FilterColumns::with_scoped_columns`], by a
-/// flush writing the first column of a family for a view created since the build.
+/// flush writing the first column of a family for a view created since the build. Where the shard
+/// holds no `based` column of the view, it opens with no layer, the extents composing onto it.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn open_scoped_column(
     prefix_dir: &Path,
     layout: ShardLayout<'_>,
@@ -29,6 +31,7 @@ pub(super) fn open_scoped_column(
     incarnation: mosaica_types::view::ViewIncarnation,
     vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
     mmap: bool,
+    based: bool,
 ) -> Result<(String, Placement, Column), ComposeError> {
     let scoped_family = Family::of_scoped(family);
     // A family with neither flag is opened and is not filterable: the drill-down still reads one
@@ -49,16 +52,26 @@ pub(super) fn open_scoped_column(
     let declared_index = usize::MAX;
     if scoped_family == Family::Text {
         let analyser = resolve_analyser(&family.name, family.analyser.as_deref())?;
-        let text = vec![TextLayer::open_base(
-            &name,
-            &dir,
-            true,
-            request_access(mmap),
-        )?];
+        let text = match based {
+            true => vec![TextLayer::open_base(
+                &name,
+                &dir,
+                true,
+                request_access(mmap),
+            )?],
+            false => Vec::new(),
+        };
         return Ok((
             name,
             placement,
             Column::text(declared_index, filterable, analyser, text),
+        ));
+    }
+    if !based {
+        return Ok((
+            name,
+            placement,
+            Column::values(declared_index, filterable, scoped_family, None, None, Route::Scan),
         ));
     }
     // The same artefacts and routing the entity-scoped family takes: a `derived` vocabulary's
@@ -389,14 +402,11 @@ impl FilterColumns {
                 let Some(incarnation) = view_incarnation(view_id) else {
                     continue;
                 };
-                // A view created at a running service has a base only in a shard a flush wrote
-                // one in.
-                if !extents
+                // A view created at a running service has a base only in a shard a flush or a
+                // compaction wrote one in; in another its column holds nothing yet.
+                let based = extents
                     .scoped_base
-                    .is_none_or(|base| base(family, view_id, incarnation))
-                {
-                    continue;
-                }
+                    .is_none_or(|base| base(family, view_id, incarnation));
                 let (name, placement, mut column) = open_scoped_column(
                     prefix_dir,
                     layout,
@@ -405,6 +415,7 @@ impl FilterColumns {
                     incarnation,
                     vocabularies,
                     mmap,
+                    based,
                 )?;
                 if let Some(text) = column.text_layers_mut() {
                     text.extend(text_extent_layers(

@@ -71,7 +71,7 @@ impl CompiledAttribute {
 }
 
 /// The columns declared at a running service and not yet written into a `MANIFEST.json` by a
-/// fold, in declaration order: the segments manifest's `attributes` and `scoped_attributes`
+/// compaction, in declaration order: the segments manifest's `attributes` and `scoped_attributes`
 /// lists, held live. Written only by the executor; read at every side-manifest publication.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RuntimeAttributes {
@@ -96,14 +96,13 @@ impl RuntimeAttributes {
         (self.entity.clone(), self.scoped.clone())
     }
 
-    /// The entity-scoped names, which is the set of columns whose base artefacts do not exist:
-    /// what the opener must not demand a base for and the fold must not read one from.
+    /// The entity-scoped names: the columns some shard holds no base of, each shard's record
+    /// saying which it does hold.
     pub(crate) fn entity_names(&self) -> Vec<String> {
         self.entity.iter().map(|d| d.name.clone()).collect()
     }
 
-    /// Drop the columns a fold has just written into `MANIFEST.json`, named at its plan. A
-    /// declaration made while the fold ran is not among them and stays.
+    /// Drop the columns a compaction has just written into `MANIFEST.json`.
     pub(crate) fn retire_folded(&mut self, entity: &[String], scoped: &[String]) {
         self.entity.retain(|d| !entity.contains(&d.name));
         self.scoped.retain(|f| !scoped.contains(&f.name));

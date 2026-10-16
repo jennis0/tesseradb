@@ -597,6 +597,18 @@ struct FoldApplies<'a> {
     carried_entities: u64,
 }
 
+/// The columns declared at a running service that a compaction writes into `MANIFEST.json`:
+/// those every shard holds the base of.
+pub(super) struct Folded {
+    entity: Vec<String>,
+    scoped: Vec<String>,
+}
+
+/// The names of `declared`, in order.
+fn names_of<T>(declared: &[T], name: impl Fn(&T) -> &String) -> Vec<String> {
+    declared.iter().map(|d| name(d).clone()).collect()
+}
+
 /// The `(layer, level)`s whose observed memberships overlap, which have no label column.
 type Overlapping = std::collections::BTreeSet<(String, u32)>;
 
@@ -609,9 +621,17 @@ struct DerivedPass<'a> {
     n: u64,
     incarnations: FxHashMap<String, mosaica_types::view::ViewIncarnation>,
     spaces: Vec<(String, mosaica_store::RowSpace)>,
-    segments: Vec<(String, mosaica_store::read::SegmentData)>,
+    segments: Vec<(String, Arc<mosaica_store::read::SegmentData>)>,
     pending: &'a PendingRetirement,
     index: mosaica_store::derived::DerivedIndex,
+}
+
+/// The derived files a compaction writes: its own shard's, and every other shard's columns of the
+/// levels whose layout it moved, which replace that shard's files of those levels.
+struct FoldDerivedFiles {
+    own: Vec<mosaica_store::manifest::DerivedExtent>,
+    others: Vec<(ShardId, mosaica_store::manifest::DerivedExtent)>,
+    moved: Vec<(LayerSpace, u32)>,
 }
 
 /// What a fold carries forward: everything the live manifest still lists that the fold did not
@@ -893,6 +913,40 @@ fn kept_derived(
         .filter(|(_, extent)| extent.form != DerivedForm::ShapeHeld || !rewritten(extent))
         .map(|(held, extent)| (held, extent.clone()))
         .collect()
+}
+
+/// A level's shape over `row_count` rows from `walk`, and the ordinals holding a row there.
+fn observe_held(
+    row_count: u32,
+    walk: mosaica_store::derived::LevelWalk<'_>,
+) -> (crate::layout::LevelShape, croaring::Bitmap) {
+    let held = std::cell::RefCell::new(croaring::Bitmap::new());
+    let shape = mosaica_store::derived::observe_shape(row_count, &|visit| {
+        walk(&mut |ordinal, rows| {
+            if !rows.is_empty() {
+                held.borrow_mut().add(ordinal);
+            }
+            visit(ordinal, rows);
+        })
+    });
+    (shape, held.into_inner())
+}
+
+/// Whether `extent` is one of the files a level holds of its layout, which a compaction that moves
+/// the level's layout writes again in every shard.
+fn superseded_by_a_move(
+    extent: &mosaica_store::manifest::DerivedExtent,
+    moved: &[(LayerSpace, u32)],
+) -> bool {
+    use mosaica_store::manifest::DerivedForm;
+    moved.contains(&(extent.space, extent.level))
+        && matches!(
+            extent.form,
+            DerivedForm::RowColumn { .. }
+                | DerivedForm::RowMembers
+                | DerivedForm::LevelLabels
+                | DerivedForm::BandLabels { .. }
+        )
 }
 
 /// Every `(layer, level)` the artifact store holds.
@@ -1288,6 +1342,22 @@ impl Executor {
 
         let attempt = self.fold.next_attempt();
         let shard = generation.shard_of(shard_id);
+        let unbased = shard.data.record.unbased(&runtime_attributes);
+        let scoped_scalars = manifest.scoped_scalars();
+        let mut scoped_views = Vec::new();
+        let mut unbased_scoped = Vec::new();
+        for family in &scoped_scalars {
+            for view in &family.views {
+                let Some(incarnation) = manifest.incarnation_of(view) else {
+                    continue;
+                };
+                let pair = (family.name.clone(), view.clone(), incarnation);
+                if !partition_data.scoped_base_in(shard_id, family, view, incarnation) {
+                    unbased_scoped.push(pair.clone());
+                }
+                scoped_views.push(pair);
+            }
+        }
         let ctx = crate::compact::FoldContext {
             from_prefix_dir: self.prefix_dir(generation),
             to_prefix_dir: self.deps.bundle_root.join(&to_prefix),
@@ -1298,13 +1368,16 @@ impl Executor {
             absent_ok,
             runtime_attributes,
             runtime_scoped_attributes,
+            unbased,
+            unbased_scoped,
+            scoped_views,
             // A `seg_id` must never be reused across the bundle's life, or a rebase's ABA check
             // would be meaningless.
             seg_id: format!("fold-{}-{attempt}", partition_data.segments_n),
             base_postings: Arc::clone(&shard.postings),
             tiers: shard.delta_postings.clone(),
             declared_scalars: manifest.declared_scalars.clone(),
-            scoped_scalars: manifest.scoped_scalars(),
+            scoped_scalars,
             view_incarnations: manifest
                 .views
                 .iter()
@@ -1427,14 +1500,16 @@ impl Executor {
     }
 
     /// Writes every derived artifact file into the prefix the fold is publishing. All of them are
-    /// derived, so a file that will not compose is left out and built on first use.
+    /// derived, so a file that will not compose is left out and built on first use. A level whose
+    /// layout the compaction moves has every other shard's column written again in the new one.
     fn write_fold_derived(
         &mut self,
+        live: &Generation,
         to_prefix_dir: &std::path::Path,
         completed: &crate::compact::CompletedFold,
         manifest_n: u64,
         pending: &PendingRetirement,
-    ) -> Vec<mosaica_store::manifest::DerivedExtent> {
+    ) -> FoldDerivedFiles {
         let plan = &completed.plan;
         let views: Vec<(String, u32)> = completed
             .segments
@@ -1460,10 +1535,12 @@ impl Executor {
         // Layouts must be chosen before the files and the registry snapshot, or the fold would
         // publish a level in its old layout under a record claiming the new one.
         let (layouts, overlapping) =
-            self.choose_layouts(layout.shard, &pass.spaces, pending, &pass.segments);
+            self.choose_layouts(live, layout.shard, &pass.spaces, pending, &pass.segments);
+        let mut moved = Vec::new();
         for (layer, level, chosen) in &layouts {
             if self.live.record_layout(layer, *level, *chosen) {
                 self.deps.artifact_projections.forget_level(layer, *level);
+                moved.push((layer.clone(), *level, *chosen));
             }
         }
         self.pending_forms.clear();
@@ -1472,7 +1549,81 @@ impl Executor {
         let shape_rows = self.write_shape_rows(&mut pass, &derived);
         derived.extend(shape_rows);
         derived.extend(self.write_shape_held(&mut pass));
-        derived
+        let others = self.write_moved_columns(live, &pass, &moved, &overlapping);
+        FoldDerivedFiles {
+            own: derived,
+            others,
+            moved: moved
+                .iter()
+                .filter_map(|(layer, level, _)| Some((self.live.space_of(layer)?, *level)))
+                .collect(),
+        }
+    }
+
+    /// Every shard but the compacted one's columns of each `moved` level, written into the
+    /// compaction's prefix in the level's new layout from that shard's live rows.
+    fn write_moved_columns(
+        &self,
+        live: &Generation,
+        compacted: &DerivedPass<'_>,
+        moved: &[(String, u32, mosaica_types::layer::ServingLayout)],
+        overlapping: &Overlapping,
+    ) -> Vec<(ShardId, mosaica_store::manifest::DerivedExtent)> {
+        let mut written = Vec::new();
+        if moved.is_empty() {
+            return written;
+        }
+        for other in live
+            .shards()
+            .filter(|other| other.id() != compacted.layout.shard)
+        {
+            let mut spaces = Vec::new();
+            let mut segments = Vec::new();
+            for (view, _) in &compacted.spaces {
+                let Some(data) = other.data.views.get(view) else {
+                    continue;
+                };
+                spaces.push((view.clone(), data.row_space.clone()));
+                if data.row_space.base_rows() > 0 {
+                    if let Some(base) = data.segments.first() {
+                        segments.push((view.clone(), Arc::clone(base)));
+                    }
+                }
+                for (layer, level, _) in moved {
+                    if self.live.spatial_layer(layer) {
+                        self.live.with_artifacts(|store| {
+                            let held = self.deps.shapes.level(
+                                view,
+                                layer,
+                                *level,
+                                store,
+                                &crate::shapes::PersistedPieces::none(),
+                            );
+                            crate::shapes::ShapeStore::stage_missing(
+                                &held,
+                                other.id(),
+                                data,
+                                &crate::shapes::PersistedPieces::none(),
+                                store,
+                            );
+                        });
+                    }
+                }
+            }
+            let mut pass = DerivedPass {
+                prefix_dir: compacted.prefix_dir,
+                layout: ShardLayout::new(compacted.layout.partition, other.id()),
+                n: compacted.n,
+                incarnations: compacted.incarnations.clone(),
+                spaces,
+                segments,
+                pending: compacted.pending,
+                index: Default::default(),
+            };
+            let columns = self.write_row_columns(&mut pass, moved, overlapping);
+            written.extend(columns.into_iter().map(|extent| (other.id(), extent)));
+        }
+        written
     }
 
     /// Whether a completed fold still applies to the live bundle, asked before anything is
@@ -1706,7 +1857,11 @@ impl Executor {
                 .with_artifacts(|store| store.levels_moved_by(&retired)),
             retired,
         };
-        let derived = self.write_fold_derived(&to_prefix_dir, &completed, manifest_n, &pending);
+        let FoldDerivedFiles {
+            own: derived,
+            others: rewritten,
+            moved,
+        } = self.write_fold_derived(&live, &to_prefix_dir, &completed, manifest_n, &pending);
         stairs.record("8 derived");
 
         // ---- the report, before anything retires ---------------------------------------------------
@@ -1821,16 +1976,26 @@ impl Executor {
             .live
             .with_view_declarations(|declarations| declarations.names());
 
-        // A pair stays listed while another shard lists it, so a shard still naming it does not
-        // read as every shard having its base.
-        let scoped_columns: Vec<mosaica_store::manifest::ScopedColumn> = live_record
-            .scoped_columns
+        // The shard now holds the base of every pair the compaction wrote, so it lists each one
+        // a shard lists; a pair of its own it did not write stays while another shard lists it.
+        let mut scoped_columns: Vec<mosaica_store::manifest::ScopedColumn> = Vec::new();
+        for (held, column) in partition_data
+            .shards
             .iter()
-            .filter(|column| {
-                partition_data.shards.iter().any(|other| {
-                    other.record.id != shard_id && other.record.scoped_columns.contains(column)
-                })
-            })
+            .flat_map(|other| other.record.scoped_columns.iter().map(move |c| (other, c)))
+        {
+            let written = completed.scoped_views.iter().any(|(family, view, at)| {
+                *family == column.column && *view == column.view && *at == column.incarnation
+            });
+            let kept = held.record.id != shard_id && live_record.scoped_columns.contains(column);
+            if (written || kept) && !scoped_columns.contains(column) {
+                scoped_columns.push(column.clone());
+            }
+        }
+        let runtime_bases: Vec<String> = completed
+            .runtime_attributes
+            .iter()
+            .chain(&completed.runtime_scoped_attributes)
             .cloned()
             .collect();
         let compacted = mosaica_store::manifest::ShardRecord {
@@ -1881,22 +2046,11 @@ impl Executor {
             tenancy_index: next_tenancy.index(),
             retired_numbers: mosaica_store::manifest::EntitySet::of(&retired_numbers),
             scoped_columns,
+            runtime_bases,
             ..mosaica_store::manifest::ShardRecord::empty(live_record.id)
         };
         let mut segments_manifest = SegmentsManifest {
             partition: mosaica_store::manifest::PartitionManifest {
-                // Only the declarations made since the fold planned: the fold's own
-                // `MANIFEST.json` already states the rest, with a base written for each.
-                attributes: runtime_attributes
-                    .iter()
-                    .filter(|d| !completed.runtime_attributes.contains(&d.name))
-                    .cloned()
-                    .collect(),
-                scoped_attributes: runtime_scoped_attributes
-                    .iter()
-                    .filter(|f| !completed.runtime_scoped_attributes.contains(&f.name))
-                    .cloned()
-                    .collect(),
                 unique_columns: live_manifest.unique_columns.clone(),
                 // The live list, not the plan's: a flush that promoted during the flight appended
                 // an extent whose ordinals the live dictionary already holds.
@@ -1927,6 +2081,28 @@ impl Executor {
             };
             segments_manifest.shards.records.extend(record);
         }
+        // The declarations every shard now holds the base of leave for `MANIFEST.json`; the rest,
+        // with those made since the plan, stay here.
+        let folded = Folded {
+            entity: segments_manifest
+                .shards
+                .based_everywhere(&names_of(&runtime_attributes, |d| &d.name))
+                .to_vec(),
+            scoped: segments_manifest
+                .shards
+                .based_everywhere(&names_of(&runtime_scoped_attributes, |f| &f.name))
+                .to_vec(),
+        };
+        segments_manifest.shards.forget_bases(&folded.entity);
+        segments_manifest.shards.forget_bases(&folded.scoped);
+        segments_manifest.partition.attributes = runtime_attributes
+            .into_iter()
+            .filter(|d| !folded.entity.contains(&d.name))
+            .collect();
+        segments_manifest.partition.scoped_attributes = runtime_scoped_attributes
+            .into_iter()
+            .filter(|f| !folded.scoped.contains(&f.name))
+            .collect();
 
         write_deny_state(
             &mut segments_manifest,
@@ -1939,7 +2115,13 @@ impl Executor {
         );
 
         // ---- the new `MANIFEST.json` ----------------------------------------------------------
-        let mut bundle_manifest = self.fold_bundle_manifest(&live, &completed);
+        let mut bundle_manifest = self.fold_bundle_manifest(&live, &completed, &folded);
+        let declared = bundle_manifest.scoped_scalars();
+        segments_manifest.shards.settle_scoped_columns(|pair| {
+            declared
+                .iter()
+                .any(|family| family.name == pair.column && family.views.contains(&pair.view))
+        });
         let others = other_shards(
             &plan.partition,
             shard_id,
@@ -1986,7 +2168,8 @@ impl Executor {
         let from_prefix_dir = self.prefix_dir(&live);
         // Every other shard's files and the derived files it keeps, linked beside the compacted
         // shard's carry-forwards.
-        let kept = kept_derived(&self.side_manifests.derived_extents, shard_id, &derived);
+        let mut kept = kept_derived(&self.side_manifests.derived_extents, shard_id, &derived);
+        kept.retain(|(_, extent)| !superseded_by_a_move(extent, &moved));
         let mut carried_rels: std::collections::BTreeSet<String> = carried_rels;
         carried_rels.extend(others.bundle.into_keys());
         carried_rels.extend(others.side.into_keys());
@@ -2029,6 +2212,8 @@ impl Executor {
             discard(&format!("its carry-forwards would not sync ({e})"));
             return;
         }
+        // Written into the new prefix, not linked.
+        kept.extend(rewritten);
         // Digested in the new prefix's side-manifest, as a publication's are.
         let artifact_rels = repacked
             .members
@@ -2247,10 +2432,7 @@ impl Executor {
         self.rotate_wal();
         stairs.record("16 wal");
         self.live.with_attributes(|attributes| {
-            attributes.retire_folded(
-                &completed.runtime_attributes,
-                &completed.runtime_scoped_attributes,
-            )
+            attributes.retire_folded(&folded.entity, &folded.scoped)
         });
         self.live
             .with_vocabularies(|vocabularies| vocabularies.retire_folded(&folded_vocabularies));
@@ -2323,8 +2505,9 @@ impl Executor {
         );
     }
 
-    /// The `MANIFEST.json` a fold's new prefix carries: the live one, with the schema wound back to
-    /// what it was at the plan, every live vocabulary binding folded in, and the fold's own files.
+    /// The `MANIFEST.json` a fold's new prefix carries: the live one, less every column declared
+    /// at a running service but those `folded`, with every live vocabulary binding folded in, and
+    /// the fold's own files.
     ///
     /// The vocabulary bindings fold in verbatim, never re-derived, re-sorted or re-numbered: keys
     /// and codes are byte-identical everywhere, and `columns.arrow` stores the code alone, so
@@ -2333,32 +2516,22 @@ impl Executor {
         &self,
         live: &Generation,
         completed: &crate::compact::CompletedFold,
+        folded: &Folded,
     ) -> mosaica_store::manifest::Manifest {
         let mut bundle_manifest = live.bundle.manifest.clone();
         let (runtime_attributes, runtime_scoped_attributes) =
             self.live.attributes_for_publication();
-        let since_plan: Vec<&str> = runtime_attributes
-            .iter()
-            .map(|d| d.name.as_str())
-            .filter(|name| !completed.runtime_attributes.iter().any(|n| n == name))
-            .collect();
-        bundle_manifest
-            .declared_scalars
-            .retain(|d| !since_plan.contains(&d.name.as_str()));
-        let scoped_since_plan: Vec<&str> = runtime_scoped_attributes
-            .iter()
-            .map(|f| f.name.as_str())
-            .filter(|name| {
-                !completed
-                    .runtime_scoped_attributes
-                    .iter()
-                    .any(|n| n == name)
-            })
-            .collect();
+        bundle_manifest.declared_scalars.retain(|d| {
+            !runtime_attributes
+                .iter()
+                .any(|runtime| runtime.name == d.name && !folded.entity.contains(&d.name))
+        });
         for group in &mut bundle_manifest.groups {
-            group
-                .scoped_scalars
-                .retain(|f| !scoped_since_plan.contains(&f.name.as_str()));
+            group.scoped_scalars.retain(|f| {
+                !runtime_scoped_attributes
+                    .iter()
+                    .any(|runtime| runtime.name == f.name && !folded.scoped.contains(&f.name))
+            });
         }
         crate::vocabularies::merge_live_values(&mut bundle_manifest, &live.vocabularies);
         bundle_manifest.files = completed.files.clone();
@@ -2677,6 +2850,90 @@ impl Executor {
             })
     }
 
+    /// `layer`'s `level` in shard `other` as it stands, observed over `view`'s rows: its shape and
+    /// the ordinals holding a row there. A spatial level's rows are the form the shard serves where
+    /// it holds them, and its segments resolved against the shapes otherwise.
+    fn observed_in(
+        &self,
+        other: &crate::Shard,
+        view: &str,
+        layer: &str,
+        level: u32,
+        spatial: bool,
+        pending: &PendingRetirement,
+    ) -> Option<(crate::layout::LevelShape, croaring::Bitmap)> {
+        let data = other.data.views.get(view)?;
+        let space = &data.row_space;
+        let row_count = u32::try_from(space.total_rows()).unwrap_or(u32::MAX);
+        if !spatial {
+            return Some(self.live.with_artifacts(|store| {
+                let slice = self.live.slice_of(other.id(), store);
+                observe_held(row_count, &|visit| {
+                    for (ordinal, record) in pending.held(store, slice, layer, level) {
+                        visit(
+                            ordinal,
+                            &slice.members_of(record).projected(|part| space.project(part)),
+                        );
+                    }
+                })
+            }));
+        }
+        let form = self
+            .deps
+            .artifact_projections
+            .held_form(other.id(), view, layer, level)
+            .filter(|form| form.membership().rows_held());
+        if let Some(form) = form {
+            return Some(observe_held(row_count, &|visit| {
+                for ordinal in 0..form.len() as u32 {
+                    if let Some(rows) = form.get(ordinal) {
+                        visit(ordinal, rows);
+                    }
+                }
+            }));
+        }
+        let segments = crate::viewport::segments_with_row_bases(view, data).ok()?;
+        let rows = self.live.with_artifacts(|store| {
+            let held = self.deps.shapes.level(
+                view,
+                layer,
+                level,
+                store,
+                &crate::shapes::PersistedPieces::none(),
+            );
+            crate::shapes::ShapeStore::stage_missing(
+                &held,
+                other.id(),
+                data,
+                &crate::shapes::PersistedPieces::none(),
+                store,
+            );
+            let mut rows: Vec<Option<croaring::Bitmap>> = Vec::new();
+            for (segment, base) in &segments {
+                let Some(piece) = held.staged(other.id(), &segment.seg_id) else {
+                    continue;
+                };
+                if rows.len() < piece.len() {
+                    rows.resize(piece.len(), None);
+                }
+                for (slot, part) in rows.iter_mut().zip(piece.iter()) {
+                    if let Some(part) = part.as_ref().filter(|part| !part.is_empty()) {
+                        slot.get_or_insert_with(croaring::Bitmap::new)
+                            .or_inplace(&part.add_offset(i64::from(*base)));
+                    }
+                }
+            }
+            rows
+        });
+        Some(observe_held(row_count, &|visit| {
+            for (ordinal, rows) in rows.iter().enumerate() {
+                if let Some(rows) = rows {
+                    visit(ordinal as u32, rows);
+                }
+            }
+        }))
+    }
+
     /// The fold's layout re-evaluation, run inside the artifact pass, reading the store
     /// post-retirement so a level the fold retired most of is observed as it is about to become.
     ///
@@ -2686,10 +2943,11 @@ impl Executor {
     /// the levels whose observed memberships overlap.
     pub(super) fn choose_layouts(
         &self,
+        live: &Generation,
         shard: ShardId,
         spaces: &[(String, mosaica_store::RowSpace)],
         pending: &PendingRetirement,
-        fold_segments: &[(String, mosaica_store::read::SegmentData)],
+        fold_segments: &[(String, Arc<mosaica_store::read::SegmentData>)],
     ) -> (
         Vec<(String, u32, mosaica_types::layer::ServingLayout)>,
         Overlapping,
@@ -2714,7 +2972,7 @@ impl Executor {
             // resolved against the level's shapes here, and the pieces are staged under the new
             // segment ids for the derived files this pass writes and for the flip's warm.
             let spatial = spatial_membership(&registered.declaration);
-            let shape = self.live.with_artifacts(|store| {
+            let (shape, held) = self.live.with_artifacts(|store| {
                 if spatial {
                     let mut observed = None;
                     for (view, segment) in fold_segments {
@@ -2740,25 +2998,24 @@ impl Executor {
                             "the fold re-resolved a segment against a spatial level's shapes"
                         );
                         if view == first_view {
-                            observed = Some(mosaica_store::derived::observe_shape(
-                                space.base_rows(),
-                                &|visit| {
-                                    for (ordinal, rows) in piece.iter().enumerate() {
-                                        if let Some(rows) = rows {
-                                            visit(ordinal as u32, rows);
-                                        }
+                            observed = Some(observe_held(space.base_rows(), &|visit| {
+                                for (ordinal, rows) in piece.iter().enumerate() {
+                                    if let Some(rows) = rows {
+                                        visit(ordinal as u32, rows);
                                     }
-                                },
-                            ));
+                                }
+                            }));
                         }
                     }
-                    observed.unwrap_or_else(crate::layout::LevelShape::empty)
+                    observed.unwrap_or_else(|| {
+                        (crate::layout::LevelShape::empty(), croaring::Bitmap::new())
+                    })
                 } else {
                     // A borrowing level's filed column is true when written and not read
                     // afterwards: the borrowed set moves with the target's version, so the engine
                     // serves it artifact-major instead (`crate::artifacts::ArtifactRows::inherit`).
                     let slice = self.live.slice_of(shard, store);
-                    mosaica_store::derived::observe_shape(space.base_rows(), &|visit| {
+                    observe_held(space.base_rows(), &|visit| {
                         for (ordinal, record) in pending.held(store, slice, &layer, level) {
                             visit(
                                 ordinal,
@@ -2770,6 +3027,18 @@ impl Executor {
                     })
                 }
             });
+            // The level over every shard: each other shard as it stands, beside this one as the
+            // compaction leaves it.
+            let mut reached = held;
+            let mut shapes = vec![shape];
+            for other in live.shards().filter(|other| other.id() != shard) {
+                let observed = self.observed_in(other, first_view, &layer, level, spatial, pending);
+                if let Some((shape, held)) = observed {
+                    reached.or_inplace(&held);
+                    shapes.push(shape);
+                }
+            }
+            let shape = crate::layout::LevelShape::summed(reached.cardinality(), shapes);
             let chosen = crate::layout::choose(&registered.declaration, shape);
             tracing::info!(
                 layer = %layer,
@@ -3433,7 +3702,7 @@ pub(super) fn fold_segments(
     prefix_dir: &std::path::Path,
     layout: ShardLayout<'_>,
     segments: &[mosaica_store::manifest::SegmentDescriptor],
-) -> Vec<(String, mosaica_store::read::SegmentData)> {
+) -> Vec<(String, Arc<mosaica_store::read::SegmentData>)> {
     let mut out = Vec::with_capacity(segments.len());
     for descriptor in segments {
         let dir = prefix_dir.join(layout.segment_rel(&descriptor.view, &descriptor.seg_id));
@@ -3465,7 +3734,7 @@ pub(super) fn fold_segments(
             descriptor.row_count,
             entities,
         ) {
-            Ok(segment) => out.push((descriptor.view.clone(), segment)),
+            Ok(segment) => out.push((descriptor.view.clone(), Arc::new(segment))),
             Err(e) => tracing::warn!(
                 view = %descriptor.view,
                 seg_id = %descriptor.seg_id,

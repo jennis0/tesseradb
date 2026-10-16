@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use mosaica_store::empty_shard::{write_empty_shard, EmptyShard, EmptyView};
-use mosaica_store::manifest::{FileDigest, RecordPackExtent, ShardRecord, UniqueIndexRuns};
+use mosaica_store::manifest::{
+    FileDigest, RecordPackExtent, ScopedColumn, ShardRecord, UniqueIndexRuns,
+};
 use mosaica_store::read::Bundle;
 use mosaica_store::{ShardLayout, StoreError};
 use mosaica_types::{LayerSpace, ShardId};
@@ -29,9 +31,10 @@ pub(crate) struct OpenedBase<'a> {
 }
 
 /// Write shard `id`'s empty base: what a build of no item writes for the columns and views the
-/// bundle declares, less the columns declared at a running service, which the record lists in
-/// `runtime_bases`, and a member pack listing nothing beside each record pack. Returns the record,
-/// open at high water 0, and the digest of every file written.
+/// bundle declares, and a member pack listing nothing beside each record pack. Returns the record,
+/// open at high water 0, and the digest of every file written. The record lists as based each
+/// column of `runtime` the bundle declares, and each group-scoped column another shard lists, since
+/// it holds the base of all of them.
 pub(crate) fn write_opened_shard(
     base: &OpenedBase<'_>,
     id: ShardId,
@@ -45,18 +48,30 @@ pub(crate) fn write_opened_shard(
                 detail: format!("no partition '{}' in this bundle", base.phash),
             })?;
     let layout = ShardLayout::new(base.phash, id);
-    let runtime = |name: &str| base.runtime.iter().any(|held| held == name);
-    let declared: Vec<_> = manifest
-        .declared_scalars
+    let scoped = manifest.scoped_scalars();
+    let runtime_bases: Vec<String> = base
+        .runtime
         .iter()
-        .filter(|scalar| !runtime(&scalar.name))
+        .filter(|name| {
+            manifest.declared_scalars.iter().any(|d| d.name == **name)
+                || scoped.iter().any(|f| f.name == **name)
+        })
         .cloned()
         .collect();
-    let scoped: Vec<_> = manifest
-        .scoped_scalars()
-        .into_iter()
-        .filter(|family| !runtime(&family.name))
-        .collect();
+    let mut scoped_columns: Vec<ScopedColumn> = Vec::new();
+    for column in partition
+        .shards
+        .iter()
+        .flat_map(|shard| shard.record.scoped_columns.iter())
+    {
+        let written = manifest.is_live_incarnation(&column.view, column.incarnation)
+            && scoped
+                .iter()
+                .any(|f| f.name == column.column && f.views.contains(&column.view));
+        if written && !scoped_columns.contains(column) {
+            scoped_columns.push(column.clone());
+        }
+    }
     let views: Vec<EmptyView<'_>> = manifest
         .views
         .iter()
@@ -76,7 +91,7 @@ pub(crate) fn write_opened_shard(
         terms: base.terms,
         small_term_threshold: manifest.small_term_threshold,
         pairs,
-        declared: &declared,
+        declared: &manifest.declared_scalars,
         vocabularies: &manifest.vocabularies,
         scoped: &scoped,
         views: &views,
@@ -117,7 +132,8 @@ pub(crate) fn write_opened_shard(
             })
             .collect(),
         membership_extents,
-        runtime_bases: base.runtime.to_vec(),
+        scoped_columns,
+        runtime_bases,
         ..ShardRecord::empty(id)
     };
     Ok((record, files))
