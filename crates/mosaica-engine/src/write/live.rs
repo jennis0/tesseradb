@@ -36,22 +36,16 @@ pub(in crate::write) struct RegistryForPublication {
 /// One point shard's write state, on [`LiveState`]'s contract.
 pub(crate) struct ShardWrite {
     pub(in crate::write) id: ShardId,
-    /// Whether the shard takes new items at its high water, as its record and the log leave it.
-    pub(in crate::write) state: mosaica_types::ShardState,
-    /// The entity id allocator. Written only by the executor, never by a handler: entity ids are
-    /// assigned at a window's close, on the one thread that also advances the high-water mark.
+    /// The entity id allocator, which holds whether the shard is open. Written only by the
+    /// executor, never by a handler: entity ids are assigned at a window's close, on the one
+    /// thread that also advances the high-water mark.
     allocator: Mutex<Allocator>,
 }
 
 impl ShardWrite {
-    pub(in crate::write) fn new(
-        id: ShardId,
-        state: mosaica_types::ShardState,
-        allocator: Allocator,
-    ) -> ShardWrite {
+    pub(in crate::write) fn new(id: ShardId, allocator: Allocator) -> ShardWrite {
         ShardWrite {
             id,
-            state,
             allocator: Mutex::new(allocator),
         }
     }
@@ -60,8 +54,10 @@ impl ShardWrite {
         lock_recover(&self.allocator).high_water()
     }
 
-    pub(crate) fn size(&self) -> u64 {
-        lock_recover(&self.allocator).size()
+    /// Whether the shard takes new items at its high water, as its record, the log and the
+    /// windows since leave it.
+    pub(crate) fn state(&self) -> mosaica_types::ShardState {
+        lock_recover(&self.allocator).state()
     }
 
     /// [`Allocator::room`], under the lock.
@@ -69,8 +65,9 @@ impl ShardWrite {
         &self,
         edits: u64,
         items: u64,
+        size: u64,
     ) -> Result<(), mosaica_types::ShardFull> {
-        lock_recover(&self.allocator).room(edits, items)
+        lock_recover(&self.allocator).room(edits, items, size)
     }
 
     /// The allocator's freed ids and the sets it holds back, as a side-manifest records them.
@@ -114,6 +111,9 @@ pub(crate) struct LiveState {
     /// One past the highest shard id ever opened, as the side-manifest's `shards.next_id` and the
     /// log leave it.
     pub(in crate::write) next_shard_id: u32,
+    /// The high water at which the open shard seals, as the side-manifest's `shards.size` and the
+    /// log leave it. Written only by the executor.
+    pub(in crate::write) size: std::sync::atomic::AtomicU64,
     pub(in crate::write) several_shards: super::SeveralShards,
     /// The descriptor resolver's extension state. Resolved in the handler before submitting, not
     /// on the executor: signature-sorted assignment needs the term set to compute a sort key
@@ -158,7 +158,7 @@ impl LiveState {
     pub(crate) fn write_shard(&self) -> &ShardWrite {
         self.shards
             .iter()
-            .rfind(|shard| shard.state == mosaica_types::ShardState::Open)
+            .rfind(|shard| shard.state() == mosaica_types::ShardState::Open)
             .expect("the open refuses a bundle with no open shard")
     }
 
@@ -174,7 +174,7 @@ impl LiveState {
 
     /// The size every shard is allocated to.
     pub(crate) fn shard_size(&self) -> u64 {
-        self.shards[0].size()
+        self.size.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Runs `f` with the registry held: a registration's or a drop's preparation.

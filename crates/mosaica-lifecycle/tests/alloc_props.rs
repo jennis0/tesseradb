@@ -8,13 +8,14 @@ use proptest::prelude::*;
 
 use croaring::Bitmap;
 use mosaica_lifecycle::alloc::{
-    assign_sorted, name_entities, raise_high_water, union_of, Allocator, ByTenancy, PendingItem,
+    assign_sorted, name_entities, raise_high_water, union_of, Allocator, Allocators, ByTenancy,
+    PendingItem,
 };
 use mosaica_lifecycle::wal::{ChangeOp, WalRecord, WalRow};
-use mosaica_types::{EntityId, ShardId, Tenancy, TermId};
+use mosaica_types::{EntityId, ShardId, ShardState, Tenancy, TermId};
 
 proptest! {
-    /// Interleaved `allocate` calls on a single allocator never overlap and always advance the
+    /// Interleaved allocations on a single allocator never overlap and always advance the
     /// high-water mark by exactly the amount requested.
     #[test]
     fn allocate_is_strictly_monotone(sizes in prop::collection::vec(1u64..64, 1..60)) {
@@ -23,7 +24,7 @@ proptest! {
         let mut seen: HashSet<u64> = HashSet::new();
 
         for n in sizes {
-            let ids = alloc.allocate(0, n).unwrap().items;
+            let ids = alloc.allocate_items(n, u64::MAX);
             prop_assert_eq!(&ids, &(expected_next..expected_next + n).collect::<Vec<_>>());
             for id in ids {
                 prop_assert!(seen.insert(id), "id {} allocated twice in one session", id);
@@ -60,7 +61,7 @@ proptest! {
             let mut alloc = Allocator::new(seed);
 
             for n in sizes {
-                let range = alloc.allocate(0, n).unwrap().items;
+                let range = alloc.allocate_items(n, u64::MAX);
                 for id in range {
                     prop_assert!(!used.contains(&id), "id {} reused across a simulated crash", id);
                     used.insert(id);
@@ -105,7 +106,7 @@ proptest! {
             let seed = side_high_water.max(shard_zero_mark(&wal));
             let mut alloc = Allocator::new(seed);
 
-            for id in alloc.allocate(0, n).unwrap().items {
+            for id in alloc.allocate_items(n, u64::MAX) {
                 prop_assert!(!used.contains(&id), "entity id {} reissued", id);
                 used.insert(id);
                 wal.push(WalRecord::IngestBatch {
@@ -140,10 +141,11 @@ proptest! {
         }
     }
 
-    /// **One allocation takes ids in the allocator's order**, over a pool of freed ids at fuzzed
-    /// tenancies: an edit's new entity takes tenancy 0, lowest first, then the high-water; a new
-    /// item takes the lowest tenancy, lowest id first, then the high-water; the edits draw first.
-    /// An allocation the shard's size cannot hold is refused and takes nothing.
+    /// **One window takes ids in the allocator's order** in its one open shard, over a pool of
+    /// freed ids at fuzzed tenancies: an edit's new entity takes tenancy 0, lowest first, then
+    /// the high water, whatever the size; a new item takes the lowest tenancy, lowest id first,
+    /// then the high water up to the size; the edits draw first. The items the size cannot hold
+    /// open the next shard and seal this one.
     #[test]
     fn a_window_takes_ids_in_the_allocators_order(
         pool in prop::collection::btree_map(0u32..200, 0u16..4, 0..40),
@@ -153,9 +155,8 @@ proptest! {
     ) {
         const HIGH_WATER: u64 = 1_000;
         let mut alloc = Allocator::new(HIGH_WATER);
-        alloc.set_size(HIGH_WATER + room);
         let free = by_tenancy(pool.iter().map(|(&id, &tenancy)| (id, tenancy)));
-        alloc.release_after(0, free.clone());
+        alloc.release_after(0, free);
         alloc.promote(0);
 
         let mut by_tenancy: Vec<(u16, u64)> =
@@ -168,26 +169,43 @@ proptest! {
             .take(edits as usize)
             .collect();
         by_tenancy.retain(|(_, id)| !expected_edits.contains(id));
-        let mut expected_items: Vec<u64> =
+        let expected_items: Vec<u64> =
             by_tenancy.iter().map(|(_, id)| *id).take(items as usize).collect();
         let edits_fresh = edits - expected_edits.len() as u64;
         let items_fresh = items - expected_items.len() as u64;
+        let here = items_fresh.min(room.saturating_sub(edits_fresh));
         expected_edits.extend(HIGH_WATER..HIGH_WATER + edits_fresh);
-        expected_items.extend(HIGH_WATER + edits_fresh..HIGH_WATER + edits_fresh + items_fresh);
+        let mut expected: Vec<(u32, u64)> = expected_edits.iter().map(|&id| (0, id)).collect();
+        expected.extend(expected_items.iter().map(|&id| (0, id)));
+        let first = HIGH_WATER + edits_fresh;
+        expected.extend((first..first + here).map(|id| (0, id)));
+        expected.extend((0..items_fresh - here).map(|id| (1, id)));
 
-        match alloc.allocate(edits, items) {
-            Ok(given) => {
-                prop_assert!(edits_fresh + items_fresh <= room);
-                prop_assert_eq!(given.edits, expected_edits);
-                prop_assert_eq!(given.items, expected_items);
-                prop_assert_eq!(alloc.high_water(), HIGH_WATER + edits_fresh + items_fresh);
-            }
-            Err(_) => {
-                prop_assert!(edits_fresh + items_fresh > room);
-                prop_assert_eq!(alloc.free(), &free, "a refused allocation takes no freed id");
-                prop_assert_eq!(alloc.high_water(), HIGH_WATER);
-            }
-        }
+        let mut pending: Vec<PendingItem> = (0..edits + items)
+            .map(|at| PendingItem {
+                terms: Vec::new(),
+                item: None,
+                edit: (at < edits).then_some(ShardId::ZERO),
+            })
+            .collect();
+        let placed = assign_sorted(
+            &mut pending,
+            &mut Allocators {
+                shards: vec![(ShardId::ZERO, &mut alloc)],
+                size: HIGH_WATER + room,
+                next_id: 1,
+            },
+        )
+        .unwrap();
+        let given: Vec<(u32, u64)> = pending
+            .iter()
+            .map(|p| p.item.map(|item| (item.shard.raw(), item.entity.raw())).unwrap())
+            .collect();
+        prop_assert_eq!(given, expected);
+        prop_assert_eq!(alloc.high_water(), HIGH_WATER + edits_fresh + here);
+        let overflow = items_fresh > here;
+        prop_assert_eq!(alloc.state() == ShardState::Sealed, overflow);
+        prop_assert_eq!(placed.opened.len(), usize::from(overflow));
     }
 
     /// **No id holds two items and no identifier names two**, across fuzzed rounds of windows
@@ -219,8 +237,9 @@ proptest! {
 
         for (created, edits, deletes, fold, rotate, crash) in rounds {
             let edited = edits.min(items.len());
-            let given = alloc.allocate(edited as u64, created).unwrap();
-            for (at, &entity) in given.edits.iter().enumerate() {
+            let given_edits = alloc.allocate_edits(edited as u64).unwrap();
+            let given_items = alloc.allocate_items(created, u64::MAX);
+            for (at, &entity) in given_edits.iter().enumerate() {
                 prop_assert_eq!(
                     index.get(&entity).copied().unwrap_or(0),
                     0,
@@ -237,7 +256,7 @@ proptest! {
                 wal.push(row(entity));
                 wal.push(deletion(old));
             }
-            for &number in &given.items {
+            for &number in &given_items {
                 prop_assert!(in_use.insert(number), "entity id {} holds two items", number);
                 let tenancy = index.get(&number).copied().unwrap_or(0);
                 prop_assert!(
@@ -317,19 +336,27 @@ proptest! {
             .iter()
             .map(|sig| PendingItem {
                 terms: sig.iter().map(|&t| TermId::new(t)).collect(),
-                entity_id: None,
-                edit: false,
+                item: None,
+                edit: None,
             })
             .collect();
 
         let mut alloc = Allocator::new(0);
-        assign_sorted(&mut items, &mut alloc).unwrap();
+        assign_sorted(
+            &mut items,
+            &mut Allocators {
+                shards: vec![(ShardId::ZERO, &mut alloc)],
+                size: u64::MAX,
+                next_id: 1,
+            },
+        )
+        .unwrap();
 
         let n = items.len() as u64;
-        let mut ids: Vec<u64> = items
-            .iter()
-            .map(|it| it.entity_id.expect("assign_sorted must fill every entity_id").raw())
-            .collect();
+        let id_of = |it: &PendingItem| {
+            it.item.expect("assign_sorted must fill every item").entity.raw()
+        };
+        let mut ids: Vec<u64> = items.iter().map(id_of).collect();
         ids.sort_unstable();
         ids.dedup();
         prop_assert_eq!(ids, (0..n).collect::<Vec<_>>(), "ids are not a dense, distinct 0..n range");
@@ -337,7 +364,7 @@ proptest! {
         // Walk items in assigned-ID order; each time the (sorted, deduplicated) signature
         // changes, it must never recur — otherwise two runs of the same signature exist.
         let mut by_id: Vec<&PendingItem> = items.iter().collect();
-        by_id.sort_by_key(|it| it.entity_id.unwrap().raw());
+        by_id.sort_by_key(|it| id_of(it));
 
         let mut closed_signatures: HashSet<Vec<u32>> = HashSet::new();
         let mut current: Option<Vec<u32>> = None;

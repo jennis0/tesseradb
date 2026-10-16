@@ -274,11 +274,7 @@ pub(crate) fn owes_value_column(
     scalar: &mosaica_store::manifest::DeclaredScalar,
     vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
 ) -> bool {
-    // Text owes none: it has many terms per entity and no per-entity slot.
-    if scalar.arrow_type == mosaica_spatial::tiler::ScalarType::Text {
-        return false;
-    }
-    scalar.index || visibility_of(scalar, vocabularies) == Some(Visibility::Derived)
+    scalar.owes_value_column(vocabularies)
 }
 
 /// Does this column's value live in the record blob?
@@ -290,10 +286,7 @@ pub(crate) fn blob_resident(
     scalar: &mosaica_store::manifest::DeclaredScalar,
     vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
 ) -> bool {
-    if scalar.arrow_type == mosaica_spatial::tiler::ScalarType::Text {
-        return true;
-    }
-    !scalar.render && !owes_value_column(scalar, vocabularies)
+    scalar.blob_resident(vocabularies)
 }
 
 /// Where a declared field's value is read from. A field may have more than one home: a rendered,
@@ -339,7 +332,7 @@ pub(crate) fn owes_postings(
     scalar: &mosaica_store::manifest::DeclaredScalar,
     vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
 ) -> bool {
-    scalar.vocabulary.is_some() && owes_value_column(scalar, vocabularies)
+    scalar.owes_postings(vocabularies)
 }
 
 /// The analyser that indexed a text column, not the default: one resolution shared by the

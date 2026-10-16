@@ -12,6 +12,11 @@ mosaica-access = { path = "../mosaica-access" }
 mosaica-roaring = { path = "../mosaica-roaring" }
 mosaica-spatial = { path = "../mosaica-spatial" }
 mosaica-analyse = { path = "../mosaica-analyse" }
+# The postings, value-column, dictionary and record-blob writers an empty shard's base is written
+# with (`src/empty_shard.rs`), which the build and a running service both call.
+mosaica-authz = { path = "../mosaica-authz" }
+mosaica-filter = { path = "../mosaica-filter" }
+mosaica-filter-write = { path = "../mosaica-filter-write" }
 arrow = { workspace = true }
 # `terms/pairs.parquet` is the one bundle artefact contracts §2 defines in Parquet rather than
 # Arrow IPC; see `src/pairs.rs` for why its writer lives here with the other six.

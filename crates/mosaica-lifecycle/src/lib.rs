@@ -33,7 +33,10 @@ pub mod roster;
 pub mod wal;
 pub mod window;
 
-pub use alloc::{assign_sorted, union_of, Allocation, Allocator, ByTenancy, PendingItem};
+pub use alloc::{
+    assign_sorted, place, union_of, AllocError, Allocator, Allocators, ByTenancy, PendingItem,
+    Placed, Placement, ShardRoom,
+};
 pub use buffer::{BufferedItem, DescriptorResolver, IngestBuffer};
 pub use command::{
     AttributeRequest, BatchArtifacts, BatchEdge, BatchMembership, DeclaredValue, ExecError,

@@ -965,6 +965,12 @@ fn build_bundle(
     // assignment walk is global; everything after it that writes entity space writes each
     // shard's files at its own ids.
     let spans = crate::ShardSpan::of(n, args.shard_size())?;
+    // The shards whose base files the stages below write. An empty build's one shard is written
+    // whole by `mosaica_store::empty_shard`, the writer a running service opens a shard with.
+    let filled: &[crate::ShardSpan] = match n {
+        0 => &[],
+        _ => &spans,
+    };
 
     // ---- 2. the dictionary -----------------------------------------------------------
     let prefix_dir = args.out.join(PREFIX);
@@ -1329,7 +1335,7 @@ fn build_bundle(
     };
     let mut entity_terms_paths: Vec<PathBuf> = Vec::new();
     let mut entity_terms_shard = 0usize;
-    let mut entity_terms = entity_terms_writer(&spans[0])?;
+    let mut entity_terms = filled.first().map(&entity_terms_writer).transpose()?;
     let mut sig_terms: Vec<u32> = Vec::new();
     for k in 0..plan.batches {
         let ordinal_lo = k * plan.batch_items;
@@ -1483,16 +1489,19 @@ fn build_bundle(
                         ))
                     })?;
             }
+            let writer = entity_terms
+                .as_mut()
+                .expect("an assigned entity is in a filled shard");
             while u64::from(entity) >= spans[entity_terms_shard].hi {
                 entity_terms_shard += 1;
                 let next = entity_terms_writer(&spans[entity_terms_shard])?;
                 entity_terms_paths.extend(
-                    std::mem::replace(&mut entity_terms, next)
+                    std::mem::replace(writer, next)
                         .finish()
                         .map_err(transpose)?,
                 );
             }
-            entity_terms
+            writer
                 .push(entity - spans[entity_terms_shard].lo as u32, &sig_terms)
                 .map_err(transpose)?;
         }
@@ -1534,7 +1543,9 @@ fn build_bundle(
         );
     }
 
-    entity_terms_paths.extend(entity_terms.finish().map_err(transpose)?);
+    if let Some(writer) = entity_terms {
+        entity_terms_paths.extend(writer.finish().map_err(transpose)?);
+    }
     for path in &entity_terms_paths {
         fsync_file(path)?;
     }
@@ -1566,7 +1577,7 @@ fn build_bundle(
         .map(|span| prefix_dir.join(span.layout().postings_rel()))
         .collect();
     let pairs_paths: Vec<PathBuf> = match args.emit_oracle_pairs {
-        true => spans
+        true => filled
             .iter()
             .map(|span| prefix_dir.join(span.layout().pairs_rel()))
             .collect(),
@@ -1576,7 +1587,7 @@ fn build_bundle(
         .iter()
         .map(|path| PairsParquetWriter::create(path))
         .collect::<std::result::Result<_, _>>()?;
-    let mut spools: Vec<mosaica_authz::PostingsSpool> = spans
+    let mut spools: Vec<mosaica_authz::PostingsSpool> = filled
         .iter()
         .zip(&postings_paths)
         .map(|(span, path)| {
@@ -1638,7 +1649,7 @@ fn build_bundle(
         let mut t = 0usize;
         while t < width {
             let hi = (t + ENCODE_CHUNK_TERMS).min(width);
-            for (k, span) in spans.iter().enumerate() {
+            for (k, span) in filled.iter().enumerate() {
                 let encoded: Vec<(Vec<u8>, std::borrow::Cow<'_, [u32]>)> = (t..hi)
                     .into_par_iter()
                     .map(|local| {
@@ -1726,7 +1737,7 @@ fn build_bundle(
     let (scoped_paths, mut scoped_render) = write_scoped_columns(
         args,
         &prefix_dir,
-        &spans,
+        filled,
         n,
         &numbering,
         entity_of_ordinal,
@@ -1843,7 +1854,7 @@ fn build_bundle(
     }
     timer.end(BuildStage::UniqueIndexes, n);
     let mut filter_paths = Vec::new();
-    for span in &spans {
+    for span in filled {
         window_shard(&mut attributes_by_entity, &mut open_extents, span);
         let (paths, text_index) = write_filter_postings(
             &prefix_dir,
@@ -1893,7 +1904,7 @@ fn build_bundle(
     // number for three jobs, which is why the 615 s this block cost at 7.4×10⁷ points could be
     // modelled and not read.
     let mut record_paths = Vec::new();
-    for span in &spans {
+    for span in filled {
         window_shard(&mut attributes_by_entity, &mut open_extents, span);
         record_paths.extend(write_record_blob(
             &prefix_dir.join(span.layout().record_rel()),
@@ -1934,6 +1945,52 @@ fn build_bundle(
         }
     }
     timer.end(BuildStage::ColumnRelease, n);
+
+    let mut empty_files: Vec<PathBuf> = Vec::new();
+    if filled.is_empty() {
+        let declared = crate::declared_scalars_of(&args.schema);
+        let vocabularies = crate::manifest_vocabularies(args, &minters);
+        let scoped: Vec<mosaica_store::manifest::ScopedScalar> = args
+            .scoped_attributes
+            .iter()
+            .map(|family| crate::scoped_scalar_of(args, family))
+            .collect();
+        // The render columns, then the view's scoped ones, as the segment write below orders them.
+        let views: Vec<mosaica_store::empty_shard::EmptyView<'_>> = args
+            .views
+            .iter()
+            .zip(&scoped_render_targets)
+            .map(|(view, targets)| mosaica_store::empty_shard::EmptyView {
+                id: &view.view_id,
+                incarnation: mosaica_store::manifest::DECLARED_INCARNATION,
+                render: crate::scalar_schema_of(&args.schema)
+                    .into_iter()
+                    .chain(
+                        targets
+                            .iter()
+                            .map(|&at| (scoped_render[at].name.clone(), scoped_render[at].ty)),
+                    )
+                    .collect(),
+            })
+            .collect();
+        for span in &spans {
+            let written = mosaica_store::empty_shard::write_empty_shard(
+                &mosaica_store::empty_shard::EmptyShard {
+                    prefix_dir: &prefix_dir,
+                    layout: span.layout(),
+                    terms: term_count,
+                    small_term_threshold: SMALL_TERM_THRESHOLD_DEFAULT,
+                    pairs: args.emit_oracle_pairs,
+                    declared: &declared,
+                    vocabularies: &vocabularies,
+                    scoped: &scoped,
+                    views: &views,
+                    seg_id: SEG_ID,
+                },
+            )?;
+            empty_files.extend(written.files.into_iter().map(|(_, path)| path));
+        }
+    }
 
     // ---- 9/10. pass two: one row space per view and shard (`views.md` §7) ---------------
     // **The build below is what it always was, run once per view.** What is not one-view-at-a-
@@ -1992,7 +2049,7 @@ fn build_bundle(
         // geometry is released before the first of them.
         let mut partitioned = Vec::with_capacity(spans.len());
         let mut view_rows = 0u64;
-        for span in &spans {
+        for span in filled {
             let layout = span.layout();
             let view_dir = prefix_dir.join(layout.view_rel(&view.view_id));
             let segment_dir = prefix_dir.join(layout.segment_rel(&view.view_id, SEG_ID));
@@ -2132,6 +2189,15 @@ fn build_bundle(
             view_files.extend(assembled.presence_paths);
             parts.push((*span, rows_in_view));
         }
+        if filled.is_empty() {
+            for (k, span) in spans.iter().enumerate() {
+                shards[k].occupancies.push(crate::Occupancy {
+                    points: 0,
+                    cells: 0,
+                });
+                parts.push((*span, 0));
+            }
+        }
 
         // ---- 10b. the post-bundle artifact pass, per view (decision 0094's first half) ----
         //
@@ -2189,15 +2255,17 @@ fn build_bundle(
             // After every file they read: the segment, the row-to-entity table, the entity terms
             // and the value columns. The in-memory build calls the same function at the same
             // point.
-            view_files.push(mosaica_store::field_tallies::derive_view(
-                &prefix_dir,
-                layout,
-                &view.view_id,
-                SEG_ID,
-                rows_in_view,
-                &crate::declared_scalars_of(&args.schema),
-                &|name| mosaica_filter::base_numbers(&prefix_dir.join(layout.column_rel(name))),
-            )?);
+            if !filled.is_empty() {
+                view_files.push(mosaica_store::field_tallies::derive_view(
+                    &prefix_dir,
+                    layout,
+                    &view.view_id,
+                    SEG_ID,
+                    rows_in_view,
+                    &crate::declared_scalars_of(&args.schema),
+                    &|name| mosaica_filter::base_numbers(&prefix_dir.join(layout.column_rel(name))),
+                )?);
+            }
             shards[k]
                 .segments
                 .push(mosaica_store::manifest::SegmentDescriptor {
@@ -2251,7 +2319,8 @@ fn build_bundle(
     tmp.close()?;
 
     // ---- 11. manifests ---------------------------------------------------------------
-    let mut other_paths = postings_paths;
+    let mut other_paths = empty_files;
+    other_paths.extend(postings_paths);
     other_paths.extend(entity_terms_paths);
     other_paths.extend(view_files);
     other_paths.extend(filter_paths);

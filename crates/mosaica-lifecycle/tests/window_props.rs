@@ -10,10 +10,12 @@ use std::collections::HashSet;
 
 use proptest::prelude::*;
 
-use mosaica_lifecycle::alloc::Allocator;
+use mosaica_lifecycle::alloc::{AllocError, Allocator, Allocators, Placed};
 use mosaica_lifecycle::command::UnallocatedRow;
 use mosaica_lifecycle::wal::WalRecord;
-use mosaica_lifecycle::window::{CommitWindow, FragmentationTally, Slot, WindowClaims, WindowEntry};
+use mosaica_lifecycle::window::{
+    ClosedEntry, CommitWindow, FragmentationTally, Slot, WindowClaims, WindowEntry,
+};
 use mosaica_types::{ShardId, TermId};
 
 fn row(terms: &[u32]) -> UnallocatedRow {
@@ -27,6 +29,22 @@ fn row(terms: &[u32]) -> UnallocatedRow {
         terms: terms.iter().map(|t| TermId::new(*t)).collect(),
         scoped: Vec::new(),
     }
+}
+
+/// `w` closed with `alloc` as shard 0's, the only shard, at no size.
+#[allow(clippy::type_complexity)]
+fn close<W>(
+    w: CommitWindow<W>,
+    alloc: &mut Allocator,
+) -> Result<(Vec<ClosedEntry<W>>, FragmentationTally, Placed), (AllocError, Vec<Vec<W>>)> {
+    w.allocate(
+        &mut Allocators {
+            shards: vec![(ShardId::ZERO, alloc)],
+            size: u64::MAX,
+            next_id: 1,
+        },
+        |item| item.entity.raw(),
+    )
 }
 
 /// The ids in a closed entry's framed WAL record — "in the WAL" for the property below, one step
@@ -78,7 +96,7 @@ proptest! {
                 }, WindowClaims::default());
             }
             let rows_in_window = window.rows();
-            let (closed, _) = window.allocate(&mut alloc, ShardId::ZERO, |e| e.raw()).expect("the id space is not exhausted");
+            let (closed, _, _) = close(window, &mut alloc).expect("the id space is not exhausted");
 
             let mut issued: Vec<u64> = Vec::new();
             for entry in &closed {
@@ -129,8 +147,7 @@ proptest! {
                 waiters: vec![()],
             }, WindowClaims::default());
         }
-        let chunked_ids: Vec<u64> = chunked
-            .allocate(&mut Allocator::new(9), ShardId::ZERO, |e| e.raw())
+        let chunked_ids: Vec<u64> = close(chunked, &mut Allocator::new(9))
             .unwrap()
             .0
             .iter()
@@ -150,8 +167,7 @@ proptest! {
                 edges: Vec::new(),
             waiters: vec![()],
         }, WindowClaims::default());
-        let whole_ids: Vec<u64> = whole
-            .allocate(&mut Allocator::new(9), ShardId::ZERO, |e| e.raw())
+        let whole_ids: Vec<u64> = close(whole, &mut Allocator::new(9))
             .unwrap()
             .0
             .iter()
@@ -213,7 +229,7 @@ fn the_window_run_ratio_against_the_full_sort_ceiling() {
                 edges: Vec::new(),
                 waiters: vec![()],
             }, WindowClaims::default());
-            for entry in window.allocate(&mut alloc, ShardId::ZERO, |e| e.raw()).unwrap().0 {
+            for entry in close(window, &mut alloc).unwrap().0 {
                 for (row, id) in group.iter().zip(entry.items.iter()) {
                     postings[row.terms[0].raw() as usize].push(id.entity.raw());
                 }
@@ -308,7 +324,7 @@ fn the_emitted_run_ratio_rises_with_the_window_and_stays_under_the_full_sort_cei
                 edges: Vec::new(),
                 waiters: vec![()],
             }, WindowClaims::default());
-            let (_, tally) = window.allocate(&mut alloc, ShardId::ZERO, |e| e.raw()).unwrap();
+            let (_, tally, _) = close(window, &mut alloc).unwrap();
             total.merge(tally);
         }
         (

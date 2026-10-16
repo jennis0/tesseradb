@@ -151,9 +151,9 @@ pub fn run(
 
     let file = mosaica_store::derived::term_image_file(prefix_dir, layout, MANIFEST_N, index)?;
 
-    // The one adapter between the postings format and the derivation: `mosaica-store` does not
-    // depend on `mosaica-authz`, so the shape is handed across and the walk is written where the
-    // format lives. `artifact_pass::containment` holds the identical six lines.
+    // The one adapter between the postings format and the derivation: the shape is handed across
+    // and the walk is written where the format lives. `artifact_pass::containment` holds the
+    // identical six lines.
     let walk = |term: u32, visit: &mut dyn FnMut(PostingSlice<'_>)| -> std::io::Result<()> {
         if let Some(posting) = postings.posting_at(term)? {
             match posting {

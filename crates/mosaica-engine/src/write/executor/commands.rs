@@ -933,10 +933,8 @@ impl Executor {
 
     /// `PUT /control/shards`: declare the point shard's size while the service runs.
     pub(super) fn commit_shards_declare(&mut self, size: u64, reply: Reply<bool>) {
-        let (held, high_water) = {
-            let shard = self.live.only_shard();
-            (shard.size(), shard.high_water())
-        };
+        let held = self.live.shard_size();
+        let high_water = self.live.only_shard().high_water();
         if let Err(e) = mosaica_types::check_shard_size(size, high_water) {
             reply.fail(ExecError::ShardSize(e));
             return;
@@ -951,8 +949,8 @@ impl Executor {
             return;
         }
         self.live
-            .only_shard()
-            .with_allocator(|alloc| alloc.set_size(size));
+            .size
+            .store(size, std::sync::atomic::Ordering::Relaxed);
         // Durable in the log and not yet in a manifest: the next publication restates it.
         self.side_manifests.behind_live = true;
         reply.ack(false);

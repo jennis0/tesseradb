@@ -880,9 +880,9 @@ pub fn sweep_row_column_scratch(scratch: &Path) {
 
 /// One term's postings, as this module needs to read them.
 ///
-/// **An adapter, not a second format.** `mosaica-authz` owns `postings.arrow` and this crate does
-/// not depend on it, so a caller hands each posting over in whichever of the two shapes it is
-/// stored in and the walk below is written once. The decode that produces the shape stays where the
+/// **An adapter, not a second format.** `mosaica-authz` owns `postings.arrow`, so a caller hands
+/// each posting over in whichever of the two shapes it is stored in and the walk below is written
+/// once. The decode that produces the shape stays where the
 /// format lives.
 pub enum PostingSlice<'a> {
     /// Ascending little-endian `u32` entity ids.

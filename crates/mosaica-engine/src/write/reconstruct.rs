@@ -519,13 +519,15 @@ impl WritePath {
                     "the shard size the manifest and the WAL leave ({size}) does not hold: {e}"
                 ))
             })?;
-            allocator.set_size(size);
+            if shard.state == mosaica_types::ShardState::Sealed {
+                allocator.seal();
+            }
             allocator.seed_freed(shard.free, shard.held, wal.retained_from(), named);
-            shards.push(ShardWrite::new(shard.id, shard.state, allocator));
+            shards.push(ShardWrite::new(shard.id, allocator));
         }
         if !shards
             .iter()
-            .any(|shard| shard.state == mosaica_types::ShardState::Open)
+            .any(|shard| shard.state() == mosaica_types::ShardState::Open)
         {
             return Err(EngineError::Malformed(
                 "every point shard the manifests and the WAL leave is sealed, so no shard takes \
@@ -558,6 +560,7 @@ impl WritePath {
                 several_shards,
                 shards,
                 next_shard_id,
+                size,
                 resolver_state,
                 accepted_batches,
                 registry,
@@ -1107,7 +1110,7 @@ mod tests {
         let shards = state
             .shards
             .iter()
-            .map(|shard| (shard.id.raw(), shard.state, shard.high_water()))
+            .map(|shard| (shard.id.raw(), shard.state(), shard.high_water()))
             .collect();
         (shards, state.next_shard_id)
     }

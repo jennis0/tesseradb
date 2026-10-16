@@ -342,7 +342,7 @@ fn fold_value_column(
         write_empty_value_column(
             &values_path,
             &presence_path,
-            column_kind_of(job.arrow_type, job.postings),
+            mosaica_store::empty_shard::value_column_kind(job.arrow_type, job.postings),
         )
         .map_err(failed("pass 4a (attributes: an empty base)"))?;
         if job.arrow_type == mosaica_spatial::tiler::ScalarType::Keyword {
@@ -582,32 +582,4 @@ fn write_empty_dictionary(dict_path: &Path) -> std::io::Result<()> {
         .and_then(|writer| writer.finish())
         .map(|_| ())
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
-}
-
-fn column_kind_of(arrow_type: ScalarType, category: bool) -> mosaica_filter::ColumnKind {
-    use mosaica_filter::ColumnKind;
-    if arrow_type == ScalarType::Keyword {
-        return ColumnKind::U32;
-    }
-    if category {
-        return match arrow_type {
-            ScalarType::U8 => ColumnKind::U8,
-            ScalarType::U16 => ColumnKind::U16,
-            _ => ColumnKind::U32,
-        };
-    }
-    match arrow_type {
-        ScalarType::Bool | ScalarType::U8 => ColumnKind::U8,
-        ScalarType::U16 => ColumnKind::U16,
-        ScalarType::U32 => ColumnKind::U32,
-        ScalarType::U64 => ColumnKind::U64,
-        ScalarType::I8 => ColumnKind::I8,
-        ScalarType::I16 => ColumnKind::I16,
-        ScalarType::I32 => ColumnKind::I32,
-        ScalarType::I64 | ScalarType::TimestampUs => ColumnKind::I64,
-        ScalarType::F32 => ColumnKind::F32,
-        ScalarType::F64 => ColumnKind::F64,
-        // Unreachable: `utf8` is not declarable and `text` folds through its own pass.
-        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => ColumnKind::U32,
-    }
 }

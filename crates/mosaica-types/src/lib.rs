@@ -5,8 +5,9 @@ pub use identity::{
 };
 mod shard;
 pub use shard::{
-    by_shard, check_room, check_shard_size, only, ItemAt, LayerSpace, ShardFull, ShardId, ShardLimit,
-    ShardRow, ShardSizeError, ShardState, Target, ENTITY_END, SHARD_SIZE_DEFAULT,
+    by_shard, check_room, check_shard_size, only, reuse_min_free, ItemAt, LayerSpace, ShardFull,
+    ShardId, ShardLimit, ShardRow, ShardSizeError, ShardState, ShardsExhausted, Target, ENTITY_END,
+    SHARD_SIZE_DEFAULT,
 };
 
 /// The process's own memory — the allocator's retention and the kernel's resident figures.

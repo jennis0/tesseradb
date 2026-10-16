@@ -728,8 +728,8 @@ fn shard_containment(store: &ArtifactStore, prefix_dir: &Path, span: ShardSpan) 
         // same. `SignatureIndex::build` returns immediately on an empty set, so the cost of the
         // symmetry is a file header.
         let wanted = derived::generating_entities(&contents);
-        // The one adapter between the postings format and the composer — `mosaica-store` may not
-        // depend on `mosaica-authz`, so the shape is handed across and the walk is written once.
+        // The one adapter between the postings format and the composer: the shape is handed across
+        // and the walk is written once.
         // The engine holds the identical six lines (`containment::signature_index`).
         let signatures = SignatureIndex::build(&wanted, postings.term_count(), &|term, visit| {
             if let Some(posting) = postings.posting_at(term)? {

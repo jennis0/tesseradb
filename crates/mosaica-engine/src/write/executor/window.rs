@@ -217,7 +217,7 @@ fn mint_cells<'a>(
 /// A full shard is refused at admission; this is the backstop.
 fn fail_allocation(
     health: &ExecutorHealth,
-    error: mosaica_types::ShardFull,
+    error: mosaica_lifecycle::AllocError,
     waiters: Vec<Vec<Reply<Ingested>>>,
     entries: u64,
     started: std::time::Instant,
@@ -431,11 +431,18 @@ impl Executor {
                 }
                 // A batch that does not fit beside the open window closes it, and is refused if it
                 // does not fit alone.
-                let (edits, items) =
-                    mosaica_lifecycle::window::wanted(&submission.rows, submission.edits.len());
+                let wanted = mosaica_lifecycle::window::wanted(
+                    &submission.rows,
+                    submission.edits.iter().map(|e| e.edit.shard),
+                );
+                let size = self.live.shard_size();
                 let room = |shard: &ShardWrite, window: &CommitWindow<Reply<Ingested>>| {
-                    let (held_edits, held_items) = window.wanted();
-                    shard.room(held_edits + edits, held_items + items)
+                    let held = window.wanted();
+                    shard.room(
+                        held.edits_total() + wanted.edits_total(),
+                        held.items + wanted.items,
+                        size,
+                    )
                 };
                 if !window.is_empty() && room(self.live.write_shard(), &window).is_err() {
                     window = self.close_and_reopen(window);
@@ -657,13 +664,29 @@ impl Executor {
                 Arc::clone(&generation.shard_of(shard.id).tenancy),
             )
         };
-        let mosaica_id_of = |entity: EntityId| {
-            crate::edited::id_at(&identity, shard.id, tenancy.of(entity), entity)
+        let mosaica_id_of = |item: mosaica_types::ItemAt| {
+            crate::edited::id_at(&identity, item.shard, tenancy.of(item.entity), item.entity)
                 .map(|id| id.raw())
                 .expect("the allocator issues entities inside the identity space")
         };
-        let closed = match shard.with_allocator(|a| window.allocate(a, shard.id, mosaica_id_of)) {
-            Ok((closed, tally)) => {
+        let size = self.live.shard_size();
+        let next_id = self.live.next_shard_id;
+        let allocated = shard.with_allocator(|alloc| {
+            window.allocate(
+                &mut mosaica_lifecycle::Allocators {
+                    shards: vec![(shard.id, alloc)],
+                    size,
+                    next_id,
+                },
+                mosaica_id_of,
+            )
+        });
+        let closed = match allocated {
+            Ok((closed, tally, placed)) => {
+                debug_assert!(
+                    placed.sealed.is_empty() && placed.opened.is_empty(),
+                    "admission leaves the write shard room for every new item of the window"
+                );
                 // Recorded at allocation: a failed append still fragmented the entity axis.
                 self.health.record_fragmentation(tally);
                 closed

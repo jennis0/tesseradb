@@ -115,6 +115,34 @@ impl DeclaredScalar {
         )
     }
 
+    /// Whether the vocabulary this column's codes index is `derived` among `vocabularies`.
+    fn derived(&self, vocabularies: &[ManifestVocabulary]) -> bool {
+        self.vocabulary.as_deref().is_some_and(|name| {
+            vocabularies
+                .iter()
+                .any(|v| v.name == name && v.visibility == Visibility::Derived)
+        })
+    }
+
+    /// Whether a shard's base holds a value column for this column: `index = true`, or a `derived`
+    /// vocabulary, whose membership postings are derived from the column. Text has none: it has
+    /// many terms per entity and no per-entity slot.
+    pub fn owes_value_column(&self, vocabularies: &[ManifestVocabulary]) -> bool {
+        self.arrow_type != ScalarType::Text && (self.index || self.derived(vocabularies))
+    }
+
+    /// Whether this column's value lives in the record blob: text always, since its postings
+    /// cannot reconstruct prose, and any other column with no other home.
+    pub fn blob_resident(&self, vocabularies: &[ManifestVocabulary]) -> bool {
+        self.arrow_type == ScalarType::Text
+            || (!self.render && !self.owes_value_column(vocabularies))
+    }
+
+    /// Whether the value column carries derived postings, which only a category's does.
+    pub fn owes_postings(&self, vocabularies: &[ManifestVocabulary]) -> bool {
+        self.vocabulary.is_some() && self.owes_value_column(vocabularies)
+    }
+
     /// Whether every row of an item, in every view, carries this column's value: a drawn column,
     /// and one the bands copy. A row adding an item to another view, and an edit's row in each
     /// view after the first, carry these columns and leave the rest to the item's first row.

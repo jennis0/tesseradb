@@ -494,7 +494,7 @@ impl Executor {
             };
             record.high_water = record.high_water.max(shard.high_water());
             (record.free_entities, record.held_entities) = shard.freed();
-            record.state = record.state.max(shard.state);
+            record.state = record.state.max(shard.state());
         }
         manifest.shards.next_id = manifest.shards.next_id.max(self.live.next_shard_id);
         manifest.shards.size = self.live.shard_size();

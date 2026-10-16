@@ -9,6 +9,7 @@ pub mod coordinates;
 pub mod declaration;
 pub mod derived;
 pub mod edited;
+pub mod empty_shard;
 pub mod entity_terms;
 pub mod error;
 pub mod exact_sum;

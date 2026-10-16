@@ -386,7 +386,7 @@ fn derive_term_images(
         )
         .map_err(failed("pass 2b (term images: naming the file)"))?;
 
-        // `mosaica-store` cannot depend on `mosaica-authz`, so the postings are adapted here.
+        // The postings, adapted to the derivation's shape.
         let walk = |term: u32,
                     visit: &mut dyn FnMut(mosaica_store::derived::PostingSlice<'_>)|
          -> std::io::Result<()> {

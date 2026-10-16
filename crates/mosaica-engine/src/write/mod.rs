@@ -323,6 +323,8 @@ pub(crate) struct WritePathState {
     several_shards: SeveralShards,
     shards: Vec<ShardWrite>,
     next_shard_id: u32,
+    /// The shard size the manifests and the log leave.
+    size: u64,
     resolver_state: ResolverState,
     accepted_batches: AcceptedBatches,
     pub(crate) registry: LayerRegistry,
@@ -375,6 +377,7 @@ impl WritePath {
             live: Arc::new(LiveState {
                 shards: state.shards,
                 next_shard_id: state.next_shard_id,
+                size: std::sync::atomic::AtomicU64::new(state.size),
                 several_shards: state.several_shards,
                 resolver_state: Mutex::new(state.resolver_state),
                 accepted_batches: Mutex::new(state.accepted_batches),
