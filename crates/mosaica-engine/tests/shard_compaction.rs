@@ -371,6 +371,35 @@ fn a_shard_sealed_with_a_deletion_pending_is_compacted_once() {
     assert_eq!(engine.write_executor_stats().folds, 1, "and only once");
 }
 
+/// A shard sealed by a lowered size with a deletion pending is compacted once, and not again.
+#[test]
+fn a_shard_sealed_by_a_lowered_size_is_compacted_once() {
+    let several = two_shards();
+    let engine = several.open_writing();
+    engine
+        .accept_changes(vec![(item_in(1, 4), ChangeOp::Delete)])
+        .unwrap();
+    let identity = records(&several.root)[1].0;
+    assert!(!engine.declare_shards(TWO_SHARD_N - TWO_SHARD_SIZE).unwrap());
+    tick_until(
+        &engine,
+        "the closing compaction",
+        Duration::from_secs(60),
+        || engine.write_executor_stats().folds == 1,
+    );
+    assert_eq!(engine.retirable_deletions(), 0);
+    let held = records(&several.root);
+    assert_ne!(held[1].0, identity, "shard 1 is the one compacted");
+    for _ in 0..5 {
+        tick(&engine);
+    }
+    assert_eq!(engine.write_executor_stats().folds, 1, "and only once");
+    assert_eq!(
+        side_manifest(&several.root).shards.records[1].state,
+        mosaica_types::ShardState::Sealed
+    );
+}
+
 /// A shard sealed with its rows still buffered, and nothing else to reclaim, is compacted once
 /// those rows are flushed. An edit in shard 0 is older, so the first tick flushes it and none of
 /// shard 1's rows.
@@ -391,6 +420,44 @@ fn a_shard_sealed_with_its_rows_buffered_is_compacted_once_they_flush() {
         records(&several.root)[1].0,
         identity,
         "shard 1 is the one compacted"
+    );
+    for _ in 0..5 {
+        tick(&engine);
+    }
+    assert_eq!(engine.write_executor_stats().folds, 1, "and only once");
+}
+
+/// A shard holding a segment flushed since its last compaction, sealed by a window the schedule
+/// leaves unpaused, is compacted once the sealing window's rows have flushed: its one closing
+/// compaction leaves it no delta and no extent beside its base.
+#[test]
+fn a_closing_compaction_waits_for_the_sealing_windows_rows() {
+    let several = two_shards();
+    let engine = several.open_writing();
+    insert_keyed(&engine, "first", &[true]);
+    tick_until(&engine, "shard 1's flush", Duration::from_secs(30), || {
+        !side_manifest(&several.root).shards.records[1]
+            .deltas
+            .is_empty()
+    });
+    insert_keyed(&engine, "sealing", &[true; 10]);
+    tick_until(
+        &engine,
+        "the closing compaction and every flush",
+        Duration::from_secs(60),
+        || engine.write_executor_stats().folds == 1 && engine.buffered_items() == 0,
+    );
+    let shard_one = &side_manifest(&several.root).shards.records[1];
+    assert_eq!(shard_one.state, mosaica_types::ShardState::Sealed);
+    assert_eq!(
+        (
+            shard_one.deltas.len(),
+            shard_one.record_extents.len(),
+            shard_one.attr_extents.len(),
+            shard_one.entity_terms_extents.len(),
+        ),
+        (0, 0, 0, 0),
+        "the sealing window's rows are in shard 1's base"
     );
     for _ in 0..5 {
         tick(&engine);
@@ -436,8 +503,8 @@ fn edit_in_shard_zero(engine: &Engine) {
     edit_by_id(engine, "edit", id).expect("the edit is accepted");
 }
 
-/// Ingest eleven rows: ten fill shard 1 to its size and the eleventh opens shard 2, sealing
-/// shard 1.
+/// Ingest eleven rows: ten fill shard 1 to its size and seal it, and the eleventh opens
+/// shard 2.
 fn seal_shard_one(engine: &Engine) {
     insert_keyed(engine, "sealing", &[true; 11]);
 }

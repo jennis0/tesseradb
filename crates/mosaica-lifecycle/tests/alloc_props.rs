@@ -144,8 +144,8 @@ proptest! {
     /// **One window takes ids in the allocator's order** in its one open shard, over a pool of
     /// freed ids at fuzzed tenancies: an edit's new entity takes tenancy 0, lowest first, then
     /// the high water, whatever the size; a new item takes the lowest tenancy, lowest id first,
-    /// then the high water up to the size; the edits draw first. The items the size cannot hold
-    /// open the next shard and seal this one.
+    /// then the high water up to the size; the edits draw first. The shard seals once its high
+    /// water reaches the size, and the items the size cannot hold open the next shard.
     #[test]
     fn a_window_takes_ids_in_the_allocators_order(
         pool in prop::collection::btree_map(0u32..200, 0u16..4, 0..40),
@@ -200,7 +200,7 @@ proptest! {
         prop_assert_eq!(given, expected);
         prop_assert_eq!(alloc.high_water(), HIGH_WATER + edits_fresh + here);
         let overflow = items_fresh > here;
-        prop_assert_eq!(alloc.state() == ShardState::Sealed, overflow);
+        prop_assert_eq!(alloc.state() == ShardState::Sealed, edits_fresh + here >= room);
         prop_assert_eq!(placed.opened.len(), usize::from(overflow));
     }
 

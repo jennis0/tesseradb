@@ -934,26 +934,40 @@ impl Executor {
         reply.ack(false);
     }
 
-    /// `PUT /control/shards`: declare the point shard's size while the service runs.
+    /// `PUT /control/shards`: declare the point shard's size while the service runs. A size the
+    /// open shard's high water has reached seals it in the same append, and queues its closing
+    /// compaction as a window's seal does.
     pub(super) fn commit_shards_declare(&mut self, size: u64, reply: Reply<bool>) {
-        let held = self.live.shard_size();
-        let high_water = self.live.open_shard().high_water();
-        if let Err(e) = mosaica_types::check_shard_size(size, high_water) {
+        if let Err(e) = mosaica_types::check_shard_size(size) {
             reply.fail(ExecError::ShardSize(e));
             return;
         }
-        if size == held {
+        if size == self.live.shard_size() {
             reply.ack(true);
             return;
         }
-        let record = WalRecord::ShardsDeclare { size };
-        if let Err(e) = self.make_durable(&[&record], "a shard size declaration") {
-            reply.fail(e);
-            return;
-        }
+        let last = self.live.last_shard();
+        let sealed = (last.state() == mosaica_types::ShardState::Open
+            && mosaica_types::reached_size(last.high_water(), size))
+        .then_some(last.id);
+        let declare = WalRecord::ShardsDeclare { size };
+        let seal = sealed.map(|shard| WalRecord::ShardSeal { shard });
+        let records: Vec<&WalRecord> = std::iter::once(&declare).chain(&seal).collect();
+        let positions = match self.make_durable(&records, "a shard size declaration") {
+            Ok(positions) => positions,
+            Err(e) => {
+                reply.fail(e);
+                return;
+            }
+        };
         self.live
             .size
             .store(size, std::sync::atomic::Ordering::Relaxed);
+        if sealed.is_some() {
+            last.with_allocator(|alloc| alloc.seal());
+        }
+        let appended_to = *positions.last().expect("the declaration is appended");
+        self.compactions.sealed(sealed, appended_to);
         // Durable in the log and not yet in a manifest: the next publication restates it.
         self.side_manifests.behind_live = true;
         reply.ack(false);

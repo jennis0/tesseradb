@@ -497,8 +497,9 @@ pub(in crate::write) struct Compactions {
     /// The shards a request named and no compaction has been dispatched for, in order. `Some`
     /// until the request is answered: [`ExecutorHealth::fold_requested`] stays raised.
     requested: Option<std::collections::VecDeque<ShardId>>,
-    /// The shards sealed since their last compaction, each due one closing compaction.
-    closing: std::collections::BTreeSet<ShardId>,
+    /// The shards sealed since their last compaction, each due one closing compaction, with the
+    /// WAL position of the last record the append that sealed it wrote.
+    closing: std::collections::BTreeMap<ShardId, u64>,
     /// When each shard's last compaction started, as a unix second, so the interval can limit
     /// attempts.
     started: std::collections::BTreeMap<ShardId, u64>,
@@ -534,9 +535,11 @@ impl Compactions {
         drop(self.thread.take());
     }
 
-    /// Queue a closing compaction for each of `sealed`.
-    pub(in crate::write) fn sealed(&mut self, sealed: impl IntoIterator<Item = ShardId>) {
-        self.closing.extend(sealed);
+    /// Queue a closing compaction for each of `sealed`, by an append that ended at WAL position
+    /// `at`.
+    pub(in crate::write) fn sealed(&mut self, sealed: impl IntoIterator<Item = ShardId>, at: u64) {
+        self.closing
+            .extend(sealed.into_iter().map(|shard| (shard, at)));
     }
 }
 
@@ -999,10 +1002,10 @@ pub(super) fn levels_of(store: &ArtifactStore) -> impl Iterator<Item = (String, 
 
 impl Executor {
     /// Each shard's gauges, as the schedule reads them. An artifact deletion counts in each shard
-    /// that holds it, and one no shard holds in the open shard's.
+    /// that holds it, and one no shard holds in the last shard's (`LiveState::last_shard`).
     fn shard_gauges(&self, generation: &Generation) -> Vec<(ShardId, crate::compact::Gauges)> {
         let mut artifact_deletions: std::collections::BTreeMap<ShardId, u64> = Default::default();
-        let open = self.live.open_shard().id;
+        let last = self.live.last_shard().id;
         let mut shards = generation.shards();
         let several = match (shards.next(), shards.next()) {
             (Some(only), None) => {
@@ -1023,7 +1026,7 @@ impl Executor {
                 *artifact_deletions.entry(shard).or_default() += artifacts.cardinality();
                 held_somewhere.or_inplace(&artifacts);
             }
-            *artifact_deletions.entry(open).or_default() +=
+            *artifact_deletions.entry(last).or_default() +=
                 deleted.andnot_cardinality(&held_somewhere);
         }
         generation
@@ -1048,7 +1051,7 @@ impl Executor {
         dead_bytes_of(
             &self.prefix_dir(generation),
             generation,
-            self.live.open_shard().id,
+            self.live.last_shard().id,
         )
     }
 
@@ -1197,19 +1200,25 @@ impl Executor {
         }
         if !self.compactions.closing.is_empty() {
             let reclaiming = self.reclaiming(generation);
-            for shard in self.compactions.closing.clone() {
-                let held = generation.shard(shard);
+            for (shard, sealed_at) in self.compactions.closing.clone() {
+                // Rows the shard holds from the sealing append or before it are flushed first, so
+                // its closing compaction reclaims them. Its edits' rows since need not wait.
+                let unflushed = generation.shard(shard).is_some_and(|held| {
+                    held.buffer
+                        .oldest_wal_pos()
+                        .is_some_and(|oldest| oldest.is_none_or(|at| at <= sealed_at))
+                });
+                if unflushed {
+                    continue;
+                }
                 let reclaims = reclaiming
                     .iter()
                     .any(|(at, _, reclaims)| *at == shard && *reclaims);
                 if reclaims {
                     return Some((shard, Dispatching::Closing));
                 }
-                // A sealed shard with nothing to reclaim is due nothing, unless rows it holds are
-                // still buffered: they are flushed first, and its closing compaction reclaims them.
-                if held.is_none_or(|held| held.buffer.is_empty()) {
-                    self.compactions.closing.remove(&shard);
-                }
+                // A sealed shard with nothing to reclaim is due nothing.
+                self.compactions.closing.remove(&shard);
             }
         }
         self.scheduled_fold(generation)

@@ -40,8 +40,8 @@ use std::collections::BTreeMap;
 
 use croaring::Bitmap;
 use mosaica_types::{
-    check_room, reuse_min_free, EntityId, ItemAt, ShardFull, ShardId, ShardState, ShardsExhausted,
-    Target, Tenancy, TermId, ENTITY_END,
+    check_room, reached_size, reuse_min_free, EntityId, ItemAt, ShardFull, ShardId, ShardState,
+    ShardsExhausted, Target, Tenancy, TermId, ENTITY_END,
 };
 
 use crate::wal::WalRecord;
@@ -328,8 +328,8 @@ struct Placement {
     /// Each shard with how many items it takes, in signature order across the list. One shard
     /// appears twice when it gives its pool first and its high water later.
     targets: Vec<(ShardId, u64)>,
-    /// Open shards whose high water reached the size with items still to place, in the order
-    /// they sealed.
+    /// Open shards whose high water reached the size, in the order they sealed: one that items
+    /// still to place passed by, then, once every item is placed, any other at the size.
     sealed: Vec<ShardId>,
     /// Shards numbered from the next shard id, in order. A shard opened and filled in one window
     /// is in [`Placement::sealed`] too.
@@ -341,7 +341,8 @@ struct Placement {
 /// The shard with the largest pool of at least [`reuse_min_free`] takes items into its pool, ties
 /// to the lowest shard; otherwise the open shard takes them into its pool and then its high water
 /// up to `size`; otherwise shard `next_id` opens. The choice is made again whenever a shard has
-/// given all it can, and an open shard that reaches `size` with items left seals.
+/// given all it can. An open shard that reaches `size` ([`reached_size`]) seals, whether the
+/// window's new items or its edits took it there, and whether or not items are left.
 fn place(
     shards: &[ShardRoom],
     next_id: u32,
@@ -399,6 +400,12 @@ fn place(
             pool: 0,
             high_water: 0,
         });
+    }
+    for room in &mut shards {
+        if room.state == ShardState::Open && reached_size(room.high_water, size) {
+            room.state = ShardState::Sealed;
+            placement.sealed.push(room.shard);
+        }
     }
     Ok(placement)
 }
@@ -1088,10 +1095,38 @@ mod tests {
             (vec![(1, 1)], vec![shard(0)], vec![shard(1)]),
             "an open shard its edits took past the size seals at the first new item"
         );
-        let placement = place(&[room(0, Open, 0, 8)], 1, 10, 2).unwrap();
-        assert!(
-            placement.sealed.is_empty(),
-            "a shard filled exactly to its size stays open"
+    }
+
+    #[test]
+    fn an_open_shard_that_reaches_the_size_with_nothing_left_seals() {
+        let sealed = |shards: &[ShardRoom], items| {
+            let placement = place(shards, 2, 10, items).unwrap();
+            assert!(placement.opened.is_empty(), "{items} items open no shard");
+            placement.sealed
+        };
+        assert_eq!(
+            sealed(&[room(0, Sealed, 0, 10), room(1, Open, 0, 8)], 2),
+            vec![shard(1)],
+            "filled exactly by the new items"
+        );
+        assert_eq!(sealed(&[room(1, Open, 0, 8)], 1), Vec::<ShardId>::new());
+        for high_water in [10, 12] {
+            assert_eq!(
+                sealed(&[room(1, Open, 0, high_water)], 0),
+                vec![shard(1)],
+                "a window of edits alone that took it to {high_water}"
+            );
+        }
+        assert_eq!(
+            sealed(&[room(0, Sealed, 9, 4096), room(1, Open, 0, 10)], 4),
+            vec![shard(1)],
+            "every item went to a pool"
+        );
+        let placement = place(&[], 1, 10, 10).unwrap();
+        assert_eq!(
+            (placement.opened, placement.sealed),
+            (vec![shard(1)], vec![shard(1)]),
+            "a shard opened and filled exactly in one window"
         );
     }
 

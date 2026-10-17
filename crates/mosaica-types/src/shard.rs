@@ -181,11 +181,6 @@ pub const SHARD_SIZE_DEFAULT: u64 = (1 << 32) - (1 << 28);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ShardSizeError {
     Zero,
-    /// Below the shard's high water.
-    BelowHighWater {
-        size: u64,
-        high_water: u64,
-    },
 }
 
 impl std::fmt::Display for ShardSizeError {
@@ -195,27 +190,25 @@ impl std::fmt::Display for ShardSizeError {
                 f,
                 "a shard size of 0 issues no id. Declare a size of 1 or more"
             ),
-            ShardSizeError::BelowHighWater { size, high_water } => write!(
-                f,
-                "a size of {size} is below the shard's high water {high_water}. Declare a size \
-                 of {high_water} or more"
-            ),
         }
     }
 }
 
 impl std::error::Error for ShardSizeError {}
 
-/// Checks `size` as the size of a shard whose high water is `high_water`. A build checks it with
-/// a high water of 0.
-pub fn check_shard_size(size: u64, high_water: u64) -> Result<(), ShardSizeError> {
+/// Checks `size` as a shard size. A size at or below an open shard's high water seals it
+/// ([`reached_size`]).
+pub fn check_shard_size(size: u64) -> Result<(), ShardSizeError> {
     if size == 0 {
         return Err(ShardSizeError::Zero);
     }
-    if size < high_water {
-        return Err(ShardSizeError::BelowHighWater { size, high_water });
-    }
     Ok(())
+}
+
+/// Whether a shard whose high water is `high_water` has reached `size`, where an open shard
+/// seals. A size past [`ENTITY_END`] is reached at the end of the ids.
+pub fn reached_size(high_water: u64, size: u64) -> bool {
+    high_water >= size.min(ENTITY_END)
 }
 
 /// Where entity ids end, exclusive: `u32::MAX` is never issued, so a half-open range's end fits a
@@ -355,22 +348,20 @@ mod tests {
     }
 
     #[test]
-    fn a_shard_size_is_positive_and_not_below_the_high_water() {
-        assert_eq!(check_shard_size(0, 0), Err(ShardSizeError::Zero));
-        assert_eq!(check_shard_size(1, 0), Ok(()));
-        assert_eq!(
-            check_shard_size(40, 40),
-            Ok(()),
-            "a full shard may keep its size"
-        );
-        assert_eq!(
-            check_shard_size(39, 40),
-            Err(ShardSizeError::BelowHighWater {
-                size: 39,
-                high_water: 40
-            })
-        );
-        assert_eq!(check_shard_size(u64::MAX, 40), Ok(()));
+    fn a_shard_size_is_positive() {
+        assert_eq!(check_shard_size(0), Err(ShardSizeError::Zero));
+        assert_eq!(check_shard_size(1), Ok(()));
+        assert_eq!(check_shard_size(u64::MAX), Ok(()));
+    }
+
+    #[test]
+    fn a_shard_reaches_its_size_at_it_or_at_the_end_of_the_ids() {
+        assert!(!reached_size(39, 40));
+        assert!(reached_size(40, 40), "at the size");
+        assert!(reached_size(41, 40), "past it, as a lowered size leaves it");
+        assert!(!reached_size(0, 1));
+        assert!(!reached_size(ENTITY_END - 1, u64::MAX));
+        assert!(reached_size(ENTITY_END, u64::MAX), "the end of the ids");
     }
 
     #[test]

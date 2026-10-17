@@ -1278,7 +1278,7 @@ fn validate_args(args: &BuildArgs) -> Result<()> {
     // The declaration's rules, for the callers that build these arguments directly.
     config::require_sources(&args.schema, &args.attribute_sources)?;
     if let Some(size) = args.shard_size {
-        mosaica_types::check_shard_size(size, 0)
+        mosaica_types::check_shard_size(size)
             .map_err(|e| config::declaration_error(format!("[shards] size: {e}")))?;
     }
     // A group's view `group:key` lives at `views/<group>/<key>/`, so each component must be a
@@ -2474,8 +2474,11 @@ fn write_manifests(
             })
             .collect::<Result<Vec<_>>>()?;
         records.push(mosaica_store::manifest::ShardRecord {
-            // Every shard but the last is full; the last takes new items.
-            state: if index + 1 == shards.len() {
+            // Every shard but the last is full; the last takes new items unless it holds the
+            // size, as an ingest that fills a shard seals it.
+            state: if index + 1 == shards.len()
+                && !mosaica_types::reached_size(shard.span.len(), args.shard_size())
+            {
                 mosaica_types::ShardState::Open
             } else {
                 mosaica_types::ShardState::Sealed

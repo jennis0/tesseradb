@@ -435,8 +435,9 @@ impl Corpus {
         }
     }
 
-    /// The files in `dir`, whole or with no rows, and the declaration.
-    fn write(&self, dir: &Path, empty: bool) -> String {
+    /// The files in `dir`, whole or with no rows, and the declaration, at the shard size `size`
+    /// where one is given.
+    fn write(&self, dir: &Path, empty: bool, size: Option<u64>) -> String {
         std::fs::create_dir_all(dir).unwrap();
         self.world.write(&dir.join("world.parquet"), empty);
         self.near.write(&dir.join("near.parquet"), empty);
@@ -449,6 +450,10 @@ impl Corpus {
             "\n[[attribute]]\nname   = \"b\"\ntype   = \"keyword\"\nunique = true\n"
         } else {
             ""
+        };
+        let shards = match size {
+            Some(size) => format!("\n[shards]\nsize = {size}\n"),
+            None => String::new(),
         };
         format!(
             r#"
@@ -464,7 +469,7 @@ members = "members.parquet"
 [defaults]
 source          = "world"
 allocation_view = "world"
-
+{shards}
 [[view]]
 name             = "world"
 extent           = {{ min = 0.0, max = 100.0 }}
@@ -581,6 +586,7 @@ fn args(dir: &Path, declaration: &str, out: &Path) -> BuildArgs {
         layers,
         layer_inputs: acquired.layers,
         schema: config.schema,
+        shard_size: config.shard_size,
         ..build_args(out, views)
     }
 }
@@ -839,15 +845,22 @@ async fn state(server: &TestServer, two_fields: bool) -> BTreeMap<String, Value>
     out
 }
 
-/// Compare the two paths over the corpus `seed` draws; answers the reasons the build refused rows
-/// for.
-async fn build_equals_ingest(seed: u64) -> Vec<String> {
+/// Compare the two paths over the corpus `seed` draws, declared in shards of a third of the items
+/// its build holds, rounded up, where `thirds`; answers the reasons the build refused rows for.
+async fn build_equals_ingest(seed: u64, thirds: bool) -> Vec<String> {
     let corpus = Corpus::draw(seed);
     let tmp = TempDir::new().unwrap();
+    let size = thirds.then(|| {
+        let counted = tmp.path().join("counted");
+        let declaration = corpus.write(&counted, false, None);
+        let report =
+            build(&args(&counted, &declaration, &counted.join("bundle"))).expect("the build runs");
+        report.items.div_ceil(3)
+    });
 
     // Path A: the build.
     let full = tmp.path().join("full");
-    let declaration = corpus.write(&full, false);
+    let declaration = corpus.write(&full, false, size);
     let built_root = full.join("bundle");
     let report = build(&args(&full, &declaration, &built_root)).expect("the build runs");
     assert!(
@@ -857,7 +870,7 @@ async fn build_equals_ingest(seed: u64) -> Vec<String> {
 
     // Path B: the same declaration built empty, and each file sent in declaration order.
     let empty = tmp.path().join("empty");
-    corpus.write(&empty, true);
+    corpus.write(&empty, true, size);
     let empty_root = empty.join("bundle");
     build(&args(&empty, &declaration, &empty_root)).expect("the empty build runs");
     trace(&format!("seed {seed}: built; spawning"));
@@ -1026,6 +1039,16 @@ async fn build_equals_ingest(seed: u64) -> Vec<String> {
     trace(&format!("seed {seed}: compared; shutting down both"));
     built.shutdown().await;
     ingested.shutdown().await;
+    if size.is_some() {
+        for (root, path) in [(&built_root, "the build"), (&empty_root, "the ingest")] {
+            let shards = mosaica_store::read::open_bundle(root)
+                .expect("the bundle opens")
+                .partitions["default"]
+                .shards
+                .len();
+            assert!(shards >= 3, "seed {seed}: {path} holds {shards} shards");
+        }
+    }
     trace(&format!("seed {seed}: done"));
     report
         .refused
@@ -1039,7 +1062,7 @@ async fn a_build_answers_as_its_files_ingested_into_an_empty_database() {
     let mut reasons = std::collections::BTreeSet::new();
     for seed in 1..=6u64 {
         eprintln!("seed {seed}");
-        reasons.extend(build_equals_ingest(seed).await);
+        reasons.extend(build_equals_ingest(seed, false).await);
     }
     for reason in [
         "names_two_items",
@@ -1052,5 +1075,15 @@ async fn a_build_answers_as_its_files_ingested_into_an_empty_database() {
             reasons.contains(reason),
             "the corpora plant {reason}: {reasons:?}"
         );
+    }
+}
+
+/// The same, declared in shards of a third of each corpus: both paths fill and seal shards, and
+/// answer alike.
+#[tokio::test]
+async fn a_build_in_shards_of_a_third_answers_as_its_files_ingested() {
+    for seed in 1..=6u64 {
+        eprintln!("seed {seed}");
+        build_equals_ingest(seed, true).await;
     }
 }

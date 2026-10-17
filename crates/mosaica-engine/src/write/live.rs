@@ -238,15 +238,11 @@ impl LiveState {
         self.shards.read().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// The open shard, which takes new items at its high water: the open checked there is one,
-    /// and a window that seals it opens the next.
-    pub(crate) fn open_shard(&self) -> Arc<ShardWrite> {
+    /// The highest-numbered shard: the open one, which takes new items at its high water, where
+    /// one is open. Where every shard is sealed, the next window to place a new item opens one.
+    pub(crate) fn last_shard(&self) -> Arc<ShardWrite> {
         let shards = self.read_shards();
-        let open = shards
-            .iter()
-            .rfind(|shard| shard.state() == mosaica_types::ShardState::Open)
-            .expect("the open refuses a bundle with no open shard");
-        Arc::clone(open)
+        Arc::clone(shards.last().expect("a bundle holds a shard"))
     }
 
     /// Shard `id`'s write state, or `None` for a shard the bundle does not hold.

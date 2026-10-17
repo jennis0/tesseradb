@@ -12,9 +12,10 @@ use tempfile::TempDir;
 use common::*;
 use mosaica_engine::{AcceptError, Engine};
 use mosaica_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite};
+use mosaica_lifecycle::wal::WalRecord;
 use mosaica_lifecycle::{ExecError, UnallocatedRow};
 use mosaica_types::{
-    EntityId, ItemAt, ShardId, ShardSizeError, ShardsExhausted, SHARD_SIZE_DEFAULT,
+    EntityId, ItemAt, ShardId, ShardSizeError, ShardState, ShardsExhausted, SHARD_SIZE_DEFAULT,
 };
 
 /// Items the fixture builds.
@@ -147,25 +148,87 @@ fn a_size_declared_at_a_running_service_survives_a_restart_a_fold_and_both() {
     assert_eq!(engine.shard_size(), size, "after a fold and a restart");
 }
 
+/// The size declarations, openings and seals the log at `tmp` keeps, in order.
+fn shard_records(tmp: &Path) -> Vec<WalRecord> {
+    mosaica_lifecycle::wal::Wal::open(tmp.join("wal.log"))
+        .unwrap()
+        .records()
+        .map(|record| record.unwrap().1)
+        .filter(|record| {
+            matches!(
+                record,
+                WalRecord::ShardsDeclare { .. }
+                    | WalRecord::ShardOpen { .. }
+                    | WalRecord::ShardSeal { .. }
+            )
+        })
+        .collect()
+}
+
+/// A size at or below the open shard's high water seals it in the declaration's own append. The
+/// next insert opens shard 1, a restart keeps shard 0 sealed, and so does a size raised past its
+/// high water.
 #[test]
-fn a_size_of_zero_or_below_the_high_water_is_refused() {
-    let tmp = built(None);
-    let (engine, _faults) = engine_over(tmp.path());
-    assert_eq!(size_refused(engine.declare_shards(0)), ShardSizeError::Zero);
-    assert_eq!(
-        size_refused(engine.declare_shards(N - 1)),
-        ShardSizeError::BelowHighWater {
-            size: N - 1,
-            high_water: N
-        }
-    );
-    assert_eq!(engine.shard_size(), SHARD_SIZE_DEFAULT);
-    assert!(
-        !engine.declare_shards(N).expect("a size at the high water"),
-        "a size at the high water is accepted"
-    );
-    let engine = restart(tmp.path(), engine);
-    assert_eq!(engine.shard_size(), N);
+fn a_lowered_size_seals_the_open_shard() {
+    for lowered in [N - 1, N] {
+        let tmp = built(None);
+        let (engine, _faults) = engine_over(tmp.path());
+        assert_eq!(size_refused(engine.declare_shards(0)), ShardSizeError::Zero);
+        assert!(
+            !engine
+                .declare_shards(lowered)
+                .expect("the size is declared"),
+            "a size of {lowered} is new"
+        );
+        let seal = WalRecord::ShardSeal {
+            shard: ShardId::ZERO,
+        };
+        let declared = vec![WalRecord::ShardsDeclare { size: lowered }, seal.clone()];
+        assert_eq!(shard_records(tmp.path()), declared);
+        assert!(engine.declare_shards(lowered).expect("the same size again"));
+
+        let engine = restart(tmp.path(), engine);
+        assert_eq!(engine.shard_size(), lowered);
+        engine
+            .ingest_rows(rows("new", 1), "new".into(), [1; 32])
+            .expect("the insert goes in");
+        assert_eq!(
+            item_at(&engine, "new-0"),
+            Some(ItemAt::new(shard(1), EntityId::new(0)))
+        );
+
+        let raised = N + 10;
+        assert!(!engine.declare_shards(raised).expect("the size is raised"));
+        engine
+            .ingest_rows(rows("later", 1), "later".into(), [2; 32])
+            .expect("the insert goes in");
+        assert_eq!(
+            item_at(&engine, "later-0"),
+            Some(ItemAt::new(shard(1), EntityId::new(1)))
+        );
+        let mut logged = declared;
+        logged.extend([
+            WalRecord::ShardOpen { shard: shard(1) },
+            WalRecord::ShardsDeclare { size: raised },
+        ]);
+        assert_eq!(shard_records(tmp.path()), logged, "shard 0 is sealed once");
+
+        let engine = restart(tmp.path(), engine);
+        publish_buffered(&engine);
+        let (shards, next_id) = recorded(&side_manifest(&tmp.path().join("bundle")));
+        let states: Vec<_> = shards
+            .iter()
+            .map(|(id, state, high_water, ..)| (*id, *state, *high_water))
+            .collect();
+        assert_eq!(
+            (states, next_id),
+            (
+                vec![(0, ShardState::Sealed, N), (1, ShardState::Open, 2)],
+                2
+            ),
+            "after a restart and a raised size, at {lowered}"
+        );
+    }
 }
 
 /// Three batches queue behind a parked window and go in together: `a` fits the open shard, `b`
@@ -245,26 +308,28 @@ fn a_batch_needing_a_shard_past_the_last_number_is_refused_alone() {
         Some((shard(0), N + 3))
     );
     assert_eq!(engine.allocator_high_water(), size);
-    let opened = mosaica_lifecycle::wal::Wal::open(tmp.path().join("wal.log"))
-        .unwrap()
-        .records()
-        .map(|record| record.unwrap().1)
-        .filter(|record| {
-            matches!(
-                record,
-                mosaica_lifecycle::wal::WalRecord::ShardOpen { .. }
-                    | mosaica_lifecycle::wal::WalRecord::ShardSeal { .. }
-            )
-        })
-        .count();
-    assert_eq!(opened, 0, "no shard opened or sealed");
+    assert_eq!(
+        shard_records(tmp.path()),
+        [
+            WalRecord::ShardsDeclare { size },
+            WalRecord::ShardSeal {
+                shard: ShardId::ZERO
+            }
+        ],
+        "no shard opened, and a and c, filling shard 0, sealed it"
+    );
 }
 
-/// A build exactly at its size takes an insert, which opens shard 1, and an edit of a built item,
-/// which stays in shard 0 and takes the first id past the size; a restart keeps both.
+/// A build exactly at its size writes its shard sealed. It takes an insert, which opens shard 1,
+/// and an edit of a built item, which stays in shard 0 and takes the first id past the size; a
+/// restart keeps both.
 #[test]
-fn a_build_at_its_size_takes_an_insert_and_an_edit_past_it() {
+fn a_build_at_its_size_writes_it_sealed_and_takes_an_insert_and_an_edit_past_it() {
     let tmp = built(Some(N));
+    assert_eq!(
+        recorded(&side_manifest(&tmp.path().join("bundle"))),
+        (vec![(0, ShardState::Sealed, N, vec![], 0)], 1)
+    );
     let (engine, _faults) = engine_over(tmp.path());
     assert_eq!(engine.shard_size(), N);
     assert_eq!(shards_of(&tmp.path().join("bundle")).0, N);
@@ -283,6 +348,11 @@ fn a_build_at_its_size_takes_an_insert_and_an_edit_past_it() {
     let expected = (Some((shard(1), 0)), Some((ShardId::ZERO, N)));
     assert_eq!(placed(&engine), expected);
     assert_eq!(engine.allocator_high_water(), N + 2);
+    assert_eq!(
+        shard_records(tmp.path()),
+        [WalRecord::ShardOpen { shard: shard(1) }],
+        "the insert opens shard 1 and seals nothing"
+    );
 
     let engine = restart(tmp.path(), engine);
     assert_eq!(placed(&engine), expected);

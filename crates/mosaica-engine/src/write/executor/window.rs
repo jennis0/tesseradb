@@ -945,7 +945,8 @@ impl Executor {
         self.pause_point(PauseSiteArg::AfterFsync);
         let sealed = closing.placing.commit(&self.live);
         // A sealed shard gets one closing compaction.
-        self.compactions.sealed(sealed);
+        let window_end = *positions.last().expect("a window appends its entries");
+        self.compactions.sealed(sealed, window_end);
         if let Some(opened) = &opened {
             self.adopt_opened(opened);
         }
@@ -1118,7 +1119,7 @@ impl Executor {
             &vocabularies,
             mints,
         );
-        // A window buffering nothing still publishes its bindings through the open shard.
+        // A window buffering nothing still publishes its bindings through the last shard.
         let mut written: std::collections::BTreeSet<ShardId> = closed
             .iter()
             .flat_map(|entry| {
@@ -1130,7 +1131,7 @@ impl Executor {
             })
             .collect();
         if written.is_empty() {
-            written.insert(self.live.open_shard().id);
+            written.insert(self.live.last_shard().id);
         }
         let mut touched: std::collections::BTreeMap<ShardId, ShardWrites> = written
             .into_iter()

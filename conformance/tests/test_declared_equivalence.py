@@ -870,7 +870,8 @@ TINY = 16
 
 @pytest.mark.parametrize("path", ["built", "live"])
 def test_an_insert_past_the_shard_size_goes_in(tmp_path, path):
-    """Built at a size its corpus fills, or declared live at its high water."""
+    """Built at a size its corpus fills, or declared live below its high water, which seals the
+    shard, and then raised to it. Either way the insert opens a second shard."""
     Deployment.stop_all()
     held = list(range(TINY))
     blocks = [fx.plain_view_toml(), fx.fx_column().toml()]
@@ -879,6 +880,7 @@ def test_an_insert_past_the_shard_size_goes_in(tmp_path, path):
     d = Deployment(tmp_path / path, Corpus(blocks, _world(held)))
     try:
         if path == "live":
+            d.control("PUT", "/control/shards", json={"size": TINY - 1}, expect=(201,))
             d.control("PUT", "/control/shards", json={"size": TINY}, expect=(201,))
         status = d.server.status()
         assert (status["shards"], status["entity_id_high_water"]) == ({"size": TINY}, TINY)

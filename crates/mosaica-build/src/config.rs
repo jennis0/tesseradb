@@ -2661,7 +2661,7 @@ impl Config {
             .shards
             .as_ref()
             .map(|shards| {
-                mosaica_types::check_shard_size(shards.size, 0)
+                mosaica_types::check_shard_size(shards.size)
                     .map(|()| shards.size)
                     .map_err(|e| declaration_error(format!("[shards] size: {e}")))
             })

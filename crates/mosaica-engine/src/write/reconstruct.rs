@@ -489,6 +489,12 @@ impl WritePath {
             named.or_inplace(items.deleted_set());
             named.or_inplace(items.suppressed_set());
         }
+        // A size no declaration could have left is refused at open, not at the first batch.
+        mosaica_types::check_shard_size(size).map_err(|e| {
+            EngineError::Malformed(format!(
+                "the shard size the manifest and the WAL leave ({size}) does not hold: {e}"
+            ))
+        })?;
         let unnamed = croaring::Bitmap::new();
         let mut shards = Vec::with_capacity(seeds.len());
         for shard in seeds {
@@ -507,31 +513,11 @@ impl WritePath {
                         mosaica_types::ENTITY_END,
                     ))
                 })?;
-            // A size no declaration could have left is refused at open, not at the first batch. A
-            // sealed shard's edits take ids past the size.
-            match shard.state {
-                mosaica_types::ShardState::Open => {
-                    mosaica_types::check_shard_size(size, allocator.high_water()).map_err(|e| {
-                        EngineError::Malformed(format!(
-                            "the shard size the manifest and the WAL leave ({size}) does not \
-                             hold: {e}"
-                        ))
-                    })?;
-                }
-                mosaica_types::ShardState::Sealed => allocator.seal(),
+            if shard.state == mosaica_types::ShardState::Sealed {
+                allocator.seal();
             }
             allocator.seed_freed(shard.free, shard.held, wal.retained_from(), named);
             shards.push(ShardWrite::new(shard.id, allocator));
-        }
-        if !shards
-            .iter()
-            .any(|shard| shard.state() == mosaica_types::ShardState::Open)
-        {
-            return Err(EngineError::Malformed(
-                "every point shard the manifests and the WAL leave is sealed, so no shard takes \
-                 new items. Restore the side-manifest and log this bundle was written with"
-                    .to_string(),
-            ));
         }
 
         let no_buffer = IngestBuffer::new();
@@ -1165,10 +1151,10 @@ mod tests {
         assert_eq!(shards_of(&state), (vec![(0, Sealed, 25), (1, Open, 15)], 2));
     }
 
-    /// A log naming a shard nothing opens, sealing one nothing opens, or sealing the one open
-    /// shard is refused at open.
+    /// A log naming a shard nothing opens, or sealing one nothing opens, is refused at open;
+    /// one sealing the open shard leaves every shard sealed, and the next window opens one.
     #[test]
-    fn a_log_naming_a_shard_nothing_opens_or_sealing_every_shard_is_refused() {
+    fn a_log_naming_a_shard_nothing_opens_is_refused_and_one_sealing_every_shard_replays() {
         use mosaica_types::ShardState::{Open, Sealed};
         let seeds = || vec![held(0, Sealed, 25), held(1, Open, 15)];
         let batch = WalRecord::IngestBatch {
@@ -1179,13 +1165,7 @@ mod tests {
             receipt: Vec::new(),
         };
         let three = ShardId::new(3).unwrap();
-        for records in [
-            vec![batch],
-            vec![WalRecord::ShardSeal { shard: three }],
-            vec![WalRecord::ShardSeal {
-                shard: ShardId::new(1).unwrap(),
-            }],
-        ] {
+        for records in [vec![batch], vec![WalRecord::ShardSeal { shard: three }]] {
             assert!(
                 matches!(
                     replayed(seeds(), 2, &records),
@@ -1194,5 +1174,12 @@ mod tests {
                 "{records:?}"
             );
         }
+        let one = ShardId::new(1).unwrap();
+        let state = replayed(seeds(), 2, &[WalRecord::ShardSeal { shard: one }])
+            .expect("the log replays");
+        assert_eq!(
+            shards_of(&state),
+            (vec![(0, Sealed, 25), (1, Sealed, 15)], 2)
+        );
     }
 }

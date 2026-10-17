@@ -3044,7 +3044,7 @@ async fn declarations_match_the_description() {
         .unwrap();
     assert_framework_refusal(&doc, &put, resp, 413).await;
 
-    // The shard's size: declared, restated, and refused below the high water or at zero.
+    // The shard's size: declared, restated, lowered below the high water, and refused at zero.
     let status = control(&f.server, &reqwest::Method::GET, "/control/status")
         .send()
         .await
@@ -3065,10 +3065,22 @@ async fn declarations_match_the_description() {
         .await
         .unwrap();
     assert_eq!(assert_answer(&doc, &put, resp, 200).await["existing"], true);
-    let resp = send(&put, "/control/shards", &json!({ "size": high_water - 1 }))
+    let lowered = json!({ "size": high_water - 1 });
+    assert_valid(&doc, "ShardsDeclaration", &lowered);
+    let resp = send(&put, "/control/shards", &lowered).await.unwrap();
+    assert_eq!(
+        assert_answer(&doc, &put, resp, 201).await["existing"],
+        false,
+        "a size below the high water seals the shard"
+    );
+    let status = control(&f.server, &reqwest::Method::GET, "/control/status")
+        .send()
         .await
         .unwrap();
-    assert_refusal_to(&doc, Some(&put), resp, 409, "conflict").await;
+    assert_eq!(
+        assert_answer(&doc, &reqwest::Method::GET, status, 200).await["shards"]["size"],
+        json!(high_water - 1)
+    );
     for refused in [
         json!({ "size": 0 }),
         json!({ "size": -1 }),

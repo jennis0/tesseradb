@@ -445,8 +445,8 @@ pub enum ExecError {
     /// Every layer space has been given, or a level needs more blocks than its layer space has
     /// left → HTTP **409**, no effect. The detail gives the figures.
     LayerSpaceFull { detail: String },
-    /// A shard size `mosaica_types::check_shard_size` refuses → HTTP **422** for a size of zero,
-    /// **409** for one below the high water. No effect.
+    /// A shard size `mosaica_types::check_shard_size` refuses, a size of zero → HTTP **422**. No
+    /// effect.
     ShardSize(ShardSizeError),
     /// This `batch_id` was already accepted, or is held in an open window, with **different**
     /// body bytes → HTTP 409 (contracts §3.4). The retry has no effect, and **a held original is
