@@ -38,9 +38,8 @@
 //! ```
 //!
 //! **A member pack lists only the ordinals its shard holds something of**, and one it covers and
-//! does not list reads as an empty blob. A record pack, and any pack written at one shard, lists
-//! every ordinal. The table follows the payload so a writer streams the blobs without knowing how
-//! many it will list.
+//! does not list reads as an empty blob. A record pack lists every ordinal. The table follows the
+//! payload so a writer streams the blobs without knowing how many it will list.
 //!
 //! **Offsets rather than lengths, and one more of them than there are blobs.** A length array needs
 //! a running sum to address the *n*th blob; an offset array addresses it in two reads, which is what
@@ -325,21 +324,65 @@ impl PackWriter {
     }
 }
 
-/// One level's two packs from one publication, written together: each artifact's record into its
-/// layer space and its members into the shard's slice, over the same ordinals. The one writer the
-/// build and a running service both use.
+/// One level's record pack from one publication, under its layer space: every ordinal's record, a
+/// hole an empty blob. The one writer the build and a running service both use.
 ///
-/// The names carry the publication `n`, the space and the level, never the layer's name, which is
+/// The name carries the publication `n` and the level, never the layer's name, which is
 /// caller-shaped and could escape the directory.
-pub struct LevelPackWriter {
-    records: PackWriter,
-    members: PackWriter,
-    record_extent: RecordPackExtent,
-    member_extent: MembershipExtent,
-    dirs: [PathBuf; 2],
+pub struct RecordPackWriter {
+    pack: PackWriter,
+    extent: RecordPackExtent,
+    dir: PathBuf,
 }
 
-impl LevelPackWriter {
+impl RecordPackWriter {
+    pub fn create(
+        prefix_dir: &Path,
+        space: crate::LayerSpaceLayout<'_>,
+        n: u64,
+        level: u32,
+        ordinal_lo: u32,
+        count: u32,
+    ) -> Result<RecordPackWriter> {
+        let records_rel = space.records_rel();
+        let dir = prefix_dir.join(&records_rel);
+        std::fs::create_dir_all(&dir).map_err(crate::error::io(&dir))?;
+        let rel = format!("{records_rel}/{}", record_pack_name(n, level));
+        Ok(RecordPackWriter {
+            pack: PackWriter::create(&prefix_dir.join(&rel), PackKind::Records, ordinal_lo, count)?,
+            extent: RecordPackExtent {
+                path: rel,
+                level,
+                ordinal_lo,
+                count,
+            },
+            dir,
+        })
+    }
+
+    /// Append the record at the next ordinal.
+    pub fn push(&mut self, record: &[u8]) -> Result<()> {
+        self.pack.push(record)
+    }
+
+    /// Finish and fsync the pack and its directory, and return its manifest entry.
+    pub fn finish(self) -> Result<RecordPackExtent> {
+        self.pack.finish()?;
+        crate::fsync_dir(&self.dir)?;
+        Ok(self.extent)
+    }
+}
+
+/// One shard's member pack of one level from one publication, over the record pack's ordinals and
+/// listing only those [`Self::push_at`] gives a blob: the ordinals the shard's slice holds a member
+/// or a generating entity of. The one writer the build and a running service both use.
+pub struct MemberPackWriter {
+    pack: PackWriter,
+    extent: MembershipExtent,
+    dir: PathBuf,
+}
+
+impl MemberPackWriter {
     pub fn create(
         prefix_dir: &Path,
         shard: crate::ShardLayout<'_>,
@@ -348,62 +391,81 @@ impl LevelPackWriter {
         level: u32,
         ordinal_lo: u32,
         count: u32,
-    ) -> Result<LevelPackWriter> {
-        let records_rel = crate::LayerSpaceLayout::new(shard.partition, space).records_rel();
+    ) -> Result<MemberPackWriter> {
         let members_rel = shard.members_rel();
-        let dirs = [prefix_dir.join(&records_rel), prefix_dir.join(&members_rel)];
-        for dir in &dirs {
-            std::fs::create_dir_all(dir).map_err(crate::error::io(dir))?;
-        }
-        let record_rel = format!("{records_rel}/records-{n:06}-{level}.tsrp");
-        let member_rel = format!("{members_rel}/members-{n:06}-{space}-{level}.tsmb");
-        Ok(LevelPackWriter {
-            records: PackWriter::create(
-                &prefix_dir.join(&record_rel),
-                PackKind::Records,
-                ordinal_lo,
-                count,
-            )?,
-            members: PackWriter::create(
-                &prefix_dir.join(&member_rel),
-                PackKind::Members,
-                ordinal_lo,
-                count,
-            )?,
-            record_extent: RecordPackExtent {
-                path: record_rel,
-                level,
-                ordinal_lo,
-                count,
-            },
-            member_extent: MembershipExtent {
-                path: member_rel,
+        let dir = prefix_dir.join(&members_rel);
+        std::fs::create_dir_all(&dir).map_err(crate::error::io(&dir))?;
+        let rel = format!("{members_rel}/members-{n:06}-{space}-{level}.tsmb");
+        Ok(MemberPackWriter {
+            pack: PackWriter::create_listing(&prefix_dir.join(&rel), ordinal_lo, count)?,
+            extent: MembershipExtent {
+                path: rel,
                 space,
                 level,
                 ordinal_lo,
                 count,
             },
-            dirs,
+            dir,
         })
     }
 
-    /// Append one artifact's record and members, in ordinal order. A hole is two empty blobs.
-    pub fn push(&mut self, record: &[u8], members: &[u8]) -> Result<()> {
-        self.records.push(record)?;
-        self.members.push(members)
+    /// Append `members` at `ordinal`, above every ordinal placed before it.
+    pub fn push_at(&mut self, ordinal: u32, members: &[u8]) -> Result<()> {
+        self.pack.push_at(ordinal, members)
     }
 
-    /// Finish and fsync both packs and their directories, and return their manifest entries.
-    pub fn finish(
-        self,
-    ) -> Result<(RecordPackExtent, MembershipExtent)> {
-        self.records.finish()?;
-        self.members.finish()?;
-        for dir in &self.dirs {
-            crate::fsync_dir(dir)?;
-        }
-        Ok((self.record_extent, self.member_extent))
+    /// Finish and fsync the pack and its directory, and return its manifest entry.
+    pub fn finish(self) -> Result<MembershipExtent> {
+        self.pack.finish()?;
+        crate::fsync_dir(&self.dir)?;
+        Ok(self.extent)
     }
+}
+
+/// The file name publication `n` writes `level`'s record pack under.
+fn record_pack_name(n: u64, level: u32) -> String {
+    format!("records-{n:06}-{level}.tsrp")
+}
+
+/// The publication that wrote the record pack at `path`, read back from
+/// [`record_pack_name`]'s name.
+fn publication_of(path: &str) -> Option<u64> {
+    Path::new(path)
+        .file_name()?
+        .to_str()?
+        .strip_prefix("records-")?
+        .split_once('-')?
+        .0
+        .parse()
+        .ok()
+}
+
+/// A member pack in `shard` over the ordinals of `records`, a record pack of `space`, listing no
+/// ordinal: what a shard opened after that pack was written holds of it. Named for the publication
+/// that wrote `records`, so the name is the same however often it is written and no later
+/// publication's pack takes it.
+pub fn empty_member_pack(
+    prefix_dir: &Path,
+    shard: crate::ShardLayout<'_>,
+    space: mosaica_types::LayerSpace,
+    records: &RecordPackExtent,
+) -> Result<MembershipExtent> {
+    let n = publication_of(&records.path).ok_or_else(|| StoreError::MalformedBundle {
+        detail: format!(
+            "record pack '{}' is not named as a publication names one",
+            records.path
+        ),
+    })?;
+    MemberPackWriter::create(
+        prefix_dir,
+        shard,
+        space,
+        n,
+        records.level,
+        records.ordinal_lo,
+        records.count,
+    )?
+    .finish()
 }
 
 /// One extent, opened and validated. The mapping is held for the reader's life; blobs are slices

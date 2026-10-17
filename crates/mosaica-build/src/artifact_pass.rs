@@ -47,14 +47,14 @@ use std::path::Path;
 use std::time::Instant;
 
 use croaring::Bitmap;
-use mosaica_authz::postings::{PostingRef, PostingsReader};
+use mosaica_authz::postings::PostingsReader;
 use mosaica_lifecycle::membership::ArtifactStore;
 use mosaica_store::derived::{resolve_segment, HeldShape, ShapeIndex};
 use mosaica_store::read::SegmentData;
 // The derived structures' writer half lives beside the formats it writes; the alias is what keeps
 // the call sites below reading as what they do rather than as which file they are in.
 use mosaica_store::derived;
-use mosaica_store::derived::{DerivedIndex, Filed, PostingSlice, SignatureIndex};
+use mosaica_store::derived::{DerivedIndex, Filed, SignatureIndex};
 use mosaica_store::manifest::DerivedForm;
 use mosaica_store::permutation::ProjectScratch;
 use mosaica_store::{RowSpace, ShardLayout};
@@ -419,7 +419,8 @@ pub(crate) fn run(
                 incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
                 space: spaces[layer],
                 level: *level,
-                level_version: store.level_version(layer, *level),
+                level_version: store.records_version(layer, *level),
+                slice_version: store.level_version(layer, *level),
                 form: DerivedForm::TileIndex,
                 bytes: derived::FiledBytes::InHand(derived::project_tile_index(
                     ordinals,
@@ -475,7 +476,8 @@ pub(crate) fn run(
                 incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
                 space: spaces[layer],
                 level: *level,
-                level_version,
+                level_version: store.records_version(layer, *level),
+                slice_version: level_version,
                 form,
                 bytes: derived::FiledBytes::Staged(path),
             };
@@ -568,7 +570,8 @@ pub(crate) fn run(
                     incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
                     space: spaces[layer],
                     level: *level,
-                    level_version,
+                    level_version: store.records_version(layer, *level),
+                    slice_version: level_version,
                     form: DerivedForm::ShapeRows {
                         seg_id: segment.seg_id.clone(),
                         row_count: segment.row_count,
@@ -608,7 +611,8 @@ pub(crate) fn run(
                 incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
                 space: spaces[layer],
                 level: *level,
-                level_version,
+                level_version: store.records_version(layer, *level),
+                slice_version: level_version,
                 form: DerivedForm::ShapeHeld,
                 bytes: derived::FiledBytes::InHand(derived::shape_held_bytes(
                     level_version,
@@ -724,19 +728,7 @@ fn shard_containment(store: &ArtifactStore, prefix_dir: &Path, span: ShardSpan) 
         // same. `SignatureIndex::build` returns immediately on an empty set, so the cost of the
         // symmetry is a file header.
         let wanted = derived::generating_entities(&contents);
-        // The one adapter between the postings format and the composer — `mosaica-store` may not
-        // depend on `mosaica-authz`, so the shape is handed across and the walk is written once.
-        // The engine holds the identical six lines (`containment::signature_index`).
-        let signatures = SignatureIndex::build(&wanted, postings.term_count(), &|term, visit| {
-            if let Some(posting) = postings.posting_at(term)? {
-                match posting {
-                    PostingRef::Array(bytes) => visit(PostingSlice::Array(bytes)),
-                    PostingRef::Roaring(view) => visit(PostingSlice::Roaring(&view)),
-                }
-            }
-            Ok(())
-        });
-        let signatures = match signatures {
+        let signatures = match SignatureIndex::of_postings(&wanted, &postings) {
             Ok(signatures) => signatures,
             Err(error) => {
                 eprintln!(
@@ -751,7 +743,8 @@ fn shard_containment(store: &ArtifactStore, prefix_dir: &Path, span: ShardSpan) 
             incarnation: None,
             space: *space,
             level: *level,
-            level_version: store.level_version(layer, *level),
+            level_version: store.records_version(layer, *level),
+            slice_version: store.level_version(layer, *level),
             form: DerivedForm::Containment,
             bytes: derived::FiledBytes::InHand(derived::compose_containment(
                 &contents,

@@ -26,8 +26,10 @@ impl ArtifactProjections {
     /// re-derives that operator whole from entity truth, because a union cannot express a leave. A
     /// fill re-derives the ordinal's records entry and its operators; the membership is untouched.
     ///
-    /// Every arm takes the delta for this view's own artifacts alone, reading the store through
-    /// [`drawn_record`], so an ordinal this view does not draw is not amended into its form.
+    /// Every arm takes the delta for this view's own artifacts alone, reading the level's records
+    /// through [`drawn_record`], so an ordinal this view does not draw is not amended into its
+    /// form. `store` is `shard`'s slice, which the memberships and generating sets are read from;
+    /// `records` holds the level's whole records, which every shard's form shares.
     ///
     /// The stored cardinality is published with the operator it was derived with, in the same pass
     /// that writes the operator, so the pair a containment test reads is the pair one moment
@@ -51,6 +53,7 @@ impl ArtifactProjections {
         layer: &str,
         level: u32,
         store: &ArtifactStore,
+        records: &ArtifactStore,
         space: &RowSpace,
         deltas: &[LevelDelta],
         source: Option<&DeltaRows<'_>>,
@@ -77,7 +80,21 @@ impl ArtifactProjections {
         let amended = Arc::make_mut(&mut rows);
         // The copy alone; every arm below is timed by `elapsed_ms`.
         let cloned_ms = started.elapsed().as_millis() as u64;
-        let applied = Self::applied(amended, &address, store, space, &pending, source);
+        let applied = Self::applied(amended, &address, (store, records), space, &pending, source);
+        self.share_records(
+            &address,
+            prefix,
+            records.records_version(layer, level),
+            amended,
+        );
+        let ordinals = amended.len();
+        if let Some(column) = amended
+            .column
+            .as_mut()
+            .filter(|column| column.len() < ordinals)
+        {
+            Arc::make_mut(column).cover(ordinals);
+        }
         let kept = amended.amend_derived_kept(&applied.added, total_rows(space));
         let lost = kept.is_none();
         // The level moved from the form's version to `now`: a count over the column's base rows
@@ -132,6 +149,24 @@ impl ArtifactProjections {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(address, Held { key, at, rows });
+    }
+
+    /// Give `rows` the level's records another shard's form holds at `records_version`, where one
+    /// does, and file its own there otherwise, so every shard's form at one records version reads
+    /// one set of records ([`super::ArtifactView`]'s `one_version`).
+    fn share_records(
+        &self,
+        (_, view, layer, level): &LevelAddress,
+        prefix: &str,
+        records_version: u64,
+        rows: &mut ArtifactRows,
+    ) {
+        rows.records = self.shared_records(
+            (view.clone(), layer.clone(), *level),
+            super::projections::DerivedKey::of(prefix, records_version),
+            rows.records.len(),
+            || Arc::clone(&rows.records),
+        );
     }
 
     /// The form this publication amends, taken out of the map with the deltas it has not yet taken.
@@ -219,17 +254,24 @@ impl ArtifactProjections {
     }
 
     /// Every pending delta applied to the form. A re-derivation projects the artifact's sets
-    /// again; a refresh alone takes the declared sizes the pages moved.
+    /// again; a refresh alone takes the declared sizes the pages moved. Each artifact is read as
+    /// the level's whole record and as the slice's record of it, which holds nothing where the
+    /// slice lists none.
     fn applied(
         amended: &mut ArtifactRows,
         address: &LevelAddress,
-        store: &ArtifactStore,
+        (slice, records): (&ArtifactStore, &ArtifactStore),
         space: &RowSpace,
         pending: &[&LevelDelta],
         source: &DeltaRows<'_>,
     ) -> Applied {
         let (_, view, layer, level) = address;
         let level = *level;
+        let slice = LevelSlice::new(slice, records, layer, level, None);
+        let drawn = |ordinal: u32| {
+            let record = drawn_record(records, layer, level, ordinal, view)?;
+            Some((record, slice.held(ordinal, record)))
+        };
         let row_major = amended.layout.is_row_major();
         let mut applied = Applied::default();
         // Ordinals whose records entry is read again, and those whose operators are re-derived
@@ -240,7 +282,7 @@ impl ArtifactProjections {
             match &delta.kind {
                 DeltaKind::Grown { joins, pages } => {
                     for (ordinal, joining) in joins {
-                        if drawn_record(store, layer, level, *ordinal, view).is_none() {
+                        if drawn(*ordinal).is_none() {
                             continue;
                         }
                         let fresh = amended.grow_rows(*ordinal, joining, space);
@@ -250,7 +292,7 @@ impl ArtifactProjections {
                         }
                     }
                     for page in pages {
-                        if drawn_record(store, layer, level, page.ordinal, view).is_none() {
+                        if drawn(page.ordinal).is_none() {
                             continue;
                         }
                         applied.sets_moved = true;
@@ -275,13 +317,12 @@ impl ArtifactProjections {
                             // A spatial level's membership is its shape, so a fill that supplied
                             // one gives the artifact rows it did not have.
                             DeltaRows::Resolved(rows) => {
-                                if let Some(record) =
-                                    drawn_record(store, layer, level, *ordinal, view)
-                                {
+                                if let Some((record, held)) = drawn(*ordinal) {
                                     applied.published += 1;
                                     let fresh = amended.publish_resolved(
                                         *ordinal,
                                         record,
+                                        held,
                                         rows(*ordinal),
                                         space,
                                     );
@@ -295,13 +336,16 @@ impl ArtifactProjections {
                 }
                 DeltaKind::Published(ordinals) => {
                     for ordinal in ordinals {
-                        if let Some(record) = drawn_record(store, layer, level, *ordinal, view) {
+                        if let Some((record, held)) = drawn(*ordinal) {
                             applied.published += 1;
                             let fresh = match source {
-                                DeltaRows::Projected => amended.publish_at(*ordinal, record, space),
+                                DeltaRows::Projected => {
+                                    amended.publish_at(*ordinal, record, held, space)
+                                }
                                 DeltaRows::Resolved(rows) => amended.publish_resolved(
                                     *ordinal,
                                     record,
+                                    held,
                                     rows(*ordinal),
                                     space,
                                 ),
@@ -315,8 +359,8 @@ impl ArtifactProjections {
             }
         }
         for ordinal in &refresh {
-            if let Some(record) = drawn_record(store, layer, level, *ordinal, view) {
-                amended.refresh_sets(*ordinal, record, space, rederive.contains(ordinal));
+            if let Some((record, held)) = drawn(*ordinal) {
+                amended.refresh_sets(*ordinal, record, held, space, rederive.contains(ordinal));
             }
         }
         applied.rederived = rederive.len();

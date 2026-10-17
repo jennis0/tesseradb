@@ -85,11 +85,9 @@ use std::sync::Arc;
 use croaring::Bitmap;
 use rustc_hash::FxHashMap;
 
-use mosaica_authz::postings::{PostingRef, PostingsReader};
+use mosaica_authz::postings::PostingsReader;
 use mosaica_lifecycle::membership::ArtifactStore;
-use mosaica_store::derived::{
-    compose_containment, generating_entities, PostingSlice, SignatureIndex,
-};
+use mosaica_store::derived::{compose_containment, generating_entities, SignatureIndex};
 use mosaica_store::membership::ContainmentPack;
 use mosaica_types::TermId;
 
@@ -100,29 +98,6 @@ use crate::session::SatisfiedKeys;
 pub struct PartitionSource<'a> {
     /// The base postings — the build's `terms/postings.arrow`, which no flush rewrites.
     pub postings: &'a PostingsReader,
-}
-
-impl PartitionSource<'_> {
-}
-
-/// Build a [`SignatureIndex`] over `postings` — the one adapter between the postings format and
-/// the composer.
-///
-/// **A type shuffle, not a decode.** `mosaica-authz` owns `postings.arrow` and `mosaica-store`
-/// does not depend on it, so the posting arrives here in whichever of its two shapes it is stored
-/// in and is handed straight across; the walk that turns postings into signatures is written once,
-/// beside the containment format. `mosaica build` holds the identical six lines, which is what a
-/// crate boundary costs when neither side may depend on the other.
-pub fn signature_index(wanted: &Bitmap, postings: &PostingsReader) -> io::Result<SignatureIndex> {
-    SignatureIndex::build(wanted, postings.term_count(), &|term, visit| {
-        if let Some(posting) = postings.posting_at(term)? {
-            match posting {
-                PostingRef::Array(bytes) => visit(PostingSlice::Array(bytes)),
-                PostingRef::Roaring(view) => visit(PostingSlice::Roaring(&view)),
-            }
-        }
-        Ok(())
-    })
 }
 
 /// One level's containment partition: an interned expression per `(artifact, rank)`.
@@ -181,7 +156,7 @@ impl ContainmentPartition {
             }
         };
         let wanted = generating_entities(&contents);
-        let signatures = signature_index(&wanted, postings)?;
+        let signatures = SignatureIndex::of_postings(&wanted, postings)?;
         Ok(Self::of_bytes(compose_containment(&contents, &signatures)))
     }
 

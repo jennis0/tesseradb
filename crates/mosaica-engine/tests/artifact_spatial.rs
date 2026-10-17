@@ -264,6 +264,15 @@ fn fixture(criterion: &str) -> Fixture {
 
 /// As [`fixture`], with the declaration edited on its way to the build — a pin, say.
 fn fixture_with(criterion: &str, edit: impl FnOnce(String) -> String) -> Fixture {
+    fixture_sized(criterion, edit, None)
+}
+
+/// As [`fixture_with`], built at `shard_size`.
+fn fixture_sized(
+    criterion: &str,
+    edit: impl FnOnce(String) -> String,
+    shard_size: Option<u64>,
+) -> Fixture {
     let corpus = corpus();
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
@@ -275,7 +284,7 @@ fn fixture_with(criterion: &str, edit: impl FnOnce(String) -> String) -> Fixture
     std::fs::write(&config_path, edit(config_toml(&corpus, criterion))).unwrap();
     let config = mosaica_build::config::Config::parse(&config_path, &Default::default())
         .expect("the spatial fixture's declaration parses");
-    build_with_layers(&root, &points, &pairs, &corpus, config);
+    build_with_layers_sized(&root, &points, &pairs, corpus.extent(), config, shard_size);
     let cache = tmp.path().join("cache");
     let wal = tmp.path().join("wal");
     Fixture {
@@ -547,6 +556,80 @@ fn a_fold_leaves_a_boundarys_answers_unchanged() {
     assert_eq!(after_narrow.len(), before_narrow.len());
 }
 
+/// **Over two shards, a compaction of each in turn leaves every boundary's answers where they
+/// were**, and a restart after them serves the same.
+#[test]
+fn a_compaction_of_each_shard_leaves_a_boundarys_answers_unchanged() {
+    let fx = fixture_sized("\"none\"", |toml| toml, Some(N / 2));
+    let writing = || {
+        let engine = open_writing(&fx.root, &fx.cache, &fx.wal, config_uncapped());
+        engine.set_background_refresh_for_test(false);
+        engine
+    };
+    let engine = writing();
+    let grant = "0,1";
+    let answers = |engine: &Engine| {
+        (
+            served(engine, grant, 0, WHOLE_MAP),
+            served(engine, grant, VIEWPORT_ZOOM, [0.0, 0.0, 500.0, 500.0]),
+        )
+    };
+    let expected = answers(&engine);
+    assert!(!expected.0.is_empty());
+    assert_eq!(expected.0, fx.expected(grant, &[], &[]));
+
+    compact(&engine, Some(ShardId::ZERO));
+    assert_eq!(answers(&engine), expected, "after shard 0's compaction");
+    compact(&engine, Some(shard(1)));
+    assert_eq!(answers(&engine), expected, "after shard 1's compaction");
+    drop(engine);
+    assert_eq!(answers(&writing()), expected, "across a restart");
+}
+
+/// **A compaction of shard 1 after a deleted boundary has left only its slice keeps every level's
+/// held shapes**, so a restart claims them rather than decomposing a level again.
+#[test]
+fn a_second_shards_compaction_keeps_the_held_shapes() {
+    let fx = fixture_sized("\"none\"", |toml| toml, Some(N / 2));
+    let writing = || {
+        let engine = open_writing(&fx.root, &fx.cache, &fx.wal, config_uncapped());
+        engine.set_background_refresh_for_test(false);
+        engine
+    };
+    let engine = writing();
+    let grant = "0,1";
+    let mut expected = served(&engine, grant, 0, WHOLE_MAP);
+    let key = expected
+        .keys()
+        .next()
+        .cloned()
+        .expect("the fixture serves a boundary");
+    engine
+        .accept_changes(vec![(
+            served_target(&engine, grant, &key),
+            ChangeOp::Delete,
+        )])
+        .expect("the deletion is accepted");
+    expected.remove(&key);
+
+    compact(&engine, Some(shard(1)));
+    compact(&engine, Some(shard(1)));
+    assert_eq!(served(&engine, grant, 0, WHOLE_MAP), expected);
+    drop(engine);
+    let engine = writing();
+    let warm = engine.shape_warm_report();
+    assert_eq!(
+        (warm.held_claimed, warm.held_decomposed),
+        (warm.artifacts, 0),
+        "a restart claims every level's held shapes: {warm:?}"
+    );
+    assert_eq!(
+        served(&engine, grant, 0, WHOLE_MAP),
+        expected,
+        "across a restart"
+    );
+}
+
 /// **A suppressed member leaves the count, and a suppressed artifact leaves the map** — the same
 /// two rules a stored membership follows, reached through a membership nothing stores.
 #[test]
@@ -778,7 +861,7 @@ fn an_open_claims_the_persisted_pieces_and_resolves_only_the_flushed_segments() 
     // A stale or torn file is refused and the segment resolved again — loudly, never served
     // short. Truncate the fold's row form and reopen: one level claimed (the column), one
     // resolved, every answer unchanged.
-    let forms: Vec<std::path::PathBuf> = walk(&fx.root)
+    let forms: Vec<std::path::PathBuf> = files_under(&fx.root)
         .into_iter()
         .filter(|p| p.extension().is_some_and(|e| e == "tssr"))
         .collect();
@@ -1007,19 +1090,4 @@ fn a_maintained_boundary_form_equals_one_resolved_from_scratch() {
             );
         }
     }
-}
-
-fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let mut out = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                out.extend(walk(&path));
-            } else {
-                out.push(path);
-            }
-        }
-    }
-    out
 }

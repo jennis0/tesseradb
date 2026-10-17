@@ -261,8 +261,10 @@ impl Scope<'_> {
         let entity = self.layer.runs[level as usize]
             .entity_of(u64::from(ordinal))
             .map(EntityId::new)?;
-        let crate::artifacts::ArtifactVerdict::Serve { masked_count, rank } = self.views
-            [level as usize]
+        let crate::artifacts::ArtifactVerdict::Serve {
+            masked_count,
+            position,
+        } = self.views[level as usize]
             .as_ref()?
             .verdict(entity, ordinal)
         else {
@@ -273,7 +275,7 @@ impl Scope<'_> {
             self.layer,
             ordinal,
             entity,
-            rank,
+            position,
         )?;
         let mosaica_id = self.engine.artifact_id(self.layer.space, entity)?.raw();
         Some(Served {
@@ -299,7 +301,7 @@ impl Scope<'_> {
     ) -> Option<&ReadLevel> {
         let target = self.targets.iter().find(|t| t.layer.space == attachment.space)?;
         let level = attachment.level as usize;
-        let crate::artifacts::ArtifactVerdict::Serve { rank, .. } = target
+        let crate::artifacts::ArtifactVerdict::Serve { position, .. } = target
             .views
             .get(level)?
             .as_ref()?
@@ -313,7 +315,7 @@ impl Scope<'_> {
             target.layer,
             attachment.ordinal,
             attachment.entity,
-            rank,
+            position,
         )?;
         Some(read)
     }

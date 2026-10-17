@@ -203,10 +203,49 @@ fn space_deny(fx: &Fixture, space: LayerSpace) -> (Vec<u32>, Vec<u32>) {
     let Some(record) = mosaica_store::manifest::layer_space(&manifest.layer_spaces, space) else {
         return (Vec::new(), Vec::new());
     };
-    let ids = |set: &mosaica_store::manifest::EntitySet| {
-        set.entities().expect("decodes").iter().collect::<Vec<u32>>()
+    (entity_ids(&record.tombstones), entity_ids(&record.deny))
+}
+
+/// A deleted artifact's space record lists the shard holding its members as yet to compact the
+/// deletion, and lists no shard for one holding no member.
+#[test]
+fn a_deleted_artifact_is_owed_by_the_shard_holding_its_members() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(flat_declaration("clusters/a"))
+        .unwrap();
+    let ids = engine
+        .publish_artifacts(
+            "clusters/a".into(),
+            0,
+            vec![
+                IncomingArtifact::from_entities(Some("c0".into()), fx.members(0..40)),
+                IncomingArtifact::from_entities(Some("c1".into()), Vec::<EntityId>::new()),
+            ],
+        )
+        .unwrap();
+    let targets: Vec<Target> = ids.iter().map(|id| artifact_target(&engine, *id)).collect();
+    engine
+        .accept_changes(targets.iter().map(|t| (*t, ChangeOp::Delete)).collect())
+        .unwrap();
+    let Target::Artifact(space, held) = targets[0] else {
+        panic!("an artifact's target")
     };
-    (ids(&record.tombstones), ids(&record.deny))
+    tick_until(
+        &engine,
+        "the space's deny state's publication",
+        WAIT,
+        || space_deny(&fx, space).0.len() == 2,
+    );
+    let manifest = side_manifest(&fx.root);
+    let record = mosaica_store::manifest::layer_space(&manifest.layer_spaces, space).unwrap();
+    let owed: Vec<(ShardId, Vec<u32>)> = record
+        .owed
+        .iter()
+        .map(|owed| (owed.shard, entity_ids(&owed.artifacts)))
+        .collect();
+    assert_eq!(owed, vec![(ShardId::ZERO, vec![held.raw() as u32])]);
 }
 
 /// An artifact's and a layer's deny is kept in its layer space's overlay, through a publication, a
@@ -733,7 +772,7 @@ fn a_corrupt_runtime_record_pack_steps_the_partition_down() {
                 .membership_extents
                 .is_empty()
         });
-        mosaica_store::open_bundle(&fx.root).unwrap().partitions[PARTITION].segments_n
+        served_n(&fx.root)
     };
     let manifest = side_manifest(&fx.root);
     let records = &manifest.layer_spaces[0].record_packs[0].path;

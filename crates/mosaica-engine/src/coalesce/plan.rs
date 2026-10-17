@@ -29,7 +29,15 @@ pub(crate) fn plan_coalesce(
 
     let mut plan = CoalescePlan {
         partition: partition.to_string(),
-        ..Default::default()
+        shard: record.id,
+        tiers: Vec::new(),
+        dicts: Vec::new(),
+        attrs: Vec::new(),
+        records: Vec::new(),
+        texts: Vec::new(),
+        terms: Vec::new(),
+        unique: Vec::new(),
+        edited: Vec::new(),
     };
 
     if let Some(window) =

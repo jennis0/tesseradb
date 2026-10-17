@@ -186,6 +186,7 @@ fn build_fixture(shape: Shape) -> Fixture {
                 members: members.into(),
                 declares_members: None,
                 contents,
+                withdrawn: Box::default(),
                 attached_to: None,
                 parents: parent.iter().copied().collect(),
                 access: Vec::new(),
@@ -425,8 +426,8 @@ fn rows_of(ranges: &[std::ops::RangeInclusive<u32>]) -> Bitmap {
 }
 
 /// What one request serves for one layer at one level: the ordinal, the masked count beside it and
-/// the rank it was served at. **All three**, because a walk that returned the right *set* on the
-/// wrong route would still be answering a different question.
+/// the position of the content it was served. **All three**, because a walk that returned the right
+/// *set* on the wrong route would still be answering a different question.
 type Served = Vec<(u32, u64, Option<u32>)>;
 
 /// **The oracle: the loop `serve_artifacts` ran before the index existed.** Every ordinal of the
@@ -446,8 +447,12 @@ fn sweep(
         let Some(entity) = fx.entity_of(ordinal) else {
             continue;
         };
-        if let ArtifactVerdict::Serve { masked_count, rank } = view.verdict(entity, ordinal) {
-            out.push((ordinal, masked_count, rank));
+        if let ArtifactVerdict::Serve {
+            masked_count,
+            position,
+        } = view.verdict(entity, ordinal)
+        {
+            out.push((ordinal, masked_count, position));
         }
     }
     out
@@ -479,8 +484,12 @@ fn walk(
         let Some(entity) = fx.entity_of(ordinal) else {
             continue;
         };
-        if let ArtifactVerdict::Serve { masked_count, rank } = view.verdict(entity, ordinal) {
-            out.push((ordinal, masked_count, rank));
+        if let ArtifactVerdict::Serve {
+            masked_count,
+            position,
+        } = view.verdict(entity, ordinal)
+        {
+            out.push((ordinal, masked_count, position));
         }
     }
     (out, nodes_visited)
@@ -844,6 +853,7 @@ fn an_index_over_another_population_is_refused_and_the_level_derives_its_own() {
                     .into(),
                 declares_members: None,
                 contents: Vec::new(),
+                withdrawn: Box::default(),
                 attached_to: None,
                 parents: Vec::new(),
                 access: Vec::new(),

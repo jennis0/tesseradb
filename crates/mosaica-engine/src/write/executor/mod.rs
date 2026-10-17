@@ -13,7 +13,7 @@ mod window;
 
 pub(crate) use background::outstanding;
 pub(super) use background::Background;
-pub(super) use manifest::{HeldSpace, SideManifests};
+pub(super) use manifest::{DerivedByShard, HeldSpace, SideManifests};
 pub(in crate::write) use unique::UniqueDeclarations;
 pub(super) use wal::ExecutorLog;
 
@@ -56,8 +56,8 @@ pub(super) struct Executor {
     pub(super) flush: Background<crate::flush::CompletedFlush>,
     /// The `unique` declarations on existing columns being built, and those waiting to be.
     pub(super) unique_declarations: UniqueDeclarations,
-    /// When the last fold attempt started, as a unix second, so the interval can limit attempts.
-    pub(super) last_fold_start_unix: Option<u64>,
+    /// What decides the next compaction's shard beside the schedule.
+    pub(super) compactions: Compactions,
     /// Deleted once nothing holds its generation; a dead node leaves it to the sweep.
     pub(super) pending_reclaim: Vec<PendingReclaim>,
     /// Every generation replaced since the last fold's publication, held weakly. A reader holding
@@ -66,11 +66,30 @@ pub(super) struct Executor {
     pub(super) superseded: std::sync::Mutex<Vec<std::sync::Weak<Generation>>>,
     /// So the first tick lands one period after construction, not immediately.
     pub(super) last_tick: std::time::Instant,
-    /// What every accepted write since the last tick did to each level's row forms.
+    /// What every accepted write since the last tick did to each level's row forms in each shard.
     pub(super) pending_forms:
-        std::collections::BTreeMap<(String, u32), Vec<crate::artifacts::LevelDelta>>,
+        std::collections::BTreeMap<(String, u32, ShardId), Vec<crate::artifacts::LevelDelta>>,
     #[cfg(feature = "fault-injection")]
     pub(super) faults: Option<Arc<mosaica_lifecycle::faults::FaultSwitchboard>>,
+}
+
+impl Drop for Executor {
+    /// Stop every unit in flight and wait for each, so nothing writes under the bundle once the
+    /// executor's thread has ended. A unit on the pool or a unique declaration's round stops
+    /// before it starts or once its writes are done, and removes what it wrote; a compaction stops
+    /// at the end of the pass it is in.
+    fn drop(&mut self) {
+        self.flush.abandon();
+        self.coalesce.abandon();
+        self.merge.abandon();
+        self.suggest.abandon();
+        self.compactions.abandon();
+        self.unique_declarations.abandon();
+        self.flush.wait_until_idle();
+        self.coalesce.wait_until_idle();
+        self.merge.wait_until_idle();
+        self.suggest.wait_until_idle();
+    }
 }
 
 /// Why a tick fired: `due` is the period or the buffered-row count, `period_due` the period alone.
@@ -106,12 +125,11 @@ fn rotated_spaces(
 }
 
 impl Executor {
-    /// Drop the region decompositions of generations older than the retention depth.
-    pub(super) fn prune_region_cache(&self, segments_version: u64) {
-        let floor = segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS);
-        self.deps
-            .region_cache
-            .retain_keys(|key| key.segments_version >= floor);
+    /// Drop the region decompositions of each shard's row spaces older than the retention depth.
+    pub(super) fn prune_region_cache(&self, live: &Generation) {
+        self.deps.region_cache.retain_keys(|key| {
+            key.segments_version >= crate::cache::retention_floor(live, key.shard)
+        });
     }
 
     /// Runs the tick, then drains deny to empty, then at most one work item, repeating, blocking
@@ -197,7 +215,10 @@ impl Executor {
         let period_due = self.last_tick.elapsed() >= period;
         let due = period_due || rows_due;
         let requested = self.health.flush_requested.load(Ordering::SeqCst);
-        let fold_requested = self.health.fold_requested.load(Ordering::SeqCst);
+        // A request stays raised while its compactions run, and one in flight wakes nothing:
+        // its completion is published at the next wake, and dispatches the request's next shard.
+        let fold_requested =
+            self.health.fold_requested.load(Ordering::SeqCst) && !self.fold.in_flight();
         if !due && !requested && !fold_requested {
             return None;
         }
@@ -214,7 +235,7 @@ impl Executor {
         self.health.mark_tick(self.last_tick);
         self.health.ticks.fetch_add(1, Ordering::Relaxed);
         // No deletion filter needed: the buffer never holds rows of a deleted entity.
-        let flushable = generation.only_shard().buffer.len();
+        let flushable = generation.buffered();
         self.health
             .flushable_items
             .store(flushable, Ordering::SeqCst);
@@ -229,7 +250,8 @@ impl Executor {
         }
     }
 
-    /// Plan every view's flush and report whether any view was refused, not merely empty.
+    /// Plan every view's flush in every shard and report whether any was refused, not merely
+    /// empty.
     fn plan_view_flushes(
         &self,
         generation: &Arc<Generation>,
@@ -238,10 +260,11 @@ impl Executor {
         let mut flushable = 0usize;
         let mut gated = false;
         let mut plans: Vec<(String, crate::flush::FlushPlan)> = Vec::new();
-        for view in views_of(generation) {
+        for (shard, view) in views_of(generation) {
             match crate::flush::plan_flush(
                 generation,
                 &view,
+                shard,
                 self.log.wal.is_poisoned(),
                 self.health.overlay_diverged.load(Ordering::SeqCst),
             ) {
@@ -255,6 +278,7 @@ impl Executor {
                     if self.health.refusal_log_due() {
                         tracing::warn!(
                             view = %view,
+                            shard = %shard,
                             gate = ?refusal,
                             "flush skipped: this node publishes no geometry in this state"
                         );
@@ -277,6 +301,10 @@ impl Executor {
         plans: Vec<(String, crate::flush::FlushPlan)>,
         gated: bool,
     ) -> bool {
+        // Before the flush, so the dead-bytes walk reads no file of a flush that has not
+        // published: no other tick walks while a flush runs. And before the two it suspends, so
+        // a tick that starts a compaction does not also start a merge that the flip would orphan.
+        self.dispatch_fold(generation);
         let mut owed = false;
         if plans.is_empty() {
             self.health.deferred_plans.store(false, Ordering::SeqCst);
@@ -289,9 +317,6 @@ impl Executor {
         } else if !self.dispatch_flushes(generation, plans) {
             self.health.fail_publication_cycle();
         }
-        // Dispatched before the two it suspends, so a tick that starts a fold does not also start
-        // a merge that the flip would orphan.
-        self.dispatch_fold(generation);
         self.dispatch_coalesce(generation);
         self.dispatch_merge(generation);
         owed
@@ -337,6 +362,7 @@ impl Executor {
         publication: GeometryPublication,
     ) -> std::result::Result<(), GeometryRefused> {
         let GeometryPublication {
+            shard: shard_id,
             prefix,
             segments_version,
             watermark,
@@ -347,8 +373,8 @@ impl Executor {
         } = publication;
         let started = std::time::Instant::now();
         let previous = self.generation.load_full();
-        check_publishable(&previous, &prefix, segments_version, watermark)?;
-        let shard = previous.only_shard();
+        check_publishable(&previous, &prefix, segments_version, shard_id, watermark)?;
+        let shard = previous.shard_of(shard_id);
 
         // Cloned and retired against here, never mutated on the shared `Arc` the read path holds.
         // Cache keys read `overlay_version` as the security state, so a geometry-only swap must
@@ -360,6 +386,7 @@ impl Executor {
                 tracing::info!(
                     retired = count,
                     prefix = %prefix,
+                    shard = %shard_id,
                     "Rule F: executed deletions retired in the fold's own publication"
                 );
                 (Arc::new(overlay), shard.overlay_version + 1)
@@ -367,12 +394,39 @@ impl Executor {
             _ => (Arc::clone(&shard.overlay), shard.overlay_version),
         };
 
-        let next = previous.with_shard(shard.id(), |g, s| {
+        // Every other shard keeps its rows across a rotation, and reads its unique, edited-items
+        // and tenancy runs over the new prefix.
+        let ids: Vec<ShardId> = std::iter::once(shard_id)
+            .chain(
+                rotation
+                    .iter()
+                    .flat_map(|r| r.carried.iter().map(|carried| carried.shard)),
+            )
+            .collect();
+        let change = |g: &mut crate::generation::GenerationParts,
+                      shards: &mut crate::generation::ShardsParts| {
             g.prefix = prefix;
             g.segments_version = segments_version;
-            s.watermark = watermark;
             g.bundle = bundle;
             g.dict = dict;
+            if rotation.as_ref().is_some_and(|r| !r.retired.is_empty()) {
+                g.fold_epoch = previous.fold_epoch + 1;
+            }
+            if rotation.as_ref().is_some_and(|r| r.frees) {
+                g.free_epoch = previous.free_epoch + 1;
+            }
+            if let Some(r) = &rotation {
+                g.layer_spaces = Arc::new(rotated_spaces(&previous.layer_spaces, r));
+                for carried in &r.carried {
+                    let s = shards.of(carried.shard);
+                    s.unique = Arc::clone(&carried.unique);
+                    s.edited = Arc::clone(&carried.edited);
+                    s.tenancy = Arc::clone(&carried.tenancy);
+                }
+            }
+            let s = shards.of(shard_id);
+            s.moved_to(segments_version);
+            s.watermark = watermark;
             // A rotation carries the new prefix's own columns, or the successor would serve stale
             // entries.
             if let Some(r) = &rotation {
@@ -391,25 +445,18 @@ impl Executor {
                 }
             }
             s.delta_postings = delta_postings;
-            if rotation.as_ref().is_some_and(|r| !r.retired.is_empty()) {
-                g.fold_epoch = previous.fold_epoch + 1;
-            }
-            if rotation.as_ref().is_some_and(|r| r.frees) {
-                g.free_epoch = previous.free_epoch + 1;
-            }
             s.overlay_version = overlay_version;
             s.overlay = overlay;
-            if let Some(r) = &rotation {
-                g.layer_spaces = Arc::new(rotated_spaces(&previous.layer_spaces, r));
-            }
-        });
+        };
+        let next = match &rotation {
+            Some(_) => previous.compacting(shard_id, ids, change),
+            None => previous.with_shards(ids, change),
+        };
         let next = Arc::new(next);
         self.publish_arc(Arc::clone(&next), started);
         // Pruned before the refresh starts, so its snapshot holds what retention keeps and no more.
-        self.row_projection_cache.prune_generations_below(
-            segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS),
-            &next.prefix,
-        );
+        self.row_projection_cache.prune_superseded(&next);
+        self.prune_region_cache(&next);
 
         // After the swap, so a missing projection after a fold is an ordinary cache miss, and
         // nothing is lost if the swap never lands. The identities this swap superseded keep their
@@ -432,8 +479,6 @@ impl Executor {
             );
             self.deps.refresh.spawn(next);
         }
-
-        self.prune_region_cache(segments_version);
         Ok(())
     }
 

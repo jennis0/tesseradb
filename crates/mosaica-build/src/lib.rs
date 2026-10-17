@@ -2076,7 +2076,8 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 &|source| by_source.get(&source).copied(),
                 n,
                 &prefix_dir,
-                layout,
+                &[ShardSpan::whole(n)],
+                tmp.path(),
                 std::slice::from_ref(&view.view_id),
                 // The linear build holds its values on the items rather than in typed entity
                 // columns, which is the only thing about the two builds this rule sees.
@@ -2230,7 +2231,11 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             occupancies: vec![occupancy],
             term_images,
             unique,
-            membership_extents: published_layers.membership_extents.clone(),
+            membership_extents: published_layers
+                .membership_extents
+                .first()
+                .cloned()
+                .unwrap_or_default(),
         }],
     )?;
     report.attribute_coverage = attribute_coverage;
@@ -2258,7 +2263,7 @@ fn spilled_column_names(
 /// One derivation, shared by both build implementations, so the two cannot come to disagree about
 /// a column's width — which would produce two bundles the byte-equality oracle calls different
 /// for a reason that is not the entity assignment it exists to check.
-fn scalar_schema_of(
+pub(crate) fn scalar_schema_of(
     schema: &crate::config::Schema,
 ) -> Vec<(String, mosaica_spatial::tiler::ScalarType)> {
     // Render columns only — the segment's tail and the assembly's render lanes must name the same
@@ -2269,6 +2274,74 @@ fn scalar_schema_of(
         .filter(|a| a.render)
         .map(|a| (a.name.clone(), a.ty))
         .collect()
+}
+
+/// The schema's vocabularies as `MANIFEST.vocabularies` records them, with the values `minters`
+/// drew.
+pub(crate) fn manifest_vocabularies(
+    args: &BuildArgs,
+    minters: &HashMap<String, mosaica_store::vocabulary::VocabularyMinter>,
+) -> Vec<ManifestVocabulary> {
+    // Sorted by name, unlike the columns: nothing indexes a vocabulary positionally, and a
+    // `HashMap`'s iteration order would otherwise put non-determinism into the manifest bytes,
+    // which are under a digest.
+    //
+    // An open vocabulary's values come from its minter in `minters`, which holds the
+    // declaration's codes and every code this build drew during the scan; a closed one's are the
+    // declaration's own. Either way they are read back sorted by key.
+    let mut compiled: Vec<ManifestVocabulary> = args
+        .schema
+        .vocabularies
+        .values()
+        .map(|v| {
+            let minter = minters.get(&v.name).unwrap_or(&v.values);
+            let values = mosaica_store::vocabulary::values_of(minter)
+                .into_iter()
+                .map(|value| ManifestVocabularyValue {
+                    title: minter.title_of(&value.key).map(str::to_string),
+                    ..value
+                })
+                .collect();
+            ManifestVocabulary {
+                name: v.name.clone(),
+                // The declaration's value set, carried verbatim: it is what ingest consults to
+                // decide whether a key nothing has bound is a typo or a new value. The manifest
+                // keeps its own two words for it.
+                kind: v.values.kind(),
+                visibility: v.visibility(),
+                // The declared code space, carried so that a reader with no column over this
+                // vocabulary still knows what bounds a code drawn into it.
+                width: v.width,
+                values,
+                reserved: v.reserved.clone(),
+            }
+        })
+        .collect();
+    compiled.sort_by(|a, b| a.name.cmp(&b.name));
+    compiled
+}
+
+/// A group-scoped family as its group's descriptor records it.
+pub(crate) fn scoped_scalar_of(
+    args: &BuildArgs,
+    family: &ScopedColumnFamily,
+) -> mosaica_store::manifest::ScopedScalar {
+    mosaica_store::manifest::ScopedScalar {
+        name: family.attribute.name.clone(),
+        group: family.group.clone(),
+        arrow_type: family.attribute.ty,
+        vocabulary: family.attribute.vocabulary.clone(),
+        analyser: family.attribute.analyser.clone(),
+        index: family.attribute.index,
+        render: family.attribute.render,
+        // The views whose columns this build **wrote**, in the order the family names them,
+        // which is the roster's own order.
+        views: family
+            .views
+            .iter()
+            .map(|&index| args.views[index].view_id.clone())
+            .collect(),
+    }
 }
 
 /// The schema's attributes as `MANIFEST.declared_scalars` records them, in declaration order.
@@ -2462,45 +2535,7 @@ fn write_manifests(
         // from it. Reordering the schema file therefore reorders every segment built after it,
         // which is why the compilation preserves declaration order rather than sorting by name.
         declared_scalars: declared_scalars_of(&args.schema),
-        // Sorted by name, unlike the columns: nothing indexes a vocabulary positionally, and a
-        // `HashMap`'s iteration order would otherwise put non-determinism into the manifest bytes
-        // — which are under a digest.
-        //
-        // An open vocabulary's values come from its minter in `minters`, which holds the
-        // declaration's codes and every code this build drew during the scan; a closed one's are
-        // the declaration's own. Either way they are read back sorted by key.
-        vocabularies: {
-            let mut compiled: Vec<ManifestVocabulary> = args
-                .schema
-                .vocabularies
-                .values()
-                .map(|v| {
-                    let minter = minters.get(&v.name).unwrap_or(&v.values);
-                    let values = mosaica_store::vocabulary::values_of(minter)
-                        .into_iter()
-                        .map(|value| ManifestVocabularyValue {
-                            title: minter.title_of(&value.key).map(str::to_string),
-                            ..value
-                        })
-                        .collect();
-                    ManifestVocabulary {
-                        name: v.name.clone(),
-                        // The declaration's value set, carried verbatim: it is what ingest
-                        // consults to decide whether a key nothing has bound is a typo or a new
-                        // value. The manifest keeps its own two words for it.
-                        kind: v.values.kind(),
-                        visibility: v.visibility(),
-                        // The declared code space, carried so that a reader with no column over
-                        // this vocabulary still knows what bounds a code drawn into it.
-                        width: v.width,
-                        values,
-                        reserved: v.reserved.clone(),
-                    }
-                })
-                .collect();
-            compiled.sort_by(|a, b| a.name.cmp(&b.name));
-            compiled
-        },
+        vocabularies: manifest_vocabularies(args, minters),
         small_term_threshold: SMALL_TERM_THRESHOLD_DEFAULT,
         identity: IdentityDescriptor {
             construction: IDENTITY_CONSTRUCTION.to_string(),
@@ -2522,22 +2557,7 @@ fn write_manifests(
                     .scoped_attributes
                     .iter()
                     .filter(|family| family.group == group.name)
-                    .map(|family| mosaica_store::manifest::ScopedScalar {
-                        name: family.attribute.name.clone(),
-                        group: family.group.clone(),
-                        arrow_type: family.attribute.ty,
-                        vocabulary: family.attribute.vocabulary.clone(),
-                        analyser: family.attribute.analyser.clone(),
-                        index: family.attribute.index,
-                        render: family.attribute.render,
-                        // The views whose columns this build **wrote**, in the order the family
-                        // names them, which is the roster's own order.
-                        views: family
-                            .views
-                            .iter()
-                            .map(|&index| args.views[index].view_id.clone())
-                            .collect(),
-                    })
+                    .map(|family| scoped_scalar_of(args, family))
                     .collect(),
                 ..group.clone()
             })

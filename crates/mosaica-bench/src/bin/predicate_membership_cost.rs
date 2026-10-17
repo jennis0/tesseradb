@@ -328,6 +328,7 @@ fn records(sets: &[Bitmap]) -> Vec<ArtifactRecord> {
             members: members.clone().into(),
             declares_members: None,
             contents: Vec::new(),
+            withdrawn: Box::default(),
             attached_to: None,
             parents: Vec::new(),
             access: Vec::new(),

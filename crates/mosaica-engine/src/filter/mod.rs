@@ -70,10 +70,7 @@ pub use columns::successor::{
 };
 pub use columns::{FilterColumns, ShardExtents, ValueLayers};
 pub(crate) use columns::{open_entity_terms_stack, open_record_stack, record_extent_paths};
-pub(crate) use declared::{
-    blob_resident, carries_live_view, owes_postings, owes_value_column, scoped_owes_postings,
-    scoped_visibility_of,
-};
+pub(crate) use declared::{carries_live_view, scoped_visibility_of};
 pub use declared::{
     extent_column_name, is_filterable, operands_of, scoped_column_name, scoped_has_value_column,
     unique_only,

@@ -334,9 +334,9 @@ impl Engine {
             let mut mosaica_id = |ordinal: u32| -> Option<u64> {
                 verdicts.get_or(ordinal, || {
                     let entity = runs.entity_of(ordinal as u64).map(EntityId::new)?;
-                    let rank = view.serves_visible_member(entity, ordinal).ok()?;
+                    let position = view.serves_visible_member(entity, ordinal).ok()?;
                     // The walk withholds an artifact whose content cannot be read back.
-                    let table = rank.is_some().then(|| {
+                    let table = position.is_some().then(|| {
                         contents
                             .get_or_init(|| {
                                 self.level_content(
@@ -355,7 +355,7 @@ impl Engine {
                         level,
                         ordinal,
                         entity,
-                        rank,
+                        position,
                         false,
                         table.flatten().as_deref(),
                     )?;

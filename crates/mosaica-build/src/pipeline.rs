@@ -148,11 +148,12 @@ use rustc_hash::FxHashMap;
 
 use mosaica_authz::encode_posting;
 use mosaica_filter::{
-    Codes, ColumnKind, RecordFieldRef, RecordValueRef, ValueColumnWriter, RECORD_BLOCKS_FILE,
+    Codes, RecordFieldRef, RecordValueRef, ValueColumnWriter, RECORD_BLOCKS_FILE,
     RECORD_BLOCK_TARGET, RECORD_DIRECTORY_FILE, RECORD_HASROW_FILE,
 };
 use mosaica_spatial::split32;
 use mosaica_spatial::tiler::{ScalarType, ScalarValue};
+use mosaica_store::manifest::DeclaredScalar;
 use mosaica_store::ShardLayout;
 use mosaica_types::SMALL_TERM_THRESHOLD_DEFAULT;
 
@@ -965,6 +966,12 @@ fn build_bundle(
     // assignment walk is global; everything after it that writes entity space writes each
     // shard's files at its own ids.
     let spans = crate::ShardSpan::of(n, args.shard_size())?;
+    // The shards whose base files the stages below write. An empty build's one shard is written
+    // whole by `mosaica_store::empty_shard`, the writer a running service opens a shard with.
+    let filled: &[crate::ShardSpan] = match n {
+        0 => &[],
+        _ => &spans,
+    };
 
     // ---- 2. the dictionary -----------------------------------------------------------
     let prefix_dir = args.out.join(PREFIX);
@@ -1329,7 +1336,7 @@ fn build_bundle(
     };
     let mut entity_terms_paths: Vec<PathBuf> = Vec::new();
     let mut entity_terms_shard = 0usize;
-    let mut entity_terms = entity_terms_writer(&spans[0])?;
+    let mut entity_terms = filled.first().map(entity_terms_writer).transpose()?;
     let mut sig_terms: Vec<u32> = Vec::new();
     for k in 0..plan.batches {
         let ordinal_lo = k * plan.batch_items;
@@ -1483,16 +1490,19 @@ fn build_bundle(
                         ))
                     })?;
             }
+            let writer = entity_terms
+                .as_mut()
+                .expect("an assigned entity is in a filled shard");
             while u64::from(entity) >= spans[entity_terms_shard].hi {
                 entity_terms_shard += 1;
                 let next = entity_terms_writer(&spans[entity_terms_shard])?;
                 entity_terms_paths.extend(
-                    std::mem::replace(&mut entity_terms, next)
+                    std::mem::replace(writer, next)
                         .finish()
                         .map_err(transpose)?,
                 );
             }
-            entity_terms
+            writer
                 .push(entity - spans[entity_terms_shard].lo as u32, &sig_terms)
                 .map_err(transpose)?;
         }
@@ -1534,7 +1544,9 @@ fn build_bundle(
         );
     }
 
-    entity_terms_paths.extend(entity_terms.finish().map_err(transpose)?);
+    if let Some(writer) = entity_terms {
+        entity_terms_paths.extend(writer.finish().map_err(transpose)?);
+    }
     for path in &entity_terms_paths {
         fsync_file(path)?;
     }
@@ -1566,7 +1578,7 @@ fn build_bundle(
         .map(|span| prefix_dir.join(span.layout().postings_rel()))
         .collect();
     let pairs_paths: Vec<PathBuf> = match args.emit_oracle_pairs {
-        true => spans
+        true => filled
             .iter()
             .map(|span| prefix_dir.join(span.layout().pairs_rel()))
             .collect(),
@@ -1576,7 +1588,7 @@ fn build_bundle(
         .iter()
         .map(|path| PairsParquetWriter::create(path))
         .collect::<std::result::Result<_, _>>()?;
-    let mut spools: Vec<mosaica_authz::PostingsSpool> = spans
+    let mut spools: Vec<mosaica_authz::PostingsSpool> = filled
         .iter()
         .zip(&postings_paths)
         .map(|(span, path)| {
@@ -1638,7 +1650,7 @@ fn build_bundle(
         let mut t = 0usize;
         while t < width {
             let hi = (t + ENCODE_CHUNK_TERMS).min(width);
-            for (k, span) in spans.iter().enumerate() {
+            for (k, span) in filled.iter().enumerate() {
                 let encoded: Vec<(Vec<u8>, std::borrow::Cow<'_, [u32]>)> = (t..hi)
                     .into_par_iter()
                     .map(|local| {
@@ -1726,7 +1738,7 @@ fn build_bundle(
     let (scoped_paths, mut scoped_render) = write_scoped_columns(
         args,
         &prefix_dir,
-        &spans,
+        filled,
         n,
         &numbering,
         entity_of_ordinal,
@@ -1785,14 +1797,13 @@ fn build_bundle(
         )?;
         // The member rows are read, so every file's numbers have served their last reader.
         drop(numbering);
-        // The member packs are written over every entity, in shard 0's directory, and cut into
-        // one a shard once the artifact pass has read them (`layers::split_member_packs`).
         crate::layers::publish(
             &mut plan,
             &|number| (number < n).then(|| u64::from(entity_of_ordinal[number as usize])),
             n,
             &prefix_dir,
-            spans[0].layout(),
+            &spans,
+            tmp.path(),
             &view_ids,
             &derived,
             publication_batch,
@@ -1844,7 +1855,7 @@ fn build_bundle(
     }
     timer.end(BuildStage::UniqueIndexes, n);
     let mut filter_paths = Vec::new();
-    for span in &spans {
+    for span in filled {
         window_shard(&mut attributes_by_entity, &mut open_extents, span);
         let (paths, text_index) = write_filter_postings(
             &prefix_dir,
@@ -1894,7 +1905,7 @@ fn build_bundle(
     // number for three jobs, which is why the 615 s this block cost at 7.4×10⁷ points could be
     // modelled and not read.
     let mut record_paths = Vec::new();
-    for span in &spans {
+    for span in filled {
         window_shard(&mut attributes_by_entity, &mut open_extents, span);
         record_paths.extend(write_record_blob(
             &prefix_dir.join(span.layout().record_rel()),
@@ -1935,6 +1946,52 @@ fn build_bundle(
         }
     }
     timer.end(BuildStage::ColumnRelease, n);
+
+    let mut empty_files: Vec<PathBuf> = Vec::new();
+    if filled.is_empty() {
+        let declared = crate::declared_scalars_of(&args.schema);
+        let vocabularies = crate::manifest_vocabularies(args, &minters);
+        let scoped: Vec<mosaica_store::manifest::ScopedScalar> = args
+            .scoped_attributes
+            .iter()
+            .map(|family| crate::scoped_scalar_of(args, family))
+            .collect();
+        // The render columns, then the view's scoped ones, as the segment write below orders them.
+        let views: Vec<mosaica_store::empty_shard::EmptyView<'_>> = args
+            .views
+            .iter()
+            .zip(&scoped_render_targets)
+            .map(|(view, targets)| mosaica_store::empty_shard::EmptyView {
+                id: &view.view_id,
+                incarnation: mosaica_store::manifest::DECLARED_INCARNATION,
+                render: crate::scalar_schema_of(&args.schema)
+                    .into_iter()
+                    .chain(
+                        targets
+                            .iter()
+                            .map(|&at| (scoped_render[at].name.clone(), scoped_render[at].ty)),
+                    )
+                    .collect(),
+            })
+            .collect();
+        for span in &spans {
+            let written = mosaica_store::empty_shard::write_empty_shard(
+                &mosaica_store::empty_shard::EmptyShard {
+                    prefix_dir: &prefix_dir,
+                    layout: span.layout(),
+                    terms: term_count,
+                    small_term_threshold: SMALL_TERM_THRESHOLD_DEFAULT,
+                    pairs: args.emit_oracle_pairs,
+                    declared: &declared,
+                    vocabularies: &vocabularies,
+                    scoped: &scoped,
+                    views: &views,
+                    seg_id: SEG_ID,
+                },
+            )?;
+            empty_files.extend(written.files.into_iter().map(|(_, path)| path));
+        }
+    }
 
     // ---- 9/10. pass two: one row space per view and shard (`views.md` §7) ---------------
     // **The build below is what it always was, run once per view.** What is not one-view-at-a-
@@ -1993,7 +2050,7 @@ fn build_bundle(
         // geometry is released before the first of them.
         let mut partitioned = Vec::with_capacity(spans.len());
         let mut view_rows = 0u64;
-        for span in &spans {
+        for span in filled {
             let layout = span.layout();
             let view_dir = prefix_dir.join(layout.view_rel(&view.view_id));
             let segment_dir = prefix_dir.join(layout.segment_rel(&view.view_id, SEG_ID));
@@ -2133,6 +2190,15 @@ fn build_bundle(
             view_files.extend(assembled.presence_paths);
             parts.push((*span, rows_in_view));
         }
+        if filled.is_empty() {
+            for (k, span) in spans.iter().enumerate() {
+                shards[k].occupancies.push(crate::Occupancy {
+                    points: 0,
+                    cells: 0,
+                });
+                parts.push((*span, 0));
+            }
+        }
 
         // ---- 10b. the post-bundle artifact pass, per view (decision 0094's first half) ----
         //
@@ -2190,15 +2256,17 @@ fn build_bundle(
             // After every file they read: the segment, the row-to-entity table, the entity terms
             // and the value columns. The in-memory build calls the same function at the same
             // point.
-            view_files.push(mosaica_store::field_tallies::derive_view(
-                &prefix_dir,
-                layout,
-                &view.view_id,
-                SEG_ID,
-                rows_in_view,
-                &crate::declared_scalars_of(&args.schema),
-                &|name| mosaica_filter::base_numbers(&prefix_dir.join(layout.column_rel(name))),
-            )?);
+            if !filled.is_empty() {
+                view_files.push(mosaica_store::field_tallies::derive_view(
+                    &prefix_dir,
+                    layout,
+                    &view.view_id,
+                    SEG_ID,
+                    rows_in_view,
+                    &crate::declared_scalars_of(&args.schema),
+                    &|name| mosaica_filter::base_numbers(&prefix_dir.join(layout.column_rel(name))),
+                )?);
+            }
             shards[k]
                 .segments
                 .push(mosaica_store::manifest::SegmentDescriptor {
@@ -2238,12 +2306,10 @@ fn build_bundle(
         published_layers.derived_extents.extend(containment);
         timer.end(BuildStage::ArtifactPass, composed);
     }
-    let (member_packs, member_paths) = crate::layers::split_member_packs(
-        &prefix_dir,
-        &published_layers.membership_extents,
-        &spans,
-    )?;
-    for (shard, extents) in shards.iter_mut().zip(member_packs) {
+    for (shard, extents) in shards
+        .iter_mut()
+        .zip(std::mem::take(&mut published_layers.membership_extents))
+    {
         shard.membership_extents = extents;
     }
 
@@ -2254,7 +2320,10 @@ fn build_bundle(
     tmp.close()?;
 
     // ---- 11. manifests ---------------------------------------------------------------
-    let mut other_paths = postings_paths;
+    let mut other_paths = empty_files;
+    if !filled.is_empty() {
+        other_paths.extend(postings_paths);
+    }
     other_paths.extend(entity_terms_paths);
     other_paths.extend(view_files);
     other_paths.extend(filter_paths);
@@ -2262,7 +2331,6 @@ fn build_bundle(
     other_paths.extend(record_paths);
     other_paths.extend(pairs_paths);
     other_paths.extend(published_layers.paths.iter().cloned());
-    other_paths.extend(member_paths);
     other_paths.extend(artifact_paths);
     let mut report = write_manifests(
         args,
@@ -3184,7 +3252,7 @@ fn scoped_render_targets(args: &BuildArgs, columns: &[ScopedRenderColumn]) -> Ve
 /// `derived` vocabulary. The difference is that a scoped family's admission decides both surfaces
 /// at once: a family on no filter surface has no `/v1/categories` answer either, so postings
 /// written for one would be read by nothing. It must agree with the engine's
-/// `filter::scoped_owes_postings`, or the open demands a file no pass wrote.
+/// `ScopedScalar::has_postings`, or the open demands a file no pass wrote.
 ///
 /// **So it is one predicate, called from both** — `manifest::ScopedScalar::licence_of`, over the
 /// four facts a declaration and a manifest record both carry. It lives at the record rather than
@@ -3605,49 +3673,21 @@ pub(crate) fn write_record_blob(
     Ok(vec![blocks_path, hasrow_path, directory_path])
 }
 
-/// Does this column's value live in the record blob — the home for a value with no other?
-///
-/// **Blob-resident is "no other home", not "no flags"** — and for a category the two differ.
-/// Records §4.2 exempts categories from the blob because their entity-space structures are the
-/// vocabulary machinery's constant floor, but that floor is [`postings_are_owed`], which holds for
-/// an *indexed* or `derived` category and not for a `public` one. A `public` category declared with
-/// neither flag therefore has no hot column, no value column and no postings, so excluding every
-/// category stored its values nowhere at all and refused nothing — silent loss of a field the
-/// caller declared. Asking the same question the entity-space pass asks is what keeps the two
-/// exhaustive between them: a field is in exactly one home, and records §3's rule that every
-/// declared field answers `entity → value` holds by construction.
-///
-/// **Text is blob-resident whether or not it is indexed** (records §4.4), which is the one place
-/// this predicate is not simply "has no other home": an indexed text column has a token index
-/// *and* a blob row, because the index answers `match` and only the blob can answer
-/// `entity → value`. Postings are term → entities; nothing in them reconstructs the prose a
-/// drill-down returns.
-///
-/// It is also what says **when a column's storage may go back to the disk**: a non-render column
-/// that is not blob-resident has no reader past the filter postings (`write_column_release`).
+/// [`DeclaredScalar::blob_resident`] over the build's declaration.
 pub(crate) fn blob_resident(
     schema: &crate::config::Schema,
     attribute: &crate::config::Attribute,
 ) -> bool {
-    attribute.ty == ScalarType::Text || (!attribute.render && !postings_are_owed(schema, attribute))
+    let indexed = postings_are_owed(schema, attribute);
+    DeclaredScalar::blob_resident_of(attribute.ty, indexed, attribute.render)
 }
 
-/// Does this column owe an **entity-space value column**, and the dictionary a keyword's ordinals
-/// index?
-///
-/// [`postings_are_owed`] is most of it: the value column is the artefact of record and the
-/// postings are derived from it (`filter-index.md` §2.1), so a column that owes no postings owes
-/// no value column either. A `text` column is the exception in the other direction — it owes
-/// postings over its tokens and no per-entity slot at all, its values being the record blob's
-/// (records §4.4) — which is why the type appears here and nowhere else in the routing.
-///
-/// This is the whole of what reads a string column's characters **at an entity index**, `render`
-/// aside, and [`takes_extents`] is its complement.
+/// [`DeclaredScalar::owes_value_column`] over the build's declaration.
 pub(crate) fn value_column_is_owed(
     schema: &crate::config::Schema,
     attribute: &crate::config::Attribute,
 ) -> bool {
-    attribute.ty != ScalarType::Text && postings_are_owed(schema, attribute)
+    DeclaredScalar::value_column_of(attribute.ty, postings_are_owed(schema, attribute))
 }
 
 /// Could this column's characters take the record blob's extents instead of an entity-ordered
@@ -3979,7 +4019,9 @@ fn write_column_values(
     let mut presence = Presence::default();
     let mut dict = None;
 
-    let mut writer = ValueColumnWriter::create(values_path, presence_path, column_kind(attribute))
+    let kind =
+        mosaica_store::empty_shard::value_column_kind(attribute.ty, attribute.vocabulary.is_some());
+    let mut writer = ValueColumnWriter::create(values_path, presence_path, kind)
         .map_err(|e| BuildError::io(values_path, e))?;
     macro_rules! push {
         ($chunk:expr) => {
@@ -4693,47 +4735,6 @@ fn category_chunk(ty: ScalarType, held: &[u32]) -> Codes {
         ScalarType::U8 => Codes::U8(held.iter().map(|&c| c as u8).collect::<Vec<_>>().into()),
         ScalarType::U16 => Codes::U16(held.iter().map(|&c| c as u16).collect::<Vec<_>>().into()),
         _ => Codes::U32(held.to_vec().into()),
-    }
-}
-
-/// The kind of column a declared attribute stores — the type the writer is created with, before
-/// its first value arrives.
-fn column_kind(attribute: &crate::config::Attribute) -> ColumnKind {
-    // A keyword's values file is an ordinal column, not a string one: the strings live once each
-    // in the dictionary beside it, and the scan reads fixed-width `u32`s at the fixed-width scan's
-    // measured constants rather than at a string scan's (records §4.3).
-    if attribute.ty == ScalarType::Keyword {
-        return ColumnKind::U32;
-    }
-    if attribute.vocabulary.is_some() {
-        return match attribute.ty {
-            ScalarType::U8 => ColumnKind::U8,
-            ScalarType::U16 => ColumnKind::U16,
-            _ => ColumnKind::U32,
-        };
-    }
-    match attribute.ty {
-        // `bool` stores as `u8` and `timestamp_us` as the `i64` it is — the *type* carries the unit
-        // into the manifest, and the storage and the comparison are an `i64`'s.
-        ScalarType::Bool | ScalarType::U8 => ColumnKind::U8,
-        ScalarType::U16 => ColumnKind::U16,
-        ScalarType::U32 => ColumnKind::U32,
-        ScalarType::U64 => ColumnKind::U64,
-        ScalarType::I8 => ColumnKind::I8,
-        ScalarType::I16 => ColumnKind::I16,
-        ScalarType::I32 => ColumnKind::I32,
-        ScalarType::I64 | ScalarType::TimestampUs => ColumnKind::I64,
-        ScalarType::F32 => ColumnKind::F32,
-        ScalarType::F64 => ColumnKind::F64,
-        // `utf8` survives as the *wire* type of a keyword's value and of a category's key
-        // (`DeclaredScalar::wire_type`); it is refused at the schema parse, so no declared
-        // attribute carries it.
-        ScalarType::Utf8 => unreachable!("`utf8` is not a declarable type"),
-        ScalarType::Keyword => unreachable!("a keyword returns above"),
-        // A text column's terms are `u32` ordinals into the layer's token dictionary, exactly as a
-        // keyword's value is — what differs is how many a row has, which is the postings' business
-        // and not this width's.
-        ScalarType::Text => ColumnKind::U32,
     }
 }
 

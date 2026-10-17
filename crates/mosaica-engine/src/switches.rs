@@ -22,6 +22,8 @@ pub(crate) struct TestSwitches {
     pub(crate) fold_paused: AtomicBool,
     /// See [`crate::Engine::set_fold_publication_paused_for_test`].
     pub(crate) fold_publication_paused: AtomicBool,
+    /// The memory a compaction's pre-flight takes the host to have, in bytes; zero measures it.
+    pub(crate) fold_memory: AtomicU64,
     /// See [`crate::Engine::set_merge_publication_paused_for_test`].
     pub(crate) merge_publication_paused: AtomicBool,
     /// Whether the background occupancy fill runs at all. A test turns it off so an assertion about
@@ -155,12 +157,13 @@ impl TestSwitches {
         }
     }
 
-    /// Called by a unique declaration's round once it has finished. Waits while a test holds it.
+    /// Called by a unique declaration's round once it has finished. Waits while a test holds it,
+    /// until `abandoned` answers true.
     #[cfg(feature = "fault-injection")]
-    pub(crate) fn hold_unique_round_if_paused(&self) {
+    pub(crate) fn hold_unique_round_if_paused(&self, abandoned: &dyn Fn() -> bool) {
         use std::sync::atomic::Ordering;
         self.unique_round_holding.store(true, Ordering::SeqCst);
-        while self.unique_round_paused.load(Ordering::SeqCst) {
+        while self.unique_round_paused.load(Ordering::SeqCst) && !abandoned() {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         self.unique_round_holding.store(false, Ordering::SeqCst);
@@ -203,6 +206,7 @@ impl Default for TestSwitches {
             flush_paused: AtomicBool::new(false),
             fold_paused: AtomicBool::new(false),
             fold_publication_paused: AtomicBool::new(false),
+            fold_memory: AtomicU64::new(0),
             merge_publication_paused: AtomicBool::new(false),
             occupancy_stage_enabled: AtomicBool::new(true),
             serial_fallback_max_rows: AtomicU64::new(crate::viewport::SERIAL_FALLBACK_MAX_ROWS),

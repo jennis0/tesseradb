@@ -10,8 +10,8 @@ use super::{record_open_error, request_access, Column, FilterColumns, Layer, Rou
 use crate::filter::declared::{resolve_analyser, visibility_of};
 use crate::filter::error::ComposeError;
 use crate::filter::{
-    blob_resident, carries_live_view, owes_postings, owes_value_column, scoped_column_name,
-    scoped_is_filterable, scoped_owes_postings, scoped_visibility_of, Family, Placement,
+    carries_live_view, scoped_column_name, scoped_is_filterable, scoped_visibility_of, Family,
+    Placement,
 };
 
 /// Open one view's column of a group-scoped attribute family: the name it is held under, its
@@ -20,7 +20,9 @@ use crate::filter::{
 /// One column per view, opened under its resolved name, so a scoped leaf evaluates through
 /// exactly the machinery an unscoped one of its family does. Called both by
 /// [`FilterColumns::open`] at startup and, through [`FilterColumns::with_scoped_columns`], by a
-/// flush writing the first column of a family for a view created since the build.
+/// flush writing the first column of a family for a view created since the build. Where the shard
+/// holds no `based` column of the view, it opens with no layer, the extents composing onto it.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn open_scoped_column(
     prefix_dir: &Path,
     layout: ShardLayout<'_>,
@@ -29,6 +31,7 @@ pub(super) fn open_scoped_column(
     incarnation: mosaica_types::view::ViewIncarnation,
     vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
     mmap: bool,
+    based: bool,
 ) -> Result<(String, Placement, Column), ComposeError> {
     let scoped_family = Family::of_scoped(family);
     // A family with neither flag is opened and is not filterable: the drill-down still reads one
@@ -49,16 +52,26 @@ pub(super) fn open_scoped_column(
     let declared_index = usize::MAX;
     if scoped_family == Family::Text {
         let analyser = resolve_analyser(&family.name, family.analyser.as_deref())?;
-        let text = vec![TextLayer::open_base(
-            &name,
-            &dir,
-            true,
-            request_access(mmap),
-        )?];
+        let text = match based {
+            true => vec![TextLayer::open_base(
+                &name,
+                &dir,
+                true,
+                request_access(mmap),
+            )?],
+            false => Vec::new(),
+        };
         return Ok((
             name,
             placement,
             Column::text(declared_index, filterable, analyser, text),
+        ));
+    }
+    if !based {
+        return Ok((
+            name,
+            placement,
+            Column::values(declared_index, filterable, scoped_family, None, None, Route::Scan),
         ));
     }
     // The same artefacts and routing the entity-scoped family takes: a `derived` vocabulary's
@@ -67,7 +80,7 @@ pub(super) fn open_scoped_column(
     let (base, postings, route) = open_value_base(
         &dir,
         scoped_family,
-        scoped_owes_postings(family),
+        family.has_postings(),
         scoped_visibility_of(family, vocabularies),
         mmap,
     )?;
@@ -170,9 +183,11 @@ pub(crate) fn record_extent_paths(
 /// The record blob's stack for one shard: the base the schema owes, plus every extent named.
 ///
 /// The base is owed exactly when the compiled schema has a blob-resident column with no other
-/// home ([`blob_resident`]); `unfolded` names the columns declared at a running service that have
-/// extents alone until a fold writes the base. Derived from the schema rather than probed for on
-/// disk, so a missing base is a refusal, never "those entities have no record".
+/// home ([`DeclaredScalar::blob_resident`]); `unfolded` names the columns declared at a running
+/// service that have extents alone until a fold writes the base. Derived from the schema rather
+/// than probed for on disk, so a missing base is a refusal, never "those entities have no record".
+///
+/// [`DeclaredScalar::blob_resident`]: mosaica_store::manifest::DeclaredScalar::blob_resident
 pub(crate) fn open_record_stack(
     prefix_dir: &Path,
     layout: ShardLayout<'_>,
@@ -184,7 +199,7 @@ pub(crate) fn open_record_stack(
 ) -> Result<RecordStack, mosaica_filter::RecordError> {
     let owes_base = declared
         .iter()
-        .any(|d| !unfolded.iter().any(|name| name == &d.name) && blob_resident(d, vocabularies));
+        .any(|d| !unfolded.iter().any(|name| name == &d.name) && d.blob_resident(vocabularies));
     let record_dir = prefix_dir.join(layout.record_rel());
     RecordStack::open(owes_base.then_some(record_dir.as_path()), extents, access)
 }
@@ -226,7 +241,7 @@ pub(super) fn runtime_layers(
             Vec::new(),
         )));
     }
-    if !owes_value_column(scalar, vocabularies) {
+    if !scalar.owes_value_column(vocabularies) {
         return Ok(None);
     }
     Ok(Some(Column::values(
@@ -240,6 +255,13 @@ pub(super) fn runtime_layers(
     )))
 }
 
+/// Whether a shard holds a base for a group-scoped family's column of a view at an incarnation.
+pub type ScopedBase<'a> = &'a dyn Fn(
+    &mosaica_store::manifest::ScopedScalar,
+    &str,
+    mosaica_types::view::ViewIncarnation,
+) -> bool;
+
 /// Every extent list one shard's record names, as [`FilterColumns::open`] reads them.
 #[derive(Default, Clone, Copy)]
 pub struct ShardExtents<'a> {
@@ -247,6 +269,9 @@ pub struct ShardExtents<'a> {
     pub records: &'a [mosaica_store::manifest::RecordExtent],
     pub entity_terms: &'a [mosaica_store::manifest::EntityTermsExtent],
     pub texts: &'a [mosaica_store::manifest::TextExtent],
+    /// Which listed views' group-scoped columns the shard holds a base for; `None` where it holds
+    /// one for every view a family lists.
+    pub scoped_base: Option<ScopedBase<'a>>,
 }
 
 impl<'a> ShardExtents<'a> {
@@ -256,6 +281,7 @@ impl<'a> ShardExtents<'a> {
             records: &record.record_extents,
             entity_terms: &record.entity_terms_extents,
             texts: &record.text_extents,
+            scoped_base: None,
         }
     }
 }
@@ -344,14 +370,14 @@ impl FilterColumns {
                 );
                 continue;
             }
-            if !owes_value_column(scalar, vocabularies) {
+            if !scalar.owes_value_column(vocabularies) {
                 continue;
             }
             let dir = prefix_dir.join(layout.column_rel(&scalar.name));
             let (base, postings, route) = open_value_base(
                 &dir,
                 family,
-                owes_postings(scalar, vocabularies),
+                scalar.owes_postings(vocabularies),
                 visibility_of(scalar, vocabularies),
                 mmap,
             )?;
@@ -378,6 +404,11 @@ impl FilterColumns {
                 let Some(incarnation) = view_incarnation(view_id) else {
                     continue;
                 };
+                // A view created at a running service has a base only in a shard a flush or a
+                // compaction wrote one in; in another its column holds nothing yet.
+                let based = extents
+                    .scoped_base
+                    .is_none_or(|base| base(family, view_id, incarnation));
                 let (name, placement, mut column) = open_scoped_column(
                     prefix_dir,
                     layout,
@@ -386,6 +417,7 @@ impl FilterColumns {
                     incarnation,
                     vocabularies,
                     mmap,
+                    based,
                 )?;
                 if let Some(text) = column.text_layers_mut() {
                     text.extend(text_extent_layers(

@@ -161,8 +161,8 @@ impl Layer {
         let context = DependencyContext::new(served_view, mask, &reachable);
         let dependency_served = engine.dependency_gate(&context);
         let mut ordinals: Vec<u32> = Vec::new();
-        // Each served ordinal's rank, which its content is read under.
-        let mut ranks: FxHashMap<u32, Option<u32>> = FxHashMap::default();
+        // Each served ordinal's content position, where its content is read.
+        let mut positions: FxHashMap<u32, Option<u32>> = FxHashMap::default();
         let mut targets = Targets::default();
         let read = match &registered {
             None => None,
@@ -170,8 +170,8 @@ impl Layer {
                 // With a cut, the level's figures are the entry the map's treed frame reads.
                 let read =
                     engine.read_level(served_view, mask, layer, self.level, self.cut.is_some())?;
-                let readable = |ordinal: u32, entity: EntityId, rank: Option<u32>| {
-                    read.content(engine, layer, ordinal, entity, rank)
+                let readable = |ordinal: u32, entity: EntityId, position: Option<u32>| {
+                    read.content(engine, layer, ordinal, entity, position)
                         .is_some()
                 };
                 match &self.cut {
@@ -191,10 +191,10 @@ impl Layer {
                                 true => drawn.served.clone(),
                                 false => crate::cut::frontier_of(&drawn.lineage, &drawn.served),
                             };
-                            for (ordinal, entity, _, rank) in drawn.passing_in(&listed) {
-                                if readable(ordinal, entity, rank) {
+                            for (ordinal, entity, _, position) in drawn.passing_in(&listed) {
+                                if readable(ordinal, entity, position) {
                                     ordinals.push(ordinal);
-                                    ranks.insert(ordinal, rank);
+                                    positions.insert(ordinal, position);
                                 }
                             }
                         }
@@ -211,14 +211,14 @@ impl Layer {
                             else {
                                 continue;
                             };
-                            let crate::artifacts::ArtifactVerdict::Serve { rank, .. } =
+                            let crate::artifacts::ArtifactVerdict::Serve { position, .. } =
                                 view.verdict(entity, ordinal)
                             else {
                                 continue;
                             };
-                            if readable(ordinal, entity, rank) {
+                            if readable(ordinal, entity, position) {
                                 ordinals.push(ordinal);
-                                ranks.insert(ordinal, rank);
+                                positions.insert(ordinal, position);
                             }
                         }
                     }
@@ -437,10 +437,10 @@ impl Layer {
                     .listed
                     .iter()
                     .map(|&o| {
-                        let rank = *ranks.get(&o)?;
+                        let position = *positions.get(&o)?;
                         let entity = EntityId::new(entity_at(o)?);
                         let own = read
-                            .content(engine, layer, o, entity, rank)
+                            .content(engine, layer, o, entity, position)
                             .and_then(|content| content.name());
                         namer.name(own, self.level, o)
                     })
@@ -552,7 +552,7 @@ impl Targets {
                 }
             };
             let view = level.view(engine, served, mask, layer, dependency_served);
-            let crate::artifacts::ArtifactVerdict::Serve { rank, .. } =
+            let crate::artifacts::ArtifactVerdict::Serve { position, .. } =
                 view.verdict(attachment.entity, attachment.ordinal)
             else {
                 continue;
@@ -562,7 +562,7 @@ impl Targets {
                 layer,
                 attachment.ordinal,
                 attachment.entity,
-                rank,
+                position,
             );
             if content.is_some() {
                 targets.counted.insert(ordinal);

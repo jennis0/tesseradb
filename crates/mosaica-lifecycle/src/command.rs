@@ -20,7 +20,9 @@
 //! executor, and this type is what a handler submits: everything a `WalRow` needs *except* the ID,
 //! plus the resolved term set that is the item's sort signature.
 
-use mosaica_types::{EntityId, ItemAt, ShardFull, ShardId, ShardSizeError, TermId};
+use mosaica_types::{
+    EntityId, ItemAt, ShardFull, ShardId, ShardSizeError, ShardsExhausted, TermId,
+};
 
 use crate::alloc::PendingItem;
 use crate::wal::{WalError, WalRow, WalScalar};
@@ -90,8 +92,8 @@ impl UnallocatedRow {
             // **A join arrives with its id already decided, and `assign_sorted` leaves it
             // alone.** The entity exists; a second allocation for it would be a second identity
             // for one document, which is the whole of what the join rule prevents.
-            entity_id: self.join.map(|item| item.entity),
-            edit: false,
+            item: self.join,
+            edit: None,
         }
     }
 
@@ -111,16 +113,14 @@ impl UnallocatedRow {
     /// whole of the "mechanical conversion" this type exists to make mechanical, and a field
     /// added to [`WalRow`] without a matching field here is a compile error at exactly this
     /// method rather than a silently-dropped column somewhere downstream.
-    ///
-    /// `shard` is a created row's shard; a join row takes its item's.
-    pub fn into_wal_row_with(self, pending: PendingItem, shard: ShardId) -> (WalRow, Vec<TermId>) {
-        let entity_id = pending
-            .entity_id
+    pub fn into_wal_row_with(self, pending: PendingItem) -> (WalRow, Vec<TermId>) {
+        let item = pending
+            .item
             .expect("assign_sorted assigns every item it is given");
         (
             WalRow {
-                shard: self.join.map_or(shard, |item| item.shard),
-                entity_id,
+                shard: item.shard,
+                entity_id: item.entity,
                 view: self.view,
                 join: self.join.is_some(),
                 descriptors: self.descriptors,
@@ -439,6 +439,9 @@ pub enum ExecError {
     /// A batch needs more ids than the shard's size or the end of its ids leaves → HTTP **409**,
     /// no effect.
     ShardFull(ShardFull),
+    /// A batch's new items need a point shard past the last a bundle holds → HTTP **409**, no
+    /// effect.
+    ShardsExhausted(ShardsExhausted),
     /// Every layer space has been given, or a level needs more blocks than its layer space has
     /// left → HTTP **409**, no effect. The detail gives the figures.
     LayerSpaceFull { detail: String },
@@ -523,6 +526,9 @@ pub enum ExecError {
     /// command's names are stale by `mosaica_engine::Stamp`'s rule. Nothing took effect, and the
     /// names are resolved again.
     Stale,
+    /// A store file the command needs could not be written or opened → HTTP 500, no effect. The
+    /// detail names the files, so it is logged and not sent.
+    Store { detail: String },
 }
 
 impl std::fmt::Display for ExecError {
@@ -530,6 +536,7 @@ impl std::fmt::Display for ExecError {
         match self {
             ExecError::Wal(e) => write!(f, "write-ahead log failure: {e}"),
             ExecError::ShardFull(full) => full.fmt(f),
+            ExecError::ShardsExhausted(exhausted) => exhausted.fmt(f),
             ExecError::LayerSpaceFull { detail } => write!(f, "{detail}"),
             ExecError::ShardSize(e) => e.fmt(f),
             ExecError::BatchConflict { batch_id } => write!(
@@ -551,6 +558,7 @@ impl std::fmt::Display for ExecError {
                 f,
                 "the items this batch names changed while it was checked; send it again"
             ),
+            ExecError::Store { detail } => write!(f, "store failure: {detail}"),
         }
     }
 }
@@ -566,6 +574,17 @@ impl From<WalError> for ExecError {
 impl From<ShardFull> for ExecError {
     fn from(full: ShardFull) -> Self {
         ExecError::ShardFull(full)
+    }
+}
+
+impl From<crate::alloc::AllocError> for ExecError {
+    fn from(error: crate::alloc::AllocError) -> Self {
+        match error {
+            crate::alloc::AllocError::Full(full) => ExecError::ShardFull(full),
+            crate::alloc::AllocError::ShardsExhausted(exhausted) => {
+                ExecError::ShardsExhausted(exhausted)
+            }
+        }
     }
 }
 
@@ -604,7 +623,7 @@ mod tests {
         let mut pending = row.take_pending();
         assert_eq!(pending.terms, original.terms);
         assert!(
-            pending.entity_id.is_none(),
+            pending.item.is_none(),
             "the whole point: no id until the executor assigns one"
         );
         assert!(
@@ -613,9 +632,9 @@ mod tests {
         );
 
         // What `assign_sorted` does, at one item's scale.
-        pending.entity_id = Some(EntityId::new(41));
+        pending.item = Some(ItemAt::new(ShardId::ZERO, EntityId::new(41)));
 
-        let (wal_row, terms) = row.into_wal_row_with(pending, ShardId::ZERO);
+        let (wal_row, terms) = row.into_wal_row_with(pending);
         assert_eq!(wal_row.entity_id, EntityId::new(41));
         assert_eq!(wal_row.descriptors, original.descriptors);
         assert_eq!(wal_row.x, original.x);

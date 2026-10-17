@@ -288,6 +288,34 @@ pub fn check_room(size: u64, end: u64, high_water: u64, needed: u64) -> Result<(
     }
 }
 
+/// The fewest freed ids a shard must hold before a window gives new items its freed ids ahead of
+/// the open shard: 2⁻¹⁰ of the shard size, and at least one.
+pub fn reuse_min_free(size: u64) -> u64 {
+    (size >> 10).max(1)
+}
+
+/// New items a window would place in a shard numbered [`ShardId::LIMIT`] or more, which no
+/// identifier can name.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ShardsExhausted {
+    /// How many new items found no shard.
+    pub needed: u64,
+}
+
+impl std::fmt::Display for ShardsExhausted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "this batch's last {} new items need a point shard past the {} a bundle holds. \
+             Delete and compact items to free ids, or send fewer new items",
+            self.needed,
+            ShardId::LIMIT
+        )
+    }
+}
+
+impl std::error::Error for ShardsExhausted {}
+
 /// A row in a named shard, ordered shard-major.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct ShardRow(u64);
@@ -416,6 +444,14 @@ mod tests {
             Err(ShardLimit::Size(u64::MAX)),
             "a count past every integer is refused, not wrapped"
         );
+    }
+
+    #[test]
+    fn the_reuse_threshold_is_a_fraction_of_the_size_and_never_zero() {
+        assert_eq!(reuse_min_free(131_073), 128);
+        assert_eq!(reuse_min_free(SHARD_SIZE_DEFAULT), 3_932_160);
+        assert_eq!(reuse_min_free(1_023), 1);
+        assert_eq!(reuse_min_free(1), 1);
     }
 
     #[test]

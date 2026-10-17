@@ -74,6 +74,8 @@ use crate::Generation;
 /// one, which is what lets it exist as a public API at all. The single exception is
 /// [`PrefixRotation::retired`], which subtracts and never adds.
 pub struct GeometryPublication {
+    /// The shard whose geometry this publishes; a rotation renumbers its rows.
+    pub shard: mosaica_types::ShardId,
     pub prefix: String,
     pub segments_version: u64,
     pub watermark: u64,
@@ -99,6 +101,9 @@ pub struct GeometryPublication {
 ///   (write-path §5.4): withdrawing the tombstone while a pre-fold fragment is still reachable
 ///   re-exposes the item the deletion hid. That is why `retired` lives *here* rather than beside
 ///   the rotation — a caller cannot ask for one without the other.
+///
+/// Every field but [`Self::carried`] and [`Self::space_contents`] is the publication's shard's own:
+/// the shard whose rows the new prefix renumbers.
 pub(crate) struct PrefixRotation {
     /// The new prefix's base postings.
     pub(crate) postings: Arc<PostingsReader>,
@@ -132,16 +137,28 @@ pub(crate) struct PrefixRotation {
     /// Each layer space's artifact deletions the fold removed the records of, leaving its overlay
     /// in this swap on [`Self::retired`]'s rule.
     pub(crate) retired_artifacts: std::collections::BTreeMap<mosaica_types::LayerSpace, Bitmap>,
+    /// Every other shard's unique, edited-items and tenancy indexes, opened over the new prefix,
+    /// which reads their runs by path: its rows, postings and filter columns carry.
+    pub(crate) carried: Vec<CarriedIndexes>,
     /// Each layer space's supplied content, opened over the new prefix for the filter columns'
     /// reason.
     pub(crate) space_contents:
         std::collections::BTreeMap<mosaica_types::LayerSpace, Arc<mosaica_filter::RecordStack>>,
 }
 
+/// A shard's indexes that read their files by path, opened over a new prefix that links them.
+pub(crate) struct CarriedIndexes {
+    pub(crate) shard: mosaica_types::ShardId,
+    pub(crate) unique: Arc<mosaica_store::unique::UniqueIndexes>,
+    pub(crate) edited: Arc<mosaica_store::edited::EditedIndex>,
+    pub(crate) tenancy: Arc<mosaica_store::tenancy::TenancyIndex>,
+}
+
 impl GeometryPublication {
-    /// A publication **within the live prefix** — what a flush and a merge make. The term index and
-    /// the fragment identity carry forward from the live generation.
+    /// A publication of `shard` **within the live prefix** — what a flush and a merge make. The
+    /// term index and the fragment identity carry forward from the live generation.
     pub fn within_prefix(
+        shard: mosaica_types::ShardId,
         prefix: String,
         segments_version: u64,
         watermark: u64,
@@ -150,6 +167,7 @@ impl GeometryPublication {
         delta_postings: Vec<Arc<DeltaTier>>,
     ) -> Self {
         GeometryPublication {
+            shard,
             prefix,
             segments_version,
             watermark,
@@ -269,6 +287,7 @@ pub(crate) fn check_publishable(
     live: &Generation,
     prefix: &str,
     segments_version: u64,
+    shard: mosaica_types::ShardId,
     watermark: u64,
 ) -> Result<(), GeometryRefused> {
     if segments_version <= live.segments_version {
@@ -279,7 +298,10 @@ pub(crate) fn check_publishable(
             GeometryRefusedReason::SegmentsVersionNotIncreasing,
         ));
     }
-    if watermark < live.only_shard().watermark {
+    if live
+        .shard(shard)
+        .is_some_and(|live| watermark < live.watermark)
+    {
         return Err(GeometryRefused::new(
             live,
             prefix,
@@ -393,14 +415,14 @@ mod tests {
     #[test]
     fn a_publication_must_strictly_increase_the_segments_version() {
         let live = generation_at("p-1", 7, 100);
-        assert!(check_publishable(&live, "p-1", 8, 100).is_ok());
+        assert!(check_publishable(&live, "p-1", 8, live.only_shard().id(), 100).is_ok());
         assert!(
-            check_publishable(&live, "p-2", 8, 100).is_ok(),
+            check_publishable(&live, "p-2", 8, live.only_shard().id(), 100).is_ok(),
             "a new prefix"
         );
 
         for offered in [7u64, 6, 0] {
-            let refused = check_publishable(&live, "p-1", offered, 100)
+            let refused = check_publishable(&live, "p-1", offered, live.only_shard().id(), 100)
                 .expect_err("a non-increasing segments_version is refused");
             assert_eq!(
                 refused.reason,
@@ -425,15 +447,15 @@ mod tests {
         let live = generation_at("p-1", 7, 100);
 
         assert!(
-            check_publishable(&live, "p-1", 8, 100).is_ok(),
+            check_publishable(&live, "p-1", 8, live.only_shard().id(), 100).is_ok(),
             "a merge or a fold passes it through"
         );
         assert!(
-            check_publishable(&live, "p-1", 8, 101).is_ok(),
+            check_publishable(&live, "p-1", 8, live.only_shard().id(), 101).is_ok(),
             "a flush raises it"
         );
 
-        let refused = check_publishable(&live, "p-2", 8, 99)
+        let refused = check_publishable(&live, "p-2", 8, live.only_shard().id(), 99)
             .expect_err("a watermark behind the live one is refused");
         assert_eq!(refused.reason, GeometryRefusedReason::WatermarkRegresses);
     }

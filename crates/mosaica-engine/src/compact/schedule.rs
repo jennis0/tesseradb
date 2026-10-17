@@ -3,7 +3,7 @@
 // `PartialEq` without `Eq` because two thresholds are `f64`; the derive exists for a test.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CompactionSchedule {
-    /// Seconds after the last attempt during which no route fires.
+    /// Seconds after a shard's last attempt during which no route fires for that shard.
     pub min_interval_secs: u64,
     /// Seconds past midnight UTC, so daylight-saving days do not shift the window.
     pub window_start_secs: Option<u32>,
@@ -50,26 +50,29 @@ pub(crate) enum FoldTrigger {
 /// takes it as a closure.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Gauges {
-    /// The largest across the partition's views.
+    /// The largest across the shard's views.
     pub(crate) live_segments: usize,
     /// Deletions only, not suppressions.
     pub(crate) retirable_deletions: u64,
-    /// The layer spaces' deletions, whose records a fold removes. They have no rows.
+    /// The layer spaces' deletions this shard's compaction removes. The open shard's also counts
+    /// those no shard holds. They have no rows.
     pub(crate) artifact_deletions: u64,
     /// Tombstoned rows included.
     pub(crate) live_rows: u64,
 }
 
-/// Bytes on disc under the live prefix, and bytes its manifests name.
-#[derive(Debug, Clone, Copy)]
+/// Bytes on disc under the shard's directory, and bytes its manifests name. The open shard's also
+/// counts everything outside every shard's directory.
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct DeadBytes {
     pub(crate) on_disc: u64,
     pub(crate) named: u64,
 }
 
-/// Whether a fold is due. `last_fold_unix` is when the last attempt ended, not the last success,
-/// so one bad setting cannot retry and discard at every tick. It is process-local and lost at
-/// restart, which is harmless.
+/// Whether a compaction of one shard is due. `last_fold_unix` is the shard's floor
+/// (`Executor::fold_floor_from`): measured from its last attempt, not its last success, so one bad
+/// setting cannot retry and discard at every tick. It is process-local and lost at restart, which
+/// is harmless.
 pub(crate) fn due(
     schedule: &CompactionSchedule,
     now_unix: u64,
@@ -119,6 +122,28 @@ pub(crate) fn due(
     let dead = measured.on_disc.saturating_sub(measured.named);
     (measured.named > 0 && dead as f64 / measured.named as f64 >= threshold)
         .then_some(FoldTrigger::DeadBytes)
+}
+
+/// What the schedule ranks a due shard by, the least first: the higher deleted fraction, then
+/// more segments, then the lower number.
+pub(crate) fn rank(
+    shard: mosaica_types::ShardId,
+    gauges: &Gauges,
+) -> (
+    std::cmp::Reverse<u64>,
+    std::cmp::Reverse<usize>,
+    mosaica_types::ShardId,
+) {
+    // Parts per billion, so the key orders exactly.
+    let fraction = match gauges.live_rows {
+        0 => 0,
+        rows => (u128::from(gauges.retirable_deletions) * 1_000_000_000 / u128::from(rows)) as u64,
+    };
+    (
+        std::cmp::Reverse(fraction),
+        std::cmp::Reverse(gauges.live_segments),
+        shard,
+    )
 }
 
 /// Whether `now_unix` falls in `[start, start + width)` past midnight UTC, wrapping at midnight.
@@ -200,6 +225,29 @@ mod tests {
             ..s
         };
         assert_eq!(due(&ratio_only, at(10, 14), None, gauges(0, 300), || None), None);
+    }
+
+    /// Due shards rank by deleted fraction, then segments, then the lower number, whatever their
+    /// deletion counts.
+    #[test]
+    fn shards_rank_by_deleted_fraction_then_segments_then_number() {
+        let shard = |id| mosaica_types::ShardId::new(id).unwrap();
+        let gauges = |deleted: u64, rows: u64, segments: usize| Gauges {
+            live_segments: segments,
+            retirable_deletions: deleted,
+            artifact_deletions: 0,
+            live_rows: rows,
+        };
+        let mut shards = [
+            (shard(0), gauges(500, 10_000, 9)),
+            (shard(1), gauges(30, 100, 1)),
+            (shard(2), gauges(3, 10, 2)),
+            (shard(3), gauges(0, 0, 40)),
+            (shard(4), gauges(3, 10, 2)),
+        ];
+        shards.sort_by_key(|(id, gauges)| rank(*id, gauges));
+        let order: Vec<u32> = shards.iter().map(|(id, _)| id.raw()).collect();
+        assert_eq!(order, vec![2, 4, 1, 0, 3]);
     }
 
     /// Seconds since the epoch at `hour`:00 UTC on day `day`.

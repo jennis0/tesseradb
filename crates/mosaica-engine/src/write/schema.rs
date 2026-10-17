@@ -148,7 +148,7 @@ pub(crate) fn filter_schema_of(
         .enumerate()
         // Text is not here: `owes_value_column` says it owes no value column. Its flush track is
         // `text_schema_of`.
-        .filter(|(_, d)| crate::filter::owes_value_column(d, &manifest.vocabularies))
+        .filter(|(_, d)| d.owes_value_column(&manifest.vocabularies))
         .map(|(index, d)| crate::flush::FilterColumnSpec {
             index,
             name: d.name.clone(),
@@ -215,9 +215,11 @@ pub(in crate::write) fn analyser_of(
 
 /// The blob-resident columns, with each one's position in a buffered row's scalar list.
 ///
-/// The predicate must be the build's, [`crate::filter::blob_resident`]: this, the render indices
-/// and the filter schema must partition `declared_scalars` identically, or a column none of them
+/// The predicate is the build's, [`DeclaredScalar::blob_resident`]: this, the render indices and
+/// the filter schema must partition `declared_scalars` identically, or a column none of them
 /// claims is acknowledged and then lost.
+///
+/// [`DeclaredScalar::blob_resident`]: mosaica_store::manifest::DeclaredScalar::blob_resident
 pub(crate) fn record_schema_of(
     manifest: &mosaica_store::manifest::Manifest,
 ) -> Vec<crate::flush::RecordColumnSpec> {
@@ -225,7 +227,7 @@ pub(crate) fn record_schema_of(
         .declared_scalars
         .iter()
         .enumerate()
-        .filter(|(_, d)| crate::filter::blob_resident(d, &manifest.vocabularies))
+        .filter(|(_, d)| d.blob_resident(&manifest.vocabularies))
         .map(|(index, d)| crate::flush::RecordColumnSpec {
             index,
             name: d.name.clone(),

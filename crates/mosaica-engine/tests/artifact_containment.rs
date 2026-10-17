@@ -220,6 +220,7 @@ fn build_fixture_n(artifacts: u32) -> Fixture {
                         generated_from: set.into_iter().collect(),
                     })
                     .collect(),
+                withdrawn: Box::default(),
                 attached_to: None,
                 parents: Vec::new(),
                 access: Vec::new(),
@@ -328,7 +329,8 @@ impl Fixture {
 }
 
 /// What the one predicate serves of `rows`' artifact at `ordinal`, as a containment answer, to a
-/// viewer seeing `mask` with `denied` denied, and the partition's `answers` where given.
+/// viewer seeing `mask` with `denied` denied, and the partition's `answers` where given. No
+/// artifact here has a content withdrawn, so the position served is the content's rank.
 fn served(
     rows: &ArtifactRows,
     ordinal: u32,
@@ -352,7 +354,10 @@ fn served(
         }],
     };
     match view.verdict(EntityId::new(999), ordinal) {
-        ArtifactVerdict::Serve { rank: Some(rank), .. } => Containment::Satisfied(rank),
+        ArtifactVerdict::Serve {
+            position: Some(position),
+            ..
+        } => Containment::Satisfied(position),
         ArtifactVerdict::Absent(Withheld::Containment) => Containment::Unsatisfied,
         other => panic!("ordinal {ordinal} was answered before containment: {other:?}"),
     }

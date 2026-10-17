@@ -6,16 +6,14 @@
 //! never writes `MANIFEST.json` or `CURRENT`: it publishes inside the current prefix, which is
 //! what separates it from a compaction.
 //!
-//! ## What is deliberately not here
+//! ## What is not here
 //!
-//! **The delta postings tier.** It is `mosaica-authz`-shaped ([`mosaica_authz::write_delta_tier`])
-//! and this crate does not depend on that one — `read.rs`'s module doc states the property, and
-//! the layering is what keeps `RowId` out of the authorisation crate. The flush unit in
-//! `mosaica-engine` writes both halves and folds both digests into the one manifest, exactly as
-//! `mosaica-build` already composes store and authz writers.
+//! **The delta postings tier.** The flush unit in `mosaica-engine` writes it through
+//! [`mosaica_authz::write_delta_tier`] beside this crate's segment, and folds both digests into
+//! the one manifest, as `mosaica-build` composes store and authz writers.
 //!
-//! **The dictionary extent**, for the same reason: a promoted descriptor's durable ordinal is
-//! written through `mosaica_authz::DictStreamWriter`.
+//! **The dictionary extent.** The flush unit writes a promoted descriptor's durable ordinal
+//! through `mosaica_authz::DictStreamWriter`.
 //!
 //! ## The watermark is `entity_hi + 1`
 //!

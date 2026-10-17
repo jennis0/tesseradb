@@ -63,6 +63,7 @@ fn promote(engine: &Engine, dir: &Path, descriptor: &[u8]) {
     let extended = Arc::new(live.dict.load_extending(&extent).unwrap());
     engine
         .publish_geometry(GeometryPublication::within_prefix(
+            mosaica_types::ShardId::ZERO,
             live.prefix.clone(),
             live.segments_version + 1,
             live.only_shard().watermark,

@@ -55,6 +55,7 @@ impl ArtifactProjections {
             layer,
             level,
             level_version: store.level_version(layer, level),
+            records_version: records.records_version(layer, level),
         };
         // See [`ProjectionKey::live`].
         let key = at.projection_key(match predicate {
@@ -147,26 +148,17 @@ impl ArtifactProjections {
     /// `records` and held for the next. Held records whose length is not the level's are stale
     /// and are rebuilt.
     fn level_records(&self, at: &Coordinate<'_>, records: &ArtifactStore) -> Arc<ArtifactRecords> {
-        let key = at.derived_key();
+        let key = at.records_key();
         let view = view_key(at.view);
         let len = (0..records.slots(at.layer, at.level).len() as u32)
             .rev()
             .find(|&ordinal| records.drawn_in_view(at.layer, at.level, ordinal, view))
             .map_or(0, |ordinal| ordinal as usize + 1);
-        let mut held = self.records_held.lock().unwrap_or_else(|e| e.into_inner());
-        let shared = held
-            .get(&at.records_address())
-            .filter(|(held_key, _)| *held_key == key)
-            .and_then(|(_, records)| records.upgrade())
-            .filter(|shared| shared.len() == len);
-        if let Some(shared) = shared {
-            return shared;
-        }
-        let built = Arc::new(ArtifactRecords::build(
-            records.level_in_view(at.layer, at.level, view),
-        ));
-        held.insert(at.records_address(), (key, Arc::downgrade(&built)));
-        built
+        self.shared_records(at.records_address(), key, len, || {
+            Arc::new(ArtifactRecords::build(
+                records.level_in_view(at.layer, at.level, view),
+            ))
+        })
     }
 
     /// A spatial level's membership is assembled from its segments' resolutions, once, over this

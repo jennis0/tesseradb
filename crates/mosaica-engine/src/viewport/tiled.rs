@@ -791,7 +791,10 @@ impl Engine {
                 .runs
                 .entity_of(u64::from(ordinal))
                 .map(EntityId::new)?;
-            let ArtifactVerdict::Serve { masked_count, rank } = view.verdict(entity, ordinal)
+            let ArtifactVerdict::Serve {
+                masked_count,
+                position,
+            } = view.verdict(entity, ordinal)
             else {
                 return None;
             };
@@ -804,14 +807,14 @@ impl Engine {
                 level.level,
                 ordinal,
                 entity,
-                rank,
+                position,
                 true,
                 contents,
             )?;
             let mosaica_id = self.artifact_id(level.layer.registered.space, entity)?.raw();
             Some(Arc::new(Admitted {
                 mosaica_id,
-                passing: (ordinal, entity, masked_count, rank),
+                passing: (ordinal, entity, masked_count, position),
                 content: supplied.values,
             }))
         });

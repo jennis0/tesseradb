@@ -44,11 +44,12 @@ pub enum Withheld {
 /// The outcome of the one predicate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactVerdict {
-    /// Served, with this masked count beside it and, where the layer declares content, the rank of
-    /// the one content this viewer gets, entire.
+    /// Served, with this masked count beside it and, where the layer declares content, the
+    /// position in the artifact's content row of the one content this viewer gets, entire: the
+    /// content the verdict's own version of the record ranked, whatever has been withdrawn since.
     Serve {
         masked_count: u64,
-        rank: Option<u32>,
+        position: Option<u32>,
     },
     /// Absent. See [`Withheld`] on why the reason never reaches a caller.
     Absent(Withheld),
@@ -202,14 +203,17 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
             return ArtifactVerdict::Absent(Withheld::Criterion);
         }
 
-        match self.rank(ordinal) {
-            Ok(rank) => ArtifactVerdict::Serve { masked_count, rank },
+        match self.position(ordinal) {
+            Ok(position) => ArtifactVerdict::Serve {
+                masked_count,
+                position,
+            },
             Err(withheld) => ArtifactVerdict::Absent(withheld),
         }
     }
 
     /// [`Self::verdict`] for an artifact the caller has seen hold a member this viewer may see,
-    /// answering with the rank of the content served. A count criterion of at most one is then
+    /// answering with the position of the content served. A count criterion of at most one is then
     /// met without counting; any other criterion is counted as the verdict counts it.
     pub fn serves_visible_member(
         &self,
@@ -226,7 +230,7 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
         if !counted {
             return Err(Withheld::Criterion);
         }
-        self.rank(ordinal)
+        self.position(ordinal)
     }
 
     /// The level's records, the same in every side.
@@ -291,11 +295,14 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
     }
 
     /// The verdict's last test: the first content whose generating set this viewer holds
-    /// entirely, or nothing where the layer declares none.
-    fn rank(&self, ordinal: u32) -> Result<Option<u32>, Withheld> {
+    /// entirely, by its position in the content row, or nothing where the layer declares none.
+    fn position(&self, ordinal: u32) -> Result<Option<u32>, Withheld> {
         match self.containment(ordinal) {
             Containment::NothingToContain => Ok(None),
-            Containment::Satisfied(i) => Ok(Some(i)),
+            Containment::Satisfied(rank) => match self.records() {
+                Some(records) => Ok(Some(records.position(ordinal, rank))),
+                None => Err(Withheld::Containment),
+            },
             Containment::Unsatisfied => Err(Withheld::Containment),
         }
     }
@@ -445,7 +452,7 @@ mod tests {
             fx.view(&d, true).verdict(EntityId::new(999), 0),
             ArtifactVerdict::Serve {
                 masked_count: 6,
-                rank: None
+                position: None
             }
         );
 
@@ -605,7 +612,7 @@ mod tests {
             view.verdict(EntityId::new(999), 0),
             ArtifactVerdict::Serve {
                 masked_count: 7,
-                rank: Some(0)
+                position: Some(0)
             }
         );
 
@@ -647,12 +654,12 @@ mod tests {
 
         for mask in [Bitmap::of(&[1, 2, 3, 4]), Bitmap::of(&[1, 2, 5, 6])] {
             match verdict(&mask) {
-                ArtifactVerdict::Serve { rank, .. } => assert_eq!(rank, Some(1)),
+                ArtifactVerdict::Serve { position, .. } => assert_eq!(position, Some(1)),
                 other => panic!("expected the narrow content, got {other:?}"),
             }
         }
         match verdict(&Bitmap::of(&[1, 2, 3, 4, 5, 6])) {
-            ArtifactVerdict::Serve { rank, .. } => assert_eq!(rank, Some(0)),
+            ArtifactVerdict::Serve { position, .. } => assert_eq!(position, Some(0)),
             other => panic!("expected the ranked-first content, got {other:?}"),
         }
         assert_eq!(
@@ -703,6 +710,7 @@ mod tests {
                 })],
                 parents: vec![Vec::new()],
                 declared: vec![Vec::new()],
+                withdrawn: Vec::new(),
                 access: Vec::new(),
                 attached_by: Default::default(),
             },
@@ -817,7 +825,7 @@ mod tests {
             fx.view(&d, true).verdict(EntityId::new(999), 0),
             ArtifactVerdict::Serve {
                 masked_count: 3,
-                rank: None
+                position: None
             }
         );
     }
@@ -852,7 +860,7 @@ mod tests {
                 .verdict(EntityId::new(999), 0),
             ArtifactVerdict::Serve {
                 masked_count: 5,
-                rank: Some(0)
+                position: Some(0)
             },
             "both slices whole: served, with the count summed over the sides"
         );
@@ -900,7 +908,7 @@ mod tests {
                 .verdict(EntityId::new(999), 0),
             ArtifactVerdict::Serve {
                 masked_count: 4,
-                rank: None
+                position: None
             }
         );
         for alone in [

@@ -1090,7 +1090,7 @@ impl Engine {
             |leaf: &crate::filter::MemberOfLeaf| self.member_rows(leaf, served, side, resolved);
         let layers = |layer: &str| self.reaches_layer(served.session, layer);
         let unique = |column: &str, keys: &[mosaica_store::unique::UniqueKey]| {
-            unique_holders(side.shard, column, keys)
+            unique_holders(served.generation, side.shard, column, keys)
         };
         let resolvers = crate::filter::RowLeafResolvers {
             regions: &regions,
@@ -1195,7 +1195,7 @@ impl Engine {
                     view: served.name.to_string(),
                     shard: side.shard.id(),
                     prefix: served.generation.prefix.clone(),
-                    segments_version: served.generation.segments_version,
+                    segments_version: side.shard.segments_version,
                     digest: digest_of(&canonical),
                     max_cells,
                 };
@@ -1338,14 +1338,15 @@ fn memo<K, V: Clone, E>(
     Ok(value)
 }
 
-/// The entities holding `keys` in a unique column, by the column's index and the live entries
-/// beside it, deleted entities dropped. Visibility is the caller's.
+/// The entities of `shard` holding `keys` in a unique column, by the shard's index and its live
+/// entries in `generation`, deleted entities dropped. Visibility is the caller's.
 pub(crate) fn unique_holders(
+    generation: &crate::Generation,
     shard: &crate::Shard,
     column: &str,
     keys: &[mosaica_store::unique::UniqueKey],
 ) -> std::result::Result<Vec<u32>, crate::filter::FilterError> {
-    crate::unique::holders(shard, column, keys)
+    crate::unique::holders_in(generation, shard, column, keys)
         .map(|found| found.into_iter().map(|(_, entity)| entity.raw() as u32).collect())
         .map_err(|e| crate::filter::FilterError::UniqueUnreadable {
             column: column.to_string(),

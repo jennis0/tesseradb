@@ -45,10 +45,12 @@ use mosaica_cache::{CacheStats, CacheWeight, SingleFlightCache, WaitEnded};
 /// 1. **`grant` is the grant whole**: `Session::terms_digest`, and the projection is a function of
 ///    the grant's keys and the shard's state alone, so sessions holding different credentials
 ///    share it. Anything per credential is read from the session.
-/// 2. **`segments_version` is globally unique within a process**, which is why
-///    [`RowProjectionCache::prune_generations_below`]'s depth test reads it alone.
-///    `crate::pins::check_publishable` refuses any publication that does not strictly increase it.
-///    Relax that guard and this pruner starts removing the wrong generation's entries.
+/// 2. **`segments_version` names one row space of the shard within a process**, which is why
+///    [`RowProjectionCache::prune_superseded`]'s depth test reads it alone. A shard's
+///    `segments_version` is the generation's at its last row-space change, and
+///    `crate::geometry::check_publishable` refuses a publication that does not raise the
+///    generation's. Relax that guard and this pruner starts removing the wrong generation's
+///    entries.
 /// 3. **`prefix` and `identity` are carried although `segments_version` discriminates within a
 ///    process**: a compaction publishes a new prefix and shard identity, and no entry from before
 ///    it may answer a request after it.
@@ -62,10 +64,10 @@ pub(crate) struct RowProjectionKey {
     pub shard: ShardId,
     /// The shard's identity (`ShardParts::identity`), which a compaction moves.
     pub identity: [u8; 32],
-    /// The geometry generation the row space belongs to. Entries more than
-    /// [`KEEP_SUPERSEDED_GENERATIONS`] behind become
-    /// [`RowProjectionCache::prune_generations_below`]'s work at the next publication; an
-    /// *overlay* swap must not move it.
+    /// The shard's `segments_version` (`ShardParts::segments_version`), which names its row
+    /// space. An entry older than the shard's row space one generation back becomes
+    /// [`RowProjectionCache::prune_superseded`]'s work at the next publication; an *overlay* swap
+    /// must not move it.
     pub segments_version: u64,
     /// The prefix that geometry belongs to — see fact 3 above.
     pub prefix: String,
@@ -311,8 +313,8 @@ impl RowProjectionCache {
     /// for.
     ///
     /// **Scoped to `prefix`**: across a fold a superseded entry carries a fragment built from the
-    /// term index the fold replaced, and `prune_generations_below` keeps the generation
-    /// immediately under the live one, which after a fold is a pre-fold entry.
+    /// term index the fold replaced, and `prune_superseded` keeps the generation immediately
+    /// under the live one, which after a fold is a pre-fold entry.
     ///
     /// **And bounded below by `floor`**, the publication's retention floor, so the drill-down is
     /// never staler than rung 2 of the viewport beside it. The prune keeps a grant's newest entry
@@ -372,10 +374,10 @@ impl RowProjectionCache {
         self.inner.retain_keys(|_| false);
     }
 
-    /// Drop every projection built against a generation older than `floor`, keeping `floor` and
-    /// everything above it, **and keeping each grant's newest projection of each view and shard in
-    /// the live prefix whatever its generation**. Called by the publication, with
-    /// `live - `[`KEEP_SUPERSEDED_GENERATIONS`] and the live generation's prefix.
+    /// Drop every projection of a shard's row space older than its [`retention_floor`] in `live`,
+    /// keeping the floor and everything above it, **and keeping each grant's newest projection of
+    /// each view and shard in the live prefix whatever its generation**. Called by the publication
+    /// with the generation it swapped in.
     ///
     /// # Why a retention depth rather than a reclaim hook
     ///
@@ -419,12 +421,12 @@ impl RowProjectionCache {
     /// is small (16 entries at the 2 GiB default and the *measured* 125.12 MB per entry); at its
     /// adversarial n, `bound / PER_ENTRY_FLOOR_BYTES`, the clone costs more than the removal,
     /// and both run on the publication path, not on a request handler.
-    pub(crate) fn prune_generations_below(&self, floor: u64, live_prefix: &str) -> usize {
+    pub(crate) fn prune_superseded(&self, live: &crate::Generation) -> usize {
         let ready = self.inner.ready_entries();
         let newest = newest_per_lineage(&ready);
         self.inner.retain_keys(|key| {
-            key.segments_version >= floor
-                || (key.prefix == live_prefix
+            key.segments_version >= retention_floor(live, key.shard)
+                || (key.prefix == live.prefix
                     && newest.get(&lineage(key)) == Some(&key.segments_version))
         })
     }
@@ -449,12 +451,18 @@ fn newest_per_lineage(
     newest
 }
 
-/// How many superseded generations' projections the cache keeps after a publication.
+/// The oldest `segments_version` of `shard`'s row space a publication of `live` keeps an artefact
+/// of: the shard's row space one generation back, or past every version of a shard `live` does
+/// not hold.
 ///
-/// **One, and the number is the patch's input rather than a margin.** A flush appends, so the
-/// generation immediately below the live one holds exactly the projection the next request's patch
-/// derives from; a second one back is derivable from the first and is kept only while it is its
-/// grant's newest in the live prefix ([`RowProjectionCache::prune_generations_below`]). Raising
-/// this buys nothing and costs a *measured* 125.12 MB per entry per grant at 10⁹; lowering it to
-/// zero forfeits the patch and reinstates the full rebuild at every tick.
-pub(crate) const KEEP_SUPERSEDED_GENERATIONS: u64 = 1;
+/// **One generation.** A flush appends, so the next request's patch derives from the shard's row
+/// space one generation below the live one. One further back is derivable from it and is kept only
+/// while it is its grant's newest in the live prefix ([`RowProjectionCache::prune_superseded`]).
+/// Each further generation costs a *measured* 125.12 MB per entry per grant at 10⁹, and with none
+/// the full rebuild runs at every tick.
+pub(crate) fn retention_floor(live: &crate::Generation, shard: ShardId) -> u64 {
+    match live.shard(shard) {
+        Some(held) => live.segments_version_before(held).unwrap_or(0),
+        None => u64::MAX,
+    }
+}

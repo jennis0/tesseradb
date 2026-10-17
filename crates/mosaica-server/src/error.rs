@@ -367,6 +367,9 @@ pub fn map_accept_error(e: mosaica_engine::AcceptError) -> ApiError {
         }
         // The detail names the size, the high water and the ids needed.
         AcceptError::Exec(e @ ExecError::ShardFull(_)) => ApiError::Conflict(e.to_string()),
+
+        // The detail names how many new items found no shard.
+        AcceptError::Exec(e @ ExecError::ShardsExhausted(_)) => ApiError::Conflict(e.to_string()),
         // The detail names the layer spaces given, or the level's need and its space's room.
         AcceptError::Exec(ExecError::LayerSpaceFull { detail }) => ApiError::Conflict(detail),
         AcceptError::Exec(ExecError::ShardSize(e @ mosaica_types::ShardSizeError::Zero)) => {
@@ -401,6 +404,17 @@ pub fn map_accept_error(e: mosaica_engine::AcceptError) -> ApiError {
         AcceptError::Exec(ExecError::UniqueTaken { detail }) => ApiError::Conflict(detail),
         // Reached only where the handler's last resolution was stale too.
         AcceptError::Exec(e @ ExecError::Stale) => ApiError::Conflict(e.to_string()),
+        AcceptError::Exec(e @ ExecError::Store { .. }) => {
+            tracing::error!(
+                detail = %e,
+                "the write executor could not write a file; answering fail-closed"
+            );
+            ApiError::FailClosed(
+                "a file this write needs could not be written, so the batch was not applied; send \
+                 it again"
+                    .to_string(),
+            )
+        }
         // The detail names rows by position, values as sent and items by `mosaica_id`.
         AcceptError::Conflict(detail) => ApiError::Conflict(detail),
         AcceptError::Contract(detail) => ApiError::Contract(detail),

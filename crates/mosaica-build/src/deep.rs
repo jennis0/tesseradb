@@ -1064,9 +1064,16 @@ fn check_band_labels(
     use mosaica_types::layer::ServingLayout;
     let extents = &shard.record.derived_extents;
     let current = |e: &DerivedExtent| {
+        let slice = shard
+            .record
+            .slice_versions
+            .iter()
+            .find(|held| held.space == e.space && held.level == e.level)
+            .map(|held| held.version);
         mosaica_store::manifest::layer_space(&partition.layer_spaces, e.space)
             .and_then(|space| space.level_version(e.level))
             == Some(e.level_version)
+            && slice == Some(e.slice_version)
     };
     let is_label_column = |e: &DerivedExtent| {
         matches!(
@@ -1711,6 +1718,7 @@ mod tests {
                     generated_from: Bitmap::of(set),
                     cardinality: set.len() as u64,
                 }],
+                withdrawn: Box::default(),
                 attached_to: None,
                 parents: Vec::new(),
                 access: Vec::new(),

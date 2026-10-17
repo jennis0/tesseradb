@@ -11,9 +11,8 @@
 //! scope is the point.
 //!
 //! "The window allocates" reads like an allocator change and is not one. IDs are issued by one
-//! [`Allocator::allocate`] call, freed ids first and then from the high-water, and assigned in
-//! signature order by [`assign_sorted`]. The window changes only *how many* are
-//! assigned in one sorted run.
+//! [`assign_sorted`] call, freed ids first and then from a high water, and assigned in signature
+//! order. The window changes only *how many* are assigned in one sorted run.
 //!
 //! ## Calibrate the win honestly
 //!
@@ -101,10 +100,12 @@
 
 use std::time::Instant;
 
-use mosaica_types::{EntityId, ItemAt, ShardFull, ShardId, TermId};
+use std::collections::BTreeMap;
+
+use mosaica_types::{ItemAt, ShardId, TermId};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::alloc::{assign_sorted, Allocator, PendingItem};
+use crate::alloc::{assign_sorted, AllocError, Allocators, PendingItem, Placed};
 use crate::command::{UnallocatedEdit, UnallocatedRow};
 use crate::wal::{RowOutcome, RowReceipt, WalEdit, WalRecord, WalRow};
 
@@ -484,13 +485,14 @@ fn tally(pending: &[PendingItem]) -> FragmentationTally {
     if rows == 0 {
         return FragmentationTally::default();
     }
-    // Ascending by id. A row that joins an existing entity keeps that entity's id, so a window's
-    // ids are not one contiguous block and cannot be addressed as `id - lowest`.
+    // Ascending by shard, then id. A row that joins an existing entity keeps that entity's id, so
+    // a window's ids are not one contiguous block and cannot be addressed as `id - lowest`. An
+    // entity is below 2³², so no two shards' ids are contiguous.
     let id_of = |index: usize| {
-        pending[index]
-            .entity_id
-            .expect("every pending item is assigned an id before the tally runs")
-            .raw()
+        let item = pending[index]
+            .item
+            .expect("every pending item is assigned an id before the tally runs");
+        (u64::from(item.shard.raw()) << 32) | item.entity.raw()
     };
     let mut by_rank: Vec<usize> = (0..pending.len()).collect();
     by_rank.sort_unstable_by_key(|&index| id_of(index));
@@ -506,7 +508,7 @@ fn tally(pending: &[PendingItem]) -> FragmentationTally {
 
     for &index in &by_rank {
         let item = &pending[index];
-        let id = item.entity_id.expect("assigned above").raw();
+        let id = id_of(index);
         for term in &item.terms {
             match last.get_mut(term) {
                 // Already counted for this row. Reached by a repeated term whether or not the
@@ -550,13 +552,41 @@ fn tally(pending: &[PendingItem]) -> FragmentationTally {
     t
 }
 
-/// The ids an entry's `rows` and its `edits` edits take at the window's close, as `(edits, new
-/// items)`: one for each edit, and one for each row that creates an item. A row joining an item
-/// takes none.
-pub fn wanted(rows: &[UnallocatedRow], edits: usize) -> (u64, u64) {
-    let items = rows.iter().filter(|row| row.join.is_none()).count();
-    (edits as u64, items as u64)
+/// The ids a window's entries take at its close.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Wanted {
+    /// One for each edit, in the shard of the item it edits.
+    pub edits: BTreeMap<ShardId, u64>,
+    /// One for each row that creates an item. A row joining an item takes none.
+    pub items: u64,
 }
+
+impl Wanted {
+    /// Adds `other`'s ids to these.
+    pub fn add(&mut self, other: Wanted) {
+        for (shard, n) in other.edits {
+            *self.edits.entry(shard).or_default() += n;
+        }
+        self.items += other.items;
+    }
+}
+
+/// The ids an entry's `rows` and the edits of items in `edits`' shards take at the window's close.
+pub fn wanted(rows: &[UnallocatedRow], edits: impl IntoIterator<Item = ShardId>) -> Wanted {
+    let mut edited = BTreeMap::new();
+    for shard in edits {
+        *edited.entry(shard).or_default() += 1;
+    }
+    Wanted {
+        edits: edited,
+        items: rows.iter().filter(|row| row.join.is_none()).count() as u64,
+    }
+}
+
+/// What [`CommitWindow::allocate`] returns: the closed entries, the assignment's tally and what it
+/// placed, or the refusal with each entry's waiters handed back.
+pub type Closed<W> =
+    Result<(Vec<ClosedEntry<W>>, FragmentationTally, Placed), (AllocError, Vec<Vec<W>>)>;
 
 /// The open commit window.
 pub struct CommitWindow<W> {
@@ -570,7 +600,7 @@ pub struct CommitWindow<W> {
     items: FxHashSet<ItemAt>,
     keys: FxHashSet<(u16, u128)>,
     rows: usize,
-    wanted: (u64, u64),
+    wanted: Wanted,
     /// When this window opened. Read by the executor to time the window's service, and by nothing
     /// else: **there is no age bound and no timer**. A window closes on its row bound or on the work
     /// queue being observed empty; the age bound the specification mentions is the safety cap on a
@@ -590,7 +620,7 @@ impl<W> CommitWindow<W> {
             items: FxHashSet::default(),
             keys: FxHashSet::default(),
             rows: 0,
-            wanted: (0, 0),
+            wanted: Wanted::default(),
             opened_at: Instant::now(),
             seq,
         }
@@ -627,9 +657,9 @@ impl<W> CommitWindow<W> {
         self.seq
     }
 
-    /// The `(edits, new items)` this window's entries take ids for: [`wanted`] summed.
-    pub fn wanted(&self) -> (u64, u64) {
-        self.wanted
+    /// The ids this window's entries take: [`wanted`] summed.
+    pub fn wanted(&self) -> &Wanted {
+        &self.wanted
     }
 
     pub fn opened_at(&self) -> Instant {
@@ -683,17 +713,19 @@ impl<W> CommitWindow<W> {
         self.items.extend(claims.items);
         self.keys.extend(claims.keys);
         self.rows += entry.rows.len() + entry.edits.iter().map(|e| e.rows.len()).sum::<usize>();
-        let (edits, items) = wanted(&entry.rows, entry.edits.len());
-        self.wanted = (self.wanted.0 + edits, self.wanted.1 + items);
+        self.wanted.add(wanted(
+            &entry.rows,
+            entry.edits.iter().map(|edit| edit.shard),
+        ));
         self.entries.push(entry);
     }
 
     /// **Close the window: one signature-sorted allocation run over every row it holds.**
     ///
-    /// Gather every entry's rows into one `Vec<PendingItem>` in `(entry, row)` order, hand it to the
-    /// unchanged [`assign_sorted`], and scatter the ids back by position. One
-    /// [`Allocator::allocate`] call for the whole window, so a window that cannot allocate has **no
-    /// effect at all** — `allocate` leaves the allocator unchanged on its error path.
+    /// Gather every entry's rows into one `Vec<PendingItem>` in `(entry, row)` order, hand it to
+    /// [`assign_sorted`], and scatter the ids back by position. One assignment for the whole
+    /// window, so a window that cannot allocate has **no effect at all**: `assign_sorted` leaves
+    /// every allocator unchanged on its error path.
     ///
     /// **No per-row clone.** `terms` are *moved* out of each row into its `PendingItem` and moved
     /// back out afterwards, rather than copied ([`UnallocatedRow::take_pending`] and
@@ -712,16 +744,15 @@ impl<W> CommitWindow<W> {
     /// the numbers mean and what they do not. The error path returns none: a window that could not
     /// allocate made no assignment to measure, which is the same statement as "no effect at all".
     ///
-    /// `alloc` is shard `shard`'s, and every row and edit the window holds takes its id there.
-    /// `mosaica_id_of` gives a created item's `mosaica_id` for the receipt each record carries; a
-    /// row naming an item carries its own.
-    #[allow(clippy::type_complexity)]
+    /// An edit takes its id in its item's shard, and the new items where the placement puts them;
+    /// [`Placed`] names the shards the window sealed and opened. `mosaica_id_of` gives a created
+    /// item's `mosaica_id` for the receipt each record carries; a row naming an item carries its
+    /// own.
     pub fn allocate(
         self,
-        alloc: &mut Allocator,
-        shard: ShardId,
-        mosaica_id_of: impl Fn(EntityId) -> u64,
-    ) -> Result<(Vec<ClosedEntry<W>>, FragmentationTally), (ShardFull, Vec<Vec<W>>)> {
+        allocators: &mut Allocators<'_>,
+        mosaica_id_of: impl Fn(ItemAt) -> u64,
+    ) -> Closed<W> {
         let mut entries = self.entries;
 
         // An edit's first row takes the new entity; its other rows take the same one after.
@@ -732,15 +763,16 @@ impl<W> CommitWindow<W> {
             }
             for edit in &mut entry.edits {
                 pending.push(PendingItem {
-                    edit: true,
+                    edit: Some(edit.shard),
                     ..edit.rows[0].take_pending()
                 });
             }
         }
 
-        if let Err(e) = assign_sorted(&mut pending, alloc) {
-            return Err((e, entries.into_iter().map(|e| e.waiters).collect()));
-        }
+        let placed = match assign_sorted(&mut pending, allocators) {
+            Ok(placed) => placed,
+            Err(e) => return Err((e, entries.into_iter().map(|e| e.waiters).collect())),
+        };
 
         // Between the assignment and the scatter is the one moment the whole window's ids and terms
         // are in hand together.
@@ -757,7 +789,7 @@ impl<W> CommitWindow<W> {
                 let p = scattered
                     .next()
                     .expect("one PendingItem was gathered per row, in this order");
-                let (wal_row, row_terms) = row.into_wal_row_with(p, shard);
+                let (wal_row, row_terms) = row.into_wal_row_with(p);
                 items.push(ItemAt::new(wal_row.shard, wal_row.entity_id));
                 wal_rows.push(wal_row);
                 terms.push(row_terms);
@@ -765,28 +797,31 @@ impl<W> CommitWindow<W> {
             let mut edits = Vec::with_capacity(entry.edits.len());
             let mut edit_terms = Vec::with_capacity(entry.edits.len());
             for edit in entry.edits {
-                debug_assert_eq!(edit.shard, shard, "an edit takes its id in its own shard");
                 let p = scattered
                     .next()
                     .expect("one PendingItem was gathered per edit, in this order");
-                let entity = p.entity_id;
+                let item = p.item;
                 let mut first = Some(p);
                 let mut rows = Vec::with_capacity(edit.rows.len());
                 for (at, row) in edit.rows.into_iter().enumerate() {
                     let pending = first.take().unwrap_or_else(|| PendingItem {
                         terms: Vec::new(),
-                        entity_id: entity,
-                        edit: true,
+                        item,
+                        edit: Some(edit.shard),
                     });
-                    let (mut wal_row, row_terms) = row.into_wal_row_with(pending, edit.shard);
+                    let (mut wal_row, row_terms) = row.into_wal_row_with(pending);
                     wal_row.join = at > 0;
                     if at == 0 {
                         edit_terms.push(row_terms);
                     }
                     rows.push(wal_row);
                 }
-                let entity = entity.expect("assign_sorted assigns every item it is given");
-                items.push(ItemAt::new(edit.shard, entity));
+                let item = item.expect("assign_sorted assigns every item it is given");
+                debug_assert_eq!(
+                    item.shard, edit.shard,
+                    "an edit takes its id in its own shard"
+                );
+                items.push(item);
                 edits.push(WalEdit {
                     shard: edit.shard,
                     old: edit.old,
@@ -812,9 +847,9 @@ impl<W> CommitWindow<W> {
                             } else {
                                 RowOutcome::Created
                             },
-                            mosaica_id: Some(
-                                mosaica_id.unwrap_or_else(|| mosaica_id_of(row.entity_id)),
-                            ),
+                            mosaica_id: Some(mosaica_id.unwrap_or_else(|| {
+                                mosaica_id_of(ItemAt::new(row.shard, row.entity_id))
+                            })),
                             over_bound: entry.over_bound.contains(&(i as u32)),
                         }
                     }
@@ -853,14 +888,16 @@ impl<W> CommitWindow<W> {
                 waiters: entry.waiters,
             });
         }
-        Ok((closed, tally))
+        Ok((closed, tally, placed))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::alloc::Allocator;
     use crate::wal::WalScalar;
+    use mosaica_types::EntityId;
 
     /// Admit `entry` claiming what its rows claim, with no unique values.
     fn push<W>(w: &mut CommitWindow<W>, entry: WindowEntry<W>) {
@@ -870,6 +907,14 @@ mod tests {
             Vec::new(),
         );
         w.push(entry, claims);
+    }
+
+    /// `w` closed with `alloc` as shard 0's, the only shard, at no size.
+    fn close<W>(w: CommitWindow<W>, alloc: &mut Allocator) -> Closed<W> {
+        w.allocate(
+            &mut Allocators::single(ShardId::ZERO, alloc, u64::MAX),
+            |item| item.entity.raw(),
+        )
     }
 
     fn claims(rows: &[UnallocatedRow]) -> WindowClaims {
@@ -921,9 +966,7 @@ mod tests {
             );
         }
         let mut alloc_split = Allocator::new(100);
-        let (closed, _) = split
-            .allocate(&mut alloc_split, ShardId::ZERO, |e| e.raw())
-            .unwrap();
+        let (closed, _, _) = close(split, &mut alloc_split).unwrap();
         let split_ids: Vec<u64> = closed
             .iter()
             .flat_map(|e| e.items.iter().map(|i| i.entity.raw()))
@@ -937,10 +980,7 @@ mod tests {
         }
         push(&mut whole, entry("one", rows));
         let mut alloc_whole = Allocator::new(100);
-        let whole_ids: Vec<u64> = whole
-            .allocate(&mut alloc_whole, ShardId::ZERO, |e| e.raw())
-            .unwrap()
-            .0[0]
+        let whole_ids: Vec<u64> = close(whole, &mut alloc_whole).unwrap().0[0]
             .items
             .iter()
             .map(|i| i.entity.raw())
@@ -964,9 +1004,7 @@ mod tests {
         let mut w = CommitWindow::new(3);
         push(&mut w, entry("a", vec![row(&[5]), row(&[0])]));
         push(&mut w, entry("b", vec![row(&[3])]));
-        let (closed, _) = w
-            .allocate(&mut Allocator::new(0), ShardId::ZERO, |e| e.raw())
-            .unwrap();
+        let (closed, _, _) = close(w, &mut Allocator::new(0)).unwrap();
 
         let mut framed = Vec::new();
         for e in &closed {
@@ -1016,7 +1054,7 @@ mod tests {
     #[test]
     fn a_window_counts_the_ids_its_entries_take() {
         let mut w: CommitWindow<&'static str> = CommitWindow::new(0);
-        assert_eq!(w.wanted(), (0, 0));
+        assert_eq!(w.wanted(), &Wanted::default());
         let joining = UnallocatedRow {
             join: Some(ItemAt::new(ShardId::ZERO, EntityId::new(7))),
             ..row(&[1])
@@ -1030,9 +1068,15 @@ mod tests {
             rows: vec![row(&[4]), row(&[4])],
         });
         push(&mut w, edited);
-        assert_eq!(w.wanted(), (1, 3));
+        assert_eq!(
+            w.wanted(),
+            &Wanted {
+                edits: BTreeMap::from([(ShardId::ZERO, 1)]),
+                items: 3,
+            }
+        );
         let mut alloc = Allocator::new(0);
-        w.allocate(&mut alloc, ShardId::ZERO, |e| e.raw()).unwrap();
+        close(w, &mut alloc).unwrap();
         assert_eq!(
             alloc.high_water(),
             4,
@@ -1086,9 +1130,7 @@ mod tests {
         assert_eq!(w.len(), entries_before, "a join adds no entry");
         assert!(!w.conflicts(&claims(&[row(&[1])])), "a join claims nothing");
 
-        let (closed, _) = w
-            .allocate(&mut Allocator::new(0), ShardId::ZERO, |e| e.raw())
-            .unwrap();
+        let (closed, _, _) = close(w, &mut Allocator::new(0)).unwrap();
         assert_eq!(closed.len(), 1);
         assert_eq!(
             closed[0].waiters,
@@ -1140,9 +1182,7 @@ mod tests {
                 ],
             ),
         );
-        let (_, t) = w
-            .allocate(&mut Allocator::new(0), ShardId::ZERO, |e| e.raw())
-            .unwrap();
+        let (_, t, _) = close(w, &mut Allocator::new(0)).unwrap();
 
         assert_eq!(t.rows, 6);
         assert_eq!(t.postings, 8, "four postings for each of the two terms");
@@ -1169,9 +1209,7 @@ mod tests {
                 vec![joining(70_000, &[1]), joining(3, &[1]), row(&[1])],
             ),
         );
-        let (closed, t) = w
-            .allocate(&mut Allocator::new(100_000), ShardId::ZERO, |e| e.raw())
-            .unwrap();
+        let (closed, t, _) = close(w, &mut Allocator::new(100_000)).unwrap();
 
         let ids: Vec<u64> = closed[0].items.iter().map(|e| e.entity.raw()).collect();
         assert_eq!(
@@ -1200,9 +1238,7 @@ mod tests {
     fn a_term_repeated_within_one_row_is_one_posting() {
         let mut w: CommitWindow<&'static str> = CommitWindow::new(0);
         push(&mut w, entry("b1", vec![row(&[7, 9, 7]), row(&[7, 9, 7])]));
-        let (_, t) = w
-            .allocate(&mut Allocator::new(0), ShardId::ZERO, |e| e.raw())
-            .unwrap();
+        let (_, t, _) = close(w, &mut Allocator::new(0)).unwrap();
 
         assert_eq!(t.rows, 2);
         assert_eq!(t.postings, 4, "two rows x two DISTINCT terms, not six");
@@ -1224,9 +1260,7 @@ mod tests {
             &mut w,
             entry("b1", vec![row(&[1]), row(&[1]), row(&[1]), row(&[1])]),
         );
-        let (closed, t) = w
-            .allocate(&mut Allocator::new(LO), ShardId::ZERO, |e| e.raw())
-            .unwrap();
+        let (closed, t, _) = close(w, &mut Allocator::new(LO)).unwrap();
 
         assert_eq!(
             closed[0]
@@ -1244,15 +1278,29 @@ mod tests {
 
     /// A window that cannot allocate has no effect: the high-water mark does not move (I9).
     #[test]
-    fn a_window_that_exhausts_the_id_space_has_no_effect() {
+    fn a_window_whose_edits_exhaust_the_id_space_has_no_effect() {
         let mut w = CommitWindow::new(0);
-        push(&mut w, entry("a", vec![row(&[1]), row(&[1])]));
+        let mut edited = entry("a", vec![row(&[1])]);
+        for old in [5, 6] {
+            edited.edits.push(UnallocatedEdit {
+                shard: ShardId::ZERO,
+                old: EntityId::new(old),
+                number: EntityId::new(old),
+                rows: vec![row(&[2])],
+            });
+        }
+        push(&mut w, edited);
         let mut alloc = Allocator::new(mosaica_types::ENTITY_END - 1);
-        let err = w.allocate(&mut alloc, ShardId::ZERO, |e| e.raw());
-        let Err((full, waiters)) = err else {
+        let Err((error, waiters)) = close(w, &mut alloc) else {
             panic!("a window past the end of the shard's ids must be refused");
         };
-        assert_eq!(full.limit, mosaica_types::ShardLimit::End(mosaica_types::ENTITY_END));
+        assert!(matches!(
+            error,
+            AllocError::Full(mosaica_types::ShardFull {
+                limit: mosaica_types::ShardLimit::End(mosaica_types::ENTITY_END),
+                ..
+            })
+        ));
         assert_eq!(alloc.high_water(), mosaica_types::ENTITY_END - 1);
         assert_eq!(
             waiters,
@@ -1261,5 +1309,87 @@ mod tests {
              as `ReceiptLost` — 'this may be applied in full' — which is the opposite of what \
              happened here"
         );
+    }
+
+    /// An edit takes its id in its item's shard and the new items go where the placement puts
+    /// them; each receipt's `mosaica_id` is taken in the shard its row landed in, and the window
+    /// says which shards it sealed and opened.
+    #[test]
+    fn a_window_over_several_shards_writes_each_row_in_the_shard_it_took_its_id_in() {
+        let one = ShardId::new(1).unwrap();
+        let two = ShardId::new(2).unwrap();
+        let mut zero = Allocator::new(10);
+        zero.release_after(
+            0,
+            crate::alloc::ByTenancy::from([(
+                mosaica_types::Tenancy::ZERO,
+                croaring::Bitmap::of(&[3]),
+            )]),
+        );
+        zero.promote(0);
+        zero.seal();
+        let mut open = Allocator::new(9);
+        let mut w = CommitWindow::new(0);
+        let mut edited = entry("a", vec![row(&[3]), row(&[1]), row(&[2])]);
+        edited.edits.push(UnallocatedEdit {
+            shard: ShardId::ZERO,
+            old: EntityId::new(5),
+            number: EntityId::new(5),
+            rows: vec![row(&[4]), row(&[4])],
+        });
+        edited.slots.push(Slot::Edited {
+            edit: 0,
+            mosaica_id: 77,
+        });
+        push(&mut w, edited);
+        let (closed, _, placed) = w
+            .allocate(
+                &mut Allocators {
+                    shards: vec![(ShardId::ZERO, &mut zero), (one, &mut open)],
+                    size: 10,
+                    next_id: 2,
+                },
+                |item| u64::from(item.shard.raw()) * 1000 + item.entity.raw(),
+            )
+            .unwrap();
+        let WalRecord::IngestBatch {
+            rows,
+            edits,
+            receipt,
+            ..
+        } = &closed[0].record
+        else {
+            panic!("a window closes into ingest records");
+        };
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.shard, row.entity_id.raw()))
+                .collect::<Vec<_>>(),
+            vec![(two, 1), (one, 9), (two, 0)],
+            "signature order: [1] fills shard 1 to its size, [2] and [3] open shard 2"
+        );
+        assert_eq!(
+            edits[0]
+                .rows
+                .iter()
+                .map(|row| (row.shard, row.entity_id.raw()))
+                .collect::<Vec<_>>(),
+            vec![(ShardId::ZERO, 3), (ShardId::ZERO, 3)],
+            "the edit takes the sealed shard's tenancy-0 id, every row of it"
+        );
+        assert_eq!(
+            receipt.iter().map(|r| r.mosaica_id).collect::<Vec<_>>(),
+            vec![Some(2001), Some(1009), Some(2000), Some(77)]
+        );
+        assert_eq!(placed.sealed, vec![one]);
+        assert_eq!(
+            placed
+                .opened
+                .iter()
+                .map(|(shard, _)| *shard)
+                .collect::<Vec<_>>(),
+            vec![two]
+        );
+        assert_eq!(open.state(), mosaica_types::ShardState::Sealed);
     }
 }

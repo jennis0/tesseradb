@@ -1,11 +1,14 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use mosaica_authz::{sweep_term_postings, DeltaTier, PostingsReader, PostingsSpool};
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_store::edited::{EditedRows, RowEntities};
-use mosaica_store::manifest::{DeclaredScalar, FileDigest, ManifestVocabulary, SegmentDescriptor};
+use mosaica_store::manifest::{
+    DeclaredScalar, FileDigest, ManifestVocabulary, ScopedColumn, SegmentDescriptor,
+};
 use mosaica_store::render_presence::RENDER_PRESENCE_DIR;
 use mosaica_store::{fold_row_space, FoldRowSpaceSpec, FoldSegmentInput, PairsParquetWriter};
 use mosaica_types::IdentityKey;
@@ -31,20 +34,41 @@ pub(crate) struct FoldContext {
     pub(crate) band_schema: Vec<(String, ScalarType)>,
     /// Per view, the columns a segment may lack; any other missing column is a torn segment.
     pub(crate) absent_ok: BTreeMap<String, Vec<String>>,
-    /// Entity-scoped columns declared at a running service and not yet folded.
+    /// The columns declared at a running service that `MANIFEST.json` does not declare,
+    /// entity-scoped and group-scoped: the compacted shard holds the base of every one of them
+    /// once this compaction publishes.
     pub(crate) runtime_attributes: Vec<String>,
     pub(crate) runtime_scoped_attributes: Vec<String>,
+    /// The entity-scoped columns the compacted shard holds no base of, read from their extents
+    /// alone.
+    pub(crate) unbased: Vec<String>,
+    /// Each view of a group-scoped column the compacted shard holds no base of.
+    pub(crate) unbased_scoped: Vec<ScopedColumn>,
+    /// Each view of a group-scoped column at the plan, in [`Self::scoped_scalars`]' order: the
+    /// shard holds the base of every one once this compaction publishes.
+    pub(crate) scoped_views: Vec<ScopedColumn>,
     /// The new base segment's id in every view. Never reused.
     pub(crate) seg_id: String,
     pub(crate) base_postings: Arc<PostingsReader>,
     pub(crate) tiers: Vec<Arc<DeltaTier>>,
     pub(crate) declared_scalars: Vec<DeclaredScalar>,
-    /// Every group's scoped column families, flattened. Each owes a folded column per view.
+    /// Every group's scoped column families, flattened. Each has a folded column per view.
     pub(crate) scoped_scalars: Vec<mosaica_store::manifest::ScopedScalar>,
-    /// A scoped column's directory names its view's incarnation.
-    pub(crate) view_incarnations:
-        std::collections::HashMap<String, mosaica_types::view::ViewIncarnation>,
     pub(crate) vocabularies: Vec<ManifestVocabulary>,
+    /// Raised when the engine closes. [`execute`] then stops at the end of the pass it is in.
+    pub(crate) abandoned: Arc<AtomicBool>,
+}
+
+impl FoldContext {
+    /// An error once the compaction is abandoned, for [`execute`] to return between passes.
+    fn going_on(&self) -> Result<(), MaintenanceFailed> {
+        if self.abandoned.load(Ordering::SeqCst) {
+            return Err(MaintenanceFailed(
+                "the compaction was abandoned because the engine closed".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// The summary is carried to publication's log, since its timings and counts are not in the file.
@@ -71,9 +95,11 @@ pub(crate) struct CompletedFold {
     pub(crate) finished: std::time::Instant,
     pub(crate) attr_bytes_read: u64,
     pub(crate) attr_bytes_written: u64,
-    /// The columns this fold gave a base, which publication takes off the runtime lists.
+    /// The columns this compaction gave the shard a base of, which its record lists.
     pub(crate) runtime_attributes: Vec<String>,
     pub(crate) runtime_scoped_attributes: Vec<String>,
+    /// [`FoldContext::scoped_views`].
+    pub(crate) scoped_views: Vec<ScopedColumn>,
 }
 
 #[derive(Default)]
@@ -127,29 +153,37 @@ pub(crate) fn execute(
 
     let segments = fold_row_spaces(&plan, &ctx, &mut out)?;
     stairs.record("1 row space");
+    ctx.going_on()?;
 
     let postings_path = fold_postings(&plan, &ctx, &terms_dir, &mut out)?;
     stairs.record("2 postings");
+    ctx.going_on()?;
 
     let term_images = derive_term_images(&plan, &ctx, &segments, &postings_path, &mut out)?;
     stairs.record("2b term images");
+    ctx.going_on()?;
 
     let unique = fold_unique_indexes(&plan, &ctx, &mut out)?;
     stairs.record("3b unique indexes");
+    ctx.going_on()?;
 
     let edited = fold_edited_items(&plan, &ctx, &mut out)?;
     stairs.record("3c edited items");
+    ctx.going_on()?;
 
     fold_text_columns(&plan, &ctx, &mut out)?;
     fold_value_columns(&plan, &ctx, &mut out)?;
     fold_record_blob(&plan, &ctx, &mut out)?;
     stairs.record("4a attributes");
+    ctx.going_on()?;
 
     fold_entity_terms(&plan, &ctx, &mut out)?;
     stairs.record("4c entity terms");
+    ctx.going_on()?;
 
     derive_field_tallies(&plan, &ctx, &segments, &mut out)?;
     stairs.record("4d field tallies");
+    ctx.going_on()?;
 
     // No pass 4b: the term dictionary is carried to the new prefix by a hard link at publication.
     let files = digest_and_sync(&out)?;
@@ -170,6 +204,7 @@ pub(crate) fn execute(
         attr_bytes_written: out.attr_written,
         runtime_attributes: ctx.runtime_attributes,
         runtime_scoped_attributes: ctx.runtime_scoped_attributes,
+        scoped_views: ctx.scoped_views,
     })
 }
 
@@ -386,26 +421,10 @@ fn derive_term_images(
         )
         .map_err(failed("pass 2b (term images: naming the file)"))?;
 
-        // `mosaica-store` cannot depend on `mosaica-authz`, so the postings are adapted here.
-        let walk = |term: u32,
-                    visit: &mut dyn FnMut(mosaica_store::derived::PostingSlice<'_>)|
-         -> std::io::Result<()> {
-            if let Some(posting) = postings.posting_at(term)? {
-                match posting {
-                    mosaica_authz::PostingRef::Array(bytes) => {
-                        visit(mosaica_store::derived::PostingSlice::Array(bytes))
-                    }
-                    mosaica_authz::PostingRef::Roaring(bitmap) => {
-                        visit(mosaica_store::derived::PostingSlice::Roaring(&bitmap))
-                    }
-                }
-            }
-            Ok(())
-        };
         let summary = mosaica_store::term_images::derive_term_images(
             &space,
             dict_len,
-            &walk,
+            &|term, visit| mosaica_store::derived::walk_posting(&postings, term, visit),
             &stamp,
             &file.path,
             mosaica_store::term_images::DeriveOptions {

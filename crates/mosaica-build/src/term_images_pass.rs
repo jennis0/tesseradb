@@ -26,8 +26,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use mosaica_authz::postings::{PostingRef, PostingsReader};
-use mosaica_store::derived::{DerivedIndex, PostingSlice};
+use mosaica_authz::postings::PostingsReader;
+use mosaica_store::derived::{walk_posting, DerivedIndex, PostingWalk};
 use mosaica_store::manifest::{TermImageExtent, DECLARED_INCARNATION};
 use mosaica_store::term_images::{
     derive_term_images, DeriveOptions, TermImageStamp, KEEP_ROWS_PER_CONTAINER,
@@ -151,20 +151,9 @@ pub fn run(
 
     let file = mosaica_store::derived::term_image_file(prefix_dir, layout, MANIFEST_N, index)?;
 
-    // The one adapter between the postings format and the derivation: `mosaica-store` does not
-    // depend on `mosaica-authz`, so the shape is handed across and the walk is written where the
-    // format lives. `artifact_pass::containment` holds the identical six lines.
-    let walk = |term: u32, visit: &mut dyn FnMut(PostingSlice<'_>)| -> std::io::Result<()> {
-        if let Some(posting) = postings.posting_at(term)? {
-            match posting {
-                PostingRef::Array(bytes) => visit(PostingSlice::Array(bytes)),
-                PostingRef::Roaring(bitmap) => visit(PostingSlice::Roaring(&bitmap)),
-            }
-        }
-        Ok(())
-    };
+    let walk: PostingWalk<'_> = &|term, visit| walk_posting(postings, term, visit);
     let options = DeriveOptions { threads };
-    let summary = derive_term_images(&space, dict_len, &walk, &stamp, &file.path, options)
+    let summary = derive_term_images(&space, dict_len, walk, &stamp, &file.path, options)
         .map_err(|e| BuildError::io(&file.path, e))?;
     // The derivation syncs the file. The directory entry has to be durable too, or a crash leaves
     // a manifest naming a file whose name was never written.

@@ -425,6 +425,36 @@ fn a_retry_that_finds_nothing_to_flush_still_reaches_the_promised_number() {
     );
 }
 
+/// Dropping an engine while a flush is in flight abandons the flush and waits for it: what the
+/// flush wrote is gone when the drop returns, and the bundle reopens and flushes the row from its
+/// log.
+#[test]
+fn an_engine_dropped_during_a_flush_abandons_it() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = engine_with_tick(&tmp, &root, 3600);
+    ingest(&engine, "dropped-flush");
+    let before = files_under(&root);
+
+    engine.set_flush_paused_for_test(true);
+    engine.request_flush();
+    wait_until("the flush is held", WAIT, || {
+        engine.flush_is_holding_for_test()
+    });
+    assert_ne!(files_under(&root), before, "the flush wrote its files");
+    drop(engine);
+    assert_eq!(files_under(&root), before);
+
+    let engine = engine_with_tick(&tmp, &root, 3600);
+    publish_buffered(&engine);
+    assert_eq!(engine.write_executor_stats().flush_rows_published, 1);
+}
+
 /// The directory `view`'s flushed segments are written into.
 fn segments_dir(root: &std::path::Path, view: &str) -> std::path::PathBuf {
     let current: serde_json::Value =

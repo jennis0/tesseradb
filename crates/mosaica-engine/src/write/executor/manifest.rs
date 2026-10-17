@@ -1,9 +1,26 @@
 use super::*;
 
-/// Every level's version, by space, and the derived files of `held` still adoptable at it. A file
-/// whose level has moved is dropped, so a manifest never names one nothing could adopt, except the
-/// row column of a layer in `enumerated` and the member file beside it: an enumerated membership
-/// only grows between folds, and an open completes a column the level has moved past
+/// Derived files, by the shard holding them; a layer space's held shapes are filed under the first
+/// shard.
+pub(in crate::write) type DerivedByShard =
+    std::collections::BTreeMap<ShardId, Vec<mosaica_store::manifest::DerivedExtent>>;
+
+/// What a publication stamps on its layer spaces and shards: each level's records version by
+/// space, each shard's slice versions, and the derived files still adoptable at them.
+pub(super) struct ArtifactCoordinates {
+    pub(super) records:
+        std::collections::BTreeMap<LayerSpace, Vec<mosaica_store::manifest::LevelVersion>>,
+    pub(super) slices:
+        std::collections::BTreeMap<ShardId, Vec<mosaica_store::manifest::SliceVersion>>,
+    pub(super) derived: Vec<(ShardId, mosaica_store::manifest::DerivedExtent)>,
+}
+
+/// Every level's records version, by space, each shard's slice versions, and the derived files of
+/// `held` still adoptable at them: a file stays while the level's records version and its shard's
+/// slice version are both the ones it was written at. A file whose level has moved is dropped, so
+/// a manifest never names one nothing could adopt, except the row column of a layer in
+/// `enumerated` and the member file beside it: an enumerated membership only grows between folds,
+/// and an open completes a column the level has moved past
 /// ([`crate::artifacts::ArtifactProjections::adopt_columns`]). Nothing completes a level's label
 /// column or its band-order copy, so those are dropped with every other file, and a level holds
 /// a copy only while the copy is current. A spatial layer's column is read only at its level's
@@ -11,47 +28,76 @@ use super::*;
 /// ones by name, are named, each at its space.
 pub(super) fn artifact_coordinates(
     store: &ArtifactStore,
-    held: &[mosaica_store::manifest::DerivedExtent],
+    held: &DerivedByShard,
     pending: Option<&PendingRetirement>,
     spaces: &std::collections::BTreeMap<String, LayerSpace>,
     enumerated: &std::collections::BTreeSet<String>,
-) -> (
-    std::collections::BTreeMap<LayerSpace, Vec<mosaica_store::manifest::LevelVersion>>,
-    Vec<mosaica_store::manifest::DerivedExtent>,
-) {
-    let expected = |layer: &str, level: u32| match pending {
-        Some(pending) => pending.version_after(store, layer, level),
-        None => store.level_version(layer, level),
+) -> ArtifactCoordinates {
+    let records_at = |layer: &str, level: u32| match pending {
+        Some(pending) => pending.records_version_after(store, layer, level),
+        None => store.records_version(layer, level),
     };
-    let mut versions = std::collections::BTreeMap::<_, Vec<_>>::new();
-    for (layer, level, _) in store.level_versions() {
+    let slice_at = |shard: ShardId, layer: &str, level: u32| match pending {
+        Some(pending) => pending.version_after(store, shard, layer, level),
+        None => Some(store.slice(shard)?.level_version(layer, level)),
+    };
+    let mut records = std::collections::BTreeMap::<_, Vec<_>>::new();
+    for (layer, level, _) in store.records_versions() {
         if let Some(space) = spaces.get(layer) {
-            versions.entry(*space).or_default().push(mosaica_store::manifest::LevelVersion {
-                level,
-                version: expected(layer, level),
-            });
+            records
+                .entry(*space)
+                .or_default()
+                .push(mosaica_store::manifest::LevelVersion {
+                    level,
+                    version: records_at(layer, level),
+                });
         }
     }
-    let still_true = held
+    let mut slices = std::collections::BTreeMap::<_, Vec<_>>::new();
+    for shard in store.shards() {
+        let Some(slice) = store.slice(shard) else {
+            continue;
+        };
+        let versions = slices.entry(shard).or_default();
+        for (layer, level, _) in slice.slice_versions() {
+            if let (Some(space), Some(version)) = (spaces.get(layer), slice_at(shard, layer, level))
+            {
+                versions.push(mosaica_store::manifest::SliceVersion {
+                    space: *space,
+                    level,
+                    version,
+                });
+            }
+        }
+    }
+    let derived = held
         .iter()
-        .filter(|entry| {
+        .flat_map(|(shard, extents)| extents.iter().map(move |extent| (*shard, extent)))
+        .filter(|(shard, entry)| {
             let Some((layer, _)) = spaces.iter().find(|(_, space)| **space == entry.space) else {
                 return false;
             };
-            let now = expected(layer, entry.level);
+            let records_now = records_at(layer, entry.level);
+            let Some(slice_now) = slice_at(*shard, layer, entry.level) else {
+                return false;
+            };
             match entry.form {
                 mosaica_store::manifest::DerivedForm::RowColumn { .. }
                 | mosaica_store::manifest::DerivedForm::RowMembers
                     if enumerated.contains(layer) =>
                 {
-                    entry.level_version <= now
+                    entry.level_version <= records_now && entry.slice_version <= slice_now
                 }
-                _ => entry.level_version == now,
+                _ => entry.level_version == records_now && entry.slice_version == slice_now,
             }
         })
-        .cloned()
+        .map(|(shard, entry)| (shard, entry.clone()))
         .collect();
-    (versions, still_true)
+    ArtifactCoordinates {
+        records,
+        slices,
+        derived,
+    }
 }
 
 /// Why [`Executor::commit_side_manifest`] did not commit: the manifest would regress durable
@@ -70,21 +116,35 @@ impl std::fmt::Display for ManifestCommitRefused {
     }
 }
 
-/// Replace a manifest's deny fields, the shard's and each layer space's, with the overlays' live
-/// state, restated fresh at every write as two separate sets and never their union: publishing
-/// the union would make every deletion look retirable by an unsuppress.
-pub(super) fn write_deny_state(
+/// Every shard's overlay in `generation`, as [`write_deny_state`] takes them.
+pub(super) fn shard_overlays(generation: &Generation) -> impl Iterator<Item = (ShardId, &Overlay)> {
+    generation
+        .shards()
+        .map(|shard| (shard.id(), &*shard.overlay))
+}
+
+/// Replace a manifest's deny fields, each named shard's and each layer space's, with the overlays'
+/// live state, restated fresh at every write as two separate sets and never their union:
+/// publishing the union would make every deletion look retirable by an unsuppress. Each space's
+/// `owed` list is what `owed` answers for the space's deletions.
+pub(super) fn write_deny_state<'a>(
     manifest: &mut SegmentsManifest,
-    overlay: &Overlay,
+    overlays: impl IntoIterator<Item = (ShardId, &'a Overlay)>,
     spaces: &crate::LayerSpaces,
+    owed: impl Fn(LayerSpace, &croaring::Bitmap) -> Vec<mosaica_store::manifest::OwedDeletions>,
 ) {
-    let record = manifest.only_shard_mut();
-    record.deny = EntitySet::of(overlay.suppressed_set());
-    record.tombstones = EntitySet::of(overlay.deleted_set());
+    for (shard, overlay) in overlays {
+        let Some(record) = manifest.shard_mut(shard) else {
+            continue;
+        };
+        record.deny = EntitySet::of(overlay.suppressed_set());
+        record.tombstones = EntitySet::of(overlay.deleted_set());
+    }
     for space in spaces.keys() {
         mosaica_store::manifest::layer_space_mut(&mut manifest.layer_spaces, *space);
     }
-    let shards: Vec<ShardId> = manifest.shards.records.iter().map(|r| r.id).collect();
+    let shards: std::collections::BTreeSet<ShardId> =
+        manifest.shards.records.iter().map(|r| r.id).collect();
     for record in &mut manifest.layer_spaces {
         let overlay = match spaces.get(&record.space) {
             Some(parts) => &*parts.overlay,
@@ -93,19 +153,11 @@ pub(super) fn write_deny_state(
         record.deny = EntitySet::of(overlay.suppressed_set());
         let deleted = overlay.deleted_set();
         record.tombstones = EntitySet::of(deleted);
-        // Every deletion is owed by every shard: each shard's compaction removes it from its own
-        // slice.
-        record.owed = if deleted.is_empty() {
-            Vec::new()
-        } else {
-            shards
-                .iter()
-                .map(|&shard| mosaica_store::manifest::OwedDeletions {
-                    shard,
-                    artifacts: EntitySet::of(deleted),
-                })
-                .collect()
+        record.owed = match deleted.is_empty() {
+            true => Vec::new(),
+            false => owed(record.space, deleted),
         };
+        record.owed.retain(|owed| shards.contains(&owed.shard));
     }
 }
 
@@ -151,12 +203,12 @@ pub(in crate::write) struct SideManifests {
     /// Deny windows applied since the last publication, the counter
     /// [`OVERLAY_PUBLICATION_MAX_WINDOWS`] floors.
     pub(super) windows_since_publication: u64,
-    /// Every member pack of the shard this node has published.
-    pub(super) membership_extents: Vec<mosaica_store::manifest::MembershipExtent>,
-    /// Every derived file the current prefix holds, the shard's and the layer spaces' held shapes,
-    /// filtered to what a manifest reaches ([`artifact_coordinates`]); a fold replaces it
-    /// wholesale.
-    pub(super) derived_extents: Vec<mosaica_store::manifest::DerivedExtent>,
+    /// Every member pack this node has published, by shard.
+    pub(super) membership_extents: super::publications::PackedMembers,
+    /// Every derived file the current prefix holds, by shard, the layer spaces' held shapes under
+    /// the first, filtered to what a manifest reaches ([`artifact_coordinates`]); a fold replaces
+    /// it wholesale.
+    pub(super) derived_extents: DerivedByShard,
     /// Each layer space's record packs and content extents, held and written with
     /// `membership_extents`, which they travel with: a membership without its record or its
     /// content withholds the artifact.
@@ -202,8 +254,8 @@ impl SideManifests {
     /// Open over what the bundle's manifests already carry.
     pub(in crate::write) fn seeded(
         next_n: u64,
-        membership_extents: Vec<mosaica_store::manifest::MembershipExtent>,
-        derived_extents: Vec<mosaica_store::manifest::DerivedExtent>,
+        membership_extents: super::publications::PackedMembers,
+        derived_extents: DerivedByShard,
         spaces: std::collections::BTreeMap<LayerSpace, HeldSpace>,
         artifact_files: std::collections::BTreeMap<String, mosaica_store::manifest::FileDigest>,
         refs: std::collections::BTreeMap<String, mosaica_store::manifest::PublishedRefs>,
@@ -226,7 +278,8 @@ impl SideManifests {
     pub(super) fn retain_named_artifact_files(&mut self) {
         let named: std::collections::BTreeSet<&str> = self
             .membership_extents
-            .iter()
+            .values()
+            .flatten()
             .map(|extent| extent.path.as_str())
             .chain(self.spaces.values().flat_map(HeldSpace::files))
             .collect();
@@ -308,11 +361,36 @@ impl Executor {
     ) -> Result<mosaica_store::manifest::PublishedRefs, ManifestCommitRefused> {
         self.write_live_state(next, fold.is_some());
         if let Some(fold) = &fold {
-            next.only_shard_mut().held_entities.push(fold.freed.clone());
+            next.shard_mut(fold.shard)
+                .expect("the fold's shard is in the manifest it publishes")
+                .held_entities
+                .push(fold.freed.clone());
         }
+        let fold_written: DerivedByShard;
         let (derived, pending) = match &fold {
-            Some(fold) => (fold.written, Some(fold.pending_retirement)),
-            None => (self.side_manifests.derived_extents.as_slice(), None),
+            Some(fold) => {
+                // A held shape is its layer space's, filed beside the first shard as
+                // `derived_by_shard` files it, and checked against that shard's slice version.
+                let first = next
+                    .shards
+                    .records
+                    .first()
+                    .map_or(fold.shard, |record| record.id);
+                let mut held = DerivedByShard::new();
+                for extent in fold.written {
+                    let shard = match extent.form {
+                        mosaica_store::manifest::DerivedForm::ShapeHeld => first,
+                        _ => fold.shard,
+                    };
+                    held.entry(shard).or_default().push(extent.clone());
+                }
+                for (shard, extent) in &fold.kept {
+                    held.entry(*shard).or_default().push(extent.clone());
+                }
+                fold_written = held;
+                (&fold_written, Some(fold.pending_retirement))
+            }
+            None => (&self.side_manifests.derived_extents, None),
         };
         let registered = self.live.registered_layers();
         let spaces = mosaica_types::layer::spaces_by_name(&registered);
@@ -323,14 +401,24 @@ impl Executor {
             })
             .map(|layer| layer.declaration.name.clone())
             .collect();
-        let (mut level_versions, derived_extents) = self.live.with_artifacts(|store| {
+        let ArtifactCoordinates {
+            records: mut level_versions,
+            slices: mut slice_versions,
+            derived: derived_extents,
+        } = self.live.with_artifacts(|store| {
             artifact_coordinates(store, derived, pending, &spaces, &enumerated)
         });
         // The clone may predate these extents, so they are restated from the held lists, and
         // their files' digests with them.
         if fold.is_none() {
-            next.only_shard_mut().membership_extents =
-                self.side_manifests.membership_extents.clone();
+            for record in &mut next.shards.records {
+                record.membership_extents = self
+                    .side_manifests
+                    .membership_extents
+                    .get(&record.id)
+                    .cloned()
+                    .unwrap_or_default();
+            }
             next.partition
                 .files
                 .retain(|rel, _| !mosaica_store::layout::is_artifact_file(partition, rel));
@@ -358,8 +446,12 @@ impl Executor {
             record.content_extents = contents.cloned().unwrap_or_default();
             record.level_versions = level_versions.remove(&record.space).unwrap_or_default();
         }
-        next.slices_at_records_versions();
-        next.file_derived(derived_extents);
+        for record in &mut next.shards.records {
+            if let Some(versions) = slice_versions.remove(&record.id) {
+                record.slice_versions = versions;
+            }
+        }
+        next.file_derived_by_shard(derived_extents);
         crate::geometry::check_manifest_publishable(partition_data, next)
             .map_err(ManifestCommitRefused::Regresses)?;
         // A fold's new prefix holds none of the live prefix's files.
@@ -403,13 +495,28 @@ impl Executor {
         Ok(refs)
     }
 
+    /// [`write_deny_state`] over `generation`'s overlays and spaces, with each space's deletions
+    /// listed against the shards whose compaction has to remove them.
+    pub(super) fn write_deny_state_of(
+        &self,
+        manifest: &mut SegmentsManifest,
+        generation: &Generation,
+    ) {
+        write_deny_state(
+            manifest,
+            shard_overlays(generation),
+            &generation.layer_spaces,
+            |space, deleted| self.live.owed_deletions(space, deleted),
+        );
+    }
+
     /// Restate the live registry, roster, shard size and runtime declarations into a side-manifest
     /// about to be committed, never carried forward from the partition's manifest, which is as of
     /// the last geometry swap. A fold writes the declarations into its `MANIFEST.json` and sets its
     /// own list of those made since it planned, so `fold` leaves them alone.
     fn write_live_state(&self, manifest: &mut SegmentsManifest, fold: bool) {
         let registry = self.live.registry_for_publication();
-        for shard in &self.live.shards {
+        for shard in self.live.shards() {
             let Some(record) = manifest
                 .shards
                 .records
@@ -420,9 +527,9 @@ impl Executor {
             };
             record.high_water = record.high_water.max(shard.high_water());
             (record.free_entities, record.held_entities) = shard.freed();
-            record.state = record.state.max(shard.state);
+            record.state = record.state.max(shard.state());
         }
-        manifest.shards.next_id = manifest.shards.next_id.max(self.live.next_shard_id);
+        manifest.shards.next_id = manifest.shards.next_id.max(self.live.next_shard_id());
         manifest.shards.size = self.live.shard_size();
         let partition = &mut manifest.partition;
         partition.layers = registry.layers;

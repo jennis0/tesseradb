@@ -1098,6 +1098,15 @@ impl RowColumn {
         self.amend_kept(pairs, row_count).is_some()
     }
 
+    /// Cover `ordinals` ordinals, an artifact this column carries no row of counting none: a
+    /// publication adds ordinals whatever rows they hold in this shard, and every shard's column
+    /// of a level covers the same ones.
+    pub fn cover(&mut self, ordinals: usize) {
+        if self.declared.len() < ordinals {
+            self.declared.resize(ordinals, 0);
+        }
+    }
+
     /// [`Self::amend`], answering with the pairs it added, ascending, or `None` where it refused.
     pub fn amend_kept(&mut self, pairs: &[(u32, u32)], row_count: u32) -> Option<Vec<(u32, u32)>> {
         let label_form = matches!(*self.pack, Pack::Label(_));

@@ -1,7 +1,3 @@
-use std::path::Path;
-
-use croaring::Bitmap;
-
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_store::manifest::{AttrExtent, DeclaredScalar, ScopedScalar};
 use mosaica_types::view::ViewIncarnation;
@@ -19,10 +15,12 @@ struct ColumnJob {
     /// `None`, like `incarnation`, for an entity-scoped column.
     view: Option<String>,
     incarnation: Option<ViewIncarnation>,
-    /// False for a column declared at a running service, which has extents only until this pass
+    /// False for a column the shard holds no base of, which has extents only until this pass
     /// writes its base.
     has_base: bool,
     arrow_type: ScalarType,
+    /// True for a column whose values are codes of a vocabulary.
+    category: bool,
     /// True for a category, whose postings are rebuilt from the folded column.
     postings: bool,
 }
@@ -33,8 +31,7 @@ impl ColumnJob {
     }
 }
 
-/// The columns the predicates select, entity-scoped then group-scoped, in manifest order. A view
-/// with no known incarnation is skipped.
+/// The columns the predicates select, entity-scoped then group-scoped, in manifest order.
 fn column_jobs(
     plan: &FoldPlan,
     ctx: &FoldContext,
@@ -50,28 +47,33 @@ fn column_jobs(
             name: d.name.clone(),
             view: None,
             incarnation: None,
-            has_base: !ctx.runtime_attributes.contains(&d.name),
+            has_base: !ctx.unbased.contains(&d.name),
             arrow_type: d.arrow_type,
-            postings: crate::filter::owes_postings(d, &ctx.vocabularies),
+            category: d.vocabulary.is_some(),
+            postings: d.owes_postings(&ctx.vocabularies),
         })
         .collect();
-    for family in ctx.scoped_scalars.iter().filter(|f| scoped(f)) {
-        for view in &family.views {
-            let Some(&incarnation) = ctx.view_incarnations.get(view) else {
-                continue;
-            };
-            jobs.push(ColumnJob {
-                rel: plan
-                    .layout()
-                    .scoped_column_rel(&family.name, view, incarnation),
-                name: family.name.clone(),
-                view: Some(view.clone()),
-                incarnation: Some(incarnation),
-                has_base: true,
-                arrow_type: family.arrow_type,
-                postings: crate::filter::scoped_owes_postings(family),
-            });
-        }
+    for column in &ctx.scoped_views {
+        let Some(family) = ctx
+            .scoped_scalars
+            .iter()
+            .find(|family| family.name == column.column && family.views.contains(&column.view))
+            .filter(|family| scoped(family))
+        else {
+            continue;
+        };
+        jobs.push(ColumnJob {
+            rel: plan
+                .layout()
+                .scoped_column_rel(&column.column, &column.view, column.incarnation),
+            name: column.column.clone(),
+            view: Some(column.view.clone()),
+            incarnation: Some(column.incarnation),
+            has_base: !ctx.unbased_scoped.contains(column),
+            arrow_type: family.arrow_type,
+            category: family.vocabulary.is_some(),
+            postings: family.has_postings(),
+        });
     }
     jobs
 }
@@ -244,7 +246,7 @@ pub(super) fn fold_value_columns(
     let jobs = column_jobs(
         plan,
         ctx,
-        |d| crate::filter::owes_value_column(d, &ctx.vocabularies),
+        |d| d.owes_value_column(&ctx.vocabularies),
         crate::filter::scoped_has_value_column,
     );
     for job in jobs {
@@ -338,19 +340,13 @@ fn fold_value_column(
         MaintenanceFailed("pass 4a (attributes): the entity bound exceeds u32".to_string())
     })?;
     let partial = if layers.is_empty() {
-        // No layer holds the column yet.
-        write_empty_value_column(
-            &values_path,
-            &presence_path,
-            column_kind_of(job.arrow_type, job.postings),
-        )
-        .map_err(failed("pass 4a (attributes: an empty base)"))?;
+        // No layer holds the column yet: the base an empty shard is written with.
+        mosaica_store::empty_shard::write_empty_value_column(&to_dir, job.arrow_type, job.category)
+            .map_err(failed("pass 4a (attributes: an empty base)"))?;
         if job.arrow_type == mosaica_spatial::tiler::ScalarType::Keyword {
-            write_empty_dictionary(&dict_path)
-                .map_err(failed("pass 4a (attributes: an empty dictionary)"))?;
             out.wrote(dict_rel, dict_path.clone());
         }
-        true
+        false
     } else if keyword_dicts.is_empty() {
         mosaica_filter_write::fold_value_column(
             &layers,
@@ -418,12 +414,12 @@ pub(super) fn fold_record_blob(
     let blob_resident = ctx
         .declared_scalars
         .iter()
-        .any(|d| crate::filter::blob_resident(d, &ctx.vocabularies));
-    // A blob-resident column declared at a running service has no base yet.
-    let based_blob_resident = ctx.declared_scalars.iter().any(|d| {
-        !ctx.runtime_attributes.contains(&d.name)
-            && crate::filter::blob_resident(d, &ctx.vocabularies)
-    });
+        .any(|d| d.blob_resident(&ctx.vocabularies));
+    // A blob-resident column the shard holds no base of is in the extents alone.
+    let based_blob_resident = ctx
+        .declared_scalars
+        .iter()
+        .any(|d| !ctx.unbased.contains(&d.name) && d.blob_resident(&ctx.vocabularies));
     if !blob_resident && !plan.record_extents.is_empty() {
         return Err(MaintenanceFailed(
             "pass 4a (record blob): the manifest names record extents but the schema declares no \
@@ -564,50 +560,4 @@ pub(super) fn fold_entity_terms(
     }
 
     Ok(())
-}
-
-/// The empty presence bitmap makes the reader take the column as partial, not dense.
-fn write_empty_value_column(
-    values_path: &Path,
-    presence_path: &Path,
-    kind: mosaica_filter::ColumnKind,
-) -> std::io::Result<()> {
-    mosaica_filter::ValueColumnWriter::create(values_path, presence_path, kind)?
-        .finish(Some(&Bitmap::new()))
-}
-
-fn write_empty_dictionary(dict_path: &Path) -> std::io::Result<()> {
-    let file = std::io::BufWriter::new(std::fs::File::create(dict_path)?);
-    mosaica_filter::SortedDictWriter::new(file)
-        .and_then(|writer| writer.finish())
-        .map(|_| ())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
-}
-
-fn column_kind_of(arrow_type: ScalarType, category: bool) -> mosaica_filter::ColumnKind {
-    use mosaica_filter::ColumnKind;
-    if arrow_type == ScalarType::Keyword {
-        return ColumnKind::U32;
-    }
-    if category {
-        return match arrow_type {
-            ScalarType::U8 => ColumnKind::U8,
-            ScalarType::U16 => ColumnKind::U16,
-            _ => ColumnKind::U32,
-        };
-    }
-    match arrow_type {
-        ScalarType::Bool | ScalarType::U8 => ColumnKind::U8,
-        ScalarType::U16 => ColumnKind::U16,
-        ScalarType::U32 => ColumnKind::U32,
-        ScalarType::U64 => ColumnKind::U64,
-        ScalarType::I8 => ColumnKind::I8,
-        ScalarType::I16 => ColumnKind::I16,
-        ScalarType::I32 => ColumnKind::I32,
-        ScalarType::I64 | ScalarType::TimestampUs => ColumnKind::I64,
-        ScalarType::F32 => ColumnKind::F32,
-        ScalarType::F64 => ColumnKind::F64,
-        // Unreachable: `utf8` is not declarable and `text` folds through its own pass.
-        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => ColumnKind::U32,
-    }
 }

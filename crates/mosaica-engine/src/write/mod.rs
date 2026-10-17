@@ -22,6 +22,7 @@ mod executor;
 mod health;
 pub(crate) mod joined;
 mod live;
+mod opening;
 mod reconstruct;
 mod schema;
 
@@ -30,6 +31,7 @@ pub(crate) use command::*;
 pub use executor::*;
 pub use health::*;
 pub(crate) use live::*;
+pub(crate) use opening::*;
 pub(crate) use reconstruct::*;
 pub(crate) use schema::*;
 
@@ -37,7 +39,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -54,7 +56,6 @@ use mosaica_lifecycle::window::{ClosedEntry, CommitWindow, FragmentationTally, W
 use mosaica_lifecycle::{IngestBuffer, Overlay, Overlays};
 
 use crate::cache::RowProjectionCache;
-use crate::cache::KEEP_SUPERSEDED_GENERATIONS;
 use crate::geometry::{check_publishable, GeometryPublication, GeometryRefused};
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_store::manifest::{EntitySet, ManifestVocabulary, SegmentsManifest};
@@ -324,12 +325,15 @@ pub(crate) struct WritePathState {
     several_shards: SeveralShards,
     shards: Vec<ShardWrite>,
     next_shard_id: u32,
+    /// The shard size the manifests and the log leave.
+    size: u64,
     resolver_state: ResolverState,
     accepted_batches: AcceptedBatches,
     pub(crate) registry: LayerRegistry,
     pub(crate) artifacts: ArtifactStore,
-    /// Every other point shard's slice of every artifact's membership: see [`LiveState::slices`].
-    pub(crate) slices: Vec<(ShardId, Arc<ArtifactStore>)>,
+    /// The layer spaces' deletions for which the manifests record the shards whose compaction
+    /// must remove them.
+    settled_owing: live::SettledSpaces,
     /// The view roster: which views of which groups exist, and which keys are burnt. Rebuilt
     /// exactly as the layer registry beside it is: seeded from the manifests, then the log
     /// replayed on top.
@@ -376,18 +380,19 @@ impl WritePath {
     pub(crate) fn new(state: WritePathState) -> Self {
         WritePath {
             live: Arc::new(LiveState {
-                shards: state.shards,
-                next_shard_id: state.next_shard_id,
+                shards: RwLock::new(state.shards.into_iter().map(Arc::new).collect()),
+                next_shard_id: std::sync::atomic::AtomicU32::new(state.next_shard_id),
+                size: std::sync::atomic::AtomicU64::new(state.size),
                 several_shards: state.several_shards,
                 resolver_state: Mutex::new(state.resolver_state),
                 accepted_batches: Mutex::new(state.accepted_batches),
                 registry: Mutex::new(state.registry),
                 artifacts: Mutex::new(state.artifacts),
-                slices: state.slices,
                 roster: Mutex::new(state.roster),
                 attributes: Mutex::new(state.attributes),
                 vocabularies: Mutex::new(state.vocabularies),
                 view_declarations: Mutex::new(state.view_declarations),
+                settled_owing: Mutex::new(state.settled_owing),
             }),
             wal: Some(state.wal),
             handle: None,
@@ -489,30 +494,27 @@ impl WritePath {
             seeded_refs,
         ) = {
             let generation = generation.load();
-            let mut members = Vec::new();
-            let mut derived = Vec::new();
+            let mut members = executor::PackedMembers::new();
+            let mut derived = executor::DerivedByShard::new();
             let mut spaces = std::collections::BTreeMap::new();
             let mut artifact_files = std::collections::BTreeMap::new();
             let mut refs = std::collections::BTreeMap::new();
-            let store_shard = live.shards[0].id;
             for (phash, partition) in &generation.bundle.partitions {
-                let Some(shard) = partition.shard(store_shard) else {
-                    continue;
-                };
-                let record = &shard.record;
-                members.extend(
-                    record
-                        .membership_extents
-                        .iter()
-                        .filter(|e| live.holds_space(e.space))
-                        .cloned(),
-                );
-                derived.extend(
-                    partition
-                        .derived_by_shard()
-                        .filter(|(shard, e)| *shard == store_shard && live.holds_space(e.space))
-                        .map(|(_, e)| e.clone()),
-                );
+                for shard in &partition.shards {
+                    members.entry(shard.record.id).or_default().extend(
+                        shard
+                            .record
+                            .membership_extents
+                            .iter()
+                            .filter(|e| live.holds_space(e.space))
+                            .cloned(),
+                    );
+                }
+                for (shard, extent) in partition.derived_by_shard() {
+                    if live.holds_space(extent.space) {
+                        derived.entry(shard).or_default().push(extent.clone());
+                    }
+                }
                 spaces.extend(
                     partition
                         .layer_spaces
@@ -598,7 +600,7 @@ impl WritePath {
                         Arc::clone(&health.flush_in_flight),
                         Arc::clone(&health.flush_completed_pending),
                     ),
-                    last_fold_start_unix: None,
+                    compactions: executor::Compactions::default(),
                     pending_reclaim: Vec::new(),
                     superseded: std::sync::Mutex::new(Vec::new()),
                     last_tick: std::time::Instant::now(),
@@ -666,10 +668,10 @@ impl WritePath {
     }
 
     /// [`crate::Engine::writable`]'s rule. [`Self::submit`] and [`Self::submit_changes`], where
-    /// every write reaches the executor, ask it; so do the entries that read the write shard
+    /// every write reaches the executor, ask it; so do the entries that read the open shard
     /// before submitting.
     pub(crate) fn writable(&self) -> Result<(), AcceptError> {
-        match (self.live.shards.len(), self.live.several_shards) {
+        match (self.live.shard_count(), self.live.several_shards) {
             (1, _) => Ok(()),
             #[cfg(feature = "several-shard-writes")]
             (_, SeveralShards::Written) => Ok(()),
@@ -968,10 +970,12 @@ impl Drop for WritePath {
     /// caller's next statement is typically `TempDir::drop`, producing intermittent `ENOENT` in
     /// tests spread across many files.
     ///
-    /// The join is unconditional and does not wait on background work: [`LifecycleHandle`] is not
-    /// `Clone` and this type is its only owner, so dropping it below closes both queues, and the
-    /// ring that follows wakes a blocked loop to observe that. A fold still running keeps its own
-    /// thread, not this one.
+    /// The join is unconditional: [`LifecycleHandle`] is not `Clone` and this type is its only
+    /// owner, so dropping it below closes both queues, and the ring that follows wakes a blocked
+    /// loop to observe that. The executor's thread abandons the background work in flight and
+    /// waits for it before it ends, so the join covers that work too: a compaction to the end of
+    /// the pass it is in, and a flush, a merge, a coalesce, a suggestion rebuild or a unique
+    /// declaration's round to the end of the unit.
     fn drop(&mut self) {
         // A test may have parked the executor at an armed pause point; release it first, or
         // teardown deadlocks on a fault the test forgot to clear.

@@ -958,9 +958,10 @@ async fn flush(
     Ok((StatusCode::ACCEPTED, Json(body)))
 }
 
-/// `POST /control/compact`: sets a flag the executor reads at its next tick, and answers 202. A
-/// request while a fold runs is dropped with a log warning, and the 202 cannot say so;
-/// `/control/status`'s `compaction` block shows what happened.
+/// `POST /control/compact`: sets a flag the executor reads at its next tick, and answers 202. At
+/// most one compaction is in flight. A request that arrives while one runs is held until it lands,
+/// and `/control/status`'s `compaction.fold_requested` stays true until the last shard the request
+/// names publishes.
 async fn compact(State(state): State<Arc<AppState>>) -> StatusCode {
     state.engine.request_fold();
     StatusCode::ACCEPTED

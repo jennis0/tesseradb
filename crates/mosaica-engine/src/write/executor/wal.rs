@@ -229,7 +229,7 @@ impl Executor {
                 let retained_from = self.log.wal.retained_from();
                 let freed: u64 = self
                     .live
-                    .shards
+                    .shards()
                     .iter()
                     .map(|shard| shard.with_allocator(|alloc| alloc.promote(retained_from)))
                     .sum();

@@ -246,7 +246,8 @@ impl WalkCx for PageCx<'_> {
                 let Some(keys) = side.shard.filter_columns.unique_keys(column, operand) else {
                     return Ok(None);
                 };
-                let holders: Bitmap = unique_holders(side.shard, column, &keys)
+                let holders: Bitmap =
+                    unique_holders(self.open.served.generation, side.shard, column, &keys)
                     .map_err(filter_refusal)?
                     .into_iter()
                     .collect();

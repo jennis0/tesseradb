@@ -5,12 +5,13 @@ one whose declaration carries the thing, with all the data, and one whose declar
 served, with the thing then declared through the control plane, its data written, and a
 publication waited for. Every principal's answers to one battery are recorded against both and
 compared after the live declaration, after a restart, after a fold, and after a restart following
-that fold. `declared_fixture` holds the corpus, the deployments and the one place identifiers are
-rekeyed for the comparison.
+that fold, and what the fold stored is checked. `declared_fixture` holds the corpus, the
+deployments and the one place identifiers are rekeyed for the comparison.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 import pyarrow as pa
@@ -18,6 +19,8 @@ import pytest
 
 import declared_fixture as fx
 from declared_fixture import Column, Corpus, Deployment, Plan, Vocabulary
+from oracle.bundle import shard_records
+from oracle.layout import live_prefix_dir, newest_side_manifest
 
 STAGES = ("live", "restart", "fold", "fold-restart")
 
@@ -343,6 +346,8 @@ class GroupScoped(Case):
     def __init__(self, name: str, recreate: bool = False):
         self.name = name
         self.recreate = recreate
+        #: The families as the group declares them: their values are the first view's.
+        self.columns = _scoped("Q1")
         views = tuple(_group_view(k) for k in KEYS)
         self.plan = Plan(
             views=(fx.WORLD, *views),
@@ -359,7 +364,7 @@ class GroupScoped(Case):
 
     def built(self, work) -> Deployment:
         blocks = [fx.plain_view_toml(), _group_toml(), fx.fx_column().toml()]
-        blocks += [c.toml() for c in _scoped("Q1")]
+        blocks += [c.toml() for c in self.columns]
         points = _world(ALL)
         for key, seed in KEYS.items():
             points[key.lower()] = (KEY_MEMBERS[key], _scoped(key), seed, GROUP_EXTENT)
@@ -379,7 +384,7 @@ class GroupScoped(Case):
         d.control("PUT", f"/control/view_groups/{GROUP}", json=group, expect=(201,))
         for key in KEYS:
             self._create(d, key)
-        for column in _scoped("Q1"):
+        for column in self.columns:
             d.control("PUT", "/control/attributes", json=column.payload(), expect=(201,))
         for key in KEYS:
             self._ingest(d, key, "first")
@@ -833,6 +838,26 @@ def test_a_live_declaration_serves_what_a_build_serves(walks, case, stage, known
         _, matching = fx.split(found, k.places)
         shown = "\n".join(map(str, matching[:6]))
         assert not matching, f"{k.reason}\n{shown}"
+
+
+# ---------------------------------------------------------------------------------------------
+# What a compaction stores
+# ---------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("case", ["entity-attributes", "group-scoped"])
+def test_a_compaction_moves_each_live_declaration_into_the_bundle_manifest(walks, case):
+    """After the compaction every shard holds each live column's base, so `MANIFEST.json`
+    declares the column, and neither the side manifest nor any shard record names it any more."""
+    live = walks(case).at("fold-restart")
+    manifest = json.loads((live_prefix_dir(live.bundle) / "MANIFEST.json").read_text())
+    declared = {d["name"] for d in manifest["declared_scalars"]}
+    declared |= {f["name"] for g in manifest["groups"] for f in g["scoped_scalars"]}
+    missing = [c.name for c in CASES[case].columns if c.name not in declared]
+    assert not missing, f"MANIFEST.json does not declare {missing}"
+    side = newest_side_manifest(live.bundle)
+    assert (side["attributes"], side["scoped_attributes"]) == ([], [])
+    for record in shard_records(side):
+        assert (record["runtime_bases"], record["scoped_columns"]) == ([], []), record["id"]
 
 
 # ---------------------------------------------------------------------------------------------

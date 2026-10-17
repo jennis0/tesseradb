@@ -57,6 +57,7 @@ pub(super) fn rows_of(sets: &[&[u32]]) -> ArtifactRows {
             attachments: vec![None; sets.len()],
             parents: vec![Vec::new(); sets.len()],
             declared: vec![Vec::new(); sets.len()],
+            withdrawn: Vec::new(),
             access: Vec::new(),
             attached_by: Default::default(),
         },
@@ -104,6 +105,7 @@ pub(super) fn rows_with_contents(members: &[u32], contents: &[(&[u32], u64)]) ->
             attachments: vec![None],
             parents: vec![Vec::new()],
             declared: vec![contents.iter().map(|(_, declared)| *declared).collect()],
+            withdrawn: Vec::new(),
             access: Vec::new(),
             attached_by: Default::default(),
         },
@@ -203,7 +205,8 @@ pub(super) fn side<'a>(
 
 /// What the one predicate serves of `rows`' artifact at `ordinal`, as a containment answer, to a
 /// viewer seeing `mask`, with `denied` denied and the partition's `answers` where given, on a layer
-/// declaring supplied content.
+/// declaring supplied content. No record here has a withdrawn content, so a served position is
+/// its rank.
 pub(super) fn contained(
     rows: &ArtifactRows,
     ordinal: u32,
@@ -228,8 +231,11 @@ pub(super) fn contained(
         ..side(rows, Some(mask))
     };
     match view_of(&declaration, vec![side]).verdict(mosaica_types::EntityId::new(999), ordinal) {
-        ArtifactVerdict::Serve { rank: Some(rank), .. } => Containment::Satisfied(rank),
-        ArtifactVerdict::Serve { rank: None, .. } => Containment::NothingToContain,
+        ArtifactVerdict::Serve {
+            position: Some(position),
+            ..
+        } => Containment::Satisfied(position),
+        ArtifactVerdict::Serve { position: None, .. } => Containment::NothingToContain,
         ArtifactVerdict::Absent(Withheld::Containment) => Containment::Unsatisfied,
         other => panic!("withheld before containment: {other:?}"),
     }

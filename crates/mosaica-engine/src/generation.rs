@@ -1,5 +1,6 @@
 //! A generation: one immutable snapshot of engine state, held once for the bundle and per shard.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use mosaica_authz::{
@@ -46,6 +47,9 @@ pub struct GenerationParts {
     /// Each layer space's deny state and supplied content. A space absent here denies nothing and
     /// has no content on disc.
     pub(crate) layer_spaces: Arc<LayerSpaces>,
+    /// The unique index entries of the rows every shard's buffer holds, published with the
+    /// buffers.
+    pub(crate) unique_live: Arc<crate::unique::UniqueLive>,
 }
 
 /// A generation's layer spaces, by space.
@@ -111,8 +115,6 @@ pub struct ShardParts {
     pub(crate) identity: [u8; 32],
     /// Every unique column's index runs, as the shard's record lists them.
     pub(crate) unique: Arc<mosaica_store::unique::UniqueIndexes>,
-    /// The unique index entries of the rows the buffer holds, published with the buffer.
-    pub(crate) unique_live: Arc<crate::unique::UniqueLive>,
     /// The edited-items map's runs, as the shard's record lists them.
     pub(crate) edited: Arc<mosaica_store::edited::EditedIndex>,
     /// The edited-items pairs no run holds yet, published with the buffer.
@@ -124,12 +126,27 @@ pub struct ShardParts {
     /// One sparse delta postings tier per flush segment, in publication order; empty after a
     /// build.
     pub delta_postings: Vec<Arc<DeltaTier>>,
+    /// The generation's `segments_version` at which this shard's row space last changed: what a
+    /// row-space artefact of the shard is keyed by, so a flush, merge or compaction of another
+    /// shard leaves it standing.
+    pub segments_version: u64,
+    /// This shard's `segments_version` before its row space last changed; `None` before its first
+    /// generation.
+    pub(crate) previous_segments_version: Option<u64>,
     /// Bumped on every overlay or buffer swap; independent of `segments_version`.
     pub overlay_version: u64,
     pub overlay: Arc<Overlay>,
     pub buffer: Arc<IngestBuffer>,
     /// The shard's filter columns; empty when the schema declares nothing filterable.
     pub filter_columns: Arc<crate::filter::FilterColumns>,
+}
+
+impl ShardParts {
+    /// Record that this shard's row space changed at the generation's `segments_version`.
+    pub(crate) fn moved_to(&mut self, segments_version: u64) {
+        self.previous_segments_version = Some(self.segments_version);
+        self.segments_version = segments_version;
+    }
 }
 
 /// One point shard of a generation. Its derived fields are functions of `data` and its parts, so
@@ -150,6 +167,42 @@ pub struct Shard {
     /// **Derived** by [`crate::compose::derive_buffered_rows`]: per view, the buffered entities
     /// that have a row there. Entity ids, because a merge, coalesce or fold rewrites rows.
     buffered_rows: Arc<crate::BufferedRows>,
+}
+
+/// The parts of the shards a publication names, by shard, for its change to edit.
+pub(crate) struct ShardsParts(BTreeMap<ShardId, ShardParts>);
+
+impl ShardsParts {
+    /// Shard `id`'s parts. Panics where the publication does not name `id`.
+    pub(crate) fn of(&mut self, id: ShardId) -> &mut ShardParts {
+        self.0
+            .get_mut(&id)
+            .unwrap_or_else(|| panic!("the publication does not name shard {id}"))
+    }
+}
+
+/// A shard's new buffer: its present one with `inserted` added and anything else only removed. The
+/// buffered-row lists are updated at the cost of those lists and `inserted`, not the buffer.
+pub(crate) struct BufferSwap<'a> {
+    pub(crate) buffer: Arc<IngestBuffer>,
+    pub(crate) inserted: &'a [EntityId],
+}
+
+/// A shard's new overlay, which differs from its present one only by deletions and suppressions
+/// of `newly_denied`, and its new buffer. Their rows are added to the mask without walking the
+/// overlay, so an unsuppress may not take this route: the entity may still be deleted.
+pub(crate) struct DenySwap<'a> {
+    pub(crate) overlay: Arc<Overlay>,
+    pub(crate) newly_denied: &'a [EntityId],
+    pub(crate) buffer: BufferSwap<'a>,
+}
+
+/// What a publication sets in one shard it names beyond what its change sets, which decides how
+/// the shard's derived fields are carried.
+pub(crate) enum ShardSwap<'a> {
+    Parts,
+    Buffer(BufferSwap<'a>),
+    Denies(DenySwap<'a>),
 }
 
 /// One immutable, atomically-swappable snapshot of engine state: what the bundle holds once, and
@@ -223,19 +276,19 @@ impl Shard {
         }
     }
 
-    /// The successor over `data` holding these, with its deny versions; none is carried across a
-    /// new prefix, since a fold renumbers the base.
+    /// The successor over `data` holding these, with its deny versions; none is carried unless
+    /// `same_rows`, since a compaction renumbers its shard's base.
     fn successor(
         &self,
-        same_prefix: bool,
+        same_rows: bool,
         data: Arc<ShardData>,
         parts: ShardParts,
         denied: Arc<DenyMask>,
         buffered_rows: Arc<crate::BufferedRows>,
     ) -> Shard {
-        let deny_versions = match Arc::ptr_eq(&denied, &self.denied) && same_prefix {
+        let deny_versions = match Arc::ptr_eq(&denied, &self.denied) && same_rows {
             true => Arc::clone(&self.deny_versions),
-            false => deny_versions(same_prefix.then_some(self), &denied, &data),
+            false => deny_versions(same_rows.then_some(self), &denied, &data),
         };
         Shard {
             data,
@@ -254,31 +307,31 @@ impl Shard {
         }
     }
 
-    fn next(&self, same_prefix: bool, data: Arc<ShardData>, parts: ShardParts) -> Shard {
+    fn next(&self, same_rows: bool, data: Arc<ShardData>, parts: ShardParts) -> Shard {
         let denied = self.carried_denied(&data, &parts.overlay);
         let buffered_rows =
             match Arc::ptr_eq(&data, &self.data) && Arc::ptr_eq(&parts.buffer, &self.buffer) {
                 true => Arc::clone(&self.buffered_rows),
                 false => Arc::new(crate::compose::derive_buffered_rows(&parts.buffer, &data)),
             };
-        self.successor(same_prefix, data, parts, denied, buffered_rows)
+        self.successor(same_rows, data, parts, denied, buffered_rows)
     }
 
     fn next_buffer(
         &self,
-        same_prefix: bool,
+        same_rows: bool,
         data: Arc<ShardData>,
         parts: ShardParts,
         inserted: &[EntityId],
     ) -> Shard {
         let denied = self.carried_denied(&data, &parts.overlay);
         let buffered_rows = self.next_buffered_rows(&data, &parts.buffer, inserted);
-        self.successor(same_prefix, data, parts, denied, buffered_rows)
+        self.successor(same_rows, data, parts, denied, buffered_rows)
     }
 
     fn next_denies(
         &self,
-        same_prefix: bool,
+        same_rows: bool,
         data: Arc<ShardData>,
         parts: ShardParts,
         newly_denied: &[EntityId],
@@ -301,7 +354,7 @@ impl Shard {
             "the incremental deny mask does not equal a fresh derivation"
         );
         let buffered_rows = self.next_buffered_rows(&data, &parts.buffer, inserted);
-        self.successor(same_prefix, data, parts, Arc::new(denied), buffered_rows)
+        self.successor(same_rows, data, parts, Arc::new(denied), buffered_rows)
     }
 
     fn next_buffered_rows(
@@ -453,6 +506,11 @@ impl Generation {
         self.shards.iter().map(Arc::as_ref)
     }
 
+    /// The rows every shard's buffer holds.
+    pub(crate) fn buffered(&self) -> usize {
+        self.shards().map(|shard| shard.buffer.len()).sum()
+    }
+
     /// The first shard's filter columns, which admit a filter and route a field's reads.
     /// Placement, uniqueness and filterability are declared, so the same in every shard; whether
     /// a column holds a value layer is the first shard's data.
@@ -461,10 +519,12 @@ impl Generation {
     }
 
     /// The successor holding `parts`: the shard `changed` answers for is replaced, and every other
-    /// is carried, re-derived where its data changed.
+    /// is carried, re-derived where its data changed. A shard keeps its rows where the prefix is
+    /// the same or `renumbered` names another shard, and only then are its deny versions carried.
     fn succeeded_by(
         &self,
         parts: GenerationParts,
+        renumbered: Option<ShardId>,
         mut changed: impl FnMut(&Shard, bool, Arc<ShardData>) -> Option<Shard>,
     ) -> Generation {
         let same_prefix = parts.prefix == self.parts.prefix;
@@ -473,107 +533,161 @@ impl Generation {
             .iter()
             .map(|shard| {
                 let id = shard.id();
+                let same_rows =
+                    same_prefix || renumbered.is_some_and(|renumbered| renumbered != id);
                 let data = Arc::clone(
                     parts
                         .bundle
                         .shard(id)
                         .unwrap_or_else(|| panic!("the bundle holds no shard {id}")),
                 );
-                if let Some(next) = changed(shard, same_prefix, Arc::clone(&data)) {
+                if let Some(next) = changed(shard, same_rows, Arc::clone(&data)) {
                     return Arc::new(next);
                 }
                 match same_prefix && Arc::ptr_eq(&data, &shard.data) {
                     true => Arc::clone(shard),
-                    false => Arc::new(shard.next(same_prefix, data, shard.parts.clone())),
+                    false => Arc::new(shard.next(same_rows, data, shard.parts.clone())),
                 }
             })
             .collect();
         Generation { parts, shards }
     }
 
-    /// The successor with `change` applied to what is held once and to shard `id`'s parts, and
-    /// that shard replaced by what `next` makes of them.
-    fn publish(
+    /// The successor with `change` applied to what is held once and to the parts of every shard
+    /// `swaps` names, each of those shards then taking its swap and replaced by what its swap
+    /// derives. Every other shard is carried.
+    pub(crate) fn publish(
         &self,
-        id: ShardId,
-        change: impl FnOnce(&mut GenerationParts, &mut ShardParts),
-        next: impl FnOnce(&Shard, bool, Arc<ShardData>, ShardParts) -> Shard,
+        swaps: BTreeMap<ShardId, ShardSwap<'_>>,
+        change: impl FnOnce(&mut GenerationParts, &mut ShardsParts),
+    ) -> Generation {
+        self.publish_renumbering(None, swaps, change)
+    }
+
+    /// [`Self::publish`], into a new prefix that renumbers the rows of `renumbered` alone where it
+    /// names a shard.
+    fn publish_renumbering(
+        &self,
+        renumbered: Option<ShardId>,
+        mut swaps: BTreeMap<ShardId, ShardSwap<'_>>,
+        change: impl FnOnce(&mut GenerationParts, &mut ShardsParts),
     ) -> Generation {
         let mut parts = self.parts.clone();
-        let mut shard = self
-            .shard(id)
-            .unwrap_or_else(|| panic!("a publication names shard {id}, which is not held"))
-            .parts
-            .clone();
-        change(&mut parts, &mut shard);
-        let mut pending = Some((shard, next));
-        self.succeeded_by(parts, |held, same_prefix, data| {
-            let (parts, next) = pending.take_if(|_| held.id() == id)?;
-            Some(next(held, same_prefix, data, parts))
+        let mut shards = ShardsParts(
+            swaps
+                .keys()
+                .map(|&id| {
+                    let held = self.shard(id).unwrap_or_else(|| {
+                        panic!("a publication names shard {id}, which is not held")
+                    });
+                    (id, held.parts.clone())
+                })
+                .collect(),
+        );
+        change(&mut parts, &mut shards);
+        for (id, swap) in &swaps {
+            let shard = shards.of(*id);
+            match swap {
+                ShardSwap::Parts => {}
+                ShardSwap::Buffer(swap) => shard.buffer = Arc::clone(&swap.buffer),
+                ShardSwap::Denies(swap) => {
+                    shard.overlay = Arc::clone(&swap.overlay);
+                    shard.buffer = Arc::clone(&swap.buffer.buffer);
+                }
+            }
+        }
+        let mut shards = shards.0;
+        self.succeeded_by(parts, renumbered, |held, same_rows, data| {
+            let swap = swaps.remove(&held.id())?;
+            let parts = shards.remove(&held.id())?;
+            Some(match swap {
+                ShardSwap::Parts => held.next(same_rows, data, parts),
+                ShardSwap::Buffer(swap) => held.next_buffer(same_rows, data, parts, swap.inserted),
+                ShardSwap::Denies(swap) => held.next_denies(
+                    same_rows,
+                    data,
+                    parts,
+                    swap.newly_denied,
+                    swap.buffer.inserted,
+                ),
+            })
         })
+    }
+
+    /// The successor over `bundle`, which serves every shard this one does and each of `opened`,
+    /// holding each of `opened` with its parts. Every shard held already is carried.
+    pub(crate) fn with_new_shards(
+        &self,
+        bundle: Arc<Bundle>,
+        opened: Vec<(ShardId, ShardParts)>,
+    ) -> Generation {
+        let mut parts = self.parts.clone();
+        parts.bundle = bundle;
+        let mut next = self.succeeded_by(parts, None, |_, _, _| None);
+        for (id, shard) in opened {
+            assert!(
+                next.shard(id).is_none(),
+                "shard {id} is opened in a generation that holds it"
+            );
+            let data = next
+                .parts
+                .bundle
+                .shard(id)
+                .unwrap_or_else(|| panic!("the bundle holds no shard {id}"));
+            next.shards
+                .push(Arc::new(Shard::new(Arc::clone(data), shard)));
+        }
+        next.shards.sort_by_key(|shard| shard.id());
+        next
     }
 
     /// A copy with `change` applied to what is held once.
     pub(crate) fn with(&self, change: impl FnOnce(&mut GenerationParts)) -> Generation {
         let mut parts = self.parts.clone();
         change(&mut parts);
-        self.succeeded_by(parts, |_, _, _| None)
+        self.succeeded_by(parts, None, |_, _, _| None)
     }
 
-    /// A copy with `change` applied to what is held once and to shard `id`. A buffer-only change
-    /// should use [`Self::with_buffer`], which derives less.
+    /// A copy with `change` applied to what is held once and to each shard of `ids`. A
+    /// buffer-only change should [`Self::publish`] a [`ShardSwap::Buffer`], which derives less.
+    pub(crate) fn with_shards(
+        &self,
+        ids: impl IntoIterator<Item = ShardId>,
+        change: impl FnOnce(&mut GenerationParts, &mut ShardsParts),
+    ) -> Generation {
+        let swaps = ids.into_iter().map(|id| (id, ShardSwap::Parts)).collect();
+        self.publish(swaps, change)
+    }
+
+    /// [`Self::with_shards`] for a compaction of `compacted` into a new prefix: its rows are
+    /// renumbered and every other shard keeps its own.
+    pub(crate) fn compacting(
+        &self,
+        compacted: ShardId,
+        ids: impl IntoIterator<Item = ShardId>,
+        change: impl FnOnce(&mut GenerationParts, &mut ShardsParts),
+    ) -> Generation {
+        let swaps = ids.into_iter().map(|id| (id, ShardSwap::Parts)).collect();
+        self.publish_renumbering(Some(compacted), swaps, change)
+    }
+
+    /// [`Self::with_shards`] over shard `id` alone.
     pub(crate) fn with_shard(
         &self,
         id: ShardId,
         change: impl FnOnce(&mut GenerationParts, &mut ShardParts),
     ) -> Generation {
-        self.publish(id, change, Shard::next)
+        self.with_shards([id], |parts, shards| change(parts, shards.of(id)))
     }
 
-    /// [`Self::with_shard`] that also sets shard `id`'s buffer to `buffer`, which must be its
-    /// present one with `inserted` added and anything else only removed; the buffered-row lists
-    /// are then updated at the cost of those lists and `inserted`, not the buffer.
-    pub(crate) fn with_buffer(
-        &self,
-        id: ShardId,
-        buffer: Arc<IngestBuffer>,
-        inserted: &[EntityId],
-        change: impl FnOnce(&mut GenerationParts, &mut ShardParts),
-    ) -> Generation {
-        self.publish(
-            id,
-            |parts, shard| {
-                change(parts, shard);
-                shard.buffer = buffer;
-            },
-            |held, same_prefix, data, parts| held.next_buffer(same_prefix, data, parts, inserted),
-        )
-    }
-
-    /// [`Self::with_buffer`] that also sets the overlay to `overlay`, which must differ from the
-    /// shard's only by deletions and suppressions of `newly_denied`; their rows are added to the
-    /// mask without walking the overlay. An unsuppress may not take this route: the entity may
-    /// still be deleted.
-    pub(crate) fn with_denies(
-        &self,
-        id: ShardId,
-        overlay: Arc<Overlay>,
-        newly_denied: &[EntityId],
-        buffer: Arc<IngestBuffer>,
-        inserted: &[EntityId],
-        change: impl FnOnce(&mut GenerationParts, &mut ShardParts),
-    ) -> Generation {
-        self.publish(
-            id,
-            |parts, shard| {
-                change(parts, shard);
-                shard.overlay = overlay;
-                shard.buffer = buffer;
-            },
-            |held, same_prefix, data, parts| {
-                held.next_denies(same_prefix, data, parts, newly_denied, inserted)
-            },
-        )
+    /// `shard`'s `segments_version` in the generation one below this one: its own where its row
+    /// space did not change at this one. What a superseded row-space artefact of the shard is kept
+    /// at, so a request may be served one generation stale while a refresh builds the live one.
+    pub(crate) fn segments_version_before(&self, shard: &Shard) -> Option<u64> {
+        match shard.segments_version == self.segments_version {
+            true => shard.previous_segments_version,
+            false => Some(shard.segments_version),
+        }
     }
 
     /// One number that moves when any shard's overlay or any layer space's does: what a stamp
@@ -641,6 +755,7 @@ impl Generation {
                 vocabularies: Arc::new(Vocabularies::default()),
                 suggest: Arc::new(crate::suggest::SuggestIndexes::default()),
                 layer_spaces: Arc::default(),
+                unique_live: Arc::default(),
             },
             vec![(
                 shard,
@@ -651,11 +766,12 @@ impl Generation {
                     ),
                     identity: [0u8; 32],
                     unique: Arc::default(),
-                    unique_live: Arc::default(),
                     edited: Arc::default(),
                     edited_live: Arc::default(),
                     tenancy: Arc::default(),
                     delta_postings: Vec::new(),
+                    segments_version,
+                    previous_segments_version: segments_version.checked_sub(1),
                     overlay_version: 0,
                     overlay: Arc::new(overlay),
                     buffer: Arc::new(buffer),
@@ -690,5 +806,64 @@ pub(crate) fn partition_of(
             })
             .collect(),
         layer_spaces: manifest.layer_spaces,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A generation of `count` shards, each holding what [`Generation::synthetic`]'s one does.
+    fn shards_of(count: u32) -> Generation {
+        let one = Generation::synthetic("v00000", 0, 0, Overlay::new(), IngestBuffer::new());
+        let mut manifest = mosaica_store::manifest::SegmentsManifest::empty();
+        manifest.shards.records = (0..count)
+            .map(|id| mosaica_store::manifest::ShardRecord::empty(ShardId::new(id).unwrap()))
+            .collect();
+        let mut parts = one.parts.clone();
+        parts.bundle = Arc::new(Bundle {
+            manifest: one.bundle.manifest.clone(),
+            partitions: std::collections::HashMap::from([(
+                "default".to_string(),
+                partition_of(manifest),
+            )]),
+        });
+        let shard = one.only_shard().parts.clone();
+        Generation::new(
+            parts,
+            (0..count)
+                .map(|id| (ShardId::new(id).unwrap(), shard.clone()))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn a_swap_over_two_of_three_shards_moves_those_two_once_each() {
+        let generation = shards_of(3);
+        let [first, second, third] = [0, 1, 2].map(|id| ShardId::new(id).unwrap());
+        let mut moved = Vec::new();
+        let next = generation.with_shards([first, third], |parts, shards| {
+            parts.deny_epoch += 1;
+            for id in [first, third] {
+                shards.of(id).overlay_version += 1;
+                moved.push(id);
+            }
+        });
+        assert_eq!(moved, vec![first, third]);
+        assert_eq!(next.deny_epoch, generation.deny_epoch + 1);
+        for id in [first, third] {
+            assert_eq!(
+                next.shard_of(id).overlay_version,
+                generation.shard_of(id).overlay_version + 1
+            );
+        }
+        assert!(
+            std::ptr::eq(next.shard_of(second), generation.shard_of(second)),
+            "the shard the swap does not name is carried"
+        );
+        assert_eq!(
+            next.shards().map(Shard::id).collect::<Vec<_>>(),
+            vec![first, second, third]
+        );
     }
 }

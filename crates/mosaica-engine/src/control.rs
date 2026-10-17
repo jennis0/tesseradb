@@ -1,13 +1,11 @@
 //! The control-plane calls: resolving, writing, declaring and publishing.
 
-use std::sync::atomic::Ordering;
-
 use mosaica_lifecycle::resolve::{self, Batch, RowIdentity, Verdict};
 use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_store::manifest::DeclaredScalar;
 use mosaica_store::unique::{KeyKind, UniqueKey};
 use mosaica_store::StoreError;
-use mosaica_types::{EntityId, ItemAt, LayerSpace, MosaicaId, Target, TermId};
+use mosaica_types::{EntityId, ItemAt, LayerSpace, MosaicaId, ShardId, Target, TermId};
 
 use crate::edited::Stamp;
 use crate::engine::Engine;
@@ -199,8 +197,7 @@ pub(crate) fn name_items_in(
             }
             let mut verdicts: Vec<Verdict> = (0..table.rows).map(no_item).collect();
             let field = resolve::Identifier::Unique(*position);
-            let holders =
-                crate::unique::holders_in_every_shard(generation, &d.name, &keys).map_err(store)?;
+            let holders = crate::unique::holders(generation, &d.name, &keys).map_err(store)?;
             for (at, item) in holders {
                 let row = from[at];
                 verdicts[row] = match &verdicts[row] {
@@ -309,7 +306,7 @@ impl resolve::Holdings for Addressed<'_> {
             .iter()
             .map(|k| UniqueKey::of_widened(kind, *k))
             .collect();
-        crate::unique::holders_in_every_shard(self.generation, &declared.name, &keys)
+        crate::unique::holders(self.generation, &declared.name, &keys)
     }
 
     fn mosaica_holders(&self, ids: &[MosaicaId]) -> Result<Vec<Option<ItemAt>>, StoreError> {
@@ -428,17 +425,19 @@ impl Engine {
         let _ = self.request_flush_publication();
     }
 
-    /// Request a compaction fold — the trigger `POST /control/compact` will take (reserved,
-    /// unbuilt). The same shape as [`Engine::request_flush`], but a fold gets its own thread
-    /// rather than the shared pool, and a 202 means minutes to hours of IO still to come. At most
-    /// one fold is in flight: a second request while one runs is satisfied by neither.
-    ///
-    /// Not built yet: the trigger's own gauges and minimum interval.
+    /// Request a compaction of every shard with something to reclaim, one after another, or of
+    /// the shard the schedule ranks first where none has: the trigger `POST /control/compact`
+    /// takes. A compaction gets its own thread rather than the shared pool, and the 202 means
+    /// minutes to hours of IO still to come. At most one compaction is in flight. A request that
+    /// arrives while one runs is held until it lands, and `fold_requested` stays true until the
+    /// last shard the request names publishes.
     pub fn request_fold(&self) {
-        self.write
-            .health()
-            .fold_requested
-            .store(true, Ordering::SeqCst);
+        self.request_compaction(None);
+    }
+
+    /// [`Engine::request_fold`], for `shard` alone where it names one.
+    pub fn request_compaction(&self, shard: Option<ShardId>) {
+        self.write.health().request_compaction(shard);
         self.write.wake();
     }
 

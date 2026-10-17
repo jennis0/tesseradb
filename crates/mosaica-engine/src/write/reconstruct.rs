@@ -33,6 +33,9 @@ pub(crate) struct ManifestSeed<'a> {
     /// Every published member pack, across every partition's manifest, beside the shard holding
     /// it, with the prefix directory their paths are relative to.
     pub membership_extents: &'a [(ShardId, mosaica_store::manifest::MembershipExtent)],
+    /// Every shard's slice version of each level, as its record holds them, seeded after the
+    /// layer spaces' records versions.
+    pub slice_versions: &'a [(ShardId, mosaica_store::manifest::SliceVersion)],
     /// Every layer space's record, across every partition's manifest: its record packs, which
     /// pair with the member packs over the same ordinals, and its levels' artifact-write counters.
     ///
@@ -88,7 +91,7 @@ pub(crate) type Reconstructed = (Overlays, BTreeMap<ShardId, IngestBuffer>, Writ
 
 /// Refuses a log naming point shard `shard`, which nothing holds: `verb` is what the log does to
 /// it, and `held_by` says what does not hold it.
-pub(crate) fn unknown_shard(shard: ShardId, verb: &str, held_by: &str) -> EngineError {
+fn unknown_shard(shard: ShardId, verb: &str, held_by: &str) -> EngineError {
     EngineError::Malformed(format!(
         "the WAL {verb} point shard {shard}, which {held_by}. Restore the side-manifest and log \
          this bundle was written with"
@@ -354,7 +357,7 @@ impl WritePath {
         // extent is addressed by absolute ordinal from the layer's reserved runs, so this must run
         // after the whole registry is replayed.
         let SeededArtifacts {
-            mut artifacts,
+            artifacts,
             slices,
             mut undecodable,
             on_heap,
@@ -362,9 +365,16 @@ impl WritePath {
             &registry,
             seed.layer_spaces,
             seed.membership_extents,
+            seed.slice_versions,
             &shard_ids,
             &seed.prefix_dir,
         )?;
+        let own = shard_ids.first().copied().unwrap_or(ShardId::ZERO);
+        let mut artifacts = artifacts.with_slices(own, slices);
+        // A shard the log opened holds nothing the manifests' packs name.
+        for opened in seeds.iter().filter(|seed| !shard_ids.contains(&seed.id)) {
+            artifacts.open_slice(opened.id);
+        }
 
         // Same ordering rule again: the overlay is seeded and the log replayed on top, because
         // seeding after replay would revert an acked unsuppress the newest manifest predates.
@@ -507,19 +517,25 @@ impl WritePath {
                         mosaica_types::ENTITY_END,
                     ))
                 })?;
-            // A size no declaration could have left is refused at open, not at the first batch.
-            mosaica_types::check_shard_size(size, allocator.high_water()).map_err(|e| {
-                EngineError::Malformed(format!(
-                    "the shard size the manifest and the WAL leave ({size}) does not hold: {e}"
-                ))
-            })?;
-            allocator.set_size(size);
+            // A size no declaration could have left is refused at open, not at the first batch. A
+            // sealed shard's edits take ids past the size.
+            match shard.state {
+                mosaica_types::ShardState::Open => {
+                    mosaica_types::check_shard_size(size, allocator.high_water()).map_err(|e| {
+                        EngineError::Malformed(format!(
+                            "the shard size the manifest and the WAL leave ({size}) does not \
+                             hold: {e}"
+                        ))
+                    })?;
+                }
+                mosaica_types::ShardState::Sealed => allocator.seal(),
+            }
             allocator.seed_freed(shard.free, shard.held, wal.retained_from(), named);
-            shards.push(ShardWrite::new(shard.id, shard.state, allocator));
+            shards.push(ShardWrite::new(shard.id, allocator));
         }
         if !shards
             .iter()
-            .any(|shard| shard.state == mosaica_types::ShardState::Open)
+            .any(|shard| shard.state() == mosaica_types::ShardState::Open)
         {
             return Err(EngineError::Malformed(
                 "every point shard the manifests and the WAL leave is sealed, so no shard takes \
@@ -552,14 +568,12 @@ impl WritePath {
                 several_shards,
                 shards,
                 next_shard_id,
+                size,
                 resolver_state,
                 accepted_batches,
                 registry,
                 artifacts,
-                slices: slices
-                    .into_iter()
-                    .map(|(shard, slice)| (shard, Arc::new(slice)))
-                    .collect(),
+                settled_owing: super::live::settled_of(seed.layer_spaces),
                 roster,
                 attributes,
                 vocabularies: runtime_vocabularies,
@@ -573,10 +587,10 @@ impl WritePath {
 
 /// What the manifests' record and member packs seed, before the log is replayed over them.
 struct SeededArtifacts {
-    /// Every artifact's whole record, with the write shard's slice of its membership and
+    /// Every artifact's whole record, with the first shard's slice of its membership and
     /// generating sets.
     artifacts: ArtifactStore,
-    /// Every other point shard's slice: see [`LiveState::slices`].
+    /// Every other point shard's slice ([`ArtifactStore::with_slices`]).
     slices: Vec<(ShardId, ArtifactStore)>,
     /// Artifacts a pack held that did not decode, or whose slices did not hold their sets.
     undecodable: usize,
@@ -586,11 +600,12 @@ struct SeededArtifacts {
 
 /// Every artifact the packs of `layer_spaces` hold, read through `registry`'s runs, each record
 /// paired with every one of `shards`' member packs over the same ordinals. `shards` is ascending,
-/// so the first is the write shard.
+/// so the first holds the store's own slice.
 fn seed_artifacts(
     registry: &LayerRegistry,
     layer_spaces: &[mosaica_store::manifest::LayerSpaceRecord],
     membership_extents: &[(ShardId, mosaica_store::manifest::MembershipExtent)],
+    slice_versions: &[(ShardId, mosaica_store::manifest::SliceVersion)],
     shards: &[ShardId],
     prefix_dir: &Path,
 ) -> Result<SeededArtifacts, EngineError> {
@@ -626,6 +641,7 @@ fn seed_artifacts(
             continue;
         };
         let name = name.to_string();
+        let deleted = space.tombstones.entities();
         // A stored layer's slice seeds only the artifacts its shard holds something of, borrowers
         // and their targets; a resolved layer's seeds every artifact.
         let held_only = several && stored_membership(&layer.declaration);
@@ -682,7 +698,7 @@ fn seed_artifacts(
                     seeded.undecodable += 1;
                     continue;
                 };
-                // The record decodes once, with the write shard's slice; every other slice is its
+                // The record decodes once, with the first shard's slice; every other slice is its
                 // members and sets. Together they hold every generating set whole, or the
                 // artifact is damage and refused in every shard.
                 let Some((mut record, shape)) = decode_slice(entity, record_blob, blobs[0]) else {
@@ -699,7 +715,7 @@ fn seed_artifacts(
                     }
                     match decode_members(blob) {
                         Some((members, sets)) if sets.len() == record.contents.len() => {
-                            others.push((at, slice_record(&record, members, sets)));
+                            others.push((at, record.slice(members, sets)));
                         }
                         _ => break,
                     }
@@ -707,8 +723,13 @@ fn seed_artifacts(
                 let held = std::iter::once(&record)
                     .chain(others.iter().map(|(_, slice)| slice))
                     .collect::<Vec<_>>();
+                // A deleted artifact leaves the slice of each shard that holds part of it at that
+                // shard's compaction, so its slices may hold part of a set until the last; it is
+                // never served.
+                let deletion_held =
+                    deleted.is_some_and(|deleted| deleted.contains(entity.raw() as u32));
                 if others.len() + unlisted.len() + 1 != shards.len()
-                    || !slices_hold_their_sets(&held)
+                    || !(slices_hold_their_sets(&held) || deletion_held)
                 {
                     seeded.undecodable += 1;
                     continue;
@@ -720,11 +741,8 @@ fn seed_artifacts(
                         slice.declares_members = Some(declares);
                     }
                     if !held_only || borrows_membership(&record) {
-                        let nothing = || record.contents.iter().map(|_| croaring::Bitmap::new());
                         for at in unlisted {
-                            let slice =
-                                slice_record(&record, croaring::Bitmap::new(), nothing().collect());
-                            others.push((at, slice));
+                            others.push((at, record.slice_holding_nothing()));
                         }
                     }
                 }
@@ -780,6 +798,17 @@ fn seed_artifacts(
                 store.seed_level_version(&name, version.level, version.version);
             }
         }
+        for (shard, version) in slice_versions {
+            if version.space != space.space {
+                continue;
+            }
+            let Some(at) = shards.iter().position(|held| held == shard) else {
+                continue;
+            };
+            if let Some(store) = seeded.stores_mut().nth(at) {
+                store.seed_slice_version(&name, version.level, version.version);
+            }
+        }
     }
     if several {
         seeded.seed_borrowed_targets();
@@ -820,7 +849,7 @@ impl SeededArtifacts {
             for (_, slice) in slices.iter_mut() {
                 if slice.get(&layer, level, ordinal).is_none() {
                     let sets = held.contents.iter().map(|_| croaring::Bitmap::new()).collect();
-                    let record = slice_record(held, croaring::Bitmap::new(), sets);
+                    let record = held.slice(croaring::Bitmap::new(), sets);
                     slice.seed(&layer, space, level, ordinal, record, None);
                 }
             }
@@ -829,37 +858,6 @@ impl SeededArtifacts {
 
     fn stores_mut(&mut self) -> impl Iterator<Item = &mut ArtifactStore> {
         std::iter::once(&mut self.artifacts).chain(self.slices.iter_mut().map(|(_, slice)| slice))
-    }
-}
-
-/// One point shard's slice of `record`: `members` and `sets` in that shard, and of the record only
-/// what a row form reads beside them.
-fn slice_record(
-    record: &ArtifactRecord,
-    members: croaring::Bitmap,
-    sets: Vec<croaring::Bitmap>,
-) -> ArtifactRecord {
-    ArtifactRecord {
-        entity: record.entity,
-        key: None,
-        view: record.view.clone(),
-        incarnation: record.incarnation,
-        members: members.into(),
-        declares_members: record.declares_members,
-        contents: record
-            .contents
-            .iter()
-            .zip(sets)
-            .map(|(content, generated_from)| mosaica_lifecycle::membership::ContentSet {
-                values: None,
-                digest: [0; 32],
-                generated_from,
-                cardinality: content.cardinality,
-            })
-            .collect(),
-        attached_to: record.attached_to.clone(),
-        parents: Vec::new(),
-        access: Vec::new(),
     }
 }
 
@@ -881,7 +879,7 @@ mod tests {
         content_digest, encode_record, frame_members, ArtifactShapes, ContentSet, Members,
     };
     use mosaica_store::manifest::{
-        LayerSpaceRecord, LevelVersion, MembershipExtent, RecordPackExtent,
+        LayerSpaceRecord, LevelVersion, MembershipExtent, RecordPackExtent, SliceVersion,
     };
     use mosaica_store::membership::{pack, PackKind};
     use mosaica_types::layer::{EntityRun, RegisteredLayer, ReservedRuns, RESERVED_BLOCK};
@@ -924,6 +922,7 @@ mod tests {
                 generated_from: Bitmap::new(),
                 cardinality,
             }],
+            withdrawn: Box::default(),
             attached_to: None,
             parents: Vec::new(),
             access: vec![b"t".to_vec()],
@@ -974,13 +973,29 @@ mod tests {
         }];
         space.level_versions = vec![LevelVersion { level: 0, version: 9 }];
         let shards = [ShardId::ZERO, ShardId::new(1).expect("in range")];
-        seed_artifacts(&registry(), &[space], &extents, &shards, dir)
+        let slice_versions = [(
+            shards[1],
+            SliceVersion {
+                space: LayerSpace::ZERO,
+                level: 0,
+                version: 11,
+            },
+        )];
+        seed_artifacts(
+            &registry(),
+            &[space],
+            &extents,
+            &slice_versions,
+            &shards,
+            dir,
+        )
     }
 
     /// The write store holds each whole record with its shard's slice and the shape, the other
     /// shard's store its slice beside the record's attachment and cardinalities alone, and both
-    /// reach the level's bound and version. A record whose slices sum short of a set is refused in
-    /// every shard, and a shard holding nothing of an artifact seeds no slice of it.
+    /// reach the level's bound and records version, each at its own slice version. A record whose
+    /// slices sum short of a set is refused in every shard, and a shard holding nothing of an
+    /// artifact seeds no slice of it.
     #[test]
     fn each_shards_slice_is_read_at_open() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1002,11 +1017,12 @@ mod tests {
         assert!(written.shape_of(layer, 0, 0).is_some());
         assert!(slice.shape_of(layer, 0, 0).is_none());
 
-        for store in [written, slice] {
+        for (store, version) in [(written, 9), (slice, 11)] {
             assert!(store.get(layer, 0, 1).is_none(), "a hole");
             assert!(store.get(layer, 0, 2).is_none(), "refused in every shard");
             assert_eq!(store.slots(layer, 0).len(), 4);
-            assert_eq!(store.level_version(layer, 0), 9);
+            assert_eq!(store.records_version(layer, 0), 9);
+            assert_eq!(store.level_version(layer, 0), version);
         }
         let own = written.get(layer, 0, 3).expect("members in shard 0 alone");
         assert_eq!(own.declares_members, Some(true));
@@ -1071,6 +1087,7 @@ mod tests {
             declared_views: Vec::new(),
             view_ids_of_key: &mosaica_lifecycle::owner_id_only,
             membership_extents: &[],
+            slice_versions: &[],
             layer_spaces: &[],
             prefix_dir: dir.path().to_path_buf(),
             manifest: &manifest,
@@ -1107,7 +1124,7 @@ mod tests {
         let shards = state
             .shards
             .iter()
-            .map(|shard| (shard.id.raw(), shard.state, shard.high_water()))
+            .map(|shard| (shard.id.raw(), shard.state(), shard.high_water()))
             .collect();
         (shards, state.next_shard_id)
     }

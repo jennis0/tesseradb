@@ -1,6 +1,8 @@
-//! Compaction (the fold) writes a new prefix holding everything the live prefix holds except
-//! deleted entities. [`plan_fold`] is pure and runs on the executor, [`execute`] runs the passes
-//! on one dedicated thread, and `Executor::publish_fold` publishes. Merge and coalesce wait for it.
+//! A compaction (the fold) of one shard writes a new prefix holding everything the live prefix
+//! holds, with that shard rewritten without its deleted entities and every other shard's files
+//! linked. An artifact deletion is executed by the compaction of the last shard that holds it.
+//! [`plan_fold`] is pure and runs on the executor, [`execute`] runs the passes on one dedicated
+//! thread, and `Executor::publish_fold` publishes. Merge and coalesce wait for it.
 //!
 //! A deletion's overlay entry is removed only by the fold that removed the entity's rows and
 //! postings. The passes run over the plan's tombstone set, but the set that retires is computed at
@@ -21,4 +23,4 @@ pub(crate) use execute::{execute, next_prefix_name, CompletedFold, FoldContext};
 pub(crate) use plan::{plan_fold, FoldPlan, FoldResources, NoFold};
 pub(crate) use retire::{executed, CarriedForward};
 pub use schedule::CompactionSchedule;
-pub(crate) use schedule::{due, DeadBytes, FoldTrigger, Gauges};
+pub(crate) use schedule::{due, rank, DeadBytes, FoldTrigger, Gauges};

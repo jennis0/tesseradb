@@ -90,6 +90,7 @@ fn publish_second_geometry(engine: &Engine, tmp: &TempDir, prefix: &str, n: u64)
     );
     engine
         .publish_geometry(GeometryPublication::within_prefix(
+            mosaica_types::ShardId::ZERO,
             prefix.to_string(),
             next_version,
             live_watermark,

@@ -450,6 +450,7 @@ fn build_shard(fixture: &Fixture, sharding: &Sharding, shard: u32, scratch: &Pat
                     members: Members::owned(members),
                     declares_members: None,
                     contents: Vec::new(),
+                    withdrawn: Box::default(),
                     attached_to: None,
                     parents: Vec::new(),
                     access: Vec::new(),

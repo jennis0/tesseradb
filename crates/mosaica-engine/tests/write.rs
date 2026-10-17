@@ -1707,6 +1707,7 @@ fn a_geometry_publication_leaves_the_work_counts_alone() {
     let live = engine.generation();
     engine
         .publish_geometry(mosaica_engine::GeometryPublication::within_prefix(
+            mosaica_types::ShardId::ZERO,
             live.prefix.clone(),
             live.segments_version + 1,
             live.only_shard().watermark,

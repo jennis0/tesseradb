@@ -43,7 +43,8 @@ impl MergePlan {
     }
 }
 
-/// Select a merge over `generation`, or `None` if nothing qualifies.
+/// Select a merge over `generation`, or `None` if nothing qualifies: the first view of the first
+/// shard that has a run to merge. A merge never crosses shards.
 ///
 /// Sizes come from the manifest's `files` map rather than stat-ing the filesystem, so selection
 /// stays IO-free.
@@ -52,7 +53,20 @@ pub(crate) fn plan_merge(generation: &Generation, policy: MergePolicy) -> Option
     if partition_data.stepped_down() {
         return None;
     }
-    let shard = partition_data.only_shard();
+    partition_data
+        .shards
+        .iter()
+        .find_map(|shard| plan_merge_in(generation, partition, partition_data, shard, policy))
+}
+
+/// [`plan_merge`] within one shard.
+fn plan_merge_in(
+    generation: &Generation,
+    partition: &str,
+    partition_data: &mosaica_store::read::PartitionData,
+    shard: &mosaica_store::read::ShardData,
+    policy: MergePolicy,
+) -> Option<MergePlan> {
     let layout = ShardLayout::new(partition, shard.record.id);
     for (view, view_data) in &shard.views {
         // Use the view's live incarnation, or skip it. A mismatch between the bundle and its
@@ -94,7 +108,7 @@ pub(crate) fn plan_merge(generation: &Generation, policy: MergePolicy) -> Option
             .find(|extent| extent.seg_id == chosen[0])
             .expect("select returns seg_ids from the list it was given");
         return Some(MergePlan {
-            partition: partition.clone(),
+            partition: partition.to_string(),
             shard: shard.record.id,
             view: view.clone(),
             incarnation,
@@ -220,7 +234,7 @@ pub(crate) fn rebase_into(
     let consumed: Vec<&str> = plan.inputs.iter().map(|i| i.seg_id.as_str()).collect();
     let listed = |seg_id: &str| {
         manifest
-            .only_shard()
+            .shard(plan.shard)?
             .segments
             .iter()
             .position(|s| s.seg_id == seg_id && s.view == plan.view)
@@ -232,7 +246,10 @@ pub(crate) fn rebase_into(
         return false;
     }
 
-    let segments = &mut manifest.only_shard_mut().segments;
+    let Some(record) = manifest.shard_mut(plan.shard) else {
+        return false;
+    };
+    let segments = &mut record.segments;
     segments.retain(|s| !(s.view == plan.view && consumed.contains(&s.seg_id.as_str())));
     segments.insert(first_segment, completed.output.segment.clone());
 

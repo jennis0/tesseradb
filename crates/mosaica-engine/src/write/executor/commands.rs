@@ -115,33 +115,54 @@ pub(super) fn growth_receipt(
                 .get(layer, level, ordinal)
                 .expect("a resolved ordinal names a record");
             // The set this row moves, which is the membership on a row with no rank and the
-            // content's generating set on a row with one. A rank naming no content refused the
-            // batch in `prepare_grow` above, so the `None` arm here is unreachable and answers
-            // nothing rather than panicking on a thread that owes an acknowledgement.
+            // content's generating set on a row with one, each shard's part counted against that
+            // shard's slice. A rank naming no content refused the batch in `prepare_grow` above,
+            // so the `unranked` branch answering nothing is unreachable, and does not panic on a
+            // thread that must acknowledge.
             //
             // `left` is counted against the set the joins have already entered, which is the
             // order the page is applied in: an entity this page both joins and leaves is one this
             // page took out. Both counts are taken from how much of a bitmap the set holds, so
             // neither the set nor the set after the joins is built.
-            let (joining, leaving) = (join.joining.shard_zero(), join.leaving.shard_zero());
-            let counted = |held: &dyn Fn(&croaring::Bitmap) -> u64| {
-                let joined = joining.cardinality() - held(joining);
-                let left = if leaving.is_empty() {
-                    0
-                } else {
-                    let both = leaving.and(joining);
-                    held(leaving) + both.cardinality() - held(&both)
-                };
-                (joined, left)
-            };
-            let (joined, left) = match join.rank {
-                None => counted(&|other| record.members.and_cardinality(other)),
-                Some(rank) => record
-                    .contents
-                    .get(rank as usize)
-                    .map_or((0, 0), |content| {
-                        counted(&|other| content.generated_from.and_cardinality(other))
-                    }),
+            let unranked = join
+                .rank
+                .is_some_and(|rank| record.contents.get(rank as usize).is_none());
+            let shards: std::collections::BTreeSet<ShardId> = join
+                .joining
+                .iter()
+                .chain(join.leaving.iter())
+                .map(|(shard, _)| shard)
+                .collect();
+            let nothing = croaring::Bitmap::new();
+            let (joined, left) = if unranked {
+                (0, 0)
+            } else {
+                shards
+                    .into_iter()
+                    .map(|shard| {
+                        let slice = store
+                            .slice(shard)
+                            .and_then(|slice| slice.get(layer, level, ordinal));
+                        let held = |other: &croaring::Bitmap| match (slice, join.rank) {
+                            (None, _) => 0,
+                            (Some(slice), None) => slice.members.and_cardinality(other),
+                            (Some(slice), Some(rank)) => slice
+                                .contents
+                                .get(rank as usize)
+                                .map_or(0, |content| content.generated_from.and_cardinality(other)),
+                        };
+                        let joining = join.joining.get(shard).unwrap_or(&nothing);
+                        let leaving = join.leaving.get(shard).unwrap_or(&nothing);
+                        let joined = joining.cardinality() - held(joining);
+                        let left = if leaving.is_empty() {
+                            0
+                        } else {
+                            let both = leaving.and(joining);
+                            held(leaving) + both.cardinality() - held(&both)
+                        };
+                        (joined, left)
+                    })
+                    .fold((0, 0), |(joined, left), (j, l)| (joined + j, left + l))
             };
             mosaica_lifecycle::MembershipGrown {
                 entity: record.entity,
@@ -292,7 +313,7 @@ impl Executor {
                 reply,
             } => {
                 if !stamp.follow_since(&self.generation.load_full(), |generation| {
-                    crate::edited::follow_changes(generation.only_shard(), &mut changes)
+                    crate::edited::follow_changes(generation, &mut changes)
                 }) {
                     reply.fail(ExecError::Stale);
                     return;
@@ -697,15 +718,15 @@ impl Executor {
                 let next = generation.with(|g| g.layer_spaces = Arc::new(spaces));
                 self.publish(next, std::time::Instant::now());
             }
-            self.side_manifests
-                .membership_extents
-                .retain(|extent| extent.space != *space);
-            self.side_manifests
-                .derived_extents
-                .retain(|extent| extent.space != *space);
+            for extents in self.side_manifests.membership_extents.values_mut() {
+                extents.retain(|extent| extent.space != *space);
+            }
+            for extents in self.side_manifests.derived_extents.values_mut() {
+                extents.retain(|extent| extent.space != *space);
+            }
             self.side_manifests.retain_named_artifact_files();
             // The deltas held for the tick describe forms that are going with the layer.
-            self.pending_forms.retain(|(layer, _), _| layer != name);
+            self.pending_forms.retain(|(layer, _, _), _| layer != name);
             self.deps.artifact_projections.forget(name);
             self.deps.lineages.forget(name);
             self.deps.level_contents.forget(name);
@@ -830,30 +851,36 @@ impl Executor {
             crate::attributes::CompiledAttribute::Scoped(f) => (Vec::new(), vec![f.clone()]),
         };
         let manifest = generation.bundle.manifest.with_attributes(&entity, &scoped);
-        // An entity-scoped column takes an empty stack in the filter columns, at its position in
-        // the served list; a scoped family's per-view columns are opened by the first flush that
-        // writes one, as a family declared at the build is for a view created since. Built before
-        // the append, so a column this process cannot hold is refused with nothing written.
-        let shard = generation.only_shard();
-        let filter_columns = match &compiled {
-            crate::attributes::CompiledAttribute::Entity(d) => {
-                let declared_index = manifest.declared_scalars.len() - 1;
-                match shard.filter_columns.with_runtime_column(
-                    d,
-                    declared_index,
-                    &manifest.vocabularies,
-                ) {
-                    Ok(columns) => Arc::new(columns),
-                    Err(e) => {
-                        reply.fail(ExecError::AttributeRefused {
-                            detail: format!("attribute '{}': {e}", request.name),
-                        });
-                        return;
+        // An entity-scoped column takes an empty stack in every shard's filter columns, at its
+        // position in the served list; a scoped family's per-view columns are opened by the first
+        // flush that writes one, as a family declared at the build is for a view created since.
+        // Built before the append, so a column this process cannot hold is refused with nothing
+        // written.
+        let mut filter_columns = Vec::new();
+        for shard in generation.shards() {
+            let columns = match &compiled {
+                crate::attributes::CompiledAttribute::Entity(d) => {
+                    let declared_index = manifest.declared_scalars.len() - 1;
+                    match shard.filter_columns.with_runtime_column(
+                        d,
+                        declared_index,
+                        &manifest.vocabularies,
+                    ) {
+                        Ok(columns) => Arc::new(columns),
+                        Err(e) => {
+                            reply.fail(ExecError::AttributeRefused {
+                                detail: format!("attribute '{}': {e}", request.name),
+                            });
+                            return;
+                        }
                     }
                 }
-            }
-            crate::attributes::CompiledAttribute::Scoped(_) => Arc::clone(&shard.filter_columns),
-        };
+                crate::attributes::CompiledAttribute::Scoped(_) => {
+                    Arc::clone(&shard.filter_columns)
+                }
+            };
+            filter_columns.push((shard.id(), columns));
+        }
         let record = WalRecord::AttributeDeclare {
             declaration: Box::new(compiled.declaration(request.title.clone())),
         };
@@ -885,10 +912,13 @@ impl Executor {
             _ => Arc::clone(&generation.suggest),
         };
         let bundle = generation.bundle.with_views(manifest);
-        let next = generation.with_shard(shard.id(), |g, s| {
+        let ids: Vec<ShardId> = filter_columns.iter().map(|(id, _)| *id).collect();
+        let next = generation.with_shards(ids, |g, shards| {
             g.bundle = bundle;
             g.vocabularies = vocabularies;
-            s.filter_columns = filter_columns;
+            for (id, columns) in filter_columns {
+                shards.of(id).filter_columns = columns;
+            }
             g.suggest = suggest;
         });
         self.publish(next, started);
@@ -906,10 +936,8 @@ impl Executor {
 
     /// `PUT /control/shards`: declare the point shard's size while the service runs.
     pub(super) fn commit_shards_declare(&mut self, size: u64, reply: Reply<bool>) {
-        let (held, high_water) = {
-            let shard = self.live.only_shard();
-            (shard.size(), shard.high_water())
-        };
+        let held = self.live.shard_size();
+        let high_water = self.live.open_shard().high_water();
         if let Err(e) = mosaica_types::check_shard_size(size, high_water) {
             reply.fail(ExecError::ShardSize(e));
             return;
@@ -924,8 +952,8 @@ impl Executor {
             return;
         }
         self.live
-            .only_shard()
-            .with_allocator(|alloc| alloc.set_size(size));
+            .size
+            .store(size, std::sync::atomic::Ordering::Relaxed);
         // Durable in the log and not yet in a manifest: the next publication restates it.
         self.side_manifests.behind_live = true;
         reply.ack(false);
@@ -1344,7 +1372,7 @@ impl Executor {
             crate::write::retire_dead_view_artifacts(registry, store, &served.bundle.manifest)
         });
         for (layer, _) in &retired {
-            self.pending_forms.retain(|(held, _), _| held != layer);
+            self.pending_forms.retain(|(held, _, _), _| held != layer);
             self.deps.artifact_projections.forget(layer);
             self.deps.lineages.forget(layer);
             self.deps.level_contents.forget(layer);
@@ -1363,8 +1391,8 @@ impl Executor {
     }
 
     /// Publish the generation a create or a drop makes: the bundle as the live roster describes
-    /// it, the deny mask re-derived over the views it now has, and every buffered row of a view
-    /// that has gone.
+    /// it, each shard's deny mask re-derived over the views it now has, and every shard's buffered
+    /// rows of a view that has gone.
     ///
     /// The buffered rows of a dropped view are discarded. They name a coordinate system that no
     /// longer exists, so nothing will ever give them geometry, and a row left in the buffer for a
@@ -1386,24 +1414,38 @@ impl Executor {
             .manifest
             .with_roster(&created, &tombstones);
         let bundle = generation.bundle.with_views(manifest);
-        let shard = generation.only_shard();
-        let buffer = if dropped.is_empty() {
-            Arc::clone(&shard.buffer)
-        } else {
-            let mut buffer = (*shard.buffer).clone();
-            buffer.remove_views(dropped);
-            self.health
-                .buffered_items
-                .store(buffer.len(), Ordering::SeqCst);
-            Arc::new(buffer)
-        };
-        let next = generation.with_shard(shard.id(), |g, s| {
+        let shards: Vec<(
+            ShardId,
+            Arc<IngestBuffer>,
+            Arc<crate::filter::FilterColumns>,
+        )> = generation
+            .shards()
+            .map(|shard| match dropped.is_empty() {
+                true => (
+                    shard.id(),
+                    Arc::clone(&shard.buffer),
+                    Arc::clone(&shard.filter_columns),
+                ),
+                false => {
+                    let mut buffer = (*shard.buffer).clone();
+                    buffer.remove_views(dropped);
+                    let columns = shard.filter_columns.without_scoped_columns(dropped);
+                    (shard.id(), Arc::new(buffer), Arc::new(columns))
+                }
+            })
+            .collect();
+        let ids: Vec<ShardId> = shards.iter().map(|(id, ..)| *id).collect();
+        let next = generation.with_shards(ids, |g, parts| {
             g.bundle = bundle;
-            s.buffer = buffer;
-            if !dropped.is_empty() {
-                s.filter_columns = Arc::new(shard.filter_columns.without_scoped_columns(dropped));
+            for (id, buffer, filter_columns) in shards {
+                let s = parts.of(id);
+                s.buffer = buffer;
+                s.filter_columns = filter_columns;
             }
         });
+        self.health
+            .buffered_items
+            .store(next.buffered(), Ordering::SeqCst);
         self.publish(next, started);
     }
 }

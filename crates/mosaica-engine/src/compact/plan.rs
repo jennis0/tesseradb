@@ -48,7 +48,7 @@ pub(crate) struct FoldPlan {
     /// The edited-items runs the fold merges, base and live.
     pub(crate) edited: mosaica_store::manifest::EditedItemsRuns,
     pub(crate) tombstones: Bitmap,
-    /// One past the highest entity with a row in this partition at the snapshot.
+    /// One past the highest entity with a row in this shard at the snapshot.
     pub(crate) entity_bound: u64,
     pub(crate) dict_len: u32,
     pub(crate) small_term_threshold: u32,
@@ -71,7 +71,7 @@ pub(crate) enum NoFold {
     OverlayDiverged,
     /// A fold would remove the segment a stepped-down side-manifest steps past.
     SteppedDown,
-    /// No partition, or no view holding a segment.
+    /// No partition, no such shard, or no view of it holding a segment.
     NothingToFold,
     /// Both figures in bytes.
     InsufficientMemory { need: u64, available: u64 },
@@ -122,7 +122,8 @@ impl NoFold {
 pub(crate) struct FoldResources {
     pub(crate) available_memory: Option<u64>,
     pub(crate) free_disc: Option<u64>,
-    /// Roaring containers across all artifact memberships held. The manifest does not record it.
+    /// Roaring containers across the compacted shard's slice of every artifact membership. The
+    /// manifest does not record it.
     pub(crate) membership_containers: u64,
 }
 
@@ -201,9 +202,11 @@ pub(crate) fn disc_estimate(live_bytes: u64) -> u64 {
         .saturating_div(100)
 }
 
-/// Plans a fold of `generation`'s single partition. Pure: it reads only its arguments.
+/// Plans a compaction of `shard` of `generation`'s single partition. Pure: it reads only its
+/// arguments.
 pub(crate) fn plan_fold(
     generation: &Generation,
+    shard: mosaica_types::ShardId,
     wal_poisoned: bool,
     overlay_diverged: bool,
     resources: FoldResources,
@@ -229,7 +232,8 @@ pub(crate) fn plan_fold(
         .next()
         .ok_or(NoFold::NothingToFold)?;
     let manifest = &partition_data.manifest;
-    let shard = partition_data.only_shard();
+    let live = generation.shard(shard).ok_or(NoFold::NothingToFold)?;
+    let shard = &live.data;
     let record = &shard.record;
     let layout = mosaica_store::ShardLayout::new(partition, record.id);
 
@@ -295,7 +299,7 @@ pub(crate) fn plan_fold(
 
     let dict_len = generation.dict.len();
     if let Some(available) = resources.available_memory {
-        // The widest view's permutation bound is the partition's entity bound.
+        // The widest view's permutation bound is the shard's entity bound.
         let need = memory_estimate(
             entity_bound,
             u64::from(dict_len),
@@ -308,13 +312,17 @@ pub(crate) fn plan_fold(
     }
     if let Some(free) = resources.free_disc {
         // The bundle manifest names the build's files and the partition manifest the write path's.
+        // Another shard's files are links.
         let live_bytes: u64 = generation
             .bundle
             .manifest
             .files
-            .values()
-            .map(|d| d.size)
-            .chain(manifest.files.values().map(|d| d.size))
+            .iter()
+            .chain(manifest.files.iter())
+            .filter(|(rel, _)| {
+                mosaica_store::layout::shard_of(partition, rel).is_none_or(|at| at == record.id)
+            })
+            .map(|(_, d)| d.size)
             .sum();
         let need = disc_estimate(live_bytes);
         if need > free {
@@ -322,7 +330,7 @@ pub(crate) fn plan_fold(
         }
     }
 
-    let tombstones = generation.only_shard().overlay.deleted_set().clone();
+    let tombstones = live.overlay.deleted_set().clone();
 
     Ok(FoldPlan {
         partition: partition.clone(),

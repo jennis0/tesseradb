@@ -611,11 +611,9 @@ fn a_merge_is_suspended_while_a_completed_fold_is_unpublished() {
 /// of either job. A fold dispatched here would plan against a segment list the held merge is about
 /// to replace, and would discard hours of IO at its rebase check.
 ///
-/// **Suspension, not refusal, is what the second half asserts**, and `dispatch_fold` keeps the two
-/// apart: it consumes the request flag only when it *refuses* — a fold already running is a state
-/// an operator must be told about — and a publication one pass away is not that. So the request
-/// stays armed and the fold happens as soon as the merge is drained, which is what makes this
-/// exclusion free of an operator-visible cost.
+/// **The second half asserts that the request waits.** `dispatch_fold` consumes a request's shard
+/// only when a gate refuses it. A merge one pass from publication is not a refusal, so the request
+/// stays raised and the fold starts as soon as the merge is drained.
 ///
 /// **Mutations this kills** (each run): reverting `dispatch_fold`'s gate to `merge_in_flight ||
 /// coalesce_in_flight` — the fold dispatches inside the hold, which the loop below catches;
@@ -659,6 +657,104 @@ fn a_fold_is_suspended_while_a_completed_merge_is_unpublished() {
         engine.write_executor_stats().merges > before.merges
     });
     wait_for_fold_publication(&engine, &before);
+}
+
+/// A compaction requested while one runs is held until that one lands, with `fold_requested`
+/// raised, and is then answered by a compaction of its own: a deletion accepted after the first
+/// compaction planned is retired by the second.
+#[test]
+fn a_request_made_while_a_compaction_runs_is_answered_by_a_later_one() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
+    let before = engine.write_executor_stats();
+
+    engine.set_fold_paused_for_test(true);
+    engine.request_fold();
+    wait_for("the first compaction's passes to finish", || {
+        engine.fold_is_holding_for_test()
+    });
+    engine
+        .accept_change(entity_of_source(&root, "v00000", 4), ChangeOp::Delete)
+        .unwrap();
+    engine.request_fold();
+    for _ in 0..5 {
+        tick(&engine);
+        let now = engine.write_executor_stats();
+        assert!(
+            now.fold_requested,
+            "the request is held while a compaction runs"
+        );
+        assert_eq!(now.folds, before.folds);
+    }
+
+    engine.set_fold_paused_for_test(false);
+    wait_for("the request to be answered", || {
+        let now = engine.write_executor_stats();
+        assert_eq!(
+            now.fold_failures, before.fold_failures,
+            "a compaction was discarded rather than published"
+        );
+        now.folds > before.folds && !now.fold_requested
+    });
+    assert_eq!(
+        engine.write_executor_stats().folds,
+        before.folds + 2,
+        "the held request is answered by a compaction of its own"
+    );
+    assert_eq!(
+        engine.retirable_deletions(),
+        0,
+        "the deletion accepted during the first compaction is retired by the second"
+    );
+}
+
+/// The `v#####` prefixes under `root`, in order.
+fn prefixes(root: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(root)
+        .unwrap()
+        .filter_map(|entry| entry.unwrap().file_name().into_string().ok())
+        .filter(|name| name.starts_with('v'))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Dropping an engine during a compaction abandons the compaction and waits for its thread: the
+/// prefix it was writing is gone when the drop returns, and the bundle reopens at once and serves
+/// what it served.
+#[test]
+fn an_engine_dropped_during_a_compaction_abandons_it() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let served = visible(&engine, &session);
+
+    engine.set_fold_paused_for_test(true);
+    engine.request_fold();
+    wait_for("the compaction's passes to finish", || {
+        engine.fold_is_holding_for_test()
+    });
+    assert_eq!(
+        prefixes(&root).len(),
+        2,
+        "the compaction is writing a prefix"
+    );
+    drop(session);
+    drop(engine);
+    assert_eq!(prefixes(&root), vec!["v00000".to_string()]);
+
+    let mut engine = Engine::open(
+        &root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        config_uncapped(),
+    )
+    .expect("the engine reopens");
+    engine.start_write_executor(8).expect("the executor starts");
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    assert_eq!(visible(&engine, &session), served);
 }
 
 /// **Compaction §7's startup sweep: an orphaned prefix is reclaimed when a write executor starts,
@@ -2332,6 +2428,72 @@ fn the_dead_bytes_route_dispatches_a_fold_on_a_bundle_with_nothing_deleted() {
         manifests,
         "the folded bundle holds nothing unnamed but its manifests, as a freshly built one does"
     );
+}
+
+/// The files a flush has written and not yet published are not dead bytes: a compaction started
+/// on them would reclaim nothing, and the flush publishes them at its next pass.
+#[test]
+fn a_flush_in_flight_does_not_make_the_dead_bytes_route_dispatch() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let threshold = 0.03;
+    let engine = engine_over_fixture(
+        tmp.path(),
+        &root,
+        config_scheduling(mosaica_engine::CompactionSchedule {
+            min_interval_secs: 0,
+            window_start_secs: None,
+            window_secs: 0,
+            window_min_segments: 0,
+            max_segments: None,
+            after_deletions: None,
+            tombstoned_rows_fraction: None,
+            dead_bytes_ratio: Some(threshold),
+        }),
+    );
+    engine.set_merge_for_test(false);
+    assert!(dead_ratio(&root, &engine) < 0.01);
+
+    engine.set_flush_paused_for_test(true);
+    let rows: Vec<UnallocatedRow> = (0..2_000)
+        .map(|i| UnallocatedRow {
+            view: "s0".to_string(),
+            join: None,
+            descriptors: vec![b"0".to_vec()],
+            x: (i % 10) as f64,
+            y: (i / 200) as f64,
+            scalars: Vec::new(),
+            terms: engine.resolve_terms(&[b"0".to_vec()]),
+            scoped: Vec::new(),
+        })
+        .collect();
+    engine
+        .ingest_rows(rows, "many".to_string(), [0u8; 32])
+        .expect("ingest is accepted");
+    let before = engine.write_executor_stats();
+    engine.request_flush();
+    wait_for("the flush to hold", || engine.flush_is_holding_for_test());
+    let held = dead_ratio(&root, &engine);
+    assert!(
+        held > threshold,
+        "the flush's files are {held:.4} of what is named, which the threshold has to sit below"
+    );
+    // A tick waits behind a running flush, so only the one that dispatched it could have read
+    // its files. A fixture compaction lands well inside this.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let now = engine.write_executor_stats();
+    assert_eq!(
+        (now.folds, now.fold_failures),
+        (before.folds, before.fold_failures),
+        "a compaction was dispatched on the files of a flush that had not published"
+    );
+
+    let flushes = engine.write_executor_stats().flushes;
+    engine.set_flush_paused_for_test(false);
+    wait_for("the flush to publish", || {
+        engine.write_executor_stats().flushes > flushes
+    });
+    assert_no_fold_within(&engine, 2);
 }
 
 /// **The segment ceiling dispatches a fold at any hour** — the route that says deferring segment

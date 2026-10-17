@@ -855,6 +855,57 @@ fn an_ingest_is_answered_from_the_slots_held_until_they_are_rebuilt() {
     assert_eq!(rebuilt.len(), after.len() + 1);
 }
 
+/// Slots read between a growth and the tick that serves it are held at the version of the level
+/// they were built from, so the tick leaves a rebuild, and the rebuild gives the slots a fresh
+/// build over the grown level gives.
+#[test]
+fn slots_read_before_the_tick_are_rebuilt_once_it_serves_the_growth() {
+    let fx = fixture();
+    let engine = &fx.engine;
+    let leaves: Vec<Node> = fx
+        .tree(&[])
+        .into_iter()
+        .filter(|n| n.key.starts_with("b4-"))
+        .collect();
+    fx.plant(FLAT, HierarchyKind::Flat, &leaves);
+    let session = fx.session(true);
+    let before = read_slots(engine, &session, FLAT, 10);
+
+    // The corner leaf takes in the far corner's items, which moves its centre across the map.
+    let map = source_to_new_map(&fx.root, "v00000");
+    let far = leaves.iter().find(|n| n.key == "b4-15-15").unwrap();
+    engine
+        .grow_memberships(
+            FLAT.into(),
+            0,
+            vec![mosaica_lifecycle::IncomingGrowth::from_entities(
+                "b4-0-0".into(),
+                far.members
+                    .iter()
+                    .map(|s| mosaica_types::EntityId::new(map[s]))
+                    .collect::<Vec<_>>(),
+            )],
+        )
+        .unwrap();
+    let late = engine.authorise(br#"{"terms":["0"]}"#).unwrap();
+    assert_eq!(
+        read_slots(engine, &late, FLAT, 10),
+        before,
+        "the level is served as last published until the tick"
+    );
+
+    tick(engine);
+    read_slots(engine, &late, FLAT, 10);
+    engine.refresh_cluster_slots(&late).unwrap();
+    let fresh = engine.authorise(br#"{ "terms":["0"] }"#).unwrap();
+    let grown = read_slots(engine, &fresh, FLAT, 10);
+    assert!(grown != before, "the growth moves a slot");
+    assert!(
+        read_slots(engine, &late, FLAT, 10) == grown,
+        "the rebuilt slots are a fresh build's"
+    );
+}
+
 /// **A level whose layer declares a centroid is centred on its figures**, the centroids the map
 /// fills when it draws the level, whichever route asks first: browse alone serves the slots the
 /// viewport then serves, and a bulk read in another session serves them too.

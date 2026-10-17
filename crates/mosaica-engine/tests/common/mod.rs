@@ -13,11 +13,14 @@
 #![allow(dead_code)]
 
 mod lifecycle;
+mod shards;
 mod wait;
 
 pub use ingest_rows::IngestRows;
 #[allow(unused_imports)]
 pub use lifecycle::*;
+#[allow(unused_imports)]
+pub use shards::*;
 #[allow(unused_imports)]
 pub use wait::*;
 
@@ -120,7 +123,7 @@ use mosaica_lifecycle::UnallocatedRow;
 use mosaica_spatial::Bounds;
 use mosaica_store::manifest::SegmentsManifest;
 use mosaica_store::read::open_bundle;
-use mosaica_types::{EntityId, IdentityKey, ItemHigh, MosaicaId, ShardId, Tenancy};
+use mosaica_types::{EntityId, IdentityKey, ItemAt, ItemHigh, MosaicaId, ShardId, Tenancy};
 
 pub const N_ITEMS: u64 = 10_000;
 pub const ALL_TERM: u64 = 0;
@@ -131,17 +134,24 @@ pub const PARTITION: &str = "default";
 pub const SHARD: mosaica_store::ShardLayout<'static> =
     mosaica_store::ShardLayout::new(PARTITION, ShardId::ZERO);
 
-/// The item each of `ids` names: `None` for one that names nothing, an artifact or a layer.
-pub fn items_of(engine: &Engine, ids: &[MosaicaId]) -> Vec<Option<EntityId>> {
+/// The item each of `ids` names, in its shard: `None` for one that names nothing, an artifact or
+/// a layer.
+pub fn items_at(engine: &Engine, ids: &[MosaicaId]) -> Vec<Option<ItemAt>> {
     engine
         .resolve_targets(ids)
         .unwrap()
         .into_iter()
         .map(|target| match target {
-            Some(mosaica_types::Target::Item(_, entity)) => Some(entity),
+            Some(mosaica_types::Target::Item(shard, entity)) => Some(ItemAt::new(shard, entity)),
             _ => None,
         })
         .collect()
+}
+
+/// [`items_at`], each item's entity alone.
+pub fn items_of(engine: &Engine, ids: &[MosaicaId]) -> Vec<Option<EntityId>> {
+    let items = items_at(engine, ids).into_iter();
+    items.map(|item| item.map(|item| item.entity)).collect()
 }
 
 /// The built bundle's partition directory in `root`'s `prefix`: where its side-manifests are.
@@ -190,15 +200,36 @@ pub fn rewrite_publication(prefix_dir: &Path, n: u64, manifest: &SegmentsManifes
         .expect("the publication is written again");
 }
 
+/// The number of the publication `root` serves, as its partition file names it.
+pub fn served_n(root: &Path) -> u64 {
+    open_bundle(root).expect("the bundle opens").partitions[PARTITION].segments_n
+}
+
+/// The publication `root` serves.
+pub fn served_publication(root: &Path) -> mosaica_store::read::PublishedManifest {
+    mosaica_store::read_publication(&root.join(current_prefix(root)), PARTITION, served_n(root))
+        .expect("the served publication reads")
+}
+
 /// Rewrite the side-manifest `root` serves with `edit` applied.
 pub fn edit_side_manifest(root: &Path, edit: impl FnOnce(&mut SegmentsManifest)) {
-    let n = open_bundle(root).expect("the bundle opens").partitions[PARTITION].segments_n;
-    let prefix_dir = root.join(current_prefix(root));
-    let mut manifest = mosaica_store::read_publication(&prefix_dir, PARTITION, n)
-        .expect("the served publication reads")
-        .manifest;
+    let published = served_publication(root);
+    let mut manifest = published.manifest;
     edit(&mut manifest);
-    rewrite_publication(&prefix_dir, n, &manifest);
+    rewrite_publication(&root.join(current_prefix(root)), published.n, &manifest);
+}
+
+/// Every file under `dir` and its subdirectories, none where `dir` is missing.
+pub fn files_under(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        match path.is_dir() {
+            true => out.extend(files_under(&path)),
+            false => out.push(path),
+        }
+    }
+    out
 }
 
 /// The bundle's shard size, and each shard's id and high water, as an open reads them.
@@ -350,12 +381,17 @@ pub fn terms_of(source_id: u64) -> Vec<u64> {
 /// larger synthetic corpus without duplicating the whole writer. [`build_fixture`] is the
 /// `N_ITEMS`-sized default every other test in this file uses.
 pub fn write_points_n(path: &Path, n: u64) {
+    write_points_of(path, 0..n);
+}
+
+/// [`write_points_n`]'s points for the `entity_id`s `ids` alone.
+pub fn write_points_of(path: &Path, ids: std::ops::Range<u64>) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
     ]));
-    let ids: Vec<u64> = (0..n).collect();
+    let ids: Vec<u64> = ids.collect();
     let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
     let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
     let batch = RecordBatch::try_new(
@@ -646,13 +682,25 @@ pub fn build_with_layers(
     corpus: &mosaica_corpus::Corpus,
     config: mosaica_build::config::Config,
 ) {
+    build_with_layers_sized(out, points_path, pairs_path, corpus.extent(), config, None);
+}
+
+/// [`build_with_layers`] over `extent`, built at `shard_size`.
+pub fn build_with_layers_sized(
+    out: &Path,
+    points_path: &Path,
+    pairs_path: &Path,
+    extent: Bounds,
+    config: mosaica_build::config::Config,
+    shard_size: Option<u64>,
+) {
     let schema = with_id(config.schema);
     let args = BuildArgs {
         views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
             projection: mosaica_spatial::Projection::None,
-            extent: corpus.extent(),
+            extent,
             points: points_path.to_path_buf(),
             point_fields: Default::default(),
             select: None,
@@ -667,7 +715,7 @@ pub fn build_with_layers(
         ),
         out: out.to_path_buf(),
         limit: None,
-        shard_size: None,
+        shard_size,
         strict: false,
         identity_key: test_key(),
         layers: config.layers,
@@ -770,12 +818,63 @@ pub fn set_tenancy(bundle_root: &Path, number: EntityId, tenancy: u16) {
     rewrite_publication(&prefix_dir, 0, &manifest);
 }
 
+/// Give `shard` of the bundle `root` serves the high water `high_water` and the freed ids `free`,
+/// each number at its tenancy in the shard's tenancy index, as a compaction that freed them leaves
+/// its record.
+pub fn seed_freed(root: &Path, shard: ShardId, high_water: u64, free: &[(u16, &[u32])]) {
+    use mosaica_store::manifest::{EntitySet, TenancyBit};
+    let prefix_dir = root.join(current_prefix(root));
+    edit_side_manifest(root, |manifest| {
+        let tenancies: Vec<(u32, u16)> = free
+            .iter()
+            .filter(|(tenancy, _)| *tenancy > 0)
+            .flat_map(|(tenancy, ids)| ids.iter().map(move |id| (*id, *tenancy)))
+            .collect();
+        let tenancy_rel = mosaica_store::ShardLayout::new(PARTITION, shard).tenancy_rel();
+        let bits = mosaica_store::tenancy::bits_of(&tenancies);
+        let mut index = Vec::new();
+        for (bit, file) in
+            mosaica_store::tenancy::write(&prefix_dir.join(&tenancy_rel), &bits).unwrap()
+        {
+            let name = file.file_name().unwrap().to_str().unwrap();
+            let rel = format!("{tenancy_rel}/{name}");
+            manifest
+                .partition
+                .files
+                .insert(rel.clone(), mosaica_store::digest_of(&file).unwrap());
+            index.push(TenancyBit { bit, path: rel });
+        }
+        let record = manifest
+            .shard_mut(shard)
+            .expect("the bundle holds the shard");
+        record.high_water = high_water;
+        record.free_entities = EntitySet::of(&croaring::Bitmap::of(
+            &free
+                .iter()
+                .flat_map(|(_, ids)| ids.iter().copied())
+                .collect::<Vec<u32>>(),
+        ));
+        record.tenancy_index = index;
+    });
+}
+
 /// The item the unique `id` value `source` names, deleted items left out.
 pub fn item_of_id(
     engine: &Engine,
     source: u64,
 ) -> Result<Option<EntityId>, mosaica_engine::EngineError> {
-    Ok(unique_holders(engine, "id", &[source.to_string()])?[0])
+    Ok(unique_holders(engine, "id", &[source.to_string()])?[0].map(|item| item.entity))
+}
+
+/// The item each of the `id` values `ids` names, in its shard, `None` for one naming none.
+pub fn items_by_id(engine: &Engine, ids: impl IntoIterator<Item = u64>) -> Vec<Option<ItemAt>> {
+    let values: Vec<String> = ids.into_iter().map(|id| id.to_string()).collect();
+    unique_holders(engine, "id", &values).expect("the `id` index reads")
+}
+
+/// The item the `id` value `id` names, in its shard.
+pub fn item_by_id(engine: &Engine, id: u64) -> ItemAt {
+    items_by_id(engine, [id])[0].expect("the value names an item")
 }
 
 /// The `id` a test gives the item it calls `key`: a stable hash with the top bit set, so it names
@@ -809,7 +908,7 @@ pub fn keyed_row(key: &str) -> UnallocatedRow {
 
 /// The live item holding the `id` of `key`, if any.
 pub fn item_of_key(engine: &Engine, key: &str) -> Option<EntityId> {
-    unique_holders(engine, "id", &[key_id(key).to_string()]).unwrap()[0]
+    unique_holders(engine, "id", &[key_id(key).to_string()]).unwrap()[0].map(|item| item.entity)
 }
 
 /// An engine with its write executor running.
@@ -992,13 +1091,13 @@ pub fn zero_credential() -> Vec<u8> {
     br#"{"terms": []}"#.to_vec()
 }
 
-/// The item each of `values` names in the unique field `field`, `None` for a value naming none,
-/// asked of [`mosaica_engine::Engine::name_items`].
+/// The item each of `values` names in the unique field `field`, in its shard, `None` for a value
+/// naming none, asked of [`mosaica_engine::Engine::name_items`].
 pub fn unique_holders(
     engine: &mosaica_engine::Engine,
     field: &str,
     values: &[String],
-) -> Result<Vec<Option<mosaica_types::EntityId>>, mosaica_engine::EngineError> {
+) -> Result<Vec<Option<ItemAt>>, mosaica_engine::EngineError> {
     let table = mosaica_engine::AddressTable {
         rows: values.len(),
         mosaica_id: None,
@@ -1014,7 +1113,7 @@ pub fn unique_holders(
         .name_items(&table)?
         .verdicts
         .into_iter()
-        .map(|verdict| verdict.ok().map(|item| item.entity))
+        .map(Result::ok)
         .collect())
 }
 

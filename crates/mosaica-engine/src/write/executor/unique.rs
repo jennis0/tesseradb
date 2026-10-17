@@ -1,23 +1,25 @@
 //! Declaring `unique` on a column that exists, and removing it.
 //!
 //! A declaration builds the column's index over the values already stored before it is in force.
-//! The build runs in rounds off this thread: the first reads every flushed value; each later one
-//! reads the entities the flushes published since the round before it started. Every round also
-//! checks the buffered values against every run written so far. Once a round finishes with no
-//! flush published during it, the values buffered since it started are checked here, and the
-//! declaration commits: a `UniqueDeclare` record, a side-manifest naming the runs, and a
-//! generation whose live entries are the buffer's. A value held twice anywhere refuses the
-//! declaration and removes its runs.
+//! The build runs in rounds off this thread, one shard at a time: each shard's first round reads
+//! every value it has flushed; each later one reads the entities its flushes published since its
+//! round before started. A round checks its values against every run written so far in any shard,
+//! and every shard's buffered values against those runs and each other. Once no round is left and
+//! no flush has published since a shard's last round started, the values buffered since the last
+//! round started are checked here, and the declaration commits: a `UniqueDeclare` record naming
+//! each run's shard, a side-manifest naming each shard's runs, and a generation whose live entries
+//! are the buffers'. A value held twice anywhere refuses the declaration and removes its runs.
 //!
 //! No fold starts while a declaration is building, and a declaration waits for a running fold:
 //! a fold rewrites every run and every layer a round reads. Denies are never held behind one.
 
 use super::*;
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use mosaica_store::manifest::{BaseKeyRun, FileDigest, UniqueIndexRuns};
+use mosaica_store::manifest::{FileDigest, UniqueIndexRuns};
 use mosaica_store::unique::{UniqueKey, WrittenUniqueRun};
+use mosaica_types::ItemAt;
 
 /// The buffered values arriving during a round that the commit checks against the runs itself;
 /// more than this and another round checks them off this thread.
@@ -39,19 +41,32 @@ pub(in crate::write) struct UniqueDeclarations {
     current: Option<Pending>,
 }
 
+/// One run a declaration wrote.
+struct Run {
+    shard: ShardId,
+    /// Written by its shard's first round, whose runs have disjoint key ranges.
+    base: bool,
+    written: WrittenUniqueRun,
+    digest: FileDigest,
+}
+
 /// The declaration being built.
 struct Pending {
     attribute: String,
     at: usize,
     reply: Reply<bool>,
-    /// The first round's runs, which have disjoint key ranges.
-    base: Vec<(WrittenUniqueRun, FileDigest)>,
-    /// Every later round's.
-    live: Vec<(WrittenUniqueRun, FileDigest)>,
-    /// The entities flushes have published since the running round started.
-    flushed_since: croaring::Bitmap,
+    runs: Vec<Run>,
+    /// The rounds still to run: each shard, and the flushed entities of it to read, or `None` for
+    /// every entity it holds when the round starts.
+    queue: VecDeque<(ShardId, Option<croaring::Bitmap>)>,
+    /// The shard the running round reads.
+    running: Option<ShardId>,
+    /// The shards a round has read.
+    read: BTreeSet<ShardId>,
+    /// Per shard, the entities its flushes have published since its last round started.
+    flushed_since: BTreeMap<ShardId, croaring::Bitmap>,
     /// The buffered values the last round checked.
-    checked: FxHashMap<EntityId, UniqueKey>,
+    checked: FxHashMap<ItemAt, UniqueKey>,
     attempt: u64,
     rounds: u64,
 }
@@ -70,28 +85,51 @@ impl UniqueDeclarations {
         self.current.is_some() || !self.waiting.is_empty()
     }
 
-    /// Note the entities a published flush consumed: the next round reads them.
-    pub(super) fn flushed(&mut self, consumed: &[EntityId]) {
+    /// Note the entities a published flush of `shard` consumed: a later round reads them.
+    pub(super) fn flushed(&mut self, shard: ShardId, consumed: &[EntityId]) {
         if let Some(pending) = &mut self.current {
+            let since = pending.flushed_since.entry(shard).or_default();
             for entity in consumed {
                 if let Ok(entity) = u32::try_from(entity.raw()) {
-                    pending.flushed_since.add(entity);
+                    since.add(entity);
                 }
             }
+        }
+    }
+
+    /// Stop the running round, wait for its thread to end, and remove every run the declaration
+    /// being built wrote. Its reply is dropped unanswered.
+    pub(super) fn abandon(&mut self) {
+        self.rounds.abandon();
+        self.rounds.wait_until_idle();
+        if let Some(pending) = self.current.take() {
+            pending.discard();
         }
     }
 }
 
 impl Pending {
-    fn runs(&self) -> impl Iterator<Item = &(WrittenUniqueRun, FileDigest)> {
-        self.base.iter().chain(&self.live)
-    }
-
     /// Remove every run this declaration wrote; nothing names them.
     fn discard(&self) {
-        for (run, _) in self.runs() {
-            let _ = std::fs::remove_file(&run.path);
+        for run in &self.runs {
+            let _ = std::fs::remove_file(&run.written.path);
         }
+    }
+
+    /// Every run written so far, each with its shard, relative to `prefix_dir`.
+    fn relative_runs(
+        &self,
+        prefix_dir: &std::path::Path,
+    ) -> Result<Vec<(ShardId, String)>, mosaica_store::StoreError> {
+        self.runs
+            .iter()
+            .map(|run| {
+                Ok((
+                    run.shard,
+                    mosaica_store::unique::relative(prefix_dir, &run.written.path)?,
+                ))
+            })
+            .collect()
     }
 }
 
@@ -127,48 +165,67 @@ impl Executor {
             reply.ack(true);
             return self.advance_unique_declarations();
         }
-        // Every entity a flush or a build can have given a value: the point region.
-        let high_water = generation.only_shard().data.record.high_water;
-        let mut wanted = croaring::Bitmap::new();
-        wanted.add_range(0..high_water.min(u64::from(u32::MAX)) as u32);
         let attempt = self.unique_declarations.rounds.next_attempt();
         self.unique_declarations.current = Some(Pending {
             attribute,
             at,
             reply,
-            base: Vec::new(),
-            live: Vec::new(),
-            flushed_since: croaring::Bitmap::new(),
+            runs: Vec::new(),
+            queue: generation
+                .shards()
+                .map(|shard| (shard.id(), None))
+                .collect(),
+            running: None,
+            read: BTreeSet::new(),
+            flushed_since: BTreeMap::new(),
             checked: FxHashMap::default(),
             attempt,
             rounds: 0,
         });
-        self.start_unique_round(generation, wanted);
+        self.start_unique_round(generation);
     }
 
-    /// Hand one round to its own thread: it reads the corpus, and the pool serves requests.
-    fn start_unique_round(&mut self, generation: Arc<Generation>, wanted: croaring::Bitmap) {
+    /// Hand the next queued round to its own thread: it reads the corpus, and the pool serves
+    /// requests.
+    fn start_unique_round(&mut self, generation: Arc<Generation>) {
         let prefix_dir = self.prefix_dir(&generation);
         let Some(pending) = &mut self.unique_declarations.current else {
             return;
         };
+        let Some((shard, wanted)) = pending.queue.pop_front() else {
+            return;
+        };
         pending.rounds += 1;
-        pending.flushed_since = croaring::Bitmap::new();
+        pending.running = Some(shard);
+        // The round reads every entity of the shard flushed before it starts.
+        pending.flushed_since.remove(&shard);
         let Some(partition) = generation.bundle.partitions.keys().next().cloned() else {
             return;
         };
+        // Every entity a flush or a build can have given a value: the shard's point region.
+        let wanted = wanted.unwrap_or_else(|| {
+            let high_water = generation
+                .shard(shard)
+                .map_or(0, |shard| shard.data.record.high_water);
+            let mut every = croaring::Bitmap::new();
+            every.add_range(0..high_water.min(u64::from(u32::MAX)) as u32);
+            every
+        });
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let input = crate::unique::RoundInput {
+            shard,
             at: pending.at,
             wanted,
-            prior: pending.runs().map(|(run, _)| run.path.clone()).collect(),
-            out_dir: prefix_dir.join(
-                ShardLayout::new(&partition, generation.only_shard().id())
-                    .unique_index_rel(&pending.attribute),
-            ),
+            prior: pending
+                .runs
+                .iter()
+                .map(|run| (run.shard, run.written.path.clone()))
+                .collect(),
+            out_dir: prefix_dir
+                .join(ShardLayout::new(&partition, shard).unique_index_rel(&pending.attribute)),
             prefix_dir,
             stem: format!("declared-{stamp}-{}", pending.rounds),
             memory_budget: ROUND_MEMORY,
@@ -181,9 +238,18 @@ impl Executor {
         let spawned = std::thread::Builder::new()
             .name("mosaica-unique".to_string())
             .spawn(move || {
+                if unit.abandoned() {
+                    return;
+                }
                 let outcome = crate::unique::build_round(input);
                 #[cfg(feature = "fault-injection")]
-                switches.hold_unique_round_if_paused();
+                switches.hold_unique_round_if_paused(&|| unit.abandoned());
+                if unit.abandoned() {
+                    for (run, _) in outcome.iter().flat_map(|output| &output.runs) {
+                        let _ = std::fs::remove_file(&run.path);
+                    }
+                    return;
+                }
                 unit.complete(CompletedRound { attempt, outcome });
             });
         if let Err(e) = spawned {
@@ -236,40 +302,58 @@ impl Executor {
                 return;
             }
         };
-        let first = pending.rounds == 1;
-        if first {
-            pending.base.extend(output.runs);
-        } else {
-            pending.live.extend(output.runs);
-        }
+        let shard = pending.running.take().expect("a round was running");
+        let base = pending.read.insert(shard);
+        pending
+            .runs
+            .extend(output.runs.into_iter().map(|(written, digest)| Run {
+                shard,
+                base,
+                written,
+                digest,
+            }));
         pending.checked = output.checked;
         if output.duplicates > 0 {
             self.refuse_unique_declare(output.duplicates, &output.examples);
             return;
         }
         let generation = self.generation.load_full();
-        if !pending.flushed_since.is_empty() {
-            let wanted = std::mem::take(&mut pending.flushed_since);
-            self.start_unique_round(generation, wanted);
+        if pending.queue.is_empty() {
+            let flushed = std::mem::take(&mut pending.flushed_since);
+            pending.queue.extend(
+                flushed
+                    .into_iter()
+                    .filter(|(_, since)| !since.is_empty())
+                    .map(|(shard, since)| (shard, Some(since))),
+            );
+        }
+        if !pending.queue.is_empty() {
+            self.start_unique_round(generation);
             return;
         }
         // The values buffered since the round started, checked here where they are few.
         let at = pending.at;
         let ty = generation.bundle.manifest.declared_scalars[at].arrow_type;
-        let shard = generation.only_shard();
-        let arrived: Vec<(EntityId, UniqueKey, WalScalar)> =
-            crate::unique::buffered_scalars(&shard.buffer)
-                .into_iter()
-                .filter(|(entity, _)| !shard.overlay.is_deleted(*entity))
-                .filter_map(|(entity, scalars)| {
-                    let value = scalars.get(at)?;
-                    let key = mosaica_store::unique::key_of(ty, value)?;
-                    (pending.checked.get(&entity) != Some(&key))
-                        .then(|| (entity, key, value.clone()))
-                })
-                .collect();
+        let buffers = generation
+            .shards()
+            .map(|shard| (shard.id(), &*shard.buffer));
+        let arrived: Vec<(ItemAt, UniqueKey, WalScalar)> = crate::unique::buffered_items(buffers)
+            .into_iter()
+            .filter(|(item, _)| !crate::unique::deleted_in(&generation, *item))
+            .filter_map(|(item, scalars)| {
+                let value = scalars.get(at)?;
+                let key = mosaica_store::unique::key_of(ty, value)?;
+                (pending.checked.get(&item) != Some(&key)).then(|| (item, key, value.clone()))
+            })
+            .collect();
         if arrived.len() > COMMIT_CHECK_MAX {
-            self.start_unique_round(generation, croaring::Bitmap::new());
+            // A round reading nothing in a shard checks every buffered value off this thread.
+            if let Some(shard) = generation.shards().next() {
+                pending
+                    .queue
+                    .push_back((shard.id(), Some(croaring::Bitmap::new())));
+            }
+            self.start_unique_round(generation);
             return;
         }
         match self.check_arrived(&generation, &arrived) {
@@ -290,13 +374,13 @@ impl Executor {
     }
 
     /// The values buffered since the last round started, against the other buffered values and
-    /// against every run the declaration wrote: the duplicates found, or `None`.
+    /// against every run the declaration wrote in any shard: the duplicates found, or `None`.
     fn check_arrived(
         &self,
         generation: &Generation,
-        arrived: &[(EntityId, UniqueKey, WalScalar)],
+        arrived: &[(ItemAt, UniqueKey, WalScalar)],
     ) -> Result<Option<(u64, Vec<String>)>, String> {
-        let overlay = &generation.only_shard().overlay;
+        let deleted = |item: &ItemAt| crate::unique::deleted_in(generation, *item);
         let pending = self
             .unique_declarations
             .current
@@ -315,14 +399,14 @@ impl Executor {
                 }
             }
         };
-        let mut held: FxHashMap<UniqueKey, EntityId> = pending
+        let mut held: FxHashMap<UniqueKey, ItemAt> = pending
             .checked
             .iter()
-            .filter(|(entity, _)| !overlay.is_deleted(**entity))
-            .map(|(entity, key)| (*key, *entity))
+            .filter(|(item, _)| !deleted(item))
+            .map(|(item, key)| (*key, *item))
             .collect();
-        for (entity, key, value) in arrived {
-            if held.insert(*key, *entity).is_some_and(|other| other != *entity) {
+        for (item, key, value) in arrived {
+            if held.insert(*key, *item).is_some_and(|other| other != *item) {
                 note(*key, value);
             }
         }
@@ -331,21 +415,20 @@ impl Executor {
         )
         .ok_or_else(|| "the column cannot be unique".to_string())?;
         let prefix_dir = self.prefix_dir(generation);
-        let runs = UniqueIndexRuns {
-            attribute: pending.attribute.clone(),
-            base: Vec::new(),
-            live: pending
-                .runs()
-                .map(|(run, _)| mosaica_store::unique::relative(&prefix_dir, &run.path))
-                .collect::<Result<_, _>>()
-                .map_err(|e| e.to_string())?,
-        };
-        let index = mosaica_store::unique::UniqueIndex::open(&runs, kind, &prefix_dir, None)
+        let runs = pending
+            .relative_runs(&prefix_dir)
             .map_err(|e| e.to_string())?;
         let keys: Vec<UniqueKey> = arrived.iter().map(|(_, key, _)| *key).collect();
-        for (i, holder) in index.lookup(&keys).map_err(|e| e.to_string())? {
-            let holder = EntityId::new(u64::from(holder));
-            if holder != arrived[i].0 && !overlay.is_deleted(holder) {
+        let holders = crate::unique::run_holders(
+            generation,
+            &pending.attribute,
+            kind,
+            &prefix_dir,
+            &runs,
+            &keys,
+        )?;
+        for (i, holder) in holders {
+            if holder != arrived[i].0 {
                 note(arrived[i].1, &arrived[i].2);
             }
         }
@@ -365,8 +448,8 @@ impl Executor {
         });
     }
 
-    /// Make the built index durable and in force: the log record, a side-manifest naming the
-    /// runs, and a generation serving them with the buffer's live entries.
+    /// Make the built index durable and in force: the log record, a side-manifest naming each
+    /// shard's runs, and a generation serving them with the buffers' live entries.
     fn commit_unique_declare(&mut self) {
         let pending = self
             .unique_declarations
@@ -376,26 +459,27 @@ impl Executor {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
         let prefix_dir = self.prefix_dir(&generation);
-        // The rounds read and wrote the one shard's values.
-        let shard = generation.only_shard().id();
-        let declared = |runs: &[(WrittenUniqueRun, FileDigest)]| {
-            runs.iter()
-                .map(|(run, digest)| {
-                    let base = run.as_base(&prefix_dir)?;
-                    Ok(mosaica_lifecycle::wal::DeclaredRun {
-                        shard,
+        let declared: Result<Vec<(bool, mosaica_lifecycle::wal::DeclaredRun)>, _> = pending
+            .runs
+            .iter()
+            .map(|run| {
+                let base = run.written.as_base(&prefix_dir)?;
+                Ok::<_, mosaica_store::StoreError>((
+                    run.base,
+                    mosaica_lifecycle::wal::DeclaredRun {
+                        shard: run.shard,
                         path: base.path,
-                        sha256: digest.sha256.clone(),
-                        size: digest.size,
+                        sha256: run.digest.sha256.clone(),
+                        size: run.digest.size,
                         first_key: base.first_key,
                         last_key: base.last_key,
-                    })
-                })
-                .collect::<Result<Vec<_>, mosaica_store::StoreError>>()
-        };
-        let (base, live) = match (declared(&pending.base), declared(&pending.live)) {
-            (Ok(base), Ok(live)) => (base, live),
-            (Err(e), _) | (_, Err(e)) => {
+                    },
+                ))
+            })
+            .collect();
+        let declared = match declared {
+            Ok(declared) => declared,
+            Err(e) => {
                 pending.discard();
                 pending.reply.fail(ExecError::AttributeRefused {
                     detail: format!("attribute '{}': {e}", pending.attribute),
@@ -403,6 +487,15 @@ impl Executor {
                 return;
             }
         };
+        let files: Vec<(String, FileDigest)> = pending
+            .runs
+            .iter()
+            .zip(&declared)
+            .map(|(run, (_, declared))| (declared.path.clone(), run.digest.clone()))
+            .collect();
+        let (base, live): (Vec<_>, Vec<_>) = declared.into_iter().partition(|(base, _)| *base);
+        let base: Vec<_> = base.into_iter().map(|(_, run)| run).collect();
+        let live: Vec<_> = live.into_iter().map(|(_, run)| run).collect();
         let record = WalRecord::UniqueDeclare {
             attribute: pending.attribute.clone(),
             unique: true,
@@ -414,25 +507,8 @@ impl Executor {
             pending.reply.fail(e);
             return;
         }
-        let index = UniqueIndexRuns {
-            attribute: pending.attribute.clone(),
-            base: base
-                .iter()
-                .map(|run| BaseKeyRun {
-                    path: run.path.clone(),
-                    first_key: run.first_key.clone(),
-                    last_key: run.last_key.clone(),
-                })
-                .collect(),
-            live: live.iter().map(|run| run.path.clone()).collect(),
-        };
-        let files: Vec<(String, FileDigest)> = base
-            .iter()
-            .chain(&live)
-            .zip(pending.runs())
-            .map(|(run, (_, digest))| (run.path.clone(), digest.clone()))
-            .collect();
-        self.publish_unique_change(&generation, &pending.attribute, Some((index, files)), started);
+        let index = DeclaredIndex { base, live, files };
+        self.publish_unique_change(&generation, &pending.attribute, Some(index), started);
         pending.reply.ack(true);
     }
 
@@ -455,24 +531,29 @@ impl Executor {
     }
 
     /// Publish the empty index of a unique column declared new at a running service.
-    pub(super) fn publish_new_unique_index(&mut self, attribute: &str, started: std::time::Instant) {
+    pub(super) fn publish_new_unique_index(
+        &mut self,
+        attribute: &str,
+        started: std::time::Instant,
+    ) {
         let generation = self.generation.load_full();
-        let runs = UniqueIndexRuns {
-            attribute: attribute.to_string(),
-            base: Vec::new(),
-            live: Vec::new(),
-        };
-        self.publish_unique_change(&generation, attribute, Some((runs, Vec::new())), started);
+        self.publish_unique_change(
+            &generation,
+            attribute,
+            Some(DeclaredIndex::default()),
+            started,
+        );
     }
 
-    /// Publish a column's index added (`Some`) or removed (`None`): a side-manifest, then the
-    /// generation. The change is already durable in the log, so a side-manifest that cannot be
-    /// written leaves the change in force and owed to the next publication.
+    /// Publish a column's index added (`Some`) or removed (`None`) in every shard: a
+    /// side-manifest, then the generation. The change is already durable in the log, so a
+    /// side-manifest that cannot be written leaves the change in force, and the next publication
+    /// writes it.
     fn publish_unique_change(
         &mut self,
         generation: &Arc<Generation>,
         attribute: &str,
-        index: Option<(UniqueIndexRuns, Vec<(String, FileDigest)>)>,
+        index: Option<DeclaredIndex>,
         started: std::time::Instant,
     ) {
         let Some((partition, partition_data)) = generation.bundle.partitions.iter().next() else {
@@ -480,23 +561,24 @@ impl Executor {
         };
         let mut manifest = partition_data.side_manifest();
         let unique = index.is_some();
-        let removed = mosaica_store::unique::set_unique_index(
-            &mut manifest.partition,
-            mosaica_types::only(&mut manifest.shards.records),
-            attribute,
-            index.as_ref().map(|(runs, _)| runs.clone()),
-        );
-        for file in removed.iter().flat_map(UniqueIndexRuns::files) {
-            manifest.partition.files.remove(file);
+        for record in &mut manifest.shards.records {
+            let runs = index.as_ref().map(|index| {
+                crate::unique::declared_runs(attribute, record.id, &index.base, &index.live)
+            });
+            let removed = mosaica_store::unique::set_unique_index(
+                &mut manifest.partition,
+                record,
+                attribute,
+                runs,
+            );
+            for file in removed.iter().flat_map(UniqueIndexRuns::files) {
+                manifest.partition.files.remove(file);
+            }
         }
-        if let Some((_, files)) = index {
-            manifest.partition.files.extend(files);
+        if let Some(index) = index {
+            manifest.partition.files.extend(index.files);
         }
-        write_deny_state(
-            &mut manifest,
-            &generation.only_shard().overlay,
-            &generation.layer_spaces,
-        );
+        self.write_deny_state_of(&mut manifest, generation);
         write_vocabulary_extensions(
             &mut manifest,
             &generation.vocabularies,
@@ -555,40 +637,62 @@ impl Executor {
             &bundle.partitions[partition].manifest,
         );
         let bundle = bundle.with_views(served);
-        let shard = generation.only_shard();
-        let unique_indexes = match reopen_unique(
-            &self.prefix_dir(generation),
-            &bundle,
-            &bundle.partitions[partition],
-            shard,
-        ) {
-            Ok(indexes) => indexes,
-            Err(e) => {
-                tracing::error!(error = %e, "ALARM: a unique index was published and could not be opened; a restart opens it");
-                return;
-            }
-        };
-        let mut unique_live = (*shard.unique_live).clone();
-        unique_live.set_unique(&bundle.manifest, &shard.buffer, attribute, unique);
-        let filter_columns = match bundle
+        let declared = bundle
             .manifest
             .declared_scalars
             .iter()
-            .find(|d| d.name == attribute)
-        {
-            Some(d) => Arc::new(
-                shard
-                    .filter_columns
-                    .with_unique(d, &bundle.manifest.vocabularies),
-            ),
-            None => Arc::clone(&shard.filter_columns),
-        };
-        let next = generation.with_shard(shard.id(), |g, s| {
+            .find(|d| d.name == attribute);
+        let mut shards = Vec::new();
+        for shard in generation.shards() {
+            let unique_indexes = match reopen_unique(
+                &self.prefix_dir(generation),
+                &bundle,
+                &bundle.partitions[partition],
+                shard,
+            ) {
+                Ok(indexes) => indexes,
+                Err(e) => {
+                    tracing::error!(error = %e, "ALARM: a unique index was published and could not be opened; a restart opens it");
+                    return;
+                }
+            };
+            let filter_columns = match declared {
+                Some(d) => Arc::new(
+                    shard
+                        .filter_columns
+                        .with_unique(d, &bundle.manifest.vocabularies),
+                ),
+                None => Arc::clone(&shard.filter_columns),
+            };
+            shards.push((shard.id(), unique_indexes, filter_columns));
+        }
+        let mut unique_live = (*generation.unique_live).clone();
+        unique_live.set_unique(
+            &bundle.manifest,
+            generation
+                .shards()
+                .map(|shard| (shard.id(), &*shard.buffer)),
+            attribute,
+            unique,
+        );
+        let ids: Vec<ShardId> = shards.iter().map(|(id, ..)| *id).collect();
+        let next = generation.with_shards(ids, |g, parts| {
             g.bundle = bundle;
-            s.unique = unique_indexes;
-            s.unique_live = Arc::new(unique_live);
-            s.filter_columns = filter_columns;
+            g.unique_live = Arc::new(unique_live);
+            for (id, unique_indexes, filter_columns) in shards {
+                let s = parts.of(id);
+                s.unique = unique_indexes;
+                s.filter_columns = filter_columns;
+            }
         });
         self.publish(next, started);
     }
+}
+
+/// A declaration's runs, as its log record names them, and each run's file digest.
+#[derive(Default)]
+struct DeclaredIndex {
+    base: Vec<mosaica_lifecycle::wal::DeclaredRun>,
+    live: Vec<mosaica_lifecycle::wal::DeclaredRun>,
+    files: Vec<(String, FileDigest)>,
 }

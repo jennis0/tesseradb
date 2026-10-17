@@ -1,70 +1,114 @@
 use super::*;
 
-pub(super) fn views_of(generation: &Generation) -> Vec<String> {
-    let mut views: Vec<String> = generation
+/// Every (shard, view) pair `generation` holds, ascending.
+pub(super) fn views_of(generation: &Generation) -> Vec<(ShardId, String)> {
+    let mut views: Vec<(ShardId, String)> = generation
         .bundle
         .partitions
         .values()
-        .flat_map(|p| p.only_shard().views.keys().cloned())
+        .flat_map(|p| p.shards.iter())
+        .flat_map(|shard| {
+            let id = shard.record.id;
+            shard.views.keys().map(move |view| (id, view.clone()))
+        })
         .collect();
     views.sort_unstable();
     views.dedup();
     views
 }
 
-/// One view's row space in `bundle`, or `None` where the partition or the view is not there.
-pub(super) fn view_row_space<'a>(
+/// One view's data in `shard` of `bundle`, or `None` where the partition, the shard or the view
+/// is not there.
+pub(super) fn view_data<'a>(
     bundle: &'a mosaica_store::read::Bundle,
     partition: &str,
+    shard: ShardId,
     view: &str,
-) -> Option<&'a mosaica_store::permutation::RowSpace> {
+) -> Option<&'a mosaica_store::read::ViewData> {
     bundle
         .partitions
         .get(partition)
-        .and_then(|p| p.only_shard().views.get(view))
-        .map(|v| &v.row_space)
+        .and_then(|p| p.shard(shard))
+        .and_then(|data| data.views.get(view))
 }
 
-/// What [`pack_levels`] wrote: the shard's member packs and each layer space's record packs.
+/// One view's row space in `shard` of `bundle`, or `None` where the partition, the shard or the
+/// view is not there.
+pub(super) fn view_row_space<'a>(
+    bundle: &'a mosaica_store::read::Bundle,
+    partition: &str,
+    shard: ShardId,
+    view: &str,
+) -> Option<&'a mosaica_store::permutation::RowSpace> {
+    view_data(bundle, partition, shard, view).map(|v| &v.row_space)
+}
+
+/// Member packs, by the shard holding them.
+pub(in crate::write) type PackedMembers =
+    std::collections::BTreeMap<ShardId, Vec<mosaica_store::manifest::MembershipExtent>>;
+
+/// What [`pack_levels`] wrote: each shard's member packs and each layer space's record packs.
 #[derive(Default)]
 pub(super) struct PackedLevels {
-    pub(super) members: Vec<mosaica_store::manifest::MembershipExtent>,
+    pub(super) members: PackedMembers,
     pub(super) records:
         std::collections::BTreeMap<LayerSpace, Vec<mosaica_store::manifest::RecordPackExtent>>,
 }
 
-/// Write each packed level's two packs into the prefix, the records into its layer space and the
-/// members into `layout`'s shard, and fsync them, returning the manifest entries. The file half of
+/// Write each packed level's record pack into its layer space and each shard's member pack into
+/// that shard of `partition`, and fsync them, returning the manifest entries. The file half of
 /// [`Executor::write_level_packs`] and [`Executor::rewrite_level_packs`], which differ only in
 /// where `ready` comes from. A level of a layer `space_of` names no space for is registered no
 /// longer and is not written.
 pub(super) fn pack_levels(
     prefix_dir: &std::path::Path,
-    layout: ShardLayout<'_>,
+    partition: &str,
     n: u64,
-    ready: Vec<mosaica_lifecycle::membership::PendingExtent>,
+    ready: Vec<mosaica_lifecycle::membership::PendingLevel>,
     space_of: impl Fn(&str) -> Option<LayerSpace>,
 ) -> mosaica_store::Result<PackedLevels> {
+    use mosaica_store::membership::{MemberPackWriter, RecordPackWriter};
     let mut packed = PackedLevels::default();
-    for (layer, level, ordinal_lo, blobs) in ready {
-        let Some(space) = space_of(&layer) else {
+    for pending in ready {
+        let Some(space) = space_of(&pending.layer) else {
             continue;
         };
-        let mut writer = mosaica_store::membership::LevelPackWriter::create(
+        let count = pending.records.len() as u32;
+        let mut records = RecordPackWriter::create(
             prefix_dir,
-            layout,
-            space,
+            mosaica_store::LayerSpaceLayout::new(partition, space),
             n,
-            level,
-            ordinal_lo,
-            blobs.len() as u32,
+            pending.level,
+            pending.ordinal_lo,
+            count,
         )?;
-        for (record, members) in &blobs {
-            writer.push(record, members)?;
+        for record in &pending.records {
+            records.push(record)?;
         }
-        let (records, members) = writer.finish()?;
-        packed.records.entry(space).or_default().push(records);
-        packed.members.push(members);
+        for (shard, listed) in &pending.members {
+            let mut members = MemberPackWriter::create(
+                prefix_dir,
+                ShardLayout::new(partition, *shard),
+                space,
+                n,
+                pending.level,
+                pending.ordinal_lo,
+                count,
+            )?;
+            for (ordinal, blob) in listed {
+                members.push_at(*ordinal, blob)?;
+            }
+            packed
+                .members
+                .entry(*shard)
+                .or_default()
+                .push(members.finish()?);
+        }
+        packed
+            .records
+            .entry(space)
+            .or_default()
+            .push(records.finish()?);
     }
     Ok(packed)
 }
@@ -234,11 +278,23 @@ pub(super) fn reopen_unique(
     mosaica_store::unique::UniqueIndexes::open(
         &bundle.manifest,
         &partition.manifest,
-        &partition.only_shard().record,
+        record_of(partition, shard),
         prefix_dir,
         Some(&shard.unique),
     )
     .map(Arc::new)
+}
+
+/// `shard`'s record in `partition`, which a publication over the generation holding `shard`
+/// names.
+fn record_of<'a>(
+    partition: &'a mosaica_store::read::PartitionData,
+    shard: &Shard,
+) -> &'a mosaica_store::manifest::ShardRecord {
+    &partition
+        .shard(shard.id())
+        .expect("a publication names every shard of the generation it was made over")
+        .record
 }
 
 /// `shard`'s edited-items index as `partition` lists it, sharing every run `shard` has open.
@@ -248,7 +304,7 @@ pub(super) fn reopen_edited(
     shard: &Shard,
 ) -> mosaica_store::Result<Arc<mosaica_store::edited::EditedIndex>> {
     mosaica_store::edited::EditedIndex::open(
-        &partition.only_shard().record.edited_items,
+        &record_of(partition, shard).edited_items,
         prefix_dir,
         Some(&shard.edited),
     )
@@ -335,22 +391,25 @@ impl Executor {
         if partition_data.stepped_down() {
             return;
         }
-        let record = &partition_data.only_shard().record;
-        let Some(plan) = crate::coalesce::plan_coalesce(
-            partition,
-            &partition_data.manifest,
-            record,
-            &generation.bundle.manifest.files,
-            self.deps.coalesce_policy,
-            // The roster as this generation has it: a scoped column of an incarnation that is no
-            // longer live is for the fold to reclaim, not for this pass to merge.
-            &|view, incarnation| {
-                generation
-                    .bundle
-                    .manifest
-                    .is_live_incarnation(view, incarnation)
-            },
-        ) else {
+        // The first shard with a window to take. A pass takes one shard's extents, and the
+        // partition's dictionary window with them.
+        let Some(plan) = partition_data.shards.iter().find_map(|shard| {
+            crate::coalesce::plan_coalesce(
+                partition,
+                &partition_data.manifest,
+                &shard.record,
+                &generation.bundle.manifest.files,
+                self.deps.coalesce_policy,
+                // The roster as this generation has it: a scoped column of an incarnation that is
+                // no longer live is for the fold to reclaim, not for this pass to merge.
+                &|view, incarnation| {
+                    generation
+                        .bundle
+                        .manifest
+                        .is_live_incarnation(view, incarnation)
+                },
+            )
+        }) else {
             return;
         };
 
@@ -362,15 +421,22 @@ impl Executor {
         let ctx = crate::coalesce::CoalesceContext {
             prefix_dir: self.prefix_dir(generation),
             prefix: generation.prefix.clone(),
-            out_rel: ShardLayout::new(partition, record.id).coalesced_rel(&id),
+            out_rel: ShardLayout::new(partition, plan.shard).coalesced_rel(&id),
             id,
         };
 
         let unit = self.coalesce.start();
         let health = Arc::clone(&self.health);
         let windows = plan.windows();
+        let prefix_dir = ctx.prefix_dir.clone();
         self.deps.pool.spawn(move || {
+            if unit.abandoned() {
+                return;
+            }
             match crate::coalesce::execute_coalesce(plan, ctx) {
+                Ok(completed) if unit.abandoned() => {
+                    background::discard_written(&prefix_dir, completed.files.keys());
+                }
                 Ok(completed) => {
                     // A failed window stays listed and the rest of the pass publishes.
                     for e in &completed.failures {
@@ -455,9 +521,15 @@ impl Executor {
 
         let unit = self.merge.start();
         let health = Arc::clone(&self.health);
-        self.deps
-            .pool
-            .spawn(move || match crate::merge::execute(plan, ctx) {
+        let prefix_dir = ctx.prefix_dir.clone();
+        self.deps.pool.spawn(move || {
+            if unit.abandoned() {
+                return;
+            }
+            match crate::merge::execute(plan, ctx) {
+                Ok(completed) if unit.abandoned() => {
+                    background::discard_written(&prefix_dir, completed.output.files.keys());
+                }
                 Ok(completed) => unit.complete(completed),
                 Err(e) => {
                     health.merge_failures.fetch_add(1, Ordering::Relaxed);
@@ -467,7 +539,8 @@ impl Executor {
                          next tick"
                     );
                 }
-            });
+            }
+        });
     }
 
     /// Dispatch a suggestion-index rebuild where one vocabulary's side map has run far enough
@@ -497,7 +570,11 @@ impl Executor {
         let unit = self.suggest.start();
         let pool = Arc::clone(&self.deps.pool);
         self.deps.pool.spawn(move || {
+            if unit.abandoned() {
+                return;
+            }
             match crate::suggest::SuggestIndex::build(&dir, build, &values, &pool) {
+                Ok(_) if unit.abandoned() => {}
                 Ok(index) => unit.complete(crate::suggest::CompletedSuggest {
                     vocabulary,
                     index: Arc::new(index),
@@ -679,11 +756,7 @@ impl Executor {
             tracing::warn!("discarding a completed merge that no longer rebases");
             return;
         }
-        write_deny_state(
-            &mut manifest,
-            &live.only_shard().overlay,
-            &live.layer_spaces,
-        );
+        self.write_deny_state_of(&mut manifest, &live);
         write_vocabulary_extensions(
             &mut manifest,
             &live.vocabularies,
@@ -753,22 +826,12 @@ impl Executor {
         // stored level's rebase costs the members inside the merged extent's range per artifact; a
         // spatial level's is the merged segment resolved whole against its shapes, in
         // `ArtifactProjections::rebase_merged`.
+        let plan = &completed.plan;
         if let (Some(previous), Some(space)) = (
-            view_row_space(
-                &live.bundle,
-                &completed.plan.partition,
-                &completed.plan.view,
-            ),
-            view_row_space(
-                &next_bundle,
-                &completed.plan.partition,
-                &completed.plan.view,
-            ),
+            view_row_space(&live.bundle, &plan.partition, plan.shard, &plan.view),
+            view_row_space(&next_bundle, &plan.partition, plan.shard, &plan.view),
         ) {
-            let merged_segment = next_bundle
-                .partitions
-                .get(&completed.plan.partition)
-                .and_then(|p| p.only_shard().views.get(&completed.plan.view))
+            let merged_segment = view_data(&next_bundle, &plan.partition, plan.shard, &plan.view)
                 .and_then(|v| v.segments.iter().find(|s| s.seg_id == merged_seg_id))
                 .map(|s| s.as_ref());
             self.live.with_artifacts(|store| {
@@ -782,11 +845,14 @@ impl Executor {
                         store,
                     )
                 };
+                let Some(slice) = store.slice(completed.plan.shard) else {
+                    return;
+                };
                 self.deps.artifact_projections.rebase_merged(
                     &live.prefix,
-                    self.live.only_shard().id,
+                    completed.plan.shard,
                     &completed.plan.view,
-                    store,
+                    slice,
                     previous,
                     space,
                     &merged_seg_id,
@@ -796,9 +862,10 @@ impl Executor {
             });
         }
 
-        let next = Arc::new(live.with(|g| {
+        let next = Arc::new(live.with_shard(completed.plan.shard, |g, s| {
             g.segments_version = segments_version;
             g.bundle = next_bundle;
+            s.moved_to(segments_version);
             // The consumed segments' delta tiers carry over: their entities still have rows in the
             // merged segment.
         }));
@@ -810,12 +877,9 @@ impl Executor {
             .store(segments_version, Ordering::SeqCst);
         self.publish_arc(Arc::clone(&next), started);
         // Pruned before the refresh starts, so its snapshot holds what retention keeps and no more.
-        self.row_projection_cache.prune_generations_below(
-            segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS),
-            &next.prefix,
-        );
+        self.row_projection_cache.prune_superseded(&next);
+        self.prune_region_cache(&next);
         self.deps.refresh.spawn(next);
-        self.prune_region_cache(segments_version);
         self.health.merges.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -864,7 +928,6 @@ impl Executor {
             }
         };
         let live = self.generation.load_full();
-        let shard = live.only_shard();
         if live.prefix != completed.prefix {
             tracing::warn!(
                 planned = %completed.prefix,
@@ -873,6 +936,13 @@ impl Executor {
             );
             return;
         }
+        let Some(shard) = live.shard(completed.shard) else {
+            tracing::warn!(
+                shard = %completed.shard,
+                "discarding a completed coalesce for a shard this bundle no longer carries"
+            );
+            return;
+        };
         let Some(partition_data) = live.bundle.partitions.get(&completed.partition) else {
             return;
         };
@@ -909,7 +979,10 @@ impl Executor {
         // files that must be installed together.
         let prefix_dir = self.prefix_dir(&live);
         let layout = ShardLayout::new(&completed.partition, shard.id());
-        let record = manifest.only_shard();
+        let Some(record) = manifest.shard(completed.shard) else {
+            discard("its shard is not in the live side-manifest");
+            return;
+        };
         let text_windows: Vec<crate::filter::CoalescedTextWindow> = completed
             .texts
             .iter()
@@ -962,10 +1035,10 @@ impl Executor {
                 .iter()
                 .map(|e| crate::filter::record_extent_paths(&prefix_dir, e))
                 .collect();
-            // The columns whose base no fold has written yet, which the schema owes no base
-            // for — the list `Engine::open` passes, so this stack and the one a restart opens
-            // are the same stack.
-            let unfolded = self.live.with_attributes(|a| a.entity_names());
+            // The columns this shard has no base of, for which the schema requires none.
+            // `Engine::open` reads the same list, so this stack and the one a restart opens are
+            // the same.
+            let unfolded = record.unbased(&self.live.with_attributes(|a| a.entity_names()));
             match crate::filter::open_record_stack(
                 &prefix_dir,
                 layout,
@@ -1002,7 +1075,7 @@ impl Executor {
         };
         // Complete current state, serialised fresh from the overlay this publication carries, the
         // same rule every other manifest write follows.
-        write_deny_state(&mut manifest, &shard.overlay, &live.layer_spaces);
+        self.write_deny_state_of(&mut manifest, &live);
         write_vocabulary_extensions(
             &mut manifest,
             &live.vocabularies,
@@ -1060,8 +1133,8 @@ impl Executor {
         for rel in &next_bundle
             .partitions
             .get(&completed.partition)
-            .expect("the partition this publication just rebased")
-            .only_shard()
+            .and_then(|partition| partition.shard(completed.shard))
+            .expect("the shard this publication just rebased")
             .record
             .deltas
         {
@@ -1179,7 +1252,6 @@ impl Executor {
             return false;
         };
         let manifest = &generation.bundle.manifest;
-        let shard = generation.only_shard();
         let scalar_schema = scalar_schema_of(manifest);
         let filter_schema = filter_schema_of(manifest);
         let record_schema = record_schema_of(manifest);
@@ -1212,9 +1284,9 @@ impl Executor {
         // space would be discarded at its rebase with its files already written. Dispatching one
         // avoids the losers' wasted segment writes; the rest re-plan at the next tick.
         //
-        // Chosen by oldest unflushed row, not by view name: `items` is ascending by entity id and
-        // entity ids are issued monotonically, so `items.first()` is an age key needing no cursor
-        // state, bounding starvation at `s × flush_max_age_secs` for `s` views.
+        // Chosen by the WAL position of the oldest unflushed row, not by view name or shard: the
+        // position is an age key needing no cursor state, bounding starvation at
+        // `s × flush_max_age_secs` for `s` (view, shard) pairs.
         //
         // A deferred plan holds the publication cycle open (`ExecutorHealth::deferred_plans`): a
         // caller waiting on a publication number is not answered until a tick dispatches with
@@ -1222,6 +1294,9 @@ impl Executor {
         self.health.deferred_plans.store(false, Ordering::SeqCst);
         let deferred = plans.len().saturating_sub(1);
         let Some((view, plan)) = plan_to_dispatch(plans) else {
+            return false;
+        };
+        let Some(shard) = generation.shard(plan.shard) else {
             return false;
         };
 
@@ -1339,7 +1414,12 @@ impl Executor {
                         filterable: crate::filter::scoped_is_filterable(family),
                         has_value_column: crate::filter::scoped_has_value_column(family),
                         render: family.render,
-                        has_base: family.views.contains(&scoped_view),
+                        has_base: partition_data.scoped_base_in(
+                            shard.id(),
+                            family,
+                            &scoped_view,
+                            scoped_incarnation,
+                        ),
                         analyser,
                     })
                 })
@@ -1461,15 +1541,21 @@ impl Executor {
             tracing::warn!(
                 deferred,
                 dispatched = %view,
-                "a flush unit is per view and a second unit in flight would be discarded at its \
-                 rebase, so one view publishes per tick; the rest re-plan at the next one"
+                shard = %shard.id(),
+                "a flush unit is one view of one shard and a second unit in flight would be \
+                 discarded at its rebase, so one publishes per tick; the rest re-plan at the next \
+                 one"
             );
         }
         let unit = self.flush.start();
         self.health.mark_flush_started(std::time::Instant::now());
         let health = Arc::clone(&self.health);
         let switches = Arc::clone(&self.deps.switches);
+        let prefix_dir = context.prefix_dir.clone();
         self.deps.pool.spawn(move || {
+            if unit.abandoned() {
+                return;
+            }
             let mut laps = crate::flush::FlushLaps::default();
             match crate::flush::execute_flush(plan, context, &mut laps) {
                 Ok(completed) => {
@@ -1478,10 +1564,15 @@ impl Executor {
                     // The unit is still in flight while this holds, which is the state the tick
                     // behind a flush is about.
                     health.flush_holding.store(true, Ordering::SeqCst);
-                    while switches.flush_paused.load(Ordering::SeqCst) {
+                    while switches.flush_paused.load(Ordering::SeqCst) && !unit.abandoned() {
                         std::thread::sleep(std::time::Duration::from_millis(5));
                     }
                     health.flush_holding.store(false, Ordering::SeqCst);
+                    // The rows stay in the log, and a reopened engine flushes them again.
+                    if unit.abandoned() {
+                        background::discard_written(&prefix_dir, completed.files.keys());
+                        return;
+                    }
                     unit.complete(completed);
                 }
                 Err(e) => {
@@ -1501,6 +1592,14 @@ impl Executor {
                 }
             }
         });
+        // Test hook; always false otherwise. The tick goes on once this flush holds, so the rest
+        // of the tick runs beside the files it wrote.
+        while self.deps.switches.flush_paused.load(Ordering::SeqCst)
+            && self.flush.in_flight()
+            && !self.health.flush_holding.load(Ordering::SeqCst)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         true
     }
 
@@ -1513,13 +1612,13 @@ impl Executor {
     /// reach such a level are what build one.
     pub(super) fn publish_row_forms(&mut self) {
         let pending = std::mem::take(&mut self.pending_forms);
-        for ((layer, level), deltas) in &pending {
-            self.publish_level_forms(layer, *level, deltas);
+        for ((layer, level, shard), deltas) in &pending {
+            self.publish_level_forms(layer, *level, *shard, deltas);
         }
     }
 
-    /// Apply an interval's deltas to every held row form of one level, in every view the
-    /// generation carries.
+    /// Apply an interval's deltas to every held row form of one level in `shard`, in every view
+    /// the generation carries there, each over that shard's row space and slice.
     ///
     /// A form at a version these deltas do not follow is dropped rather than amended, which
     /// [`crate::artifacts::ArtifactProjections::publish`] argues in full.
@@ -1531,6 +1630,7 @@ impl Executor {
         &self,
         layer: &str,
         level: u32,
+        shard: ShardId,
         deltas: &[crate::artifacts::LevelDelta],
     ) {
         // Where the delta's rows come from. A stored membership's are the records' members,
@@ -1552,7 +1652,10 @@ impl Executor {
         let mut views: std::collections::BTreeMap<&str, Option<&mosaica_store::read::ViewData>> =
             std::collections::BTreeMap::new();
         for partition in generation.bundle.partitions.values() {
-            for (name, data) in &partition.only_shard().views {
+            let Some(data) = partition.shard(shard) else {
+                continue;
+            };
+            for (name, data) in &data.views {
                 views
                     .entry(name.as_str())
                     .and_modify(|held| *held = None)
@@ -1560,15 +1663,19 @@ impl Executor {
             }
         }
         self.live.with_artifacts(|store| {
+            let Some(slice) = store.slice(shard) else {
+                return;
+            };
             for (view, data) in views {
                 let Some(data) = data else { continue };
                 if stored {
                     self.deps.artifact_projections.publish(
                         &generation.prefix,
-                        self.live.only_shard().id,
+                        shard,
                         view,
                         layer,
                         level,
+                        slice,
                         store,
                         &data.row_space,
                         deltas,
@@ -1638,10 +1745,11 @@ impl Executor {
                 };
                 self.deps.artifact_projections.publish(
                     &generation.prefix,
-                    self.live.only_shard().id,
+                    shard,
                     view,
                     layer,
                     level,
+                    slice,
                     store,
                     &data.row_space,
                     deltas,
@@ -1745,17 +1853,10 @@ impl Executor {
         }
         // What this publication wrote, per partition, so the resident memberships can move onto it
         // once every manifest naming one is durable (`LiveState::rehouse_memberships`).
-        let mut written: Vec<(
-            std::path::PathBuf,
-            Vec<mosaica_store::manifest::MembershipExtent>,
-        )> = Vec::new();
+        let mut written: Vec<(std::path::PathBuf, PackedMembers)> = Vec::new();
         for (partition, partition_data) in &live.bundle.partitions {
             let mut manifest = partition_data.side_manifest();
-            write_deny_state(
-                &mut manifest,
-                &live.only_shard().overlay,
-                &live.layer_spaces,
-            );
+            self.write_deny_state_of(&mut manifest, &live);
             // Record and member packs are written before the manifest that names them, which is
             // the whole of their durability contract: a manifest naming a missing pack refuses at
             // open, so the file has to be durable first. A failure here abandons the publication
@@ -1783,7 +1884,8 @@ impl Executor {
             // segment.
             let packed_rels = packed
                 .members
-                .iter()
+                .values()
+                .flatten()
                 .map(|extent| extent.path.as_str())
                 .chain(
                     packed
@@ -1807,9 +1909,13 @@ impl Executor {
             }
             // Onto the held lists; [`Executor::commit_side_manifest`] restates them into the
             // manifest below.
-            self.side_manifests
-                .membership_extents
-                .extend(packed.members.clone());
+            for (shard, members) in &packed.members {
+                self.side_manifests
+                    .membership_extents
+                    .entry(*shard)
+                    .or_default()
+                    .extend(members.iter().cloned());
+            }
             for (space, records) in packed.records {
                 self.side_manifests
                     .spaces
@@ -1975,13 +2081,9 @@ impl Executor {
         n: u64,
     ) -> mosaica_store::Result<PackedLevels> {
         let ready = self.live.unpublished_memberships();
-        pack_levels(
-            prefix_dir,
-            ShardLayout::new(partition, self.live.only_shard().id),
-            n,
-            ready,
-            |layer| self.live.space_of(layer),
-        )
+        pack_levels(prefix_dir, partition, n, ready, |layer| {
+            self.live.space_of(layer)
+        })
     }
 
     /// Publication by rebase: apply a completed flush to the then-current generation rather than
@@ -2038,7 +2140,6 @@ impl Executor {
             }
         };
         let live = self.generation.load_full();
-        let shard = live.only_shard();
         if live.prefix != completed.prefix {
             // A compaction moved the prefix under this flush. Nothing to apply it to.
             tracing::warn!(
@@ -2048,6 +2149,13 @@ impl Executor {
             );
             return false;
         }
+        let Some(shard) = live.shard(completed.shard) else {
+            tracing::warn!(
+                shard = %completed.shard,
+                "discarding a completed flush for a shard this bundle no longer carries"
+            );
+            return false;
+        };
         // A column that became unique during the flight has live entries for these rows and no
         // run from this flush; one that stopped being unique has no index to take a run.
         let unique_now: Vec<&str> = live
@@ -2147,36 +2255,45 @@ impl Executor {
         // The new columns first, then the extents that land on them. A flush of a view a family
         // had no column for wrote its base in the same unit as its extent, and the extent
         // composes onto a column, so the column has to exist before the composition below can
-        // find it. Empty in every steady-state flush, where the base has been on disc since the
-        // build.
-        let live_columns = if completed.scoped_columns.is_empty() {
-            Arc::clone(&shard.filter_columns)
-        } else {
-            // Stamped with the incarnation of the view the pair names, which is what places the
-            // base the flush just wrote.
-            let opening: Vec<(String, String, mosaica_types::view::ViewIncarnation)> = completed
-                .scoped_columns
-                .iter()
-                .map(|(column, view)| (column.clone(), view.clone(), completed.scoped_incarnation))
-                .collect();
-            match shard.filter_columns.with_scoped_columns(
-                &record_dir,
-                ShardLayout::new(&completed.partition, completed.shard),
-                &opening,
-                &live.bundle.manifest.scoped_scalars(),
-                &live.bundle.manifest.vocabularies,
-                true,
-            ) {
-                Ok(columns) => Arc::new(columns),
-                Err(e) => {
-                    discard(&format!(
-                        "it wrote a group-scoped column this process cannot open ({e}), and a \
-                         manifest must not name a column no request could read"
-                    ));
-                    return false;
+        // find it. Each is stamped with the incarnation of the view it names, which places the
+        // base the flush just wrote. Every other shard takes a column holding nothing, so a
+        // filter naming it is admitted and answered there as it is here. Empty in every
+        // steady-state flush, where the base has been on disc since the build.
+        let opening: Vec<mosaica_store::manifest::ScopedColumn> = completed
+            .scoped_columns
+            .iter()
+            .map(|(column, view)| mosaica_store::manifest::ScopedColumn {
+                column: column.clone(),
+                view: view.clone(),
+                incarnation: completed.scoped_incarnation,
+            })
+            .collect();
+        let mut live_columns = Arc::clone(&shard.filter_columns);
+        let mut unbased_columns = Vec::new();
+        if !opening.is_empty() {
+            for other in live.shards() {
+                let based = other.id() == shard.id();
+                match other.filter_columns.with_scoped_columns(
+                    &record_dir,
+                    ShardLayout::new(&completed.partition, other.id()),
+                    &opening,
+                    &live.bundle.manifest.scoped_scalars(),
+                    &live.bundle.manifest.vocabularies,
+                    true,
+                    based,
+                ) {
+                    Ok(columns) if based => live_columns = Arc::new(columns),
+                    Ok(columns) => unbased_columns.push((other.id(), Arc::new(columns))),
+                    Err(e) => {
+                        discard(&format!(
+                            "it wrote a group-scoped column this process cannot open ({e}), and \
+                             a manifest must not name a column no request could read"
+                        ));
+                        return false;
+                    }
                 }
             }
-        };
+        }
         let filter_columns = match live_columns.with_extents(
             &completed.filter_extents,
             &record_paths,
@@ -2215,28 +2332,24 @@ impl Executor {
                 return false;
             }
         };
+        manifest.partition.files.extend(completed.files);
+        if let Some(extent) = completed.dict_extent {
+            manifest.partition.dict_extents.push(extent);
+        }
+        let Some(record) = manifest.shard_mut(completed.shard) else {
+            discard("its shard is not in the live side-manifest");
+            return false;
+        };
         // The group-scoped columns this flush gave a view its first of. Carried forward and
         // appended to, never restated: the list is what a restart recovers
         // `scoped_scalars[..].views` from, and a render-only family writes no extent for the
         // derivation to find. `manifest` is the live side-manifest cloned, so the earlier pairs
-        // are already here.
-        for (column, view) in &completed.scoped_columns {
-            let entry = mosaica_store::manifest::ScopedColumn {
-                column: column.clone(),
-                view: view.clone(),
-                // The incarnation of the view the entry names. The list is carried forward
-                // indefinitely, so an entry outlives the drop that orphaned its column; the stamp
-                // is what keeps a key created again from publishing it as its own.
-                incarnation: completed.scoped_incarnation,
-            };
-            let record = manifest.only_shard_mut();
+        // are already here. The list outlives the drop that orphaned a column, so each entry's
+        // incarnation keeps a key created again from publishing it as its own.
+        for entry in opening {
             if !record.scoped_columns.contains(&entry) {
                 record.scoped_columns.push(entry);
             }
-        }
-        manifest.partition.files.extend(completed.files);
-        if let Some(extent) = completed.dict_extent {
-            manifest.partition.dict_extents.push(extent);
         }
         // The watermark advances at every flush publication and never regresses: a publication
         // coordinate, not an entity count.
@@ -2251,7 +2364,6 @@ impl Executor {
         // A values-only publication has no segment and so no entity high-water of its own; it
         // still advances the watermark, since it publishes extents a resident fragment must be
         // rebuilt past.
-        let record = manifest.only_shard_mut();
         record.watermark = completed
             .segment
             .as_ref()
@@ -2317,7 +2429,7 @@ impl Executor {
         record
             .text_extents
             .extend(completed.text_extents.iter().cloned());
-        write_deny_state(&mut manifest, &shard.overlay, &live.layer_spaces);
+        self.write_deny_state_of(&mut manifest, &live);
         n = self
             .health
             .flush_lap(crate::flush::FlushStage::ManifestDenyState, n);
@@ -2453,13 +2565,6 @@ impl Executor {
             // entity outright would lose a row that is in no segment and no buffer.
             buffer.remove_in_view(*entity, &completed.view);
         }
-        // The gauge follows the buffer here too. A flush is the other place occupancy changes: if
-        // it were not stated here, a node that flushed and then took no ingest would report a
-        // backlog it had already written, and `/control/ingest`'s occupancy bound is measured
-        // against this figure.
-        self.health
-            .buffered_items
-            .store(buffer.len(), Ordering::SeqCst);
         *mark = self
             .health
             .flush_lap(crate::flush::FlushStage::BufferRebase, *mark);
@@ -2467,7 +2572,8 @@ impl Executor {
         let watermark = next_bundle
             .partitions
             .get(&completed.partition)
-            .map(|p| p.only_shard().record.watermark)
+            .and_then(|p| p.shard(completed.shard))
+            .map(|data| data.record.watermark)
             .unwrap_or(shard.watermark);
         let segments_version = live.segments_version + 1;
         let mut delta_postings = shard.delta_postings.clone();
@@ -2488,16 +2594,28 @@ impl Executor {
         // A values-only publication added no rows, so it extends no form: `seg_id` is `None` and
         // the row space it publishes is the one it found.
         if let (Some(previous), Some(space)) = (
-            view_row_space(&live.bundle, &completed.partition, &completed.view),
-            view_row_space(&next_bundle, &completed.partition, &completed.view),
+            view_row_space(
+                &live.bundle,
+                &completed.partition,
+                completed.shard,
+                &completed.view,
+            ),
+            view_row_space(
+                &next_bundle,
+                &completed.partition,
+                completed.shard,
+                &completed.view,
+            ),
         ) {
             let segment = seg_id.as_ref().and_then(|seg_id| {
-                next_bundle
-                    .partitions
-                    .get(&completed.partition)
-                    .and_then(|p| p.only_shard().views.get(&completed.view))
-                    .and_then(|v| v.segments.iter().find(|s| &s.seg_id == seg_id))
-                    .map(|s| s.as_ref())
+                view_data(
+                    &next_bundle,
+                    &completed.partition,
+                    completed.shard,
+                    &completed.view,
+                )
+                .and_then(|v| v.segments.iter().find(|s| &s.seg_id == seg_id))
+                .map(|s| s.as_ref())
             });
             self.live.with_artifacts(|store| {
                 let rows_of = |layer: &str, level: u32| {
@@ -2510,11 +2628,14 @@ impl Executor {
                         store,
                     )
                 };
+                let Some(slice) = store.slice(completed.shard) else {
+                    return;
+                };
                 self.deps.artifact_projections.extend_flushed(
                     &live.prefix,
-                    self.live.only_shard().id,
+                    completed.shard,
                     &completed.view,
-                    store,
+                    slice,
                     previous,
                     space,
                     segments_version,
@@ -2571,10 +2692,11 @@ impl Executor {
             }
         };
         let unique_live = if completed.unique_runs.is_empty() {
-            Arc::clone(&shard.unique_live)
+            Arc::clone(&live.unique_live)
         } else {
-            let mut unique_live = (*shard.unique_live).clone();
+            let mut unique_live = (*live.unique_live).clone();
             unique_live.flushed(
+                completed.shard,
                 completed
                     .unique_runs
                     .iter()
@@ -2582,22 +2704,38 @@ impl Executor {
             );
             Arc::new(unique_live)
         };
-        self.unique_declarations.flushed(&completed.consumed);
-        let next = Arc::new(live.with_shard(shard.id(), |g, s| {
+        self.unique_declarations
+            .flushed(completed.shard, &completed.consumed);
+        let ids: Vec<ShardId> = std::iter::once(shard.id())
+            .chain(unbased_columns.iter().map(|(id, _)| *id))
+            .collect();
+        let next = Arc::new(live.with_shards(ids, |g, shards| {
+            for (id, columns) in unbased_columns {
+                shards.of(id).filter_columns = columns;
+            }
+            let s = shards.of(shard.id());
             // The live columns with this flush's extents composed on: the whole of what makes an
             // entity ingested since the build answer a filter on its own value.
             s.filter_columns = filter_columns;
             g.segments_version = segments_version;
+            s.moved_to(segments_version);
             s.watermark = watermark;
             g.bundle = next_bundle;
             g.dict = completed.dict;
             s.delta_postings = delta_postings;
             s.buffer = Arc::new(buffer);
             s.unique = unique;
-            s.unique_live = unique_live;
+            g.unique_live = unique_live;
             s.edited = edited;
             s.edited_live = edited_live;
         }));
+        // The gauge follows the buffer here too. A flush is the other place occupancy changes: if
+        // it were not stated here, a node that flushed and then took no ingest would report a
+        // backlog it had already written, and `/control/ingest`'s occupancy bound is measured
+        // against this figure.
+        self.health
+            .buffered_items
+            .store(next.buffered(), Ordering::SeqCst);
         // Armed before the swap, and that ordering is the mechanism. A request landing between
         // the swap and the pool task's first insert must find the flag set, or it takes the cost
         // of a full rebuild, where the whole design is that it be shed with a 429 for the bounded
@@ -2613,12 +2751,9 @@ impl Executor {
         // does: one swap, one `segments_version` bump, one retention pass, before the refresh
         // starts so its snapshot holds what retention keeps and no more. The superseded
         // generation itself is held by nothing but the requests already in flight against it.
-        self.row_projection_cache.prune_generations_below(
-            segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS),
-            &next.prefix,
-        );
+        self.row_projection_cache.prune_superseded(&next);
+        self.prune_region_cache(&next);
         self.deps.refresh.spawn(next);
-        self.prune_region_cache(segments_version);
         self.health.flushes.fetch_add(1, Ordering::Relaxed);
         self.health
             .flush_rows_published
@@ -2650,18 +2785,22 @@ impl Executor {
     }
 }
 
-/// The one plan a dispatch sends, chosen by oldest unflushed row. Free and pure so the choice can
-/// be tested without an executor. See `Executor::dispatch_flushes` for why one plan.
+/// The one plan a dispatch sends, chosen by the WAL position of its oldest unflushed row, an
+/// unknown position first, then by shard and first entity. Free and pure so the choice can be
+/// tested without an executor. See `Executor::dispatch_flushes` for why one plan.
 pub(super) fn plan_to_dispatch(
     plans: Vec<(String, crate::flush::FlushPlan)>,
 ) -> Option<(String, crate::flush::FlushPlan)> {
     plans.into_iter().min_by_key(|(_, plan)| {
-        // `items` is ascending by entity id, so the first is this view's oldest waiting row. An
-        // empty plan cannot occur (`plan_flush` returns `NothingToFlush`); sorting it last keeps a
-        // hypothetical one from winning every tick.
-        plan.items
-            .first()
-            .map_or(u64::MAX, |(entity, _)| entity.raw())
+        // An empty plan cannot occur (`plan_flush` returns `NothingToFlush`); sorting it last
+        // keeps a hypothetical one from winning every tick.
+        let oldest = plan.oldest_wal_pos();
+        (
+            oldest.is_none(),
+            oldest.flatten(),
+            plan.shard,
+            plan.items.first().map(|(entity, _)| entity.raw()),
+        )
     })
 }
 
@@ -2682,7 +2821,12 @@ mod dispatch_rules_tests {
     use super::*;
     use mosaica_lifecycle::BufferedItem;
 
-    pub(super) fn plan_from(oldest: u64) -> crate::flush::FlushPlan {
+    /// A plan in `shard` of one row, of entity `entity`, that arrived at WAL position `wal_pos`.
+    pub(super) fn plan_from(
+        shard: u32,
+        entity: u64,
+        wal_pos: Option<u64>,
+    ) -> crate::flush::FlushPlan {
         let item = BufferedItem {
             terms: Vec::new(),
             view: "s".to_string(),
@@ -2691,26 +2835,39 @@ mod dispatch_rules_tests {
             y: 0.5,
             scalars: Vec::new(),
             scoped: Vec::new(),
-            wal_pos: None,
+            wal_pos,
         };
         crate::flush::FlushPlan {
-            items: vec![(EntityId::new(oldest), item)],
+            shard: ShardId::new(shard).unwrap(),
+            items: vec![(EntityId::new(entity), item)],
         }
     }
 
     /// One plan is dispatched per tick, since a second unit in flight is discarded at its rebase.
-    /// The one sent is the view whose oldest waiting row is oldest, not the first by name, which
-    /// would let a continuously-fed `s0` deny `s1` a flush for ever.
+    /// The one sent holds the row that arrived first, not the first view by name, which would let
+    /// a continuously-fed `s0` deny `s1` a flush for ever, and not the lowest entity, which a
+    /// reused number or another shard's entity space makes no age.
     #[test]
     pub(super) fn a_dispatch_sends_the_plan_holding_the_oldest_unflushed_row() {
         let plans = vec![
-            ("s0".to_string(), plan_from(900)),
-            ("s1".to_string(), plan_from(100)),
-            ("s2".to_string(), plan_from(500)),
+            ("s0".to_string(), plan_from(0, 900, Some(30))),
+            ("s1".to_string(), plan_from(1, 100, Some(20))),
+            ("s2".to_string(), plan_from(0, 5, Some(10))),
+            ("s3".to_string(), plan_from(1, 1, Some(40))),
         ];
-        let (view, plan) = plan_to_dispatch(plans).expect("one of three");
-        assert_eq!(view, "s1", "oldest row wins, not lowest view id");
-        assert_eq!(plan.items[0].0.raw(), 100);
+        let (view, plan) = plan_to_dispatch(plans).expect("one of four");
+        assert_eq!(view, "s2", "the oldest WAL position wins");
+        assert_eq!(plan.items[0].0.raw(), 5);
+
+        let plans = vec![
+            ("s0".to_string(), plan_from(0, 1, Some(10))),
+            ("s1".to_string(), plan_from(1, 900, None)),
+        ];
+        let (view, _) = plan_to_dispatch(plans).expect("one of two");
+        assert_eq!(
+            view, "s1",
+            "a row of unknown position may be the oldest, so it goes first"
+        );
     }
 
     #[test]

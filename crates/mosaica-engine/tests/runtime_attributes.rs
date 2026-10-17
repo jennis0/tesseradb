@@ -125,7 +125,7 @@ fn write_points(path: &Path, n: u64) {
     w.close().unwrap();
 }
 
-fn build_fixture_with_schema(root: &Path, tmp: &Path) {
+fn build_fixture_with_schema(root: &Path, tmp: &Path, shard_size: Option<u64>) {
     let points = tmp.join("points.parquet");
     let pairs = tmp.join("pairs.parquet");
     write_points(&points, N_ITEMS);
@@ -152,7 +152,7 @@ fn build_fixture_with_schema(root: &Path, tmp: &Path) {
         attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
         out: root.to_path_buf(),
         limit: None,
-        shard_size: None,
+        shard_size,
         strict: false,
         identity_key: test_key(),
         layers: Vec::new(),
@@ -174,9 +174,14 @@ struct Fixture {
 }
 
 fn fixture() -> Fixture {
+    fixture_at(None)
+}
+
+/// The fixture built at `shard_size`.
+fn fixture_at(shard_size: Option<u64>) -> Fixture {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("bundle");
-    build_fixture_with_schema(&root, tmp.path());
+    build_fixture_with_schema(&root, tmp.path(), shard_size);
     Fixture { tmp, root }
 }
 
@@ -1169,4 +1174,216 @@ fn a_record_coalesce_publishes_over_a_blob_declared_at_a_running_service() {
         "the reopened bundle holds {reopened} layers where the live stack held {after}"
     );
     assert_eq!(served(&engine), expected);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Over several shards
+// ---------------------------------------------------------------------------------------------
+
+/// The size the several-shard fixture is built at: shard 0 sealed at 70 items, shard 1 open at 50.
+const SIZE: u64 = 70;
+
+/// An engine over `fx` that writes several shards, its background refresh off.
+fn several_over(fx: &Fixture) -> Engine {
+    let engine = open_writing(
+        &fx.root,
+        &fx.tmp.path().join("cache"),
+        &fx.tmp.path().join("wal.log"),
+        config_uncapped(),
+    );
+    engine.set_background_refresh_for_test(false);
+    engine
+}
+
+/// One batch carrying `rank`: each row names the built item of its `id`, or with none creates an
+/// item.
+fn ranked(engine: &Engine, batch: &str, rows: &[(Option<u64>, f32)]) {
+    let rows = rows
+        .iter()
+        .map(|(id, rank)| mosaica_lifecycle::IngestRow {
+            mosaica_id: None,
+            labels: Some(vec![b"0".to_vec()]),
+            position: Some((500.0, 500.0)),
+            scalars: vec![
+                WalScalar::Utf8("mid".to_string()),
+                WalScalar::F32(1.0),
+                id.map_or(WalScalar::Null, WalScalar::U64),
+                WalScalar::F32(*rank),
+            ],
+            scoped: Vec::new(),
+            omitted: Vec::new(),
+        })
+        .collect();
+    engine
+        .ingest(mosaica_engine::IngestRequest {
+            batch_id: batch.to_string(),
+            body_hash: [3; 32],
+            view: Some("s0".to_string()),
+            rows,
+            artifacts: Default::default(),
+            strict: true,
+            mosaica_id_column: false,
+        })
+        .unwrap_or_else(|e| panic!("batch {batch} is accepted: {e}"));
+}
+
+/// Each item a filter on `rank` matches, by id, with the value its card serves.
+fn ranks(engine: &Engine) -> Vec<(u64, Option<ScalarOut>)> {
+    let session = session(engine);
+    let mut served: Vec<(u64, Option<ScalarOut>)> =
+        viewport(engine, &session, Some(leaf("rank", at_least(0.0))))
+            .ids
+            .into_iter()
+            .map(|id| {
+                let item = engine
+                    .item(&session, mosaica_types::MosaicaId::new(id))
+                    .unwrap()
+                    .expect("the item is visible to a full principal");
+                let rank = item.fields.into_iter().find(|f| f.name == "rank");
+                (id, rank.map(|f| f.value))
+            })
+            .collect();
+    served.sort_by_key(|(id, _)| *id);
+    served
+}
+
+/// Each shard's listed runtime bases, the columns the side manifest declares, and whether the
+/// prefix's `MANIFEST.json` declares `rank`.
+fn stored(root: &Path) -> (Vec<Vec<String>>, Vec<String>, bool) {
+    let side = side_manifest(root);
+    let declared = open_bundle(root)
+        .unwrap()
+        .manifest
+        .declared_scalars
+        .iter()
+        .any(|d| d.name == "rank");
+    (
+        side.shards
+            .records
+            .iter()
+            .map(|r| r.runtime_bases.clone())
+            .collect(),
+        side.partition
+            .attributes
+            .iter()
+            .map(|d| d.name.clone())
+            .collect(),
+        declared,
+    )
+}
+
+fn rank_listed() -> Vec<String> {
+    vec!["rank".to_string()]
+}
+
+/// **A column declared at a running service leaves for `MANIFEST.json` only once every shard
+/// holds its base.** With values in both shards, shard 0's compaction alone gives shard 0 a base
+/// and leaves the declaration in the side manifest; shard 1's moves it. The column serves the same
+/// at every step and across a restart after each.
+#[test]
+fn a_runtime_column_leaves_for_the_bundle_manifest_once_every_shard_holds_its_base() {
+    let fx = fixture_at(Some(SIZE));
+    let engine = several_over(&fx);
+    engine
+        .declare_attribute(AttributeRequest {
+            index: true,
+            ..request("rank", "f32")
+        })
+        .expect("the declaration is accepted");
+    let (zero, one) = (
+        ids_in_shard(&engine, N_ITEMS, 0)[0],
+        ids_in_shard(&engine, N_ITEMS, 1)[0],
+    );
+    ranked(
+        &engine,
+        "ranked",
+        &[(Some(zero), 0.9), (Some(one), 0.8), (None, 0.7)],
+    );
+    publish_buffered(&engine);
+    let expected = ranks(&engine);
+    assert_eq!(expected.len(), 3);
+    assert!(expected.iter().all(|(_, rank)| rank.is_some()));
+    assert_eq!(
+        stored(&fx.root),
+        (vec![Vec::new(), Vec::new()], rank_listed(), false)
+    );
+
+    compact(&engine, Some(shard(0)));
+    assert_eq!(
+        stored(&fx.root),
+        (vec![rank_listed(), Vec::new()], rank_listed(), false),
+        "shard 0 holds the base; shard 1 does not, so the side manifest still declares it"
+    );
+    assert_eq!(ranks(&engine), expected);
+    let engine = {
+        drop(engine);
+        several_over(&fx)
+    };
+    assert_eq!(ranks(&engine), expected, "after a restart");
+
+    compact(&engine, Some(shard(1)));
+    assert_eq!(
+        stored(&fx.root),
+        (vec![Vec::new(), Vec::new()], Vec::new(), true),
+        "both shards hold the base, so MANIFEST.json declares it"
+    );
+    assert_eq!(ranks(&engine), expected);
+    let engine = {
+        drop(engine);
+        several_over(&fx)
+    };
+    assert_eq!(ranks(&engine), expected, "after a restart");
+    assert_eq!(declared_names(&engine), ["band", "score", "id", "rank"]);
+}
+
+/// **A shard opened after a declaration holds the column's base from its opening**, so the
+/// declaration leaves for `MANIFEST.json` at the compactions of the shards before it, and the
+/// opened shard serves the column across a restart without being compacted.
+#[test]
+fn a_shard_opened_after_a_declaration_holds_its_base_from_its_opening() {
+    let fx = fixture_at(Some(SIZE));
+    let engine = several_over(&fx);
+    engine
+        .declare_attribute(AttributeRequest {
+            index: true,
+            ..request("rank", "f32")
+        })
+        .expect("the declaration is accepted");
+    let rows: Vec<(Option<u64>, f32)> = (0..(N_ITEMS - SIZE) / 2)
+        .map(|at| (None, at as f32))
+        .collect();
+    let folds = engine.write_executor_stats().folds;
+    ranked(&engine, "opening", &rows);
+    publish_buffered(&engine);
+    let expected = ranks(&engine);
+    assert_eq!(expected.len(), rows.len());
+    // The batch fills shard 1 and seals it; lacking the base, it is due a closing compaction.
+    tick_until(
+        &engine,
+        "the sealed shard's closing compaction",
+        std::time::Duration::from_secs(120),
+        || engine.write_executor_stats().folds > folds,
+    );
+    assert_eq!(
+        stored(&fx.root),
+        (
+            vec![Vec::new(), rank_listed(), rank_listed()],
+            rank_listed(),
+            false
+        ),
+        "the sealed shard's compaction and the shard the batch opened list the base"
+    );
+
+    compact(&engine, Some(shard(0)));
+    assert_eq!(
+        stored(&fx.root),
+        (vec![Vec::new(); 3], Vec::new(), true),
+        "every shard holds the base"
+    );
+    assert_eq!(ranks(&engine), expected);
+    let engine = {
+        drop(engine);
+        several_over(&fx)
+    };
+    assert_eq!(ranks(&engine), expected, "after a restart");
 }

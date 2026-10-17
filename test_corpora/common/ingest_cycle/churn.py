@@ -8,12 +8,10 @@ rounds, the fields of a row and how each is measured are in `test_corpora/common
 
 from __future__ import annotations
 
-import base64
 import itertools
 import json
 import os
 import random
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -23,11 +21,7 @@ from ..serve_battery import full_box
 from .control import wait_for
 from .cycle import Cycle, fold_sentences, safe
 from .holdout import HoldOut
-from .split import bundle_manifest, declared_entities, declared_layers
-
-# The oracle's publication reader.
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "reference"))
-from oracle.layout import newest_publication
+from .split import declared_entities, declared_layers, served_state
 
 
 class Churn(Cycle):
@@ -215,6 +209,7 @@ class Churn(Cycle):
             else None,
             "term_images_bytes": disc["term_images_bytes"],
             "fresh_term_images_bytes": fresh["term_images_bytes"],
+            "shards": disc["shards"],
             "bundle_bytes": tree_bytes(self.served.bundle),
             "principals": principals,
         }
@@ -383,57 +378,6 @@ def high_water_failures(rows: list[dict]) -> list[str]:
                 f"for {row['deleted']:,} new items; expected at most {allowed:,}"
             )
     return out
-
-
-def served_state(bundle: Path) -> dict:
-    """What the churn reads off the newest side-manifest of each partition of `bundle`'s current
-    version. `postings_bytes` is the term index on disc, the base postings and every live delta
-    tier; `term_images_bytes`, every view's term images; `free_ids` and `held_ids`, the freed
-    entity ids the allocator issues next and those it holds back until the log rotates."""
-    read = bundle_manifest(bundle)
-    if read is None:
-        raise FileNotFoundError(f"{bundle} has no CURRENT; state --all-in-bundle as a built bundle")
-    prefix, _ = read
-    root = bundle / prefix
-    out = {"prefix": prefix, "postings_bytes": 0, "term_images_bytes": 0}
-    frees: list[str] = []
-    held: list[str] = []
-    for partition in sorted(path for path in (root / "partitions").iterdir() if path.is_dir()):
-        _, published = newest_publication(root, partition.name)
-        for record in published["shards"]["records"]:
-            postings = partition / "shards" / str(record["id"]) / "terms" / "postings.arrow"
-            out["postings_bytes"] += postings.stat().st_size
-            out["postings_bytes"] += sum((root / path).stat().st_size for path in record["deltas"])
-            out["term_images_bytes"] += sum(
-                (root / extent["path"]).stat().st_size for extent in record["term_image_extents"]
-            )
-            frees.append(record["free_entities"])
-            held += [entry["entities"] for entry in record["held_entities"]]
-    out["free_ids"] = sum(map(roaring_cardinality, frees))
-    out["held_ids"] = sum(map(roaring_cardinality, held))
-    return out
-
-
-def roaring_cardinality(encoded: str) -> int:
-    """How many ids a side-manifest's base64 portable Roaring bitmap holds, read from its header:
-    after the cookie and, where the cookie says run containers are present, their bitset, each
-    container's key and its cardinality less one."""
-    data = base64.b64decode(encoded)
-    cookie = int.from_bytes(data[:4], "little")
-    if cookie & 0xFFFF == 12347:
-        containers = (cookie >> 16) + 1
-        at = 4 + (containers + 7) // 8
-    elif cookie == 12346:
-        containers = int.from_bytes(data[4:8], "little")
-        at = 8
-    else:
-        raise ValueError(
-            f"a Roaring bitmap whose cookie is {cookie}, which is not the portable format"
-        )
-    if containers == 0:
-        return 0
-    header = np.frombuffer(data, dtype="<u2", count=2 * containers, offset=at)
-    return int(header[1::2].astype(np.int64).sum()) + containers
 
 
 def tree_bytes(root: Path) -> int:
