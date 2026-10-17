@@ -177,7 +177,7 @@ fn an_empty_shard_holds_every_declared_structure_and_no_item() {
     for name in ["plain", "num"] {
         assert!(
             !column(layout.column_rel(name)).exists(),
-            "'{name}' owes no value column"
+            "'{name}' has no value column"
         );
     }
     let note = column(layout.column_rel("note"));

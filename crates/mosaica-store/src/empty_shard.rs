@@ -178,7 +178,7 @@ pub fn write_empty_shard(shard: &EmptyShard<'_>) -> Result<EmptyShardWritten> {
                     &column_rel,
                     family.arrow_type,
                     family.vocabulary.is_some(),
-                    family.vocabulary.is_some() && family.is_filterable(),
+                    family.has_postings(),
                 )?;
             } else {
                 if family.index {
@@ -260,7 +260,7 @@ impl Written<'_> {
     }
 
     /// A value column of no entity, with its empty dictionary for a keyword and its empty postings
-    /// for a category that owes them. It names no presence bitmap.
+    /// for a category that has them. It names no presence bitmap.
     fn value_column(
         &mut self,
         column_rel: &str,

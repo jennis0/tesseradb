@@ -367,6 +367,8 @@ pub fn map_accept_error(e: mosaica_engine::AcceptError) -> ApiError {
         }
         // The detail names the size, the high water and the ids needed.
         AcceptError::Exec(e @ ExecError::ShardFull(_)) => ApiError::Conflict(e.to_string()),
+
+        // The detail names how many new items found no shard.
         AcceptError::Exec(e @ ExecError::ShardsExhausted(_)) => ApiError::Conflict(e.to_string()),
         // The detail names the layer spaces given, or the level's need and its space's room.
         AcceptError::Exec(ExecError::LayerSpaceFull { detail }) => ApiError::Conflict(detail),

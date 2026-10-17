@@ -128,14 +128,29 @@ impl DeclaredScalar {
     /// vocabulary, whose membership postings are derived from the column. Text has none: it has
     /// many terms per entity and no per-entity slot.
     pub fn owes_value_column(&self, vocabularies: &[ManifestVocabulary]) -> bool {
-        self.arrow_type != ScalarType::Text && (self.index || self.derived(vocabularies))
+        Self::value_column_of(self.arrow_type, self.index || self.derived(vocabularies))
+    }
+
+    /// [`Self::owes_value_column`] over a declaration's facts. `indexed` is `index = true` or a
+    /// `derived` vocabulary.
+    pub fn value_column_of(arrow_type: ScalarType, indexed: bool) -> bool {
+        arrow_type != ScalarType::Text && indexed
     }
 
     /// Whether this column's value lives in the record blob: text always, since its postings
     /// cannot reconstruct prose, and any other column with no other home.
     pub fn blob_resident(&self, vocabularies: &[ManifestVocabulary]) -> bool {
-        self.arrow_type == ScalarType::Text
-            || (!self.render && !self.owes_value_column(vocabularies))
+        Self::blob_resident_of(
+            self.arrow_type,
+            self.index || self.derived(vocabularies),
+            self.render,
+        )
+    }
+
+    /// [`Self::blob_resident`] over a declaration's facts, `indexed` as in
+    /// [`Self::value_column_of`].
+    pub fn blob_resident_of(arrow_type: ScalarType, indexed: bool, render: bool) -> bool {
+        arrow_type == ScalarType::Text || (!render && !Self::value_column_of(arrow_type, indexed))
     }
 
     /// Whether the value column carries derived postings, which only a category's does.
@@ -651,6 +666,11 @@ impl ScopedScalar {
     /// served on `POST /v1/items/{mosaica_id}`, on no filter surface and in no row tail.
     pub fn has_value_column(&self) -> bool {
         self.vocabulary.is_some() || self.arrow_type != ScalarType::Text
+    }
+
+    /// Whether this family's per-view column carries postings: a category on the filter surface.
+    pub fn has_postings(&self) -> bool {
+        self.vocabulary.is_some() && self.is_filterable()
     }
 }
 
@@ -1892,13 +1912,28 @@ pub fn layer_space_mut(
     &mut spaces[at]
 }
 
-/// `shard`'s derived files and every one of `spaces`' held shapes, as one list.
-pub(crate) fn derived_and_held<'a>(
-    shard: &'a ShardRecord,
+/// Every record's derived files, each beside its shard, and every one of `spaces`' held shapes
+/// beside the first record's shard: the pairs [`SegmentsManifest::file_derived_by_shard`] files.
+pub(crate) fn derived_by_shard<'a>(
+    records: impl Iterator<Item = &'a ShardRecord> + Clone + 'a,
     spaces: &'a [LayerSpaceRecord],
-) -> impl Iterator<Item = &'a DerivedExtent> {
-    let held = spaces.iter().flat_map(|space| space.held_shapes.iter());
-    shard.derived_extents.iter().chain(held)
+) -> impl Iterator<Item = (ShardId, &'a DerivedExtent)> + 'a {
+    let first = records.clone().next().map(|record| record.id);
+    let held = first.into_iter().flat_map(move |first| {
+        spaces
+            .iter()
+            .flat_map(|space| space.held_shapes.iter())
+            .map(move |extent| (first, extent))
+    });
+    records
+        .flat_map(|record| {
+            let id = record.id;
+            record
+                .derived_extents
+                .iter()
+                .map(move |extent| (id, extent))
+        })
+        .chain(held)
 }
 
 /// One file derived from an artifact level: a containment partition, a tile index, a row-major
@@ -1907,8 +1942,8 @@ pub(crate) fn derived_and_held<'a>(
 ///
 /// A reader adopts the file only where the level's records are at exactly `level_version` and
 /// the file's shard's slice at exactly `slice_version`, and derives the structure again
-/// otherwise. A stale file is narrow (a growth added members it does
-/// not cover), so nothing weaker than equality is safe.
+/// otherwise. A stale file is narrow (a growth added members it does not cover), so nothing
+/// weaker than equality is safe.
 ///
 /// Every form but containment is addressed by row, so it names the view and the incarnation whose
 /// row space it was written over; a containment partition names entities' terms and answers for
@@ -2279,14 +2314,13 @@ pub struct PartitionManifest {
     /// argument: rotation reclaims the `AttributeDeclare` record, and a column whose declaration
     /// lived only there comes back from a restart as one no reader knows exists. The columns a
     /// build declared are in `MANIFEST.json` and are not restated here; the served schema is the
-    /// two together ([`Manifest::with_attributes`]). A compaction moves a column into the next
-    /// `MANIFEST.json` once every shard holds its base ([`Shards::based_everywhere`]).
+    /// two together ([`Manifest::with_attributes`]). A compaction moves the leading run of these
+    /// that every shard holds a base of into the next `MANIFEST.json`
+    /// ([`Shards::based_everywhere`]).
     ///
-    /// **A name here is a column some shard holds no base of.** A column declared at a running
-    /// service has no base value column, no base postings and no slot in any segment written
-    /// before it until a shard's compaction writes them there; the opener demands a base of it
-    /// (`FilterColumns::open`), and the compaction reads one, only in a shard whose
-    /// [`ShardRecord::runtime_bases`] lists it.
+    /// **A name here is a column `MANIFEST.json` does not declare yet.** A shard holds its base
+    /// only where its [`ShardRecord::runtime_bases`] lists it: the opener demands one
+    /// (`FilterColumns::open`), and a compaction reads one, only there.
     ///
     /// No `serde(default)`: a manifest omitting it is malformed, not
     /// declaration-free, and the two are indistinguishable under a default while only one is safe
@@ -2447,11 +2481,11 @@ pub struct ShardRecord {
     /// A lost list sends every session through a permutation walk, with no fault reported.
     pub term_image_extents: Vec<TermImageExtent>,
     /// Every `(group-scoped family, view)` pair this shard holds a column or render lane of,
-    /// written by a flush, a compaction or the shard's opening, while `MANIFEST.json` does not
-    /// stand for it in every shard. Not derivable: `MANIFEST.json` names only the build's, and a render-only family writes no
-    /// entity-space extent. A pair leaves every shard's list once every shard lists it and
-    /// `MANIFEST.json` lists the view in the family ([`Shards::settle_scoped_columns`]). No
-    /// `serde(default)`: a lost list must not read as column-free.
+    /// written by a flush, a compaction or the shard's opening. Not derivable: `MANIFEST.json`
+    /// names only the build's, and a render-only family writes no entity-space extent. A pair
+    /// leaves every shard's list once every shard lists it and `MANIFEST.json` lists the view in
+    /// the family ([`Shards::settle_scoped_columns`]). No `serde(default)`: a lost list must not
+    /// read as column-free.
     pub scoped_columns: Vec<ScopedColumn>,
     /// The columns declared at a running service ([`PartitionManifest::attributes`] and
     /// [`PartitionManifest::scoped_attributes`], by name) this shard holds a base of: written by
@@ -2763,7 +2797,6 @@ impl SegmentsManifest {
     /// The files this manifest names split by the directory holding them: each shard's, each layer
     /// space's, and the rest, which the partition's own file names.
     pub(crate) fn split_files(&self, partition: &str) -> SplitFiles {
-        let shards_rel = format!("{}/", crate::layout::shards_rel(partition));
         let spaces_rel = format!("{}/", crate::layout::layer_spaces_rel(partition));
         let mut split = SplitFiles {
             partition: BTreeMap::new(),
@@ -2781,10 +2814,8 @@ impl SegmentsManifest {
         };
         let number = |rest: &str| rest.split('/').next()?.parse::<u32>().ok();
         for (rel, digest) in &self.partition.files {
-            let held = if let Some(rest) = rel.strip_prefix(&shards_rel) {
-                number(rest)
-                    .and_then(|id| ShardId::new(id).ok())
-                    .and_then(|id| split.shards.get_mut(&id))
+            let held = if let Some(id) = crate::layout::shard_of(partition, rel) {
+                split.shards.get_mut(&id)
             } else if let Some(rest) = rel.strip_prefix(&spaces_rel) {
                 number(rest)
                     .and_then(|space| LayerSpace::new(space).ok())
@@ -2878,56 +2909,10 @@ impl SegmentsManifest {
         mosaica_types::only(&mut self.shards.records)
     }
 
-    /// The shard's derived files and every layer space's held shapes.
-    pub fn derived_extents(&self) -> impl Iterator<Item = &DerivedExtent> {
-        derived_and_held(self.only_shard(), &self.layer_spaces)
-    }
-
     /// Every shard's derived files, each beside its shard, and every layer space's held shapes
     /// beside the first shard: the pairs [`Self::file_derived_by_shard`] files.
     pub fn derived_by_shard(&self) -> impl Iterator<Item = (ShardId, &DerivedExtent)> {
-        let first = self.shards.records.first().map(|record| record.id);
-        let held = first.into_iter().flat_map(move |first| {
-            self.layer_spaces
-                .iter()
-                .flat_map(|space| space.held_shapes.iter())
-                .map(move |extent| (first, extent))
-        });
-        self.shards
-            .records
-            .iter()
-            .flat_map(|record| {
-                let id = record.id;
-                record
-                    .derived_extents
-                    .iter()
-                    .map(move |extent| (id, extent))
-            })
-            .chain(held)
-    }
-
-    /// File `derived` on `shard`, as [`Self::file_derived_by_shard`] files it, every other shard
-    /// keeping the derived files it lists.
-    pub fn file_derived(&mut self, shard: ShardId, derived: Vec<DerivedExtent>) {
-        let others: Vec<(ShardId, DerivedExtent)> = self
-            .shards
-            .records
-            .iter()
-            .filter(|record| record.id != shard)
-            .flat_map(|record| {
-                let id = record.id;
-                record
-                    .derived_extents
-                    .iter()
-                    .map(move |extent| (id, extent.clone()))
-            })
-            .collect();
-        self.file_derived_by_shard(
-            derived
-                .into_iter()
-                .map(|extent| (shard, extent))
-                .chain(others),
-        );
+        derived_by_shard(self.shards.records.iter(), &self.layer_spaces)
     }
 
     /// File `derived`, replacing what the manifest lists: each held shape under its space's

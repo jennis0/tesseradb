@@ -2,11 +2,9 @@
 //! loader, and the tile lookup — `tile_ranges` for one tile, `tile_ranges_all` for the whole
 //! tile set of a viewport in one sweep.
 //!
-//! `mosaica-store` never depends on `mosaica-authz`, and this module has its own Arrow IPC
-//! reader — `columns.arrow`'s schema (fixed-width primitive columns) differs from
-//! `mosaica-authz::postings`'s single `LargeBinary` column, so the zero-copy technique (mmap →
-//! `arrow::buffer::Buffer::from_custom_allocation` → decode without copying) is reused, not the
-//! code.
+//! This module has its own Arrow IPC reader: `columns.arrow`'s schema (fixed-width primitive
+//! columns) differs from `postings.arrow`'s single `LargeBinary` column, so the zero-copy
+//! technique is reused and the code is not.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
@@ -339,28 +337,13 @@ impl PartitionData {
         Arc::make_mut(mosaica_types::only(&mut self.shards))
     }
 
-    /// The shard's derived files and every layer space's held shapes.
-    pub fn derived_extents(&self) -> impl Iterator<Item = &DerivedExtent> {
-        crate::manifest::derived_and_held(&self.only_shard().record, &self.layer_spaces)
-    }
-
     /// Every shard's derived files, each beside its shard, and every layer space's held shapes
     /// beside the first shard: the pairs `SegmentsManifest::file_derived_by_shard` files.
     pub fn derived_by_shard(&self) -> impl Iterator<Item = (ShardId, &DerivedExtent)> {
-        let first = self.shards.first().map(|shard| shard.record.id);
-        let held = first.into_iter().flat_map(move |first| {
-            self.layer_spaces
-                .iter()
-                .flat_map(|space| space.held_shapes.iter())
-                .map(move |extent| (first, extent))
-        });
-        self.shards
-            .iter()
-            .flat_map(|shard| {
-                let id = shard.record.id;
-                shard.record.derived_extents.iter().map(move |extent| (id, extent))
-            })
-            .chain(held)
+        crate::manifest::derived_by_shard(
+            self.shards.iter().map(|shard| &shard.record),
+            &self.layer_spaces,
+        )
     }
 
     /// The side-manifest this partition was published with, to edit into the next one.

@@ -148,11 +148,12 @@ use rustc_hash::FxHashMap;
 
 use mosaica_authz::encode_posting;
 use mosaica_filter::{
-    Codes, ColumnKind, RecordFieldRef, RecordValueRef, ValueColumnWriter, RECORD_BLOCKS_FILE,
+    Codes, RecordFieldRef, RecordValueRef, ValueColumnWriter, RECORD_BLOCKS_FILE,
     RECORD_BLOCK_TARGET, RECORD_DIRECTORY_FILE, RECORD_HASROW_FILE,
 };
 use mosaica_spatial::split32;
 use mosaica_spatial::tiler::{ScalarType, ScalarValue};
+use mosaica_store::manifest::DeclaredScalar;
 use mosaica_store::ShardLayout;
 use mosaica_types::SMALL_TERM_THRESHOLD_DEFAULT;
 
@@ -2320,7 +2321,9 @@ fn build_bundle(
 
     // ---- 11. manifests ---------------------------------------------------------------
     let mut other_paths = empty_files;
-    other_paths.extend(postings_paths);
+    if !filled.is_empty() {
+        other_paths.extend(postings_paths);
+    }
     other_paths.extend(entity_terms_paths);
     other_paths.extend(view_files);
     other_paths.extend(filter_paths);
@@ -3670,49 +3673,21 @@ pub(crate) fn write_record_blob(
     Ok(vec![blocks_path, hasrow_path, directory_path])
 }
 
-/// Does this column's value live in the record blob — the home for a value with no other?
-///
-/// **Blob-resident is "no other home", not "no flags"** — and for a category the two differ.
-/// Records §4.2 exempts categories from the blob because their entity-space structures are the
-/// vocabulary machinery's constant floor, but that floor is [`postings_are_owed`], which holds for
-/// an *indexed* or `derived` category and not for a `public` one. A `public` category declared with
-/// neither flag therefore has no hot column, no value column and no postings, so excluding every
-/// category stored its values nowhere at all and refused nothing — silent loss of a field the
-/// caller declared. Asking the same question the entity-space pass asks is what keeps the two
-/// exhaustive between them: a field is in exactly one home, and records §3's rule that every
-/// declared field answers `entity → value` holds by construction.
-///
-/// **Text is blob-resident whether or not it is indexed** (records §4.4), which is the one place
-/// this predicate is not simply "has no other home": an indexed text column has a token index
-/// *and* a blob row, because the index answers `match` and only the blob can answer
-/// `entity → value`. Postings are term → entities; nothing in them reconstructs the prose a
-/// drill-down returns.
-///
-/// It is also what says **when a column's storage may go back to the disk**: a non-render column
-/// that is not blob-resident has no reader past the filter postings (`write_column_release`).
+/// [`DeclaredScalar::blob_resident`] over the build's declaration.
 pub(crate) fn blob_resident(
     schema: &crate::config::Schema,
     attribute: &crate::config::Attribute,
 ) -> bool {
-    attribute.ty == ScalarType::Text || (!attribute.render && !postings_are_owed(schema, attribute))
+    let indexed = postings_are_owed(schema, attribute);
+    DeclaredScalar::blob_resident_of(attribute.ty, indexed, attribute.render)
 }
 
-/// Does this column owe an **entity-space value column**, and the dictionary a keyword's ordinals
-/// index?
-///
-/// [`postings_are_owed`] is most of it: the value column is the artefact of record and the
-/// postings are derived from it (`filter-index.md` §2.1), so a column that owes no postings owes
-/// no value column either. A `text` column is the exception in the other direction — it owes
-/// postings over its tokens and no per-entity slot at all, its values being the record blob's
-/// (records §4.4) — which is why the type appears here and nowhere else in the routing.
-///
-/// This is the whole of what reads a string column's characters **at an entity index**, `render`
-/// aside, and [`takes_extents`] is its complement.
+/// [`DeclaredScalar::owes_value_column`] over the build's declaration.
 pub(crate) fn value_column_is_owed(
     schema: &crate::config::Schema,
     attribute: &crate::config::Attribute,
 ) -> bool {
-    attribute.ty != ScalarType::Text && postings_are_owed(schema, attribute)
+    DeclaredScalar::value_column_of(attribute.ty, postings_are_owed(schema, attribute))
 }
 
 /// Could this column's characters take the record blob's extents instead of an entity-ordered
@@ -4044,7 +4019,9 @@ fn write_column_values(
     let mut presence = Presence::default();
     let mut dict = None;
 
-    let mut writer = ValueColumnWriter::create(values_path, presence_path, column_kind(attribute))
+    let kind =
+        mosaica_store::empty_shard::value_column_kind(attribute.ty, attribute.vocabulary.is_some());
+    let mut writer = ValueColumnWriter::create(values_path, presence_path, kind)
         .map_err(|e| BuildError::io(values_path, e))?;
     macro_rules! push {
         ($chunk:expr) => {
@@ -4758,47 +4735,6 @@ fn category_chunk(ty: ScalarType, held: &[u32]) -> Codes {
         ScalarType::U8 => Codes::U8(held.iter().map(|&c| c as u8).collect::<Vec<_>>().into()),
         ScalarType::U16 => Codes::U16(held.iter().map(|&c| c as u16).collect::<Vec<_>>().into()),
         _ => Codes::U32(held.to_vec().into()),
-    }
-}
-
-/// The kind of column a declared attribute stores — the type the writer is created with, before
-/// its first value arrives.
-fn column_kind(attribute: &crate::config::Attribute) -> ColumnKind {
-    // A keyword's values file is an ordinal column, not a string one: the strings live once each
-    // in the dictionary beside it, and the scan reads fixed-width `u32`s at the fixed-width scan's
-    // measured constants rather than at a string scan's (records §4.3).
-    if attribute.ty == ScalarType::Keyword {
-        return ColumnKind::U32;
-    }
-    if attribute.vocabulary.is_some() {
-        return match attribute.ty {
-            ScalarType::U8 => ColumnKind::U8,
-            ScalarType::U16 => ColumnKind::U16,
-            _ => ColumnKind::U32,
-        };
-    }
-    match attribute.ty {
-        // `bool` stores as `u8` and `timestamp_us` as the `i64` it is — the *type* carries the unit
-        // into the manifest, and the storage and the comparison are an `i64`'s.
-        ScalarType::Bool | ScalarType::U8 => ColumnKind::U8,
-        ScalarType::U16 => ColumnKind::U16,
-        ScalarType::U32 => ColumnKind::U32,
-        ScalarType::U64 => ColumnKind::U64,
-        ScalarType::I8 => ColumnKind::I8,
-        ScalarType::I16 => ColumnKind::I16,
-        ScalarType::I32 => ColumnKind::I32,
-        ScalarType::I64 | ScalarType::TimestampUs => ColumnKind::I64,
-        ScalarType::F32 => ColumnKind::F32,
-        ScalarType::F64 => ColumnKind::F64,
-        // `utf8` survives as the *wire* type of a keyword's value and of a category's key
-        // (`DeclaredScalar::wire_type`); it is refused at the schema parse, so no declared
-        // attribute carries it.
-        ScalarType::Utf8 => unreachable!("`utf8` is not a declarable type"),
-        ScalarType::Keyword => unreachable!("a keyword returns above"),
-        // A text column's terms are `u32` ordinals into the layer's token dictionary, exactly as a
-        // keyword's value is — what differs is how many a row has, which is the postings' business
-        // and not this width's.
-        ScalarType::Text => ColumnKind::U32,
     }
 }
 

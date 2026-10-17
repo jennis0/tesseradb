@@ -3065,7 +3065,7 @@ impl<'a> LevelPacks<'a> {
         level: u32,
         ordinals: std::ops::Range<u32>,
     ) -> Result<()> {
-        use mosaica_lifecycle::membership::{encode_record, frame_members, listed_members};
+        use mosaica_lifecycle::membership::{encode_record, listed_members, listed_parts};
         let slots = store.slots(layer, level);
         for ordinal in ordinals {
             let Some(record) = slots.get(ordinal as usize).and_then(Option::as_deref) else {
@@ -3092,11 +3092,9 @@ impl<'a> LevelPacks<'a> {
                     .iter()
                     .map(|content| span.members(&content.generated_from))
                     .collect();
-                if in_shard.is_empty() && sets.iter().all(|set| set.is_empty()) {
-                    continue;
+                if let Some(part) = listed_parts(&in_shard, &sets) {
+                    pack.push_at(ordinal, &part).map_err(BuildError::Store)?;
                 }
-                let part = frame_members(&in_shard, sets.iter().map(|set| set.as_ref()));
-                pack.push_at(ordinal, &part).map_err(BuildError::Store)?;
             }
         }
         Ok(())
@@ -3176,8 +3174,8 @@ fn publication_batches(
 }
 
 /// Pack every level's records and memberships into one record pack and a member pack in each shard
-/// ([`LevelPacks`]), fsync them, and **read the store's copies back through the mapped members** —
-/// the format, and the writers, that a control-plane publication uses.
+/// ([`LevelPacks`]), fsync them, and **read the store's copies back through the mapped members**.
+/// The format and the writers are the ones a control-plane publication uses.
 ///
 /// **A blob at a time, into the file.** The store answers a level's ordinal *range*
 /// (`pending_ranges`) and an artifact is encoded where it stands, so what is resident here is one

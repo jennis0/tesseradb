@@ -2834,10 +2834,10 @@ impl Executor {
                         incarnation: None,
                         space: self.live.space_of(&layer)?,
                         level,
-                        records_version: self.live.with_artifacts(|store| {
+                        level_version: self.live.with_artifacts(|store| {
                             pending.records_version_after(store, &layer, level)
                         }),
-                        level_version,
+                        slice_version: level_version,
                         form: mosaica_store::manifest::DerivedForm::Containment,
                         bytes: mosaica_store::derived::FiledBytes::InHand(bytes),
                     })
@@ -3363,10 +3363,10 @@ impl Executor {
                         incarnation: Some(incarnation),
                         space,
                         level,
-                        records_version: self.live.with_artifacts(|store| {
+                        level_version: self.live.with_artifacts(|store| {
                             pending.records_version_after(store, &layer, level)
                         }),
-                        level_version,
+                        slice_version: level_version,
                         form,
                         bytes: mosaica_store::derived::FiledBytes::Staged(path),
                     })
@@ -3448,8 +3448,8 @@ impl Executor {
                     incarnation: Some(incarnation),
                     space,
                     level: *level,
-                    records_version,
-                    level_version: version,
+                    level_version: records_version,
+                    slice_version: version,
                     form: mosaica_store::manifest::DerivedForm::ShapeRows {
                         seg_id: segment.seg_id.clone(),
                         row_count: segment.row_count,
@@ -3517,8 +3517,8 @@ impl Executor {
                         incarnation: Some(incarnation),
                         space,
                         level: *level,
-                        records_version: store.records_version(layer, *level),
-                        level_version: version,
+                        level_version: store.records_version(layer, *level),
+                        slice_version: version,
                         form: mosaica_store::manifest::DerivedForm::ShapeHeld,
                         bytes: mosaica_store::derived::FiledBytes::InHand(
                             mosaica_store::derived::shape_held_bytes(version, &shapes),
@@ -3610,10 +3610,10 @@ impl Executor {
                         incarnation: Some(incarnation),
                         space: self.live.space_of(&layer)?,
                         level,
-                        records_version: self.live.with_artifacts(|store| {
+                        level_version: self.live.with_artifacts(|store| {
                             pending.records_version_after(store, &layer, level)
                         }),
-                        level_version,
+                        slice_version: level_version,
                         form: mosaica_store::manifest::DerivedForm::TileIndex,
                         bytes: mosaica_store::derived::FiledBytes::InHand(bytes),
                     })

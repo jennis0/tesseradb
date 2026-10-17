@@ -79,8 +79,9 @@ pub type LevelWalk<'a> = &'a dyn Fn(&mut dyn FnMut(u32, &Bitmap));
 /// first. May be called more than once, on [`LevelWalk`]'s terms.
 pub type PairWalk<'a> = &'a dyn Fn(&mut dyn FnMut(u32, u32));
 
-/// One term's postings, handed to a visitor — the shape [`SignatureIndex::build`] walks the
-/// postings through. See [`PostingSlice`] for why it is a callback and not a return.
+/// One term's postings, handed to a visitor: the shape [`SignatureIndex::build`] walks the
+/// postings through. A callback, because a stored Roaring posting is a view that lives only for
+/// the call.
 pub type PostingWalk<'a> = &'a dyn Fn(u32, &mut dyn FnMut(PostingSlice<'_>)) -> std::io::Result<()>;
 
 /// One level's generating sets, visited in ascending ordinal — rank order within each artifact.
@@ -878,17 +879,27 @@ pub fn sweep_row_column_scratch(scratch: &Path) {
 // The containment partition
 // ---------------------------------------------------------------------------------------------
 
-/// One term's postings, as this module needs to read them.
-///
-/// **An adapter, not a second format.** `mosaica-authz` owns `postings.arrow`, so a caller hands
-/// each posting over in whichever of the two shapes it is stored in and the walk below is written
-/// once. The decode that produces the shape stays where the
-/// format lives.
+/// One term's posting, in either stored shape. [`walk_posting`] reads one from a postings file; a
+/// test may hand over an in-memory set.
 pub enum PostingSlice<'a> {
     /// Ascending little-endian `u32` entity ids.
     Array(&'a [u8]),
     /// A Roaring bitmap of entity ids.
     Roaring(&'a Bitmap),
+}
+
+/// `postings`' record for `term`, handed to `visit` in its stored shape; nothing where it has none.
+pub fn walk_posting(
+    postings: &mosaica_authz::PostingsReader,
+    term: u32,
+    visit: &mut dyn FnMut(PostingSlice<'_>),
+) -> std::io::Result<()> {
+    match postings.posting_at(term)? {
+        Some(mosaica_authz::PostingRef::Array(bytes)) => visit(PostingSlice::Array(bytes)),
+        Some(mosaica_authz::PostingRef::Roaring(view)) => visit(PostingSlice::Roaring(&view)),
+        None => {}
+    }
+    Ok(())
 }
 
 /// Every entity's term signature, for the entities one level's generating sets name.
@@ -947,6 +958,16 @@ impl SignatureIndex {
             .values()
             .all(|sig| sig.windows(2).all(|w| w[0] < w[1])));
         Ok(SignatureIndex { by_entity })
+    }
+
+    /// [`Self::build`] over a postings file.
+    pub fn of_postings(
+        wanted: &Bitmap,
+        postings: &mosaica_authz::PostingsReader,
+    ) -> std::io::Result<Self> {
+        Self::build(wanted, postings.term_count(), &|term, visit| {
+            walk_posting(postings, term, visit)
+        })
     }
 
     fn signature(&self, entity: u32) -> &[u32] {
@@ -1172,10 +1193,10 @@ pub struct Filed {
     pub incarnation: Option<mosaica_types::view::ViewIncarnation>,
     pub space: mosaica_types::LayerSpace,
     pub level: u32,
-    /// The level's records version the file was written at ([`DerivedExtent::level_version`]).
-    pub records_version: u64,
-    /// The level's version in the file's shard ([`DerivedExtent::slice_version`]).
+    /// [`DerivedExtent::level_version`].
     pub level_version: u64,
+    /// [`DerivedExtent::slice_version`].
+    pub slice_version: u64,
     pub form: DerivedForm,
     pub bytes: FiledBytes,
 }
@@ -1378,8 +1399,8 @@ pub fn file_derived(
             path: format!("{dir_rel}/{name}"),
             space: item.space,
             level: item.level,
-            level_version: item.records_version,
-            slice_version: item.level_version,
+            level_version: item.level_version,
+            slice_version: item.slice_version,
             view: item.view.clone(),
             incarnation: item.incarnation,
             form: item.form.clone(),

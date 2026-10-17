@@ -403,26 +403,10 @@ fn derive_term_images(
         )
         .map_err(failed("pass 2b (term images: naming the file)"))?;
 
-        // The postings, adapted to the derivation's shape.
-        let walk = |term: u32,
-                    visit: &mut dyn FnMut(mosaica_store::derived::PostingSlice<'_>)|
-         -> std::io::Result<()> {
-            if let Some(posting) = postings.posting_at(term)? {
-                match posting {
-                    mosaica_authz::PostingRef::Array(bytes) => {
-                        visit(mosaica_store::derived::PostingSlice::Array(bytes))
-                    }
-                    mosaica_authz::PostingRef::Roaring(bitmap) => {
-                        visit(mosaica_store::derived::PostingSlice::Roaring(&bitmap))
-                    }
-                }
-            }
-            Ok(())
-        };
         let summary = mosaica_store::term_images::derive_term_images(
             &space,
             dict_len,
-            &walk,
+            &|term, visit| mosaica_store::derived::walk_posting(&postings, term, visit),
             &stamp,
             &file.path,
             mosaica_store::term_images::DeriveOptions {

@@ -44,6 +44,16 @@ pub fn segments_name(n: u64) -> String {
     format!("SEGMENTS-{n}.json")
 }
 
+/// Whether `file`, a file name, is a publication's manifest: `MANIFEST.json`, or a
+/// [`segments_name`] with `n` spelled as it writes it.
+pub fn is_manifest_name(file: &str) -> bool {
+    file == "MANIFEST.json"
+        || file
+            .strip_prefix("SEGMENTS-")
+            .and_then(|rest| rest.strip_suffix(".json"))
+            .is_some_and(|n| n.parse::<u64>().is_ok_and(|parsed| parsed.to_string() == n))
+}
+
 /// The directory under a partition's holding its shards' directories.
 pub const SHARDS_DIR: &str = "shards";
 
@@ -76,6 +86,14 @@ pub fn is_artifact_file(partition: &str, rel: &str) -> bool {
 /// A partition's shard directories, prefix-relative.
 pub fn shards_rel(partition: &str) -> String {
     format!("{}/{SHARDS_DIR}", partition_rel(partition))
+}
+
+/// The shard whose directory under [`shards_rel`] holds `rel`, a prefix-relative path; `None`
+/// for a path outside every shard's directory.
+pub fn shard_of(partition: &str, rel: &str) -> Option<ShardId> {
+    let rest = rel.strip_prefix(&shards_rel(partition))?.strip_prefix('/')?;
+    let number = rest.split('/').next()?;
+    ShardId::new(number.parse().ok()?).ok()
 }
 
 /// A partition's layer-space directories, prefix-relative.
@@ -282,6 +300,35 @@ pub(crate) const TEST_SHARD: ShardLayout<'static> = ShardLayout::new("p", ShardI
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_path_names_the_shard_whose_directory_holds_it() {
+        let one = ShardId::new(1).unwrap();
+        let rel = ShardLayout::new("p", one).members_rel();
+        assert_eq!(shard_of("p", &rel), Some(one));
+        assert_eq!(
+            shard_of("p", &format!("{}/x", TEST_SHARD.rel())),
+            Some(ShardId::ZERO)
+        );
+        assert_eq!(shard_of("q", &rel), None);
+        assert_eq!(shard_of("p", "partitions/p/layers/0/records"), None);
+        assert_eq!(shard_of("p", "partitions/p/shardsx/0/a"), None);
+    }
+
+    #[test]
+    fn a_manifest_name_is_one_a_publication_writes() {
+        assert!(is_manifest_name("MANIFEST.json"));
+        assert!(is_manifest_name(&segments_name(0)));
+        assert!(is_manifest_name(&segments_name(11)));
+        for name in [
+            "SEGMENTS-.json",
+            "SEGMENTS-01.json",
+            "SEGMENTS-1.json.tmp",
+            "SEGMENTS-x.json",
+        ] {
+            assert!(!is_manifest_name(name), "{name}");
+        }
+    }
 
     #[test]
     fn a_scoped_columns_path_moves_with_the_incarnation_and_not_at_the_build() {

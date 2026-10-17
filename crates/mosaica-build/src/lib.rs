@@ -2283,7 +2283,7 @@ pub(crate) fn manifest_vocabularies(
     minters: &HashMap<String, mosaica_store::vocabulary::VocabularyMinter>,
 ) -> Vec<ManifestVocabulary> {
     // Sorted by name, unlike the columns: nothing indexes a vocabulary positionally, and a
-    // `HashMap`'s iteration order would otherwise put non-determinism into the manifest bytes —
+    // `HashMap`'s iteration order would otherwise put non-determinism into the manifest bytes,
     // which are under a digest.
     //
     // An open vocabulary's values come from its minter in `minters`, which holds the
