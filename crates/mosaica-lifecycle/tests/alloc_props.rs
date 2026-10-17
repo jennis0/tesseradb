@@ -24,7 +24,7 @@ proptest! {
         let mut seen: HashSet<u64> = HashSet::new();
 
         for n in sizes {
-            let ids = alloc.allocate_items(n, u64::MAX);
+            let ids = alloc.allocate_items(n, u64::MAX, &mut ByTenancy::new());
             prop_assert_eq!(&ids, &(expected_next..expected_next + n).collect::<Vec<_>>());
             for id in ids {
                 prop_assert!(seen.insert(id), "id {} allocated twice in one session", id);
@@ -61,7 +61,7 @@ proptest! {
             let mut alloc = Allocator::new(seed);
 
             for n in sizes {
-                let range = alloc.allocate_items(n, u64::MAX);
+                let range = alloc.allocate_items(n, u64::MAX, &mut ByTenancy::new());
                 for id in range {
                     prop_assert!(!used.contains(&id), "id {} reused across a simulated crash", id);
                     used.insert(id);
@@ -106,7 +106,7 @@ proptest! {
             let seed = side_high_water.max(shard_zero_mark(&wal));
             let mut alloc = Allocator::new(seed);
 
-            for id in alloc.allocate_items(n, u64::MAX) {
+            for id in alloc.allocate_items(n, u64::MAX, &mut ByTenancy::new()) {
                 prop_assert!(!used.contains(&id), "entity id {} reissued", id);
                 used.insert(id);
                 wal.push(WalRecord::IngestBatch {
@@ -233,8 +233,8 @@ proptest! {
 
         for (created, edits, deletes, fold, rotate, crash) in rounds {
             let edited = edits.min(items.len());
-            let given_edits = alloc.allocate_edits(edited as u64).unwrap();
-            let given_items = alloc.allocate_items(created, u64::MAX);
+            let given_edits = alloc.allocate_edits(edited as u64, &mut ByTenancy::new()).unwrap();
+            let given_items = alloc.allocate_items(created, u64::MAX, &mut ByTenancy::new());
             for (at, &entity) in given_edits.iter().enumerate() {
                 prop_assert_eq!(
                     index.get(&entity).copied().unwrap_or(0),

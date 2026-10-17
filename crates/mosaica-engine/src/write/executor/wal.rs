@@ -120,7 +120,7 @@ impl Executor {
 
     /// Append `records` in order and fsync once: the one path to durability. Each position is read
     /// before its own append, since that is the bound rotation must not reclaim past. On failure
-    /// nothing the caller prepared is in force, and its reserved ids stay spent.
+    /// nothing the caller prepared is in force.
     pub(super) fn append_and_sync(
         &mut self,
         records: &[&WalRecord],

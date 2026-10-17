@@ -745,9 +745,9 @@ impl<W> CommitWindow<W> {
     /// allocate made no assignment to measure, which is the same statement as "no effect at all".
     ///
     /// An edit takes its id in its item's shard, and the new items where the placement puts them;
-    /// [`Placed`] names the shards the window sealed and opened. `mosaica_id_of` gives a created
-    /// item's `mosaica_id` for the receipt each record carries; a row naming an item carries its
-    /// own.
+    /// [`Placed`] holds what the window took from each shard, and names the shards it sealed and
+    /// opened. `mosaica_id_of` gives a created item's `mosaica_id` for the receipt each record
+    /// carries; a row naming an item carries its own.
     pub fn allocate(
         self,
         allocators: &mut Allocators<'_>,

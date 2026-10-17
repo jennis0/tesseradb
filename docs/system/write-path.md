@@ -289,10 +289,11 @@ At close, the whole window is sorted and allocated from the id allocator in one 
 record per submission is appended, carrying its rows and what every row of the request became, and
 one fsync covers the entire window. Only then is the window applied to build a new generation, the
 pointer is swapped, and every waiting request is acknowledged with every row's `mosaica_id`. If
-the append or the fsync fails, the window applies nothing: every waiter is refused, and a caller
-retries under the same batch id. A retry of an accepted batch answers the `mosaica_id`s its first
-acceptance did, and the rows it refused, after a restart too, since the record carries them. The
-index of accepted batch ids is built from the WAL members retained, so a batch id is remembered
+the append or the fsync fails, or the window is refused after its ids are taken, the window applies
+nothing: every id it took goes back to its shard to be issued again, every waiter is refused, and a
+caller retries under the same batch id. A retry of an accepted batch answers the `mosaica_id`s its
+first acceptance did, and the rows it refused, after a restart too, since the record carries them.
+The index of accepted batch ids is built from the WAL members retained, so a batch id is remembered
 until the flush whose WAL rotation removes the member holding its record, and a retry sent after
 that is decided as a new batch.
 

@@ -771,10 +771,9 @@ fn a_deny_whose_retries_are_exhausted_is_hidden_now_and_visible_after_a_restart(
 /// The negative control for the rule above: **the apply-anyway exception is deny-scoped**.
 ///
 /// An ingest whose append failed applies nothing — applying un-fsynced ingest would make items
-/// appear and vanish across a crash, and that holds per window as it does per command. The extra
-/// assertion that the high-water *did* advance keeps "nothing applied" from being satisfied
-/// vacuously by a failure that happened before assignment: it pins that the batch reached
-/// allocation and burned its ids, which is the documented, I9-safe behaviour.
+/// appear and vanish across a crash, and that holds per window as it does per command. The window
+/// reached its append, so it had been given its ids; it gives them back, and the next window is
+/// given them.
 #[test]
 fn an_ingest_append_failure_applies_nothing() {
     let tmp = TempDir::new().unwrap();
@@ -785,15 +784,23 @@ fn an_ingest_append_failure_applies_nothing() {
     let err = engine
         .ingest_rows(vec![keyed_row("never-lands")], "doomed".to_string(), [3u8; 32])
         .expect_err("an ingest whose append failed must be refused");
+    assert!(
+        matches!(err, AcceptError::Exec(mosaica_lifecycle::ExecError::Wal(_))),
+        "the window reached its append: {err}"
+    );
 
     assert!(
         item_of_key(&engine, "never-lands").is_none(),
         "nothing may be applied for an ingest that was never made durable ({err})"
     );
+    assert_eq!(engine.allocator_high_water(), before_hw);
+    let given = engine
+        .ingest_rows(vec![keyed_row("lands")], "after".to_string(), [4u8; 32])
+        .expect("the next ingest is accepted");
     assert_eq!(
-        engine.allocator_high_water(),
-        before_hw + 1,
-        "the batch did reach assignment and burned its ids — monotone, never reused (I9)"
+        given,
+        vec![EntityId::new(before_hw)],
+        "the failed window's id is issued again"
     );
 }
 

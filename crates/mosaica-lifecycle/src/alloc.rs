@@ -77,19 +77,20 @@ fn take_out(sets: &mut ByTenancy, ids: &Bitmap) {
     sets.retain(|_, held| !held.is_empty());
 }
 
-/// The lowest `n` ids of `sets` at `tenancy`, taken out of it.
-fn take_lowest(sets: &mut ByTenancy, tenancy: Tenancy, n: u64) -> Vec<u64> {
+/// The lowest `n` ids of `sets` at `tenancy`, taken out of it and added to `taken` at it.
+fn take_lowest(sets: &mut ByTenancy, tenancy: Tenancy, n: u64, taken: &mut ByTenancy) -> Vec<u64> {
     let Some(ids) = sets.get_mut(&tenancy) else {
         return Vec::new();
     };
-    let taken: Vec<u64> = ids.iter().take(n as usize).map(u64::from).collect();
-    if let Some(&last) = taken.last() {
-        ids.remove_range(..=last as u32);
+    let lowest: Vec<u32> = ids.iter().take(n as usize).collect();
+    if let Some(&last) = lowest.last() {
+        ids.remove_range(..=last);
+        taken.entry(tenancy).or_default().add_many(&lowest);
     }
     if ids.is_empty() {
         sets.remove(&tenancy);
     }
-    taken
+    lowest.into_iter().map(u64::from).collect()
 }
 
 /// Why a window's ids cannot be given. Either way the allocators are unchanged.
@@ -152,9 +153,12 @@ impl Allocator {
         self.state = ShardState::Sealed;
     }
 
-    /// Undoes a seal no log record holds: a window that sealed the shard and did not commit.
-    pub fn reopen(&mut self) {
-        self.state = ShardState::Open;
+    /// Undo a window that did not commit: the freed ids it took return at their tenancies, the
+    /// high water falls back to where the window found it, and a seal it made is lifted.
+    pub fn give_back(&mut self, taken: Taken) {
+        absorb(&mut self.free, taken.free);
+        self.high_water = taken.high_water;
+        self.state = taken.state;
     }
 
     fn at_zero(&self) -> u64 {
@@ -202,11 +206,11 @@ impl Allocator {
 
     /// The new entities of `n` edits of this shard's items: tenancy-0 ids lowest first, then the
     /// high water up to [`ENTITY_END`]. An edit's entity never becomes a number, so it takes no id
-    /// an item has held as its number. Refuses, leaving the allocator unchanged, where the high
-    /// water would pass the end.
-    pub fn allocate_edits(&mut self, n: u64) -> Result<Vec<u64>, ShardFull> {
+    /// an item has held as its number. Each freed id it gives is added to `taken`. Refuses,
+    /// leaving the allocator unchanged, where the high water would pass the end.
+    pub fn allocate_edits(&mut self, n: u64, taken: &mut ByTenancy) -> Result<Vec<u64>, ShardFull> {
         self.edits_room(n)?;
-        let mut ids = take_lowest(&mut self.free, Tenancy::ZERO, n);
+        let mut ids = take_lowest(&mut self.free, Tenancy::ZERO, n, taken);
         let lo = self.high_water;
         self.high_water += n - ids.len() as u64;
         ids.extend(lo..self.high_water);
@@ -215,8 +219,9 @@ impl Allocator {
 
     /// Ids for up to `n` new items: the freed ids [`Allocator::item_pool`] counts, lowest tenancy
     /// then lowest id first, then, in an open shard, the high water up to `size`. Fewer than `n`
-    /// where the shard has no more to give.
-    pub fn allocate_items(&mut self, n: u64, size: u64) -> Vec<u64> {
+    /// where the shard has no more to give. Each freed id it gives is added to `taken` at its
+    /// tenancy.
+    pub fn allocate_items(&mut self, n: u64, size: u64, taken: &mut ByTenancy) -> Vec<u64> {
         let mut ids: Vec<u64> = Vec::with_capacity(n as usize);
         let tenancies: Vec<Tenancy> = self.free.keys().copied().collect();
         for tenancy in tenancies {
@@ -227,7 +232,7 @@ impl Allocator {
             if wanted == 0 {
                 break;
             }
-            ids.extend(take_lowest(&mut self.free, tenancy, wanted));
+            ids.extend(take_lowest(&mut self.free, tenancy, wanted, taken));
         }
         if self.state == ShardState::Open {
             let bound = size.min(ENTITY_END).max(self.high_water);
@@ -455,9 +460,19 @@ pub fn check_window_room(
     check_room(size, ENTITY_END, high_water, needed)
 }
 
-/// What a window's assignment did beyond issuing ids.
+/// What a window took from one allocator, which [`Allocator::give_back`] returns: the freed ids
+/// it issued, each at its tenancy, and the high water and state it found.
+pub struct Taken {
+    free: ByTenancy,
+    high_water: u64,
+    state: ShardState,
+}
+
+/// What a window's assignment did to the shards.
 #[derive(Default)]
 pub struct Placed {
+    /// What it took from each shard it was given, ascending.
+    pub taken: Vec<(ShardId, Taken)>,
     /// The shards that sealed, in the order they sealed.
     pub sealed: Vec<ShardId>,
     /// The shards that opened, each with its allocator, ascending.
@@ -706,11 +721,17 @@ pub fn assign_sorted(
     let placement = place(&rooms, allocators.next_id, allocators.size, created)
         .map_err(AllocError::ShardsExhausted)?;
 
+    let found: Vec<(ShardId, u64, ShardState)> = allocators
+        .shards
+        .iter()
+        .map(|(shard, alloc)| (*shard, alloc.high_water(), alloc.state()))
+        .collect();
+    let mut freed: BTreeMap<ShardId, ByTenancy> = BTreeMap::new();
     let mut ids: Vec<ItemAt> = Vec::with_capacity(keyed.len());
     for (shard, alloc) in allocators.shards.iter_mut() {
         if let Some(edited) = edits.get(shard) {
             let given = alloc
-                .allocate_edits(edited.len() as u64)
+                .allocate_edits(edited.len() as u64, freed.entry(*shard).or_default())
                 .expect("the edits' room was checked above");
             ids.extend(
                 given
@@ -739,8 +760,11 @@ pub fn assign_sorted(
         }
     }
     for &(shard, n) in &placement.targets {
-        let given =
-            alloc_of(&mut allocators.shards, &mut opened, shard).allocate_items(n, allocators.size);
+        let given = alloc_of(&mut allocators.shards, &mut opened, shard).allocate_items(
+            n,
+            allocators.size,
+            freed.entry(shard).or_default(),
+        );
         debug_assert_eq!(
             given.len() as u64,
             n,
@@ -759,7 +783,22 @@ pub fn assign_sorted(
     for ((_, _, idx), id) in keyed.into_iter().zip(ids) {
         items[idx].item = Some(id);
     }
+    let taken = found
+        .into_iter()
+        .map(|(shard, high_water, state)| {
+            let free = freed.remove(&shard).unwrap_or_default();
+            (
+                shard,
+                Taken {
+                    free,
+                    high_water,
+                    state,
+                },
+            )
+        })
+        .collect();
     Ok(Placed {
+        taken,
         sealed: placement.sealed,
         opened,
     })
@@ -796,12 +835,22 @@ mod tests {
 
     const NO_SIZE: u64 = u64::MAX;
 
+    /// [`Allocator::allocate_items`], keeping no record of what it took.
+    fn take_items(alloc: &mut Allocator, n: u64, size: u64) -> Vec<u64> {
+        alloc.allocate_items(n, size, &mut ByTenancy::new())
+    }
+
+    /// [`Allocator::allocate_edits`], keeping no record of what it took.
+    fn take_edits(alloc: &mut Allocator, n: u64) -> Result<Vec<u64>, ShardFull> {
+        alloc.allocate_edits(n, &mut ByTenancy::new())
+    }
+
     #[test]
     fn ids_rise_from_the_high_water_without_freed_ids() {
         let mut alloc = Allocator::new(10);
-        assert_eq!(alloc.allocate_items(3, NO_SIZE), vec![10, 11, 12]);
-        assert_eq!(alloc.allocate_edits(2).unwrap(), vec![13, 14]);
-        assert_eq!(alloc.allocate_items(3, NO_SIZE), vec![15, 16, 17]);
+        assert_eq!(take_items(&mut alloc, 3, NO_SIZE), vec![10, 11, 12]);
+        assert_eq!(take_edits(&mut alloc, 2).unwrap(), vec![13, 14]);
+        assert_eq!(take_items(&mut alloc, 3, NO_SIZE), vec![15, 16, 17]);
         assert_eq!(alloc.high_water(), 18);
     }
 
@@ -810,7 +859,7 @@ mod tests {
         let mut alloc = Allocator::new(100);
         alloc.release_after(7, at(0, &[40, 12, 90]));
         assert_eq!(
-            alloc.allocate_items(2, NO_SIZE),
+            take_items(&mut alloc, 2, NO_SIZE),
             vec![100, 101],
             "held ids are not issued"
         );
@@ -820,8 +869,8 @@ mod tests {
             "the log still keeps a record older than 7"
         );
         assert_eq!(alloc.promote(7), 3);
-        assert_eq!(alloc.allocate_items(2, NO_SIZE), vec![12, 40]);
-        assert_eq!(alloc.allocate_items(3, NO_SIZE), vec![90, 102, 103]);
+        assert_eq!(take_items(&mut alloc, 2, NO_SIZE), vec![12, 40]);
+        assert_eq!(take_items(&mut alloc, 3, NO_SIZE), vec![90, 102, 103]);
         assert_eq!(alloc.high_water(), 104);
         assert!(alloc.free().is_empty());
     }
@@ -830,12 +879,12 @@ mod tests {
     fn edits_take_tenancy_zero_and_new_items_the_lowest_tenancy_first() {
         let mut alloc = freed(100, &[(0, &[40, 12]), (3, &[2]), (1, &[30, 5])]);
         assert_eq!(
-            alloc.allocate_edits(3).unwrap(),
+            take_edits(&mut alloc, 3).unwrap(),
             vec![12, 40, 100],
             "an edit takes tenancy 0, then the high water"
         );
         assert_eq!(
-            alloc.allocate_items(4, NO_SIZE),
+            take_items(&mut alloc, 4, NO_SIZE),
             vec![5, 30, 2, 101],
             "a new item takes the lowest tenancy, lowest id first, then the high water"
         );
@@ -843,12 +892,12 @@ mod tests {
 
         let mut alloc = freed(102, &[(0, &[7]), (2, &[9])]);
         assert_eq!(
-            alloc.allocate_items(1, NO_SIZE),
+            take_items(&mut alloc, 1, NO_SIZE),
             vec![7],
             "tenancy 0 comes first for a new item of an open shard"
         );
         assert_eq!(
-            alloc.allocate_edits(1).unwrap(),
+            take_edits(&mut alloc, 1).unwrap(),
             vec![102],
             "an edit takes no id above tenancy 0"
         );
@@ -862,13 +911,13 @@ mod tests {
         assert_eq!(alloc.state(), ShardState::Sealed);
         assert_eq!(alloc.item_pool(), 2);
         assert_eq!(
-            alloc.allocate_items(5, NO_SIZE),
+            take_items(&mut alloc, 5, NO_SIZE),
             vec![8, 6],
             "never a tenancy-0 id and never the high water"
         );
         assert_eq!(alloc.high_water(), 50);
         assert_eq!(
-            alloc.allocate_edits(3).unwrap(),
+            take_edits(&mut alloc, 3).unwrap(),
             vec![3, 4, 50],
             "its edits take its tenancy-0 ids, then its high water"
         );
@@ -878,7 +927,7 @@ mod tests {
     fn a_refused_edit_takes_no_freed_id() {
         let mut alloc = freed(ENTITY_END - 1, &[(0, &[5]), (4, &[3])]);
         assert_eq!(
-            alloc.allocate_edits(3),
+            take_edits(&mut alloc, 3),
             Err(ShardFull {
                 limit: mosaica_types::ShardLimit::End(ENTITY_END),
                 high_water: ENTITY_END - 1,
@@ -887,7 +936,7 @@ mod tests {
         );
         assert_eq!(listed(alloc.free()), vec![(0, vec![5]), (4, vec![3])]);
         assert_eq!(alloc.high_water(), ENTITY_END - 1);
-        assert_eq!(alloc.allocate_edits(2).unwrap(), vec![5, ENTITY_END - 1]);
+        assert_eq!(take_edits(&mut alloc, 2).unwrap(), vec![5, ENTITY_END - 1]);
     }
 
     #[test]
@@ -926,19 +975,19 @@ mod tests {
             full(4),
             "the edits' three ids and the second item's are past the size"
         );
-        assert_eq!(alloc.allocate_edits(1).unwrap(), vec![2]);
+        assert_eq!(take_edits(&mut alloc, 1).unwrap(), vec![2]);
         assert_eq!(
-            alloc.allocate_items(4, 10),
+            take_items(&mut alloc, 4, 10),
             vec![3, 8, 9],
             "items stop at the size"
         );
-        assert_eq!(alloc.allocate_items(1, 10), Vec::<u64>::new());
+        assert_eq!(take_items(&mut alloc, 1, 10), Vec::<u64>::new());
         assert_eq!(
-            alloc.allocate_edits(2).unwrap(),
+            take_edits(&mut alloc, 2).unwrap(),
             vec![10, 11],
             "an edit runs past the size"
         );
-        assert_eq!(alloc.allocate_items(1, 13), vec![12]);
+        assert_eq!(take_items(&mut alloc, 1, 13), vec![12]);
     }
 
     #[test]
@@ -998,11 +1047,11 @@ mod tests {
     fn a_shard_issues_ids_to_the_end_of_its_space_and_none_past_it() {
         let mut a = Allocator::new(ENTITY_END - 2);
         assert_eq!(
-            a.allocate_items(3, NO_SIZE),
+            take_items(&mut a, 3, NO_SIZE),
             vec![ENTITY_END - 2, ENTITY_END - 1]
         );
         assert_eq!(
-            a.allocate_edits(1),
+            take_edits(&mut a, 1),
             Err(ShardFull {
                 limit: mosaica_types::ShardLimit::End(ENTITY_END),
                 high_water: ENTITY_END,
@@ -1213,6 +1262,58 @@ mod tests {
         );
         assert_eq!((last.high_water(), last.state()), (8, Open));
         assert!(items.iter().all(|item| item.item.is_none()));
+    }
+
+    #[test]
+    fn a_window_that_does_not_commit_gives_back_what_it_took() {
+        let mut zero = freed(10, &[(0, &[1]), (1, &[2, 3])]);
+        zero.seal();
+        let mut one = freed(8, &[(0, &[4]), (2, &[5])]);
+        let state = |alloc: &Allocator| (alloc.high_water(), alloc.state(), listed(alloc.free()));
+        let before = (state(&zero), state(&one));
+        let assign = |zero: &mut Allocator, one: &mut Allocator| {
+            let mut items: Vec<PendingItem> = (0..7).map(|_| pending(&[1], None)).collect();
+            items.extend([pending(&[1], Some(0)), pending(&[1], Some(1))]);
+            let placed = assign_sorted(
+                &mut items,
+                &mut Allocators {
+                    shards: vec![(shard(0), zero), (shard(1), one)],
+                    size: 10,
+                    next_id: 2,
+                },
+            )
+            .unwrap();
+            (assigned(&items), placed)
+        };
+
+        let (first, placed) = assign(&mut zero, &mut one);
+        assert_eq!(
+            first,
+            vec![
+                (0, 2),
+                (0, 3),
+                (1, 5),
+                (1, 8),
+                (1, 9),
+                (2, 0),
+                (2, 1),
+                (0, 1),
+                (1, 4),
+            ],
+            "the window takes freed ids at every tenancy, shard 1's high water to the size, and a \
+             new shard"
+        );
+        assert_eq!(placed.sealed, vec![shard(1)]);
+        for ((_, taken), alloc) in placed.taken.into_iter().zip([&mut zero, &mut one]) {
+            alloc.give_back(taken);
+        }
+        assert_eq!(
+            (state(&zero), state(&one)),
+            before,
+            "each shard has its freed ids back at their tenancies, its high water and its state"
+        );
+        let (again, _) = assign(&mut zero, &mut one);
+        assert_eq!(again, first, "the next window is given the same ids");
     }
 
     #[test]

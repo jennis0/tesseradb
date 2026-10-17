@@ -191,8 +191,8 @@ fn a_window_past_the_size_opens_a_shard_that_survives_restarts() {
 }
 
 /// A window whose records do not become durable opens and seals nothing: the next window seals the
-/// shard and opens the next itself, the log holding one opening and one seal, and the ids the
-/// failed window took are not issued again.
+/// shard and opens the next itself, the log holding one opening and one seal, and is given the ids
+/// the failed window took.
 #[test]
 fn a_window_that_is_not_made_durable_opens_and_seals_nothing() {
     let built = two_shards();
@@ -232,8 +232,11 @@ fn a_window_that_is_not_made_durable_opens_and_seals_nothing() {
     let accepted = insert_keyed(&engine, "after", &twelve);
     assert_eq!(
         placed(&engine, &accepted),
-        (0..12).map(|entity| (2, entity, 0)).collect::<Vec<_>>(),
-        "shard 1's ids the failed window took stay spent, and shard 2 opens once"
+        (15..25)
+            .map(|entity| (1, entity, 0))
+            .chain((0..2).map(|entity| (2, entity, 0)))
+            .collect::<Vec<_>>(),
+        "shard 1 issues again the ids the failed window took, and shard 2 opens once"
     );
     let logged: Vec<WalRecord> = Wal::open(&built.wal)
         .unwrap()
