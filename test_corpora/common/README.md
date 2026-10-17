@@ -73,6 +73,13 @@ cycle compares against, and the frame `--state-extent` states into the base decl
 deployment the cycle serves is a copy of a bundle on its own scratch state, since a bundle served
 directly is a different bundle once a publication or flush writes to it.
 
+`--shard-size` writes `[shards] size` into the base build's declaration and declares it on every
+served copy through `PUT /control/shards`. The result records it as `shard_size`, and each
+declaration's status and body under `shard_size_declared`. With `--reuse-base`, a base bundle built
+at another size is built again. A release binary refuses every write to a bundle of several
+shards, and a server refuses a declared size below the served copy's high water. A refused
+declaration is in `shard_size_declared`, and the run goes on at the size the bundle holds.
+
 ## The churn
 
 The ingest cycle's second mode measures what steady deletion and re-insertion does to a built
@@ -115,10 +122,13 @@ and the run's parameters under `churn`, and a table of the rows is printed.
 | `flush` | — | `POST /control/flush` until its publication lands, then the wait for `live` to return to round 0's |
 | `sessions_ended` | — | `POST /control/sessions/end`'s status for each principal, sent before the compaction |
 | `fold` | — | the cycle's fold: `fold_s` is the server's `compaction.last_secs`, `observed_s` the driver's wait, and `fold_refusals` with `last_refusal` a fold refused for want of memory or disc |
+| `fold.compactions[]` | — | each compaction seen to publish while the wait polled: `folds` after it, its `fold_s` and `fold_peak_rss_bytes`, and `missed`, the compactions that published between two polls |
+| `fold.shards_compacted` | — | the shards whose `identity` in the newest side-manifest moved across the request |
 | `live`, `live_by_view` | count | zoom-0 `visible` under every term after the compaction, on the anchor view and, where there are several, on each |
 | `entity_id_high_water`, `high_water_rise` | count | `/control/status`, and the rise since the row before |
 | `free_ids`, `held_ids` | count | the newest side-manifest's shard records' `free_entities`, the freed ids the allocator issues before its high water, and `held_entities`, those held back until the log rotates |
 | `prefix` | — | the bundle version `CURRENT` names |
+| `shards[]` | — | each shard's `partition`, `id`, `state`, `identity`, `high_water`, `segments`, `live_rows`, `postings_bytes`, `term_images_bytes`, `free_ids` and `held_ids`, from its record in the newest side-manifest |
 | `postings_bytes`, `fresh_postings_bytes`, `postings_vs_fresh` | bytes | the term index on disc, `partitions/<p>/shards/<s>/terms/postings.arrow` and every delta tier the newest side-manifest lists, on the served copy and on the all-in bundle, and their ratio |
 | `term_images_bytes`, `fresh_term_images_bytes` | bytes | the side-manifest's `term_image_extents`, on each |
 | `bundle_bytes` | bytes | every file under the served copy, a version not yet removed included |
@@ -289,7 +299,7 @@ view's, under `ingest_by_view` (below, under "Beyond the schema").
 | `bodies_over_cap` | count | single-row bodies over the cap, sent as they are and refused 422 |
 | `flush_s` | seconds | `POST /control/flush` to `/control/status`'s `publication` reaching the number the flush answered: the cycle carrying every buffered row has published |
 | `visibility_s` | seconds | the same request to a zoom-0 viewport reaching the expected count, not `flush_s` |
-| `fold_s` | seconds | the server's own `compaction.last_secs`; compact answers 202 at once, and the wait ends when a fold lands or the server counts one discarded or refused |
+| `fold_s` | seconds | the server's own `compaction.last_secs`; compact answers 202 at once, and the wait ends when `compaction.fold_requested` falls |
 | `fold_peak_rss` | bytes | the server's own `compaction.last_rss_bytes` |
 | `driver_peak_rss` | bytes/`null` | the driver's own `VmHWM` at the cell's end, not the server's |
 | `equivalence` | — | the masked-count equivalence test, by surface — below |

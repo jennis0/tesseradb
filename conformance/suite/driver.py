@@ -112,6 +112,7 @@ from oracle.harness import (
     SPAWN_ATTEMPTS,
     PortTaken,
     Server,
+    compaction_answered,
     ensure_cli_built,
     exited_early,
     free_port,
@@ -1432,10 +1433,8 @@ class Fold(Stage):
 
     def apply(self, h: SuiteHarness) -> None:
         self._counts = _publication_counts(h)
-        compaction = h.status()["compaction"]
         self._snap = {
-            "folds": compaction["folds"],
-            "fold_failures": compaction["fold_failures"],
+            "compaction": h.status()["compaction"],
             "refreshes": h.executor()["flush"]["refreshes"],
         }
         self._request(h)
@@ -1445,17 +1444,11 @@ class Fold(Stage):
         self._request(h)
 
     def barrier(self, h: SuiteHarness) -> None:
-        def landed() -> bool:
-            compaction = h.status()["compaction"]
-            if compaction["fold_failures"] > self._snap["fold_failures"]:
-                raise RuntimeError(f"the fold failed rather than landed: {compaction}")
-            if compaction["fold_requested"]:
-                return False
-            if compaction["folds"] > self._snap["folds"]:
-                return True
-            raise RuntimeError(f"the compaction was refused rather than landed: {compaction}")
-
-        poll(landed, "the compaction request was not answered", timeout=300.0)
+        poll(
+            lambda: compaction_answered(self._snap["compaction"], h.status()["compaction"]),
+            "the compaction request was not answered",
+            timeout=300.0,
+        )
         poll(
             lambda: h.executor()["flush"]["refreshes"] > self._snap["refreshes"],
             "the post-fold refresh never carried the resident session across the flip",

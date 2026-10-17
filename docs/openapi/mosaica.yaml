@@ -2005,18 +2005,21 @@ paths:
     post:
       tags: ["control: compact"]
       operationId: compact
-      summary: Ask for a compaction fold at the next tick.
+      summary: Ask for a compaction of every shard with something to reclaim.
       description: |
         Sets a flag the write executor reads at its next tick, and answers `202` with no body. A
-        fold rewrites the bundle with deleted rows removed and runs for minutes to hours on a
-        large corpus. A request while a fold runs is dropped, and the `202` cannot say so;
-        `compaction` on `/control/status` shows what happened, including a fold refused for want
-        of memory or disc. The query string is not read.
+        compaction rewrites one shard with its deleted rows removed, and runs for minutes to hours
+        on a large corpus. The executor compacts every shard with something to reclaim, one after
+        another. Where no shard has anything to reclaim, the shard the schedule ranks first is
+        compacted. At most one compaction is in flight. A request that arrives while one runs is
+        held until it lands. `compaction.fold_requested` on `/control/status` stays true until the
+        last shard the request names publishes. The same block counts a compaction refused for
+        want of memory or disc. The query string is not read.
       security:
         - controlCredential: []
       responses:
         "202":
-          description: The fold is requested. No body.
+          description: The compaction is requested. No body.
         "401":
           $ref: "#/components/responses/ControlBadCredential"
         "403":
@@ -7923,7 +7926,7 @@ components:
           description: Folds discarded. Each leaves a bundle-sized directory nothing reclaims.
         fold_requested:
           type: boolean
-          description: A `POST /control/compact` is waiting for the next tick.
+          description: True from a `POST /control/compact` until the last compaction it asked for publishes, is discarded or is refused.
         fold_refusals:
           type: integer
           minimum: 0

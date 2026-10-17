@@ -202,8 +202,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             "give exactly one of --fraction, which runs the ingest cycle, and --churn-rounds, "
             "which runs the churn"
         )
-    if args.shard_size is not None and args.shard_size < 1:
-        ap.error(f"--shard-size is {args.shard_size}; give a size of at least 1")
     if not 0.0 < args.churn_fraction <= 1.0:
         ap.error(
             f"--churn-fraction is {args.churn_fraction}; give a fraction above 0 and at most 1"

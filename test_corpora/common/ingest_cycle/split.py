@@ -20,7 +20,8 @@ import pyarrow.parquet as pq
 
 # The oracle's publication reader.
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "reference"))
-from oracle.layout import newest_publication
+from oracle.bundle import shard_records
+from oracle.layout import newest_publication, shard_dir
 
 # ---------------------------------------------------------------------------------------------
 # The split
@@ -377,18 +378,18 @@ def served_state(bundle: Path) -> dict:
     `postings_bytes` is the term index on disc, the base postings and every live delta tier;
     `term_images_bytes`, every view's term images; `free_ids` and `held_ids`, the freed entity ids
     the allocator issues next and those it holds back until the log rotates."""
-    shards = shard_state(bundle)
-    prefix = bundle_manifest(bundle)[0]
+    prefix, shards = shard_state(bundle)
     out = {"prefix": prefix, "shards": shards}
     for key in ("postings_bytes", "term_images_bytes", "free_ids", "held_ids"):
         out[key] = sum(shard[key] for shard in shards)
     return out
 
 
-def shard_state(bundle: Path) -> list[dict]:
-    """Each point shard of `bundle`'s current version, as the newest side-manifest of its partition
-    records it, read through the oracle's publication reader: its number, state, identity, high
-    water, live segments and rows, its term index and term images on disc, and its freed ids."""
+def shard_state(bundle: Path) -> tuple[str, list[dict]]:
+    """The prefix of `bundle`'s current version, and each point shard of it as the newest
+    side-manifest of its partition records it, read through the oracle's publication reader: its
+    number, state, identity, high water, live segments and rows, its term index and term images on
+    disc, and its freed ids."""
     read = bundle_manifest(bundle)
     if read is None:
         raise FileNotFoundError(f"{bundle} has no CURRENT; state --all-in-bundle as a built bundle")
@@ -397,14 +398,14 @@ def shard_state(bundle: Path) -> list[dict]:
     shards: list[dict] = []
     for partition in sorted(path for path in (root / "partitions").iterdir() if path.is_dir()):
         _, published = newest_publication(root, partition.name)
-        for record in published["shards"]["records"]:
-            postings = partition / "shards" / str(record["id"]) / "terms" / "postings.arrow"
+        for record in shard_records(published):
+            postings = shard_dir(root, partition.name, record["id"]) / "terms" / "postings.arrow"
             shards.append(
                 {
                     "partition": partition.name,
                     "id": record["id"],
-                    "state": record.get("state"),
-                    "identity": record.get("identity"),
+                    "state": record["state"],
+                    "identity": record["identity"],
                     "high_water": record["high_water"],
                     "segments": len(record["segments"]),
                     "live_rows": sum(segment["row_count"] for segment in record["segments"]),
@@ -420,7 +421,7 @@ def shard_state(bundle: Path) -> list[dict]:
                     ),
                 }
             )
-    return shards
+    return prefix, shards
 
 
 def roaring_cardinality(encoded: str) -> int:

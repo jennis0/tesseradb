@@ -9,15 +9,12 @@ and after changes no answer.
 
 from __future__ import annotations
 
-import io
-
 import pytest
-from layer_fixture import VIEW, CatalogueServer, artifact_card, matched
+from layer_fixture import VIEW, CatalogueServer, artifact_card, bulk_column, enumerated_layer, matched
 from oracle import catalogue
 from oracle import identity as identity_mod
 from oracle.layout import live_prefix_dir, newest_side_manifest
-from oracle.wire import decode_viewport, decode_viewport_artifacts, split_items_frames
-from pyarrow import ipc
+from oracle.wire import decode_viewport_artifacts
 from pyroaring import BitMap
 
 LAYER = "erase"
@@ -31,23 +28,11 @@ MEMBERS = {KEPT: list(range(0, 40)), ERASED: list(range(40, 80))}
 
 def layer() -> dict:
     return {
-        "name": LAYER,
-        "title": LAYER,
-        "views": [VIEW],
-        "membership": "enumerated",
-        "value_set": "closed",
-        "visibility": None,
-        "artifact_visibility": {"field": None, "default": "inherited"},
-        "require_member_visibility": None,
-        "hierarchy": {"kind": "flat", "prune_children": False},
+        **enumerated_layer(LAYER, VIEW),
         "content": {
             "computed": [],
             "supplied": [{"name": "topic", "type": "text", "require_member_visibility": "all"}],
         },
-        "depends_on": [],
-        "levels": [],
-        "layout": None,
-        "shape": None,
     }
 
 
@@ -63,7 +48,9 @@ class Erasing(CatalogueServer):
             {
                 "key": key,
                 "members": ids(items),
-                "content": [{"values": [f"topic of {key}"], "generated_from": ids(items[:20])}],
+                "content": [
+                    {"values": [f"topic of {key}"], "generated_from": ids(items[: len(items) // 2])}
+                ],
             }
             for key, items in MEMBERS.items()
         ]
@@ -83,23 +70,6 @@ class Erasing(CatalogueServer):
         )
         browse = server.browse(token, view=VIEW, layer=LAYER)
         assert browse.status_code == 200, browse.text
-        bulk = server.artifacts(token, view=VIEW, layer=LAYER, fields=["key", "masked_count"])
-        assert bulk.status_code == 200, bulk.text
-        listed = []
-        for records, _end in split_items_frames(bulk.content).pages:
-            with ipc.open_stream(io.BytesIO(records)) as reader:
-                for batch in reader:
-                    listed.extend(batch.column("key").to_pylist())
-
-        def region(mosaica_id: int) -> tuple[int, int]:
-            filters = {"region": {"artifact": str(mosaica_id)}}
-            resp = server.viewport_response(
-                token, VIEW, 0, catalogue.FULL_VIEWPORT, k=0, filters=filters
-            )
-            if resp.status_code != 200:
-                return resp.status_code, 0
-            tiles, _points = decode_viewport(resp.content)
-            return resp.status_code, sum(t[2] for t in tiles)
 
         def member_of(mosaica_id: int) -> int:
             return matched(server, token, {"member_of": {"layer": LAYER, "artifact": str(mosaica_id)}})
@@ -108,10 +78,13 @@ class Erasing(CatalogueServer):
         return {
             "viewport": sorted(a.key for a in viewport if a.layer == LAYER),
             "browse": sorted(row["key"] for row in browse.json()["artifacts"]),
-            "bulk": sorted(listed),
+            "bulk": sorted(bulk_column(server, token, LAYER, "key")),
             "card": {name: artifact_card(server, token, i) for name, i in each.items()},
             "member_of": {name: member_of(i) for name, i in each.items()},
-            "region": {name: region(i) for name, i in each.items()},
+            "region": {
+                name: matched(server, token, {"region": {"artifact": str(i)}})
+                for name, i in each.items()
+            },
         }
 
     def stored(self) -> tuple[bool, bool, int]:

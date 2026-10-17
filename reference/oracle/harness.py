@@ -596,6 +596,20 @@ def _fixture_bundle_is_usable(bundle_root: Path, wanted: dict) -> bool:
         return False
 
 
+def compaction_answered(before: dict, now: dict) -> bool:
+    """Whether a `POST /control/compact` is answered, from `/control/status`'s `compaction` block
+    read before the request (`before`) and since (`now`). The request is answered when
+    `fold_requested` falls. Raises `RuntimeError` when a compaction fails, or when the request is
+    answered with none published."""
+    if now["fold_failures"] > before["fold_failures"]:
+        raise RuntimeError(f"the compaction failed: {now}")
+    if now["fold_requested"]:
+        return False
+    if now["folds"] > before["folds"]:
+        return True
+    raise RuntimeError(f"the compaction was refused: {now}")
+
+
 class Server:
     """An HTTP-only handle to a running `mosaica serve` process."""
 
@@ -938,17 +952,9 @@ class Server:
         assert resp.status_code == 202 and resp.json()["visible"], resp.text
 
     def compact(self, timeout: float = 300.0) -> None:
-        """Ask for a compaction and **wait for the request to be answered** (contracts §3.4): the
-        server compacts every shard with something to reclaim, one after another, and keeps
-        `fold_requested` raised until the last publishes.
-
-        Same shape as [`flush`] and the same reason for the barrier, over a longer wait: a
-        compaction re-reads and rewrites a shard. `fold_failures` is watched beside `folds` so a
-        failed compaction surfaces as its own error rather than as a timeout, and a request
-        answered with no compaction published is a refusal — different diagnoses, and the gates a
-        compaction can refuse on (memory, free disc, a poisoned WAL) are properties of the machine
-        rather than of the code under test.
-        """
+        """Ask for a compaction and wait until the server answers the request. The server compacts
+        every shard with something to reclaim, one after another, and keeps `fold_requested`
+        raised until the last publishes. Raises `RuntimeError` as [`compaction_answered`] does."""
         before = self.status()["compaction"]
         resp = requests.post(
             f"{self.control_base}/control/compact",
@@ -958,13 +964,8 @@ class Server:
         resp.raise_for_status()
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            now = self.status()["compaction"]
-            if now["fold_failures"] > before["fold_failures"]:
-                raise RuntimeError(f"the compaction fold failed: {now}")
-            if not now["fold_requested"]:
-                if now["folds"] > before["folds"]:
-                    return
-                raise RuntimeError(f"the compaction was refused: {now}")
+            if compaction_answered(before, self.status()["compaction"]):
+                return
             time.sleep(0.2)
         raise TimeoutError(f"the compaction request was not answered within {timeout}s")
 

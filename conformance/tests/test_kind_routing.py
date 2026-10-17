@@ -19,6 +19,7 @@ from layer_fixture import (
     VIEW,
     CatalogueServer,
     artifact_card,
+    bulk_column,
     enumerated_layer,
     matched,
     stored,
@@ -26,7 +27,6 @@ from layer_fixture import (
 from oracle import catalogue
 from oracle import identity as identity_mod
 from oracle.bundle import artifact_mosaica_id, layer_mosaica_id, registered_layer
-from oracle.wire import split_items_frames
 from pyarrow import ipc
 
 LAYER = "routing"
@@ -51,22 +51,6 @@ def masked_count(server, token: str, mosaica_id: int) -> int:
     resp = server.artifact_card(token, mosaica_id, VIEW)
     assert resp.status_code == 200, resp.text
     return resp.json()["masked_count"]
-
-
-def read_by_ids(server, token: str, ids: list[int]) -> list[int]:
-    """The identifiers `POST /v1/artifacts` serves for `ids`, in one page."""
-    resp = server.artifacts(
-        token, view=VIEW, layer=LAYER, fields=["masked_count"], ids=[str(i) for i in ids]
-    )
-    assert resp.status_code == 200, resp.text
-    decoded = split_items_frames(resp.content)
-    assert decoded.trailer["next"] is None
-    served = []
-    for records, _end in decoded.pages:
-        with ipc.open_stream(io.BytesIO(records)) as reader:
-            for batch in reader:
-                served.extend(batch.column("mosaica_id").to_pylist())
-    return served
 
 
 def refusals(body: dict) -> list[tuple[int, str]]:
@@ -153,8 +137,9 @@ def check_leaves(routing) -> None:
     for named in (routing.item[0], routing.item[65_536], routing.layer, routing.no_artifact):
         assert matched(server, token, leaf(named)) == 0, named
 
-    assert read_by_ids(server, token, [a0]) == [a0]
-    assert read_by_ids(server, token, [routing.item[0], routing.item[65_536], routing.layer]) == []
+    assert bulk_column(server, token, LAYER, "mosaica_id", [a0]) == [a0]
+    named = [routing.item[0], routing.item[65_536], routing.layer]
+    assert bulk_column(server, token, LAYER, "mosaica_id", named) == []
 
     def children(parent: int) -> list:
         resp = server.browse(token, view=VIEW, layer=LAYER, parent=str(parent))

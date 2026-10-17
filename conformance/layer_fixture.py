@@ -3,13 +3,15 @@ the catalogue, an enumerated layer's declaration, and the side-manifest the serv
 
 from __future__ import annotations
 
+import io
 import time
 
 from oracle import catalogue
 from oracle import identity as identity_mod
 from oracle.harness import kill_server, spawn_server, stop_server
 from oracle.layout import newest_side_manifest
-from oracle.wire import decode_viewport
+from oracle.wire import decode_viewport, split_items_frames
+from pyarrow import ipc
 
 VIEW = catalogue.VIEW_ID
 #: Every block's term: a principal holding them all sees every catalogue item.
@@ -58,6 +60,24 @@ def matched(server, token: str, filters: dict | None) -> int:
     resp = server.viewport_response(token, VIEW, 0, catalogue.FULL_VIEWPORT, k=0, filters=filters)
     tiles, _points = decode_viewport(resp.content)
     return sum(t[2] for t in tiles)
+
+
+def bulk_column(server, token: str, layer: str, column: str, ids: list[int] | None = None) -> list:
+    """`column` of every row `POST /v1/artifacts` serves for `layer`, or for the artifacts of it
+    that `ids` names, read in one page."""
+    body = {"view": VIEW, "layer": layer, "fields": ["key", "masked_count"]}
+    if ids is not None:
+        body["ids"] = [str(i) for i in ids]
+    resp = server.artifacts(token, **body)
+    assert resp.status_code == 200, resp.text
+    decoded = split_items_frames(resp.content)
+    assert decoded.trailer["next"] is None
+    served = []
+    for records, _end in decoded.pages:
+        with ipc.open_stream(io.BytesIO(records)) as reader:
+            for batch in reader:
+                served.extend(batch.column(column).to_pylist())
+    return served
 
 
 class CatalogueServer:

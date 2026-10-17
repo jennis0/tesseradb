@@ -49,6 +49,10 @@ from .split import (
     write_base_inputs,
 )
 
+# `.split` puts the oracle on the path.
+from oracle.harness import compaction_answered
+from oracle.layout import newest_side_manifest
+
 # ---------------------------------------------------------------------------------------------
 # The run
 # ---------------------------------------------------------------------------------------------
@@ -192,10 +196,16 @@ class Cycle:
         self.result["base_entities"] = len(base_ids)
         self.result["holdout_entities"] = len(held)
         self.held = held
+        if self.args.shard_size is not None:
+            self.result["shard_size"] = self.args.shard_size
         if self.args.reuse_base and (bundle / "CURRENT").exists():
-            self.log(f"reusing {bundle}")
-            self.result["build"] = {"reused": True}
-            return base_dir
+            built = newest_side_manifest(bundle)["shards"]["size"]
+            if self.args.shard_size in (None, built):
+                self.log(f"reusing {bundle}")
+                self.result["build"] = {"reused": True}
+                return base_dir
+            self.log(f"rebuilding {bundle}: it was built at shard size {built}")
+            shutil.rmtree(bundle)
         # `--reuse-base` also reuses prepared inputs whose build failed, where they hold the
         # entity count this fraction and seed give.
         prepared = base_dir / "base-inputs.json"
@@ -215,7 +225,6 @@ class Cycle:
             pa.default_memory_pool().release_unused()
         if self.args.shard_size is not None:
             declare_shard_size(base_dir / "corpus.toml", self.args.shard_size)
-            self.result["shard_size"] = self.args.shard_size
         if self.args.state_extent:
             self.result["stated_extent"] = state_extent(base_dir / "corpus.toml", self.all_in)
             self.log(f"stated the all-in frame in the base declaration: {self.result['stated_extent']}")
@@ -857,8 +866,9 @@ class Cycle:
         """`POST /control/compact`, and the compaction block once the request is answered: the
         server compacts every shard with something to reclaim, one after another, and keeps
         `fold_requested` raised until the last publishes. Each compaction seen to publish is
-        recorded with its shard, where the status names it, its seconds and its peak memory; the
-        shards whose identity moved on disc are the ones compacted."""
+        recorded with its seconds and its peak memory; the shards whose identity moved on disc are
+        the ones compacted. `completed` is false where [`compaction_answered`] raises, and
+        `fold_failures` and `fold_refusals` say why."""
         before = control.status()["compaction"]
         identities = self.shard_identities()
         code = control.compact().status_code
@@ -874,7 +884,6 @@ class Cycle:
                 compactions.append(
                     {
                         "folds": now["folds"],
-                        "shard": now.get("shard"),
                         "fold_s": now.get("last_secs"),
                         "fold_peak_rss_bytes": now.get("last_rss_bytes"),
                         "missed": now["folds"] - seen - 1,
@@ -885,7 +894,10 @@ class Cycle:
 
         settled_in_time, wall = wait_for(settled, timeout=self.args.fold_timeout, interval=1.0)
         compaction = control.status()["compaction"]
-        done = settled_in_time and compaction["folds"] > before["folds"]
+        try:
+            done = settled_in_time and compaction_answered(before, compaction)
+        except RuntimeError:
+            done = False
         after = self.shard_identities()
         return {
             "status": code,
@@ -905,15 +917,8 @@ class Cycle:
         }
 
     def shard_identities(self) -> dict[int, str]:
-        """Each shard's identity as the served copy's newest publication records it, by shard;
-        empty where nothing is served."""
-        if self.served is None:
-            return {}
-        try:
-            state = shard_state(self.served.bundle)
-        except FileNotFoundError:
-            return {}
-        return {shard["id"]: shard["identity"] for shard in state}
+        """Each shard's identity as the served copy's newest publication records it, by shard."""
+        return {shard["id"]: shard["identity"] for shard in shard_state(self.served.bundle)[1]}
 
     def declared_levels(self, view: str) -> dict[str, list[int]]:
         """The levels each of one view's layers declares, from `/v1/meta`: what the census's zooms
