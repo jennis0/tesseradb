@@ -1336,7 +1336,7 @@ fn build_bundle(
     };
     let mut entity_terms_paths: Vec<PathBuf> = Vec::new();
     let mut entity_terms_shard = 0usize;
-    let mut entity_terms = filled.first().map(&entity_terms_writer).transpose()?;
+    let mut entity_terms = filled.first().map(entity_terms_writer).transpose()?;
     let mut sig_terms: Vec<u32> = Vec::new();
     for k in 0..plan.batches {
         let ordinal_lo = k * plan.batch_items;
