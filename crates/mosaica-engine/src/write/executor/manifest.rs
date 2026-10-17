@@ -369,7 +369,17 @@ impl Executor {
         let fold_written: DerivedByShard;
         let (derived, pending) = match &fold {
             Some(fold) => {
-                let mut held = DerivedByShard::from([(fold.shard, fold.written.to_vec())]);
+                // A held shape is its layer space's, filed beside the first shard as
+                // `derived_by_shard` files it, and checked against that shard's slice version.
+                let first = next.shards.records.first().map_or(fold.shard, |record| record.id);
+                let mut held = DerivedByShard::new();
+                for extent in fold.written {
+                    let shard = match extent.form {
+                        mosaica_store::manifest::DerivedForm::ShapeHeld => first,
+                        _ => fold.shard,
+                    };
+                    held.entry(shard).or_default().push(extent.clone());
+                }
                 for (shard, extent) in &fold.kept {
                     held.entry(*shard).or_default().push(extent.clone());
                 }

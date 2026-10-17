@@ -137,7 +137,7 @@ fn level_length<'a>(
 /// What a fold hands the manifest commit in place of the held list: the derived files it has just
 /// written, and the retirement its levels are stamped for.
 pub(super) struct FoldDerived<'a> {
-    /// The shard the fold compacts, which holds what it wrote.
+    /// The shard the fold compacts, which holds what it wrote but its held shapes.
     pub(super) shard: ShardId,
     pub(super) written: &'a [mosaica_store::manifest::DerivedExtent],
     /// The derived files of every other shard the fold links into its prefix.
@@ -542,12 +542,13 @@ impl Compactions {
 
 /// Whether `shard` has something a compaction reclaims: a deletion in its overlay, an artifact
 /// deletion it must remove, a segment flushed since its last compaction, a column of `runtime` it
-/// holds no base of, or bytes under its directory no manifest names.
+/// holds no base of, or bytes under its directory no manifest names. `unnamed` is a directory
+/// walk, called only after every other check has declined.
 fn reclaims(
     shard: &Shard,
     gauges: &crate::compact::Gauges,
     runtime: &[String],
-    unnamed: u64,
+    unnamed: impl FnOnce() -> u64,
 ) -> bool {
     gauges.retirable_deletions > 0
         || gauges.artifact_deletions > 0
@@ -557,7 +558,7 @@ fn reclaims(
             .values()
             .any(|view| !view.row_space.extents().is_empty())
         || !shard.data.record.unbased(runtime).is_empty()
-        || unnamed > 0
+        || unnamed() > 0
 }
 
 /// Where a compaction's shard came from.
@@ -946,9 +947,11 @@ fn kept_derived(
         })
     };
     held.iter()
-        .filter(|(held, _)| **held != shard)
         .flat_map(|(held, extents)| extents.iter().map(move |extent| (*held, extent)))
-        .filter(|(_, extent)| extent.form != DerivedForm::ShapeHeld || !rewritten(extent))
+        .filter(|(held, extent)| match extent.form {
+            DerivedForm::ShapeHeld => !rewritten(extent),
+            _ => *held != shard,
+        })
         .map(|(held, extent)| (held, extent.clone()))
         .collect()
 }
@@ -1000,7 +1003,17 @@ impl Executor {
     fn shard_gauges(&self, generation: &Generation) -> Vec<(ShardId, crate::compact::Gauges)> {
         let mut artifact_deletions: std::collections::BTreeMap<ShardId, u64> = Default::default();
         let open = self.live.open_shard().id;
-        for (space, parts) in generation.layer_spaces.iter() {
+        let mut shards = generation.shards();
+        let several = match (shards.next(), shards.next()) {
+            (Some(only), None) => {
+                // Every artifact deletion is the one shard's, held by its slice or not: no slice
+                // is probed.
+                artifact_deletions.insert(only.id(), generation.space_overlay_figures().1);
+                false
+            }
+            _ => true,
+        };
+        for (space, parts) in generation.layer_spaces.iter().filter(|_| several) {
             let deleted = parts.overlay.deleted_set();
             if deleted.is_empty() {
                 continue;
@@ -1041,7 +1054,12 @@ impl Executor {
 
     /// Each shard's gauges, and whether it has something a compaction reclaims ([`reclaims`]).
     fn reclaiming(&self, generation: &Generation) -> Vec<(ShardId, crate::compact::Gauges, bool)> {
-        let dead = self.dead_bytes(generation).unwrap_or_default();
+        let dead = std::cell::OnceCell::new();
+        let unnamed = |shard: ShardId| {
+            dead.get_or_init(|| self.dead_bytes(generation).unwrap_or_default())
+                .get(&shard)
+                .map_or(0, |gauge| gauge.unnamed)
+        };
         let (attributes, scoped) = self.live.attributes_for_publication();
         let runtime: Vec<String> = attributes
             .into_iter()
@@ -1051,10 +1069,9 @@ impl Executor {
         self.shard_gauges(generation)
             .into_iter()
             .map(|(shard, gauges)| {
-                let unnamed = dead.get(&shard).map_or(0, |gauge| gauge.unnamed);
                 let reclaims = generation
                     .shard(shard)
-                    .is_some_and(|held| reclaims(held, &gauges, &runtime, unnamed));
+                    .is_some_and(|held| reclaims(held, &gauges, &runtime, || unnamed(shard)));
                 (shard, gauges, reclaims)
             })
             .collect()

@@ -586,6 +586,39 @@ fn a_compaction_of_each_shard_leaves_a_boundarys_answers_unchanged() {
     assert_eq!(answers(&writing()), expected, "across a restart");
 }
 
+/// **A compaction of shard 1 after a deleted boundary has left only its slice keeps every level's
+/// held shapes**, so a restart claims them rather than decomposing a level again.
+#[test]
+fn a_second_shards_compaction_keeps_the_held_shapes() {
+    let fx = fixture_sized("\"none\"", |toml| toml, Some(N / 2));
+    let writing = || {
+        let engine = open_writing(&fx.root, &fx.cache, &fx.wal, config_uncapped());
+        engine.set_background_refresh_for_test(false);
+        engine
+    };
+    let engine = writing();
+    let grant = "0,1";
+    let mut expected = served(&engine, grant, 0, WHOLE_MAP);
+    let key = expected.keys().next().cloned().expect("the fixture serves a boundary");
+    engine
+        .accept_changes(vec![(served_target(&engine, grant, &key), ChangeOp::Delete)])
+        .expect("the deletion is accepted");
+    expected.remove(&key);
+
+    compact(&engine, Some(shard(1)));
+    compact(&engine, Some(shard(1)));
+    assert_eq!(served(&engine, grant, 0, WHOLE_MAP), expected);
+    drop(engine);
+    let engine = writing();
+    let warm = engine.shape_warm_report();
+    assert_eq!(
+        (warm.held_claimed, warm.held_decomposed),
+        (warm.artifacts, 0),
+        "a restart claims every level's held shapes: {warm:?}"
+    );
+    assert_eq!(served(&engine, grant, 0, WHOLE_MAP), expected, "across a restart");
+}
+
 /// **A suppressed member leaves the count, and a suppressed artifact leaves the map** — the same
 /// two rules a stored membership follows, reached through a membership nothing stores.
 #[test]
