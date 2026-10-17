@@ -95,19 +95,27 @@ impl PendingRetirement {
         })
     }
 
-    /// [`Self::records`], each as `slice`, the compacted shard's slice of `store`, holds it: what
-    /// the shard's derived files are composed from. An artifact the slice holds nothing of is
-    /// left out.
+    /// [`Self::records`], each as `slice`, `shard`'s slice of `store`, holds it: what the shard's
+    /// derived files are composed from. An artifact the slice holds nothing of, or the retirement
+    /// releases from it, is left out.
     fn held<'s>(
         &'s self,
         store: &'s ArtifactStore,
         slice: &'s ArtifactStore,
+        shard: ShardId,
         layer: &'s str,
         level: u32,
     ) -> impl Iterator<Item = (u32, &'s mosaica_lifecycle::membership::ArtifactRecord)> + 's {
         let slots = slice.slots(layer, level);
+        let released = store
+            .space_of(layer)
+            .filter(|_| shard == self.retired.shard)
+            .and_then(|space| self.retired.released.get(&space));
         self.records(store, layer, level)
-            .filter_map(move |(ordinal, _)| {
+            .filter_map(move |(ordinal, record)| {
+                if released.is_some_and(|released| released.contains(record.entity.raw() as u32)) {
+                    return None;
+                }
                 let held = slots.get(ordinal as usize)?.as_deref()?;
                 Some((ordinal, held))
             })
@@ -968,12 +976,9 @@ impl Executor {
                 continue;
             }
             let mut owed_somewhere = croaring::Bitmap::new();
-            for owed in self.live.owed_deletions(*space, deleted) {
-                let Some(artifacts) = owed.artifacts.entities() else {
-                    continue;
-                };
-                *artifact_deletions.entry(owed.shard).or_default() += artifacts.cardinality();
-                owed_somewhere.or_inplace(artifacts);
+            for (shard, artifacts) in self.live.owing(*space, deleted) {
+                *artifact_deletions.entry(shard).or_default() += artifacts.cardinality();
+                owed_somewhere.or_inplace(&artifacts);
             }
             *artifact_deletions.entry(open).or_default() +=
                 deleted.andnot_cardinality(&owed_somewhere);
@@ -1821,18 +1826,49 @@ impl Executor {
         // deletions: a suppressed member keeps its bit (Rule S).
         let to_prefix_dir = self.deps.bundle_root.join(&completed.prefix);
         stairs.record("6 hand-off");
-        // Every artifact deletion is executed here: an artifact has no rows, and its record and
-        // its members leave the packs this fold writes.
-        let executed_artifacts: std::collections::BTreeMap<LayerSpace, croaring::Bitmap> = live
-            .layer_spaces
-            .iter()
-            .filter(|(_, parts)| parts.overlay.deleted_len() > 0)
-            .map(|(space, parts)| (*space, parts.overlay.deleted_set().clone()))
-            .collect();
+        // An artifact deletion this shard owes leaves its slice here. One no other shard still
+        // owes is executed: an artifact has no rows, and its record, content and members leave
+        // the files this compaction writes. One another shard owes stays held, denied, for that
+        // shard's compaction.
+        let mut executed_artifacts: std::collections::BTreeMap<LayerSpace, croaring::Bitmap> =
+            Default::default();
+        let mut released: std::collections::BTreeMap<LayerSpace, croaring::Bitmap> =
+            Default::default();
+        let mut settled = crate::write::live::SettledSpaces::new();
+        for (space, parts) in live.layer_spaces.iter() {
+            let deleted = parts.overlay.deleted_set();
+            if deleted.is_empty() {
+                continue;
+            }
+            let mut owing = self.live.owing(*space, deleted);
+            let here = owing.remove(&shard_id).unwrap_or_default();
+            let mut still = croaring::Bitmap::new();
+            for owed in owing.values() {
+                still.or_inplace(owed);
+            }
+            let gone = deleted.andnot(&still);
+            let left = here.andnot(&gone);
+            if !left.is_empty() {
+                released.insert(*space, left);
+            }
+            if !gone.is_empty() {
+                executed_artifacts.insert(*space, gone);
+            }
+            if !still.is_empty() {
+                settled.insert(
+                    *space,
+                    crate::write::live::SettledOwing {
+                        deletions: still,
+                        by_shard: owing,
+                    },
+                );
+            }
+        }
         let retired = mosaica_lifecycle::membership::Retired {
             shard: shard_id,
             points: executed.clone(),
             artifacts: executed_artifacts.clone(),
+            released,
         };
         let repacked =
             match self.rewrite_level_packs(&to_prefix_dir, &plan.partition, manifest_n, &retired) {
@@ -2111,7 +2147,11 @@ impl Executor {
                 false => (id, overlay),
             }),
             &published_spaces,
-            &self.live,
+            |space, deleted| {
+                settled
+                    .get(&space)
+                    .map_or_else(Vec::new, |settled| settled.owed(deleted))
+            },
         );
 
         // ---- the new `MANIFEST.json` ----------------------------------------------------------
@@ -2319,6 +2359,7 @@ impl Executor {
         // overlay already carries the executed deletions retired, so retiring after would leave a
         // window where a deleted artifact's entity reads not denied while its record still serves.
         let mut moved = self.live.retire_artifacts(&pending.retired);
+        self.live.settle_owing(settled);
         self.live.mark_memberships_published();
         self.live.mark_growth_packed();
         let (rehoused, kept) = self
@@ -2869,7 +2910,7 @@ impl Executor {
             return Some(self.live.with_artifacts(|store| {
                 let slice = self.live.slice_of(other.id(), store);
                 observe_held(row_count, &|visit| {
-                    for (ordinal, record) in pending.held(store, slice, layer, level) {
+                    for (ordinal, record) in pending.held(store, slice, other.id(), layer, level) {
                         visit(
                             ordinal,
                             &slice.members_of(record).projected(|part| space.project(part)),
@@ -3016,7 +3057,7 @@ impl Executor {
                     // serves it artifact-major instead (`crate::artifacts::ArtifactRows::inherit`).
                     let slice = self.live.slice_of(shard, store);
                     observe_held(space.base_rows(), &|visit| {
-                        for (ordinal, record) in pending.held(store, slice, &layer, level) {
+                        for (ordinal, record) in pending.held(store, slice, shard, &layer, level) {
                             visit(
                                 ordinal,
                                 &slice
@@ -3181,7 +3222,9 @@ impl Executor {
                             composed_as,
                             scratch,
                             &|visit| {
-                                for (ordinal, record) in pending.held(store, slice, layer, *level) {
+                                for (ordinal, record) in
+                                    pending.held(store, slice, shard, layer, *level)
+                                {
                                     visit(
                                         ordinal,
                                         &slice
@@ -3531,7 +3574,7 @@ impl Executor {
                     for (view, space) in spaces {
                         let index = crate::tile_index::TileIndex::project(
                             ordinals,
-                            || pending.held(store, slice, layer, *level),
+                            || pending.held(store, slice, pass.layout.shard, layer, *level),
                             space,
                             slice,
                         );

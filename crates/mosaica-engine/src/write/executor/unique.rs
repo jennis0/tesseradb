@@ -568,7 +568,7 @@ impl Executor {
             &mut manifest,
             shard_overlays(generation),
             &generation.layer_spaces,
-            &self.live,
+            |space, deleted| self.live.owed_deletions(space, deleted),
         );
         write_vocabulary_extensions(
             &mut manifest,

@@ -331,6 +331,8 @@ pub(crate) struct WritePathState {
     accepted_batches: AcceptedBatches,
     pub(crate) registry: LayerRegistry,
     pub(crate) artifacts: ArtifactStore,
+    /// The layer spaces' deletions whose owing shards the manifests record.
+    settled_owing: live::SettledSpaces,
     /// The view roster: which views of which groups exist, and which keys are burnt. Rebuilt
     /// exactly as the layer registry beside it is: seeded from the manifests, then the log
     /// replayed on top.
@@ -389,6 +391,7 @@ impl WritePath {
                 attributes: Mutex::new(state.attributes),
                 vocabularies: Mutex::new(state.vocabularies),
                 view_declarations: Mutex::new(state.view_declarations),
+                settled_owing: Mutex::new(state.settled_owing),
             }),
             wal: Some(state.wal),
             handle: None,

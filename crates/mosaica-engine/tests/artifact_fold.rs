@@ -24,7 +24,7 @@ use mosaica_lifecycle::membership::IncomingContent;
 use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_lifecycle::IncomingArtifact;
 use mosaica_types::layer::{ContentDeclaration, LayerDeclaration};
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, Target};
 
 fn declaration(name: &str) -> LayerDeclaration {
     LayerDeclaration {
@@ -1870,4 +1870,440 @@ fn a_borrowing_label_keeps_its_targets_membership_across_a_fold() {
         300,
         "the fold renumbered the rows the cluster holds, and the label still reads them"
     );
+}
+
+// ---- an artifact deletion two shards owe ----------------------------------------------------------
+
+/// Items the two-shard fixture builds, in shards of [`TWO_SIZE`] and the rest.
+const TWO_N: u64 = 40;
+const TWO_SIZE: u64 = 25;
+/// The deleted artifact's key: bytes no other file of the bundle holds.
+const ERASED: &str = "erased-cluster-7f3a9c";
+
+fn shard(id: u32) -> mosaica_types::ShardId {
+    mosaica_types::ShardId::new(id).unwrap()
+}
+
+/// An engine over the two-shard fixture that writes both shards.
+fn writing(fx: &Fixture) -> Engine {
+    let mut engine = Engine::open_writing_several_shards(&fx.root, &fx.cache, &fx.wal, config())
+        .expect("the engine opens");
+    engine.start_write_executor(8).expect("the executor starts");
+    engine
+}
+
+/// Each `id` of the fixture's items, as the item it names.
+fn items_by_id(engine: &Engine) -> Vec<mosaica_types::ItemAt> {
+    let table = mosaica_engine::AddressTable {
+        rows: TWO_N as usize,
+        mosaica_id: None,
+        columns: vec![(
+            "id".to_string(),
+            (0..TWO_N)
+                .map(|id| Some(mosaica_engine::AddressValue::Text(id.to_string())))
+                .collect(),
+        )],
+    };
+    engine
+        .name_items(&table)
+        .unwrap()
+        .verdicts
+        .into_iter()
+        .map(|verdict| verdict.expect("every id names an item"))
+        .collect()
+}
+
+/// One artifact as it is served: its key, masked count and content.
+type Served = (Option<String>, u64, Vec<String>);
+
+/// What the full viewer is served of `clusters/a` on every artifact route: the viewport's
+/// artifacts, each artifact's card, its `member_of` and `region` matches, browse's roots and the
+/// bulk read's rows. A refused leaf is `None`.
+#[derive(Debug, PartialEq)]
+struct Routes {
+    viewport: Vec<Served>,
+    cards: Vec<Option<Served>>,
+    member_of: Vec<Option<u64>>,
+    region: Vec<Option<u64>>,
+    browse: Vec<(Option<String>, u64)>,
+    bulk: Vec<Vec<String>>,
+}
+
+fn routes(engine: &Engine, ids: &[mosaica_types::MosaicaId]) -> Routes {
+    use mosaica_engine::browse::{BrowseForm, BrowseRequest};
+    use mosaica_engine::filter::{FilterExpr, MemberOfLeaf, RegionLeaf};
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let served =
+        |a: &mosaica_engine::ArtifactOut| (a.key.clone(), a.masked_count, a.content.clone());
+    let mut viewport: Vec<_> = artifacts_of(engine, &full_coverage_credential())
+        .iter()
+        .map(served)
+        .collect();
+    viewport.sort();
+    let matched = |filter: FilterExpr| {
+        let request =
+            mosaica_engine::ViewportRequest::new("s0", 0, WHOLE_MAP, TWO_N as usize).filter(filter);
+        let out = engine.viewport(&session, request).ok()?;
+        Some(out.tiles.iter().map(|tile| tile.matched).sum())
+    };
+    let browse = engine
+        .browse(
+            &session,
+            BrowseRequest {
+                view: "s0",
+                layer: "clusters/a",
+                level: None,
+                form: BrowseForm::Roots,
+                filter: None,
+                limit: 100,
+                cursor: None,
+                palette_size: None,
+            },
+        )
+        .expect("browse answers");
+    let fields = ["key", "masked_count", "content"].map(String::from);
+    let mut bulk: Vec<Vec<String>> = drain(|cursor, pages| {
+        engine
+            .artifacts_stream(
+                &session,
+                mosaica_engine::ArtifactsRequest {
+                    view: "s0",
+                    layer: "clusters/a",
+                    level: None,
+                    parent: None,
+                    q: None,
+                    ids: None,
+                    filter: None,
+                    keep_unmatched: false,
+                    count: cursor.is_none(),
+                    fields: &fields,
+                    palette_size: None,
+                    page_rows: Some(2),
+                    pages: Some(1),
+                    cursor,
+                    limits: limits(),
+                    cancel: None,
+                },
+                pages,
+            )
+            .expect("the artifacts read answers")
+            .next
+    })
+    .iter()
+    .flat_map(|response| &response.batches)
+    .flat_map(|batch| rows_of(batch, &["mosaica_id"], None))
+    .collect();
+    bulk.sort();
+    Routes {
+        viewport,
+        cards: ids
+            .iter()
+            .map(|id| {
+                engine
+                    .artifact(&session, *id, "s0", None)
+                    .expect("the card answers")
+                    .as_ref()
+                    .map(served)
+            })
+            .collect(),
+        member_of: ids
+            .iter()
+            .map(|id| {
+                matched(FilterExpr::MemberOf(MemberOfLeaf {
+                    layer: "clusters/a".to_string(),
+                    artifact: *id,
+                }))
+            })
+            .collect(),
+        region: ids
+            .iter()
+            .map(|id| matched(FilterExpr::Region(RegionLeaf::Artifact(*id))))
+            .collect(),
+        browse: browse
+            .artifacts
+            .iter()
+            .map(|row| (row.key.clone(), row.masked_count))
+            .collect(),
+        bulk,
+    }
+}
+
+/// What the live prefix holds of the artifact at `entity` of `space`: whether any file holds its
+/// key, whether a content extent of its space holds its row, and the ordinals of `space` each
+/// shard's member packs list.
+fn held_on_disc(
+    root: &std::path::Path,
+    space: mosaica_types::LayerSpace,
+    entity: EntityId,
+) -> (bool, bool, Vec<Vec<u32>>) {
+    fn files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            match entry.path().is_dir() {
+                true => files(&entry.path(), out),
+                false => out.push(entry.path()),
+            }
+        }
+    }
+    let prefix = root.join(current_prefix(root));
+    let mut all = Vec::new();
+    files(&prefix, &mut all);
+    let key = ERASED.as_bytes();
+    let holds_key = all.iter().any(|path| {
+        std::fs::read(path)
+            .unwrap()
+            .windows(key.len())
+            .any(|window| window == key)
+    });
+    let manifest = side_manifest(root);
+    let holds_content = mosaica_store::manifest::layer_space(&manifest.layer_spaces, space)
+        .into_iter()
+        .flat_map(|record| &record.content_extents)
+        .any(|extent| {
+            let bytes = std::fs::read(prefix.join(&extent.hasrow)).unwrap();
+            croaring::Bitmap::try_deserialize::<croaring::Portable>(&bytes)
+                .expect("a has-row bitmap")
+                .contains(entity.raw() as u32)
+        });
+    let listed = manifest
+        .shards
+        .records
+        .iter()
+        .map(|record| {
+            let mut ordinals: Vec<u32> = record
+                .membership_extents
+                .iter()
+                .filter(|extent| extent.space == space)
+                .flat_map(|extent| {
+                    let pack = mosaica_store::membership::LevelPack::open(
+                        &prefix.join(&extent.path),
+                        mosaica_store::membership::PackKind::Members,
+                    )
+                    .unwrap();
+                    pack.iter()
+                        .filter(|(_, blob)| !blob.is_empty())
+                        .map(|(ordinal, _)| ordinal)
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            ordinals.sort_unstable();
+            ordinals.dedup();
+            ordinals
+        })
+        .collect();
+    (holds_key, holds_content, listed)
+}
+
+/// The shards the served side-manifest says owe `entity`'s deletion in `space`, and whether the
+/// space still holds the deletion.
+fn owed(
+    root: &std::path::Path,
+    space: mosaica_types::LayerSpace,
+    entity: EntityId,
+) -> (Vec<u32>, bool) {
+    let manifest = side_manifest(root);
+    let Some(record) = mosaica_store::manifest::layer_space(&manifest.layer_spaces, space) else {
+        return (Vec::new(), false);
+    };
+    let at = entity.raw() as u32;
+    let shards = record
+        .owed
+        .iter()
+        .filter(|owed| owed.artifacts.entities().unwrap().contains(at))
+        .map(|owed| owed.shard.raw())
+        .collect();
+    (shards, record.tombstones.entities().unwrap().contains(at))
+}
+
+/// An artifact with members and a generating set in both shards is deleted. It is served on no
+/// route from the acknowledgement; the compaction of the first shard takes it out of that shard's
+/// member pack and leaves its record, its content and the other shard's slice on the disc, still
+/// denied and still counted; the second's removes it from every file. A restart between the two,
+/// and one after, changes no answer. A deletion no shard owes leaves at the first compaction.
+fn an_artifact_deletion_two_shards_owe(first: u32, second: u32) {
+    let fx = fixture_sized(TWO_N, Some(TWO_SIZE));
+    let engine = writing(&fx);
+    engine.register_layer(content_layer()).unwrap();
+    engine
+        .register_layer(flat_declaration("clusters/b"))
+        .unwrap();
+    let items = items_by_id(&engine);
+    let in_shard = |at: u32| -> Vec<u64> {
+        (0..TWO_N)
+            .filter(|id| items[*id as usize].shard == shard(at))
+            .collect()
+    };
+    let (zero, one) = (in_shard(0), in_shard(1));
+    assert!(zero.len() >= 4 && one.len() >= 4, "items in both shards");
+    let sets = |ids: &[u64]| {
+        mosaica_lifecycle::ShardSets::of_items(ids.iter().map(|id| items[*id as usize]))
+    };
+    let artifact = |key: &str, members: Vec<u64>, from: Vec<u64>| {
+        let mut artifact = IncomingArtifact::with_content(
+            Some(key.into()),
+            Vec::new(),
+            vec![IncomingContent::new(
+                vec![format!("topic of {key}")],
+                Vec::new(),
+            )],
+        );
+        artifact.members = sets(&members);
+        artifact.contents[0].generated_from = sets(&from);
+        artifact
+    };
+    let ids = engine
+        .publish_artifacts(
+            "clusters/a".into(),
+            0,
+            vec![
+                artifact(
+                    "kept",
+                    vec![zero[0], zero[1], one[0], one[1]],
+                    vec![zero[0], one[0]],
+                ),
+                artifact(
+                    ERASED,
+                    vec![zero[2], zero[3], one[2], one[3]],
+                    vec![zero[2], one[2]],
+                ),
+            ],
+        )
+        .unwrap();
+    let memberless = engine
+        .publish_artifacts(
+            "clusters/b".into(),
+            0,
+            vec![IncomingArtifact::from_entities(
+                Some("none".into()),
+                Vec::<EntityId>::new(),
+            )],
+        )
+        .unwrap();
+    let Target::Artifact(space, erased) = artifact_target(&engine, ids[1]) else {
+        panic!("an artifact's target")
+    };
+    let Target::Artifact(empty_space, empty) = artifact_target(&engine, memberless[0]) else {
+        panic!("an artifact's target")
+    };
+    tick_until(
+        &engine,
+        "both shards' member packs and the content",
+        std::time::Duration::from_secs(30),
+        || {
+            let (_, content, listed) = held_on_disc(&fx.root, space, erased);
+            content && listed == vec![vec![0, 1], vec![0, 1]]
+        },
+    );
+    let (holds_key, _, _) = held_on_disc(&fx.root, space, erased);
+    assert!(
+        holds_key,
+        "the record pack holds the key, so its absence below is a removal"
+    );
+
+    engine
+        .accept_changes(vec![
+            (Target::Artifact(space, erased), ChangeOp::Delete),
+            (Target::Artifact(empty_space, empty), ChangeOp::Delete),
+        ])
+        .unwrap();
+    tick_until(
+        &engine,
+        "the deletions' publication",
+        std::time::Duration::from_secs(30),
+        || owed(&fx.root, space, erased).1 && owed(&fx.root, empty_space, empty).1,
+    );
+    assert_eq!(owed(&fx.root, space, erased), (vec![0, 1], true));
+    assert_eq!(
+        owed(&fx.root, empty_space, empty),
+        (vec![], true),
+        "owed by no shard"
+    );
+    let deleted = routes(&engine, &ids);
+    assert_eq!(
+        deleted
+            .viewport
+            .iter()
+            .map(|a| a.0.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("kept")]
+    );
+    assert!(deleted.cards[0].is_some() && deleted.cards[1].is_none());
+    assert_eq!(deleted.member_of, vec![Some(4), Some(0)]);
+    assert_eq!(deleted.region, vec![Some(4), Some(0)]);
+    assert_eq!(
+        deleted
+            .browse
+            .iter()
+            .map(|row| row.0.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("kept")]
+    );
+    assert!(deleted.bulk.len() == 1 && deleted.bulk[0].contains(&"key=kept".to_string()));
+    assert_eq!(engine.generation_status().layer_spaces.retirable, 2);
+
+    assert_eq!(compact(&engine, Some(shard(first))), 1);
+    assert_eq!(routes(&engine, &ids), deleted);
+    assert_eq!(owed(&fx.root, space, erased), (vec![second], true));
+    assert_eq!(
+        owed(&fx.root, empty_space, empty),
+        (vec![], false),
+        "the deletion no shard owes leaves at the first compaction"
+    );
+    assert_eq!(engine.generation_status().layer_spaces.retirable, 1);
+    let mut listed = vec![vec![0, 1], vec![0, 1]];
+    listed[first as usize] = vec![0];
+    assert_eq!(
+        held_on_disc(&fx.root, space, erased),
+        (true, true, listed.clone()),
+        "the first shard's member pack no longer lists it; its record, content and the other \
+         shard's slice stay"
+    );
+
+    drop(engine);
+    let engine = writing(&fx);
+    assert_eq!(routes(&engine, &ids), deleted, "a restart changes nothing");
+    assert_eq!(
+        engine
+            .locate_artifact(Target::Artifact(space, erased))
+            .and_then(|at| at.key),
+        Some(ERASED.to_string()),
+        "the record is held, though one slice no longer holds its part of the set"
+    );
+    assert_eq!(owed(&fx.root, space, erased), (vec![second], true));
+    assert_eq!(engine.generation_status().layer_spaces.retirable, 1);
+    assert_eq!(held_on_disc(&fx.root, space, erased), (true, true, listed));
+
+    assert_eq!(compact(&engine, Some(shard(second))), 1);
+    assert_eq!(routes(&engine, &ids), deleted);
+    assert_eq!(owed(&fx.root, space, erased), (vec![], false));
+    assert_eq!(engine.generation_status().layer_spaces.retirable, 0);
+    assert_eq!(
+        held_on_disc(&fx.root, space, erased),
+        (false, false, vec![vec![0], vec![0]]),
+        "no file of the new prefix holds its record, its content or its members"
+    );
+    assert_eq!(
+        engine
+            .locate_artifact(Target::Artifact(space, erased))
+            .and_then(|at| at.key),
+        None
+    );
+
+    drop(engine);
+    let engine = writing(&fx);
+    assert_eq!(
+        routes(&engine, &ids),
+        deleted,
+        "nor does a restart bring it back"
+    );
+    assert_eq!(engine.generation_status().layer_spaces.retirable, 0);
+}
+
+#[test]
+fn an_artifact_deletion_two_shards_owe_leaves_at_the_second_compaction() {
+    an_artifact_deletion_two_shards_owe(1, 0);
+}
+
+#[test]
+fn an_artifact_deletion_leaves_the_write_shards_slice_before_the_other_shards() {
+    an_artifact_deletion_two_shards_owe(0, 1);
 }

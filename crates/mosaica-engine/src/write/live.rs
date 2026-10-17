@@ -33,6 +33,60 @@ pub(in crate::write) struct RegistryForPublication {
     pub version: u64,
 }
 
+/// One layer space's deletions whose owing shards a compaction settled, and each owing shard's
+/// share of them.
+#[derive(Clone, Default)]
+pub(in crate::write) struct SettledOwing {
+    pub(in crate::write) deletions: croaring::Bitmap,
+    pub(in crate::write) by_shard: BTreeMap<ShardId, croaring::Bitmap>,
+}
+
+impl SettledOwing {
+    /// Each owing shard's share of `deleted`, as a side-manifest records it.
+    pub(in crate::write) fn owed(
+        &self,
+        deleted: &croaring::Bitmap,
+    ) -> Vec<mosaica_store::manifest::OwedDeletions> {
+        self.by_shard
+            .iter()
+            .map(|(shard, artifacts)| (*shard, artifacts.and(deleted)))
+            .filter(|(_, owed)| !owed.is_empty())
+            .map(|(shard, owed)| mosaica_store::manifest::OwedDeletions {
+                shard,
+                artifacts: mosaica_store::manifest::EntitySet::of(&owed),
+            })
+            .collect()
+    }
+}
+
+/// Every layer space's [`SettledOwing`], by space.
+pub(in crate::write) type SettledSpaces = BTreeMap<LayerSpace, SettledOwing>;
+
+/// What the side-manifest's layer spaces record as owed, read as settled: each space's deletions
+/// and each shard's share of them.
+pub(in crate::write) fn settled_of(
+    layer_spaces: &[mosaica_store::manifest::LayerSpaceRecord],
+) -> SettledSpaces {
+    layer_spaces
+        .iter()
+        .filter_map(|record| {
+            let deletions = record.tombstones.entities()?.clone();
+            let by_shard = record
+                .owed
+                .iter()
+                .filter_map(|owed| Some((owed.shard, owed.artifacts.entities()?.clone())))
+                .collect();
+            (!deletions.is_empty()).then_some((
+                record.space,
+                SettledOwing {
+                    deletions,
+                    by_shard,
+                },
+            ))
+        })
+        .collect()
+}
+
 /// One point shard's write state, on [`LiveState`]'s contract.
 pub(crate) struct ShardWrite {
     pub(in crate::write) id: ShardId,
@@ -145,6 +199,9 @@ pub(crate) struct LiveState {
     /// the vocabulary list's contract.
     pub(in crate::write) view_declarations:
         Mutex<crate::view_declarations::RuntimeViewDeclarations>,
+    /// The deletions whose owing shards the open read or a compaction settled. Written only by
+    /// the executor, at a compaction's publication.
+    pub(in crate::write) settled_owing: Mutex<SettledSpaces>,
 }
 
 impl LiveState {
@@ -421,18 +478,36 @@ impl LiveState {
     }
 
     /// For each shard, the artifacts of `deleted` in `space` its compaction has to remove from its
-    /// slice: those its slice holds a member or a generating entity of, or borrows a membership
-    /// for. Every shard owes each deletion of a layer whose memberships are not stored, since
-    /// each shard derives them. A shard owing none is left out, and so is every shard where no
-    /// live layer holds `space`.
-    pub(in crate::write) fn owed_deletions(
+    /// slice. A settled deletion is owed by the shards settled for it. Any other is owed by the
+    /// shards whose slice holds a member or a generating entity of it, or borrows a membership
+    /// for it, and by every shard where its layer's memberships are not stored, since each shard
+    /// derives them. A shard owing none is left out, and so is every shard where no live layer
+    /// holds `space` and the deletion is not settled.
+    pub(in crate::write) fn owing(
         &self,
         space: LayerSpace,
         deleted: &croaring::Bitmap,
-    ) -> Vec<mosaica_store::manifest::OwedDeletions> {
+    ) -> BTreeMap<ShardId, croaring::Bitmap> {
+        let mut owing = BTreeMap::new();
+        let unsettled = match lock_recover(&self.settled_owing).get(&space) {
+            Some(settled) => {
+                for (shard, artifacts) in &settled.by_shard {
+                    let owed = artifacts.and(deleted);
+                    if !owed.is_empty() {
+                        owing.insert(*shard, owed);
+                    }
+                }
+                deleted.andnot(&settled.deletions)
+            }
+            None => deleted.clone(),
+        };
+        if unsettled.is_empty() {
+            return owing;
+        }
+        let deleted = &unsettled;
         let registry = lock_recover(&self.registry);
         let Some((name, layer)) = registry.in_space(space) else {
-            return Vec::new();
+            return owing;
         };
         let every = !stored_membership(&layer.declaration);
         let written = lock_recover(&self.artifacts);
@@ -444,33 +519,53 @@ impl LiveState {
                 Some((entity, level, ordinal))
             })
             .collect();
-        self.shards()
-            .iter()
-            .filter_map(|shard| {
-                let slice = self.slice_of(shard.id, &written);
-                let owed: croaring::Bitmap = match every {
-                    true => deleted.clone(),
-                    false => places
-                        .iter()
-                        .filter(|(_, level, ordinal)| {
-                            slice.get(name, *level, *ordinal).is_some_and(|record| {
-                                mosaica_lifecycle::membership::borrows_membership(record)
-                                    || !record.members.is_empty()
-                                    || record
-                                        .contents
-                                        .iter()
-                                        .any(|content| !content.generated_from.is_empty())
-                            })
+        for shard in self.shards() {
+            let slice = self.slice_of(shard.id, &written);
+            let owed: croaring::Bitmap = match every {
+                true => deleted.clone(),
+                false => places
+                    .iter()
+                    .filter(|(_, level, ordinal)| {
+                        slice.get(name, *level, *ordinal).is_some_and(|record| {
+                            mosaica_lifecycle::membership::borrows_membership(record)
+                                || !record.members.is_empty()
+                                || record
+                                    .contents
+                                    .iter()
+                                    .any(|content| !content.generated_from.is_empty())
                         })
-                        .map(|(entity, ..)| *entity)
-                        .collect(),
-                };
-                (!owed.is_empty()).then(|| mosaica_store::manifest::OwedDeletions {
-                    shard: shard.id,
-                    artifacts: mosaica_store::manifest::EntitySet::of(&owed),
-                })
+                    })
+                    .map(|(entity, ..)| *entity)
+                    .collect(),
+            };
+            if !owed.is_empty() {
+                owing
+                    .entry(shard.id)
+                    .or_insert_with(croaring::Bitmap::new)
+                    .or_inplace(&owed);
+            }
+        }
+        owing
+    }
+
+    /// [`Self::owing`], as a side-manifest records it.
+    pub(in crate::write) fn owed_deletions(
+        &self,
+        space: LayerSpace,
+        deleted: &croaring::Bitmap,
+    ) -> Vec<mosaica_store::manifest::OwedDeletions> {
+        self.owing(space, deleted)
+            .into_iter()
+            .map(|(shard, owed)| mosaica_store::manifest::OwedDeletions {
+                shard,
+                artifacts: mosaica_store::manifest::EntitySet::of(&owed),
             })
             .collect()
+    }
+
+    /// Replace the settled deletions with `settled`, what a compaction's publication left owed.
+    pub(in crate::write) fn settle_owing(&self, settled: SettledSpaces) {
+        *lock_recover(&self.settled_owing) = settled;
     }
 
     /// Whether `entity` of `space` is a live layer's own entity or an artifact its levels hold.

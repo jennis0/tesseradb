@@ -742,7 +742,7 @@ impl Executor {
             &mut manifest,
             shard_overlays(&live),
             &live.layer_spaces,
-            &self.live,
+            |space, deleted| self.live.owed_deletions(space, deleted),
         );
         write_vocabulary_extensions(
             &mut manifest,
@@ -1062,7 +1062,7 @@ impl Executor {
             &mut manifest,
             shard_overlays(&live),
             &live.layer_spaces,
-            &self.live,
+            |space, deleted| self.live.owed_deletions(space, deleted),
         );
         write_vocabulary_extensions(
             &mut manifest,
@@ -1831,7 +1831,7 @@ impl Executor {
                 &mut manifest,
                 shard_overlays(&live),
                 &live.layer_spaces,
-                &self.live,
+                |space, deleted| self.live.owed_deletions(space, deleted),
             );
             // Record and member packs are written before the manifest that names them, which is
             // the whole of their durability contract: a manifest naming a missing pack refuses at
@@ -2434,7 +2434,7 @@ impl Executor {
             &mut manifest,
             shard_overlays(&live),
             &live.layer_spaces,
-            &self.live,
+            |space, deleted| self.live.owed_deletions(space, deleted),
         );
         n = self
             .health

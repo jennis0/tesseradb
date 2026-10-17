@@ -573,6 +573,7 @@ impl WritePath {
                 accepted_batches,
                 registry,
                 artifacts,
+                settled_owing: super::live::settled_of(seed.layer_spaces),
                 roster,
                 attributes,
                 vocabularies: runtime_vocabularies,
@@ -640,6 +641,7 @@ fn seed_artifacts(
             continue;
         };
         let name = name.to_string();
+        let deleted = space.tombstones.entities();
         // A stored layer's slice seeds only the artifacts its shard holds something of, borrowers
         // and their targets; a resolved layer's seeds every artifact.
         let held_only = several && stored_membership(&layer.declaration);
@@ -721,8 +723,12 @@ fn seed_artifacts(
                 let held = std::iter::once(&record)
                     .chain(others.iter().map(|(_, slice)| slice))
                     .collect::<Vec<_>>();
+                // A deleted artifact leaves each owing shard's slice at that shard's compaction, so
+                // its slices may hold part of a set until the last; it is never served.
+                let deletion_held =
+                    deleted.is_some_and(|deleted| deleted.contains(entity.raw() as u32));
                 if others.len() + unlisted.len() + 1 != shards.len()
-                    || !slices_hold_their_sets(&held)
+                    || !(slices_hold_their_sets(&held) || deletion_held)
                 {
                     seeded.undecodable += 1;
                     continue;

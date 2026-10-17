@@ -126,12 +126,12 @@ pub(super) fn shard_overlays(generation: &Generation) -> impl Iterator<Item = (S
 /// Replace a manifest's deny fields, each named shard's and each layer space's, with the overlays'
 /// live state, restated fresh at every write as two separate sets and never their union:
 /// publishing the union would make every deletion look retirable by an unsuppress. Each space's
-/// deletions are owed by the shards `live` says still hold something of them.
+/// deletions are owed as `owed` answers for the space.
 pub(super) fn write_deny_state<'a>(
     manifest: &mut SegmentsManifest,
     overlays: impl IntoIterator<Item = (ShardId, &'a Overlay)>,
     spaces: &crate::LayerSpaces,
-    live: &LiveState,
+    owed: impl Fn(LayerSpace, &croaring::Bitmap) -> Vec<mosaica_store::manifest::OwedDeletions>,
 ) {
     for (shard, overlay) in overlays {
         let Some(record) = manifest.shard_mut(shard) else {
@@ -155,7 +155,7 @@ pub(super) fn write_deny_state<'a>(
         record.tombstones = EntitySet::of(deleted);
         record.owed = match deleted.is_empty() {
             true => Vec::new(),
-            false => live.owed_deletions(record.space, deleted),
+            false => owed(record.space, deleted),
         };
         record.owed.retain(|owed| shards.contains(&owed.shard));
     }
