@@ -211,12 +211,15 @@ impl Engine {
             return warmed;
         }
         let first = generation.shards().next().map(|shard| shard.id());
+        // A level's contents are keyed, as `LevelForms::level_version` keys them, by the sum of
+        // every shard's form version.
+        let mut summed = std::collections::BTreeMap::<(&str, usize, u32), u64>::new();
         for shard in generation.shards() {
             for (view, view_data) in &shard.data.views {
                 let Ok(segments) = segments_with_row_bases(view, view_data) else {
                     continue;
                 };
-                for layer in &layers {
+                for (at, layer) in layers.iter().enumerate() {
                     if !layer.declaration.draws_on(view) {
                         continue;
                     }
@@ -234,7 +237,7 @@ impl Engine {
                         // The engine's own pool: the decode fans out, and running it outside
                         // `install` would spill onto rayon's global pool instead of the one sized
                         // for this deployment.
-                        let ((rows, level_version), lineage) = self.pool.install(|| {
+                        let ((rows, form_version), lineage) = self.pool.install(|| {
                             self.write.live().with_artifacts(|written| {
                                 let form = self.form_in(
                                     &generation,
@@ -258,6 +261,7 @@ impl Engine {
                             })
                         });
                         warmed.levels += 1;
+                        *summed.entry((view.as_str(), at, level)).or_default() += form_version;
                         // What follows is of the level's records, which every shard shares.
                         if Some(shard.id()) != first {
                             continue;
@@ -266,11 +270,13 @@ impl Engine {
                         // records alone (~0.5s each at rung 3's largest), not from a mask or
                         // principal.
                         self.level_lineage(layer, level, lineage, &rows);
-                        if let Some(runs) = layer.runs.get(level as usize) {
-                            self.level_content(&generation, layer, level, level_version, runs);
-                        }
                     }
                 }
+            }
+        }
+        for ((_, at, level), level_version) in summed {
+            if let Some(runs) = layers[at].runs.get(level as usize) {
+                self.level_content(&generation, &layers[at], level, level_version, runs);
             }
         }
         warmed.elapsed_ms = started.elapsed().as_millis() as u64;

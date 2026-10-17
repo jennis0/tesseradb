@@ -599,9 +599,16 @@ fn a_second_shards_compaction_keeps_the_held_shapes() {
     let engine = writing();
     let grant = "0,1";
     let mut expected = served(&engine, grant, 0, WHOLE_MAP);
-    let key = expected.keys().next().cloned().expect("the fixture serves a boundary");
+    let key = expected
+        .keys()
+        .next()
+        .cloned()
+        .expect("the fixture serves a boundary");
     engine
-        .accept_changes(vec![(served_target(&engine, grant, &key), ChangeOp::Delete)])
+        .accept_changes(vec![(
+            served_target(&engine, grant, &key),
+            ChangeOp::Delete,
+        )])
         .expect("the deletion is accepted");
     expected.remove(&key);
 
@@ -616,7 +623,11 @@ fn a_second_shards_compaction_keeps_the_held_shapes() {
         (warm.artifacts, 0),
         "a restart claims every level's held shapes: {warm:?}"
     );
-    assert_eq!(served(&engine, grant, 0, WHOLE_MAP), expected, "across a restart");
+    assert_eq!(
+        served(&engine, grant, 0, WHOLE_MAP),
+        expected,
+        "across a restart"
+    );
 }
 
 /// **A suppressed member leaves the count, and a suppressed artifact leaves the map** — the same

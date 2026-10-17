@@ -1189,6 +1189,50 @@ fn served_layer(engine: &Engine) -> Vec<Vec<ServedArtifact>> {
         .collect()
 }
 
+/// A level's contents read at open, for a publication over both shards, are the ones the first
+/// request serves: the request reads no table again.
+#[test]
+fn the_contents_read_at_open_serve_the_first_request() {
+    use mosaica_lifecycle::membership::IncomingContent;
+    use mosaica_lifecycle::ShardSets;
+    let several = two_shards();
+    let engine = several.open_writing();
+    let items = items_by_id(&engine, 0..TWO_SHARD_N);
+    let sets = |ids: &[u64]| ShardSets::of_items(ids.iter().map(|id| items[*id as usize].unwrap()));
+    let both = [
+        ids_in_shard(&engine, TWO_SHARD_N, 0)[0],
+        ids_in_shard(&engine, TWO_SHARD_N, 1)[0],
+    ];
+    engine.register_layer(label_layer("t")).unwrap();
+    let mut artifact = IncomingArtifact::with_content(
+        Some("a".into()),
+        Vec::new(),
+        vec![IncomingContent::new(vec!["label".to_string()], Vec::new())],
+    );
+    artifact.members = sets(&both);
+    artifact.contents[0].generated_from = sets(&both);
+    engine
+        .publish_artifacts("t".into(), 0, vec![artifact])
+        .unwrap();
+    tick(&engine);
+    drop(engine);
+
+    let engine = several.open_writing();
+    assert_eq!(
+        engine.artifact_content_cache_stats().builds,
+        1,
+        "read at open"
+    );
+    let served = served_layer(&engine);
+    assert_eq!(served[0].len(), 1);
+    assert_eq!(served[0][0].2, vec!["label".to_string()]);
+    assert_eq!(
+        engine.artifact_content_cache_stats().builds,
+        1,
+        "the request read the table the open built"
+    );
+}
+
 /// A publication with members and generating sets in both shards, a growth adding a shard-1 item
 /// and a page moving a set into shard 1 serve the counts, containment and `member_of` verdicts one
 /// shard holding the same items serves, before a tick, after it and across a restart; the tick

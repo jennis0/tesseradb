@@ -371,7 +371,11 @@ impl Executor {
             Some(fold) => {
                 // A held shape is its layer space's, filed beside the first shard as
                 // `derived_by_shard` files it, and checked against that shard's slice version.
-                let first = next.shards.records.first().map_or(fold.shard, |record| record.id);
+                let first = next
+                    .shards
+                    .records
+                    .first()
+                    .map_or(fold.shard, |record| record.id);
                 let mut held = DerivedByShard::new();
                 for extent in fold.written {
                     let shard = match extent.form {
