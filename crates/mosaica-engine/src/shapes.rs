@@ -628,10 +628,10 @@ pub struct WarmReport {
 /// derived file beside the shard it was written for. A level's held decompositions are its layer
 /// space's, and read whichever shard they are listed beside.
 ///
-/// Two forms, both written by the build and by every fold and both keyed by the level version:
-/// the `shape-rows` row form, which also names its segment and the segment's row count; and the
-/// row-major column, which is over the view's base rows and so is the base segment's piece —
-/// inverted here into the same per-ordinal bitmaps. **Equality on every key, never anything
+/// Two forms, both written by the build and by every fold and both keyed by their shard's slice
+/// version of the level: the `shape-rows` row form, which also names its segment and the
+/// segment's row count; and the row-major column, which is over the view's base rows and so is
+/// the base segment's piece — inverted here into the same per-ordinal bitmaps. **Equality on every key, never anything
 /// weaker** (I11): a piece that does not match is resolved again from the geometry, and the
 /// refusal is said.
 #[derive(Clone, Copy, Default)]
@@ -699,7 +699,8 @@ impl PersistedPieces<'_> {
     }
 
     /// The piece for `shard`'s `segment` under `level`, if a persisted form supplies it. `base`
-    /// says whether `segment` is the view's base, the one segment a row-major column covers.
+    /// says whether `segment` is the view's base, the one segment a row-major column covers. A
+    /// form is keyed by `shard`'s slice version of the level.
     fn claim(
         &self,
         level: &ShapeLevel,
@@ -709,6 +710,7 @@ impl PersistedPieces<'_> {
         store: &ArtifactStore,
     ) -> Option<Vec<Option<Bitmap>>> {
         let prefix_dir = self.prefix_dir?;
+        let version = store.slice(shard)?.level_version(&level.layer, level.level);
         let same_level = |held: &ShardId, e: &DerivedExtent| {
             *held == shard
                 && e.view.as_deref() == Some(level.view.as_str())
@@ -724,14 +726,14 @@ impl PersistedPieces<'_> {
             _ => None,
         });
         if let Some((extent, row_count)) = shape_rows {
-            if extent.slice_version != level.level_version || row_count != segment.row_count {
+            if extent.slice_version != version || row_count != segment.row_count {
                 tracing::warn!(
                     layer = %level.layer,
                     level = level.level,
                     view = %level.view,
                     seg_id = %segment.seg_id,
                     written_at = extent.slice_version,
-                    now = level.level_version,
+                    now = version,
                     written_rows = row_count,
                     rows = segment.row_count,
                     "a persisted shape row form is refused: its key is not this level version \
@@ -741,7 +743,7 @@ impl PersistedPieces<'_> {
             }
             match mosaica_store::derived::read_shape_rows(
                 &prefix_dir.join(&extent.path),
-                level.level_version,
+                version,
                 &segment.seg_id,
                 segment.row_count,
             ) {
@@ -776,13 +778,13 @@ impl PersistedPieces<'_> {
             _ => None,
         });
         if let Some((extent, layout)) = column {
-            if extent.slice_version != level.level_version {
+            if extent.slice_version != version {
                 tracing::warn!(
                     layer = %level.layer,
                     level = level.level,
                     view = %level.view,
                     written_at = extent.slice_version,
-                    now = level.level_version,
+                    now = version,
                     "a persisted row-major column is not this level version's; the base segment \
                      is resolved again from the geometry"
                 );

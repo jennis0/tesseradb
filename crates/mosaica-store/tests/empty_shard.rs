@@ -121,8 +121,6 @@ fn an_empty_shard_holds_every_declared_structure_and_no_item() {
     let written = write_empty_shard(&EmptyShard {
         prefix_dir: prefix,
         layout,
-        terms: 3,
-        small_term_threshold: 32,
         pairs: true,
         declared: &declared,
         vocabularies: &vocabularies,
@@ -149,16 +147,8 @@ fn an_empty_shard_holds_every_declared_structure_and_no_item() {
 
     let postings =
         mosaica_authz::PostingsReader::open(&prefix.join(layout.postings_rel()), true).unwrap();
-    assert_eq!(postings.term_count(), 3, "one record for each term");
-    for term in 0..3 {
-        assert!(postings
-            .posting_at(term)
-            .unwrap()
-            .is_none_or(|posting| match posting {
-                mosaica_authz::PostingRef::Array(bytes) => bytes.is_empty(),
-                mosaica_authz::PostingRef::Roaring(set) => set.is_empty(),
-            }));
-    }
+    assert_eq!(postings.term_count(), 0, "no record, of any term");
+    assert!(postings.posting_at(3).unwrap().is_none());
     let transpose =
         mosaica_store::EntityTerms::open_dir(&prefix.join(layout.entity_terms_rel())).unwrap();
     assert_eq!(transpose.len(), 0);

@@ -1090,6 +1090,12 @@ impl Executor {
     /// startup sweep's to reclaim, not a fold's.
     fn scheduled_fold(&self, generation: &Arc<Generation>) -> Option<(ShardId, Scheduled)> {
         let now = unix_now()?;
+        // No shard past its floor is due on any gauge, so none is read.
+        if !generation.shards().any(|shard| {
+            crate::compact::past_floor(&self.deps.compaction, now, self.fold_floor_from(shard.id()))
+        }) {
+            return None;
+        }
         let dead = std::cell::OnceCell::new();
         let walked = || dead.get_or_init(|| self.dead_bytes(generation));
         let (shard, trigger, gauges) = self

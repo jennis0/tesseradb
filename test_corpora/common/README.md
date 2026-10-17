@@ -76,9 +76,9 @@ directly is a different bundle once a publication or flush writes to it.
 `--shard-size` writes `[shards] size` into the base build's declaration and declares it on every
 served copy through `PUT /control/shards`. The result records it as `shard_size`, and each
 declaration's status and body under `shard_size_declared`. With `--reuse-base`, a base bundle built
-at another size is built again. A release binary refuses every write to a bundle of several
-shards, and a server refuses a declared size below the served copy's high water. A refused
-declaration is in `shard_size_declared`, and the run goes on at the size the bundle holds.
+at another size is built again. A size at or below the served copy's high water seals its open
+shard, and the next insert opens a new one. A refused declaration is in `shard_size_declared`, and
+the run goes on at the size the bundle holds.
 
 ## The churn
 

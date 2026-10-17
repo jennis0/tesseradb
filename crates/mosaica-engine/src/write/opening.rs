@@ -24,8 +24,6 @@ pub(crate) struct Opening<'a> {
     pub(crate) prefix_dir: &'a Path,
     pub(crate) prefix: &'a str,
     pub(crate) phash: &'a str,
-    /// How many terms the dictionary holds.
-    pub(crate) terms: u64,
     /// Every record pack the partition's layer spaces name.
     pub(crate) record_packs: Vec<(LayerSpace, RecordPackExtent)>,
     /// [`OpenedBase::runtime`], from [`runtime_columns`].
@@ -68,7 +66,6 @@ pub(crate) fn open_shards(
                 phash: opening.phash,
                 bundle,
                 manifest_digest: &manifest_digest,
-                terms: opening.terms,
                 record_packs: &opening.record_packs,
                 runtime: &opening.runtime,
             },
@@ -104,8 +101,6 @@ struct OpenedBase<'a> {
     bundle: &'a Bundle,
     /// The hex digest of the prefix's `MANIFEST.json`, which the shard's identity is taken from.
     manifest_digest: &'a str,
-    /// How many terms the dictionary holds.
-    terms: u64,
     /// Every record pack the partition's layer spaces name.
     record_packs: &'a [(LayerSpace, RecordPackExtent)],
     /// The columns declared at a running service and not yet written into `MANIFEST.json` by a
@@ -171,8 +166,6 @@ fn write_opened_shard(
     let written = write_empty_shard(&EmptyShard {
         prefix_dir: base.prefix_dir,
         layout,
-        terms: base.terms,
-        small_term_threshold: manifest.small_term_threshold,
         pairs,
         declared: &manifest.declared_scalars,
         vocabularies: &manifest.vocabularies,

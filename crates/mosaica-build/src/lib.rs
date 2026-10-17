@@ -1604,8 +1604,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     }
 
     // The dictionary is the authority on how many terms exist — `max(term_id) + 1` over the
-    // items would agree only as long as every interned term is still carried by some item, and
-    // a postings file shorter than the dictionary would silently make its tail terms unaskable.
+    // items would agree only as long as every interned term is still carried by some item.
     let term_count = dict.len() as u64;
 
     // ---- 4/5. postings and pairs -----------------------------------------------------
@@ -1638,7 +1637,13 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     }
 
     let postings_path = prefix_dir.join(layout.postings_rel());
-    write_postings(&postings_path, &per_term, SMALL_TERM_THRESHOLD_DEFAULT)
+    // Over no item, the postings an empty shard holds: no record
+    // (`mosaica_store::empty_shard::write_empty_shard`).
+    let written = match staged.is_empty() {
+        true => &per_term[..0],
+        false => &per_term[..],
+    };
+    write_postings(&postings_path, written, SMALL_TERM_THRESHOLD_DEFAULT)
         .map_err(|e| BuildError::io(&postings_path, e))?;
     fsync_file(&postings_path)?;
 

@@ -1035,7 +1035,6 @@ impl Executor {
                 prefix_dir: &prefix_dir,
                 prefix: &generation.prefix,
                 phash,
-                terms: generation.dict.len() as u64,
                 record_packs,
                 runtime: crate::write::runtime_columns(attributes),
             },

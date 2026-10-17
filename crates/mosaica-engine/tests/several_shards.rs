@@ -2000,8 +2000,10 @@ fn a_join_a_membership_row_and_an_edit_in_the_sealed_shard_serve_as_one_shard_do
 
 /// New items past the open shard's size, some joining an artifact, open shard 2 and serve as the
 /// same items in one shard serve: before a tick, across a restart that replays the opening, after
-/// a tick and a flush, and across a restart that reads it from a manifest. The opened shard holds
-/// an empty member pack beside each record pack.
+/// a tick and a flush, across a restart that reads it from a manifest, and after shard 2's
+/// compaction. The opened shard holds an empty member pack beside each record pack, and a base
+/// postings file of no record, which its compaction writes again with a record for every term; the
+/// bundle then verifies.
 #[test]
 fn items_in_a_shard_opened_while_the_service_runs_serve_as_one_shard_does() {
     let one = layered_fixture(None);
@@ -2076,4 +2078,21 @@ fn items_in_a_shard_opened_while_the_service_runs_serve_as_one_shard_does() {
     drop(engine);
     let engine = several.open_writing();
     compare(&engine, "across a restart that reads the manifest");
+
+    let base_terms = || {
+        let path = several
+            .root
+            .join(current_prefix(&several.root))
+            .join(mosaica_store::ShardLayout::new(PARTITION, shard(2)).postings_rel());
+        mosaica_authz::PostingsReader::open(&path, false)
+            .unwrap()
+            .term_count()
+    };
+    assert_eq!(base_terms(), 0);
+    assert_eq!(compact(&engine, Some(shard(2))), 1);
+    compare(&engine, "after shard 2's compaction");
+    assert_eq!(base_terms(), engine.generation().dict.len());
+    drop(engine);
+    mosaica_build::verify_deep(&several.root, &mosaica_build::VerifyOpts::default())
+        .expect("the bundle verifies");
 }

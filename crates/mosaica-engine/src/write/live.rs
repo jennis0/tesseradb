@@ -33,8 +33,8 @@ pub(in crate::write) struct RegistryForPublication {
     pub version: u64,
 }
 
-/// One layer space's deletions for which a compaction settled the shards whose compaction must
-/// remove them, and each such shard's share of them.
+/// One layer space's deletions whose owing shards are known, and each such shard's share of them:
+/// those a compaction settled, or those [`LiveState::owing`] read from the slices.
 #[derive(Clone, Default)]
 pub(in crate::write) struct SettledOwing {
     pub(in crate::write) deletions: croaring::Bitmap,
@@ -73,6 +73,16 @@ fn owed_records(
             },
         )
         .collect()
+}
+
+/// Add each shard's share in `shares` to `into`.
+fn add_shares(
+    into: &mut BTreeMap<ShardId, croaring::Bitmap>,
+    shares: BTreeMap<ShardId, croaring::Bitmap>,
+) {
+    for (shard, share) in shares {
+        into.entry(shard).or_default().or_inplace(&share);
+    }
 }
 
 /// `shard`'s slice of every membership in `written`. Panics on a shard the store holds no slice
@@ -226,6 +236,10 @@ pub(crate) struct LiveState {
     /// The deletions for which the open or a compaction settled the shards whose compaction must
     /// remove them. Written only by the executor, at a compaction's publication.
     pub(in crate::write) settled_owing: Mutex<SettledSpaces>,
+    /// The deletions outside `settled_owing` whose owing shards [`Self::owing`] has read from the
+    /// slices since the artifact store was last written. Written only by the executor, and emptied
+    /// at every write of the store, since a write can change which slices hold a deleted artifact.
+    pub(in crate::write) probed_owing: Mutex<SettledSpaces>,
 }
 
 impl LiveState {
@@ -319,6 +333,8 @@ impl LiveState {
         registry.apply(record);
         if let WalRecord::LayerDrop { name, .. } = record {
             lock_recover(&self.artifacts).remove_layer(name);
+            drop(registry);
+            self.forget_probed_owing();
         }
     }
 
@@ -331,9 +347,13 @@ impl LiveState {
         &self,
         f: impl FnOnce(&mut LayerRegistry, &mut ArtifactStore) -> R,
     ) -> R {
-        let mut registry = lock_recover(&self.registry);
-        let mut artifacts = lock_recover(&self.artifacts);
-        f(&mut registry, &mut artifacts)
+        let out = {
+            let mut registry = lock_recover(&self.registry);
+            let mut artifacts = lock_recover(&self.artifacts);
+            f(&mut registry, &mut artifacts)
+        };
+        self.forget_probed_owing();
+        out
     }
 
     /// The bound rotation may not reclaim past, or `None` if no membership is at risk. See
@@ -349,6 +369,8 @@ impl LiveState {
         for shard in shards {
             artifacts.open_slice(shard);
         }
+        drop(artifacts);
+        self.forget_probed_owing();
     }
 
     /// Read the artifact store: the request path's route to a membership.
@@ -484,7 +506,9 @@ impl LiveState {
         &self,
         retired: &mosaica_lifecycle::membership::Retired,
     ) -> Vec<mosaica_lifecycle::membership::MovedLevel> {
-        lock_recover(&self.artifacts).retire(retired)
+        let moved = lock_recover(&self.artifacts).retire(retired);
+        self.forget_probed_owing();
+        moved
     }
 
     /// Where an entity of `space` sits: `(level, ordinal)`. Addressing only. See
@@ -506,6 +530,8 @@ impl LiveState {
     /// layer's memberships are not stored, since each shard derives them. A shard with none to
     /// remove is left out, and so is every shard where no live layer holds `space` and the
     /// deletion is not settled.
+    ///
+    /// The slices are read once for a deletion until the artifact store is next written.
     pub(in crate::write) fn owing(
         &self,
         space: LayerSpace,
@@ -515,14 +541,37 @@ impl LiveState {
             Some(settled) => (settled.share(deleted), deleted.andnot(&settled.deletions)),
             None => (BTreeMap::new(), deleted.clone()),
         };
-        if unsettled.is_empty() {
+        let unprobed = match lock_recover(&self.probed_owing).get(&space) {
+            Some(probed) => {
+                add_shares(&mut owing, probed.share(&unsettled));
+                unsettled.andnot(&probed.deletions)
+            }
+            None => unsettled,
+        };
+        if unprobed.is_empty() {
             return owing;
         }
-        let deleted = &unsettled;
-        let registry = lock_recover(&self.registry);
-        let Some((name, layer)) = registry.in_space(space) else {
+        let Some(probed) = self.probe_owing(space, &unprobed) else {
             return owing;
         };
+        let mut memo = lock_recover(&self.probed_owing);
+        let held = memo.entry(space).or_default();
+        held.deletions.or_inplace(&unprobed);
+        add_shares(&mut held.by_shard, probed.clone());
+        drop(memo);
+        add_shares(&mut owing, probed);
+        owing
+    }
+
+    /// [`Self::owing`] for deletions neither settled nor probed, read from every shard's slice, or
+    /// `None` where no live layer holds `space`.
+    fn probe_owing(
+        &self,
+        space: LayerSpace,
+        deleted: &croaring::Bitmap,
+    ) -> Option<BTreeMap<ShardId, croaring::Bitmap>> {
+        let registry = lock_recover(&self.registry);
+        let (name, layer) = registry.in_space(space)?;
         let every = !stored_membership(&layer.declaration);
         let written = lock_recover(&self.artifacts);
         let places: Vec<(u32, u32, u32)> = deleted
@@ -533,6 +582,7 @@ impl LiveState {
                 Some((entity, level, ordinal))
             })
             .collect();
+        let mut owing = BTreeMap::new();
         for shard in self.shards() {
             let slice = slice_of(&written, shard.id);
             let owed: croaring::Bitmap = match every {
@@ -553,13 +603,15 @@ impl LiveState {
                     .collect(),
             };
             if !owed.is_empty() {
-                owing
-                    .entry(shard.id)
-                    .or_insert_with(croaring::Bitmap::new)
-                    .or_inplace(&owed);
+                owing.insert(shard.id, owed);
             }
         }
-        owing
+        Some(owing)
+    }
+
+    /// Empty [`Self::probed_owing`]: the artifact store was written.
+    fn forget_probed_owing(&self) {
+        lock_recover(&self.probed_owing).clear();
     }
 
     /// [`Self::owing`], as a side-manifest records it.

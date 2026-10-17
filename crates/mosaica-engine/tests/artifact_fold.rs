@@ -22,7 +22,7 @@ use common::*;
 use mosaica_engine::Engine;
 use mosaica_lifecycle::membership::IncomingContent;
 use mosaica_lifecycle::wal::ChangeOp;
-use mosaica_lifecycle::IncomingArtifact;
+use mosaica_lifecycle::{IncomingArtifact, IncomingGrowth};
 use mosaica_types::layer::{ContentDeclaration, LayerDeclaration};
 use mosaica_types::{EntityId, Target};
 
@@ -2264,4 +2264,92 @@ fn an_artifact_deletion_in_two_shards_compacting_shard_zero_first() {
 #[test]
 fn an_artifact_deletion_in_two_shards_compacting_shard_one_first() {
     an_artifact_deletion_in_two_shards(1, 0);
+}
+
+/// A growth and a put naming a deleted artifact by its key are taken while its record is held, and
+/// each adds the shard of the members it brings to those whose compaction must remove it. What the
+/// side-manifest records is the same at a later publication and across a restart.
+#[test]
+fn the_shards_owing_a_deletion_follow_the_writes_naming_it() {
+    let fx = two_shards();
+    let engine = fx.open_writing();
+    engine
+        .register_layer(flat_declaration("clusters/a"))
+        .unwrap();
+    let items = items_by_id(&engine, 0..TWO_SHARD_N);
+    let (zero, one) = (
+        ids_in_shard(&engine, TWO_SHARD_N, 0),
+        ids_in_shard(&engine, TWO_SHARD_N, 1),
+    );
+    let sets = |ids: &[u64]| {
+        mosaica_lifecycle::ShardSets::of_items(
+            ids.iter()
+                .map(|id| items[*id as usize].expect("every id names an item")),
+        )
+    };
+    let artifact = |key: &str, members: &[u64]| {
+        let mut artifact =
+            IncomingArtifact::from_entities(Some(key.into()), Vec::<EntityId>::new());
+        artifact.members = sets(members);
+        artifact
+    };
+    let ids = engine
+        .publish_artifacts(
+            "clusters/a".into(),
+            0,
+            vec![
+                artifact("grown", &[zero[0], zero[1]]),
+                artifact("put", &[zero[2], zero[3]]),
+            ],
+        )
+        .unwrap();
+    let targets: Vec<(mosaica_types::LayerSpace, EntityId)> = ids
+        .iter()
+        .map(|id| match artifact_target(&engine, *id) {
+            Target::Artifact(space, entity) => (space, entity),
+            other => panic!("an artifact's target, not {other:?}"),
+        })
+        .collect();
+    engine
+        .accept_changes(
+            targets
+                .iter()
+                .map(|(space, entity)| (Target::Artifact(*space, *entity), ChangeOp::Delete))
+                .collect(),
+        )
+        .unwrap();
+    let owed_now = || {
+        targets
+            .iter()
+            .map(|(space, entity)| owed(&fx.root, *space, *entity))
+            .collect::<Vec<_>>()
+    };
+    tick_until(
+        &engine,
+        "the deletions' publication",
+        std::time::Duration::from_secs(30),
+        || owed_now().iter().all(|(_, held)| *held),
+    );
+    assert_eq!(owed_now(), vec![(vec![0], true); 2]);
+
+    let mut join = IncomingGrowth::from_entities("grown".into(), Vec::new());
+    join.joining = sets(&[one[0]]);
+    engine
+        .grow_memberships("clusters/a".into(), 0, vec![join])
+        .expect("the growth is taken");
+    publish_buffered(&engine);
+    assert_eq!(owed_now(), vec![(vec![0, 1], true), (vec![0], true)]);
+    engine
+        .put_artifacts("clusters/a".into(), 0, vec![artifact("put", &[one[1]])])
+        .expect("the put is taken");
+    publish_buffered(&engine);
+    let expected = vec![(vec![0, 1], true); 2];
+    assert_eq!(owed_now(), expected);
+    publish_buffered(&engine);
+    assert_eq!(owed_now(), expected, "a later publication");
+
+    drop(engine);
+    let engine = fx.open_writing();
+    publish_buffered(&engine);
+    assert_eq!(owed_now(), expected, "across a restart");
 }

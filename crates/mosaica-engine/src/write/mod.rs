@@ -372,6 +372,7 @@ impl WritePath {
                 vocabularies: Mutex::new(state.vocabularies),
                 view_declarations: Mutex::new(state.view_declarations),
                 settled_owing: Mutex::new(state.settled_owing),
+                probed_owing: Mutex::default(),
             }),
             wal: Some(state.wal),
             handle: None,

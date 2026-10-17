@@ -803,7 +803,6 @@ fn open_logged_shards(
             prefix_dir: &readers.prefix_dir,
             prefix: &readers.prefix,
             phash: &readers.phash,
-            terms: readers.dict.len() as u64,
             record_packs,
             runtime: crate::write::runtime_columns(state.attributes.snapshot()),
         },
