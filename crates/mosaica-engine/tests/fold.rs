@@ -2382,6 +2382,72 @@ fn the_dead_bytes_route_dispatches_a_fold_on_a_bundle_with_nothing_deleted() {
     );
 }
 
+/// The files a flush has written and not yet published are not dead bytes: a compaction started
+/// on them would reclaim nothing, and the flush publishes them at its next pass.
+#[test]
+fn a_flush_in_flight_does_not_make_the_dead_bytes_route_dispatch() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let threshold = 0.03;
+    let engine = engine_over_fixture(
+        tmp.path(),
+        &root,
+        config_scheduling(mosaica_engine::CompactionSchedule {
+            min_interval_secs: 0,
+            window_start_secs: None,
+            window_secs: 0,
+            window_min_segments: 0,
+            max_segments: None,
+            after_deletions: None,
+            tombstoned_rows_fraction: None,
+            dead_bytes_ratio: Some(threshold),
+        }),
+    );
+    engine.set_merge_for_test(false);
+    assert!(dead_ratio(&root, &engine) < 0.01);
+
+    engine.set_flush_paused_for_test(true);
+    let rows: Vec<UnallocatedRow> = (0..2_000)
+        .map(|i| UnallocatedRow {
+            view: "s0".to_string(),
+            join: None,
+            descriptors: vec![b"0".to_vec()],
+            x: (i % 10) as f64,
+            y: (i / 200) as f64,
+            scalars: Vec::new(),
+            terms: engine.resolve_terms(&[b"0".to_vec()]),
+            scoped: Vec::new(),
+        })
+        .collect();
+    engine
+        .ingest_rows(rows, "many".to_string(), [0u8; 32])
+        .expect("ingest is accepted");
+    let before = engine.write_executor_stats();
+    engine.request_flush();
+    wait_for("the flush to hold", || engine.flush_is_holding_for_test());
+    let held = dead_ratio(&root, &engine);
+    assert!(
+        held > threshold,
+        "the flush's files are {held:.4} of what is named, which the threshold has to sit below"
+    );
+    // A tick waits behind a running flush, so only the one that dispatched it could have read
+    // its files. A fixture compaction lands well inside this.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let now = engine.write_executor_stats();
+    assert_eq!(
+        (now.folds, now.fold_failures),
+        (before.folds, before.fold_failures),
+        "a compaction was dispatched on the files of a flush that had not published"
+    );
+
+    let flushes = engine.write_executor_stats().flushes;
+    engine.set_flush_paused_for_test(false);
+    wait_for("the flush to publish", || {
+        engine.write_executor_stats().flushes > flushes
+    });
+    assert_no_fold_within(&engine, 2);
+}
+
 /// **The segment ceiling dispatches a fold at any hour** — the route that says deferring segment
 /// growth to the next window has stopped being cheaper than folding now.
 ///

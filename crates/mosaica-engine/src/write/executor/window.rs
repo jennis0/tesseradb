@@ -507,18 +507,15 @@ impl Executor {
                 );
                 let live = Arc::clone(&self.live);
                 let room = |window: &CommitWindow<Reply<Ingested>>| {
-                    let held = window.wanted();
-                    let mut edits = held.edits.clone();
-                    for (shard, n) in &wanted.edits {
-                        *edits.entry(*shard).or_default() += n;
-                    }
+                    let mut total = window.wanted().clone();
+                    total.add(wanted.clone());
                     let items = match live.several_shards {
-                        SeveralShards::Refused => held.items + wanted.items,
+                        SeveralShards::Refused => total.items,
                         // New items open the next shard past the open one's size.
                         #[cfg(feature = "several-shard-writes")]
                         SeveralShards::Written => 0,
                     };
-                    live.window_room(&edits, items)
+                    live.window_room(&total.edits, items)
                 };
                 if !window.is_empty() && room(&window).is_err() {
                     window = self.close_and_reopen(window);
@@ -562,11 +559,7 @@ impl Executor {
         let creates = rows.iter().any(|row| row.join.is_none()) || !edits.is_empty();
         // Each item is read in its own shard; one in a shard the generation no longer holds is
         // gone.
-        let deleted = |item: ItemAt| {
-            generation
-                .shard(item.shard)
-                .is_none_or(|shard| shard.overlay.is_deleted(item.entity))
-        };
+        let deleted = |item: ItemAt| crate::unique::deleted_in(&generation, item);
         let stale = crate::unique::moved_since(&generation, &keys, unique_seq, creates)
                 || edits.iter().any(|submitted| {
                     let old = submitted.edit.item();
@@ -775,7 +768,8 @@ impl Executor {
         };
         let mut closing = ClosingWindow::new(closed, entries, started);
         // Written before anything names them; a failure leaves files nothing names.
-        let opened = match self.open_shards(&placing.opened()) {
+        let opening = placing.opened();
+        let opened = match self.open_shards(&opening) {
             Ok(opened) => opened,
             Err(e) => {
                 tracing::error!(
@@ -783,11 +777,13 @@ impl Executor {
                     "ALARM: a shard this window opens could not be written; nothing of the \
                      window is in force"
                 );
-                let detail = e.to_string();
-                closing.fail_all(&self.health, || {
-                    ExecError::Wal(mosaica_lifecycle::wal::WalError::Io(std::io::Error::other(
-                        detail.clone(),
-                    )))
+                let shards: Vec<String> = opening.iter().map(ToString::to_string).collect();
+                let detail = format!(
+                    "the files of the shards this window opens ({}) could not be written ({e})",
+                    shards.join(", ")
+                );
+                closing.fail_all(&self.health, || ExecError::Store {
+                    detail: detail.clone(),
                 });
                 return;
             }
@@ -842,7 +838,7 @@ impl Executor {
         }
 
         // A window carrying no join row reads no artifact.
-        let restating = joining_entities(closing.entries());
+        let restating = joining_items(closing.entries());
         let (prepared, joined_per_entry) = if restating.is_empty() {
             (
                 growth_records(closing.entries(), None),
@@ -936,7 +932,7 @@ impl Executor {
         // Durable, not yet in force. See `pause_point`.
         self.pause_point(PauseSiteArg::AfterFsync);
         let sealed = placing.commit(&self.live);
-        // A sealed shard is owed one closing compaction.
+        // A sealed shard gets one closing compaction.
         self.compactions.sealed(sealed);
         if let Some(opened) = &opened {
             self.adopt_opened(opened);
@@ -1138,7 +1134,13 @@ impl Executor {
             .into_iter()
             .map(|id| {
                 let buffer = (*generation.shard_of(id).buffer).clone();
-                (id, ShardWrites::over(buffer))
+                (
+                    id,
+                    ShardWrites {
+                        buffer,
+                        ..Default::default()
+                    },
+                )
             })
             .collect();
         mark = self.health.lap(WriteStage::ApplyBufferClone, mark);
@@ -1239,10 +1241,7 @@ impl Executor {
             .collect();
         mark = self.health.lap(WriteStage::ApplyRows, mark);
 
-        let overlay_versions: std::collections::BTreeMap<ShardId, u64> = touched
-            .keys()
-            .map(|id| (*id, generation.shard_of(*id).overlay_version + 1))
-            .collect();
+        let ids: Vec<ShardId> = touched.keys().copied().collect();
         let edited = !edited_live.is_empty();
         let change = |g: &mut crate::GenerationParts, shards: &mut crate::ShardsParts| {
             g.vocabularies = Arc::new(vocabularies);
@@ -1253,8 +1252,8 @@ impl Executor {
             if edited {
                 g.edit_epoch = generation.edit_epoch + 1;
             }
-            for (id, version) in overlay_versions {
-                shards.of(id).overlay_version = version;
+            for id in ids {
+                shards.of(id).overlay_version += 1;
             }
             for (id, edited_live) in edited_live {
                 shards.of(id).edited_live = Arc::new(edited_live);
@@ -1282,13 +1281,14 @@ impl Executor {
         // Published here, and everywhere else buffer occupancy changes.
         self.health
             .buffered_items
-            .store(buffered_in(&next), Ordering::SeqCst);
+            .store(next.buffered(), Ordering::SeqCst);
         self.publish(next, started);
         self.health.lap(WriteStage::ApplySwap, mark);
     }
 }
 
 /// What a window writes in one shard before its publication.
+#[derive(Default)]
 struct ShardWrites {
     buffer: mosaica_lifecycle::IngestBuffer,
     /// Every entity the window buffered a row for.
@@ -1299,17 +1299,4 @@ struct ShardWrites {
     newly_denied: Vec<EntityId>,
     /// Each edit's `(number, new entity)`.
     pairs: Vec<(u32, u32)>,
-}
-
-impl ShardWrites {
-    fn over(buffer: mosaica_lifecycle::IngestBuffer) -> ShardWrites {
-        ShardWrites {
-            buffer,
-            inserted: Vec::new(),
-            overlay: None,
-            deleted: Vec::new(),
-            newly_denied: Vec::new(),
-            pairs: Vec::new(),
-        }
-    }
 }

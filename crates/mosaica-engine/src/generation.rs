@@ -506,6 +506,11 @@ impl Generation {
         self.shards.iter().map(Arc::as_ref)
     }
 
+    /// The rows every shard's buffer holds.
+    pub(crate) fn buffered(&self) -> usize {
+        self.shards().map(|shard| shard.buffer.len()).sum()
+    }
+
     /// The first shard's filter columns, which admit a filter and route a field's reads.
     /// Placement, uniqueness and filterability are declared, so the same in every shard; whether
     /// a column holds a value layer is the first shard's data.

@@ -184,14 +184,19 @@ impl FilterColumns {
         &self,
         prefix_dir: &Path,
         layout: mosaica_store::ShardLayout<'_>,
-        columns: &[(String, String, mosaica_types::view::ViewIncarnation)],
+        columns: &[mosaica_store::manifest::ScopedColumn],
         scoped: &[mosaica_store::manifest::ScopedScalar],
         vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
         mmap: bool,
         based: bool,
     ) -> Result<FilterColumns, ComposeError> {
         let mut next = self.successor();
-        for (column, view, incarnation) in columns {
+        for mosaica_store::manifest::ScopedColumn {
+            column,
+            view,
+            incarnation,
+        } in columns
+        {
             let Some(family) = scoped.iter().find(|f| f.name == *column) else {
                 return Err(ComposeError::UndeclaredScopedFamily {
                     column: column.clone(),

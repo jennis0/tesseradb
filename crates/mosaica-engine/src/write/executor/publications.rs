@@ -738,12 +738,7 @@ impl Executor {
             tracing::warn!("discarding a completed merge that no longer rebases");
             return;
         }
-        write_deny_state(
-            &mut manifest,
-            shard_overlays(&live),
-            &live.layer_spaces,
-            |space, deleted| self.live.owed_deletions(space, deleted),
-        );
+        self.write_deny_state_of(&mut manifest, &live);
         write_vocabulary_extensions(
             &mut manifest,
             &live.vocabularies,
@@ -924,6 +919,10 @@ impl Executor {
             return;
         }
         let Some(shard) = live.shard(completed.shard) else {
+            tracing::warn!(
+                shard = %completed.shard,
+                "discarding a completed coalesce for a shard this bundle no longer carries"
+            );
             return;
         };
         let Some(partition_data) = live.bundle.partitions.get(&completed.partition) else {
@@ -1018,9 +1017,9 @@ impl Executor {
                 .iter()
                 .map(|e| crate::filter::record_extent_paths(&prefix_dir, e))
                 .collect();
-            // The columns this shard holds no base of, which the schema owes no base for — the
-            // list `Engine::open` reads, so this stack and the one a restart opens are the same
-            // stack.
+            // The columns this shard has no base of, for which the schema requires none.
+            // `Engine::open` reads the same list, so this stack and the one a restart opens are
+            // the same.
             let unfolded = record.unbased(&self.live.with_attributes(|a| a.entity_names()));
             match crate::filter::open_record_stack(
                 &prefix_dir,
@@ -1058,12 +1057,7 @@ impl Executor {
         };
         // Complete current state, serialised fresh from the overlay this publication carries, the
         // same rule every other manifest write follows.
-        write_deny_state(
-            &mut manifest,
-            shard_overlays(&live),
-            &live.layer_spaces,
-            |space, deleted| self.live.owed_deletions(space, deleted),
-        );
+        self.write_deny_state_of(&mut manifest, &live);
         write_vocabulary_extensions(
             &mut manifest,
             &live.vocabularies,
@@ -1571,6 +1565,14 @@ impl Executor {
                 }
             }
         });
+        // Test hook; always false otherwise. The tick goes on once this flush holds, so the rest
+        // of the tick runs beside the files it wrote.
+        while self.deps.switches.flush_paused.load(Ordering::SeqCst)
+            && self.flush.in_flight()
+            && !self.health.flush_holding.load(Ordering::SeqCst)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         true
     }
 
@@ -1827,12 +1829,7 @@ impl Executor {
         let mut written: Vec<(std::path::PathBuf, PackedMembers)> = Vec::new();
         for (partition, partition_data) in &live.bundle.partitions {
             let mut manifest = partition_data.side_manifest();
-            write_deny_state(
-                &mut manifest,
-                shard_overlays(&live),
-                &live.layer_spaces,
-                |space, deleted| self.live.owed_deletions(space, deleted),
-            );
+            self.write_deny_state_of(&mut manifest, &live);
             // Record and member packs are written before the manifest that names them, which is
             // the whole of their durability contract: a manifest naming a missing pack refuses at
             // open, so the file has to be durable first. A failure here abandons the publication
@@ -2231,58 +2228,42 @@ impl Executor {
         // The new columns first, then the extents that land on them. A flush of a view a family
         // had no column for wrote its base in the same unit as its extent, and the extent
         // composes onto a column, so the column has to exist before the composition below can
-        // find it. Empty in every steady-state flush, where the base has been on disc since the
-        // build.
-        // Stamped with the incarnation of the view the pair names, which is what places the base
-        // the flush just wrote.
-        let opening: Vec<(String, String, mosaica_types::view::ViewIncarnation)> = completed
+        // find it. Each is stamped with the incarnation of the view it names, which places the
+        // base the flush just wrote. Every other shard takes a column holding nothing, so a
+        // filter naming it is admitted and answered there as it is here. Empty in every
+        // steady-state flush, where the base has been on disc since the build.
+        let opening: Vec<mosaica_store::manifest::ScopedColumn> = completed
             .scoped_columns
             .iter()
-            .map(|(column, view)| (column.clone(), view.clone(), completed.scoped_incarnation))
+            .map(|(column, view)| mosaica_store::manifest::ScopedColumn {
+                column: column.clone(),
+                view: view.clone(),
+                incarnation: completed.scoped_incarnation,
+            })
             .collect();
-        let live_columns = if opening.is_empty() {
-            Arc::clone(&shard.filter_columns)
-        } else {
-            match shard.filter_columns.with_scoped_columns(
-                &record_dir,
-                ShardLayout::new(&completed.partition, completed.shard),
-                &opening,
-                &live.bundle.manifest.scoped_scalars(),
-                &live.bundle.manifest.vocabularies,
-                true,
-                true,
-            ) {
-                Ok(columns) => Arc::new(columns),
-                Err(e) => {
-                    discard(&format!(
-                        "it wrote a group-scoped column this process cannot open ({e}), and a \
-                         manifest must not name a column no request could read"
-                    ));
-                    return false;
-                }
-            }
-        };
-        // Every other shard holding no column of the view takes one holding nothing, so a filter
-        // naming it is admitted and answered there as it is here.
+        let mut live_columns = Arc::clone(&shard.filter_columns);
         let mut unbased_columns = Vec::new();
-        let others = live.shards().filter(|other| other.id() != shard.id());
-        for other in others.take_while(|_| !opening.is_empty()) {
-            match other.filter_columns.with_scoped_columns(
-                &record_dir,
-                ShardLayout::new(&completed.partition, other.id()),
-                &opening,
-                &live.bundle.manifest.scoped_scalars(),
-                &live.bundle.manifest.vocabularies,
-                true,
-                false,
-            ) {
-                Ok(columns) => unbased_columns.push((other.id(), Arc::new(columns))),
-                Err(e) => {
-                    discard(&format!(
-                        "it wrote a group-scoped column this process cannot open ({e}), and a \
-                         manifest must not name a column no request could read"
-                    ));
-                    return false;
+        if !opening.is_empty() {
+            for other in live.shards() {
+                let based = other.id() == shard.id();
+                match other.filter_columns.with_scoped_columns(
+                    &record_dir,
+                    ShardLayout::new(&completed.partition, other.id()),
+                    &opening,
+                    &live.bundle.manifest.scoped_scalars(),
+                    &live.bundle.manifest.vocabularies,
+                    true,
+                    based,
+                ) {
+                    Ok(columns) if based => live_columns = Arc::new(columns),
+                    Ok(columns) => unbased_columns.push((other.id(), Arc::new(columns))),
+                    Err(e) => {
+                        discard(&format!(
+                            "it wrote a group-scoped column this process cannot open ({e}), and \
+                             a manifest must not name a column no request could read"
+                        ));
+                        return false;
+                    }
                 }
             }
         }
@@ -2324,29 +2305,24 @@ impl Executor {
                 return false;
             }
         };
+        manifest.partition.files.extend(completed.files);
+        if let Some(extent) = completed.dict_extent {
+            manifest.partition.dict_extents.push(extent);
+        }
+        let Some(record) = manifest.shard_mut(completed.shard) else {
+            discard("its shard is not in the live side-manifest");
+            return false;
+        };
         // The group-scoped columns this flush gave a view its first of. Carried forward and
         // appended to, never restated: the list is what a restart recovers
         // `scoped_scalars[..].views` from, and a render-only family writes no extent for the
         // derivation to find. `manifest` is the live side-manifest cloned, so the earlier pairs
-        // are already here.
-        for (column, view) in &completed.scoped_columns {
-            let entry = mosaica_store::manifest::ScopedColumn {
-                column: column.clone(),
-                view: view.clone(),
-                // The incarnation of the view the entry names. The list is carried forward
-                // indefinitely, so an entry outlives the drop that orphaned its column; the stamp
-                // is what keeps a key created again from publishing it as its own.
-                incarnation: completed.scoped_incarnation,
-            };
-            if let Some(record) = manifest.shard_mut(completed.shard) {
-                if !record.scoped_columns.contains(&entry) {
-                    record.scoped_columns.push(entry);
-                }
+        // are already here. The list outlives the drop that orphaned a column, so each entry's
+        // incarnation keeps a key created again from publishing it as its own.
+        for entry in opening {
+            if !record.scoped_columns.contains(&entry) {
+                record.scoped_columns.push(entry);
             }
-        }
-        manifest.partition.files.extend(completed.files);
-        if let Some(extent) = completed.dict_extent {
-            manifest.partition.dict_extents.push(extent);
         }
         // The watermark advances at every flush publication and never regresses: a publication
         // coordinate, not an entity count.
@@ -2361,10 +2337,6 @@ impl Executor {
         // A values-only publication has no segment and so no entity high-water of its own; it
         // still advances the watermark, since it publishes extents a resident fragment must be
         // rebuilt past.
-        let Some(record) = manifest.shard_mut(completed.shard) else {
-            discard("its shard is not in the live side-manifest");
-            return false;
-        };
         record.watermark = completed
             .segment
             .as_ref()
@@ -2430,12 +2402,7 @@ impl Executor {
         record
             .text_extents
             .extend(completed.text_extents.iter().cloned());
-        write_deny_state(
-            &mut manifest,
-            shard_overlays(&live),
-            &live.layer_spaces,
-            |space, deleted| self.live.owed_deletions(space, deleted),
-        );
+        self.write_deny_state_of(&mut manifest, &live);
         n = self
             .health
             .flush_lap(crate::flush::FlushStage::ManifestDenyState, n);
@@ -2571,14 +2538,6 @@ impl Executor {
             // entity outright would lose a row that is in no segment and no buffer.
             buffer.remove_in_view(*entity, &completed.view);
         }
-        // The gauge follows the buffer here too. A flush is the other place occupancy changes: if
-        // it were not stated here, a node that flushed and then took no ingest would report a
-        // backlog it had already written, and `/control/ingest`'s occupancy bound is measured
-        // against this figure.
-        let buffered = buffered_in(&live) - shard.buffer.len() + buffer.len();
-        self.health
-            .buffered_items
-            .store(buffered, Ordering::SeqCst);
         *mark = self
             .health
             .flush_lap(crate::flush::FlushStage::BufferRebase, *mark);
@@ -2743,6 +2702,13 @@ impl Executor {
             s.edited = edited;
             s.edited_live = edited_live;
         }));
+        // The gauge follows the buffer here too. A flush is the other place occupancy changes: if
+        // it were not stated here, a node that flushed and then took no ingest would report a
+        // backlog it had already written, and `/control/ingest`'s occupancy bound is measured
+        // against this figure.
+        self.health
+            .buffered_items
+            .store(next.buffered(), Ordering::SeqCst);
         // Armed before the swap, and that ordering is the mechanism. A request landing between
         // the swap and the pool task's first insert must find the flag set, or it takes the cost
         // of a full rebuild, where the whole design is that it be shed with a 429 for the bounded

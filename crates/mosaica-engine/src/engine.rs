@@ -1375,11 +1375,7 @@ impl Engine {
         engine.shapes.clear_staged();
         // The rows the log held and no flush wrote, which the occupancy bound and the row trigger
         // count from the first request, not from the first write.
-        let buffered = engine
-            .generation()
-            .shards()
-            .map(|shard| shard.buffer.len())
-            .sum();
+        let buffered = engine.generation().buffered();
         engine
             .write
             .health()

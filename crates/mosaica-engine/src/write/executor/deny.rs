@@ -220,11 +220,15 @@ impl Executor {
                     continue;
                 }
             };
-            let changed = shards.entry(id).or_insert_with(|| ShardChanges {
-                overlay: (*generation.shard_of(id).overlay).clone(),
-                newly_denied: Vec::new(),
-                deleted: Vec::new(),
-                unsuppressed: false,
+            let changed = shards.entry(id).or_insert_with(|| {
+                let shard = generation.shard_of(id);
+                ShardChanges {
+                    overlay: Arc::clone(&shard.overlay),
+                    buffer: Arc::clone(&shard.buffer),
+                    newly_denied: Vec::new(),
+                    deleted: Vec::new(),
+                    unsuppressed: false,
+                }
             });
             match op {
                 ChangeOp::Delete => {
@@ -234,7 +238,7 @@ impl Executor {
                 ChangeOp::Suppress => changed.newly_denied.push(entity),
                 ChangeOp::Unsuppress => changed.unsuppressed = true,
             }
-            changed.overlay.apply(entity, op);
+            Arc::make_mut(&mut changed.overlay).apply(entity, op);
         }
         let layer_spaces = Arc::new(spaces);
         let deny_epoch = generation.deny_epoch + 1;
@@ -272,50 +276,39 @@ impl Executor {
         // unique entries go with its rows. Its edited-item pair stays until the fold that removes
         // it, which reads the pair to tell an entity an edit made from an item's number.
         let mut unique_live: Option<crate::unique::UniqueLive> = None;
-        let buffers: Vec<Arc<IngestBuffer>> = shards
-            .iter()
-            .map(|(id, changed)| {
-                let shard = generation.shard_of(*id);
-                if !shard.buffer.holds_any(&changed.deleted) {
-                    return Arc::clone(&shard.buffer);
-                }
-                let mut buffer = (*shard.buffer).clone();
-                for entity in &changed.deleted {
-                    buffer.remove(*entity);
-                }
-                unique_live
-                    .get_or_insert_with(|| (*generation.unique_live).clone())
-                    .remove_entities(
-                        *id,
-                        &changed
-                            .deleted
-                            .iter()
-                            .filter_map(|e| u32::try_from(e.raw()).ok())
-                            .collect(),
-                    );
-                Arc::new(buffer)
-            })
-            .collect();
+        for (id, changed) in shards.iter_mut() {
+            if !changed.buffer.holds_any(&changed.deleted) {
+                continue;
+            }
+            let buffer = Arc::make_mut(&mut changed.buffer);
+            for entity in &changed.deleted {
+                buffer.remove(*entity);
+            }
+            unique_live
+                .get_or_insert_with(|| (*generation.unique_live).clone())
+                .remove_entities(
+                    *id,
+                    &changed
+                        .deleted
+                        .iter()
+                        .filter_map(|e| u32::try_from(e.raw()).ok())
+                        .collect(),
+                );
+        }
 
         // A window of deletes and suppressions only grows a shard's mask; an unsuppress re-derives
         // it, since subtracting a row would re-expose a still-deleted entity.
-        let overlays: Vec<Arc<Overlay>> = shards
-            .values_mut()
-            .map(|changed| Arc::new(std::mem::take(&mut changed.overlay)))
-            .collect();
         let swaps = shards
             .iter()
-            .zip(&buffers)
-            .zip(&overlays)
-            .map(|(((id, changed), buffer), overlay)| {
+            .map(|(id, changed)| {
                 let buffer = crate::BufferSwap {
-                    buffer: Arc::clone(buffer),
+                    buffer: Arc::clone(&changed.buffer),
                     inserted: &[],
                 };
                 let swap = match changed.unsuppressed {
                     true => crate::ShardSwap::Buffer(buffer),
                     false => crate::ShardSwap::Denies(crate::DenySwap {
-                        overlay: Arc::clone(overlay),
+                        overlay: Arc::clone(&changed.overlay),
                         newly_denied: &changed.newly_denied,
                         buffer,
                     }),
@@ -329,25 +322,26 @@ impl Executor {
             if let Some(unique_live) = unique_live {
                 g.unique_live = Arc::new(unique_live);
             }
-            for ((id, changed), overlay) in shards.iter().zip(&overlays) {
+            for (id, changed) in &shards {
                 let s = parts.of(*id);
                 s.overlay_version += 1;
                 if changed.unsuppressed {
-                    s.overlay = Arc::clone(overlay);
+                    s.overlay = Arc::clone(&changed.overlay);
                 }
             }
         });
         self.health
             .buffered_items
-            .store(buffered_in(&next), Ordering::SeqCst);
+            .store(next.buffered(), Ordering::SeqCst);
         self.publish(next, started)
     }
 }
 
-/// One shard's part of a deny window: its overlay with the window's changes applied, and what
-/// they deny.
+/// One shard's part of a deny window: its overlay with the window's changes applied, its buffer
+/// without the deleted entities' rows, and what the changes deny.
 struct ShardChanges {
-    overlay: Overlay,
+    overlay: Arc<Overlay>,
+    buffer: Arc<IngestBuffer>,
     newly_denied: Vec<EntityId>,
     deleted: Vec<EntityId>,
     unsuppressed: bool,

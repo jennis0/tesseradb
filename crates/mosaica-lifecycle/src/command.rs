@@ -526,6 +526,9 @@ pub enum ExecError {
     /// command's names are stale by `mosaica_engine::Stamp`'s rule. Nothing took effect, and the
     /// names are resolved again.
     Stale,
+    /// A store file the command needs could not be written or opened → HTTP 500, no effect. The
+    /// detail names the files, so it is logged and not sent.
+    Store { detail: String },
 }
 
 impl std::fmt::Display for ExecError {
@@ -555,6 +558,7 @@ impl std::fmt::Display for ExecError {
                 f,
                 "the items this batch names changed while it was checked; send it again"
             ),
+            ExecError::Store { detail } => write!(f, "store failure: {detail}"),
         }
     }
 }

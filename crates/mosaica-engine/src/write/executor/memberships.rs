@@ -26,7 +26,7 @@ pub(super) struct HeldMembers<'a> {
 
 /// The items of a window's join rows and of the items it places in artifacts in place, by shard:
 /// the only rows that can restate a membership.
-pub(super) fn joining_entities<W>(
+pub(super) fn joining_items<W>(
     closed: &[mosaica_lifecycle::ClosedEntry<W>],
 ) -> mosaica_lifecycle::ShardSets {
     mosaica_lifecycle::ShardSets::of_items(closed.iter().flat_map(|entry| {

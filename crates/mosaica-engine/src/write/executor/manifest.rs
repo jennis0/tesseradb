@@ -126,7 +126,7 @@ pub(super) fn shard_overlays(generation: &Generation) -> impl Iterator<Item = (S
 /// Replace a manifest's deny fields, each named shard's and each layer space's, with the overlays'
 /// live state, restated fresh at every write as two separate sets and never their union:
 /// publishing the union would make every deletion look retirable by an unsuppress. Each space's
-/// deletions are owed as `owed` answers for the space.
+/// `owed` list is what `owed` answers for the space's deletions.
 pub(super) fn write_deny_state<'a>(
     manifest: &mut SegmentsManifest,
     overlays: impl IntoIterator<Item = (ShardId, &'a Overlay)>,
@@ -361,9 +361,10 @@ impl Executor {
     ) -> Result<mosaica_store::manifest::PublishedRefs, ManifestCommitRefused> {
         self.write_live_state(next, fold.is_some());
         if let Some(fold) = &fold {
-            if let Some(record) = next.shard_mut(fold.shard) {
-                record.held_entities.push(fold.freed.clone());
-            }
+            next.shard_mut(fold.shard)
+                .expect("the fold's shard is in the manifest it publishes")
+                .held_entities
+                .push(fold.freed.clone());
         }
         let fold_written: DerivedByShard;
         let (derived, pending) = match &fold {
@@ -478,6 +479,21 @@ impl Executor {
             }
         }
         Ok(refs)
+    }
+
+    /// [`write_deny_state`] over `generation`'s overlays and spaces, with each space's deletions
+    /// listed against the shards whose compaction has to remove them.
+    pub(super) fn write_deny_state_of(
+        &self,
+        manifest: &mut SegmentsManifest,
+        generation: &Generation,
+    ) {
+        write_deny_state(
+            manifest,
+            shard_overlays(generation),
+            &generation.layer_spaces,
+            |space, deleted| self.live.owed_deletions(space, deleted),
+        );
     }
 
     /// Restate the live registry, roster, shard size and runtime declarations into a side-manifest

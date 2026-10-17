@@ -320,12 +320,7 @@ impl Executor {
             .map(|shard| (shard.id(), &*shard.buffer));
         let arrived: Vec<(ItemAt, UniqueKey, WalScalar)> = crate::unique::buffered_items(buffers)
             .into_iter()
-            .filter(|(item, _)| {
-                !generation
-                    .shard_of(item.shard)
-                    .overlay
-                    .is_deleted(item.entity)
-            })
+            .filter(|(item, _)| !crate::unique::deleted_in(&generation, *item))
             .filter_map(|(item, scalars)| {
                 let value = scalars.get(at)?;
                 let key = mosaica_store::unique::key_of(ty, value)?;
@@ -366,11 +361,7 @@ impl Executor {
         generation: &Generation,
         arrived: &[(ItemAt, UniqueKey, WalScalar)],
     ) -> Result<Option<(u64, Vec<String>)>, String> {
-        let deleted = |item: &ItemAt| {
-            generation
-                .shard(item.shard)
-                .is_none_or(|shard| shard.overlay.is_deleted(item.entity))
-        };
+        let deleted = |item: &ItemAt| crate::unique::deleted_in(generation, *item);
         let pending = self
             .unique_declarations
             .current
@@ -521,20 +512,24 @@ impl Executor {
     }
 
     /// Publish the empty index of a unique column declared new at a running service.
-    pub(super) fn publish_new_unique_index(&mut self, attribute: &str, started: std::time::Instant) {
+    pub(super) fn publish_new_unique_index(
+        &mut self,
+        attribute: &str,
+        started: std::time::Instant,
+    ) {
         let generation = self.generation.load_full();
-        let index = DeclaredIndex {
-            base: Vec::new(),
-            live: Vec::new(),
-            files: Vec::new(),
-        };
-        self.publish_unique_change(&generation, attribute, Some(index), started);
+        self.publish_unique_change(
+            &generation,
+            attribute,
+            Some(DeclaredIndex::default()),
+            started,
+        );
     }
 
     /// Publish a column's index added (`Some`) or removed (`None`) in every shard: a
     /// side-manifest, then the generation. The change is already durable in the log, so a
-    /// side-manifest that cannot be written leaves the change in force and owed to the next
-    /// publication.
+    /// side-manifest that cannot be written leaves the change in force, and the next publication
+    /// writes it.
     fn publish_unique_change(
         &mut self,
         generation: &Arc<Generation>,
@@ -564,12 +559,7 @@ impl Executor {
         if let Some(index) = index {
             manifest.partition.files.extend(index.files);
         }
-        write_deny_state(
-            &mut manifest,
-            shard_overlays(generation),
-            &generation.layer_spaces,
-            |space, deleted| self.live.owed_deletions(space, deleted),
-        );
+        self.write_deny_state_of(&mut manifest, generation);
         write_vocabulary_extensions(
             &mut manifest,
             &generation.vocabularies,
@@ -681,6 +671,7 @@ impl Executor {
 }
 
 /// A declaration's runs, as its log record names them, and each run's file digest.
+#[derive(Default)]
 struct DeclaredIndex {
     base: Vec<mosaica_lifecycle::wal::DeclaredRun>,
     live: Vec<mosaica_lifecycle::wal::DeclaredRun>,

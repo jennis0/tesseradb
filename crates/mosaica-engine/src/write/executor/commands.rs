@@ -117,8 +117,8 @@ pub(super) fn growth_receipt(
             // The set this row moves, which is the membership on a row with no rank and the
             // content's generating set on a row with one, each shard's part counted against that
             // shard's slice. A rank naming no content refused the batch in `prepare_grow` above,
-            // so the arm answering nothing for one is unreachable and does not panic on a thread
-            // that owes an acknowledgement.
+            // so the `unranked` branch answering nothing is unreachable, and does not panic on a
+            // thread that must acknowledge.
             //
             // `left` is counted against the set the joins have already entered, which is the
             // order the page is applied in: an entity this page both joins and leaves is one this
@@ -134,33 +134,36 @@ pub(super) fn growth_receipt(
                 .map(|(shard, _)| shard)
                 .collect();
             let nothing = croaring::Bitmap::new();
-            let (joined, left) = shards
-                .into_iter()
-                .filter(|_| !unranked)
-                .map(|shard| {
-                    let slice = store
-                        .slice(shard)
-                        .and_then(|slice| slice.get(layer, level, ordinal));
-                    let held = |other: &croaring::Bitmap| match (slice, join.rank) {
-                        (None, _) => 0,
-                        (Some(slice), None) => slice.members.and_cardinality(other),
-                        (Some(slice), Some(rank)) => slice
-                            .contents
-                            .get(rank as usize)
-                            .map_or(0, |content| content.generated_from.and_cardinality(other)),
-                    };
-                    let joining = join.joining.get(shard).unwrap_or(&nothing);
-                    let leaving = join.leaving.get(shard).unwrap_or(&nothing);
-                    let joined = joining.cardinality() - held(joining);
-                    let left = if leaving.is_empty() {
-                        0
-                    } else {
-                        let both = leaving.and(joining);
-                        held(leaving) + both.cardinality() - held(&both)
-                    };
-                    (joined, left)
-                })
-                .fold((0, 0), |(joined, left), (j, l)| (joined + j, left + l));
+            let (joined, left) = if unranked {
+                (0, 0)
+            } else {
+                shards
+                    .into_iter()
+                    .map(|shard| {
+                        let slice = store
+                            .slice(shard)
+                            .and_then(|slice| slice.get(layer, level, ordinal));
+                        let held = |other: &croaring::Bitmap| match (slice, join.rank) {
+                            (None, _) => 0,
+                            (Some(slice), None) => slice.members.and_cardinality(other),
+                            (Some(slice), Some(rank)) => slice
+                                .contents
+                                .get(rank as usize)
+                                .map_or(0, |content| content.generated_from.and_cardinality(other)),
+                        };
+                        let joining = join.joining.get(shard).unwrap_or(&nothing);
+                        let leaving = join.leaving.get(shard).unwrap_or(&nothing);
+                        let joined = joining.cardinality() - held(joining);
+                        let left = if leaving.is_empty() {
+                            0
+                        } else {
+                            let both = leaving.and(joining);
+                            held(leaving) + both.cardinality() - held(&both)
+                        };
+                        (joined, left)
+                    })
+                    .fold((0, 0), |(joined, left), (j, l)| (joined + j, left + l))
+            };
             mosaica_lifecycle::MembershipGrown {
                 entity: record.entity,
                 joined,
@@ -1442,7 +1445,7 @@ impl Executor {
         });
         self.health
             .buffered_items
-            .store(buffered_in(&next), Ordering::SeqCst);
+            .store(next.buffered(), Ordering::SeqCst);
         self.publish(next, started);
     }
 }

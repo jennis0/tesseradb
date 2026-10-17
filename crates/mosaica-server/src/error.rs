@@ -404,6 +404,17 @@ pub fn map_accept_error(e: mosaica_engine::AcceptError) -> ApiError {
         AcceptError::Exec(ExecError::UniqueTaken { detail }) => ApiError::Conflict(detail),
         // Reached only where the handler's last resolution was stale too.
         AcceptError::Exec(e @ ExecError::Stale) => ApiError::Conflict(e.to_string()),
+        AcceptError::Exec(e @ ExecError::Store { .. }) => {
+            tracing::error!(
+                detail = %e,
+                "the write executor could not write a file; answering fail-closed"
+            );
+            ApiError::FailClosed(
+                "a file this write needs could not be written, so the batch was not applied; send \
+                 it again"
+                    .to_string(),
+            )
+        }
         // The detail names rows by position, values as sent and items by `mosaica_id`.
         AcceptError::Conflict(detail) => ApiError::Conflict(detail),
         AcceptError::Contract(detail) => ApiError::Contract(detail),

@@ -73,11 +73,6 @@ pub(super) struct Executor {
     pub(super) faults: Option<Arc<mosaica_lifecycle::faults::FaultSwitchboard>>,
 }
 
-/// The rows every shard's buffer holds.
-pub(super) fn buffered_in(generation: &Generation) -> usize {
-    generation.shards().map(|shard| shard.buffer.len()).sum()
-}
-
 /// Why a tick fired: `due` is the period or the buffered-row count, `period_due` the period alone.
 struct TickDue {
     due: bool,
@@ -221,7 +216,7 @@ impl Executor {
         self.health.mark_tick(self.last_tick);
         self.health.ticks.fetch_add(1, Ordering::Relaxed);
         // No deletion filter needed: the buffer never holds rows of a deleted entity.
-        let flushable = buffered_in(generation);
+        let flushable = generation.buffered();
         self.health
             .flushable_items
             .store(flushable, Ordering::SeqCst);
@@ -287,6 +282,10 @@ impl Executor {
         plans: Vec<(String, crate::flush::FlushPlan)>,
         gated: bool,
     ) -> bool {
+        // Before the flush, so the dead-bytes walk reads no file of a flush that has not
+        // published: no other tick walks while a flush runs. And before the two it suspends, so
+        // a tick that starts a compaction does not also start a merge that the flip would orphan.
+        self.dispatch_fold(generation);
         let mut owed = false;
         if plans.is_empty() {
             self.health.deferred_plans.store(false, Ordering::SeqCst);
@@ -299,9 +298,6 @@ impl Executor {
         } else if !self.dispatch_flushes(generation, plans) {
             self.health.fail_publication_cycle();
         }
-        // Dispatched before the two it suspends, so a tick that starts a fold does not also start
-        // a merge that the flip would orphan.
-        self.dispatch_fold(generation);
         self.dispatch_coalesce(generation);
         self.dispatch_merge(generation);
         owed
@@ -444,12 +440,12 @@ impl Executor {
         self.publish_arc(Arc::clone(&next), started);
         // Pruned before the refresh starts, so its snapshot holds what retention keeps and no more.
         self.row_projection_cache.prune_superseded(&next);
+        self.prune_region_cache(&next);
 
         // After the swap, so a missing projection after a fold is an ordinary cache miss, and
         // nothing is lost if the swap never lands. The identities this swap superseded keep their
         // fragments until the next rotation: a request still on the previous generation reads
         // them, and may be writing one.
-        self.prune_region_cache(&next);
         if rotation.is_some() {
             self.deps
                 .figures

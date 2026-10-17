@@ -407,7 +407,7 @@ pub(crate) fn declared_runs(
 }
 
 /// Whether `generation` has deleted `item`, or holds no shard of it.
-fn deleted_in(generation: &Generation, item: ItemAt) -> bool {
+pub(crate) fn deleted_in(generation: &Generation, item: ItemAt) -> bool {
     generation
         .shard(item.shard)
         .is_none_or(|shard| shard.overlay.is_deleted(item.entity))
