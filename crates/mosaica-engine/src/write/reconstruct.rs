@@ -453,6 +453,16 @@ impl WritePath {
         let (mut overlay, mut buffers, resolver) = replay.finish();
         // A dropped layer's denies leave with it, though the log and the manifest still hold them.
         overlay.spaces.retain(|space, _| registry.in_space(*space).is_some());
+        // A deleted artifact's key names nothing, though its record is held.
+        for (space, deny) in &overlay.spaces {
+            for entity in deny.deleted_set().iter() {
+                if let Some((name, level, ordinal)) =
+                    registry.locate_in(*space, EntityId::new(u64::from(entity)))
+                {
+                    artifacts.release_key(name, level, ordinal);
+                }
+            }
+        }
 
         // A shard a record names is one the manifests or the log's openings hold.
         let named_shards = wal_high_water

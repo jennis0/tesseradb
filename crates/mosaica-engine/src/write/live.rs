@@ -511,6 +511,22 @@ impl LiveState {
         moved
     }
 
+    /// Free the key of each artifact `deleted` names, where the key still names it: a
+    /// publication under the key then creates a new artifact, and a growth or fill by it is
+    /// refused. The records stay until a compaction removes them.
+    pub(in crate::write) fn release_artifact_keys(&self, deleted: &[(LayerSpace, EntityId)]) {
+        if deleted.is_empty() {
+            return;
+        }
+        self.with_publication_state(|registry, store| {
+            for (space, entity) in deleted {
+                if let Some((name, level, ordinal)) = registry.locate_in(*space, *entity) {
+                    store.release_key(name, level, ordinal);
+                }
+            }
+        });
+    }
+
     /// Where an entity of `space` sits: `(level, ordinal)`. Addressing only. See
     /// [`LayerRegistry::locate_in`].
     pub(crate) fn locate_artifact(

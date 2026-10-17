@@ -106,9 +106,11 @@ impl Executor {
         });
     }
 
-    /// One fsync for the whole window, then apply, then one swap, then ack. On a failed append or
-    /// fsync, every [`ChangeOp::Delete`] and [`ChangeOp::Suppress`] in the window is applied anyway
-    /// and every waiter gets an error; [`ChangeOp::Unsuppress`] applies nothing. The overlay is not
+    /// One fsync for the whole window, then apply, then one swap, then ack. A deleted artifact's
+    /// key is free from the acknowledgement. On a failed append or fsync, every
+    /// [`ChangeOp::Delete`] and [`ChangeOp::Suppress`] in the window is applied anyway and every
+    /// waiter gets an error; [`ChangeOp::Unsuppress`] applies nothing, and no key is freed, since
+    /// a restart without the record brings the artifact back under its key. The overlay is not
     /// marked behind-live for these: they have no durable record behind them, so publishing them
     /// into a manifest would make a deny the caller was told failed permanent.
     pub(super) fn commit_denies(&mut self, entries: Vec<DenyEntry>) {
@@ -152,8 +154,16 @@ impl Executor {
             .iter()
             .flat_map(|e| e.changes.iter().copied())
             .collect();
+        let deleted_artifacts: Vec<(LayerSpace, EntityId)> = applied
+            .iter()
+            .filter_map(|change| match change {
+                (Target::Artifact(space, entity), ChangeOp::Delete) => Some((*space, *entity)),
+                _ => None,
+            })
+            .collect();
 
         self.apply_changes(applied);
+        self.live.release_artifact_keys(&deleted_artifacts);
         self.side_manifests.behind_live = true;
         self.side_manifests.windows_since_publication += 1;
         if self.side_manifests.windows_since_publication >= OVERLAY_PUBLICATION_MAX_WINDOWS {

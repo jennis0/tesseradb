@@ -42,12 +42,12 @@ use mosaica_engine::{
 };
 use mosaica_lifecycle::command::{SubmitError, UnallocatedRow};
 use mosaica_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite, Step};
-use mosaica_lifecycle::ChangeOp;
+use mosaica_lifecycle::{ChangeOp, IncomingArtifact};
 use mosaica_types::EntityId;
 
 use common::{
-    build_fixture, full_coverage_credential, item, item_of_id, item_of_key, keyed_row, open_engine,
-    tick, IngestRows, N_ITEMS,
+    artifact_target, build_fixture, flat_declaration, full_coverage_credential, item, item_of_id,
+    item_of_key, keyed_row, open_engine, tick, IngestRows, N_ITEMS,
 };
 
 const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -765,6 +765,60 @@ fn a_deny_whose_retries_are_exhausted_is_hidden_now_and_visible_after_a_restart(
         before,
         "nothing was ever made durable, so replay cannot reinstate it — the caller was told to \
          retry, and this is what it costs if they do not"
+    );
+}
+
+/// **An artifact deletion that missed the log keeps its key.** The deletion is applied anyway, and
+/// a restart without its record brings the artifact back under the key, so until then a
+/// publication under the key reaches that artifact rather than creating a second one beside it.
+#[test]
+fn an_artifact_deletion_whose_retries_are_exhausted_keeps_its_key() {
+    let tmp = TempDir::new().unwrap();
+    let wal_path = tmp.path().join("wal.log");
+    let (engine, faults) = engine_with_faults(&tmp, 8);
+    engine
+        .register_layer(flat_declaration("clusters/a"))
+        .unwrap();
+    let members: Vec<EntityId> = (0..10).map(|id| entity_of(&engine, id)).collect();
+    let publish = |engine: &Engine| {
+        engine
+            .put_artifacts(
+                "clusters/a".into(),
+                0,
+                vec![IncomingArtifact::from_entities(
+                    Some("k".into()),
+                    members.clone(),
+                )],
+            )
+            .expect("the publication is taken")
+    };
+    let id = publish(&engine).mosaica_ids[0];
+
+    faults.fail_next_fsyncs(DENY_DURABILITY_ATTEMPTS);
+    engine
+        .accept_changes(vec![(artifact_target(&engine, id), ChangeOp::Delete)])
+        .expect_err("every attempt failed, so the answer is an error");
+    let again = publish(&engine);
+    assert_eq!(
+        (again.created, again.mosaica_ids),
+        (0, vec![id]),
+        "the key still names the artifact whose deletion missed the log"
+    );
+    drop(engine);
+
+    let mut reopened = open_engine(
+        &tmp.path().join("bundle"),
+        &tmp.path().join("cache-reopened"),
+        &wal_path,
+    );
+    reopened
+        .start_write_executor(8)
+        .expect("the executor starts once");
+    let again = publish(&reopened);
+    assert_eq!(
+        (again.created, again.mosaica_ids),
+        (0, vec![id]),
+        "after a restart the artifact is back under its key, and it is the only one"
     );
 }
 

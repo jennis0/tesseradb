@@ -1707,10 +1707,10 @@ impl LayerRegistry {
     ///
     /// **Suppression-blindness carries over unchanged**, because the duplicate-key check
     /// [`prepare_artifacts`] makes reads [`ArtifactStore::ordinal_of_key`] — the store's key index,
-    /// which loses a key at exactly one event, the fold retiring the artifact's own entity. A
-    /// suppressed value's key therefore still resolves, is refused as a duplicate, and never mints a
-    /// second unsuppressed artifact (§5's third ruling, stated in full on [`resolve_or_mint`]). A
-    /// *deleted* value's key does mint again, and the new artifact is a new object with a new
+    /// which loses a key only when the artifact is deleted. A suppressed value's key therefore
+    /// still resolves, is refused as a duplicate, and never mints a second unsuppressed artifact
+    /// (§5's third ruling, stated in full on [`resolve_or_mint`]). A *deleted* value's key mints
+    /// again from the deletion's acknowledgement, and the new artifact is a new object with a new
     /// entity — which is what a deletion means.
     ///
     /// [`prepare_publish`]: LayerRegistry::prepare_publish
@@ -2220,7 +2220,8 @@ impl LayerRegistry {
     /// [`crate::IncomingGrowth`], and [`LayerRegistry::resolve_or_mint`] for the route that does
     /// create one. The resolution is [`ArtifactStore::ordinal_of_key`] — the *store's* index, never
     /// the served view — which is what keeps a suppressed artifact from reading as absent and
-    /// having a second, unsuppressed artifact minted under its key (§5).
+    /// having a second, unsuppressed artifact minted under its key (§5). A deleted artifact's key
+    /// is held by nothing, so a growth by it is refused.
     ///
     /// **Nothing joining is not an error.** A caller may honestly name an artifact and add nothing
     /// to it; `Ok(None)` says the record would be empty and no append is owed. Refusing would block
@@ -2388,10 +2389,9 @@ impl LayerRegistry {
     /// caller's key refuses one batch instead of the window it would have joined.
     ///
     /// **Suppression is invisible to this by construction, which is §5's third ruling.** The lookup
-    /// is [`ArtifactStore::ordinal_of_key`] — the store's key index — and that index loses a key at
-    /// exactly one event, the fold retiring the artifact's own entity, which is a *deletion*. A
-    /// suppression touches no stored structure at all (write-path §5.4, Rule S), so there is
-    /// nothing here that could see one. Written against the *served* view instead, a suppressed
+    /// is [`ArtifactStore::ordinal_of_key`] — the store's key index — and that index loses a key
+    /// only at the acknowledgement of the artifact's *deletion*. A suppression touches no stored
+    /// structure at all (write-path §5.4, Rule S), so there is nothing here that could see one. Written against the *served* view instead, a suppressed
     /// artifact would read as absent, its key would mint a second artifact, and the new one would
     /// not be suppressed — a suppression defeated by ingesting a point. That is why this reads the
     /// store, and why it must never be replaced by a `verdict` call.

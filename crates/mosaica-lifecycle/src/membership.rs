@@ -1466,6 +1466,8 @@ pub struct ArtifactStore {
     /// The third level is the artifact's view (`ingest.md` §1.5): a group-scoped layer's keys are
     /// unique per `(layer, view)` and an entity-scoped layer's sit under `None`, so the same key
     /// in two views resolves to two ordinals and neither can be reached from the other's view.
+    /// A deleted artifact's key leaves at the deletion's acknowledgement
+    /// ([`ArtifactStore::release_key`]), while its record is held until a compaction removes it.
     keys: KeyIndex,
     /// Where the oldest surviving publication sits in the log — the bound rotation may not reclaim
     /// past. See [`ArtifactStore::oldest_wal_pos`].
@@ -1863,14 +1865,19 @@ impl ArtifactStore {
             self.spaces.insert(layer.to_string(), space);
         }
         if let Some(key) = &record.key {
-            self.keys
+            // Two records hold one key only where the older was deleted before the key was given
+            // again, and ordinals are never reused, so the key names the higher.
+            let named = self
+                .keys
                 .entry(layer.to_string())
                 .or_default()
                 .entry(level)
                 .or_default()
                 .entry(record.view.clone())
                 .or_default()
-                .insert(key.clone(), ordinal);
+                .entry(key.clone())
+                .or_insert(ordinal);
+            *named = (*named).max(ordinal);
         }
         let edge = edge(space, &record);
         let idx = ordinal as usize;
@@ -2010,6 +2017,40 @@ impl ArtifactStore {
             .1
             .get(key)
             .copied()
+    }
+
+    /// Take the key of `layer`'s artifact at `level` and `ordinal` out of the key index, where it
+    /// still names that artifact, so the key names nothing and a publication under it creates a
+    /// new artifact. The record stays.
+    pub fn release_key(&mut self, layer: &str, level: u32, ordinal: u32) {
+        let Some(record) = self.get(layer, level, ordinal) else {
+            return;
+        };
+        let (view, key) = (record.view.clone(), record.key.clone());
+        self.unkey(layer, level, &view, key.as_deref(), ordinal);
+    }
+
+    /// Remove `key` from `view`'s index of the level where it names `ordinal`: a key given again
+    /// after a deletion names the new artifact, which keeps it.
+    fn unkey(
+        &mut self,
+        layer: &str,
+        level: u32,
+        view: &Option<String>,
+        key: Option<&str>,
+        ordinal: u32,
+    ) {
+        let Some(key) = key else { return };
+        if let Some(keys) = self
+            .keys
+            .get_mut(layer)
+            .and_then(|levels| levels.get_mut(&level))
+            .and_then(|views| views.get_mut(view))
+        {
+            if keys.get(key) == Some(&ordinal) {
+                keys.remove(key);
+            }
+        }
     }
 
     /// The views, other than `view`, whose set of this level holds `key` — what a cross-view edge
@@ -3569,9 +3610,10 @@ impl ArtifactStore {
     /// where the slice is this store's own, the record keeps nothing of the shard's members or
     /// generating sets. Its key and edges stay with the record.
     ///
-    /// **A retired artifact's slot becomes a hole rather than disappearing**, and its key
-    /// goes with it — the key indexes an ordinal, and a key left behind would resolve a caller's
-    /// republication onto the identity of the artifact this fold just removed.
+    /// **A retired artifact's slot becomes a hole rather than disappearing**, and its key goes
+    /// with it where the key still names it — the key indexes an ordinal, and a key left behind
+    /// would resolve a caller's republication onto the identity of the artifact this fold just
+    /// removed. A key given to a new artifact since the deletion stays.
     ///
     /// **Only the levels this actually changed have their versions moved**, each by one, and those
     /// levels are returned: the records version and every slice's where a record changed, the
@@ -3622,16 +3664,7 @@ impl ArtifactStore {
                 continue;
             };
             if let Some(record) = slot.take() {
-                if let Some(key) = &record.key {
-                    if let Some(keys) = self
-                        .keys
-                        .get_mut(layer.as_str())
-                        .and_then(|levels| levels.get_mut(level))
-                        .and_then(|views| views.get_mut(&record.view))
-                    {
-                        keys.remove(key.as_str());
-                    }
-                }
+                self.unkey(layer, *level, &record.view, record.key.as_deref(), *ordinal);
                 gone.extend(edge(space, &record));
             }
             self.clear_other_slices(layer, *level, *ordinal);
@@ -3755,18 +3788,7 @@ impl ArtifactStore {
             let Some(record) = self.slot_mut(&layer, level, ordinal).and_then(Option::take) else {
                 continue;
             };
-            if let Some(key) = &record.key {
-                if let Some(keys) = self
-                    .keys
-                    .get_mut(layer.as_str())
-                    .and_then(|levels| levels.get_mut(&level))
-                    .and_then(|views| views.get_mut(&record.view))
-                {
-                    if keys.get(key.as_str()) == Some(&ordinal) {
-                        keys.remove(key.as_str());
-                    }
-                }
-            }
+            self.unkey(&layer, level, &record.view, record.key.as_deref(), ordinal);
             if let Some(shape) = self
                 .shapes
                 .get_mut(layer.as_str())
@@ -4904,6 +4926,47 @@ mod tests {
             store.cascade_from(&[at("clusters/a", 100)]).is_empty(),
             "the label is gone, so deleting its cluster cascades into nothing"
         );
+    }
+
+    /// Put an artifact keyed `k` at `ordinal` of `clusters/a`'s level 0.
+    fn put_keyed(store: &mut ArtifactStore, ordinal: u32, entity: u64) {
+        let record = ArtifactRecord {
+            key: Some("k".into()),
+            ..record(entity, &[1])
+        };
+        store.put("clusters/a", space("clusters/a"), 0, ordinal, record, None);
+    }
+
+    #[test]
+    fn a_released_key_leaves_only_where_it_names_the_released_artifact() {
+        let mut store = ArtifactStore::new();
+        put_keyed(&mut store, 0, 100);
+        store.release_key("clusters/a", 0, 0);
+        assert_eq!(store.ordinal_of_key("clusters/a", 0, None, "k"), None);
+        let held = store.get("clusters/a", 0, 0);
+        assert!(held.is_some(), "the record is held");
+
+        put_keyed(&mut store, 1, 101);
+        store.release_key("clusters/a", 0, 0);
+        assert_eq!(store.ordinal_of_key("clusters/a", 0, None, "k"), Some(1));
+        store.retire(&artifacts_of("clusters/a", &[100]));
+        let held = store.get("clusters/a", 0, 0);
+        assert!(held.is_none(), "the record is retired");
+        assert_eq!(
+            store.ordinal_of_key("clusters/a", 0, None, "k"),
+            Some(1),
+            "the retirement leaves the key of the artifact it was given to"
+        );
+    }
+
+    #[test]
+    fn a_key_two_records_hold_names_the_higher_ordinal() {
+        let mut store = ArtifactStore::new();
+        put_keyed(&mut store, 1, 101);
+        put_keyed(&mut store, 0, 100);
+        assert_eq!(store.ordinal_of_key("clusters/a", 0, None, "k"), Some(1));
+        put_keyed(&mut store, 2, 102);
+        assert_eq!(store.ordinal_of_key("clusters/a", 0, None, "k"), Some(2));
     }
 
     #[test]
