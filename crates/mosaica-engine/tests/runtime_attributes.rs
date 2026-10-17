@@ -1377,22 +1377,29 @@ fn a_shard_opened_after_a_declaration_holds_its_base_from_its_opening() {
     let rows: Vec<(Option<u64>, f32)> = (0..(N_ITEMS - SIZE) / 2)
         .map(|at| (None, at as f32))
         .collect();
+    let folds = engine.write_executor_stats().folds;
     ranked(&engine, "opening", &rows);
     publish_buffered(&engine);
     let expected = ranks(&engine);
     assert_eq!(expected.len(), rows.len());
+    // The batch fills shard 1 and seals it; lacking the base, it is owed a closing compaction.
+    tick_until(
+        &engine,
+        "the sealed shard's closing compaction",
+        std::time::Duration::from_secs(120),
+        || engine.write_executor_stats().folds > folds,
+    );
     assert_eq!(
         stored(&fx.root),
         (
-            vec![Vec::new(), Vec::new(), rank_listed()],
+            vec![Vec::new(), rank_listed(), rank_listed()],
             rank_listed(),
             false
         ),
-        "the shard the batch opened lists the base it was opened with"
+        "the sealed shard's compaction and the shard the batch opened list the base"
     );
 
     compact(&engine, Some(shard(0)));
-    compact(&engine, Some(shard(1)));
     assert_eq!(
         stored(&fx.root),
         (vec![Vec::new(); 3], Vec::new(), true),
