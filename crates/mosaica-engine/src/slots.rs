@@ -239,9 +239,10 @@ pub(crate) struct WithheldKey {
     level: u32,
     palette: u8,
     registry_version: u64,
-    /// Each level's lineage version.
+    /// The lineage version of each level the build reads.
     lineages: Vec<u64>,
-    /// Each layer it depends on, with each of its levels' record and lineage versions.
+    /// Each layer it depends on, with the version each of its levels' forms in this view are of
+    /// and the level's lineage version.
     dependencies: Vec<(String, Vec<(u64, u64)>)>,
     deny_epoch: u64,
     edit_epoch: u64,
@@ -259,7 +260,7 @@ pub(crate) struct WithheldKey {
 /// after the response.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct AddedKey {
-    /// Each level's record version.
+    /// The version of each level the build reads, as its forms are of it.
     levels: Vec<u64>,
     segments_version: u64,
     projection_segments_version: u64,
@@ -479,7 +480,9 @@ impl Engine {
         Ok(Some(slots))
     }
 
-    /// Both halves of the key this viewer's slots over `level` of `layer` are held under.
+    /// Both halves of the key this viewer's slots over `level` of `layer` are held under. Every
+    /// version is the one the forms the build reads are of, which lags the store's between a
+    /// write and the tick that publishes it, so the tick moves the key.
     fn slot_keys(
         &self,
         served: &ServedView<'_>,
@@ -487,20 +490,20 @@ impl Engine {
         level: u32,
         palette: u8,
     ) -> (WithheldKey, AddedKey) {
-        let versions = |name: &str, levels: usize| -> Vec<(u64, u64)> {
-            self.write.live().with_artifacts(|store| {
-                (0..levels as u32)
-                    .map(|level| {
-                        (
-                            store.every_slice_version(name, level),
-                            store.lineage_version(name, level),
-                        )
-                    })
-                    .collect()
-            })
+        let versions = |layer: &RegisteredLayer, levels: std::ops::Range<u32>| {
+            levels
+                .map(|level| {
+                    let forms = self.level_forms(served, layer, level);
+                    (forms.level_version(), forms.lineage.version)
+                })
+                .collect::<Vec<_>>()
         };
         let name = layer.declaration.name.as_str();
-        let own = versions(name, layer.runs.len());
+        let first = match layer.declaration.hierarchy.kind {
+            HierarchyKind::Tiered => 0,
+            _ => level,
+        };
+        let own = versions(layer, first..level + 1);
         let dependencies = layer
             .declaration
             .depends_on
@@ -510,14 +513,17 @@ impl Engine {
                     .write
                     .live()
                     .registered_layer(target)
-                    .map_or(0, |target| target.runs.len());
-                (target.clone(), versions(target, levels))
+                    .filter(|target| target.declaration.draws_on(served.name))
+                    .map_or_else(Vec::new, |target| {
+                        versions(&target, 0..target.runs.len() as u32)
+                    });
+                (target.clone(), levels)
             })
             .collect();
         let id = served.mask_identity;
         let generation = served.generation;
         let added = AddedKey {
-            levels: own.iter().map(|&(record, _)| record).collect(),
+            levels: own.iter().map(|&(version, _)| version).collect(),
             segments_version: id.segments_version,
             projection_segments_version: id.projection_segments_version,
             shards: served
@@ -825,11 +831,7 @@ impl Engine {
 
         let mine: Vec<u32> = (first as u32..(first + ordinals.len()) as u32).collect();
         let passes: Vec<Pass> = if treed {
-            let lineage_version = self
-                .write
-                .live()
-                .with_artifacts(|store| store.lineage_version(&layer.declaration.name, level));
-            let lineage = self.level_lineage(layer, level, lineage_version, read.forms.first());
+            let lineage = self.level_lineage(layer, level, read.forms.lineage, read.forms.first());
             let of = |served: Vec<u32>| -> Vec<u32> {
                 served.into_iter().map(|o| here[o as usize]).collect()
             };

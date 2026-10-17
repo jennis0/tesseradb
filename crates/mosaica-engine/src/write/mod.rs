@@ -970,11 +970,12 @@ impl Drop for WritePath {
     /// caller's next statement is typically `TempDir::drop`, producing intermittent `ENOENT` in
     /// tests spread across many files.
     ///
-    /// The join is unconditional and does not wait on background work: [`LifecycleHandle`] is not
-    /// `Clone` and this type is its only owner, so dropping it below closes both queues, and the
-    /// ring that follows wakes a blocked loop to observe that. The executor's thread abandons a
-    /// running compaction and joins its thread before it ends, so the join covers the compaction
-    /// too and waits for at most the end of the pass it is in.
+    /// The join is unconditional: [`LifecycleHandle`] is not `Clone` and this type is its only
+    /// owner, so dropping it below closes both queues, and the ring that follows wakes a blocked
+    /// loop to observe that. The executor's thread abandons the background work in flight and
+    /// waits for it before it ends, so the join covers that work too: a compaction to the end of
+    /// the pass it is in, and a flush, a merge, a coalesce, a suggestion rebuild or a unique
+    /// declaration's round to the end of the unit.
     fn drop(&mut self) {
         // A test may have parked the executor at an armed pause point; release it first, or
         // teardown deadlocks on a fault the test forgot to clear.

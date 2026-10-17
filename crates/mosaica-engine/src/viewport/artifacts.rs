@@ -234,22 +234,27 @@ impl Engine {
                         // The engine's own pool: the decode fans out, and running it outside
                         // `install` would spill onto rayon's global pool instead of the one sized
                         // for this deployment.
-                        let ((rows, level_version), lineage_version) = self.pool.install(|| {
+                        let ((rows, level_version), lineage) = self.pool.install(|| {
                             self.write.live().with_artifacts(|written| {
-                                (
-                                    self.form_in(
-                                        &generation,
-                                        shard,
-                                        view,
-                                        view_data,
-                                        &segments,
-                                        layer,
-                                        level,
-                                        &code_of_key,
-                                        written,
-                                    ),
-                                    written.lineage_version(&layer.declaration.name, level),
-                                )
+                                let form = self.form_in(
+                                    &generation,
+                                    shard,
+                                    view,
+                                    view_data,
+                                    &segments,
+                                    layer,
+                                    level,
+                                    &code_of_key,
+                                    written,
+                                );
+                                let lineage = crate::layer_read::lineage_at(
+                                    written,
+                                    &layer.declaration.name,
+                                    level,
+                                    shard.id(),
+                                    form.1,
+                                );
+                                (form, lineage)
                             })
                         });
                         warmed.levels += 1;
@@ -260,26 +265,7 @@ impl Engine {
                         // Warmed for the same reason as the row form: derived from the level's
                         // records alone (~0.5s each at rung 3's largest), not from a mask or
                         // principal.
-                        self.lineages.get_or_build(
-                            &layer.declaration.name,
-                            level,
-                            lineage_version,
-                            || {
-                                let records = rows.records();
-                                let edges = (0..records.len() as u32).map(|ordinal| {
-                                    let within = records
-                                        .parents(ordinal)
-                                        .iter()
-                                        .filter(move |parent| parent.level == level)
-                                        .map(|parent| parent.ordinal);
-                                    (ordinal, within)
-                                });
-                                match lineage_kind(layer.declaration.hierarchy.kind) {
-                                    Some(true) => crate::cut::Lineage::dag(edges),
-                                    _ => crate::cut::Lineage::new(edges),
-                                }
-                            },
-                        );
+                        self.level_lineage(layer, level, lineage, &rows);
                         if let Some(runs) = layer.runs.get(level as usize) {
                             self.level_content(&generation, layer, level, level_version, runs);
                         }
@@ -1047,7 +1033,7 @@ impl Engine {
         let lineage = self.level_lineage(
             &layer.registered,
             level.level,
-            level.forms.lineage_version,
+            level.forms.lineage,
             level.forms.first(),
         );
         let ordinals: Vec<u32> = passing.iter().map(|&(o, ..)| o).collect();
@@ -1063,8 +1049,8 @@ impl Engine {
         (lineage, served)
     }
 
-    /// One level's lineage at `lineage_version`, held per generation: rebuilding it per request
-    /// would cost ~96ms at ten million against ~3ms for the cut.
+    /// One level's lineage at `at`, which describes `rows`' records, held per generation:
+    /// rebuilding it per request would cost ~96ms at ten million against ~3ms for the cut.
     ///
     /// Read from every artifact's parent list, not only the passing ones, since one lineage
     /// serves every viewer; a cut is taken over the passing nodes alone, so a withheld ancestor
@@ -1075,11 +1061,11 @@ impl Engine {
         &self,
         layer: &mosaica_types::layer::RegisteredLayer,
         number: u32,
-        lineage_version: u64,
+        at: crate::cut::LineageAt,
         rows: &crate::artifacts::ArtifactRows,
     ) -> Arc<crate::cut::Lineage> {
         self.lineages
-            .get_or_build(&layer.declaration.name, number, lineage_version, || {
+            .get_or_build(&layer.declaration.name, number, at, || {
                 let records = rows.records();
                 let edges = (0..records.len() as u32).map(|ordinal| {
                     let within = records

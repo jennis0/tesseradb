@@ -73,6 +73,25 @@ pub(super) struct Executor {
     pub(super) faults: Option<Arc<mosaica_lifecycle::faults::FaultSwitchboard>>,
 }
 
+impl Drop for Executor {
+    /// Stop every unit in flight and wait for each, so nothing writes under the bundle once the
+    /// executor's thread has ended. A unit on the pool or a unique declaration's round stops
+    /// before it starts or once its writes are done, and removes what it wrote; a compaction stops
+    /// at the end of the pass it is in.
+    fn drop(&mut self) {
+        self.flush.abandon();
+        self.coalesce.abandon();
+        self.merge.abandon();
+        self.suggest.abandon();
+        self.compactions.abandon();
+        self.unique_declarations.abandon();
+        self.flush.wait_until_idle();
+        self.coalesce.wait_until_idle();
+        self.merge.wait_until_idle();
+        self.suggest.wait_until_idle();
+    }
+}
+
 /// Why a tick fired: `due` is the period or the buffered-row count, `period_due` the period alone.
 struct TickDue {
     due: bool,

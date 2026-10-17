@@ -96,6 +96,16 @@ impl UniqueDeclarations {
             }
         }
     }
+
+    /// Stop the running round, wait for its thread to end, and remove every run the declaration
+    /// being built wrote. Its reply is dropped unanswered.
+    pub(super) fn abandon(&mut self) {
+        self.rounds.abandon();
+        self.rounds.wait_until_idle();
+        if let Some(pending) = self.current.take() {
+            pending.discard();
+        }
+    }
 }
 
 impl Pending {
@@ -228,9 +238,18 @@ impl Executor {
         let spawned = std::thread::Builder::new()
             .name("mosaica-unique".to_string())
             .spawn(move || {
+                if unit.abandoned() {
+                    return;
+                }
                 let outcome = crate::unique::build_round(input);
                 #[cfg(feature = "fault-injection")]
-                switches.hold_unique_round_if_paused();
+                switches.hold_unique_round_if_paused(&|| unit.abandoned());
+                if unit.abandoned() {
+                    for (run, _) in outcome.iter().flat_map(|output| &output.runs) {
+                        let _ = std::fs::remove_file(&run.path);
+                    }
+                    return;
+                }
                 unit.complete(CompletedRound { attempt, outcome });
             });
         if let Err(e) = spawned {

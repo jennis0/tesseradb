@@ -15,6 +15,8 @@ pub(crate) fn outstanding(in_flight: &AtomicBool, completed_pending: &AtomicBool
 pub(in crate::write) struct Background<C> {
     in_flight: Arc<AtomicBool>,
     completed_pending: Arc<AtomicBool>,
+    /// Raised when the executor ends; a unit then stops at its next check and publishes nothing.
+    abandoned: Arc<AtomicBool>,
     attempt: u64,
     done: Receiver<C>,
     submit: Sender<C>,
@@ -36,6 +38,7 @@ impl<C> Background<C> {
         Background {
             in_flight,
             completed_pending,
+            abandoned: Arc::default(),
             attempt: 0,
             done,
             submit,
@@ -63,6 +66,18 @@ impl<C> Background<C> {
         self.attempt
     }
 
+    /// Tell the unit in flight, and any started later, to stop at its next check.
+    pub(super) fn abandon(&self) {
+        self.abandoned.store(true, Ordering::SeqCst);
+    }
+
+    /// Wait until no unit of this kind is in flight.
+    pub(super) fn wait_until_idle(&self) {
+        while self.in_flight() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     /// Marks a unit in flight and returns what its worker reports through.
     pub(super) fn start(&self) -> InFlight<C> {
         self.in_flight.store(true, Ordering::SeqCst);
@@ -70,6 +85,7 @@ impl<C> Background<C> {
             completed: false,
             in_flight: Arc::clone(&self.in_flight),
             completed_pending: Arc::clone(&self.completed_pending),
+            abandoned: Arc::clone(&self.abandoned),
             submit: self.submit.clone(),
             bell: self.bell.clone(),
         }
@@ -98,11 +114,17 @@ pub(super) struct InFlight<C> {
     completed: bool,
     in_flight: Arc<AtomicBool>,
     completed_pending: Arc<AtomicBool>,
+    abandoned: Arc<AtomicBool>,
     submit: Sender<C>,
     bell: SyncSender<()>,
 }
 
 impl<C> InFlight<C> {
+    /// Whether the executor has ended, so the unit stops and publishes nothing.
+    pub(super) fn abandoned(&self) -> bool {
+        self.abandoned.load(Ordering::SeqCst)
+    }
+
     /// Hands the finished unit to the executor and wakes it. The unit stops being in flight here,
     /// after the pending flag is set, so it is outstanding throughout and no longer running once
     /// the executor can publish it. Consumed, so a worker still running afterwards cannot clear
@@ -121,6 +143,26 @@ impl<C> Drop for InFlight<C> {
         if !self.completed {
             self.in_flight.store(false, Ordering::SeqCst);
             let _ = self.bell.try_send(());
+        }
+    }
+}
+
+/// Remove what an abandoned unit wrote under `prefix_dir`, each file named relative to it, and
+/// each directory that leaves empty. No manifest names them, and a reopened engine's units may
+/// write the same names.
+pub(super) fn discard_written<'a>(
+    prefix_dir: &std::path::Path,
+    files: impl IntoIterator<Item = &'a String>,
+) {
+    for file in files {
+        let path = prefix_dir.join(file);
+        let _ = std::fs::remove_file(&path);
+        let mut dir = path.parent();
+        while let Some(at) = dir.filter(|at| at.starts_with(prefix_dir) && *at != prefix_dir) {
+            if std::fs::remove_dir(at).is_err() {
+                break;
+            }
+            dir = at.parent();
         }
     }
 }

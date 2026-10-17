@@ -487,8 +487,9 @@ impl Lineage {
 /// larger than everything the cut itself now costs — and it is the same fact for the depth table
 /// and the child index the lineage carries beside them.
 ///
-/// Keyed on the level's **lineage version** and nothing else (`ArtifactStore::lineage_version`;
-/// `ingest.md` §1.5, §4.1): unlike a row-space projection this holds no view and no prefix,
+/// Keyed on the level's **lineage version** (`ArtifactStore::lineage_version`; `ingest.md` §1.5,
+/// §4.1), and on the version of the row form the records came from while that form is behind the
+/// store ([`LineageAt`]): unlike a row-space projection this holds no view and no prefix,
 /// because a parent is an ordinal in the same level whichever view is served, and a fold
 /// renumbers rows rather than ordinals. The three writes that can move a parent pointer are a
 /// publication, a fill of a parent list and the fold's retire, and each moves that counter.
@@ -501,8 +502,35 @@ impl Lineage {
 /// A level of a layer — what a lineage is held against.
 type LevelOf = (String, u32);
 
-/// A held lineage and the lineage version it was derived from.
-type Held = (u64, std::sync::Arc<Lineage>);
+/// The lineage a request reads: the level's lineage version, and the version of the row form its
+/// records came from where that form is behind the store. A form is behind between a write and
+/// the tick that publishes it, and its records then need not hold the edges the lineage version
+/// counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LineageAt {
+    pub version: u64,
+    pub behind: Option<u64>,
+}
+
+impl LineageAt {
+    /// A lineage derived from records that hold every edge `version` counts.
+    pub fn current(version: u64) -> Self {
+        LineageAt {
+            version,
+            behind: None,
+        }
+    }
+
+    /// Whether a lineage filed at `self` answers for `wanted`: one derived from current records
+    /// answers for every read at its version, and one derived from a form behind the store only
+    /// for a read of that form.
+    fn answers(&self, wanted: &LineageAt) -> bool {
+        self.version == wanted.version && (self.behind.is_none() || self.behind == wanted.behind)
+    }
+}
+
+/// A held lineage and what it was derived at.
+type Held = (LineageAt, std::sync::Arc<Lineage>);
 
 #[derive(Debug, Default)]
 pub struct Lineages {
@@ -537,21 +565,21 @@ impl Lineages {
             .retain(|(held, _), _| held != layer);
     }
 
-    /// This level's lineage at `lineage_version`, building it if what is held is stale.
+    /// This level's lineage at `at`, building it if what is held does not answer for it.
     ///
-    /// **The version and the build must come from one reading of the store**, which is the
-    /// caller's obligation rather than this module's: `cut` knows nothing about an artifact store
-    /// and is the better for it. The serving path takes both inside one `with_artifacts`.
+    /// **`at` must describe the records the build reads**, which is the caller's obligation
+    /// rather than this module's: `cut` knows nothing about an artifact store and is the better
+    /// for it. The serving path takes both inside one `with_artifacts`.
     ///
     /// **The build runs outside this cache's lock**, as [`crate::artifacts::ArtifactProjections`]'s
-    /// does and for the same reason: two threads racing one key both build, from the same level
-    /// version, so the two results are equal and the waste is one derivation rather than a wrong
+    /// does and for the same reason: two threads racing one key both build from records at the
+    /// same `at`, so the two results are equal and the waste is one derivation rather than a wrong
     /// answer.
     pub fn get_or_build<F>(
         &self,
         layer: &str,
         level: u32,
-        lineage_version: u64,
+        at: LineageAt,
         build: F,
     ) -> std::sync::Arc<Lineage>
     where
@@ -564,7 +592,7 @@ impl Lineages {
             .unwrap_or_else(|e| e.into_inner())
             .get(&key)
         {
-            if *held == lineage_version {
+            if held.answers(&at) {
                 return std::sync::Arc::clone(lineage);
             }
         }
@@ -574,7 +602,7 @@ impl Lineages {
         self.cached
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(key, (lineage_version, std::sync::Arc::clone(&lineage)));
+            .insert(key, (at, std::sync::Arc::clone(&lineage)));
         lineage
     }
 }

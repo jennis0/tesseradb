@@ -142,7 +142,7 @@ impl Engine {
             Some(vocabulary) => vocabulary.code_of(key),
             None => key.parse::<u32>().ok(),
         };
-        let (built, lineage_version) = self.write.live().with_artifacts(|written| {
+        let (built, lineage) = self.write.live().with_artifacts(|written| {
             let built: Vec<(Arc<ArtifactRows>, u64)> = served
                 .sides
                 .iter()
@@ -160,7 +160,14 @@ impl Engine {
                     )
                 })
                 .collect();
-            (built, written.lineage_version(&layer.declaration.name, level))
+            let lineage = lineage_at(
+                written,
+                &layer.declaration.name,
+                level,
+                served.sides[0].shard.id(),
+                built[0].1,
+            );
+            (built, lineage)
         });
         let (rows, versions): (Vec<_>, Vec<_>) = built.into_iter().unzip();
         LevelForms {
@@ -168,7 +175,7 @@ impl Engine {
             side_figures: vec![None; rows.len()],
             rows,
             versions,
-            lineage_version,
+            lineage,
             figures: None,
         }
     }
@@ -327,6 +334,23 @@ impl Engine {
     }
 }
 
+/// The lineage the records of `shard`'s form of `level` hold, the form being of `form_version`:
+/// the level's lineage version in `written`, and the form's version where the store's slice has
+/// moved past it.
+pub(crate) fn lineage_at(
+    written: &mosaica_lifecycle::membership::ArtifactStore,
+    layer: &str,
+    level: u32,
+    shard: mosaica_types::ShardId,
+    form_version: u64,
+) -> crate::cut::LineageAt {
+    let current = crate::write::slice_of(written, shard).level_version(layer, level);
+    crate::cut::LineageAt {
+        version: written.lineage_version(layer, level),
+        behind: (form_version != current).then_some(form_version),
+    }
+}
+
 /// Whether `layer` holds the `level` a request named: a kind with one level holds none to name.
 pub(crate) fn check_level(
     layer: &RegisteredLayer,
@@ -384,8 +408,8 @@ pub(crate) struct LevelForms {
     pub(crate) rows: Vec<Arc<ArtifactRows>>,
     /// The version of the level each side's form is of.
     versions: Vec<u64>,
-    /// The version of the level's lineage.
-    pub(crate) lineage_version: u64,
+    /// The lineage the first side's records hold ([`lineage_at`]).
+    pub(crate) lineage: crate::cut::LineageAt,
     /// Each side's masked counts, where the level is served from a column and the request reads
     /// the side; `None` elsewhere, and everywhere until [`Engine::count_level`].
     pub(crate) side_figures: Vec<Option<Arc<Figures>>>,
@@ -406,7 +430,7 @@ impl LevelForms {
             versions: vec![0; rows.len()],
             rows: rows.into_iter().map(Arc::new).collect(),
             shards,
-            lineage_version: 0,
+            lineage: crate::cut::LineageAt::current(0),
             figures: None,
         }
     }

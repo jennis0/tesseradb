@@ -296,6 +296,43 @@ fn a_publication_that_adds_an_edge_is_in_the_next_requests_cut() {
     );
 }
 
+/// A lineage read between a parent fill and the tick that serves it is held at the version of the
+/// records it was derived from, so the tick's edge is in the next request's cut.
+#[test]
+fn a_read_before_the_tick_does_not_file_the_old_lineage_under_the_new_version() {
+    let fx = fixture();
+    let engine = fx.open_unrefreshed();
+    engine.register_layer(treed("clusters/tree")).unwrap();
+    publish(
+        &engine,
+        "clusters/tree",
+        vec![
+            node(&fx, "root", None, 0..300),
+            node(&fx, "child", None, 0..300),
+        ],
+    );
+    let both = vec![("child".to_string(), 300), ("root".to_string(), 300)];
+    assert_eq!(served(&engine, "clusters/tree"), both);
+    engine
+        .publish_artifacts(
+            "clusters/tree".into(),
+            0,
+            vec![node(&fx, "child", Some("root"), 0..300)],
+        )
+        .expect("a parent list filled on an artifact that has none is accepted");
+    assert_eq!(
+        served(&engine, "clusters/tree"),
+        both,
+        "the level is served as last published until the tick"
+    );
+    tick(&engine);
+    assert_eq!(
+        served(&engine, "clusters/tree"),
+        vec![("child".to_string(), 300)],
+        "the edge the tick published is in the cut"
+    );
+}
+
 /// **A dropped layer's derived structures leave both caches, and nobody else's do.**
 ///
 /// Retention rather than correctness: a name registered again continues its levels' versions, so a

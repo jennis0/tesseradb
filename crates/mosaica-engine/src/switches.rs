@@ -157,12 +157,13 @@ impl TestSwitches {
         }
     }
 
-    /// Called by a unique declaration's round once it has finished. Waits while a test holds it.
+    /// Called by a unique declaration's round once it has finished. Waits while a test holds it,
+    /// until `abandoned` answers true.
     #[cfg(feature = "fault-injection")]
-    pub(crate) fn hold_unique_round_if_paused(&self) {
+    pub(crate) fn hold_unique_round_if_paused(&self, abandoned: &dyn Fn() -> bool) {
         use std::sync::atomic::Ordering;
         self.unique_round_holding.store(true, Ordering::SeqCst);
-        while self.unique_round_paused.load(Ordering::SeqCst) {
+        while self.unique_round_paused.load(Ordering::SeqCst) && !abandoned() {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         self.unique_round_holding.store(false, Ordering::SeqCst);

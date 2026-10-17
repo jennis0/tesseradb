@@ -428,8 +428,15 @@ impl Executor {
         let unit = self.coalesce.start();
         let health = Arc::clone(&self.health);
         let windows = plan.windows();
+        let prefix_dir = ctx.prefix_dir.clone();
         self.deps.pool.spawn(move || {
+            if unit.abandoned() {
+                return;
+            }
             match crate::coalesce::execute_coalesce(plan, ctx) {
+                Ok(completed) if unit.abandoned() => {
+                    background::discard_written(&prefix_dir, completed.files.keys());
+                }
                 Ok(completed) => {
                     // A failed window stays listed and the rest of the pass publishes.
                     for e in &completed.failures {
@@ -514,9 +521,15 @@ impl Executor {
 
         let unit = self.merge.start();
         let health = Arc::clone(&self.health);
-        self.deps
-            .pool
-            .spawn(move || match crate::merge::execute(plan, ctx) {
+        let prefix_dir = ctx.prefix_dir.clone();
+        self.deps.pool.spawn(move || {
+            if unit.abandoned() {
+                return;
+            }
+            match crate::merge::execute(plan, ctx) {
+                Ok(completed) if unit.abandoned() => {
+                    background::discard_written(&prefix_dir, completed.output.files.keys());
+                }
                 Ok(completed) => unit.complete(completed),
                 Err(e) => {
                     health.merge_failures.fetch_add(1, Ordering::Relaxed);
@@ -526,7 +539,8 @@ impl Executor {
                          next tick"
                     );
                 }
-            });
+            }
+        });
     }
 
     /// Dispatch a suggestion-index rebuild where one vocabulary's side map has run far enough
@@ -556,7 +570,11 @@ impl Executor {
         let unit = self.suggest.start();
         let pool = Arc::clone(&self.deps.pool);
         self.deps.pool.spawn(move || {
+            if unit.abandoned() {
+                return;
+            }
             match crate::suggest::SuggestIndex::build(&dir, build, &values, &pool) {
+                Ok(_) if unit.abandoned() => {}
                 Ok(index) => unit.complete(crate::suggest::CompletedSuggest {
                     vocabulary,
                     index: Arc::new(index),
@@ -1533,7 +1551,11 @@ impl Executor {
         self.health.mark_flush_started(std::time::Instant::now());
         let health = Arc::clone(&self.health);
         let switches = Arc::clone(&self.deps.switches);
+        let prefix_dir = context.prefix_dir.clone();
         self.deps.pool.spawn(move || {
+            if unit.abandoned() {
+                return;
+            }
             let mut laps = crate::flush::FlushLaps::default();
             match crate::flush::execute_flush(plan, context, &mut laps) {
                 Ok(completed) => {
@@ -1542,10 +1564,15 @@ impl Executor {
                     // The unit is still in flight while this holds, which is the state the tick
                     // behind a flush is about.
                     health.flush_holding.store(true, Ordering::SeqCst);
-                    while switches.flush_paused.load(Ordering::SeqCst) {
+                    while switches.flush_paused.load(Ordering::SeqCst) && !unit.abandoned() {
                         std::thread::sleep(std::time::Duration::from_millis(5));
                     }
                     health.flush_holding.store(false, Ordering::SeqCst);
+                    // The rows stay in the log, and a reopened engine flushes them again.
+                    if unit.abandoned() {
+                        background::discard_written(&prefix_dir, completed.files.keys());
+                        return;
+                    }
                     unit.complete(completed);
                 }
                 Err(e) => {

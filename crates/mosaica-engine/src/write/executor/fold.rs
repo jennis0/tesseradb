@@ -529,6 +529,11 @@ impl Drop for CompactionThread {
 }
 
 impl Compactions {
+    /// Abandon a running compaction and wait for its thread.
+    pub(in crate::write) fn abandon(&mut self) {
+        drop(self.thread.take());
+    }
+
     /// Queue a closing compaction for each of `sealed`.
     pub(in crate::write) fn sealed(&mut self, sealed: impl IntoIterator<Item = ShardId>) {
         self.closing.extend(sealed);
@@ -3735,7 +3740,7 @@ impl Executor {
                 self.deps.lineages.get_or_build(
                     layer,
                     *level,
-                    store.lineage_version(layer, *level),
+                    crate::cut::LineageAt::current(store.lineage_version(layer, *level)),
                     || {
                         crate::cut::Lineage::new(store.level(layer, *level).map(
                             |(ordinal, record)| {
