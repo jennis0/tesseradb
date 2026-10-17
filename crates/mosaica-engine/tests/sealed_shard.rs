@@ -1,15 +1,13 @@
 //! Edits of a shard's items: each takes its new entity in the item's own shard, an id freed
 //! there at tenancy 0 first and then the shard's high water, which runs past the size; a shard
 //! whose ids are spent refuses the edit and changes nothing.
-//!
-//! Written through the engine's several-shard feature.
 
 mod common;
 
 use common::*;
 use mosaica_engine::AcceptError;
 use mosaica_lifecycle::ExecError;
-use mosaica_types::{ShardFull, ShardId, ShardLimit, ShardState, ENTITY_END};
+use mosaica_types::{ShardFull, ShardId, ShardState, ENTITY_END};
 
 /// An edit of a sealed shard-0 item takes the ids shard 0 freed at tenancy 0, lowest first, then
 /// shard 0's high water past the size, never an id of the open shard 1; the item keeps its
@@ -82,7 +80,6 @@ fn a_sealed_shard_at_the_end_of_its_ids_refuses_an_edit_and_changes_nothing() {
         matches!(
             refused,
             Err(AcceptError::Exec(ExecError::ShardFull(ShardFull {
-                limit: ShardLimit::End(ENTITY_END),
                 high_water: ENTITY_END,
                 needed: 1,
             })))

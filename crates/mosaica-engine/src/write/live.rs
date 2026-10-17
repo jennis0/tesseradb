@@ -193,7 +193,6 @@ pub(crate) struct LiveState {
     /// The high water at which the open shard seals, as the side-manifest's `shards.size` and the
     /// log leave it. Written only by the executor.
     pub(in crate::write) size: std::sync::atomic::AtomicU64,
-    pub(in crate::write) several_shards: super::SeveralShards,
     /// The descriptor resolver's extension state. Resolved in the handler before submitting, not
     /// on the executor: signature-sorted assignment needs the term set to compute a sort key
     /// before any id exists, the structural exception argued at [`WritePath::resolve_terms`].
@@ -237,11 +236,6 @@ impl LiveState {
 
     fn read_shards(&self) -> std::sync::RwLockReadGuard<'_, Vec<Arc<ShardWrite>>> {
         self.shards.read().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// How many shards the bundle holds.
-    pub(in crate::write) fn shard_count(&self) -> usize {
-        self.read_shards().len()
     }
 
     /// The open shard, which takes new items at its high water: the open checked there is one,
@@ -289,14 +283,13 @@ impl LiveState {
     }
 
     /// Whether a window whose edits take `edits` ids in each shard and whose `items` new items are
-    /// placed fits beside every shard's allocator
-    /// ([`mosaica_lifecycle::alloc::check_window_room`]). Where several shards are refused, the
-    /// one shard never seals, and its size bounds its edits too ([`Allocator::room`]).
+    /// placed fits beside every shard's allocator and the shards it may open
+    /// ([`mosaica_lifecycle::alloc::check_window`]).
     pub(crate) fn window_room(
         &self,
         edits: &BTreeMap<ShardId, u64>,
         items: u64,
-    ) -> Result<(), mosaica_types::ShardFull> {
+    ) -> Result<(), mosaica_lifecycle::AllocError> {
         let shards = self.shards();
         let allocators = lock_allocators(&shards);
         let held: Vec<(ShardId, &Allocator)> = shards
@@ -304,15 +297,13 @@ impl LiveState {
             .zip(&allocators)
             .map(|(shard, alloc)| (shard.id, &**alloc))
             .collect();
-        match (self.several_shards, held.as_slice()) {
-            (super::SeveralShards::Refused, [(shard, alloc)]) => {
-                let edited = edits.get(shard).copied().unwrap_or(0);
-                alloc.room(edited, items, self.shard_size())
-            }
-            _ => {
-                mosaica_lifecycle::alloc::check_window_room(&held, edits, items, self.shard_size())
-            }
-        }
+        mosaica_lifecycle::alloc::check_window(
+            &held,
+            edits,
+            items,
+            self.shard_size(),
+            self.next_shard_id(),
+        )
     }
 
     /// The size every shard is allocated to.

@@ -208,10 +208,6 @@ pub enum AcceptError {
     /// The batch cannot be taken as sent: a row creates an item with no position or no label, or
     /// carries coordinates in a batch naming no view. Nothing was submitted.
     Contract(String),
-    /// The bundle holds several point shards and takes no write. Nothing was submitted.
-    SeveralShards {
-        shards: usize,
-    },
 }
 
 impl std::fmt::Display for AcceptError {
@@ -255,12 +251,6 @@ impl std::fmt::Display for AcceptError {
             AcceptError::Conflict(detail) | AcceptError::Contract(detail) => {
                 write!(f, "{detail}")
             }
-            AcceptError::SeveralShards { shards } => write!(
-                f,
-                "this bundle holds {shards} point shards, which take no write until stage 5 of \
-                 the sharding plan; to write, serve a bundle of one shard, built with a \
-                 `[shards] size` of at least its item count"
-            ),
         }
     }
 }
@@ -310,19 +300,9 @@ pub(crate) fn retire_dead_view_artifacts(
     })
 }
 
-/// Whether a bundle of several point shards takes writes. Only the engine's own tests open one
-/// that does.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum SeveralShards {
-    Refused,
-    #[cfg(feature = "several-shard-writes")]
-    Written,
-}
-
 /// Everything [`WritePath::reconstruct`] rebuilds from durable state.
 pub(crate) struct WritePathState {
     wal: Wal,
-    several_shards: SeveralShards,
     shards: Vec<ShardWrite>,
     next_shard_id: u32,
     /// The shard size the manifests and the log leave.
@@ -383,7 +363,6 @@ impl WritePath {
                 shards: RwLock::new(state.shards.into_iter().map(Arc::new).collect()),
                 next_shard_id: std::sync::atomic::AtomicU32::new(state.next_shard_id),
                 size: std::sync::atomic::AtomicU64::new(state.size),
-                several_shards: state.several_shards,
                 resolver_state: Mutex::new(state.resolver_state),
                 accepted_batches: Mutex::new(state.accepted_batches),
                 registry: Mutex::new(state.registry),
@@ -436,12 +415,6 @@ impl WritePath {
             })?;
         tracing::debug!(root = %bundle_lock.path().display(), "bundle write lock taken");
         let wal = self.wal.take().expect("checked immediately above");
-        // No thread runs over a bundle that takes no write; the lock still keeps other writers out.
-        if self.writable().is_err() {
-            self.bundle_lock = Some(bundle_lock);
-            self.health.advance(ExecutorPosture::Running);
-            return Ok(());
-        }
         let wal_position_at_start = wal.position();
 
         // The startup sweep runs before anything else and before the thread. `AlreadyStarted` is
@@ -667,18 +640,6 @@ impl WritePath {
         &self.health
     }
 
-    /// [`crate::Engine::writable`]'s rule. [`Self::submit`] and [`Self::submit_changes`], where
-    /// every write reaches the executor, ask it; so do the entries that read the open shard
-    /// before submitting.
-    pub(crate) fn writable(&self) -> Result<(), AcceptError> {
-        match (self.live.shard_count(), self.live.several_shards) {
-            (1, _) => Ok(()),
-            #[cfg(feature = "several-shard-writes")]
-            (_, SeveralShards::Written) => Ok(()),
-            (shards, _) => Err(AcceptError::SeveralShards { shards }),
-        }
-    }
-
     fn handle(&self) -> Result<&LifecycleHandle, SubmitError> {
         // "Never started" and "died" get the same answer, and `SubmitError::ExecutorDead`'s own
         // doc already states the reason: there is no honest 200 to give when there is nothing left
@@ -725,7 +686,6 @@ impl WritePath {
     /// Open a reply channel, enqueue the command built around it, and wait for the answer that
     /// command's reply is typed to carry.
     fn submit<T>(&self, command: impl FnOnce(Reply<T>) -> Command) -> Result<T, AcceptError> {
-        self.writable()?;
         let (reply, pending) = Reply::channel(
             Some(Arc::clone(&self.health)),
             #[cfg(feature = "fault-injection")]
@@ -932,7 +892,6 @@ impl WritePath {
         changes: Vec<(Target, ChangeOp)>,
         stamp: crate::edited::Stamp,
     ) -> Result<PendingChange, AcceptError> {
-        self.writable()?;
         let (reply, pending) = Reply::channel(
             None,
             #[cfg(feature = "fault-injection")]

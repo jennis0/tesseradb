@@ -441,12 +441,6 @@ impl Engine {
         self.write.wake();
     }
 
-    /// Refuses every write to a bundle of several shards
-    /// ([`crate::write::WritePath::writable`]). A caller asks it before reading a write's body.
-    pub fn writable(&self) -> std::result::Result<(), crate::write::AcceptError> {
-        self.write.writable()
-    }
-
     /// The stamp of the generation served now: what a write naming entities taken from it, rather
     /// than from [`Engine::name_items`], carries.
     fn stamp_now(&self) -> Stamp {
@@ -459,7 +453,6 @@ impl Engine {
         entity: EntityId,
         op: ChangeOp,
     ) -> std::result::Result<(), crate::write::AcceptError> {
-        self.write.writable()?;
         let shard = self.generation.load().only_shard().id();
         self.accept_changes(vec![(Target::Item(shard, entity), op)])
     }

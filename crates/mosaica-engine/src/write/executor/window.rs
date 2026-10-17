@@ -301,7 +301,8 @@ fn mint_cells<'a>(
 
 /// The window could not be allocated: nothing was appended, nothing applied, and the high-water
 /// mark did not move. The one exit outside [`ClosingWindow`], since allocation is what failed.
-/// A full shard is refused at admission; this is the backstop.
+/// Admission refuses a batch whose edits pass the end of a shard's ids or whose new items need a
+/// shard past the last number; this is the backstop.
 fn fail_allocation(
     health: &ExecutorHealth,
     error: mosaica_lifecycle::AllocError,
@@ -526,20 +527,14 @@ impl Executor {
                 let room = |window: &CommitWindow<Reply<Ingested>>| {
                     let mut total = window.wanted().clone();
                     total.add(wanted.clone());
-                    let items = match live.several_shards {
-                        SeveralShards::Refused => total.items,
-                        // New items open the next shard past the open one's size.
-                        #[cfg(feature = "several-shard-writes")]
-                        SeveralShards::Written => 0,
-                    };
-                    live.window_room(&total.edits, items)
+                    live.window_room(&total.edits, total.items)
                 };
                 if !window.is_empty() && room(&window).is_err() {
                     window = self.close_and_reopen(window);
                     admission = Admission::YieldedAfterClose;
                 }
-                if let Err(full) = room(&window) {
-                    reply.fail(ExecError::ShardFull(full));
+                if let Err(refused) = room(&window) {
+                    reply.fail(ExecError::from(refused));
                     return (window, admission);
                 }
                 if let Some(entry) = self.admit(submission, reply) {

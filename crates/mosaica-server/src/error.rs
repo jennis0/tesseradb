@@ -418,8 +418,6 @@ pub fn map_accept_error(e: mosaica_engine::AcceptError) -> ApiError {
         // The detail names rows by position, values as sent and items by `mosaica_id`.
         AcceptError::Conflict(detail) => ApiError::Conflict(detail),
         AcceptError::Contract(detail) => ApiError::Contract(detail),
-        // The detail names the shard count and what to serve to write.
-        e @ AcceptError::SeveralShards { .. } => ApiError::Conflict(e.to_string()),
         // 404, as an unknown view is on every plane.
         AcceptError::UnknownView { view, .. } => {
             ApiError::Unknown(format!("unknown view '{view}'"))

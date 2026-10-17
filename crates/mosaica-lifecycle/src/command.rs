@@ -436,8 +436,8 @@ pub enum ExecError {
     /// So the 500 means "at least one item is in force but not durable, and every deny in the
     /// request was attempted", never "the batch was refused".
     Wal(WalError),
-    /// A batch needs more ids than the shard's size or the end of its ids leaves → HTTP **409**,
-    /// no effect.
+    /// A batch's edits need more ids than the end of their shard's ids leaves → HTTP **409**, no
+    /// effect.
     ShardFull(ShardFull),
     /// A batch's new items need a point shard past the last a bundle holds → HTTP **409**, no
     /// effect.

@@ -869,7 +869,7 @@ TINY = 16
 
 
 @pytest.mark.parametrize("path", ["built", "live"])
-def test_an_insert_past_the_shard_size_is_refused_until_the_size_is_raised(tmp_path, path):
+def test_an_insert_past_the_shard_size_goes_in(tmp_path, path):
     """Built at a size its corpus fills, or declared live at its high water."""
     Deployment.stop_all()
     held = list(range(TINY))
@@ -884,19 +884,10 @@ def test_an_insert_past_the_shard_size_is_refused_until_the_size_is_raised(tmp_p
         assert (status["shards"], status["entity_id_high_water"]) == ({"size": TINY}, TINY)
 
         past = fx.point_rows([TINY, TINY + 1], [fx.fx_column()])
-        with pytest.raises(fx.Refused) as refused:
-            d.rows("/control/ingest", past, "past")
-        assert refused.value.status == 409
-        assert d.server.status()["entity_id_high_water"] == TINY
-        d.control("PUT", "/control/shards", json={"size": TINY - 1}, expect=(409,))
-
-        d.control("PUT", "/control/shards", json={"size": TINY + 2}, expect=(201,))
         assert d.rows("/control/ingest", past, "past")["created"] == 2
+        assert d.server.status()["entity_id_high_water"] == TINY + 2
         d.restart()
         status = d.server.status()
-        assert (status["shards"], status["entity_id_high_water"]) == (
-            {"size": TINY + 2},
-            TINY + 2,
-        )
+        assert (status["shards"], status["entity_id_high_water"]) == ({"size": TINY}, TINY + 2)
     finally:
         d.stop()

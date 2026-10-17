@@ -204,7 +204,7 @@ impl Engine {
         self.write.live().high_water()
     }
 
-    /// The point shards' size: the high water an insert may not take a shard past.
+    /// The point shards' size: the high water past which new items go to another shard.
     pub fn shard_size(&self) -> u64 {
         self.write.live().shard_size()
     }

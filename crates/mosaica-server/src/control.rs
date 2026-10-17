@@ -149,10 +149,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         // flushing and compaction need `write` as a write does.
         .route("/control/flush", post(flush))
         .route("/control/compact", post(compact))
-        .route_layer(axum::middleware::from_fn_with_state(
-            Arc::clone(&state),
-            require_writable,
-        ))
         .route_layer(axum::middleware::from_fn(require_write));
     let admin_routes = Router::new().route("/control/status", get(status));
     // Fault arming exists only in a fault-injection build, behind the credential like every route.
@@ -229,17 +225,6 @@ async fn require_write(
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, ApiError> {
     caller(&request).require(mosaica_catalogue::Permission::Write)?;
-    Ok(next.run(request).await)
-}
-
-/// The engine's write rule, asked before a write's body is read, so a bundle that takes no write
-/// refuses every write the same way whatever the body holds.
-async fn require_writable(
-    State(state): State<Arc<AppState>>,
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> Result<axum::response::Response, ApiError> {
-    state.engine.writable().map_err(map_accept_error)?;
     Ok(next.run(request).await)
 }
 

@@ -1,13 +1,11 @@
 //! A bundle a build wrote past its `[shards] size`, opened by a running service: it answers every
 //! read as the same items built as one shard answer it, names each item in its own shard, and
-//! refuses every write unless the engine is opened to write several shards.
+//! answers every write as a bundle of one shard does.
 
 mod common;
 
 use common::*;
-use mosaica_engine::{
-    AcceptError, Engine, EngineError, ExecutorPosture, RecordsOrder, ViewportRequest,
-};
+use mosaica_engine::{AcceptError, Engine, ExecutorPosture, RecordsOrder, ViewportRequest};
 use mosaica_lifecycle::resolve::Refusal;
 use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_lifecycle::{DeclaredValue, IncomingArtifact, IncomingGrowth, VocabularyRequest};
@@ -139,9 +137,10 @@ fn status_sums_the_shards() {
     );
 }
 
-/// Every write kind, through the engine.
+/// Every write kind, through the engine, naming items of shard 0, which holds the same items
+/// whether the fixture is built as one shard or two.
 fn writes(engine: &Engine) -> Vec<(&'static str, Result<(), AcceptError>)> {
-    let item = item_in(1, 0);
+    let item = item_in(0, 1);
     let frame = mosaica_engine::DeclaredFrame {
         x_min: 0.0,
         x_max: 1000.0,
@@ -154,10 +153,6 @@ fn writes(engine: &Engine) -> Vec<(&'static str, Result<(), AcceptError>)> {
             engine
                 .ingest_rows(vec![keyed_row("new")], "b".into(), [1; 32])
                 .map(drop),
-        ),
-        (
-            "change",
-            engine.accept_change(EntityId::new(0), ChangeOp::Suppress),
         ),
         (
             "changes",
@@ -173,7 +168,6 @@ fn writes(engine: &Engine) -> Vec<(&'static str, Result<(), AcceptError>)> {
             "layer",
             engine.register_layer(flat_declaration("l")).map(drop),
         ),
-        ("layer drop", engine.drop_layer("l".into())),
         (
             "attribute",
             engine
@@ -190,10 +184,7 @@ fn writes(engine: &Engine) -> Vec<(&'static str, Result<(), AcceptError>)> {
                 })
                 .map(drop),
         ),
-        (
-            "shards",
-            engine.declare_shards(TWO_SHARD_SIZE + 1).map(drop),
-        ),
+        ("shards", engine.declare_shards(TWO_SHARD_N + 1).map(drop)),
         (
             "vocabulary",
             engine
@@ -280,7 +271,7 @@ fn writes(engine: &Engine) -> Vec<(&'static str, Result<(), AcceptError>)> {
                         view: None,
                         joining: mosaica_lifecycle::ShardSets::in_shard(
                             ShardId::ZERO,
-                            croaring::Bitmap::of(&[0]),
+                            croaring::Bitmap::of(&[2]),
                         ),
                         leaving: Default::default(),
                         rank: None,
@@ -289,70 +280,62 @@ fn writes(engine: &Engine) -> Vec<(&'static str, Result<(), AcceptError>)> {
                 )
                 .map(drop),
         ),
+        ("layer drop", engine.drop_layer("l".into())),
     ]
 }
 
-#[test]
-fn every_write_is_refused_and_a_restart_reopens_the_bundle() {
-    let built = two_shards();
-    let engine = built.open();
-    let before = served_to(&engine, &full_coverage_credential());
-
-    assert!(matches!(
-        engine.writable(),
-        Err(AcceptError::SeveralShards { shards: 2 })
-    ));
-    for (kind, answered) in writes(&engine) {
-        assert!(
-            matches!(answered, Err(AcceptError::SeveralShards { shards: 2 })),
-            "{kind}: {answered:?}"
-        );
-    }
-    assert_eq!(
-        engine.allocator_high_water(),
-        TWO_SHARD_N,
-        "nothing was allocated"
-    );
-    assert_eq!(
-        served_to(&engine, &full_coverage_credential()),
-        before,
-        "nothing changed"
-    );
-
-    drop(engine);
-    let engine = built.open();
-    assert_eq!(served_to(&engine, &full_coverage_credential()), before);
+/// What an answer was: `ok`, or the names of the error's variants, outermost first.
+fn kind(answered: &Result<(), AcceptError>) -> String {
+    let Err(e) = answered else {
+        return "ok".into();
+    };
+    let debug = format!("{e:?}");
+    let named = debug.split('"').next().unwrap_or_default();
+    named
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|word| word.starts_with(|c: char| c.is_ascii_uppercase()))
+        .collect::<Vec<_>>()
+        .join("::")
 }
 
+/// Every write kind answers over a bundle of two shards as over the same items built as one, the
+/// executor runs over both, and a restart replays the log the writes left to the same answers.
 #[test]
-fn a_bundle_of_one_shard_takes_every_write() {
-    let built = fixture_sized(TWO_SHARD_N, None);
-    let engine = built.open();
-    assert!(engine.writable().is_ok());
-    let refused: Vec<&str> = writes(&engine)
-        .into_iter()
-        .filter(|(_, answered)| matches!(answered, Err(AcceptError::SeveralShards { .. })))
-        .map(|(kind, _)| kind)
-        .collect();
-    assert!(refused.is_empty(), "{refused:?}");
-}
-
-/// No write to a bundle of several shards can be in a log, so a log beside one that holds a
-/// record is another bundle's, and the open refuses it.
-#[test]
-fn a_log_holding_records_is_refused_beside_several_shards() {
+fn every_write_answers_over_two_shards_as_over_one_and_a_restart_replays_it() {
     let one = fixture_sized(TWO_SHARD_N, None);
-    let engine = one.open();
-    ingest(&engine, "a");
-    drop(engine);
-
     let several = two_shards();
-    let opened = Engine::open(&several.root, &several.cache, &one.wal, config());
+    let mut answered = Vec::new();
+    for built in [&one, &several] {
+        let engine = built.open();
+        assert_eq!(engine.write_executor_posture(), ExecutorPosture::Running);
+        let kinds: Vec<(&str, String)> = writes(&engine)
+            .iter()
+            .map(|(route, answer)| (*route, kind(answer)))
+            .collect();
+        let served = served_to(&engine, &full_coverage_credential());
+        drop(engine);
+        let logged = mosaica_lifecycle::wal::Wal::open(&built.wal)
+            .unwrap()
+            .records()
+            .count();
+        assert!(logged > 0, "the writes are in the log");
+        let engine = built.open();
+        assert_eq!(
+            served_to(&engine, &full_coverage_credential()),
+            served,
+            "the restart serves what the writes left"
+        );
+        answered.push((kinds, served));
+    }
+    let [(one_kinds, one_served), (several_kinds, several_served)] = &answered[..] else {
+        unreachable!()
+    };
+    assert_eq!(several_kinds, one_kinds);
     assert!(
-        matches!(opened, Err(EngineError::SeveralShardsLogged { shards: 2 })),
-        "{:?}",
-        opened.err()
+        one_kinds.iter().any(|(_, kind)| kind == "ok"),
+        "{one_kinds:?}"
     );
+    assert_eq!(several_served, one_served);
 }
 
 /// A table naming each of `read`'s items by its `mosaica_id` and by its unique `id`.
@@ -435,37 +418,6 @@ fn each_item_is_named_in_its_own_shard() {
         "{:?}",
         crossed.verdicts
     );
-}
-
-/// An engine opened to write several shards admits writes and starts its executor, and opens a
-/// log holding a record beside the shards, which [`Engine::open`] refuses.
-#[test]
-fn an_engine_writing_several_shards_admits_writes_and_a_log() {
-    let several = two_shards();
-    let engine = several.open_writing();
-    assert!(engine.writable().is_ok());
-    assert_eq!(engine.write_executor_posture(), ExecutorPosture::Running);
-    let before = served_to(&engine, &full_coverage_credential());
-    drop(engine);
-
-    // A log naming no shard: a layer's registration.
-    let one = fixture_sized(TWO_SHARD_N, None);
-    let engine = one.open();
-    engine.register_layer(flat_declaration("l")).unwrap();
-    drop(engine);
-
-    let refused = Engine::open(&several.root, &several.cache, &one.wal, config());
-    assert!(
-        matches!(refused, Err(EngineError::SeveralShardsLogged { shards: 2 })),
-        "{:?}",
-        refused.err()
-    );
-    let engine = open_writing(&several.root, &several.cache, &one.wal, config());
-    assert!(
-        engine.registered_layer("l").is_some(),
-        "the log is replayed"
-    );
-    assert_eq!(served_to(&engine, &full_coverage_credential()), before);
 }
 
 /// An insert into a bundle built as two shards lands in the open one, shard 1, at its high

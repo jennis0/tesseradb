@@ -363,17 +363,11 @@ def test_a_size_declared_after_the_first_commit_is_sent_where_the_server_reports
         plan = db.check()
         assert plan.ok, plan
         assert plan.plan[0] == "declare shard size 3"
-        report = db.commit()
-        # The two rows would take the high water from 2 to 4, past the size 3 sent before them.
-        assert not report.ok
-        assert [one["status"] for one in report.refusals] == [409]
-        assert db.status()["shards"] == {"size": 3}
-        assert [line for line in db.check().plan if line.startswith("declare")] == []
-
-        db.declare_shards(4)
-        db.insert("map", rows.assign(id=[3, 4]), x="x", y="y", access="access")
+        # The two rows take the high water from 2 to the size 3 sent before them, and a second
+        # shard holds the one past it.
         assert db.commit().ok
-        assert (db.status()["shards"], db.status()["entity_id_high_water"]) == ({"size": 4}, 4)
+        assert (db.status()["shards"], db.status()["entity_id_high_water"]) == ({"size": 3}, 4)
+        assert [line for line in db.check().plan if line.startswith("declare")] == []
     finally:
         db.close()
 

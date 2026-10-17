@@ -1296,10 +1296,7 @@ mod tests {
         };
         assert!(matches!(
             error,
-            AllocError::Full(mosaica_types::ShardFull {
-                limit: mosaica_types::ShardLimit::End(mosaica_types::ENTITY_END),
-                ..
-            })
+            AllocError::Full(mosaica_types::ShardFull { .. })
         ));
         assert_eq!(alloc.high_water(), mosaica_types::ENTITY_END - 1);
         assert_eq!(

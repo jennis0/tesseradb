@@ -165,25 +165,6 @@ impl Allocator {
         self.free.get(&Tenancy::ZERO).map_or(0, Bitmap::cardinality)
     }
 
-    /// How many of a window's `edits` and `items` take a freed id when both are in this shard: an
-    /// edit takes one at tenancy 0, and a new item one at any tenancy that is left.
-    fn reused(&self, edits: u64, items: u64) -> (u64, u64) {
-        let edits_reused = edits.min(self.at_zero());
-        let items_reused = items.min(cardinality_of(&self.free) - edits_reused);
-        (edits_reused, items_reused)
-    }
-
-    /// Whether a window of `edits` edits and `items` new items fits a bundle of this one shard,
-    /// which no window seals, so the size bounds its edits as well as its new items: the ids the
-    /// window takes from the high water, after the freed ids, may pass neither `size` nor
-    /// [`ENTITY_END`]. Held ids are not counted. [`check_window_room`] is the rule where a window
-    /// may seal the shard.
-    pub fn room(&self, edits: u64, items: u64, size: u64) -> Result<(), ShardFull> {
-        let (edits_reused, items_reused) = self.reused(edits, items);
-        let needed = (edits - edits_reused) + (items - items_reused);
-        check_room(size, ENTITY_END, self.high_water, needed)
-    }
-
     /// The freed ids [`Allocator::allocate_items`] can give, held ids aside: every tenancy in an
     /// open shard, and tenancy 1 and above in a sealed one, whose tenancy-0 ids are its edits'.
     fn item_pool(&self) -> u64 {
@@ -196,12 +177,7 @@ impl Allocator {
     /// Whether `n` edits fit: tenancy-0 ids, then the high water up to [`ENTITY_END`], whatever
     /// the shard's state and size.
     fn edits_room(&self, n: u64) -> Result<(), ShardFull> {
-        check_room(
-            u64::MAX,
-            ENTITY_END,
-            self.high_water,
-            n - n.min(self.at_zero()),
-        )
+        check_room(self.high_water, n - n.min(self.at_zero()))
     }
 
     /// The new entities of `n` edits of this shard's items: tenancy-0 ids lowest first, then the
@@ -428,36 +404,19 @@ fn place(
 }
 
 /// Whether a window fits among `shards`, ascending, when its edits take `edits` ids in each shard
-/// and its `items` new items are placed there with no shard opened: [`assign_sorted`]'s rule,
-/// asked before the window is assigned. A shard's edits run to [`ENTITY_END`] whatever its size.
-/// Held ids are not counted.
-///
-/// The refusal names the open shard: its high water, and the ids its edits and the window's new
-/// items would take past it.
-pub fn check_window_room(
+/// and its `items` new items are placed there and in the shards it opens from `next_id`:
+/// [`assign_sorted`]'s rule, asked before the window is assigned. Held ids are not counted.
+pub fn check_window(
     shards: &[(ShardId, &Allocator)],
     edits: &BTreeMap<ShardId, u64>,
     items: u64,
     size: u64,
-) -> Result<(), ShardFull> {
-    let rooms = rooms(shards.iter().map(|(shard, alloc)| (*shard, *alloc)), edits)?;
-    let Err(ShardsExhausted { needed: left }) = place(&rooms, ShardId::LIMIT, size, items) else {
-        return Ok(());
-    };
-    // `place` asked for a new shard, so the open shard gave all it had.
-    let open = shards
-        .iter()
-        .zip(&rooms)
-        .rfind(|(_, room)| room.state == ShardState::Open);
-    let (high_water, needed) = match open {
-        Some(((_, alloc), room)) => {
-            let edited = room.high_water - alloc.high_water();
-            let filled = size.min(ENTITY_END).saturating_sub(room.high_water);
-            (alloc.high_water(), edited + filled + left)
-        }
-        None => (size, left),
-    };
-    check_room(size, ENTITY_END, high_water, needed)
+    next_id: u32,
+) -> Result<(), AllocError> {
+    let rooms = rooms(shards.iter().map(|(shard, alloc)| (*shard, *alloc)), edits)
+        .map_err(AllocError::Full)?;
+    place(&rooms, next_id, size, items).map_err(AllocError::ShardsExhausted)?;
+    Ok(())
 }
 
 /// What a window took from one allocator, which [`Allocator::give_back`] returns: the freed ids
@@ -929,7 +888,6 @@ mod tests {
         assert_eq!(
             take_edits(&mut alloc, 3),
             Err(ShardFull {
-                limit: mosaica_types::ShardLimit::End(ENTITY_END),
                 high_water: ENTITY_END - 1,
                 needed: 2,
             })
@@ -943,38 +901,45 @@ mod tests {
     fn the_size_bounds_new_items_and_not_edits() {
         let mut alloc = freed(8, &[(0, &[2]), (1, &[3])]);
         alloc.release_after(5, at(0, &[4]));
-        let full = |needed| {
-            Err(ShardFull {
-                limit: mosaica_types::ShardLimit::Size(10),
-                high_water: 8,
-                needed,
-            })
-        };
-        let fits = |alloc: &Allocator, edits, items| {
-            check_window_room(
+        let exhausted = |needed| Err(AllocError::ShardsExhausted(ShardsExhausted { needed }));
+        // With no shard number left, the new items must fit this shard.
+        let fits = |alloc: &Allocator, edits, items, next_id| {
+            check_window(
                 &[(shard(0), alloc)],
                 &BTreeMap::from([(shard(0), edits)]),
                 items,
                 10,
+                next_id,
             )
         };
+        let last = ShardId::LIMIT;
         assert_eq!(
-            fits(&alloc, 1, 3),
+            fits(&alloc, 1, 3, last),
             Ok(()),
             "the edit takes 2, two items take 3 and 8, and one 9"
         );
-        assert_eq!(fits(&alloc, 1, 4), full(3), "the held 4 is not counted");
         assert_eq!(
-            fits(&alloc, 4, 0),
+            fits(&alloc, 1, 4, last),
+            exhausted(1),
+            "the held 4 is not counted"
+        );
+        assert_eq!(
+            fits(&alloc, 1, 4, 1),
+            Ok(()),
+            "the fourth item opens shard 1"
+        );
+        assert_eq!(
+            fits(&alloc, 4, 0, last),
             Ok(()),
             "edits take 2, then 8 and 9, and run past the size to 10"
         );
-        assert_eq!(fits(&alloc, 4, 1), Ok(()), "the item takes 3");
+        assert_eq!(fits(&alloc, 4, 1, last), Ok(()), "the item takes 3");
         assert_eq!(
-            fits(&alloc, 4, 2),
-            full(4),
-            "the edits' three ids and the second item's are past the size"
+            fits(&alloc, 4, 2, last),
+            exhausted(1),
+            "the edits run past the size, and the second item needs a new shard"
         );
+        assert_eq!(fits(&alloc, 4, 2, 1), Ok(()));
         assert_eq!(take_edits(&mut alloc, 1).unwrap(), vec![2]);
         assert_eq!(
             take_items(&mut alloc, 4, 10),
@@ -988,27 +953,6 @@ mod tests {
             "an edit runs past the size"
         );
         assert_eq!(take_items(&mut alloc, 1, 13), vec![12]);
-    }
-
-    #[test]
-    fn one_shard_alone_bounds_its_edits_and_new_items_by_the_size() {
-        let mut alloc = freed(8, &[(0, &[2]), (1, &[3])]);
-        alloc.release_after(5, at(0, &[4]));
-        let full = |needed| {
-            Err(ShardFull {
-                limit: mosaica_types::ShardLimit::Size(10),
-                high_water: 8,
-                needed,
-            })
-        };
-        assert_eq!(alloc.room(1, 3, 10), Ok(()));
-        assert_eq!(alloc.room(1, 4, 10), full(3), "the held 4 is not counted");
-        assert_eq!(alloc.room(3, 0, 10), Ok(()));
-        assert_eq!(
-            alloc.room(4, 0, 10),
-            full(3),
-            "an edit takes no id above tenancy 0, and the size bounds it"
-        );
     }
 
     #[test]
@@ -1053,7 +997,6 @@ mod tests {
         assert_eq!(
             take_edits(&mut a, 1),
             Err(ShardFull {
-                limit: mosaica_types::ShardLimit::End(ENTITY_END),
                 high_water: ENTITY_END,
                 needed: 1,
             })
@@ -1363,13 +1306,9 @@ mod tests {
     }
 
     #[test]
-    fn a_window_fits_the_pools_at_the_threshold_and_the_open_shards_room() {
+    fn a_window_fits_the_pools_at_the_threshold_the_open_shards_room_and_the_shards_it_opens() {
         let size = 2048;
-        let full = |high_water, needed| ShardFull {
-            limit: mosaica_types::ShardLimit::Size(size),
-            high_water,
-            needed,
-        };
+        let exhausted = |needed| Err(AllocError::ShardsExhausted(ShardsExhausted { needed }));
         let mut pooled = freed(3000, &[(0, &[1, 2]), (1, &[3, 4])]);
         pooled.seal();
         let mut below = freed(2100, &[(1, &[5])]);
@@ -1377,21 +1316,24 @@ mod tests {
         let open = freed(2040, &[(0, &[6])]);
         let shards = [(shard(0), &pooled), (shard(1), &below), (shard(2), &open)];
         let none = BTreeMap::new();
+        let last = ShardId::LIMIT;
         // Shard 0's pool of 2 is at the threshold of 2; shard 1's of 1 is below it.
-        assert_eq!(check_window_room(&shards, &none, 11, size), Ok(()));
+        assert_eq!(check_window(&shards, &none, 11, size, last), Ok(()));
+        assert_eq!(check_window(&shards, &none, 12, size, last), exhausted(1));
         assert_eq!(
-            check_window_room(&shards, &none, 12, size),
-            Err(full(2040, 9))
+            check_window(&shards, &none, 12, size, 3),
+            Ok(()),
+            "the twelfth item opens shard 3"
         );
         let edited = BTreeMap::from([(shard(2), 1)]);
         assert_eq!(
-            check_window_room(&shards, &edited, 11, size),
-            Err(full(2040, 9)),
+            check_window(&shards, &edited, 11, size, last),
+            exhausted(1),
             "the open shard's edit takes its tenancy-0 id before a new item can"
         );
         let edited = BTreeMap::from([(shard(0), 2), (shard(1), 1)]);
         assert_eq!(
-            check_window_room(&shards, &edited, 11, size),
+            check_window(&shards, &edited, 11, size, last),
             Ok(()),
             "a sealed shard's edits are not bounded by the size"
         );
@@ -1401,48 +1343,79 @@ mod tests {
         let shards = [(shard(0), &ended), (shard(1), &open)];
         let edited = BTreeMap::from([(shard(0), 1)]);
         assert_eq!(
-            check_window_room(&shards, &edited, 0, size),
-            Err(ShardFull {
-                limit: mosaica_types::ShardLimit::End(ENTITY_END),
+            check_window(&shards, &edited, 0, size, 2),
+            Err(AllocError::Full(ShardFull {
                 high_water: ENTITY_END,
                 needed: 1,
-            })
+            }))
         );
     }
 
     #[test]
-    fn a_window_fits_where_its_assignment_opens_no_shard() {
-        let alloc = || freed(8, &[(0, &[2]), (1, &[3])]);
-        for (edits, items) in [
-            (0, 4),
-            (0, 5),
-            (1, 3),
-            (2, 3),
-            (3, 0),
-            (4, 0),
-            (4, 1),
-            (4, 2),
-        ] {
-            let fits = check_window_room(
-                &[(shard(0), &alloc())],
-                &BTreeMap::from([(shard(0), edits)]),
-                items,
-                10,
-            );
-            let mut window: Vec<PendingItem> = (0..edits)
-                .map(|_| pending(&[1], Some(0)))
-                .chain((0..items).map(|_| pending(&[1], None)))
-                .collect();
-            let mut assigning = alloc();
-            let assigned = assign_sorted(
-                &mut window,
-                &mut Allocators::single(shard(0), &mut assigning, 10),
-            );
-            assert_eq!(
-                fits.is_ok(),
-                assigned.is_ok_and(|placed| placed.opened.is_empty()),
-                "{edits} edits, {items} items"
-            );
+    fn a_window_needing_a_shard_past_the_last_number_does_not_fit() {
+        let full = Allocator::new(10);
+        let shards = [(shard(0), &full)];
+        let none = BTreeMap::new();
+        let next_id = ShardId::LIMIT - 1;
+        assert_eq!(
+            check_window(&shards, &none, 10, 10, next_id),
+            Ok(()),
+            "the last shard number takes ten"
+        );
+        assert_eq!(
+            check_window(&shards, &none, 11, 10, next_id),
+            Err(AllocError::ShardsExhausted(ShardsExhausted { needed: 1 }))
+        );
+    }
+
+    #[test]
+    fn a_window_fits_where_its_assignment_succeeds() {
+        let size = 10;
+        let allocs: [fn() -> Allocator; 2] = [
+            || freed(8, &[(0, &[2]), (1, &[3])]),
+            || freed(ENTITY_END - 1, &[(0, &[2])]),
+        ];
+        for alloc in allocs {
+            for next_id in [1, ShardId::LIMIT - 1, ShardId::LIMIT] {
+                for (edits, items) in [
+                    (0, 4),
+                    (0, 5),
+                    (1, 3),
+                    (2, 3),
+                    (3, 0),
+                    (4, 0),
+                    (4, 1),
+                    (4, 2),
+                    (0, 15),
+                    (0, 25),
+                ] {
+                    let fits = check_window(
+                        &[(shard(0), &alloc())],
+                        &BTreeMap::from([(shard(0), edits)]),
+                        items,
+                        size,
+                        next_id,
+                    );
+                    let mut window: Vec<PendingItem> = (0..edits)
+                        .map(|_| pending(&[1], Some(0)))
+                        .chain((0..items).map(|_| pending(&[1], None)))
+                        .collect();
+                    let mut assigning = alloc();
+                    let assigned = assign_sorted(
+                        &mut window,
+                        &mut Allocators {
+                            shards: vec![(shard(0), &mut assigning)],
+                            size,
+                            next_id,
+                        },
+                    );
+                    assert_eq!(
+                        fits,
+                        assigned.map(|_| ()),
+                        "{edits} edits, {items} items, next shard {next_id}"
+                    );
+                }
+            }
         }
     }
 

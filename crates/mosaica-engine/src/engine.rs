@@ -633,7 +633,6 @@ struct ReconstructedWrites {
 /// entity it names.
 fn reconstruct_writes(
     wal_path: &Path,
-    several_shards: crate::write::SeveralShards,
     bundle: &Bundle,
     readers: &PrefixReaders,
     side: SideDeclarations,
@@ -716,7 +715,6 @@ fn reconstruct_writes(
     };
     let (overlay, buffers, state) = WritePath::reconstruct(
         wal_path,
-        several_shards,
         crate::write::ManifestSeed {
             shards: seeds,
             next_id: partition.next_shard_id,
@@ -1223,40 +1221,6 @@ impl Engine {
         wal_path: &Path,
         config: EngineConfig,
     ) -> Result<Engine> {
-        Engine::open_with(
-            bundle_root,
-            cache_dir,
-            wal_path,
-            config,
-            crate::write::SeveralShards::Refused,
-        )
-    }
-
-    /// [`Engine::open`], taking writes, and a log, over a bundle of several point shards. For this
-    /// crate's own tests.
-    #[cfg(feature = "several-shard-writes")]
-    pub fn open_writing_several_shards(
-        bundle_root: &Path,
-        cache_dir: &Path,
-        wal_path: &Path,
-        config: EngineConfig,
-    ) -> Result<Engine> {
-        Engine::open_with(
-            bundle_root,
-            cache_dir,
-            wal_path,
-            config,
-            crate::write::SeveralShards::Written,
-        )
-    }
-
-    fn open_with(
-        bundle_root: &Path,
-        cache_dir: &Path,
-        wal_path: &Path,
-        config: EngineConfig,
-        several_shards: crate::write::SeveralShards,
-    ) -> Result<Engine> {
         config.check()?;
         let mut bundle = open_bundle(bundle_root).map_err(EngineError::Store)?;
         let side = merge_side_declarations(&mut bundle);
@@ -1267,7 +1231,7 @@ impl Engine {
             buffers,
             mut state,
             vocabularies,
-        } = reconstruct_writes(wal_path, several_shards, &bundle, &readers, side)?;
+        } = reconstruct_writes(wal_path, &bundle, &readers, side)?;
         open_logged_shards(bundle_root, &mut bundle, &mut readers, &state)?;
 
         let fragments = Arc::new(FragmentCache::new(cache_dir, authorisation_rule_hash()));

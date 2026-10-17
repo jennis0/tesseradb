@@ -6,7 +6,7 @@ pub use identity::{
 mod shard;
 pub use shard::{
     by_shard, check_room, check_shard_size, only, reuse_min_free, ItemAt, LayerSpace, ShardFull,
-    ShardId, ShardLimit, ShardRow, ShardSizeError, ShardState, ShardsExhausted, Target, ENTITY_END,
+    ShardId, ShardRow, ShardSizeError, ShardState, ShardsExhausted, Target, ENTITY_END,
     SHARD_SIZE_DEFAULT,
 };
 
