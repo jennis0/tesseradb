@@ -428,9 +428,9 @@ impl Engine {
     /// Request a compaction of every shard with something to reclaim, one after another, or of
     /// the shard the schedule ranks first where none has: the trigger `POST /control/compact`
     /// takes. A compaction gets its own thread rather than the shared pool, and the 202 means
-    /// minutes to hours of IO still to come. At most one compaction is in flight: a request
-    /// arriving while one runs is refused, and `fold_requested` stays true until the last shard a
-    /// request named publishes.
+    /// minutes to hours of IO still to come. At most one compaction is in flight. A request that
+    /// arrives while one runs is held until it lands, and `fold_requested` stays true until the
+    /// last shard the request names publishes.
     pub fn request_fold(&self) {
         self.request_compaction(None);
     }

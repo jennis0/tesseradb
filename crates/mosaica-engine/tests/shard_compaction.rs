@@ -407,7 +407,95 @@ fn a_shard_sealed_with_a_deletion_pending_is_compacted_once() {
     engine
         .accept_changes(vec![(item_in(1, 4), ChangeOp::Delete)])
         .unwrap();
-    // Ten rows fill shard 1 to its size and the eleventh opens shard 2, sealing shard 1.
+    seal_shard_one(&engine);
+    assert_eq!(shards_of(&several.root).1.len(), 3);
+    let identity = records(&several.root)[1].0;
+    tick_until(
+        &engine,
+        "the closing compaction",
+        Duration::from_secs(60),
+        || engine.write_executor_stats().folds == 1,
+    );
+    assert_eq!(engine.retirable_deletions(), 0);
+    assert_ne!(
+        records(&several.root)[1].0,
+        identity,
+        "shard 1 is the one compacted"
+    );
+    for _ in 0..5 {
+        tick(&engine);
+    }
+    assert_eq!(engine.write_executor_stats().folds, 1, "and only once");
+}
+
+/// A shard sealed with its rows still buffered, and nothing else to reclaim, is compacted once
+/// those rows are flushed. An edit in shard 0 is older, so the first tick flushes it and none of
+/// shard 1's rows.
+#[test]
+fn a_shard_sealed_with_its_rows_buffered_is_compacted_once_they_flush() {
+    let several = fixture_sized(N, Some(SIZE));
+    let engine = writing(&several);
+    edit_in_shard_zero(&engine);
+    seal_shard_one(&engine);
+    let identity = records(&several.root)[1].0;
+    tick_until(
+        &engine,
+        "the closing compaction",
+        Duration::from_secs(30),
+        || engine.write_executor_stats().folds == 1,
+    );
+    assert_ne!(
+        records(&several.root)[1].0,
+        identity,
+        "shard 1 is the one compacted"
+    );
+    for _ in 0..5 {
+        tick(&engine);
+    }
+    assert_eq!(engine.write_executor_stats().folds, 1, "and only once");
+}
+
+/// Move an item of shard 0, found by its `id` value: an edit, whose row shard 0 buffers.
+fn edit_in_shard_zero(engine: &Engine) {
+    let named = |id: u64| {
+        let table = mosaica_engine::AddressTable {
+            rows: 1,
+            mosaica_id: None,
+            columns: vec![(
+                "id".to_string(),
+                vec![Some(mosaica_engine::AddressValue::Text(id.to_string()))],
+            )],
+        };
+        engine.name_items(&table).unwrap().verdicts[0]
+            .clone()
+            .expect("the value names an item")
+    };
+    let id = (0..N)
+        .find(|id| named(*id).shard == shard(0))
+        .expect("shard 0 holds an item");
+    engine
+        .ingest(mosaica_engine::IngestRequest {
+            batch_id: "edit".to_string(),
+            body_hash: [9; 32],
+            view: Some("s0".to_string()),
+            rows: vec![mosaica_lifecycle::IngestRow {
+                mosaica_id: None,
+                labels: Some(vec![b"0".to_vec()]),
+                position: Some((7.0, 7.0)),
+                scalars: vec![mosaica_lifecycle::wal::WalScalar::U64(id)],
+                scoped: Vec::new(),
+                omitted: Vec::new(),
+            }],
+            artifacts: Default::default(),
+            strict: true,
+            mosaica_id_column: false,
+        })
+        .expect("the edit is accepted");
+}
+
+/// Ingest eleven rows: ten fill shard 1 to its size and the eleventh opens shard 2, sealing
+/// shard 1.
+fn seal_shard_one(engine: &Engine) {
     let rows = (0..11)
         .map(|at| mosaica_lifecycle::IngestRow {
             mosaica_id: None,
@@ -429,24 +517,6 @@ fn a_shard_sealed_with_a_deletion_pending_is_compacted_once() {
             mosaica_id_column: false,
         })
         .expect("the batch is accepted");
-    assert_eq!(shards_of(&several.root).1.len(), 3);
-    let identity = records(&several.root)[1].0;
-    tick_until(
-        &engine,
-        "the closing compaction",
-        Duration::from_secs(60),
-        || engine.write_executor_stats().folds == 1,
-    );
-    assert_eq!(engine.retirable_deletions(), 0);
-    assert_ne!(
-        records(&several.root)[1].0,
-        identity,
-        "shard 1 is the one compacted"
-    );
-    for _ in 0..5 {
-        tick(&engine);
-    }
-    assert_eq!(engine.write_executor_stats().folds, 1, "and only once");
 }
 
 fn insert(engine: &Engine, key: &str) -> MosaicaId {

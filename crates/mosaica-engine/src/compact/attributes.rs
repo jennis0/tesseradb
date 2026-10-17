@@ -19,6 +19,8 @@ struct ColumnJob {
     /// writes its base.
     has_base: bool,
     arrow_type: ScalarType,
+    /// True for a column whose values are codes of a vocabulary.
+    category: bool,
     /// True for a category, whose postings are rebuilt from the folded column.
     postings: bool,
 }
@@ -29,8 +31,7 @@ impl ColumnJob {
     }
 }
 
-/// The columns the predicates select, entity-scoped then group-scoped, in manifest order. A view
-/// with no known incarnation is skipped.
+/// The columns the predicates select, entity-scoped then group-scoped, in manifest order.
 fn column_jobs(
     plan: &FoldPlan,
     ctx: &FoldContext,
@@ -48,28 +49,31 @@ fn column_jobs(
             incarnation: None,
             has_base: !ctx.unbased.contains(&d.name),
             arrow_type: d.arrow_type,
+            category: d.vocabulary.is_some(),
             postings: crate::filter::owes_postings(d, &ctx.vocabularies),
         })
         .collect();
-    for family in ctx.scoped_scalars.iter().filter(|f| scoped(f)) {
-        for view in &family.views {
-            let Some(&incarnation) = ctx.view_incarnations.get(view) else {
-                continue;
-            };
-            jobs.push(ColumnJob {
-                rel: plan
-                    .layout()
-                    .scoped_column_rel(&family.name, view, incarnation),
-                name: family.name.clone(),
-                view: Some(view.clone()),
-                incarnation: Some(incarnation),
-                has_base: !ctx.unbased_scoped.iter().any(|(column, held, at)| {
-                    *column == family.name && held == view && *at == incarnation
-                }),
-                arrow_type: family.arrow_type,
-                postings: crate::filter::scoped_owes_postings(family),
-            });
-        }
+    for column in &ctx.scoped_views {
+        let Some(family) = ctx
+            .scoped_scalars
+            .iter()
+            .find(|family| family.name == column.column && family.views.contains(&column.view))
+            .filter(|family| scoped(family))
+        else {
+            continue;
+        };
+        jobs.push(ColumnJob {
+            rel: plan
+                .layout()
+                .scoped_column_rel(&column.column, &column.view, column.incarnation),
+            name: column.column.clone(),
+            view: Some(column.view.clone()),
+            incarnation: Some(column.incarnation),
+            has_base: !ctx.unbased_scoped.contains(column),
+            arrow_type: family.arrow_type,
+            category: family.vocabulary.is_some(),
+            postings: crate::filter::scoped_owes_postings(family),
+        });
     }
     jobs
 }
@@ -337,7 +341,7 @@ fn fold_value_column(
     })?;
     let partial = if layers.is_empty() {
         // No layer holds the column yet: the base an empty shard is written with.
-        mosaica_store::empty_shard::write_empty_value_column(&to_dir, job.arrow_type, job.postings)
+        mosaica_store::empty_shard::write_empty_value_column(&to_dir, job.arrow_type, job.category)
             .map_err(failed("pass 4a (attributes: an empty base)"))?;
         if job.arrow_type == mosaica_spatial::tiler::ScalarType::Keyword {
             out.wrote(dict_rel, dict_path.clone());

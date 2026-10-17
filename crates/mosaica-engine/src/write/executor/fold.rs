@@ -98,18 +98,18 @@ impl PendingRetirement {
         })
     }
 
-    /// [`Self::records`], each as `slice`, `shard`'s slice of `store`, holds it: what the shard's
-    /// derived files are composed from. An artifact the slice holds nothing of, or the retirement
-    /// releases from it, is left out.
+    /// Each of [`Self::records`] as `shard`'s slice holds it, leaving out an artifact the slice
+    /// holds nothing of or the retirement releases from it.
     fn held<'s>(
         &'s self,
         store: &'s ArtifactStore,
-        slice: &'s ArtifactStore,
         shard: ShardId,
         layer: &'s str,
         level: u32,
     ) -> impl Iterator<Item = (u32, &'s mosaica_lifecycle::membership::ArtifactRecord)> + 's {
-        let slots = slice.slots(layer, level);
+        let slots = store
+            .slice(shard)
+            .map_or(&[][..], |slice| slice.slots(layer, level));
         let released = store
             .space_of(layer)
             .filter(|_| shard == self.retired.shard)
@@ -384,7 +384,7 @@ pub(in crate::write) fn sweep_orphan_prefixes(bundle_root: &Path, live: &str) {
 /// the build's own artefacts are in the first and would be missed by reading only the second.
 /// `unnamed` is what no manifest names at all: neither map, no derived file and no shard, space or
 /// partition file.
-pub(super) fn dead_bytes_of(
+fn dead_bytes_of(
     prefix_dir: &Path,
     generation: &Generation,
     rest: ShardId,
@@ -411,11 +411,7 @@ pub(super) fn dead_bytes_of(
     let owner = |rel: &str| {
         partitions
             .iter()
-            .find_map(|partition| {
-                let shards = format!("{}/", mosaica_store::layout::shards_rel(partition));
-                let number = rel.strip_prefix(&shards)?.split('/').next()?;
-                ShardId::new(number.parse().ok()?).ok()
-            })
+            .find_map(|partition| mosaica_store::layout::shard_of(partition, rel))
             .unwrap_or(rest)
     };
     let files = generation.bundle.manifest.files.iter().chain(
@@ -449,12 +445,7 @@ pub(super) fn dead_bytes_of(
         };
         gauge.dead.on_disc += size;
         let file = rel.rsplit('/').next().unwrap_or(rel);
-        let manifest = file == "MANIFEST.json"
-            || file
-                .strip_prefix("SEGMENTS-")
-                .and_then(|n| n.strip_suffix(".json"))
-                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
-        if !manifest && !named.contains(rel.as_str()) {
+        if !mosaica_store::layout::is_manifest_name(file) && !named.contains(rel.as_str()) {
             gauge.unnamed += size;
         }
     }
@@ -462,22 +453,10 @@ pub(super) fn dead_bytes_of(
 }
 
 /// One shard's dead-bytes gauge: the schedule's ratio, and the bytes no manifest names.
-#[derive(Debug, Clone, Copy)]
-pub(super) struct ShardDeadBytes {
-    pub(super) dead: crate::compact::DeadBytes,
-    pub(super) unnamed: u64,
-}
-
-impl Default for ShardDeadBytes {
-    fn default() -> Self {
-        ShardDeadBytes {
-            dead: crate::compact::DeadBytes {
-                on_disc: 0,
-                named: 0,
-            },
-            unnamed: 0,
-        }
-    }
+#[derive(Debug, Clone, Copy, Default)]
+struct ShardDeadBytes {
+    dead: crate::compact::DeadBytes,
+    unnamed: u64,
 }
 
 /// Free bytes on the filesystem holding `path`, or `None` where unknowable.
@@ -518,7 +497,7 @@ pub(in crate::write) struct Compactions {
     /// The shards a request named and no compaction has been dispatched for, in order. `Some`
     /// until the request is answered: [`ExecutorHealth::fold_requested`] stays raised.
     requested: Option<std::collections::VecDeque<ShardId>>,
-    /// The shards sealed since their last compaction, each owed one closing compaction.
+    /// The shards sealed since their last compaction, each due one closing compaction.
     closing: std::collections::BTreeSet<ShardId>,
     /// When each shard's last compaction started, as a unix second, so the interval can limit
     /// attempts.
@@ -537,12 +516,41 @@ impl Compactions {
     }
 }
 
+/// Whether `shard` has something a compaction reclaims: a deletion in its overlay, an artifact
+/// deletion it must remove, a segment flushed since its last compaction, a column of `runtime` it
+/// holds no base of, or bytes under its directory no manifest names.
+fn reclaims(
+    shard: &Shard,
+    gauges: &crate::compact::Gauges,
+    runtime: &[String],
+    unnamed: u64,
+) -> bool {
+    gauges.retirable_deletions > 0
+        || gauges.artifact_deletions > 0
+        || shard
+            .data
+            .views
+            .values()
+            .any(|view| !view.row_space.extents().is_empty())
+        || !shard.data.record.unbased(runtime).is_empty()
+        || unnamed > 0
+}
+
 /// Where a compaction's shard came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 enum Dispatching {
     Requested,
     Closing,
-    Scheduled(crate::compact::FoldTrigger),
+    Scheduled(Scheduled),
+}
+
+/// Why the schedule called for a compaction of a shard, and the gauges it read.
+#[derive(Debug, Clone, Copy)]
+struct Scheduled {
+    trigger: crate::compact::FoldTrigger,
+    gauges: crate::compact::Gauges,
+    /// `None` where the live prefix could not be walked.
+    dead: Option<ShardDeadBytes>,
 }
 
 /// Whether every artefact a completed fold consumed is still listed in the live manifest.
@@ -610,14 +618,9 @@ struct FoldApplies<'a> {
 
 /// The columns declared at a running service that a compaction writes into `MANIFEST.json`:
 /// those every shard holds the base of.
-pub(super) struct Folded {
+struct Folded {
     entity: Vec<String>,
     scoped: Vec<String>,
-}
-
-/// The names of `declared`, in order.
-fn names_of<T>(declared: &[T], name: impl Fn(&T) -> &String) -> Vec<String> {
-    declared.iter().map(|d| name(d).clone()).collect()
 }
 
 /// The `(layer, level)`s whose observed memberships overlap, which have no label column.
@@ -873,12 +876,12 @@ pub(super) fn carried_files(
 /// live `MANIFEST.json`'s and partition manifest's `files` under another shard's directory, less
 /// the member packs, which the compaction writes again. The new prefix links each, and lists it in
 /// the same map it came from.
-pub(super) struct OtherShards {
-    pub(super) bundle: std::collections::BTreeMap<String, mosaica_store::manifest::FileDigest>,
-    pub(super) side: std::collections::BTreeMap<String, mosaica_store::manifest::FileDigest>,
+struct OtherShards {
+    bundle: std::collections::BTreeMap<String, mosaica_store::manifest::FileDigest>,
+    side: std::collections::BTreeMap<String, mosaica_store::manifest::FileDigest>,
 }
 
-pub(super) fn other_shards(
+fn other_shards(
     partition: &str,
     shard: ShardId,
     live_manifest: &mosaica_store::manifest::PartitionManifest,
@@ -889,7 +892,7 @@ pub(super) fn other_shards(
             files
                 .iter()
                 .filter(|(rel, _)| {
-                    crate::compact::in_other_shard(partition, shard, rel)
+                    mosaica_store::layout::shard_of(partition, rel).is_some_and(|at| at != shard)
                         && !mosaica_store::layout::is_artifact_file(partition, rel)
                 })
                 .map(|(rel, digest)| (rel.clone(), digest.clone()))
@@ -969,7 +972,7 @@ pub(super) fn levels_of(store: &ArtifactStore) -> impl Iterator<Item = (String, 
 
 impl Executor {
     /// Each shard's gauges, as the schedule reads them. An artifact deletion counts in each shard
-    /// that owes it, and one no shard owes in the open shard's.
+    /// that holds it, and one no shard holds in the open shard's.
     fn shard_gauges(&self, generation: &Generation) -> Vec<(ShardId, crate::compact::Gauges)> {
         let mut artifact_deletions: std::collections::BTreeMap<ShardId, u64> = Default::default();
         let open = self.live.open_shard().id;
@@ -978,13 +981,13 @@ impl Executor {
             if deleted.is_empty() {
                 continue;
             }
-            let mut owed_somewhere = croaring::Bitmap::new();
+            let mut held_somewhere = croaring::Bitmap::new();
             for (shard, artifacts) in self.live.owing(*space, deleted) {
                 *artifact_deletions.entry(shard).or_default() += artifacts.cardinality();
-                owed_somewhere.or_inplace(&artifacts);
+                held_somewhere.or_inplace(&artifacts);
             }
             *artifact_deletions.entry(open).or_default() +=
-                deleted.andnot_cardinality(&owed_somewhere);
+                deleted.andnot_cardinality(&held_somewhere);
         }
         generation
             .shards()
@@ -993,34 +996,60 @@ impl Executor {
                     live_segments: live_segments_in(shard),
                     retirable_deletions: shard.overlay.deleted_len(),
                     artifact_deletions: artifact_deletions.get(&shard.id()).copied().unwrap_or(0),
-                    live_rows: shard
-                        .data
-                        .record
-                        .segments
-                        .iter()
-                        .map(|descriptor| u64::from(descriptor.row_count))
-                        .sum(),
+                    live_rows: crate::status::live_rows_in(shard),
                 };
                 (shard.id(), gauges)
             })
             .collect()
     }
 
+    /// Each shard's dead-bytes gauge, from one walk of the live prefix.
+    fn dead_bytes(
+        &self,
+        generation: &Generation,
+    ) -> Option<std::collections::BTreeMap<ShardId, ShardDeadBytes>> {
+        dead_bytes_of(
+            &self.prefix_dir(generation),
+            generation,
+            self.live.open_shard().id,
+        )
+    }
+
+    /// Each shard's gauges, and whether it has something a compaction reclaims ([`reclaims`]).
+    fn reclaiming(&self, generation: &Generation) -> Vec<(ShardId, crate::compact::Gauges, bool)> {
+        let dead = self.dead_bytes(generation).unwrap_or_default();
+        let (attributes, scoped) = self.live.attributes_for_publication();
+        let runtime: Vec<String> = attributes
+            .into_iter()
+            .map(|declared| declared.name)
+            .chain(scoped.into_iter().map(|family| family.name))
+            .collect();
+        self.shard_gauges(generation)
+            .into_iter()
+            .map(|(shard, gauges)| {
+                let unnamed = dead.get(&shard).map_or(0, |gauge| gauge.unnamed);
+                let reclaims = generation
+                    .shard(shard)
+                    .is_some_and(|held| reclaims(held, &gauges, &runtime, unnamed));
+                (shard, gauges, reclaims)
+            })
+            .collect()
+    }
+
     /// Which shard [`crate::compact::CompactionSchedule`] calls for a compaction of now, and why:
-    /// among the shards due on their own gauges and interval, the one [`crate::compact::rank`] puts first.
+    /// among the shards due on their own gauges and interval, the one [`crate::compact::rank`] puts
+    /// first.
     ///
     /// The dead-bytes gauge is a directory walk and is passed as a closure: `due` calls it only
-    /// after every cheaper gauge has declined, and the walk is taken once for every shard. It
-    /// walks the live prefix, not the bundle root; an orphaned prefix is the startup sweep's to
-    /// reclaim, not a fold's.
-    pub(super) fn scheduled_fold(
-        &self,
-        generation: &Arc<Generation>,
-    ) -> Option<(ShardId, crate::compact::FoldTrigger)> {
+    /// after every cheaper gauge has declined, and the walk is taken at most once and shared by
+    /// every shard. It walks the live prefix, not the bundle root; an orphaned prefix is the
+    /// startup sweep's to reclaim, not a fold's.
+    fn scheduled_fold(&self, generation: &Arc<Generation>) -> Option<(ShardId, Scheduled)> {
         let now = unix_now()?;
         let dead = std::cell::OnceCell::new();
-        let rest = self.live.open_shard().id;
-        self.shard_gauges(generation)
+        let walked = || dead.get_or_init(|| self.dead_bytes(generation));
+        let (shard, trigger, gauges) = self
+            .shard_gauges(generation)
             .into_iter()
             .filter_map(|(shard, gauges)| {
                 let trigger = crate::compact::due(
@@ -1028,19 +1057,23 @@ impl Executor {
                     now,
                     self.fold_floor_from(shard),
                     gauges,
-                    || {
-                        dead.get_or_init(|| {
-                            dead_bytes_of(&self.prefix_dir(generation), generation, rest)
-                        })
-                        .as_ref()?
-                        .get(&shard)
-                        .map(|gauge| gauge.dead)
-                    },
+                    || walked().as_ref()?.get(&shard).map(|gauge| gauge.dead),
                 )?;
-                Some((crate::compact::rank(shard, &gauges), shard, trigger))
+                Some((crate::compact::rank(shard, &gauges), shard, trigger, gauges))
             })
-            .min_by_key(|(key, _, _)| *key)
-            .map(|(_, shard, trigger)| (shard, trigger))
+            .min_by_key(|(key, ..)| *key)
+            .map(|(_, shard, trigger, gauges)| (shard, trigger, gauges))?;
+        let dead = walked()
+            .as_ref()
+            .and_then(|by_shard| by_shard.get(&shard).copied());
+        Some((
+            shard,
+            Scheduled {
+                trigger,
+                gauges,
+                dead,
+            },
+        ))
     }
 
     /// The shards a request names, in the order they are compacted: those it names; or, for
@@ -1056,72 +1089,23 @@ impl Executor {
         let mut shards: std::collections::BTreeSet<ShardId> =
             request.shards.intersection(&held).copied().collect();
         if request.every {
-            let gauges = self.shard_gauges(generation);
-            let unnamed = self.unnamed_bytes(generation);
-            let reclaiming: Vec<ShardId> = gauges
-                .iter()
-                .filter(|(shard, gauges)| self.reclaims(generation, *shard, gauges, &unnamed))
-                .map(|(shard, _)| *shard)
-                .collect();
-            match reclaiming.is_empty() {
-                false => shards.extend(reclaiming),
+            let reclaiming = self.reclaiming(generation);
+            match reclaiming.iter().any(|(_, _, reclaims)| *reclaims) {
                 true => shards.extend(
-                    gauges
+                    reclaiming
                         .iter()
-                        .min_by_key(|(shard, gauges)| crate::compact::rank(*shard, gauges))
-                        .map(|(shard, _)| *shard),
+                        .filter(|(_, _, reclaims)| *reclaims)
+                        .map(|(shard, ..)| *shard),
+                ),
+                false => shards.extend(
+                    reclaiming
+                        .iter()
+                        .min_by_key(|(shard, gauges, _)| crate::compact::rank(*shard, gauges))
+                        .map(|(shard, ..)| *shard),
                 ),
             }
         }
         shards.into_iter().collect()
-    }
-
-    /// Whether `shard` has something a compaction reclaims: a deletion in its overlay, an
-    /// artifact deletion it owes, a segment written since its last compaction, a runtime column
-    /// it holds no base of, or bytes under its directory no manifest names.
-    fn reclaims(
-        &self,
-        generation: &Generation,
-        shard: ShardId,
-        gauges: &crate::compact::Gauges,
-        unnamed: &std::collections::BTreeMap<ShardId, u64>,
-    ) -> bool {
-        let Some(held) = generation.shard(shard) else {
-            return false;
-        };
-        let flushed = held
-            .data
-            .views
-            .values()
-            .any(|view| !view.row_space.extents().is_empty());
-        let (attributes, scoped) = self.live.attributes_for_publication();
-        let based = &held.data.record.runtime_bases;
-        let unbased = attributes
-            .iter()
-            .map(|declared| &declared.name)
-            .chain(scoped.iter().map(|family| &family.name))
-            .any(|name| !based.contains(name));
-        gauges.retirable_deletions > 0
-            || gauges.artifact_deletions > 0
-            || flushed
-            || unbased
-            || unnamed.get(&shard).is_some_and(|bytes| *bytes > 0)
-    }
-
-    /// Each shard's bytes no manifest names, from one walk of the live prefix.
-    fn unnamed_bytes(&self, generation: &Generation) -> std::collections::BTreeMap<ShardId, u64> {
-        dead_bytes_of(
-            &self.prefix_dir(generation),
-            generation,
-            self.live.open_shard().id,
-        )
-        .map(|by_shard| {
-            by_shard
-                .into_iter()
-                .map(|(shard, gauge)| (shard, gauge.unnamed))
-                .collect()
-        })
-        .unwrap_or_default()
     }
 
     /// The instant `compaction_min_interval_secs` is measured from for `shard`: a compaction of it
@@ -1129,7 +1113,7 @@ impl Executor {
     /// that one has ended. Measuring from the end alone would drift the schedule by the
     /// compaction's own duration; measuring from the start alone would let one that discards
     /// re-dispatch immediately.
-    pub(super) fn fold_floor_from(&self, shard: ShardId) -> Option<u64> {
+    fn fold_floor_from(&self, shard: ShardId) -> Option<u64> {
         let started = *self.compactions.started.get(&shard)?;
         let ended = match self.compactions.last == Some(shard) {
             true => self.health.fold_ended_unix.load(Ordering::SeqCst),
@@ -1139,8 +1123,9 @@ impl Executor {
     }
 
     /// Answer the request being worked through where no shard of it is left to dispatch: the
-    /// caller knows none is in flight.
-    pub(super) fn request_answered(&mut self) {
+    /// caller knows none is in flight. [`ExecutorHealth::fold_requested`] stays raised while a
+    /// request no tick has taken is held.
+    fn request_answered(&mut self) {
         if self
             .compactions
             .requested
@@ -1148,7 +1133,13 @@ impl Executor {
             .is_some_and(|left| left.is_empty())
         {
             self.compactions.requested = None;
-            self.health.fold_requested.store(false, Ordering::SeqCst);
+        }
+        if self.compactions.requested.is_none() {
+            // Under the lock a request is raised under, so a request raised now is not lowered.
+            let held = lock_recover(&self.health.compaction_request);
+            if held.is_none() {
+                self.health.fold_requested.store(false, Ordering::SeqCst);
+            }
         }
     }
 
@@ -1163,24 +1154,25 @@ impl Executor {
         {
             return Some((*shard, Dispatching::Requested));
         }
-        // A sealed shard with nothing to reclaim is owed nothing.
-        while let Some(shard) = self.compactions.closing.first().copied() {
-            let gauges = self
-                .shard_gauges(generation)
-                .into_iter()
-                .find(|(held, _)| *held == shard);
-            let unnamed = self.unnamed_bytes(generation);
-            match gauges {
-                Some((_, gauges)) if self.reclaims(generation, shard, &gauges, &unnamed) => {
+        if !self.compactions.closing.is_empty() {
+            let reclaiming = self.reclaiming(generation);
+            for shard in self.compactions.closing.clone() {
+                let held = generation.shard(shard);
+                let reclaims = reclaiming
+                    .iter()
+                    .any(|(at, _, reclaims)| *at == shard && *reclaims);
+                if reclaims {
                     return Some((shard, Dispatching::Closing));
                 }
-                _ => {
+                // A sealed shard with nothing to reclaim is due nothing, unless rows it holds are
+                // still buffered: they are flushed first, and its closing compaction reclaims them.
+                if held.is_none_or(|held| held.buffer.is_empty()) {
                     self.compactions.closing.remove(&shard);
                 }
             }
         }
         self.scheduled_fold(generation)
-            .map(|(shard, trigger)| (shard, Dispatching::Scheduled(trigger)))
+            .map(|(shard, scheduled)| (shard, Dispatching::Scheduled(scheduled)))
     }
 
     /// `shard`'s compaction is dispatched or refused: it leaves the request or the closing queue
@@ -1199,41 +1191,27 @@ impl Executor {
         }
     }
 
-    /// Plan a compaction and start it on its own thread, if one is requested, owed or due and
-    /// nothing blocks it. Not on the shared rayon pool: a compaction's input is a shard of the
-    /// corpus, and occupying request-serving workers for its duration would let maintenance
-    /// compete with the product it serves.
+    /// Plan a compaction and start it on its own thread, if one is requested, due or called for
+    /// by a seal and nothing blocks it. Not on the shared rayon pool: a compaction's input is a
+    /// shard of the corpus, and occupying request-serving workers for its duration would let
+    /// maintenance compete with the product it serves.
     ///
-    /// A refusal (a latched gate) consumes the shard's place in a request; a suspension (a merge
-    /// or coalesce outstanding) leaves it for the next tick (see [`Executor::fold_outstanding`]).
+    /// A refusal (a latched gate) consumes the shard's place in a request. A request that arrives
+    /// while a compaction runs, and a shard of one while a merge or coalesce is outstanding, wait
+    /// for a later tick (see [`Executor::fold_outstanding`]).
     pub(super) fn dispatch_fold(&mut self, generation: &Arc<Generation>) {
         // A compaction this node could not publish is hours of IO spent to produce an orphan. The
         // planner's own gates cover the recoverable postures; this one covers the two that latch.
         if !self.may_publish() {
             return;
         }
-        // A request arriving while a compaction runs is refused, not held. One being answered
-        // keeps `fold_requested` raised until its last shard publishes.
-        if self.fold.in_flight() {
-            if self.health.take_compaction_request().is_some() {
-                if self.compactions.requested.is_none() {
-                    self.health.fold_requested.store(false, Ordering::SeqCst);
-                }
-                tracing::warn!(
-                    "a compaction was requested while one is already running; refused rather \
-                     than queued. At most one compaction is in flight, and the running one will \
-                     re-evaluate the gauges when it lands"
-                );
-            }
-            return;
-        }
-        // A completed compaction not yet drained excludes a second one, but unlike the refusal
-        // above this consumes nothing: publication is one pass away, so a request left waiting
-        // is answered by the next tick rather than dropped.
+        // At most one compaction is in flight, and a completed one not yet drained is one pass
+        // from publication. A request stays held, `fold_requested` raised, and the first tick
+        // after the landing takes it.
         if self.fold_outstanding() {
             return;
         }
-        // A request names its shards now, against the gauges as they stand.
+        // A request is resolved to its shards at this tick, against the gauges as they stand.
         if let Some(request) = self.health.take_compaction_request() {
             let shards = self.requested_shards(generation, request);
             match &mut self.compactions.requested {
@@ -1248,11 +1226,6 @@ impl Executor {
             }
         }
         self.request_answered();
-        // A request or a closing compaction dispatches on its own terms, whatever hour it is and
-        // whatever the gauges read, so the schedule is not consulted for one.
-        let Some((shard_id, from)) = self.next_compaction(generation) else {
-            return;
-        };
         // At most one compaction, and none while a merge or a coalesce is outstanding (running, or
         // completed and not yet published, see [`Executor::fold_outstanding`]). Their outputs
         // would be orphaned by the flip and their inputs are the compaction's, so starting now
@@ -1260,6 +1233,11 @@ impl Executor {
         if self.merge_outstanding() || self.coalesce_outstanding() {
             return;
         }
+        // A request or a closing compaction dispatches on its own terms, whatever hour it is and
+        // whatever the gauges read, so the schedule is not consulted for one.
+        let Some((shard_id, from)) = self.next_compaction(generation) else {
+            return;
+        };
         // A unique declaration's rounds read the layers and runs a fold rewrites.
         if self.unique_declarations.busy() {
             return;
@@ -1359,11 +1337,15 @@ impl Executor {
                 let Some(incarnation) = manifest.incarnation_of(view) else {
                     continue;
                 };
-                let pair = (family.name.clone(), view.clone(), incarnation);
+                let column = mosaica_store::manifest::ScopedColumn {
+                    column: family.name.clone(),
+                    view: view.clone(),
+                    incarnation,
+                };
                 if !partition_data.scoped_base_in(shard_id, family, view, incarnation) {
-                    unbased_scoped.push(pair.clone());
+                    unbased_scoped.push(column.clone());
                 }
-                scoped_views.push(pair);
+                scoped_views.push(column);
             }
         }
         let ctx = crate::compact::FoldContext {
@@ -1386,31 +1368,19 @@ impl Executor {
             tiers: shard.delta_postings.clone(),
             declared_scalars: manifest.declared_scalars.clone(),
             scoped_scalars,
-            view_incarnations: manifest
-                .views
-                .iter()
-                .map(|v| (v.id.clone(), v.incarnation))
-                .collect(),
             vocabularies: manifest.vocabularies.clone(),
         };
 
-        if let Dispatching::Scheduled(trigger) = from {
+        if let Dispatching::Scheduled(Scheduled {
+            trigger,
+            gauges,
+            dead,
+        }) = from
+        {
             // Every gauge, not only the one that fired: a compaction is minutes to hours, and an
             // operator reading why one started needs to see the state that produced it, not just
             // the single number that crossed first. The dead-bytes pair especially, since it is
             // the one figure `/control/status` does not carry.
-            let gauges = self
-                .shard_gauges(generation)
-                .into_iter()
-                .find(|(held, _)| *held == shard_id)
-                .map(|(_, gauges)| gauges)
-                .unwrap_or_default();
-            let dead = dead_bytes_of(
-                &self.prefix_dir(generation),
-                generation,
-                self.live.open_shard().id,
-            )
-            .and_then(|by_shard| by_shard.get(&shard_id).copied());
             tracing::info!(
                 trigger = ?trigger,
                 shard = %shard_id,
@@ -1450,10 +1420,10 @@ impl Executor {
                         health
                             .fold_ended_unix
                             .store(unix_now().unwrap_or(0), Ordering::SeqCst);
-                        // Counted after the flag clears, so a request made on seeing the count
-                        // is not refused as arriving while this fold runs.
-                        drop(unit);
+                        // Counted before the flag clears, so a caller that sees its request
+                        // answered sees the failure.
                         health.fold_failures.fetch_add(1, Ordering::Relaxed);
+                        drop(unit);
                         tracing::warn!(
                             error = %e,
                             "a compaction fold failed; its files are orphans under a prefix \
@@ -1599,22 +1569,7 @@ impl Executor {
                 }
                 for (layer, level, _) in moved {
                     if self.live.spatial_layer(layer) {
-                        self.live.with_artifacts(|store| {
-                            let held = self.deps.shapes.level(
-                                view,
-                                layer,
-                                *level,
-                                store,
-                                &crate::shapes::PersistedPieces::none(),
-                            );
-                            crate::shapes::ShapeStore::stage_missing(
-                                &held,
-                                other.id(),
-                                data,
-                                &crate::shapes::PersistedPieces::none(),
-                                store,
-                            );
-                        });
+                        self.stage_level(other.id(), view, data, layer, *level);
                     }
                 }
             }
@@ -1829,10 +1784,10 @@ impl Executor {
         // deletions: a suppressed member keeps its bit (Rule S).
         let to_prefix_dir = self.deps.bundle_root.join(&completed.prefix);
         stairs.record("6 hand-off");
-        // An artifact deletion this shard owes leaves its slice here. One no other shard still
-        // owes is executed: an artifact has no rows, and its record, content and members leave
-        // the files this compaction writes. One another shard owes stays held, denied, for that
-        // shard's compaction.
+        // An artifact deletion this shard must remove leaves its slice here. One no other shard
+        // still holds is executed: an artifact has no rows, and its record, content and members
+        // leave the files this compaction writes. One another shard holds stays, denied, until
+        // that shard's compaction.
         let mut executed_artifacts: std::collections::BTreeMap<LayerSpace, croaring::Bitmap> =
             Default::default();
         let mut released: std::collections::BTreeMap<LayerSpace, croaring::Bitmap> =
@@ -2023,9 +1978,7 @@ impl Executor {
             .iter()
             .flat_map(|other| other.record.scoped_columns.iter().map(move |c| (other, c)))
         {
-            let written = completed.scoped_views.iter().any(|(family, view, at)| {
-                *family == column.column && *view == column.view && *at == column.incarnation
-            });
+            let written = completed.scoped_views.contains(column);
             let kept = held.record.id != shard_id && live_record.scoped_columns.contains(column);
             if (written || kept) && !scoped_columns.contains(column) {
                 scoped_columns.push(column.clone());
@@ -2125,11 +2078,21 @@ impl Executor {
         let folded = Folded {
             entity: segments_manifest
                 .shards
-                .based_everywhere(&names_of(&runtime_attributes, |d| &d.name))
+                .based_everywhere(
+                    &runtime_attributes
+                        .iter()
+                        .map(|d| d.name.clone())
+                        .collect::<Vec<_>>(),
+                )
                 .to_vec(),
             scoped: segments_manifest
                 .shards
-                .based_everywhere(&names_of(&runtime_scoped_attributes, |f| &f.name))
+                .based_everywhere(
+                    &runtime_scoped_attributes
+                        .iter()
+                        .map(|f| f.name.clone())
+                        .collect::<Vec<_>>(),
+                )
                 .to_vec(),
         };
         segments_manifest.shards.forget_bases(&folded.entity);
@@ -2188,7 +2151,7 @@ impl Executor {
                 }
             }
         }
-        let carried_rels = carried_files(
+        let mut carried_rels = carried_files(
             plan.layout(),
             live_manifest,
             &live.bundle.manifest.files,
@@ -2213,7 +2176,6 @@ impl Executor {
         // shard's carry-forwards.
         let mut kept = kept_derived(&self.side_manifests.derived_extents, shard_id, &derived);
         kept.retain(|(_, extent)| !superseded_by_a_move(extent, &moved));
-        let mut carried_rels: std::collections::BTreeSet<String> = carried_rels;
         carried_rels.extend(others.bundle.into_keys());
         carried_rels.extend(others.side.into_keys());
         carried_rels.extend(kept.iter().map(|(_, extent)| extent.path.clone()));
@@ -2504,10 +2466,8 @@ impl Executor {
             completed.attr_bytes_read,
             completed.attr_bytes_written,
         );
-        // After the cost, so a reader that sees the count move reads this fold's passes, and before
-        // the request is answered, so one that sees it answered sees the count move.
+        // After the cost, so a reader that sees the count move reads this fold's passes.
         self.health.folds.fetch_add(1, Ordering::Relaxed);
-        self.request_answered();
         // One line per view: a group's keys are separate views over one dictionary, each paying
         // its own table and payload.
         for images in &completed.term_images {
@@ -2556,7 +2516,7 @@ impl Executor {
     /// The vocabulary bindings fold in verbatim, never re-derived, re-sorted or re-numbered: keys
     /// and codes are byte-identical everywhere, and `columns.arrow` stores the code alone, so
     /// renumbering here would recolour the corpus with no error and no digest mismatch.
-    pub(super) fn fold_bundle_manifest(
+    fn fold_bundle_manifest(
         &self,
         live: &Generation,
         completed: &crate::compact::CompletedFold,
@@ -2894,6 +2854,35 @@ impl Executor {
             })
     }
 
+    /// `layer`'s spatial `level` in `view`, with a piece staged for every segment of `shard`'s
+    /// `data` it held none of.
+    fn stage_level(
+        &self,
+        shard: ShardId,
+        view: &str,
+        data: &mosaica_store::read::ViewData,
+        layer: &str,
+        level: u32,
+    ) -> Arc<crate::shapes::ShapeLevel> {
+        self.live.with_artifacts(|store| {
+            let held = self.deps.shapes.level(
+                view,
+                layer,
+                level,
+                store,
+                &crate::shapes::PersistedPieces::none(),
+            );
+            crate::shapes::ShapeStore::stage_missing(
+                &held,
+                shard,
+                data,
+                &crate::shapes::PersistedPieces::none(),
+                store,
+            );
+            held
+        })
+    }
+
     /// `layer`'s `level` in shard `other` as it stands, observed over `view`'s rows: its shape and
     /// the ordinals holding a row there. A spatial level's rows are the form the shard serves where
     /// it holds them, and its segments resolved against the shapes otherwise.
@@ -2913,10 +2902,12 @@ impl Executor {
             return Some(self.live.with_artifacts(|store| {
                 let slice = self.live.slice_of(other.id(), store);
                 observe_held(row_count, &|visit| {
-                    for (ordinal, record) in pending.held(store, slice, other.id(), layer, level) {
+                    for (ordinal, record) in pending.held(store, other.id(), layer, level) {
                         visit(
                             ordinal,
-                            &slice.members_of(record).projected(|part| space.project(part)),
+                            &slice
+                                .members_of(record)
+                                .projected(|part| space.project(part)),
                         );
                     }
                 })
@@ -2937,38 +2928,22 @@ impl Executor {
             }));
         }
         let segments = crate::viewport::segments_with_row_bases(view, data).ok()?;
-        let rows = self.live.with_artifacts(|store| {
-            let held = self.deps.shapes.level(
-                view,
-                layer,
-                level,
-                store,
-                &crate::shapes::PersistedPieces::none(),
-            );
-            crate::shapes::ShapeStore::stage_missing(
-                &held,
-                other.id(),
-                data,
-                &crate::shapes::PersistedPieces::none(),
-                store,
-            );
-            let mut rows: Vec<Option<croaring::Bitmap>> = Vec::new();
-            for (segment, base) in &segments {
-                let Some(piece) = held.staged(other.id(), &segment.seg_id) else {
-                    continue;
-                };
-                if rows.len() < piece.len() {
-                    rows.resize(piece.len(), None);
-                }
-                for (slot, part) in rows.iter_mut().zip(piece.iter()) {
-                    if let Some(part) = part.as_ref().filter(|part| !part.is_empty()) {
-                        slot.get_or_insert_with(croaring::Bitmap::new)
-                            .or_inplace(&part.add_offset(i64::from(*base)));
-                    }
+        let held = self.stage_level(other.id(), view, data, layer, level);
+        let mut rows: Vec<Option<croaring::Bitmap>> = Vec::new();
+        for (segment, base) in &segments {
+            let Some(piece) = held.staged(other.id(), &segment.seg_id) else {
+                continue;
+            };
+            if rows.len() < piece.len() {
+                rows.resize(piece.len(), None);
+            }
+            for (slot, part) in rows.iter_mut().zip(piece.iter()) {
+                if let Some(part) = part.as_ref().filter(|part| !part.is_empty()) {
+                    slot.get_or_insert_with(croaring::Bitmap::new)
+                        .or_inplace(&part.add_offset(i64::from(*base)));
                 }
             }
-            rows
-        });
+        }
         Some(observe_held(row_count, &|visit| {
             for (ordinal, rows) in rows.iter().enumerate() {
                 if let Some(rows) = rows {
@@ -3060,7 +3035,7 @@ impl Executor {
                     // serves it artifact-major instead (`crate::artifacts::ArtifactRows::inherit`).
                     let slice = self.live.slice_of(shard, store);
                     observe_held(space.base_rows(), &|visit| {
-                        for (ordinal, record) in pending.held(store, slice, shard, &layer, level) {
+                        for (ordinal, record) in pending.held(store, shard, &layer, level) {
                             visit(
                                 ordinal,
                                 &slice
@@ -3225,9 +3200,7 @@ impl Executor {
                             composed_as,
                             scratch,
                             &|visit| {
-                                for (ordinal, record) in
-                                    pending.held(store, slice, shard, layer, *level)
-                                {
+                                for (ordinal, record) in pending.held(store, shard, layer, *level) {
                                     visit(
                                         ordinal,
                                         &slice
@@ -3577,7 +3550,7 @@ impl Executor {
                     for (view, space) in spaces {
                         let index = crate::tile_index::TileIndex::project(
                             ordinals,
-                            || pending.held(store, slice, pass.layout.shard, layer, *level),
+                            || pending.held(store, pass.layout.shard, layer, *level),
                             space,
                             slice,
                         );

@@ -611,11 +611,9 @@ fn a_merge_is_suspended_while_a_completed_fold_is_unpublished() {
 /// of either job. A fold dispatched here would plan against a segment list the held merge is about
 /// to replace, and would discard hours of IO at its rebase check.
 ///
-/// **Suspension, not refusal, is what the second half asserts**, and `dispatch_fold` keeps the two
-/// apart: it consumes the request flag only when it *refuses* — a fold already running is a state
-/// an operator must be told about — and a publication one pass away is not that. So the request
-/// stays armed and the fold happens as soon as the merge is drained, which is what makes this
-/// exclusion free of an operator-visible cost.
+/// **The second half asserts that the request waits.** `dispatch_fold` consumes a request's shard
+/// only when a gate refuses it. A merge one pass from publication is not a refusal, so the request
+/// stays raised and the fold starts as soon as the merge is drained.
 ///
 /// **Mutations this kills** (each run): reverting `dispatch_fold`'s gate to `merge_in_flight ||
 /// coalesce_in_flight` — the fold dispatches inside the hold, which the loop below catches;
@@ -659,6 +657,56 @@ fn a_fold_is_suspended_while_a_completed_merge_is_unpublished() {
         engine.write_executor_stats().merges > before.merges
     });
     wait_for_fold_publication(&engine, &before);
+}
+
+/// A compaction requested while one runs is held until that one lands, with `fold_requested`
+/// raised, and is then answered by a compaction of its own: a deletion accepted after the first
+/// compaction planned is retired by the second.
+#[test]
+fn a_request_made_while_a_compaction_runs_is_answered_by_a_later_one() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
+    let before = engine.write_executor_stats();
+
+    engine.set_fold_paused_for_test(true);
+    engine.request_fold();
+    wait_for("the first compaction's passes to finish", || {
+        engine.fold_is_holding_for_test()
+    });
+    engine
+        .accept_change(entity_of_source(&root, "v00000", 4), ChangeOp::Delete)
+        .unwrap();
+    engine.request_fold();
+    for _ in 0..5 {
+        tick(&engine);
+        let now = engine.write_executor_stats();
+        assert!(
+            now.fold_requested,
+            "the request is held while a compaction runs"
+        );
+        assert_eq!(now.folds, before.folds);
+    }
+
+    engine.set_fold_paused_for_test(false);
+    wait_for("the request to be answered", || {
+        let now = engine.write_executor_stats();
+        assert_eq!(
+            now.fold_failures, before.fold_failures,
+            "a compaction was discarded rather than published"
+        );
+        now.folds > before.folds && !now.fold_requested
+    });
+    assert_eq!(
+        engine.write_executor_stats().folds,
+        before.folds + 2,
+        "the held request is answered by a compaction of its own"
+    );
+    assert_eq!(
+        engine.retirable_deletions(),
+        0,
+        "the deletion accepted during the first compaction is retired by the second"
+    );
 }
 
 /// **Compaction §7's startup sweep: an orphaned prefix is reclaimed when a write executor starts,

@@ -5,7 +5,9 @@ use std::sync::Arc;
 use mosaica_authz::{sweep_term_postings, DeltaTier, PostingsReader, PostingsSpool};
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_store::edited::{EditedRows, RowEntities};
-use mosaica_store::manifest::{DeclaredScalar, FileDigest, ManifestVocabulary, SegmentDescriptor};
+use mosaica_store::manifest::{
+    DeclaredScalar, FileDigest, ManifestVocabulary, ScopedColumn, SegmentDescriptor,
+};
 use mosaica_store::render_presence::RENDER_PRESENCE_DIR;
 use mosaica_store::{fold_row_space, FoldRowSpaceSpec, FoldSegmentInput, PairsParquetWriter};
 use mosaica_types::IdentityKey;
@@ -39,22 +41,18 @@ pub(crate) struct FoldContext {
     /// The entity-scoped columns the compacted shard holds no base of, read from their extents
     /// alone.
     pub(crate) unbased: Vec<String>,
-    /// Each `(family, view, incarnation)` of a group-scoped column the compacted shard holds no
-    /// base of.
-    pub(crate) unbased_scoped: Vec<ScopedView>,
-    /// Each `(family, view, incarnation)` of a group-scoped column at the plan: the shard holds
-    /// the base of every one once this compaction publishes.
-    pub(crate) scoped_views: Vec<ScopedView>,
+    /// Each view of a group-scoped column the compacted shard holds no base of.
+    pub(crate) unbased_scoped: Vec<ScopedColumn>,
+    /// Each view of a group-scoped column at the plan, in [`Self::scoped_scalars`]' order: the
+    /// shard holds the base of every one once this compaction publishes.
+    pub(crate) scoped_views: Vec<ScopedColumn>,
     /// The new base segment's id in every view. Never reused.
     pub(crate) seg_id: String,
     pub(crate) base_postings: Arc<PostingsReader>,
     pub(crate) tiers: Vec<Arc<DeltaTier>>,
     pub(crate) declared_scalars: Vec<DeclaredScalar>,
-    /// Every group's scoped column families, flattened. Each owes a folded column per view.
+    /// Every group's scoped column families, flattened. Each has a folded column per view.
     pub(crate) scoped_scalars: Vec<mosaica_store::manifest::ScopedScalar>,
-    /// A scoped column's directory names its view's incarnation.
-    pub(crate) view_incarnations:
-        std::collections::HashMap<String, mosaica_types::view::ViewIncarnation>,
     pub(crate) vocabularies: Vec<ManifestVocabulary>,
 }
 
@@ -86,11 +84,8 @@ pub(crate) struct CompletedFold {
     pub(crate) runtime_attributes: Vec<String>,
     pub(crate) runtime_scoped_attributes: Vec<String>,
     /// [`FoldContext::scoped_views`].
-    pub(crate) scoped_views: Vec<ScopedView>,
+    pub(crate) scoped_views: Vec<ScopedColumn>,
 }
-
-/// A group-scoped family's column of one view at one incarnation.
-pub(crate) type ScopedView = (String, String, mosaica_types::view::ViewIncarnation);
 
 #[derive(Default)]
 pub(super) struct FoldOutput {

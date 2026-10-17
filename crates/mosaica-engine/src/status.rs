@@ -87,12 +87,16 @@ pub struct GenerationStatus {
 }
 
 pub(crate) fn live_rows_of(generation: &Generation) -> u64 {
-    generation
-        .bundle
-        .partitions
-        .values()
-        .flat_map(|partition| partition.shards.iter())
-        .flat_map(|shard| shard.record.segments.iter())
+    generation.shards().map(live_rows_in).sum()
+}
+
+/// The rows `shard`'s segments hold, deleted ones included.
+pub(crate) fn live_rows_in(shard: &crate::Shard) -> u64 {
+    shard
+        .data
+        .record
+        .segments
+        .iter()
         .map(|descriptor| u64::from(descriptor.row_count))
         .sum()
 }

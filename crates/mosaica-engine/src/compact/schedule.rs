@@ -3,7 +3,7 @@
 // `PartialEq` without `Eq` because two thresholds are `f64`; the derive exists for a test.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CompactionSchedule {
-    /// Seconds after the last attempt during which no route fires.
+    /// Seconds after a shard's last attempt during which no route fires for that shard.
     pub min_interval_secs: u64,
     /// Seconds past midnight UTC, so daylight-saving days do not shift the window.
     pub window_start_secs: Option<u32>,
@@ -50,26 +50,29 @@ pub(crate) enum FoldTrigger {
 /// takes it as a closure.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Gauges {
-    /// The largest across the partition's views.
+    /// The largest across the shard's views.
     pub(crate) live_segments: usize,
     /// Deletions only, not suppressions.
     pub(crate) retirable_deletions: u64,
-    /// The layer spaces' deletions, whose records a fold removes. They have no rows.
+    /// The layer spaces' deletions this shard's compaction removes. The open shard's also counts
+    /// those no shard holds. They have no rows.
     pub(crate) artifact_deletions: u64,
     /// Tombstoned rows included.
     pub(crate) live_rows: u64,
 }
 
-/// Bytes on disc under the live prefix, and bytes its manifests name.
-#[derive(Debug, Clone, Copy)]
+/// Bytes on disc under the shard's directory, and bytes its manifests name. The open shard's also
+/// counts everything outside every shard's directory.
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct DeadBytes {
     pub(crate) on_disc: u64,
     pub(crate) named: u64,
 }
 
-/// Whether a fold is due. `last_fold_unix` is when the last attempt ended, not the last success,
-/// so one bad setting cannot retry and discard at every tick. It is process-local and lost at
-/// restart, which is harmless.
+/// Whether a compaction of one shard is due. `last_fold_unix` is the shard's floor
+/// (`Executor::fold_floor_from`): measured from its last attempt, not its last success, so one bad
+/// setting cannot retry and discard at every tick. It is process-local and lost at restart, which
+/// is harmless.
 pub(crate) fn due(
     schedule: &CompactionSchedule,
     now_unix: u64,

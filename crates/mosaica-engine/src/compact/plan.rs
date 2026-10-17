@@ -202,15 +202,6 @@ pub(crate) fn disc_estimate(live_bytes: u64) -> u64 {
         .saturating_div(100)
 }
 
-/// Whether `rel`, a prefix-relative path, is under the directory of a shard of `partition` other
-/// than `shard`: a file a compaction of `shard` links and does not rewrite.
-pub(crate) fn in_other_shard(partition: &str, shard: mosaica_types::ShardId, rel: &str) -> bool {
-    let shards = format!("{}/", mosaica_store::layout::shards_rel(partition));
-    rel.strip_prefix(&shards)
-        .and_then(|rest| rest.split('/').next())
-        .is_some_and(|number| number != shard.to_string())
-}
-
 /// Plans a compaction of `shard` of `generation`'s single partition. Pure: it reads only its
 /// arguments.
 pub(crate) fn plan_fold(
@@ -328,7 +319,9 @@ pub(crate) fn plan_fold(
             .files
             .iter()
             .chain(manifest.files.iter())
-            .filter(|(rel, _)| !in_other_shard(partition, record.id, rel))
+            .filter(|(rel, _)| {
+                mosaica_store::layout::shard_of(partition, rel).is_none_or(|at| at == record.id)
+            })
             .map(|(_, d)| d.size)
             .sum();
         let need = disc_estimate(live_bytes);
