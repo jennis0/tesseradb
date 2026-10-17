@@ -333,6 +333,30 @@ impl ArtifactProjections {
         &self.scratch
     }
 
+    /// The level's records at `address` and `key`, `len` long, as another shard's form holds
+    /// them, else `make`'s, held for the next. Held records at another key or length are stale and
+    /// are replaced.
+    pub(super) fn shared_records(
+        &self,
+        address: RecordsAddress,
+        key: DerivedKey,
+        len: usize,
+        make: impl FnOnce() -> Arc<ArtifactRecords>,
+    ) -> Arc<ArtifactRecords> {
+        let mut held = self.records_held.lock().unwrap_or_else(|e| e.into_inner());
+        let shared = held
+            .get(&address)
+            .filter(|(held_key, _)| *held_key == key)
+            .and_then(|(_, records)| records.upgrade())
+            .filter(|shared| shared.len() == len);
+        if let Some(shared) = shared {
+            return shared;
+        }
+        let made = make();
+        held.insert(address, (key, Arc::downgrade(&made)));
+        made
+    }
+
     pub fn builds(&self) -> u64 {
         self.builds.load(std::sync::atomic::Ordering::Relaxed)
     }

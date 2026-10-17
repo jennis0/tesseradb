@@ -15,6 +15,8 @@ pub(crate) struct LevelSlice<'a> {
     level: u32,
     /// Whether `shard` is `records` itself rather than a shard's slice of it.
     whole: bool,
+    /// The slice's records of the level, by ordinal.
+    slots: &'a [Option<Box<ArtifactRecord>>],
     /// Per number of contents, an artifact of which the shard holds nothing.
     empty: Vec<ArtifactRecord>,
     /// The level's records, which a form of the slice takes rather than builds.
@@ -48,6 +50,7 @@ impl<'a> LevelSlice<'a> {
             layer,
             level,
             whole,
+            slots: shard.slots(layer, level),
             empty,
             shared,
         }
@@ -81,27 +84,35 @@ impl<'a> LevelSlice<'a> {
         self.through_slice(self.records.level_in_view(self.layer, self.level, view))
     }
 
+    /// The slice's record of the artifact at `ordinal`, whose record in the level's records is
+    /// `record`: `record` itself where the slice is the whole store, and [`nothing_held`] where the
+    /// slice holds none of it.
+    pub(crate) fn held<'v>(
+        &'v self,
+        ordinal: u32,
+        record: &'v ArtifactRecord,
+    ) -> &'v ArtifactRecord {
+        match self.whole {
+            true => record,
+            false => self
+                .slots
+                .get(ordinal as usize)
+                .and_then(Option::as_deref)
+                .unwrap_or(&self.empty[record.contents.len()]),
+        }
+    }
+
     fn through_slice<'v>(
         &'v self,
         records: impl Iterator<Item = (u32, &'v ArtifactRecord)>,
     ) -> impl Iterator<Item = (u32, &'v ArtifactRecord)> {
-        let slots = self.shard.slots(self.layer, self.level);
-        records.map(move |(ordinal, record)| match self.whole {
-            true => (ordinal, record),
-            false => (
-                ordinal,
-                slots
-                    .get(ordinal as usize)
-                    .and_then(Option::as_deref)
-                    .unwrap_or(&self.empty[record.contents.len()]),
-            ),
-        })
+        records.map(move |(ordinal, record)| (ordinal, self.held(ordinal, record)))
     }
 }
 
 /// A record with `contents` empty generating sets and no member. A slice's form reads nothing else
 /// of it.
-pub(super) fn nothing_held(contents: usize) -> ArtifactRecord {
+fn nothing_held(contents: usize) -> ArtifactRecord {
     ArtifactRecord {
         entity: mosaica_types::EntityId::new(0),
         key: None,

@@ -154,20 +154,11 @@ impl ArtifactProjections {
             .rev()
             .find(|&ordinal| records.drawn_in_view(at.layer, at.level, ordinal, view))
             .map_or(0, |ordinal| ordinal as usize + 1);
-        let mut held = self.records_held.lock().unwrap_or_else(|e| e.into_inner());
-        let shared = held
-            .get(&at.records_address())
-            .filter(|(held_key, _)| *held_key == key)
-            .and_then(|(_, records)| records.upgrade())
-            .filter(|shared| shared.len() == len);
-        if let Some(shared) = shared {
-            return shared;
-        }
-        let built = Arc::new(ArtifactRecords::build(
-            records.level_in_view(at.layer, at.level, view),
-        ));
-        held.insert(at.records_address(), (key, Arc::downgrade(&built)));
-        built
+        self.shared_records(at.records_address(), key, len, || {
+            Arc::new(ArtifactRecords::build(
+                records.level_in_view(at.layer, at.level, view),
+            ))
+        })
     }
 
     /// A spatial level's membership is assembled from its segments' resolutions, once, over this

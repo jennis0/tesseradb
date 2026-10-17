@@ -74,6 +74,8 @@ use crate::Generation;
 /// one, which is what lets it exist as a public API at all. The single exception is
 /// [`PrefixRotation::retired`], which subtracts and never adds.
 pub struct GeometryPublication {
+    /// The shard whose geometry this publishes; a rotation renumbers its rows.
+    pub shard: mosaica_types::ShardId,
     pub prefix: String,
     pub segments_version: u64,
     pub watermark: u64,
@@ -99,10 +101,10 @@ pub struct GeometryPublication {
 ///   (write-path §5.4): withdrawing the tombstone while a pre-fold fragment is still reachable
 ///   re-exposes the item the deletion hid. That is why `retired` lives *here* rather than beside
 ///   the rotation — a caller cannot ask for one without the other.
+///
+/// Every field but [`Self::carried`] and [`Self::space_contents`] is the publication's shard's own:
+/// the shard whose rows the new prefix renumbers.
 pub(crate) struct PrefixRotation {
-    /// The shard whose rows the new prefix renumbers; every field below but
-    /// [`Self::carried`] and [`Self::space_contents`] is its own.
-    pub(crate) shard: mosaica_types::ShardId,
     /// The new prefix's base postings.
     pub(crate) postings: Arc<PostingsReader>,
     /// The shard's identity in the new prefix (`ShardRecord::identity`), which files its
@@ -153,9 +155,10 @@ pub(crate) struct CarriedIndexes {
 }
 
 impl GeometryPublication {
-    /// A publication **within the live prefix** — what a flush and a merge make. The term index and
-    /// the fragment identity carry forward from the live generation.
+    /// A publication of `shard` **within the live prefix** — what a flush and a merge make. The
+    /// term index and the fragment identity carry forward from the live generation.
     pub fn within_prefix(
+        shard: mosaica_types::ShardId,
         prefix: String,
         segments_version: u64,
         watermark: u64,
@@ -164,6 +167,7 @@ impl GeometryPublication {
         delta_postings: Vec<Arc<DeltaTier>>,
     ) -> Self {
         GeometryPublication {
+            shard,
             prefix,
             segments_version,
             watermark,

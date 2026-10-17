@@ -67,8 +67,8 @@ impl Default for CoalescePolicy {
 #[derive(Debug)]
 pub(crate) struct CoalescePlan {
     pub(crate) partition: String,
-    /// The shard whose entity-space extents the plan takes. The dictionary window is the
-    /// partition's, and rides with whichever shard's pass takes it.
+    /// The shard whose entity-space extents the plan takes. The dictionary window belongs to the
+    /// partition, and the pass of whichever shard takes it consumes it.
     pub(crate) shard: mosaica_types::ShardId,
     pub(crate) tiers: Vec<String>,
     pub(crate) dicts: Vec<DictExtent>,

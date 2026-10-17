@@ -6,28 +6,111 @@ use std::path::Path;
 
 use mosaica_store::empty_shard::{write_empty_shard, EmptyShard, EmptyView};
 use mosaica_store::manifest::{
-    FileDigest, RecordPackExtent, ScopedColumn, ShardRecord, UniqueIndexRuns,
+    DeclaredScalar, FileDigest, MembershipExtent, RecordPackExtent, ScopedColumn, ScopedScalar,
+    ShardRecord, UniqueIndexRuns,
 };
 use mosaica_store::read::Bundle;
 use mosaica_store::{ShardLayout, StoreError};
 use mosaica_types::{LayerSpace, ShardId};
 
+use crate::error::EngineError;
+
 /// An opened shard's base segment, in every view.
 const BASE_SEG_ID: &str = "seg-0";
 
-/// What an opened shard's base is written from.
-pub(crate) struct OpenedBase<'a> {
+/// What every shard opened together is written from, beside the bundle each is added to.
+pub(crate) struct Opening<'a> {
+    pub(crate) bundle_root: &'a Path,
     pub(crate) prefix_dir: &'a Path,
+    pub(crate) prefix: &'a str,
     pub(crate) phash: &'a str,
-    pub(crate) bundle: &'a Bundle,
-    /// The hex digest of the prefix's `MANIFEST.json`, which the shard's identity is taken from.
-    pub(crate) manifest_digest: &'a str,
     /// How many terms the dictionary holds.
     pub(crate) terms: u64,
     /// Every record pack the partition's layer spaces name.
-    pub(crate) record_packs: &'a [(LayerSpace, RecordPackExtent)],
-    /// The columns declared at a running service and not yet folded, entity and group-scoped.
-    pub(crate) runtime: &'a [String],
+    pub(crate) record_packs: Vec<(LayerSpace, RecordPackExtent)>,
+    /// [`OpenedBase::runtime`], from [`runtime_columns`].
+    pub(crate) runtime: Vec<String>,
+}
+
+/// The columns declared at a running service that an opened shard holds the base of: the
+/// entity-scoped ones, then the group-scoped families.
+pub(crate) fn runtime_columns(
+    (entity, scoped): (Vec<DeclaredScalar>, Vec<ScopedScalar>),
+) -> Vec<String> {
+    entity
+        .into_iter()
+        .map(|attribute| attribute.name)
+        .chain(scoped.into_iter().map(|family| family.name))
+        .collect()
+}
+
+/// A shard [`open_shards`] wrote: its member packs, and their files' digests.
+pub(crate) struct OpenedMembers {
+    pub(crate) id: ShardId,
+    pub(crate) extents: Vec<MembershipExtent>,
+    pub(crate) files: BTreeMap<String, FileDigest>,
+}
+
+/// Write each of `ids` as [`write_opened_shard`] does and add it to `bundle`'s partition, so the
+/// bundle serves it. The record's identity is taken from the `MANIFEST.json` digest `CURRENT`
+/// names.
+pub(crate) fn open_shards(
+    opening: &Opening<'_>,
+    bundle: &mut Bundle,
+    ids: &[ShardId],
+) -> Result<Vec<OpenedMembers>, EngineError> {
+    let manifest_digest = crate::engine::read_current(opening.bundle_root)?.manifest_digest;
+    let mut opened = Vec::with_capacity(ids.len());
+    for &id in ids {
+        let (record, files) = write_opened_shard(
+            &OpenedBase {
+                prefix_dir: opening.prefix_dir,
+                phash: opening.phash,
+                bundle,
+                manifest_digest: &manifest_digest,
+                terms: opening.terms,
+                record_packs: &opening.record_packs,
+                runtime: &opening.runtime,
+            },
+            id,
+        )
+        .map_err(EngineError::Store)?;
+        opened.push(OpenedMembers {
+            id,
+            extents: record.membership_extents.clone(),
+            files: files
+                .iter()
+                .filter(|(rel, _)| mosaica_store::layout::is_artifact_file(opening.phash, rel))
+                .map(|(rel, digest)| (rel.clone(), digest.clone()))
+                .collect(),
+        });
+        bundle
+            .add_opened_shard(
+                opening.prefix_dir,
+                opening.prefix,
+                opening.phash,
+                record,
+                files,
+            )
+            .map_err(EngineError::Store)?;
+    }
+    Ok(opened)
+}
+
+/// What an opened shard's base is written from.
+struct OpenedBase<'a> {
+    prefix_dir: &'a Path,
+    phash: &'a str,
+    bundle: &'a Bundle,
+    /// The hex digest of the prefix's `MANIFEST.json`, which the shard's identity is taken from.
+    manifest_digest: &'a str,
+    /// How many terms the dictionary holds.
+    terms: u64,
+    /// Every record pack the partition's layer spaces name.
+    record_packs: &'a [(LayerSpace, RecordPackExtent)],
+    /// The columns declared at a running service and not yet written into `MANIFEST.json` by a
+    /// compaction, entity and group-scoped.
+    runtime: &'a [String],
 }
 
 /// Write shard `id`'s empty base: what a build of no item writes for the columns and views the
@@ -35,7 +118,7 @@ pub(crate) struct OpenedBase<'a> {
 /// open at high water 0, and the digest of every file written. The record lists as based each
 /// column of `runtime` the bundle declares, and each group-scoped column another shard lists, since
 /// it holds the base of all of them.
-pub(crate) fn write_opened_shard(
+fn write_opened_shard(
     base: &OpenedBase<'_>,
     id: ShardId,
 ) -> Result<(ShardRecord, BTreeMap<String, FileDigest>), StoreError> {

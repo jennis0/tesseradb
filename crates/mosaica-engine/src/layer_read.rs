@@ -208,7 +208,7 @@ impl Engine {
             view,
             &declaration.name,
             level,
-            self.write.live().slice_of(shard.id(), written),
+            crate::write::slice_of(written, shard.id()),
             written,
             &view_data.row_space,
             Some(&shard.partition_source()),

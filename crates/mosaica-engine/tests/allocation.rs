@@ -22,12 +22,15 @@ fn shard(id: u32) -> ShardId {
     ShardId::new(id).unwrap()
 }
 
-/// An engine over `built` that writes several shards, its executor running.
+/// An engine over `built` that writes several shards, its executor running. A compaction a seal
+/// starts holds before it publishes, so what these tests read from the bundle is what allocation
+/// wrote, whenever they read it.
 fn writing(built: &Fixture) -> Engine {
     let mut engine =
         Engine::open_writing_several_shards(&built.root, &built.cache, &built.wal, config())
             .expect("the engine opens");
     engine.start_write_executor(8).expect("the executor starts");
+    engine.set_fold_paused_for_test(true);
     engine
 }
 

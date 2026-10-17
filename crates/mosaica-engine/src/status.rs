@@ -107,7 +107,7 @@ fn overlay_depth_of(generation: &Generation) -> usize {
 }
 
 /// The point shards' deletions, summed: what a fold can retire.
-pub(crate) fn retirable_deletions_of(generation: &Generation) -> u64 {
+fn retirable_deletions_of(generation: &Generation) -> u64 {
     generation
         .shards()
         .map(|shard| shard.overlay.deleted_len())

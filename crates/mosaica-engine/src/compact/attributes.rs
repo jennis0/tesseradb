@@ -50,7 +50,7 @@ fn column_jobs(
             has_base: !ctx.unbased.contains(&d.name),
             arrow_type: d.arrow_type,
             category: d.vocabulary.is_some(),
-            postings: crate::filter::owes_postings(d, &ctx.vocabularies),
+            postings: d.owes_postings(&ctx.vocabularies),
         })
         .collect();
     for column in &ctx.scoped_views {
@@ -72,7 +72,7 @@ fn column_jobs(
             has_base: !ctx.unbased_scoped.contains(column),
             arrow_type: family.arrow_type,
             category: family.vocabulary.is_some(),
-            postings: crate::filter::scoped_owes_postings(family),
+            postings: family.has_postings(),
         });
     }
     jobs
@@ -246,7 +246,7 @@ pub(super) fn fold_value_columns(
     let jobs = column_jobs(
         plan,
         ctx,
-        |d| crate::filter::owes_value_column(d, &ctx.vocabularies),
+        |d| d.owes_value_column(&ctx.vocabularies),
         crate::filter::scoped_has_value_column,
     );
     for job in jobs {
@@ -414,12 +414,12 @@ pub(super) fn fold_record_blob(
     let blob_resident = ctx
         .declared_scalars
         .iter()
-        .any(|d| crate::filter::blob_resident(d, &ctx.vocabularies));
+        .any(|d| d.blob_resident(&ctx.vocabularies));
     // A blob-resident column the shard holds no base of is in the extents alone.
-    let based_blob_resident = ctx.declared_scalars.iter().any(|d| {
-        !ctx.unbased.contains(&d.name)
-            && crate::filter::blob_resident(d, &ctx.vocabularies)
-    });
+    let based_blob_resident = ctx
+        .declared_scalars
+        .iter()
+        .any(|d| !ctx.unbased.contains(&d.name) && d.blob_resident(&ctx.vocabularies));
     if !blob_resident && !plan.record_extents.is_empty() {
         return Err(MaintenanceFailed(
             "pass 4a (record blob): the manifest names record extents but the schema declares no \

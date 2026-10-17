@@ -46,10 +46,11 @@ use mosaica_cache::{CacheStats, CacheWeight, SingleFlightCache, WaitEnded};
 ///    the grant's keys and the shard's state alone, so sessions holding different credentials
 ///    share it. Anything per credential is read from the session.
 /// 2. **`segments_version` names one row space of the shard within a process**, which is why
-///    [`RowProjectionCache::prune_superseded`]'s depth test reads it alone. It is drawn from the
-///    generation's counter, which `crate::geometry::check_publishable` refuses any publication
-///    not to strictly increase, at each change to the shard's row space. Relax that guard and this
-///    pruner starts removing the wrong generation's entries.
+///    [`RowProjectionCache::prune_superseded`]'s depth test reads it alone. A shard's
+///    `segments_version` is the generation's at its last row-space change, and
+///    `crate::geometry::check_publishable` refuses a publication that does not raise the
+///    generation's. Relax that guard and this pruner starts removing the wrong generation's
+///    entries.
 /// 3. **`prefix` and `identity` are carried although `segments_version` discriminates within a
 ///    process**: a compaction publishes a new prefix and shard identity, and no entry from before
 ///    it may answer a request after it.
@@ -454,12 +455,11 @@ fn newest_per_lineage(
 /// of: the shard's row space one generation back, or past every version of a shard `live` does
 /// not hold.
 ///
-/// **One generation, and the depth is the patch's input rather than a margin.** A flush appends,
-/// so the shard's row space one generation below the live one holds exactly the projection the
-/// next request's patch derives from; one further back is derivable from it and is kept only while
-/// it is its grant's newest in the live prefix ([`RowProjectionCache::prune_superseded`]). Keeping
-/// more buys nothing and costs a *measured* 125.12 MB per entry per grant at 10⁹; keeping none
-/// forfeits the patch and reinstates the full rebuild at every tick.
+/// **One generation.** A flush appends, so the next request's patch derives from the shard's row
+/// space one generation below the live one. One further back is derivable from it and is kept only
+/// while it is its grant's newest in the live prefix ([`RowProjectionCache::prune_superseded`]).
+/// Each further generation costs a *measured* 125.12 MB per entry per grant at 10⁹, and with none
+/// the full rebuild runs at every tick.
 pub(crate) fn retention_floor(live: &crate::Generation, shard: ShardId) -> u64 {
     match live.shard(shard) {
         Some(held) => live.segments_version_before(held).unwrap_or(0),

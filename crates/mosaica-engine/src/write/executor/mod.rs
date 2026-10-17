@@ -343,6 +343,7 @@ impl Executor {
         publication: GeometryPublication,
     ) -> std::result::Result<(), GeometryRefused> {
         let GeometryPublication {
+            shard: shard_id,
             prefix,
             segments_version,
             watermark,
@@ -353,10 +354,6 @@ impl Executor {
         } = publication;
         let started = std::time::Instant::now();
         let previous = self.generation.load_full();
-        let shard_id = match &rotation {
-            Some(rotation) => rotation.shard,
-            None => previous.only_shard().id(),
-        };
         check_publishable(&previous, &prefix, segments_version, shard_id, watermark)?;
         let shard = previous.shard_of(shard_id);
 

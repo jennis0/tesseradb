@@ -67,11 +67,11 @@ pub(crate) fn flushed_scalar_of(
     // read as "no value held".
     let entity_raw = u32::try_from(entity.raw()).expect("entity ids are capped at u32::MAX by I9");
 
-    let stored = if crate::filter::owes_value_column(declared, vocabularies) {
+    let stored = if declared.owes_value_column(vocabularies) {
         shard
             .filter_columns
             .stored_value(&declared.name, entity_raw)
-    } else if crate::filter::blob_resident(declared, vocabularies) {
+    } else if declared.blob_resident(vocabularies) {
         // The blob's rows are self-describing; a malformed row is a lost report here, warned
         // once per row by `BlobRow`.
         blob.get(shard, entity_raw)

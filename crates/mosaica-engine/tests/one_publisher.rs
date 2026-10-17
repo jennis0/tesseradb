@@ -52,6 +52,7 @@ fn an_engine_without_a_write_executor_cannot_publish() {
 
     let err = engine
         .publish_geometry(GeometryPublication::within_prefix(
+            mosaica_types::ShardId::ZERO,
             live.prefix.clone(),
             live.segments_version + 1,
             live.only_shard().watermark,

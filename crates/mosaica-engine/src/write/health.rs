@@ -476,7 +476,9 @@ pub struct ExecutorStats {
     /// Compaction folds published, and the ones discarded.
     pub folds: u64,
     pub fold_failures: u64,
-    /// Whether a `POST /control/compact` is awaiting the next tick.
+    /// Whether a `POST /control/compact` is unanswered: true from the request until the last
+    /// compaction it names publishes, is discarded or is refused. A request made while a
+    /// compaction runs is held until that one lands.
     pub fold_requested: bool,
     /// The sum of [`Self::fold_refusals_by_gate`].
     pub fold_refusals: u64,

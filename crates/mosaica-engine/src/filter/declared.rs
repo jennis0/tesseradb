@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 use mosaica_store::manifest::Visibility;
+#[cfg(doc)]
+use mosaica_store::manifest::DeclaredScalar;
 
 use super::error::ComposeError;
 
@@ -137,7 +139,7 @@ impl Placement {
             || if family == Family::Text {
                 scalar.index
             } else {
-                owes_value_column(scalar, vocabularies) && (scalar.index || row)
+                scalar.owes_value_column(vocabularies) && (scalar.index || row)
             };
         (row || entity).then_some(Placement {
             entity,
@@ -230,14 +232,6 @@ pub fn scoped_is_filterable(scoped: &mosaica_store::manifest::ScopedScalar) -> b
     scoped.is_filterable()
 }
 
-/// Does this scoped family's per-view column carry keyed postings?
-///
-/// A category's, and only a category's: the postings answer `eq`/`in` on a `public` vocabulary and
-/// derive value visibility for `/v1/categories` on a `derived` one.
-pub(crate) fn scoped_owes_postings(scoped: &mosaica_store::manifest::ScopedScalar) -> bool {
-    scoped.vocabulary.is_some() && scoped_is_filterable(scoped)
-}
-
 /// The `visibility` of the vocabulary a scoped category's codes index.
 pub(crate) fn scoped_visibility_of(
     scoped: &mosaica_store::manifest::ScopedScalar,
@@ -266,38 +260,15 @@ pub(in crate::filter) fn visibility_of(
     visibility_of_vocabulary(scalar.vocabulary.as_deref(), vocabularies)
 }
 
-/// Does the build write a value column for this column?
-///
-/// `index = true`, or a `derived` vocabulary, since that control's membership postings are derived
-/// from this column. Must agree with the build's own rule for the same question.
-pub(crate) fn owes_value_column(
-    scalar: &mosaica_store::manifest::DeclaredScalar,
-    vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
-) -> bool {
-    scalar.owes_value_column(vocabularies)
-}
-
-/// Does this column's value live in the record blob?
-///
-/// Blob-resident exactly when it has no other home. A public category with neither `index` nor
-/// `render` is blob-resident like any other field with no other home.
-/// Text is always blob-resident: its postings answer `match` but cannot reconstruct prose.
-pub(crate) fn blob_resident(
-    scalar: &mosaica_store::manifest::DeclaredScalar,
-    vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
-) -> bool {
-    scalar.blob_resident(vocabularies)
-}
-
 /// Where a declared field's value is read from. A field may have more than one home: a rendered,
 /// indexed column is in the view's row tail and in its value column both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FieldHomes {
     /// In the row tail of every view, read in the view a request names.
     pub rendered: bool,
-    /// In a per-item column in stored order: [`owes_value_column`].
+    /// In a per-item column in stored order: [`DeclaredScalar::owes_value_column`].
     pub value_column: bool,
-    /// In the record store: [`blob_resident`].
+    /// In the record store: [`DeclaredScalar::blob_resident`].
     pub record: bool,
 }
 
@@ -309,8 +280,8 @@ impl FieldHomes {
     ) -> FieldHomes {
         FieldHomes {
             rendered: scalar.render,
-            value_column: owes_value_column(scalar, vocabularies),
-            record: blob_resident(scalar, vocabularies),
+            value_column: scalar.owes_value_column(vocabularies),
+            record: scalar.blob_resident(vocabularies),
         }
     }
 
@@ -325,14 +296,6 @@ impl FieldHomes {
         .filter_map(|(held, name)| held.then_some(name))
         .collect()
     }
-}
-
-/// Does the build write derived postings for this column? Only a category earns them.
-pub(crate) fn owes_postings(
-    scalar: &mosaica_store::manifest::DeclaredScalar,
-    vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
-) -> bool {
-    scalar.owes_postings(vocabularies)
 }
 
 /// The analyser that indexed a text column, not the default: one resolution shared by the

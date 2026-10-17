@@ -709,6 +709,54 @@ fn a_request_made_while_a_compaction_runs_is_answered_by_a_later_one() {
     );
 }
 
+/// The `v#####` prefixes under `root`, in order.
+fn prefixes(root: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(root)
+        .unwrap()
+        .filter_map(|entry| entry.unwrap().file_name().into_string().ok())
+        .filter(|name| name.starts_with('v'))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Dropping an engine during a compaction abandons the compaction and waits for its thread: the
+/// prefix it was writing is gone when the drop returns, and the bundle reopens at once and serves
+/// what it served.
+#[test]
+fn an_engine_dropped_during_a_compaction_abandons_it() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let served = visible(&engine, &session);
+
+    engine.set_fold_paused_for_test(true);
+    engine.request_fold();
+    wait_for("the compaction's passes to finish", || {
+        engine.fold_is_holding_for_test()
+    });
+    assert_eq!(
+        prefixes(&root).len(),
+        2,
+        "the compaction is writing a prefix"
+    );
+    drop(session);
+    drop(engine);
+    assert_eq!(prefixes(&root), vec!["v00000".to_string()]);
+
+    let mut engine = Engine::open(
+        &root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        config_uncapped(),
+    )
+    .expect("the engine reopens");
+    engine.start_write_executor(8).expect("the executor starts");
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    assert_eq!(visible(&engine, &session), served);
+}
+
 /// **Compaction §7's startup sweep: an orphaned prefix is reclaimed when a write executor starts,
 /// and the live one is not.**
 ///

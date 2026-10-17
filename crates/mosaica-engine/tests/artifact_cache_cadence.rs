@@ -568,6 +568,41 @@ fn a_write_re_derives_the_shape_it_moved() {
     );
 }
 
+/// A shape read between a write and the tick that publishes it is filed at the version the
+/// served forms are of, so the publication still moves the key and the next read derives again.
+#[test]
+fn a_read_before_the_tick_does_not_file_the_old_shape_under_the_new_version() {
+    let fx = fixture();
+    let engine = fx.open_unrefreshed();
+    engine.register_layer(hulled("clusters/a")).unwrap();
+    publish(&engine, "clusters/a", vec![node(&fx, "c0", None, 0..200)]);
+
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let hull_of = |engine: &Engine| shape_of(engine, &session, "clusters/a");
+    let before = hull_of(&engine);
+    engine
+        .grow_memberships(
+            "clusters/a".into(),
+            0,
+            vec![IncomingGrowth::from_entities(
+                "c0".into(),
+                fx.members(200..2_000),
+            )],
+        )
+        .expect("points joining an artifact that exists is an ordinary write");
+    assert_eq!(
+        hull_of(&engine),
+        before,
+        "the level is served as last published until the tick"
+    );
+    tick(&engine);
+    assert_ne!(
+        hull_of(&engine),
+        before,
+        "the shape from before the publication was served after it"
+    );
+}
+
 /// **A shape is never shared across principals**, which is the term the whole safety of holding one
 /// rests on: a hull is derived from `membership ∩ M_auth`, so one principal's is not an answer to
 /// another's request for the same artifact.

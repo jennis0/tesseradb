@@ -405,19 +405,53 @@ fn open_shard_indexes(
         path: layout.dir(prefix_dir),
         source: std::io::Error::from(e),
     })?;
+    let (unique, edited) = open_record_indexes(prefix_dir, bundle, phash, record)?;
+    Ok(ShardIndexes {
+        filter_columns: Arc::new(filter_columns),
+        unique,
+        edited,
+    })
+}
+
+/// The unique and edited-items indexes partition `phash`'s shard `record` lists under
+/// `prefix_dir`.
+#[allow(clippy::type_complexity)]
+fn open_record_indexes(
+    prefix_dir: &Path,
+    bundle: &Bundle,
+    phash: &str,
+    record: &mosaica_store::manifest::ShardRecord,
+) -> std::result::Result<
+    (
+        Arc<mosaica_store::unique::UniqueIndexes>,
+        Arc<mosaica_store::edited::EditedIndex>,
+    ),
+    mosaica_store::StoreError,
+> {
     let unique = mosaica_store::unique::UniqueIndexes::open(
         &bundle.manifest,
-        &partition.manifest,
+        &bundle.partitions[phash].manifest,
         record,
         prefix_dir,
         None,
     )?;
     let edited = mosaica_store::edited::EditedIndex::open(&record.edited_items, prefix_dir, None)?;
-    Ok(ShardIndexes {
-        filter_columns: Arc::new(filter_columns),
-        unique: Arc::new(unique),
-        edited: Arc::new(edited),
-    })
+    Ok((Arc::new(unique), Arc::new(edited)))
+}
+
+/// The tenancy index partition `phash`'s shard `record` lists under `prefix_dir`, each file
+/// checked against the digest a `files` map holds for it.
+fn open_tenancy(
+    prefix_dir: &Path,
+    bundle: &Bundle,
+    phash: &str,
+    record: &mosaica_store::manifest::ShardRecord,
+) -> std::result::Result<Arc<mosaica_store::tenancy::TenancyIndex>, mosaica_store::StoreError> {
+    let digests = mosaica_store::read::Digests {
+        side: &bundle.partitions[phash].manifest.files,
+        bundle: &bundle.manifest.files,
+    };
+    mosaica_store::read::open_tenancy_index(prefix_dir, record, digests).map(Arc::new)
 }
 
 /// What the side manifests declare, merged into the manifest and then kept: [`ManifestSeed`]
@@ -526,20 +560,13 @@ impl ShardReaders {
                 DeltaTier::open(&prefix_dir.join(rel)).map_err(EngineError::Io)?,
             ));
         }
-        let tenancy = mosaica_store::read::open_tenancy_index(
-            prefix_dir,
-            &shard.record,
-            mosaica_store::read::Digests {
-                side: &partition.manifest.files,
-                bundle: &bundle.manifest.files,
-            },
-        )
-        .map_err(EngineError::Store)?;
+        let tenancy =
+            open_tenancy(prefix_dir, bundle, phash, &shard.record).map_err(EngineError::Store)?;
         Ok(ShardReaders {
             id: shard.record.id,
             postings,
             delta_postings,
-            tenancy: Arc::new(tenancy),
+            tenancy,
         })
     }
 }
@@ -762,8 +789,7 @@ fn open_logged_shards(
     if opened.is_empty() {
         return Ok(());
     }
-    let manifest_digest = read_current(bundle_root)?.manifest_digest;
-    let record_packs: Vec<_> = partition
+    let record_packs = partition
         .layer_spaces
         .iter()
         .flat_map(|space| {
@@ -773,35 +799,20 @@ fn open_logged_shards(
                 .map(|extent| (space.space, extent.clone()))
         })
         .collect();
-    let (attributes, scoped_attributes) = state.attributes.snapshot();
-    let runtime: Vec<String> = attributes
-        .into_iter()
-        .map(|attribute| attribute.name)
-        .chain(scoped_attributes.into_iter().map(|family| family.name))
-        .collect();
+    crate::write::open_shards(
+        &crate::write::Opening {
+            bundle_root,
+            prefix_dir: &readers.prefix_dir,
+            prefix: &readers.prefix,
+            phash: &readers.phash,
+            terms: readers.dict.len() as u64,
+            record_packs,
+            runtime: crate::write::runtime_columns(state.attributes.snapshot()),
+        },
+        bundle,
+        &opened,
+    )?;
     for id in opened {
-        let (record, files) = crate::write::write_opened_shard(
-            &crate::write::OpenedBase {
-                prefix_dir: &readers.prefix_dir,
-                phash: &readers.phash,
-                bundle,
-                manifest_digest: &manifest_digest,
-                terms: readers.dict.len() as u64,
-                record_packs: &record_packs,
-                runtime: &runtime,
-            },
-            id,
-        )
-        .map_err(EngineError::Store)?;
-        bundle
-            .add_opened_shard(
-                &readers.prefix_dir,
-                &readers.prefix,
-                &readers.phash,
-                record,
-                files,
-            )
-            .map_err(EngineError::Store)?;
         let data = bundle.partitions[&readers.phash]
             .shard(id)
             .expect("the shard was just added");
@@ -828,9 +839,15 @@ pub(crate) fn opened_shard_parts(
     runtime_attributes: &[String],
     segments_version: u64,
 ) -> Result<crate::ShardParts> {
-    let data = bundle.partitions[phash]
-        .shard(id)
-        .unwrap_or_else(|| panic!("the bundle serves no shard {id}"));
+    let data = bundle
+        .partitions
+        .get(phash)
+        .and_then(|partition| partition.shard(id))
+        .ok_or_else(|| {
+            EngineError::Malformed(format!(
+                "partition '{phash}' serves no shard {id}; open the shard into the bundle first"
+            ))
+        })?;
     let readers = ShardReaders::open(prefix_dir, phash, bundle, data)?;
     let record = &data.record;
     let indexes = open_shard_indexes(prefix_dir, bundle, phash, record, runtime_attributes)
@@ -1512,8 +1529,9 @@ pub(crate) fn open_rotation(
     retired: croaring::Bitmap,
     carried: Option<&Bundle>,
 ) -> std::result::Result<(Arc<Bundle>, crate::geometry::PrefixRotation), PublishGeometryError> {
-    let current = read_current(bundle_root)
-        .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;
+    let not_openable =
+        |e: &dyn std::fmt::Display| PublishGeometryError::PrefixNotOpenable(e.to_string());
+    let current = read_current(bundle_root).map_err(|e| not_openable(&e))?;
     if current.prefix != prefix {
         return Err(PublishGeometryError::PrefixNotCommitted {
             offered: prefix.to_string(),
@@ -1527,7 +1545,7 @@ pub(crate) fn open_rotation(
         }
         None => mosaica_store::open_written_prefix(bundle_root, prefix),
     }
-    .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;
+    .map_err(|e| not_openable(&e))?;
     // The columns the side manifest still declares, appended on `Engine::open`'s rule: those
     // declared while the compaction ran and those some shard holds no base of.
     let (side_attributes, side_scoped_attributes) = side_manifest_attributes(&bundle);
@@ -1547,29 +1565,18 @@ pub(crate) fn open_rotation(
         .iter()
         .next()
         .map(|(k, v)| (k.clone(), v))
-        .ok_or_else(|| {
-            PublishGeometryError::PrefixNotOpenable(
-                "the written prefix has no partitions".to_string(),
-            )
-        })?;
+        .ok_or_else(|| not_openable(&"the written prefix has no partitions"))?;
 
-    let not_openable =
-        |e: mosaica_store::StoreError| PublishGeometryError::PrefixNotOpenable(e.to_string());
-    let digests = mosaica_store::read::Digests {
-        side: &partition.manifest.files,
-        bundle: &bundle.manifest.files,
-    };
     let record = &partition
         .shard(shard)
-        .ok_or_else(|| {
-            PublishGeometryError::PrefixNotOpenable(format!(
-                "the written prefix has no shard {shard}"
-            ))
-        })?
+        .ok_or_else(|| not_openable(&format!("the written prefix has no shard {shard}")))?
         .record;
     let identity = record.identity;
-    let postings = open_postings(&prefix_dir, mosaica_store::ShardLayout::new(&phash, record.id))
-        .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;
+    let postings = open_postings(
+        &prefix_dir,
+        mosaica_store::ShardLayout::new(&phash, record.id),
+    )
+    .map_err(|e| not_openable(&e))?;
 
     // Opened over the new prefix, from its own manifests: cloning the live generation's would
     // serve the superseded prefix's pre-fold files, missing the blanking and the folded extents. A
@@ -1579,47 +1586,31 @@ pub(crate) fn open_rotation(
         unique,
         edited,
     } = open_shard_indexes(&prefix_dir, &bundle, &phash, record, &runtime_attributes)
-        .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;
+        .map_err(|e| not_openable(&e))?;
     let space_contents = crate::artifact_content::open_space_contents(&prefix_dir, &bundle)
-        .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;
-    let tenancy = Arc::new(
-        mosaica_store::read::open_tenancy_index(&prefix_dir, record, digests)
-            .map_err(not_openable)?,
-    );
+        .map_err(|e| not_openable(&e))?;
+    let tenancy =
+        open_tenancy(&prefix_dir, &bundle, &phash, record).map_err(|e| not_openable(&e))?;
     let carried = partition
         .shards
         .iter()
         .filter(|other| other.record.id != shard)
         .map(|other| {
             let record = &other.record;
+            let (unique, edited) = open_record_indexes(&prefix_dir, &bundle, &phash, record)?;
             Ok(crate::geometry::CarriedIndexes {
                 shard: record.id,
-                unique: Arc::new(mosaica_store::unique::UniqueIndexes::open(
-                    &bundle.manifest,
-                    &partition.manifest,
-                    record,
-                    &prefix_dir,
-                    None,
-                )?),
-                edited: Arc::new(mosaica_store::edited::EditedIndex::open(
-                    &record.edited_items,
-                    &prefix_dir,
-                    None,
-                )?),
-                tenancy: Arc::new(mosaica_store::read::open_tenancy_index(
-                    &prefix_dir,
-                    record,
-                    digests,
-                )?),
+                unique,
+                edited,
+                tenancy: open_tenancy(&prefix_dir, &bundle, &phash, record)?,
             })
         })
         .collect::<std::result::Result<Vec<_>, mosaica_store::StoreError>>()
-        .map_err(not_openable)?;
+        .map_err(|e| not_openable(&e))?;
 
     Ok((
         bundle,
         crate::geometry::PrefixRotation {
-            shard,
             postings,
             identity,
             filter_columns,

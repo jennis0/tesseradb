@@ -331,7 +331,8 @@ pub(crate) struct WritePathState {
     accepted_batches: AcceptedBatches,
     pub(crate) registry: LayerRegistry,
     pub(crate) artifacts: ArtifactStore,
-    /// The layer spaces' deletions whose owing shards the manifests record.
+    /// The layer spaces' deletions for which the manifests record the shards whose compaction
+    /// must remove them.
     settled_owing: live::SettledSpaces,
     /// The view roster: which views of which groups exist, and which keys are burnt. Rebuilt
     /// exactly as the layer registry beside it is: seeded from the manifests, then the log
@@ -667,10 +668,10 @@ impl WritePath {
     }
 
     /// [`crate::Engine::writable`]'s rule. [`Self::submit`] and [`Self::submit_changes`], where
-    /// every write reaches the executor, ask it; so do the entries that read the write shard
+    /// every write reaches the executor, ask it; so do the entries that read the open shard
     /// before submitting.
     pub(crate) fn writable(&self) -> Result<(), AcceptError> {
-        match (self.live.shards().len(), self.live.several_shards) {
+        match (self.live.shard_count(), self.live.several_shards) {
             (1, _) => Ok(()),
             #[cfg(feature = "several-shard-writes")]
             (_, SeveralShards::Written) => Ok(()),
@@ -971,8 +972,9 @@ impl Drop for WritePath {
     ///
     /// The join is unconditional and does not wait on background work: [`LifecycleHandle`] is not
     /// `Clone` and this type is its only owner, so dropping it below closes both queues, and the
-    /// ring that follows wakes a blocked loop to observe that. A fold still running keeps its own
-    /// thread, not this one.
+    /// ring that follows wakes a blocked loop to observe that. The executor's thread abandons a
+    /// running compaction and joins its thread before it ends, so the join covers the compaction
+    /// too and waits for at most the end of the pass it is in.
     fn drop(&mut self) {
         // A test may have parked the executor at an armed pause point; release it first, or
         // teardown deadlocks on a fault the test forgot to clear.

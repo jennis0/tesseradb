@@ -587,7 +587,7 @@ impl WritePath {
 
 /// What the manifests' record and member packs seed, before the log is replayed over them.
 struct SeededArtifacts {
-    /// Every artifact's whole record, with the write shard's slice of its membership and
+    /// Every artifact's whole record, with the first shard's slice of its membership and
     /// generating sets.
     artifacts: ArtifactStore,
     /// Every other point shard's slice ([`ArtifactStore::with_slices`]).
@@ -600,7 +600,7 @@ struct SeededArtifacts {
 
 /// Every artifact the packs of `layer_spaces` hold, read through `registry`'s runs, each record
 /// paired with every one of `shards`' member packs over the same ordinals. `shards` is ascending,
-/// so the first is the write shard.
+/// so the first holds the store's own slice.
 fn seed_artifacts(
     registry: &LayerRegistry,
     layer_spaces: &[mosaica_store::manifest::LayerSpaceRecord],
@@ -698,7 +698,7 @@ fn seed_artifacts(
                     seeded.undecodable += 1;
                     continue;
                 };
-                // The record decodes once, with the write shard's slice; every other slice is its
+                // The record decodes once, with the first shard's slice; every other slice is its
                 // members and sets. Together they hold every generating set whole, or the
                 // artifact is damage and refused in every shard.
                 let Some((mut record, shape)) = decode_slice(entity, record_blob, blobs[0]) else {
@@ -723,8 +723,9 @@ fn seed_artifacts(
                 let held = std::iter::once(&record)
                     .chain(others.iter().map(|(_, slice)| slice))
                     .collect::<Vec<_>>();
-                // A deleted artifact leaves each owing shard's slice at that shard's compaction, so
-                // its slices may hold part of a set until the last; it is never served.
+                // A deleted artifact leaves the slice of each shard that holds part of it at that
+                // shard's compaction, so its slices may hold part of a set until the last; it is
+                // never served.
                 let deletion_held =
                     deleted.is_some_and(|deleted| deleted.contains(entity.raw() as u32));
                 if others.len() + unlisted.len() + 1 != shards.len()
@@ -740,10 +741,8 @@ fn seed_artifacts(
                         slice.declares_members = Some(declares);
                     }
                     if !held_only || borrows_membership(&record) {
-                        let nothing = || record.contents.iter().map(|_| croaring::Bitmap::new());
                         for at in unlisted {
-                            let slice = record.slice(croaring::Bitmap::new(), nothing().collect());
-                            others.push((at, slice));
+                            others.push((at, record.slice_holding_nothing()));
                         }
                     }
                 }
@@ -995,8 +994,8 @@ mod tests {
     /// The write store holds each whole record with its shard's slice and the shape, the other
     /// shard's store its slice beside the record's attachment and cardinalities alone, and both
     /// reach the level's bound and records version, each at its own slice version. A record whose
-    /// slices sum short of a set is refused in
-    /// every shard, and a shard holding nothing of an artifact seeds no slice of it.
+    /// slices sum short of a set is refused in every shard, and a shard holding nothing of an
+    /// artifact seeds no slice of it.
     #[test]
     fn each_shards_slice_is_read_at_open() {
         let dir = tempfile::tempdir().expect("tempdir");

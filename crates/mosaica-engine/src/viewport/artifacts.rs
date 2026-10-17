@@ -436,10 +436,7 @@ impl Engine {
                 layer: name.clone(),
                 level,
                 ordinal,
-                level_version: self
-                    .write
-                    .live()
-                    .with_artifacts(|store| store.every_slice_version(&name, level)),
+                level_version: forms.level_version(),
                 shards: mask_identity.shards,
                 properties: crate::derived::cache::properties_bits(&declared_derived),
             };

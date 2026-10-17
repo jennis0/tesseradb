@@ -429,6 +429,7 @@ impl Engine {
 
         self.write.publish_geometry(
             GeometryPublication::within_prefix(
+                shard,
                 prefix.to_string(),
                 segments_version,
                 watermark,

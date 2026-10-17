@@ -943,7 +943,7 @@ impl Engine {
                         continue;
                     };
                     // The item's shard's slice lists the artifact where it holds a member there.
-                    let slice = live.slice_of(item.shard, store);
+                    let slice = crate::write::slice_of(store, item.shard);
                     let record = ordinal.and_then(|ordinal| {
                         slice.get(&membership.layer, membership.level, ordinal)
                     });
@@ -975,7 +975,7 @@ impl Engine {
         let resident = manifest
             .declared_scalars
             .iter()
-            .any(|d| crate::filter::blob_resident(d, &manifest.vocabularies));
+            .any(|d| d.blob_resident(&manifest.vocabularies));
         let mut blobs = FxHashMap::default();
         if !resident {
             return Ok(Some(blobs));
@@ -1014,7 +1014,7 @@ impl Engine {
         manifest.declared_scalars.iter().enumerate().any(|(at, d)| {
             at < row.scalars.len()
                 && !row.omitted.contains(&at)
-                && crate::filter::blob_resident(d, &manifest.vocabularies)
+                && d.blob_resident(&manifest.vocabularies)
         })
     }
 

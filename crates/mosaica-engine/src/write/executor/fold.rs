@@ -507,6 +507,25 @@ pub(in crate::write) struct Compactions {
     ended: std::collections::BTreeMap<ShardId, u64>,
     /// The shard of the compaction dispatched last.
     last: Option<ShardId>,
+    /// The thread of the compaction dispatched last.
+    thread: Option<CompactionThread>,
+}
+
+/// A compaction's thread and the flag that abandons it. Dropping it raises the flag and joins the
+/// thread, which stops at the end of the pass it is in and removes the prefix it was writing, so
+/// the executor's thread ends only once nothing writes under the bundle.
+struct CompactionThread {
+    abandoned: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for CompactionThread {
+    fn drop(&mut self) {
+        self.abandoned.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 impl Compactions {
@@ -1197,7 +1216,7 @@ impl Executor {
     /// maintenance compete with the product it serves.
     ///
     /// A refusal (a latched gate) consumes the shard's place in a request. A request that arrives
-    /// while a compaction runs, and a shard of one while a merge or coalesce is outstanding, wait
+    /// while a compaction, a merge, a coalesce or a unique declaration's build is outstanding waits
     /// for a later tick (see [`Executor::fold_outstanding`]).
     pub(super) fn dispatch_fold(&mut self, generation: &Arc<Generation>) {
         // A compaction this node could not publish is hours of IO spent to produce an orphan. The
@@ -1209,6 +1228,18 @@ impl Executor {
         // from publication. A request stays held, `fold_requested` raised, and the first tick
         // after the landing takes it.
         if self.fold_outstanding() {
+            return;
+        }
+        // None while a merge, a coalesce or a unique declaration's build is outstanding. A merge's
+        // or a coalesce's output would be orphaned by the flip and its inputs are the
+        // compaction's, so the rebase check would discard the compaction. A build's rounds read
+        // the layers and runs a compaction rewrites. Each writes files no manifest names until it
+        // publishes, so a request is resolved, and a closing compaction's shard tested, only once
+        // none is outstanding.
+        if self.merge_outstanding()
+            || self.coalesce_outstanding()
+            || self.unique_declarations.busy()
+        {
             return;
         }
         // A request is resolved to its shards at this tick, against the gauges as they stand.
@@ -1226,22 +1257,11 @@ impl Executor {
             }
         }
         self.request_answered();
-        // At most one compaction, and none while a merge or a coalesce is outstanding (running, or
-        // completed and not yet published, see [`Executor::fold_outstanding`]). Their outputs
-        // would be orphaned by the flip and their inputs are the compaction's, so starting now
-        // would mean re-reading the shard to discard it at the rebase check.
-        if self.merge_outstanding() || self.coalesce_outstanding() {
-            return;
-        }
         // A request or a closing compaction dispatches on its own terms, whatever hour it is and
         // whatever the gauges read, so the schedule is not consulted for one.
         let Some((shard_id, from)) = self.next_compaction(generation) else {
             return;
         };
-        // A unique declaration's rounds read the layers and runs a fold rewrites.
-        if self.unique_declarations.busy() {
-            return;
-        }
 
         let plan = match crate::compact::plan_fold(
             generation,
@@ -1369,6 +1389,7 @@ impl Executor {
             declared_scalars: manifest.declared_scalars.clone(),
             scoped_scalars,
             vocabularies: manifest.vocabularies.clone(),
+            abandoned: Arc::new(AtomicBool::new(false)),
         };
 
         if let Dispatching::Scheduled(Scheduled {
@@ -1397,17 +1418,36 @@ impl Executor {
         let unit = self.fold.start();
         let health = Arc::clone(&self.health);
         let switches = Arc::clone(&self.deps.switches);
+        let abandoned = Arc::clone(&ctx.abandoned);
         let spawned = std::thread::Builder::new()
             .name("mosaica-fold".to_string())
             .spawn(move || {
-                match crate::compact::execute(plan, ctx) {
+                let abandoned = Arc::clone(&ctx.abandoned);
+                let to_prefix_dir = ctx.to_prefix_dir.clone();
+                let outcome = crate::compact::execute(plan, ctx);
+                // Test hook; always false otherwise. See `Engine::set_fold_paused_for_test`.
+                if outcome.is_ok() {
+                    health.fold_holding.store(true, Ordering::SeqCst);
+                    while switches.fold_paused.load(Ordering::SeqCst)
+                        && !abandoned.load(Ordering::SeqCst)
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    health.fold_holding.store(false, Ordering::SeqCst);
+                }
+                if abandoned.load(Ordering::SeqCst) {
+                    if let Err(e) = mosaica_store::reclaim_prefix(&to_prefix_dir) {
+                        tracing::warn!(
+                            error = %e,
+                            prefix = %to_prefix_dir.display(),
+                            "an abandoned compaction's prefix could not be removed; the next \
+                             executor's startup sweep removes it"
+                        );
+                    }
+                    return;
+                }
+                match outcome {
                     Ok(mut completed) => {
-                        // Test hook; always false otherwise. See `Engine::set_fold_paused_for_test`.
-                        health.fold_holding.store(true, Ordering::SeqCst);
-                        while switches.fold_paused.load(Ordering::SeqCst) {
-                            std::thread::sleep(std::time::Duration::from_millis(5));
-                        }
-                        health.fold_holding.store(false, Ordering::SeqCst);
                         completed.finished = std::time::Instant::now();
                         // Before the in-flight flag clears, so a tick that observes the fold
                         // finished also observes when. See `fold_floor_from`.
@@ -1433,20 +1473,26 @@ impl Executor {
                     }
                 }
             });
-        if spawned.is_ok() {
-            if let Some(last) = self.compactions.last {
-                let ended = self.health.fold_ended_unix.load(Ordering::SeqCst);
-                self.compactions.ended.insert(last, ended);
+        match spawned {
+            Ok(thread) => {
+                self.compactions.thread = Some(CompactionThread {
+                    abandoned,
+                    thread: Some(thread),
+                });
+                if let Some(last) = self.compactions.last {
+                    let ended = self.health.fold_ended_unix.load(Ordering::SeqCst);
+                    self.compactions.ended.insert(last, ended);
+                }
+                self.compactions.last = Some(shard_id);
+                if let Some(now) = unix_now() {
+                    self.compactions.started.insert(shard_id, now);
+                }
             }
-            self.compactions.last = Some(shard_id);
-            if let Some(now) = unix_now() {
-                self.compactions.started.insert(shard_id, now);
+            Err(e) => {
+                // The closure was dropped without running, which cleared the in-flight flag.
+                self.health.fold_failures.fetch_add(1, Ordering::Relaxed);
+                tracing::error!(error = %e, "the OS refused a thread for the compaction fold");
             }
-        }
-        if let Err(e) = spawned {
-            // The closure was dropped without running, which cleared the in-flight flag.
-            self.health.fold_failures.fetch_add(1, Ordering::Relaxed);
-            tracing::error!(error = %e, "the OS refused a thread for the compaction fold");
         }
     }
 
@@ -2606,6 +2652,7 @@ impl Executor {
             .collect::<Result<Vec<Arc<DeltaTier>>, String>>()?;
         self.publish_geometry(
             GeometryPublication::within_prefix(
+                shard_id,
                 prefix.to_string(),
                 live.segments_version + 1,
                 shard.watermark,
@@ -2749,7 +2796,7 @@ impl Executor {
         };
 
         let composed: Vec<(String, u32, u64, Vec<u8>)> = self.live.with_artifacts(|store| {
-            let slice = self.live.slice_of(layout.shard, store);
+            let slice = slice_of(store, layout.shard);
             let levels: Vec<(String, u32)> = levels_of(store).collect();
             levels
                 .into_iter()
@@ -2900,7 +2947,7 @@ impl Executor {
         let row_count = u32::try_from(space.total_rows()).unwrap_or(u32::MAX);
         if !spatial {
             return Some(self.live.with_artifacts(|store| {
-                let slice = self.live.slice_of(other.id(), store);
+                let slice = slice_of(store, other.id());
                 observe_held(row_count, &|visit| {
                     for (ordinal, record) in pending.held(store, other.id(), layer, level) {
                         visit(
@@ -3033,7 +3080,7 @@ impl Executor {
                     // A borrowing level's filed column is true when written and not read
                     // afterwards: the borrowed set moves with the target's version, so the engine
                     // serves it artifact-major instead (`crate::artifacts::ArtifactRows::inherit`).
-                    let slice = self.live.slice_of(shard, store);
+                    let slice = slice_of(store, shard);
                     observe_held(space.base_rows(), &|visit| {
                         for (ordinal, record) in pending.held(store, shard, &layer, level) {
                             visit(
@@ -3146,7 +3193,7 @@ impl Executor {
             mosaica_store::manifest::DerivedForm,
             std::path::PathBuf,
         )> = self.live.with_artifacts(|store| {
-            let slice = self.live.slice_of(shard, store);
+            let slice = slice_of(store, shard);
             let mut out = Vec::with_capacity(wanted.len() * spaces.len());
             for (layer, level, layout) in &wanted {
                 let partitions = !overlapping.contains(&(layer.clone(), *level));
@@ -3379,9 +3426,7 @@ impl Executor {
             let (records_version, version) = self.live.with_artifacts(|store| {
                 (
                     store.records_version(layer, *level),
-                    self.live
-                        .slice_of(layout.shard, store)
-                        .level_version(layer, *level),
+                    slice_of(store, layout.shard).level_version(layer, *level),
                 )
             });
             for (view, segment) in fold_segments {
@@ -3538,7 +3583,7 @@ impl Executor {
                         })
                     })
                     .collect();
-                let slice = self.live.slice_of(pass.layout.shard, store);
+                let slice = slice_of(store, pass.layout.shard);
                 let mut out = Vec::with_capacity(levels.len() * spaces.len());
                 for (layer, level) in &levels {
                     let Some(version) =
@@ -3672,7 +3717,7 @@ impl Executor {
                             view,
                             layer,
                             *level,
-                            self.live.slice_of(shard.id(), store),
+                            slice_of(store, shard.id()),
                             store,
                             &view_data.row_space,
                             Some(&shard.partition_source()),

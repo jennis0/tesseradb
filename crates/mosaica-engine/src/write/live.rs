@@ -33,8 +33,8 @@ pub(in crate::write) struct RegistryForPublication {
     pub version: u64,
 }
 
-/// One layer space's deletions whose owing shards a compaction settled, and each owing shard's
-/// share of them.
+/// One layer space's deletions for which a compaction settled the shards whose compaction must
+/// remove them, and each such shard's share of them.
 #[derive(Clone, Default)]
 pub(in crate::write) struct SettledOwing {
     pub(in crate::write) deletions: croaring::Bitmap,
@@ -42,28 +42,53 @@ pub(in crate::write) struct SettledOwing {
 }
 
 impl SettledOwing {
-    /// Each owing shard's share of `deleted`, as a side-manifest records it.
+    /// Each settled shard's share of `deleted`, leaving out a shard whose share is empty.
+    fn share(&self, deleted: &croaring::Bitmap) -> BTreeMap<ShardId, croaring::Bitmap> {
+        self.by_shard
+            .iter()
+            .map(|(shard, artifacts)| (*shard, artifacts.and(deleted)))
+            .filter(|(_, share)| !share.is_empty())
+            .collect()
+    }
+
+    /// [`Self::share`], as a side-manifest records it.
     pub(in crate::write) fn owed(
         &self,
         deleted: &croaring::Bitmap,
     ) -> Vec<mosaica_store::manifest::OwedDeletions> {
-        self.by_shard
-            .iter()
-            .map(|(shard, artifacts)| (*shard, artifacts.and(deleted)))
-            .filter(|(_, owed)| !owed.is_empty())
-            .map(|(shard, owed)| mosaica_store::manifest::OwedDeletions {
-                shard,
-                artifacts: mosaica_store::manifest::EntitySet::of(&owed),
-            })
-            .collect()
+        owed_records(self.share(deleted))
     }
+}
+
+/// Each shard's artifact deletions, as a side-manifest records them.
+fn owed_records(
+    by_shard: BTreeMap<ShardId, croaring::Bitmap>,
+) -> Vec<mosaica_store::manifest::OwedDeletions> {
+    by_shard
+        .into_iter()
+        .map(
+            |(shard, artifacts)| mosaica_store::manifest::OwedDeletions {
+                shard,
+                artifacts: mosaica_store::manifest::EntitySet::of(&artifacts),
+            },
+        )
+        .collect()
+}
+
+/// `shard`'s slice of every membership in `written`. Panics on a shard the store holds no slice
+/// of: answering from another shard's slice would project its entities through this shard's row
+/// space.
+pub(crate) fn slice_of(written: &ArtifactStore, shard: ShardId) -> &ArtifactStore {
+    written
+        .slice(shard)
+        .expect("every served shard has a slice")
 }
 
 /// Every layer space's [`SettledOwing`], by space.
 pub(in crate::write) type SettledSpaces = BTreeMap<LayerSpace, SettledOwing>;
 
-/// What the side-manifest's layer spaces record as owed, read as settled: each space's deletions
-/// and each shard's share of them.
+/// What the side-manifest's layer spaces record for each shard whose compaction must remove a
+/// deletion, read as settled: each space's deletions and each shard's share of them.
 pub(in crate::write) fn settled_of(
     layer_spaces: &[mosaica_store::manifest::LayerSpaceRecord],
 ) -> SettledSpaces {
@@ -199,37 +224,51 @@ pub(crate) struct LiveState {
     /// the vocabulary list's contract.
     pub(in crate::write) view_declarations:
         Mutex<crate::view_declarations::RuntimeViewDeclarations>,
-    /// The deletions whose owing shards the open read or a compaction settled. Written only by
-    /// the executor, at a compaction's publication.
+    /// The deletions for which the open or a compaction settled the shards whose compaction must
+    /// remove them. Written only by the executor, at a compaction's publication.
     pub(in crate::write) settled_owing: Mutex<SettledSpaces>,
 }
 
 impl LiveState {
     /// Every shard's write state, ascending by id.
     pub(crate) fn shards(&self) -> Vec<Arc<ShardWrite>> {
-        self.shards
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.read_shards().clone()
+    }
+
+    fn read_shards(&self) -> std::sync::RwLockReadGuard<'_, Vec<Arc<ShardWrite>>> {
+        self.shards.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// How many shards the bundle holds.
+    pub(in crate::write) fn shard_count(&self) -> usize {
+        self.read_shards().len()
     }
 
     /// The open shard, which takes new items at its high water: the open checked there is one,
     /// and a window that seals it opens the next.
     pub(crate) fn open_shard(&self) -> Arc<ShardWrite> {
-        self.shards()
-            .into_iter()
+        let shards = self.read_shards();
+        let open = shards
+            .iter()
             .rfind(|shard| shard.state() == mosaica_types::ShardState::Open)
-            .expect("the open refuses a bundle with no open shard")
+            .expect("the open refuses a bundle with no open shard");
+        Arc::clone(open)
     }
 
     /// Shard `id`'s write state, or `None` for a shard the bundle does not hold.
     pub(crate) fn shard(&self, id: ShardId) -> Option<Arc<ShardWrite>> {
-        self.shards().into_iter().find(|shard| shard.id == id)
+        self.read_shards()
+            .iter()
+            .find(|shard| shard.id == id)
+            .map(Arc::clone)
     }
 
     /// Every shard's high water, summed.
     pub(crate) fn high_water(&self) -> u64 {
-        self.shards().iter().map(|shard| shard.high_water()).sum()
+        self.read_shards()
+            .iter()
+            .map(|shard| shard.high_water())
+            .sum()
     }
 
     /// One past the highest shard id ever opened.
@@ -328,19 +367,6 @@ impl LiveState {
     /// Read the artifact store: the request path's route to a membership.
     pub(crate) fn with_artifacts<R>(&self, f: impl FnOnce(&ArtifactStore) -> R) -> R {
         f(&lock_recover(&self.artifacts))
-    }
-
-    /// `shard`'s slice of every membership, given `written`, the store [`Self::with_artifacts`]
-    /// lends. Panics on a shard the open read no slice of: answering from another shard's slice
-    /// would project its entities through this shard's row space.
-    pub(crate) fn slice_of<'a>(
-        &self,
-        shard: ShardId,
-        written: &'a ArtifactStore,
-    ) -> &'a ArtifactStore {
-        written
-            .slice(shard)
-            .expect("every shard's slice is read at open")
     }
 
     /// Everything not yet in a manifest, packed and ready. See [`ArtifactStore::unpublished`].
@@ -487,28 +513,20 @@ impl LiveState {
     }
 
     /// For each shard, the artifacts of `deleted` in `space` its compaction has to remove from its
-    /// slice. A settled deletion is owed by the shards settled for it. Any other is owed by the
-    /// shards whose slice holds a member or a generating entity of it, or borrows a membership
-    /// for it, and by every shard where its layer's memberships are not stored, since each shard
-    /// derives them. A shard owing none is left out, and so is every shard where no live layer
-    /// holds `space` and the deletion is not settled.
+    /// slice. A settled deletion is removed by the compactions of the shards settled for it. Any
+    /// other is removed by the compactions of the shards whose slice holds a member or a
+    /// generating entity of it, or borrows a membership for it, and of every shard where its
+    /// layer's memberships are not stored, since each shard derives them. A shard with none to
+    /// remove is left out, and so is every shard where no live layer holds `space` and the
+    /// deletion is not settled.
     pub(in crate::write) fn owing(
         &self,
         space: LayerSpace,
         deleted: &croaring::Bitmap,
     ) -> BTreeMap<ShardId, croaring::Bitmap> {
-        let mut owing = BTreeMap::new();
-        let unsettled = match lock_recover(&self.settled_owing).get(&space) {
-            Some(settled) => {
-                for (shard, artifacts) in &settled.by_shard {
-                    let owed = artifacts.and(deleted);
-                    if !owed.is_empty() {
-                        owing.insert(*shard, owed);
-                    }
-                }
-                deleted.andnot(&settled.deletions)
-            }
-            None => deleted.clone(),
+        let (mut owing, unsettled) = match lock_recover(&self.settled_owing).get(&space) {
+            Some(settled) => (settled.share(deleted), deleted.andnot(&settled.deletions)),
+            None => (BTreeMap::new(), deleted.clone()),
         };
         if unsettled.is_empty() {
             return owing;
@@ -529,7 +547,7 @@ impl LiveState {
             })
             .collect();
         for shard in self.shards() {
-            let slice = self.slice_of(shard.id, &written);
+            let slice = slice_of(&written, shard.id);
             let owed: croaring::Bitmap = match every {
                 true => deleted.clone(),
                 false => places
@@ -563,16 +581,11 @@ impl LiveState {
         space: LayerSpace,
         deleted: &croaring::Bitmap,
     ) -> Vec<mosaica_store::manifest::OwedDeletions> {
-        self.owing(space, deleted)
-            .into_iter()
-            .map(|(shard, owed)| mosaica_store::manifest::OwedDeletions {
-                shard,
-                artifacts: mosaica_store::manifest::EntitySet::of(&owed),
-            })
-            .collect()
+        owed_records(self.owing(space, deleted))
     }
 
-    /// Replace the settled deletions with `settled`, what a compaction's publication left owed.
+    /// Replace the settled deletions with `settled`, what a compaction's publication left for
+    /// later compactions to remove.
     pub(in crate::write) fn settle_owing(&self, settled: SettledSpaces) {
         *lock_recover(&self.settled_owing) = settled;
     }

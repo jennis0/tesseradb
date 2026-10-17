@@ -338,6 +338,22 @@ pub(crate) fn holders_in(
     attribute: &str,
     keys: &[UniqueKey],
 ) -> Result<Vec<(usize, EntityId)>, mosaica_store::StoreError> {
+    let live = generation
+        .unique_live
+        .lookup(attribute, keys)
+        .into_iter()
+        .filter(|(_, item)| item.shard == shard.id())
+        .map(|(i, item)| (i, item.entity));
+    shard_holders(shard, attribute, keys, live)
+}
+
+/// [`holders_in`], given `live`, the shard's live entries holding `keys`.
+fn shard_holders(
+    shard: &crate::Shard,
+    attribute: &str,
+    keys: &[UniqueKey],
+    live: impl IntoIterator<Item = (usize, EntityId)>,
+) -> Result<Vec<(usize, EntityId)>, mosaica_store::StoreError> {
     let mut out: Vec<(usize, EntityId)> = match shard.unique.get(attribute) {
         Some(index) => index
             .lookup(keys)?
@@ -346,14 +362,7 @@ pub(crate) fn holders_in(
             .collect(),
         None => Vec::new(),
     };
-    out.extend(
-        generation
-            .unique_live
-            .lookup(attribute, keys)
-            .into_iter()
-            .filter(|(_, item)| item.shard == shard.id())
-            .map(|(i, item)| (i, item.entity)),
-    );
+    out.extend(live);
     out.retain(|(_, entity)| !shard.overlay.is_deleted(*entity));
     out.sort_unstable();
     out.dedup();
@@ -368,10 +377,16 @@ pub(crate) fn holders(
     attribute: &str,
     keys: &[UniqueKey],
 ) -> Result<Vec<(usize, ItemAt)>, mosaica_store::StoreError> {
+    let mut live: std::collections::BTreeMap<ShardId, Vec<(usize, EntityId)>> =
+        std::collections::BTreeMap::new();
+    for (at, item) in generation.unique_live.lookup(attribute, keys) {
+        live.entry(item.shard).or_default().push((at, item.entity));
+    }
     let mut out = Vec::new();
     for shard in generation.shards() {
+        let live = live.remove(&shard.id()).unwrap_or_default();
         out.extend(
-            holders_in(generation, shard, attribute, keys)?
+            shard_holders(shard, attribute, keys, live)?
                 .into_iter()
                 .map(|(at, entity)| (at, ItemAt::new(shard.id(), entity))),
         );
@@ -486,7 +501,7 @@ pub(crate) fn for_each_flushed_value(
             }
         }
     };
-    if crate::filter::owes_value_column(declared, &manifest.vocabularies) {
+    if declared.owes_value_column(&manifest.vocabularies) {
         let columns = &shard.filter_columns;
         let mut present = croaring::Bitmap::new();
         if let Some(layers) = columns.value_layers(&declared.name) {
@@ -502,7 +517,7 @@ pub(crate) fn for_each_flushed_value(
                 send(entity, value);
             }
         }
-    } else if crate::filter::blob_resident(declared, &manifest.vocabularies) {
+    } else if declared.blob_resident(&manifest.vocabularies) {
         shard
             .filter_columns
             .records()

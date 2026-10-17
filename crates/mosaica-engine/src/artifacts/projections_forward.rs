@@ -152,9 +152,8 @@ impl ArtifactProjections {
     }
 
     /// Give `rows` the level's records another shard's form holds at `records_version`, where one
-    /// does, and file its own there otherwise: every shard's form at one records version reads one
-    /// set of records, which is what a verdict over several shards takes for one version of the
-    /// level.
+    /// does, and file its own there otherwise, so every shard's form at one records version reads
+    /// one set of records ([`super::ArtifactView`]'s `one_version`).
     fn share_records(
         &self,
         (_, view, layer, level): &LevelAddress,
@@ -162,20 +161,12 @@ impl ArtifactProjections {
         records_version: u64,
         rows: &mut ArtifactRows,
     ) {
-        let key = super::projections::DerivedKey::of(prefix, records_version);
-        let address = (view.clone(), layer.clone(), *level);
-        let mut held = self.records_held.lock().unwrap_or_else(|e| e.into_inner());
-        let shared = held
-            .get(&address)
-            .filter(|(held_key, _)| *held_key == key)
-            .and_then(|(_, records)| records.upgrade())
-            .filter(|shared| shared.len() == rows.records.len());
-        match shared {
-            Some(shared) => rows.records = shared,
-            None => {
-                held.insert(address, (key, Arc::downgrade(&rows.records)));
-            }
-        }
+        rows.records = self.shared_records(
+            (view.clone(), layer.clone(), *level),
+            super::projections::DerivedKey::of(prefix, records_version),
+            rows.records.len(),
+            || Arc::clone(&rows.records),
+        );
     }
 
     /// The form this publication amends, taken out of the map with the deltas it has not yet taken.
@@ -276,15 +267,10 @@ impl ArtifactProjections {
     ) -> Applied {
         let (_, view, layer, level) = address;
         let level = *level;
-        let whole = std::ptr::eq(slice, records);
+        let slice = LevelSlice::new(slice, records, layer, level, None);
         let drawn = |ordinal: u32| {
             let record = drawn_record(records, layer, level, ordinal, view)?;
-            let held = match slice.get(layer, level, ordinal) {
-                Some(held) if !whole => std::borrow::Cow::Borrowed(held),
-                None if !whole => std::borrow::Cow::Owned(nothing_held(record.contents.len())),
-                _ => std::borrow::Cow::Borrowed(record),
-            };
-            Some((record, held))
+            Some((record, slice.held(ordinal, record)))
         };
         let row_major = amended.layout.is_row_major();
         let mut applied = Applied::default();
@@ -336,7 +322,7 @@ impl ArtifactProjections {
                                     let fresh = amended.publish_resolved(
                                         *ordinal,
                                         record,
-                                        &held,
+                                        held,
                                         rows(*ordinal),
                                         space,
                                     );
@@ -354,12 +340,12 @@ impl ArtifactProjections {
                             applied.published += 1;
                             let fresh = match source {
                                 DeltaRows::Projected => {
-                                    amended.publish_at(*ordinal, record, &held, space)
+                                    amended.publish_at(*ordinal, record, held, space)
                                 }
                                 DeltaRows::Resolved(rows) => amended.publish_resolved(
                                     *ordinal,
                                     record,
-                                    &held,
+                                    held,
                                     rows(*ordinal),
                                     space,
                                 ),
@@ -374,7 +360,7 @@ impl ArtifactProjections {
         }
         for ordinal in &refresh {
             if let Some((record, held)) = drawn(*ordinal) {
-                amended.refresh_sets(*ordinal, record, &held, space, rederive.contains(ordinal));
+                amended.refresh_sets(*ordinal, record, held, space, rederive.contains(ordinal));
             }
         }
         applied.rederived = rederive.len();

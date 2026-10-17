@@ -40,7 +40,6 @@ pub use rows::{
 };
 pub use sources::{AttributeSource, PredicateSource, SpatialSource};
 pub(crate) use slice::LevelSlice;
-use slice::nothing_held;
 pub use view::{ArtifactSide, ArtifactVerdict, ArtifactView, LabelGate, Withheld};
 
 pub(crate) use rows::view_key;

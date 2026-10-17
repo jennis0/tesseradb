@@ -3252,7 +3252,7 @@ fn scoped_render_targets(args: &BuildArgs, columns: &[ScopedRenderColumn]) -> Ve
 /// `derived` vocabulary. The difference is that a scoped family's admission decides both surfaces
 /// at once: a family on no filter surface has no `/v1/categories` answer either, so postings
 /// written for one would be read by nothing. It must agree with the engine's
-/// `filter::scoped_owes_postings`, or the open demands a file no pass wrote.
+/// `ScopedScalar::has_postings`, or the open demands a file no pass wrote.
 ///
 /// **So it is one predicate, called from both** — `manifest::ScopedScalar::licence_of`, over the
 /// four facts a declaration and a manifest record both carry. It lives at the record rather than

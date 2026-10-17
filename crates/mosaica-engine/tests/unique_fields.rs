@@ -1768,3 +1768,42 @@ fn a_declaration_over_a_value_held_in_two_shards_is_refused() {
         BIG + 2_032
     )));
 }
+
+/// **A compaction requested while a declaration builds reads the runs it is writing as named**:
+/// the request is resolved once the build lands, so it compacts the shard holding a deletion and
+/// not the shard the build was writing runs into.
+#[test]
+fn a_request_made_while_a_declaration_builds_compacts_only_what_has_something_to_reclaim() {
+    let fx = two_shards(false);
+    let engine = Arc::new(writing_two(&fx));
+    compact(&engine, Some(ShardId::new(0).unwrap()));
+    compact(&engine, Some(ShardId::new(1).unwrap()));
+    engine
+        .accept_changes(vec![(
+            built_item(&engine, source_in(&engine, 1)).target(),
+            ChangeOp::Delete,
+        )])
+        .unwrap();
+
+    let held = held_declaration(&engine, "doi");
+    let before = engine.write_executor_stats();
+    engine.request_compaction(None);
+    tick(&engine);
+    engine.set_unique_round_paused_for_test(false);
+    assert!(held.join().unwrap().is_ok());
+    wait_until(
+        "the request to be answered",
+        Duration::from_secs(120),
+        || {
+            let now = engine.write_executor_stats();
+            assert_eq!(now.fold_failures, before.fold_failures);
+            now.folds > before.folds && !now.fold_requested
+        },
+    );
+    assert_eq!(
+        engine.write_executor_stats().folds,
+        before.folds + 1,
+        "only shard 1 holds something to reclaim"
+    );
+    assert_eq!(engine.retirable_deletions(), 0);
+}

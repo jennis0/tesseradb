@@ -10,8 +10,8 @@ use super::{record_open_error, request_access, Column, FilterColumns, Layer, Rou
 use crate::filter::declared::{resolve_analyser, visibility_of};
 use crate::filter::error::ComposeError;
 use crate::filter::{
-    blob_resident, carries_live_view, owes_postings, owes_value_column, scoped_column_name,
-    scoped_is_filterable, scoped_owes_postings, scoped_visibility_of, Family, Placement,
+    carries_live_view, scoped_column_name, scoped_is_filterable, scoped_visibility_of, Family,
+    Placement,
 };
 
 /// Open one view's column of a group-scoped attribute family: the name it is held under, its
@@ -80,7 +80,7 @@ pub(super) fn open_scoped_column(
     let (base, postings, route) = open_value_base(
         &dir,
         scoped_family,
-        scoped_owes_postings(family),
+        family.has_postings(),
         scoped_visibility_of(family, vocabularies),
         mmap,
     )?;
@@ -183,9 +183,11 @@ pub(crate) fn record_extent_paths(
 /// The record blob's stack for one shard: the base the schema owes, plus every extent named.
 ///
 /// The base is owed exactly when the compiled schema has a blob-resident column with no other
-/// home ([`blob_resident`]); `unfolded` names the columns declared at a running service that have
-/// extents alone until a fold writes the base. Derived from the schema rather than probed for on
-/// disk, so a missing base is a refusal, never "those entities have no record".
+/// home ([`DeclaredScalar::blob_resident`]); `unfolded` names the columns declared at a running
+/// service that have extents alone until a fold writes the base. Derived from the schema rather
+/// than probed for on disk, so a missing base is a refusal, never "those entities have no record".
+///
+/// [`DeclaredScalar::blob_resident`]: mosaica_store::manifest::DeclaredScalar::blob_resident
 pub(crate) fn open_record_stack(
     prefix_dir: &Path,
     layout: ShardLayout<'_>,
@@ -197,7 +199,7 @@ pub(crate) fn open_record_stack(
 ) -> Result<RecordStack, mosaica_filter::RecordError> {
     let owes_base = declared
         .iter()
-        .any(|d| !unfolded.iter().any(|name| name == &d.name) && blob_resident(d, vocabularies));
+        .any(|d| !unfolded.iter().any(|name| name == &d.name) && d.blob_resident(vocabularies));
     let record_dir = prefix_dir.join(layout.record_rel());
     RecordStack::open(owes_base.then_some(record_dir.as_path()), extents, access)
 }
@@ -239,7 +241,7 @@ pub(super) fn runtime_layers(
             Vec::new(),
         )));
     }
-    if !owes_value_column(scalar, vocabularies) {
+    if !scalar.owes_value_column(vocabularies) {
         return Ok(None);
     }
     Ok(Some(Column::values(
@@ -368,14 +370,14 @@ impl FilterColumns {
                 );
                 continue;
             }
-            if !owes_value_column(scalar, vocabularies) {
+            if !scalar.owes_value_column(vocabularies) {
                 continue;
             }
             let dir = prefix_dir.join(layout.column_rel(&scalar.name));
             let (base, postings, route) = open_value_base(
                 &dir,
                 family,
-                owes_postings(scalar, vocabularies),
+                scalar.owes_postings(vocabularies),
                 visibility_of(scalar, vocabularies),
                 mmap,
             )?;

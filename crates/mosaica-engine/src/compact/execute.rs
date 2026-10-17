@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use mosaica_authz::{sweep_term_postings, DeltaTier, PostingsReader, PostingsSpool};
@@ -54,6 +55,20 @@ pub(crate) struct FoldContext {
     /// Every group's scoped column families, flattened. Each has a folded column per view.
     pub(crate) scoped_scalars: Vec<mosaica_store::manifest::ScopedScalar>,
     pub(crate) vocabularies: Vec<ManifestVocabulary>,
+    /// Raised when the engine closes. [`execute`] then stops at the end of the pass it is in.
+    pub(crate) abandoned: Arc<AtomicBool>,
+}
+
+impl FoldContext {
+    /// An error once the compaction is abandoned, for [`execute`] to return between passes.
+    fn going_on(&self) -> Result<(), MaintenanceFailed> {
+        if self.abandoned.load(Ordering::SeqCst) {
+            return Err(MaintenanceFailed(
+                "the compaction was abandoned because the engine closed".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// The summary is carried to publication's log, since its timings and counts are not in the file.
@@ -138,29 +153,37 @@ pub(crate) fn execute(
 
     let segments = fold_row_spaces(&plan, &ctx, &mut out)?;
     stairs.record("1 row space");
+    ctx.going_on()?;
 
     let postings_path = fold_postings(&plan, &ctx, &terms_dir, &mut out)?;
     stairs.record("2 postings");
+    ctx.going_on()?;
 
     let term_images = derive_term_images(&plan, &ctx, &segments, &postings_path, &mut out)?;
     stairs.record("2b term images");
+    ctx.going_on()?;
 
     let unique = fold_unique_indexes(&plan, &ctx, &mut out)?;
     stairs.record("3b unique indexes");
+    ctx.going_on()?;
 
     let edited = fold_edited_items(&plan, &ctx, &mut out)?;
     stairs.record("3c edited items");
+    ctx.going_on()?;
 
     fold_text_columns(&plan, &ctx, &mut out)?;
     fold_value_columns(&plan, &ctx, &mut out)?;
     fold_record_blob(&plan, &ctx, &mut out)?;
     stairs.record("4a attributes");
+    ctx.going_on()?;
 
     fold_entity_terms(&plan, &ctx, &mut out)?;
     stairs.record("4c entity terms");
+    ctx.going_on()?;
 
     derive_field_tallies(&plan, &ctx, &segments, &mut out)?;
     stairs.record("4d field tallies");
+    ctx.going_on()?;
 
     // No pass 4b: the term dictionary is carried to the new prefix by a hard link at publication.
     let files = digest_and_sync(&out)?;

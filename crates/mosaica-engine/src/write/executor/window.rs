@@ -982,9 +982,9 @@ impl Executor {
         self.observe_wal();
     }
 
-    /// The shards `ids` a window opens, each written as a build of no item writes a shard, with a
-    /// member pack beside each record pack the publications name, and opened over the live
-    /// bundle. `None` where it opens none.
+    /// The shards `ids` a window opens. Each is written as a build with no items writes a shard,
+    /// with an empty member pack beside each record pack the publications name, and opened over
+    /// the live bundle. `None` where `ids` is empty.
     pub(super) fn open_shards(
         &self,
         ids: &[ShardId],
@@ -1000,8 +1000,7 @@ impl Executor {
             .iter()
             .next()
             .expect("a served bundle has a partition");
-        let manifest_digest = crate::engine::read_current(&self.deps.bundle_root)?.manifest_digest;
-        let record_packs: Vec<(LayerSpace, mosaica_store::manifest::RecordPackExtent)> = self
+        let record_packs = self
             .side_manifests
             .spaces
             .iter()
@@ -1011,40 +1010,31 @@ impl Executor {
                     .map(move |extent| (*space, extent.clone()))
             })
             .collect();
-        let (attributes, scoped_attributes) = self.live.attributes_for_publication();
-        let entity: Vec<String> = attributes.into_iter().map(|a| a.name).collect();
-        let runtime: Vec<String> = entity
-            .iter()
-            .cloned()
-            .chain(scoped_attributes.into_iter().map(|family| family.name))
-            .collect();
-        let mut bundle = Arc::clone(&generation.bundle);
-        let mut members = Vec::with_capacity(ids.len());
+        let attributes = self.live.attributes_for_publication();
+        let entity: Vec<String> = attributes.0.iter().map(|a| a.name.clone()).collect();
+        let mut bundle = mosaica_store::read::Bundle {
+            manifest: generation.bundle.manifest.clone(),
+            partitions: generation.bundle.partitions.clone(),
+        };
+        let opened = crate::write::open_shards(
+            &crate::write::Opening {
+                bundle_root: &self.deps.bundle_root,
+                prefix_dir: &prefix_dir,
+                prefix: &generation.prefix,
+                phash,
+                terms: generation.dict.len() as u64,
+                record_packs,
+                runtime: crate::write::runtime_columns(attributes),
+            },
+            &mut bundle,
+            ids,
+        )?;
+        let bundle = Arc::new(bundle);
+        let mut members = Vec::with_capacity(opened.len());
         let mut member_files = std::collections::BTreeMap::new();
-        for &id in ids {
-            let (record, files) = crate::write::write_opened_shard(
-                &crate::write::OpenedBase {
-                    prefix_dir: &prefix_dir,
-                    phash,
-                    bundle: &bundle,
-                    manifest_digest: &manifest_digest,
-                    terms: generation.dict.len() as u64,
-                    record_packs: &record_packs,
-                    runtime: &runtime,
-                },
-                id,
-            )
-            .map_err(crate::EngineError::Store)?;
-            members.push((id, record.membership_extents.clone()));
-            member_files.extend(
-                files
-                    .iter()
-                    .filter(|(rel, _)| mosaica_store::layout::is_artifact_file(phash, rel))
-                    .map(|(rel, digest)| (rel.clone(), digest.clone())),
-            );
-            bundle = bundle
-                .with_opened_shard(&prefix_dir, &generation.prefix, phash, record, files)
-                .map_err(crate::EngineError::Store)?;
+        for shard in opened {
+            members.push((shard.id, shard.extents));
+            member_files.extend(shard.files);
         }
         let parts = ids
             .iter()
