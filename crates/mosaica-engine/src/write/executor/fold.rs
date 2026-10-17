@@ -62,9 +62,10 @@ impl PendingRetirement {
         layer: &str,
         level: u32,
     ) -> Option<u64> {
-        let moves = self
-            .moved(layer, level)
-            .is_some_and(|moved| moved.records || shard == self.retired.shard);
+        let moves = self.moved(layer, level).is_some_and(|moved| {
+            moved.moves == mosaica_lifecycle::membership::Moves::Records
+                || shard == self.retired.shard
+        });
         Some(store.slice(shard)?.level_version(layer, level) + u64::from(moves))
     }
 
@@ -75,7 +76,9 @@ impl PendingRetirement {
         layer: &str,
         level: u32,
     ) -> u64 {
-        let moves = self.moved(layer, level).is_some_and(|moved| moved.records);
+        let moves = self
+            .moved(layer, level)
+            .is_some_and(|moved| moved.moves == mosaica_lifecycle::membership::Moves::Records);
         store.records_version(layer, level) + u64::from(moves)
     }
 

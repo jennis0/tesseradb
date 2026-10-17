@@ -251,7 +251,8 @@ impl LiveState {
 
     /// Whether a window whose edits take `edits` ids in each shard and whose `items` new items are
     /// placed fits beside every shard's allocator
-    /// ([`mosaica_lifecycle::alloc::check_window_room`]).
+    /// ([`mosaica_lifecycle::alloc::check_window_room`]). Where several shards are refused, the
+    /// one shard never seals, and its size bounds its edits too ([`Allocator::room`]).
     pub(crate) fn window_room(
         &self,
         edits: &BTreeMap<ShardId, u64>,
@@ -264,7 +265,15 @@ impl LiveState {
             .zip(&allocators)
             .map(|(shard, alloc)| (shard.id, &**alloc))
             .collect();
-        mosaica_lifecycle::alloc::check_window_room(&held, edits, items, self.shard_size())
+        match (self.several_shards, held.as_slice()) {
+            (super::SeveralShards::Refused, [(shard, alloc)]) => {
+                let edited = edits.get(shard).copied().unwrap_or(0);
+                alloc.room(edited, items, self.shard_size())
+            }
+            _ => {
+                mosaica_lifecycle::alloc::check_window_room(&held, edits, items, self.shard_size())
+            }
+        }
     }
 
     /// The size every shard is allocated to.

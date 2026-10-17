@@ -34,8 +34,7 @@ pub mod wal;
 pub mod window;
 
 pub use alloc::{
-    assign_sorted, place, union_of, AllocError, Allocator, Allocators, ByTenancy, PendingItem,
-    Placed, Placement, ShardRoom,
+    assign_sorted, union_of, AllocError, Allocator, Allocators, ByTenancy, PendingItem, Placed,
 };
 pub use buffer::{BufferedItem, DescriptorResolver, IngestBuffer};
 pub use command::{

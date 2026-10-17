@@ -18,7 +18,7 @@ proptest! {
     /// Interleaved allocations on a single allocator never overlap and always advance the
     /// high-water mark by exactly the amount requested.
     #[test]
-    fn allocate_is_strictly_monotone(sizes in prop::collection::vec(1u64..64, 1..60)) {
+    fn issued_ids_rise_strictly(sizes in prop::collection::vec(1u64..64, 1..60)) {
         let mut alloc = Allocator::new(0);
         let mut expected_next = 0u64;
         let mut seen: HashSet<u64> = HashSet::new();
@@ -190,11 +190,7 @@ proptest! {
             .collect();
         let placed = assign_sorted(
             &mut pending,
-            &mut Allocators {
-                shards: vec![(ShardId::ZERO, &mut alloc)],
-                size: HIGH_WATER + room,
-                next_id: 1,
-            },
+            &mut Allocators::single(ShardId::ZERO, &mut alloc, HIGH_WATER + room),
         )
         .unwrap();
         let given: Vec<(u32, u64)> = pending
@@ -344,11 +340,7 @@ proptest! {
         let mut alloc = Allocator::new(0);
         assign_sorted(
             &mut items,
-            &mut Allocators {
-                shards: vec![(ShardId::ZERO, &mut alloc)],
-                size: u64::MAX,
-                next_id: 1,
-            },
+            &mut Allocators::single(ShardId::ZERO, &mut alloc, u64::MAX),
         )
         .unwrap();
 

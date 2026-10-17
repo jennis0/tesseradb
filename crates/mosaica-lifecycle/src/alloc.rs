@@ -17,7 +17,7 @@
 //! A commit window draws its edits' new entities first, each in its item's shard from tenancy 0,
 //! lowest id first, then from that shard's high water: an edit's entity carries its item's
 //! `mosaica_id` and never becomes a number, so it takes no id an item has held as its number. Its
-//! new items then go where [`place`] says: into the largest pool of freed ids, or the open shard's
+//! new items then go where `place` says: into the largest pool of freed ids, or the open shard's
 //! freed ids and then its high water, lowest tenancy, lowest id first. A sealed shard's tenancy-0
 //! ids are its own edits' alone. Freed ids are issued before any id from a high water, so churn
 //! reuses a bounded set of ids rather than growing the id space and everything sized by it. A
@@ -169,9 +169,11 @@ impl Allocator {
         (edits_reused, items_reused)
     }
 
-    /// Whether a window of `edits` edits and `items` new items fits this shard alone: the ids it
-    /// takes from the high water, after the freed ids, may pass neither `size` nor
-    /// [`ENTITY_END`]. Held ids are not counted.
+    /// Whether a window of `edits` edits and `items` new items fits a bundle of this one shard,
+    /// which no window seals, so the size bounds its edits as well as its new items: the ids the
+    /// window takes from the high water, after the freed ids, may pass neither `size` nor
+    /// [`ENTITY_END`]. Held ids are not counted. [`check_window_room`] is the rule where a window
+    /// may seal the shard.
     pub fn room(&self, edits: u64, items: u64, size: u64) -> Result<(), ShardFull> {
         let (edits_reused, items_reused) = self.reused(edits, items);
         let needed = (edits - edits_reused) + (items - items_reused);
@@ -180,7 +182,7 @@ impl Allocator {
 
     /// The freed ids [`Allocator::allocate_items`] can give, held ids aside: every tenancy in an
     /// open shard, and tenancy 1 and above in a sealed one, whose tenancy-0 ids are its edits'.
-    pub fn item_pool(&self) -> u64 {
+    fn item_pool(&self) -> u64 {
         match self.state {
             ShardState::Open => cardinality_of(&self.free),
             ShardState::Sealed => cardinality_of(&self.free) - self.at_zero(),
@@ -303,28 +305,54 @@ impl Allocator {
     }
 }
 
-/// One shard as [`place`] sees it: what it can give new items.
+/// One shard as [`place`] sees it: what it can give new items once the window's edits have taken
+/// their ids.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ShardRoom {
-    pub shard: ShardId,
-    pub state: ShardState,
+struct ShardRoom {
+    shard: ShardId,
+    state: ShardState,
     /// [`Allocator::item_pool`].
-    pub pool: u64,
-    pub high_water: u64,
+    pool: u64,
+    high_water: u64,
+}
+
+/// Each shard's room once `edits` has taken its edits' ids there: tenancy-0 ids first, then the
+/// high water. Refuses where a shard's edits pass [`ENTITY_END`].
+fn rooms<'a>(
+    shards: impl IntoIterator<Item = (ShardId, &'a Allocator)>,
+    edits: &BTreeMap<ShardId, u64>,
+) -> Result<Vec<ShardRoom>, ShardFull> {
+    shards
+        .into_iter()
+        .map(|(shard, alloc)| {
+            let n = edits.get(&shard).copied().unwrap_or(0);
+            alloc.edits_room(n)?;
+            let reused = n.min(alloc.at_zero());
+            Ok(ShardRoom {
+                shard,
+                state: alloc.state(),
+                pool: match alloc.state() {
+                    ShardState::Open => alloc.item_pool() - reused,
+                    ShardState::Sealed => alloc.item_pool(),
+                },
+                high_water: alloc.high_water() + (n - reused),
+            })
+        })
+        .collect()
 }
 
 /// Where a window's new items go, in the order they take their ids.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Placement {
+struct Placement {
     /// Each shard with how many items it takes, in signature order across the list. One shard
     /// appears twice when it gives its pool first and its high water later.
-    pub targets: Vec<(ShardId, u64)>,
+    targets: Vec<(ShardId, u64)>,
     /// Open shards whose high water reached the size with items still to place, in the order
     /// they sealed.
-    pub sealed: Vec<ShardId>,
+    sealed: Vec<ShardId>,
     /// Shards numbered from the next shard id, in order. A shard opened and filled in one window
     /// is in [`Placement::sealed`] too.
-    pub opened: Vec<ShardId>,
+    opened: Vec<ShardId>,
 }
 
 /// Where `items` new items go among `shards`, given the shard `size` and the next shard number.
@@ -333,7 +361,7 @@ pub struct Placement {
 /// to the lowest shard; otherwise the open shard takes them into its pool and then its high water
 /// up to `size`; otherwise shard `next_id` opens. The choice is made again whenever a shard has
 /// given all it can, and an open shard that reaches `size` with items left seals.
-pub fn place(
+fn place(
     shards: &[ShardRoom],
     next_id: u32,
     size: u64,
@@ -355,10 +383,7 @@ pub fn place(
         let pooled = shards
             .iter_mut()
             .filter(|room| room.pool >= threshold)
-            .reduce(|best, room| match room.pool > best.pool {
-                true => room,
-                false => best,
-            });
+            .reduce(|best, room| if room.pool > best.pool { room } else { best });
         if let Some(room) = pooled {
             let taken = left.min(room.pool);
             room.pool -= taken;
@@ -398,41 +423,42 @@ pub fn place(
 }
 
 /// Whether a window fits among `shards`, ascending, when its edits take `edits` ids in each shard
-/// and its `items` new items are placed there: a sealed shard's edits within the end of its ids,
-/// and the open shard's edits and every new item no pool at or above [`reuse_min_free`] takes
-/// within `size`, the open shard's freed ids first. Held ids are not counted.
+/// and its `items` new items are placed there with no shard opened: [`assign_sorted`]'s rule,
+/// asked before the window is assigned. A shard's edits run to [`ENTITY_END`] whatever its size.
+/// Held ids are not counted.
+///
+/// The refusal names the open shard: its high water, and the ids its edits and the window's new
+/// items would take past it.
 pub fn check_window_room(
     shards: &[(ShardId, &Allocator)],
     edits: &BTreeMap<ShardId, u64>,
     items: u64,
     size: u64,
 ) -> Result<(), ShardFull> {
-    let threshold = reuse_min_free(size);
+    let rooms = rooms(shards.iter().map(|(shard, alloc)| (*shard, *alloc)), edits)?;
+    let Err(ShardsExhausted { needed: left }) = place(&rooms, ShardId::LIMIT, size, items) else {
+        return Ok(());
+    };
+    // `place` asked for a new shard, so the open shard gave all it had.
     let open = shards
         .iter()
-        .rfind(|(_, alloc)| alloc.state() == ShardState::Open);
-    let edited = |shard: &ShardId| edits.get(shard).copied().unwrap_or(0);
-    let mut pooled = 0u64;
-    for (shard, alloc) in shards {
-        if alloc.state() == ShardState::Open {
-            continue;
+        .zip(&rooms)
+        .rfind(|(_, room)| room.state == ShardState::Open);
+    let (high_water, needed) = match open {
+        Some(((_, alloc), room)) => {
+            let edited = room.high_water - alloc.high_water();
+            let filled = size.min(ENTITY_END).saturating_sub(room.high_water);
+            (alloc.high_water(), edited + filled + left)
         }
-        alloc.edits_room(edited(shard))?;
-        let pool = alloc.item_pool();
-        if pool >= threshold {
-            pooled += pool;
-        }
-    }
-    match open {
-        Some((shard, alloc)) => alloc.room(edited(shard), items.saturating_sub(pooled), size),
-        None => check_room(size, ENTITY_END, size, items.saturating_sub(pooled)),
-    }
+        None => (size, left),
+    };
+    check_room(size, ENTITY_END, high_water, needed)
 }
 
 /// What a window's assignment did beyond issuing ids.
 #[derive(Default)]
 pub struct Placed {
-    /// The shards that sealed, in [`Placement::sealed`]'s order.
+    /// The shards that sealed, in the order they sealed.
     pub sealed: Vec<ShardId>,
     /// The shards that opened, each with its allocator, ascending.
     pub opened: Vec<(ShardId, Allocator)>,
@@ -609,10 +635,21 @@ pub struct Allocators<'a> {
     pub next_id: u32,
 }
 
+impl<'a> Allocators<'a> {
+    /// `shard`'s allocator alone, at `size`, the next shard opening past it.
+    pub fn single(shard: ShardId, alloc: &'a mut Allocator, size: u64) -> Self {
+        Allocators {
+            shards: vec![(shard, alloc)],
+            size,
+            next_id: shard.raw() + 1,
+        }
+    }
+}
+
 /// Assigns entity ids to `items`, the edits' new entities and the new items each in ascending
 /// order of `signature_sort_key`, ties in batch order. Each edit takes its entity in its own
 /// shard ([`Allocator::allocate_edits`]); the new items are cut in that order at the counts
-/// [`place`] gives and take their ids there ([`Allocator::allocate_items`]). Items with identical
+/// `place` gives and take their ids there ([`Allocator::allocate_items`]). Items with identical
 /// signatures take adjacent ids from a high water, which is what makes their postings compress as
 /// runs; freed ids come first and scatter among other signatures' runs.
 ///
@@ -648,22 +685,18 @@ pub fn assign_sorted(
     );
     let created = (keyed.len() - edited) as u64;
 
-    let mut rooms = Vec::with_capacity(allocators.shards.len());
-    for (shard, alloc) in &allocators.shards {
-        let n = edits.get(shard).map_or(0, Vec::len) as u64;
-        alloc.edits_room(n).map_err(AllocError::Full)?;
-        // What the edits leave: tenancy-0 ids first, then the high water.
-        let reused = n.min(alloc.at_zero());
-        rooms.push(ShardRoom {
-            shard: *shard,
-            state: alloc.state(),
-            pool: match alloc.state() {
-                ShardState::Open => alloc.item_pool() - reused,
-                ShardState::Sealed => alloc.item_pool(),
-            },
-            high_water: alloc.high_water() + (n - reused),
-        });
-    }
+    let counts = edits
+        .iter()
+        .map(|(shard, edited)| (*shard, edited.len() as u64))
+        .collect();
+    let rooms = rooms(
+        allocators
+            .shards
+            .iter()
+            .map(|(shard, alloc)| (*shard, &**alloc)),
+        &counts,
+    )
+    .map_err(AllocError::Full)?;
     for shard in edits.keys() {
         assert!(
             rooms.iter().any(|room| room.shard == *shard),
@@ -691,18 +724,23 @@ pub fn assign_sorted(
         .iter()
         .map(|&shard| (shard, Allocator::new(0)))
         .collect();
+    fn alloc_of<'s>(
+        held: &'s mut [(ShardId, &mut Allocator)],
+        opened: &'s mut [(ShardId, Allocator)],
+        shard: ShardId,
+    ) -> &'s mut Allocator {
+        match held.iter_mut().find(|(id, _)| *id == shard) {
+            Some((_, alloc)) => alloc,
+            None => opened
+                .iter_mut()
+                .find(|(id, _)| *id == shard)
+                .map(|(_, alloc)| alloc)
+                .expect("a placed shard is one the window holds or opened"),
+        }
+    }
     for &(shard, n) in &placement.targets {
-        let alloc = match allocators.shards.iter_mut().find(|(id, _)| *id == shard) {
-            Some((_, alloc)) => &mut **alloc,
-            None => {
-                let (_, alloc) = opened
-                    .iter_mut()
-                    .find(|(id, _)| *id == shard)
-                    .expect("a target is a shard the window holds or opened");
-                alloc
-            }
-        };
-        let given = alloc.allocate_items(n, allocators.size);
+        let given =
+            alloc_of(&mut allocators.shards, &mut opened, shard).allocate_items(n, allocators.size);
         debug_assert_eq!(
             given.len() as u64,
             n,
@@ -715,14 +753,7 @@ pub fn assign_sorted(
         );
     }
     for &shard in &placement.sealed {
-        match allocators.shards.iter_mut().find(|(id, _)| *id == shard) {
-            Some((_, alloc)) => alloc.seal(),
-            None => {
-                if let Some((_, alloc)) = opened.iter_mut().find(|(id, _)| *id == shard) {
-                    alloc.seal();
-                }
-            }
-        }
+        alloc_of(&mut allocators.shards, &mut opened, shard).seal();
     }
 
     for ((_, _, idx), id) in keyed.into_iter().zip(ids) {
@@ -870,17 +901,30 @@ mod tests {
                 needed,
             })
         };
+        let fits = |alloc: &Allocator, edits, items| {
+            check_window_room(
+                &[(shard(0), alloc)],
+                &BTreeMap::from([(shard(0), edits)]),
+                items,
+                10,
+            )
+        };
         assert_eq!(
-            alloc.room(1, 3, 10),
+            fits(&alloc, 1, 3),
             Ok(()),
             "the edit takes 2, two items take 3 and 8, and one 9"
         );
-        assert_eq!(alloc.room(1, 4, 10), full(3), "the held 4 is not counted");
-        assert_eq!(alloc.room(3, 0, 10), Ok(()));
+        assert_eq!(fits(&alloc, 1, 4), full(3), "the held 4 is not counted");
         assert_eq!(
-            alloc.room(4, 0, 10),
-            full(3),
-            "an edit takes no id above tenancy 0"
+            fits(&alloc, 4, 0),
+            Ok(()),
+            "edits take 2, then 8 and 9, and run past the size to 10"
+        );
+        assert_eq!(fits(&alloc, 4, 1), Ok(()), "the item takes 3");
+        assert_eq!(
+            fits(&alloc, 4, 2),
+            full(4),
+            "the edits' three ids and the second item's are past the size"
         );
         assert_eq!(alloc.allocate_edits(1).unwrap(), vec![2]);
         assert_eq!(
@@ -895,6 +939,27 @@ mod tests {
             "an edit runs past the size"
         );
         assert_eq!(alloc.allocate_items(1, 13), vec![12]);
+    }
+
+    #[test]
+    fn one_shard_alone_bounds_its_edits_and_new_items_by_the_size() {
+        let mut alloc = freed(8, &[(0, &[2]), (1, &[3])]);
+        alloc.release_after(5, at(0, &[4]));
+        let full = |needed| {
+            Err(ShardFull {
+                limit: mosaica_types::ShardLimit::Size(10),
+                high_water: 8,
+                needed,
+            })
+        };
+        assert_eq!(alloc.room(1, 3, 10), Ok(()));
+        assert_eq!(alloc.room(1, 4, 10), full(3), "the held 4 is not counted");
+        assert_eq!(alloc.room(3, 0, 10), Ok(()));
+        assert_eq!(
+            alloc.room(4, 0, 10),
+            full(3),
+            "an edit takes no id above tenancy 0, and the size bounds it"
+        );
     }
 
     #[test]
@@ -1126,15 +1191,8 @@ mod tests {
         let before = |alloc: &Allocator| (alloc.high_water(), listed(alloc.free()));
         let held = before(&zero);
         let mut items = vec![pending(&[1], Some(0)), pending(&[2], Some(0))];
-        let error = assign_sorted(
-            &mut items,
-            &mut Allocators {
-                shards: vec![(shard(0), &mut zero)],
-                size: 10,
-                next_id: 1,
-            },
-        )
-        .err();
+        let error =
+            assign_sorted(&mut items, &mut Allocators::single(shard(0), &mut zero, 10)).err();
         assert!(matches!(error, Some(AllocError::Full(_))));
         assert_eq!(before(&zero), held);
 
@@ -1146,11 +1204,7 @@ mod tests {
         ];
         let error = assign_sorted(
             &mut items,
-            &mut Allocators {
-                shards: vec![(shard(ShardId::LIMIT - 1), &mut last)],
-                size: 10,
-                next_id: ShardId::LIMIT,
-            },
+            &mut Allocators::single(shard(ShardId::LIMIT - 1), &mut last, 10),
         )
         .err();
         assert_eq!(
@@ -1169,15 +1223,8 @@ mod tests {
             pending(&[1], None),
             pending(&[3], None),
         ];
-        let placed = assign_sorted(
-            &mut items,
-            &mut Allocators {
-                shards: vec![(shard(0), &mut zero)],
-                size: 10,
-                next_id: 1,
-            },
-        )
-        .unwrap();
+        let placed =
+            assign_sorted(&mut items, &mut Allocators::single(shard(0), &mut zero, 10)).unwrap();
         assert_eq!(assigned(&items), vec![(1, 0), (0, 9), (1, 1)]);
         assert_eq!(placed.sealed, vec![shard(0)]);
         assert_eq!(zero.state(), Sealed);
@@ -1201,15 +1248,8 @@ mod tests {
     fn a_shard_opened_and_filled_in_one_window_is_opened_before_it_is_sealed() {
         let mut zero = Allocator::new(10);
         let mut items: Vec<PendingItem> = (0..15).map(|_| pending(&[1], None)).collect();
-        let placed = assign_sorted(
-            &mut items,
-            &mut Allocators {
-                shards: vec![(shard(0), &mut zero)],
-                size: 10,
-                next_id: 1,
-            },
-        )
-        .unwrap();
+        let placed =
+            assign_sorted(&mut items, &mut Allocators::single(shard(0), &mut zero, 10)).unwrap();
         assert_eq!(
             placed.records(),
             vec![
@@ -1270,17 +1310,36 @@ mod tests {
     }
 
     #[test]
-    fn one_open_shard_has_the_room_its_allocator_has() {
-        let alloc = freed(8, &[(0, &[2]), (1, &[3])]);
-        for (edits, items) in [(0, 4), (0, 5), (1, 3), (2, 3), (3, 0), (4, 0)] {
+    fn a_window_fits_where_its_assignment_opens_no_shard() {
+        let alloc = || freed(8, &[(0, &[2]), (1, &[3])]);
+        for (edits, items) in [
+            (0, 4),
+            (0, 5),
+            (1, 3),
+            (2, 3),
+            (3, 0),
+            (4, 0),
+            (4, 1),
+            (4, 2),
+        ] {
+            let fits = check_window_room(
+                &[(shard(0), &alloc())],
+                &BTreeMap::from([(shard(0), edits)]),
+                items,
+                10,
+            );
+            let mut window: Vec<PendingItem> = (0..edits)
+                .map(|_| pending(&[1], Some(0)))
+                .chain((0..items).map(|_| pending(&[1], None)))
+                .collect();
+            let mut assigning = alloc();
+            let assigned = assign_sorted(
+                &mut window,
+                &mut Allocators::single(shard(0), &mut assigning, 10),
+            );
             assert_eq!(
-                check_window_room(
-                    &[(shard(0), &alloc)],
-                    &BTreeMap::from([(shard(0), edits)]),
-                    items,
-                    10
-                ),
-                alloc.room(edits, items, 10),
+                fits.is_ok(),
+                assigned.is_ok_and(|placed| placed.opened.is_empty()),
                 "{edits} edits, {items} items"
             );
         }

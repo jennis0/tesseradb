@@ -690,7 +690,7 @@ pub struct MembershipGrowth {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GrownSet {
     /// The membership (`rank: null` on the wire). Its size is derived from the set and never
-    /// stored ([`crate::membership::ArtifactRecord::declared_size`]).
+    /// stored ([`crate::membership::ArtifactStore::declared_size`]).
     Membership,
     /// The generating set of the content at `rank`, with the set's **stored cardinality** after
     /// this delta (`ingest.md` §1.1): the number the executor publishes beside the set's row-space

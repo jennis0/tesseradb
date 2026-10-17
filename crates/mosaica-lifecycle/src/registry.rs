@@ -382,8 +382,6 @@ fn prepare_set_page(
     withdrawn: &mut Vec<(usize, u16)>,
     index: usize,
 ) -> Result<Option<crate::wal::MembershipGrowth>, RegistryError> {
-    // Joins before leaves, which is the order the store applies them in and the order that makes
-    // a paged replacement safe (`ingest.md` §1.1, §2.2).
     let (changed, cardinality) = store
         .paged(
             layer_name,

@@ -562,12 +562,8 @@ pub struct Wanted {
 }
 
 impl Wanted {
-    /// The edits in every shard.
-    pub fn edits_total(&self) -> u64 {
-        self.edits.values().sum()
-    }
-
-    fn add(&mut self, other: Wanted) {
+    /// Adds `other`'s ids to these.
+    pub fn add(&mut self, other: Wanted) {
         for (shard, n) in other.edits {
             *self.edits.entry(shard).or_default() += n;
         }
@@ -586,6 +582,11 @@ pub fn wanted(rows: &[UnallocatedRow], edits: impl IntoIterator<Item = ShardId>)
         items: rows.iter().filter(|row| row.join.is_none()).count() as u64,
     }
 }
+
+/// What [`CommitWindow::allocate`] returns: the closed entries, the assignment's tally and what it
+/// placed, or the refusal with each entry's waiters handed back.
+pub type Closed<W> =
+    Result<(Vec<ClosedEntry<W>>, FragmentationTally, Placed), (AllocError, Vec<Vec<W>>)>;
 
 /// The open commit window.
 pub struct CommitWindow<W> {
@@ -744,14 +745,14 @@ impl<W> CommitWindow<W> {
     /// allocate made no assignment to measure, which is the same statement as "no effect at all".
     ///
     /// An edit takes its id in its item's shard, and the new items where the placement puts them;
-    /// [`Placed`] says which shards that sealed and opened. `mosaica_id_of` gives a created item's
-    /// `mosaica_id` for the receipt each record carries; a row naming an item carries its own.
-    #[allow(clippy::type_complexity)]
+    /// [`Placed`] names the shards the window sealed and opened. `mosaica_id_of` gives a created
+    /// item's `mosaica_id` for the receipt each record carries; a row naming an item carries its
+    /// own.
     pub fn allocate(
         self,
         allocators: &mut Allocators<'_>,
         mosaica_id_of: impl Fn(ItemAt) -> u64,
-    ) -> Result<(Vec<ClosedEntry<W>>, FragmentationTally, Placed), (AllocError, Vec<Vec<W>>)> {
+    ) -> Closed<W> {
         let mut entries = self.entries;
 
         // An edit's first row takes the new entity; its other rows take the same one after.
@@ -909,17 +910,9 @@ mod tests {
     }
 
     /// `w` closed with `alloc` as shard 0's, the only shard, at no size.
-    #[allow(clippy::type_complexity)]
-    fn close<W>(
-        w: CommitWindow<W>,
-        alloc: &mut Allocator,
-    ) -> Result<(Vec<ClosedEntry<W>>, FragmentationTally, Placed), (AllocError, Vec<Vec<W>>)> {
+    fn close<W>(w: CommitWindow<W>, alloc: &mut Allocator) -> Closed<W> {
         w.allocate(
-            &mut Allocators {
-                shards: vec![(ShardId::ZERO, alloc)],
-                size: u64::MAX,
-                next_id: 1,
-            },
+            &mut Allocators::single(ShardId::ZERO, alloc, u64::MAX),
             |item| item.entity.raw(),
         )
     }

@@ -10,11 +10,11 @@ use std::collections::HashSet;
 
 use proptest::prelude::*;
 
-use mosaica_lifecycle::alloc::{AllocError, Allocator, Allocators, Placed};
+use mosaica_lifecycle::alloc::{Allocator, Allocators};
 use mosaica_lifecycle::command::UnallocatedRow;
 use mosaica_lifecycle::wal::WalRecord;
 use mosaica_lifecycle::window::{
-    ClosedEntry, CommitWindow, FragmentationTally, Slot, WindowClaims, WindowEntry,
+    Closed, CommitWindow, FragmentationTally, Slot, WindowClaims, WindowEntry,
 };
 use mosaica_types::{ShardId, TermId};
 
@@ -32,17 +32,9 @@ fn row(terms: &[u32]) -> UnallocatedRow {
 }
 
 /// `w` closed with `alloc` as shard 0's, the only shard, at no size.
-#[allow(clippy::type_complexity)]
-fn close<W>(
-    w: CommitWindow<W>,
-    alloc: &mut Allocator,
-) -> Result<(Vec<ClosedEntry<W>>, FragmentationTally, Placed), (AllocError, Vec<Vec<W>>)> {
+fn close<W>(w: CommitWindow<W>, alloc: &mut Allocator) -> Closed<W> {
     w.allocate(
-        &mut Allocators {
-            shards: vec![(ShardId::ZERO, alloc)],
-            size: u64::MAX,
-            next_id: 1,
-        },
+        &mut Allocators::single(ShardId::ZERO, alloc, u64::MAX),
         |item| item.entity.raw(),
     )
 }

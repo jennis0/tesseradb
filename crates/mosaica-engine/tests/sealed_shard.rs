@@ -1,4 +1,4 @@
-//! Edits of a sealed shard's items: each takes its new entity in the item's own shard, an id freed
+//! Edits of a shard's items: each takes its new entity in the item's own shard, an id freed
 //! there at tenancy 0 first and then the shard's high water, which runs past the size; a shard
 //! whose ids are spent refuses the edit and changes nothing.
 //!
@@ -163,4 +163,22 @@ fn a_sealed_shard_at_the_end_of_its_ids_refuses_an_edit_and_changes_nothing() {
         .records()
         .count();
     assert_eq!(logged, 0, "nothing is in the log");
+}
+
+/// An edit of an item of the open shard, whose high water is at the size and which holds no id
+/// freed at tenancy 0, is accepted and takes the first id past the size. The size bounds new items
+/// and not edits.
+#[test]
+fn an_edit_of_an_open_shard_at_its_size_runs_past_the_size() {
+    let built = fixture_sized(N, Some(SIZE));
+    let one = ShardId::new(1).unwrap();
+    seed_freed(&built.root, one, SIZE, &[]);
+    let engine = writing(&built);
+    let id = (0..N)
+        .find(|id| item_of(&engine, *id).shard == one)
+        .expect("shard 1 holds an item");
+
+    edit(&engine, "e", id).expect("the edit is accepted");
+    let after = item_of(&engine, id);
+    assert_eq!((after.shard, after.entity.raw()), (one, SIZE));
 }
